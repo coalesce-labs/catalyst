@@ -214,6 +214,45 @@ function labelsOf(d) {
 function labelName(l) {
   return String(l?.name ?? l ?? "");
 }
+// CTL-1552: the operator-driven "a human is holding this ticket" latch now rides
+// on a standalone workspace label, read from the descriptor board-health already
+// receives — NOT a per-host env var (which never syncs across the cluster). A pure
+// O(labels) reader over ticketsById descriptors; case-insensitive via labelName.
+const PARKED_BY_HUMAN_LABEL = "parked-by-human";
+export function isParkedByHuman(d) {
+  const ls = labelsOf(d);
+  return Array.isArray(ls) && ls.some((l) => labelName(l).toLowerCase() === PARKED_BY_HUMAN_LABEL);
+}
+export function isHumanEscalatedSignal(sig) {
+  if (!sig || typeof sig !== "object") return false;
+  if (!NEEDS_HUMAN_STATUSES.has(String(sig.status ?? "").toLowerCase())) return false;
+  const explanation = sig.explanation;
+  return !!explanation && typeof explanation === "object" && explanation.degraded !== true;
+}
+// CTL-1552: the ONE suppression predicate shared by proposeMoves,
+// eligibleDeferredAnchors, and buildBoardScanEvent's suppressed-set — so the
+// gate, the ranking, and the observability can never disagree (same discipline
+// eligibleDeferredAnchors' shared-helper comment documents). A ticket is
+// suppressed iff it carries the parked-by-human label (read from the descriptor
+// board-health already receives). CTL-1552: this replaced the per-host
+// sanctioned-latch env var (CTL-1432 B3), which never synced across the cluster.
+function makeSuppressed(board) {
+  const byId = board?.ticketsById;
+  const get = typeof byId?.get === "function" ? (t) => byId.get(t) : () => undefined;
+  const escalated = board?.humanEscalatedTickets instanceof Set
+    ? board.humanEscalatedTickets
+    : new Set();
+  return (t) => isParkedByHuman(get(t)) || escalated.has(t);
+}
+
+const anchorable = (move) => !!(move && move.ticket);
+// suppressedTickets — the flagged ids actually suppressed this scan (flagged ∩
+// suppressed). Feeds the recovery.board-scan event so an operator can see WHICH
+// tickets were held back, not just infer it by differencing flagged vs moves.
+function suppressedTickets(invariants, board) {
+  const suppressed = makeSuppressed(board);
+  return dedupeFlagged(invariants).filter(suppressed);
+}
 
 let _lastRunMs = 0; // host-local throttle state (mirrors unstuck-sweep)
 
@@ -550,6 +589,9 @@ export function assembleBoardState({
   // inert/shadow-safe: !present is always false → nothing is excluded until the
   // daemon binds the real fs check. See selectAnchorCandidates.
   hasTriageArtifact = () => true,
+  // CAT-76: dedicated recovery-pass signal reader. The inert default preserves
+  // existing behavior until the daemon binds workers/<ticket>/phase-recovery-pass.json.
+  readEscalationSignal = () => null,
 } = {}) {
   const nowMs = now();
   const safe = (fn, fallback) => {
@@ -634,6 +676,16 @@ export function assembleBoardState({
   }
 
   const rosterArr = Array.isArray(roster) ? roster : [];
+  const humanEscalatedTickets = new Set();
+  const knownTickets = new Set([...ticketsById.keys(), ...signals.map((s) => s.ticket).filter(Boolean)]);
+  for (const ticket of knownTickets) {
+    const descriptor = ticketsById.get(ticket);
+    if (descriptor && isTerminalLinearState(descriptor)) continue;
+    let escalation = null;
+    try { escalation = readEscalationSignal(ticket); } catch { escalation = null; }
+    if (isHumanEscalatedSignal(escalation)) humanEscalatedTickets.add(ticket);
+  }
+
   return Object.freeze({
     ticketsById,
     signals,
@@ -695,6 +747,7 @@ export function assembleBoardState({
     // hasTriageArtifact seam this is always an empty Set (shadow-safe, inert until
     // the daemon binds the real fs check at the scheduler call site).
     triageLaunchFailureOnlyTickets,
+    humanEscalatedTickets,
   });
 }
 
@@ -1720,15 +1773,17 @@ function checkNeedsHumanPile(b) {
 // isTerminalLinearState too. (The 30-min defer cooldown is applied upstream in
 // readDeferredBoardHealthIntents.) Shared by decideBoardHealth (gate count) AND
 // selectAnchorCandidates (ranking) so the two never disagree.
-function eligibleDeferredAnchors(board) {
-  const sanctioned = new Set(board?.sanctionedNeedsHuman ?? []);
+export function eligibleDeferredAnchors(board) {
+  // CTL-1552: suppression via the shared predicate — env-var sanction OR the
+  // parked-by-human label (so a parked deferred-anchor is not resurrected here).
+  const suppressed = makeSuppressed(board);
   const byId = board?.ticketsById;
   // CTL-1432 (Codex P2): HRW-ownership filter, mirroring selectAnchorCandidates — a
   // foreign-owned deferred marker must not make the gate proceed (this host would then
   // no-anchor it). N=1 / no roster / no ownerForTicket ⇒ owns everything ⇒ unchanged.
   const owns = makeOwnsFilter(board);
   return (board?.deferredBoardHealth ?? []).filter((t) => {
-    if (sanctioned.has(t)) return false;
+    if (suppressed(t)) return false;
     if (!owns(t)) return false;
     const d = byId && typeof byId.get === "function" ? byId.get(t) : undefined;
     if (!d) return false;
@@ -1739,10 +1794,10 @@ function eligibleDeferredAnchors(board) {
 export function decideBoardHealth(invariants, boardState) {
   const observableFailed = Object.values(invariants).filter((v) => v.observable && !v.ok);
   const invariantsFailed = observableFailed.reduce((n, v) => n + (Number(v.failed) || 0), 0);
-  // CAT-58: threaded through to `decision()` so the emitted scan carries which
-  // needs-human latches were sanctioned (operator-allowlisted), same source as
-  // eligibleDeferredAnchors/selectAnchorCandidates above.
-  const sanctioned = new Set(boardState?.sanctionedNeedsHuman ?? []);
+  // CTL-1552: the flagged tickets actually suppressed this scan (env-var sanction
+  // ∪ parked-by-human label). Threaded onto the decision so buildBoardScanEvent
+  // can expose it as details.sanctioned — first-class, not inferred by differencing.
+  const sanctioned = suppressedTickets(invariants, boardState);
 
   // CTL-1432 (B2/B3 — Codex P1): gate on ACTIONABLE work, not merely a failed
   // invariant. proposeMoves already suppresses the sanctioned needs-human latches
@@ -1758,7 +1813,11 @@ export function decideBoardHealth(invariants, boardState) {
   // (not sanctioned, live + non-terminal) — a since-terminal / sanctioned defer must not
   // make the gate proceed (it would proceed then no-anchor). Same helper selectAnchorCandidates uses.
   const deferred = eligibleDeferredAnchors(boardState);
-  const hasActionableWork = moves.tier1.length > 0 || moves.tier2.length > 0 || deferred.length > 0;
+  // CAT-76: ticket-less moves are telemetry notes. They cannot survive
+  // selectAnchorCandidates' ticketsOf filter and must not open the dispatch gate.
+  const hasActionableWork =
+    moves.tier1.filter(anchorable).length > 0 ||
+    moves.tier2.filter(anchorable).length > 0 || deferred.length > 0;
 
   // Gate 1 — nothing actionable (all green, or every failure suppressed/escalate-only,
   // and no deferred work) → skip the holistic DISPATCH (no LLM thrash). CTL-1432 (Codex
@@ -1776,14 +1835,14 @@ export function decideBoardHealth(invariants, boardState) {
   }
   // Gate 2 — actionable work but no free slot to dispatch a fix → skip.
   if ((boardState.capacity?.freeSlots ?? 0) <= 0) {
-    return decision("skip", "no-free-slots", invariantsFailed, emptyMoves());
+    return decision("skip", "no-free-slots", invariantsFailed, emptyMoves(), sanctioned);
   }
   // Gate 3 — near a rate-limit cliff → acting now risks 429s → skip (and obey it).
   // Two independent cliffs gate here: the GitHub core REST quota (CAT-40) and the
   // account's own subscription usage limit (CAT-58). Either one makes acting futile.
   const rl = invariants.rateLimitHeadroom;
   if (rl && rl.observable && !rl.ok) {
-    return decision("skip", "rate-limit-cliff", invariantsFailed, emptyMoves());
+    return decision("skip", "rate-limit-cliff", invariantsFailed, emptyMoves(), sanctioned);
   }
   const au = invariants.accountUsageHeadroom;
   if (au && au.observable && !au.ok) {
@@ -1794,15 +1853,17 @@ export function decideBoardHealth(invariants, boardState) {
     observableFailed.length > 0
       ? `${observableFailed.length} invariant(s) flagged`
       : `${deferred.length} deferred board-health intent(s)`;
-  return decision("proceed", reason, invariantsFailed, moves);
+  return decision("proceed", reason, invariantsFailed, moves, sanctioned);
 }
 
-function decision(gateDecision, reason, invariantsFailed, moves) {
+function decision(gateDecision, reason, invariantsFailed, moves, sanctioned = []) {
   return {
     gate: { decision: gateDecision, reason },
     invariantsFailed,
     proposed: { tier1: moves.tier1.length, tier2: moves.tier2.length, tier3: moves.tier3.length },
     moves,
+    // CTL-1552: the tickets suppressed this scan (parked-by-human / env sanction).
+    sanctioned,
   };
 }
 
@@ -1819,8 +1880,9 @@ export function proposeMoves(invariants, _b) {
   // frozenNeedsHuman / boardContext (suppression is HERE only, never in
   // checkFrozenNeedsHuman) so a human still sees them; they just stop drowning the
   // genuinely-stuck tickets every 5-min scan (making proposedTier1/2 a constant).
-  const sanctioned = new Set(_b?.sanctionedNeedsHuman ?? []);
-  const sanction = (t) => sanctioned.has(t);
+  // CTL-1552: parked-by-human LABEL suppression superseded the per-host
+  // sanctionedNeedsHuman env-var latch (never synced across the cluster).
+  const sanction = makeSuppressed(_b);
   if (invariants.dispatchLiveness && !invariants.dispatchLiveness.ok) {
     tier1.push({ move: "kick-dispatch", rationale: invariants.dispatchLiveness.note });
   }
@@ -2018,10 +2080,10 @@ export function selectAnchorCandidates(
   // A ticket with a completed triage artifact and a stuck post-triage phase is
   // NOT in this set and remains anchor-eligible. With the default board shape
   // (no hasTriageArtifact seam bound), the set is empty and this is a no-op.
-  const excluded =
-    board?.triageLaunchFailureOnlyTickets instanceof Set
-      ? board.triageLaunchFailureOnlyTickets
-      : new Set();
+  const excluded = new Set([
+    ...(board?.triageLaunchFailureOnlyTickets instanceof Set ? board.triageLaunchFailureOnlyTickets : []),
+    ...(board?.humanEscalatedTickets instanceof Set ? board.humanEscalatedTickets : []),
+  ]);
   const out = [];
   const seen = new Set();
   const add = (t) => {
@@ -2358,6 +2420,10 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       // route + reason for each held ticket survives to the event-log / HUD /
       // monitor. Ticket-id keyed → high cardinality → body.payload, never promoted.
       strandedRoutes: invariants.strandedMidPipeline?.classified ?? {},
+      // CTL-1552: the tickets suppressed this scan (parked-by-human / env sanction).
+      // A ticket-id list → body.payload, never a promoted scalar. Lets an operator
+      // see WHAT was held back instead of differencing flagged against the moves.
+      sanctioned: decision.sanctioned ?? [],
       tier1Moves: decision.moves.tier1,
       tier2Moves: decision.moves.tier2,
       tier3Moves: decision.moves.tier3,
@@ -2422,6 +2488,7 @@ export function boardHealthPass({
   log = () => {},
   // CTL-1649: triage artifact presence seam (daemon-bound); default inert (→ empty exclusion set).
   hasTriageArtifact = undefined,
+  readEscalationSignal = undefined,
 } = {}) {
   if (mode === "off") return { ran: false, reason: "off" }; // strict no-op
   const nowMs = now();
@@ -2453,6 +2520,7 @@ export function boardHealthPass({
     productivityMode,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).
     ...(hasTriageArtifact !== undefined ? { hasTriageArtifact } : {}),
+    ...(readEscalationSignal !== undefined ? { readEscalationSignal } : {}),
   });
   const invariants = evaluateInvariants(_rawBoard, { mode });
   // CAT-11 (Codex P1 round 2): classify salvage BEFORE proposing moves. proposeMoves
@@ -2524,18 +2592,17 @@ export function boardHealthPass({
         });
         const anchor = candidates[0] ?? null;
         if (!anchor) {
-          log(
-            { reason: "no-owned-anchor" },
-            "board-health: proceed but no actionable ticket anchor — no holistic dispatch this scan"
-          );
+          log({ reason: "no-owned-anchor", anchorCandidate: null, dispatchedCandidate: null }, "board-health: proceed but no actionable ticket anchor — no holistic dispatch this scan");
           actOutcome = { dispatched: false, anchor: null, skippedReason: "no-owned-anchor" };
         } else {
           const boardContext = buildBoardContext(board, invariants);
           actResult = act({ anchor, candidates, boardContext, decision: dec, board }) ?? null;
-          log(
-            { anchor, candidates: candidates.length, dispatched: actResult?.dispatched ?? null },
-            "board-health: holistic recovery-pass delegate actuated"
-          );
+          log({
+            anchorCandidate: anchor,
+            dispatchedCandidate: actResult?.dispatched === true ? (actResult?.candidate ?? anchor) : null,
+            candidates: candidates.length,
+            dispatched: actResult?.dispatched ?? null,
+          }, "board-health: holistic recovery-pass delegate actuated");
           const dispatched = actResult?.dispatched === true;
           actOutcome = {
             dispatched,
@@ -2547,7 +2614,7 @@ export function boardHealthPass({
           };
         }
       } catch (err) {
-        log({ err: err.message }, "board-health: act failed (continuing)");
+        log({ err: err.message, anchorCandidate: null, dispatchedCandidate: null }, "board-health: act failed (continuing)");
         actOutcome = { dispatched: false, anchor: null, skippedReason: "act-error" };
       }
     }

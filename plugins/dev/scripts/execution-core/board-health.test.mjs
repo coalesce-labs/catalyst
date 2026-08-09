@@ -29,6 +29,10 @@ import {
   deriveRing,
   makeOwnsFilter,
   resolveRosterSeam,
+  // CTL-1552: the parked-by-human label reader + the human-escalated signal check.
+  isParkedByHuman,
+  isHumanEscalatedSignal,
+  eligibleDeferredAnchors,
 } from "./board-health.mjs";
 // CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
 // exercises the production body.payload.details nesting + attribute promotion.
@@ -88,9 +92,27 @@ function mkPrStatusMap(rows = []) {
 
 // A complete, default-healthy boardState shape (the frozen output assembleBoardState
 // produces). Overrides are shallow-merged per top-level key.
+//
+// CTL-1552: `sanctionedNeedsHuman` (the retired per-host env-var latch) is kept as a
+// test-only convenience — mkBoard translates each listed ticket into the real,
+// current suppression mechanism (a `parked-by-human` label on its ticketsById
+// descriptor) so every pre-CTL-1552 caller of this option keeps working unchanged.
 function mkBoard(o = {}) {
+  // Passthrough when there's nothing to merge in — preserves callers that hand
+  // mkBoard a deliberately-throwing ticketsById fixture (fail-open tests).
+  let ticketsById = o.ticketsById ?? new Map();
+  if ((o.sanctionedNeedsHuman ?? []).length > 0) {
+    ticketsById = new Map(ticketsById);
+    for (const t of o.sanctionedNeedsHuman) {
+      const existing = ticketsById.get(t) ?? {};
+      const labels = Array.isArray(existing.labels) ? existing.labels : [];
+      if (!labels.some((l) => String(l?.name ?? l).toLowerCase() === "parked-by-human")) {
+        ticketsById.set(t, { ...existing, labels: [...labels, { name: "parked-by-human" }] });
+      }
+    }
+  }
   return {
-    ticketsById: o.ticketsById ?? new Map(),
+    ticketsById,
     signals: o.signals ?? [],
     eligible: o.eligible ?? [],
     roster: o.roster ?? [],
@@ -683,28 +705,31 @@ describe("decideBoardHealth — ordered gates, first match wins", () => {
   });
 
   test("Gate 2: failures but freeSlots===0 → skip/no-free-slots", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1) };
+    const invs = { ...allGreen(), blockedTree: inv(false, 1, true, ["CTL-1"]) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 0 } }));
     expect(d.gate.decision).toBe("skip");
     expect(d.gate.reason).toBe("no-free-slots");
   });
 
   test("Gate 3: failures + free slots + rate-limit cliff → skip/rate-limit-cliff", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1), rateLimitHeadroom: inv(false, 1) };
+    const invs = { ...allGreen(), blockedTree: inv(false, 1, true, ["CTL-1"]), rateLimitHeadroom: inv(false, 1) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     expect(d.gate.decision).toBe("skip");
     expect(d.gate.reason).toBe("rate-limit-cliff");
   });
 
   test("Gate 3: failures + free slots + account usage cliff → skip/account-usage-cliff", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1), accountUsageHeadroom: inv(false, 1, true, ["account-usage"]) };
+    // CAT-76: dispatchLiveness's own move is ticket-less (not anchorable), so it
+    // can no longer serve as Gate 1's actionable-work filler — use a real
+    // ticket-bearing failure instead so Gate 1 passes and Gate 3 is reached.
+    const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CTL-FILLER"]), accountUsageHeadroom: inv(false, 1, true, ["account-usage"]) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     expect(d.gate.decision).toBe("skip");
     expect(d.gate.reason).toBe("account-usage-cliff");
   });
 
   test("Gate 3: an unobservable account usage invariant does not gate", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1), accountUsageHeadroom: inv(false, 1, false) };
+    const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CTL-FILLER"]), accountUsageHeadroom: inv(false, 1, false) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     expect(d.gate.decision).toBe("proceed");
   });
@@ -712,7 +737,7 @@ describe("decideBoardHealth — ordered gates, first match wins", () => {
   test("Gate 3: the GitHub cliff wins when both quota cliffs are tripped", () => {
     const invs = {
       ...allGreen(),
-      dispatchLiveness: inv(false, 1),
+      needsHumanPile: inv(false, 1, true, ["CTL-FILLER"]),
       rateLimitHeadroom: inv(false, 1),
       accountUsageHeadroom: inv(false, 1),
     };
@@ -720,11 +745,11 @@ describe("decideBoardHealth — ordered gates, first match wins", () => {
     expect(d.gate.reason).toBe("rate-limit-cliff");
   });
 
-  test("Gate 4: real observable failures + headroom → proceed + tiered proposals", () => {
+  test("CAT-76: ticket-less dispatch-liveness note is visible but does not proceed", () => {
     const invs = { ...allGreen(), dispatchLiveness: inv(false, 1) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
-    expect(d.gate.decision).toBe("proceed");
-    expect(d.gate.reason).toMatch(/invariant\(s\) flagged/);
+    expect(d.gate.decision).toBe("skip");
+    expect(d.gate.reason).toBe("no-actionable-moves");
     expect(d.invariantsFailed).toBe(1);
     expect(d.proposed.tier1).toBe(1); // dispatch wedge → kick-dispatch
   });
@@ -805,6 +830,100 @@ describe("proposeMoves — CTL-1432 sanctioned-latch suppression (B3)", () => {
     const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CTL-SANCT"]) };
     const m = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-SANCT"] }));
     expect(m.tier1.map((x) => x.ticket)).not.toContain("CTL-SANCT");
+  });
+});
+
+// ─── CTL-1552: parked-by-human LABEL suppression (the cluster-wide successor to
+// the per-host sanctioned-latch env var) ─────────────────────────────────────
+describe("CTL-1552 — parked-by-human label suppression", () => {
+  test("proposeMoves: a parked-by-human ticket is suppressed from tier1 (needsHumanPile)", () => {
+    const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CTL-9"]) };
+    const board = mkBoard({
+      ticketsById: new Map([["CTL-9", { labels: [{ name: "parked-by-human" }] }]]),
+    });
+    const m = proposeMoves(invs, board);
+    expect([...m.tier1, ...m.tier2].some((x) => x.ticket === "CTL-9")).toBe(false);
+  });
+
+  test("proposeMoves: a parked-by-human ticket is suppressed from tier2 (frozenNeedsHuman)", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-9", "CTL-REAL"]) };
+    const board = mkBoard({
+      ticketsById: new Map([["CTL-9", { labels: [{ name: "parked-by-human" }] }]]),
+    });
+    const m = proposeMoves(invs, board);
+    const t2 = m.tier2.map((x) => x.ticket);
+    expect(t2).toContain("CTL-REAL"); // a NON-parked frozen ticket is still proposed
+    expect(t2).not.toContain("CTL-9");
+  });
+
+  test("eligibleDeferredAnchors: a parked-by-human ticket is not an anchor candidate (even HRW-owned & present)", () => {
+    const board = mkBoard({
+      deferredBoardHealth: ["CTL-9"],
+      ticketsById: new Map([["CTL-9", { labels: [{ name: "parked-by-human" }], state: "Todo" }]]),
+    });
+    expect(eligibleDeferredAnchors(board)).not.toContain("CTL-9");
+  });
+
+  test("VISIBILITY invariant: a parked ticket STAYS in buildBoardContext.frozenNeedsHuman", () => {
+    // suppression is in proposeMoves ONLY, never in the cohort surfaces — a human
+    // must still see a parked ticket. CTL-9 carries needs-human + parked-by-human.
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 1, true, ["CTL-9"]) };
+    const board = mkBoard({
+      ticketsById: new Map([
+        ["CTL-9", { labels: [{ name: "needs-human" }, { name: "parked-by-human" }] }],
+      ]),
+    });
+    const ctx = buildBoardContext(board, invs);
+    expect(ctx.frozenNeedsHuman).toContain("CTL-9");
+  });
+
+  test("buildBoardScanEvent: details.sanctioned lists the suppressed (parked) ticket ids", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-9", "CTL-REAL"]) };
+    const board = mkBoard({
+      capacity: { freeSlots: 4 },
+      ticketsById: new Map([["CTL-9", { labels: [{ name: "parked-by-human" }] }]]),
+    });
+    const decision = decideBoardHealth(invs, board);
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision });
+    expect(ev.details.sanctioned).toContain("CTL-9");
+    expect(ev.details.sanctioned).not.toContain("CTL-REAL"); // only what was actually suppressed
+  });
+
+});
+
+describe("CAT-76 — authored escalation suppression", () => {
+  const authored = { status: "needs-human", explanation: { escalation_type: "decision", problem: "choose base", call_to_action: "choose", options: ["A", "B"], why_you: "operator decision" } };
+
+  test("recognizes authored needs-human and stalled signals, failing open otherwise", () => {
+    expect(isHumanEscalatedSignal(authored)).toBe(true);
+    expect(isHumanEscalatedSignal({ ...authored, status: "stalled" })).toBe(true);
+    expect(isHumanEscalatedSignal({ ...authored, explanation: { ...authored.explanation, degraded: true } })).toBe(false);
+    expect(isHumanEscalatedSignal({ status: "needs-human" })).toBe(false);
+    expect(isHumanEscalatedSignal({ status: "needs-human", explanation: null })).toBe(false);
+    expect(isHumanEscalatedSignal({ ...authored, status: "in-progress" })).toBe(false);
+    expect(isHumanEscalatedSignal(null)).toBe(false);
+  });
+
+  test("assembleBoardState default is inert; bound authored signal suppresses proposals and eligible fallback", () => {
+    const opts = { getBoard: () => [{ identifier: "CAT-40", state: "Todo" }], getWorkerSignals: () => [], getEligible: () => [{ identifier: "CAT-40" }] };
+    const inert = assembleBoardState(opts);
+    expect(inert.humanEscalatedTickets.size).toBe(0);
+    const board = assembleBoardState({ ...opts, readEscalationSignal: () => authored });
+    expect([...board.humanEscalatedTickets]).toEqual(["CAT-40"]);
+    const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CAT-40"]), workerAge: inv(false, 1, true, ["CAT-40"]) };
+    expect([...proposeMoves(invs, board).tier1, ...proposeMoves(invs, board).tier2].some((m) => m.ticket === "CAT-40")).toBe(false);
+    expect(selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board)).not.toContain("CAT-40");
+    const decision = decideBoardHealth(invs, { ...board, capacity: { freeSlots: 4 } });
+    expect(decision.gate.reason).toBe("no-actionable-moves");
+    expect(decision.sanctioned).toContain("CAT-40");
+  });
+
+  test("missing or degraded explanation remains anchorable", () => {
+    for (const signal of [{ status: "needs-human" }, { ...authored, explanation: { ...authored.explanation, degraded: true } }]) {
+      const board = assembleBoardState({ getBoard: () => [{ identifier: "CAT-40", state: "Todo" }], getEligible: () => [], readEscalationSignal: () => signal });
+      const moves = proposeMoves({ ...allGreen(), needsHumanPile: inv(false, 1, true, ["CAT-40"]) }, board);
+      expect(moves.tier1.map((m) => m.ticket)).toContain("CAT-40");
+    }
   });
 });
 
@@ -943,7 +1062,7 @@ describe("buildBoardScanEvent", () => {
   });
 
   test("type/ticket/scalars at top of details; rosters as arrays; mode echoed", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-1"]) };
     const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision });
 
@@ -956,7 +1075,7 @@ describe("buildBoardScanEvent", () => {
     expect(typeof ev.details.gateReason).toBe("string");
     expect(ev.details.proposedTier1).toBe(decision.proposed.tier1);
     // per-invariant {ok,failed,observable}
-    expect(ev.details.invariants.dispatchLiveness).toEqual({ ok: false, failed: 1, observable: true });
+    expect(ev.details.invariants.workerAge).toEqual({ ok: false, failed: 1, observable: true });
     // rosters/move arrays live in details (→ body.payload), as arrays
     expect(Array.isArray(ev.details.flagged)).toBe(true);
     expect(ev.details.flagged).toContain("CTL-1");
@@ -1184,8 +1303,8 @@ function flaggedDeps(extra = {}) {
   // a board that trips dispatchLiveness (free slots + queue + no recent dispatch)
   return {
     orchDir: "/tmp/x",
-    getBoard: () => [],
-    getWorkerSignals: () => [],
+    getBoard: () => [{ identifier: "CTL-1", state: "Implement" }],
+    getWorkerSignals: () => [{ ticket: "CTL-1", phase: "implement", status: "running", updatedAt: new Date(NOW - 5 * HOUR).toISOString() }],
     getEligible: () => [{ identifier: "CTL-1" }, { identifier: "CTL-2" }],
     roster: [],
     self: "mini",
@@ -1547,6 +1666,8 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
       flaggedDeps({
         mode: "enforce",
         getEligible: () => [], // no queue → no dispatch wedge → all-green → gate=skip
+        getBoard: () => [],
+        getWorkerSignals: () => [],
         emit: (e) => emits.push(e),
         act: () => { throw new Error("must not act — gate held"); },
       }),
@@ -1591,7 +1712,7 @@ describe("deriveRing → board.ring.boardScans via assembleBoardState (CTL-1435 
     // exact nesting the daemon writes (buildRecoveryEnvelope → body.payload.details).
     // Before the fix, deriveRing read payload.mode (null) and every enforce scan was
     // filtered out — silently disabling the invariant in production.
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-1"]) };
     const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     const flat = buildBoardScanEvent({
       mode: "enforce",
@@ -2027,7 +2148,8 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
 
   test("an operator-sanctioned ticket is not re-proposed", () => {
     const inv = evaluateInvariants(board({ ticketsById: one() }));
-    const moves = proposeMoves(inv, { sanctionedNeedsHuman: ["CTL-9"] });
+    // CTL-1552: suppression is label-only now — parked-by-human on the descriptor.
+    const moves = proposeMoves(inv, { ticketsById: one({ labels: [{ name: "parked-by-human" }] }) });
     expect(moves.tier2.some((x) => x.move === "recover-unowned-in-flight")).toBe(false);
   });
 

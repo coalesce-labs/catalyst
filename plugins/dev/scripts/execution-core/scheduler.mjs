@@ -5999,6 +5999,11 @@ export function schedulerTick(
           // can exclude tickets whose only non-clean signal is a triage launch failure.
           // existsSync/join are already imported in scheduler.mjs.
           hasTriageArtifact: (ticket) => existsSync(join(orchDir, "workers", ticket, "triage.json")),
+          readEscalationSignal: (ticket) => {
+            try {
+              return JSON.parse(readFileSync(join(orchDir, "workers", ticket, "phase-recovery-pass.json"), "utf8"));
+            } catch { return null; }
+          },
         });
         if (_bhResult?.ran) _boardHealthLastRunMs = _bhResult.ranAtMs;
         // CTL-1157 (Codex round-5): a successful board-health ENFORCE dispatch enqueued

@@ -455,6 +455,15 @@ it as a recovery item. Previously the classifier blindly escalated it to a human
 The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode logs a
 `recovery.would-fix` event without dispatching; enforce dispatches the recovery-pass worker.
 
+### Board-health holistic anchor suppression (CAT-76)
+
+Board-health treats ticket-less proposals such as dispatch-liveness and cache-coherence notes as
+telemetry, not delegate-actuation candidates. The holistic anchor path also excludes a ticket when
+`workers/<TICKET>/phase-recovery-pass.json` records a needs-human or stalled signal with an authored,
+non-degraded explanation. Missing or coerced (`degraded: true`) explanations remain anchorable for
+the untyped-stuck catch-all. This signal check complements the recovery-intent ledger: board-health
+defer is cooldown-only, while an absent ledger deliberately fails open.
+
 ### Delegate-first escalation + explanation chokepoint (CTL-1609)
 
 Two gaps closed at the point where the scheduler labels a ticket `needs-human`:
