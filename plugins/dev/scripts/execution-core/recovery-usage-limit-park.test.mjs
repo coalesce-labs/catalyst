@@ -73,7 +73,8 @@ describe("reclaimDeadWorkIfPossible — CAT-58 usage-limit park", () => {
     expect(persisted.failureReason).toBe("usage-limit-blocked");
     expect(persisted.usageLimitExplanation.observed.likely_cause).toBe("account-usage-limit");
     expect(persisted.usageLimitExplanation.problem).toMatch(/usage limit is exhausted/i);
-    expect(persisted.usageLimitExplanation.call_to_action).toMatch(/codex-exec/);
+    expect(persisted.usageLimitExplanation.call_to_action).toMatch(/wait for the reset/i);
+    expect(persisted.usageLimitExplanation.observed.fallback_lane).toBeNull();
     expect(persisted.status).toBe("failed");
     expect(s.applyStalledLabel.calls).toHaveLength(0);
   });

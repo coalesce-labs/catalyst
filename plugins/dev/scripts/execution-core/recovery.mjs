@@ -3474,7 +3474,10 @@ export function reclaimDeadWorkIfPossible(
       phase,
       resetsAt: quota.resetsAt,
       lane: "bg",
-      fallbackLane: "codex-exec",
+      // Recovery cannot see the daemon's boot-time Codex eligibility verdict.
+      // Do not promise a reroute here; dispatch emits the authoritative fallback
+      // or no-healthy-lane event when it evaluates the live lane options.
+      fallbackLane: null,
       detail: quota.detail,
     });
     const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
