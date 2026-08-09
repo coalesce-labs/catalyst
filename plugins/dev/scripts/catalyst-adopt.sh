@@ -98,18 +98,29 @@ fi
 # so a board that renames Done/Canceled — or returns the canceled-category state
 # `Duplicate` — is still refused. CTL-1642 Codex P1 (#3175).
 # CATALYST_ADOPT_TERMINAL_STATES still overrides the whole set verbatim.
+#
+# $1 (optional) = the TARGET worktree path. The configured mappings must come from
+# the ticket's OWN project, so the config is read from the target worktree's
+# .catalyst/config.json first — reading the caller's current checkout would apply
+# the wrong project's terminal states when adopt runs from another repo (Codex
+# #3175 round 2 #3). Falls back to the git toplevel only when no worktree is known
+# yet (e.g. the auto-resolve failure path never reaches the guard).
 _adopt_terminal_states() {
+  local worktree="${1:-}"
   if [[ -n "${CATALYST_ADOPT_TERMINAL_STATES:-}" ]]; then
     printf '%s' "${CATALYST_ADOPT_TERMINAL_STATES}"
     return 0
   fi
   # Built-in terminal aliases (repository-recognized completed/canceled names).
   local states="Done,Cancelled,Canceled,Duplicate,Merged"
-  # Union with the PROJECT's configured terminal state names.
+  # Union with the TARGET PROJECT's configured terminal state names.
   local cfg="${CATALYST_CONFIG_JSON:-}"
+  if [[ -z "$cfg" && -n "$worktree" && -f "$worktree/.catalyst/config.json" ]]; then
+    cfg="$worktree/.catalyst/config.json"
+  fi
   if [[ -z "$cfg" ]]; then
     local top
-    top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    top="$(git ${worktree:+-C "$worktree"} rev-parse --show-toplevel 2>/dev/null || true)"
     [[ -n "$top" && -f "$top/.catalyst/config.json" ]] && cfg="$top/.catalyst/config.json"
   fi
   if [[ -n "$cfg" && -f "$cfg" ]] && command -v jq >/dev/null 2>&1; then
@@ -120,7 +131,6 @@ _adopt_terminal_states() {
   fi
   printf '%s' "$states"
 }
-TERMINAL_STATES="$(_adopt_terminal_states)"
 
 _adopt_is_terminal_state() {
   local state="$1"
@@ -239,22 +249,9 @@ _emit_json() {
     "${_ADOPT_RESULT_REFUSED_REASON}"
 }
 
-# Step 0: terminal-state guard (refuse-first, before any mutation)
-STATE="$(_adopt_get_ticket_state "$TICKET" 2>/dev/null || echo "")"
-if [[ -z "$STATE" ]]; then
-  printf 'catalyst-adopt: could not read state for %s (replica stale or missing); refusing to proceed\n' "$TICKET" >&2
-  _ADOPT_RESULT_REFUSED_REASON="state_read_failed"
-  [[ "$JSON_MODE" -eq 1 ]] && _emit_json
-  exit 1
-fi
-if _adopt_is_terminal_state "$STATE"; then
-  printf 'catalyst-adopt: refusing to adopt terminal ticket %s (state: %s)\n' "$TICKET" "$STATE" >&2
-  _ADOPT_RESULT_REFUSED_REASON="terminal_state:${STATE}"
-  [[ "$JSON_MODE" -eq 1 ]] && _emit_json
-  exit 2
-fi
-
-# Step 1: resolve worktree
+# Step 0: resolve worktree FIRST — the terminal-state SET is read from the target
+# worktree's own .catalyst/config.json (Codex #3175 round 2 #3), so the worktree
+# must be known before the terminal guard runs. Resolution is read-only.
 if [[ -z "$WORKTREE" ]]; then
   _wt_rc=0
   WORKTREE="$(_adopt_resolve_worktree "$TICKET")" || _wt_rc=$?
@@ -271,6 +268,23 @@ fi
 if [[ ! -d "$WORKTREE" ]]; then
   printf 'catalyst-adopt: worktree path does not exist: %s\n' "$WORKTREE" >&2
   exit 1
+fi
+
+# Step 1: terminal-state guard (refuse-first, before any mutation). The terminal
+# SET is derived from the TARGET worktree's project config.
+TERMINAL_STATES="$(_adopt_terminal_states "$WORKTREE")"
+STATE="$(_adopt_get_ticket_state "$TICKET" 2>/dev/null || echo "")"
+if [[ -z "$STATE" ]]; then
+  printf 'catalyst-adopt: could not read state for %s (replica stale or missing); refusing to proceed\n' "$TICKET" >&2
+  _ADOPT_RESULT_REFUSED_REASON="state_read_failed"
+  [[ "$JSON_MODE" -eq 1 ]] && _emit_json
+  exit 1
+fi
+if _adopt_is_terminal_state "$STATE"; then
+  printf 'catalyst-adopt: refusing to adopt terminal ticket %s (state: %s)\n' "$TICKET" "$STATE" >&2
+  _ADOPT_RESULT_REFUSED_REASON="terminal_state:${STATE}"
+  [[ "$JSON_MODE" -eq 1 ]] && _emit_json
+  exit 2
 fi
 printf 'catalyst-adopt: worktree = %s\n' "$WORKTREE" >&2
 
@@ -329,15 +343,21 @@ fi
 # after the commit is a trap: the WIP commit makes the tree clean AND ahead of
 # origin/main, so implementProbe reads it as completed implementation and infers
 # `verify`, skipping any unfinished research/plan/implement work (CTL-1642 Codex
-# P1, #3175). Inference is read-only and keys on --cwd + the durable worker
-# signals under --orch-dir, so it reflects the TRUE pre-adoption state here.
+# P1, #3175). Inference is read-only and keys on --cwd, so it reflects the TRUE
+# pre-adoption worktree state here.
+#
+# The shim deliberately mirrors recovery.mjs's `inferResumePhase(ticket,{cwd})`
+# (cwd only, no orchDir): it detects up to the worktree-provable range
+# (research/plan/implement) and re-dispatches from there, leaving the precise
+# post-implement routing (verify-verdict detour, stale post-PR sanitization) to
+# the scheduler that the dispatched phase re-enters. Resuming earlier than the
+# true phase is conservative — the re-run phases are read-only/idempotent, nothing
+# is skipped — so ORCH_DIR is intentionally NOT passed to the shim.
 INFER_SHIM="${PLUGIN_ROOT}/scripts/execution-core/adopt-infer-phase.mjs"
 RESUME_PHASE="research"
 if [[ -f "$INFER_SHIM" ]]; then
-  infer_args=(--ticket "$TICKET" --cwd "$WORKTREE")
-  [[ -n "$ORCH_DIR" ]] && infer_args+=(--orch-dir "$ORCH_DIR")
-  INFERRED="$(node "$INFER_SHIM" "${infer_args[@]}" 2>/dev/null || \
-              bun "$INFER_SHIM" "${infer_args[@]}" 2>/dev/null || \
+  INFERRED="$(node "$INFER_SHIM" --ticket "$TICKET" --cwd "$WORKTREE" 2>/dev/null || \
+              bun "$INFER_SHIM" --ticket "$TICKET" --cwd "$WORKTREE" 2>/dev/null || \
               echo "research")"
   [[ -n "$INFERRED" ]] && RESUME_PHASE="$INFERRED"
 fi

@@ -181,7 +181,7 @@ echo "--- Phase 2: arg parsing, terminal refusal, dry-run ---"
 # 2.3 Terminal ticket → exits 2, nothing committed/dispatched
 {
   tag="${SCRATCH}/term"
-  make_repo "$tag" "CTL-9001"
+  make_repo "$tag" "PROJ-9001"
   bin_dir="${SCRATCH}/bin_term"; log="${SCRATCH}/call_term.log"
   install_stubs "$bin_dir" "$log"
 
@@ -192,7 +192,7 @@ echo "--- Phase 2: arg parsing, terminal refusal, dry-run ---"
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_term" \
     CATALYST_ADOPT_TERMINAL_STATES="Done,Cancelled,Canceled" \
     CATALYST_ADOPT_TICKET_STATE="Done" \
-    bash "$ADOPT" "CTL-9001" \
+    bash "$ADOPT" "PROJ-9001" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch" 2>&1
   ); rc=$?
@@ -207,7 +207,7 @@ echo "--- Phase 2: arg parsing, terminal refusal, dry-run ---"
 # 2.4 Dry-run: prints plan, no mutations
 {
   tag="${SCRATCH}/dryrun"
-  make_repo "$tag" "CTL-9002" --dirty
+  make_repo "$tag" "PROJ-9002" --dirty
   bin_dir="${SCRATCH}/bin_dr"; log="${SCRATCH}/call_dr.log"
   install_stubs "$bin_dir" "$log"
 
@@ -215,7 +215,7 @@ echo "--- Phase 2: arg parsing, terminal refusal, dry-run ---"
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_dr" \
     CATALYST_ADOPT_TICKET_STATE="Implement" \
-    bash "$ADOPT" "CTL-9002" \
+    bash "$ADOPT" "PROJ-9002" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch" \
       --dry-run 2>&1
@@ -237,7 +237,7 @@ echo "--- Phase 2: arg parsing, terminal refusal, dry-run ---"
 # 2.5 Non-terminal state proceeds past terminal guard
 {
   tag="${SCRATCH}/nonterm"
-  make_repo "$tag" "CTL-9003"
+  make_repo "$tag" "PROJ-9003"
   bin_dir="${SCRATCH}/bin_nt"; log="${SCRATCH}/call_nt.log"
   install_stubs "$bin_dir" "$log"
 
@@ -245,7 +245,7 @@ echo "--- Phase 2: arg parsing, terminal refusal, dry-run ---"
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_nt" \
     CATALYST_ADOPT_TICKET_STATE="Implement" \
-    bash "$ADOPT" "CTL-9003" \
+    bash "$ADOPT" "PROJ-9003" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch" \
       --dry-run 2>&1
@@ -263,7 +263,7 @@ echo "--- Phase 3: salvage-first, WIP commit, push ---"
 # 3.1 WIP commit created for dirty worktree
 {
   tag="${SCRATCH}/wip"
-  make_repo "$tag" "CTL-9004" --dirty
+  make_repo "$tag" "PROJ-9004" --dirty
   bin_dir="${SCRATCH}/bin_wip"; log="${SCRATCH}/call_wip.log"
   install_stubs "$bin_dir" "$log"
 
@@ -271,7 +271,7 @@ echo "--- Phase 3: salvage-first, WIP commit, push ---"
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_wip" \
     CATALYST_ADOPT_TICKET_STATE="Implement" \
-    bash "$ADOPT" "CTL-9004" \
+    bash "$ADOPT" "PROJ-9004" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch" 2>&1
   ); rc=$?
@@ -290,7 +290,7 @@ echo "--- Phase 3: salvage-first, WIP commit, push ---"
 # 3.2 No WIP commit when tree is already clean (committed-only)
 {
   tag="${SCRATCH}/clean"
-  make_repo "$tag" "CTL-9005"
+  make_repo "$tag" "PROJ-9005"
   # Make a commit in the worktree (not dirty)
   ( cd "${SCRATCH}/clean/wt" || exit 1
     printf 'committed\n' > committed.txt
@@ -304,7 +304,7 @@ echo "--- Phase 3: salvage-first, WIP commit, push ---"
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_clean" \
     CATALYST_ADOPT_TICKET_STATE="Implement" \
-    bash "$ADOPT" "CTL-9005" \
+    bash "$ADOPT" "PROJ-9005" \
       --worktree "${SCRATCH}/clean/wt" \
       --orch-dir "$SCRATCH" --orch-id "test-orch" 2>&1
   ); rc=$?
@@ -318,7 +318,7 @@ echo "--- Phase 3: salvage-first, WIP commit, push ---"
 # 3.3 Salvage artifact exists BEFORE the WIP commit (ordering invariant)
 {
   tag="${SCRATCH}/salvorder"
-  make_repo "$tag" "CTL-9006" --dirty
+  make_repo "$tag" "PROJ-9006" --dirty
   bin_dir="${SCRATCH}/bin_so"; log="${SCRATCH}/call_so.log"
   salvage_dir="${SCRATCH}/salvage_so"
   install_stubs "$bin_dir" "$log"
@@ -327,7 +327,7 @@ echo "--- Phase 3: salvage-first, WIP commit, push ---"
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="$salvage_dir" \
     CATALYST_ADOPT_TICKET_STATE="Implement" \
-    bash "$ADOPT" "CTL-9006" \
+    bash "$ADOPT" "PROJ-9006" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch" 2>&1
   ); rc=$?
@@ -349,7 +349,7 @@ echo "--- Phase 4: draft PR ensure, inferred-phase dispatch ---"
 # 4.1 dispatch called after adopt
 {
   tag="${SCRATCH}/dispatch"
-  make_repo "$tag" "CTL-9007"
+  make_repo "$tag" "PROJ-9007"
   ( cd "${SCRATCH}/dispatch/wt" || exit 1
     printf 'work\n' > work.txt
     git add work.txt
@@ -363,7 +363,7 @@ echo "--- Phase 4: draft PR ensure, inferred-phase dispatch ---"
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_disp" \
     CATALYST_ADOPT_TICKET_STATE="Research" \
-    bash "$ADOPT" "CTL-9007" \
+    bash "$ADOPT" "PROJ-9007" \
       --worktree "${SCRATCH}/dispatch/wt" \
       --orch-dir "$SCRATCH" --orch-id "test-orch-1" 2>&1
   ); rc=$?
@@ -371,13 +371,13 @@ echo "--- Phase 4: draft PR ensure, inferred-phase dispatch ---"
   # phase-agent-dispatch was called
   log_content="$(cat "$log" 2>/dev/null || echo '')"
   assert_contains "$log_content" "phase-agent-dispatch" "dispatch: phase-agent-dispatch was called"
-  assert_contains "$log_content" "CTL-9007" "dispatch: ticket arg passed to dispatch"
+  assert_contains "$log_content" "PROJ-9007" "dispatch: ticket arg passed to dispatch"
 }
 
 # 4.2 adopt does NOT pre-write a signal file (dispatcher owns it)
 {
   tag="${SCRATCH}/nosig"
-  make_repo "$tag" "CTL-9008"
+  make_repo "$tag" "PROJ-9008"
   orch_dir="${SCRATCH}/orch_nosig"
   mkdir -p "$orch_dir"
   bin_dir="${SCRATCH}/bin_nosig"; log="${SCRATCH}/call_nosig.log"
@@ -387,15 +387,15 @@ echo "--- Phase 4: draft PR ensure, inferred-phase dispatch ---"
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_nosig" \
     CATALYST_ADOPT_TICKET_STATE="Research" \
-    bash "$ADOPT" "CTL-9008" \
+    bash "$ADOPT" "PROJ-9008" \
       --worktree "${SCRATCH}/nosig/wt" \
       --orch-dir "$orch_dir" --orch-id "test-orch-2" 2>&1
   ); rc=$?
 
   # adopt must not write any phase-*.json signal file
   sig_count=0
-  if [[ -d "${orch_dir}/workers/CTL-9008" ]]; then
-    sig_count="$(ls "${orch_dir}/workers/CTL-9008/phase-"*.json 2>/dev/null | wc -l || echo 0)"
+  if [[ -d "${orch_dir}/workers/PROJ-9008" ]]; then
+    sig_count="$(ls "${orch_dir}/workers/PROJ-9008/phase-"*.json 2>/dev/null | wc -l || echo 0)"
   fi
   if [[ "$sig_count" -eq 0 ]]; then
     pass "no-signal: adopt authored no phase-*.json"
@@ -412,7 +412,7 @@ echo "--- Phase 5: --json contract ---"
 # 5.1 --json emits a valid JSON object on stdout
 {
   tag="${SCRATCH}/json"
-  make_repo "$tag" "CTL-9009" --dirty
+  make_repo "$tag" "PROJ-9009" --dirty
   bin_dir="${SCRATCH}/bin_json"; log="${SCRATCH}/call_json.log"
   install_stubs "$bin_dir" "$log"
 
@@ -420,7 +420,7 @@ echo "--- Phase 5: --json contract ---"
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_json" \
     CATALYST_ADOPT_TICKET_STATE="Implement" \
-    bash "$ADOPT" "CTL-9009" \
+    bash "$ADOPT" "PROJ-9009" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch-3" \
       --json 2>/dev/null
@@ -436,7 +436,7 @@ echo "--- Phase 5: --json contract ---"
 # 5.2 Terminal refusal via --json exits 2 and emits JSON with .adopted=false
 {
   tag="${SCRATCH}/json_term"
-  make_repo "$tag" "CTL-9010"
+  make_repo "$tag" "PROJ-9010"
   bin_dir="${SCRATCH}/bin_jterm"; log="${SCRATCH}/call_jterm.log"
   install_stubs "$bin_dir" "$log"
 
@@ -444,7 +444,7 @@ echo "--- Phase 5: --json contract ---"
     PATH="${bin_dir}:$PATH" \
     CATALYST_ADOPT_TICKET_STATE="Done" \
     CATALYST_ADOPT_TERMINAL_STATES="Done,Cancelled,Canceled" \
-    bash "$ADOPT" "CTL-9010" \
+    bash "$ADOPT" "PROJ-9010" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch-4" \
       --json 2>/dev/null
@@ -461,14 +461,14 @@ echo "--- Phase 5: --json contract ---"
 # 5.3 Exit codes are stable: 0 success, 2 refused-terminal
 {
   tag2="${SCRATCH}/exit_ok"
-  make_repo "$tag2" "CTL-9011"
+  make_repo "$tag2" "PROJ-9011"
   bin_dir="${SCRATCH}/bin_ok"; log="${SCRATCH}/call_ok.log"
   install_stubs "$bin_dir" "$log"
 
   PATH="${bin_dir}:$PATH" \
   CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_ok" \
   CATALYST_ADOPT_TICKET_STATE="Research" \
-  bash "$ADOPT" "CTL-9011" \
+  bash "$ADOPT" "PROJ-9011" \
     --worktree "$WORK" \
     --orch-dir "$SCRATCH" --orch-id "test-orch-5" \
     >/dev/null 2>&1; ok_rc=$?
@@ -484,7 +484,7 @@ echo "--- Phase 6: remediation hardening (Codex #3175) ---"
 # 6.1 Live handle present → refuse to mutate (no WIP commit), exit non-zero
 {
   tag="${SCRATCH}/livehandle"
-  make_repo "$tag" "CTL-9101" --dirty
+  make_repo "$tag" "PROJ-9101" --dirty
   bin_dir="${SCRATCH}/bin_live"; log="${SCRATCH}/call_live.log"
   install_stubs "$bin_dir" "$log"
   # Override lsof to report a FOREIGN holder (a pid that is not our ancestor).
@@ -499,7 +499,7 @@ STUB
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_live" \
     CATALYST_ADOPT_TICKET_STATE="Implement" \
-    bash "$ADOPT" "CTL-9101" \
+    bash "$ADOPT" "PROJ-9101" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch-live" 2>&1
   ); rc=$?
@@ -513,7 +513,7 @@ STUB
 # 6.2 Dispatcher failure propagates: adopt exits non-zero, --json .adopted=false
 {
   tag="${SCRATCH}/dispfail"
-  make_repo "$tag" "CTL-9102"
+  make_repo "$tag" "PROJ-9102"
   bin_dir="${SCRATCH}/bin_df"; log="${SCRATCH}/call_df.log"
   install_stubs "$bin_dir" "$log"
   # Dispatcher reports a missing prior artifact (contract: exit 2).
@@ -528,7 +528,7 @@ STUB
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_df" \
     CATALYST_ADOPT_TICKET_STATE="Research" \
-    bash "$ADOPT" "CTL-9102" \
+    bash "$ADOPT" "PROJ-9102" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch-df" \
       --json 2>/dev/null
@@ -550,14 +550,14 @@ STUB
 # 6.3 Terminal set includes the repository-recognized 'Duplicate' by default
 {
   tag="${SCRATCH}/dup"
-  make_repo "$tag" "CTL-9103"
+  make_repo "$tag" "PROJ-9103"
   bin_dir="${SCRATCH}/bin_dup"; log="${SCRATCH}/call_dup.log"
   install_stubs "$bin_dir" "$log"
 
   out=$(
     PATH="${bin_dir}:$PATH" \
     CATALYST_ADOPT_TICKET_STATE="Duplicate" \
-    bash "$ADOPT" "CTL-9103" \
+    bash "$ADOPT" "PROJ-9103" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch-dup" 2>&1
   ); rc=$?
@@ -567,27 +567,28 @@ STUB
   assert_eq "0" "$ahead" "terminal-duplicate: no commit made"
 }
 
-# 6.4 Terminal set honors a PROJECT-renamed done state from config stateMap
+# 6.4 Terminal set honors a renamed done state read from the TARGET worktree's
+#     OWN .catalyst/config.json (Codex #3175 round 2 #3 — not the caller's cwd,
+#     and without CATALYST_CONFIG_JSON).
 {
   tag="${SCRATCH}/renamed"
-  make_repo "$tag" "CTL-9104"
-  bin_dir="${SCRATCH}/bin_rn"; log="${SCRATCH}/call_rn.log"
-  install_stubs "$bin_dir" "$log"
-  cfg="${SCRATCH}/renamed-config.json"
-  cat > "$cfg" <<'JSON'
+  make_repo "$tag" "PROJ-9104"
+  mkdir -p "${WORK}/.catalyst"
+  cat > "${WORK}/.catalyst/config.json" <<'JSON'
 { "catalyst": { "linear": { "stateMap": { "done": "Shipped", "canceled": "Abandoned" } } } }
 JSON
+  bin_dir="${SCRATCH}/bin_rn"; log="${SCRATCH}/call_rn.log"
+  install_stubs "$bin_dir" "$log"
 
   out=$(
     PATH="${bin_dir}:$PATH" \
-    CATALYST_CONFIG_JSON="$cfg" \
     CATALYST_ADOPT_TICKET_STATE="Shipped" \
-    bash "$ADOPT" "CTL-9104" \
+    bash "$ADOPT" "PROJ-9104" \
       --worktree "$WORK" \
       --orch-dir "$SCRATCH" --orch-id "test-orch-rn" 2>&1
   ); rc=$?
 
-  assert_eq 2 "$rc" "terminal-renamed: exits 2 (config stateMap.done=Shipped is terminal)"
+  assert_eq 2 "$rc" "terminal-renamed: exits 2 (target worktree stateMap.done=Shipped is terminal)"
 }
 
 # 6.5 Bounded matching: a longer sibling ticket's worktree is NOT resolved
@@ -600,8 +601,8 @@ JSON
   ( cd "$primary" || exit 1
     printf 'base\n' > base.txt; git add base.txt; git commit --quiet -m base
     git push --quiet origin HEAD:refs/heads/main
-    git worktree add --quiet -b "ryan/CTL-1642-target" "${root}/wt-1642" >/dev/null 2>&1
-    git worktree add --quiet -b "ryan/CTL-16420-other" "${root}/wt-16420" >/dev/null 2>&1
+    git worktree add --quiet -b "ryan/PROJ-1642-target" "${root}/wt-1642" >/dev/null 2>&1
+    git worktree add --quiet -b "ryan/PROJ-16420-other" "${root}/wt-16420" >/dev/null 2>&1
   )
   bin_dir="${SCRATCH}/bin_bound"; log="${SCRATCH}/call_bound.log"
   install_stubs "$bin_dir" "$log"
@@ -611,12 +612,12 @@ JSON
     PATH="${bin_dir}:$PATH" \
     CATALYST_SALVAGE_DIR="${SCRATCH}/salvage_bound" \
     CATALYST_ADOPT_TICKET_STATE="Research" \
-    bash "$ADOPT" "CTL-1642" \
+    bash "$ADOPT" "PROJ-1642" \
       --orch-dir "$SCRATCH" --orch-id "test-orch-bound" 2>&1
   ); rc=$?
 
-  assert_contains "$out" "wt-1642" "bounded-match: resolves the CTL-1642 worktree"
-  assert_not_contains "$out" "wt-16420" "bounded-match: does NOT resolve the CTL-16420 sibling"
+  assert_contains "$out" "wt-1642" "bounded-match: resolves the PROJ-1642 worktree"
+  assert_not_contains "$out" "wt-16420" "bounded-match: does NOT resolve the PROJ-16420 sibling"
 }
 
 # ─── Summary ─────────────────────────────────────────────────────────────────

@@ -114,7 +114,7 @@ console.log("\nadopt-infer-phase.mjs tests\n");
 // ─── Test 2: falls back to 'research' when no artifacts ──────────────────────
 
 {
-  const ticket = "CTL-9999";
+  const ticket = "PROJ-9999";
   const { dir, cleanup } = makeGitFixture(ticket);
   try {
     const { code, stdout, stderr } = runShim(
@@ -134,7 +134,7 @@ console.log("\nadopt-infer-phase.mjs tests\n");
 // research probe fires → next phase = plan
 
 {
-  const ticket = "CTL-9998";
+  const ticket = "PROJ-9998";
   const { dir, cleanup } = makeGitFixture(ticket, (work, td, t) => {
     const body = "## Summary\n" + "x".repeat(220);
     writeFileSync(join(td, "research", `2026-01-01-${t.toLowerCase()}.md`), body);
@@ -156,7 +156,7 @@ console.log("\nadopt-infer-phase.mjs tests\n");
 // plan probe fires → next phase = implement
 
 {
-  const ticket = "CTL-9997";
+  const ticket = "PROJ-9997";
   const { dir, cleanup } = makeGitFixture(ticket, (work, td, t) => {
     const tl = t.toLowerCase();
     writeFileSync(
@@ -184,7 +184,7 @@ console.log("\nadopt-infer-phase.mjs tests\n");
 // ─── Test 5: stdout is exactly one bare token (no log noise) ─────────────────
 
 {
-  const ticket = "CTL-9996";
+  const ticket = "PROJ-9996";
   const { dir, cleanup } = makeGitFixture(ticket);
   try {
     const { stdout } = runShim(["--ticket", ticket, "--cwd", dir], GIT_ENV);
@@ -196,44 +196,35 @@ console.log("\nadopt-infer-phase.mjs tests\n");
   }
 }
 
-// ─── Test 6: orchDir threading — orchestrator-scoped probes fire (Codex #3175) ─
-// A durable verify.json under <orchDir>/workers/<ticket>/ must let the shim infer
-// the phase AFTER verify (review). Without --orch-dir the same fixture can only
-// see up to the worktree artifacts, so it falls back to 'research'. This proves
-// the P2 fix: the orchestrator-scoped probes now receive orchDir.
+// ─── Test 6: caps at the worktree-detectable range (Codex #3175 round 2) ──────
+// The shim mirrors recovery.mjs's inferResumePhase(ticket,{cwd}) — cwd only, no
+// orchDir — so the orchDir-gated post-implement probes never fire and a retained
+// verify.json under a worker dir must NOT pull inference to `review`. Post-implement
+// routing (verify-verdict detour, stale post-PR sanitization) is the scheduler's job.
+// A worktree with research+plan+implement done resumes at `verify` (the next
+// worktree-detectable step), never `review`/`teardown`.
 
 {
-  const ticket = "CTL-9995";
-  const { dir, cleanup } = makeGitFixture(ticket);
-  const orchDir = join(dir, "..", "orch");
-  const workerDir = join(orchDir, "workers", ticket);
-  mkdirSync(workerDir, { recursive: true });
-  writeFileSync(
-    join(workerDir, "verify.json"),
-    JSON.stringify({
-      findings: [],
-      regression_risk: 2,
-      tests_attempted: 3,
-      gates: {},
-      generatedAt: "2026-01-01T00:00:00Z",
-    })
-  );
+  const ticket = "PROJ-9995";
+  const { dir, cleanup } = makeGitFixture(ticket, (work, td, t) => {
+    const tl = t.toLowerCase();
+    writeFileSync(join(td, "research", `2026-01-01-${tl}.md`), "## Summary\n" + "x".repeat(220));
+    writeFileSync(
+      join(td, "plans", `2026-01-01-${tl}.md`),
+      "## Phase 1\nSome content\n\nSuccess Criteria: done\n" + "x".repeat(200)
+    );
+    // Commit the plan work so implementProbe (clean + ahead + plan phases) fires.
+    runGit(["add", "-A"], work);
+    runGit(["commit", "--quiet", "-m", "impl"], work);
+    runGit(["push", "--quiet", "origin", "HEAD"], work);
+  });
   try {
-    // Without --orch-dir: the orchestrator-scoped probes cannot see the signal.
-    const noOrch = runShim(["--ticket", ticket, "--cwd", dir], GIT_ENV);
+    const { code, stdout, stderr } = runShim(["--ticket", ticket, "--cwd", dir], GIT_ENV);
+    assert(code === 0, "exits 0 with implement-complete worktree", stderr);
+    const token = stdout.trim();
     assert(
-      noOrch.stdout.trim() === "research",
-      `without --orch-dir falls back to research, got '${noOrch.stdout.trim()}'`
-    );
-    // With --orch-dir: verifyProbe fires → next phase is review.
-    const withOrch = runShim(
-      ["--ticket", ticket, "--cwd", dir, "--orch-dir", orchDir],
-      GIT_ENV
-    );
-    assert(withOrch.code === 0, "exits 0 with orchDir verify.json", withOrch.stderr);
-    assert(
-      withOrch.stdout.trim() === "review",
-      `infers 'review' after verify done (orchDir threaded), got '${withOrch.stdout.trim()}'`
+      token === "verify",
+      `caps at worktree-detectable range → 'verify' after implement, got '${token}'`
     );
   } finally {
     cleanup();
