@@ -74,6 +74,8 @@ function mkPrStatusMap(rows = []) {
 function mkBoard(o = {}) {
   return {
     ticketsById: o.ticketsById ?? new Map(),
+    boardCacheAgeMs: o.boardCacheAgeMs ?? null,
+    boardCacheFrozen: o.boardCacheFrozen ?? false,
     signals: o.signals ?? [],
     eligible: o.eligible ?? [],
     roster: o.roster ?? [],
@@ -986,6 +988,18 @@ describe("buildBoardScanEvent", () => {
     expect(ev.details.slotFree).toBe(1);
   });
 
+  test("publishes boardCacheAgeMs on the recovery.board-scan payload", () => {
+    const board = mkBoard({ boardCacheAgeMs: 17 * MIN });
+    const invs = evaluateInvariants(board);
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
+    expect(ev.details.boardCacheAgeMs).toBe(17 * MIN);
+  });
+
   // CTL-1607 (Codex #2985 P2 #1): in_use is derived from capacity − freeSlots, so it
   // reflects the FULL occupancy basis (liveCount + queued delegates + SDK inflight)
   // the scheduler admits against — NOT the raw bg liveCount. Here occupancy is 4
@@ -1101,6 +1115,48 @@ describe("buildBoardContext", () => {
 
 // ─── assembleBoardState — the one impure reader (reads only) ─────────────────
 describe("assembleBoardState", () => {
+  test("boardCacheAgeMs is the age of the freshest readable descriptor", () => {
+    const board = assembleBoardState({
+      getBoard: () => [
+        { identifier: "CTL-OLD", updatedAt: new Date(NOW - 3 * HOUR).toISOString() },
+        { identifier: "CTL-FRESH", updated_at: new Date(NOW - 10 * MIN).toISOString() },
+      ],
+      now: () => NOW,
+    });
+    expect(board.boardCacheAgeMs).toBe(10 * MIN);
+    expect(board.boardCacheFrozen).toBe(false);
+  });
+
+  test("boardCacheAgeMs is null and frozen is false when timestamps are absent or unreadable", () => {
+    for (const descriptors of [[], [{ identifier: "CTL-A" }], [{ identifier: "CTL-A", updatedAt: "bad" }]]) {
+      const board = assembleBoardState({ getBoard: () => descriptors, now: () => NOW });
+      expect(board.boardCacheAgeMs).toBeNull();
+      expect(board.boardCacheFrozen).toBe(false);
+    }
+  });
+
+  test("cache freshness accepts ISO strings and epoch-ms integers", () => {
+    const board = assembleBoardState({
+      getBoard: () => [
+        { identifier: "CTL-ISO", updatedAt: new Date(NOW - 2 * HOUR).toISOString() },
+        { identifier: "CTL-EPOCH", updated_at: NOW - 30 * MIN },
+      ],
+      now: () => NOW,
+    });
+    expect(board.boardCacheAgeMs).toBe(30 * MIN);
+    expect(board.boardCacheFrozen).toBe(false);
+  });
+
+  test("boardCacheFrozen is true at and beyond the configured threshold", () => {
+    const getBoard = () => [{ identifier: "CTL-A", updatedAt: new Date(NOW - HOUR).toISOString() }];
+    expect(assembleBoardState({ getBoard, now: () => NOW }).boardCacheFrozen).toBe(true);
+    expect(assembleBoardState({
+      getBoard,
+      now: () => NOW,
+      thresholds: { boardCacheFrozenMs: 2 * HOUR },
+    }).boardCacheFrozen).toBe(false);
+  });
+
   test("github quota seam is skipped in off and sampled in shadow", () => {
     let calls = 0;
     const getGithubQuota = () => { calls += 1; return quotaSnapshot(); };
@@ -1840,6 +1896,35 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
   const one = (over = {}) =>
     new Map([["CTL-9", { id: "CTL-9", state: "Implement", updatedAt: at(72), ...over }]]);
 
+  test("frozen board cache makes the invariant unobservable and names its age", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(), boardCacheFrozen: true, boardCacheAgeMs: 72 * HOUR,
+    })).unownedInFlight;
+    expect(r.observable).toBe(false);
+    expect(r.ok).toBe(true);
+    expect(r.flagged).toEqual([]);
+    expect(r.note).toContain("board cache frozen (4320m");
+  });
+
+  test("a fresh cache preserves normal unowned-in-flight findings", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(), boardCacheFrozen: false, boardCacheAgeMs: 5 * MIN,
+    })).unownedInFlight;
+    expect(r.flagged).toEqual(["CTL-9"]);
+  });
+
+  test("a frozen cache yields zero actuation candidates while non-cache invariants remain active", () => {
+    const b = board({
+      ticketsById: one(), boardCacheFrozen: true, boardCacheAgeMs: 72 * HOUR,
+      signals: [{ ticket: "CTL-WORKER", status: "running", ageMs: 10 * HOUR }],
+    });
+    const invs = evaluateInvariants(b, { thresholds: { workerAgeMs: HOUR } });
+    expect(invs.unownedInFlight.observable).toBe(false);
+    expect(invs.workerAge.flagged).toEqual(["CTL-WORKER"]);
+    const moves = proposeMoves(invs, b);
+    expect([...moves.tier1, ...moves.tier2, ...moves.tier3].some((m) => m.ticket === "CTL-9")).toBe(false);
+  });
+
   test("flags a ticket whose state claims in-flight with no worker and no PR", () => {
     const r = evaluateInvariants(board({ ticketsById: one() })).unownedInFlight;
     expect(r.observable).toBe(true);
@@ -2192,6 +2277,17 @@ describe("checkStrandedMidPipeline (CTL-1644)", () => {
   // Full "nothing salvageable" evidence row for CTL-9.
   const noActuation = { id: "CTL-9", hasWorkerDir: false, hasLiveBg: false,
     hasFreshIntent: false, openPr: null, remoteBranchExists: false, worktreeUnpushed: false };
+
+  test("frozen board cache makes the invariant unobservable", () => {
+    const r = evaluateInvariants(board({
+      ticketsById: one(), boardCacheFrozen: true, boardCacheAgeMs: 72 * HOUR,
+      self: "mini", ownerForTicket: () => "mini", strandedEvidence: ev([noActuation]),
+    })).strandedMidPipeline;
+    expect(r.observable).toBe(false);
+    expect(r.ok).toBe(true);
+    expect(r.flagged).toEqual([]);
+    expect(r.note).toContain("stranded-mid-pipeline not observable");
+  });
 
   test("observable:false when no evidence seam provided (empty Map → shadow-first wiring)", () => {
     // strandedEvidence defaults to new Map() in mkBoard → size 0 → not observable.
