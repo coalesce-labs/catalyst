@@ -20,9 +20,43 @@ import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
 import { sdkRunPhaseAgent, defaultEmitBackstop, scrubSecrets } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query()); CTL-1367 P1: shared failed-terminal backstop for a rejected async dispatch; CTL-1367 item 11: scrub token-shaped substrings out of a rejected-dispatch reason before it is backstopped/logged
-import { codexRunPhaseAgent } from "./codex-run-phase-agent.mjs"; // CTL-1457: the executor=codex-exec launch verb (spawns `codex exec --json` as a child process)
+import { codexRunPhaseAgent, resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: the executor=codex-exec launch verb (spawns `codex exec --json` as a child process); CAT-58: the auth+binary probe the usage-limit fallback needs POSITIVE evidence from
 import { hasFreshClaim } from "./signal-reader.mjs"; // CTL-1367 P2-G: a young single-flight claim makes a missing SDK signal a benign claim-lost no-op
-import { log, resolveExecutorForPhase } from "./config.mjs"; // CTL-1367 P1: log a swallowed async-dispatch rejection before the backstop fires; CTL-1457: per-phase executor routing hook (the default seam threaded into makePhaseAwareDispatchFn)
+import { log, resolveExecutorForPhase, codexConfig } from "./config.mjs"; // CTL-1367 P1: log a swallowed async-dispatch rejection before the backstop fires; CTL-1457: per-phase executor routing hook (the default seam threaded into makePhaseAwareDispatchFn); CAT-58: resolve the codex runtime config the fallback probe checks
+import { inLaneCooldown, readLaneCooldown } from "./lane-cooldown.mjs";
+
+// defaultVerifyCodexLane — CAT-58 (Codex round 2, P1 "Verify Codex before using it as the
+// fallback"). `codexBootEligible` is TRUE in two structurally different situations:
+//   (a) codex IS routed and its auth + binary were PROBED and passed, and
+//   (b) codex is NOT routed anywhere, so resolveCodexBootEligibility returned its no-op
+//       sentinel { eligible: true } having checked NOTHING.
+// The usage-limit fallback may only reroute onto a lane it has POSITIVE evidence for, so it
+// must not read (b) as a healthy lane — on a normal bg-only node that would send every parked
+// dispatch to an absent/unauthenticated codex, converting a clean "defer until reset" into a
+// storm of real dispatch failures and breaker trips. This helper force-ARMS the same boot gate
+// (bootExecutor: "codex-exec" makes routesToCodex true) so the auth + `codex --version` probe
+// actually runs, and reports only its verdict. Silent by construction: no logger and no
+// emitEvent are passed, so a negative verdict here neither WARN-logs nor emits the boot gate's
+// codex-fallback event (this is a per-park probe, not a boot-time configuration error).
+export function defaultVerifyCodexLane({ configPath, env = process.env } = {}) {
+  try {
+    const verdict = resolveCodexBootEligibility(
+      {},
+      {
+        codexCfg: codexConfig({ configPath, env }),
+        env,
+        bootExecutor: "codex-exec",
+        emitEvent: undefined,
+        log: null,
+      },
+    );
+    return verdict?.eligible === true;
+  } catch {
+    // Fail CLOSED: an unreadable codex config / throwing probe is NOT evidence of a
+    // healthy lane, so the caller defers rather than dispatching into the unknown.
+    return false;
+  }
+}
 
 // phase-agent-dispatch sits one directory up from execution-core/.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(new URL("../phase-agent-dispatch", import.meta.url));
@@ -335,7 +369,16 @@ export function makePhaseAwareDispatchFn({
   resolveExecutorForPhase = _defaultResolveExecutorForPhase,
   dispatchForExecutor = _defaultDispatchForExecutor,
   log: logger = log,
+  orchDir = null,
+  now = Date.now,
+  // CAT-58 (Codex round 2, P1): the usage-limit fallback's evidence source. Injectable so
+  // the unit tests drive the verdict without a real codex install; defaults to the live
+  // auth + `codex --version` probe.
+  verifyCodexLane = () => defaultVerifyCodexLane({ configPath }),
 } = {}) {
+  // Memoized verdict for `verifyCodexLane` (null = not yet probed). Scoped to the factory so
+  // it is per-daemon-process, and so each test's fresh fn re-probes.
+  let codexLaneVerified = null;
   return (args, seams = {}) => {
     // Per-phase routing. Only an EXPLICITLY-routed phase (source "executorByPhase")
     // overrides the boot executor; an unrouted phase keeps the boot executor (which
@@ -376,9 +419,48 @@ export function makePhaseAwareDispatchFn({
     if (effective === "sdk" && !sdkBootEligible) {
       effective = bootExecutor === "sdk" ? "bg" : bootExecutor;
     }
+    const bgParked = orchDir ? inLaneCooldown(orchDir, "bg", now()) : false;
+    if (bgParked && effective === "bg") {
+      const marker = readLaneCooldown(orchDir, "bg");
+      // CAT-58 (Codex round 2, P1): consult a VERIFIED codex lane, never the
+      // codexBootEligible sentinel — see defaultVerifyCodexLane. Memoized for the life of
+      // this dispatch fn so a park episode pays the auth+binary probe once rather than once
+      // per dispatch; the daemon rebuilds the fn on restart, which is also when a newly
+      // provisioned codex should be re-probed.
+      // Both must hold. `codexBootEligible === false` is POSITIVE evidence the lane is bad
+      // (the boot gate probed it and it failed) and is decisive on its own; `true` is
+      // ambiguous, so the probe disambiguates verified-healthy from never-checked.
+      if (codexLaneVerified === null) {
+        codexLaneVerified = codexBootEligible === true && verifyCodexLane() === true;
+      }
+      if (codexLaneVerified) {
+        effective = "codex-exec";
+        emitEvent?.({ "event.name": "execution-core.executor.usage-limit-fallback", payload: { ticket: args.ticket, phase: args.phase, from: "bg", to: "codex-exec", expiresAt: marker?.expiresAt } });
+      } else {
+        emitEvent?.({ "event.name": "execution-core.executor.no-healthy-lane", payload: { ticket: args.ticket, phase: args.phase, lane: "bg", expiresAt: marker?.expiresAt } });
+        // CAT-58 (Codex round 2, P1 "Suppress approved-resume retries while the lane is
+        // deferred"): `laneDeferred` marks this as a DEFERRAL, not a dispatch failure. A
+        // caller that retains approval sentinels + re-appends phase.dispatch.requested on
+        // every generic failure would otherwise self-wake the scheduler and retry the same
+        // approval for the whole cooldown. Callers branch on this flag to leave the ticket
+        // untouched until `retryAfter`.
+        return {
+          code: 75,
+          deferred: true,
+          laneDeferred: true,
+          lane: "bg",
+          retryAfter: marker?.expiresAt ?? null,
+          reason: "no-healthy-executor-lane",
+        };
+      }
+    }
     const fn = dispatchForExecutor(effective);
+    const withEffectiveExecutor = (result) => {
+      if (result && typeof result === "object") result.effectiveExecutor = effective;
+      return result;
+    };
     if (effective === "sdk" || effective === "codex-exec") {
-      return fn(args, {
+      const result = fn(args, {
         emitEvent: (name, payload) => emitEvent({ "event.name": name, payload }),
         // CTL-1457 (finding 4): the codex runner resolves its runtime codexConfig from
         // configPath — thread it so the runtime auth guard + buildCodexArgs honor the
@@ -387,8 +469,14 @@ export function makePhaseAwareDispatchFn({
         ...(effective === "codex-exec" ? { configPath } : {}),
         ...seams,
       });
+      if (result && typeof result.then === "function") {
+        const tagged = result.then(withEffectiveExecutor);
+        tagged.effectiveExecutor = effective;
+        return tagged;
+      }
+      return withEffectiveExecutor(result);
     }
-    return fn(args, seams);
+    return withEffectiveExecutor(fn(args, seams));
   };
 }
 

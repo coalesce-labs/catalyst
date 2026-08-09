@@ -328,6 +328,16 @@ flag (`CATALYST_PUBLISH_PREFLIGHT` over Layer-2 configuration, default `shadow`)
 GitHub quota. The worker-only doctor check reports PASS when allowed, WARN for shadow denial, FAIL
 for enforce denial, and INFO when inconclusive.
 
+### Usage-limit parking and executor fallback (CAT-58)
+
+When a terminal `bg` job's `timeline.jsonl` reports that the Claude account usage limit was hit,
+recovery parks the ticket phase until the reported reset instead of reviving it through the normal
+progress gate. The worker signal records `failureReason: "usage-limit-blocked"`; a ticket/phase
+dispatch cooldown and a node-local `.lane-cooldowns/bg.json` marker carry the reset deadline. While
+that lane marker is active, phase-aware dispatch routes `bg` work to `codex-exec` when its boot gate
+is healthy and emits an audit-only fallback event. Account rate-limit samples also derive the board
+health `nearCliff` invariant from five-hour and seven-day utilization (90% by default).
+
 ### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707 + CAT-31)
 
 On a **fresh** dispatch of a **build** phase (`research`,`plan`,`implement`,`verify`,`review`),

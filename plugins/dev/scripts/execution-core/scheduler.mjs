@@ -78,6 +78,7 @@ import {
   isThenable,
   backstopOnRejection,
 } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) dispatch synchronously + backstop a rejected async dispatch
+import { clearLaneCooldown } from "./lane-cooldown.mjs";
 import {
   fetchTicketState,
   fetchTicketsBatch,
@@ -2414,18 +2415,19 @@ export function inDispatchCooldown(orchDir, ticket, phase, now) {
 // pre-CTL-671 marker without the counter reads as 0 (the `?? 0` default) and
 // self-upgrades on this write. clearDispatchCooldown rmSync's the whole marker,
 // so a successful dispatch resets the counter for free.
-export function recordDispatchFailure(orchDir, ticket, phase, code, now) {
+export function recordDispatchFailure(orchDir, ticket, phase, code, now, { expiresAtOverride = null, reasonCode = null, countsTowardBreaker = true } = {}) {
   const dir = join(orchDir, ".dispatch-cooldowns");
   const path = dispatchCooldownPath(orchDir, ticket, phase);
   const prev = readCooldownMarker(orchDir, ticket, phase);
-  let consecutiveFailures = 1;
+  let consecutiveFailures = countsTowardBreaker ? 1 : 0;
   if (prev?.code === code && typeof prev.consecutiveFailures === "number") {
-    consecutiveFailures = prev.consecutiveFailures + 1;
+    consecutiveFailures = countsTowardBreaker ? prev.consecutiveFailures + 1 : prev.consecutiveFailures;
   }
   const ttl = PERMANENT_FAILURE_CODES.has(code)
     ? DISPATCH_PERMANENT_COOLDOWN_MS
     : DISPATCH_COOLDOWN_MS;
-  const marker = { ticket, phase, code, failedAt: now, expiresAt: now + ttl, consecutiveFailures };
+  const expiresAt = Number.isFinite(expiresAtOverride) && expiresAtOverride > now ? expiresAtOverride : now + ttl;
+  const marker = { ticket, phase, code, reasonCode, failedAt: now, expiresAt, consecutiveFailures };
   try {
     mkdirSync(dir, { recursive: true });
     writeFileSync(path, JSON.stringify(marker));
@@ -4450,6 +4452,7 @@ export function schedulerTick(
       resumeSession,
       clusterGeneration,
     });
+    const effectiveExecutor = rawDispatch?.effectiveExecutor;
     const dispatchWasAsync = isThenable(rawDispatch);
     // CTL-1367 P1: on a REJECTED async (sdk) dispatch the detached handler logs the
     // rejection AND emits the failed-terminal backstop (stalled signal +
@@ -4470,6 +4473,9 @@ export function schedulerTick(
       const v = verifyDispatched(orchDir, ticket, phase, { requireBgJob: !dispatchWasAsync });
       if (v.ok) {
         clearDispatchCooldown(orchDir, ticket, phase); // CTL-624: success clears any prior cool-down
+        if (effectiveExecutor === "bg" || (effectiveExecutor == null && dispatch === defaultDispatch)) {
+          clearLaneCooldown(orchDir, "bg");
+        }
         // CTL-660: record the VERIFIED launch. Re-read the signal for the
         // bg_job_id + worktreePath the launched worker wrote.
         const signal = readPhaseSignalRaw(orchDir, ticket, phase);
@@ -4529,6 +4535,17 @@ export function schedulerTick(
         });
       }
       return { ok: false, code: 0, reason, signal: null };
+    }
+
+    // A parked executor lane is infrastructure state, not a ticket failure.
+    // Arm a retry cooldown without incrementing the breaker or emitting a
+    // misleading phase.dispatch.failed event.
+    if (r.deferred) {
+      const cd = recordDispatchFailure(orchDir, ticket, phase, r.code, now(), {
+        countsTowardBreaker: false,
+        reasonCode: r.reason ?? "no-healthy-executor-lane",
+      });
+      return { ok: false, code: r.code, reason: r.reason, deferred: true, expiresAt: cd.expiresAt, signal: null };
     }
 
     // rc != 0 — real dispatch failure.
@@ -5651,6 +5668,7 @@ export function schedulerTick(
         // suppression. null when CATALYST_BELIEFS_SHADOW=0 (the default — legacy tests
         // unaffected; intentAwareKill falls through to plain killBgJob).
         intentDb,
+        recordDispatchFailureFn: recordDispatchFailure,
         // CTL-863: thread this tick's live cluster gate + host identity so
         // reclaimDeadWork's postReclaimMirror fence zombie-guard is armed on a real
         // ≥2-host cluster (roster resolved per-tick above → no boot-time staleness).
@@ -5709,6 +5727,11 @@ export function schedulerTick(
         case "no-progress-stopped":
           // CTL-736 Phase 3: a dead worker that made zero forward progress was
           // stopped + flagged needs-human, never respawned (the futile idle loop).
+          noProgressStopped.push(entry);
+          break;
+        case "usage-limit-parked":
+          // Account quota is infrastructure state, not a ticket defect. The
+          // reset-anchored cooldown owns re-entry; do not label needs-human.
           noProgressStopped.push(entry);
           break;
         case "escalated":

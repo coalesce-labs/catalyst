@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { readRatelimitPollerConfig, log } from "./config.mjs";
 import { emitRatelimitEvent, RATELIMIT_EVENT_SAMPLED } from "./ratelimit-event.mjs";
+import { writeAccountQuota } from "./account-quota.mjs";
 
 const PROFILE_ENDPOINT = "https://api.anthropic.com/api/oauth/profile";
 const OAUTH_BETA = "oauth-2025-04-20";
@@ -182,6 +183,7 @@ async function defaultResolveEmail(token, { userAgent }) {
  * @param {Function} [opts.now]                              injectable envelope timestamp fn (forwarded to emit; defaults to real time)
  */
 export function startRatelimitPoller({
+  orchDir = null,
   clock = realClock(),
   config = readRatelimitPollerConfig(),
   readToken = defaultReadToken,
@@ -262,9 +264,7 @@ export function startRatelimitPoller({
 
       const fiveHour = body.five_hour ?? {};
       const sevenDay = body.seven_day ?? {};
-      emit(
-        RATELIMIT_EVENT_SAMPLED,
-        {
+      const payload = {
           email: cachedEmail,
           fiveHourPct: pctOf(body.five_hour),
           sevenDayPct: pctOf(body.seven_day),
@@ -274,9 +274,9 @@ export function startRatelimitPoller({
           sonnetPct: pctOf(body.seven_day_sonnet),
           subscriptionType: orgMeta.subscriptionType,
           rateLimitTier: orgMeta.rateLimitTier,
-        },
-        { now },
-      );
+      };
+      emit(RATELIMIT_EVENT_SAMPLED, payload, { now });
+      if (orchDir) writeAccountQuota(orchDir, payload, { now });
     } catch (err) {
       log.warn({ err: err?.message }, "ratelimit-poller: tick failed");
     }
