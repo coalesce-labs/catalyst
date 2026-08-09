@@ -21,6 +21,7 @@ import {
   isTicketInFlight,
   listInFlightTickets,
   computeDispatchSurvivingRoster, // CTL-1091 Phase 3: positive-liveness dispatch roster
+  computeNotLiveHosts,
   resolveDispatchRoster, // CTL-1091: shared dispatch-roster resolver (liveness + deflap + outage)
   readMaxParallel,
   readExecutionCoreConcurrency,
@@ -10465,6 +10466,19 @@ describe("computeDispatchSurvivingRoster — positive liveness (CTL-1091/CTL-105
     expect(out).toEqual(["solo"]);
     expect(read).toBe(false);
   });
+
+  test("not-live computation is also a strict single-host no-op", () => {
+    let read = false;
+    const out = computeNotLiveHosts(["solo"], {
+      readHeartbeats: () => {
+        read = true;
+        return {};
+      },
+      nowMs: NOW,
+    });
+    expect(out).toEqual([]);
+    expect(read).toBe(false);
+  });
 });
 
 // ── CTL-1091: resolveDispatchRoster — the shared liveness+deflap+outage resolver ─
@@ -10561,6 +10575,163 @@ describe("resolveDispatchRoster — shared dispatch resolver (CTL-1091)", () => 
     // prevState preserved (we learned nothing this tick).
     const persisted = JSON.parse(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8"));
     expect(persisted.laptop.liveSince).toBe(1234);
+  });
+
+  test("sustained outage narrows to the last-known-good roster by default", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ __lastGoodRoster: ["mini", "laptop"], __outage: { sinceMs: 1_000 } }),
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop", "gone"],
+      orchDir,
+      self: "mini",
+      nowMs: 10_000,
+      sustainedMs: 5_000,
+      readHeartbeats: () => ({}),
+      persist: true,
+    });
+    expect(out).toEqual(["mini", "laptop"]);
+  });
+
+  test("sustained outage refuses to narrow a multi-host roster to self", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ __lastGoodRoster: ["mini"], __outage: { sinceMs: 1_000 } }),
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "ghost", "gone"],
+      orchDir,
+      self: "mini",
+      nowMs: 10_000,
+      sustainedMs: 5_000,
+      readHeartbeats: () => ({}),
+      persist: true,
+    });
+    expect(out).toEqual(["mini", "ghost", "gone"]);
+  });
+
+  test("complete healthy view persists a safe LKG consumed by a later sustained outage", () => {
+    const roster = ["mini", "laptop", "tower"];
+    const healthy = resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent, tower: recent }),
+      persist: true,
+    });
+    expect(healthy).toEqual(roster);
+    const persisted = JSON.parse(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8"));
+    expect(persisted.__lastGoodRoster).toEqual(roster);
+
+    const outage = resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW + 10_000,
+      sustainedMs: 0,
+      readHeartbeats: () => ({}),
+      persist: true,
+    });
+    expect(outage).toEqual(roster);
+  });
+
+  test("a partial healthy view carries the LKG forward instead of erasing it", () => {
+    const roster = ["mini", "laptop", "tower"];
+    // Tick 1 — complete view records the LKG.
+    resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent, tower: recent }),
+      persist: true,
+    });
+
+    // Tick 2 — `tower` goes quiet. Still a healthy (non-outage) read, so the LKG
+    // must NOT be refreshed to the narrower view, but must NOT be dropped either.
+    resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW + 1_000,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }),
+      persist: true,
+    });
+    const persisted = JSON.parse(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8"));
+    expect(persisted.__lastGoodRoster).toEqual(roster);
+
+    // Tick 3 — feed dies. The surviving evidence is still consumable.
+    const outage = resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW + 10_000,
+      sustainedMs: 0,
+      readHeartbeats: () => ({}),
+      persist: true,
+    });
+    expect(outage).toEqual(roster);
+  });
+
+  test("a partial healthy view narrows a later sustained outage to the recorded LKG", () => {
+    const roster = ["mini", "laptop", "ghost"];
+    // Tick 1 — only mini+laptop have ever been live; `ghost` never checks in, so
+    // the view is never complete and no LKG is ever recorded from it.
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ __lastGoodRoster: ["mini", "laptop"] }),
+    );
+    // Tick 2 — partial healthy view (ghost absent) must preserve the LKG.
+    resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }),
+      persist: true,
+    });
+    // Tick 3 — sustained outage narrows to the preserved LKG, shedding ghost.
+    const outage = resolveDispatchRoster({
+      roster,
+      orchDir,
+      self: "mini",
+      nowMs: NOW + 10_000,
+      sustainedMs: 0,
+      readHeartbeats: () => ({}),
+      persist: true,
+    });
+    expect(outage.sort()).toEqual(["laptop", "mini"]);
+  });
+
+  test("cold-start sustained outage remains on the full roster", () => {
+    const out = resolveDispatchRoster({
+      roster: ["mini", "ghost"],
+      orchDir,
+      self: "mini",
+      nowMs: 10_000,
+      sustainedMs: 0,
+      readHeartbeats: () => ({}),
+    });
+    // `[self]` on every host would make every host own every ticket.
+    expect(out).toEqual(["mini", "ghost"]);
+  });
+
+  test("full-roster opt-out retains the old sustained-outage behavior", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ __lastGoodRoster: ["mini"], __outage: { sinceMs: 1_000 } }),
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "ghost"], orchDir, self: "mini", nowMs: 10_000,
+      sustainedMs: 5_000, outageFallback: "full-roster", readHeartbeats: () => ({}),
+    });
+    expect(out).toEqual(["mini", "ghost"]);
   });
 
   test("persist:false does NOT write the deflap file", () => {

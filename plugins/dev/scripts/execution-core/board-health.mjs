@@ -372,6 +372,17 @@ export function resolveDeadHosts(deadHosts) {
   }
 }
 
+// `null` is deliberately distinct from `[]`: null means the liveness signal
+// could not be observed, while [] means it was observed and every host is live.
+export function resolveNotLiveHosts(notLiveHosts) {
+  try {
+    const value = typeof notLiveHosts === "function" ? notLiveHosts() : notLiveHosts;
+    return Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export function assembleBoardState({
   orchDir,
   getBoard = () => [],
@@ -383,6 +394,7 @@ export function assembleBoardState({
   // (scheduler.mjs); empty default keeps the holistic foreign-failover unreachable
   // (shadow-safe AND N=1-safe).
   deadHosts = [],
+  getNotLiveHosts = () => null,
   self = "",
   multiHost = false,
   capacity = { maxParallel: 0, liveCount: 0, freeSlots: 0 },
@@ -524,6 +536,7 @@ export function assembleBoardState({
     // CTL-1524 (C4b): resolve here too, so a direct assembleBoardState caller may
     // also pass a thunk. Already-resolved arrays pass through untouched.
     deadHosts: resolveDeadHosts(deadHosts),
+    notLiveHosts: safe(() => resolveNotLiveHosts(getNotLiveHosts), null),
     self: self ?? "",
     multiHost: !!multiHost,
     // CTL-1157 off-gate: carried so evaluateInvariants can skip the cohort checks
@@ -761,25 +774,20 @@ function checkRateLimitHeadroom(b, t) {
   return invariant(!failed, failed ? 1 : 0, true, [], note);
 }
 
-// #6 — stranded node (mini-2 class): a rostered host that HRW-owns a share of
-// the board but is either failing its team reconcile or provably dead by
-// heartbeat.
-//
-// CAT-23: markers/failing (reconcileMarkers / ring.reconcileFailing) are keyed
-// by Linear TEAM name (reconcile-health.mjs tracks per-team eligible-query
-// polling — see its header), never by hostname, so markers[host]/failing.has
-// (host) below can never match a real roster host in production; they only
-// fire for a caller that happens to hand this function host-keyed data (as
-// this file's own unit tests do). This was a known, documented gap ("Cross-host
-// PEER liveness needs the heartbeat/Loki path → only the local-marker form
-// ships now") — the daemon-computed, heartbeat-derived `deadHosts` set
-// (CTL-1157, computeSurvivingRoster, already threaded onto the board state for
-// the dead/stranded escalation move below) closes it: a roster host that owns
-// work and is in `deadHosts` is a confirmed stranded node, independent of
-// whether any team's reconcile happens to be failing too.
+// #6 — stranded node: a rostered host that HRW-owns a share of the board but is
+// NOT live. Only liveness reaches `flagged`, because it authorizes foreign-work
+// takeover. Fleet-wide, team-keyed reconcile failures are operator context only.
+// CAT-23: an earlier version of this check also flagged a host purely for a
+// failing team reconcile (markerFail/ringFail), which incorrectly stripped
+// ownership from hosts that were still alive but transiently failing one
+// team's reconcile poll — "keep dispatch ownership on live roster during
+// outages" fixes that: only confirmed non-liveness authorizes takeover.
 function checkStrandedNode(b) {
   if (!b.ownerForTicket || b.roster.length === 0) {
     return invariant(true, 0, false, [], "no roster/HRW → stranded-node not observable");
+  }
+  if (b.notLiveHosts == null) {
+    return invariant(true, 0, false, [], "liveness signal unbound → stranded-node not observable");
   }
   const ownedByHost = new Map();
   for (const [id] of b.ticketsById) {
@@ -790,33 +798,26 @@ function checkStrandedNode(b) {
   }
   const failing = b.ring?.reconcileFailing ?? new Set();
   const markers = b.reconcileMarkers ?? {};
-  const deadHosts = new Set(b.deadHosts ?? []);
+  const notLive = new Set(b.notLiveHosts);
   const flagged = [];
   for (const host of b.roster) {
     const share = ownedByHost.get(host) ?? 0;
     if (share <= 0) continue;
-    const markerFail = (markers[host]?.consecutiveFailures ?? 0) > 0;
-    const ringFail = failing.has(host);
-    const heartbeatDead = deadHosts.has(host);
-    if (markerFail || ringFail || heartbeatDead) flagged.push(host);
+    if (notLive.has(host)) flagged.push(host);
   }
-  // observable if we have SOME reconcile OR heartbeat signal to judge against.
-  // deadHosts.size > 0 is unambiguous (a confirmed dead host); an EMPTY
-  // deadHosts set stays neutral here rather than forcing observable:true,
-  // since [] is also assembleBoardState's default when nothing ever wired
-  // real heartbeat data in (no way to tell "computed, healthy" from "absent"
-  // from this function's side of that boundary).
-  const haveSignal = Object.keys(markers).length > 0 || failing.size > 0 || deadHosts.size > 0;
+  const reconcileFailingTeams = [...new Set([
+    ...Object.entries(markers).filter(([, marker]) => (marker?.consecutiveFailures ?? 0) > 0).map(([team]) => team),
+    ...failing,
+  ])].sort();
   return invariant(
     flagged.length === 0,
     flagged.length,
-    haveSignal,
+    true,
     flagged,
     flagged.length
-      ? `node(s) stranded (own work, reconcile failing or heartbeat-dead): ${flagged.join(", ")}`
-      : haveSignal
-        ? "all rostered nodes participating"
-        : "no reconcile-health or liveness signal → peer liveness not observable",
+      ? `${flagged.length} rostered host(s) own work but are not live: ${flagged.join(", ")}`
+      : "all rostered nodes participating",
+    { reconcileFailingTeams },
   );
 }
 
@@ -1500,7 +1501,7 @@ export function proposeMoves(invariants, _b) {
     }
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
-    if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but reconcile is failing" });
+    if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but is not live" });
   }
   for (const p of invariants.projectSilence?.flagged ?? []) {
     if (!invariants.projectSilence.ok) tier3.push({ project: p, move: "escalate-project-silence", rationale: "no movement in expected cadence" });
@@ -1830,6 +1831,7 @@ export function boardHealthPass({
   getGithubQuota,
   githubQuotaMode,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
+  getNotLiveHosts,
   lastRunMs = _lastRunMs,
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
   isThrottledFn = isThrottled,
@@ -1853,7 +1855,7 @@ export function boardHealthPass({
     // so the expensive whole-log heartbeat read behind the daemon's thunk is paid
     // only on a tick that actually proceeds, not on all ~59 throttled ticks between
     // 5-minute passes. Arrays still work unchanged (resolveDeadHosts is a no-op).
-    getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), mode, now,
+    getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), getNotLiveHosts, mode, now,
     getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
     getStrandedEvidence, // CTL-1644: per-ticket evidence seam (empty-Map default if unbound)
     getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)
@@ -1903,9 +1905,14 @@ export function boardHealthPass({
         // peer's branch. The act site iterates the list and dispatches the first
         // ACTIONABLE (non-cooldown/non-latched) candidate, one per scan, so a single
         // latched anchor no longer wedges the whole flagged cohort.
+        // Positive-liveness absence is intentionally broader than fail-open
+        // deadHosts: a never-seen roster member is "not live" but is not proven
+        // dead. Keep strandedNode escalation observable, but require the recovery
+        // proof before it can authorize foreign-work takeover.
+        const boardDeadHosts = new Set(board.deadHosts ?? []);
         const strandedOrDeadHosts = new Set([
-          ...(invariants.strandedNode?.flagged ?? []),
-          ...(board.deadHosts ?? []),
+          ...(invariants.strandedNode?.flagged ?? []).filter((host) => boardDeadHosts.has(host)),
+          ...boardDeadHosts,
         ]);
         const candidates = selectAnchorCandidates(dec.moves, board, { holistic: true, strandedOrDeadHosts });
         const anchor = candidates[0] ?? null;

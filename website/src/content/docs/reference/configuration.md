@@ -13,6 +13,12 @@ rarely edit them by hand. This page covers the keys you're most likely to touch.
 - **`.catalyst/config.json`** — plain project info. Safe to commit to git.
 - **`~/.config/catalyst/config-{projectKey}.json`** — secrets like API keys. Never commit this.
 
+For a multi-host execution-core installation, the machine-local
+`catalyst.cluster.dispatchOutageFallback` key controls sustained peer-view outages. Its values are
+`last-known-good` (the default) and `full-roster`. The environment variable
+`CATALYST_DISPATCH_OUTAGE_FALLBACK` takes precedence. The setting is consulted only on the outage
+path; healthy dispatch does not read machine configuration for it.
+
 The `projectKey` links the two files.
 
 ## Project config (`.catalyst/config.json`)
