@@ -20,4 +20,8 @@ describe("getDispatchOutageFallback", () => {
     process.env.CATALYST_DISPATCH_OUTAGE_FALLBACK = "invalid";
     expect(getDispatchOutageFallback()).toBe("last-known-good");
   });
+  test("an empty environment value is treated as absent", () => {
+    process.env.CATALYST_DISPATCH_OUTAGE_FALLBACK = "";
+    expect(getDispatchOutageFallback()).toBe("last-known-good");
+  });
 });

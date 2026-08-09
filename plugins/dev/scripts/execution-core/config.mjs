@@ -1283,7 +1283,7 @@ export function getDispatchOutageFallback() {
     } catch {
       configValue = undefined;
     }
-    const value = envValue ?? configValue ?? fallback;
+    const value = envValue || configValue || fallback;
     return value === "last-known-good" || value === "full-roster" ? value : fallback;
   } catch {
     return fallback;

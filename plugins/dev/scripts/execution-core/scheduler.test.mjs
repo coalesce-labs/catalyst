@@ -22,6 +22,7 @@ import {
   isTicketInFlight,
   listInFlightTickets,
   computeDispatchSurvivingRoster, // CTL-1091 Phase 3: positive-liveness dispatch roster
+  computeNotLiveHosts,
   resolveDispatchRoster, // CTL-1091: shared dispatch-roster resolver (liveness + deflap + outage)
   readMaxParallel,
   readExecutionCoreConcurrency,
@@ -10371,6 +10372,19 @@ describe("computeDispatchSurvivingRoster — positive liveness (CTL-1091/CTL-105
       nowMs: NOW,
     });
     expect(out).toEqual(["solo"]);
+    expect(read).toBe(false);
+  });
+
+  test("not-live computation is also a strict single-host no-op", () => {
+    let read = false;
+    const out = computeNotLiveHosts(["solo"], {
+      readHeartbeats: () => {
+        read = true;
+        return {};
+      },
+      nowMs: NOW,
+    });
+    expect(out).toEqual([]);
     expect(read).toBe(false);
   });
 });

@@ -63,6 +63,7 @@ import {
   readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
+import { readDeflapState } from "./liveness-deflap.mjs"; // CAT-23: distinguish never-live peers at boot
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import {
@@ -1729,10 +1730,13 @@ export function startDaemon({
   }
 
   if (bootMultiHost && Array.isArray(dispatchRosterForBoot)) {
-    const absentPeers = bootRoster.filter((host) => host !== bootSelf && !dispatchRosterForBoot.includes(host));
-    if (absentPeers.length > 0) {
+    const bootLivenessState = readDeflapState(orchDir);
+    const neverLivePeers = bootRoster.filter(
+      (host) => host !== bootSelf && bootLivenessState[host]?.everLive !== true,
+    );
+    if (neverLivePeers.length > 0) {
       log.warn(
-        { host: bootSelf, neverLiveHosts: absentPeers, roster: bootRoster, dispatchRoster: dispatchRosterForBoot },
+        { host: bootSelf, neverLiveHosts: neverLivePeers, roster: bootRoster, dispatchRoster: dispatchRosterForBoot },
         "execution-core daemon: rostered worker(s) are not live. Their HRW share fails over while peer liveness is healthy but may revert during a peer-view outage; start the daemon there, or remove a non-worker node from catalyst.cluster.staticRoster / catalyst-cluster cluster.json.",
       );
     }

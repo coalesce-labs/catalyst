@@ -2080,9 +2080,14 @@ export function boardHealthPass({
         // peer's branch. The act site iterates the list and dispatches the first
         // ACTIONABLE (non-cooldown/non-latched) candidate, one per scan, so a single
         // latched anchor no longer wedges the whole flagged cohort.
+        // Positive-liveness absence is intentionally broader than fail-open
+        // deadHosts: a never-seen roster member is "not live" but is not proven
+        // dead. Keep strandedNode escalation observable, but require the recovery
+        // proof before it can authorize foreign-work takeover.
+        const deadHosts = new Set(board.deadHosts ?? []);
         const strandedOrDeadHosts = new Set([
-          ...(invariants.strandedNode?.flagged ?? []),
-          ...(board.deadHosts ?? []),
+          ...(invariants.strandedNode?.flagged ?? []).filter((host) => deadHosts.has(host)),
+          ...deadHosts,
         ]);
         const candidates = selectAnchorCandidates(dec.moves, board, { holistic: true, strandedOrDeadHosts });
         const anchor = candidates[0] ?? null;

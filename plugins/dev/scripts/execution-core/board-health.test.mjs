@@ -1352,6 +1352,37 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     expect(acted.length).toBe(0);
   });
 
+  test("a never-seen foreign owner cannot authorize holistic takeover without fail-open dead proof", () => {
+    const acted = [];
+    boardHealthPass({
+      orchDir: "/tmp/x",
+      mode: "enforce",
+      getBoard: () => [{ identifier: "CTL-FOREIGN" }],
+      getWorkerSignals: () => [{
+        ticket: "CTL-FOREIGN",
+        phase: "implement",
+        status: "running",
+        updatedAt: new Date(NOW - 5 * HOUR).toISOString(),
+      }],
+      getEligible: () => [],
+      roster: ["mini", "never-seen"],
+      self: "mini",
+      multiHost: true,
+      capacity: { maxParallel: 4, liveCount: 1, freeSlots: 3 },
+      readEventRing: () => [],
+      ownerForTicket: () => "never-seen",
+      getNotLiveHosts: () => ["never-seen"],
+      deadHosts: [],
+      getReconcileMarkers: () => ({}),
+      lastRunMs: 0,
+      intervalMs: 0,
+      now: () => NOW,
+      emit: () => {},
+      act: (payload) => acted.push(payload),
+    });
+    expect(acted).toEqual([]);
+  });
+
   test("selectAnchor: tier-1 nudge > tier-2 re-dispatch-blocker > top eligible > null", () => {
     const board = { eligible: [{ id: "CTL-ELIG" }] };
     expect(selectAnchor({ tier1: [{ move: "kick-dispatch" }, { ticket: "CTL-N", move: "nudge" }], tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }], tier3: [] }, board)).toBe("CTL-N");
