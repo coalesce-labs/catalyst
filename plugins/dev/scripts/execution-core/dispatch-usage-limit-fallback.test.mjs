@@ -29,8 +29,9 @@ test("a bg phase falls back to codex while bg is parked", () => {
       },
       emitEvent: (event) => events.push(event),
     });
-    fn({ ticket: "CAT-58", phase: "research" });
+    const result = fn({ ticket: "CAT-58", phase: "research" });
     expect(dispatched).toEqual(["codex-exec"]);
+    expect(result.effectiveExecutor).toBe("codex-exec");
     expect(
       events.some((event) => event["event.name"] === "execution-core.executor.usage-limit-fallback")
     ).toBe(true);

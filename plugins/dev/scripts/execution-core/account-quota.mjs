@@ -13,7 +13,7 @@ export function accountQuotaPath(orchDir) {
 export function writeAccountQuota(
   orchDir,
   sample,
-  { now = Date.now, log = defaultLog, fileOps = { mkdirSync, writeFileSync, renameSync } } = {},
+  { now = Date.now, log = defaultLog, fileOps = { mkdirSync, writeFileSync, renameSync } } = {}
 ) {
   if (!orchDir) return false;
   try {
@@ -35,7 +35,10 @@ export function writeAccountQuota(
     fileOps.renameSync(tmpPath, finalPath);
     return true;
   } catch (err) {
-    log?.warn?.({ orchDir, err: err?.message }, "account-quota: snapshot write failed — continuing");
+    log?.warn?.(
+      { orchDir, err: err?.message },
+      "account-quota: snapshot write failed — continuing"
+    );
     return false;
   }
 }
@@ -45,7 +48,8 @@ export function readAccountQuota(orchDir, { now = Date.now, log = defaultLog } =
   try {
     const snapshot = JSON.parse(readFileSync(path, "utf8"));
     const sampledAtMs = Date.parse(snapshot?.sampledAt ?? "");
-    if (!Number.isFinite(sampledAtMs) || now() - sampledAtMs > ACCOUNT_QUOTA_MAX_AGE_MS) return null;
+    if (!Number.isFinite(sampledAtMs) || now() - sampledAtMs > ACCOUNT_QUOTA_MAX_AGE_MS)
+      return null;
     return snapshot;
   } catch (err) {
     if (err?.code !== "ENOENT") {
@@ -64,8 +68,8 @@ export function resolveAccountResetsAt(orchDir, { now = Date.now } = {}) {
   const hasSevenDayPct = typeof sevenDayPct === "number" && Number.isFinite(sevenDayPct);
   if (hasFiveHourPct && hasSevenDayPct) {
     return fiveHourPct > sevenDayPct
-      ? snapshot.fiveHourResetsAt ?? snapshot.sevenDayResetsAt ?? null
-      : snapshot.sevenDayResetsAt ?? snapshot.fiveHourResetsAt ?? null;
+      ? (snapshot.fiveHourResetsAt ?? snapshot.sevenDayResetsAt ?? null)
+      : (snapshot.sevenDayResetsAt ?? snapshot.fiveHourResetsAt ?? null);
   }
   if (hasFiveHourPct) return snapshot.fiveHourResetsAt ?? snapshot.sevenDayResetsAt ?? null;
   if (hasSevenDayPct) return snapshot.sevenDayResetsAt ?? snapshot.fiveHourResetsAt ?? null;

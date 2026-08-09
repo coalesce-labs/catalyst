@@ -4746,6 +4746,7 @@ export function schedulerTick(
       resumeSession,
       clusterGeneration,
     });
+    const effectiveExecutor = rawDispatch?.effectiveExecutor;
     const dispatchWasAsync = isThenable(rawDispatch);
     // CTL-1367 P1: on a REJECTED async (sdk) dispatch the detached handler logs the
     // rejection AND emits the failed-terminal backstop (stalled signal +
@@ -4766,7 +4767,9 @@ export function schedulerTick(
       const v = verifyDispatched(orchDir, ticket, phase, { requireBgJob: !dispatchWasAsync });
       if (v.ok) {
         clearDispatchCooldown(orchDir, ticket, phase); // CTL-624: success clears any prior cool-down
-        if (dispatch === defaultDispatch) clearLaneCooldown(orchDir, "bg");
+        if (effectiveExecutor === "bg" || (effectiveExecutor == null && dispatch === defaultDispatch)) {
+          clearLaneCooldown(orchDir, "bg");
+        }
         // CTL-660: record the VERIFIED launch. Re-read the signal for the
         // bg_job_id + worktreePath the launched worker wrote.
         const signal = readPhaseSignalRaw(orchDir, ticket, phase);

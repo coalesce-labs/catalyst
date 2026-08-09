@@ -3455,13 +3455,25 @@ export function reclaimDeadWorkIfPossible(
   // CAT-58: a terminal bg worker blocked by the account quota must be parked
   // before the progress gate; otherwise forward progress causes an immediate
   // revive into the same exhausted lane.
+  const recordedResetMs = Date.parse(signal.raw?.usageLimitResetsAt ?? "");
+  if (
+    signal.raw?.failureReason === "usage-limit-blocked" &&
+    Number.isFinite(recordedResetMs) &&
+    recordedResetMs > now()
+  ) {
+    return "usage-limit-parked";
+  }
   let quota = { blocked: false };
   try {
     quota = detectUsageLimit(prevBgJobId, {
       now,
       pollerResetsAt: resolveAccountResetsAtFn?.(orchDir, { now }) ?? null,
     });
-  } catch {
+  } catch (err) {
+    log.warn(
+      { ticket, phase, err: err.message },
+      "cat-58: usage-limit detection failed — continuing with normal recovery"
+    );
     quota = { blocked: false };
   }
   if (quota.blocked) {

@@ -390,8 +390,12 @@ export function makePhaseAwareDispatchFn({
       }
     }
     const fn = dispatchForExecutor(effective);
+    const withEffectiveExecutor = (result) => {
+      if (result && typeof result === "object") result.effectiveExecutor = effective;
+      return result;
+    };
     if (effective === "sdk" || effective === "codex-exec") {
-      return fn(args, {
+      const result = fn(args, {
         emitEvent: (name, payload) => emitEvent({ "event.name": name, payload }),
         // CTL-1457 (finding 4): the codex runner resolves its runtime codexConfig from
         // configPath — thread it so the runtime auth guard + buildCodexArgs honor the
@@ -400,8 +404,14 @@ export function makePhaseAwareDispatchFn({
         ...(effective === "codex-exec" ? { configPath } : {}),
         ...seams,
       });
+      if (result && typeof result.then === "function") {
+        const tagged = result.then(withEffectiveExecutor);
+        tagged.effectiveExecutor = effective;
+        return tagged;
+      }
+      return withEffectiveExecutor(result);
     }
-    return fn(args, seams);
+    return withEffectiveExecutor(fn(args, seams));
   };
 }
 

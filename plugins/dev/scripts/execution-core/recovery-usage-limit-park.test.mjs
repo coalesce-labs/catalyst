@@ -115,4 +115,14 @@ describe("reclaimDeadWorkIfPossible — CAT-58 usage-limit park", () => {
     reclaimDeadWorkIfPossible(s.orchDir, s.signal, s.opts);
     expect(s.appendUsageLimitEvent.calls[0][0].quota.resetSource).toBe("detail");
   });
+
+  test("an already-parked signal is idempotent until its recorded reset", () => {
+    const s = scenario();
+    expect(reclaimDeadWorkIfPossible(s.orchDir, s.signal, s.opts)).toBe("usage-limit-parked");
+    const persisted = JSON.parse(readFileSync(s.signalPath, "utf8"));
+    const replay = { ...s.signal, raw: persisted };
+    expect(reclaimDeadWorkIfPossible(s.orchDir, replay, s.opts)).toBe("usage-limit-parked");
+    expect(s.appendUsageLimitEvent.calls).toHaveLength(1);
+    expect(s.parkLaneFn.calls).toHaveLength(1);
+  });
 });
