@@ -659,6 +659,36 @@ percentage, reset time, sampling host, and snapshot age, and emits the scalar va
 `CATALYST_BH_GH_QUOTA` defaults to `shadow`, so `rateLimitHeadroom` stays unobservable to Gate 3
 until an operator explicitly selects `enforce`.
 
+**Worktree salvage-before-destroy (CTL-1639).** Every destructive worktree removal — the
+dispatcher's L3 destroy+recreate, the orphan-sweep, phase-teardown, and the JS reaper's PR-merged
+cleanup — first calls the shared `lib/worktree-salvage.sh` primitive, which snapshots the worktree's
+unpushed commits (`git bundle`), tracked uncommitted diff (`.patch`, plus a separate `.index.patch`
+for a staged-only delta), and untracked files (`.tar`) to `~/catalyst/salvage/` and emits one
+`worktree.salvage.{created,skipped,failed}` event (service `catalyst.worktree-salvage`). Every
+recovery-patch `git diff` is routed through a shared `_wsv_diff` helper (`--no-ext-diff` +
+`-c color.ui=false` + `--no-textconv`) so a repo/global `diff.external`/`GIT_EXTERNAL_DIFF`/forced-
+color config or a `.gitattributes` textconv driver can't substitute non-applyable output for the
+real bytes, and a `git update-index --assume-unchanged` bit is cleared before diffing so such a
+file's edit isn't invisible to the salvage the same way it's invisible to plain `git status`. A
+dirty/uninitialized submodule (any depth, via `git submodule status --recursive`) is salvaged
+recursively — its own uncommitted diff + untracked files, not just the superproject's opaque
+`Subproject commit <sha>-dirty` marker. The orphan-sweep's `ORPHAN_GITFILE` case (a stale/missing
+`.git` file pointer — not a usable git worktree, so the git-based primitive above can't inspect it at
+all) instead calls the primitive's sibling `salvage_raw_directory` (plain `tar`, no git involved)
+before its `rm -rf`. Because the sweep runs every 1–3h and revisits a retained
+`SALVAGE_UNPUSHED`/`SALVAGE_DIRTY` worktree every pass, orphan-sweep wraps its own calls in a
+`salvage_worktree_dedup` fingerprint check (HEAD sha + a git-blob-hash of the working diff/staged
+diff/untracked-file set, stored per-worktree under `~/catalyst/salvage/.state/`) so an unchanged tree
+is NOT re-archived under a new unique name every single sweep — this dedup lives in orphan-sweep.sh
+itself, not inside `salvage_worktree`, so the primitive's other callers (each acting on a worktree
+exactly once) and its own multi-call test contract are unaffected. The `worktree.salvage.*` prefix is
+**unprotected** under the CTL-1142 namespace contract (no `isBrokerProtectedName` collision — it
+routes through `shouldSkipEvent` normally). Salvage is best-effort/fail-open — it never blocks a
+removal — layered on top of the existing fail-closed `_removal_guard_ok` live-handle gate, which is
+re-asserted immediately after salvage completes (not just before it starts) at every synchronous call
+site, since salvage's own duration widens the window a live handle could appear in. (Retention/GC of
+`~/catalyst/salvage/` beyond the dedup above is deferred follow-up.)
+
 ### Linear app-actor self-echo guard (`botUserId`)
 
 The execution-core daemon mirrors phase-agent output to Linear and wakes on human replies, so it

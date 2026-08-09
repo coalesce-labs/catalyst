@@ -1123,3 +1123,45 @@ describe("applyAssignee (CTL-781)", () => {
     });
   });
 });
+
+// ─── CTL-1568 (Codex #2861 P1): injectable label read-back seam ──────────────
+// applyLabel's verification always went live (`linearis issues read`). On the
+// recovery-pass skill path that added a rate-limited API call per escalation to a
+// shared fleet quota. The seam lets that caller verify against the local replica —
+// but must NEVER weaken verification.
+describe("applyLabel readLabels seam (CTL-1568)", () => {
+  const okExec = (_cmd, args) =>
+    args?.[1] === "update"
+      ? { code: 0, stdout: "", stderr: "" }
+      : { code: 0, stdout: JSON.stringify({ identifier: "T-1", labels: { nodes: [{ name: "needs-human" }] } }), stderr: "" };
+
+  test("a seam returning the label verifies WITHOUT any live read", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push(args?.[1]); return okExec(cmd, args); };
+    const res = applyLabel({ ticket: "T-1", label: "needs-human", exec, readLabels: () => ["needs-human"] });
+    expect(res.applied).toBe(true);
+    expect(calls).toEqual(["update"]); // no "read" — the API call was avoided
+  });
+
+  test("a seam returning NULL falls back to the live read (never a false verify-failed)", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push(args?.[1]); return okExec(cmd, args); };
+    const res = applyLabel({ ticket: "T-1", label: "needs-human", exec, readLabels: () => null });
+    expect(res.applied).toBe(true);
+    expect(calls).toContain("read"); // fell back rather than failing
+  });
+
+  test("a seam that genuinely lacks the label still fails verification", () => {
+    const res = applyLabel({ ticket: "T-1", label: "needs-human", exec: okExec, readLabels: () => ["other"] });
+    expect(res.applied).toBe(false);
+    expect(res.reason).toBe("verify-failed");
+  });
+
+  test("omitting the seam is byte-identical to the previous behavior (live read)", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push(args?.[1]); return okExec(cmd, args); };
+    const res = applyLabel({ ticket: "T-1", label: "needs-human", exec });
+    expect(res.applied).toBe(true);
+    expect(calls).toContain("read");
+  });
+});

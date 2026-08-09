@@ -88,6 +88,10 @@ source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
 # shellcheck source=lib/ctl708-resolve.sh
 source "${SCRIPT_DIR}/lib/ctl708-resolve.sh"
 ctl708_wire_resolver
+# CTL-1639: salvage a doomed worktree's unpushed work before the L3 recreate
+# destroys it (below). Best-effort/fail-open — never blocks the recreate.
+# shellcheck source=lib/worktree-salvage.sh
+source "${SCRIPT_DIR}/lib/worktree-salvage.sh"
 # shellcheck source=lib/phase-artifact-gate.sh
 source "${SCRIPT_DIR}/lib/phase-artifact-gate.sh"
 # shellcheck source=lib/phase-signal-freshness.sh
@@ -1194,6 +1198,24 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 					# any auto-remediation path.
 					STALL_REASON="worktree_live_handle_guard_refused"
 				else
+					# CTL-1639: snapshot unpushed commits + dirty tree to
+					# ~/catalyst/salvage/ BEFORE the destroy. This is the
+					# highest-value site — `branch -f` resets the ref AND the tree
+					# is removed, so without salvage both vanish together.
+					salvage_worktree "$_WT_PATH" "$TICKET" \
+						--base "$BASE_BRANCH" --orch "$ORCH_ID" \
+						--reason "$STALL_REASON" --site "dispatch-l3-recreate" || true
+					# CTL-1639 (Codex P1): salvage can bundle history / tar files
+					# for seconds — a widened window in which a worker or an
+					# interactive session could ENTER the worktree after the guard
+					# above passed. Re-assert the live-handle guard immediately
+					# before the force-remove so we never yank a tree that went
+					# live during salvage; a fresh refusal parks instead of
+					# removing (same fail-closed reason as the pre-salvage guard).
+					if ! _removal_guard_ok "$_WT_PATH"; then
+						echo "phase-agent-dispatch: recreate: a live handle appeared during salvage for ${_WT_PATH}; parking instead" >&2
+						STALL_REASON="worktree_live_handle_guard_refused"
+					else
 					git -C "$_REPO_ROOT" worktree remove --force "$_WT_PATH" 2>/dev/null || true
 					git -C "$_REPO_ROOT" branch -f "$TICKET" "origin/${BASE_BRANCH}" 2>/dev/null || true
 					# CATALYST_RECREATE_WORKTREE_DIR overrides the worktrees base for
@@ -1224,6 +1246,7 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 							--orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID"
 					else
 						echo "phase-agent-dispatch: recreate failed to produce worktree; parking instead" >&2
+					fi
 					fi
 				fi
 			fi
