@@ -55,10 +55,35 @@ _wsv_diff() {
 #   0 = at least one artifact was written (this submodule had something to save)
 #   1 = clean — no unpushed commits/diff/untracked files, nothing to save
 #   2 = ATTEMPTED but at least one artifact write failed (real error, not "clean")
+# _wsv_clear_hidden_index_flags <dir> — clear assume-unchanged / skip-worktree bits.
+#
+# CTL-1639 (Codex #3026 P1): extracted so SUBMODULES get it too. The top-level worktree
+# cleared these before diffing, but _wsv_salvage_submodule did not — so a submodule file
+# carrying `assume-unchanged` (or `skip-worktree`) had its edit invisible to the
+# submodule's own `git diff`, exactly as it is invisible to plain `git status`, and the
+# salvage recorded an empty patch while the destructive removal discarded the real edit.
+# The worktree is doomed either way, so mutating its index has no downside.
+_wsv_clear_hidden_index_flags() {
+  local dir="$1"
+  local au_files sw_files
+  au_files="$(git -C "$dir" ls-files -v 2>/dev/null | awk '/^h /{ $1=""; sub(/^ /,""); print }')"
+  if [[ -n "$au_files" ]]; then
+    ( cd "$dir" && printf '%s\n' "$au_files" | xargs -I{} git update-index --no-assume-unchanged -- {} ) 2>/dev/null || true
+  fi
+  sw_files="$(git -C "$dir" ls-files -v 2>/dev/null | awk '/^S /{ $1=""; sub(/^ /,""); print }')"
+  if [[ -n "$sw_files" ]]; then
+    ( cd "$dir" && printf '%s\n' "$sw_files" | xargs -I{} git update-index --no-skip-worktree -- {} ) 2>/dev/null || true
+  fi
+}
+
 _wsv_salvage_submodule() {
   local wt="$1" rel="$2" stem="$3"
   local sm_dir="${wt}/${rel}"
   git -C "$sm_dir" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  # Codex #3026 P1: clear the submodule's OWN hidden index flags — on $sm_dir, not on
+  # the parent $wt (which salvage_worktree already handled). Runs after the rev-parse
+  # guard so we never touch a path that is not a git dir.
+  _wsv_clear_hidden_index_flags "$sm_dir"
   local safe_name; safe_name="$(printf '%s' "$rel" | tr '/ ' '__')"
   local path_hash; path_hash="$(printf '%s' "$rel" | cksum | cut -d' ' -f1)"
   local base="${stem}.submodule-${safe_name}-${path_hash}"
@@ -111,10 +136,16 @@ _wsv_salvage_submodule() {
     fi
   fi
 
-  if [[ "$saved" -eq 1 ]]; then
-    return 0
-  elif [[ "$failed" -eq 1 ]]; then
+  # CTL-1639 (Codex #3026 P1): FAILURE takes precedence over partial success. With
+  # `saved` checked first, a submodule where one artifact was written and another was
+  # LOST returned 0 — the caller recorded a clean salvage and the destructive removal
+  # proceeded, silently discarding the lost artifact. That is the one outcome this
+  # primitive exists to prevent. rc=2 routes to `submodule-salvage-failed` ->
+  # emit_salvage_failed / _WSV_LAST_STATUS=failed, which blocks the removal.
+  if [[ "$failed" -eq 1 ]]; then
     return 2
+  elif [[ "$saved" -eq 1 ]]; then
+    return 0
   else
     return 1
   fi
@@ -205,15 +236,7 @@ salvage_worktree() {
   #          (uppercase) letter, not folded into the `h` case above.
   #      Clear both before diffing so (b) below actually sees the edit; the
   #      worktree is doomed either way, so mutating its index has no downside.
-  local au_files sw_files
-  au_files="$(git -C "$wt" ls-files -v 2>/dev/null | awk '/^h /{ $1=""; sub(/^ /,""); print }')"
-  if [[ -n "$au_files" ]]; then
-    ( cd "$wt" && printf '%s\n' "$au_files" | xargs -I{} git update-index --no-assume-unchanged -- {} ) 2>/dev/null || true
-  fi
-  sw_files="$(git -C "$wt" ls-files -v 2>/dev/null | awk '/^S /{ $1=""; sub(/^ /,""); print }')"
-  if [[ -n "$sw_files" ]]; then
-    ( cd "$wt" && printf '%s\n' "$sw_files" | xargs -I{} git update-index --no-skip-worktree -- {} ) 2>/dev/null || true
-  fi
+  _wsv_clear_hidden_index_flags "$wt"
 
   # (b) Tracked uncommitted work → patch(es). Two DISTINCT deltas must each be
   #     captured or force-removal discards them:

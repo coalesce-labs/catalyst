@@ -65,8 +65,12 @@ make_repo() {
   local origin="${root}/origin.git" wt="${root}/wt"
   rm -rf "$root"; mkdir -p "$root"
   git init --quiet --bare "$origin"
-  git clone --quiet "$origin" "$wt" 2>/dev/null
-  ( cd "$wt"
+  # CTL-1639 (Codex #3026 P1): fail CLOSED. An unchecked clone plus a bare `cd`
+  # meant that if either failed the subshell kept running in the CURRENT directory —
+  # the real checkout — and executed `git add`/`git commit` there. Every cd is now
+  # chained, matching AGENTS.md's rule against a bare `cd` on its own line.
+  git clone --quiet "$origin" "$wt" 2>/dev/null || { echo "FAIL: fixture clone failed"; exit 1; }
+  ( cd "$wt" || exit 1
     printf 'base\n' > base.txt
     git add base.txt
     git commit --quiet -m "base"
@@ -75,9 +79,9 @@ make_repo() {
   )
   local f
   for f in "$@"; do case "$f" in
-    --unpushed)  ( cd "$wt"; printf 'more\n' > feature.txt; git add feature.txt; git commit --quiet -m "unpushed feature" ) ;;
-    --dirty)     ( cd "$wt"; printf 'edited\n' >> base.txt ) ;;
-    --untracked) ( cd "$wt"; printf 'scratch\n' > untracked.txt ) ;;
+    --unpushed)  ( cd "$wt" || exit 1; printf 'more\n' > feature.txt; git add feature.txt; git commit --quiet -m "unpushed feature" ) ;;
+    --dirty)     ( cd "$wt" || exit 1; printf 'edited\n' >> base.txt ) ;;
+    --untracked) ( cd "$wt" || exit 1; printf 'scratch\n' > untracked.txt ) ;;
   esac; done
   printf '%s' "$wt"
 }
@@ -415,3 +419,32 @@ assert_true "declare -F salvage_worktree >/dev/null" "re-source is a no-op (fn s
 echo
 echo "results: $PASSES passed, $FAILURES failed"
 [ $FAILURES -eq 0 ]
+
+# ─── CTL-1639 (Codex #3026 P1): hidden index flags inside SUBMODULES ──────────
+# salvage_worktree cleared assume-unchanged/skip-worktree on the top-level worktree
+# before diffing, but _wsv_salvage_submodule did not — so a submodule file carrying
+# `assume-unchanged` had its edit invisible to the submodule's own `git diff` (exactly
+# as it is to plain `git status`), the salvage recorded an EMPTY patch, and the
+# destructive removal discarded the real edit.
+echo ""
+echo "Test: _wsv_clear_hidden_index_flags surfaces an assume-unchanged edit"
+{
+  d="${SCRATCH}/hidden-flags"
+  rm -rf "$d"; mkdir -p "$d"
+  git init --quiet "$d"
+  ( cd "$d" || exit 1
+    printf 'v1\n' > f.txt
+    git add f.txt
+    git -c user.email=t@t -c user.name=t commit --quiet -m base
+    git update-index --assume-unchanged f.txt
+    printf 'v2-EDITED\n' > f.txt
+  )
+  # Precondition: the edit is hidden while the flag is set.
+  before="$(git -C "$d" diff HEAD -- f.txt | wc -l | tr -d ' ')"
+  assert_eq "0" "$before" "assume-unchanged hides the edit from git diff (precondition)"
+  _wsv_clear_hidden_index_flags "$d"
+  after="$(git -C "$d" diff HEAD -- f.txt | wc -l | tr -d ' ')"
+  [[ "$after" -gt 0 ]] \
+    && echo "  PASS: clearing the flag makes the edit visible to git diff" \
+    || { echo "  FAIL: edit still hidden after clearing (diff lines=$after)"; FAILED=$((FAILED+1)); }
+}

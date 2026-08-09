@@ -1216,9 +1216,40 @@ function defaultSalvageWorktree({ worktreePath, ticket, branch, orchId, reason }
       // is installed under a path with spaces / `#` / `%` / non-ASCII, handing bash
       // a nonexistent script; decode to a real filesystem path.
       const lib = fileURLToPath(new URL("../lib/worktree-salvage.sh", import.meta.url));
+      // CTL-1639 (Codex #3026 P1): the deadline lives INSIDE the child, not only in
+      // the parent's setTimeout below.
+      //
+      // The child is `detached: true` (its own process group), so if the reaper exits
+      // or is killed before that timer fires, the child reparents to PID 1 and runs
+      // FOREVER against a worktree nobody is waiting on — precisely the leak class
+      // AGENTS.md's "make the loop itself self-limiting; never let cleanup be
+      // load-bearing" rule exists for. The parent timer is retained as belt-and-braces
+      // (it also kills the whole group), but it is no longer the only bound.
+      //
+      // Uses AGENTS.md's watchdog form verbatim: run the real command, arm a sleeping
+      // killer, wait, then cancel the killer and propagate the real exit code. The
+      // watchdog SLEEPS rather than spinning, and it self-terminates after the deadline
+      // even if the `kill "$w"` line never runs.
+      // `set -m` is load-bearing: without job control the backgrounded job stays in the
+      // wrapper's process group, so the watchdog can only signal the bash LEADER and its
+      // foreground descendant (the running `git bundle` / `tar`) survives and reparents
+      // to PID 1 — the exact leak this is meant to close. With it, the job leads its own
+      // group and `kill -9 -"$p"` takes the whole tree. Verified by mutation: the
+      // pid-only form leaves the descendant alive; the group form does not.
+      const selfBoundedScript =
+        'set -m; bash "$0" "$@" & p=$!; ' +
+        // The watchdog's stdio MUST be detached (>/dev/null 2>&1). The parent reads the
+        // child's stderr over a pipe and resolves on its 'close', which fires only when
+        // EVERY holder of that pipe exits — a sleeping watchdog inheriting it holds the
+        // pipe open for the whole deadline, so a fast salvage still took the full
+        // timeout to resolve. (Caught by the reaper suite: 5 tests hit their 5s limit.)
+        '( sleep "$CATALYST_SALVAGE_TIMEOUT_SEC"; kill -9 -"$p" 2>/dev/null || kill -9 "$p" 2>/dev/null ) >/dev/null 2>&1 & w=$!; ' +
+        'wait "$p"; rc=$?; kill "$w" 2>/dev/null; exit "$rc"';
       const child = spawn(
         "bash",
         [
+          "-c",
+          selfBoundedScript,
           lib,
           worktreePath,
           ticket || branch || "unknown",
@@ -1233,6 +1264,13 @@ function defaultSalvageWorktree({ worktreePath, ticket, branch, orchId, reason }
         ],
         {
           stdio: ["ignore", "ignore", "pipe"],
+          // The child's own deadline, in seconds — kept a couple of seconds INSIDE the
+          // parent's SALVAGE_TIMEOUT_MS so the self-bound normally fires first and the
+          // parent timer stays a backstop rather than the primary mechanism.
+          env: {
+            ...process.env,
+            CATALYST_SALVAGE_TIMEOUT_SEC: String(Math.max(1, Math.floor(SALVAGE_TIMEOUT_MS / 1000) - 2)),
+          },
           // CTL-1639 Codex round-2 P1: `detached: true` (POSIX) makes this bash
           // child the leader of its OWN process group instead of joining the
           // reaper's. On timeout that lets us signal the WHOLE group (bash plus

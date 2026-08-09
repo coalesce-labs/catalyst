@@ -118,12 +118,35 @@ _ows_fingerprint_path() {
 # newest submodule edits would never reach a recovery artifact. Mirrors the
 # same submodule-path-parsing care as the primitive's own loop (a path can
 # contain spaces; a plain `awk '{print $2}'` would truncate it).
+# _ows_diff — _wsv_diff when the salvage library is loaded, else the plain git diff.
+#
+# CTL-1639 (Codex #3026 P1): the library is sourced CONDITIONALLY above
+# (`[ -r ... ] && source ...`), so _wsv_diff can legitimately be undefined. Calling it
+# unguarded would emit "command not found" and hash EMPTY output for every worktree —
+# making all fingerprints identical, so the dedup would match everything and no tree
+# would ever be re-salvaged before removal. Degrade to the previous bare-diff behavior
+# instead: weaker than _wsv_diff, but correct, and never silently uniform.
+_ows_diff() {
+  local dir="$1"; shift
+  if command -v _wsv_diff >/dev/null 2>&1; then
+    _wsv_diff "$dir" "$@"
+  else
+    git -C "$dir" diff "$@"
+  fi
+}
+
 _ows_fingerprint() {
   local wt="$1"
   {
     git -C "$wt" rev-parse HEAD 2>/dev/null || echo "no-head"
-    git -C "$wt" diff HEAD 2>/dev/null | git -C "$wt" hash-object --stdin 2>/dev/null
-    git -C "$wt" diff --cached HEAD 2>/dev/null | git -C "$wt" hash-object --stdin 2>/dev/null
+    # CTL-1639 (Codex #3026 P1): route through _wsv_diff, which the salvage library
+    # defines precisely to neutralize `diff.external`/GIT_EXTERNAL_DIFF, forced color,
+    # and .gitattributes textconv drivers. A bare `git diff` here can hash CONVERTED
+    # output, so a real content change whose textconv output is identical hashes the
+    # same and the dedup skips a worktree whose contents actually changed — the tree
+    # is then never re-salvaged before removal.
+    _ows_diff "$wt" HEAD 2>/dev/null | git -C "$wt" hash-object --stdin 2>/dev/null
+    _ows_diff "$wt" --cached HEAD 2>/dev/null | git -C "$wt" hash-object --stdin 2>/dev/null
     git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
       | xargs -0 -I{} git -C "$wt" hash-object {} 2>/dev/null | sort
     local sm_line sm_status sm_rest sm_path sm_dir
@@ -136,8 +159,8 @@ _ows_fingerprint() {
       [[ -z "$sm_path" || ! -d "${wt}/${sm_path}" ]] && continue
       sm_dir="${wt}/${sm_path}"
       git -C "$sm_dir" rev-parse HEAD 2>/dev/null
-      git -C "$sm_dir" diff HEAD 2>/dev/null | git -C "$sm_dir" hash-object --stdin 2>/dev/null
-      git -C "$sm_dir" diff --cached HEAD 2>/dev/null | git -C "$sm_dir" hash-object --stdin 2>/dev/null
+      _ows_diff "$sm_dir" HEAD 2>/dev/null | git -C "$sm_dir" hash-object --stdin 2>/dev/null
+      _ows_diff "$sm_dir" --cached HEAD 2>/dev/null | git -C "$sm_dir" hash-object --stdin 2>/dev/null
       git -C "$sm_dir" ls-files --others --exclude-standard -z 2>/dev/null \
         | xargs -0 -I{} git -C "$sm_dir" hash-object {} 2>/dev/null | sort
     done
