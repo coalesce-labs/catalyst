@@ -1168,14 +1168,23 @@ function checkUnownedInFlight(b, t) {
       }
     }
   }
+  // CAT-11 (review): an all-unverifiable scan must NOT read like a healthy board.
+  // Without this qualifier a broken seam / exhausted quota / dead gh auth renders as
+  // the unqualified "no unowned in-flight tickets" — the exact silent failure this
+  // invariant exists to catch. Qualifiers are ordered and comma-joined so the
+  // spared-only summary keeps its pre-existing wording.
+  const greenQualifiers = [];
+  if (sparedByPrDiscovery > 0) greenQualifiers.push(`${sparedByPrDiscovery} spared by authoritative PR discovery`);
+  if (unverifiablePrChecks > 0) greenQualifiers.push(`${unverifiablePrChecks} unverifiable`);
+  if (unconfirmedForBudget > 0) greenQualifiers.push(`${unconfirmedForBudget} unconfirmed for budget`);
   return invariant(
     flagged.length === 0,
     flagged.length,
     true,
     flagged,
     flagged.length === 0
-      ? sparedByPrDiscovery > 0
-        ? `no unowned in-flight tickets (${sparedByPrDiscovery} spared by authoritative PR discovery)`
+      ? greenQualifiers.length > 0
+        ? `no unowned in-flight tickets (${greenQualifiers.join(", ")})`
         : "no unowned in-flight tickets"
       : `${flagged.length} ticket(s) assert an in-flight state with no worker and no open PR past ${Math.round(limit / 3_600_000)}h`,
     { unobservableAges, thresholdMs: limit, sparedByPrDiscovery, unverifiablePrChecks,

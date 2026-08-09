@@ -181,6 +181,20 @@ describe("schedulerTick — CAT-11 discovery and salvage seams", () => {
     expect(verifyOpenPrs("CAT-11")).toEqual({ ok: true, prs: [] });
     expect(calls).toEqual(["CAT-11"]);
   });
+
+  // CAT-11 (review): CATALYST_BH_UNOWNED_PR_VERIFY=0 must leave the seam UNBOUND.
+  // A closure that merely answers null keeps b.verifyOpenPrs truthy, so
+  // checkUnownedInFlight takes the budgeted branch and truncates the cohort.
+  test("kill switch leaves the confirmation seam unbound, not stubbed", () => {
+    const prev = process.env.CATALYST_BH_UNOWNED_PR_VERIFY;
+    process.env.CATALYST_BH_UNOWNED_PR_VERIFY = "0";
+    try {
+      expect(unownedPrVerifierFor({ orchDir, checkOpenPrs: () => ({ prs: [] }) })).toBeNull();
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_BH_UNOWNED_PR_VERIFY;
+      else process.env.CATALYST_BH_UNOWNED_PR_VERIFY = prev;
+    }
+  });
 });
 
 // CTL-1644 Phase 3: end-to-end enforce-mode flow through boardHealthPass.

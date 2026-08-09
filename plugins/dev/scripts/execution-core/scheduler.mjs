@@ -8320,6 +8320,13 @@ let _stallJanitorCensusLastRunMs = 0;
 // scheduler ticks. The closure itself owns the memo; this map only owns lifetime.
 const _unownedPrVerifiers = new Map();
 export function unownedPrVerifierFor(opts) {
+  // CAT-11 (review): the kill switch must restore the pre-CAT-11 cohort EXACTLY.
+  // Binding a closure that answers null still makes b.verifyOpenPrs a function, so
+  // checkUnownedInFlight takes the budgeted branch and silently truncates the cohort
+  // to unownedPrVerifyMax — an operator disabling verification during an incident
+  // would lose detection of every candidate past the 5 oldest. Leave the seam
+  // UNBOUND instead, which is the documented "disable the live union check".
+  if (process.env.CATALYST_BH_UNOWNED_PR_VERIFY === "0") return null;
   const key = opts.orchDir;
   if (!_unownedPrVerifiers.has(key)) {
     _unownedPrVerifiers.set(key, makeOpenPrVerifier({
@@ -8327,7 +8334,6 @@ export function unownedPrVerifierFor(opts) {
       getQuota: () => readGithubQuota(opts.orchDir),
       ttlMs: Number(process.env.CATALYST_BH_UNOWNED_PR_VERIFY_TTL_MS) || 30 * 60_000,
       minRemaining: Number(process.env.CATALYST_BH_UNOWNED_PR_MIN_QUOTA) || 500,
-      enabled: process.env.CATALYST_BH_UNOWNED_PR_VERIFY !== "0",
     }));
   }
   return _unownedPrVerifiers.get(key);

@@ -636,9 +636,12 @@ Rubric Four governs rescuing orphaned committed work that has no PR.
 >
 > 1. Rebuild the worktree from the pushed work with `create-worktree.sh <TICKET>`. It seeds
 >    from `origin/<TICKET>` by default (CTL-1640).
-> 2. Run `source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"`; rebase onto `origin/<base>` via
->    `rebase_onto_base_classified`, then run `draft_pr_push_verify` and `draft_pr_ensure` to
->    open a **draft** PR. Draft, not ready: this work was never reviewed and may be mid-phase.
+> 2. Source BOTH lib primitives — `source "${PLUGIN_ROOT}/scripts/lib/worktree-rebase.sh"`
+>    (owns `rebase_onto_base_classified`) and `source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"`
+>    (owns `draft_pr_push_verify` / `draft_pr_ensure`), exactly as RUBRIC TWO does. Rebase onto
+>    `origin/<base>` via `rebase_onto_base_classified`, then run `draft_pr_push_verify` and
+>    `draft_pr_ensure` to open a **draft** PR. Draft, not ready: this work was never reviewed
+>    and may be mid-phase.
 > 3. Re-arm the ticket's phase signal so the scheduler re-queues it, and record the win with
 >    `recovery-emit.mjs fixed`.
 >

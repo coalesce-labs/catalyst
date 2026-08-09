@@ -2111,6 +2111,36 @@ describe("checkUnownedInFlight — authoritative PR confirmation (CAT-11)", () =
     expect(r.unconfirmedForBudget).toBe(4);
   });
 
+  // CAT-11 (review): the kill switch is an operator escape hatch — it must restore
+  // the pre-CAT-11 cohort exactly, not a budget-truncated subset of it. A verifier
+  // that answers null still binds the seam, so the budgeted branch silently drops
+  // every candidate past unownedPrVerifyMax.
+  test("kill-switch cohort is identical to the unbound-seam cohort", () => {
+    const ticketsById = new Map(Array.from({ length: 9 }, (_, i) => stale(`CAT-${i}`, 72 - i)));
+    const thresholds = { unownedPrVerifyMax: 5 };
+    const unbound = run({ ticketsById }, thresholds);
+    const disabled = run({ ticketsById, verifyOpenPrs: null }, thresholds);
+    expect(unbound.flagged).toHaveLength(9);
+    expect(disabled.flagged).toEqual(unbound.flagged);
+    expect(disabled.unconfirmedForBudget).toBe(0);
+  });
+
+  // CAT-11 (review): an all-unverifiable scan must not render as a healthy board —
+  // that is exactly how a broken seam / exhausted quota / dead gh auth would hide.
+  test("green summary is qualified when nothing could actually be verified", () => {
+    const ticketsById = new Map(Array.from({ length: 7 }, (_, i) => stale(`CAT-${i}`, 72 - i)));
+    const r = run({ ticketsById, verifyOpenPrs: () => ({ unverifiable: true, prs: [] }) },
+      { unownedPrVerifyMax: 3 });
+    expect(r.flagged).toEqual([]);
+    expect(r.ok).toBe(true);
+    expect(r.note).toBe("no unowned in-flight tickets (3 unverifiable, 4 unconfirmed for budget)");
+  });
+
+  test("spared-only green summary keeps its pre-existing wording", () => {
+    const r = run({ verifyOpenPrs: () => ({ prs: [{ number: 72 }] }) });
+    expect(r.note).toBe("no unowned in-flight tickets (1 spared by authoritative PR discovery)");
+  });
+
   test("off mode never invokes confirmation", () => {
     let calls = 0;
     const board = mkBoard({ now, mode: "off", ticketsById: new Map([stale("CAT-11")]),

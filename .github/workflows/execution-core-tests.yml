@@ -303,6 +303,12 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/recovery-pass-pr-not-merged.test.sh
 
+      - name: recovery-pass RUBRIC FOUR orphaned-work test (CAT-11)
+        # This job uses an explicit allowlist (no glob runner exists), so a new
+        # __tests__/*.test.sh is CI-dark until it is named here.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/recovery-pass-rubric-four.test.sh
+
       - name: review-comments headless resolution test (CTL-1496)
         working-directory: plugins/dev/scripts
         run: bash __tests__/review-comments-headless.test.sh
