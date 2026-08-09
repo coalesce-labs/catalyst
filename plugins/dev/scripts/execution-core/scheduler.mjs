@@ -4617,6 +4617,21 @@ export function schedulerTick(
       : roster;
     return _dispatchRosterMemo;
   };
+  // CTL-925 cycle escalation happens before a dispatch claim exists, so its
+  // ownership roster must not depend on host-local deflap/outage state (two
+  // hosts could otherwise narrow differently and both write Linear). It still
+  // needs normal offline-owner failover, however. Use the raw positive-liveness
+  // view: partial liveness re-homes to the live host, while an unreadable/empty
+  // feed fails safe to the full configured roster. The injected dispatch roster
+  // is the deterministic positive-liveness seam used by schedulerTick tests.
+  let _cycleEscalationRosterMemo = null;
+  const _cycleEscalationRoster = () => {
+    if (_cycleEscalationRosterMemo) return _cycleEscalationRosterMemo;
+    _cycleEscalationRosterMemo = Array.isArray(dispatchSurvivingRoster)
+      ? dispatchSurvivingRoster
+      : computeDispatchSurvivingRoster(roster, { readHeartbeats: tickReadHeartbeats });
+    return _cycleEscalationRosterMemo;
+  };
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
   // event for ONE scheduler write site. `writerResult` is the runTransition return
   // ({applied, reason, from_state, to_state, ...}) from applyPhaseStatus /
@@ -7244,11 +7259,11 @@ export function schedulerTick(
           // of them, and labelOnce's marker is host-local: N hosts → N Linear label
           // writes and N worker.transition events for one ticket. Unlike actual
           // dispatch, this pre-claim external write has no cluster-claim CAS to
-          // serialize hosts. Use the stable configured roster here: sustained
-          // outage fallback state is host-local and may diverge, so it is not a
-          // safe ownership authority for non-claim-gated side effects.
+          // serialize hosts. Use raw positive liveness here: it preserves normal
+          // offline-owner failover without consulting host-local sustained-outage
+          // or deflap state, which may diverge across hosts.
           // STRICT no-op at N=1.
-          if (multiHost && !ownedBy(member, roster, self)) continue;
+          if (multiHost && !ownedBy(member, _cycleEscalationRoster(), self)) continue;
           log.warn(
             { member, members: anomaly.members },
             "ctl-925 sweep-2: eligible ticket in dependency cycle → needs-human"
