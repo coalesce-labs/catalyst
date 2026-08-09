@@ -17,8 +17,16 @@ nothing.
 
 ## Step 0 — Inventory before you touch anything
 
+Resolve the target repo and its **default branch** first — both are used throughout.
+`$ARGUMENTS` carries `--repo owner/name`; nothing else reads it, so without this an
+invocation naming another repo silently operates on the current checkout — and every
+ruleset mutation and merge below would hit the wrong repository. Likewise a repo whose
+default branch is `master`/`develop` must never be probed as `main`.
+
 ```bash
+REPO="$(printf '%s' "${ARGUMENTS:-}" | sed -n 's/.*--repo[= ]\([^ ]*\).*/\1/p')"
 REPO="${REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
+BASE="$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)"   # never hardcode main
 gh pr list --repo "$REPO" --limit 60 \
   --json number,title,isDraft,mergeStateStatus,isCrossRepository,createdAt,headRefName \
   --jq '.[]|[.number,(if .isCrossRepository then "FORK" else "base" end),.mergeStateStatus,
@@ -47,8 +55,11 @@ Before any review work, ask: *can these PRs merge at all?*
 ### 1a. What does the branch actually require?
 
 ```bash
-gh api "repos/$REPO/rules/branches/main" --jq '.[]|"\(.type) (ruleset \(.ruleset_id))"'
-for id in $(gh api "repos/$REPO/rulesets" --jq '.[].id'); do
+gh api "repos/$REPO/rules/branches/$BASE" --jq '.[]|"\(.type) (ruleset \(.ruleset_id))"'
+# ONLY the rulesets this branch actually evaluates. A repo may also hold disabled
+# rulesets, or ones targeting tags/other branches, whose rules never apply here —
+# printing them identifies requirements that do not exist.
+for id in $(gh api "repos/$REPO/rules/branches/$BASE" --jq '[.[].ruleset_id]|unique|.[]'); do
   gh api "repos/$REPO/rulesets/$id" --jq '.rules[]|select(.type=="required_status_checks")|.parameters'
   gh api "repos/$REPO/rulesets/$id" --jq '.rules[]|select(.type=="pull_request")|.parameters'
 done
@@ -57,7 +68,7 @@ done
 Two traps:
 - **Rulesets vs classic protection.** `branches/main/protection` returning 404 "Branch not
   protected" does NOT mean unprotected — modern repos use **Rulesets** (Settings → Rules →
-  Rulesets). Query `/rules/branches/main`, which reports what actually applies.
+  Rulesets). Query `/rules/branches/$BASE`, which reports what actually applies.
 - **Thread resolution hides inside `pull_request`.** `required_review_thread_resolution` is a
   *parameter* of the `pull_request` rule, not a rule type. Filtering by `.type` misses it and you
   will wrongly conclude threads don't block.
@@ -79,18 +90,32 @@ Detect it by the check being **missing** from the fork's rollup while present on
 Remedies, in order of preference:
 1. Give the contributor write access → future branches are in-repo and get the token.
 2. Migrate existing heads to base-repo branches.
-3. Temporarily drop that check from `required_status_checks` — **ask the user first**, back the
-   ruleset up, and record how to restore it:
+3. Temporarily remove **only the offending context** from `required_status_checks` —
+   **ask the user first**, back the ruleset up, and record how to restore it:
    ```bash
+   BLOCKER="Cloudflare Pages"   # the fork-incompatible check, whatever it is called here
    gh api "repos/$REPO/rulesets/$ID" --jq '{name,target,enforcement,conditions,bypass_actors,rules}' > backup.json
-   jq '{name,target,enforcement,conditions,bypass_actors,rules:[.rules[]|select(.type!="required_status_checks")]}' backup.json > relaxed.json
+   # Drop ONLY that context. Keep the rule, its other contexts, and the strict policy.
+   jq --arg b "$BLOCKER" '
+     .rules |= map(
+       if .type == "required_status_checks"
+       then .parameters.required_status_checks |= map(select(.context != $b))
+       else . end)' backup.json > relaxed.json
    gh api -X PUT "repos/$REPO/rulesets/$ID" --input relaxed.json   # restore: --input backup.json
    ```
+   **Do not delete the whole `required_status_checks` rule.** That is the tempting one-liner
+   and it disables *every* other required check plus the strict/up-to-date policy — turning a
+   targeted, reversible unblock into a repo-wide gate outage that is easy to forget to undo.
+   Only when the blocker is genuinely the rule's *sole* context is removing the rule equivalent,
+   and even then the surgical form above is what you want, because it stays correct if someone
+   adds a second check later.
+
    Never `--admin`-merge instead; that bypasses the gate silently and per-PR.
 
-**Side effect worth knowing:** `strict_required_status_checks_policy` lives inside that same rule.
-Dropping it also drops "must be up to date with base", which is what forces one-at-a-time
-merging. Merges stop serializing — a large speedup, and a real reduction in safety. Say both.
+**Know what else lives in that rule.** `strict_required_status_checks_policy` sits alongside the
+contexts. Removing a single context leaves it intact (merges keep serializing); removing the whole
+rule drops it too, which stops serialization — a large speedup and a real reduction in safety.
+Whichever you do, state it.
 
 ### 1c. Is the automated reviewer actually firing?
 
@@ -112,13 +137,13 @@ If a connector has been switched to request-only, nothing is reviewed until aske
 **once** per PR (`@codex review` or the repo's equivalent); do not re-request after each
 remediation push — that is how a review↔fix treadmill starts.
 
-### 1d. Is `main` itself green?
+### 1d. Is the base branch itself green?
 
 ```bash
-gh run list --repo "$REPO" --branch main --limit 8 --json conclusion,headSha --jq '.[]|"\(.headSha[0:8]) \(.conclusion)"'
+gh run list --repo "$REPO" --branch "$BASE" --limit 8 --json conclusion,headSha --jq '.[]|"\(.headSha[0:8]) \(.conclusion)"'
 ```
 
-If `main` is red, every branch inherits it and you will misattribute failures to your own diff.
+If the base branch is red, every branch inherits it and you will misattribute failures to your own diff.
 Fix or ticket that first, and record the failing test names so you can recognise them later.
 
 ## Step 2 — Triage every thread in parallel, and VERIFY
@@ -179,14 +204,31 @@ gh pr merge <N> --repo "$REPO" --squash --delete-branch
 Before merging, check the **actual** failing checks rather than trusting the gate:
 
 ```bash
-gh pr view <N> --repo "$REPO" --json statusCheckRollup \
-  --jq '[.statusCheckRollup[]?|select((.conclusion//.state)|IN("FAILURE","ERROR"))|(.name//.context)]'
+# Blocking = anything not a clean terminal success. FAILURE/ERROR alone is too narrow:
+# TIMED_OUT / CANCELLED / ACTION_REQUIRED / STARTUP_FAILURE are terminal-bad, and an
+# empty conclusion means still PENDING — none of which should be merged over silently.
+gh pr view <N> --repo "$REPO" --json statusCheckRollup --jq '
+  [ .statusCheckRollup[]?
+    | {n:(.name//.context), c:(.conclusion//""), s:(.status//.state//"")}
+    | select( (.c|IN("SUCCESS","NEUTRAL","SKIPPED")) | not )
+    | "\(.n): \(if .c == "" then "PENDING("+.s+")" else .c end)" ]'
 ```
 
 If something is red, decide deliberately:
-- **Compare against `main`.** Same failure on `main` = pre-existing, not yours.
-- **Stash your changes and re-run locally.** Identical failure count = pre-existing. This is the
-  single most reliable check and it takes one minute.
+- **Compare against the base branch.** The same failure on `$BASE` = pre-existing, not yours.
+- **Re-run locally against the MERGE BASE, not a stash.** `git stash` only shelves *uncommitted*
+  work — once your fix is committed and pushed, stashing changes nothing and the rerun still tests
+  your head. A failure you introduced then reproduces with an identical count and gets mislabeled
+  "pre-existing", which is the worst possible outcome since the skill then merges over it. Check
+  out the base instead and compare:
+  ```bash
+  git stash list            # only meaningful if you have UNCOMMITTED work
+  BASECOMMIT="$(git merge-base HEAD "origin/$BASE")"
+  git -c advice.detachedHead=false checkout -q "$BASECOMMIT"
+  <run the failing suite>   # note the failing test NAMES, not just the count
+  git checkout -q -         # back to your branch
+  ```
+  Compare **which tests fail**, not how many — two unrelated flakes can coincidentally match.
 - **Re-run the job.** Different tests failing on a re-run of the same commit = flaky suite.
 - Only then merge over it — and **say in your report that you did, and why**.
 
