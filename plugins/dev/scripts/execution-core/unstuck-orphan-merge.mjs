@@ -67,12 +67,14 @@ export function classifyOrphanMergedReconcile(evidence = {}) {
 
 // defaultCollectOrphanMergedCandidates — census with injected seams.
 // Filters candidates to those with reason 'orphan-sweep-stale', resolves PR state
-// and bg-job liveness via injected seams. Fail-closed: resolvePrState throw →
-// candidate.prState = null (skip).
+// and bg-job liveness via injected synchronous seams. Fail-closed:
+// resolvePrState throw/thenable → candidate.prState = null (skip), with a
+// named warning for the unsupported async contract.
 export function defaultCollectOrphanMergedCandidates({
   candidates = [],       // from defaultCollectUnstuckCandidates
-  resolvePrState = null, // (ticket) → 'MERGED'|'OPEN'|'CLOSED'|null (async ok)
+  resolvePrState = null, // synchronous (ticket) → 'MERGED'|'OPEN'|'CLOSED'|null
   jobLifecycle = null,   // (bgJobId) → bool (is the bg job alive)
+  log = null,
   nowMs = Date.now(),
   phaseAllowlist = ["monitor-merge", "monitor-deploy"],
 } = {}) {
@@ -87,8 +89,10 @@ export function defaultCollectOrphanMergedCandidates({
       try {
         const result = resolvePrState ? resolvePrState(c.ticket) : null;
         if (result && typeof result.then === "function") {
-          // Synchronous-only in tests; async usage is the caller's responsibility
-          prState = null; // treat async as unavailable in sync path
+          const message = `orphan-stale: pr-state-async-unsupported (${c.ticket})`;
+          if (typeof log?.warn === "function") log.warn(message);
+          else if (typeof log === "function") log(message);
+          prState = null;
         } else {
           prState = result;
         }

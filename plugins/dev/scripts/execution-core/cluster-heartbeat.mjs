@@ -115,7 +115,21 @@ const READ_ATTACHMENTS_QUERY = `query ReadFence($id: String!) {
 // liveness record callers consume. `in_flight_tickets` is normalised to a
 // string array (non-string entries filtered). CTL-1092: adds max_parallel
 // (finite int or null) and in_flight_count (int ≥ 0). Exported for unit coverage.
-export function parseHeartbeatMetadata(metadata) {
+const HEARTBEAT_CLOCK_SKEW_MS = 5 * 60_000;
+
+function normaliseIsoTimestamp(value, { now = Date.now() } = {}) {
+  if (typeof value !== "string") return null;
+  const ts = Date.parse(value);
+  if (!Number.isFinite(ts) || ts > now + HEARTBEAT_CLOCK_SKEW_MS) return null;
+  return value;
+}
+
+function normaliseLastSeen(value) {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return null;
+  return value;
+}
+
+export function parseHeartbeatMetadata(metadata, { now = Date.now() } = {}) {
   const m = metadata ?? {};
   const raw = m.in_flight_tickets;
   const tickets = Array.isArray(raw) ? raw.filter((t) => typeof t === "string") : [];
@@ -125,7 +139,10 @@ export function parseHeartbeatMetadata(metadata) {
   const inFlightCount = Number.isInteger(rawCount) && rawCount >= 0 ? rawCount : tickets.length;
   return {
     host: m.host ?? null,
-    last_seen: m.last_seen ?? null,
+    // A future last_seen is still positive liveness. Rejecting clock-skewed
+    // peers here can split dispatch ownership and permit double dispatch.
+    last_seen: normaliseLastSeen(m.last_seen),
+    last_advance_at: normaliseIsoTimestamp(m.last_advance_at, { now }),
     in_flight_tickets: tickets,
     max_parallel: maxParallel,
     in_flight_count: inFlightCount,
@@ -175,7 +192,7 @@ const WRITE_ATTACHMENT_MUTATION = `mutation UpsertFence($input: AttachmentCreate
 // resolveIssueId(anchorIssue) call, so behavior is UNCHANGED when no override
 // is supplied — this is purely additive.
 export async function publishHeartbeat(
-  { anchorIssue, host, inFlightTickets = [], maxParallel = null },
+  { anchorIssue, host, inFlightTickets = [], maxParallel = null, lastAdvanceAt = null },
   { post = defaultPost, now, issueId: issueIdOverride = null } = {},
 ) {
   const issueId = issueIdOverride || (await resolveIssueId(anchorIssue, { post }));
@@ -188,6 +205,7 @@ export async function publishHeartbeat(
     max_parallel: maxParallel ?? null,
     in_flight_count: inFlightTickets.length,
   };
+  if (lastAdvanceAt != null) metadata.last_advance_at = lastAdvanceAt;
   const data = await post(WRITE_ATTACHMENT_MUTATION, {
     input: {
       issueId,
@@ -221,7 +239,11 @@ export async function runCli(argv, { post = defaultPost, now } = {}) {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "publish": {
-      const [anchor, host, ticketsCsv, maxParallelRaw, issueIdRaw] = rest;
+      const flags = rest.filter((arg) => typeof arg === "string" && arg.startsWith("--"));
+      const positional = rest.filter((arg) => typeof arg !== "string" || !arg.startsWith("--"));
+      const [anchor, host, ticketsCsv, maxParallelRaw, issueIdRaw] = positional;
+      const lastAdvanceAt = flags.find((arg) => arg.startsWith("--last-advance-at="))
+        ?.slice("--last-advance-at=".length) || null;
       const inFlightTickets =
         ticketsCsv
           ? ticketsCsv
@@ -239,7 +261,7 @@ export async function runCli(argv, { post = defaultPost, now } = {}) {
       // to resolving it itself, byte-identical to pre-follow-up behavior).
       const issueId = issueIdRaw != null && issueIdRaw !== "" ? issueIdRaw : null;
       const rec = await publishHeartbeat(
-        { anchorIssue: anchor, host, inFlightTickets, maxParallel },
+        { anchorIssue: anchor, host, inFlightTickets, maxParallel, lastAdvanceAt },
         { post, now, issueId },
       );
       process.stdout.write(JSON.stringify(rec) + "\n");
@@ -260,7 +282,7 @@ export async function runCli(argv, { post = defaultPost, now } = {}) {
     default:
       process.stderr.write(
         `cluster-heartbeat.mjs: unknown subcommand: ${cmd ?? "(none)"}\n` +
-          "usage: cluster-heartbeat.mjs <publish <anchor> <host> <ticketsCSV> [maxParallel] [issueId] | read <anchor> | resolve-anchor <anchor>>\n",
+          "usage: cluster-heartbeat.mjs <publish <anchor> <host> <ticketsCSV> [maxParallel] [issueId] [--last-advance-at=<iso>] | read <anchor> | resolve-anchor <anchor>>\n",
       );
       return 1;
   }

@@ -72,6 +72,31 @@ const ARTIFACT_NAMES = new Set([
 // display, boot-resume, reclaim/revive, merge-state, stall-detection). CTL-830.
 const TERMINAL = new Set(["done", "failed", "stalled", "skipped", "turn-cap-exhausted"]);
 
+// computeLastPhaseAdvanceTs — newest locally-attributed terminal phase timestamp.
+// Missing host attribution is accepted fail-open because older phase writers did
+// not carry host.name. Malformed records and clock-skewed future values are ignored.
+export function computeLastPhaseAdvanceTs(signals, { self, now = Date.now() } = {}) {
+  if (!Array.isArray(signals)) return null;
+  let latest = null;
+  for (const signal of signals) {
+    try {
+      if (!signal || typeof signal !== "object") continue;
+      const status = String(signal.status ?? "").toLowerCase();
+      if (!TERMINAL.has(status) && status !== "complete" && status !== "completed") continue;
+      const host = signal.raw?.host?.name ?? signal.host?.name ?? null;
+      if (host != null && host !== self) continue;
+      const value = signal.completedAt ?? signal.raw?.completedAt ?? signal.updatedAt ?? signal.raw?.updatedAt;
+      if (typeof value !== "string") continue;
+      const ts = Date.parse(value);
+      if (!Number.isFinite(ts) || ts > now + 5 * 60_000) continue;
+      if (latest == null || ts > latest) latest = ts;
+    } catch {
+      // A malformed signal cannot interrupt liveness publication.
+    }
+  }
+  return latest == null ? null : new Date(latest).toISOString();
+}
+
 // readWorkerSignals — glob both layouts under ${orchDir}/workers/ and return
 // a canonical WorkerSignal per worker:
 //   { ticket, layout:'flat'|'nested', signalPath, phase, status,
