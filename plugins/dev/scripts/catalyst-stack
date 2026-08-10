@@ -1332,6 +1332,16 @@ cmd_status() {
     if pid_alive "$sp"; then echo "  log-shipper      running  pid=$sp"; else echo "  log-shipper      stopped"; fi
   fi
 
+  # CTL-1736: local Linear replica writer (cloud-sync) — surfaced on the primary status
+  # view so an operator on any node class can see writer liveness without running doctor.
+  case "$(_cloud_sync_state)" in
+    fresh)    echo "  cloud-sync       running  (replica fresh)" ;;
+    stale)    echo "  cloud-sync       stale    (writer wedged — launchctl kickstart -k gui/$UID/${CLOUD_SYNC_AGENT_LABEL})" ;;
+    unseeded) echo "  cloud-sync       installed, not seeded (reads fall back to linearis)" ;;
+    idle)     echo "  cloud-sync       not installed (no local replica; reads fall back to linearis)" ;;
+    *)        echo "  cloud-sync       unknown" ;;
+  esac
+
   # CTL-1084: governance section from the last node.boot event.
   local boot_json
   boot_json="$(latest_boot_event 2>/dev/null || true)"
@@ -1389,6 +1399,68 @@ CLOUD_SYNC_AGENT_LABEL="ai.coalesce.catalyst-cloud-sync"
 CLOUD_SYNC_AGENT_PLIST="${HOME}/Library/LaunchAgents/${CLOUD_SYNC_AGENT_LABEL}.plist"
 _cloud_sync_agent_installed() { [[ -f "$CLOUD_SYNC_AGENT_PLIST" ]]; }
 _resolve_cloud_sync_launcher() { printf '%s\n' "$CLOUD_SYNC_LAUNCHER"; }
+
+# CTL-1736: leaf seams for cloud-sync local-writer freshness (overridable in tests).
+# _cs_agent_installed — true when the KeepAlive LaunchAgent plist is present.
+_cs_agent_installed() { _cloud_sync_agent_installed; }
+# _cs_token_present — true when the canonical provisioning file is non-empty.
+_cs_token_present() { [[ -s "$HOME/.config/catalyst/cloud-sync.env" ]]; }
+# _cs_lock_age — epoch-seconds age of the writer heartbeat lock; empty if absent.
+# GNU stat -c %Y first (macOS lacks -c; it errors cleanly and falls through to BSD -f %m).
+_cs_lock_age() {
+  local lock="${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}.writer.lock"
+  local m; m=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null) || true
+  [[ -n "$m" ]] || return 0
+  printf '%s\n' "$(( $(date +%s) - m ))"
+}
+# _cs_cursor_seeded — rc 0 when sync_meta has a non-empty cursor row (seed complete).
+_cs_cursor_seeded() {
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  local db="${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"
+  [[ -n "$(sqlite3 "$db" "SELECT 1 FROM sync_meta WHERE key='cursor' AND value<>'' LIMIT 1;" 2>/dev/null)" ]]
+}
+
+# _cloud_sync_state — classify the local writer into fresh|stale|unseeded|idle.
+# Severity table (plan §"Key discriminator"):
+#   idle     : no plist AND no token  → clean idle by design
+#   unseeded : adopted/provisioned but lock absent or cursor empty → not seeding yet
+#   stale    : lock present but older than CATALYST_LINEAR_REPLICA_STALE_MS/1000
+#   fresh    : lock young + cursor seeded
+_cloud_sync_state() {
+  if ! _cs_agent_installed && ! _cs_token_present; then
+    echo idle; return
+  fi
+  local age; age="$(_cs_lock_age)"
+  if [[ -z "$age" ]] || ! _cs_cursor_seeded; then
+    echo unseeded; return
+  fi
+  local thr=$(( ${CATALYST_LINEAR_REPLICA_STALE_MS:-300000} / 1000 ))
+  if (( age > thr )); then
+    echo stale; return
+  fi
+  echo fresh
+}
+
+# _vn_cloud_sync_state — thin seam (tests override this, not _cloud_sync_state directly).
+_vn_cloud_sync_state() { _cloud_sync_state; }
+
+# _vn_v_cloud_sync <state> — CTL-1736: pure verdict for the local replica writer.
+# Advisory (required=false): a legitimately idle developer node must not flip the run.
+_vn_v_cloud_sync() {
+  local state="${1:-}"
+  case "$state" in
+    fresh)
+      printf 'PASS|local replica writer fresh (cloud-sync seeding ~/catalyst/catalyst-replica.db)\n' ;;
+    stale)
+      printf 'FAIL|local replica writer STALE — writer.lock older than threshold; reads fall back to linearis (burns quota). Kickstart: launchctl kickstart -k gui/$UID/%s\n' "$CLOUD_SYNC_AGENT_LABEL" ;;
+    unseeded)
+      printf 'WARN|cloud-sync installed/provisioned but replica not seeded yet — reads fall back to linearis until seed completes\n' ;;
+    idle)
+      printf 'PASS|cloud-sync not adopted and no token — clean idle (developer reads fall back to linearis by design)\n' ;;
+    *)
+      printf 'WARN|cloud-sync state unverified\n' ;;
+  esac
+}
 
 # CTL-1654: event-mirror LaunchAgent — fans fleet events into the local event file on
 # observation nodes (monitor/developer). Installed/uninstalled by start/stop_event_mirror
@@ -3642,6 +3714,7 @@ _vn_run_developer() {
   _vn_emit "exec-core-stopped"  T1 true "$(_vn_v_daemon_down execution-core "$(_vn_exec_core_running)")"
   _vn_emit "plugins-fresh"      T1 true "$(_vn_v_updater "$(_vn_updater_ec)")"
   _vn_emit "read-replica"       T1 true "$(_vn_v_read_replica developer "$(_vn_read_replica_base)")"
+  _vn_emit "replica-writer-local" T1 false "$(_vn_v_cloud_sync "$(_vn_cloud_sync_state)")"
   _vn_emit "event-mirror-running" T1 true "$(_vn_v_daemon_up event-mirror "$(_vn_event_mirror_running)")"
   _vn_emit "would-not-own-work" T1 true "$(_vn_v_dev_no_work "$in_roster" "$multi_host" "$drained" "$roster_src")"
 }
