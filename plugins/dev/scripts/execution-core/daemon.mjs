@@ -163,6 +163,7 @@ import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-5
 import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
+import { createRelationsStore } from "./linear-relations-store.mjs"; // CAT-168: on-disk L2 for the relations cache
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
 import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
@@ -1269,7 +1270,13 @@ export function startDaemon({
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into
     // both is what turns a write-through into a guaranteed next-tick hit.
-    const cache = createTicketStateCache();
+    // CAT-168: the relations half is additionally backed by an on-disk SQLite
+    // L2 (a store deliberately separate from the CAT-152 replica — see
+    // linear-relations-store.mjs) so a fresh relation descriptor survives a
+    // daemon restart instead of forcing a live re-fetch of every ticket's
+    // relations. createRelationsStore fails open on any disk error, so a
+    // broken store degrades to the pre-CAT-168 in-memory-only behavior.
+    const cache = createTicketStateCache({ relationsStore: createRelationsStore() });
     // CTL-823: readonly client over the broker's durable descriptor store
     // (~/catalyst/filter-state.db). Fail-open — see gateway-read.mjs.
     const gatewayReader = createGatewayReader();
