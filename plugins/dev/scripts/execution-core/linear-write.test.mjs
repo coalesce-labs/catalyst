@@ -1165,3 +1165,57 @@ describe("applyLabel readLabels seam (CTL-1568)", () => {
     expect(calls).toContain("read");
   });
 });
+
+// ─── rawExec DEFAULT timeout (mirrors linear-query.mjs's CTL-1364 fix) ───────
+// linear-write.mjs's rawExec had NO Node timeout at all: a single stalled/
+// rate-limited write (status transition, label apply, assignee apply) could
+// block the scheduler's synchronous tick indefinitely. linear-query.mjs's read
+// path already got a default timeout floor for this exact failure mode
+// (CTL-1364); the write path never did. Observed live 2026-08-10: a ~19s
+// event-loop stall correlating with worker-label read/write attempts while the
+// CTL-679 breaker was open.
+describe("rawExec DEFAULT timeout (write path)", () => {
+  test("a spawn with no explicit timeout is killed by the default floor (timedOut → breaker-trip)", async () => {
+    process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS = "200";
+    try {
+      const fresh = await import(`./linear-write.mjs?write-timeout-floor=${Date.now()}`);
+      const t0 = Date.now();
+      const res = fresh.__rawExecForTest("sleep", ["5"]);
+      const elapsed = Date.now() - t0;
+      expect(res.code).toBe(127);
+      expect(elapsed).toBeLessThan(1000);
+      expect(res.timedOut).toBe(true);
+    } finally {
+      delete process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS;
+    }
+  });
+
+  test("a fast spawn under the floor completes normally (exit 0)", async () => {
+    process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS = "5000";
+    try {
+      const fresh = await import(`./linear-write.mjs?write-timeout-fast=${Date.now()}`);
+      const res = fresh.__rawExecForTest("sleep", ["0.1"]);
+      expect(res.code).toBe(0);
+    } finally {
+      delete process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS;
+    }
+  });
+
+  test("CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS=0 disables the floor (uncapped)", async () => {
+    process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS = "0";
+    try {
+      const fresh = await import(`./linear-write.mjs?write-timeout-disabled=${Date.now()}`);
+      const res = fresh.__rawExecForTest("sleep", ["0.2"]);
+      expect(res.code).toBe(0);
+    } finally {
+      delete process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS;
+    }
+  });
+
+  test("a missing binary returns code 127 but timedOut:false (config error, not a breaker-trip signal)", async () => {
+    const fresh = await import(`./linear-write.mjs?write-timeout-enoent=${Date.now()}`);
+    const res = fresh.__rawExecForTest("catalyst-no-such-binary-xyz", []);
+    expect(res.code).toBe(127);
+    expect(res.timedOut).toBe(false);
+  });
+});
