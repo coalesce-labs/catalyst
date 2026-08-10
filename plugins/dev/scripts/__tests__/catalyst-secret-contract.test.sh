@@ -86,8 +86,8 @@ expect_eq "idempotent-source guard set" "1" "${_CATALYST_SECRET_CONTRACT_SH_LOAD
 
 # --- registry shape --------------------------------------------------------
 IDS_OUT="$(catalyst_secret_registry_ids | tr '\n' ',')"
-expect_eq "11 registry ids in order" \
-  "github-token,webhook-secret,linear-webhook-secret,claude-accounts.env,execution-core.env,linear-api-token,linear-orchestrator-actor,linear-worker-actor,groq-api-key,cloud-token,age-key," \
+expect_eq "12 registry ids in order" \
+  "github-token,webhook-secret,linear-webhook-secret,claude-accounts.env,execution-core.env,linear-api-token,linear-orchestrator-actor,linear-linearis-actor,linear-worker-actor,groq-api-key,cloud-token,age-key," \
   "$IDS_OUT"
 
 expect_eq "unknown id delivery is empty, not a crash" "" "$(catalyst_secret_delivery bogus-id-xyz)"

@@ -100,6 +100,8 @@ source "${SCRIPT_DIR}/lib/worktree-salvage.sh"
 source "${SCRIPT_DIR}/lib/phase-artifact-gate.sh"
 # shellcheck source=lib/phase-signal-freshness.sh
 source "${SCRIPT_DIR}/lib/phase-signal-freshness.sh"
+# shellcheck source=lib/linear-app-actor.sh
+source "${SCRIPT_DIR}/lib/linear-app-actor.sh"
 
 # CAT-29: workers must not inherit a daemon's stale/broken PATH verbatim. The
 # shared leaf is the repository's single ordered, existence-tested derivation.
@@ -1046,6 +1048,11 @@ compose_worker_settings_json() {
 	# backstop). Default 5 min; override by exporting AGENT_BROWSER_IDLE_TIMEOUT_MS.
 	local ab_idle_timeout_ms="${AGENT_BROWSER_IDLE_TIMEOUT_MS:-300000}"
 
+	# The linearis app-actor token minted (or left empty, fail-open)
+	# above, by the caller -- read here, not re-minted, so this function stays a
+	# pure composer like every other field it reads from the caller's env.
+	local linearis_token="${CATALYST_PHASE_AGENT_LINEARIS_TOKEN:-}"
+
 	local statusline_script="${SCRIPT_DIR}/catalyst-statusline.sh"
 
 	jq -nc \
@@ -1064,6 +1071,7 @@ compose_worker_settings_json() {
 		--arg cluster_generation "$cluster_generation_val" \
 		--arg executor "$executor_val" \
 		--arg ab_idle_timeout_ms "$ab_idle_timeout_ms" \
+		--arg linearis_token "$linearis_token" \
 		--arg statusline_cmd "$statusline_script" \
 		--argjson have_statusline "$([[ -f $statusline_script ]] && echo true || echo false)" \
 		'{
@@ -1078,6 +1086,7 @@ compose_worker_settings_json() {
          + (if $otlp_endpoint == "" then {} else { "OTEL_EXPORTER_OTLP_ENDPOINT": $otlp_endpoint } end)
          + (if $otlp_protocol == "" then {} else { "OTEL_EXPORTER_OTLP_PROTOCOL": $otlp_protocol } end)
          + (if $otel_attrs == "" then {} else { "OTEL_RESOURCE_ATTRIBUTES": $otel_attrs } end)
+         + (if $linearis_token == "" then {} else { "LINEAR_API_TOKEN": $linearis_token } end)
          + (if $orch_dir == "" then {} else { "CATALYST_ORCHESTRATOR_DIR": $orch_dir } end)
          + (if $orch_id == "" then {} else { "CATALYST_ORCHESTRATOR_ID": $orch_id } end)
          + (if $phase == "" then {} else { "CATALYST_PHASE": $phase } end)
@@ -1096,6 +1105,22 @@ compose_worker_settings_json() {
         then { statusLine: { type: "command", command: $statusline_cmd } }
         else {} end)'
 }
+# Mint the dedicated linearis app-actor identity so linearis calls made
+# inside the spawned phase-agent worker (phase-triage, phase-teardown,
+# phase-monitor-deploy, phase-research's linear-read-replica.sh fallback, etc.)
+# stop drawing on the operator's personal Linear rate-limit bucket. `claude --bg`
+# RPCs to a per-user daemon that inherits ITS OWN frozen env, not this script's --
+# a plain export here would be silently dropped (CTL-760's own header comment
+# above documents this) -- so the minted value is threaded through the SAME
+# surviving --settings channel compose_worker_settings_json already uses for the
+# OTEL/CTL-777 context vars, not exported for this script's own use. Fail-open:
+# a failed mint (e.g. the identity not yet propagated to this host) leaves the
+# scoped var empty, compose_worker_settings_json omits the key entirely (same
+# optional-key pattern as OTEL_EXPORTER_OTLP_ENDPOINT), and the worker's own
+# linearis calls fall back to their own resolution exactly as they do today --
+# dispatch is never blocked by this.
+linear_app_actor_auth "phase-agent-dispatch" CATALYST_PHASE_AGENT_LINEARIS_TOKEN linear-linearis-actor "Catalyst linearis app-actor"
+
 WORKER_SETTINGS_JSON="$(compose_worker_settings_json)"
 # Fail-open: never let a malformed settings string reach the spawn or dry-run.
 if ! printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1; then

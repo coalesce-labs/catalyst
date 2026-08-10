@@ -160,6 +160,18 @@ export const SECRET_REGISTRY = Object.freeze(
       bootstrapFor: null,
     },
     {
+      id: "linear-linearis-actor",
+      envNames: [],
+      delivery: "config-json",
+      configJsonPath: "catalyst.linear.bot.linearis",
+      // Deliberately a SEPARATE row from linear-orchestrator-actor / linear-worker-actor
+      // (same reasoning as that pair) — mints identically, differs only in this
+      // config path. Gives the linearis CLI its own non-personal identity so fleet automation
+      // that shells out to it stops sharing the operator's personal Linear rate-limit bucket.
+      rotation: { class: "re-armable", trigger: "on-401" },
+      bootstrapFor: null,
+    },
+    {
       id: "linear-worker-actor",
       envNames: [],
       delivery: "config-json",

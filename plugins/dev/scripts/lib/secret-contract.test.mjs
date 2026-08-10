@@ -47,8 +47,8 @@ beforeEach(() => {
 });
 
 describe("SECRET_REGISTRY — shape", () => {
-  test("11 seed rows, matching the design §2 seed table", () => {
-    expect(SECRET_REGISTRY.length).toBe(11);
+  test("12 seed rows, matching the design §2 seed table (+ linear-linearis-actor)", () => {
+    expect(SECRET_REGISTRY.length).toBe(12);
     expect(SECRET_REGISTRY.map((r) => r.id)).toEqual([
       "github-token",
       "webhook-secret",
@@ -57,6 +57,7 @@ describe("SECRET_REGISTRY — shape", () => {
       "execution-core.env",
       "linear-api-token",
       "linear-orchestrator-actor",
+      "linear-linearis-actor",
       "linear-worker-actor",
       "groq-api-key",
       "cloud-token",
@@ -73,7 +74,7 @@ describe("SECRET_REGISTRY — shape", () => {
     expect(() => {
       SECRET_REGISTRY.push({ id: "bogus" });
     }).toThrow();
-    expect(SECRET_REGISTRY.length).toBe(11);
+    expect(SECRET_REGISTRY.length).toBe(12); // +linear-linearis-actor
   });
 
   test("DEEP-FREEZE (Codex finding fix): every row's NESTED envNames array is also frozen, not just the outer row object", () => {
@@ -134,6 +135,18 @@ describe("SECRET_REGISTRY — shape", () => {
     expect(orch).toBeDefined();
     expect(worker).toBeDefined();
     expect(orch.configJsonPath).not.toBe(worker.configJsonPath);
+  });
+
+  test("linear-linearis-actor is a separate row from linear-orchestrator-actor / linear-worker-actor (same shape as that pair)", () => {
+    const linearis = getSecretRow("linear-linearis-actor");
+    const orch = getSecretRow("linear-orchestrator-actor");
+    const worker = getSecretRow("linear-worker-actor");
+    expect(linearis).toBeDefined();
+    expect(linearis.configJsonPath).toBe("catalyst.linear.bot.linearis");
+    expect(linearis.envNames).toEqual([]);
+    expect(linearis.delivery).toBe("config-json");
+    expect(linearis.configJsonPath).not.toBe(orch.configJsonPath);
+    expect(linearis.configJsonPath).not.toBe(worker.configJsonPath);
   });
 
   test("exactly one row per cloud/cluster bootstrap class (design §5)", () => {
@@ -405,6 +418,20 @@ describe("resolveSecret — config-json delivery (linear-orchestrator-actor, gro
     );
     const r = resolveSecret("groq-api-key", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
     expect(r).toMatchObject({ value: null, source: "none" });
+  });
+  test("linear-linearis-actor resolves catalyst.linear.bot.linearis from the Layer-2 file (same shape as linear-orchestrator-actor)", () => {
+    const dir = fixtureDir();
+    const l2 = writeFile(
+      dir,
+      "config.json",
+      JSON.stringify({
+        catalyst: { linear: { bot: { linearis: { clientId: "fake-client-id", clientSecret: "fake-client-secret" } } } },
+      }),
+    );
+    const r = resolveSecret("linear-linearis-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: l2 } });
+    expect(r.source).toBe("config-json");
+    expect(r.value).toBe('{"clientId":"fake-client-id","clientSecret":"fake-client-secret"}');
+    expect(JSON.parse(r.value)).toEqual({ clientId: "fake-client-id", clientSecret: "fake-client-secret" });
   });
 });
 
@@ -997,9 +1024,13 @@ describe("registry validation (§6) — the rearm-hook honesty rules", () => {
     // mechanism in isolation, not "no hook exists anywhere in the codebase" (which is no
     // longer true for linear-orchestrator-actor OR github-token). Only linear-api-token
     // remains genuinely hookless everywhere in the codebase as of this PR.
+    // UPDATE: linear-linearis-actor joins the re-armable list (same rotation
+    // class as linear-orchestrator-actor, per the design §2 pattern that row's own comment
+    // documents) — it has no production rearm hook either, same hookless-here status as
+    // linear-worker-actor and every other re-armable row this test exercises.
     const reArmable = SECRET_REGISTRY.filter((r) => r.rotation.class === "re-armable");
     expect(reArmable.map((r) => r.id).sort()).toEqual(
-      ["github-token", "linear-api-token", "linear-orchestrator-actor"].sort(),
+      ["github-token", "linear-api-token", "linear-linearis-actor", "linear-orchestrator-actor"].sort(),
     );
     for (const row of reArmable) {
       const env = { PROBE_UNSET_VAR_FOR_TEST: "x" }; // resolves to none for every one of these rows

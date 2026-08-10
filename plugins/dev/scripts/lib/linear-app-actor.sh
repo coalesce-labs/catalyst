@@ -9,14 +9,25 @@
 # on the env token drains the operator's interactive quota fleet-wide (the
 # broker's cache-reconcile board walk was the CTL-1577 RCA).
 #
-# linear_app_actor_auth <daemon-name> [target-env-var]
-#   Mints a fresh client_credentials token from
-#   catalyst.linear.bot.orchestrator.{clientId,clientSecret} in the global config.
+# linear_app_actor_auth <daemon-name> [target-env-var] [secret-id] [display-name]
+#   Mints a fresh client_credentials token from <secret-id>'s config path in the
+#   global config (default: linear-orchestrator-actor, i.e.
+#   catalyst.linear.bot.orchestrator.{clientId,clientSecret} — UNCHANGED from
+#   every call site that omits the new params).
 #   --noproxy keeps the mint off the audit MITM (curl can't trust its CA).
 #   Fail-open (parity with CTL-785): a failed mint logs a loud warning and leaves
 #   the existing env token intact so the daemon still starts; a missing
-#   orchestrator app config is a silent no-op. <daemon-name> prefixes the log
-#   lines so each daemon's log stays attributable.
+#   app config is a silent no-op. <daemon-name> prefixes the log lines so each
+#   daemon's log stays attributable.
+#
+#   <secret-id> (default "linear-orchestrator-actor") and
+#   <display-name> (default "Catalyst Orchestrator app-actor") let a caller
+#   mint from a DIFFERENT app-actor identity — e.g.
+#   linear_app_actor_auth "phase-agent-dispatch" CATALYST_PHASE_AGENT_LINEARIS_TOKEN
+#   linear-linearis-actor "Catalyst linearis app-actor" mints the dedicated
+#   linearis identity instead. Every other default-arg caller (execution-core,
+#   broker, catalyst-monitor.sh) is byte-for-byte unaffected — both new params
+#   default to the values every existing call already hardcoded.
 #
 #   Default (no target-env-var): exports LINEAR_API_TOKEN + LINEAR_API_KEY —
 #   the broker/execution-core behavior, UNCHANGED.
@@ -249,6 +260,8 @@ _laa_resolve_json_tier() {
 linear_app_actor_auth() {
   local _daemon="${1:?linear_app_actor_auth: daemon name required}"
   local _target_var="${2:-}"
+  local _secret_id="${3:-linear-orchestrator-actor}"
+  local _display_name="${4:-Catalyst Orchestrator app-actor}"
   local _ocid _ocsec _otok _creds _json_tier
   local _inherited_fallback=""
 
@@ -269,7 +282,7 @@ linear_app_actor_auth() {
     _inherited_fallback="$LAA_LAST_CLEARED_TOKEN"
   fi
 
-  catalyst_resolve_secret linear-orchestrator-actor >/dev/null
+  catalyst_resolve_secret "$_secret_id" >/dev/null
   _creds="$CATALYST_SECRET_LAST_VALUE"
   # Clear the breadcrumb the moment it's copied (#2924 post-merge Codex P2):
   # this shell goes on to exec the long-lived daemon runtime, and a lingering
@@ -318,10 +331,10 @@ linear_app_actor_auth() {
         # of the shorter failure-retry window.
         export "${_target_var}=${_otok}"
         export "${_target_var}_SOURCE=minted"
-        echo "${_daemon}: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket, scoped to \$${_target_var})" >&2
+        echo "${_daemon}: authenticated as ${_display_name} (isolated 5000/hr bucket, scoped to \$${_target_var})" >&2
       else
         export LINEAR_API_TOKEN="$_otok" LINEAR_API_KEY="$_otok"
-        echo "${_daemon}: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket)" >&2
+        echo "${_daemon}: authenticated as ${_display_name} (isolated 5000/hr bucket)" >&2
       fi
     else
       # CTL-1612 round 6: creds WERE configured but the mint POST itself
@@ -338,12 +351,12 @@ linear_app_actor_auth() {
           # CTL-1612 round 7: "inherited", not "minted" — see the provenance
           # comment above.
           export "${_target_var}_SOURCE=inherited"
-          echo "${_daemon}: orchestrator token mint failed — reusing the inherited app-actor token for \$${_target_var} (still usable until it expires; a future successful mint will replace it)" >&2
+          echo "${_daemon}: ${_display_name} token mint failed — reusing the inherited app-actor token for \$${_target_var} (still usable until it expires; a future successful mint will replace it)" >&2
         else
-          echo "${_daemon}: WARNING orchestrator token mint failed — \$${_target_var} not set (self-reads fall back to existing resolution)" >&2
+          echo "${_daemon}: WARNING ${_display_name} token mint failed — \$${_target_var} not set (self-reads fall back to existing resolution)" >&2
         fi
       else
-        echo "${_daemon}: WARNING orchestrator token mint failed — daemon using existing LINEAR_API_TOKEN" >&2
+        echo "${_daemon}: WARNING ${_display_name} token mint failed — daemon using existing LINEAR_API_TOKEN" >&2
       fi
     fi
   elif [[ -n "$_target_var" && -n "$_inherited_fallback" ]]; then
@@ -356,6 +369,6 @@ linear_app_actor_auth() {
     # CTL-1612 round 7: "inherited", not "minted" — see the provenance
     # comment above.
     export "${_target_var}_SOURCE=inherited"
-    echo "${_daemon}: no orchestrator app configured — reusing the inherited app-actor token for \$${_target_var} (still usable until it expires)" >&2
+    echo "${_daemon}: no ${_display_name} configured — reusing the inherited app-actor token for \$${_target_var} (still usable until it expires)" >&2
   fi
 }

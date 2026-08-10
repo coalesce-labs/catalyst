@@ -384,8 +384,8 @@ if command -v jq >/dev/null 2>&1; then
 	else
 		fail "mint-fails + no-inherited-token: SCOPED_TARGET unexpectedly set; output: $OUT_FAIL_NOFALLBACK"
 	fi
-	if echo "$OUT_FAIL_NOFALLBACK" | grep -q "WARNING orchestrator token mint failed"; then
-		pass "mint-fails + no-inherited-token: logs the existing WARNING (unchanged)"
+	if echo "$OUT_FAIL_NOFALLBACK" | grep -q "WARNING Catalyst Orchestrator app-actor token mint failed"; then
+		pass "mint-fails + no-inherited-token: logs the WARNING (default display-name now flows through \$_display_name, same semantic content)"
 	else
 		fail "mint-fails + no-inherited-token: did not log the WARNING; output: $OUT_FAIL_NOFALLBACK"
 	fi
@@ -483,6 +483,115 @@ else
 	else
 		fail "no-parser: SCOPED_TARGET unexpectedly set; output: $OUT_NONE"
 	fi
+fi
+
+# ─── linear_app_actor_auth <daemon> [target-var] [secret-id] [display-name] ────
+# The 3rd/4th params let a caller mint from a DIFFERENT identity than the orchestrator
+# (e.g. linear-linearis-actor) and log it under a different display name. Both default to
+# today's exact values, so every 2-arg call above (execution-core, broker, catalyst-monitor.sh)
+# is untouched — these cases prove that explicitly, then prove the new params actually change
+# which credentials get minted. Same jq-required boundary as the round-15 cases above:
+# catalyst_resolve_secret's Layer-2 reader needs jq specifically, independent of this file's
+# own tiered mint-parsing.
+if command -v jq >/dev/null 2>&1; then
+	FAKE_L2_MULTI="${SCRATCH}/fake-layer2-multi-identity.json"
+	cat > "$FAKE_L2_MULTI" <<'EOF'
+{"catalyst":{"linear":{"bot":{
+  "orchestrator":{"clientId":"fake-orch-client-id","clientSecret":"fake-orch-client-secret"},
+  "linearis":{"clientId":"fake-linearis-client-id","clientSecret":"fake-linearis-client-secret"}
+}}}}
+EOF
+	MULTI_BIN="${SCRATCH}/multi-bin"
+	mkdir -p "$MULTI_BIN"
+	# Distinguishes which identity's creds were actually POSTed by inspecting the request
+	# body (client_id=...) — a canned response alone couldn't prove the RIGHT identity minted.
+	cat > "${MULTI_BIN}/curl" <<'CURLSTUB'
+#!/usr/bin/env bash
+BODY="$(cat)"
+if echo "$BODY" | grep -q "client_id=fake-linearis-client-id"; then
+	echo '{"access_token":"fake-linearis-mint-token"}'
+elif echo "$BODY" | grep -q "client_id=fake-orch-client-id"; then
+	echo '{"access_token":"fake-orch-mint-token"}'
+else
+	echo '{"error":"unrecognized_client_in_test_stub"}'
+fi
+CURLSTUB
+	chmod +x "${MULTI_BIN}/curl"
+
+	echo ""
+	echo "backward compat: omitting secret-id/display-name still mints the orchestrator identity under its original name"
+	OUT_DEFAULT="$(env -i HOME="$HOME" PATH="${MULTI_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2_MULTI" \
+		bash -c '
+			set -uo pipefail
+			source "'"$LIB"'"
+			linear_app_actor_auth "test-daemon" SCOPED_TARGET
+			echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+		' 2>&1)"
+	if echo "$OUT_DEFAULT" | grep -qxF "SCOPED_TARGET=[fake-orch-mint-token]"; then
+		pass "backward-compat: 2-arg call still mints the orchestrator identity"
+	else
+		fail "backward-compat: 2-arg call did not mint the orchestrator identity; output: $OUT_DEFAULT"
+	fi
+	if echo "$OUT_DEFAULT" | grep -q "Catalyst Orchestrator app-actor"; then
+		pass "backward-compat: 2-arg call log line unchanged (Catalyst Orchestrator app-actor)"
+	else
+		fail "backward-compat: 2-arg call log line changed; output: $OUT_DEFAULT"
+	fi
+
+	echo ""
+	echo "4-arg call mints from a DIFFERENT secret-contract id, under a DIFFERENT display name"
+	OUT_LINEARIS="$(env -i HOME="$HOME" PATH="${MULTI_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2_MULTI" \
+		bash -c '
+			set -uo pipefail
+			source "'"$LIB"'"
+			linear_app_actor_auth "test-daemon" SCOPED_TARGET linear-linearis-actor "Catalyst linearis app-actor"
+			echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+		' 2>&1)"
+	if echo "$OUT_LINEARIS" | grep -qxF "SCOPED_TARGET=[fake-linearis-mint-token]"; then
+		pass "4-arg: mints the linearis identity, not the orchestrator one"
+	else
+		fail "4-arg: did not mint the linearis identity; output: $OUT_LINEARIS"
+	fi
+	if echo "$OUT_LINEARIS" | grep -q "Catalyst linearis app-actor"; then
+		pass "4-arg: log line uses the custom display name"
+	else
+		fail "4-arg: log line missing the custom display name; output: $OUT_LINEARIS"
+	fi
+	if echo "$OUT_LINEARIS" | grep -q "Catalyst Orchestrator app-actor"; then
+		fail "4-arg: log line unexpectedly still contains the orchestrator's display name; output: $OUT_LINEARIS"
+	else
+		pass "4-arg: log line does not leak the orchestrator's display name"
+	fi
+
+	echo ""
+	echo "4-arg call: a mint failure for the new identity is fail-open, same shape as the 2-arg failure path"
+	# Real (fake) linearis creds ARE configured here, but the mint POST itself fails
+	# (curl-fail stub) -- this is the genuine "mint failed" path (WARNING logged), distinct
+	# from "no app configured at all" (a silent no-op per the documented contract, when
+	# there's also no inherited fallback to seed from -- not what this case is testing).
+	MULTI_FAIL_BIN="${SCRATCH}/multi-fail-bin"
+	mkdir -p "$MULTI_FAIL_BIN"
+	cp "${STUB_BIN}/curl-fail" "${MULTI_FAIL_BIN}/curl"
+	OUT_LINEARIS_FAIL="$(env -i HOME="$HOME" PATH="${MULTI_FAIL_BIN}:${PATH}" CATALYST_LAYER2_CONFIG_FILE="$FAKE_L2_MULTI" \
+		bash -c '
+			set -uo pipefail
+			source "'"$LIB"'"
+			linear_app_actor_auth "test-daemon" SCOPED_TARGET linear-linearis-actor "Catalyst linearis app-actor"
+			echo "SCOPED_TARGET=[${SCOPED_TARGET:-}]"
+		' 2>&1)"
+	if echo "$OUT_LINEARIS_FAIL" | grep -qxF "SCOPED_TARGET=[]"; then
+		pass "4-arg mint-fails (creds configured, mint POST fails): SCOPED_TARGET stays unset"
+	else
+		fail "4-arg mint-fails: SCOPED_TARGET unexpectedly set; output: $OUT_LINEARIS_FAIL"
+	fi
+	if echo "$OUT_LINEARIS_FAIL" | grep -q "WARNING" && echo "$OUT_LINEARIS_FAIL" | grep -q "Catalyst linearis app-actor"; then
+		pass "4-arg mint-fails: logs the WARNING under the custom display name"
+	else
+		fail "4-arg mint-fails: did not log the expected WARNING; output: $OUT_LINEARIS_FAIL"
+	fi
+else
+	echo ""
+	echo "SKIP: multi-identity cases require jq (catalyst_resolve_secret's Layer-2 reader dependency)"
 fi
 
 echo ""

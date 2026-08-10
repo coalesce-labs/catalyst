@@ -2794,6 +2794,29 @@ describe("readLinearBotUserIds", () => {
     const ids = readLinearBotUserIds(null, layer2);
     expect(ids.size).toBe(0);
   });
+
+  test("does NOT include the linearis identity even when catalyst.linear.bot.linearis.botUserId is populated -- the function is hardcoded to worker/orchestrator/legacy only, deliberately excluding linearis so its writes stay treated as human-authored by the CTL-1567 needs-human-clearing gate that consumes this Set", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: {
+              worker: { botUserId: "worker-uuid" },
+              orchestrator: { botUserId: "orch-uuid" },
+              linearis: { botUserId: "linearis-uuid-should-not-appear" },
+            },
+          },
+        },
+      })
+    );
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("worker-uuid")).toBe(true);
+    expect(ids.has("orch-uuid")).toBe(true);
+    expect(ids.has("linearis-uuid-should-not-appear")).toBe(false);
+    expect(ids.size).toBe(2); // not 3 -- linearis is never picked up
+  });
 });
 
 // _isBotId — normalises string vs Set so guard callers are consistent
