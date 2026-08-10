@@ -1,5 +1,22 @@
 # Changelog
 
+## [12.52.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.51.0...catalyst-dev-v12.52.0) (2026-08-10)
+
+
+### Features
+
+* **dev:** CAT-31 resolve ticket worktrees before dispatch ([#3141](https://github.com/coalesce-labs/catalyst/issues/3141)) ([5b40163](https://github.com/coalesce-labs/catalyst/commit/5b401630ea4b7abc36e433ef0f40b8be65beba9f))
+* **dev:** CTL-1490 — durable phase artifacts + cross-host ticket-state reconstruction ([#2697](https://github.com/coalesce-labs/catalyst/issues/2697)) ([797dfdc](https://github.com/coalesce-labs/catalyst/commit/797dfdc4e9a3c02c2a3c7dc663a3b472f352ef8a))
+
+
+### Bug Fixes
+
+* **dev:** CAT-24 reclaim empty and signal-less worker directories ([#3176](https://github.com/coalesce-labs/catalyst/issues/3176)) ([228fb4f](https://github.com/coalesce-labs/catalyst/commit/228fb4f63d15a927324f3a53cf17dbb2871530bc))
+* **dev:** CAT-90 — source claude-accounts.env unconditionally, not gated on CATALYST_EXECUTOR ([#3186](https://github.com/coalesce-labs/catalyst/issues/3186)) ([27670c7](https://github.com/coalesce-labs/catalyst/commit/27670c729fb9002a88ee63b21649f0673dea7c36))
+* **dev:** confirm SIGKILL reap before returning in forward-stop (CTL-1502) ([#3172](https://github.com/coalesce-labs/catalyst/issues/3172)) ([ec9f51b](https://github.com/coalesce-labs/catalyst/commit/ec9f51b80b1b7ff087fa5b106df2a526c92aa78f))
+* **dev:** CTL-1701 move synthetic test pids above the real-pid ceiling ([#3197](https://github.com/coalesce-labs/catalyst/issues/3197)) ([c051400](https://github.com/coalesce-labs/catalyst/commit/c051400a171c2ab1698f849a3eb56b6865ea99ed))
+* **dev:** unbreak main — stop ps truncating the forwarder identity check ([#3196](https://github.com/coalesce-labs/catalyst/issues/3196)) ([e8ab2e4](https://github.com/coalesce-labs/catalyst/commit/e8ab2e4530f51aca188c1ce9262f58e7a8c9e2e4))
+
 ## [12.51.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.50.0...catalyst-dev-v12.51.0)
 
 Aug 10, 2026
