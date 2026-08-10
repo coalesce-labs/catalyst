@@ -140,134 +140,58 @@ function admissionOpts({
 const noopReclaim = () => "noop";
 
 describe("CAT-36 new-work admission", () => {
-  test("a triage-probe error on the admission path is logged, not swallowed", () => {
-    const warnings = [];
-    const realWarn = log.warn;
+  // CAT-36 (Codex P1 round 2, #3140): the admission ranking must keep ready-but-
+  // UNTRIAGED tickets as slot RESERVATIONS. The three tests that used to sit here
+  // asserted the log cadence of an admission-path canOccupySlotNow filter; that
+  // filter was removed because it starved urgent untriaged work (the monitor defers
+  // triage while maxParallel is full, so dropping the untriaged ticket from the
+  // ranking hands every freed slot to a lower-priority triaged waiter, forever).
+  // Their coverage is replaced by the reservation test below — the behaviour that
+  // is actually wanted. The budget guard still lives in the new-work sweep
+  // (dispatchableReady), covered by "an untriaged top-ranked ticket does not
+  // consume the only free slot".
+  test("an urgent untriaged ticket reserves the freed slot from a lower-priority triaged waiter", () => {
+    const debugs = [];
+    const realDebug = log.debug;
+    // A triaged waiter, ready to be free-promoted the moment a slot opens.
     seedTriagedWaiter(orchDir, "CTL-WAIT");
-    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    const probeError = Object.assign(new Error("EACCES"), { code: "EACCES" });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     try {
-      log.warn = (...args) => warnings.push(args);
-      schedulerTick(
-        orchDir,
-        admissionOpts({
+      log.debug = (...args) => debugs.push(args);
+      schedulerTick(orchDir, {
+        ...admissionOpts({
           eligible: [
-            { identifier: "CTL-BROKEN", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+            // Untriaged but URGENT (priority 1 outranks 4). It needs the free slot
+            // for its OWN triage, which the monitor can only run while one is free.
+            { identifier: "CTL-URGENT", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+            { identifier: "CTL-WAIT", priority: 4, createdAt: "2026-05-02T00:00:00Z" },
           ],
-          hasTriageArtifact: (_dir, ticket) => {
-            if (ticket === "CTL-BROKEN") throw probeError;
-            return true;
-          },
-        })
-      );
-      const warning = warnings.find((args) =>
-        args.some(
-          (a) => typeof a === "string" && a.includes("admission triage artifact probe failed")
-        )
-      );
-      expect(warning).toBeDefined();
-      expect(warning.find((a) => a && typeof a === "object")).toMatchObject({
-        ticket: "CTL-BROKEN",
-        reason: "triage-probe-error",
-        held_ticks: 1,
+          hasTriageArtifact: (_dir, ticket) => ticket === "CTL-WAIT",
+        }),
+        // The shared helper pins this false, which zeroes freeSlotsForPromotion and
+        // would make the admitted-count assertion below vacuous. Admission has to be
+        // genuinely able to promote for this test to discriminate.
+        livenessIsFresh: () => true,
       });
-      expect(warning.find((a) => a && typeof a === "object")?.error).toContain("EACCES");
-    } finally {
-      log.warn = realWarn;
-    }
-  });
-
-  test("admission probe-error cadence is independent from the new-work hold cadence", () => {
-    const warnings = [];
-    const realWarn = log.warn;
-    seedTriagedWaiter(orchDir, "CTL-WAIT");
-    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    try {
-      log.warn = (...args) => warnings.push(args);
-      for (let tick = 0; tick < 12; tick += 1) {
-        schedulerTick(
-          orchDir,
-          admissionOpts({
-            eligible: [
-              { identifier: "CTL-BROKEN", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
-            ],
-            hasTriageArtifact: (_dir, ticket) => {
-              if (ticket === "CTL-BROKEN") throw new Error("EACCES");
-              return true;
-            },
-          })
-        );
-      }
-      const streaksFor = (fragment) =>
-        warnings
-          .filter((args) =>
-            args.some((a) => typeof a === "string" && a.includes(fragment))
-          )
-          .map((args) => args.find((a) => a && typeof a === "object")?.held_ticks);
-      expect(streaksFor("admission triage artifact probe failed")).toEqual([1, 10]);
-      expect(streaksFor("triage artifact probe failed — holding new-work")).toEqual([1, 10]);
-    } finally {
-      log.warn = realWarn;
-    }
-  });
-
-  test("an admission probe-error streak restarts after a non-probed tick", () => {
-    const warnings = [];
-    const realWarn = log.warn;
-    seedTriagedWaiter(orchDir, "CTL-WAIT");
-    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    const broken = { identifier: "CTL-BROKEN", priority: 1, createdAt: "2026-05-01T00:00:00Z" };
-    const throwingProbe = (_dir, ticket) => {
-      if (ticket === "CTL-BROKEN") throw new Error("EACCES");
-      return true;
-    };
-    try {
-      log.warn = (...args) => warnings.push(args);
-      schedulerTick(
-        orchDir,
-        admissionOpts({ eligible: [broken], hasTriageArtifact: throwingProbe })
-      );
-      const blocked = {
-        ...broken,
-        relations: {
-          nodes: [{ type: "blocked_by", relatedIssue: { identifier: "CTL-DEP" } }],
-        },
-        inverseRelations: { nodes: [] },
-      };
-      const blockedBatch = (ids) =>
-        new Map(
-          ids.map((id) => [
-            id,
-            {
-              state: "In Progress",
-              priority: 1,
-              labels: [],
-              relations:
-                id === "CTL-BROKEN"
-                  ? blocked.relations
-                  : { nodes: [] },
-              inverseRelations: { nodes: [] },
-            },
-          ])
-        );
-      schedulerTick(
-        orchDir,
-        admissionOpts({ eligible: [blocked], fetchBatch: blockedBatch })
-      );
-      schedulerTick(
-        orchDir,
-        admissionOpts({ eligible: [broken], hasTriageArtifact: throwingProbe })
-      );
-      const heldTicks = warnings
+      const admission = debugs
         .filter((args) =>
-          args.some(
-            (a) => typeof a === "string" && a.includes("admission triage artifact probe failed")
-          )
+          args.some((a) => typeof a === "string" && a.includes("STEP A admission"))
         )
-        .map((args) => args.find((a) => a && typeof a === "object")?.held_ticks);
-      expect(heldTicks).toEqual([1, 1]);
+        .map((args) => args.find((a) => a && typeof a === "object"))
+        .pop();
+      expect(admission).toBeDefined();
+      // BOTH tickets contend. The untriaged one is NOT filtered out of the ranking:
+      // that exclusion is what starved urgent untriaged work, because the monitor
+      // defers triage while maxParallel is full, so handing the freed slot to the
+      // lower-priority triaged waiter leaves the urgent ticket untriaged forever.
+      expect(admission.free_slots_for_promotion).toBe(1);
+      expect(admission.contenders).toBeGreaterThanOrEqual(2);
+      // And with only CTL-URGENT outranking it, the low-priority waiter is NOT
+      // admitted — the slot stays free for the monitor's triage pass. Restoring the
+      // filter makes contenders 1 and admits CTL-WAIT.
+      expect(admission.admitted).toBe(0);
     } finally {
-      log.warn = realWarn;
+      log.debug = realDebug;
     }
   });
 

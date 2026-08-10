@@ -6426,54 +6426,32 @@ export function schedulerTick(
 
       // A.6 — priority + capacity selection over the COMBINED ready pool. Triaged
       // candidates compete fairly with brand-new ready work for the shared
-      // free-slot ceiling. Eligible candidates must be able to consume any slot
-      // they win; triaged-waiting members are dispatchable by construction.
+      // free-slot ceiling.
       const triagedWaitingSet = new Set(triagedWaiting);
       const freeSlotsForPromotion = livenessIsFresh()
         ? Math.max(0, computeFreeSlots(maxParallel, occupiedCount))
         : 0;
-      const admissionContenders = admissionPool.filter((t) => {
-        if (!readyIds.has(t.identifier)) return false;
-        if (triagedWaitingSet.has(t.identifier)) return true;
-        const readiness = canOccupySlotNow(orchDir, t.identifier, {
-          hasTriageArtifact: _hasTriageArtifact,
-        });
-        if (readiness.ok) {
-          lastAdmissionProbeLogged.delete(t.identifier);
-          return true;
-        }
-        if (readiness.error) {
-          const streak = (lastAdmissionProbeLogged.get(t.identifier) ?? 0) + 1;
-          lastAdmissionProbeLogged.set(t.identifier, streak);
-          if (streak === 1 || streak % HOLD_RELOG_EVERY === 0) {
-            log.warn(
-              {
-                ticket: t.identifier,
-                reason: readiness.reason,
-                held_ticks: streak,
-                error: String(readiness.error),
-              },
-              "ctl-1150: admission triage artifact probe failed — excluding candidate (CAT-36)"
-            );
-          }
-        } else {
-          lastAdmissionProbeLogged.delete(t.identifier);
-        }
-        return false;
-      });
-      if (lastAdmissionProbeLogged.size > 0) {
-        const probedCandidateIds = new Set(
-          admissionPool
-            .filter(
-              (t) => readyIds.has(t.identifier) && !triagedWaitingSet.has(t.identifier)
-            )
-            .map((t) => t.identifier)
-        );
-        for (const ticket of lastAdmissionProbeLogged.keys()) {
-          if (!probedCandidateIds.has(ticket)) lastAdmissionProbeLogged.delete(ticket);
-        }
-      }
-      const readyCandidates = rankTickets(admissionContenders);
+      // CAT-36 (Codex P1 round 2, #3140): ready-but-UNTRIAGED tickets STAY in this
+      // ranking, as slot RESERVATIONS. Do not filter them on canOccupySlotNow —
+      // that is the same "wrong question" already documented at the preemption
+      // guard below, and here it is actively harmful:
+      //
+      //   - Admission costs no dispatch budget for them anyway. `admittedThisTick`
+      //     keeps only `triagedWaitingSet` members, so an untriaged ticket that wins
+      //     a slot here is never dispatched — the slot is simply left unconsumed,
+      //     which is exactly the reservation the monitor's triage pass then spends
+      //     (computeTriageBudget is just computeFreeSlots).
+      //   - Excluding them STARVES urgent untriaged work. The monitor defers triage
+      //     while maxParallel is full (monitor.mjs). If the freed slot is then handed
+      //     to a lower-priority *triaged* waiter because the untriaged ticket was
+      //     dropped from the ranking, a sustained triaged backlog refills every freed
+      //     slot forever and the urgent ticket is never triaged at all — undoing the
+      //     preemption behaviour this ticket restored.
+      //
+      // "Can't start ⇒ don't spend a slot on it" is enforced where it actually
+      // applies: the new-work sweep's `dispatchableReady` gate, which is what stops
+      // an untriaged ticket consuming a *dispatch*.
+      const readyCandidates = rankTickets(admissionPool.filter((t) => readyIds.has(t.identifier)));
       const admittedSlice = selectDispatchablePerProject(
         readyCandidates,
         new Set(),
@@ -6787,9 +6765,10 @@ export function schedulerTick(
       //      the MONITOR's triage dispatch (computeTriageBudget is just
       //      computeFreeSlots), not only by a pipeline-phase dispatch. An
       //      untriaged urgent ticket genuinely needs that slot — to be triaged.
-      // The budget fix this ticket is about lives in the new-work + admission
-      // sweeps (dispatchableReady / admissionContenders), which is where
-      // "can't start ⇒ don't spend a slot on it" actually applies.
+      // The budget fix this ticket is about lives in the new-work sweep
+      // (dispatchableReady), which is where "can't start ⇒ don't spend a slot on
+      // it" actually applies. It deliberately does NOT live in the A.6 admission
+      // ranking either — see the reservation note there (Codex P1 round 2).
       const topQueued = ranking.find((d) => !d.inFlight);
       // Victim candidates: in-flight, sorted worst-to-best (reverse ranking).
       const inFlightRanked = ranking.filter((d) => d.inFlight);
@@ -8400,8 +8379,6 @@ const observedYieldFiles = new Set();
 // daemon restart (via __resetForTests).
 const lastHeldEmitState = new Map();
 const lastHoldLogged = new Map();
-// Admission probe failures have an independent cadence from sweep 2 holds.
-const lastAdmissionProbeLogged = new Map();
 const STARVATION_WARN_STREAK = 3;
 const STARVATION_REWARN_EVERY = 10;
 const HOLD_RELOG_EVERY = 10;
@@ -9620,7 +9597,6 @@ export function __resetForTests() {
   observedYieldFiles.clear(); // CTL-702: reset per-lifetime dedup set between tests
   lastHeldEmitState.clear(); // CTL-755: reset held-event only-on-change dedup
   lastHoldLogged.clear();
-  lastAdmissionProbeLogged.clear();
   starvationStreak = 0;
   lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests
