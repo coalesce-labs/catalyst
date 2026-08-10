@@ -70,6 +70,7 @@ export function defaultRunPhaseAgent(
   { spawn = spawnSync } = {}
 ) {
   const args = ["--phase", phase, "--ticket", ticket, "--orch-dir", orchDir, "--orch-id", ticket];
+  if (worktreePath) args.push("--worktree", worktreePath);
   if (resumeSession) args.push("--resume-session", resumeSession);
   if (attempt != null) args.push("--attempt", String(attempt)); // CTL-761
   const extraEnv = {};

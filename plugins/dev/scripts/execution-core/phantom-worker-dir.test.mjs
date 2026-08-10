@@ -12,7 +12,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test phantom-worker-dir.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -21,6 +21,7 @@ import {
   listInFlightTickets,
   buildGlobalRanking,
   bgLivenessProtects,
+  isReclaimableEmptyWorkerDir,
 } from "./scheduler.mjs";
 
 let orchDir;
@@ -59,7 +60,15 @@ describe("isPhantomWorkerDir (CTL-1323)", () => {
   test("a PARKED / ESCALATED / PREEMPTED / FAILED recovery-pass is NOT phantom — never re-pulled", () => {
     // These statuses surface a pending operator decision (needs-human / Needs-You) or
     // are resumable (preempted) or hold the slot — re-pulling them would bury that state.
-    for (const status of ["needs-human", "needs-input", "turn-cap-exhausted", "preempted", "failed", "stalled", "aborted"]) {
+    for (const status of [
+      "needs-human",
+      "needs-input",
+      "turn-cap-exhausted",
+      "preempted",
+      "failed",
+      "stalled",
+      "aborted",
+    ]) {
       expect(isPhantomWorkerDir({ "recovery-pass": status })).toBe(false);
     }
   });
@@ -105,14 +114,81 @@ describe("listStartedTickets / listInFlightTickets ignore phantom dirs (CTL-1323
     expect(listStartedTickets(orchDir).has("ADV-esc")).toBe(true);
   });
 
-  test("an empty worker dir (no phase signals yet) is started but NOT in-flight — conservative, not re-pulled", () => {
+  test("a FRESH empty worker dir is still started — the dispatch bare-dir window is protected", () => {
     mkdirSync(join(orchDir, "workers", "CTL-fresh"), { recursive: true });
     expect(listStartedTickets(orchDir).has("CTL-fresh")).toBe(true);
     expect(listInFlightTickets(orchDir).has("CTL-fresh")).toBe(false);
   });
+
+  test("an AGED empty worker dir is NOT started — the ticket is re-pulled (CAT-24)", () => {
+    const dir = join(orchDir, "workers", "CAT-aged");
+    mkdirSync(dir, { recursive: true });
+    utimesSync(dir, new Date(Date.now() - 2 * 3600_000), new Date(Date.now() - 2 * 3600_000));
+    expect(listStartedTickets(orchDir).has("CAT-aged")).toBe(false);
+    expect(listInFlightTickets(orchDir).has("CAT-aged")).toBe(false);
+  });
+
+  test("an aged MARKER-ONLY dir is NOT started", () => {
+    const dir = join(orchDir, "workers", "CAT-markers");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, ".janitor-cleared-recovery-pass.applied"), "");
+    writeFileSync(join(dir, "inbox.jsonl"), "{}\n");
+    utimesSync(dir, new Date(Date.now() - 2 * 3600_000), new Date(Date.now() - 2 * 3600_000));
+    expect(listStartedTickets(orchDir).has("CAT-markers")).toBe(false);
+  });
+
+  test("a FRESH zero-signal dir holding an operator reply is re-pulled immediately (CAT-24)", () => {
+    // clear-stall preserved the human's answer and deleted the last signal; writing
+    // inbox.jsonl refreshed the dir mtime, so the grace would otherwise park this
+    // answered ticket for the whole window with no worker to consume the reply.
+    const dir = join(orchDir, "workers", "CAT-answered");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "inbox.jsonl"), '{"from":"operator"}\n');
+    expect(listStartedTickets(orchDir).has("CAT-answered")).toBe(false);
+  });
+
+  test("a FRESH zero-signal dir with an EMPTY inbox stays protected by the grace", () => {
+    const dir = join(orchDir, "workers", "CAT-emptyinbox");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "inbox.jsonl"), "");
+    expect(listStartedTickets(orchDir).has("CAT-emptyinbox")).toBe(true);
+  });
+
+  test("the grace window is caller-overridable (config-resolved in production)", () => {
+    const dir = join(orchDir, "workers", "CAT-grace");
+    mkdirSync(dir, { recursive: true });
+    utimesSync(dir, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    // 1 min old: inside a 10-min grace, outside a 1-second one.
+    expect(listStartedTickets(orchDir, { graceMs: 600_000 }).has("CAT-grace")).toBe(true);
+    expect(listStartedTickets(orchDir, { graceMs: 1_000 }).has("CAT-grace")).toBe(false);
+  });
+
+  test("an aged dir that still carries a signal is unaffected", () => {
+    seedSignal("CAT-signaled", "implement", "stalled");
+    const dir = join(orchDir, "workers", "CAT-signaled");
+    utimesSync(dir, new Date(Date.now() - 2 * 3600_000), new Date(Date.now() - 2 * 3600_000));
+    expect(listStartedTickets(orchDir).has("CAT-signaled")).toBe(true);
+  });
+});
+
+describe("isReclaimableEmptyWorkerDir (CAT-24)", () => {
+  test("only empty, old dirs are reclaimable", () => {
+    expect(isReclaimableEmptyWorkerDir({ hasSignals: false, ageMs: 11, graceMs: 10 })).toBe(true);
+    expect(isReclaimableEmptyWorkerDir({ hasSignals: false, ageMs: 9, graceMs: 10 })).toBe(false);
+    expect(isReclaimableEmptyWorkerDir({ hasSignals: true, ageMs: 11, graceMs: 10 })).toBe(false);
+    expect(isReclaimableEmptyWorkerDir({ hasSignals: false, ageMs: NaN, graceMs: 10 })).toBe(false);
+  });
 });
 
 describe("buildGlobalRanking re-pulls a phantom-wedged eligible ticket (CTL-1323)", () => {
+  test("an aged empty worker dir is re-pulled as eligible new work", () => {
+    const dir = join(orchDir, "workers", "CAT-24");
+    mkdirSync(dir, { recursive: true });
+    utimesSync(dir, new Date(Date.now() - 2 * 3600_000), new Date(Date.now() - 2 * 3600_000));
+    const ranking = buildGlobalRanking(orchDir, [{ identifier: "CAT-24", priority: 1 }]);
+    expect(ranking.filter((d) => d.identifier === "CAT-24")).toHaveLength(1);
+    expect(ranking.find((d) => d.identifier === "CAT-24").inFlight).toBe(false);
+  });
   test("ADV-1398 (recovery-pass:done) eligible → exactly ONE fresh new-work descriptor (no dup)", () => {
     seedSignal("ADV-1398", "recovery-pass", "done");
     const eligible = [{ identifier: "ADV-1398", priority: 2, createdAt: "2026-06-23T10:00:00Z" }];
