@@ -95,9 +95,10 @@ runtime fallback — plus, outside the legacy plugin, `setup-orchestrator.sh` (`
   enrollment under `execution-core/projects/` and the `/orchestrate` enroll step were retired in
   CTL-582. Access flows through `registry.mjs` `list-projects`/`get-project-config` — the D9 cloud
   seam (swappable to a hosted table without touching callers). Each entry's `team` must match its
-  `repoRoot`'s Layer-1 `catalyst.linear.teamKey`; `listProjects()` warns on a mismatch and
-  `catalyst doctor` grades it with the advisory `registry-team-identity` check. Catalyst's own CAT
-  registration is recorded in ADR-028.
+  `repoRoot`'s Layer-1 `catalyst.linear.teamKey`. The hot-path `listProjects()` check reads the
+  working tree and warns on mismatch; the opt-in `catalyst doctor` arm reads the dispatch revision
+  from local refs only and grades working-tree/revision drift as WARN. Both remain advisory under
+  `registry-team-identity`. Catalyst's own CAT registration is recorded in ADR-028.
 - **Heartbeat** — orchestrators write `lastHeartbeat` every 2–3 min; entries stale >10 min are GC'd
   as `abandoned`.
 
