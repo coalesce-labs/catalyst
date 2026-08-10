@@ -157,7 +157,9 @@ jobs:
     # ever running. Running whenever detect-changes did NOT succeed (result != 'success') treats
     # an errored/cancelled detector as "assume relevant" and runs the suite; `!cancelled()` still
     # keeps this job from running if the *workflow run itself* was cancelled.
-    if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.relevant == 'true') }}
+    if:
+      ${{ !cancelled() && (needs.detect-changes.result != 'success' ||
+      needs.detect-changes.outputs.relevant == 'true') }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -510,7 +512,9 @@ jobs:
         # without this step the required check could pass without ever exercising
         # the zsh path. Installed explicitly rather than assumed present on the
         # runner image so the regression coverage doesn't silently degrade to a skip.
-        run: command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zsh)
+        run:
+          command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y
+          --no-install-recommends zsh)
 
       - name: phase-artifact-gate contract + zsh regression test
         # Covers match_thoughts_artifact (tail/slug/case forms, cross-ticket
@@ -591,7 +595,10 @@ jobs:
             board-health-seam.test.mjs \
             dispatch-readiness.test.mjs \
             stall-janitor-throttle.test.mjs \
+            clear-stall-empty-dir.test.mjs \
+            empty-worker-dir-grace-config.test.mjs \
             phantom-worker-dir.test.mjs \
+            worker-dir-gc.test.mjs \
             in-flight-supersede.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
