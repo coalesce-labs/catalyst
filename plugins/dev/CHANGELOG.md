@@ -1,16 +1,21 @@
 # Changelog
 
-## [12.52.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.51.0...catalyst-dev-v12.52.0) (2026-08-10)
+## [12.52.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.51.0...catalyst-dev-v12.52.0)
+
+Aug 10, 2026
+
+<!-- ai-enhanced -->
+
+### Durable Phase Artifacts & Cross-Host Recovery
+
+Six phase skills now write durable thought docs to the shared repo before emitting complete, enabling `reconstruct-ticket-state.mjs` to rebuild any in-flight ticket's history from scratch on a fresh host. The sync gate rolls out behind `catalyst.phaseArtifactSync.mode` — default `off` is behavior-identical to today; set `shadow` to observe without blocking, or `enforce` to make sync failures fatal. This release also fixes orphaned worker directories that held tickets in-flight indefinitely, corrects `claude-accounts.env` sourcing on bg-executor nodes where it was silently never loading, and resolves a `ps` truncation bug that caused the forwarder identity check to fail on Linux CI.
 
 
-### Features
+
+### PRs
 
 * **dev:** CAT-31 resolve ticket worktrees before dispatch ([#3141](https://github.com/coalesce-labs/catalyst/issues/3141)) ([5b40163](https://github.com/coalesce-labs/catalyst/commit/5b401630ea4b7abc36e433ef0f40b8be65beba9f))
 * **dev:** CTL-1490 — durable phase artifacts + cross-host ticket-state reconstruction ([#2697](https://github.com/coalesce-labs/catalyst/issues/2697)) ([797dfdc](https://github.com/coalesce-labs/catalyst/commit/797dfdc4e9a3c02c2a3c7dc663a3b472f352ef8a))
-
-
-### Bug Fixes
-
 * **dev:** CAT-24 reclaim empty and signal-less worker directories ([#3176](https://github.com/coalesce-labs/catalyst/issues/3176)) ([228fb4f](https://github.com/coalesce-labs/catalyst/commit/228fb4f63d15a927324f3a53cf17dbb2871530bc))
 * **dev:** CAT-90 — source claude-accounts.env unconditionally, not gated on CATALYST_EXECUTOR ([#3186](https://github.com/coalesce-labs/catalyst/issues/3186)) ([27670c7](https://github.com/coalesce-labs/catalyst/commit/27670c729fb9002a88ee63b21649f0673dea7c36))
 * **dev:** confirm SIGKILL reap before returning in forward-stop (CTL-1502) ([#3172](https://github.com/coalesce-labs/catalyst/issues/3172)) ([ec9f51b](https://github.com/coalesce-labs/catalyst/commit/ec9f51b80b1b7ff087fa5b106df2a526c92aa78f))
