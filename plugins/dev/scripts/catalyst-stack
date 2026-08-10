@@ -2525,7 +2525,18 @@ cmd_activate_replica() {
   else
     merged="$(jq -nc '{catalyst:{linearReplica:{mode:"on"}}}')"
   fi
-  if [[ "$dry_run" == yes ]]; then printf '%s\n' "$merged"; return 0; fi
+  if [[ "$dry_run" == yes ]]; then
+    # Preview the CHANGE, never the document (CAT-21 Codex P1). `merged` is the
+    # WHOLE Layer-2 config, which is where this machine's API tokens live — and the
+    # runbook recommends this command, so dumping it discloses every secret to
+    # whatever captured stdout: an agent transcript, a CI log, a terminal recording,
+    # a support paste. The only thing activate-replica changes is
+    # catalyst.linearReplica, so that subtree is the entire useful preview.
+    printf 'activate-replica --dry-run: would set catalyst.linearReplica.mode="on" in %s\n' "$cfg" >&2
+    printf 'activate-replica --dry-run: the rest of the document is unchanged and withheld (it carries secrets)\n' >&2
+    jq -n --argjson lr "$(jq -c '.catalyst.linearReplica // {}' <<<"$merged")" '{catalyst:{linearReplica:$lr}}'
+    return 0
+  fi
   mkdir -p "$(dirname "$cfg")"
   local tmp="${cfg}.tmp.$$"
   if printf '%s\n' "$merged" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$cfg"; then

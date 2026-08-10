@@ -46,6 +46,28 @@ check "permissive file still resolves" has_line "present=yes"
 check "perms warning" has_line "perms_warning=yes"
 check "secret absent from stderr" bash -c '! grep -q abc "$1"' _ "$H/stderr"
 
+# CAT-21 Codex P1: the probe must present LAUNCHD's environment, not the caller's.
+# render_cloud_sync_plist sets only PATH/HOME/CATALYST_DIR/CATALYST_HOST_NAME, so an
+# override exported by the invoking shell is invisible to the daemon. These two
+# redirect Layer-2 config resolution and therefore change which token variable the
+# probe reports — the earlier enumerate-a-few-unsets approach missed both.
+H="$TMP_ROOT/machine-config-override"; mkdir -p "$H/.config/catalyst" "$H/elsewhere"
+printf 'export CATALYST_CLOUD_TOKEN=abc\n' > "$H/.config/catalyst/cloud-sync.env"; chmod 600 "$H/.config/catalyst/cloud-sync.env"
+printf '{"catalyst":{"cloud":{"tokenEnv":"MY_TOKEN"}}}\n' > "$H/elsewhere/config.json"
+OUT="$(HOME="$H" CATALYST_MACHINE_CONFIG="$H/elsewhere/config.json" \
+       CLOUD_SYNC_CONFIG_DIR="$(cd "${SCRIPT_DIR}/../execution-core" && pwd)" \
+       cloud_sync_probe_token --host test-host 2>"$H/stderr")"
+check "CATALYST_MACHINE_CONFIG from the caller is ignored" has_line "name=CATALYST_CLOUD_TOKEN"
+
+H="$TMP_ROOT/xdg-override"; mkdir -p "$H/.config/catalyst" "$H/xdg/catalyst"
+printf 'export CATALYST_CLOUD_TOKEN=abc\n' > "$H/.config/catalyst/cloud-sync.env"; chmod 600 "$H/.config/catalyst/cloud-sync.env"
+printf '{"catalyst":{"cloud":{"tokenEnv":"XDG_TOKEN"}}}\n' > "$H/xdg/catalyst/config.json"
+OUT="$(HOME="$H" XDG_CONFIG_HOME="$H/xdg" \
+       CLOUD_SYNC_CONFIG_DIR="$(cd "${SCRIPT_DIR}/../execution-core" && pwd)" \
+       cloud_sync_probe_token --host test-host 2>"$H/stderr")"
+check "XDG_CONFIG_HOME from the caller is ignored" has_line "source=cloud-sync.env"
+check "XDG override does not rename the token" has_line "name=CATALYST_CLOUD_TOKEN"
+
 echo
 if (( FAILURES > 0 )); then echo "FAIL: $FAILURES failed, $PASSES passed"; exit 1; fi
 echo "OK: $PASSES passed"

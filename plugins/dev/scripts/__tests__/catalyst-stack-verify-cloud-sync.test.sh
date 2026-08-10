@@ -53,6 +53,15 @@ check "activate preserves secret config mode" test "$(_stat_field %Lp %a "$CATAL
 BEFORE="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"; cmd_activate_replica --dry-run >/dev/null; AFTER="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"
 check "dry-run changes nothing" test "$BEFORE" = "$AFTER"
 
+# CAT-21 Codex P1: --dry-run used to print the WHOLE merged Layer-2 document, which
+# is where this machine's API tokens live. The runbook recommends the command, so
+# that discloses every secret to whatever captured stdout (agent transcript, CI log,
+# terminal recording, support paste). It must preview only the subtree it changes.
+printf '{"keep":true,"catalyst":{"linear":{"apiToken":"lin_api_DRYRUNSECRET"}}}\n' > "$CATALYST_LAYER2_CONFIG_FILE"
+DRY_OUT="$(cmd_activate_replica --dry-run 2>/dev/null)"
+check "dry-run does not print Layer-2 secrets" bash -c '! grep -q DRYRUNSECRET <<<"$1"' _ "$DRY_OUT"
+check "dry-run still previews the replica change" bash -c 'jq -e ".catalyst.linearReplica.mode == \"on\"" <<<"$1" >/dev/null' _ "$DRY_OUT"
+
 printf '{"catalyst":{"linearReplica":"off","token":"keep-secret"},"keep":true}\n' > "$CATALYST_LAYER2_CONFIG_FILE"
 cmd_activate_replica >/dev/null
 check "activate normalizes legacy mode without clobbering config" jq -e '.keep == true and .catalyst.token == "keep-secret" and .catalyst.linearReplica.mode == "on"' "$CATALYST_LAYER2_CONFIG_FILE"
