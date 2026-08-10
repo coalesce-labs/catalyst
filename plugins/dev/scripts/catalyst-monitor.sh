@@ -815,7 +815,15 @@ acquire_forward_lock() {
 # rather than killing something we cannot identify.
 _forward_pid_is_ours() {
   local pid="$1" cmd
-  cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || return 1
+  # -ww: NEVER let ps truncate. Linux procps wraps at 80 columns when stdout is
+  # not a tty, and the pre-exec command line here is
+  # `bash <tmp>/bin/bun run <repo>/plugins/dev/scripts/otel-forward/index.ts` —
+  # ~114 chars in CI, so the "otel-forward" marker this match depends on is cut
+  # off entirely. The identity check then answered "not ours", read_forward_pid
+  # deleted the pid file as stale, and forward-restart skipped the stop and
+  # started a SECOND forwarder (CI: "Forwarder not running" with pid 2413 still
+  # in state S). macOS ps does not truncate, so this reproduced only on Linux.
+  cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null)" || return 1
   [[ -n "$cmd" ]] || return 1
   [[ "$cmd" == *"otel-forward"* ]]
 }
@@ -1002,7 +1010,15 @@ WATCHDOG_SCRIPT="${SCRIPT_DIR}/execution-core/daemon-watchdog-run.mjs"
 
 _watchdog_pid_is_ours() {
   local pid="$1" cmd
-  cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || return 1
+  # -ww: NEVER let ps truncate. Linux procps wraps at 80 columns when stdout is
+  # not a tty, and the pre-exec command line here is
+  # `bash <tmp>/bin/bun run <repo>/plugins/dev/scripts/otel-forward/index.ts` —
+  # ~114 chars in CI, so the "otel-forward" marker this match depends on is cut
+  # off entirely. The identity check then answered "not ours", read_forward_pid
+  # deleted the pid file as stale, and forward-restart skipped the stop and
+  # started a SECOND forwarder (CI: "Forwarder not running" with pid 2413 still
+  # in state S). macOS ps does not truncate, so this reproduced only on Linux.
+  cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null)" || return 1
   [[ -n "$cmd" ]] || return 1
   [[ "$cmd" == *"daemon-watchdog-run"* ]]
 }

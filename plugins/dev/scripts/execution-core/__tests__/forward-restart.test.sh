@@ -196,5 +196,39 @@ if ! _forward_pid_gone "$ZPID"; then
   echo "FAIL: _forward_pid_gone reported reaped pid $ZPID as still running"; exit 1
 fi
 
+# --- Test 6: the identity check survives a TRUNCATING ps ---
+#
+# The regression that made this suite red on CI while passing on every dev machine.
+# Linux procps wraps `ps -o command=` at 80 columns when stdout is not a tty. The
+# forwarder's pre-exec command line is
+#   bash <tmp>/bin/bun run <repo>/plugins/dev/scripts/otel-forward/index.ts
+# (~114 chars on the runner), so the "otel-forward" marker _forward_pid_is_ours
+# matches on was cut off. The check answered "not ours", read_forward_pid deleted
+# the pid file as stale, and forward-restart skipped the stop entirely and started
+# a SECOND forwarder — observed as `restart output: Forwarder not running` with the
+# old pid still in state S. macOS ps does not truncate, so this could not reproduce
+# locally; the stub below makes it deterministic on ANY host by truncating exactly
+# as procps does unless -ww is passed.
+PSW="$TMP/pswide"; mkdir -p "$PSW"
+cat > "$PSW/ps" <<'SH'
+#!/usr/bin/env bash
+# Emits a realistically LONG forwarder command line, truncated to 80 columns
+# unless -ww is given — i.e. Linux procps behaviour, deterministically.
+wide=0
+for a in "$@"; do case "$a" in -ww|-w) wide=1 ;; esac; done
+line="bash /tmp/tmp.aBcDeFgHiJ/bin/bun run /home/runner/work/catalyst/catalyst/plugins/dev/scripts/otel-forward/index.ts"
+if [[ "$wide" == "1" ]]; then printf '%s\n' "$line"; else printf '%s\n' "${line:0:80}"; fi
+SH
+chmod +x "$PSW/ps"
+
+if PATH="$PSW:$PATH" _forward_pid_is_ours 4242; then
+  echo "PASS: identity check survives a truncating ps (production passes -ww)"
+else
+  echo "FAIL: identity check broke under a truncating ps — forward-restart would skip the stop"
+  echo "  truncated view : [$(PATH="$PSW:$PATH" ps -o command= -p 4242)]"
+  echo "  wide view      : [$(PATH="$PSW:$PATH" ps -ww -o command= -p 4242)]"
+  exit 1
+fi
+
 echo "PASS: forward-restart cold-start, hot-swap, and idempotent back-to-back restarts + wiring"
 echo "PASS: defunct pid reads as gone (kill -0 cannot see it); live and reaped pids read correctly"
