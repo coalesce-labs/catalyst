@@ -29,13 +29,55 @@ _wtr_worktree_for_branch() {
 }
 _wtr_abs() { [[ -d $1 ]] || return 1; (cd "$1" 2>/dev/null && pwd -P) || return 1; }
 
-# A branch serves $ticket when it IS the ticket (execution-core convention) or
-# ends in "-<ticket>" (the legacy "<orch-id>-<ticket>" convention that
-# orchestrate-dispatch-next uses for ${WORKTREE_BASE}/${ORCH_ID}-${T}).
+# A branch serves $ticket when it IS the ticket (execution-core convention) or is
+# EXACTLY "<orch-id>-<ticket>" (the legacy convention orchestrate-dispatch-next
+# uses for ${WORKTREE_BASE}/${ORCH_ID}-${T}).
+#
+# CAT-31 review P1: the legacy arm used to be a bare `*-<ticket>` glob, which also
+# matched any ordinary developer branch whose name happens to end in the ticket key
+# — `fix-CAT-100`, `revert-CAT-100`, `wip-CAT-100`. Because the cwd-serving rung is
+# consulted BEFORE the registry, dispatch standing in such a checkout would rebase
+# and launch the worker there instead of the registered CAT-100 worktree, and strict
+# mode would accept it as a legitimate source. A suffix alone does not establish
+# orchestrator identity.
+#
+# There is no shape to pattern-match against: real orchestrator ids are arbitrary
+# (`demo`, `exec-core-tracer`, `o-adv-1103-1088-...`, `ctl-123-126`). The only sound
+# discriminator is the id itself, which every dispatch path already has — the
+# dispatchers export CATALYST_ORCHESTRATOR_ID, and phase-agent-dispatch keeps it in
+# ORCH_ID when it came from --orch-id. WTR_ORCH_ID lets a caller pass it explicitly.
+#
+# FAILS CLOSED: with no orchestrator id in scope we cannot establish that identity,
+# so only the exact ticket branch serves. The resolver then falls through to the
+# registry / cwd-repo rungs, which resolve BY TICKET — the safe answer.
 _wtr_branch_serves_ticket() {
 	local branch="$1" ticket="$2"
+	local orch="${WTR_ORCH_ID:-${CATALYST_ORCHESTRATOR_ID:-${ORCH_ID:-}}}"
 	[[ -n $branch && -n $ticket ]] || return 1
-	[[ $branch == "$ticket" || $branch == *-"$ticket" ]]
+	[[ $branch == "$ticket" ]] && return 0
+	[[ -n $orch ]] || return 1
+	[[ $branch == "${orch}-${ticket}" ]]
+}
+
+# Print nothing; succeed when $1 is the TOP LEVEL of a git worktree whose checked-out
+# branch serves $ticket.
+#
+# CAT-31 review P1: `--worktree` was accepted on `[[ -d ]]` alone, so an unrelated
+# existing checkout — or a stale path since repurposed for another ticket — was
+# returned as source=explicit and strict mode permitted the dispatch. The dispatcher
+# then cd's there, rebases it, and launches the ticket's worker in the wrong tree.
+# Requiring the path to BE a worktree root (not a subdirectory of one) and to be
+# serving this ticket closes that without loosening anything: the in-tree caller
+# passes a freshly created worktree root checked out on the ticket branch.
+_wtr_path_serves_ticket() {
+	local path="$1" ticket="$2" top="" branch=""
+	[[ -n $path && -n $ticket ]] || return 1
+	top="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)" || return 1
+	[[ -n $top ]] || return 1
+	top="$(cd "$top" 2>/dev/null && pwd -P)" || return 1
+	[[ $top == "$path" ]] || return 1
+	branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 1
+	_wtr_branch_serves_ticket "$branch" "$ticket"
 }
 
 # Print the toplevel of the CURRENT worktree when its checked-out branch already
@@ -54,14 +96,25 @@ resolve_ticket_worktree() {
 	# shellcheck disable=SC2034 # public breadcrumbs consumed by source callers
 	WT_RESOLVE_SOURCE=""
 	WT_RESOLVE_EXPLICIT_MISSING=0
+	# shellcheck disable=SC2034 # public breadcrumb consumed by source callers
+	WT_RESOLVE_EXPLICIT_MISMATCH=0
 	if [[ -n $explicit ]]; then
-		if candidate="$(_wtr_abs "$explicit")"; then WT_RESOLVE_SOURCE="explicit"; WTR_RESOLVED_PATH="$candidate"; printf '%s' "$candidate"; return 0; fi
-		# CAT-31 review P1: a stale or mistyped --worktree must NOT short-circuit to
-		# the caller's cwd — with strict mode off by default that silently creates
-		# signals, rebases and launches the ticket worker in an unrelated checkout.
-		# Fall through to the rungs that resolve BY TICKET instead.
+		if candidate="$(_wtr_abs "$explicit")" && _wtr_path_serves_ticket "$candidate" "$ticket"; then
+			WT_RESOLVE_SOURCE="explicit"; WTR_RESOLVED_PATH="$candidate"; printf '%s' "$candidate"; return 0
+		fi
+		# CAT-31 review P1: a stale, mistyped, or WRONG --worktree must NOT
+		# short-circuit to the caller's cwd — with strict mode off by default that
+		# silently creates signals, rebases and launches the ticket worker in an
+		# unrelated checkout. Fall through to the rungs that resolve BY TICKET.
+		#
+		# "Wrong" covers an existing directory that is not a worktree root, or one
+		# whose branch serves a different ticket; MISMATCH distinguishes that from a
+		# path that simply is not there. Both keep source=explicit-missing, because
+		# that is the value CATALYST_DISPATCH_WORKTREE_STRICT refuses on — a new
+		# source string would silently slip past the strict-mode case.
 		bad_explicit=1
 		WT_RESOLVE_EXPLICIT_MISSING=1
+		[[ -n $candidate ]] && WT_RESOLVE_EXPLICIT_MISMATCH=1
 	fi
 	# CAT-31 review P1: when the caller is already standing in a worktree whose
 	# branch serves this ticket, keep it. A registry-first lookup would otherwise
