@@ -1328,6 +1328,41 @@ export function createServer(opts: CreateServerOptions): BunServer {
     });
   }
 
+  // CAT-152: webhook-fed catalyst-replica.db writer — lazily constructed on
+  // first use (VITE-GRAPH GUARD, CTL-883: execution-core imports must be
+  // computed specifiers, never static top-level imports, so they never reach
+  // the Vite/esbuild browser bundle). One instance per monitor process,
+  // memoized; applyEvent/backfillTeam failures are caught at each call site
+  // and never break the webhook response (fail-open, matching every other
+  // replica-tier seam in this codebase).
+  let webhookReplicaWriterPromise: Promise<{
+    applyEvent: (event: unknown) => void;
+    backfillTeam: (teamKey: string) => Promise<void>;
+  }> | null = null;
+  const backfilledTeams = new Set<string>();
+  function loadWebhookReplicaWriter() {
+    if (!webhookReplicaWriterPromise) {
+      webhookReplicaWriterPromise = (async () => {
+        const writerSpecifier = ["..", "execution-core", "webhook-replica-writer.mjs"].join("/");
+        const configSpecifier = ["..", "execution-core", "config.mjs"].join("/");
+        const [{ createWebhookReplicaWriter }, { getReplicaDbPath, getHostName }] = await Promise.all([
+          import(writerSpecifier) as Promise<{
+            createWebhookReplicaWriter: (opts: { dbPath: string; ownerKey: string }) => {
+              applyEvent: (event: unknown) => void;
+              backfillTeam: (teamKey: string) => Promise<void>;
+            };
+          }>,
+          import(configSpecifier) as Promise<{ getReplicaDbPath: () => string; getHostName: () => string }>,
+        ]);
+        return createWebhookReplicaWriter({
+          dbPath: getReplicaDbPath(),
+          ownerKey: `${getHostName()}-webhook-replica`,
+        });
+      })();
+    }
+    return webhookReplicaWriterPromise;
+  }
+
   // Linear webhook handler — independent of GitHub config so a daemon can run
   // either or both. Shares the same EventLogWriter when both are present so
   // GitHub and Linear events interleave in the same monthly file. CTL-210.
@@ -1367,6 +1402,23 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // fields, so they skip it. Best-effort; never throws.
         if (event.kind === "issue" && event.ticket !== null) {
           _clearTitleDescCache(event.ticket);
+        }
+        // CAT-152: feed the webhook-fed catalyst-replica.db writer. Fail-open —
+        // a replica-write failure must never break the webhook response, same
+        // contract as every other replica-tier seam in this codebase.
+        if (event.kind === "issue" || event.kind === "comment") {
+          try {
+            const writer = await loadWebhookReplicaWriter();
+            if (event.kind === "issue" && event.teamKey !== null && !backfilledTeams.has(event.teamKey)) {
+              backfilledTeams.add(event.teamKey);
+              void writer.backfillTeam(event.teamKey).catch((err: unknown) => {
+                console.warn(`webhook-replica: backfill failed for ${event.teamKey} (non-fatal)`, err);
+              });
+            }
+            writer.applyEvent(event);
+          } catch (err) {
+            console.warn("webhook-replica: apply failed (non-fatal)", err);
+          }
         }
       },
       logger: {
