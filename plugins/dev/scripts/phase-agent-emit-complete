@@ -272,7 +272,11 @@ if [[ $STATUS == complete ]]; then
 				fi
 			fi
 		fi
-		if ! match_thoughts_artifact "$_GATE_DIR" "$TICKET" >/dev/null 2>&1; then
+		# CTL-1490: on a miss, pull the thoughts repo once and re-check before
+		# downgrading — a cross-host takeover may have written the artifact on
+		# another host. Happy path (artifact present locally) short-circuits
+		# without pulling; the pull is best-effort.
+		if ! match_thoughts_artifact_with_pull_retry "$_GATE_DIR" "$TICKET" >/dev/null 2>&1; then
 			echo "phase-agent-emit-complete: refusing 'complete' for ${TICKET}/${PHASE}: own artifact not gate-visible" >&2
 			echo "  expected: ${_GATE_DIR}/*-${TICKET}*.md   cwd: $(pwd)" >&2
 			STATUS="failed"

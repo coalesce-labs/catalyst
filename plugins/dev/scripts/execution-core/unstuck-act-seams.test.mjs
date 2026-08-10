@@ -396,6 +396,23 @@ describe("buildSourceConflictActSeam (CTL-1219)", () => {
 
 // ---------------------------------------------------------------------------
 // Phase 3 — orphan-stale act seam (emit synthetic phase-complete if merged)
+describe("marker path phase guard (CAT-47)", () => {
+  for (const bad of [undefined, null, "", 42, {}]) {
+    test(`orphan-stale rejects malformed phase ${JSON.stringify(bad)}`, () => {
+      const writes = [];
+      const seam = buildOrphanStaleActSeam(makeStubDeps({ writeMarker: (path) => writes.push(path) }));
+      expect(() => seam(orphanStaleCandidate({ phase: bad }), {})).toThrow(/missing-phase/);
+      expect(writes).toHaveLength(0);
+    });
+  }
+
+  test("probes the literal real-phase marker", () => {
+    const probed = [];
+    const seam = buildOrphanStaleActSeam(makeStubDeps({ markerExists: (path) => (probed.push(path), true) }));
+    seam(orphanStaleCandidate(), {});
+    expect(probed[0]).toBe("/tmp/orch/workers/CTL-3/.unstuck-orphan-merge-monitor-merge.applied");
+  });
+});
 // ---------------------------------------------------------------------------
 describe("buildOrphanStaleActSeam (CTL-1219)", () => {
   test("emits a synthetic phase.<phase>.complete.<ticket> when the orphan-merge precondition holds", () => {

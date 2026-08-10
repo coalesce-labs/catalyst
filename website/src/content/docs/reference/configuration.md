@@ -1102,6 +1102,39 @@ rows once it is definitively finished. This knob is an env var on the `catalyst-
   (≈10× `FILTER_HEARTBEAT_STALE_MS`) so only unambiguously-finished sessions are dropped — a genuine
   revival simply re-checks-in and recreates the rows.
 
+### Phase-artifact thoughts sync (`catalyst.phaseArtifactSync.mode`, CTL-1490)
+
+Phase skills write a durable local thoughts doc after each phase (the record
+`reconstruct-ticket-state.mjs`'s thoughts-artifact walk reads to figure out where a ticket left off
+after a crash or cross-host takeover — see `docs/orchestrator-overview.md`). Pushing that doc
+off-machine (`humanlayer thoughts sync`) is what makes it survive the *local* disk being lost too,
+not just the process. `catalyst.phaseArtifactSync.mode` controls when that push happens:
+
+| Mode (`resolve_phase_artifact_sync_mode` in `plugins/dev/scripts/lib/phase-artifact-sync-mode.sh`) | Behavior |
+| --- | --- |
+| `off` (default) | Roster-gated, byte-identical to pre-CTL-1490 behavior: a single-host roster (`.catalyst/hosts.json` absent or ≤1 entry) skips the sync entirely (exit 0, no push); a multi-host roster syncs, and a sync failure blocks the phase (`exit 11`, terminal event `failed`, reason `thoughts_sync_failed`). |
+| `shadow` | Always syncs regardless of roster size, but a failure never blocks the phase — it appends a `thoughts.sync.failed.<phase>.<ticket>` WARN event to the unified event log and continues (`exit 0`). Use this to observe sync reliability on a single-host node before turning `enforce` on. |
+| `enforce` | Always syncs regardless of roster size, and a failure blocks the phase exactly like `off`'s multi-host path (`exit 11`, terminal event `failed`, reason `thoughts_sync_failed`). |
+
+Any unrecognized value fails safe to `off` — a typo can never silently start (or silently stop)
+pushing thoughts docs off-machine.
+
+**Precedence** (`plugins/dev/scripts/lib/phase-artifact-sync-mode.sh`): the `CATALYST_PHASE_ARTIFACT_SYNC_MODE`
+env var (case-insensitive, whitespace-stripped) wins over `.catalyst/config.json`'s
+`catalyst.phaseArtifactSync.mode`, which wins over the `off` default. Consumed by
+`plugins/dev/scripts/lib/thoughts-sync-gate.sh`, called from every phase skill immediately before its
+terminal `phase-agent-emit-complete` call.
+
+```json
+{
+  "catalyst": {
+    "phaseArtifactSync": {
+      "mode": "shadow"
+    }
+  }
+}
+```
+
 ### Board-health delegate (CTL-1290)
 
 On a low-frequency cadence the scheduler runs a **whole-board health scan**: a read-only pass that
@@ -1126,6 +1159,9 @@ structural, not configured), so the telemetry that is the feature's whole point 
 | `catalyst.boardHealth.githubQuota` _(Layer-2)_           | `shadow`          | Same three values; honored when `CATALYST_BH_GH_QUOTA` is unset.                                                                                                                                                                                                                                                                                                                                                                  |
 | `CATALYST_BH_GH_CORE_PCT`                                | `10`              | Remaining core REST percentage at or below which the quota state is `low`.                                                                                                                                                                                                                                                                                                                                                        |
 | `CATALYST_BH_GH_QUOTA_STALE_MS`                          | `900000` (15 min) | Maximum snapshot age. A missing or older snapshot is unknown and unobservable, even in `enforce`.                                                                                                                                                                                                                                                                                                                                  |
+| `CATALYST_BH_PRODUCTIVITY` _(env var)_                   | `shadow`          | Per-host productivity invariant mode: `off` skips the peer-heartbeat read, `shadow` publishes productivity status but keeps the invariant unobservable, and `enforce` reports a live peer that owns work but has not advanced past a phase boundary within the configured window. The resulting move is escalate-only and cannot dispatch a recovery delegate. Garbage values fall back to `shadow`. Overrides Layer-2. |
+| `catalyst.boardHealth.productivity` _(Layer-2)_          | `shadow`          | Same three values; honored when `CATALYST_BH_PRODUCTIVITY` is unset. |
+| `CATALYST_BH_UNPRODUCTIVE_MS`                            | `86400000` (24 h) | Maximum age of a live owning peer's last phase-boundary advance before the productivity invariant reports it as unproductive. |
 | `CATALYST_BH_INTERVAL_MS`                               | `300000` (5 min)  | Cadence floor — the scan runs at most once per interval per host.                                                                                                                                                                                                                                                                                                                                                                 |
 | `CATALYST_BH_DISPATCH_STALL_MS`                         | `600000` (10 min) | Dispatch-liveness threshold: free slots + a queue + no dispatch within this window flags a wedge.                                                                                                                                                                                                                                                                                                                                 |
 | `CATALYST_BH_WORKER_AGE_MS`                             | `14400000` (4 h)  | Fallback worker-age threshold (per-phase normals override it).                                                                                                                                                                                                                                                                                                                                                                    |
@@ -1134,6 +1170,10 @@ structural, not configured), so the telemetry that is the feature's whole point 
 | `CATALYST_BH_STALLED_PR_REVIEW_MS`                     | `259200000` (72 h / 3 d)  | CTL-1608. How long a PR may sit without a review-request being responded to before board-health emits a `nudge-stalled-pr` move. Requires `orchestration.stalledPrSweep.enabled: true`. The stalled-PR timer stamps `reviewRequestedAt` in `workers/<TICKET>/stalled-pr.json`; board-health compares `now - reviewRequestedAt` against this threshold. |
 | `CATALYST_BH_STALLED_PR_CI_MS`                         | `172800000` (48 h / 2 d)     | CTL-1608. How long a PR may have a continuously-failing CI check before it is flagged stalled. The timer stamps `ciFirstFailedAt` on first CI failure detection. |
 | `CATALYST_BH_STALLED_PR_NOPUSH_MS`                     | `432000000` (120 h / 5 d)   | CTL-1608. How long a PR may go without a push (no new commits) while still open before it is flagged stalled. The timer stamps `lastPushAt` on each push detected. |
+
+The productivity signal requires peers to publish `last_advance_at` in their heartbeat records.
+During a mixed-version fleet rollout, a peer without that field is treated as unknown and is not
+flagged; the invariant begins observing that peer only after the upgraded publisher supplies it.
 
 ### Monitor reply-route trusted origins (CTL-1573)
 

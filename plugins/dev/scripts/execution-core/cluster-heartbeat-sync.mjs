@@ -125,7 +125,7 @@ export function resolveAnchorIssueIdSyncCached({ anchorIssue }, { env = process.
 // failed to resolve, or the cache disabled AND the resolve failing) falls back to the
 // pre-follow-up 4-arg form untouched.
 export function publishHeartbeatSync(
-  { anchorIssue, host, inFlightTickets = [], maxParallel = null },
+  { anchorIssue, host, inFlightTickets = [], maxParallel = null, lastAdvanceAt = null },
   {
     spawn = spawnSync,
     nodeBin = process.execPath,
@@ -149,6 +149,7 @@ export function publishHeartbeatSync(
       argv.push("");
     }
     if (issueId) argv.push(issueId);
+    if (lastAdvanceAt != null) argv.push(`--last-advance-at=${lastAdvanceAt}`);
     const res = spawn(nodeBin, argv, {
       encoding: "utf8",
       env,

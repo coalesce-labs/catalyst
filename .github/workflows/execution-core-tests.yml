@@ -597,6 +597,7 @@ jobs:
             autotune-writeback.test.mjs \
             board-health.test.mjs \
             board-health-seam.test.mjs \
+            dispatch-readiness.test.mjs \
             stall-janitor-throttle.test.mjs \
             phantom-worker-dir.test.mjs \
             in-flight-supersede.test.mjs \
@@ -653,6 +654,7 @@ jobs:
             gateway-read.test.mjs \
             halt-on-complete.test.mjs \
             heartbeat-event.test.mjs \
+            loki-liveness.test.mjs \
             hrw.test.mjs \
             integration-ctl-701.test.mjs \
             integration-ctl-705.test.mjs \
@@ -684,6 +686,7 @@ jobs:
             registry.test.mjs \
             replica-read.test.mjs \
             scan.test.mjs \
+            scheduler-created-at.test.mjs \
             scheduler-perproject.test.mjs \
             scheduler-rank.test.mjs \
             scheduler-replica-freshness.test.mjs \
@@ -711,12 +714,16 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            recovery-fix-backoff.test.mjs \
+            recovery-orphan-stale-e2e.test.mjs \
             pr-block-probe.test.mjs \
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
+            unstuck-orphan-merge.test.mjs \
+            orphan-sweep-explain.test.mjs \
             unstuck-escalate-seam.test.mjs \
             unstuck-sweep.test.mjs \
             lib/catalyst-resource.test.mjs \
@@ -737,4 +744,6 @@ jobs:
             github-token-candidates-legacy-parity.test.mjs \
             github-quota.test.mjs \
             github-quota-timer.test.mjs \
-            cluster-sync.test.mjs
+            cluster-sync.test.mjs \
+            reconstruct-ticket-state.test.mjs \
+            hosts-json-retired.test.mjs
