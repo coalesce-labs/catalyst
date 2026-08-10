@@ -56,7 +56,23 @@ export function defaultReadArtifact(path) {
 // `git worktree list --porcelain`. Shared by implementProbe and the artifact
 // probes. Returns the path or null (missing input, git failure, or no match) —
 // never throws, never spawns when input is incomplete.
-export function resolveWorktree({ ticket, repoRoot } = {}, { runGit = defaultRunGit } = {}) {
+//
+// `worktreePath` short-circuit (CTL-1642 Codex #3175 P1). A caller that ALREADY
+// knows the worktree passes it and we return it verbatim — no git spawn, no
+// branch matching. This exists because branch-name resolution is a strictly
+// weaker way to answer a question the caller can already answer: the porcelain
+// match is exact (`refs/heads/<ticket>`), so every other shape the surrounding
+// tooling accepts — `<ticket>-hotfix`, `ryan/<ticket>-slug`, `codex/<ticket>-x`,
+// and the lowercase `ryan/ctl-NNNN-…` forms that dominate the real worktree list
+// — resolves to null and silently probes false. For `catalyst-adopt.sh` that
+// turned every completed research/plan/implement signal into "not done" and
+// pinned inference at `research`. Callers that do NOT pass it are unaffected:
+// same git spawn, same exact match, same null-on-miss contract as before.
+export function resolveWorktree(
+  { ticket, repoRoot, worktreePath } = {},
+  { runGit = defaultRunGit } = {},
+) {
+  if (worktreePath) return worktreePath;
   if (!ticket || !repoRoot) return null;
   const list = runGit(["-C", repoRoot, "worktree", "list", "--porcelain"]);
   if (list.code !== 0) return null;
@@ -227,10 +243,16 @@ function monitorMergeProbe({ ticket, orchDir } = {}, { readFile = defaultReadFil
 // Returns false on any git failure (safe default — missing worktree, stale ref,
 // permission error, etc.). Shared by implementProbe (CTL-574) and remediateProbe
 // (CTL-653); implement strengthens this core with a plan-completeness gate (CTL-663).
-function commitProbe({ ticket, repoRoot } = {}, { runGit = defaultRunGit } = {}) {
+function commitProbe(
+  { ticket, repoRoot, worktreePath: knownWorktree } = {},
+  { runGit = defaultRunGit } = {},
+) {
   if (!ticket || !repoRoot) return false;
 
-  const worktreePath = resolveWorktree({ ticket, repoRoot }, { runGit });
+  const worktreePath = resolveWorktree(
+    { ticket, repoRoot, worktreePath: knownWorktree },
+    { runGit },
+  );
   if (!worktreePath) return false;
 
   const ahead = runGit(["-C", worktreePath, "rev-list", "--count", "origin/main..HEAD"]);
@@ -253,7 +275,7 @@ function commitProbe({ ticket, repoRoot } = {}, { runGit = defaultRunGit } = {})
 // remediateProbe NEVER gets this gate (Option A1) — remediate fixes 1–2 findings,
 // not N plan phases; gating it would cause revive loops on short remediations.
 function implementProbe(
-  { ticket, repoRoot } = {},
+  { ticket, repoRoot, worktreePath: knownWorktree } = {},
   {
     runGit = defaultRunGit,
     listArtifacts = defaultListArtifacts,
@@ -262,7 +284,10 @@ function implementProbe(
 ) {
   if (!ticket || !repoRoot) return false;
 
-  const worktreePath = resolveWorktree({ ticket, repoRoot }, { runGit });
+  const worktreePath = resolveWorktree(
+    { ticket, repoRoot, worktreePath: knownWorktree },
+    { runGit },
+  );
   if (!worktreePath) return false;
 
   const ahead = runGit(["-C", worktreePath, "rev-list", "--count", "origin/main..HEAD"]);
@@ -321,11 +346,14 @@ function bodyHasMarkers(body, { anyOf = [], allOf = [] }) {
 // established safe default, so a borderline artifact is re-dispatched, not advanced.
 function artifactProbe(subdir, markers) {
   return (
-    { ticket, repoRoot } = {},
+    { ticket, repoRoot, worktreePath: knownWorktree } = {},
     { runGit = defaultRunGit, listArtifacts = defaultListArtifacts, readArtifact = defaultReadArtifact } = {},
   ) => {
     if (!ticket || !repoRoot) return false;
-    const worktreePath = resolveWorktree({ ticket, repoRoot }, { runGit });
+    const worktreePath = resolveWorktree(
+      { ticket, repoRoot, worktreePath: knownWorktree },
+      { runGit },
+    );
     if (!worktreePath) return false;
 
     const dir = `${worktreePath}/${subdir}`;

@@ -35,6 +35,30 @@ describe("heartbeatUrl", () => {
 });
 
 describe("parseHeartbeatMetadata", () => {
+  test("normalises last_advance_at and rejects malformed or future values", () => {
+    const now = Date.parse("2026-08-09T03:00:00Z");
+    expect(parseHeartbeatMetadata({ last_advance_at: "2026-08-09T02:00:00Z" }, { now }).last_advance_at)
+      .toBe("2026-08-09T02:00:00Z");
+    for (const value of [42, "not-a-date", undefined, "2026-08-09T04:00:00Z"]) {
+      expect(parseHeartbeatMetadata({ last_advance_at: value }, { now }).last_advance_at).toBeNull();
+    }
+  });
+
+  test("keeps a parseable future last_seen as positive liveness", () => {
+    const now = Date.parse("2026-08-09T03:00:00Z");
+    expect(parseHeartbeatMetadata({ last_seen: "2026-08-09T03:30:00Z" }, { now }).last_seen)
+      .toBe("2026-08-09T03:30:00Z");
+  });
+
+  test("old publisher metadata remains intact and gains unknown last_advance_at", () => {
+    expect(parseHeartbeatMetadata({
+      host: "mini", last_seen: "2026-08-09T02:00:00Z", in_flight_tickets: ["CAT-1"],
+      max_parallel: 3, in_flight_count: 1,
+    })).toEqual({
+      host: "mini", last_seen: "2026-08-09T02:00:00Z", last_advance_at: null,
+      in_flight_tickets: ["CAT-1"], max_parallel: 3, in_flight_count: 1,
+    });
+  });
   test("normalises in_flight_tickets to an array", () => {
     expect(parseHeartbeatMetadata({ host: "mini", last_seen: "2026-06-13T01:00:00Z" }))
       .toMatchObject({ host: "mini", last_seen: "2026-06-13T01:00:00Z", in_flight_tickets: [] });
@@ -65,6 +89,18 @@ describe("parseHeartbeatMetadata", () => {
 });
 
 describe("publishHeartbeat", () => {
+  test("writes last_advance_at when supplied and omits the key when null", async () => {
+    const written = [];
+    const post = async (q, v) => {
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-anchor" } };
+      written.push(v.input.metadata);
+      return { attachmentCreate: { success: true } };
+    };
+    await publishHeartbeat({ anchorIssue: "CAT-1", host: "mini", lastAdvanceAt: "2026-08-09T02:00:00Z" }, { post });
+    await publishHeartbeat({ anchorIssue: "CAT-1", host: "mini", lastAdvanceAt: null }, { post });
+    expect(written[0].last_advance_at).toBe("2026-08-09T02:00:00Z");
+    expect(Object.hasOwn(written[1], "last_advance_at")).toBe(false);
+  });
   test("upserts the per-host attachment with last_seen + tickets", async () => {
     const calls = [];
     const post = async (q, v) => {
@@ -190,6 +226,7 @@ describe("readPeerHeartbeats", () => {
     expect(Object.keys(map).sort()).toEqual(["laptop", "mini"]);
     expect(map.laptop.in_flight_tickets).toEqual(["CTL-7"]);
     expect(map.mini.last_seen).toBe("2026-06-13T01:00:00Z");
+    expect(map.laptop.last_advance_at).toBeNull();
   });
 
   test("returns {} on a missing anchor / empty attachments", async () => {
@@ -211,6 +248,23 @@ describe("readPeerHeartbeats", () => {
 });
 
 describe("runCli", () => {
+  test("publish parses last-advance flag from any position and ignores unknown flags", async () => {
+    let metadata;
+    const post = async (q, v) => {
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };
+      metadata = v.input.metadata;
+      return { attachmentCreate: { success: true } };
+    };
+    const { code } = await captureStdout(() => runCli([
+      "publish", "--newer-flag=ignored", "CAT-1", "mini",
+      "--last-advance-at=2026-08-09T02:00:00Z", "CAT-2", "3",
+    ], { post, now: () => "2026-08-09T03:00:00Z" }));
+    expect(code).toBe(0);
+    expect(metadata.last_advance_at).toBe("2026-08-09T02:00:00Z");
+    expect(metadata.in_flight_tickets).toEqual(["CAT-2"]);
+    expect(metadata.max_parallel).toBe(3);
+  });
+
   test("publish: prints one JSON line and exits 0", async () => {
     const post = async (q) => {
       if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };

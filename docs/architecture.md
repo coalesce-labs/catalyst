@@ -104,6 +104,15 @@ outage (heartbeat read throws / everyone looks dead) degrades to the **full rost
 only its own HRW slice — never double-acts). The Linear-CAS claim (`cluster-claim.mjs` soft-CAS on
 `catalyst://fence/<TICKET>`, applied HRW-first/claim-second) remains the transition-race serializer.
 
+**Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
+scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.
+Its `dispatchLiveness` invariant judges only this host's owned queue, while preserving the raw and
+owned depths in its scan context; dispatch-recency evidence is also host-scoped, fail-open for
+legacy events without host attribution. The separate `nodeProductivity` invariant reports a live
+peer that owns work but has not crossed a phase boundary within the configured window. It defaults
+to `shadow` and proposes only an escalate-only tier-3 move, so it cannot dispatch a recovery
+delegate.
+
 **Worker signal projection (CTL-532 = ADR-018 Phase 3, shipped; Phase 1 retired, CTL-1628).**
 Per-worker `workers/<TICKET>.json` files are still written by ~7 scripts with no inter-process
 locking; ADR-018 originally proposed closing that gap via a `worker.state_changed` command event and
@@ -394,6 +403,29 @@ it as a recovery item. Previously the classifier blindly escalated it to a human
 
 The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode logs a
 `recovery.would-fix` event without dispatching; enforce dispatches the recovery-pass worker.
+
+### Orphan-stale merged-PR reconciliation (CAT-47)
+
+Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
+PR-state resolver, background-job liveness probe, stall clearer, and status writer once; Pass 0u
+uses them to build its act registry, while Pass 0r receives both that registry and the raw bundle
+for capability-checked fallback construction. An injected partial registry therefore falls back
+to real dependencies instead of either using inert defaults or failing as unavailable.
+
+The recovery candidate contract is `{ ticket, phase, signal }`. `phase` names the exact
+`.unstuck-orphan-merge-<phase>.applied` idempotency marker, and `signal.bg_job_id` feeds the
+liveness gate. Marker construction fails closed when phase is absent, preventing malformed
+`undefined` or `null` marker names. PR-state readers are synchronous; thenables are surfaced as
+`pr-state-async-unsupported` rather than silently interpreted as missing evidence.
+
+Repeated identical fix failures are stored at
+`<orchDir>/.recovery-fix-failures/<ticket>-<fix_class>.json`, outside `workers/` because completed
+tickets may no longer have worker directories. This separate family is not erased by
+`recoveryForgetIntent`. After `RECOVERY_FIX_BACKOFF_THRESHOLD` identical failures (default 3),
+retries use exponential windows controlled by `RECOVERY_FIX_BACKOFF_BASE_MS` (default 30 minutes)
+and `RECOVERY_FIX_BACKOFF_MAX_MS` (default 24 hours). Audit-comment hashes are committed only after
+successful delivery, so an outage leaves the comment eligible for retry while delivered duplicate
+content is suppressed.
 
 ### Delegate-first escalation + explanation chokepoint (CTL-1609)
 

@@ -69,6 +69,7 @@ export function buildHeartbeatEnvelope({
   inFlightTicketsFn,
   activeTicketsFn,
   maxParallelFn,
+  lastAdvanceAtFn,
   boardReachableFn,
 } = {}) {
   const ts = now ? now() : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -103,6 +104,20 @@ export function buildHeartbeatEnvelope({
   // treats "absent" as no-data, but a literal 0 would render as zero capacity).
   const mpRaw = maxParallelFn ? maxParallelFn() : null;
   const maxParallel = Number.isInteger(mpRaw) && mpRaw > 0 ? mpRaw : null;
+  // CAT-57 (Codex round 2, P1): this host's last phase-boundary advance, carried on
+  // the Loki transport so board-health's nodeProductivity invariant is observable
+  // under CATALYST_LIVENESS_READ_SOURCE=loki. Without it the loki mode retires the
+  // Linear anchor (the only prior last_advance_at transport) and leaves productivity
+  // permanently unobservable. Same fail-safe shaping as max_parallel: an invalid or
+  // missing value OMITS the attribute rather than publishing a fake timestamp — an
+  // absent field must read as "unknown", never as "advanced just now".
+  let lastAdvanceAt = null;
+  if (lastAdvanceAtFn) {
+    try {
+      const raw = lastAdvanceAtFn();
+      if (typeof raw === "string" && Number.isFinite(Date.parse(raw))) lastAdvanceAt = raw;
+    } catch { lastAdvanceAt = null; }
+  }
   let board = null;
   if (boardReachableFn) {
     try {
@@ -136,6 +151,8 @@ export function buildHeartbeatEnvelope({
       "catalyst.node.active_count": activeTickets.length,
       // CTL-1551: Loki-queryable cross-host capacity signal (omitted when unknown).
       ...(maxParallel != null ? { "catalyst.node.max_parallel": maxParallel } : {}),
+      // CAT-57: Loki-queryable cross-host productivity signal (omitted when unknown).
+      ...(lastAdvanceAt != null ? { "catalyst.node.last_advance_at": lastAdvanceAt } : {}),
       ...(board ? {
         "catalyst.node.board_reachable": board.reachable !== false,
         ...(board.blindTeams != null ? { "catalyst.node.blind_teams": board.blindTeams } : {}),
@@ -170,9 +187,10 @@ export async function emitHeartbeatEvent({
   inFlightTicketsFn, // CTL-1420 (#17): forward the in-flight-tickets seam to the builder
   activeTicketsFn, // CTL-1581: forward the slot-occupancy seam to the builder
   maxParallelFn, // CTL-1551: forward the slot-ceiling seam to the builder
+  lastAdvanceAtFn, // CAT-57: forward the last-phase-advance seam to the builder
   boardReachableFn,
 } = {}) {
-  const line = `${JSON.stringify(buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn, inFlightTicketsFn, activeTicketsFn, maxParallelFn, boardReachableFn }))}\n`;
+  const line = `${JSON.stringify(buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn, inFlightTicketsFn, activeTicketsFn, maxParallelFn, lastAdvanceAtFn, boardReachableFn }))}\n`;
   try {
     await mkdir(dirname(logPath), { recursive: true });
     await appendFile(logPath, line);
@@ -198,7 +216,7 @@ export async function emitHeartbeatEvent({
  * @param {Function} [opts.activeTicketsFn] CTL-1581: live slot-occupancy fn (daemon-supplied)
  * @param {Function} [opts.maxParallelFn] CTL-1551: live slot-ceiling fn (daemon-supplied)
  */
-export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath, admissionFn, governanceFn, inFlightTicketsFn, activeTicketsFn, maxParallelFn, boardReachableFn } = {}) {
+export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath, admissionFn, governanceFn, inFlightTicketsFn, activeTicketsFn, maxParallelFn, lastAdvanceAtFn, boardReachableFn } = {}) {
   const tick = () => {
     // CTL-1280: deterministic liveness heartbeat to daemon.log (Alloy→Loki),
     // riding the same cadence as the node.heartbeat event but on the .log stream
@@ -208,7 +226,7 @@ export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath, ad
     // CTL-1517: per-process RSS/heap OTel gauge on the same tick (fire-and-forget; never
     // throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
     emitProcessMemoryMetric({ serviceName: "catalyst.execution-core", log }).catch(() => {});
-    return emitHeartbeatEvent({ logPath, admissionFn, governanceFn, inFlightTicketsFn, activeTicketsFn, maxParallelFn, boardReachableFn }).catch(() => {});
+    return emitHeartbeatEvent({ logPath, admissionFn, governanceFn, inFlightTicketsFn, activeTicketsFn, maxParallelFn, lastAdvanceAtFn, boardReachableFn }).catch(() => {});
   };
   const started = tick(); // emit once at boot; Promise for callers that need to await it
   const timer = setInterval(tick, intervalMs);
