@@ -170,6 +170,8 @@ unset _SRC
 
 # shellcheck source=lib/cloud-sync-token-probe.sh
 [[ -f "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh" ]] && . "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
+# shellcheck source=lib/catalyst-agent-path.sh
+source "$SCRIPT_DIR/lib/catalyst-agent-path.sh"
 
 # ─── Proxy env (used only under --proxy) ─────────────────────────────────────
 PROXY_HOST="http://127.0.0.1:8080"
@@ -245,6 +247,55 @@ pid_alive() {
 # shellcheck source=lib/plugin-dirs.sh
 [[ -f "${SCRIPT_DIR}/lib/plugin-dirs.sh" ]] || fail "missing lib/plugin-dirs.sh next to catalyst-stack"
 . "${SCRIPT_DIR}/lib/plugin-dirs.sh"
+
+# CTL-1616 PR5 secret-contract bash mirror — sourced once at load (SAFE: pure function/array
+# definitions, no subprocess/network/jq until a function runs). Gives _start_coordination_locked
+# access to catalyst_secret_cloud_token_name so the token-presence fingerprint resolves the
+# CONFIGURED cloud-token env-var name (CATALYST_CLOUD_TOKEN_ENV / Layer-2 catalyst.cloud.tokenEnv /
+# default) instead of hardcoding CATALYST_CLOUD_TOKEN (Codex P1, CTL-1668). Optional: a checkout
+# missing the lib must not break the whole stack CLI, so guard the source.
+# shellcheck source=lib/catalyst-secret-contract.sh
+[[ -f "${SCRIPT_DIR}/lib/catalyst-secret-contract.sh" ]] && . "${SCRIPT_DIR}/lib/catalyst-secret-contract.sh"
+
+# _pristine_scripts_dir — the scripts dir of the registered pristine plugin-source
+# checkout, or "". Mirrored from install-orphan-sweep.sh (CTL-1473): shared helper
+# extracted here so catalyst-stack can guard the shipper config path.
+_pristine_scripts_dir() {
+  local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+  [[ -f "$cfg" ]] || return 0
+  # CTL-1473 remediate (round-3): distinguish "jq missing" from "no config".
+  # The prior combined guard (`[[ -f "$cfg" ]] && command -v jq || return 0`)
+  # returned empty for both, so a configured pluginDirs was silently ignored
+  # when jq was absent and cmd_install_services baked from the wrong (SCRIPT_DIR)
+  # dir with no signal. Warn to stderr (stdout is the command-substitution value)
+  # so the cause is visible; the downstream _is_ephemeral_dir guard still catches
+  # an ephemeral fallback, but a non-ephemeral SCRIPT_DIR would otherwise bake silently.
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "warn: _pristine_scripts_dir: jq not found — cannot read pluginDirs from ${cfg}; shipper bake dir may fall back to this script's own location" >&2
+    return 0
+  fi
+  local pd
+  pd="$(jq -r '.catalyst.orchestration.pluginDirs | if type=="array" then .[0] elif type=="string" then . else empty end' "$cfg" 2>/dev/null || true)"
+  [[ -n "$pd" && -f "${pd}/scripts/log-shipper/config.alloy" ]] && echo "${pd}/scripts"
+  return 0
+}
+
+# _is_ephemeral_dir <dir>: true if the dir is a linked git worktree or under a
+# temp root — a path that can be deleted out from under the LaunchAgent. Mirrored
+# from install-orphan-sweep.sh (CTL-1473): guards the shipper config bake path.
+_is_ephemeral_dir() {
+  local d="$1"
+  case "$d" in
+    /private/tmp/*|/tmp/*|/var/tmp/*|/var/folders/*|/private/var/folders/*|*/.Trash/*) return 0 ;;
+  esac
+  command -v git >/dev/null 2>&1 || return 1
+  local gd
+  gd="$(git -C "$d" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  case "$gd" in
+    */worktrees/*) return 0 ;;
+  esac
+  return 1
+}
 
 mitm_pid() { pgrep -f "mitmdump -s.*mitm_linear_addon" 2>/dev/null | head -1; }
 
@@ -575,15 +626,59 @@ _start_coordination_locked() {
   # The fingerprint captures everything the LONG-LIVED daemon reads only at startup:
   # resolved config (mode/hubUrl), the plugin checkout (so a refresh redeploys), the
   # state/events roots it derives its paths from (CATALYST_DIR/CATALYST_EVENTS_DIR),
-  # and the enforce-mode interim inbound source (CATALYST_LOKI_QUERY_URL /
+  # the enforce-mode interim inbound source (CATALYST_LOKI_QUERY_URL /
   # OTEL_EXPORTER_OTLP_ENDPOINT) — Codex P2: a reinstall that changes any of these
-  # must bounce the publisher, else it keeps using the old value. Any change → restart.
-  local resolved mode hub fp checkout_id
+  # must bounce the publisher, else it keeps using the old value — and token presence
+  # (CTL-1668): a first-time token provisioning in cloud-sync.env must bounce the daemon
+  # so it picks up the credential (value is never written; only 0/1 presence is recorded).
+  local resolved mode hub fp checkout_id token_fp
   resolved="$(coordination_resolve)"
   mode="${resolved%%$'\t'*}"
   hub="${resolved#*$'\t'}"
   checkout_id="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
-  fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}|${CATALYST_LOKI_QUERY_URL:-}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+  # token_fp — a NON-SECRET change marker for the resolved cloud token: `<presence>:<name>:<hash>`,
+  # where <name> is the CONFIGURED env-var name (via the secret-contract mirror
+  # catalyst_secret_cloud_token_name: env override → Layer-2 catalyst.cloud.tokenEnv → default, NOT
+  # the hardcoded CATALYST_CLOUD_TOKEN) and <hash> is a truncated (12-hex) sha256 of the value.
+  # Two Codex P1s drove this shape:
+  #  - Bare presence (token:0/1) misses a ROTATION of a populated token (1→1) or a switch between
+  #    two populated variables — the fingerprint stays identical, the keep-alive tick treats the
+  #    publisher as current, and it keeps using the revoked startup credential (auth failures + DLQ
+  #    growth) until a manual stop. The one-way truncated hash is a change marker, NOT the
+  #    credential, so the secret-env hygiene rule (never persist the value) still holds. A custom
+  #    token NAME is likewise captured so a name change alone bounces the daemon.
+  #  - The token must be SOURCED before it can be resolved/hashed: the CTL-1307 projection stores it
+  #    in cluster.env on launchd hosts (launchd sources no shell rc), so this subshell sources
+  #    cluster.env THEN cloud-sync.env — same order as cloud-sync/launch.sh and health-responder's
+  #    _token_provisioned — else enforce+hub would fingerprint `token:0:…` and never start with the
+  #    credential. Fail-safe: resolver/lib absent → default name; shasum absent → empty hash
+  #    (presence + name still gate; rotation-of-same-var degrades to undetected — no worse than a
+  #    host without hashing).
+  token_fp="$(
+    set +u
+    # cluster.env follows the projection config dir per cloud-token-env.mjs defaultConfigDir:
+    # CATALYST_CONFIG_DIR override else ~/.config/catalyst, so a host that sets CATALYST_CONFIG_DIR
+    # reads the token from where it was actually projected. cloud-sync.env, by contrast, is ALWAYS
+    # at the canonical $HOME/.config/catalyst — the cloud-sync launcher and provisioning runbook
+    # never relocate it, so a per-node token in the documented file must be sourced there even when
+    # CATALYST_CONFIG_DIR is overridden. Codex P1, round 10.
+    _cfg_dir="${CATALYST_CONFIG_DIR:-$HOME/.config/catalyst}"
+    [[ -r "$_cfg_dir/cluster.env" ]] && . "$_cfg_dir/cluster.env"
+    [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
+    _tok_name="CATALYST_CLOUD_TOKEN"
+    if declare -f catalyst_secret_cloud_token_name >/dev/null 2>&1; then
+      catalyst_secret_cloud_token_name cloud-token >/dev/null 2>&1
+      [[ -n "${CATALYST_SECRET_TOKEN_NAME:-}" ]] && _tok_name="$CATALYST_SECRET_TOKEN_NAME"
+    fi
+    _tok_val="${!_tok_name:-}"
+    if [[ -n "$_tok_val" ]]; then
+      _tok_hash="$(printf '%s' "$_tok_val" | shasum -a 256 2>/dev/null | cut -c1-12)"
+      printf '1:%s:%s' "$_tok_name" "$_tok_hash"
+    else
+      printf '0:%s:' "$_tok_name"
+    fi
+  )"
+  fp="${mode}|${hub}|${checkout_id}|${CATALYST_DIR:-}|${CATALYST_EVENTS_DIR:-}|${CATALYST_LOKI_QUERY_URL:-}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|token:${token_fp}"
 
   local pid; pid="$(coordination_pid)"
 
@@ -626,12 +721,33 @@ _start_coordination_locked() {
     warn "coordination-publish entrypoint missing at $COORDINATION_SCRIPT — skipping"
     return 1
   fi
-  # 4. Launch detached (the daemon reads CATALYST_DIR/EVENTS_DIR + config from env/Layer-2).
+  # 4. Launch detached. Source the projected cloud env in a subshell so the per-host cloud token
+  #    (CTL-1668: CATALYST_CLOUD_TOKEN / configured name) reaches the daemon without persisting the
+  #    credential into the long-lived catalyst-stack shell process. Source cluster.env THEN
+  #    cloud-sync.env — the CTL-1307 projection stores the token in cluster.env on launchd hosts
+  #    (Codex P1: sourcing only cloud-sync.env launched enforce+hub WITHOUT the credential and
+  #    degraded to inbound-only on every keep-alive tick); order matches the fingerprint subshell
+  #    above and cloud-sync/launch.sh.
   log "starting coordination-publish (mode: $mode, log: $COORDINATION_LOG)"
-  nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
-  echo $! > "$COORDINATION_PID"
+  # Capture the PID and disown INSIDE the subshell that starts the job — that is the only
+  # shell where `$!` refers to this `bun &`. Doing `disown $!` in the parent (Codex P1) is
+  # broken: the parent never backgrounded this job, so under `set -u` its `$!` is either unset
+  # (aborting the function AFTER the PID/fingerprint write but BEFORE the start-lock release —
+  # wedging every future start on the leaked non-empty lock) or a stale, unrelated PID.
+  (
+    set +u
+    # Same split as the fingerprint subshell: cluster.env from the projection config dir
+    # CATALYST_CONFIG_DIR override else ~/.config/catalyst, cloud-sync.env ALWAYS from the canonical
+    # $HOME/.config/catalyst — the launcher/runbook never relocate it. Codex P1.
+    _cfg_dir="${CATALYST_CONFIG_DIR:-$HOME/.config/catalyst}"
+    [[ -r "$_cfg_dir/cluster.env" ]] && . "$_cfg_dir/cluster.env"
+    [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
+    nohup bun run "$COORDINATION_SCRIPT" >"$COORDINATION_LOG" 2>&1 &
+    _cp_pid=$!
+    echo "$_cp_pid" > "$COORDINATION_PID"
+    disown "$_cp_pid" 2>/dev/null || true
+  )
   printf '%s' "$fp" > "$COORDINATION_FP"   # record the config this pid was launched with
-  disown $! 2>/dev/null || true
   sleep 1
   pid="$(coordination_pid)"
   if pid_alive "$pid"; then
@@ -699,6 +815,12 @@ start_monitor()  { catalyst-monitor start 2>&1 | sed 's/^/  /'; }
 stop_monitor()   { catalyst-monitor stop  2>&1 | sed 's/^/  /'; }
 start_forward()  { catalyst-monitor forward-start 2>&1 | sed 's/^/  /'; }
 stop_forward()   { catalyst-monitor forward-stop  2>&1 | sed 's/^/  /'; }
+# CTL-1502 (Codex P1): the standalone forwarder watchdog, for nodes that run
+# otel-forward WITHOUT execution-core. On a worker the probe is armed inside
+# startDaemon, so this is started ONLY on monitor-class nodes — exactly one
+# supervisor per forwarder in either topology.
+start_daemon_watchdog() { catalyst-monitor watchdog-start 2>&1 | sed 's/^/  /'; }
+stop_daemon_watchdog()  { catalyst-monitor watchdog-stop  2>&1 | sed 's/^/  /'; }
 
 start_daemon() {
   local use_proxy="$1"
@@ -1086,6 +1208,24 @@ cmd_start() {
   if [[ "$node_class" != "developer" ]]; then
     start_forward
   fi
+  # CTL-1307 / CTL-1668 (Codex P1): project the cluster-shared cloud token into machine-level env
+  # (writes ~/.config/catalyst/cluster.env) BEFORE start_coordination launches the publisher — NOT
+  # after. On a first start right after cluster-sync decrypts a newly provisioned/rotated token,
+  # cluster.env does not exist yet; if the publisher launches first it comes up tokenless, then
+  # consumes and checkpoints coordination rows WITHOUT buffering them for outbound (index.ts only
+  # buffers when the authenticated hubClient exists), and the next keep-alive restart dedups those
+  # already-mirrored rows instead of publishing them — permanent outbound data loss, not merely
+  # delayed auth. Quiet + fail-open + idempotent: a node with no decrypted token is a silent no-op.
+  _cloud_token_env_run quiet
+
+  # CTL-1502 (Codex P1): a monitor node runs otel-forward but NOT execution-core,
+  # so the in-daemon watchdog never arms and its forwarder would be supervised by
+  # pid-liveness alone. Start the standalone probe for exactly that case — a
+  # worker keeps the in-daemon one, a developer runs no forwarder to watch.
+  # Non-fatal: a watchdog is a tap, and a tap must never be load-bearing (CTL-988).
+  if [[ "$node_class" == "monitor" ]]; then
+    start_daemon_watchdog || warn "continuing without daemon-watchdog (forwarder supervised by pid-liveness only)"
+  fi
   # CTL-1494: coordination-publish follows the reporting substrate (worker + monitor,
   # gated != developer, same as start_forward). Non-fatal — a broken/absent publisher
   # must never block the stack (CTL-988 non-load-bearing). When the mode resolves to
@@ -1112,10 +1252,8 @@ cmd_start() {
     start_event_mirror || warn "continuing without event-mirror (local tail/wait-for see only local events)"
   fi
 
-  # CTL-1307: project the cluster-shared cloud token into machine-level env, if
-  # one has been decrypted from the catalyst-cluster repo. Quiet + fail-open: a
-  # node not opted into catalyst-cloud has no token and this is a silent no-op.
-  _cloud_token_env_run quiet
+  # (CTL-1307 token projection now runs BEFORE start_coordination above, so the publisher
+  # launches with cluster.env already present — see the Codex-P1 note there.)
 
   log ""
   log "stack up — current state:"
@@ -1131,6 +1269,11 @@ cmd_stop() {
   # here (after the shipper/event-mirror, before stop_daemon/stop_forward).
   stop_coordination
   stop_daemon
+  # CTL-1502: stop the standalone watchdog BEFORE the forwarder it supervises —
+  # otherwise an in-flight enforced restart could relaunch otel-forward after
+  # stop_forward already took it down. Unconditional: it's an idempotent no-op on
+  # a node that never started one (matching stop_event_mirror's shape).
+  stop_daemon_watchdog
   stop_forward
   stop_monitor
   stop_broker
@@ -1377,11 +1520,11 @@ _stack_host_name() {
 # those CLIs under ~/.local; the launchd daemon shells out to them every tick
 # (reconcile → linearis, liveness snapshot → claude, linearis runtime → node),
 # so omitting these dirs makes every spawn exit-127 and the node strands
-# silently (frozen eligible set, freeSlots=0). Mirrors the proven join-shell
-# PATH order (catalyst-join.sh:719). Additive: the seed's homebrew/system tools
-# remain on PATH, and prepended member dirs that don't exist are a no-op.
+# silently (frozen eligible set, freeSlots=0). Persistent launchd definitions
+# intentionally omit the interactive installer's inherited PATH: only canonical
+# directories that exist at install time are written to the plist.
 _stack_agent_path() {
-  printf '%s\n' "${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  catalyst_agent_path ""
 }
 
 # _xml_escape <value> — escape the five XML predefined entities so an env value with
@@ -1475,6 +1618,39 @@ render_stack_plist() {
     <key>OTEL_EXPORTER_OTLP_ENDPOINT</key>
     <string>$(_xml_escape "${OTEL_EXPORTER_OTLP_ENDPOINT}")</string>"
   fi
+  # CTL-1668 (Codex P1): pin the cloud-token LOCATION overrides. launchd's minimal RunAtLoad/keep-alive
+  # environment sources no shell rc, so without these a host installed with a nondefault
+  # CATALYST_CONFIG_DIR (where cloud-token-env.mjs projects/reads cluster.env) or a custom
+  # CATALYST_CLOUD_TOKEN_ENV (the token's env-var name) would, after reboot, project and source the
+  # DEFAULT ~/.config/catalyst/cluster.env under the DEFAULT token name — restarting an enforce
+  # publisher WITHOUT its credential and never noticing (the fingerprint resolves the default too).
+  # Captured at install time from the invoking environment; omitted when unset.
+  local cloudtok_env=""
+  if [[ -n "${CATALYST_CONFIG_DIR:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>CATALYST_CONFIG_DIR</key>
+    <string>$(_xml_escape "${CATALYST_CONFIG_DIR}")</string>"
+  fi
+  if [[ -n "${CATALYST_CLOUD_TOKEN_ENV:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>CATALYST_CLOUD_TOKEN_ENV</key>
+    <string>$(_xml_escape "${CATALYST_CLOUD_TOKEN_ENV}")</string>"
+  fi
+  # The secret-contract Layer-2 path resolver reads CATALYST_LAYER2_CONFIG_FILE (pinned above) →
+  # CATALYST_MACHINE_CONFIG → XDG_CONFIG_HOME/catalyst/config.json. Pin the latter two tiers too, or a
+  # host relying on them for catalyst.cloud.tokenEnv loses them under launchd's minimal env and the
+  # resolver falls back to the default Layer-2 file after reboot — resolving the wrong token name and
+  # launching an enforce publisher without its credential (Codex P1, round 11).
+  if [[ -n "${CATALYST_MACHINE_CONFIG:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>CATALYST_MACHINE_CONFIG</key>
+    <string>$(_xml_escape "${CATALYST_MACHINE_CONFIG}")</string>"
+  fi
+  if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    cloudtok_env="${cloudtok_env}
+    <key>XDG_CONFIG_HOME</key>
+    <string>$(_xml_escape "${XDG_CONFIG_HOME}")</string>"
+  fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -1508,7 +1684,7 @@ render_stack_plist() {
     <key>PATH</key>
     <string>$(_stack_agent_path)</string>
     <key>HOME</key>
-    <string>$(_xml_escape "${HOME}")</string>${host_env}${catdir_env}${layer2_env}${coord_env}${otel_env}
+    <string>$(_xml_escape "${HOME}")</string>${host_env}${catdir_env}${layer2_env}${coord_env}${otel_env}${cloudtok_env}
   </dict>
 
   <!--
@@ -1536,7 +1712,7 @@ PLIST
 # StartInterval and deliberately NO AbandonProcessGroup — launchd OWNS this pgid and
 # restarts the job (alloy) the instant it exits. host_name pins CATALYST_HOST_NAME.
 render_shipper_plist() {
-  local launcher="$1" host_name="${2:-}"
+  local launcher="$1" host_name="${2:-}" config_path="${3:-$SHIPPER_CONFIG}"
   local host_env=""
   if [[ -n "$host_name" ]]; then
     host_env="
@@ -1564,7 +1740,7 @@ render_shipper_plist() {
     <string>/bin/bash</string>
     <string>${launcher}</string>
     <string>--config</string>
-    <string>${SHIPPER_CONFIG}</string>
+    <string>${config_path}</string>
     <string>--storage</string>
     <string>${SHIPPER_STORAGE}</string>
   </array>
@@ -1825,10 +2001,33 @@ cmd_install_services() {
   # Warning goes to stderr: log() writes stdout, and --print emits the plist to
   # stdout — a stdout warning would corrupt `--print` output (CTL-1202 review).
   [[ -z "$host_name" ]] && log "warning: catalyst.host.name not set in Layer-2 config; CATALYST_HOST_NAME will not be pinned (telemetry/scheduler identity may split)" >&2
+  # CTL-1473: resolve the shipper bake dir (ephemeral guard applies to both --print and real install).
+  local _shipper_bake_dir="${CATALYST_FORCE_BAKE_DIR:-$(_pristine_scripts_dir)}"
+  # CTL-1473 remediate: track whether we fell back to SCRIPT_DIR because neither
+  # CATALYST_FORCE_BAKE_DIR nor a pristine pluginDirs resolved — the ephemeral
+  # guard's remediation hint differs for that case (set pluginDirs) vs. an
+  # explicitly-configured-but-ephemeral bake dir (point it at a pristine checkout).
+  local _shipper_bake_from_fallback="no"
+  if [[ -z "$_shipper_bake_dir" ]]; then
+    _shipper_bake_dir="$SCRIPT_DIR"
+    _shipper_bake_from_fallback="yes"
+  fi
+  local _shipper_config_resolved="${_shipper_bake_dir}/log-shipper/config.alloy"
+  if _is_ephemeral_dir "$_shipper_bake_dir"; then
+    if [[ "$_shipper_bake_from_fallback" == "yes" ]]; then
+      # pluginDirs unset → fell back to this script's own (worktree) dir. Baking
+      # the shipper config from a linked worktree would point the LaunchAgent at a
+      # path that can be deleted out from under it (the CTL-1473 bug). Do NOT fall
+      # back silently — tell the operator exactly what to set.
+      fail "refusing to install the log-shipper from an ephemeral path (CTL-1473): no pristine pluginDirs is configured, so the bake dir fell back to this script's own location (${_shipper_bake_dir}), which is inside a linked worktree or temp dir. Set catalyst.orchestration.pluginDirs in your Layer-2 config to a pristine plugin-source checkout (e.g. ~/catalyst/plugin-source), or run install-services from that checkout, or set CATALYST_FORCE_BAKE_DIR to a stable scripts dir."
+    fi
+    fail "refusing to install the log-shipper from an ephemeral path (CTL-1473): ${_shipper_bake_dir} is inside a linked worktree or temp dir. Run 'catalyst-stack install-services' from the pristine plugin-source checkout (~/catalyst/plugin-source) or after setting CATALYST_LAYER2_CONFIG_FILE to a config with a pristine pluginDirs."
+  fi
+
   if [[ "$print_only" == "yes" ]]; then
     render_stack_plist "$cmd" "$interval" "$host_name"
     render_thoughts_sync_plist "$sync_cmd" "$sync_interval"
-    render_shipper_plist "$shipper_launcher" "$host_name"
+    render_shipper_plist "$shipper_launcher" "$host_name" "$_shipper_config_resolved"
     [[ -x "${SCRIPT_DIR}/install-orphan-sweep.sh" ]] && bash "${SCRIPT_DIR}/install-orphan-sweep.sh" --print-only 2>/dev/null || true
     [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]] && bash "${SCRIPT_DIR}/install-health-responder.sh" --print-only 2>/dev/null || true
     [[ -x "${SCRIPT_DIR}/install-dependabot-escalate.sh" ]] && bash "${SCRIPT_DIR}/install-dependabot-escalate.sh" --print-only 2>/dev/null || true
@@ -1861,13 +2060,12 @@ cmd_install_services() {
   else
     fail "launchctl bootstrap failed for $SYNC_AGENT_PLIST"
   fi
-
   # CTL-1285: log-shipper agent. Reap any non-agent Alloy FIRST (a stack-started
   # child or a hand-started orphan) so KeepAlive+RunAtLoad never bring up a SECOND
   # Alloy double-shipping the same four logs. The reap runs BEFORE the plist exists,
   # so the start_shipper/stop_shipper defer-guards don't short-circuit it.
   _reap_unmanaged_shipper
-  render_shipper_plist "$shipper_launcher" "$host_name" > "$SHIPPER_AGENT_PLIST"
+  render_shipper_plist "$shipper_launcher" "$host_name" "$_shipper_config_resolved" > "$SHIPPER_AGENT_PLIST"
   log "wrote $SHIPPER_AGENT_PLIST (exec: launch.sh, KeepAlive foreground)"
 
   launchctl bootout "$guid" "$SHIPPER_AGENT_PLIST" 2>/dev/null || true
@@ -1937,7 +2135,7 @@ cmd_install_services() {
   #     install-services), so this provisions the WORKER fleet (the dark cohort). Dev/monitor (laptop)
   #     sampler coverage is a deliberate follow-up — the laptop already emits claude_code_* interactively.
   if [[ -x "${SCRIPT_DIR}/catalyst-agent/install.sh" ]]; then
-    if PATH="${HOME}/.local/node/bin:${HOME}/.local/bin:${PATH}" \
+    if PATH="$(_stack_agent_path)" \
         bash "${SCRIPT_DIR}/catalyst-agent/install.sh" 2>&1 | sed 's/^/  /'; then
       log "loaded com.catalyst.agent — per-account rate-limit usage sampler (5-min cadence)"
     else
@@ -2306,6 +2504,38 @@ cmd_activate_replica() {
     return 1
   fi
   log "activated local Linear replica; restart execution-core to construct the reader"
+}
+
+# cmd_adopt_thoughts_sync — CTL-1473: install the thoughts-sync LaunchAgent for developer/monitor
+# nodes. Extracted from cmd_install_services so developer nodes (routed through adopt-updater,
+# not install-services) get thoughts-sync too. Pure install — no cutover side effects.
+cmd_adopt_thoughts_sync() {
+  local print_only="no" sync_interval="$SYNC_AGENT_INTERVAL_DEFAULT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --print)         print_only="yes"; shift ;;
+      --sync-interval) sync_interval="${2:?--sync-interval needs a value}"; shift 2 ;;
+      *) fail "unknown adopt-thoughts-sync arg: $1 (try: --print | --sync-interval <sec>)" ;;
+    esac
+  done
+  [[ "$sync_interval" =~ ^[0-9]+$ ]] || fail "--sync-interval must be an integer (seconds), got: $sync_interval"
+  local sync_cmd; sync_cmd="$(_resolve_thoughts_sync_cmd)"
+  if [[ "$print_only" == "yes" ]]; then
+    render_thoughts_sync_plist "$sync_cmd" "$sync_interval"
+    return 0
+  fi
+  [[ "$(uname -s)" == "Darwin" ]] || fail "adopt-thoughts-sync is macOS-only (launchd); this host is $(uname -s). Use --print to preview the plist."
+  command -v launchctl >/dev/null 2>&1 || fail "launchctl not found"
+  mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/catalyst"
+  render_thoughts_sync_plist "$sync_cmd" "$sync_interval" > "$SYNC_AGENT_PLIST"
+  log "wrote $SYNC_AGENT_PLIST (exec: $sync_cmd, interval ${sync_interval}s)"
+  local guid; guid="gui/$(id -u)"
+  launchctl bootout "$guid" "$SYNC_AGENT_PLIST" 2>/dev/null || true
+  if launchctl bootstrap "$guid" "$SYNC_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
+    log "loaded $SYNC_AGENT_LABEL — RunAtLoad fired thoughts-pull-sync"
+  else
+    fail "launchctl bootstrap failed for $SYNC_AGENT_PLIST"
+  fi
 }
 
 # cmd_adopt_cloud_sync — install the supervised catalyst-cloud-sync LaunchAgent
@@ -3206,13 +3436,116 @@ _vn_monitor_running() {
   if command -v catalyst-monitor >/dev/null 2>&1 \
      && catalyst-monitor status 2>/dev/null | grep -qi 'monitor running'; then echo yes; else echo no; fi
 }
+# _vn_source_daemon_env_for_read — CTL-1678 (Codex P2). The durable
+# CATALYST_DRAIN_DISABLED / CATALYST_BOOT_DRAINED overrides live in the machine-local
+# execution-core.env that ONLY the daemon's start path sources; a read-only verify-node
+# process never does, so the drain probes below would report the ambient shell's (usually
+# unset) value while the running daemon honors the file. Source it fail-open so the probes
+# mirror the daemon's EFFECTIVE env. Mirrors catalyst-execution-core's helper of the same
+# name. Callers invoke it inside a subshell so the sourced vars never leak into verify-node.
+_vn_source_daemon_env_for_read() {
+  local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
+  # shellcheck disable=SC1090
+  [[ -f "$_daemon_env" ]] && source "$_daemon_env"
+  return 0 # fail-open: absent file is a no-op success, never a non-zero return
+}
+# _vn_daemon_runtime_env — CTL-1678 (Codex round-3 P1). The overrides are restart-only:
+# sourcing the mutable env file reports the NEXT daemon's config, not the running one's.
+# The daemon snapshots its effective override state (post boot-drain precedence) into
+# daemon-runtime-env.json at boot, keyed by its pid. When that pid is still the daemon of
+# record AND alive, print "<drainDisabled> <bootDrained>" (JSON booleans) and succeed;
+# otherwise fail so callers fall back to the env-file view (truthful for a stopped
+# daemon). grep-parsed (flat single-object JSON we write ourselves) — no jq dependency,
+# matching the status idiom.
+#
+# Codex round-4 P2: liveness alone is not identity — a crashed daemon's marker plus a
+# recycled pid would falsely re-certify a dead snapshot, so the pid must also equal the
+# live daemon.pid. Mirrors config.mjs readDaemonRuntimeEnv's two-condition gate.
+_vn_daemon_runtime_env() {
+  local ec_dir="${CATALYST_DIR:-$HOME/catalyst}/execution-core"
+  local marker="${ec_dir}/daemon-runtime-env.json"
+  [[ -f "$marker" ]] || return 1
+  local pid dd bd of_record pid_path recorded
+  pid=$(grep -o '"pid":[0-9]*' "$marker" | head -1 | cut -d: -f2)
+  [[ -n "$pid" ]] || return 1
+  # Round-6 P2: prefer the pid-file path the daemon RECORDED, matching config.mjs
+  # readDaemonRuntimeEnv. A standalone verify-node does not inherit the daemon's
+  # EXECUTION_CORE_PID_FILE, so re-deriving the path would reject a valid live
+  # snapshot on a relocated-pid-file host and fall back to the mutable env file —
+  # the exact failure this mechanism exists to prevent. `"pidFile":null` (daemon
+  # started without --pid-file) yields no match and falls through to the env chain.
+  recorded=$(grep -o '"pidFile":"[^"]*"' "$marker" | head -1 | cut -d'"' -f4)
+  pid_path="${recorded:-${EXECUTION_CORE_PID_FILE:-${ec_dir}/daemon.pid}}"
+  of_record=$(tr -d '[:space:]' <"$pid_path" 2>/dev/null)
+  [[ "$of_record" == "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  dd=$(grep -o '"drainDisabled":[a-z]*' "$marker" | head -1 | cut -d: -f2)
+  bd=$(grep -o '"bootDrained":[a-z]*' "$marker" | head -1 | cut -d: -f2)
+  printf '%s %s' "${dd:-false}" "${bd:-false}"
+}
+# _vn_drain_disabled — CTL-1678: this node ignores the drain flag when
+# CATALYST_DRAIN_DISABLED=1 (a worker-only override; `=== "1"` opt-in). Boot-drain is
+# AUTHORITATIVE (mirrors config.mjs isDrainDisabled): a boot-drained node's override is
+# neutralized, so report `no`. Sources the daemon env in a subshell (Codex P2) so the
+# durable override is visible and the sourced vars do not leak into the caller's shell.
+_vn_drain_disabled() {
+  (
+    # CTL-1678 (round-3 P1): a LIVE daemon's boot snapshot is authoritative — the env
+    # file may have been edited after daemon start and describes only the next restart.
+    local _rt
+    if _rt=$(_vn_daemon_runtime_env); then
+      # drainDisabled is recorded post-precedence (boot-drain already folded in).
+      if [[ "${_rt%% *}" == "true" ]]; then echo yes; else echo no; fi
+      return 0
+    fi
+    _vn_source_daemon_env_for_read
+    if [[ "${CATALYST_BOOT_DRAINED:-}" == "1" ]]; then
+      echo no
+    elif [[ "${CATALYST_DRAIN_DISABLED:-}" == "1" ]]; then
+      echo yes
+    else
+      echo no
+    fi
+  )
+}
 # _vn_drained — node would refuse new work: persistent drain flag OR boot-drain opt-in.
+# CTL-1678: the CATALYST_DRAIN_DISABLED=1 override neutralizes the flag, so a
+# drain-disabled node reports `no` (it admits new work) even if the flag file exists.
+# Codex P2: boot-drain is AUTHORITATIVE over the override — checked FIRST so a node with
+# BOTH CATALYST_BOOT_DRAINED=1 and CATALYST_DRAIN_DISABLED=1 stays drained, matching the
+# corrected JS resolver (config.mjs isDrainDisabled returns false under boot-drain). Sources
+# the daemon env in a subshell so the durable override is visible without leaking.
 _vn_drained() {
-  if [[ -f "${CATALYST_DIR:-$HOME/catalyst}/execution-core/drain" || "${CATALYST_BOOT_DRAINED:-}" == "1" ]]; then
-    echo yes
-  else
-    echo no
-  fi
+  (
+    # CTL-1678 (round-3 P1): prefer the LIVE daemon's boot snapshot for the ENV half;
+    # the flag file stays a live read in both branches (the sentinel is dynamic —
+    # only the env overrides are boot-frozen).
+    local _rt _dd _bd
+    if _rt=$(_vn_daemon_runtime_env); then
+      _dd="${_rt%% *}"
+      _bd="${_rt##* }"
+      if [[ "$_bd" == "true" ]]; then
+        echo yes
+      elif [[ "$_dd" == "true" ]]; then
+        echo no
+      elif [[ -f "${CATALYST_DIR:-$HOME/catalyst}/execution-core/drain" ]]; then
+        echo yes
+      else
+        echo no
+      fi
+      return 0
+    fi
+    _vn_source_daemon_env_for_read
+    if [[ "${CATALYST_BOOT_DRAINED:-}" == "1" ]]; then
+      echo yes
+    elif [[ "${CATALYST_DRAIN_DISABLED:-}" == "1" ]]; then
+      echo no
+    elif [[ -f "${CATALYST_DIR:-$HOME/catalyst}/execution-core/drain" ]]; then
+      echo yes
+    else
+      echo no
+    fi
+  )
 }
 # _vn_read_replica_base [cfg] — the resolved read endpoint: CATALYST_MONITOR_URL env
 # override else Layer-2 catalyst.readReplica.baseUrl. The Layer-2 file defaults to the SAME
@@ -3352,6 +3685,16 @@ _vn_v_dev_no_work() {
   printf 'WARN|single-host roster includes this node and it is not drained — safe only while the work daemons are down (see broker/exec-core); set CATALYST_BOOT_DRAINED=1 to be explicit\n'
 }
 
+# _vn_v_drain_disabled <yes|no> — CTL-1678: advisory PASS either way (the override
+# is an intended worker-only operator action; never fails the run).
+_vn_v_drain_disabled() {
+  if [[ "$1" == "yes" ]]; then
+    printf 'PASS|drain-disabled — ignores the drain flag (CTL-1678)\n'
+  else
+    printf 'PASS|not drain-disabled — honors the drain flag\n'
+  fi
+}
+
 # --- check runner (mirrors the _vu_* runner; adds a non-fatal WARN status) -----
 VN_JSON="no"
 VN_NAMES=(); VN_TIERS=(); VN_REQUIRED=(); VN_STATUSES=(); VN_DETAILS=()
@@ -3402,6 +3745,7 @@ _vn_run_worker() {
   _vn_emit "exec-core-running" T1 true "$(_vn_v_daemon_up execution-core "$(_vn_exec_core_running)")"
   _vn_emit "monitor-running"   T1 true "$(_vn_v_daemon_up monitor "$(_vn_monitor_running)")"
   _vn_emit "pull-owner"        T1 true "$(_vn_v_worker_owner "${CATALYST_PLUGIN_PULL_OWNER:-}" "$(_vu_read_pull_owner "$VN_CFG")")"
+  _vn_emit "drain-disabled"    T1 false "$(_vn_v_drain_disabled "$(_vn_drain_disabled)")"  # CTL-1678: scenario 3 visibility (advisory, non-required)
   if [[ "$VN_JSON" != "yes" ]]; then
     echo "    note: LOCAL subset only — full activation-gate grading (Linear/bot/HRW/webhook/PATH) is 'catalyst-doctor' (CTL-1355 doctor.mjs, the follow-up)."
   fi
@@ -3983,19 +4327,20 @@ case "${1:-}" in
   parity)   shift; cmd_parity "$@" ;;
   install-services)   shift; cmd_install_services "$@" ;;
   uninstall-services) shift; cmd_uninstall_services ;;
-  adopt-updater)      shift; cmd_adopt_updater "$@" ;;
-  adopt-cloud-sync)   shift; cmd_adopt_cloud_sync "$@" ;;
-  verify-cloud-sync)  shift; cmd_verify_cloud_sync "$@" ;;
-  activate-replica)   shift; cmd_activate_replica "$@" ;;
-  verify-updater)     shift; cmd_verify_updater "$@" ;;
-  verify-node)        shift; cmd_verify_node "$@" ;;
-  services-status)    shift; cmd_services_status ;;
-  sync-cloud-env)     shift; cmd_sync_cloud_env "$@" ;;
-  claude-account)     shift; cmd_claude_account "$@" ;;
+  adopt-updater)        shift; cmd_adopt_updater "$@" ;;
+  adopt-thoughts-sync)  shift; cmd_adopt_thoughts_sync "$@" ;;
+  adopt-cloud-sync)     shift; cmd_adopt_cloud_sync "$@" ;;
+  verify-cloud-sync)    shift; cmd_verify_cloud_sync "$@" ;;
+  activate-replica)     shift; cmd_activate_replica "$@" ;;
+  verify-updater)       shift; cmd_verify_updater "$@" ;;
+  verify-node)          shift; cmd_verify_node "$@" ;;
+  services-status)      shift; cmd_services_status ;;
+  sync-cloud-env)       shift; cmd_sync_cloud_env "$@" ;;
+  claude-account)       shift; cmd_claude_account "$@" ;;
   status|"") cmd_status ;;
   -h|--help)
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | adopt-cloud-sync | verify-cloud-sync | activate-replica | verify-updater | verify-node | services-status | claude-account)" ;;
+  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | adopt-thoughts-sync | adopt-cloud-sync | verify-cloud-sync | activate-replica | verify-updater | verify-node | services-status | claude-account)" ;;
 esac
 fi

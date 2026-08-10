@@ -89,6 +89,22 @@ describe("writeLayer2MaxParallel", () => {
     expect(mode).toBe(0o600);
   });
 
+  test("enforces 600 even when a stale .tmp file from an interrupted prior write is reused at a looser mode", () => {
+    // writeFileSync's `mode` option only governs *creation* permissions — it is a
+    // no-op when the path already exists. Simulate the interrupted-write + PID-reuse
+    // scenario directly: pre-create the exact tmp path writeLayer2MaxParallel will
+    // target, at a loose mode, before calling it.
+    const p = join(dir, "config.json");
+    writeFileSync(p, JSON.stringify({ catalyst: {} }));
+    const tmp = `${p}.tmp.${process.pid}`;
+    writeFileSync(tmp, "stale partial content");
+    chmodSync(tmp, 0o644);
+    const ok = writeLayer2MaxParallel(p, 11);
+    expect(ok).toBe(true);
+    const mode = statSync(p).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
   test("uses injected readFileSync / writeFileSync / renameSync seams", () => {
     const reads = [];
     const writes = [];

@@ -758,3 +758,38 @@ independently at `off`. **Rejected**: widening CTL-855's `sourceConflictActSeam`
 (solves a structurally narrower problem — force-push-past-staleness, not merge-conflict resolution);
 a `deriveAdvancement` detour as #1461 originally described (unreachable — stalled tickets are excluded
 from `isTicketInFlight` before `deriveAdvancement` ever runs).
+
+## ADR-029: Catalyst self-hosts its CAT backlog via a separate fork clone (CAT-52)
+
+**Decision.** The CAT team is registered in `execution-core/registry.json`, allowing the fleet to
+work Catalyst's own self-healing findings. Its `repoRoot` is a **separate clone of the fork**
+(`thagale/catalyst`), never the live `plugin-source` checkout from which the fleet loads its
+plugins. This is CAT-52's option 2.
+
+**Why not option 1** (register `plugin-source` itself): phase agents would edit the execution-core
+currently executing them, and `plugin-source` has no `/github/<owner>/<repo>` path segment, so
+`ownerRepoFromRepoRoot` cannot resolve it and board-health falls back to number-only ambiguous
+skips for CAT tickets.
+
+**Why not option 3** (exclude CAT and work it by hand): recovery-pass findings are routed into CAT
+so the system learns and recurring wedge classes disappear. A queue that only fills re-derives
+defects already filed and unread. No exclusion primitive exists and none is introduced here.
+
+**A correct CAT `repoRoot` must satisfy all three:**
+
+1. It is a checkout of the fork (`thagale/catalyst`), whose main carries CAT-numbered history.
+2. Its Layer-1 `catalyst.linear.teamKey` is `CAT`, matching the registry schema's contract and the
+   warn-only enforcement added in CAT-52.
+3. Its path contains `/github/<owner>/<repo>` so `ownerRepoFromRepoRoot` resolves
+   `thagale/catalyst`. The canonical path is `~/code-repos/github/thagale/catalyst`.
+
+**Deploy story.** Merged CAT pull requests land on `thagale/catalyst` main. Because
+`plugin-source`'s `origin` is that fork, the updater pulls those changes into the running plugins,
+closing the self-hosting loop.
+
+**Consequences.** The registry's `team` ↔ `teamKey` contract is observable through a
+`registry.mjs` warning and the advisory `registry-team-identity` doctor check. A mismatched entry
+is still dispatched so a typo cannot silently stop fleet work. Nothing yet detects a Linear team
+with Todo work that is wholly absent from the registry; that requires a workspace-wide Linear team
+sweep and remains outside CAT-52. The `coalesce-labs/catalyst` clone remains the CTL project and
+keeps its `CTL` Layer-1 declaration; it is not a valid CAT `repoRoot`.

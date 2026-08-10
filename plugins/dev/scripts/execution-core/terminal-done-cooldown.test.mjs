@@ -112,6 +112,28 @@ describe("terminalDoneOnce — fence-suppress cooldown (CTL-1157 A1)", () => {
     expect(existsSync(doneMarker(t))).toBe(true);
   });
 
+  test("the ESCALATION-side cooldown does NOT hold back a genuine terminal Done", () => {
+    // The terminal-sweep escalation site arms its own cooldown after a needs-human
+    // write that fenceGuard PERMITTED (missing generation → fail-open). That is a
+    // probe-burn bound, not a fence suppression, so terminalDoneOnce must ignore it:
+    // sharing `.fence-suppressed` left a pipeline that finished teardown moments later
+    // stuck non-terminal for the whole 15-minute window.
+    const t = "CTL-1423";
+    mkWorker(t);
+    writeFileSync(join(wdir(t), ".escalation-probe-cooldown"), JSON.stringify({ ts: 1_000 }));
+    let fenceCalls = 0;
+    const doneCalls = [];
+    terminalDoneOnce(orchDir, t, okWriteStatus(doneCalls), undefined, {
+      multiHost: true,
+      fence: () => { fenceCalls++; return true; },
+      now: () => 1_000 + 60_000, // well inside the escalation cooldown window
+      emitDoneApplied: () => {},
+    });
+    expect(fenceCalls).toBe(1);
+    expect(doneCalls).toEqual([t]);
+    expect(existsSync(doneMarker(t))).toBe(true);
+  });
+
   test("already-applied (.terminal-done.applied present) → no fence-check, no re-write", () => {
     const t = "CTL-1423";
     mkWorker(t);

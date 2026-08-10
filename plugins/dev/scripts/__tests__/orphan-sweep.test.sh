@@ -707,6 +707,23 @@ run "T26a: SALVAGE_DIRTY fixture not removed, salvage logged" \
 run "T26a-b: SALVAGE_DIRTY-WT not in git worktree remove" \
   bash -c "! grep -E 'worktree remove.*SALVAGE_DIRTY|SALVAGE_DIRTY.*worktree remove' '${GIT_LOG}' 2>/dev/null; true"
 
+# T26a-c (CTL-1639): the DIRTY tree is kept, but salvage_worktree still runs
+# first. A dirty-only tree has NO unpushed commits, so (Codex P1 fix) salvage now
+# probes the revision set and skips `git bundle` entirely — its salvage mechanism
+# is the tracked-diff patch. The `git diff HEAD` probe against the SALVAGE_DIRTY
+# path proves the uncommitted diff was snapshotted before the keep (closes the
+# never-reaped gap). Isolated sweep root (see T26b-c) so the assertion never rides
+# the shared T26 root's accumulated fixture ordering.
+DIRTY_ISO_ROOT="${SCRATCH}/wt_dirty_iso"
+DIRTY_ISO_LOG="${SCRATCH}/git_dirty_iso.log"
+mkdir -p "${DIRTY_ISO_ROOT}/SALVAGE_DIRTY-WT/.git"
+touch -t 202501010000 "${DIRTY_ISO_ROOT}/SALVAGE_DIRTY-WT" 2>/dev/null || true
+GIT_LOG="$DIRTY_ISO_LOG" SWEEP_WT_ROOT="$DIRTY_ISO_ROOT" \
+  SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent \
+  SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash "${SWEEP}" >/dev/null 2>&1 || true
+run "T26a-c: SALVAGE_DIRTY salvaged (diff probe ran on the dirty tree)" \
+  bash -c "grep -E 'SALVAGE_DIRTY.*diff' '${DIRTY_ISO_LOG}' 2>/dev/null"
+
 # T26b: SALVAGE_UNPUSHED fixture -> NOT removed, log says "salvage"
 UNPUSHED_WT="${SWEEP_WT_ROOT}/SALVAGE_UNPUSHED-WT"
 mkdir -p "${UNPUSHED_WT}/.git"
@@ -718,6 +735,26 @@ run "T26b: SALVAGE_UNPUSHED fixture not removed, salvage logged" \
 run "T26b-b: SALVAGE_UNPUSHED-WT not in git worktree remove" \
   bash -c "! grep -E 'worktree remove.*SALVAGE_UNPUSHED|SALVAGE_UNPUSHED.*worktree remove' '${GIT_LOG}' 2>/dev/null; true"
 
+# T26b-c (CTL-1639): the local bundle salvage runs at the top of the
+# SALVAGE_UNPUSHED branch, independent of SWEEP_SALVAGE_PUSH (here 0/default), so
+# the unpushed commits are captured to ~/catalyst/salvage/ even when the tree is
+# kept. The git bundle-create probe against the SALVAGE_UNPUSHED path proves it.
+# T26b-c (CTL-1639): the local bundle salvage runs at the TOP of the
+# SALVAGE_UNPUSHED branch, independent of SWEEP_SALVAGE_PUSH, so unpushed commits
+# are captured even when the tree is kept. Run this in an ISOLATED sweep root
+# holding ONLY the UNPUSHED fixture — the shared T26 root accumulates enough
+# earlier fixtures that the pre-existing `while read` sweep loop (both original
+# and post-CTL-1639) never reaches a 7th entry, which would mask the assertion.
+UNPUSHED_ISO_ROOT="${SCRATCH}/wt_unpushed_iso"
+UNPUSHED_ISO_LOG="${SCRATCH}/git_unpushed_iso.log"
+mkdir -p "${UNPUSHED_ISO_ROOT}/SALVAGE_UNPUSHED-WT/.git"
+touch -t 202501010000 "${UNPUSHED_ISO_ROOT}/SALVAGE_UNPUSHED-WT" 2>/dev/null || true
+GIT_LOG="$UNPUSHED_ISO_LOG" SWEEP_WT_ROOT="$UNPUSHED_ISO_ROOT" \
+  SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent \
+  SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash "${SWEEP}" >/dev/null 2>&1 || true
+run "T26b-c: SALVAGE_UNPUSHED salvaged locally (bundle probe ran, push-flag-independent)" \
+  bash -c "grep -E 'SALVAGE_UNPUSHED.*bundle' '${UNPUSHED_ISO_LOG}' 2>/dev/null"
+
 # T27: --dry-run -> logs "would remove" for SAFE dirs, GIT_LOG has no worktree remove
 rm -f "$GIT_LOG"
 run "T27: dry-run logs would-remove for SAFE dirs" \
@@ -725,6 +762,34 @@ run "T27: dry-run logs would-remove for SAFE dirs" \
 
 run "T27b: dry-run GIT_LOG has no worktree remove" \
   bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' --dry-run && ! grep -q 'worktree remove' '${GIT_LOG}' 2>/dev/null; true"
+
+# T27c/T27d (CTL-1639, Codex P2): --dry-run over SALVAGE_* fixtures must be
+# side-effect free — a "would salvage" preview, but NO salvage_worktree run (no
+# git bundle probe against the tree, no artifacts/telemetry). Isolated roots so
+# the sweep loop always reaches the fixture.
+DRY_DIRTY_ROOT="${SCRATCH}/wt_dry_dirty_iso"
+DRY_DIRTY_LOG="${SCRATCH}/git_dry_dirty_iso.log"
+mkdir -p "${DRY_DIRTY_ROOT}/SALVAGE_DIRTY-WT/.git"
+touch -t 202501010000 "${DRY_DIRTY_ROOT}/SALVAGE_DIRTY-WT" 2>/dev/null || true
+GIT_LOG="$DRY_DIRTY_LOG" SWEEP_WT_ROOT="$DRY_DIRTY_ROOT" \
+  SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent \
+  SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash "${SWEEP}" --dry-run >"${SCRATCH}/dry_dirty.out" 2>&1 || true
+run "T27c: dry-run SALVAGE_DIRTY logs would-salvage preview" \
+  bash -c "grep -qi 'would salvage' '${SCRATCH}/dry_dirty.out'"
+run "T27c-b: dry-run SALVAGE_DIRTY runs no bundle probe (side-effect free)" \
+  bash -c "! grep -E 'SALVAGE_DIRTY.*bundle' '${DRY_DIRTY_LOG}' 2>/dev/null; true"
+
+DRY_UNP_ROOT="${SCRATCH}/wt_dry_unp_iso"
+DRY_UNP_LOG="${SCRATCH}/git_dry_unp_iso.log"
+mkdir -p "${DRY_UNP_ROOT}/SALVAGE_UNPUSHED-WT/.git"
+touch -t 202501010000 "${DRY_UNP_ROOT}/SALVAGE_UNPUSHED-WT" 2>/dev/null || true
+GIT_LOG="$DRY_UNP_LOG" SWEEP_WT_ROOT="$DRY_UNP_ROOT" \
+  SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent \
+  SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash "${SWEEP}" --dry-run >"${SCRATCH}/dry_unp.out" 2>&1 || true
+run "T27d: dry-run SALVAGE_UNPUSHED logs would-salvage preview" \
+  bash -c "grep -qi 'would salvage' '${SCRATCH}/dry_unp.out'"
+run "T27d-b: dry-run SALVAGE_UNPUSHED runs no bundle probe (side-effect free)" \
+  bash -c "! grep -E 'SALVAGE_UNPUSHED.*bundle' '${DRY_UNP_LOG}' 2>/dev/null; true"
 
 # T28: SWEEP_WT_ROOT=/nonexistent -> exit 0, no error
 run "T28: nonexistent SWEEP_WT_ROOT exits 0" \
@@ -1430,6 +1495,86 @@ make_safe_wt_p9 SAFE-T66b
 rm -f "$GIT_LOG" "$SCRATCH_OTEL_LOG"
 run "T66: worktree.sweep.completed emitted exactly once" \
   bash -c "eval \"${P9_SWEEP}\" bash '${SWEEP}' && count=\$(grep -c 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' 2>/dev/null || echo 0); [[ \"\$count\" -eq 1 ]]"
+
+# --- Phase 9b: CTL-1473 wf_* worktree sweep + plugin-source root (T140-T144) ---
+
+# Reuse the Phase 8/9 git mock (still installed) and p9 pmset+presweep mocks.
+# P9B_SWEEP targets a plugin-source-style .claude/worktrees root that contains wf_* dirs.
+P9B_WT_ROOT="${SCRATCH}/p10-plugin-source-wt"
+mkdir -p "$P9B_WT_ROOT"
+
+make_wf_wt() {
+  local name="$1"
+  # Use a real .git directory so _is_orphan_gitfile_dir does NOT fire — wf_* check
+  # must apply to linked worktrees with real .git dirs, not just orphan gitfiles.
+  mkdir -p "${P9B_WT_ROOT}/${name}/.git"
+}
+
+# wf_* classify: stale (backdated) -> SAFE
+mkdir -p "$SCRATCH/clf_wf"
+make_wf_wt "wf_old1234"
+touch -t 202501010000 "${P9B_WT_ROOT}/wf_old1234" "${P9B_WT_ROOT}/wf_old1234/.git" 2>/dev/null || true
+
+run "T140: wf_* worktree backdated -> SAFE" bash -c "
+  verdict=\$(SWEEP_WF_STALE_DAYS=7 SWEEP_IDLE_HOURS=9999 bash '${SWEEP}' --classify '${P9B_WT_ROOT}/wf_old1234' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SAFE' ]]
+"
+
+# wf_* classify: fresh (now) -> KEEP (not idle enough)
+make_wf_wt "wf_fresh5678"
+# do NOT backdate — mtime is NOW
+
+run "T141: wf_* worktree fresh mtime -> KEEP" bash -c "
+  verdict=\$(SWEEP_WF_STALE_DAYS=7 SWEEP_IDLE_HOURS=9999 bash '${SWEEP}' --classify '${P9B_WT_ROOT}/wf_fresh5678' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP' ]]
+"
+
+# wf_* with active session -> KEEP (active_session guard fires before wf_* guard)
+# Unquoted heredoc so ${P9B_WT_ROOT} expands NOW (write-time) into a literal path;
+# runtime shell vars in the script (${1:-}) are escaped with backslash.
+cat > "$MOCKBIN/claude" <<CLAUDEOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "agents" ]]; then
+  echo '[{"sessionId":"live_active_session","kind":"background","status":"idle","cwd":"${P9B_WT_ROOT}/wf_active"}]'
+fi
+CLAUDEOF
+chmod +x "$MOCKBIN/claude"
+
+make_wf_wt "wf_active"
+touch -t 202501010000 "${P9B_WT_ROOT}/wf_active" "${P9B_WT_ROOT}/wf_active/.git" 2>/dev/null || true
+
+run "T142: wf_* with live active session -> KEEP (session guard wins)" bash -c "
+  ACTIVE_CWD='${P9B_WT_ROOT}/wf_active' verdict=\$(SWEEP_WF_STALE_DAYS=7 SWEEP_IDLE_HOURS=9999 bash '${SWEEP}' --classify '${P9B_WT_ROOT}/wf_active' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP' ]]
+"
+
+# Restore no-op claude mock
+cat > "$MOCKBIN/claude" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "agents" ]]; then echo "[]"; fi
+EOF
+chmod +x "$MOCKBIN/claude"
+
+# discover_worktree_roots includes SWEEP_PLUGIN_SOURCE_WT when dir exists
+P9B_PS_WT="${SCRATCH}/p10-ps-wt"
+mkdir -p "$P9B_PS_WT"
+
+# T143: check via --print-config (which now includes SWEEP_PLUGIN_SOURCE_WT) and via dry-run log
+run "T143a: --print-config shows SWEEP_WF_STALE_DAYS and SWEEP_PLUGIN_SOURCE_WT" bash -c "
+  SWEEP_WF_STALE_DAYS=7 SWEEP_PLUGIN_SOURCE_WT='${P9B_PS_WT}' bash '${SWEEP}' --print-config 2>&1 | grep -q 'SWEEP_WF_STALE_DAYS=7'
+"
+
+run "T143b: --dry-run logs scanning of SWEEP_PLUGIN_SOURCE_WT root" bash -c "
+  SWEEP_WT_ROOT='/nonexistent' SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 SWEEP_PROJECT_CLAUDE_WT='/nonexistent' SWEEP_PLUGIN_SOURCE_WT='${P9B_PS_WT}' SWEEP_WF_STALE_DAYS=7 bash '${SWEEP}' --dry-run 2>&1 | grep -q '${P9B_PS_WT}'
+"
+
+# SWEEP_PLUGIN_SOURCE_WT that doesn't exist -> silently skipped (no error)
+run "T144: SWEEP_PLUGIN_SOURCE_WT nonexistent -> no error" bash -c "
+  SWEEP_WT_ROOT='/nonexistent' SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 SWEEP_PROJECT_CLAUDE_WT='/nonexistent' SWEEP_PLUGIN_SOURCE_WT='/nonexistent/plugin-source/.claude/worktrees' SWEEP_WF_STALE_DAYS=7 bash '${SWEEP}' --dry-run 2>&1
+"
 
 rm -f "$MOCKBIN/git"
 rm -f "$MOCKBIN/pmset"

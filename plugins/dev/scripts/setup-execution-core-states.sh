@@ -412,6 +412,89 @@ reconcile_worker_status_labels() {
 	return 0
 }
 
+# --- parked-by-human standalone label reconcile (CTL-1552) ------------------
+# Idempotently ensures a workspace-scoped PLAIN label 'parked-by-human' (NOT a
+# member of the exclusive worker-status group — a parked ticket must keep its
+# needs-human label, and that group is single-valued). This is the operator-
+# driven "a human is holding this ticket" latch board-health suppresses from
+# proposeMoves/eligibleDeferredAnchors (isParkedByHuman). Same query-then-create
+# tolerance as reconcile_worker_status_labels: any Linear failure WARNs and
+# returns 0 — never alters exit codes 0/2/3/4.
+
+# parked_by_human_label_name — the workspace-scoped standalone label name.
+parked_by_human_label_name() { echo "parked-by-human"; }
+# parked_by_human_color — distinct hue from the worker-status palette so the
+# operator reads "parked" at a glance (a purple, unlike the needs-human orange).
+parked_by_human_color() { echo "#9b51e0"; }
+
+reconcile_parked_by_human_label() {
+	local token="$1"
+	local label_name
+	label_name=$(parked_by_human_label_name)
+
+	if [[ ${dry_run:-0} -eq 1 ]]; then
+		echo "DRY-RUN: would ensure standalone workspace label '${label_name}' (not a worker-status member)"
+		return 0
+	fi
+
+	# Query workspace labels (team:null = workspace-scoped, not per-team).
+	local query payload resp
+	query='query { issueLabels(filter: {team: {null: true}}, first: 250) { nodes { id name isGroup parent { id } } } }'
+	payload=$(jq -nc --arg q "$query" '{query: $q}')
+	resp=$(linear_graphql_post "$token" "$payload")
+
+	# Transport validation before .errors — a curl failure yields non-JSON text.
+	if ! jq -e . >/dev/null 2>&1 <<<"$resp"; then
+		echo "WARNING: reconcile_parked_by_human_label: non-JSON/transport response — skipping" >&2
+		return 0
+	fi
+	if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
+		local err
+		err=$(echo "$resp" | jq -r '.errors[0].message // "unknown error"')
+		echo "WARNING: reconcile_parked_by_human_label: could not query workspace labels: ${err}" >&2
+		return 0
+	fi
+
+	local labels_json existing_id
+	labels_json=$(echo "$resp" | jq -c '.data.issueLabels.nodes // []')
+	# Match the top-level (parent==null) standalone label by name. Already present
+	# ⇒ zero mutations (idempotent). isGroup != true is REQUIRED: a label GROUP of
+	# the same name also has parent==null, and adopting one would report success
+	# forever while never provisioning a label that can be applied to a ticket —
+	# leaving board-health parking silently unusable.
+	existing_id=$(echo "$labels_json" | jq -r --arg n "$label_name" \
+		'.[] | select(.name == $n and .parent == null and (.isGroup // false) != true) | .id // empty' | head -1)
+	if [[ -n $existing_id ]]; then
+		echo "reconcile_parked_by_human_label: label '${label_name}' already present (id: ${existing_id})"
+		return 0
+	fi
+	# A same-named GROUP is a name collision an operator must resolve — creating
+	# the plain label alongside it would fail on Linear's uniqueness constraint.
+	if echo "$labels_json" | jq -e --arg n "$label_name" \
+		'any(.[]; .name == $n and (.isGroup // false) == true)' >/dev/null 2>&1; then
+		echo "WARNING: reconcile_parked_by_human_label: a label GROUP named '${label_name}' already exists — board-health parking needs a PLAIN label of that name. Rename the group or delete it, then re-run." >&2
+		return 0
+	fi
+
+	# Create the plain standalone label (no isGroup, no parent).
+	local mutation create_payload create_resp
+	mutation=$(build_issue_label_group_create_mutation_plain "$label_name" "$(parked_by_human_color)")
+	create_payload=$(jq -nc --arg q "$mutation" '{query: $q}')
+	create_resp=$(linear_graphql_post "$token" "$create_payload")
+	if ! jq -e . >/dev/null 2>&1 <<<"$create_resp"; then
+		echo "WARNING: reconcile_parked_by_human_label: non-JSON/transport response on create — skipping" >&2
+		return 0
+	fi
+	if echo "$create_resp" | jq -e '.errors' >/dev/null 2>&1; then
+		local create_err
+		create_err=$(echo "$create_resp" | jq -r '.errors[0].message // "unknown error"')
+		echo "WARNING: reconcile_parked_by_human_label: could not create '${label_name}': ${create_err}" >&2
+		return 0
+	fi
+	echo "reconcile_parked_by_human_label: created standalone label '${label_name}'"
+	return 0
+}
+
 # --- worker:<host> label group reconcile (CTL-1481) -------------------------
 # Idempotently ensures a workspace-scoped exclusive 'worker' label group with
 # one 'worker:<host>' child per cluster host, via issueLabelCreate. Mirrors
@@ -1103,6 +1186,11 @@ main() {
 	# Must run before git automations so the group exists before the daemon starts
 	# applying labels. Best-effort — never alters exit codes 0/2/3/4.
 	reconcile_worker_status_labels "$token" || true
+
+	# --- reconcile parked-by-human standalone label (CTL-1552) -----------------
+	# The operator-driven needs-human latch, now on the ticket (a label) instead
+	# of a per-host env var. Best-effort — never gates the exit code.
+	reconcile_parked_by_human_label "$token" || true
 
 	# --- reconcile worker:<host> label group (CTL-1481) ------------------------
 	# Best-effort visibility projection — never gates the exit code. Runs right

@@ -126,6 +126,8 @@ import {
 import { checkFleetFreeze } from "./fleet-freeze-alert.mjs"; // CTL-1420: fleet-frozen-for-admission alert
 import { recordReplicaRead } from "./replica-health.mjs"; // CAT-35
 
+const MONITOR_BOOT_TS = Date.now();
+
 // DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
 // ticket". The monitor classifies these as a kill: remove the ticket from the
 // eligible projection and abort any in-flight worker. CTL-584: any other
@@ -452,7 +454,11 @@ export function reconcileAll({ exec, delegateExec, appendHealthEvent, fleetFreez
   checkFleetFreeze({
     teams: [...seen],
     isTeamFrozen: (t) => getReconcileHealth(t)?.alerting === true,
+    isTeamFailing: (t) => (getReconcileHealth(t)?.consecutiveFailures ?? 0) > 0,
     getTeamOrigin: (t) => getReconcileHealth(t)?.lastFailureOrigin ?? "poll",
+    getTeamLastSuccess: (t) => getReconcileHealth(t)?.lastSuccessTs ?? null,
+    getTeamLastFailureMessage: (t) => getReconcileHealth(t)?.lastFailureMessage ?? null,
+    bootTs: MONITOR_BOOT_TS,
     ...(fleetFreezeAppend ? { append: fleetFreezeAppend } : {}),
   });
 }

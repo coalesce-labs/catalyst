@@ -21,6 +21,7 @@ import {
   checkThoughts,
   checkClaudeSettings,
   checkReaper,
+  checkLogShipper,
   checkHealthResponder,
   checkAgentBrowser,
   checkCloudTokenEnv,
@@ -42,6 +43,9 @@ import {
   checkPluginPullOwner,
   checkPluginSourceFreshness,
   classifyPluginSourceFreshness,
+  checkStaleLock,
+  checkSkillsDirPlugins,
+  classifySkillsDirPlugins,
   checksForClass,
   installChecksForClass,
   summarize,
@@ -645,6 +649,30 @@ describe("checkDaemonToolPath", () => {
     // smoke-probes linearis + claude (node is resolution-only)
     expect(probed).toEqual(["linearis", "claude"]);
   });
+
+  it("CAT-29 prefers the running daemon PATH and reports plist disagreement", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: "/opt/homebrew/bin:/usr/bin",
+      runningFacts: { pid: 42, path: "/usr/bin" },
+      resolveInPath: (cmd, path) => path.includes("homebrew") || cmd !== "linearis",
+      smokeProbe: () => 0,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("running daemon");
+    expect(checks[0].detail).toContain("disagrees");
+    expect(checks[0].detail).toContain("linearis");
+  });
+
+  it("CAT-29 falls back to the plist when running boot facts are absent", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      runningFacts: null,
+      resolveInPath: () => true,
+      smokeProbe: () => 0,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("launchd");
+  });
 });
 
 // ─── Phase 5c: checkWebhookIngestion (CTL-1284) ──────────────────────────────
@@ -937,7 +965,7 @@ describe("checkThoughts", () => {
     expect(checks[0].detail).toContain("humanlayer.json");
   });
 
-  it("FAILs a multiHost member whose primary resolves to a foreign repo (groundworkapp guard)", () => {
+  it("FAILs a multiHost member whose primary resolves to a foreign repo (pollution guard)", () => {
     const checks = checkThoughts({
       resolveRoster: multi,
       readHumanlayer: () => ({
@@ -948,9 +976,67 @@ describe("checkThoughts", () => {
         },
       }),
       cloneOk: okClone,
+      configuredThoughtsOrg: () => "coalesce-labs",
     });
     expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
-    expect(checks.find((c) => c.name === "thoughts-primary").detail).toMatch(/foreign|groundworkapp/i);
+    expect(checks.find((c) => c.name === "thoughts-primary").detail).toMatch(/foreign/i);
+  });
+
+  // Codex #3080 P1: the guard used to hardcode the org catalog — coalesce-labs PASS,
+  // groundworkapp/rightsite-cloud FAIL. A node that legitimately hosts its thoughts
+  // under rightsite-cloud provisioned correctly and was then FAILed here, aborting
+  // activation right after a successful join. The verdict must follow the CONFIGURED
+  // primary, not a name.
+  it("PASSes a member whose CONFIGURED primary is rightsite-cloud (no hardcoded catalog)", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: () => ({
+        thoughts: {
+          thoughtsRepo: "/Users/x/catalyst/hlt/rightsite-cloud/thoughts",
+          defaultProfile: "adva",
+          repoMappings: { "/r": { repo: "x", profile: "adva" } },
+        },
+      }),
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "rightsite-cloud",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.PASS);
+  });
+
+  it("FAILs when the primary is coalesce-labs but the node configured another org", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "rightsite-cloud",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
+  });
+
+  it("WARNs (never guesses) when Layer-1 declares no thoughts org", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.WARN);
+  });
+
+  it("does not treat a same-prefix org as a match (coalesce-labs vs coalesce-labs-fork)", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: () => ({
+        thoughts: {
+          thoughtsRepo: "/Users/x/catalyst/hlt/coalesce-labs-fork/thoughts",
+          defaultProfile: "coalesce-labs-fork",
+          repoMappings: { "/r": { repo: "x", profile: "coalesce-labs-fork" } },
+        },
+      }),
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "coalesce-labs",
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
   });
 
   it("FAILs a multiHost member with empty repoMappings", () => {
@@ -978,7 +1064,12 @@ describe("checkThoughts", () => {
   });
 
   it("PASSes a fully-provisioned multiHost member", () => {
-    const checks = checkThoughts({ resolveRoster: multi, readHumanlayer: cleanHl, cloneOk: okClone });
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: okClone,
+      configuredThoughtsOrg: () => "coalesce-labs",
+    });
     expect(verdict(checks, "thoughts-primary")).toBe(STATUS.PASS);
     expect(verdict(checks, "thoughts-repo-mappings")).toBe(STATUS.PASS);
     expect(verdict(checks, "thoughts-clone")).toBe(STATUS.PASS);
@@ -1765,6 +1856,169 @@ describe("checkAgentBrowser", () => {
     expect(checks.every((c) => c.status !== STATUS.FAIL)).toBe(true);
     expect(checks.find((c) => c.name === "agent-browser-version").status).toBe(STATUS.PASS);
     expect(checks.find((c) => c.name === "agent-browser-doctor").status).toBe(STATUS.PASS);
+  });
+});
+
+// ─── checkLogShipper (CTL-1473) ──────────────────────────────────────────────
+
+const shipperPlist = (cfg) =>
+  `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string>` +
+  `<string>/x/launch.sh</string><string>--config</string><string>${cfg}</string></array></dict></plist>`;
+
+describe("checkLogShipper", () => {
+  it("is a no-op (empty) for classes that do not ship logs (developer/monitor)", () => {
+    expect(checkLogShipper({ shipsLogs: false })).toEqual([]);
+  });
+
+  it("FAILs when the shipper LaunchAgent is not installed (shipsLogs class)", () => {
+    const c = checkLogShipper({ shipsLogs: true, readFile: () => { throw new Error("ENOENT"); } });
+    expect(c).toHaveLength(1);
+    expect(c[0].name).toBe("shipper-installed");
+    expect(c[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs when the plist is present but launchd never loaded the job", () => {
+    const cfg = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(cfg),
+      shipperState: () => ({ loaded: false, lastExit: null }),
+    });
+    expect(c[0].name).toBe("shipper-installed");
+    expect(c[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs and names the offending path when --config is outside the pristine checkout", () => {
+    const bad = "/Users/x/catalyst/wt/CTL-1410/plugins/dev/scripts/log-shipper/config.alloy";
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(bad),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    const found = c.find((x) => x.name === "shipper-config");
+    expect(found).toBeDefined();
+    expect(found.status).toBe(STATUS.FAIL);
+    expect(found.detail).toContain(bad);
+  });
+
+  it("PASSes when loaded and --config resolves to the canonical path", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    expect(c.every((x) => x.status === STATUS.PASS)).toBe(true);
+  });
+
+  it("downgrades FAIL→WARN under preinstall flag", () => {
+    const c = checkLogShipper({
+      shipsLogs: true,
+      preinstall: true,
+      readFile: () => { throw new Error("ENOENT"); },
+    });
+    expect(c[0].name).toBe("shipper-installed");
+    expect(c[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs (not FAILs) when canonicalConfig is unavailable", () => {
+    const cfg = "/some/path/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(cfg),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => null,
+      shipperState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    expect(c[0].name).toBe("shipper-config");
+    expect(c[0].status).toBe(STATUS.WARN);
+  });
+
+  // CTL-1473 remediate (round-3): a loaded-but-crash-looping shipper (non-zero
+  // LastExitStatus, shipping nothing) must NOT report a clean shipper-config
+  // PASS. The prior code dropped lastExit; these assert the shipper-health
+  // check now FAILs on 127/non-zero and never falls through to a clean pass.
+  it("FAILs with shipper-health (not a config PASS) when loaded but last exit was 127", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 127 }),
+    });
+    expect(c[0].name).toBe("shipper-health");
+    expect(c[0].status).toBe(STATUS.FAIL);
+    expect(c.some((x) => x.name === "shipper-config" && x.status === STATUS.PASS)).toBe(false);
+  });
+
+  it("FAILs with shipper-health on a non-zero, non-127 exit (crash-looping shipper)", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 78 }),
+    });
+    expect(c[0].name).toBe("shipper-health");
+    expect(c[0].status).toBe(STATUS.FAIL);
+    expect(c[0].detail).toContain("78");
+  });
+
+  it("downgrades shipper-health FAIL→WARN under the preinstall flag", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      preinstall: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 127 }),
+    });
+    expect(c[0].name).toBe("shipper-health");
+    expect(c[0].status).toBe(STATUS.WARN);
+  });
+
+  it("PASSes (config check) when loaded but never run yet (lastExit null)", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: null }),
+    });
+    expect(c.every((x) => x.status === STATUS.PASS)).toBe(true);
+    expect(c.some((x) => x.name === "shipper-config")).toBe(true);
+  });
+});
+
+describe("checksForClass — checkLogShipper membership (CTL-1473)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+  it("worker suite includes checkLogShipper", () => {
+    const s = src(nodeClassOf({ class: "worker", raw: "worker" }));
+    expect(s).toContain("checkLogShipper");
+  });
+  it("developer suite does NOT include checkLogShipper", () => {
+    const s = src(nodeClassOf({ class: "developer", raw: "developer" }));
+    expect(s).not.toContain("checkLogShipper");
+  });
+  it("monitor suite does NOT include checkLogShipper", () => {
+    const s = src(nodeClassOf({ class: "monitor", raw: "monitor" }));
+    expect(s).not.toContain("checkLogShipper");
   });
 });
 
@@ -3403,6 +3657,13 @@ const nodeClassOf = (over = {}) => ({
   ...over,
 });
 
+// passingSkillsDirCheck — the `skillsDirCheck` seam installChecksForClass exposes, stubbed healthy.
+// The real check probes the live ~/.claude tree, and for class=worker a missing symlink is a hard
+// FAIL (developer/monitor only WARN). Any test that asserts on runDoctor's aggregate FAIL COUNT for
+// a worker must inject this, or it grades the host it happens to run on instead of the code under
+// test — which is exactly how it went red in CI. checkSkillsDirPlugins keeps its own direct coverage.
+const passingSkillsDirCheck = () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }];
+
 describe("checkNodeClass (CTL-1355)", () => {
   it("PASSes an explicit, recognized class", () => {
     const checks = checkNodeClass({ nodeClass: nodeClassOf({ class: "developer", raw: "developer" }) });
@@ -4589,9 +4850,18 @@ describe("doctor pull-owner reads persisted installed state (CTL-1369 PR4 / Code
     await withEnv({ CATALYST_LAYER2_CONFIG_FILE: cfg }, async () => {
       // real resolveNodeClass + real defaultPluginPullOwner (both read CATALYST_LAYER2_CONFIG_FILE);
       // only the launchd agent probe is injected (it is env-dependent).
-      const code = await runDoctor({ profile: "install", json: true, hasStackAgent: false, hasUpdaterAgent: true, log: (m) => logs.push(m) });
+      // skillsDirCheck is injected: the real one probes a live ~/.claude tree, which a
+      // unit test has no business depending on. Its own coverage lives with
+      // checkSkillsDirPlugins; here we only assert it is PART of the install rubric —
+      // the point of Codex #2664 P1, since the cutover is best-effort and would
+      // otherwise let a failed install report success.
+      const code = await runDoctor({
+        profile: "install", json: true, hasStackAgent: false, hasUpdaterAgent: true,
+        skillsDirCheck: () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }],
+        log: (m) => logs.push(m),
+      });
       const parsed = JSON.parse(logs[0]);
-      expect(parsed.checks.map((c) => c.name)).toEqual(["node-class", "agents-for-class", "plugin-pull-owner"]);
+      expect(parsed.checks.map((c) => c.name)).toEqual(["node-class", "agents-for-class", "plugin-pull-owner", "skills-dir-plugins"]);
       expect(parsed.checks.find((c) => c.name === "node-class").detail).toContain("developer"); // class from the SAME file
       expect(parsed.ok).toBe(true); // class + owner consistent → developer rubric PASSes
       expect(code).toBe(0);
@@ -4671,10 +4941,11 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
         hasStackAgent: true,
         hasUpdaterAgent: true, // the two-puller hazard
         pluginPullOwner: "broker",
+        skillsDirCheck: passingSkillsDirCheck,
       }),
       log: () => {},
     });
-    expect(code).toBe(1);
+    expect(code).toBe(1); // exactly one FAIL: the updater agent. The skills-dir seam is stubbed healthy.
   });
 
   it("PASSes a correctly-provisioned worker post-install (stack only, owner=broker)", async () => {
@@ -4684,6 +4955,7 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: true,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker",
+      skillsDirCheck: passingSkillsDirCheck,
       log: () => {},
     });
     expect(code).toBe(0);
@@ -4728,6 +5000,7 @@ describe("runDoctor profile routing (CTL-1369 PR4)", () => {
       hasStackAgent: true,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker",
+      skillsDirCheck: passingSkillsDirCheck,
       log: (m) => logs.push(m),
     });
     const parsed = JSON.parse(logs[0]);
@@ -4943,6 +5216,302 @@ describe("checksForClass — checkPluginSourceFreshness registration (CTL-1421)"
   for (const cls of ["worker", "developer", "monitor"]) {
     it(`wires checkPluginSourceFreshness into the ${cls} suite`, () => {
       expect(src({ recognized: true, class: cls })).toContain("checkPluginSourceFreshness");
+    });
+  }
+});
+
+// ─── checkStaleLock (CTL-1415) ───────────────────────────────────────────────
+//
+// A stale plugin-source .git/index.lock silently freezes plugin pulls. doctor
+// REPORTS it (WARN) — age-gated via the shared lib/stale-lock.mjs classifier, so
+// a live git op (fresh lock) reads as in-progress, not a problem.
+describe("checkStaleLock (CTL-1415)", () => {
+  const ROOT = "/co/plugin-source";
+  const LOCK = "/co/plugin-source/.git/index.lock";
+  const NOW = 1_750_000_000_000;
+  const statFor = (mtimeMs) => (path) => (path === LOCK && mtimeMs != null ? mtimeMs : null);
+
+  it("no lock → PASS", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, statFn: statFor(null) });
+    expect(c.name).toBe("stale-plugin-lock");
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("no stale git index.lock");
+  });
+
+  it("fresh lock (live git op) → PASS (in progress, not stale)", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, thresholdMs: 600_000, statFn: statFor(NOW - 4_000) });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("git operation is in progress");
+  });
+
+  it("stale lock (older than threshold) → WARN with the frozen-pulls guidance", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, thresholdMs: 600_000, statFn: statFor(NOW - 8.5 * 60 * 60 * 1000) });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain("FROZEN");
+    expect(c.detail).toContain(LOCK);
+  });
+
+  it("stale lock is a WARN, never a FAIL (never blocks doctor exit)", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, thresholdMs: 600_000, statFn: statFor(NOW - 3_600_000) });
+    expect(c.status).not.toBe(STATUS.FAIL);
+  });
+});
+
+describe("checksForClass — checkStaleLock registration (CTL-1415)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+  for (const cls of ["worker", "developer", "monitor"]) {
+    it(`wires checkStaleLock into the ${cls} suite`, () => {
+      expect(src({ recognized: true, class: cls })).toContain("checkStaleLock()");
+    });
+  }
+});
+
+// Codex P2 (#2530): a checkout provisioned via `setup-plugin-source.sh --path`
+// only persists the custom root through pluginDirs config, not
+// CATALYST_PLUGIN_SOURCE — the old hardcoded ~/catalyst/plugin-source default
+// could report "no stale lock" while the ACTUAL configured checkout was frozen.
+// checkStaleLock must resolve the same configured root(s) the adjacent
+// freshness check and the real pull path use.
+describe("checkStaleLock — resolves configured pluginDirs roots (Codex P2, #2530)", () => {
+  const NOW = 1_750_000_000_000;
+
+  it("inspects a resolveRootsFn-provided custom root, not the hardcoded default", () => {
+    const CUSTOM = "/custom/plugin-source";
+    const LOCK = `${CUSTOM}/.git/index.lock`;
+    const [c] = checkStaleLock({
+      now: NOW,
+      thresholdMs: 600_000,
+      resolveRootsFn: () => [CUSTOM],
+      statFn: (path) => (path === LOCK ? NOW - 3_600_000 : null), // 1h stale
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain(LOCK);
+  });
+
+  it("no stale lock across multiple resolved roots → PASS listing all roots", () => {
+    const A = "/co/a";
+    const B = "/co/b";
+    const [c] = checkStaleLock({
+      now: NOW,
+      resolveRootsFn: () => [A, B],
+      statFn: () => null,
+    });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain(A);
+    expect(c.detail).toContain(B);
+  });
+
+  it("one of several resolved roots is stale → WARN naming that root", () => {
+    const A = "/co/a";
+    const B = "/co/b";
+    const staleLock = `${B}/.git/index.lock`;
+    const [c] = checkStaleLock({
+      now: NOW,
+      thresholdMs: 600_000,
+      resolveRootsFn: () => [A, B],
+      statFn: (path) => (path === staleLock ? NOW - 3_600_000 : null),
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain(staleLock);
+  });
+
+  it("an explicit root still overrides resolveRootsFn (single-checkout callers/tests)", () => {
+    const EXPLICIT = "/explicit/root";
+    const IGNORED = "/should/not/be/checked";
+    const [c] = checkStaleLock({
+      root: EXPLICIT,
+      now: NOW,
+      resolveRootsFn: () => [IGNORED],
+      statFn: () => null,
+    });
+    expect(c.detail).toContain(EXPLICIT);
+    expect(c.detail).not.toContain(IGNORED);
+  });
+
+  it("no pluginDirs configured (resolveRootsFn returns []) → falls back to the historical default", () => {
+    const [c] = checkStaleLock({
+      now: NOW,
+      resolveRootsFn: () => [],
+      statFn: () => null,
+    });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("plugin-source");
+  });
+});
+// ─── checkSkillsDirPlugins (skills-dir plugin migration) ─────────────────────
+// Asserts catalyst loads in-place via user-scope ~/.claude/skills symlinks (every
+// plugin in the checkout symlinked into it) with no legacy marketplace/wrapper
+// residue. worker=FAIL, dev/monitor=WARN. classifySkillsDirPlugins is the pure core.
+describe("classifySkillsDirPlugins — decision core", () => {
+  const ROOT = "/co/plugin-source";
+  // two plugins, both symlinked correctly, no residue — the clean end state
+  const EXPECTED = [
+    { name: "catalyst-dev", dir: `${ROOT}/plugins/dev` },
+    { name: "catalyst-pm", dir: `${ROOT}/plugins/pm` },
+  ];
+  const cleanLinks = {
+    "catalyst-dev": { kind: "symlink", target: `${ROOT}/plugins/dev` },
+    "catalyst-pm": { kind: "symlink", target: `${ROOT}/plugins/pm` },
+  };
+  const clean = (over = {}) => ({
+    roots: [ROOT],
+    expectedPlugins: EXPECTED,
+    linkByName: cleanLinks,
+    settings: null,
+    installedPlugins: null,
+    wrapperRcFiles: [],
+    nodeClass: "worker",
+    ...over,
+  });
+
+  it("no roots on a worker → FAIL", () => {
+    const c = classifySkillsDirPlugins({ roots: [], nodeClass: "worker" });
+    expect(c.name).toBe("skills-dir-plugins");
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/pluginDirs unset|no plugin-source/i);
+  });
+
+  it("no roots on a developer → WARN", () => {
+    expect(classifySkillsDirPlugins({ roots: [], nodeClass: "developer" }).status).toBe(STATUS.WARN);
+  });
+
+  it("all plugins symlinked + no residue → PASS", () => {
+    const c = classifySkillsDirPlugins(clean());
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain(ROOT);
+    expect(c.detail).toMatch(/2 catalyst plugins/);
+  });
+
+  it("a missing symlink → FAIL naming the plugin", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ linkByName: { ...cleanLinks, "catalyst-pm": { kind: "missing" } } }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toContain("catalyst-pm");
+    expect(c.detail).toMatch(/missing/i);
+  });
+
+  it("a real file/dir (non-symlink) at the skills path → FAIL, never clobbered signal", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ linkByName: { ...cleanLinks, "catalyst-dev": { kind: "other" } } }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/not a symlink/i);
+  });
+
+  it("a dangling symlink → FAIL", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ linkByName: { ...cleanLinks, "catalyst-dev": { kind: "symlink", target: null } } }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/dangling/i);
+  });
+
+  it("a symlink pointing outside the checkout → FAIL", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ linkByName: { ...cleanLinks, "catalyst-dev": { kind: "symlink", target: "/some/other/dev" } } }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/resolves to \/some\/other\/dev/);
+  });
+
+  it("enabledPlugins residue → FAIL", () => {
+    const c = classifySkillsDirPlugins(clean({ settings: { enabledPlugins: { "catalyst-dev@catalyst": true } } }));
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/enabledPlugins still lists catalyst-dev@catalyst/);
+  });
+
+  it("a still-registered marketplace → FAIL", () => {
+    const c = classifySkillsDirPlugins(clean({ settings: { extraKnownMarketplaces: { catalyst: { source: {} } } } }));
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/marketplace is still registered/i);
+  });
+
+  it("an installed marketplace copy (precedence-block) → FAIL", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ installedPlugins: { plugins: { "catalyst-dev@catalyst": [{ scope: "project" }] } } }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/precedence-BLOCKS/i);
+  });
+
+  it("a surviving interactive wrapper → FAIL", () => {
+    const c = classifySkillsDirPlugins(clean({ wrapperRcFiles: ["/home/u/.zshrc"] }));
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/wrapper is still in \/home\/u\/\.zshrc/);
+  });
+
+  it("residue on a monitor → WARN (not FAIL)", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ nodeClass: "monitor", settings: { enabledPlugins: { "catalyst-pm@catalyst": true } } }),
+    );
+    expect(c.status).toBe(STATUS.WARN);
+  });
+
+  // Codex P1: the marketplace catalog has ten plugins, not just catalyst-dev/-pm — a
+  // stale marketplace copy of any OTHER catalogued plugin (catalyst-meta here) must be
+  // caught too, derived from expectedPlugins rather than a hardcoded two-name allowlist.
+  it("a still-enabled marketplace copy of a THIRD checkout plugin (not dev/pm) → FAIL", () => {
+    const threePlugins = [...EXPECTED, { name: "catalyst-meta", dir: `${ROOT}/plugins/meta` }];
+    const c = classifySkillsDirPlugins(
+      clean({
+        expectedPlugins: threePlugins,
+        linkByName: { ...cleanLinks, "catalyst-meta": { kind: "symlink", target: `${ROOT}/plugins/meta` } },
+        settings: { enabledPlugins: { "catalyst-meta@catalyst": true } },
+      }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/enabledPlugins still lists catalyst-meta@catalyst/);
+  });
+
+  it("an installed marketplace copy of a THIRD checkout plugin (not dev/pm) → FAIL", () => {
+    const threePlugins = [...EXPECTED, { name: "catalyst-meta", dir: `${ROOT}/plugins/meta` }];
+    const c = classifySkillsDirPlugins(
+      clean({
+        expectedPlugins: threePlugins,
+        linkByName: { ...cleanLinks, "catalyst-meta": { kind: "symlink", target: `${ROOT}/plugins/meta` } },
+        installedPlugins: { plugins: { "catalyst-meta@catalyst": [{ scope: "user" }] } },
+      }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/catalyst-meta@catalyst is still installed from the marketplace/);
+  });
+});
+
+describe("checkSkillsDirPlugins — seams", () => {
+  const ROOT = "/co/plugin-source";
+  const expected = [{ name: "catalyst-dev", dir: `${ROOT}/plugins/dev` }];
+  it("wires resolveRootsFn + expectedPluginsFn + skillLinkFn (clean → PASS)", () => {
+    const [c] = checkSkillsDirPlugins({
+      nodeClass: "worker",
+      resolveRootsFn: () => [ROOT],
+      expectedPluginsFn: () => expected,
+      skillLinkFn: () => ({ kind: "symlink", target: `${ROOT}/plugins/dev` }),
+      readSettingsFn: () => null,
+      readInstalledPluginsFn: () => null,
+      wrapperRcFilesFn: () => [],
+    });
+    expect(c.status).toBe(STATUS.PASS);
+  });
+  it("propagates a missing symlink → FAIL on worker", () => {
+    const [c] = checkSkillsDirPlugins({
+      nodeClass: "worker",
+      resolveRootsFn: () => [ROOT],
+      expectedPluginsFn: () => expected,
+      skillLinkFn: () => ({ kind: "missing" }),
+      readSettingsFn: () => null,
+      readInstalledPluginsFn: () => null,
+      wrapperRcFilesFn: () => [],
+    });
+    expect(c.status).toBe(STATUS.FAIL);
+  });
+});
+
+describe("checksForClass — checkSkillsDirPlugins registration", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+  for (const cls of ["worker", "developer", "monitor"]) {
+    it(`wires checkSkillsDirPlugins into the ${cls} suite`, () => {
+      expect(src({ recognized: true, class: cls })).toContain("checkSkillsDirPlugins");
     });
   }
 });

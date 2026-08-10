@@ -12,9 +12,29 @@
 // contention, corrupt row) returns null — callers fall through to the live
 // linearis read exactly as before this module existed. The gateway is a safe
 // optimization, never the source of truth.
-import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { createRequire } from "node:module";
+
+// CTL-1568 (Codex #2861 P0): `bun:sqlite` is loaded LAZILY, not as a static import.
+// This module also exports pure helpers (descriptorAgeMs, claimedAtAgeMs) that touch
+// no database, and linear-query.mjs imports ONLY descriptorAgeMs from here. With a
+// static `import { Database } from "bun:sqlite"`, merely resolving that pure helper
+// dragged a Bun-only specifier into the graph — so any NODE process importing
+// linear-query.mjs (→ linear-write.mjs → recovery-emit.mjs, whose shebang is
+// `#!/usr/bin/env node` and which the recovery-pass skill invokes with node) died at
+// module-load with ERR_UNSUPPORTED_ESM_URL_SCHEME, before dispatching any subcommand.
+//
+// Deferring the load to the single place a Database is actually constructed makes the
+// whole chain importable under plain Node while changing nothing under Bun. A Node
+// process that genuinely tries to OPEN the gateway db still fails — correctly, and
+// with a clear error at the call rather than an opaque one at import.
+let _Database = null;
+function loadDatabase() {
+  if (_Database) return _Database;
+  _Database = createRequire(import.meta.url)("bun:sqlite").Database;
+  return _Database;
+}
 
 function defaultDbPath() {
   return resolve(process.env.CATALYST_DIR ?? `${homedir()}/catalyst`, "filter-state.db");
@@ -48,6 +68,7 @@ export function createGatewayReader({ dbPath = defaultDbPath() } = {}) {
 
   const open = () => {
     if (db) return db;
+    const Database = loadDatabase();
     db = new Database(dbPath, { readonly: true });
     // Readonly + WAL: writers never block readers, but a checkpoint can hold
     // the lock briefly — wait a beat instead of failing the read.

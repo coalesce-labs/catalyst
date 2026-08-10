@@ -75,7 +75,10 @@ per-orchestrator local state in worktrees stays the source of truth for crash re
   upserts each team's entry. Daemon reads the registry directly (D4). The CTL-554 per-repo
   enrollment under `execution-core/projects/` and the `/orchestrate` enroll step were retired in
   CTL-582. Access flows through `registry.mjs` `list-projects`/`get-project-config` — the D9 cloud
-  seam (swappable to a hosted table without touching callers).
+  seam (swappable to a hosted table without touching callers). Each entry's `team` must match its
+  `repoRoot`'s Layer-1 `catalyst.linear.teamKey`; `listProjects()` warns on a mismatch and
+  `catalyst doctor` grades it with the advisory `registry-team-identity` check. Catalyst's own CAT
+  registration is recorded in ADR-029.
 - **Heartbeat** — orchestrators write `lastHeartbeat` every 2–3 min; entries stale >10 min are GC'd
   as `abandoned`.
 
@@ -108,6 +111,15 @@ The daemon boot announcement reports `ownsRawRoster` and `ownsDispatchRoster`; o
 reflects live dispatch ownership. Board health's `strandedNode` invariant is liveness-driven.
 Team-level reconcile failures remain visible as context but never authorize takeover of another
 host's work.
+
+**Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
+scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.
+Its `dispatchLiveness` invariant judges only this host's owned queue, while preserving the raw and
+owned depths in its scan context; dispatch-recency evidence is also host-scoped, fail-open for
+legacy events without host attribution. The separate `nodeProductivity` invariant reports a live
+peer that owns work but has not crossed a phase boundary within the configured window. It defaults
+to `shadow` and proposes only an escalate-only tier-3 move, so it cannot dispatch a recovery
+delegate.
 
 **Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
 scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.
@@ -464,6 +476,29 @@ non-degraded explanation. Missing or coerced (`degraded: true`) explanations rem
 the untyped-stuck catch-all. This signal check complements the recovery-intent ledger: board-health
 defer is cooldown-only, while an absent ledger deliberately fails open.
 
+### Orphan-stale merged-PR reconciliation (CAT-47)
+
+Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
+PR-state resolver, background-job liveness probe, stall clearer, and status writer once; Pass 0u
+uses them to build its act registry, while Pass 0r receives both that registry and the raw bundle
+for capability-checked fallback construction. An injected partial registry therefore falls back
+to real dependencies instead of either using inert defaults or failing as unavailable.
+
+The recovery candidate contract is `{ ticket, phase, signal }`. `phase` names the exact
+`.unstuck-orphan-merge-<phase>.applied` idempotency marker, and `signal.bg_job_id` feeds the
+liveness gate. Marker construction fails closed when phase is absent, preventing malformed
+`undefined` or `null` marker names. PR-state readers are synchronous; thenables are surfaced as
+`pr-state-async-unsupported` rather than silently interpreted as missing evidence.
+
+Repeated identical fix failures are stored at
+`<orchDir>/.recovery-fix-failures/<ticket>-<fix_class>.json`, outside `workers/` because completed
+tickets may no longer have worker directories. This separate family is not erased by
+`recoveryForgetIntent`. After `RECOVERY_FIX_BACKOFF_THRESHOLD` identical failures (default 3),
+retries use exponential windows controlled by `RECOVERY_FIX_BACKOFF_BASE_MS` (default 30 minutes)
+and `RECOVERY_FIX_BACKOFF_MAX_MS` (default 24 hours). Audit-comment hashes are committed only after
+successful delivery, so an outage leaves the comment eligible for retry while delivered duplicate
+content is suppressed.
+
 ### Delegate-first escalation + explanation chokepoint (CTL-1609)
 
 Two gaps closed at the point where the scheduler labels a ticket `needs-human`:
@@ -529,7 +564,59 @@ reclaim storms). Three additive defenses:
 Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlight` drop the ticket;
 the terminal sweep applies `needs-human` via `labelOnce`.
 
-### Two-axis worker state & the recordWorkerTransition chokepoint (CTL-764)
+### Stuck-but-alive daemon watchdog (CTL-1502)
+
+Both existing daemon-supervision paths — the launchd `KeepAlive`/`StartInterval` agents and
+`catalyst-monitor forward-start` — are **pid-liveness only** (`kill -0`), so a wedged process that
+holds its pid passes every check. The stuck-but-alive watchdog closes that emit→act gap for the
+otel-forward stack daemon: it reads *stuck predicates pid-liveness cannot see* and, in `enforce`
+mode, restarts the stuck daemon exactly once per breach episode.
+
+- **Two disk-only predicates (OR'd), both O(1) `statSync`/small-JSON reads that never touch the
+  daemon or the bytes they measure.** **P1 DLQ-size** — the DLQ file's `statSync().size` at or above
+  `dlqMaxBytes` (default 1 GiB); read by size, not `readFileSync`, so it stays honest past 2 GB where
+  a whole-file read throws and the in-payload `dlqDepth` silently freezes. **P2 forwarding-lag** — the
+  checkpoint's `lastForwardedTs` frozen for ≥ `stalenessMs` *while the event log has fresher writes*
+  (real backlog), so a legitimately idle forwarder never trips. `lastForwardedTs` is the honest
+  progress signal because it advances only on real forwarding, unlike the checkpoint file's mtime
+  (rewritten unconditionally every 10 s — the same trap as the unconditional heartbeat).
+- **Out-of-band alert path** (the watched daemon's own egress may be the wedged thing): the alert
+  rides the exec-core daemon's pino `.log` (Alloy-shipped, independent of otel-forward) plus a durable
+  local marker `~/catalyst/watchdog/<daemon>.alert.json` latching the current stuck/cleared state (a
+  HUD/orch-monitor renderer over that marker is a follow-up — CTL-1502 Codex P2). A best-effort
+  `catalyst.alert.raised|cleared {kind:"daemon_stuck"}` event to the log (for dashboards) is
+  explicitly *not* load-bearing — it rides the very egress that may be broken.
+- **State machine** (a structural clone of the fleet-health probe, hysteresis + cooldown): a
+  sustained breach (≥ `sustainedTicks`) restarts once; a **post-restart verify window** re-checks for
+  `verifyTicks` ticks — if the predicate clears, it emits `cleared` and re-arms; if it stays tripped,
+  it **escalates** (a latched, non-clearing raised alert + a `severity:high` recovery finding) with
+  no second restart until the `cooldownMs` (default 15 min, deliberately > the 600 s launchd
+  `StartInterval` so the two supervision layers never race) expires and a healthy tick re-arms.
+- **Modes** `off/shadow/enforce` (default **`shadow`** — detect + log `would-restart`, mutate
+  nothing). Ships shadow-first; an operator flips it to `enforce` via
+  `catalyst.orchestration.daemonWatchdog.mode` or `EXECUTION_CORE_DAEMON_WATCHDOG_MODE`. Every reader
+  returns a non-crossing sentinel on throw so the guardrail can never wedge the daemon tick. First
+  ship registers exactly one target (otel-forward) behind a descriptor registry, so a second watched
+  daemon is a one-line addition.
+- **Two hosts for one probe, gated by node class.** `catalyst-stack` starts otel-forward on both
+  worker and monitor nodes but execution-core on workers only, so arming the probe solely from
+  `startDaemon` would leave every **monitor**-node forwarder supervised by pid-liveness alone. A
+  **worker** keeps the in-daemon probe; a **monitor** node runs the same probe standalone via
+  `execution-core/daemon-watchdog-run.mjs`, supervised by
+  `catalyst-monitor watchdog-start|watchdog-stop|watchdog-status` (pid file + identity check, the
+  `forward-*` shape). A **developer** node runs no forwarder, so nothing to watch. Exactly one
+  supervisor per forwarder in every topology; `cmd_stop` stops the watchdog *before* the forwarder
+  so an in-flight enforced restart cannot relaunch it after shutdown.
+- **Restart safety in `catalyst-monitor.sh`.** The forwarder's start/stop/restart share a portable
+  `mkdir`-based mutation lock (stock macOS has no `flock`) with a dead-owner stale reaper and a
+  bounded wait; `forward-restart` holds **one** lock across both halves, so a concurrent
+  `catalyst-stack start` can't observe the momentarily-stopped forwarder and launch a second,
+  untracked one. Its `INT`/`TERM` handler **exits** rather than returning (a returning handler would
+  let an aborted restart resume into the start half). Pid files are matched by process **identity**,
+  not just `kill -0`, and fail closed — a recycled pid is treated as a stale file, never a kill
+  target. Covered by `__tests__/daemon-watchdog-supervision.test.sh`.
+
+### Two-axis worker state & the recordTransition chokepoint (CTL-764)
 
 Every worker ticket has **two orthogonal axes** — never blurred:
 

@@ -452,6 +452,22 @@ node plugins/dev/scripts/execution-core/registry.mjs upsert \
   --status Todo
 ```
 
+**The `team` ↔ `teamKey` contract.** A registry entry's `team` MUST equal — exactly, since the
+runtime compares with `===`/`!==` — the `catalyst.linear.teamKey` declared in
+`<repoRoot>/.catalyst/config.json`. The contract, its failure mode, and the full repair procedure
+(including preserving a custom `eligibleQuery` and cleaning up worktrees already cut from the wrong
+checkout) are documented in the canonical configuration reference:
+`website/src/content/docs/reference/configuration.md` → "The `team` ↔ `teamKey` contract".
+
+Implementation notes for this repo (CAT-52): the contract is declared by
+`docs/schemas/registry.schema.json` and observed by `teamIdentityOf()` in `registry.mjs`, which
+attaches a runtime-only `identity` field to each entry `listProjects()` returns — `matches: null`
+means "unknown", deliberately distinct from `false` ("mismatch"). `listProjects()` warns on a
+mismatch and `checkRegistryTeamIdentity()` in `doctor.mjs` grades it (WARN mismatch / INFO
+unverified / PASS all-verified, never FAIL).
+
+See ADR-029 for Catalyst's own CAT registration.
+
 ---
 
 ## Phase Signal Files

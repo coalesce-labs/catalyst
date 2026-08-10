@@ -191,7 +191,9 @@ export function fenceGuard(
     // — log loud + proceed with the prior always-write behavior — rather than
     // silently dropping a human escalation. The mutating write sites keep the
     // default (false = fail-closed): suppressing a mutating write on "can't tell"
-    // is the safe side; dropping a needs-human escalation is NOT.
+    // is the safe side; dropping a needs-human escalation is NOT. SCOPE: this
+    // loosens ONLY the "ownership is unknown" case. A projection that positively
+    // names a foreign owner is a KNOWN answer, and stays fail-closed regardless.
     proceedOnMissingGeneration = false,
     // CTL-1329 interlock: fired whenever a generation could not be determined
     // (regardless of proceedOnMissingGeneration), BEFORE the proceed/fail-closed
@@ -250,11 +252,18 @@ export function fenceGuard(
     // so a self-owned-but-STALE row still fails closed. A foreign/unowned/absent row
     // seeds nothing → fail-closed for mutating sites (fail-open only where the site
     // opted into proceedOnMissingGeneration).
+    // Set when the projection POSITIVELY names another host as the current owner
+    // (a non-empty ownerHost !== self). That is a different answer from "we could
+    // not determine ownership": a known-foreign owner stays fail-CLOSED even at an
+    // escalation site (see the missing-generation branch below).
+    let foreignOwner = null;
     if (!Number.isFinite(generation) && gateway) {
       try {
         const f = readFence(ticket);
         if (Number.isFinite(f?.generation) && f.ownerHost === self) {
           generation = f.generation;
+        } else if (typeof f?.ownerHost === "string" && f.ownerHost && f.ownerHost !== self) {
+          foreignOwner = f.ownerHost;
         }
       } catch (err) {
         // A throwing gateway/SQLite read is a real (rare) fault, not the common
@@ -264,6 +273,25 @@ export function fenceGuard(
       }
     }
     if (!Number.isFinite(generation)) {
+      // KNOWN-FOREIGN ≠ UNKNOWN. proceedOnMissingGeneration exists for "we cannot
+      // tell who owns this ticket" — never for "we can tell, and it is not us".
+      // Without this branch a stale host whose worker dir lost cluster-generation.json
+      // would decline to borrow the foreign generation above, fall through as merely
+      // "missing", and fail OPEN — applying the STICKY needs-human label to the new
+      // owner's ACTIVE ticket, which the new owner has no local once-marker to clear.
+      // The escalation is not lost fleet-wide: the ticket's real owner reaches the
+      // same site itself. Returns before onMissingGeneration because this is a
+      // genuine fence suppression — the call site's own fail-closed branch arms
+      // whatever cooldown it keeps for that case.
+      if (foreignOwner) {
+        logger?.warn?.(
+          { ticket, foreignOwner, self },
+          "ctl-863: fenceGuard read NO local generation and the projection names a FOREIGN owner — " +
+            "SUPPRESSING the guarded write (fail-closed) even at an escalation site; " +
+            "the current owner escalates this ticket itself.",
+        );
+        return false;
+      }
       if (typeof onMissingGeneration === "function") {
         try {
           onMissingGeneration({ ticket });

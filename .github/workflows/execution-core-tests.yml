@@ -95,6 +95,12 @@ on:
       - "plugins/dev/scripts/migrate-dual-harness.sh"
       - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
+      # CTL-1639: worktree-salvage-sites.test.sh scans phase-teardown/SKILL.md for
+      # the salvage-before-destroy source-order invariant. That skill lives OUTSIDE
+      # plugins/dev/scripts/ (not covered by the scripts/** glob), so a change
+      # confined to the teardown removal block would skip this workflow and the
+      # ordering backstop couldn't catch a destroy-before-salvage regression.
+      - "plugins/dev/skills/phase-teardown/**"
       # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
       # every member package's install (incl. execution-core, broker, otel-forward).
       - "package.json"
@@ -142,7 +148,16 @@ jobs:
 
   execution-core-unit-tests:
     needs: detect-changes
-    if: needs.detect-changes.outputs.relevant == 'true'
+    # Fail CLOSED: `needs.*.result` is only 'success' when `detect-changes` completed without
+    # error. If `dorny/paths-filter` (or the checkout before it) errors — API unavailable, token
+    # lacks permission, runner outage — `detect-changes` fails and its `relevant` output is unset,
+    # which would make a naive `needs.detect-changes.outputs.relevant == 'true'` check false and
+    # SKIP this required job. A skipped required check still posts a `skipped` conclusion, which
+    # satisfies branch protection — so a PR touching execution-core could merge without the suite
+    # ever running. Running whenever detect-changes did NOT succeed (result != 'success') treats
+    # an errored/cancelled detector as "assume relevant" and runs the suite; `!cancelled()` still
+    # keeps this job from running if the *workflow run itself* was cancelled.
+    if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.relevant == 'true') }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -187,6 +202,13 @@ jobs:
         # Walk its static graph.
         run: bun build install-lifecycle.mjs --target=node --outfile /dev/null
 
+      - name: Verify service-manifest import graph (bun build resolution check, CTL-1473)
+        # CTL-1473: service-manifest.mjs is the per-class service truth consumed by
+        # install-lifecycle.mjs and doctor.mjs. It has no heavy runtime deps (pure
+        # constants + helpers), so a bad import silently breaks both consumers. Walk
+        # its static graph before merge.
+        run: bun build service-manifest.mjs --target=node --outfile /dev/null
+
       - name: Verify catalyst-linear import graph (node-loadability contract, CTL-1391)
         # CTL-1391: linear-cli.mjs is the catalyst-linear driver, a separate CLI entrypoint
         # NOT in daemon.mjs's graph. Its node-loadability is load-bearing — the write-reject +
@@ -210,6 +232,23 @@ jobs:
         # CLI registration) that the unit tests bypass.
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-install.test.sh
+
+      - name: daemon-watchdog supervision test (CTL-1502)
+        # Covers the bash half of the CTL-1502 Codex P1 fixes: node-class gating
+        # (the standalone watchdog runs on a monitor node and NOT on a worker, so
+        # a forwarder is never double-supervised), pid-identity checks (a recycled
+        # pid is never reported live and never signalled), and lock discipline
+        # (stale-owner reaping, a TERM handler that exits rather than resuming,
+        # and one lock spanning forward-restart's stop+start).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/daemon-watchdog-supervision.test.sh
+
+      - name: forward-restart subcommand test (CTL-1502)
+        # Exercises the real catalyst-monitor.sh forward-restart transaction
+        # (cold start, hot swap, back-to-back idempotence, usage/dispatch wiring)
+        # against a stubbed forwarder — nothing else in CI covers that path.
+        working-directory: plugins/dev/scripts
+        run: bash execution-core/__tests__/forward-restart.test.sh
 
       - name: CLI reference doc drift test
         # CTL-1387: asserts website/src/content/docs/reference/catalyst-cli.md
@@ -254,6 +293,13 @@ jobs:
         # flags (source/result/op top-level attrs + numeric age_ms).
         working-directory: plugins/dev/scripts
         run: bash __tests__/canonical-event.test.sh
+
+      - name: catalyst-stack shipper ephemeral-path guard test (CTL-1473)
+        # CTL-1473: guards that install-services (--print and real) refuses to bake
+        # an ephemeral config path (worktree or /tmp). Uses CATALYST_FORCE_BAKE_DIR +
+        # CATALYST_LAYER2_CONFIG_FILE seams; no launchctl calls.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-shipper-guard.test.sh
 
       - name: gh-pr-comment helper test (CTL-1496)
         # Covers PR_NUMBER numeric validation + the idempotent existing-comment
@@ -304,6 +350,28 @@ jobs:
         # same round wired both in together.
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/linear-app-actor.test.sh
+
+      - name: worktree-salvage primitive + telemetry unit tests (CTL-1639)
+        # lib/worktree-salvage.sh snapshots a worktree's unpushed commits +
+        # uncommitted changes to ~/catalyst/salvage/ BEFORE any destructive
+        # removal. It is the single-source-of-truth primitive four destructive
+        # sites (dispatcher L3, orphan-sweep, phase-teardown, JS reaper) call, so
+        # a regression here silently re-opens the data-loss hole the ticket
+        # closed. Lives under lib/__tests__/ (like linear-app-actor above), so it
+        # needs its own explicit step — the CI job's enumerated allowlist does not
+        # glob that directory.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/worktree-salvage.test.sh
+
+      - name: worktree-salvage destroy-site wiring tests (CTL-1639)
+        # Deterministic source-order invariant: each destructive bash site
+        # (phase-agent-dispatch L3, orphan-sweep, phase-teardown SKILL.md) must
+        # source the salvage lib AND place its salvage_worktree call BEFORE the
+        # destructive git op. The dispatcher + teardown suites are not CI-gated
+        # (locally flaky), so this static guard is the CI backstop that a future
+        # refactor can't move a destroy ahead of its salvage.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/worktree-salvage-sites.test.sh
 
       - name: daemon shared-GitHub-credential projection test (CTL-1612)
         # Covers _project_shared_github_token: the shared SOPS file WINS over a stale
@@ -481,6 +549,18 @@ jobs:
         run: bash __tests__/draft-pr-lib.test.sh
 
       - name: Run stable unit tests
+        # CTL-1678 round-7 (Codex): the four drain suites added below
+        # (__tests__/config-drain-disabled, __tests__/doctor-drain-disabled,
+        # cli/drain, drain-event) had NO required-CI coverage, so every regression
+        # they guard could recur while CI stayed green.
+        #
+        # The fifth suite Codex named, __tests__/verify-node.test.sh (the BASH half
+        # of the same two-engine contract), is deliberately NOT wired in: it is
+        # ALREADY RED on main. Its monitor-class case stubs only _vn_resolve, so
+        # cmd_verify_node runs the real _vn_broker_running / _vn_monitor_running
+        # probes and FAILs wherever the stack is not running — which includes every
+        # CI runner. Wiring it in as required would block every PR. Fixing its seam
+        # coverage is tracked on CTL-1685 rather than smuggled into this PR.
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
         # timing / sandbox incompatibility:
         #
@@ -545,6 +625,7 @@ jobs:
             unowned-pr-verify.test.mjs \
             stall-janitor-throttle.test.mjs \
             phantom-worker-dir.test.mjs \
+            in-flight-supersede.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
             claim.test.mjs \
@@ -557,7 +638,17 @@ jobs:
             cluster-claim.test.mjs \
             comms-drain.test.mjs \
             codex-run-phase-agent.test.mjs \
+            daemon-watchdog-alert.test.mjs \
+            daemon-watchdog-config.test.mjs \
+            daemon-watchdog-predicates.test.mjs \
+            daemon-watchdog-probe.test.mjs \
             config-pino-fallback.test.mjs \
+            __tests__/config-drain-disabled.test.mjs \
+            __tests__/doctor-drain-disabled.test.mjs \
+            __tests__/doctor-registry-team-identity.test.mjs \
+            __tests__/registry-team-identity.test.mjs \
+            cli/drain.test.mjs \
+            drain-event.test.mjs \
             config-node-class.test.mjs \
             config-cloud-token-env.test.mjs \
             config.test.mjs \
@@ -649,12 +740,16 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            recovery-fix-backoff.test.mjs \
+            recovery-orphan-stale-e2e.test.mjs \
             pr-block-probe.test.mjs \
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
+            unstuck-orphan-merge.test.mjs \
+            orphan-sweep-explain.test.mjs \
             unstuck-escalate-seam.test.mjs \
             unstuck-sweep.test.mjs \
             lib/catalyst-resource.test.mjs \
@@ -670,6 +765,7 @@ jobs:
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
             updater/updater-tracing.test.mjs \
+            service-manifest.test.mjs \
             github-auth-preflight.test.mjs \
             publish-preflight.test.mjs \
             publish-preflight-config.test.mjs \

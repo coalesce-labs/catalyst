@@ -204,7 +204,10 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
     // worker-dir censuses (stall-janitor.mjs, unstuck-sweep.mjs), so a descriptive
     // id like "CTL-1240-STALL" is skipped as debris and the closure under test never
     // runs — the spy stays empty and the assertion fails for the wrong reason.
-    const STALL_TICKET = "STALL-1240";
+    // Codex #3148 P1: use the canonical PROJ-<n> placeholder prefix — AGENTS.md
+    // "Version Control" keeps portable fixtures on PROJ rather than committing a
+    // real team's prefix.
+    const STALL_TICKET = "PROJ-1240";
 
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     // Seed the stalled signal — stalledReason triggers the J3 isLinearTerminal probe.
@@ -234,9 +237,22 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
 
     // The stall-clear census isLinearTerminal closure must have consulted the gateway.
     // PRE-FIX: fetchTicketState(id) bare → spy never called → assertion fails.
-    // Pinned to stall-janitor.mjs so an unrelated pass resolving the same ticket
-    // cannot satisfy this on the census's behalf.
-    expect(gateway.calledFrom(STALL_TICKET, "stall-janitor.mjs")).toBe(true);
+    //
+    // Codex #3148 P2: pinned to the EXACT collector frame, not the module. Both the
+    // J3 stall-clear census and the J4 terminal-signal GC census live in
+    // stall-janitor.mjs and resolve this same worker through separately wired gateway
+    // closures, so a "stall-janitor.mjs" pin can be satisfied by J4 on J3's behalf —
+    // leaving the test green through the very regression it exists to catch.
+    //
+    // Scope of what was verified: mutating J3 back to bare fetchTicketState(id) fails
+    // this test. It also failed under the OLD module-name pin in an isolated run, so
+    // the blindness did NOT reproduce here — Codex reported it under a preloaded fresh
+    // liveness snapshot (as occurs in the full suite), which this file does not set up.
+    // The frame pin is applied regardless: it is strictly tighter than the module pin,
+    // cannot be satisfied by a sibling census, and is the assertion this test means.
+    expect(
+      gateway.calledFrom(STALL_TICKET, "defaultCollectStallClearCandidates"),
+    ).toBe(true);
   });
 
   // ── Site 5: default unstuck census (scheduler.mjs:5356–5361) ─────────────────
@@ -254,7 +270,7 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
     // "CTL-1240-STUCK" was likewise skipped by the census; this assertion only
     // passed because another pass in the same tick happened to consult the spy,
     // so it was not actually exercising the unstuck census closure.
-    const STUCK_TICKET = "STUCK-1240";
+    const STUCK_TICKET = "PROJ-1241";
 
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     writeSignal(STUCK_TICKET, "implement", "stalled", {
@@ -282,6 +298,8 @@ describe("CTL-1240 Phase 2 — census closures use { cache, gateway }", () => {
     // The unstuck census isLinearTerminal closure must have consulted the gateway.
     // PRE-FIX: fetchTicketState(id) bare → spy never called → assertion fails.
     // Pinned to unstuck-sweep.mjs for the same reason as the stall-clear case.
-    expect(gateway.calledFrom(STUCK_TICKET, "unstuck-sweep.mjs")).toBe(true);
+    expect(
+      gateway.calledFrom(STUCK_TICKET, "defaultCollectUnstuckCandidates"),
+    ).toBe(true);
   });
 });

@@ -46,47 +46,50 @@ gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
 Group comments into threads using `in_reply_to_id` — read the full thread before acting on any
 individual comment, since later replies may refine or resolve earlier ones.
 
-## Step 1b: Determine the review round (convergence policy)
+## Step 1.5: Determine the Review Round (per reviewer)
 
-This skill runs once per review round on a PR (bot review, human review, or a re-run after
-pushing fixes). Fleet-wide policy: P1 findings get fixed every round; P2-and-lower findings get
-fixed inline only on round 1 — from round 2 onward they're filed to a follow-up ticket instead
-of chased indefinitely. See `docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md` (repo
-root) for the full policy this section implements.
+Automated reviewers re-review after every remediation push, and each round can surface new,
+smaller findings. Track the round **per bot**, not globally — a PR can have more than one
+automated reviewer (this repo's `create-pr`/`merge-pr` already anticipate that), and applying one
+bot's count to another bot's findings misclassifies them:
 
 ```bash
-ROUND=$(( $(git log --oneline --grep="address review comments from PR #${PR_NUMBER}" | wc -l) + 1 ))
-echo "review-comments: round ${ROUND} for PR #${PR_NUMBER}"
+# Round for a specific bot login = how many times that login has submitted a review on this PR.
+review_round_for_bot() {
+  local bot_login="$1"
+  gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+    --jq "[.[] | select(.user.login == \"${bot_login}\")] | length"
+}
 ```
 
-`ROUND == 1` → address P1 and P2 alike (Step 3, unchanged). `ROUND >= 2` → P1 findings still get
-fixed inline; P2-or-lower findings go to Step 3b (follow-up ticket) instead of Step 3.
+When categorizing a finding (Step 2), look up its round using **that finding's own reviewer
+login** — never one shared "current round" variable:
+
+```bash
+FINDING_BOT_LOGIN="…"   # the .user.login on the review/review-comment this finding came from
+REVIEW_ROUND=$(review_round_for_bot "$FINDING_BOT_LOGIN")
+```
+
+- `REVIEW_ROUND == 1` → P0/P1 mandatory-fix; use judgment on P2/P3 — fix it now if it's real,
+  cheap, and clearly correct, otherwise defer (Step 2/3).
+- `REVIEW_ROUND >= 2` → P0/P1 stays mandatory-fix; P2-and-lower is **always** deferred, no
+  exceptions (see "Deferring low-priority findings after round one" under Step 3).
+
+This exists because fine-grained automated reviewers keep surfacing progressively smaller findings
+on every pass — chasing all of them to zero, round after round, burns disproportionate time and
+tokens for diminishing value. Round 1 still gets a real look (early findings are often genuine
+gaps); it's only the rounds after that narrow strictly to P0/P1.
 
 ## Step 2: Categorize Comments
 
-| Category | Severity | Action |
-|----------|----------|--------|
-| **Code change requested — correctness/security/build-breaking** | P1 | Implement the fix (every round) |
-| **Code change requested — style/naming/simplification/nit** | P2 | Round 1: implement. Round 2+: Step 3b (ticket) |
-| **Question / clarification** | — | Read context and draft a reply |
-| **Suggestion (optional)** | P2 | Round 1: evaluate/implement. Round 2+: Step 3b (ticket) |
-| **Approval / praise** | — | No action needed |
-| **Already resolved** | — | Skip (check if thread is marked resolved) |
-
-Severity: classify by substance against the P1 definition (correctness bug, security issue, data
-loss, broken build/tests, spec violation) — don't just trust a reviewer's own numeric label. Only
-defer to an explicit tag when its vocabulary maps cleanly onto blocking-vs-not
-(`critical`/`blocking` → P1, `minor`/`nit`/`suggestion` → P2). Common bot P0–P3 scales often do
-NOT map cleanly: Codex, for instance, uses P2 for an ordinary, still-real correctness defect, not
-merely a style nit — treating every bot "P2" as automatically deferrable would let a genuine bug
-slip into a follow-up ticket instead of getting fixed. When genuinely unsure, treat it as P1
-rather than defer it.
-
-**Round-carryover exemption:** a P2 finding raised in round 1 that simply never got fixed
-(omitted, or the fix didn't land) is still owed from round 1 — it does not become ticket-eligible
-just by reappearing in round 2. Round-2+ ticketing is for genuinely new findings (or a
-previously-fixed one a reviewer reopens with fresh critique), not a way for an incomplete round-1
-remediation to dodge the round it was actually due in.
+| Category | Action |
+|----------|--------|
+| **Code change requested** | P0/P1: implement the fix, every round. P2/P3: round 1 is a judgment call; round 2+ always defers — see below |
+| **Question / clarification** | Read context and draft a reply |
+| **Suggestion (optional)** | Evaluate — implement if it improves the code, explain trade-off if not |
+| **Deferred (P2/P3, per round policy)** | File a follow-up ticket capturing the finding; reply linking it; do not implement inline — see "Deferring low-priority findings after round one" |
+| **Approval / praise** | No action needed |
+| **Already resolved** | Skip (check if thread is marked resolved) |
 
 For each actionable comment, note:
 - File path and line number
@@ -107,8 +110,9 @@ For each actionable comment that is P1, or P2 on round 1, in order:
 P2-or-lower comments on round 2+ skip this step entirely — see Step 3b.
 
 **Handling disagreements:** If a reviewer's suggestion would introduce a regression, reduce type
-safety, or conflict with project conventions, don't silently ignore it. Draft a respectful reply
-explaining the trade-off and let the user decide whether to post it. Present it as:
+safety, or conflict with project conventions — regardless of its priority tag or which round
+produced it — don't silently ignore it and don't auto-defer it via ticket. Draft a respectful
+reply explaining the trade-off and let the user decide whether to post it. Present it as:
 ```
 Reviewer @name suggested X on file.ts:42.
 I think this would [concern]. Draft reply:
@@ -116,6 +120,33 @@ I think this would [concern]. Draft reply:
    Happy to discuss if you feel strongly about this."
 Post this reply? [y/N]
 ```
+Classify a finding as a disagreement/judgment call **before** applying the round-based P2 policy
+below — a P2 tag does not make a finding non-judgmental.
+
+**Deferring low-priority findings after round one:** applies only to **addressable findings
+authored by the automated reviewer** — never a human reviewer's comment, which always goes through
+existing human-request handling (`phase-monitor-merge` requires human change requests to be
+surfaced for operator action, never addressed programmatically) — and only once the disagreement
+check above has ruled out a judgment call.
+
+- **Round 1**: P0/P1 always gets fixed. For P2/P3, use judgment — fix it now if it's real, cheap,
+  and clearly correct; otherwise defer (below).
+- **Round 2+**: P0/P1 always gets fixed. P2/P3 is always deferred — no exceptions, even a trivial
+  one-liner.
+
+To defer a finding:
+1. File a follow-up ticket capturing it (file, line, what the reviewer flagged) — same team as the
+   PR's ticket, Backlog status.
+2. Reply on the thread linking the follow-up ticket, then resolve the thread (Step 5).
+
+If ticket filing fails (Linearis unavailable, no usable Linear credentials), don't let that block
+the thread indefinitely — fall back to fixing the finding inline instead (the normal Step 3 path).
+An optional dependency should never become load-bearing for getting a PR unstuck.
+
+This is a policy decision, not itself a judgment call: it applies identically in interactive and
+headless mode and does NOT go through the `[y/N]` prompt above. It keeps AGENTS.md's "every review
+thread resolved" rule intact — deferral resolves the thread via that reply, it does not leave it
+open.
 
 ## Step 3b: File a follow-up ticket for deferred P2 findings (round 2+)
 
@@ -143,6 +174,10 @@ mode safe for `claude --bg` workers (no stdin available):
 
 - **Addressable findings** (code change requested, clear fix) → address in code + resolve the
   thread via `resolveReviewThread` mutation (same as the interactive path). Unchanged.
+- **Deferred findings** (bot-authored, non-judgment-call P2/P3 — round 1 by judgment, round 2+
+  always) → same in both modes: file the follow-up ticket, reply, resolve the thread. Not gated on
+  `--headless` — see "Deferring low-priority findings after round one" above; this is a policy
+  decision, not a judgment call.
 - **Disagreement / judgment-call findings** → the `Post this reply? [y/N]` prompt is **SKIPPED** in headless mode.
   Instead, the thread is left unresolved and a structured record is appended to the ticket's
   worker directory under the orchestrator dir:
@@ -186,7 +221,7 @@ workflow. Summary:
 
 - **Code change implemented** → resolve the thread
 - **Reply posted** (disagreement or clarification) → resolve the thread
-- **Deferred to follow-up ticket** (Step 3b) → resolve the thread after linking the ticket
+- **Deferred to follow-up ticket** (P2/P3, per the round policy) → resolve the thread
 - **Approval / praise** → already not blocking, skip
 - **Could not address** → do NOT resolve; leave for human review
 
@@ -218,11 +253,11 @@ workflow. Summary:
    - Analysis: The switch is more readable here and has exhaustiveness checking.
    - Draft reply ready — awaiting your decision.
 
-### Deferred to Follow-up Ticket (round {N}, P2-and-lower)
+### Deferred to Follow-up (low priority, per round policy)
 
 5. **@reviewer** on `path/to/file.ts:200`
-   - Comment: "Consider extracting this into a helper" (verbatim)
-   - Deferred to {TICKET-ID} per the PR review convergence policy; thread resolved.
+   - Comment: "Consider extracting this into a helper"
+   - Filed as: {TICKET-ID} — reply posted, thread resolved
 
 ### No Action Needed
 
@@ -233,7 +268,7 @@ workflow. Summary:
 - Code changes: {N}
 - Questions answered: {N}
 - Disagreements flagged: {N}
-- Deferred to follow-up ticket: {N}
+- Deferred to follow-up: {N}
 - Skipped (resolved/approval): {N}
 - Commit: {short hash} pushed to branch
 ```

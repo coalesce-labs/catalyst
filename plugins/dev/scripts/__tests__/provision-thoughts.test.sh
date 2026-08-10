@@ -357,6 +357,81 @@ else
   echo "  SKIP: system bash is not 3.x (no bash-3.2 empty-array repro on this host)"
 fi
 
+# ─── Phase 6: catalyst.thoughts.org is the thoughts owner ────────────────────
+# The regression this locks (Codex #3080 P1): a project's thoughts owner is NOT
+# derivable from its checkout path or its HumanLayer profile alias. The real
+# fleet shape — code under /github/<code-org>/<repo>, thoughts under a DIFFERENT
+# GitHub org, reached through a third name as the profile — must round-trip.
+echo ""
+echo "=== Phase 6: catalyst.thoughts.org drives the thoughts owner ==="
+
+REPO_SPLIT="$SCRATCH/github/code-org/product"
+mkdir -p "$REPO_SPLIT/.catalyst"
+cat > "$REPO_SPLIT/.catalyst/config.json" <<'EOF'
+{"catalyst":{"thoughts":{"org":"thoughts-org","profile":"alias","directory":"product-notes"}}}
+EOF
+REG_SPLIT="$SCRATCH/registry-split.json"
+cat > "$REG_SPLIT" <<EOF
+{"projects":[{"repoRoot":"$REPO_SPLIT","team":"SPL"}]}
+EOF
+
+SPLIT_OUT="$(run_provision --registry "$REG_SPLIT")"
+SPLIT_JSON="$(extract_json "$SPLIT_OUT")"
+
+assert_grep "split-org: clones the thoughts.org repo, not the checkout's own org" \
+  "$SPLIT_OUT" "thoughts-org/thoughts"
+assert_not_grep "split-org: never derives an HLT dir from the CODE org" \
+  "$SPLIT_OUT" "hlt/code-org"
+assert_not_grep "split-org: never treats the profile alias as a GitHub org" \
+  "$SPLIT_OUT" "hlt/alias"
+assert_eq "split-org: profile key is the declared alias, pointing at the thoughts.org HLT path" \
+  "$(jq -r '.profiles["alias"].thoughtsRepo // "MISSING"' <<<"$SPLIT_JSON")" \
+  "$SCRATCH/hlt/thoughts-org/thoughts"
+assert_eq "split-org: repoMapping profile is the alias (org and profile may differ)" \
+  "$(jq -r --arg p "$REPO_SPLIT" '.repoMappings[$p].profile // "MISSING"' <<<"$SPLIT_JSON")" \
+  "alias"
+assert_eq "split-org: repoMapping repo still comes from .thoughts.directory" \
+  "$(jq -r --arg p "$REPO_SPLIT" '.repoMappings[$p].repo // "MISSING"' <<<"$SPLIT_JSON")" \
+  "product-notes"
+
+# A project declaring ONLY a profile falls back to it as the org — loudly, since
+# that is right only when the two names coincide.
+REPO_PROF="$SCRATCH/github/code-org/legacy"
+mkdir -p "$REPO_PROF/.catalyst"
+cat > "$REPO_PROF/.catalyst/config.json" <<'EOF'
+{"catalyst":{"thoughts":{"profile":"legacy-org"}}}
+EOF
+REG_PROF="$SCRATCH/registry-prof.json"
+cat > "$REG_PROF" <<EOF
+{"projects":[{"repoRoot":"$REPO_PROF","team":"LEG"}]}
+EOF
+
+PROF_OUT="$(run_provision --registry "$REG_PROF")"
+assert_grep "profile-only: WARNs that thoughts.org is unset before falling back" \
+  "$PROF_OUT" "catalyst.thoughts.org is unset"
+assert_grep "profile-only: falls back to the profile as the org (does not abort)" \
+  "$PROF_OUT" "legacy-org/thoughts"
+
+# --primary-org beats registry ORDER for the global fallback (Codex #3080 P1).
+REG_ORDER="$SCRATCH/registry-order.json"
+cat > "$REG_ORDER" <<EOF
+{"projects":[
+  {"repoRoot":"$REPO_SPLIT","team":"SPL"},
+  {"repoRoot":"$REPO_HT","team":"CAT"}
+]}
+EOF
+ORDER_OUT="$(env -i PATH="$PATH" HOME="$SCRATCH/home" USER="testnode" \
+  HLT_ROOT="$SCRATCH/hlt" HL_CONFIG="$HL_CONFIG_FILE" \
+  bash "$PROVISION" --dry-run --no-clone --registry "$REG_ORDER" \
+  --primary-org operator-org 2>&1)"
+ORDER_JSON="$(extract_json "$ORDER_OUT")"
+assert_eq "--primary-org wins over the registry's first project" \
+  "$(jq -r '.defaultProfile' <<<"$ORDER_JSON")" "operator-org"
+assert_eq "--primary-org sets the global thoughtsRepo" \
+  "$(jq -r '.thoughtsRepo' <<<"$ORDER_JSON")" "$SCRATCH/hlt/operator-org/thoughts"
+assert_grep "--primary-org echoes the resolved primary for the caller to read back" \
+  "$ORDER_OUT" "Primary org: operator-org"
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Results ==="

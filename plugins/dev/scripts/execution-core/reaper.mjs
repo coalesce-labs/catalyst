@@ -14,9 +14,10 @@
 // managed-agents port lands, only the executors here swap to control-plane
 // APIs. The schema, the producers, and the consumer count are all stable.
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { scanEventsChunked } from "./event-tail.mjs";
 import { shortIdFromSessionId, isSelfSession } from "./claude-ids.mjs";
 import { emitReapIntent, REAP_INTENT_TYPES } from "./reap-intent.mjs";
@@ -90,12 +91,25 @@ export const CLEANUP_GRACE_MS = 60_000;
 //     state (state === "MERGED" || mergedAt != null) via an injectable prView
 //     seam, fail-CLOSED on any error/unresolvable PR; event.force === true is
 //     kept as a no-gh fast-path for the manual CLI MERGED row.
+// `priorVerdict` (CTL-1639 Codex round-4 P1) — when the caller is REVALIDATING
+// after a prior call already confirmed the merge/provenance facts for this
+// SAME event (the post-salvage re-check in `_handlePrMergedCleanup`), pass
+// the prior verdict object back in. `confirmedMerged`/`orchProvenance` are
+// facts about the PR/registry, not the worktree's live local state — a PR
+// that was MERGED does not become un-merged a few seconds/minutes later
+// while salvage runs, so re-resolving them is redundant, synchronous
+// (`gh pr list` + `gh pr view`, no subprocess timeout) work on the daemon's
+// shared event loop for no new information. Reusing them skips that network
+// round-trip entirely; the MUTABLE local safety evidence this re-check exists
+// to catch — live `claude agents`/lsof procLive, and a fresh git dirty/
+// unmerged read — is still fully re-run every time, unconditionally.
 export async function defaultAssessWorktreeRemoval(
   event,
   readAgents = () => listClaudeAgentsResult(),
   orchDirs = listOrchDirs(),
   prView = makePrView((/* ticket */) => event.worktree_path),
   resolvePr = (e) => defaultResolvePrForEvent(e),
+  priorVerdict = null,
 ) {
   const gateRunGit = (args) =>
     spawnSync("git", ["-C", event.worktree_path, ...args], { encoding: "utf8" });
@@ -105,6 +119,8 @@ export async function defaultAssessWorktreeRemoval(
   // session". (getAgentsCached().agents ALWAYS returns an array — cold cache → []
   // — which would silently defeat the gate; CTL-791 adversarial review.)
   // `readAgents` is injectable so a test can drive the failed-read branch.
+  // Always re-run fresh — this is exactly the mutable local evidence a
+  // post-salvage re-check exists to catch, never skipped/reused.
   let agentsList = [];
   let agentsOk = false;
   try {
@@ -124,8 +140,17 @@ export async function defaultAssessWorktreeRemoval(
   // (the manual CLI MERGED row) short-circuits with no gh round-trip; every other
   // path resolves the ticket's PR and asks gh. Fail-CLOSED: an unresolvable PR or
   // any gh/parse error leaves confirmedMerged false → "not-merged" → defer.
+  //
+  // Reuse from `priorVerdict` when offered — only if it was itself confirmed
+  // true; a prior `false` might just mean "not resolved yet" rather than
+  // "definitively not merged", so a false prior value is NOT trusted as a
+  // final answer and this call still resolves it for real (fail-closed stays
+  // fail-closed either way — the retry can only make confirmedMerged MORE
+  // permissive by upgrading a real, current gh answer, never less).
   let confirmedMerged = event.force === true;
-  if (!confirmedMerged) {
+  if (!confirmedMerged && priorVerdict?.confirmedMerged === true) {
+    confirmedMerged = true;
+  } else if (!confirmedMerged) {
     try {
       const pr = resolvePr(event);
       if (pr?.number) {
@@ -137,18 +162,29 @@ export async function defaultAssessWorktreeRemoval(
     }
   }
 
-  return isSafeToRemoveWorktree(
+  // orchProvenance is a static local registry read (cheap, no network) — reuse
+  // when offered mainly for consistency with confirmedMerged's reuse, not
+  // because it's independently expensive.
+  const orchProvenance =
+    typeof priorVerdict?.orchProvenance === "boolean"
+      ? priorVerdict.orchProvenance
+      : hasOrchProvenance(event.ticket, { orchDirs });
+
+  const result = isSafeToRemoveWorktree(
     event.worktree_path,
     {
       ticket: event.ticket,
       repoRoot: event.worktree_path,
       branch: event.branch,
       terminal: true,
-      prMerged: confirmedMerged, // confirmed GitHub MERGED (force fast-path OR prView)
-      orchProvenance: hasOrchProvenance(event.ticket, { orchDirs }),
+      prMerged: confirmedMerged, // confirmed GitHub MERGED (force fast-path OR prView OR reused)
+      orchProvenance,
     },
     { runGit: gateRunGit, agentsList, agentsOk, procLive: lsofCwdUnder(event.worktree_path) === true },
   );
+  // Additive fields (existing callers destructure only .safe/.reasons) so a
+  // SUBSEQUENT call on the same event can reuse these via `priorVerdict`.
+  return { ...result, confirmedMerged, orchProvenance };
 }
 
 // defaultResolvePrForEvent — CTL-1218 Part B. Resolve the GitHub PR descriptor
@@ -206,6 +242,11 @@ export class Reaper {
     // worktree-path archive; tests inject stubs to drive each branch.
     assessWorktreeRemoval = defaultAssessWorktreeRemoval,
     archiveWorktree = archiveWorktreeArtifacts,
+    // CTL-1639: snapshot unpushed work to ~/catalyst/salvage/ before the
+    // PR-merged worktree is archived+removed. Default shells out to the bash
+    // salvage primitive; tests inject a recording stub. Fail-open — a salvage
+    // failure never blocks the removal.
+    salvageWorktree = defaultSalvageWorktree,
     // CTL-649 safety guards:
     //  - includeInteractive: opt-in to reaping interactive (human) sessions.
     //    Default false — the daemon never opts in, so a stepped-away human
@@ -245,6 +286,7 @@ export class Reaper {
     this.cwdExists = cwdExists;
     this.assessWorktreeRemoval = assessWorktreeRemoval;
     this.archiveWorktree = archiveWorktree;
+    this.salvageWorktree = salvageWorktree;
     this.includeInteractive = includeInteractive;
     this.minIdleMs = minIdleMs;
     this.lastSeenMs = lastSeenMs;
@@ -568,6 +610,78 @@ export class Reaper {
         worktreePath: event.worktree_path,
         branch: event.branch,
         reason: `unsafe:${(verdict.reasons || []).join(",")}`,
+      });
+      return;
+    }
+    // CTL-1639: snapshot unpushed work to ~/catalyst/salvage/ BEFORE any
+    // destructive op (archive copies only signal docs; gitWorktreeRemove below
+    // is lossy). Runs only past the verdict.safe gate above — we never salvage a
+    // tree we are not about to remove. Best-effort/fail-open: a salvage failure
+    // never blocks the archive+remove.
+    try {
+      // Await so the snapshot completes BEFORE the archive+remove below, and so a
+      // hung salvage is bounded by the seam's own timeout rather than racing the
+      // removal. Forward the ACTUAL triggering reason (event.reason when present,
+      // else the event name) so the salvage telemetry attributes direct merged
+      // cleanups and targeted orphan reaps distinctly (Codex P2).
+      await this.salvageWorktree({
+        worktreePath: event.worktree_path,
+        ticket: event.ticket,
+        branch: event.branch,
+        orchId: event.orch_id,
+        reason: event.reason || event.event,
+      });
+    } catch {
+      /* fail-open */
+    }
+    // CTL-1639 Codex round-2 P1: salvage can spend seconds or reach its
+    // 120s timeout, widening the interval between the sole safety
+    // assessment above and the removal below. A worker or operator can
+    // enter the worktree during that window; reassess BOTH the presweep
+    // (live sessions) and the CTL-791 evidence gate immediately after the
+    // await, from the fresh post-salvage state, rather than acting on the
+    // now-stale pre-salvage verdict. Mirrors the dispatcher's L3 fix
+    // (`_removal_guard_ok` re-asserted right before `git worktree remove
+    // --force`, phase-agent-dispatch).
+    const stillLiveAfterSalvage = await this._handleWorktreePresweep({
+      worktree_path: event.worktree_path,
+    });
+    if (stillLiveAfterSalvage > 0) {
+      await this.emit("pr.merged.cleanup-failed", {
+        ticket: event.ticket,
+        worktreePath: event.worktree_path,
+        branch: event.branch,
+        reason: "sessions-still-live-post-salvage",
+      });
+      return;
+    }
+    // CTL-1639 Codex round-4 P1: reuse the already-confirmed merge/provenance
+    // facts from `verdict` above instead of re-resolving them — those facts
+    // are about the PR/registry, not the worktree's live local state, so
+    // re-running the synchronous `gh pr list`/`gh pr view` round-trip here
+    // (on the daemon's shared event loop, with no subprocess timeout) buys no
+    // new information. The mutable local safety evidence (live agents/lsof,
+    // fresh git dirty/unmerged state) below is still fully re-verified, which
+    // is the actual point of this post-salvage re-check.
+    const verdictAfterSalvage = await this.assessWorktreeRemoval(
+      event,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      verdict,
+    );
+    if (!verdictAfterSalvage.safe) {
+      deferWorktreeCleanup(
+        event.worktree_path,
+        { ticket: event.ticket, branch: event.branch, reasons: verdictAfterSalvage.reasons || [] },
+        { emit: (t, f) => this.emit(t, f) },
+      );
+      await this.emit("pr.merged.cleanup-failed", {
+        ticket: event.ticket,
+        worktreePath: event.worktree_path,
+        branch: event.branch,
+        reason: `unsafe-post-salvage:${(verdictAfterSalvage.reasons || []).join(",")}`,
       });
       return;
     }
@@ -1074,6 +1188,134 @@ function mapFields(fields = {}) {
     out[map[k] ?? k] = v;
   }
   return out;
+}
+
+// CTL-1639: bound the async salvage so a pathological worktree (huge unpushed
+// history / a large untracked tree) can never wedge the shared daemon loop's
+// cleanup indefinitely — salvage is fail-open, so a timeout kills the child and
+// the removal proceeds. Overridable for tests.
+const SALVAGE_TIMEOUT_MS = Number(process.env.CATALYST_SALVAGE_TIMEOUT_MS) || 120_000;
+
+// CTL-1639: default salvage seam — shell out to the single-source-of-truth bash
+// primitive (lib/worktree-salvage.sh) so the git/bundle logic lives in exactly
+// one place (no .mjs twin). Snapshots unpushed commits + dirty tree to
+// ~/catalyst/salvage/ before the reaper removes a PR-merged worktree.
+//
+// ASYNC (Codex P1): the bundle/diff/tar can run for seconds on a large worktree,
+// and this runs on execution-core's shared event-loop thread (multi-second SYNC
+// subprocesses starve scheduler ticks — the documented wedge). So use async
+// `spawn` (child runs off-thread; the loop stays free while we await) instead of
+// `spawnSync`, and bound it with a timeout. Returns a Promise; the caller awaits
+// it BEFORE removing the worktree. Fail-open: any failure resolves { ok: false }
+// and the caller ignores it (never blocks the removal below).
+function defaultSalvageWorktree({ worktreePath, ticket, branch, orchId, reason } = {}) {
+  return new Promise((resolve) => {
+    try {
+      if (!worktreePath) return resolve({ ok: false, error: "no-worktree-path" });
+      // fileURLToPath (Codex P2): `.pathname` stays percent-encoded when Catalyst
+      // is installed under a path with spaces / `#` / `%` / non-ASCII, handing bash
+      // a nonexistent script; decode to a real filesystem path.
+      const lib = fileURLToPath(new URL("../lib/worktree-salvage.sh", import.meta.url));
+      // CTL-1639 (Codex #3026 P1): the deadline lives INSIDE the child, not only in
+      // the parent's setTimeout below.
+      //
+      // The child is `detached: true` (its own process group), so if the reaper exits
+      // or is killed before that timer fires, the child reparents to PID 1 and runs
+      // FOREVER against a worktree nobody is waiting on — precisely the leak class
+      // AGENTS.md's "make the loop itself self-limiting; never let cleanup be
+      // load-bearing" rule exists for. The parent timer is retained as belt-and-braces
+      // (it also kills the whole group), but it is no longer the only bound.
+      //
+      // Uses AGENTS.md's watchdog form verbatim: run the real command, arm a sleeping
+      // killer, wait, then cancel the killer and propagate the real exit code. The
+      // watchdog SLEEPS rather than spinning, and it self-terminates after the deadline
+      // even if the `kill "$w"` line never runs.
+      // `set -m` is load-bearing: without job control the backgrounded job stays in the
+      // wrapper's process group, so the watchdog can only signal the bash LEADER and its
+      // foreground descendant (the running `git bundle` / `tar`) survives and reparents
+      // to PID 1 — the exact leak this is meant to close. With it, the job leads its own
+      // group and `kill -9 -"$p"` takes the whole tree. Verified by mutation: the
+      // pid-only form leaves the descendant alive; the group form does not.
+      const selfBoundedScript =
+        'set -m; bash "$0" "$@" & p=$!; ' +
+        // The watchdog's stdio MUST be detached (>/dev/null 2>&1). The parent reads the
+        // child's stderr over a pipe and resolves on its 'close', which fires only when
+        // EVERY holder of that pipe exits — a sleeping watchdog inheriting it holds the
+        // pipe open for the whole deadline, so a fast salvage still took the full
+        // timeout to resolve. (Caught by the reaper suite: 5 tests hit their 5s limit.)
+        '( sleep "$CATALYST_SALVAGE_TIMEOUT_SEC"; kill -9 -"$p" 2>/dev/null || kill -9 "$p" 2>/dev/null ) >/dev/null 2>&1 & w=$!; ' +
+        'wait "$p"; rc=$?; kill "$w" 2>/dev/null; exit "$rc"';
+      const child = spawn(
+        "bash",
+        [
+          "-c",
+          selfBoundedScript,
+          lib,
+          worktreePath,
+          ticket || branch || "unknown",
+          "--site",
+          "reaper-pr-merged",
+          // Preserve the ACTUAL triggering reason (Codex P2): this handler serves
+          // both direct pr.merged.cleanup-requested and targeted orphans.reap-requested
+          // events — hardcoding one misattributes the other in the audit telemetry.
+          "--reason",
+          reason || "reaper-pr-merged",
+          ...(orchId ? ["--orch", orchId] : []),
+        ],
+        {
+          stdio: ["ignore", "ignore", "pipe"],
+          // The child's own deadline, in seconds — kept a couple of seconds INSIDE the
+          // parent's SALVAGE_TIMEOUT_MS so the self-bound normally fires first and the
+          // parent timer stays a backstop rather than the primary mechanism.
+          env: {
+            ...process.env,
+            CATALYST_SALVAGE_TIMEOUT_SEC: String(Math.max(1, Math.floor(SALVAGE_TIMEOUT_MS / 1000) - 2)),
+          },
+          // CTL-1639 Codex round-2 P1: `detached: true` (POSIX) makes this bash
+          // child the leader of its OWN process group instead of joining the
+          // reaper's. On timeout that lets us signal the WHOLE group (bash plus
+          // whatever `git bundle`/`git diff`/`tar` it's currently running in the
+          // foreground), not just the bash leader — a bare `child.kill()` only
+          // kills bash and leaves a foreground descendant to survive/reparent
+          // and keep reading/writing a worktree the reaper is about to remove.
+          detached: true,
+        },
+      );
+      let stderr = "";
+      let settled = false;
+      const done = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const timer = setTimeout(() => {
+        // SIGKILL can't be caught/ignored, so signaling the group is sufficient
+        // to guarantee every member (bash + its foreground descendant) is gone —
+        // no need to block resolution on waiting for the "close" event.
+        try {
+          if (child.pid) process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* ignore */
+          }
+        }
+        done({ ok: false, error: `salvage timed out after ${SALVAGE_TIMEOUT_MS}ms` });
+      }, SALVAGE_TIMEOUT_MS);
+      child.stderr?.on("data", (d) => {
+        stderr += d.toString();
+      });
+      child.on("error", (err) => done({ ok: false, error: err.message }));
+      child.on("close", (code) =>
+        done({ ok: code === 0, error: code === 0 ? undefined : stderr.trim() || `exit ${code}` }),
+      );
+    } catch (err) {
+      resolve({ ok: false, error: String(err?.message || err) }); // fail-open — caller ignores !ok
+    }
+  });
 }
 
 async function defaultGitWorktreeRemove(path) {

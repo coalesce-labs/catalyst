@@ -105,6 +105,9 @@ function defaultEmitPhaseComplete({ ticket, phase, orchDir }, { spawn = spawnSyn
 
 // markerPath — the per-(ticket, phase) idempotency once-marker under workers/<T>/.
 function markerPath(orchDir, ticket, phase, name) {
+  if (typeof phase !== "string" || phase === "") {
+    throw new Error(`${name}: missing-phase (${ticket}) — cannot build idempotency marker`);
+  }
   return join(orchDir ?? ".", "workers", ticket, `.unstuck-${name}-${phase}.applied`);
 }
 
@@ -305,8 +308,12 @@ export function buildOrphanStaleActSeam(deps = {}) {
     let prState = null;
     try {
       const r = resolvePrState(ticket);
-      prState = r && typeof r.then === "function" ? null : r;
-    } catch {
+      if (r && typeof r.then === "function") {
+        throw new Error(`orphan-stale: pr-state-async-unsupported (${ticket})`);
+      }
+      prState = r;
+    } catch (err) {
+      if (err?.message?.includes("pr-state-async-unsupported")) throw err;
       prState = null;
     }
 

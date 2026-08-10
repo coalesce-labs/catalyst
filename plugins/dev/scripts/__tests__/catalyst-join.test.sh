@@ -225,6 +225,8 @@ FIXTURE_BUNDLE="${SCRATCH}/bundle.json"
 cat > "$FIXTURE_BUNDLE" <<'BEOF'
 {
   "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "thoughtsOrg": "example-thoughts-org",
+  "thoughtsOrgSource": "thoughts.org",
   "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
   "hostsRoster": ["mini"],
   "livenessAnchorIssue": "CTL-1",
@@ -628,6 +630,7 @@ MULTIHOST_WH_BUNDLE="${SCRATCH}/multihost-wh.json"
 cat > "$MULTIHOST_WH_BUNDLE" <<'BEOF'
 {
   "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "thoughtsOrg": "CTL",
   "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
   "hostsRoster": ["mini", "mini-2"],
   "livenessAnchorIssue": "CTL-1",
@@ -644,6 +647,7 @@ SINGLEHOST_WH_BUNDLE="${SCRATCH}/singlehost-wh.json"
 cat > "$SINGLEHOST_WH_BUNDLE" <<'BEOF'
 {
   "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "thoughtsOrg": "CTL",
   "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
   "hostsRoster": ["mini"],
   "livenessAnchorIssue": "CTL-1",
@@ -1007,9 +1011,11 @@ run "T2.9g resume after upstream layer1 fix re-pulls and wires (#2914 P2)" bash 
 # T2.10 / T2.11: (CTL-1293) provision-thoughts that CLONES OK but fails push-auth
 # is FATAL on a multiHost member (roster>1 owns work → must sync thoughts to
 # peers) but warn-and-proceed on a single-host / Stage-0 SHADOW node.
-# The primary clone path is keyed off layer1Identity.projectKey ("CTL" in both
+# The primary clone path is keyed off bundle .thoughtsOrg ("CTL" in both
 # MULTIHOST_WH_BUNDLE and SINGLEHOST_WH_BUNDLE below) — not a hardcoded org —
-# since do_provision_thoughts's fallback derives it from the bundle identity.
+# since do_provision_thoughts's fallback derives it from the bundle's
+# thoughts-org field (Codex #3080 P1: NOT layer1Identity.projectKey, which is
+# the Layer-2 secrets-file key, not a GitHub org).
 PT_CLONE_PUSHFAIL_STUB="${STUBS2}/stub-provision-thoughts-pushfail.sh"
 cat > "$PT_CLONE_PUSHFAIL_STUB" <<'EOF'
 #!/usr/bin/env bash
@@ -1242,6 +1248,36 @@ run "T3.6 provision-thoughts invoked and runs before setup-catalyst" bash -c "
   sc_line=\$(grep -n 'setup-catalyst' '$INVLOG36' | head -1 | cut -d: -f1) && \
   [[ -n \"\$pt_line\" && -n \"\$sc_line\" && \"\$pt_line\" -lt \"\$sc_line\" ]]"
 
+# T3.7: (Codex #3080 P1) a bundle with NO thoughts org — an older bundle, or a
+# Layer-1 with thoughts persistence disabled — must SKIP the provision-thoughts
+# stage with a warning, never abort the join. join-bundle.mjs documents
+# thoughtsOrg as optional/backward-compatible, and provision-thoughts hard-exits
+# when handed neither an org nor a registry, so catalyst-join must not call it.
+STUBS37="${SCRATCH}/stubs37"
+make_stubs "$STUBS37"
+INVLOG37="${STUBS37}/invocations.log"
+NOORG_BUNDLE="${SCRATCH}/bundle-no-thoughts-org.json"
+jq 'del(.thoughtsOrg, .thoughtsOrgSource)' "$FIXTURE_BUNDLE" > "$NOORG_BUNDLE"
+
+run "T3.7 bundle without thoughtsOrg skips provisioning, join still succeeds (#3080 P1)" bash -c "
+  catdir='${SCRATCH}/c37'
+  rm -f '$INVLOG37'
+  env -i HOME='${SCRATCH}/h37' CATALYST_DIR=\"\$catdir\" \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS37}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS37}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS37}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS37}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS37}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS37}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS37}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$NOORG_BUNDLE' >/dev/null 2>&1
+  # The join completed past provision-thoughts (setup-catalyst ran) …
+  grep -q 'setup-catalyst' '$INVLOG37' && \
+  # … and provision-thoughts itself was skipped, not invoked.
+  ! grep -q 'provision-thoughts' '$INVLOG37'"
+
 # ── Phase 4: SHARED config merge, per-node items, doctor gate, SHADOW stop ────
 
 echo ""
@@ -1392,7 +1428,11 @@ STUBS4O="${SCRATCH}/stubs4o"
 make_stubs "$STUBS4O"
 INVLOG4O="${STUBS4O}/invocations.log"
 
-run "T4.5 catalyst-stack install-services runs last" bash -c "
+# CTL-1473 remediate: install-services is NO LONGER the last invocation — the diff
+# added a strict post-install `doctor-verify` stage that runs AFTER it (see
+# catalyst-join.sh main() step 8). Assert the ordering install-services < the final
+# doctor invocation, rather than the now-stale "install-services runs last".
+run "T4.5 install-services runs after config, before the post-install doctor verify (CTL-1473)" bash -c "
   catdir='${SCRATCH}/c45'
   home45='${SCRATCH}/h45'
   mkdir -p \"\$home45/.config/catalyst\"
@@ -1409,9 +1449,50 @@ run "T4.5 catalyst-stack install-services runs last" bash -c "
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4O}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS4O}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
-  # stack install-services must be last in the log
-  last=\$(tail -1 '$INVLOG4O')
-  echo \"\$last\" | grep -q 'install-services'"
+  # install-services present, and the final doctor invocation (the post-install
+  # verify) runs AFTER install-services.
+  install_line=\$(grep -n 'install-services' '$INVLOG4O' | head -1 | cut -d: -f1)
+  verify_line=\$(grep -n 'check-setup' '$INVLOG4O' | tail -1 | cut -d: -f1)
+  [[ -n \"\$install_line\" && -n \"\$verify_line\" ]] && [[ \"\$install_line\" -lt \"\$verify_line\" ]]"
+
+# T4.7: CTL-1473 — the doctor gate runs in PREINSTALL mode (install-remediable
+# FAIL→WARN) BEFORE install-services, then a strict post-install verify (no
+# PREINSTALL downgrade) runs AFTER install-services. The doctor stub records the
+# CATALYST_DOCTOR_PREINSTALL flag state per invocation so we can assert both the
+# mode and the ordering (previously untested — verify.json coverage finding).
+STUBS4V="${SCRATCH}/stubs4v"
+make_stubs "$STUBS4V"
+INVLOG4V="${STUBS4V}/invocations.log"
+cat > "$STUBS4V/stub-check-setup.sh" <<EOF
+#!/usr/bin/env bash
+echo "check-setup PREINSTALL=\${CATALYST_DOCTOR_PREINSTALL:-unset}" >> "$INVLOG4V"
+exit 0
+EOF
+chmod +x "$STUBS4V/stub-check-setup.sh"
+
+run "T4.7 doctor gate is PREINSTALL before stack, strict verify after (CTL-1473)" bash -c "
+  catdir='${SCRATCH}/c47'
+  home47='${SCRATCH}/h47'
+  mkdir -p \"\$home47/.config/catalyst\"
+  printf '{}' > \"\$home47/.config/catalyst/config.json\"
+  rm -f '$INVLOG4V'
+  env -i HOME=\"\$home47\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS4V}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4V}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4V}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS4V}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS4V}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4V}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS4V}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
+  # Order in the log: gate(PREINSTALL=1) → install-services → verify(PREINSTALL=unset)
+  gate_line=\$(grep -n 'check-setup PREINSTALL=1' '$INVLOG4V' | head -1 | cut -d: -f1)
+  install_line=\$(grep -n 'install-services' '$INVLOG4V' | head -1 | cut -d: -f1)
+  verify_line=\$(grep -n 'check-setup PREINSTALL=unset' '$INVLOG4V' | head -1 | cut -d: -f1)
+  [[ -n \"\$gate_line\" && -n \"\$install_line\" && -n \"\$verify_line\" ]] && \
+  [[ \"\$gate_line\" -lt \"\$install_line\" ]] && \
+  [[ \"\$install_line\" -lt \"\$verify_line\" ]]"
 
 # T4.6: Idempotency — second run with same host.name produces identical config
 run "T4.6 idempotency: second run is no-op" bash -c "

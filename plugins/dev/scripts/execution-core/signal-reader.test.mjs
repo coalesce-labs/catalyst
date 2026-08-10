@@ -351,6 +351,35 @@ describe("byActivePhase — turn-cap-exhausted is terminal (CTL-830)", () => {
   });
 });
 
+// CTL-1552: the recovery-pass escalation signal is now terminal ("stalled") rather
+// than the old non-terminal "needs-human". Both it and the failed phase signal are
+// now terminal, so byActivePhase falls to updatedAt recency — the escalation is
+// written LAST (freshest), so readWorkerSignals still surfaces IT (not the failed
+// phase), preserving the ticket + explanation the old non-terminal status relied on.
+describe("byActivePhase — CTL-1552 stalled escalation wins by recency (freshness capture)", () => {
+  test("a fresher stalled recovery-pass signal beats an older failed phase signal", () => {
+    const failedPhase = { phase: "verify", status: "failed", updatedAt: "2026-07-29T10:00:00Z" };
+    const escalation = { phase: "recovery-pass", status: "stalled", updatedAt: "2026-07-29T10:05:00Z" };
+    const sorted = [failedPhase, escalation].sort(byActivePhase);
+    expect(sorted[0].phase).toBe("recovery-pass");
+    expect(sorted[0].status).toBe("stalled");
+  });
+
+  test("readWorkerSignals picks the fresh stalled recovery-pass signal for the ticket", () => {
+    writeNested("CTL-9", "verify", { status: "failed", updatedAt: "2026-07-29T10:00:00Z" });
+    writeNested("CTL-9", "recovery-pass", {
+      status: "stalled",
+      stalledReason: "needs_human",
+      needsHumanSince: "2026-07-29T10:05:00Z",
+      updatedAt: "2026-07-29T10:05:00Z",
+      explanation: { escalation_type: "manual" },
+    });
+    const sig = byTicket(readWorkerSignals(orchDir)).get("CTL-9");
+    expect(sig.phase).toBe("recovery-pass");
+    expect(sig.status).toBe("stalled");
+  });
+});
+
 // --- CTL-702: yield-tombstone exclusion -----------------------------------
 
 describe("yield-tombstone exclusion (CTL-702)", () => {

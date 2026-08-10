@@ -50,7 +50,8 @@ import {
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
 import { existsSync, appendFileSync, chmodSync } from "node:fs";
-import { recordEscalation } from "./label-guard.mjs"; // CTL-1442: seed reason-change scenarios
+import { recordEscalation, LABEL_CONFIRM_CAP } from "./label-guard.mjs"; // CTL-1442: seed reason-change scenarios; CTL-1643: cap
+import { readDurableEscalations } from "./durable-escalation.mjs"; // CTL-1643: durable store reader
 import { defaultClearStall } from "./scheduler.mjs"; // CTL-1442: operator re-arm resets the ask budget
 import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 
@@ -4426,6 +4427,46 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     expect(appendEvent.calls.length).toBe(0);
   });
 
+  test("CTL-1552-normalized park (stalled + stalledReason needs_human) is noop'd before the no-probe branch", () => {
+    // CTL-1552 renamed the park recovery-emit writes from status "needs-human"
+    // to "stalled" + stalledReason "needs_human". "stalled" is in TERMINAL, so
+    // classifyWorker returns "terminal" and this noops at the top — earlier and
+    // more robustly than the bespoke needs-human guard in the no-probe branch,
+    // which only ever existed because "needs-human" was NOT terminal. Pinned
+    // because the guard reads like it is the only thing protecting the
+    // worker-authored brief, and it is not.
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const escalate = recorder(undefined);
+    const recoveryPassSig = {
+      ticket: "PROJ-509",
+      phase: "recovery-pass",
+      status: "stalled",
+      stalledReason: "needs_human",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: {
+        ticket: "PROJ-509",
+        phase: "recovery-pass",
+        status: "stalled",
+        stalledReason: "needs_human",
+        bg_job_id: "job-old",
+      },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, recoveryPassSig, {
+      statJob: () => null,
+      listTicketPhases: () => [],
+      completeEventSeen: () => false,
+      emitComplete: emit,
+      appendEvent,
+      appendEscalatedEvent: escalate,
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("noop");
+    expect(escalate.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
+    expect(appendEvent.calls.length).toBe(0);
+  });
+
   test("no-probe-for-phase returns 'reclaim-failed' when the complete-event-seen emit-complete repair fails (regression, Codex #3027 round 4 P2)", () => {
     // The other completion-reconciliation branches (PROJ-778 alive-probe-reclaim,
     // and branch (B) of reclaimDeadWork) both return 'reclaim-failed' on a
@@ -6466,5 +6507,153 @@ describe("buildEventEnvelope — CTL-1488 caused_by + event.stream_class parity"
   test("stamps attributes['event.stream_class'] = 'coordination' for every phase.* envelope", () => {
     const line = buildEventEnvelope({ phase: "verify", ticket: "CTL-1", action: "escalated", reason: "x" });
     expect(JSON.parse(line).attributes["event.stream_class"]).toBe("coordination");
+  });
+});
+
+// --- CTL-1643: escalateOnce verified-or-loud label application ---------------
+// Tests that escalateOnce gates the 10-min cooldown on a confirmed or
+// unrecoverable label write — not on a transient 429 — and persists a durable
+// escalation record that survives worker-dir GC.
+//
+// Drives reclaimDeadWorkIfPossible on the "no-progress-stopped" path
+// (dead worker, probe NOT done, zero progress, no escalation cooldown).
+// Uses the module-level orchDir real tmpdir (same beforeEach/afterEach).
+describe("CTL-1643: escalateOnce verified-or-loud label application", () => {
+  const ticket = "CTL-9";
+
+  // Minimal seam set that reaches escalateOnce via the no-progress-stopped path.
+  // All seams that would touch the real filesystem are injected so the tests are
+  // hermetic. recordEscalationFn is always injected to avoid writing real cooldowns.
+  function escSeams(extra = {}) {
+    return {
+      repoRoot: "/repo",
+      statJob: () => null,                          // dead-gone
+      probes: { implement: () => false },           // work NOT done
+      progressMark: () => 0,
+      readProgressMark: () => 0,
+      writeProgressMark: recorder(undefined),
+      appendEvent: recorder(undefined),
+      appendEscalatedEvent: recorder(undefined),
+      appendReviveEvent: recorder(undefined),
+      appendReviveSuppressedEvent: recorder(undefined),
+      applyStalledLabel: recorder(false),           // default: transient
+      recordEscalationFn: recorder(undefined),      // track cooldown writes
+      inEscalationCooldownFn: () => false,          // no existing cooldown
+      emitComplete: recorder({ code: 0 }),
+      reviveDispatch: recorder({ code: 0 }),
+      killBgJob: recorder(undefined),
+      countReviveEvents: recorder(0),
+      countDistinctRevivingTickets: recorder(0),
+      writeReviveMarker: recorder(undefined),
+      resolveSession: () => null,
+      postReclaimMirror: recorder(undefined),
+      listTicketPhases: () => ["implement"],
+      emitReapIntent: () => Promise.resolve(),
+      readBootSince: () => undefined,
+      readEscalationRecordFn: () => null,           // no prior asks
+      escalationAskCap: 100,                        // isolate from ask-cap effects
+      breaker: { isOpen: () => false },
+      now: () => 1_000_000,
+      ...extra,
+    };
+  }
+
+  test("transient 429 (applyStalledLabel returns false, no markers) → cooldown NOT written", () => {
+    const recordEscalation = recorder(undefined);
+    const result = reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(false),
+      recordEscalationFn: recordEscalation,
+    }));
+    expect(result).toBe("no-progress-stopped");
+    expect(recordEscalation.calls.length).toBe(0);
+  });
+
+  test("transient 429 → durable record written with labelConfirmed:false, labelAttempts:1", () => {
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(false),
+    }));
+    const recs = readDurableEscalations(orchDir);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].ticket).toBe(ticket);
+    expect(recs[0].labelConfirmed).toBe(false);
+    expect(recs[0].labelAttempts).toBe(1);
+  });
+
+  test("confirmed label (applyStalledLabel returns true) → cooldown written", () => {
+    const recordEscalation = recorder(undefined);
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(true),
+      recordEscalationFn: recordEscalation,
+    }));
+    expect(recordEscalation.calls.length).toBe(1);
+  });
+
+  test("confirmed label → durable record written with labelConfirmed:true", () => {
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(true),
+    }));
+    const recs = readDurableEscalations(orchDir);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].labelConfirmed).toBe(true);
+  });
+
+  test(".skipped marker (unrecoverable) → cooldown written even if applyStalledLabel returns false", () => {
+    // Write the unrecoverable marker that labelOnce leaves when the label is missing/conflicting.
+    mkdirSync(join(orchDir, "workers", ticket), { recursive: true });
+    writeFileSync(join(orchDir, "workers", ticket, ".linear-label-needs-human.skipped"), "");
+    const recordEscalation = recorder(undefined);
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(false),
+      recordEscalationFn: recordEscalation,
+    }));
+    expect(recordEscalation.calls.length).toBe(1);
+  });
+
+  test("cap reached after LABEL_CONFIRM_CAP transient ticks → cooldown written + loud event", () => {
+    const recordEscalation = recorder(undefined);
+    const appendEvent = recorder(undefined);
+    for (let i = 0; i < LABEL_CONFIRM_CAP; i++) {
+      reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+        applyStalledLabel: recorder(false),
+        recordEscalationFn: recordEscalation,
+        appendEvent,
+      }));
+    }
+    // Cooldown written exactly once — on the cap-reaching tick.
+    expect(recordEscalation.calls.length).toBe(1);
+    // A distinct escalation.label-unconfirmed.<ticket> event was emitted.
+    const loudEvents = appendEvent.calls.filter(
+      (c) => c[0]?.["event.name"] === `escalation.label-unconfirmed.${ticket}`,
+    );
+    expect(loudEvents.length).toBe(1);
+  });
+
+  test("appendEscalatedEvent fires AT MOST ONCE across N transient ticks (same-episode gate)", () => {
+    const appendEscalated = recorder(undefined);
+    // First tick: no prior labelAttempts → fires.
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(false),
+      appendEscalatedEvent: appendEscalated,
+    }));
+    expect(appendEscalated.calls.length).toBe(1);
+    // Second tick: cooldown not written (transient), labelAttempts:1 in the
+    // durable record + no cooldown file → same-episode gate suppresses the event.
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(false),
+      appendEscalatedEvent: appendEscalated,
+    }));
+    expect(appendEscalated.calls.length).toBe(1); // still 1, not 2
+  });
+
+  test("regression: confirmed-first-try path is byte-for-byte unchanged (event once, cooldown once)", () => {
+    const appendEscalated = recorder(undefined);
+    const recordEscalation = recorder(undefined);
+    reclaimDeadWorkIfPossible(orchDir, implementSignal(), escSeams({
+      applyStalledLabel: recorder(true),
+      appendEscalatedEvent: appendEscalated,
+      recordEscalationFn: recordEscalation,
+    }));
+    expect(appendEscalated.calls.length).toBe(1);
+    expect(recordEscalation.calls.length).toBe(1);
   });
 });

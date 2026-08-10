@@ -13,7 +13,7 @@ import {
   cpus as osCpus,
   platform as osPlatform,
 } from "node:os";
-import { readFileSync, writeFileSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, chmodSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { clampToBounds } from "./scheduler.mjs";
 import {
@@ -433,6 +433,7 @@ export function writeLayer2MaxParallel(layer2Path, next, {
   readFileSync: readFile = readFileSync,
   writeFileSync: writeFile = writeFileSync,
   renameSync: rename = renameSync,
+  chmodSync: chmod = chmodSync,
 } = {}) {
   let existing = {};
   try {
@@ -456,7 +457,13 @@ export function writeLayer2MaxParallel(layer2Path, next, {
     // 600). Without this the tmp file is created at the default 0o666&~umask (644),
     // and POSIX rename() replaces the destination's permission bits along with its
     // content, silently reverting any prior chmod 600 on every autotune write.
+    // The `mode` option only governs *creation* permissions though — if the tmp
+    // path already exists (e.g. an interrupted prior write left it behind and the
+    // PID got reused), writeFileSync truncates it in place without touching its
+    // existing mode. Explicitly chmod after writing so reuse can't smuggle a
+    // looser mode through to the rename.
     writeFile(tmp, JSON.stringify(existing, null, 2), { mode: 0o600 });
+    chmod(tmp, 0o600);
     rename(tmp, layer2Path);
     return true;
   } catch (err) {

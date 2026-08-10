@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Belief Engine Rulebook — redesign mockup</title>
+<script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+<style>
+  :root{
+    --bg:#0b0b0c; --card:#141416; --card2:#101012;
+    --fg:#e7e7ea; --muted:#9a9aa2; --faint:#6b6b73; --border:#26262b;
+    --s1:#7c9cff; --s2:#5ec8a8; --s3:#e0b15a; --s4:#e08a6a; --s5:#b58ae0; --s6:#62b6d8;
+  }
+  html,body{background:#0b0b0c;color:#e7e7ea;}
+  body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial;}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+  .measure{max-width:72ch;}
+  .muted{color:var(--muted);} .faint{color:var(--faint);}
+  .border-subtle{border-color:var(--border);}
+  .prose-cal p{color:#d4d4d8;line-height:1.7;margin:0 0 .85rem;}
+  .prose-cal em{font-style:italic;color:#c9c9d0;}
+  /* ladder */
+  .ladder{position:relative;}
+  .ladder::before{content:"";position:absolute;left:14px;top:10px;bottom:10px;width:2px;
+    background:linear-gradient(to bottom,var(--s1),var(--s2),var(--s3),var(--s4),var(--s5),var(--s6));opacity:.5;}
+  .rung{position:relative;padding:10px 0 14px 44px;}
+  .dot{position:absolute;left:6px;top:11px;width:18px;height:18px;border-radius:999px;
+    display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#0b0b0c;}
+  .seg{border:1px solid var(--border);border-radius:8px;overflow:hidden;display:inline-flex;background:var(--card2);}
+  .seg button{padding:5px 12px;font-size:12px;color:var(--muted);background:transparent;border:0;cursor:pointer;}
+  .seg button.on{background:#1d1d21;color:#e7e7ea;}
+  .seg button.jargon{color:var(--faint);}
+  .pill{border:1px solid var(--border);border-radius:999px;overflow:hidden;display:inline-flex;background:var(--card2);}
+  .pill button{padding:4px 14px;font-size:12px;color:var(--muted);background:transparent;border:0;cursor:pointer;}
+  .pill button.on{background:#1d1d21;color:#e7e7ea;}
+  details>summary{list-style:none;cursor:pointer;} details>summary::-webkit-details-marker{display:none;}
+  .chev{transition:transform .15s;} details[open] .chev{transform:rotate(90deg);}
+  .rulecard{background:var(--card);border:1px solid var(--border);border-radius:10px;}
+  .tick{width:3px;border-radius:3px;}
+  .codeblk{background:#0e0e10;border:1px solid var(--border);border-radius:8px;}
+  kbd.sev{font-size:10px;padding:1px 6px;border-radius:999px;}
+</style>
+</head>
+<body>
+<div class="min-h-screen">
+  <!-- centered reading column -->
+  <div class="mx-auto measure px-6 py-12">
+
+    <!-- title block -->
+    <header class="mb-7">
+      <h1 class="text-2xl font-bold tracking-tight">Belief Engine Rulebook</h1>
+      <p class="muted text-sm mt-1">How the daemon decides who's working, who's wedged, and when to call a human.</p>
+      <div class="mt-4">
+        <span class="pill">
+          <button class="on">● Read</button>
+          <button>○ Map</button>
+        </span>
+      </div>
+    </header>
+
+    <!-- why this engine exists (prose, no card) -->
+    <section class="prose-cal text-[15px] mb-7">
+      <h2 class="text-base font-semibold mb-2">Why this engine exists</h2>
+      <p>Every few seconds, the daemon has to answer one question on its own:
+        who's actually working, and who only looks like they are? A worker can be
+        running but stuck (<em>stalled-alive</em>), checked in but never actually
+        start (<em>never-started wedge</em>), or busily producing output against a
+        board that no longer matches Linear (<em>board drift</em>).</p>
+      <p>This engine is that reasoning. It starts from plain observations —
+        heartbeats, turns, job states — and walks them up until it reaches a verdict:
+        alive, wedged, retry, or get-a-human. Nothing is a black box: open any belief
+        and trace which facts triggered which rule.</p>
+      <p class="muted">The engine reasons in layers — each rule turns facts it already
+        trusts into a new, named belief. That layering (its <em>strata</em>) keeps the
+        logic ordered and every conclusion traceable.</p>
+    </section>
+
+    <!-- primer collapsed -->
+    <details class="mb-8 rounded-lg border border-subtle" style="background:var(--card2)">
+      <summary class="px-4 py-3 flex items-center gap-2 text-sm">
+        <span class="chev faint">▸</span>
+        <span>How the rules work <span class="muted">(the Datalog model)</span></span>
+        <span class="ml-auto faint text-xs mono">17 rules · rules.dl</span>
+      </summary>
+      <div class="px-4 pb-4 prose-cal text-sm muted">
+        <p>Datalog is a logic language where rules derive new facts from existing ones.
+          Each rule reads beliefs it already trusts and writes a new named belief. Rules
+          are arranged in <em>strata</em> (layers) so a rule never depends on something
+          computed later — that's what makes every conclusion finite and traceable.</p>
+      </div>
+    </details>
+
+    <!-- ladder of reasoning -->
+    <section class="mb-10">
+      <h2 class="text-base font-semibold mb-1">The ladder of reasoning</h2>
+      <p class="muted text-sm mb-4">Facts enter at the bottom and rise into decisions. Six layers, 17 rules.</p>
+      <div class="ladder">
+        <!-- 1 -->
+        <a href="#s1" class="rung block hover:bg-white/[.02] rounded-lg -ml-2 pl-[52px]">
+          <span class="dot" style="background:var(--s1)">1</span>
+          <div class="font-medium text-[15px]">What we directly observe to be true</div>
+          <div class="text-sm muted">The ground floor — raw facts, lined up per worker. No judgment yet.</div>
+          <div class="text-xs faint mono mt-1">Ground correlations · reads obs_* (EDB) only · 4 rules</div>
+        </a>
+        <!-- 2 -->
+        <a href="#s2" class="rung block hover:bg-white/[.02] rounded-lg -ml-2 pl-[52px]">
+          <span class="dot" style="background:var(--s2)">2</span>
+          <div class="font-medium text-[15px]">Who is alive, and who is wedged</div>
+          <div class="text-sm muted">Where 'running' becomes 'alive' or 'wedged'.</div>
+          <div class="text-xs faint mono mt-1">Liveness verdicts · stratified negation over S1 · 4 rules</div>
+        </a>
+        <!-- 3 -->
+        <a href="#s3" class="rung block hover:bg-white/[.02] rounded-lg -ml-2 pl-[52px]">
+          <span class="dot" style="background:var(--s3)">3</span>
+          <div class="font-medium text-[15px]">How much capacity is free</div>
+          <div class="text-sm muted">A headcount of free slots per host.</div>
+          <div class="text-xs faint mono mt-1">Capacity aggregation · over S2 lease_valid + obs_agent · 1 rule</div>
+        </a>
+        <!-- 4 -->
+        <a href="#s4" class="rung block hover:bg-white/[.02] rounded-lg -ml-2 pl-[52px]">
+          <span class="dot" style="background:var(--s4)">4</span>
+          <div class="font-medium text-[15px]">When it's time to get a human</div>
+          <div class="text-sm muted">The escalation ladder — cheaper moves first, raise a hand last.</div>
+          <div class="text-xs faint mono mt-1">Escalation ladder · negation over the intent table · 3 rules</div>
+        </a>
+        <!-- 5 -->
+        <a href="#s5" class="rung block hover:bg-white/[.02] rounded-lg -ml-2 pl-[52px]">
+          <span class="dot" style="background:var(--s5)">5</span>
+          <div class="font-medium text-[15px]">What is blocked by what</div>
+          <div class="text-sm muted">Follows the blocker chain; flags loops that can't resolve.</div>
+          <div class="text-xs faint mono mt-1">Recursive dependency · transitive closure (WITH RECURSIVE) · 3 rules</div>
+        </a>
+        <!-- 6 -->
+        <a href="#s6" class="rung block hover:bg-white/[.02] rounded-lg -ml-2 pl-[52px]">
+          <span class="dot" style="background:var(--s6)">6</span>
+          <div class="font-medium text-[15px]">What happens next</div>
+          <div class="text-sm muted">Predicts where each worker advances, spots exhausted cycles.</div>
+          <div class="text-xs faint mono mt-1">FSM advancement · from obs_signal/verdict/cycle · 2 rules</div>
+        </a>
+      </div>
+    </section>
+
+    <!-- sticky perspective toggle -->
+    <div class="sticky top-0 -mx-6 px-6 py-3 mb-2 backdrop-blur" style="background:rgba(11,11,12,.8);border-bottom:1px solid var(--border)">
+      <div class="flex items-center gap-3">
+        <span class="text-xs muted">Show each rule as</span>
+        <span class="seg">
+          <button class="on">Plain English</button>
+          <button class="jargon">Datalog</button>
+          <button class="jargon">SQL</button>
+        </span>
+        <span class="ml-auto text-xs faint">switch once — all rules follow</span>
+      </div>
+    </div>
+
+    <!-- stratum section: 1 -->
+    <section id="s1" class="pt-5">
+      <div class="flex items-baseline gap-2 mb-1">
+        <h2 class="text-lg font-semibold">1 · What we directly observe to be true</h2>
+      </div>
+      <p class="text-xs faint mono mb-4">Ground correlations · reads obs_* (EDB) only</p>
+
+      <div class="space-y-3">
+        <div class="rulecard flex">
+          <div class="tick" style="background:var(--s1)"></div>
+          <div class="p-4 flex-1">
+            <div class="flex items-center gap-2">
+              <span class="mono text-xs muted">R1</span>
+              <span class="font-medium text-sm">session_registered</span>
+              <kbd class="sev" style="background:#1c2a44;color:#9bb8ff">info</kbd>
+            </div>
+            <p class="text-sm mt-2 text-zinc-300">The worker's background job shows up in the live agents listing — the session is registered.</p>
+          </div>
+        </div>
+        <div class="rulecard flex">
+          <div class="tick" style="background:var(--s1)"></div>
+          <div class="p-4 flex-1">
+            <div class="flex items-center gap-2">
+              <span class="mono text-xs muted">R3</span>
+              <span class="font-medium text-sm">turn_started</span>
+              <kbd class="sev" style="background:#1c2a44;color:#9bb8ff">info</kbd>
+            </div>
+            <p class="text-sm mt-2 text-zinc-300">A turn has begun for this phase — the worker is past registration and actually doing work.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- stratum section: 2 (with a datalog peek) -->
+    <section id="s2" class="pt-8">
+      <h2 class="text-lg font-semibold mb-1">2 · Who is alive, and who is wedged</h2>
+      <p class="text-xs faint mono mb-4">Liveness verdicts · stratified negation over S1</p>
+
+      <div class="space-y-3">
+        <div class="rulecard flex">
+          <div class="tick" style="background:var(--s2)"></div>
+          <div class="p-4 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="mono text-xs muted">R5</span>
+              <span class="font-medium text-sm">lease_valid</span>
+              <kbd class="sev" style="background:#1c2a44;color:#9bb8ff">info</kbd>
+              <span class="text-[10px] faint">feeds R6 · reads progress_evidence, worker_dead</span>
+            </div>
+            <p class="text-sm mt-2 text-zinc-300">The worker still holds a valid lease — it has shown progress within its time
+              window and isn't known dead, so we treat it as alive.</p>
+            <div class="mt-2 flex items-center gap-1">
+              <span class="text-[10px] muted">cfg:</span>
+              <span class="text-[10px] mono faint">lease_window_doc_ms</span>
+              <span class="text-[10px] mono faint">· lease_window_build_ms</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="text-xs faint mt-3">↑ This is the <span class="muted">Plain English</span> view. Flipping the toggle to
+        <span class="muted">Datalog</span> swaps every card's body to its source — like this:</p>
+      <div class="codeblk mono text-[11px] p-3 mt-2 text-zinc-400 leading-relaxed">
+        <span class="faint">// R5 lease_valid</span><br/>
+        INSERT INTO belief SELECT 'lease_valid', s.subject ...<br/>
+        &nbsp;&nbsp;FROM progress_evidence p WHERE NOT EXISTS (worker_dead) ...
+      </div>
+    </section>
+
+    <!-- thresholds collapsed -->
+    <details class="mt-10 rounded-lg border border-subtle" style="background:var(--card2)">
+      <summary class="px-4 py-3 flex items-center gap-2 text-sm">
+        <span class="chev faint">▸</span>
+        <span>Thresholds <span class="muted">(the tunable numbers)</span></span>
+        <span class="ml-auto faint text-xs mono">cfg · 9 keys</span>
+      </summary>
+      <div class="px-4 pb-4 text-sm muted">
+        <p class="py-2">lease_window_doc_ms · 2,700,000 &nbsp;&nbsp; lease_window_build_ms · 1,800,000 &nbsp;&nbsp; diag_cooldown_ms · 600,000 …</p>
+      </div>
+    </details>
+
+    <p class="text-center text-xs faint mt-12">Mockup · calm prose textbook direction · the Map view (React Flow strata DAG) is a deferred fast-follow</p>
+  </div>
+</div>
+</body>
+</html>

@@ -32,6 +32,7 @@ import { parseEventTailChunk } from "./event-tail.mjs";
 import {
   getExecutionCoreDir,
   applyBootDrainPolicy, // CTL-1321: boot accepting work by default
+  writeDaemonRuntimeEnv, // CTL-1678: boot-time env snapshot for read-only surfaces
   getRegistryPath,
   getEventLogPath,
   getJobsRoot, // CTL-1165 D3: job-dir GC root
@@ -41,6 +42,7 @@ import {
   readWaitWatcherConfig,
   readMemorySamplerConfig,
   readFleetHealthConfig, // CTL-1165 D5: fleet-health guardrail config (selfHeal default OFF)
+  readDaemonWatchdogConfig, // CTL-1502: stuck-but-alive daemon watchdog config (shadow default)
   readRatelimitPollerConfig,
   getHostName, // CTL-862
   resolveClusterHosts, // CTL-1273/CTL-1271: roster + source + multiHost for the boot assertion
@@ -72,6 +74,7 @@ import {
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-health-probe.mjs"; // CTL-1165 D5: pre-exhaustion fleet-health guardrail
+import { startDaemonWatchdogProbe as realStartDaemonWatchdogProbe } from "./daemon-watchdog-probe.mjs"; // CTL-1502: stuck-but-alive daemon watchdog
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
@@ -134,8 +137,9 @@ import {
   clearDispositionEmit as defaultClearDispositionEmit, // Codex #2970 round 3: reset the in-process worker.transition dedup after an out-of-band clear
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
-import { labelMarkerBase } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth)
+import { labelMarkerBase, clearStalledLabel } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth); CTL-1552: clear needs-human LABEL + once-marker together (leaf module → no cycle)
 import { defaultForgetIntent } from "./recovery-reasoning.mjs"; // CTL-1567: re-arm recovery when a human responds
+import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator clear
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
 import {
   writeBootMarker,
@@ -145,6 +149,8 @@ import {
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
 import { probePublishCapability as realProbePublishCapability, resolvePushRemote } from "./publish-preflight.mjs";
+import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
+import { getReconcileHealth } from "./reconcile-health.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
@@ -176,6 +182,33 @@ let _debounceTimer = null;
 let _stopMonitor = null;
 let _stopScheduler = null;
 let _pidFile = null;
+
+// CAT-29: publish the exact environment the running process booted with so
+// catalyst doctor can inspect reality instead of certifying only the installed
+// plist. Atomic replacement prevents readers observing a partial JSON body.
+export function writeBootFacts(
+  orchDir,
+  preflight,
+  { pid = process.pid, startedAt = new Date().toISOString(), path = process.env.PATH ?? "" } = {},
+) {
+  const file = join(orchDir, "boot-facts.json");
+  const tmp = `${file}.tmp`;
+  writeFileSync(
+    tmp,
+    JSON.stringify({
+      pid,
+      startedAt,
+      path,
+      preflight: {
+        ok: preflight?.ok === true,
+        missing: Array.isArray(preflight?.missing) ? preflight.missing : [],
+        degraded: preflight?.ok !== true || preflight?.degraded === true,
+      },
+    }),
+  );
+  renameSync(tmp, file);
+  return file;
+}
 // CTL-649: reap-intent reconciler + periodic orphan-sweep timer.
 let _reaper = null;
 let _orphanTimer = null;
@@ -199,6 +232,8 @@ let _waitWatcher = null;
 let _memorySampler = null;
 // CTL-1165 D5: pre-exhaustion fleet-health probe handle.
 let _fleetHealthProbe = null;
+// CTL-1502: stuck-but-alive daemon watchdog probe handle.
+let _daemonWatchdogProbe = null;
 // CTL-787: account-level rate-limit usage poller handle.
 let _ratelimitPoller = null;
 // CTL-859: node-heartbeat emitter handle (distributed-coordination foundation).
@@ -611,6 +646,9 @@ export async function handleCommentWake(
       } catch {
         /* observability only */
       }
+      // CTL-1643: clear the durable escalation record so the board durable-escalation
+      // card disappears when the operator responds. Fail-open (never throws).
+      forgetDurableEscalation(orchDir, ticket);
     }
   }
 
@@ -691,8 +729,14 @@ export async function handleCommentWake(
       clearHoldStopCooldown(orchDir, ticket, parkedPhase);
     }
 
+    // CTL-1552: clear the needs-human LABEL and its once-marker TOGETHER via
+    // clearStalledLabel — the operator-response unpark now owns both halves. The
+    // prior raw label-removal deleted the Linear label but orphaned the once-marker
+    // (workers/<T>/.linear-label-needs-human.applied), so labelOnce stayed disarmed
+    // (a genuine re-escalation could never re-apply). Both halves together re-arm
+    // the guard. Fail-open (clearStalledLabel never throws).
     try {
-      await removeLabel(ticket, "needs-human"); // CTL-1067 Bug 3: was "needs-human/question"
+      clearStalledLabel(orchDir, ticket, "needs-human", { removeLabel });
     } catch {
       /* fail-open */
     }
@@ -825,6 +869,14 @@ export function startDaemon({
   // undefined → resolve from config (env + Layer-1 via configPath) in the boot
   // body below; tests may force true/false and that wins via `??`.
   enableFleetHealth = undefined,
+  // CTL-1502: stuck-but-alive daemon watchdog probe. Injectable for tests; gated
+  // by the readDaemonWatchdogConfig mode (default "shadow" → enabled; off disables).
+  // Shadow-first: it detects + logs would-restart but performs no restart until an
+  // operator flips it to enforce.
+  startDaemonWatchdogProbe = realStartDaemonWatchdogProbe,
+  // undefined → resolve from config (env + Layer-1 via configPath) below; tests
+  // may force true/false and that wins via `??`.
+  enableDaemonWatchdog = undefined,
   // CTL-787: account-level rate-limit usage poller. Injectable for tests; gated
   // by a config knob (default-on, CATALYST_RATELIMIT_POLLER=0 disables) like the
   // memory sampler.
@@ -883,6 +935,7 @@ export function startDaemon({
   // CTL-1612: injectable GitHub-credential boot preflight. Tests inject a fake; in
   // production it probes `gh` for real. Advisory — never throws, never blocks boot.
   githubAuthPreflight = resolveGithubBootAuth,
+  bootDependencyPreflight = resolveBootDependencies,
   // CTL-862: injectable seams for the ownership boot-log. Tests inject a fixed
   // roster and eligible list; production resolves them from the real modules.
   readAllEligible = readAllEligibleTickets,
@@ -901,6 +954,7 @@ export function startDaemon({
   reapOrphanedRunners: reapOrphanedRunnersFn = reapOrphanedRunners,
 } = {}) {
   const orchDir = getExecutionCoreDir();
+  let bootDependencyState = { ok: true, missing: [], holdReason: null };
   ensureState(orchDir);
   // CTL-862: write the resolved config path back into the env so downstream
   // callers (getClusterHosts → getCatalystRepoDir) resolve the right repo
@@ -963,6 +1017,15 @@ export function startDaemon({
     writeFileSync(tmp, String(process.pid));
     renameSync(tmp, pidFile);
   }
+
+  // CTL-1678 (Codex round-3 P1): snapshot the drain-override env THIS process captured,
+  // keyed by our pid, so read-only surfaces (status / doctor / verify-node) report the
+  // running daemon's effective state instead of re-reading the mutable env file (whose
+  // edits are restart-only and may describe a future daemon, not this one). Written
+  // AFTER the pid file — readers require both to agree, so the reverse order would
+  // publish a snapshot that is briefly unverifiable. `pidFile` is recorded in the
+  // payload because EXECUTION_CORE_PID_FILE can relocate it (round-5 P2).
+  writeDaemonRuntimeEnv(orchDir, { pidFile });
 
   // A throw from any composed boot step must not leave a stale PID file —
   // stopDaemon removes _pidFile via unlinkSync. Rethrow so the main()-level
@@ -1160,20 +1223,44 @@ export function startDaemon({
     // closure IS rearmGithubTokenFromFile), but through the registry's arm path.
     armSecret("github-token", { env: process.env });
 
-    const bootResume = reconcileBoot({
-      orchDir,
-      report,
-      concurrency,
-      dispatch: dispatchFn,
-      sdkSessionHarvest,
-    }); // CTL-665: config-first ceiling; CTL-1422: warm-resume harvest
-    _bootResume = bootResume;
-    // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
-    // (operator may have dropped the sentinel while the daemon was down).
-    // CTL-1367 item E2: thread the resolved executor dispatch — this is the 5th
-    // dispatch entry point and previously defaulted to defaultDispatch, so an
-    // approved-resume ticket launched via bg even under executor=sdk (split-brain).
-    processApprovedResumes({ orchDir, dispatch: dispatchFn });
+    // CAT-29 (Codex P1): the dependency verdict must be resolved BEFORE anything
+    // dispatches, and it must actually quarantine the actuators. Previously this ran
+    // after reconcileBoot/processApprovedResumes had already launched workers and was
+    // consumed only by the heartbeat callbacks — so a node missing `linearis`/`node`
+    // advertised itself as non-accepting while still dispatching work that could only
+    // fail, producing stalled/retry churn. Hoisting is safe: unlike githubAuthPreflight
+    // (a 10s `gh` network round-trip, deliberately left after the dispatches) this probe
+    // is a local PATH lookup and is fail-open — an indeterminate probe returns ok:true.
+    bootDependencyState = bootDependencyPreflight({ env: process.env, log });
+    writeBootFacts(orchDir, bootDependencyState);
+    if (!bootDependencyState.ok) {
+      log.warn(
+        { missing: bootDependencyState.missing, holdReason: bootDependencyState.holdReason },
+        `execution-core boot dependencies unusable (${bootDependencyState.missing.join(", ")}) — ` +
+        `quarantined: crash-recovery re-dispatch, approved-resume dispatch, and the ` +
+        `monitor + scheduler actuators are NOT armed. The process stays UP and keeps ` +
+        `heartbeating as non-accepting so the fleet can see it refusing (CAT-29).`
+      );
+    }
+
+    // CAT-29: both boot dispatch entry points are gated on the verdict — a quarantined
+    // node must not re-launch in-flight work it cannot run.
+    if (bootDependencyState.ok) {
+      const bootResume = reconcileBoot({
+        orchDir,
+        report,
+        concurrency,
+        dispatch: dispatchFn,
+        sdkSessionHarvest,
+      }); // CTL-665: config-first ceiling; CTL-1422: warm-resume harvest
+      _bootResume = bootResume;
+      // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
+      // (operator may have dropped the sentinel while the daemon was down).
+      // CTL-1367 item E2: thread the resolved executor dispatch — this is the 5th
+      // dispatch entry point and previously defaulted to defaultDispatch, so an
+      // approved-resume ticket launched via bg even under executor=sdk (split-brain).
+      processApprovedResumes({ orchDir, dispatch: dispatchFn });
+    }
     // CTL-1612: NOW probe the credential — after the dispatches, so a 10s `gh` timeout can
     // never delay crash recovery. Advisory only: never throws, never blocks boot, and
     // alerts solely on a definitive 401.
@@ -1256,7 +1343,11 @@ export function startDaemon({
 
     // CTL-1654: the actuator arming below (monitorFn + schedulerFn + auto-tuner) is
     // gated on _isWorkerNode — see the observe-only backstop comment above.
-    if (_isWorkerNode) {
+    // CAT-29 (Codex P1): the dependency quarantine joins the CTL-1654 node-class gate —
+    // same actuator seam, same observe-only outcome. A node whose boot dependencies are
+    // unusable arms neither the monitor nor the scheduler, so it cannot dispatch or
+    // reclaim work it has no way to execute.
+    if (_isWorkerNode && bootDependencyState.ok) {
     monitorFn({
       orchDir,
       cache,
@@ -1421,6 +1512,17 @@ export function startDaemon({
       _fleetHealthProbe = startFleetHealthProbe({ orchDir, config: fleetHealthConfig });
     }
 
+    // CTL-1502: start the stuck-but-alive daemon watchdog. SHADOW by default
+    // (detect + log would-restart; no restart until an operator flips to enforce).
+    // Inside the same try/catch so a throw triggers PID-file cleanup via stopDaemon.
+    // Config resolved WITH configPath so the Layer-1
+    // catalyst.orchestration.daemonWatchdog knobs take effect, and passed to the
+    // probe so it reads the SAME resolved thresholds.
+    const daemonWatchdogConfig = readDaemonWatchdogConfig(configPath);
+    if (enableDaemonWatchdog ?? daemonWatchdogConfig.enabled) {
+      _daemonWatchdogProbe = startDaemonWatchdogProbe({ config: daemonWatchdogConfig });
+    }
+
     // CTL-787: start the account-level rate-limit usage poller. Inside the same
     // try/catch so a throw triggers PID-file cleanup via stopDaemon.
     if (enableRatelimitPoller) {
@@ -1448,7 +1550,33 @@ export function startDaemon({
       // the same gate source fns the scheduler enforces (orchDir + concurrency are
       // both in scope here). Fail-open: readAdmissionState never throws.
       _heartbeat = startHeartbeat({
-        admissionFn: () => readAdmissionState({ orchDir, concurrency }),
+        // CAT-29 (Codex P2): the dependency hold must return the FULL admission shape
+        // — { accepting, holdReason, effectiveCapacity, activeWorkers }. The heartbeat
+        // builder serializes this object unchanged, so returning only two fields
+        // published a heartbeat missing the capacity/occupancy the readers expect.
+        // Spread the real state (never throws) so activeWorkers stays truthful, then
+        // force the hold: effectiveCapacity 0 is exactly what readAdmissionState
+        // itself reports whenever accepting is false.
+        admissionFn: () => bootDependencyState.ok
+          ? readAdmissionState({ orchDir, concurrency })
+          : {
+              ...readAdmissionState({ orchDir, concurrency }),
+              accepting: false,
+              holdReason: BOOT_DEPENDENCY_HOLD_REASON,
+              effectiveCapacity: 0,
+            },
+        boardReachableFn: () => {
+          if (!bootDependencyState.ok) {
+            return { reachable: false, blindTeams: listProjectsFn().length };
+          }
+          const projects = listProjectsFn();
+          const blindTeams = projects.filter((p) => {
+            const team = typeof p === "string" ? p : (p.team ?? p.key);
+            const state = team ? getReconcileHealth(team) : null;
+            return state?.consecutiveFailures > 0;
+          }).length;
+          return { reachable: projects.length === 0 || blindTeams < projects.length, blindTeams };
+        },
         // CTL-1420 (#17): carry this host's in-flight tickets on every node.heartbeat
         // so a peer can read liveness + ownership from Loki (retiring the Linear
         // heartbeat attachment). Same local signal-scan source the publisher uses.
@@ -1676,6 +1804,21 @@ export function startDaemon({
       rewalkDispatched: _bootResume?.dispatched ?? 0,
     },
   });
+  // CTL-1552: record which config LAYER each governance knob resolved from
+  // (env-override / config / default) at boot, so an operator can tell at a
+  // glance whether e.g. board-health enforce came from the host env or Layer-2 —
+  // previously only the beliefs booleans' sources were legible. effectiveFlags
+  // carries the resolved mode values; flagSources carries the layer each came
+  // from (now including boardHealth/recoveryPass/unstuckSweep/deadDocWorker).
+  // Fail-open — the boot self-report must never block startup.
+  try {
+    log.info(
+      { effectiveFlags: readGovernanceConfig(), flagSources: readGovernanceSources() },
+      "execution-core daemon: governance flags resolved (value ← layer)",
+    );
+  } catch {
+    /* best-effort boot self-report */
+  }
   // CTL-1271: announce roster + source + multiHost at boot so an operator can
   // always read what the daemon resolved and where it came from.
   log.info(
@@ -2268,6 +2411,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: fleet-health-probe stop failed");
     }
     _fleetHealthProbe = null;
+  }
+  // CTL-1502: stop the stuck-but-alive daemon watchdog probe.
+  if (_daemonWatchdogProbe) {
+    try {
+      _daemonWatchdogProbe.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: daemon-watchdog stop failed");
+    }
+    _daemonWatchdogProbe = null;
   }
   // CTL-787: stop the account-level rate-limit usage poller.
   if (_ratelimitPoller) {

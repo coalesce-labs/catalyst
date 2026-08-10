@@ -242,6 +242,21 @@ describe("planPhases — per-class correctness (pure)", () => {
     expect(labels).toContain("adopt-updater");
     expect(labels).not.toContain("install-services");
   });
+  test("install/developer adopts thoughts-sync (CTL-1473) but not the stack keep-alive", () => {
+    const labels = stepLabels(planPhases({ operation: "install", nodeClass: "developer", scripts: SCRIPTS }));
+    expect(labels).toContain("adopt-thoughts-sync");
+    expect(labels).not.toContain("install-services");
+  });
+  test("install/monitor adopts thoughts-sync (developer-shaped, CTL-1473)", () => {
+    const labels = stepLabels(planPhases({ operation: "install", nodeClass: "monitor", scripts: SCRIPTS }));
+    expect(labels).toContain("adopt-thoughts-sync");
+    expect(labels).not.toContain("install-services");
+  });
+  test("install/worker still gets the full stack; no separate thoughts-sync step (folded into install-services)", () => {
+    const labels = stepLabels(planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS }));
+    expect(labels).toContain("install-services");
+    expect(labels).not.toContain("adopt-thoughts-sync");
+  });
   test("install phase order EXACTLY matches the OTEL-locked INSTALL_PHASES", () => {
     expect(phaseNames(planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS }))).toEqual([...INSTALL_PHASES]);
   });
@@ -279,6 +294,29 @@ describe("planPhases — per-class correctness (pure)", () => {
     const plan = planPhases({ operation: "install", nodeClass: "developer", scripts: SCRIPTS });
     const backupStep = plan.find((p) => p.phase === "backup").steps[0];
     expect(backupStep.argv).toEqual(["BACKUP", "backup", "--label", "install-developer"]);
+  });
+  // Codex P1: previously `catalyst install`/`reinstall` only ran setup-plugin-source.sh
+  // with --no-interactive-wrapper (acquire — pre-backup, git-reconstructable work only),
+  // so the stateful cutover (shell-rc wrapper removal + marketplace retirement) never
+  // ran outside catalyst-join. write-config now also runs it in FULL mode (no flag),
+  // placed after backup() (both operations) so the mutated state is restorable.
+  test("install/reinstall run the FULL plugin-source cutover (no --no-interactive-wrapper) in write-config, after backup", () => {
+    for (const operation of ["install", "reinstall"]) {
+      const plan = planPhases({ operation, nodeClass: "worker", scripts: SCRIPTS });
+      const backupIdx = plan.findIndex((p) => p.phase === "backup");
+      const wcIdx = plan.findIndex((p) => p.phase === "write-config");
+      expect(backupIdx).toBeGreaterThanOrEqual(0);
+      expect(wcIdx).toBeGreaterThan(backupIdx);
+      const cutover = plan[wcIdx].steps.find((s) => s.label === "plugin-source-cutover");
+      expect(cutover).toBeDefined();
+      expect(cutover.argv).toEqual([SCRIPTS.pluginSrc]);
+      expect(cutover.argv).not.toContain("--no-interactive-wrapper");
+    }
+  });
+  test("acquire() (pre-backup) still runs setup-plugin-source.sh with --no-interactive-wrapper", () => {
+    const plan = planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS });
+    const acquireStep = plan.find((p) => p.phase === "acquire").steps.find((s) => s.label === "plugin-source");
+    expect(acquireStep.argv).toEqual([SCRIPTS.pluginSrc, "--no-interactive-wrapper"]);
   });
   test("unknown operation throws", () => {
     expect(() => planPhases({ operation: "frobnicate", nodeClass: "worker", scripts: SCRIPTS })).toThrow(/unknown operation/);

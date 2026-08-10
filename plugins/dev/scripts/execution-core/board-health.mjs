@@ -555,9 +555,6 @@ export function assembleBoardState({
   // candidates so the holistic pass actuates them. Empty default keeps a bare unit
   // call byte-identical.
   getDeferredBoardHealthTickets = () => [],
-  // CTL-1432 (B3): operator-sanctioned needs-human latch allowlist (a static array,
-  // not a live query). Suppressed from proposeMoves; stays visible in frozenNeedsHuman.
-  sanctionedNeedsHuman = [],
   // CTL-1157: PR-lifecycle status map (filter_state). Empty Map default ⇒ the
   // phantom-merged-PR / orphaned-open-PR invariants stay observable:false (the
   // shadow-first seam: wiring lands before the invariants begin observing).
@@ -712,12 +709,11 @@ export function assembleBoardState({
       admissionGated: !!capacity?.admissionGated,
     },
     reconcileMarkers: safe(() => getReconcileMarkers(), {}),
-    // CTL-1432 (B2/B3): deferred board-health anchor candidates + the sanctioned
-    // needs-human allowlist, carried on the frozen board for the pure consumers
-    // (selectAnchorCandidates reads deferredBoardHealth; proposeMoves reads
-    // sanctionedNeedsHuman).
+    // CTL-1432 (B2): deferred board-health anchor candidates, carried on the frozen
+    // board for the pure consumer (selectAnchorCandidates reads deferredBoardHealth).
+    // CTL-1552: the sanctioned needs-human allowlist is gone — suppression now reads
+    // the parked-by-human label straight off each ticketsById descriptor.
     deferredBoardHealth: safe(() => getDeferredBoardHealthTickets(), []),
-    sanctionedNeedsHuman: Array.isArray(sanctionedNeedsHuman) ? sanctionedNeedsHuman : [],
     // CTL-1157 off-gate: in off the filter_state PR-status SELECT must NOT run —
     // skip getPrStatusMap() entirely so off is byte-identical to origin/main (the
     // phantom/orphaned-PR invariants also stay out of evaluateInvariants in off).
@@ -951,22 +947,12 @@ function checkRateLimitHeadroom(b, t) {
   if (b.githubQuotaMode === "off") {
     return invariant(true, 0, false, [], "GitHub quota sampling off");
   }
-  const q = evaluateQuotaHeadroom(
-    b.githubQuota,
-    {
-      coreRemainingPct: t.githubCoreRemainingPct,
-      stalenessMs: t.githubQuotaStaleMs,
-    },
-    b.now
-  );
+  const q = evaluateQuotaHeadroom(b.githubQuota, {
+    coreRemainingPct: t.githubCoreRemainingPct,
+    stalenessMs: t.githubQuotaStaleMs,
+  }, b.now);
   if (q.state === "unknown") {
-    return invariant(
-      true,
-      0,
-      false,
-      [],
-      q.stale ? "GitHub quota snapshot stale" : "no GitHub quota snapshot"
-    );
+    return invariant(true, 0, false, [], q.stale ? "GitHub quota snapshot stale" : "no GitHub quota snapshot");
   }
   const note = `GitHub core quota ${q.remaining}/${q.limit} (${q.remainingPct.toFixed(1)}%) remaining; resets ${q.resetAt ?? "unknown"}`;
   if (b.githubQuotaMode !== "enforce") return invariant(true, 0, false, [], note);
@@ -1830,7 +1816,7 @@ export function decideBoardHealth(invariants, boardState) {
       observableFailed.length === 0 ? "all-green" : "no-actionable-moves",
       invariantsFailed,
       moves,
-      sanctioned
+      sanctioned,
     );
   }
   // Gate 2 — actionable work but no free slot to dispatch a fix → skip.
@@ -1880,8 +1866,9 @@ export function proposeMoves(invariants, _b) {
   // frozenNeedsHuman / boardContext (suppression is HERE only, never in
   // checkFrozenNeedsHuman) so a human still sees them; they just stop drowning the
   // genuinely-stuck tickets every 5-min scan (making proposedTier1/2 a constant).
-  // CTL-1552: parked-by-human LABEL suppression superseded the per-host
-  // sanctionedNeedsHuman env-var latch (never synced across the cluster).
+  // CTL-1552: suppression reads the parked-by-human LABEL off each descriptor
+  // (board-health already receives it) — so a park applies on EVERY host, unlike
+  // the per-host env var this replaced.
   const sanction = makeSuppressed(_b);
   if (invariants.dispatchLiveness && !invariants.dispatchLiveness.ok) {
     tier1.push({ move: "kick-dispatch", rationale: invariants.dispatchLiveness.note });
@@ -2015,6 +2002,13 @@ export function proposeMoves(invariants, _b) {
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
     if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but is not live" });
+  }
+  for (const h of invariants.nodeProductivity?.flagged ?? []) {
+    if (!invariants.nodeProductivity.ok) tier3.push({
+      host: h,
+      move: "escalate-unproductive-node",
+      rationale: "rostered node owns work and is live but has advanced nothing past a phase boundary",
+    });
   }
   for (const h of invariants.nodeProductivity?.flagged ?? []) {
     if (!invariants.nodeProductivity.ok) tier3.push({
@@ -2454,7 +2448,6 @@ export function boardHealthPass({
   repoForTicket, // CTL-1157 (Codex #4): ticket→owner/repo resolver (daemon-bound)
   getReconcileMarkers,
   getDeferredBoardHealthTickets, // CTL-1432 (B2): deferred board-health anchor candidates
-  sanctionedNeedsHuman, // CTL-1432 (B3): sanctioned needs-human latch allowlist
   getPrStatusMap, // CTL-1157: filter_state PR-status reader (daemon-bound)
   // CTL-1644: per-ticket actuation+salvageability evidence builder for
   // checkStrandedMidPipeline. Empty-Map default (same shadow-first pattern as
@@ -2504,7 +2497,7 @@ export function boardHealthPass({
     // only on a tick that actually proceeds, not on all ~59 throttled ticks between
     // 5-minute passes. Arrays still work unchanged (resolveDeadHosts is a no-op).
     getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), getNotLiveHosts, mode, now,
-    getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
+    getDeferredBoardHealthTickets, // CTL-1432 (B2). CTL-1552: sanctionedNeedsHuman removed.
     getStrandedEvidence, // CTL-1644: per-ticket evidence seam (empty-Map default if unbound)
     getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)
     getGithubQuota,

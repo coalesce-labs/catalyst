@@ -153,6 +153,53 @@ assert_eq "0" "$RC10" "slugged plan doc satisfies the gate (writer↔gate agreem
 assert_contains "$OUT10" "phase-artifact-gate-contracts.md" "slugged plan doc found by matcher"
 
 echo ""
+echo "Test 12 (regression): match_thoughts_artifact excludes hidden/AppleDouble files"
+HIDDEN_DIR="${SCRATCH}/thoughts/shared/hidden"
+mkdir -p "$HIDDEN_DIR"
+touch "${HIDDEN_DIR}/._2026-06-12-proj-2020.md"
+OUT12="$(match_thoughts_artifact "$HIDDEN_DIR" "PROJ-2020" 2>/dev/null || echo "")"
+RC12=0
+match_thoughts_artifact "$HIDDEN_DIR" "PROJ-2020" >/dev/null 2>&1 || RC12=$?
+assert_eq "1" "$RC12" "hidden-only dir returns non-zero (dotfile excluded)"
+assert_eq "" "$OUT12" "hidden-only dir output is empty"
+
+echo ""
+echo "Test 13 (regression): match_thoughts_artifact does not descend into subdirectories"
+NEST_DIR="${SCRATCH}/thoughts/shared/nested"
+mkdir -p "${NEST_DIR}/subdir"
+touch "${NEST_DIR}/subdir/2026-06-12-proj-3030.md"
+OUT13="$(match_thoughts_artifact "$NEST_DIR" "PROJ-3030" 2>/dev/null || echo "")"
+RC13=0
+match_thoughts_artifact "$NEST_DIR" "PROJ-3030" >/dev/null 2>&1 || RC13=$?
+assert_eq "1" "$RC13" "nested-only dir returns non-zero (subdirectory not descended)"
+assert_eq "" "$OUT13" "nested-only dir output is empty"
+
+echo ""
+echo "Test 15 (regression): match_thoughts_artifact handles a dir path containing glob metacharacters"
+# Codex review (PR #3108 round 1): an earlier revision depth-limited via
+# \`-type d ! -path "\$dir" -prune\` instead of -maxdepth. -path pattern-matches
+# its argument, so a <dir> containing glob metacharacters (e.g. a worktree
+# named repo[1]) never matched itself and got pruned, silently returning no
+# matches. -maxdepth is purely numeric and has no such failure mode.
+BRACKET_DIR="${SCRATCH}/repo[1]/thoughts/shared/research"
+mkdir -p "$BRACKET_DIR"
+touch "${BRACKET_DIR}/2026-01-01-proj-5050.md"
+OUT15="$(match_thoughts_artifact "$BRACKET_DIR" "PROJ-5050")"
+RC15=$?
+assert_eq "0" "$RC15" "bracket-containing dir path still matches (return code 0)"
+assert_contains "$OUT15" "2026-01-01-proj-5050.md" "bracket-containing dir path finds the artifact"
+
+echo ""
+echo "Test 14 (regression): match_thoughts_artifact prints matches in deterministic sorted order"
+ORDER_DIR="${SCRATCH}/thoughts/shared/order"
+mkdir -p "$ORDER_DIR"
+touch "${ORDER_DIR}/2026-06-14-proj-4040-newer.md"
+touch "${ORDER_DIR}/2026-06-01-proj-4040-older.md"
+OUT14="$(match_thoughts_artifact "$ORDER_DIR" "PROJ-4040")"
+EXPECTED14="$(printf '%s\n%s' "${ORDER_DIR}/2026-06-01-proj-4040-older.md" "${ORDER_DIR}/2026-06-14-proj-4040-newer.md")"
+assert_eq "$EXPECTED14" "$OUT14" "matches are lexicographically sorted regardless of traversal/creation order"
+
+echo ""
 echo "Test 11 (regression): match_thoughts_artifact behaves identically sourced under zsh"
 # `shopt` is not a zsh builtin, and the prior bash-array-glob implementation
 # relied on it (`shopt -s nullglob nocaseglob`). Under zsh that call silently
@@ -161,14 +208,18 @@ echo "Test 11 (regression): match_thoughts_artifact behaves identically sourced 
 # that didn't match — which poisoned the ENTIRE assignment, so even an
 # alternative that DID match never made it into `matches`. Confirmed root
 # cause of at least one false "prior artifact missing" plan-phase stall (see
-# CAT-39's friction log — sourced this file under an interactive zsh session,
+# PROJ-39's friction log — sourced this file under an interactive zsh session,
 # not via `bash -c` as intended). Skips (not a failure) when zsh isn't installed.
 if command -v zsh >/dev/null 2>&1; then
-	ZSH_OUT="$(zsh -c "source '$LIB'; match_thoughts_artifact '$FIXTURES' CTL-1081" 2>&1)"
+	ZSH_DIR="${SCRATCH}/thoughts/shared/zsh-fixtures"
+	mkdir -p "$ZSH_DIR"
+	touch "${ZSH_DIR}/2026-06-12-proj-1081.md"
+	touch "${ZSH_DIR}/2026-06-12-proj-1081-per-image-ai-captions.md"
+	ZSH_OUT="$(zsh -c "source '$LIB'; match_thoughts_artifact '$ZSH_DIR' PROJ-1081" 2>&1)"
 	ZSH_RC=$?
 	assert_eq "0" "$ZSH_RC" "zsh: return code is 0 (at least one match)"
-	assert_contains "$ZSH_OUT" "2026-06-12-ctl-1081.md" "zsh: output includes tail form"
-	assert_contains "$ZSH_OUT" "2026-06-12-ctl-1081-per-image-ai-captions.md" "zsh: output includes lowercase slug"
+	assert_contains "$ZSH_OUT" "2026-06-12-proj-1081.md" "zsh: output includes tail form"
+	assert_contains "$ZSH_OUT" "2026-06-12-proj-1081-per-image-ai-captions.md" "zsh: output includes lowercase slug"
 	assert_not_contains "$ZSH_OUT" "shopt" "zsh: no shopt/command-not-found noise in output"
 else
 	echo "  SKIP: zsh not installed on this host"

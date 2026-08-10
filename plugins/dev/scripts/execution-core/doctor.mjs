@@ -24,8 +24,8 @@
 //
 // Exit code: number of FAIL-level checks (0 = all clear).
 
-import { readFileSync, statSync, existsSync, realpathSync, openSync, readSync, closeSync } from "node:fs";
-import { resolve, dirname, isAbsolute } from "node:path";
+import { readFileSync, statSync, existsSync, lstatSync, realpathSync, readdirSync, openSync, readSync, closeSync } from "node:fs";
+import { resolve, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -42,6 +42,8 @@ import {
   resolveNodeClass,
   NODE_CLASSES,
   isDraining,
+  resolveDrainState, // CTL-1678: three-state drain resolver for checkDrainDisabled
+  readDaemonRuntimeEnv, // CTL-1678 (round-3 P1): live daemon's boot-time env snapshot
   getExecutionCoreDir,
   // CTL-1375: configured-repo discovery for the repo-icon token-scope advisory.
   getRegistryPath,
@@ -90,6 +92,9 @@ import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-cat
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
 import { probePublishCapability, resolvePushRemote } from "./publish-preflight.mjs"; // CAT-60: worker write-capability gate
 import { resolvePublishPreflightMode } from "./config.mjs";
+import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
+import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
+import { listProjects } from "./registry.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -996,6 +1001,20 @@ function defaultDaemonPath() {
   }
 }
 
+// CAT-29: prefer facts published by the live daemon. A correct installed plist
+// cannot certify a daemon that was started earlier from a broken interactive
+// environment. Stale facts are ignored by verifying that their PID is alive.
+function defaultRunningDaemonFacts() {
+  try {
+    const facts = JSON.parse(readFileSync(join(getExecutionCoreDir(), "boot-facts.json"), "utf8"));
+    if (!Number.isInteger(facts?.pid) || typeof facts?.path !== "string") return null;
+    process.kill(facts.pid, 0);
+    return facts;
+  } catch {
+    return null;
+  }
+}
+
 // defaultResolveInPath — does `cmd` resolve to an executable under `pathStr`?
 // Uses `command -v` with positional args (no shell injection).
 function defaultResolveInPath(cmd, pathStr) {
@@ -1022,30 +1041,35 @@ function defaultSmokeProbe(cmd, args, pathStr) {
 // checkDaemonToolPath — assert the daemon's launchd PATH can resolve and run the
 // CLIs it shells out to. Injectable deps for unit testing.
 export function checkDaemonToolPath(deps = {}) {
+  const plistPath = deps.daemonPath !== undefined ? deps.daemonPath : defaultDaemonPath();
+  const runningFacts = deps.runningFacts !== undefined ? deps.runningFacts : defaultRunningDaemonFacts();
   const {
-    daemonPath = defaultDaemonPath(),
     resolveInPath = defaultResolveInPath,
     smokeProbe = defaultSmokeProbe,
     tools = ["linearis", "node", "claude"],
   } = deps;
+  const daemonPath = runningFacts?.path ?? plistPath;
 
   if (!daemonPath) {
     return [
       mkCheck(
         "daemon-tool-path",
         STATUS.WARN,
-        "no installed catalyst-stack launchd plist found — cannot assert the daemon's PATH; run `catalyst-stack install-services`",
+        "no running daemon boot facts or installed catalyst-stack launchd plist found — cannot assert the daemon's PATH; run `catalyst-stack install-services`",
       ),
     ];
   }
 
   const missing = tools.filter((t) => !resolveInPath(t, daemonPath));
   if (missing.length > 0) {
+    const source = runningFacts ? "running daemon" : "daemon launchd";
+    const disagreement =
+      runningFacts && plistPath && missing.every((tool) => resolveInPath(tool, plistPath));
     return [
       mkCheck(
         "daemon-tool-path",
         STATUS.FAIL,
-        `daemon launchd PATH cannot resolve: ${missing.join(", ")} — the daemon shells out to these every tick; missing → exit-127 silent strand (frozen eligible set, freeSlots=0). PATH=${daemonPath}`,
+        `${source} PATH cannot resolve: ${missing.join(", ")} — the daemon shells out to these every tick; missing → exit-127 silent strand (frozen eligible set, freeSlots=0).${disagreement ? " Running daemon PATH disagrees with the installed plist." : ""} PATH=${daemonPath}`,
       ),
     ];
   }
@@ -1074,7 +1098,7 @@ export function checkDaemonToolPath(deps = {}) {
     mkCheck(
       "daemon-tool-path",
       STATUS.PASS,
-      `daemon launchd PATH resolves linearis/node/claude and they run (no exit-127)`,
+      `${runningFacts ? "running daemon" : "daemon launchd"} PATH resolves linearis/node/claude and they run (no exit-127)`,
     ),
   ];
 }
@@ -1368,11 +1392,36 @@ function defaultThoughtsCloneOk(dir) {
   }
 }
 
+// A configured org is untrusted text going into a RegExp — escape it, or an org
+// containing regex metacharacters would either throw or match too broadly. Matching is
+// anchored to path-segment boundaries so "coalesce-labs" never matches the distinct org
+// "coalesce-labs-fork".
+function escapeThoughtsOrg(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// defaultConfiguredThoughtsOrg — the GitHub owner THIS node's Layer-1 declares as its
+// thoughts host: `catalyst.thoughts.org`, falling back to `catalyst.thoughts.profile`
+// (a HumanLayer alias that only coincidentally equals the owner — the same loud
+// fallback join-bundle.mjs and provision-thoughts.sh make). Returns "" when nothing is
+// declared, which the gate treats as "cannot judge" rather than "wrong".
+function defaultConfiguredThoughtsOrg() {
+  try {
+    const l1 = JSON.parse(readFileSync(resolveDoctorLayer1Path(), "utf8"));
+    const t = l1?.catalyst?.thoughts;
+    const v = t?.org ?? t?.profile ?? "";
+    return typeof v === "string" ? v : "";
+  } catch {
+    return "";
+  }
+}
+
 export function checkThoughts(deps = {}) {
   const {
     resolveRoster = resolveClusterHosts,
     readHumanlayer = defaultReadHumanlayer,
     cloneOk = defaultThoughtsCloneOk,
+    configuredThoughtsOrg = defaultConfiguredThoughtsOrg,
   } = deps;
 
   const roster = resolveRoster();
@@ -1402,19 +1451,42 @@ export function checkThoughts(deps = {}) {
   const thoughtsRepo = typeof t.thoughtsRepo === "string" ? t.thoughtsRepo : "";
   const defaultProfile = typeof t.defaultProfile === "string" ? t.defaultProfile : "";
 
-  // Pollution guard: primary must be coalesce-labs, NEVER a foreign repo. The
-  // global thoughtsRepo fallback defaulting to groundworkapp/rightsite-cloud is
-  // the exact pollution bug (locked invariant: provision-thoughts-invariant.test.sh).
-  if (/groundworkapp|rightsite-cloud/i.test(thoughtsRepo) || /groundworkapp|rightsite-cloud/i.test(defaultProfile)) {
+  // Pollution guard: the humanlayer primary must be the org THIS node configured, never
+  // a foreign one. The bug this locks out (provision-thoughts-invariant.test.sh) is the
+  // global thoughtsRepo fallback silently settling on somebody else's org.
+  //
+  // Codex #3080 P1: the org names were previously HARDCODED here — coalesce-labs PASS,
+  // groundworkapp/rightsite-cloud FAIL — which is the very hardcoding this PR removes
+  // from the provisioning path. A node that legitimately hosts its thoughts under
+  // rightsite-cloud (the documented rightsite-cloud/adva layout) provisioned correctly
+  // and was then FAILed here, so `catalyst-join.sh` aborted activation right after a
+  // successful join. Judge against the CONFIGURED primary instead: same guard, no catalog.
+  const wantOrg = configuredThoughtsOrg();
+  const matchesWant =
+    wantOrg !== "" &&
+    (new RegExp(`(^|[/@:])${escapeThoughtsOrg(wantOrg)}(/|$)`, "i").test(thoughtsRepo) ||
+      defaultProfile.toLowerCase() === wantOrg.toLowerCase());
+  if (wantOrg === "") {
+    // Nothing declared — we cannot say which org is "foreign", so do not guess.
+    checks.push(
+      mkCheck(
+        "thoughts-primary",
+        STATUS.WARN,
+        `cannot verify humanlayer.json primary — no catalyst.thoughts.org/.profile in Layer-1 (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}")`,
+      ),
+    );
+  } else if (matchesWant) {
+    checks.push(
+      mkCheck("thoughts-primary", STATUS.PASS, `humanlayer.json primary = ${wantOrg} (as configured)`),
+    );
+  } else if (thoughtsRepo !== "" || defaultProfile !== "") {
     checks.push(
       mkCheck(
         "thoughts-primary",
         STATUS.FAIL,
-        `humanlayer.json primary resolves to a FOREIGN repo (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}") — pollutes groundworkapp/rightsite-cloud; must be coalesce-labs`,
+        `humanlayer.json primary resolves to a FOREIGN org (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}") — this node configures catalyst.thoughts.org="${wantOrg}"; pollutes the wrong repo`,
       ),
     );
-  } else if (/coalesce-labs/i.test(thoughtsRepo) || defaultProfile === "coalesce-labs") {
-    checks.push(mkCheck("thoughts-primary", STATUS.PASS, "humanlayer.json primary = coalesce-labs"));
   } else {
     checks.push(
       mkCheck(
@@ -2594,6 +2666,165 @@ export function checkAgentBrowser(deps = {}) {
   return checks;
 }
 
+// defaultShipperState — load state + last exit of the log-shipper LaunchAgent.
+// Mirrors defaultReaperState but for ai.coalesce.catalyst-log-shipper.
+function defaultShipperState() {
+  try {
+    const r = spawnSync("launchctl", ["list", MANIFEST_LABELS.shipper], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (r.status !== 0 || !r.stdout) return { loaded: false, lastExit: null };
+    const m = r.stdout.match(/"LastExitStatus"\s*=\s*(-?\d+)/);
+    return { loaded: true, lastExit: m ? parseInt(m[1], 10) : null };
+  } catch {
+    return { loaded: false, lastExit: null };
+  }
+}
+
+// defaultCanonicalShipperConfig — resolve the canonical config path from the
+// registered pristine plugin-source checkout (catalyst.orchestration.pluginDirs[0]).
+// Returns the absolute path or null if the config is absent/unreadable.
+function defaultCanonicalShipperConfig() {
+  try {
+    const cfg = JSON.parse(readFileSync(layer2Path(), "utf8"));
+    const pluginDirs = cfg?.catalyst?.orchestration?.pluginDirs;
+    const pd = Array.isArray(pluginDirs) ? pluginDirs[0] : (typeof pluginDirs === "string" ? pluginDirs : null);
+    if (!pd) return null;
+    return resolve(pd, "scripts", "log-shipper", "config.alloy");
+  } catch {
+    return null;
+  }
+}
+
+// checkLogShipper — CTL-1473: for classes whose manifest declares shipsLogs:true,
+// (a) FAILs when the shipper LaunchAgent is missing/unloaded, and (b) FAILs when
+// the plist's --config path does not resolve to the canonical config under the
+// registered pristine plugin-source checkout. A preinstall flag (from
+// CATALYST_DOCTOR_PREINSTALL=1) downgrades FAILs to WARNs so the join pre-install
+// gate can run before install-services creates the shipper. The post-install strict
+// verify runs without the flag and fails hard on a missing/misconfigured shipper.
+export function checkLogShipper(deps = {}) {
+  const {
+    shipsLogs: shipperRequired = false,
+    preinstall = false,
+    plistPath = resolve(homedir(), "Library", "LaunchAgents", `${MANIFEST_LABELS.shipper}.plist`),
+    readFile = (p) => readFileSync(p, "utf8"),
+    fileExists = (p) => existsSync(p),
+    realpath = (p) => {
+      // Runtime-agnostic: realpathSync is imported at module top (line 27), so
+      // symlink normalization runs under both node and bun. The prior
+      // require("node:fs") threw under node ESM (require is undefined), silently
+      // returning the un-normalized path (CTL-1473 verify silent-failure finding).
+      try { return realpathSync(p); } catch { return p; }
+    },
+    canonicalConfig = defaultCanonicalShipperConfig,
+    shipperState = defaultShipperState,
+  } = deps;
+
+  if (!shipperRequired) return [];
+
+  const sev = (s) => (preinstall && s === STATUS.FAIL ? STATUS.WARN : s);
+  const checks = [];
+
+  let xml;
+  try {
+    xml = readFile(plistPath);
+  } catch {
+    checks.push(mkCheck(
+      "shipper-installed",
+      sev(STATUS.FAIL),
+      `log-shipper agent (${MANIFEST_LABELS.shipper}) not installed — daemon logs won't reach Loki; run 'catalyst-stack install-services'`,
+    ));
+    return checks;
+  }
+
+  const { loaded, lastExit } = shipperState();
+  if (!loaded) {
+    checks.push(mkCheck(
+      "shipper-installed",
+      sev(STATUS.FAIL),
+      `log-shipper plist present but not loaded by launchd — run 'catalyst-stack install-services'`,
+    ));
+    return checks;
+  }
+
+  // CTL-1473 remediate (round-3): inspect lastExit exactly like checkReaper
+  // (line ~1728). The prior code destructured only `loaded` and dropped
+  // lastExit, so a loaded-but-crash-looping shipper (LastExitStatus 127/78,
+  // shipping nothing) with a canonical --config path reported shipper-config:
+  // PASS — the exact "green while shipping nothing" failure this ticket exists
+  // to prevent. FAIL (sev-wrapped so the preinstall gate downgrades to WARN)
+  // given shipsLogs criticality; PASS on 0 (clean) or null (loaded but never
+  // run yet) falls through to the canonical --config check below.
+  if (lastExit === 127) {
+    checks.push(mkCheck(
+      "shipper-health",
+      sev(STATUS.FAIL),
+      `log-shipper last exited 127 (program path unresolved) — shipping nothing; reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+  if (typeof lastExit === "number" && lastExit !== 0) {
+    checks.push(mkCheck(
+      "shipper-health",
+      sev(STATUS.FAIL),
+      `log-shipper last exited ${lastExit} — crash-looping and shipping nothing; check the shipper log and reinstall ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  // Extract the --config argument from the plist ProgramArguments
+  const cfgMatch = xml.match(/<string>([^<]*config\.alloy)<\/string>/);
+  const bakedConfig = cfgMatch ? cfgMatch[1] : null;
+  if (!bakedConfig) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper plist present and loaded but no --config alloy path found in ${plistPath} (malformed plist)`,
+    ));
+    return checks;
+  }
+
+  const canonical = typeof canonicalConfig === "function" ? canonicalConfig() : canonicalConfig;
+  if (!canonical) {
+    checks.push(mkCheck(
+      "shipper-config",
+      STATUS.WARN,
+      `log-shipper config path unverifiable (no pluginDirs in Layer-2 config) — baked path: ${bakedConfig}`,
+    ));
+    return checks;
+  }
+
+  const bakedExists = fileExists(bakedConfig);
+  if (!bakedExists) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper --config path does not exist on disk (ephemeral/deleted worktree?): ${bakedConfig} — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  let resolvedBaked = bakedConfig;
+  let resolvedCanon = canonical;
+  try { resolvedBaked = realpath(bakedConfig); } catch { /* use raw */ }
+  try { resolvedCanon = realpath(canonical); } catch { /* use raw */ }
+
+  if (resolvedBaked !== resolvedCanon) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper --config points at a non-canonical path (likely a deleted worktree): ${bakedConfig} (expected: ${canonical}) — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  checks.push(mkCheck("shipper-config", STATUS.PASS, `log-shipper config path is canonical (${bakedConfig})`));
+  return checks;
+}
+
+
 // checkCloudTokenEnv — CTL-1307. ADVISORY for the cluster-shared-token distribution
 // checks below (the `cloud-token` row's original CTL-1307 scope): CATALYST_CLOUD_TOKEN
 // is an OPTIONAL extension for a cluster node — a node stays fully local-only without
@@ -3279,6 +3510,156 @@ async function defaultLinearGraphQLPost(query, token) {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+// parseEnvFileVar / overlayDaemonDrainEnv — CTL-1678 (Codex P2). Read a single
+// `[export ]KEY=val` assignment out of an env-file body (same shape parseEnvFileExecutor
+// matches for CATALYST_EXECUTOR) and overlay the two durable drain overrides onto an env
+// object. The daemon launcher `source`s execution-core.env AFTER inheriting the ambient
+// env, so a file assignment wins over an inherited one — the overlay reproduces that
+// precedence (file value replaces ambient only when the file actually sets the key).
+function parseEnvFileFlag(text, re) {
+  if (typeof text !== "string" || !text) return null;
+  const m = text.match(re);
+  return m ? m[1] : null;
+}
+function overlayDaemonDrainEnv(env, envFileText) {
+  // Literal per-key regexes (no dynamic RegExp) mirroring parseEnvFileExecutor. File
+  // value replaces ambient only when the file actually sets the key (matching `source`).
+  const out = { ...env };
+  const dd = parseEnvFileFlag(envFileText, /^\s*(?:export\s+)?CATALYST_DRAIN_DISABLED=["']?([^"'\s]+)/m);
+  if (dd !== null) out.CATALYST_DRAIN_DISABLED = dd;
+  const bd = parseEnvFileFlag(envFileText, /^\s*(?:export\s+)?CATALYST_BOOT_DRAINED=["']?([^"'\s]+)/m);
+  if (bd !== null) out.CATALYST_BOOT_DRAINED = bd;
+  return out;
+}
+
+// checkDrainDisabled — CTL-1678. Advisory report of the per-node drain override.
+// A worker with CATALYST_DRAIN_DISABLED=1 permanently ignores the drain flag; this
+// surfaces the third "draining-but-ignored" state so an operator scanning doctor
+// output sees an active neutralization. NEVER FAILs (advisory, like checkWorkerLabels)
+// — the override is an intended operator action, so its presence must not block the
+// activation gate. WARN only when the flag is present AND being ignored; PASS/INFO
+// otherwise. Worker-suite only (the env is worker-only).
+export function checkDrainDisabled(deps = {}) {
+  const {
+    env = process.env,
+    orchDir = getExecutionCoreDir(),
+    resolveDrainState: _resolve = resolveDrainState,
+    // CTL-1678 (Codex P2): the durable CATALYST_DRAIN_DISABLED / CATALYST_BOOT_DRAINED
+    // overrides live in the machine-local execution-core.env that the daemon launcher
+    // sources at start — `catalyst-doctor` runs doctor.mjs WITHOUT sourcing it, so a
+    // naive process.env read reports "honors the drain flag" while the running daemon
+    // ignores it (contradictory operator health output). Overlay the file's values onto
+    // the ambient env (file wins, matching `source` semantics) so this check mirrors the
+    // daemon's EFFECTIVE env. Mirrors checkSdkDaemonEnv's env-file read for CATALYST_EXECUTOR.
+    // Injectable seam; default reads the real file, absent/unreadable → "".
+    execCoreEnvPath = defaultExecCoreEnvPath(),
+    readEnvFile = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch {
+        return "";
+      }
+    },
+    // CTL-1678 (Codex round-3 P1): when a daemon is RUNNING, the file overlay below can
+    // still lie — the overrides are restart-only, so a file edited after daemon start
+    // describes the NEXT daemon, not this one. Prefer the live daemon's boot-time
+    // snapshot (pid-gated: a marker from a dead daemon is ignored); the overlay is the
+    // fallback for the stopped-daemon case, where next-start config is the honest answer.
+    readRuntimeEnv = readDaemonRuntimeEnv,
+  } = deps;
+  const runtime = readRuntimeEnv(orchDir);
+  const effectiveEnv = runtime
+    ? {
+        CATALYST_DRAIN_DISABLED: runtime.drainDisabled ? "1" : "0",
+        // drainDisabled is recorded post-precedence (boot-drain already folded in), so
+        // the synthetic env never re-triggers isDrainDisabled's boot-drain gate.
+        CATALYST_BOOT_DRAINED: "0",
+      }
+    : overlayDaemonDrainEnv(env, readEnvFile(execCoreEnvPath));
+  const { flagPresent, disabled } = _resolve(orchDir, { env: effectiveEnv });
+  if (disabled && flagPresent) {
+    return mkCheck(
+      "drain-disabled",
+      STATUS.WARN,
+      "drain flag is present but being IGNORED (CATALYST_DRAIN_DISABLED=1) — " +
+        "this node admits new work despite an active drain (CTL-1678)",
+    );
+  }
+  if (disabled) {
+    return mkCheck(
+      "drain-disabled",
+      STATUS.PASS,
+      "drain-disabled — this node ignores the drain flag (CATALYST_DRAIN_DISABLED=1, CTL-1678)",
+    );
+  }
+  return mkCheck(
+    "drain-disabled",
+    STATUS.INFO,
+    "not drain-disabled — this node honors the drain flag (CTL-1678)",
+  );
+}
+
+// Advisory report for registry entries whose checkout declares a different
+// Linear team. This check is total and never FAILs: host registry state is an
+// operator repair, and doctor's FAIL count gates worker activation.
+export function checkRegistryTeamIdentity(deps = {}) {
+  const { listProjects: readProjects = listProjects } = deps;
+  let projects;
+  try {
+    projects = readProjects();
+  } catch (err) {
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      `registry unreadable — team identity not checked (${err?.message ?? "unknown"}) (CAT-52)`,
+    );
+  }
+  if (!projects.length) {
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      "registry has no projects — nothing to check (the zero-project warning is the daemon's, CTL-854)",
+    );
+  }
+  const mismatches = projects.filter((project) => project?.identity?.matches === false);
+  if (mismatches.length) {
+    const details = mismatches
+      .map((project) =>
+        `${project.team} → ${project.repoRoot} (declares "${project.identity.declared}")`)
+      .join("; ");
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.WARN,
+      `${mismatches.length} registry entr${mismatches.length === 1 ? "y" : "ies"} point at a ` +
+        "checkout that declares a DIFFERENT Linear team — worktrees cut from it inherit that " +
+        `checkout's Layer-1 catalyst.linear config and ticket prefix: ${details} (CAT-52)`,
+    );
+  }
+  const known = projects.filter((project) => project?.identity?.matches === true).length;
+  // No mismatch is NOT the same as verified. An entry whose checkout config is
+  // absent, unreadable, malformed, or missing teamKey yields matches:null, and
+  // grading that PASS would report a clean contract that was never actually
+  // checked — exactly the drift this check exists to surface. Anything short of
+  // full verification stays INFO (advisory-only: this check never FAILs).
+  if (known < projects.length) {
+    const unverified = projects.length - known;
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.INFO,
+      `${known}/${projects.length} registry entries verified against their repoRoot's declared ` +
+        `teamKey; ${unverified} could not be checked (config absent, unreadable, malformed, or ` +
+        "missing catalyst.linear.teamKey) — no mismatch found, but the contract is unverified " +
+        "for those entries (CAT-52)",
+    );
+  }
+  return mkCheck(
+    "registry-team-identity",
+    STATUS.PASS,
+    `${known}/${projects.length} registry entries verified against their repoRoot's declared ` +
+      "teamKey; no mismatches (CAT-52)",
+  );
 }
 
 // checkWorkerLabels — CTL-1481. Advisory health of the workspace `worker`
@@ -4584,6 +4965,271 @@ export function checkPluginSourceFreshness(deps = {}) {
   return [classifyPluginSourceFreshness({ roots, healthByRoot, nodeClass })];
 }
 
+// checkStaleLock — CTL-1415: a stale `.git/index.lock` in the node's plugin-source
+// checkout silently freezes every plugin pull (a crashed git op leaves the lock;
+// each later `git reset --hard` then fails forever — the ~8.5h laptop freeze in
+// CTL-1401). doctor REPORTS the frozen state so the node isn't silently stuck on
+// stale plugins; the updater/broker pull path (broker/plugin-refresh.mjs) is what
+// auto-clears it. Age-gated via the SHARED lib/stale-lock.mjs classifier, so the
+// "safe age" can't drift from what the pull path clears, and a live git op (a
+// fresh lock) is reported as in-progress, never flagged.
+//
+// Codex P2 (#2530): a checkout provisioned via `setup-plugin-source.sh --path`
+// only persists the custom root through catalyst.orchestration.pluginDirs — it
+// does NOT guarantee CATALYST_PLUGIN_SOURCE is set in doctor's environment. The
+// old hardcoded ~/catalyst/plugin-source default could report "no stale lock"
+// while the ACTUAL configured checkout sat frozen. Resolve the same
+// resolvePluginCheckoutRoots() the adjacent freshness check and the real pull
+// path use (CTL-1421), so this check inspects the checkout(s) that are actually
+// live rather than an unconditional guess. An explicit `root` still wins (tests /
+// single-checkout callers); the historical env/default guess is the last-resort
+// fallback only when nothing resolves at all (no pluginDirs configured).
+export function checkStaleLock(deps = {}) {
+  const {
+    root,
+    resolveRootsFn = () => resolvePluginCheckoutRoots({}),
+    now = Date.now(),
+    thresholdMs = STALE_LOCK_THRESHOLD_MS,
+    statFn,
+  } = deps;
+  const resolved = root ? [root] : resolveRootsFn();
+  const roots =
+    resolved.length > 0
+      ? resolved
+      : [process.env.CATALYST_PLUGIN_SOURCE || resolve(homedir(), "catalyst", "plugin-source")];
+
+  const statuses = roots.map((r) => ({ r, s: staleLockStatus({ root: r, now, thresholdMs, statFn }) }));
+  const stale = statuses.filter(({ s }) => s.present && s.stale);
+  if (stale.length > 0) {
+    const thMins = Math.round(thresholdMs / 60000);
+    const details = stale
+      .map(({ r, s }) => `${indexLockPath(r)} (~${Math.round(s.ageMs / 60000)}m old)`)
+      .join("; ");
+    return [mkCheck("stale-plugin-lock", STATUS.WARN,
+      `stale .git/index.lock (age ≥ ${thMins}m threshold) — plugin pulls are FROZEN until it clears; the updater/broker auto-clears it on its next pull (CTL-1415), or remove by hand: ${details}`)];
+  }
+  const inProgress = statuses.find(({ s }) => s.present && !s.stale);
+  if (inProgress) {
+    const secs = Math.round(inProgress.s.ageMs / 1000);
+    const thSecs = Math.round(thresholdMs / 1000);
+    return [mkCheck("stale-plugin-lock", STATUS.PASS, `a git operation is in progress in plugin-source (index.lock ${secs}s old < ${thSecs}s threshold) — not stale`)];
+  }
+  return [mkCheck("stale-plugin-lock", STATUS.PASS, `no stale git index.lock in plugin-source (${roots.join(", ")})`)];
+}
+
+// ─── Skills-dir plugin migration ─────────────────────────────────────────────
+// The daemon / SDK / Codex executors load catalyst plugins from the resolved
+// pluginDirs checkout (still — the Agent SDK does not auto-load ~/.claude/skills
+// plugins, so pluginDirs stays and checkPluginSourceFreshness above guards it).
+// Every OTHER session type Claude Code itself resolves plugins for (interactive
+// `claude`, `claude --bg`, bg-spare, desktop) must load catalyst IN-PLACE from
+// that same checkout via user-scope skills-dir symlinks — never the version-keyed
+// `catalyst` marketplace cache (the one path that goes stale, the "stale copy
+// reports healthy" class this migration closes). This check asserts that end
+// state: every plugin in the checkout has a matching ~/.claude/skills/<name>
+// symlink resolving into it, AND no legacy path (marketplace registration,
+// enabledPlugins residue, an installed marketplace copy that precedence-BLOCKS the
+// skills-dir plugin, or the retired interactive --plugin-dir wrapper) survives.
+// worker = FAIL (the fleet node), developer/monitor = WARN.
+
+const SKILLS_DIR_WRAPPER_MARKER = "# >>> catalyst plugin-source (managed) >>>";
+
+// claudeConfigDir — Claude Code's data directory, honoring CLAUDE_CONFIG_DIR.
+//
+// CTL (Codex #2664 P1): the skills-dir call sites hardcoded homedir()/.claude. Claude
+// Code lets an operator relocate that directory, and CLAUDE_CONFIG_DIR may hold a
+// COLON-SEPARATED list whose FIRST entry is the writable primary — so on a relocated
+// install the cutover wrote symlinks to, and doctor verified them in, a directory
+// Claude Code never reads. Mirrors setup-plugin-source.sh's claude_config_dir() so the
+// bash writer and this JS verifier can never disagree about where the links live.
+export function claudeConfigDir() {
+  const v = process.env.CLAUDE_CONFIG_DIR;
+  if (typeof v === "string" && v !== "") return v.split(":")[0];
+  return resolve(homedir(), ".claude");
+}
+
+// defaultExpectedSkillsPlugins — every <root>/plugins/*/.claude-plugin/plugin.json,
+// keyed by manifest `name` (the symlink basename) with `dir` realpath'd for a
+// direct string compare against the (also realpath'd) symlink target.
+function defaultExpectedSkillsPlugins(roots) {
+  const out = [];
+  for (const root of roots) {
+    const pluginsDir = resolve(root, "plugins");
+    let entries;
+    try {
+      entries = readdirSync(pluginsDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const dir = resolve(pluginsDir, e.name);
+      try {
+        const name = JSON.parse(readFileSync(resolve(dir, ".claude-plugin", "plugin.json"), "utf8"))?.name;
+        if (name) out.push({ name, dir: realpathSync(dir) });
+      } catch {
+        /* no manifest → not a loadable plugin */
+      }
+    }
+  }
+  return out;
+}
+
+// defaultSkillLink — classify ~/.claude/skills/<name>: symlink (target realpath'd,
+// null if dangling) | other (a real file/dir, never clobbered) | missing.
+function defaultSkillLink(name) {
+  const link = resolve(claudeConfigDir(), "skills", name);
+  let st;
+  try {
+    st = lstatSync(link);
+  } catch {
+    return { kind: "missing" };
+  }
+  if (!st.isSymbolicLink()) return { kind: "other" };
+  try {
+    return { kind: "symlink", target: realpathSync(link) };
+  } catch {
+    return { kind: "symlink", target: null }; // dangling
+  }
+}
+
+// defaultReadInstalledPlugins — ~/.claude/plugins/installed_plugins.json (records a
+// marketplace copy install even when it is not in enabledPlugins).
+function defaultReadInstalledPlugins() {
+  try {
+    return JSON.parse(readFileSync(resolve(homedir(), ".claude", "plugins", "installed_plugins.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// defaultWrapperRcFiles — interactive rc files still carrying the retired managed
+// `claude()` --plugin-dir wrapper block (double-loads with skills-dir).
+function defaultWrapperRcFiles() {
+  const found = [];
+  for (const rc of [".zshrc", ".bashrc", ".bash_profile"].map((f) => resolve(homedir(), f))) {
+    try {
+      if (readFileSync(rc, "utf8").includes(SKILLS_DIR_WRAPPER_MARKER)) found.push(rc);
+    } catch {
+      /* absent */
+    }
+  }
+  return found;
+}
+
+// classifySkillsDirPlugins — PURE decision core (all IO injected). Aggregates every
+// residue into a single check, mirroring classifyPluginSourceFreshness's shape.
+export function classifySkillsDirPlugins({
+  roots = [],
+  expectedPlugins = [],
+  linkByName = {},
+  settings = null,
+  installedPlugins = null,
+  wrapperRcFiles = [],
+  nodeClass = "worker",
+} = {}) {
+  const sev = nodeClass === "worker" ? STATUS.FAIL : STATUS.WARN;
+
+  if (roots.length === 0) {
+    return mkCheck(
+      "skills-dir-plugins",
+      sev,
+      "no plugin-source checkout resolved (pluginDirs unset) — cannot verify the ~/.claude/skills symlinks; " +
+        "run setup-plugin-source.sh",
+    );
+  }
+
+  const problems = [];
+
+  // (a) every plugin in the checkout has a matching skills-dir symlink into it
+  for (const { name, dir } of expectedPlugins) {
+    const link = linkByName[name];
+    if (!link || link.kind === "missing") {
+      problems.push(`~/.claude/skills/${name} is missing`);
+    } else if (link.kind === "other") {
+      problems.push(`~/.claude/skills/${name} exists but is not a symlink`);
+    } else if (!link.target) {
+      problems.push(`~/.claude/skills/${name} is a dangling symlink`);
+    } else if (link.target !== dir) {
+      problems.push(`${claudeConfigDir()}/skills/${name} resolves to ${link.target}, not the plugin-source checkout (${dir})`);
+    }
+  }
+
+  // (b) legacy marketplace load-path residue — any of these reintroduces the stale
+  //     version-keyed cache and/or precedence-blocks the in-place skills-dir copy.
+  //     Covers EVERY plugin in the checkout's catalog (via expectedPlugins), not a
+  //     hardcoded catalyst-dev/-pm allowlist — Codex P1: the marketplace catalog has
+  //     ten plugins (catalyst-meta, catalyst-analytics, catalyst-debugging, …); a
+  //     two-name check would report clean while an untouched marketplace copy of one
+  //     of the other eight kept running stale code.
+  const marketplaceIds =
+    expectedPlugins.length > 0
+      ? expectedPlugins.map(({ name }) => `${name}@catalyst`)
+      : ["catalyst-dev@catalyst", "catalyst-pm@catalyst"];
+  const ep = settings?.enabledPlugins || {};
+  for (const k of marketplaceIds) {
+    if (k in ep) problems.push(`enabledPlugins still lists ${k} — clear it`);
+  }
+  if (settings?.extraKnownMarketplaces?.catalyst) {
+    problems.push("the 'catalyst' marketplace is still registered (extraKnownMarketplaces) — remove it");
+  }
+  const installed = installedPlugins?.plugins || {};
+  for (const k of marketplaceIds) {
+    if (installed[k]) {
+      problems.push(`${k} is still installed from the marketplace — it precedence-BLOCKS the skills-dir copy; uninstall it`);
+    }
+  }
+
+  // (c) the retired interactive --plugin-dir wrapper (double-loads with skills-dir)
+  for (const rc of wrapperRcFiles) {
+    problems.push(`the legacy interactive --plugin-dir wrapper is still in ${rc} — remove the managed block`);
+  }
+
+  if (problems.length > 0) {
+    return mkCheck(
+      "skills-dir-plugins",
+      sev,
+      `catalyst plugins do not load cleanly in-place via user-scope skills-dir (${problems.join("; ")}). ` +
+        "Run the full 'bash setup-plugin-source.sh' cutover to fix (marketplace copies enabled at project scope in " +
+        "another repo need 'claude plugin uninstall <p>@catalyst --scope project -y' from that repo).",
+    );
+  }
+  return mkCheck(
+    "skills-dir-plugins",
+    STATUS.PASS,
+    `all ${expectedPlugins.length} catalyst plugins load in-place via ~/.claude/skills symlinks into ${roots[0]}; ` +
+      "no marketplace / wrapper residue",
+  );
+}
+
+// checkSkillsDirPlugins — gather the IO, then classify. Seams injectable for tests.
+export function checkSkillsDirPlugins(deps = {}) {
+  const {
+    nodeClass = "worker",
+    resolveRootsFn = () => resolvePluginCheckoutRoots({}),
+    expectedPluginsFn = defaultExpectedSkillsPlugins,
+    skillLinkFn = defaultSkillLink,
+    readSettingsFn = defaultReadClaudeSettings,
+    readInstalledPluginsFn = defaultReadInstalledPlugins,
+    wrapperRcFilesFn = defaultWrapperRcFiles,
+  } = deps;
+  const roots = resolveRootsFn();
+  const expectedPlugins = expectedPluginsFn(roots);
+  const linkByName = {};
+  for (const { name } of expectedPlugins) linkByName[name] = skillLinkFn(name);
+  return [
+    classifySkillsDirPlugins({
+      roots,
+      expectedPlugins,
+      linkByName,
+      settings: readSettingsFn(),
+      installedPlugins: readInstalledPluginsFn(),
+      wrapperRcFiles: wrapperRcFilesFn(),
+      nodeClass,
+    }),
+  ];
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -4620,6 +5266,9 @@ export function checksForClass(nc, opts = {}) {
     publishCacheDir,
     publishNow,
     publishSpawn,
+    // CTL-1473: pre-install flag downgrades install-remediable checks (shipper, agents-for-class)
+    // from FAIL to WARN when the join gate runs BEFORE install-services (which creates the services).
+    preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
@@ -4654,6 +5303,12 @@ export function checksForClass(nc, opts = {}) {
   // CTL-1421: assert the worker plugin path resolves to a healthy pristine plugin-source
   // (else workers silently serve stale marketplace-cache code). worker=FAIL, dev/monitor=WARN.
   const pluginSourceFreshThunk = () => checkPluginSourceFreshness({ nodeClass: nc.class });
+  // CTL-1415: a stale plugin-source .git/index.lock freezes pulls on ANY node class.
+  const staleLockThunk = () => checkStaleLock();
+  // skills-dir-plugin migration: catalyst loads in-place via ~/.claude/skills symlinks
+  // for every session type Claude Code resolves plugins for; no marketplace/wrapper
+  // residue. worker=FAIL, dev/monitor=WARN.
+  const skillsDirPluginsThunk = () => checkSkillsDirPlugins({ nodeClass: nc.class });
 
   const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
   const wontOwnThunk = () =>
@@ -4712,6 +5367,8 @@ export function checksForClass(nc, opts = {}) {
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (correct class agent set)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater (a developer runs no broker)
       pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a developer)
+      staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the updater's pulls
+      skillsDirPluginsThunk, // skills-dir migration: catalyst loads in-place via ~/.claude/skills; no marketplace/wrapper residue (WARN on a developer)
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
@@ -4743,6 +5400,8 @@ export function checksForClass(nc, opts = {}) {
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater
       pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a monitor)
+      staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the updater's pulls
+      skillsDirPluginsThunk, // skills-dir migration: catalyst loads in-place via ~/.claude/skills; no marketplace/wrapper residue (WARN on a monitor)
       replicaThunk,
       wontOwnThunk,
       () => [
@@ -4774,10 +5433,13 @@ export function checksForClass(nc, opts = {}) {
     agentsThunk, // CTL-1369 PR4: worker work-stack agent installed, no updater agent (correct class agent set)
     pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=broker (the worker's broker owns the pull)
     pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (FAIL — the CI/CD executor)
+    staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the broker's pulls
+    skillsDirPluginsThunk, // skills-dir migration: catalyst loads in-place via ~/.claude/skills; no marketplace/wrapper residue (FAIL on a worker)
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
+    () => checkLogShipper({ shipsLogs: shipsLogs("worker"), preinstall }), // CTL-1473: log-shipper present + canonical config path
     () => checkHealthResponder(), // CTL-1509: cloud-sync health responder installed + baked path + kill-switch (advisory, never FAIL)
     () => checkAgentBrowser(), // CTL-1500: worker browser tool present + >= min + idle-timeout wired + reaper (advisory, never FAIL)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
@@ -4798,6 +5460,8 @@ export function checksForClass(nc, opts = {}) {
     }), // CAT-60: workers must be able to publish to the resolved write remote
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
+    () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
+    () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
   ];
 }
 
@@ -4810,7 +5474,14 @@ export function checksForClass(nc, opts = {}) {
 // read-replica reachability/webhooks/thoughts): those depend on remote nodes + tokens an install
 // can't guarantee, so failing them would mis-attribute an operational gap to the install run.
 export function installChecksForClass(nc, opts = {}) {
-  const { hasStackAgent, hasUpdaterAgent, pluginPullOwner } = opts;
+  const {
+    hasStackAgent,
+    hasUpdaterAgent,
+    pluginPullOwner,
+    // Injectable like the sibling probes — the skills-dir state is environment-dependent
+    // (a real ~/.claude tree), so tests supply a stub rather than the live filesystem.
+    skillsDirCheck = () => checkSkillsDirPlugins({ nodeClass: nc.class }),
+  } = opts;
   // strict:true — under install verification an INFERRED/unpersisted class is a FAIL (the install's
   // write-config must have persisted catalyst.node.class), not the activation INFO (CTL-1369 PR4 Codex P2).
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc, strict: true });
@@ -4820,6 +5491,15 @@ export function installChecksForClass(nc, opts = {}) {
     nodeClassCheck,
     () => checkAgentsForClass({ nodeClass: nc.class, strict: true, hasStackAgent, hasUpdaterAgent }),
     () => checkPluginPullOwner({ nodeClass: nc.class, strict: true, owner: pluginPullOwner }),
+    // CTL (Codex #2664 P1): verify the skills-dir cutover here too. The cutover runs
+    // BEST-EFFORT from the install lifecycle's write-config phase — a partial or failed
+    // symlink pass does not fail the install — so without this check the install
+    // reported success while the plugins did not actually load in place. This is the
+    // post-install verification pass, which is exactly where a best-effort step must be
+    // confirmed. No `strict` option here: unlike its siblings this check has no advisory
+    // mode — it already returns FAIL when the cutover is incomplete (verified), so
+    // passing strict would be a silently-ignored no-op.
+    skillsDirCheck,
   ];
 }
 

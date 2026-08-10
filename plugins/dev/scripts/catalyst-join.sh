@@ -553,10 +553,10 @@ do_github_auth() {
 # thoughts repo into ~/catalyst/hlt/<org>/thoughts, write a clean humanlayer.json
 # (deterministic repoMappings), verify auth. Orgs are derived data-driven from
 # the node's execution-core registry when present, else from the bundle's
-# layer1Identity.projectKey (the product/thoughts org — distinct from repoUrl,
-# which is wherever the catalyst plugin source itself lives) — never a
-# hardcoded list. MUST run before setup-catalyst, whose thoughts-init binds the
-# checkout to these repos + humanlayer.json.
+# thoughtsOrg (the product/thoughts org — distinct from repoUrl, which is
+# wherever the catalyst plugin source itself lives) — never a hardcoded list.
+# MUST run before setup-catalyst, whose thoughts-init binds the checkout to
+# these repos + humanlayer.json.
 do_provision_thoughts() {
   local pt="$PROVISION_THOUGHTS_SCRIPT"
   [[ -x "$pt" ]] || { fail "provision-thoughts.sh not found/executable at $pt"; return 1; }
@@ -566,27 +566,68 @@ do_provision_thoughts() {
   # lives where setup-plugin-source.sh put it (CATALYST_PLUGIN_SOURCE or the
   # $HOME default), not at a from-scratch ${CATALYST_DIR}/plugin-source guess.
   [[ -f "$registry" ]] || registry="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/plugins/dev/scripts/execution-core/registry.json"
-  # First-join fallback org: layer1Identity.projectKey IS the GitHub org that hosts
-  # the product/thoughts repos (join-bundle.mjs sets it from Layer-1 catalyst.projectKey).
-  # NOT repoUrl's org — repoUrl/pluginSourceUrl point at wherever the catalyst plugin
-  # source itself lives, which can be a different org/personal fork entirely (CTL-1214
-  # verify: conflating the two derived a bogus thoughts org on a forked install).
-  local primary_org
-  primary_org="$(bundle_get '.layer1Identity.projectKey')"
+  # The seed's primary thoughts org: bundle .thoughtsOrg IS the GitHub org that
+  # hosts the thoughts repo (join-bundle.mjs sets it from Layer-1
+  # catalyst.thoughts.org, falling back to .profile). NOT
+  # .layer1Identity.projectKey — projectKey is the Layer-2 secrets-file key (see
+  # AGENTS.md "Configuration"), not a GitHub org (Codex #3080 P1). NOT repoUrl's
+  # org either — repoUrl/pluginSourceUrl point at wherever the catalyst plugin
+  # source itself lives, which can be a different org/personal fork entirely.
+  local primary_org primary_org_source primary_profile
+  primary_org="$(bundle_get '.thoughtsOrg')"
+  primary_org_source="$(bundle_get '.thoughtsOrgSource')"
+  # Codex #3080 P1: the profile ALIAS paired with the org. It need not equal the owner
+  # (rightsite-cloud/adva), and provision-thoughts' bare-CSV path would otherwise
+  # register profile == org — leaving humanlayer.json with no `adva` profile even though
+  # create-worktree.sh later requests `adva` by name from Layer-1, so background
+  # worktrees resolve a nonexistent profile and fail to sync thoughts. Empty on an older
+  # bundle (identity applies, the previous behavior).
+  primary_profile="$(bundle_get '.thoughtsProfile')"
+  if [[ "$primary_org_source" == "thoughts.profile" ]]; then
+    warn "join bundle carries no catalyst.thoughts.org — using catalyst.thoughts.profile ('$primary_org') as the GitHub org."
+    warn "profile is a HumanLayer alias and need not equal the owner; set catalyst.thoughts.org in the seed's .catalyst/config.json."
+  elif [[ -z "$primary_org" ]]; then
+    # An older bundle, or a Layer-1 with thoughts persistence disabled. Never
+    # abort the join over it: fall through with no primary declared and let
+    # provision-thoughts derive the org set from the registry (Codex #3080 P1).
+    warn "join bundle carries neither catalyst.thoughts.org nor .profile — no primary thoughts org declared."
+  fi
   if [[ -f "$registry" ]]; then
     args+=(--registry "$registry")
+    # Forward the declared primary ALONGSIDE --registry. Without it the
+    # registry's first project silently becomes the global thoughtsRepo /
+    # defaultProfile — registry order is not a primary-org declaration
+    # (Codex #3080 P1).
+    [[ -n "$primary_org" ]] && args+=(--primary-org "$primary_org")
+    [[ -n "$primary_profile" ]] && args+=(--primary-profile "$primary_profile")
+  elif [[ -n "$primary_org" ]]; then
+    # Carry the paired alias through the no-registry path too — this is the branch that
+    # discarded it (Codex #3080 P1).
+    args+=(--orgs "$primary_org" --primary-org "$primary_org")
+    [[ -n "$primary_profile" ]] && args+=(--primary-profile "$primary_profile")
   else
-    [[ -n "$primary_org" ]] && args+=(--orgs "$primary_org")
-  fi
-  if bash "$pt" "${args[@]}"; then
+    # No registry AND no declared org: provision-thoughts has nothing to act on
+    # and would hard-exit. Thoughts persistence is optional, so skip the stage
+    # rather than failing the join.
+    warn "provision-thoughts: no registry and no thoughts org — skipping thoughts provisioning."
+    warn "Set catalyst.thoughts.org on the seed and re-run to enable thoughts persistence on this node."
     return 0
   fi
+  local pt_out pt_rc=0
+  pt_out="$(bash "$pt" "${args[@]}" 2>&1)" || pt_rc=$?
+  printf '%s\n' "$pt_out"
+  [[ "$pt_rc" -eq 0 ]] && return 0
   # provision-thoughts failed — usually push-auth (an M2 precondition), not the
   # clone. If the primary thoughts repo is present AND has a usable HEAD (a real
   # read-OK clone, not a partial/interrupted one), severity depends on whether
-  # this node will own work.
-  local primary="${CATALYST_DIR:-$HOME/catalyst}/hlt/${primary_org:-coalesce-labs}/thoughts"
-  if [[ -d "$primary/.git" ]] && git -C "$primary" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+  # this node will own work. Read the org the provisioner actually settled on
+  # rather than assuming a hardcoded name: with --registry and no declared
+  # primary it picks the first derived org, which only it knows.
+  local resolved_org
+  resolved_org="$(sed -nE 's/^\[provision-thoughts\] Primary org: (.+)$/\1/p' <<<"$pt_out" | tail -1)"
+  [[ -n "$resolved_org" ]] || resolved_org="$primary_org"
+  local primary="${CATALYST_DIR:-$HOME/catalyst}/hlt/${resolved_org}/thoughts"
+  if [[ -n "$resolved_org" ]] && [[ -d "$primary/.git" ]] && git -C "$primary" rev-parse --verify -q HEAD >/dev/null 2>&1; then
     # CTL-1293: a multiHost MEMBER (roster>1) WILL own HRW work, and a worker
     # that can't push thoughts strands its research/learnings/handoffs (peers
     # never see them) — so an unverified push is a HARD blocker, not a warning.
@@ -972,6 +1013,11 @@ do_doctor_gate() {
   # Gate strictly on [$? -eq 0] per the doctor contract. This replaces the old
   # default of check-setup.sh, a cwd-relative full-workstation check that exits
   # nonzero on a fresh node (the reason mini-2's join needed a manual marker poke).
+  #
+  # CTL-1473: CATALYST_DOCTOR_PREINSTALL=1 downgrades install-remediable FAILs to
+  # WARNs (e.g. missing log-shipper, which will be fixed by do_install_stack below).
+  # The post-install strict verify (do_doctor_verify) then re-checks without the flag.
+  #
   # #2918 follow-up (Codex P1): thread the SAME Layer-1 the webhook-wiring
   # gate consulted (provisioner-parity plugin-source checkout) into the doctor
   # run — the deployment-mode resolver's own Layer-1 default is CWD-relative
@@ -979,11 +1025,26 @@ do_doctor_gate() {
   # resolves an inferred default and keeps the webhook-ingestion FAIL on a
   # declared non-cluster join that the wiring gate intentionally skipped.
   local _doctor_l1="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/.catalyst/config.json"
-  if CATALYST_CONFIG_FILE="$_doctor_l1" bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
-    info "Doctor gate passed (catalyst-doctor: 0 FAIL checks)."
+  if CATALYST_DOCTOR_PREINSTALL=1 CATALYST_CONFIG_FILE="$_doctor_l1" bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
+    info "Doctor gate passed (catalyst-doctor: 0 FAIL checks, preinstall mode)."
     return 0
   else
     fail "Activation gate (catalyst-doctor) reported FAIL check(s). Run '${DOCTOR_SCRIPT}' for details."
+    return 1
+  fi
+}
+
+do_doctor_verify() {
+  # CTL-1473: strict post-install doctor check (no PREINSTALL downgrade).
+  # Runs AFTER do_install_stack to catch any install-remediable issues that were
+  # not actually remediated (e.g. an ephemeral shipper --config path).
+  # Threads the same provisioner-parity Layer-1 as the pre-install gate (#2918).
+  local _doctor_l1="${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}/.catalyst/config.json"
+  if CATALYST_CONFIG_FILE="$_doctor_l1" bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
+    info "Post-install doctor verify passed (catalyst-doctor: 0 FAIL checks)."
+    return 0
+  else
+    fail "Post-install verify (catalyst-doctor) reported FAIL check(s). Run '${DOCTOR_SCRIPT}' for details."
     return 1
   fi
 }
@@ -1043,11 +1104,15 @@ main() {
   # 5. SHARED config merge + per-node items
   run_stage "config-merge" do_config_merge || exit 1
 
-  # 6. Doctor gate (T4)
+  # 6. Doctor gate (T4) — pre-install, PREINSTALL mode (install-remediable FAILs → WARN)
   run_stage "doctor" do_doctor_gate || exit 1
 
   # 7. Install launchd stack LAST (Stage-0 SHADOW)
   run_stage "stack" do_install_stack || exit 1
+
+  # 8. Post-install strict doctor verify (CTL-1473): confirms install-remediable
+  #    issues are actually resolved (no PREINSTALL downgrade this time).
+  run_stage "doctor-verify" do_doctor_verify || exit 1
 
   # Guard so a successful re-run doesn't append a duplicate shadow-stop entry to
   # completedStages each time (verify low finding).

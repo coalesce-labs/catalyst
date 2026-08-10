@@ -226,6 +226,8 @@ import {
   type WebhookHandler,
 } from "./lib/webhook-handler";
 import { createFileBasedPrCache } from "./lib/pr-cache";
+import type { PrCacheLike } from "./lib/pr-cache";
+import { backfillPrStatuses } from "./lib/pr-status-backfill";
 import {
   resolveOrchestrator as resolveOrchestratorFn,
   type ActiveOrchestrator,
@@ -1034,6 +1036,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // the prFetcher's freshness filter needs to call into it. We hold a mutable
   // ref and assign once the handler exists.
   let webhookHandlerRef: WebhookHandler | null = null;
+  // CTL-1606 (Codex #2878 P1): same-scope handle for the one-shot upgrade backfill,
+  // which runs from the startup block far below. Mirrors webhookHandlerRef.
+  let webhookPrCacheRef: PrCacheLike | null = null;
   const prFetcher: PrStatusFetcher | null =
     prStatusFetcher === null
       ? null
@@ -1278,6 +1283,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
         error: (m) => console.error(m),
       },
     });
+    // CTL-1606 (Codex #2878 P1): keep the handle so the one-shot upgrade backfill
+    // below writes through the SAME cache (and the same `merged` latch) the webhook
+    // path uses, rather than opening a second connection to the file.
+    const webhookPrCache = createFileBasedPrCache();
+    webhookPrCacheRef = webhookPrCache;
     webhookHandler = createWebhookHandler({
       secret: webhookConfig.secret,
       prFetcher,
@@ -1287,7 +1297,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
       resolveOrchestrator: (input) =>
         resolveOrchestratorFn(input, getActiveOrchestrators()),
       emit: (type, data) => emit(type, data),
-      prCache: createFileBasedPrCache(),
+      prCache: webhookPrCache,
       logger: {
         info: (m) => console.info(m),
         warn: (m) => console.warn(m),
@@ -5674,6 +5684,35 @@ export function createServer(opts: CreateServerOptions): BunServer {
       void webhookTunnel.start().catch((err: unknown) => {
         console.error(
           `[server] webhook tunnel start failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+      // CTL-1606 (Codex #2878 P1): the 1-hour replay below cannot recover a PR that
+      // merged before the window — a merged PR is terminal and emits no further
+      // webhook — so on a fresh upgrade its status row is never created and the
+      // phantom-merged invariant stays blind to exactly the pre-existing stuck tickets
+      // this ticket targets. Seed the store once from live GitHub state. One-shot (it
+      // no-ops when the table already has rows), best-effort, and never blocking:
+      // `void` + its own catch, so a gh/auth/rate-limit failure cannot delay or fail
+      // startup.
+      const backfillCache = webhookPrCacheRef;
+      if (backfillCache) void backfillPrStatuses({
+        cache: backfillCache,
+        repos: webhookConfig.watchRepos ?? [],
+        runner: async (argv: string[]) => {
+          try {
+            const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
+            const stdout = await new Response(proc.stdout).text();
+            const exit = await proc.exited;
+            return { stdout, ok: exit === 0 };
+          } catch {
+            return { stdout: "", ok: false };
+          }
+        },
+        logger: { info: (m: string) => console.info(m), warn: (m: string) => console.warn(m) },
+      }).catch((err: unknown) => {
+        console.warn(
+          `[server] PR-status backfill failed (non-fatal):`,
           err instanceof Error ? err.message : String(err),
         );
       });

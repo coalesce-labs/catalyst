@@ -30,6 +30,9 @@ while [[ -L $_SRC ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 
+# shellcheck source=lib/catalyst-agent-path.sh
+source "$SCRIPT_DIR/lib/catalyst-agent-path.sh"
+
 DAEMON_SCRIPT="${EXECUTION_CORE_DAEMON_SCRIPT:-$SCRIPT_DIR/execution-core/daemon.mjs}"
 RUNTIME="${EXECUTION_CORE_RUNTIME-}" # empty → resolve_runtime picks bun/node
 
@@ -61,8 +64,33 @@ resolve_runtime() {
 		echo "node"
 		return 0
 	fi
-	echo "error: neither bun nor node found on PATH" >&2
+	echo "error: required JS runtime not resolvable on PATH (tried bun, node)" >&2
+	echo "  PATH=${PATH}" >&2
 	return 1
+}
+
+# The daemon shells out to linearis on every reconcile tick. Starting without it
+# creates a process that heartbeats while seeing no board work.
+CATALYST_REQUIRED_TOOLS="${CATALYST_REQUIRED_TOOLS:-linearis}"
+resolve_required_tools() {
+	[[ "${CATALYST_SKIP_DEP_PREFLIGHT:-}" == "1" ]] && return 0
+	local tool
+	local -a required_tools missing
+	IFS=' ' read -r -a required_tools <<<"$CATALYST_REQUIRED_TOOLS"
+	missing=()
+	for tool in "${required_tools[@]}"; do
+		[[ -n "$tool" ]] || continue
+		command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+	done
+	if (( ${#missing[@]} > 0 )); then
+		echo "error: required tool(s) not resolvable on PATH: ${missing[*]}" >&2
+		echo "  PATH=${PATH}" >&2
+		echo "  The daemon shells out to these every reconcile tick; starting without them" >&2
+		echo "  yields a daemon that heartbeats while seeing an empty board." >&2
+		echo "  Fix the install, or set CATALYST_SKIP_DEP_PREFLIGHT=1 to override." >&2
+		return 1
+	fi
+	return 0
 }
 
 # CTL-635: the daemon's --bg-spare pool freezes OTEL_RESOURCE_ATTRIBUTES at warm
@@ -150,8 +178,12 @@ cmd_start() {
 		echo "catalyst-execution-core already running (pid $(read_pid))"
 		return 0
 	fi
+	# CAT-29: repair the inherited environment before resolving either the JS
+	# runtime or linearis. This also covers direct interactive starts.
+	export PATH="$(catalyst_agent_path "$PATH")"
 	local runtime
 	runtime=$(resolve_runtime) || return 1
+	resolve_required_tools || return 1
 	if [[ ! -f $DAEMON_SCRIPT ]]; then
 		echo "error: daemon script not found: $DAEMON_SCRIPT" >&2
 		return 1
@@ -249,12 +281,11 @@ cmd_start() {
 	fi
 	# shellcheck disable=SC1090
 	[[ -f "$_accounts_env" ]] && source "$_accounts_env"
-	# CTL-1289: belt-and-suspenders — a daemon started by hand (not via the
-	# catalyst-stack launchd plist, which already sets _stack_agent_path) inherits
-	# whatever PATH the invoking shell had, which on a fresh member can omit the
-	# npm/user prefix where linearis/node/claude live. Prepend them so the daemon's
-	# per-tick spawns (reconcile/liveness/runtime) resolve regardless of launcher.
-	export PATH="${HOME}/.local/node/bin:${HOME}/.local/bin:${PATH}"
+	# CAT-29: machine-local env files are an explicit override seam and may set
+	# PATH. Re-apply the shared derivation after both files are sourced so the
+	# daemon launches with the same required-tool-safe PATH that the early boot
+	# gate validated, while retaining any operator-provided directories.
+	export PATH="$(catalyst_agent_path "$PATH")"
 	# CTL-1084: resolve durable governance flags (Layer-2 + any explicit env override)
 	# and export them so the daemon — and every per-tick gate that reads process.env —
 	# inherits the durable value with no manual re-export ritual. Best-effort: a failure
@@ -372,35 +403,71 @@ cmd_status() {
 		[ "$arg" = "--json" ] && want_json=1
 	done
 	# CTL-1095: read drain state (shell out to drain.mjs --json for the inFlightCount).
-	local drain_json draining in_flight_count
+	# CTL-1678: source the machine-local override first so status reflects the drain
+	# state the running daemon actually honors, not the un-overridden default.
+	# CTL-1678 (Codex round-8): drain.mjs already returns the full three-state answer
+	# (flagPresent / disabled / draining). Parsing only `draining` threw away the one
+	# distinction an operator needs before starting maintenance — a node IGNORING an
+	# active drain is indistinguishable here from a node with no drain at all, on the
+	# most-used status surface. Carry `flagPresent`/`disabled` through to both outputs.
+	local drain_json draining in_flight_count flag_present drain_disabled
+	_source_daemon_env_for_read
 	drain_json=$(exec_runtime_module "drain" --json --status-read 2>/dev/null || echo '{"draining":false,"inFlightCount":0}')
 	draining=$(printf '%s' "$drain_json" | grep -o '"draining":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo false)
 	in_flight_count=$(printf '%s' "$drain_json" | grep -o '"inFlightCount":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo 0)
+	flag_present=$(printf '%s' "$drain_json" | grep -o '"flagPresent":[^,}]*' | cut -d: -f2 | tr -d ' ')
+	drain_disabled=$(printf '%s' "$drain_json" | grep -o '"disabled":[^,}]*' | cut -d: -f2 | tr -d ' ')
+	: "${flag_present:=false}" "${drain_disabled:=false}"
+	# The one line an operator must not miss: the flag is set and the node ignores it.
+	_status_drain_note() {
+		if [ "$draining" = "true" ]; then
+			echo "draining — ${in_flight_count} tickets to land"
+		elif [ "$drain_disabled" = "true" ] && [ "$flag_present" = "true" ]; then
+			echo "drain flag present but IGNORED (CATALYST_DRAIN_DISABLED=1) — this node still admits work"
+		elif [ "$drain_disabled" = "true" ]; then
+			echo "drain-disabled — this node ignores the drain flag (CATALYST_DRAIN_DISABLED=1)"
+		fi
+	}
 	local pid
 	if pid=$(read_pid); then
 		if [ "$want_json" -eq 1 ]; then
-			printf '{"running":true,"pid":%s,"draining":%s,"inFlightCount":%s}\n' "$pid" "$draining" "$in_flight_count"
+			printf '{"running":true,"pid":%s,"draining":%s,"inFlightCount":%s,"flagPresent":%s,"drainDisabled":%s}\n' \
+				"$pid" "$draining" "$in_flight_count" "$flag_present" "$drain_disabled"
 		else
 			echo "running (pid $pid)"
-			if [ "$draining" = "true" ]; then
-				echo "draining — ${in_flight_count} tickets to land"
-			fi
+			_status_drain_note
 		fi
 		return 0
 	fi
 	if [ "$want_json" -eq 1 ]; then
-		printf '{"running":false,"pid":null,"draining":%s,"inFlightCount":%s}\n' "$draining" "$in_flight_count"
+		printf '{"running":false,"pid":null,"draining":%s,"inFlightCount":%s,"flagPresent":%s,"drainDisabled":%s}\n' \
+			"$draining" "$in_flight_count" "$flag_present" "$drain_disabled"
 	else
 		echo "stopped"
-		if [ "$draining" = "true" ]; then
-			echo "draining — ${in_flight_count} tickets to land"
-		fi
+		_status_drain_note
 	fi
 }
 
 # CTL-649 Phase 5: route a noun (sessions|worktrees|branches|tidy) to its mjs
 # module under execution-core/cli/. The audit CLI lives inside this same binary
 # — no new wrapper symlink, no new plist. resolve_runtime picks bun/node.
+# CTL-1678 (Codex P1 + round-3 P1): the durable CATALYST_DRAIN_DISABLED /
+# CATALYST_BOOT_DRAINED overrides live in the machine-local execution-core.env that ONLY
+# `cmd_start` sources before launching the daemon; they are restart-only, so no read-time
+# view of the MUTABLE file can establish the running daemon's state. The truth is two-tier:
+# drain.mjs (readDrainStatus → resolveDrainStateForRead) prefers the LIVE daemon's
+# boot-time snapshot (daemon-runtime-env.json, pid-gated) and only falls back to its
+# process env when no daemon is running. This helper supplies that FALLBACK env: source
+# the same file with the same plain-source semantics the daemon uses (no `set -a`), so
+# for a stopped daemon the report matches what the next start would do — the truthful
+# answer in that state. Best-effort; absent file = no-op.
+_source_daemon_env_for_read() {
+	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
+	# shellcheck disable=SC1090
+	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	return 0 # fail-open: absent file is a no-op success, never a non-zero return
+}
+
 exec_runtime_module() {
 	local module="$1"
 	shift
@@ -563,6 +630,9 @@ if ! (return 0 2>/dev/null); then
 	# CTL-1095: drain mode toggle.
 	drain)
 		shift
+		# CTL-1678: pick up the machine-local CATALYST_DRAIN_DISABLED override so the
+		# CLI reports (and warns about) the state the daemon honors, not stale state.
+		_source_daemon_env_for_read
 		exec_runtime_module "drain" "$@"
 		;;
 	# CTL-1084: governance-env-exports emits eval-safe export lines for the four

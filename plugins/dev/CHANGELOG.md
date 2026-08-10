@@ -1,5 +1,64 @@
 # Changelog
 
+## [12.50.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.49.0...catalyst-dev-v12.50.0)
+
+Aug 09, 2026
+
+<!-- ai-enhanced -->
+
+### Skills-Dir Plugin Loading & Reliability Fixes
+
+Plugins now load exclusively from a live `~/catalyst/plugin-source` checkout via `~/.claude/skills/` symlinks, retiring the version-keyed marketplace cache that caused merged changes to stay invisible until the next release bump. This release also fixes the otel-forward DLQ amplification loop (terminal 4xx errors now drop cleanly instead of cycling), ensures worktree salvage snapshots unpushed commits before any destructive removal, and makes escalation comment + `needs-human` label an atomic operation so tickets actually appear in the inbox. Run `setup-plugin-source.sh` on any fleet node not yet cut over — until then, `doctor` will report a worker-FAIL on `skills-dir-plugins`.
+
+
+
+### PRs
+
+* **dev:** CAT-52 — enforce registry team identity contract + doctor drift check ([#3158](https://github.com/coalesce-labs/catalyst/issues/3158)) ([8c12284](https://github.com/coalesce-labs/catalyst/commit/8c12284b67c5fdea8096255cec5c738f0aa0f482))
+* **dev:** CTL-1506 otel-forward HTTP status classification + DLQ-loop fix ([#2742](https://github.com/coalesce-labs/catalyst/issues/2742)) ([ab62f2d](https://github.com/coalesce-labs/catalyst/commit/ab62f2dcbc7f3c38db37dcb368efb1f16dee3caf))
+* **dev:** CTL-1639 salvage worktree unpushed work before destructive removal ([#3026](https://github.com/coalesce-labs/catalyst/issues/3026)) ([0560821](https://github.com/coalesce-labs/catalyst/commit/05608212c49bc9606b2f0e656f27ed1fd3ee4daf))
+* **dev:** load catalyst plugins in-place via skills-dir; retire marketplace ([#2664](https://github.com/coalesce-labs/catalyst/issues/2664)) ([12c454f](https://github.com/coalesce-labs/catalyst/commit/12c454fff814c5cf5535b5ebeb753ea144307488))
+* **dev:** add otel-forward to the post-merge stack-reload chain ([#3164](https://github.com/coalesce-labs/catalyst/issues/3164)) ([edc0ae2](https://github.com/coalesce-labs/catalyst/commit/edc0ae231f6fc71d2fc0b7a958c326f966181aff))
+* **dev:** CAT-29 refuse execution-core blindness to Linear ([#3139](https://github.com/coalesce-labs/catalyst/issues/3139)) ([4761b9e](https://github.com/coalesce-labs/catalyst/commit/4761b9e26bd9570a5800a07ad15efb2844d02620))
+* **dev:** CTL-1240 census tests never ran their census (isTicketKey skip) ([#3148](https://github.com/coalesce-labs/catalyst/issues/3148)) ([7a04cff](https://github.com/coalesce-labs/catalyst/commit/7a04cff88db1a7343524ac201750ce2a353be2b7))
+* **dev:** CTL-1568 make the escalation comment and the needs-human label one atomic act ([#2861](https://github.com/coalesce-labs/catalyst/issues/2861)) ([357a53c](https://github.com/coalesce-labs/catalyst/commit/357a53cb46423e8c09f194c7bffb8f25a25c6cec))
+* **execution-core:** fall back to credentials file when Keychain read fails ([#3130](https://github.com/coalesce-labs/catalyst/issues/3130)) ([62e4401](https://github.com/coalesce-labs/catalyst/commit/62e440102d2bfe42dc1a7638b6dbcb24afa4812b))
+
+## [12.49.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.48.0...catalyst-dev-v12.49.0)
+
+Aug 08, 2026
+
+<!-- ai-enhanced -->
+
+### Escalation Durability & Premature Done Guards
+
+Escalations now survive GC via a durable per-ticket store, so Needs-You cards no longer vanish when a ticket goes terminal. Three independent guards close the false-Done/false-advance family: a dispatch freshness gate, a live GitHub merged check in teardown, and a PR-merged gate in the scheduler's terminal Done writer. Worker nodes can also now set `CATALYST_DRAIN_DISABLED=1` to permanently ignore drain requests, emitting a `node.drain.ignored` tripwire event instead of silently halting new-work admission.
+
+
+
+### PRs
+
+* **dev:** CTL-1473 — codify four laptop-audit failure modes ([#2638](https://github.com/coalesce-labs/catalyst/issues/2638)) ([0783e71](https://github.com/coalesce-labs/catalyst/commit/0783e712e5c9268dc5bd25d5174d13385cb22894))
+* **dev:** CTL-1494 — wire coordination-publish into catalyst-stack lifecycle ([#3066](https://github.com/coalesce-labs/catalyst/issues/3066)) ([6f3f5df](https://github.com/coalesce-labs/catalyst/commit/6f3f5dfaf5a2fd51dcea4f10096a1bef46451351))
+* **dev:** CTL-1502 — stuck-but-alive daemon watchdog (detect + auto-restart wedged otel-forward) ([#2703](https://github.com/coalesce-labs/catalyst/issues/2703)) ([5c6c02f](https://github.com/coalesce-labs/catalyst/commit/5c6c02f192e7761566e3d1d1c8e03ef77503a01b))
+* **dev:** CTL-1552 Phase 1 — parked-by-human label + isParkedByHuman reader ([#2791](https://github.com/coalesce-labs/catalyst/issues/2791)) ([0b561cd](https://github.com/coalesce-labs/catalyst/commit/0b561cdf3738e91a8bda92a9b24f4fe685736600))
+* **dev:** CTL-1606 — persist PR status from webhooks; fix board-health phantom/orphan detection ([#2878](https://github.com/coalesce-labs/catalyst/issues/2878)) ([43f6ee0](https://github.com/coalesce-labs/catalyst/commit/43f6ee09975b4010ee222bb51b1904964b179b5a))
+* **dev:** CTL-1643 escalation durability — verified-or-loud labels + GC-surviving attention store ([#3009](https://github.com/coalesce-labs/catalyst/issues/3009)) ([13e06a2](https://github.com/coalesce-labs/catalyst/commit/13e06a2b6d3ef74790baee804c80934fe6ce7566))
+* **dev:** CTL-1645 add canonical onboarding planner ([#3001](https://github.com/coalesce-labs/catalyst/issues/3001)) ([28f9092](https://github.com/coalesce-labs/catalyst/commit/28f90926a2e5f1e93f132f0a1bef44b5499d7bcd))
+* **dev:** CTL-1667 — root fix for premature Done / monitor-deploy false-advance family ([#3061](https://github.com/coalesce-labs/catalyst/issues/3061)) ([c27dedd](https://github.com/coalesce-labs/catalyst/commit/c27deddf3f29ef88852544fdf440475e1e53b9b9))
+* **dev:** CTL-1668 coordination-publish cloud endpoint wiring + ADR-023 parity harness ([#3105](https://github.com/coalesce-labs/catalyst/issues/3105)) ([2640720](https://github.com/coalesce-labs/catalyst/commit/2640720f9e2cbac8dfe537211ee81c6a1889da6f))
+* **dev:** CTL-1678 — worker nodes can permanently ignore drain requests ([#3073](https://github.com/coalesce-labs/catalyst/issues/3073)) ([d9bd6c6](https://github.com/coalesce-labs/catalyst/commit/d9bd6c6d0b6791898206e990fe247b77d5b646b9))
+* **dev:** CTL-1081 make match_thoughts_artifact shell-agnostic (zsh/shopt bug) ([#3108](https://github.com/coalesce-labs/catalyst/issues/3108)) ([bcafa4f](https://github.com/coalesce-labs/catalyst/commit/bcafa4f3122b2a1ca18d460bb76ae14c6846548c))
+* **dev:** CTL-1415 — age-gate and auto-clear a stale plugin-source .git/index.lock ([#2530](https://github.com/coalesce-labs/catalyst/issues/2530)) ([2740458](https://github.com/coalesce-labs/catalyst/commit/27404586d8cc116f6c857209c72bc9f1176838c5))
+* **dev:** CTL-1660 defer P2+ automated-review findings after round one ([#3035](https://github.com/coalesce-labs/catalyst/issues/3035)) ([b5592bb](https://github.com/coalesce-labs/catalyst/commit/b5592bbd93e7be723f7723b810315e1ce43aa821))
+* **dev:** CTL-1680 Phases 2+3 — confirm merge SHA + reviewer-arrival window ([#3079](https://github.com/coalesce-labs/catalyst/issues/3079)) ([3850648](https://github.com/coalesce-labs/catalyst/commit/38506485d29a434324ed92dff8327ae2509f099a))
+* **dev:** fenceGuard fails OPEN on a missing generation at the terminal-sweep needs-human escalation site ([#3048](https://github.com/coalesce-labs/catalyst/issues/3048)) ([522e178](https://github.com/coalesce-labs/catalyst/commit/522e178497e144262f79f04624c2dd8a64387fa5))
+* **dev:** isTicketInFlight supersede guard for stale phase signals ([#3081](https://github.com/coalesce-labs/catalyst/issues/3081)) ([6accd27](https://github.com/coalesce-labs/catalyst/commit/6accd271db54a8c396e3b0933d63ccfa522a2cb7))
+* **dev:** remove hardcoded org name from provision-thoughts convention ([#3080](https://github.com/coalesce-labs/catalyst/issues/3080)) ([9cea441](https://github.com/coalesce-labs/catalyst/commit/9cea441908ede4607dcb73df0e41f7ca2793bace))
+* **execution-core:** close two remaining codex-exec thoughts-symlink escape gaps ([#3098](https://github.com/coalesce-labs/catalyst/issues/3098)) ([00374f1](https://github.com/coalesce-labs/catalyst/commit/00374f10825c22ec6db93d19c61485d84f3ee5b0))
+* **execution-core:** codex-exec thoughts symlink resolution + no-progress escalation count ([#3082](https://github.com/coalesce-labs/catalyst/issues/3082)) ([4d672d5](https://github.com/coalesce-labs/catalyst/commit/4d672d5e05c18ecd3570080969b33c34ee25e8fb))
+* **execution-core:** preserve 0600 on Layer-2 config across autotune write-back (supersedes [#3074](https://github.com/coalesce-labs/catalyst/issues/3074)) ([#3106](https://github.com/coalesce-labs/catalyst/issues/3106)) ([5369b6f](https://github.com/coalesce-labs/catalyst/commit/5369b6f2d3e4ff063efec73a8805304d187667d0))
+
 ## [12.48.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.47.0...catalyst-dev-v12.48.0)
 
 Aug 07, 2026

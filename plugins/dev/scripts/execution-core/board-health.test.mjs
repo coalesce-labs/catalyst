@@ -150,9 +150,8 @@ function mkBoard(o = {}) {
     repoForTicket: o.repoForTicket ?? null,
     verifyOpenPrs: o.verifyOpenPrs ?? null,
     getBranchSalvage: o.getBranchSalvage ?? null,
-    // CTL-1432 (B2/B3): deferred board-health anchor candidates + sanctioned latch allowlist.
+    // CTL-1432 (B2): deferred board-health anchor candidates.
     deferredBoardHealth: o.deferredBoardHealth ?? [],
-    sanctionedNeedsHuman: o.sanctionedNeedsHuman ?? [],
     // CTL-1644: per-ticket evidence map for the stranded-mid-pipeline check.
     // Empty Map default ⇒ checkStrandedMidPipeline stays observable:false (shadow-first).
     strandedEvidence: o.strandedEvidence ?? new Map(),
@@ -173,6 +172,36 @@ function mkOwnedBoard({ owner = () => "mini", ...overrides } = {}) {
     ...overrides,
   });
 }
+
+// CTL-1552: build a ticketsById Map whose listed ids each carry the parked-by-human
+// label — the cluster-wide successor to the per-host sanctioned-latch env var.
+// Suppression now reads this label off the descriptor, so a "parked" ticket is one
+// present in this map.
+function parkedMap(...ids) {
+  return new Map(ids.map((id) => [id, { labels: [{ name: "parked-by-human" }] }]));
+}
+
+// ─── CTL-1552: isParkedByHuman — the standalone parked-by-human label reader ──
+describe("isParkedByHuman — descriptor label reader", () => {
+  test("true when descriptor carries the label (alongside needs-human)", () => {
+    expect(
+      isParkedByHuman({ labels: [{ name: "needs-human" }, { name: "parked-by-human" }] }),
+    ).toBe(true);
+  });
+  test("false when absent / labels missing / null / undefined", () => {
+    expect(isParkedByHuman({ labels: [{ name: "needs-human" }] })).toBe(false);
+    expect(isParkedByHuman({})).toBe(false);
+    expect(isParkedByHuman(undefined)).toBe(false);
+    expect(isParkedByHuman(null)).toBe(false);
+  });
+  test("tolerates string labels and {name} labels (labelName shape)", () => {
+    expect(isParkedByHuman({ labels: ["parked-by-human"] })).toBe(true);
+    expect(isParkedByHuman({ labels: ["needs-human"] })).toBe(false);
+  });
+  test("case-insensitive on the label name", () => {
+    expect(isParkedByHuman({ labels: [{ name: "Parked-By-Human" }] })).toBe(true);
+  });
+});
 
 // ─── evaluateInvariants — one green + one failing per invariant ──────────────
 describe("evaluateInvariants — per-invariant green/fail", () => {
@@ -810,25 +839,27 @@ describe("proposeMoves — tiering", () => {
   });
 });
 
-// ─── CTL-1432 (B3): sanctioned needs-human latches suppressed from proposeMoves ─
-describe("proposeMoves — CTL-1432 sanctioned-latch suppression (B3)", () => {
-  test("a sanctioned frozen ticket is NOT re-proposed; a non-sanctioned one still is", () => {
+// ─── CTL-1432 (B3) / CTL-1552: parked latches suppressed from proposeMoves ─────
+// (Mechanism migrated from the per-host sanctioned-latch env var to the
+// parked-by-human label; the suppression behavior these pin is unchanged.)
+describe("proposeMoves — parked-latch suppression (B3, via parked-by-human label)", () => {
+  test("a parked frozen ticket is NOT re-proposed; a non-parked one still is", () => {
     const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT", "CTL-REAL"]) };
-    const m = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-SANCT"] }));
+    const m = proposeMoves(invs, mkBoard({ ticketsById: parkedMap("CTL-SANCT") }));
     const t2 = m.tier2.filter((x) => x.move === "review-needs-human").map((x) => x.ticket);
     expect(t2).toContain("CTL-REAL");
     expect(t2).not.toContain("CTL-SANCT");
   });
 
-  test("empty allowlist → every frozen ticket still proposed (default behavior unchanged)", () => {
+  test("nothing parked → every frozen ticket still proposed (default behavior unchanged)", () => {
     const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 1, true, ["CTL-REAL"]) };
     const m = proposeMoves(invs, mkBoard());
     expect(m.tier2.map((x) => x.ticket)).toContain("CTL-REAL");
   });
 
-  test("(Codex P1) a sanctioned ticket in the needs-human PILE is not proposed as a tier1 holistic-triage", () => {
+  test("(Codex P1) a parked ticket in the needs-human PILE is not proposed as a tier1 holistic-triage", () => {
     const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CTL-SANCT"]) };
-    const m = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-SANCT"] }));
+    const m = proposeMoves(invs, mkBoard({ ticketsById: parkedMap("CTL-SANCT") }));
     expect(m.tier1.map((x) => x.ticket)).not.toContain("CTL-SANCT");
   });
 });
@@ -958,11 +989,10 @@ describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () =>
     expect(out).not.toContain("CTL-DONE");
   });
 
-  test("(Codex P1 r3) a deferred ticket that is ALSO sanctioned is dropped from the deferred anchors", () => {
+  test("(Codex P1 r3) a deferred ticket that is ALSO parked is dropped from the deferred anchors", () => {
     const board = mkBoard({
       deferredBoardHealth: ["CTL-SANCT"],
-      sanctionedNeedsHuman: ["CTL-SANCT"],
-      ticketsById: new Map([["CTL-SANCT", {}]]),
+      ticketsById: parkedMap("CTL-SANCT"),
     });
     const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
     expect(out).not.toContain("CTL-SANCT");
@@ -1008,10 +1038,10 @@ describe("decideBoardHealth — CTL-1432 gate (deferred proceed / all-sanctioned
     expect(d.moves.tier3.map((x) => x.move)).toContain("escalate-stranded-node"); // …but surfaced
   });
 
-  test("(F2) an all-sanctioned frozenNeedsHuman as the ONLY failure → gate SKIPS (no actionable moves)", () => {
+  test("(F2) an all-parked frozenNeedsHuman as the ONLY failure → gate SKIPS (no actionable moves)", () => {
     const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT-1", "CTL-SANCT-2"]) };
     const board = mkBoard({
-      sanctionedNeedsHuman: ["CTL-SANCT-1", "CTL-SANCT-2"],
+      ticketsById: parkedMap("CTL-SANCT-1", "CTL-SANCT-2"),
       capacity: { freeSlots: 4 },
     });
     const d = decideBoardHealth(invs, board);
@@ -1019,9 +1049,9 @@ describe("decideBoardHealth — CTL-1432 gate (deferred proceed / all-sanctioned
     expect(d.gate.reason).toBe("no-actionable-moves");
   });
 
-  test("a partially-sanctioned frozenNeedsHuman still PROCEEDS on the non-sanctioned ticket", () => {
+  test("a partially-parked frozenNeedsHuman still PROCEEDS on the non-parked ticket", () => {
     const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT", "CTL-REAL"]) };
-    const board = mkBoard({ sanctionedNeedsHuman: ["CTL-SANCT"], capacity: { freeSlots: 4 } });
+    const board = mkBoard({ ticketsById: parkedMap("CTL-SANCT"), capacity: { freeSlots: 4 } });
     const d = decideBoardHealth(invs, board);
     expect(d.gate.decision).toBe("proceed");
     expect(d.moves.tier2.map((x) => x.ticket)).toEqual(["CTL-REAL"]);
@@ -2139,17 +2169,16 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
     // detected, reported, and then left as stuck as before. That is precisely how
     // this cohort sat untouched for 13 days. It must be anchorable.
     const inv = evaluateInvariants(board({ ticketsById: one() }));
-    const moves = proposeMoves(inv, { sanctionedNeedsHuman: [] });
+    const moves = proposeMoves(inv, {});
     const m = moves.tier2.find((x) => x.move === "recover-unowned-in-flight");
     expect(m).toBeTruthy();
     expect(m.ticket).toBe("CTL-9");
     expect(moves.tier3.some((x) => x.ticket === "CTL-9")).toBe(false);
   });
 
-  test("an operator-sanctioned ticket is not re-proposed", () => {
+  test("an operator-parked ticket is not re-proposed", () => {
     const inv = evaluateInvariants(board({ ticketsById: one() }));
-    // CTL-1552: suppression is label-only now — parked-by-human on the descriptor.
-    const moves = proposeMoves(inv, { ticketsById: one({ labels: [{ name: "parked-by-human" }] }) });
+    const moves = proposeMoves(inv, { ticketsById: parkedMap("CTL-9") });
     expect(moves.tier2.some((x) => x.move === "recover-unowned-in-flight")).toBe(false);
   });
 
@@ -2853,14 +2882,21 @@ describe("CTL-1608 checkStalledPr — review/CI/no-push staleness, liveness-inde
     expect(moves.tier1.find((m) => m.ticket === "CTL-CI" && m.move === "nudge-stalled-pr")).toBeTruthy();
   });
 
-  test("sanctioned latch suppresses the stalled-pr move (stays visible in the invariant)", () => {
+  test("parked-by-human label suppresses the stalled-pr move (stays visible in the invariant)", () => {
+    // CTL-1552: suppression is label-only (the env-var sanctionedNeedsHuman latch
+    // this test used before Phase 3 no longer exists) — a parked ticket carries
+    // BOTH the open-PR shape checkStalledPr needs AND the parked-by-human label
+    // makeSuppressed reads.
+    const parkedOpenPr = new Map([
+      ["CTL-CI", { identifier: "CTL-CI", linear_state: "In Review", pr_number: 1, labels: [{ name: "parked-by-human" }] }],
+    ]);
     const invs = evaluateInvariants(mkBoard({
       ticketsById: openPrTicket("CTL-CI"),
       stalledPrMap: mkStalledPrMap([
         { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
       ]),
     }), { mode: "shadow" });
-    const moves = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-CI"] }));
+    const moves = proposeMoves(invs, mkBoard({ ticketsById: parkedOpenPr }));
     expect(moves.tier1.find((m) => m.ticket === "CTL-CI")).toBeFalsy();
     expect(invs.stalledPr.flagged).toContain("CTL-CI"); // suppression is in proposeMoves ONLY
   });

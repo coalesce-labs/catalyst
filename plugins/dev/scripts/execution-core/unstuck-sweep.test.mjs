@@ -31,6 +31,14 @@ describe("classifyStalledTicket — pure top-level router (CTL-1064)", () => {
     expect(r).toEqual({ category: "skip", action: "skip" });
   });
 
+  test("needs_human stalls are SKIPPED — the normalized human handoff is already fully escalated (CTL-1552)", () => {
+    // recovery-emit + recovery-reasoning both write stalled + stalledReason
+    // "needs_human". Routing it to unknown/escalate would bypass the intent gate
+    // and post a fresh Linear comment every sweep interval on a parked ticket.
+    const r = classifyStalledTicket({ reason: "needs_human" });
+    expect(r).toEqual({ category: "skip", action: "skip" });
+  });
+
   test("rebase_refused_dirty_tree → dirty-tree/clear-noise-and-retry", () => {
     const r = classifyStalledTicket({ reason: "rebase_refused_dirty_tree" });
     expect(r.category).toBe("dirty-tree");

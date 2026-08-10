@@ -27,8 +27,11 @@ import {
   recordVerdict,
   defaultSkipReason,
   escalateExhaustedIntents,
+  readEscalationDeferrals, // CTL-1568
   classifyPrNotMerged,
   PR_NOT_MERGED_REASON,
+  MONITOR_DEPLOY_EMPTY_SHA_PREFIX,
+  isPrMergeUnconfirmedReason,
   defaultClearIntentCooldown,
   defaultLatchHasNoClock,
   restampNoClockEscalations,
@@ -2177,12 +2180,15 @@ describe("reasoningRecoveryPass decision visibility (CTL-1287)", () => {
 });
 
 // ─── CTL-1157 F #6 (Codex round-4): escalation signal must carry `ticket` ─────
-// signal-reader parseSignal keys off raw.ticket and status:"needs-human" is
-// non-terminal, so this fresh recovery-pass signal wins over the failed phase.
-// Without a ticket, readWorkerSignals() reports ticket:null and scheduler-recovery /
-// board-health consumers lose the escalated ticket after the first pass.
+// signal-reader parseSignal keys off raw.ticket. Without a ticket, readWorkerSignals()
+// reports ticket:null and scheduler-recovery / board-health consumers lose the
+// escalated ticket after the first pass.
+// CTL-1552: status is now the terminal "stalled" + stalledReason (was the bespoke
+// non-terminal "needs-human"). byActivePhase ranks this vs. the failed phase signal
+// by updatedAt recency now that both are terminal — this escalation is written last,
+// so it stays freshest and still wins (asserted in the byActivePhase test below).
 describe("defaultWriteEscalationSignal (CTL-1157 F #6)", () => {
-  test("the written phase-recovery-pass.json carries the ticket", () => {
+  test("the written phase-recovery-pass.json carries the ticket + normalized stalled status", () => {
     const orchDir = mkdtempSync(pathJoin(tmpdir(), "esc-"));
     try {
       defaultWriteEscalationSignal(
@@ -2194,7 +2200,9 @@ describe("defaultWriteEscalationSignal (CTL-1157 F #6)", () => {
       expect(existsSync(p)).toBe(true);
       const signal = JSON.parse(readFileSync(p, "utf8"));
       expect(signal.ticket).toBe("CTL-42"); // the fix: never null
-      expect(signal.status).toBe("needs-human");
+      expect(signal.status).toBe("stalled"); // CTL-1552: normalized from needs-human
+      expect(signal.stalledReason).toBe("needs_human");
+      expect(typeof signal.needsHumanSince).toBe("string");
       expect(signal.explanation).toBeDefined();
     } finally {
       rmSync(orchDir, { recursive: true, force: true });
@@ -2256,7 +2264,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
       now: () => t0 + 1,
       emitEvent: (e) => events.push(e),
       postComment: (t, body) => comments.push({ t, body }),
-      labelNeedsHuman: (dir, t) => labels.push(t),
+      labelNeedsHuman: (dir, t) => { labels.push(t); return true; },
       writeSignal: (t, payload) => signals.push({ t, payload }),
     });
     expect(out).toEqual(["CTL-X"]);
@@ -2271,7 +2279,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     expect(labels).toEqual([orchDir + ":CTL-X"] .map(() => "CTL-X")); // label called with the ticket
     expect(signals[0].payload.escalation_type).toBe("authorization");
     // Idempotent: escalated:true excludes it from the next scan.
-    expect(escalateExhaustedIntents(orchDir, { now: () => t0 + 2, emitEvent: (e) => events.push(e), postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {} })).toEqual([]);
+    expect(escalateExhaustedIntents(orchDir, { now: () => t0 + 2, emitEvent: (e) => events.push(e), postComment: () => {}, labelNeedsHuman: () => true, writeSignal: () => {} })).toEqual([]);
     expect(events.length).toBe(1);
   });
 
@@ -2285,7 +2293,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
       now: () => t0 + 1,
       emitEvent: () => {},
       postComment: () => {},
-      labelNeedsHuman: () => {},
+      labelNeedsHuman: () => true,
       writeSignal: () => {},
     });
     expect(out).toEqual([]);
@@ -2298,7 +2306,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     const out = escalateExhaustedIntents(orchDir, {
       now: () => t0 + 1,
       isActive: (t) => t !== "CTL-DONE",
-      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {},
+      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => true, writeSignal: () => {},
     });
     expect(out).toEqual(["CTL-LIVE"]);
     expect(readLedger("CTL-DONE").escalated).toBe(false); // untouched — terminal cleanup owns it
@@ -2307,7 +2315,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     const out2 = escalateExhaustedIntents(orchDir, {
       now: () => t0 + 2,
       isActive: (t) => { if (t === "CTL-THROW") throw new Error("read failed"); return true; },
-      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {},
+      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => true, writeSignal: () => {},
     });
     expect(out2).toContain("CTL-THROW");
   });
@@ -2316,16 +2324,119 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     const t0 = 1_000_000_000_000;
     defaultRecordIntent("CTL-RO", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
     const events = [];
+    // CTL-1568 reordering: the LABEL attempt now legitimately precedes the ledger
+    // latch (the latch is sticky, so attempting after it would strand a failed
+    // escalation forever — see escalateExhaustedIntents). Codex R1's rule still
+    // holds for every remaining side effect: signal, comment, and the
+    // recovery.escalated event stay behind the latch read-back gate.
     const out = escalateExhaustedIntents(orchDir, {
       now: () => t0 + 1,
       recordIntent: () => ({ escalated: true }), // LIES: never writes the file
       emitEvent: (e) => events.push(e),
       postComment: () => { throw new Error("must not comment"); },
-      labelNeedsHuman: () => { throw new Error("must not label"); },
+      labelNeedsHuman: () => true, // allowed to run — it is the gate, not a side effect
       writeSignal: () => { throw new Error("must not write signal"); },
     });
     expect(out).toEqual([]); // latch verification failed → no side effects, retry next tick
     expect(events).toEqual([]);
+  });
+
+  // ─── CTL-1568: the comment and the label are ONE act ───────────────────────
+  test("CTL-1568: no '(See your inbox.)' comment when the needs-human label did not land", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-NL", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const events = [];
+    const comments = [];
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      emitEvent: (e) => events.push(e),
+      postComment: (t, body) => comments.push({ t, body }),
+      labelNeedsHuman: () => false, // suppressed / rate-limited / missing label
+      beliefOwnsLabel: () => false, // NOT a transfer — a genuine miss
+      writeSignal: () => {},
+    });
+    expect(out).toEqual([]); // the act did not complete
+    expect(comments).toEqual([]); // ← the defect this ticket exists to fix
+    // The ledger is left UN-latched so the next tick retries the whole act.
+    expect(readLedger("CTL-NL").escalated).toBe(false);
+    expect(events.map((e) => e.type)).toEqual(["recovery.escalation.deferred"]);
+    expect(events[0].deferrals).toBe(1);
+  });
+
+  test("CTL-1568: a deferred escalation RETRIES and completes once the label lands", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-RT", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const base = { emitEvent: () => {}, writeSignal: () => {}, beliefOwnsLabel: () => false };
+    // tick 1 — label misses
+    expect(escalateExhaustedIntents(orchDir, { ...base, now: () => t0 + 1, postComment: () => { throw new Error("must not comment"); }, labelNeedsHuman: () => false })).toEqual([]);
+    // tick 2 — label lands → comment posts, ledger latches, counter cleared
+    const comments = [];
+    expect(escalateExhaustedIntents(orchDir, { ...base, now: () => t0 + 2, postComment: (t, b) => comments.push({ t, b }), labelNeedsHuman: () => true })).toEqual(["CTL-RT"]);
+    expect(comments.length).toBe(1);
+    expect(comments[0].b).toContain("(See your inbox.)");
+    expect(readLedger("CTL-RT").escalated).toBe(true);
+    expect(readEscalationDeferrals(orchDir, "CTL-RT")).toBe(0); // cleared on success
+  });
+
+  test("CTL-1568: deferrals are BOUNDED — the split alarm fires once, then the ticket is skipped", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-SP", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const events = [];
+    let labelCalls = 0;
+    const run = (i) =>
+      escalateExhaustedIntents(orchDir, {
+        now: () => t0 + i,
+        maxDeferrals: 3,
+        emitEvent: (e) => events.push(e),
+        postComment: () => { throw new Error("must not comment"); },
+        labelNeedsHuman: () => { labelCalls += 1; return false; },
+        beliefOwnsLabel: () => false,
+        writeSignal: () => {},
+      });
+    for (let i = 1; i <= 6; i++) run(i);
+    expect(events.map((e) => e.type)).toEqual([
+      "recovery.escalation.deferred", // 1
+      "recovery.escalation.deferred", // 2
+      "recovery.escalation.split", // 3 — the AC #5 anomaly, raised ONCE
+    ]);
+    // …and the ticket stops costing a Linear label write once alarmed.
+    expect(labelCalls).toBe(3);
+  });
+
+  test("CTL-1568: a belief-engine transfer is NOT a split — the comment stays truthful", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-BE", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const events = [];
+    const comments = [];
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      emitEvent: (e) => events.push(e),
+      postComment: (t, b) => comments.push({ t, b }),
+      labelNeedsHuman: () => false, // deferred to the belief owner…
+      beliefOwnsLabel: () => true, // …which is a TRANSFER, not a dropped half
+      writeSignal: () => {},
+    });
+    expect(out).toEqual(["CTL-BE"]);
+    expect(comments.length).toBe(1);
+    expect(events.map((e) => e.type)).toEqual(["recovery.escalated"]);
+  });
+
+  test("CTL-1568: an unwritable deferral counter retries SILENTLY (no per-tick WARN storm)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-DF", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    // Make .escalation-deferrals unwritable by planting a FILE where the dir must go.
+    writeFileSync(pathJoin(orchDir, ".escalation-deferrals"), "not-a-dir");
+    const events = [];
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      emitEvent: (e) => events.push(e),
+      postComment: () => { throw new Error("must not comment"); },
+      labelNeedsHuman: () => false,
+      beliefOwnsLabel: () => false,
+      writeSignal: () => {},
+    });
+    expect(out).toEqual([]);
+    expect(events).toEqual([]); // no bound available → stay silent rather than storm
   });
 
   test("(Codex R1) the HOLISTIC gate keys a board-health defer on the frozen deferredSince anchor", () => {
@@ -2344,7 +2455,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     const t0 = 1_000_000_000_000;
     defaultRecordIntent("CTL-Y", { decision: "fix", fix_class: "bounded-llm", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + RECOVERY_COOLDOWN_MS * 10 })).toBe("attempts-exhausted");
-    escalateExhaustedIntents(orchDir, { now: () => t0 + 1, emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {} });
+    escalateExhaustedIntents(orchDir, { now: () => t0 + 1, emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => true, writeSignal: () => {} });
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 })).toBe("escalated");
     // …and B1's terminal TTL ages it back into triage.
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 + RECOVERY_TERMINAL_INTENT_TTL_MS })).toBeNull();
@@ -2462,12 +2573,14 @@ describe("classifyPrNotMerged (CTL-1496)", () => {
     expect(r.decision).toBe("defer");
   });
 
-  test("no PR found (prNumber null) → escalate with 'no open PR' reason", () => {
+  test("no PR found (prNumber null) → escalate with 'no PR found' reason", () => {
     const r = defaultClassifyTicket(mkEvidence(), {
       probePrBlock: probeReturning({ prNumber: null }),
     });
     expect(r.decision).toBe("escalate");
-    expect(r.details.reason).toContain("no open PR");
+    // CTL-1680: the probe now queries `--state all` (not just open), so the
+    // escalation text no longer claims "open" specifically.
+    expect(r.details.reason).toContain("no PR found");
   });
 
   test("generateRemediateBrief('pr-not-merged') mentions gh pr view, @codex review", () => {
@@ -2710,5 +2823,350 @@ describe("reasoningRecoveryPass — pr_not_merged end-to-end (CTL-1496 Phase 4)"
     expect(deferIntent).toBeDefined();
     expect(events.some((e) => e.type === "recovery.fixed")).toBe(false);
     expect(events.some((e) => e.type === "recovery.escalated")).toBe(false);
+  });
+});
+
+// ─── CTL-1680: monitor-deploy empty-mergeCommitSha signature → probe ────────
+
+describe("CTL-1680: monitor-deploy empty-SHA routes to PR-state probe", () => {
+  // The three exact failure strings emitted by phase-monitor-deploy's empty-SHA gate.
+  const EMPTY_SHA_REASONS = [
+    "phase-monitor-merge.json has empty .pr.mergeCommitSha and no PR number available for gh REST fallback",
+    "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh repo view returned empty",
+    "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh REST fallback also returned empty for pr#290",
+  ];
+
+  const probeReturning = (o) => () => o;
+
+  const openGreenBotEvidence = (failureReason) => ({
+    logsOutput: null,
+    signal: { failureReason, ticket: "CTC-350", worktreePath: "/wt/CTC-350" },
+    failureReason,
+    ticket: "CTC-350",
+  });
+
+  // 1. The canonical incident case: REST-fallback-empty string → probe → fix
+  test("REST-fallback-empty reason → routes to probe → bounded-llm fix", () => {
+    const reason = EMPTY_SHA_REASONS[2];
+    const r = defaultClassifyTicket(openGreenBotEvidence(reason), {
+      probePrBlock: probeReturning({
+        prNumber: 290,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [{ id: "T1", path: "a.ts", line: 3, body: "fix this" }],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+  });
+
+  // 2. All three monitor-deploy failure strings route to the probe
+  test.each(EMPTY_SHA_REASONS)("reason '%s' → routes to probe → fix", (reason) => {
+    let called = false;
+    defaultClassifyTicket(openGreenBotEvidence(reason), {
+      probePrBlock: (ticket, opts) => {
+        called = true;
+        return {
+          prNumber: 290,
+          mergeStateStatus: "CLEAN",
+          failingChecks: [],
+          unresolvedBotThreads: [],
+          unresolvedHumanThreads: [],
+          hasChangesRequested: false,
+        };
+      },
+    });
+    expect(called).toBe(true);
+  });
+
+  // 3. Probe is called for the empty-SHA reasons (probe invocation assertion)
+  test("probe is invoked for the empty-SHA reason", () => {
+    let called = false;
+    defaultClassifyTicket(openGreenBotEvidence(EMPTY_SHA_REASONS[0]), {
+      probePrBlock: () => { called = true; return { prNumber: 1, mergeStateStatus: "CLEAN", failingChecks: [], unresolvedBotThreads: [], unresolvedHumanThreads: [], hasChangesRequested: false }; },
+    });
+    expect(called).toBe(true);
+  });
+
+  // 4. REGRESSION GUARD: a reason containing "merge" but not the empty-SHA prefix never calls the probe
+  test("REGRESSION: reason containing 'merge' but not empty-SHA prefix — probe never called", () => {
+    let called = false;
+    defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "merge-conflict" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(called).toBe(false);
+  });
+
+  // 4b. Existing regression guards still pass unchanged
+  test("REGRESSION: unknown failure — probe never called (existing guard)", () => {
+    let called = false;
+    defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "some-other-reason" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(called).toBe(false);
+  });
+
+  // 5. Human CHANGES_REQUESTED via new route → escalate, PR number in reason
+  test("empty-SHA reason + human CHANGES_REQUESTED → escalate with PR number", () => {
+    const r = defaultClassifyTicket(openGreenBotEvidence(EMPTY_SHA_REASONS[2]), {
+      probePrBlock: probeReturning({
+        prNumber: 290,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [{ id: "H1", body: "redesign the API", path: "b.ts", line: 9 }],
+        hasChangesRequested: true,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.fix_class).toBe("human");
+    expect(r.details.reason).toContain("290");
+  });
+
+  // isPrMergeUnconfirmedReason predicate unit tests
+  test("isPrMergeUnconfirmedReason: true for pr_not_merged", () => {
+    expect(isPrMergeUnconfirmedReason(PR_NOT_MERGED_REASON)).toBe(true);
+  });
+
+  test("isPrMergeUnconfirmedReason: true for empty-SHA prefixed reasons", () => {
+    for (const r of EMPTY_SHA_REASONS) {
+      expect(isPrMergeUnconfirmedReason(r)).toBe(true);
+    }
+  });
+
+  test("isPrMergeUnconfirmedReason: false for unrelated reasons", () => {
+    expect(isPrMergeUnconfirmedReason("merge-conflict")).toBe(false);
+    expect(isPrMergeUnconfirmedReason("some-other-reason")).toBe(false);
+    expect(isPrMergeUnconfirmedReason(undefined)).toBe(false);
+    expect(isPrMergeUnconfirmedReason(null)).toBe(false);
+  });
+
+  // MONITOR_DEPLOY_EMPTY_SHA_PREFIX is exported and matches the prefix
+  test("MONITOR_DEPLOY_EMPTY_SHA_PREFIX exported and matches the incident strings", () => {
+    for (const r of EMPTY_SHA_REASONS) {
+      expect(r.startsWith(MONITOR_DEPLOY_EMPTY_SHA_PREFIX)).toBe(true);
+    }
+  });
+
+  // ─── CTL-1680 (Codex #3079 P1): an ALREADY-MERGED PR recovers, never escalates ──
+  // The empty-SHA family fires on a PR that actually merged (monitor-merge confirmed
+  // REST .merged but recorded an empty SHA). With `--state all` the probe resolves it
+  // as MERGED; classifyPrNotMerged must recover the SHA (fix), not escalate a merged
+  // PR to a human. Prior `--state open` probe returned null → false "no PR" escalate.
+  test("empty-SHA reason + MERGED probe → fix (recover SHA), not escalate", () => {
+    const r = defaultClassifyTicket(openGreenBotEvidence(EMPTY_SHA_REASONS[2]), {
+      probePrBlock: probeReturning({
+        prNumber: 290,
+        state: "MERGED",
+        mergeCommitSha: "abc1234def5678",
+        mergeStateStatus: null,
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.reason).toContain("290");
+    expect(r.details.reason.toLowerCase()).toContain("merged");
+    // the recovered SHA (short form) is surfaced for the recovery-pass brief
+    expect(r.details.reason).toContain("abc1234def");
+    expect(r.details.brief).toContain("mergeCommitSha");
+  });
+
+  // A MERGED PR whose SHA the probe could not surface still recovers (no escalate).
+  test("MERGED probe with null mergeCommitSha → fix, brief instructs SHA recovery", () => {
+    const r = defaultClassifyTicket(openGreenBotEvidence(EMPTY_SHA_REASONS[0]), {
+      probePrBlock: probeReturning({
+        prNumber: 291,
+        state: "MERGED",
+        mergeCommitSha: null,
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.details.brief).toContain("already MERGED");
+    expect(r.details.brief).toContain("merge_commit_sha");
+  });
+
+  // generateRemediateBrief gains a merged-SHA-missing category.
+  test("generateRemediateBrief('pr-merge-sha-missing') tells recovery to re-record the SHA, not re-merge", () => {
+    const b = generateRemediateBrief("pr-merge-sha-missing", {
+      prNumber: 290,
+      state: "MERGED",
+      mergeCommitSha: "deadbeefcafe",
+    });
+    expect(b).toContain("290");
+    expect(b).toContain("deadbeefcafe");
+    expect(b).toContain("phase-monitor-merge.json");
+    expect(b.toLowerCase()).toContain("do not re-merge");
+  });
+});
+
+// CTL-1680 (Codex #3079 round-3 P1): the empty-SHA failure reason names the PR
+// (`… returned empty for pr#<N>`). Parse it and thread it to the probe so recovery
+// acts on THAT PR — not whichever historical PR a title search happens to return.
+describe("parsePrNumberFromReason + probe threading", () => {
+  test("extracts the number from phase-monitor-deploy's real reason string", async () => {
+    const { parsePrNumberFromReason } = await import("./recovery-reasoning.mjs");
+    expect(
+      parsePrNumberFromReason(
+        "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh REST fallback also returned empty for pr#290",
+      ),
+    ).toBe(290);
+  });
+
+  test("tolerates the spaced/uppercase spellings", async () => {
+    const { parsePrNumberFromReason } = await import("./recovery-reasoning.mjs");
+    expect(parsePrNumberFromReason("blocked on PR #42")).toBe(42);
+    expect(parsePrNumberFromReason("blocked on pr # 42")).toBe(undefined);
+    expect(parsePrNumberFromReason("blocked on pr #42 today")).toBe(42);
+  });
+
+  test("never guesses from a bare number or a non-string", async () => {
+    const { parsePrNumberFromReason } = await import("./recovery-reasoning.mjs");
+    // An unprefixed digit run is far more likely a SHA fragment/count/timestamp.
+    expect(parsePrNumberFromReason("empty .pr.mergeCommitSha after 290 seconds")).toBe(undefined);
+    expect(parsePrNumberFromReason("pr_not_merged")).toBe(undefined);
+    expect(parsePrNumberFromReason(undefined)).toBe(undefined);
+    expect(parsePrNumberFromReason(null)).toBe(undefined);
+    expect(parsePrNumberFromReason(290)).toBe(undefined);
+  });
+
+  test("classifyPrNotMerged threads the parsed number into the probe", async () => {
+    const { classifyPrNotMerged } = await import("./recovery-reasoning.mjs");
+    let seen;
+    const probePrBlock = (_ticket, opts) => {
+      seen = opts;
+      return {
+        prNumber: 290,
+        state: "MERGED",
+        mergeCommitSha: "deadbeefcafe",
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      };
+    };
+    const out = classifyPrNotMerged(
+      {
+        ticket: "CTL-9",
+        failureReason:
+          "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh REST fallback also returned empty for pr#290",
+      },
+      { probePrBlock },
+    );
+    expect(seen.prNumber).toBe(290);
+    expect(out.decision).toBe("fix");
+  });
+
+  test("a reason naming no PR threads undefined (search path preserved)", async () => {
+    const { classifyPrNotMerged } = await import("./recovery-reasoning.mjs");
+    let seen;
+    const probePrBlock = (_ticket, opts) => {
+      seen = opts;
+      return {
+        prNumber: null,
+        state: null,
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      };
+    };
+    classifyPrNotMerged({ ticket: "CTL-9", failureReason: "pr_not_merged" }, { probePrBlock });
+    expect(seen.prNumber).toBe(undefined);
+  });
+});
+
+// CTL-1680 (Codex #3079 round-4 P1): two production failure reasons carry no `pr#<N>`,
+// so the exact number must be recovered from the sibling phase artifacts on disk.
+// Without it the probe falls back to a `--state all --limit 1` title search that can
+// resolve a DIFFERENT historical PR and recover ITS merge SHA.
+describe("prNumberFromWorkerDir / resolvePrNumberForRecovery (CTL-1680)", () => {
+  let dir;
+  beforeEach(() => { dir = mkdtempSync(pathJoin(tmpdir(), "prnum-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  const signalPath = () => pathJoin(dir, "phase-monitor-deploy.json");
+  const write = (name, obj) => writeFileSync(pathJoin(dir, name), JSON.stringify(obj));
+
+  test("reads .pr.number from phase-pr.json", async () => {
+    const { prNumberFromWorkerDir } = await import("./recovery-reasoning.mjs");
+    write("phase-pr.json", { pr: { number: 3079 } });
+    expect(prNumberFromWorkerDir(signalPath())).toBe(3079);
+  });
+
+  test("phase-pr.json wins over phase-monitor-merge.json and phase-implement.json", async () => {
+    const { prNumberFromWorkerDir } = await import("./recovery-reasoning.mjs");
+    write("phase-pr.json", { pr: { number: 111 } });
+    write("phase-monitor-merge.json", { pr: { number: 222 } });
+    write("phase-implement.json", { draftPr: { number: 333 } });
+    expect(prNumberFromWorkerDir(signalPath())).toBe(111);
+  });
+
+  test("falls through to phase-implement.json's draftPr when the others are absent", async () => {
+    const { prNumberFromWorkerDir } = await import("./recovery-reasoning.mjs");
+    write("phase-implement.json", { draftPr: { number: 456 } });
+    expect(prNumberFromWorkerDir(signalPath())).toBe(456);
+  });
+
+  test("skips a malformed / empty / non-positive source rather than throwing", async () => {
+    const { prNumberFromWorkerDir } = await import("./recovery-reasoning.mjs");
+    writeFileSync(pathJoin(dir, "phase-pr.json"), "{not json");
+    write("phase-monitor-merge.json", { pr: { number: 0 } });
+    write("phase-implement.json", { draftPr: { number: 789 } });
+    expect(prNumberFromWorkerDir(signalPath())).toBe(789);
+  });
+
+  test("returns undefined when nothing names a PR (search fallback preserved)", async () => {
+    const { prNumberFromWorkerDir } = await import("./recovery-reasoning.mjs");
+    expect(prNumberFromWorkerDir(signalPath())).toBeUndefined();
+    expect(prNumberFromWorkerDir("")).toBeUndefined();
+    expect(prNumberFromWorkerDir(null)).toBeUndefined();
+  });
+
+  test("resolve: the reason's own pr#<N> beats the on-disk artifacts", async () => {
+    const { resolvePrNumberForRecovery } = await import("./recovery-reasoning.mjs");
+    write("phase-pr.json", { pr: { number: 111 } });
+    expect(
+      resolvePrNumberForRecovery({
+        failureReason: "…gh REST fallback also returned empty for pr#999",
+        signalPath: signalPath(),
+      }),
+    ).toBe(999);
+  });
+
+  test("resolve: an unnumbered reason recovers the number from disk", async () => {
+    const { resolvePrNumberForRecovery } = await import("./recovery-reasoning.mjs");
+    write("phase-pr.json", { pr: { number: 2638 } });
+    // The real "no PR number available for gh REST fallback" production reason.
+    expect(
+      resolvePrNumberForRecovery({
+        failureReason:
+          "phase-monitor-merge.json has empty .pr.mergeCommitSha and no PR number available for gh REST fallback",
+        signalPath: signalPath(),
+      }),
+    ).toBe(2638);
+  });
+
+  test("resolve: reads the reason and path from evidence.signal too", async () => {
+    const { resolvePrNumberForRecovery } = await import("./recovery-reasoning.mjs");
+    write("phase-implement.json", { draftPr: { number: 77 } });
+    expect(
+      resolvePrNumberForRecovery({ signal: { failureReason: "stalled" }, signalPath: signalPath() }),
+    ).toBe(77);
   });
 });

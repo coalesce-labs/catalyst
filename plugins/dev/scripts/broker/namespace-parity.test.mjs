@@ -49,6 +49,7 @@ import {
   PUBLISH_PREFLIGHT_BLOCKED,
   PUBLISH_PREFLIGHT_WOULD_BLOCK,
 } from "../execution-core/publish-preflight-event.mjs";
+import { ALERT_BOOT_DEPENDENCY_UNUSABLE } from "../execution-core/dispatch-alert.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -88,6 +89,7 @@ const EXEC_CORE_EVENT_NAMES = [
   LINEAR_READ_EVENT, // CTL-1403 reads-by-source (catalyst.linear.read)
   PUBLISH_PREFLIGHT_BLOCKED,
   PUBLISH_PREFLIGHT_WOULD_BLOCK,
+  ALERT_BOOT_DEPENDENCY_UNUSABLE,
   ...INLINE_EVENT_NAMES,
 ];
 
@@ -163,5 +165,32 @@ describe("recovery.mjs dynamic phase-slot producers", () => {
     expect(isAllowedPhaseSlot("dispatch")).toBe(true);
     // "dispatch" is NOT a canonical pipeline phase
     expect(KNOWN_PHASES.includes("dispatch")).toBe(false);
+  });
+});
+
+// ── CTL-1639: worktree.salvage.* is a NEW, UNPROTECTED prefix ─────────────────
+// The salvage primitive emits worktree.salvage.{created,skipped,failed}. These
+// must NOT collide with any broker-protected namespace and must NOT be phase
+// slots, so shouldSkipEvent ingests them normally (no namespace-contract.mjs edit
+// was required to add the family). This guards against a future FORBIDDEN_PREFIXES
+// / PROTECTED_EXACT_NAMES change silently swallowing salvage telemetry.
+describe("CTL-1639 worktree.salvage.* namespace (unprotected)", () => {
+  const SALVAGE_NAMES = [
+    "worktree.salvage.created",
+    "worktree.salvage.skipped",
+    "worktree.salvage.failed",
+  ];
+
+  test("no worktree.salvage.* name is broker-protected", () => {
+    for (const name of SALVAGE_NAMES) {
+      expect(isBrokerProtectedName(name), `${name} must not be broker-protected`).toBe(false);
+    }
+  });
+
+  test("no worktree.salvage.* name is a phase slot", () => {
+    for (const name of SALVAGE_NAMES) {
+      expect(phaseSlotOf(name), `${name} must not resolve to a phase slot`).toBeNull();
+      expect(PHASE_EVENT_PATTERN.test(name)).toBe(false);
+    }
   });
 });

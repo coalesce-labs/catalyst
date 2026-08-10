@@ -1025,6 +1025,59 @@ describe("runStallJanitorPass — J4 enforce (CTL-1242)", () => {
   });
 });
 
+// CTL-1552: J4 must reconcile a live needs-human LABEL before its rmSync deletes
+// the once-marker collaterally — else the label is orphaned in Linear.
+describe("defaultGcTerminalSignals — CTL-1552 needs-human reconcile before rmSync", () => {
+  let gcDir;
+  beforeEach(() => {
+    gcDir = mkdtempSync(join(tmpdir(), "ctl1552-j4-"));
+  });
+  afterEach(() => {
+    rmSync(gcDir, { recursive: true, force: true });
+  });
+
+  test("a live needs-human label is reconciled (removeLabel called) before the dir is removed", () => {
+    const ticket = "CTL-J4";
+    const wdir = join(gcDir, "workers", ticket);
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(join(wdir, ".linear-label-needs-human.applied"), "");
+    const calls = [];
+    const removeLabel = (t, l) => {
+      calls.push([t, l]);
+      return { removed: true };
+    };
+    const ok = defaultGcTerminalSignals(gcDir, { removeLabel })({ ticket });
+    expect(ok).toBe(true);
+    expect(calls).toEqual([[ticket, "needs-human"]]); // label reconciled…
+    expect(existsSync(wdir)).toBe(false); // …and the dir removed
+  });
+
+  test("no needs-human marker → removeLabel NOT called, dir still removed", () => {
+    const ticket = "CTL-J4B";
+    const wdir = join(gcDir, "workers", ticket);
+    mkdirSync(wdir, { recursive: true });
+    let called = false;
+    const removeLabel = () => {
+      called = true;
+      return { removed: true };
+    };
+    const ok = defaultGcTerminalSignals(gcDir, { removeLabel })({ ticket });
+    expect(ok).toBe(true);
+    expect(called).toBe(false);
+    expect(existsSync(wdir)).toBe(false);
+  });
+
+  test("no removeLabel seam wired → still GCs the dir (back-compat)", () => {
+    const ticket = "CTL-J4C";
+    const wdir = join(gcDir, "workers", ticket);
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(join(wdir, ".linear-label-needs-human.applied"), "");
+    const ok = defaultGcTerminalSignals(gcDir)({ ticket }); // no opts (legacy caller)
+    expect(ok).toBe(true);
+    expect(existsSync(wdir)).toBe(false);
+  });
+});
+
 describe("runStallJanitorPass — J4 shadow (CTL-1242)", () => {
   test("shadow: emits janitor.would.gc, never calls gcTerminalSignals", async () => {
     const events = [];
@@ -1083,6 +1136,34 @@ describe("defaultGcTerminalSignals (CTL-1242 J4 integration)", () => {
   test("never throws on ENOENT (already removed)", () => {
     const gc = defaultGcTerminalSignals(orchDir);
     expect(() => gc({ ticket: "CTL-1242-GONE" })).not.toThrow();
+  });
+
+  // CTL-1643: J4 GC also removes the durable escalation record so the board
+  // does not surface a "ghost" needs-human card after the worker dir is gone.
+  test("CTL-1643: also removes .escalations/<T>.json when present", async () => {
+    const { recordDurableEscalation, readDurableEscalations } = await import(
+      "./durable-escalation.mjs"
+    );
+    const workerDir = join(orchDir, "workers", "CTL-1643-J4");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-implement.json"), JSON.stringify({ status: "failed" }));
+    recordDurableEscalation({
+      orchDir,
+      ticket: "CTL-1643-J4",
+      phase: "implement",
+      reason: "stuck > 24h",
+      labelConfirmed: false,
+      commentPosted: true,
+      source: "scheduler",
+      now: Date.now(),
+    });
+    expect(readDurableEscalations(orchDir)).toHaveLength(1);
+
+    const gc = defaultGcTerminalSignals(orchDir);
+    gc({ ticket: "CTL-1643-J4" });
+
+    expect(existsSync(workerDir)).toBe(false);
+    expect(readDurableEscalations(orchDir)).toHaveLength(0);
   });
 });
 
