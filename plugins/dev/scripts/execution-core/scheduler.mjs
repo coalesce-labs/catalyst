@@ -4425,6 +4425,7 @@ export function schedulerTick(
     // CTL-1176: Pass 0r — recovery-reasoning pass seams. Default undefined keeps
     // a bare tick fully inert. Production passes mode from env > Layer-2.
     recoveryPass: { mode: _recoveryPassMode = undefined } = {},
+    recoverySeamDeps: _recoverySeamDeps = undefined,
     // CTL-1290: board-health delegate seam. Threaded by the daemon (runTick) with
     // the real-IO seams (board snapshot / event-ring / reconcile markers) — mirrors
     // the stallJanitor census wiring. Undefined on a bare schedulerTick (unit
@@ -5615,6 +5616,7 @@ export function schedulerTick(
           // tick's first arg (schedulerTick(orchDir, …)), so it's already in scope.
           const rResult = reasoningRecoveryPass(rItems, {
             mode: rMode,
+            orchDir,
             shouldSkipItem: (ticket) => recoveryShouldSkipItem(ticket, { orchDir }),
             recordIntent: (ticket, intent) => recoveryRecordIntent(ticket, intent, { orchDir }),
             // CTL-1157 Workstream C: write the curated 6-field explanation signal
@@ -5624,8 +5626,13 @@ export function schedulerTick(
             // CTL-1157 Workstream B: read prior attempts so a defer marker pins
             // them (no auto-increment, no budget burn).
             readIntentAttempts: (ticket) => recoveryReadIntentAttempts(ticket, { orchDir }),
-            invokeSeam: (ticket, seamId, brief) =>
-              recoveryInvokeSeam(ticket, seamId, brief, { orchDir }),
+            invokeSeam: (ticket, seamId, brief, extra) =>
+              recoveryInvokeSeam(ticket, seamId, brief, {
+                ...(_recoverySeamDeps ?? {}),
+                ...(extra ?? {}),
+                orchDir,
+                actByCategory: _unstuckActByCategory,
+              }),
             // CTL-1176 rung 3: dispatch the recovery-pass skill for the
             // bounded-LLM path (was recoveryInvokeRemediateCapped → phase-remediate).
             // CTL-1331 FU-1: ENQUEUE the dispatch instead of running the synchronous
@@ -8490,7 +8497,46 @@ function runTick() {
     // CTL-935 Phase 2: capture schedulerTick return so comparators can read
     // procedural values (freeSlots, maxParallel, inFlightCount, etc.) without
     // re-deriving them. The bare call is replaced by const tickResult = ...
+    // CAT-47: one production dependency bundle is shared by Pass 0u's registry
+    // and Pass 0r's fallback registry construction.
+    const unstuckSeamDeps = {
+      orchDir: runningOpts.orchDir,
+      clearStall: defaultClearStall(
+        runningOpts.orchDir,
+        runningOpts.writeStatus ?? linearWrite
+      ),
+      writeStatus: runningOpts.writeStatus ?? linearWrite,
+      resolvePrState: (ticket) => {
+        const adapter = runningOpts.prAdapter;
+        if (!adapter || typeof adapter.prView !== "function") return null;
+        let pr = null;
+        for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+          if (sig.ticket === ticket) {
+            pr = sig.raw?.pr ?? sig.pr ?? null;
+            if (pr?.number) break;
+          }
+        }
+        if (!pr?.number) return null;
+        try {
+          const view = adapter.prView(ticket, pr);
+          if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
+          return view?.state ?? null;
+        } catch {
+          return null;
+        }
+      },
+      jobLifecycle: (bgJobId) => {
+        if (typeof runningOpts.isBgJobAlive !== "function" || !bgJobId) return false;
+        try {
+          return Boolean(runningOpts.isBgJobAlive(bgJobId, { agents: getAgentsCached().agents }));
+        } catch {
+          return false;
+        }
+      },
+    };
+
     const tickResult = schedulerTick(runningOpts.orchDir, {
+      recoverySeamDeps: unstuckSeamDeps,
       // CTL-1529: the tick's SHARED bounded heartbeat reader (see runTick's head).
       readHeartbeats: tickReadHeartbeats,
       readEligible: runningOpts.readEligible,
