@@ -254,7 +254,25 @@ export function readPeerHeartbeatsSync(
 // operator model simple. 0 disables the cache entirely.
 const HEARTBEAT_READ_CACHE_MS_DEFAULT = 45_000;
 
-// heartbeatReadCache — module-scope Map(anchorIssue -> {peers, ts}).
+// CTL-1092 follow-up (retry-storm fix, 2026-08-10): an empty read result (readPeerHeartbeatsSync
+// collapses EVERY failure mode — spawn error, timeout, non-zero exit, a RATELIMITED/401 GraphQL
+// rejection swallowed inside the subprocess, unparseable stdout — to the SAME `{}` it would also
+// return for a genuinely-empty anchor) used to NEVER be cached, so every caller re-spawned the
+// real subprocess read on EVERY call — including every ~5-9s scheduler tick, from EVERY host,
+// for as long as the underlying Linear app-actor bucket stays exhausted. Observed live 2026-08-10:
+// the shared orchestrator app-actor's 5000/hr bucket saturated, cross-host heartbeat reads started
+// returning {} fleet-wide, and the uncached retry-every-tick behavior kept hammering that same
+// already-exhausted bucket instead of backing off — amplifying the outage duration instead of
+// letting it drain. An empty result is now cached too, but for a much SHORTER window than a
+// successful non-empty read (CATALYST_HEARTBEAT_FAILURE_BACKOFF_MS, default 20s vs the 45s success
+// TTL) — short enough to notice a real recovery quickly and well under the 5-min liveness grace
+// window (node-liveness.mjs DEFAULT_LIVENESS_GRACE_MS), but long enough to cut retry volume
+// several-fold during a sustained outage instead of firing on every scheduler tick. 0 disables
+// the backoff (every empty result is treated as an immediate cache miss, matching the old
+// never-cache-empty behavior).
+const HEARTBEAT_FAILURE_BACKOFF_MS_DEFAULT = 20_000;
+
+// heartbeatReadCache — module-scope Map(anchorIssue -> {peers, ts, empty}).
 const heartbeatReadCache = new Map();
 
 // clearHeartbeatReadCache — test-only reset of the module-scope cache between cases.
@@ -267,32 +285,34 @@ function resolveHeartbeatReadCacheMs(env) {
   return Number.isFinite(raw) && raw >= 0 ? raw : HEARTBEAT_READ_CACHE_MS_DEFAULT;
 }
 
+function resolveHeartbeatFailureBackoffMs(env) {
+  const raw = Number(env?.CATALYST_HEARTBEAT_FAILURE_BACKOFF_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : HEARTBEAT_FAILURE_BACKOFF_MS_DEFAULT;
+}
+
 // readPeerHeartbeatsSyncCached — the cached entry point. A hit within the TTL returns
 // immediately with ZERO subprocess spawn (mirrors fenceCheckSyncCached). `now`/`env` are
 // injectable test seams; every other option passes straight through to
 // readPeerHeartbeatsSync on a cache miss.
 //
-// What is cached: readPeerHeartbeatsSync collapses EVERY failure mode (spawn error,
-// timeout, non-zero exit, unparseable/non-object stdout) to the SAME `{}` it would also
-// return for a genuinely-empty anchor (no heartbeats published yet) — the two are
-// indistinguishable from the return value alone. So this only caches a NON-EMPTY result
-// (at least one peer record) — the closest available proxy for "a determinate, successful
-// read" given the wrapped function's shape. Since this whole liveness channel is an exact
-// no-op on a single-host install (startLivenessPublisher returns an inert handle), by the
-// time this cache is ever consulted the cluster has ≥2 hosts, each of which publishes its
-// OWN record — so a genuinely-empty `{}` is only possible in the brief window before the
-// first-ever publish, and is conservatively treated as "unknown, do not cache" (never an
-// error is cached; a false non-cache in that narrow bootstrap window self-heals on the
-// very next call).
+// Two TTLs, keyed off the SAME cache entry: a non-empty (successful, real data) result is
+// trusted for `ttlMs` (CATALYST_FENCE_READ_CACHE_MS, default 45s); an empty result — genuinely
+// no peers published yet, OR any failure mode readPeerHeartbeatsSync swallowed to `{}` — is
+// trusted for the much shorter `failureBackoffMs` (CATALYST_HEARTBEAT_FAILURE_BACKOFF_MS,
+// default 20s) before the next call re-attempts a real read. See the constant's comment above
+// for why an empty result is no longer left permanently uncached.
 export function readPeerHeartbeatsSyncCached({ anchorIssue }, { now = Date.now, env = process.env, ...rest } = {}) {
   const ttlMs = resolveHeartbeatReadCacheMs(env);
-  if (ttlMs > 0) {
-    const cached = heartbeatReadCache.get(anchorIssue);
-    if (cached && now() - cached.ts < ttlMs) return cached.peers;
+  const failureBackoffMs = resolveHeartbeatFailureBackoffMs(env);
+  const cached = heartbeatReadCache.get(anchorIssue);
+  if (cached) {
+    const effectiveTtl = cached.empty ? failureBackoffMs : ttlMs;
+    if (effectiveTtl > 0 && now() - cached.ts < effectiveTtl) return cached.peers;
   }
   const peers = readPeerHeartbeatsSync({ anchorIssue }, { env, ...rest });
-  if (ttlMs > 0 && peers && Object.keys(peers).length > 0) {
-    heartbeatReadCache.set(anchorIssue, { peers, ts: now() });
+  const isEmpty = !peers || Object.keys(peers).length === 0;
+  if (isEmpty ? failureBackoffMs > 0 : ttlMs > 0) {
+    heartbeatReadCache.set(anchorIssue, { peers, ts: now(), empty: isEmpty });
   }
   return peers;
 }
