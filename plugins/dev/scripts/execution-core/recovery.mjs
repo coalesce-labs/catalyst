@@ -49,6 +49,9 @@ import {
 // transcripts so a doc worker mid in-process fan-out is never judged silent
 // (CTL-662-safe). Used ONLY to break the cold-snapshot doc-phase 6h tie below.
 import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
+import { USAGE_LIMIT_TEXT_RE, detectUsageLimitBlock, buildUsageLimitExplanation } from "./usage-limit.mjs";
+import { parkLane } from "./lane-cooldown.mjs";
+import { resolveAccountResetsAt } from "./account-quota.mjs";
 import { scanEventsChunked, scanEventsSince, DEFAULT_TAIL_MAX_BYTES } from "./event-tail.mjs"; // CTL-1514 / CTL-1529: bounded event-log scans
 // CTL-863 fleet-unfreeze (entourage follow-up to #2552): readPeerHeartbeatsSyncCached is
 // the CACHED reader — a 45s in-process TTL cache around the same anchor-issue read, safe
@@ -245,7 +248,7 @@ export function detectSessionRateLimitHit(
       if (
         c?.type === "text" &&
         typeof c.text === "string" &&
-        /hit your (session|usage) limit/i.test(c.text)
+        USAGE_LIMIT_TEXT_RE.test(c.text)
       ) {
         return true;
       }
@@ -570,6 +573,23 @@ export function defaultAppendReclaimEvent({
     }),
     "reclaim"
   );
+}
+
+export function defaultAppendUsageLimitEvent({ phase, ticket, orchId, orchDir, bgJobId, quota, explanation = null }) {
+  return appendEnvelopeBestEffort(buildEventEnvelope({
+    phase, ticket, orchId, action: "usage-limit-blocked",
+    reason: "account-usage-limit", ticketType: resolveTicketType(orchDir, ticket),
+    payloadExtras: {
+      bgJobId,
+      lane: "bg",
+      resetsAt: quota.resetsAt,
+      resetSource: quota.resetSource,
+      source: quota.source,
+      detail: quota.detail,
+      problem: explanation?.problem ?? null,
+      callToAction: explanation?.call_to_action ?? null,
+    },
+  }));
 }
 
 // CTL-868 — defaultAppendOrphanDetectedEvent — phase.<phase>.orphan-detected.<ticket>.
@@ -2065,6 +2085,11 @@ export function reclaimDeadWorkIfPossible(
     // see detectSessionRateLimitHit's own header for the full rationale.
     // Never changes the STOP/escalate decision itself, only its explanation.
     detectRateLimit = detectSessionRateLimitHit,
+    detectUsageLimit = (id, opts) => detectUsageLimitBlock(id, opts),
+    appendUsageLimitEvent = defaultAppendUsageLimitEvent,
+    recordDispatchFailureFn = null,
+    parkLaneFn = parkLane,
+    resolveAccountResetsAtFn = resolveAccountResetsAt,
     appendReviveSuppressedEvent = defaultAppendReviveSuppressedEvent,
     reviveDispatch = defaultReviveDispatch,
     applyStalledLabel = defaultApplyStalledLabel,
@@ -3425,6 +3450,61 @@ export function reclaimDeadWorkIfPossible(
       "ctl-735: signal too old to revive — abandoned historical dir, inert"
     );
     return "inert-stale";
+  }
+
+  // CAT-58: a terminal bg worker blocked by the account quota must be parked
+  // before the progress gate; otherwise forward progress causes an immediate
+  // revive into the same exhausted lane.
+  const recordedResetMs = Date.parse(signal.raw?.usageLimitResetsAt ?? "");
+  if (
+    signal.raw?.failureReason === "usage-limit-blocked" &&
+    Number.isFinite(recordedResetMs) &&
+    recordedResetMs > now()
+  ) {
+    return "usage-limit-parked";
+  }
+  let quota = { blocked: false };
+  try {
+    quota = detectUsageLimit(prevBgJobId, {
+      now,
+      pollerResetsAt: resolveAccountResetsAtFn?.(orchDir, { now }) ?? null,
+    });
+  } catch (err) {
+    log.warn(
+      { ticket, phase, err: err.message },
+      "cat-58: usage-limit detection failed — continuing with normal recovery"
+    );
+    quota = { blocked: false };
+  }
+  if (quota.blocked) {
+    if (prevBgJobId) {
+      emitReapIntent("phase.terminal.reap-requested", { ticket, phase, bgJobId: prevBgJobId, worktreePath: signal.raw?.worktreePath, reason: "cat-58-usage-limit-blocked" }).catch(() => {});
+      intentAwareKill({ bgJobId: prevBgJobId });
+    }
+    const explanation = buildUsageLimitExplanation({
+      ticket,
+      phase,
+      resetsAt: quota.resetsAt,
+      lane: "bg",
+      // Recovery cannot see the daemon's boot-time Codex eligibility verdict.
+      // Do not promise a reroute here; dispatch emits the authoritative fallback
+      // or no-healthy-lane event when it evaluates the live lane options.
+      fallbackLane: null,
+      detail: quota.detail,
+    });
+    const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+    try {
+      const raw = JSON.parse(readFileSync(signalPath, "utf8"));
+      Object.assign(raw, { status: "failed", failureReason: "usage-limit-blocked", usageLimitResetsAt: quota.resetsAt, usageLimitDetail: quota.detail ?? null, usageLimitSource: quota.source, usageLimitExplanation: explanation, updatedAt: new Date(now()).toISOString() });
+      const tmp = `${signalPath}.tmp.${process.pid}`;
+      writeFileSync(tmp, JSON.stringify(raw, null, 2)); renameSync(tmp, signalPath);
+    } catch (err) { log.warn({ ticket, phase, err: err.message }, "cat-58: usage-limit signal write failed"); }
+    const expiresAtOverride = Date.parse(quota.resetsAt);
+    recordDispatchFailureFn?.(orchDir, ticket, phase, 0, now(), { expiresAtOverride, reasonCode: "usage-limit-blocked", countsTowardBreaker: false });
+    parkLaneFn?.(orchDir, "bg", { resetsAt: quota.resetsAt, detail: quota.detail, ticket, phase, now: now() });
+    appendUsageLimitEvent({ phase, ticket, orchId, orchDir, bgJobId: prevBgJobId, quota, explanation });
+    log.warn({ ticket, phase, resetsAt: quota.resetsAt }, "cat-58: account usage limit — parking instead of reviving");
+    return "usage-limit-parked";
   }
 
   // CTL-736 Phase 3 — THE progress gate. Replaces the MAX_REVIVES per-ticket

@@ -84,8 +84,7 @@ const DEFAULT_THRESHOLDS = {
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
 // but the LLM-bearing review is bounded to once per interval per host.
-export const BOARD_HEALTH_INTERVAL_MS =
-  Number(process.env.CATALYST_BH_INTERVAL_MS) || 5 * 60_000;
+export const BOARD_HEALTH_INTERVAL_MS = Number(process.env.CATALYST_BH_INTERVAL_MS) || 5 * 60_000;
 
 // per-phase "normal" worker age (v1 flat fallback; per-phase p95 is a follow-up).
 const PHASE_NORMAL_MS = {
@@ -347,13 +346,18 @@ function extractBlockers(descriptor) {
   if (!descriptor) return [];
   let rel = descriptor.relations ?? descriptor.blockedBy ?? null;
   if (typeof rel === "string") {
-    try { rel = JSON.parse(rel); } catch { return []; }
+    try {
+      rel = JSON.parse(rel);
+    } catch {
+      return [];
+    }
   }
   if (!rel) return [];
   const ids = [];
   const push = (x) => {
     if (!x) return;
-    const id = x.identifier ?? x.relatedIssue?.identifier ?? x.ticket ?? (typeof x === "string" ? x : null);
+    const id =
+      x.identifier ?? x.relatedIssue?.identifier ?? x.ticket ?? (typeof x === "string" ? x : null);
     if (id) ids.push(id);
   };
   if (Array.isArray(rel)) {
@@ -371,7 +375,17 @@ function extractBlockers(descriptor) {
 // deriveRing — distill the bounded recent-event tail into the few out-of-band
 // signals the invariants need. Best-effort: an event class that isn't present
 // yields null/empty, and the dependent invariant degrades to observable:false.
-function deriveRing(events, nowMs, self) {
+export const NEAR_CLIFF_PCT = Number(process.env.CATALYST_NEAR_CLIFF_PCT) || 90;
+export function deriveNearCliff(payload) {
+  if (payload?.nearCliff != null || payload?.near_cliff != null)
+    return !!(payload.nearCliff ?? payload.near_cliff);
+  const values = [payload?.fiveHourPct, payload?.sevenDayPct].filter(
+    (n) => typeof n === "number" && Number.isFinite(n)
+  );
+  return values.length > 0 && Math.max(...values) >= NEAR_CLIFF_PCT;
+}
+
+export function deriveRing(events, nowMs, self) {
   const ring = {
     recentDispatchTs: null,
     cacheReconcile: null,
@@ -402,6 +416,9 @@ function deriveRing(events, nowMs, self) {
     } else if (/account\.ratelimit|ratelimit\.sampled/i.test(name)) {
       // Anthropic subscription telemetry only. GitHub core quota arrives through
       // the dedicated githubQuota snapshot seam below, never through this ring.
+      // The ring stays a faithful passthrough of the sampled payload — the
+      // usage-limit cliff is DERIVED in checkAccountUsageHeadroom (CAT-58), not
+      // synthesized here, so this stays raw telemetry.
       ring.accountRatelimit = { ...payload };
     } else if (/reconcile\.failing/i.test(name)) {
       const team = payload.team ?? name.split(".").pop();
@@ -430,7 +447,7 @@ function deriveRing(events, nowMs, self) {
     }
   }
   // guard against a stale dispatch ts in the future / absurd past
-  if (ring.recentDispatchTs != null && (ring.recentDispatchTs > nowMs + 60_000)) {
+  if (ring.recentDispatchTs != null && ring.recentDispatchTs > nowMs + 60_000) {
     ring.recentDispatchTs = nowMs;
   }
   return ring;
@@ -667,7 +684,10 @@ export function assembleBoardState({
 }
 
 // ── (2) evaluateInvariants — PURE. Each check fails-open on a throw. ─────────
-export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS, mode = boardState?.mode } = {}) {
+export function evaluateInvariants(
+  boardState,
+  { thresholds = DEFAULT_THRESHOLDS, mode = boardState?.mode } = {}
+) {
   const checks = {
     cacheCoherence: () => checkCacheCoherence(boardState),
     dispatchLiveness: () => checkDispatchLiveness(boardState, thresholds),
@@ -713,6 +733,10 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       // gated like its siblings so the off set stays byte-identical.
       stalledPr: () => checkStalledPr(boardState, thresholds),
       nodeProductivity: () => checkNodeProductivity(boardState, thresholds),
+      // CAT-58: the account's own subscription usage-limit cliff (5h / 7d), the
+      // condition that makes every Claude-lane re-dispatch futile until reset.
+      // Cohort-gated like its siblings so the off set stays byte-identical.
+      accountUsageHeadroom: () => checkAccountUsageHeadroom(boardState),
     });
   }
   const out = {};
@@ -721,7 +745,9 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       out[name] = fn();
     } catch (err) {
       // a throwing invariant must never abort the scan — fail open, but record.
-      out[name] = invariant(true, 0, true, [], `check error: ${err.message}`, { error: err.message });
+      out[name] = invariant(true, 0, true, [], `check error: ${err.message}`, {
+        error: err.message,
+      });
     }
   }
   return out;
@@ -733,7 +759,13 @@ function checkCacheCoherence(b) {
   const cr = b.ring?.cacheReconcile;
   if (!cr) return invariant(true, 0, false, [], "cache reconcile off/unseen → coherence unknown");
   const changed = Number(cr.changed) || 0;
-  return invariant(changed === 0, changed > 0 ? 1 : 0, true, [], `last reconcile corrected ${changed} row(s)`);
+  return invariant(
+    changed === 0,
+    changed > 0 ? 1 : 0,
+    true,
+    [],
+    `last reconcile corrected ${changed} row(s)`
+  );
 }
 
 // #1 — dispatch liveness (the liveness-hold wedge): open slots + a waiting queue
@@ -779,17 +811,18 @@ function checkWorkerAge(b, t) {
     flagged.length,
     true,
     flagged,
-    flagged.length ? `${flagged.length} worker(s) past phase-normal age` : "all workers within normal age",
+    flagged.length
+      ? `${flagged.length} worker(s) past phase-normal age`
+      : "all workers within normal age"
   );
 }
 
 // #3 — blocked tree alive: nothing blocked by a blocker that is itself
 // unscheduled (not eligible/in-flight) and not done.
 function checkBlockedTree(b) {
-  const scheduled = new Set([
-    ...b.eligible.map((e) => e.id),
-    ...b.signals.map((s) => s.ticket),
-  ].filter(Boolean));
+  const scheduled = new Set(
+    [...b.eligible.map((e) => e.id), ...b.signals.map((s) => s.ticket)].filter(Boolean)
+  );
   const flagged = [];
   for (const [id, d] of b.ticketsById) {
     for (const blockerId of extractBlockers(d)) {
@@ -807,8 +840,10 @@ function checkBlockedTree(b) {
     flagged.length,
     true,
     flagged,
-    flagged.length ? `${flagged.length} ticket(s) blocked by an unscheduled/stuck blocker` : "blocked tree alive",
-    { caveat: "relations may be stale (cache; reconciled out-of-band)" },
+    flagged.length
+      ? `${flagged.length} ticket(s) blocked by an unscheduled/stuck blocker`
+      : "blocked tree alive",
+    { caveat: "relations may be stale (cache; reconciled out-of-band)" }
   );
 }
 
@@ -823,7 +858,8 @@ function checkProjectSilence(b, t) {
     byProject.set(project, Math.max(byProject.get(project) ?? 0, ms));
   };
   for (const e of b.eligible) consider(e.project, e.updatedAt);
-  for (const [, d] of b.ticketsById) consider(d.project ?? d.projectName, d.updatedAt ?? d.updated_at);
+  for (const [, d] of b.ticketsById)
+    consider(d.project ?? d.projectName, d.updatedAt ?? d.updated_at);
   if (byProject.size === 0) {
     return invariant(true, 0, false, [], "no project/updatedAt join available → not observable");
   }
@@ -837,7 +873,7 @@ function checkProjectSilence(b, t) {
     true,
     flagged,
     flagged.length ? `${flagged.length} project(s) silent past cadence` : "all projects moving",
-    { caveat: "updatedAt is a movement proxy" },
+    { caveat: "updatedAt is a movement proxy" }
   );
 }
 
@@ -847,17 +883,72 @@ function checkRateLimitHeadroom(b, t) {
   if (b.githubQuotaMode === "off") {
     return invariant(true, 0, false, [], "GitHub quota sampling off");
   }
-  const q = evaluateQuotaHeadroom(b.githubQuota, {
-    coreRemainingPct: t.githubCoreRemainingPct,
-    stalenessMs: t.githubQuotaStaleMs,
-  }, b.now);
+  const q = evaluateQuotaHeadroom(
+    b.githubQuota,
+    {
+      coreRemainingPct: t.githubCoreRemainingPct,
+      stalenessMs: t.githubQuotaStaleMs,
+    },
+    b.now
+  );
   if (q.state === "unknown") {
-    return invariant(true, 0, false, [], q.stale ? "GitHub quota snapshot stale" : "no GitHub quota snapshot");
+    return invariant(
+      true,
+      0,
+      false,
+      [],
+      q.stale ? "GitHub quota snapshot stale" : "no GitHub quota snapshot"
+    );
   }
   const note = `GitHub core quota ${q.remaining}/${q.limit} (${q.remainingPct.toFixed(1)}%) remaining; resets ${q.resetAt ?? "unknown"}`;
   if (b.githubQuotaMode !== "enforce") return invariant(true, 0, false, [], note);
   const failed = q.state === "low" || q.state === "exhausted";
   return invariant(!failed, failed ? 1 : 0, true, [], note);
+}
+
+// #5b — Anthropic ACCOUNT usage-limit headroom (CAT-58). Distinct from #5: that
+// one reads the GitHub core REST quota snapshot, this one reads the account's own
+// 5-hour / 7-day subscription utilization off the `account.ratelimit` ring. Both
+// can wedge the fleet and they reset independently, so they are separate
+// invariants rather than one overloaded `rateLimitHeadroom` key. Cohort-gated in
+// evaluateInvariants so the `off` invariant set stays byte-identical to main.
+function checkAccountUsageHeadroom(b) {
+  const rl = b.ring?.accountRatelimit;
+  if (!rl) {
+    return invariant(
+      true,
+      0,
+      false,
+      [],
+      "no out-of-band account usage signal (subscription telemetry absent)"
+    );
+  }
+  // Derived here rather than read off the ring: the ring is raw sampled telemetry
+  // (CAT-40 locks that passthrough with a test), so the cliff judgment lives here.
+  const near = deriveNearCliff(rl);
+  const values = [rl.fiveHourPct, rl.sevenDayPct].filter(
+    (n) => typeof n === "number" && Number.isFinite(n)
+  );
+  if (values.length === 0) {
+    return invariant(true, 0, false, [], "account usage sample carries no utilization data");
+  }
+  const pct = values.length ? Math.max(...values) : 0;
+  const resetsAt = rl.sevenDayResetsAt ?? rl.fiveHourResetsAt ?? null;
+  return invariant(
+    !near,
+    near ? 1 : 0,
+    true,
+    near ? ["account-usage"] : [],
+    near
+      ? `account at ${pct}% utilization — resets ${resetsAt ?? "unknown"}`
+      : `account usage headroom ok (${pct}%)`,
+    {
+      fiveHourPct: rl.fiveHourPct ?? null,
+      sevenDayPct: rl.sevenDayPct ?? null,
+      resetsAt,
+      nearCliffPct: NEAR_CLIFF_PCT,
+    }
+  );
 }
 
 // #6 — stranded node (mini-2 class): a rostered host that HRW-owns a share of
@@ -870,7 +961,11 @@ function checkStrandedNode(b) {
   const ownedByHost = new Map();
   for (const [id] of b.ticketsById) {
     let owner;
-    try { owner = b.ownerForTicket(id, b.roster); } catch { owner = null; }
+    try {
+      owner = b.ownerForTicket(id, b.roster);
+    } catch {
+      owner = null;
+    }
     if (!owner) continue;
     ownedByHost.set(owner, (ownedByHost.get(owner) ?? 0) + 1);
   }
@@ -895,7 +990,7 @@ function checkStrandedNode(b) {
       ? `node(s) stranded (own work, reconcile failing): ${flagged.join(", ")}`
       : haveSignal
         ? "all rostered nodes participating"
-        : "no reconcile-health signal → peer liveness not observable",
+        : "no reconcile-health signal → peer liveness not observable"
   );
 }
 
@@ -992,7 +1087,13 @@ const WEDGE_SKIP_REASONS = new Set(["all-candidates-cooldown", "act-error", "no-
 // deduped Gherkin ticket is C3/C4. C2's job is DETECT + SURFACE.
 function checkActuationLiveness(b, t) {
   if (b.mode !== "enforce") {
-    return invariant(true, 0, false, [], "actuation liveness observable only when the host is currently enforce");
+    return invariant(
+      true,
+      0,
+      false,
+      [],
+      "actuation liveness observable only when the host is currently enforce"
+    );
   }
   const K = t.actuationLivenessScans;
   const scans = (b.ring?.boardScans ?? []).filter((s) => s.mode === "enforce");
@@ -1002,7 +1103,7 @@ function checkActuationLiveness(b, t) {
       0,
       false,
       [],
-      `insufficient enforce board-scan history (${scans.length}/${K}) → actuation liveness not observable`,
+      `insufficient enforce board-scan history (${scans.length}/${K}) → actuation liveness not observable`
     );
   }
   const recent = scans.slice(-K);
@@ -1016,7 +1117,7 @@ function checkActuationLiveness(b, t) {
       0,
       false,
       [],
-      `enforce scan window not recent/contiguous (>${Math.round(windowMs / 60_000)}m span or missing ts) → actuation liveness not observable`,
+      `enforce scan window not recent/contiguous (>${Math.round(windowMs / 60_000)}m span or missing ts) → actuation liveness not observable`
     );
   }
   // A dispatch anywhere in the window clears it; otherwise EVERY scan must be an
@@ -1038,7 +1139,7 @@ function checkActuationLiveness(b, t) {
     [], // fleet/host-scoped anomaly, no per-ticket flagged list
     wedged
       ? `${K} consecutive enforce scans proposed moves but dispatched nothing → actuation wedged (propose-forever/dispatch-never)`
-      : "board-health actuation live (recent scans dispatched or had nothing actionable)",
+      : "board-health actuation live (recent scans dispatched or had nothing actionable)"
   );
 }
 
@@ -1069,7 +1170,13 @@ function checkActuationLiveness(b, t) {
 function checkUnownedInFlight(b, t) {
   const tickets = b?.ticketsById;
   if (!(tickets instanceof Map) || tickets.size === 0) {
-    return invariant(true, 0, false, [], "no ticket descriptors → unowned-in-flight not observable");
+    return invariant(
+      true,
+      0,
+      false,
+      [],
+      "no ticket descriptors → unowned-in-flight not observable"
+    );
   }
   const nowMs = Number.isFinite(b?.now) ? b.now : Date.now();
   const limit = t?.unownedInFlightMs ?? DEFAULT_THRESHOLDS.unownedInFlightMs;
@@ -1082,7 +1189,7 @@ function checkUnownedInFlight(b, t) {
   // cohort already uses, and the scheduler's phantom-directory logic likewise treats a
   // `complete` signal as inert rather than as real pipeline work.
   const hasLiveSignal = new Set(
-    b.signals?.filter((s) => s?.ticket && isLiveWorkerStatus(s.status)).map((s) => s.ticket) ?? [],
+    b.signals?.filter((s) => s?.ticket && isLiveWorkerStatus(s.status)).map((s) => s.ticket) ?? []
   );
   const prMap = b.prStatusMap instanceof Map ? b.prStatusMap : null;
   const flagged = [];
@@ -1099,7 +1206,11 @@ function checkUnownedInFlight(b, t) {
     // open. Resolve the exact (repo, number) the way the sibling PR cohorts do.
     const prNum = prNumberOf(d);
     if (prNum != null && prMap) {
-      const pr = lookupPrStatus(prMap, prNum, b.repoForTicket ? safeRepoOf(b.repoForTicket, id) : null);
+      const pr = lookupPrStatus(
+        prMap,
+        prNum,
+        b.repoForTicket ? safeRepoOf(b.repoForTicket, id) : null
+      );
       if (pr && pr.ambiguous) continue; // cannot disambiguate → spare it
       if (pr && String(pr.status).toLowerCase() === "open") continue;
     }
@@ -1113,7 +1224,10 @@ function checkUnownedInFlight(b, t) {
     const ts = tsMillis(updatedAt);
     // Fail SAFE on an unreadable timestamp: without an age we cannot prove
     // staleness, and flagging on "unknown" would re-dispatch fresh work.
-    if (!Number.isFinite(ts)) { unobservableAges++; continue; }
+    if (!Number.isFinite(ts)) {
+      unobservableAges++;
+      continue;
+    }
     if (nowMs - ts >= limit) flagged.push(id);
   }
   return invariant(
@@ -1124,7 +1238,7 @@ function checkUnownedInFlight(b, t) {
     flagged.length === 0
       ? "no unowned in-flight tickets"
       : `${flagged.length} ticket(s) assert an in-flight state with no worker and no open PR past ${Math.round(limit / 3_600_000)}h`,
-    { unobservableAges, thresholdMs: limit },
+    { unobservableAges, thresholdMs: limit }
   );
 }
 
@@ -1135,8 +1249,11 @@ function checkUnownedInFlight(b, t) {
 // absent → restart-fresh; salvage NOT yet checked → unknown-salvage (held).
 export function classifyRevivalRoute(evidence = {}) {
   if (evidence.openPr) {
-    return { route: "pr-not-merged", dispatchable: true,
-      rationale: "open PR found — route through existing pr-not-merged remediation" };
+    return {
+      route: "pr-not-merged",
+      dispatchable: true,
+      rationale: "open PR found — route through existing pr-not-merged remediation",
+    };
   }
   // CTL-1644 (Codex P2 round 3): require an EXPLICIT negative local-salvage result
   // (worktreeUnpushed === false), not merely falsy. If the remote probe succeeded
@@ -1145,12 +1262,21 @@ export function classifyRevivalRoute(evidence = {}) {
   // discarding unpushed local commits that actually need the held `adopt` route.
   // Absent local evidence falls through to the unknown-salvage guard below (held).
   if (evidence.remoteBranchExists && evidence.worktreeUnpushed === false) {
-    return { route: "resume-from-remote", dispatchable: true,
-      rationale: "remote branch exists, no unpushed local — seed a fresh worktree from origin/<ticket> (CTL-1640)" };
+    return {
+      route: "resume-from-remote",
+      dispatchable: true,
+      rationale:
+        "remote branch exists, no unpushed local — seed a fresh worktree from origin/<ticket> (CTL-1640)",
+    };
   }
   if (evidence.worktreeUnpushed) {
-    return { route: "adopt", dispatchable: false, blockedBy: "CTL-1642",
-      rationale: "local worktree with unpushed commits — adopt orphaned worktree (CTL-1642, not yet implemented)" };
+    return {
+      route: "adopt",
+      dispatchable: false,
+      blockedBy: "CTL-1642",
+      rationale:
+        "local worktree with unpushed commits — adopt orphaned worktree (CTL-1642, not yet implemented)",
+    };
   }
   // CTL-1644 (Codex P1): restart-fresh re-admits the ticket to Todo — destructive
   // if it actually had a pushed branch or unpushed local commits. The Phase-2
@@ -1163,11 +1289,19 @@ export function classifyRevivalRoute(evidence = {}) {
   const salvageChecked =
     evidence.remoteBranchExists !== undefined && evidence.worktreeUnpushed !== undefined;
   if (!salvageChecked) {
-    return { route: "unknown-salvage", dispatchable: false, blockedBy: "CTL-1644-phase3",
-      rationale: "salvage evidence not yet populated (remoteBranchExists/worktreeUnpushed unwired until Phase 3) — cannot prove no salvageable state; hold rather than restart-fresh" };
+    return {
+      route: "unknown-salvage",
+      dispatchable: false,
+      blockedBy: "CTL-1644-phase3",
+      rationale:
+        "salvage evidence not yet populated (remoteBranchExists/worktreeUnpushed unwired until Phase 3) — cannot prove no salvageable state; hold rather than restart-fresh",
+    };
   }
-  return { route: "restart-fresh", dispatchable: true,
-    rationale: "no salvageable state — re-admit the ticket to Todo for a fresh dispatch" };
+  return {
+    route: "restart-fresh",
+    dispatchable: true,
+    rationale: "no salvageable state — re-admit the ticket to Todo for a fresh dispatch",
+  };
 }
 
 // CTL-1644: detect HRW-owned mid-pipeline tickets with no actuation past a
@@ -1198,8 +1332,14 @@ function checkStrandedMidPipeline(b, t) {
   // persisted dir as NOT-actuated in Phase 2 would risk restart-freshing a live
   // worker mid-run — the more dangerous error — so that exemption is intentional.)
   const hasLiveSignal = new Set(
-    b.signals?.filter((s) => s?.ticket && isLiveWorkerStatus(s.status)
-      && !(Number.isFinite(s.ageMs) && s.ageMs > limit)).map((s) => s.ticket) ?? [],
+    b.signals
+      ?.filter(
+        (s) =>
+          s?.ticket &&
+          isLiveWorkerStatus(s.status) &&
+          !(Number.isFinite(s.ageMs) && s.ageMs > limit)
+      )
+      .map((s) => s.ticket) ?? []
   );
   const flagged = [];
   const classified = {};
@@ -1211,7 +1351,11 @@ function checkStrandedMidPipeline(b, t) {
     // HRW self-ownership: only flag tickets this host owns (foreign owners handle theirs).
     if (b.ownerForTicket && b.self) {
       let owner = null;
-      try { owner = b.ownerForTicket(id, b.roster); } catch { owner = null; }
+      try {
+        owner = b.ownerForTicket(id, b.roster);
+      } catch {
+        owner = null;
+      }
       if (owner && owner !== b.self) continue;
     }
     // needs-human LABEL exemption — mirror checkFrozenNeedsHuman's label check.
@@ -1222,21 +1366,30 @@ function checkStrandedMidPipeline(b, t) {
     if (hasLiveSignal.has(id)) continue;
     // No evidence row for this ticket ⇒ we cannot prove it is stranded. Fail safe.
     const e = evidence.get(id);
-    if (!e) { unobservableAges++; continue; }
+    if (!e) {
+      unobservableAges++;
+      continue;
+    }
     // Any actuation flag exempts the ticket.
     if (e.hasWorkerDir || e.hasLiveBg || e.hasFreshIntent) continue;
     const ts = tsMillis(d?.updatedAt ?? d?.updated_at ?? null);
-    if (!Number.isFinite(ts)) { unobservableAges++; continue; }
+    if (!Number.isFinite(ts)) {
+      unobservableAges++;
+      continue;
+    }
     if (nowMs - ts < limit) continue;
     flagged.push(id);
     classified[id] = classifyRevivalRoute(e);
   }
   return invariant(
-    flagged.length === 0, flagged.length, true, flagged,
+    flagged.length === 0,
+    flagged.length,
+    true,
+    flagged,
     flagged.length === 0
       ? "no stranded mid-pipeline tickets"
       : `${flagged.length} HRW-owned in-flight ticket(s) with no actuation past ${Math.round(limit / 3_600_000)}h`,
-    { classified, unobservableAges, thresholdMs: limit },
+    { classified, unobservableAges, thresholdMs: limit }
   );
 }
 
@@ -1267,7 +1420,7 @@ function checkPhantomMergedPr(b) {
     flagged,
     flagged.length
       ? `${flagged.length} ticket(s) in a PR state with an already-merged/deployed PR`
-      : "no phantom merged-PR tickets",
+      : "no phantom merged-PR tickets"
   );
 }
 
@@ -1287,7 +1440,7 @@ function checkOrphanedOpenPr(b, t) {
   // behind a dead/failed worker is exactly the orphaned case this cohort catches
   // — do NOT let a terminal-FAILURE signal mask it as "has a live worker".
   const liveTickets = new Set(
-    b.signals.filter((s) => s.ticket && isLiveWorkerStatus(s.status)).map((s) => s.ticket),
+    b.signals.filter((s) => s.ticket && isLiveWorkerStatus(s.status)).map((s) => s.ticket)
   );
   const flagged = [];
   for (const [id, d] of b.ticketsById) {
@@ -1330,7 +1483,10 @@ function checkOrphanedOpenPr(b, t) {
     flagged.length
       ? `${flagged.length} open PR(s) with no live worker past ${Math.round(t.orphanedPrAgeMs / 3_600_000)}h`
       : "no orphaned open PRs",
-    { caveat: "filter_state.updated_at is last-webhook, not last-PR-activity — verify with gh pr view" },
+    {
+      caveat:
+        "filter_state.updated_at is last-webhook, not last-PR-activity — verify with gh pr view",
+    }
   );
 }
 
@@ -1376,7 +1532,7 @@ function checkStalledPr(b, t) {
     flagged.length
       ? `${flagged.length} open PR(s) stalled on ${[...new Set(Object.values(reasons).flat())].join("/")}`
       : "no stalled open PRs",
-    { reasons, caveat: "durations are timer-stamped from live gh probes — verify with gh pr view" },
+    { reasons, caveat: "durations are timer-stamped from live gh probes — verify with gh pr view" }
   );
 }
 
@@ -1410,7 +1566,7 @@ function checkFrozenNeedsHuman(b, t) {
       ? `${flagged.length} needs-human ticket(s) frozen past ${Math.round(t.frozenNeedsHumanMs / 3_600_000)}h`
       : haveLabels
         ? "no frozen needs-human tickets"
-        : "no labels in cache → frozen needs-human not observable",
+        : "no labels in cache → frozen needs-human not observable"
   );
 }
 
@@ -1441,7 +1597,9 @@ function checkNeedsHumanPile(b) {
     flagged.length,
     true,
     flagged,
-    flagged.length ? `${flagged.length} worker(s) parked at needs-human/stalled` : "no needs-human/stalled workers",
+    flagged.length
+      ? `${flagged.length} worker(s) parked at needs-human/stalled`
+      : "no needs-human/stalled workers"
   );
 }
 
@@ -1495,8 +1653,7 @@ export function decideBoardHealth(invariants, boardState) {
   // (not sanctioned, live + non-terminal) — a since-terminal / sanctioned defer must not
   // make the gate proceed (it would proceed then no-anchor). Same helper selectAnchorCandidates uses.
   const deferred = eligibleDeferredAnchors(boardState);
-  const hasActionableWork =
-    moves.tier1.length > 0 || moves.tier2.length > 0 || deferred.length > 0;
+  const hasActionableWork = moves.tier1.length > 0 || moves.tier2.length > 0 || deferred.length > 0;
 
   // Gate 1 — nothing actionable (all green, or every failure suppressed/escalate-only,
   // and no deferred work) → skip the holistic DISPATCH (no LLM thrash). CTL-1432 (Codex
@@ -1509,7 +1666,7 @@ export function decideBoardHealth(invariants, boardState) {
       observableFailed.length === 0 ? "all-green" : "no-actionable-moves",
       invariantsFailed,
       moves,
-      sanctioned,
+      sanctioned
     );
   }
   // Gate 2 — actionable work but no free slot to dispatch a fix → skip.
@@ -1517,9 +1674,15 @@ export function decideBoardHealth(invariants, boardState) {
     return decision("skip", "no-free-slots", invariantsFailed, emptyMoves(), sanctioned);
   }
   // Gate 3 — near a rate-limit cliff → acting now risks 429s → skip (and obey it).
+  // Two independent cliffs gate here: the GitHub core REST quota (CAT-40) and the
+  // account's own subscription usage limit (CAT-58). Either one makes acting futile.
   const rl = invariants.rateLimitHeadroom;
   if (rl && rl.observable && !rl.ok) {
     return decision("skip", "rate-limit-cliff", invariantsFailed, emptyMoves(), sanctioned);
+  }
+  const au = invariants.accountUsageHeadroom;
+  if (au && au.observable && !au.ok) {
+    return decision("skip", "account-usage-cliff", invariantsFailed, emptyMoves(), sanctioned);
   }
   // Gate 4 — actionable work + headroom → proceed.
   const reason =
@@ -1561,30 +1724,60 @@ export function proposeMoves(invariants, _b) {
     tier1.push({ move: "kick-dispatch", rationale: invariants.dispatchLiveness.note });
   }
   for (const t of invariants.workerAge?.flagged ?? []) {
-    if (!invariants.workerAge.ok && !sanction(t)) tier1.push({ ticket: t, move: "nudge", rationale: "worker past phase-normal age" });
+    if (!invariants.workerAge.ok && !sanction(t))
+      tier1.push({ ticket: t, move: "nudge", rationale: "worker past phase-normal age" });
   }
-  if (invariants.cacheCoherence && invariants.cacheCoherence.observable && !invariants.cacheCoherence.ok) {
+  if (
+    invariants.cacheCoherence &&
+    invariants.cacheCoherence.observable &&
+    !invariants.cacheCoherence.ok
+  ) {
     tier1.push({ move: "note-cache-drift", rationale: invariants.cacheCoherence.note });
   }
   // CTL-1157: the most-actionable stuck work — phantom merged-PR tickets (judge
   // Done vs reopen) and orphaned open PRs (finish or close) — is tier1 (highest
   // anchor priority); the status-based needs-human pile is the untyped catch-all.
   for (const t of invariants.phantomMergedPr?.flagged ?? []) {
-    if (!invariants.phantomMergedPr.ok && !sanction(t)) tier1.push({ ticket: t, move: "judge-done-or-reopen", rationale: "PR merged/deployed but ticket still in a PR/in-review state" });
+    if (!invariants.phantomMergedPr.ok && !sanction(t))
+      tier1.push({
+        ticket: t,
+        move: "judge-done-or-reopen",
+        rationale: "PR merged/deployed but ticket still in a PR/in-review state",
+      });
   }
   for (const t of invariants.orphanedOpenPr?.flagged ?? []) {
-    if (!invariants.orphanedOpenPr.ok && !sanction(t)) tier1.push({ ticket: t, move: "finish-or-close-pr", rationale: "open PR with no live worker past age" });
+    if (!invariants.orphanedOpenPr.ok && !sanction(t))
+      tier1.push({
+        ticket: t,
+        move: "finish-or-close-pr",
+        rationale: "open PR with no live worker past age",
+      });
   }
   for (const t of invariants.needsHumanPile?.flagged ?? []) {
-    if (!invariants.needsHumanPile.ok && !sanction(t)) tier1.push({ ticket: t, move: "holistic-triage", rationale: "worker parked at needs-human/stalled" });
+    if (!invariants.needsHumanPile.ok && !sanction(t))
+      tier1.push({
+        ticket: t,
+        move: "holistic-triage",
+        rationale: "worker parked at needs-human/stalled",
+      });
   }
   for (const t of invariants.blockedTree?.flagged ?? []) {
-    if (!invariants.blockedTree.ok && !sanction(t)) tier2.push({ ticket: t, move: "re-dispatch-blocker", rationale: "blocked by unscheduled/stuck blocker" });
+    if (!invariants.blockedTree.ok && !sanction(t))
+      tier2.push({
+        ticket: t,
+        move: "re-dispatch-blocker",
+        rationale: "blocked by unscheduled/stuck blocker",
+      });
   }
   // CTL-1157: a needs-human-LABELLED ticket frozen past 48h has already been
   // escalated once → tier2 (review, lower urgency than the actionable PR work).
   for (const t of invariants.frozenNeedsHuman?.flagged ?? []) {
-    if (!invariants.frozenNeedsHuman.ok && !sanction(t)) tier2.push({ ticket: t, move: "review-needs-human", rationale: "needs-human label frozen past threshold" });
+    if (!invariants.frozenNeedsHuman.ok && !sanction(t))
+      tier2.push({
+        ticket: t,
+        move: "review-needs-human",
+        rationale: "needs-human label frozen past threshold",
+      });
   }
   // CTL-1475: tier2 = ANCHORABLE, so the delegate actually sweeps these up.
   //
@@ -1609,7 +1802,11 @@ export function proposeMoves(invariants, _b) {
   const strandedClassified = invariants.strandedMidPipeline?.classified ?? {};
   for (const t of invariants.unownedInFlight?.flagged ?? []) {
     if (!invariants.unownedInFlight.ok && !sanction(t) && !strandedClassified[t]) {
-      tier2.push({ ticket: t, move: "recover-unowned-in-flight", rationale: "Linear state claims in-flight but there is no worker and no open PR" });
+      tier2.push({
+        ticket: t,
+        move: "recover-unowned-in-flight",
+        rationale: "Linear state claims in-flight but there is no worker and no open PR",
+      });
     }
   }
   // CTL-1644: one tier2 route move per stranded ticket — the delegate picks the
@@ -1627,19 +1824,32 @@ export function proposeMoves(invariants, _b) {
     if (!invariants.strandedMidPipeline.ok && !sanction(t)) {
       const cls = strandedClassified[t] ?? {};
       if (cls.dispatchable === false) continue; // held — surface only, never anchor
-      tier2.push({ ticket: t, move: "route-stranded-mid-pipeline",
-        route: cls.route, rationale: cls.rationale ?? "stranded mid-pipeline ticket classified for revival" });
+      tier2.push({
+        ticket: t,
+        move: "route-stranded-mid-pipeline",
+        route: cls.route,
+        rationale: cls.rationale ?? "stranded mid-pipeline ticket classified for revival",
+      });
     }
   }
   // CTL-1608: a PR that stopped progressing (review/CI/no-push) is actionable
   // work → tier1, alongside the orphaned-PR cohort. Sanctioned latches suppressed.
   for (const t of invariants.stalledPr?.flagged ?? []) {
     if (!invariants.stalledPr.ok && !sanction(t)) {
-      tier1.push({ ticket: t, move: "nudge-stalled-pr", rationale: "open PR stopped progressing (review/CI/no-push) past threshold" });
+      tier1.push({
+        ticket: t,
+        move: "nudge-stalled-pr",
+        rationale: "open PR stopped progressing (review/CI/no-push) past threshold",
+      });
     }
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
-    if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but reconcile is failing" });
+    if (!invariants.strandedNode.ok)
+      tier3.push({
+        host: h,
+        move: "escalate-stranded-node",
+        rationale: "rostered node owns work but reconcile is failing",
+      });
   }
   for (const h of invariants.nodeProductivity?.flagged ?? []) {
     if (!invariants.nodeProductivity.ok) tier3.push({
@@ -1649,7 +1859,12 @@ export function proposeMoves(invariants, _b) {
     });
   }
   for (const p of invariants.projectSilence?.flagged ?? []) {
-    if (!invariants.projectSilence.ok) tier3.push({ project: p, move: "escalate-project-silence", rationale: "no movement in expected cadence" });
+    if (!invariants.projectSilence.ok)
+      tier3.push({
+        project: p,
+        move: "escalate-project-silence",
+        rationale: "no movement in expected cadence",
+      });
   }
   return { tier1, tier2, tier3 };
 }
@@ -1686,7 +1901,11 @@ export function proposeMoves(invariants, _b) {
 // of foreign-failover. N=1 (no roster / no ownerForTicket / !multiHost) ⇒ owns()
 // ≡ true and strandedOrDeadHosts is empty ⇒ the foreign branch is unreachable ⇒
 // byte-identical to today.
-export function selectAnchorCandidates(moves, board, { holistic = false, strandedOrDeadHosts = new Set() } = {}) {
+export function selectAnchorCandidates(
+  moves,
+  board,
+  { holistic = false, strandedOrDeadHosts = new Set() } = {}
+) {
   const multiHost = !!(board && board.multiHost && typeof board.ownerForTicket === "function");
   const baseOwns = makeOwnsFilter(board);
   const owns = (ticket) => !!ticket && baseOwns(ticket);
@@ -1696,9 +1915,10 @@ export function selectAnchorCandidates(moves, board, { holistic = false, strande
   // A ticket with a completed triage artifact and a stuck post-triage phase is
   // NOT in this set and remains anchor-eligible. With the default board shape
   // (no hasTriageArtifact seam bound), the set is empty and this is a no-op.
-  const excluded = board?.triageLaunchFailureOnlyTickets instanceof Set
-    ? board.triageLaunchFailureOnlyTickets
-    : new Set();
+  const excluded =
+    board?.triageLaunchFailureOnlyTickets instanceof Set
+      ? board.triageLaunchFailureOnlyTickets
+      : new Set();
   const out = [];
   const seen = new Set();
   const add = (t) => {
@@ -1718,7 +1938,11 @@ export function selectAnchorCandidates(moves, board, { holistic = false, strande
   // excludes Done/removed via getBoard's includeRemoved:false), so a stale defer marker
   // whose ticket has since gone terminal is dropped rather than re-anchored.
   for (const t of eligibleDeferredAnchors(board)) add(t); // already HRW-owns-filtered
-  for (const e of (board?.eligible ?? []).map((x) => x && x.id).filter(Boolean).filter(owns)) add(e);
+  for (const e of (board?.eligible ?? [])
+    .map((x) => x && x.id)
+    .filter(Boolean)
+    .filter(owns))
+    add(e);
   // holistic foreign-failover: a flagged tier1/tier2 ticket this host does NOT own,
   // ONLY when its owner is provably dead/stranded. Appended AFTER all self-owned.
   if (holistic && multiHost) {
@@ -1836,7 +2060,7 @@ export function buildBoardContext(boardState, invariants) {
       ownedTickets: invariants.nodeProductivity?.unproductive?.[host]?.ownedTickets ?? [],
     })),
     invariants: Object.fromEntries(
-      Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed }]),
+      Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed }])
     ),
   };
 }
@@ -1913,8 +2137,9 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       // stranded tickets — the anchor filter keeps these out of tier2Moves and
       // boardContext, so this is the only chartable signal that the cohort exists
       // but is being deliberately held (e.g. the whole Phase-2 unknown-salvage set).
-      strandedHeldCount: Object.values(invariants.strandedMidPipeline?.classified ?? {})
-        .filter((c) => c?.dispatchable === false).length,
+      strandedHeldCount: Object.values(invariants.strandedMidPipeline?.classified ?? {}).filter(
+        (c) => c?.dispatchable === false
+      ).length,
       // CTL-1607: per-host slot census so fleet capacity is visible off-host
       // (computed above; occupancy-derived in_use, delegate-debited + gate-collapsed
       // free). A fleet consumer SUMs slotFree directly — never capacity − in_use:
@@ -1928,7 +2153,10 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       githubCoreRemaining: githubQuota?.remaining ?? null,
       githubCoreRemainingPct: githubQuota?.remainingPct ?? null,
       invariants: Object.fromEntries(
-        Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed, observable: v.observable }]),
+        Object.entries(invariants).map(([k, v]) => [
+          k,
+          { ok: v.ok, failed: v.failed, observable: v.observable },
+        ])
       ),
       // ── rosters/proposals: stay in body.payload, NEVER promoted (cardinality) ──
       flagged: dedupeFlagged(invariants),
@@ -2011,7 +2239,10 @@ export function boardHealthPass({
     // so the expensive whole-log heartbeat read behind the daemon's thunk is paid
     // only on a tick that actually proceeds, not on all ~59 throttled ticks between
     // 5-minute passes. Arrays still work unchanged (resolveDeadHosts is a no-op).
-    getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), mode, now,
+    getPrStatusMap,
+    deadHosts: resolveDeadHosts(deadHosts),
+    mode,
+    now,
     getDeferredBoardHealthTickets, // CTL-1432 (B2). CTL-1552: sanctionedNeedsHuman removed.
     getStrandedEvidence, // CTL-1644: per-ticket evidence seam (empty-Map default if unbound)
     getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)
@@ -2053,7 +2284,11 @@ export function boardHealthPass({
   if (mode === "enforce" && typeof act === "function") {
     if (dec.gate.decision !== "proceed") {
       // the gate held (all-green / no-actionable-moves / no-free-slots / rate-limit-cliff)
-      actOutcome = { dispatched: false, anchor: null, skippedReason: dec.gate.reason ?? "gate-hold" };
+      actOutcome = {
+        dispatched: false,
+        anchor: null,
+        skippedReason: dec.gate.reason ?? "gate-hold",
+      };
     } else {
       try {
         // CTL-1157 (MUST-FIX 1+2): compute the ORDERED holistic candidate list. The
@@ -2067,23 +2302,32 @@ export function boardHealthPass({
           ...(invariants.strandedNode?.flagged ?? []),
           ...(board.deadHosts ?? []),
         ]);
-        const candidates = selectAnchorCandidates(dec.moves, board, { holistic: true, strandedOrDeadHosts });
+        const candidates = selectAnchorCandidates(dec.moves, board, {
+          holistic: true,
+          strandedOrDeadHosts,
+        });
         const anchor = candidates[0] ?? null;
         if (!anchor) {
-          log({ reason: "no-owned-anchor" }, "board-health: proceed but no actionable ticket anchor — no holistic dispatch this scan");
+          log(
+            { reason: "no-owned-anchor" },
+            "board-health: proceed but no actionable ticket anchor — no holistic dispatch this scan"
+          );
           actOutcome = { dispatched: false, anchor: null, skippedReason: "no-owned-anchor" };
         } else {
           const boardContext = buildBoardContext(board, invariants);
           actResult = act({ anchor, candidates, boardContext, decision: dec, board }) ?? null;
-          log({ anchor, candidates: candidates.length, dispatched: actResult?.dispatched ?? null }, "board-health: holistic recovery-pass delegate actuated");
+          log(
+            { anchor, candidates: candidates.length, dispatched: actResult?.dispatched ?? null },
+            "board-health: holistic recovery-pass delegate actuated"
+          );
           const dispatched = actResult?.dispatched === true;
           actOutcome = {
             dispatched,
             // the ACTUALLY-dispatched candidate (holisticBoardHealthAct may skip the
             // [0] anchor and dispatch a later one); fall back to the intended anchor.
             anchor: (dispatched ? actResult?.candidate : null) ?? anchor,
-            skippedReason: dispatched ? null : actResult?.reason ?? "all-candidates-cooldown",
-            skippedReasonNoClock: dispatched ? false : (actResult?.latchedNoClock === true), // CTL-1610
+            skippedReason: dispatched ? null : (actResult?.reason ?? "all-candidates-cooldown"),
+            skippedReasonNoClock: dispatched ? false : actResult?.latchedNoClock === true, // CTL-1610
           };
         }
       } catch (err) {

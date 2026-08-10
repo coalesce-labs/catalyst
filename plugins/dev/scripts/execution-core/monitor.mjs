@@ -1067,18 +1067,6 @@ function dispatchTriage(
   // signal is reset to stalled by the reclaim/revive path, after which counting
   // resumes; "failed"/"stalled" re-dispatches launch real workers and count.
   const statusAtLaunch = readTriageSignalStatus(orchDir, identifier);
-  if (!isTriageInFlight(statusAtLaunch) && statusAtLaunch !== "done") {
-    bumpTriageDispatchCount(orchDir, identifier);
-    // CTL-1649: mirror the host-local bump on the fence attachment so the fleet-wide
-    // count stays in lockstep. Fail-open — a fence write failure never blocks launch.
-    if (multiHost) {
-      try {
-        bumpFenceTriageAttempt({ ticket: identifier });
-      } catch {
-        /* fail-open */
-      }
-    }
-  }
   // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. bg returns a
   // plain object (passthrough → byte-identical). sdk returns a Promise whose
   // synchronous prelaunch already wrote the triage `dispatched` signal;
@@ -1098,6 +1086,25 @@ function dispatchTriage(
       ),
     },
   );
+  if (r.deferred) {
+    log.info(
+      { identifier, code: r.code, reason: r.reason },
+      "monitor: triage dispatch deferred — executor lane parked"
+    );
+    return false;
+  }
+  // Count only a real spawn attempt. A lane-parked dispatch returns before any
+  // worker launch and must not consume the ticket or fleet-wide triage budget.
+  if (!isTriageInFlight(statusAtLaunch) && statusAtLaunch !== "done") {
+    bumpTriageDispatchCount(orchDir, identifier);
+    if (multiHost) {
+      try {
+        bumpFenceTriageAttempt({ ticket: identifier });
+      } catch {
+        /* fail-open */
+      }
+    }
+  }
   if (r.code !== 0) {
     log.warn({ identifier, code: r.code }, "monitor: triage dispatch failed");
     return false;

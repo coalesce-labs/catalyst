@@ -797,18 +797,21 @@ describe("startDaemon", () => {
   // mirroring the CTL-685 memory-sampler wiring.
   test("starts the ratelimit-poller when enabled (CTL-787)", () => {
     let started = 0;
+    let pollerOptions = null;
     startDaemon({
       recover: () => {},
       startMonitor: () => {},
       startScheduler: () => {},
       watchRegistry: false,
-      startRatelimitPoller: () => {
+      startRatelimitPoller: (options) => {
         started++;
+        pollerOptions = options;
         return { stop: () => {} };
       },
       enableRatelimitPoller: true,
     });
     expect(started).toBe(1);
+    expect(pollerOptions?.orchDir).toBeTruthy();
   });
 
   test("skips the ratelimit-poller when disabled (CTL-787)", () => {

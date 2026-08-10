@@ -105,6 +105,8 @@ import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079
 import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
 import { recordRemovalFailure } from "./label-guard.mjs"; // CTL-1605 Codex thread: drive needs-human into CTL-1078 backoff for the terminal-stale multi-label tests
 import { getDrainFlagPath, getEventLogPath } from "./config.mjs"; // CTL-1678: drain-disabled override integration test
+import { makePhaseAwareDispatchFn } from "./dispatch.mjs";
+import { laneCooldownPath, parkLane } from "./lane-cooldown.mjs";
 
 let orchDir;
 let catalystDir;
@@ -1790,6 +1792,33 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
       isBgJobAlive: () => false,
     });
     expect(result.quarantinedPhantoms).toEqual([{ ticket: "CTL-9", phase: "implement" }]);
+  });
+});
+
+describe("CAT-58 deferred executor-lane dispatch", () => {
+  test("does not count a deferred dispatch as a ticket failure", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const failedEvents = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [{
+        identifier: "CAT-58-DEFERRED",
+        priority: 1,
+        createdAt: "x",
+        state: { name: "Todo" },
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      }],
+      dispatch: () => ({ code: 75, deferred: true, reason: "no-healthy-executor-lane" }),
+      liveBackgroundCount: () => 0,
+      hosts: ["vega"],
+      hostName: "vega",
+      appendDispatchFailedEvent: (event) => failedEvents.push(event),
+      hasTriageArtifact: () => true,
+      fetchBatch: mkBatch({ "CAT-58-DEFERRED": { state: "Todo", priority: 1, labels: [], relations: { nodes: [] }, inverseRelations: { nodes: [] } } }),
+    });
+    const marker = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, "CAT-58-DEFERRED", "research"), "utf8"));
+    expect(marker).toMatchObject({ consecutiveFailures: 0, reasonCode: "no-healthy-executor-lane" });
+    expect(failedEvents).toHaveLength(0);
   });
 });
 
@@ -11243,6 +11272,29 @@ describe("dispatchAndVerify shared core (CTL-826)", () => {
     });
     // No failure event on the success branch.
     expect(dispatchFailedEvents("CTL-826A")).toHaveLength(0);
+  });
+
+  test("verified production phase-aware bg launch clears the bg lane park", () => {
+    writeSignal("CTL-826-LANE", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    parkLane(orchDir, "bg", { resetsAt: "2026-08-10T18:00:00.000Z", now: 1_000 });
+    const dispatch = makePhaseAwareDispatchFn({
+      bootExecutor: "bg",
+      codexBootEligible: false,
+      orchDir,
+      now: () => Date.parse("2026-08-11T18:00:00.000Z"),
+      resolveExecutorForPhase: () => ({ source: "executor", executor: "bg" }),
+      dispatchForExecutor: () => dispatchWritesSignal(),
+    });
+
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => Date.parse("2026-08-11T18:00:00.000Z"),
+    });
+
+    expect(r.advanced).toContainEqual({ ticket: "CTL-826-LANE", phase: "plan" });
+    expect(existsSync(laneCooldownPath(orchDir, "bg"))).toBe(false);
   });
 
   // ─── Branch 2: verify-failed (rc=0, no live signal) ───

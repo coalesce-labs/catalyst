@@ -1159,6 +1159,7 @@ export function startDaemon({
       codexBootEligible: codexElig.eligible,
       sdkBootEligible,
       configPath,
+      orchDir,
       emitEvent: defaultAppendOperatorEvent,
       log,
     });
@@ -1502,7 +1503,7 @@ export function startDaemon({
     // CTL-787: start the account-level rate-limit usage poller. Inside the same
     // try/catch so a throw triggers PID-file cleanup via stopDaemon.
     if (enableRatelimitPoller) {
-      _ratelimitPoller = startRatelimitPoller();
+      _ratelimitPoller = startRatelimitPoller({ orchDir });
     }
 
     // CTL-1654: _nodeClass / _isWorkerNode were resolved above (before the actuators)
