@@ -41,6 +41,20 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# This is a macOS LaunchAgent (StartInterval sweep), not a Claude
+# process -- unlike execution-core/broker, it had no app-actor auth at all,
+# so its linearis calls fell straight through to the operator's own personal
+# credential. Mint the dedicated linear-linearis-actor identity before the
+# first linearis call below. Fail-open (linear_app_actor_auth's own
+# documented contract): a failed mint just leaves LINEAR_API_TOKEN unset, and
+# linearis falls back to its own resolution (~/.linearis/token) exactly as it
+# does today -- the sweep is never blocked by this.
+# shellcheck source=lib/linear-app-actor.sh
+source "${SCRIPT_DIR}/lib/linear-app-actor.sh"
+linear_app_actor_auth "dependabot-escalate" LINEAR_API_TOKEN linear-linearis-actor "Catalyst linearis app-actor"
+
 # ─── repo → Linear team key map ────────────────────────────────────────────
 # Deliberately NOT hardcoded here (this script ships in the public
 # coalesce-labs/catalyst repo — see AGENTS.md's "Do NOT commit: Specific
