@@ -154,6 +154,30 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    the wait (defeats the assistant `end_turn` rendering bleed described in [[monitor-events]] §
    Narration). Shape: `wake: <event.name> #<PR_NUMBER> — <action being taken>`.
 
+Before the `clean` merge handler, handle a draft exactly once per phase run:
+
+```bash
+if [[ "$MERGEABLE_STATE" == "draft" ]]; then
+  if [[ -n "${DRAFT_PROMOTE_ATTEMPTED:-}" ]]; then
+    echo "phase-monitor-merge: PR #${PR_NUMBER} still draft after one promote attempt" >&2
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+      --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "pr_stuck_in_draft"
+    exit 1
+  fi
+  DRAFT_PROMOTE_ATTEMPTED=1
+  source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+  if ! draft_pr_promote_verify; then
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+      --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "pr_stuck_in_draft"
+    exit 1
+  fi
+  echo "wake: pr#${PR_NUMBER} — PR was draft; promoted to ready"
+  continue
+fi
+```
+
 ## Merge
 
 Once `mergeable_state == "clean"` (and the PR isn't already merged):
@@ -677,3 +701,4 @@ Plan architectural commitment #3. The listen loop logic lives in [[oneshot]] SKI
 exercised every day. Lifting it into a phase-agent skill without duplicating the body keeps both
 paths in lockstep — when the legacy oneshot path retires (plan §Initiative 1 Phase 6), this skill
 becomes the sole owner.
+   | draft            | attempt `draft_pr_promote_verify` once; re-read on success, otherwise fail with `pr_stuck_in_draft`                                    |
