@@ -503,18 +503,68 @@ describe("readPeerHeartbeatsSyncCached — 45s TTL cache around the peer-livenes
     expect(calls).toBe(3); // cache fully disabled — no memoization at all
   });
 
-  test("(d) an empty/error result is NEVER cached — the next call retries the real read", () => {
+  test("(d) an empty/error result is cached for the SHORT failure-backoff window (retry-storm fix)", () => {
     let calls = 0;
     const spawn = () => {
       calls += 1;
       return { status: 1, stdout: "" }; // non-zero exit → the {} fail-open shape
     };
-    const now = () => 1_000_000; // frozen clock — within TTL, so only caching (not expiry) explains a re-spawn
-    const first = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004" }, { spawn, now });
-    const second = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004" }, { spawn, now });
+    let now = 1_000_000;
+    const first = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004" }, { spawn, now: () => now });
+    now += 1_000; // 1s later — well within the 20s default failure backoff
+    const second = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004" }, { spawn, now: () => now });
     expect(first).toEqual({});
     expect(second).toEqual({});
-    expect(calls).toBe(2); // NOT cached — both calls spawned
+    expect(calls).toBe(1); // second call served from the failure-backoff cache, no spawn
+  });
+
+  test("(d2) after the failure-backoff window expires, the next call retries the real read", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 1, stdout: "" };
+    };
+    let now = 1_000_000;
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004b" }, { spawn, now: () => now });
+    now += 20_001; // just past the 20s default failure-backoff window
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004b" }, { spawn, now: () => now });
+    expect(calls).toBe(2); // backoff expired → the second call re-spawned
+  });
+
+  test("(d3) CATALYST_HEARTBEAT_FAILURE_BACKOFF_MS=0 disables the failure backoff — every empty read retries", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 1, stdout: "" };
+    };
+    const env = { CATALYST_HEARTBEAT_FAILURE_BACKOFF_MS: "0" };
+    const now = () => 1_000_000; // frozen clock — proves it's the env flag, not elapsed time
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004c" }, { spawn, env, now });
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004c" }, { spawn, env, now });
+    expect(calls).toBe(2); // backoff fully disabled — no memoization of the empty result
+  });
+
+  test("(d4) once the failure backoff expires, a recovered (non-empty) read is cached at the normal success TTL", () => {
+    let calls = 0;
+    const responses = [
+      { status: 1, stdout: "" },
+      { status: 0, stdout: JSON.stringify(peerMap) + "\n" },
+    ];
+    const spawn = () => {
+      const res = responses[calls];
+      calls += 1;
+      return res;
+    };
+    let now = 1_000_000;
+    const first = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004d" }, { spawn, now: () => now });
+    expect(first).toEqual({});
+    now += 20_001; // past the failure backoff — retries for real, finds recovery
+    const second = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004d" }, { spawn, now: () => now });
+    expect(second).toEqual(peerMap);
+    now += 1_000; // within the (longer) 45s success TTL
+    const third = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004d" }, { spawn, now: () => now });
+    expect(third).toEqual(peerMap);
+    expect(calls).toBe(2); // third call served from the success cache, no spawn
   });
 
   test("different anchors are NOT interchangeable — each gets its own read + cache slot", () => {
