@@ -3204,3 +3204,60 @@ describe("dispatchTriage — drain gate (CTL-1095)", () => {
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
 });
+
+// CAT-159: the durable cross-host liveness-anchor ticket (config
+// catalyst.cluster.livenessAnchorIssue) has no completion criteria — it exists
+// permanently as an attachment point for heartbeat records (config.mjs
+// getLivenessAnchorIssue). Dispatching triage/research against it always
+// fails (nothing to research for a ticket with no deliverable), which
+// escalates to recovery-pass, self-heal exhausts, and needs a human to
+// manually clear it back into the identical loop (observed live 2026-08-09/10).
+// Excluded at dispatchTriage — the single choke point all three dispatch
+// entry points (webhook, sweep) funnel through — so no Linear API call is
+// spent on it at all, not even a read.
+describe("dispatchTriage — liveness-anchor exclusion (CAT-159)", () => {
+  const orchDir = "/orch-cat159-anchor";
+
+  function toTriageEvent(ticket) {
+    return {
+      event: "linear.issue.state_changed",
+      detail: { ticket, teamKey: "ENG", toState: "Triage" },
+    };
+  }
+
+  test("returns false and never dispatches when the ticket is the configured liveness anchor", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(toTriageEvent("CAT-1"), {
+      dispatch,
+      orchDir,
+      livenessAnchorIssue: "CAT-1",
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("dispatches normally for a non-anchor ticket even with an anchor configured (regression guard)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(toTriageEvent("ENG-ANCHOR-2"), {
+      dispatch,
+      orchDir,
+      livenessAnchorIssue: "CAT-1",
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test("dispatches normally when no anchor is configured (default byte-identical)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(toTriageEvent("ENG-ANCHOR-3"), {
+      dispatch,
+      orchDir,
+      livenessAnchorIssue: null,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+});

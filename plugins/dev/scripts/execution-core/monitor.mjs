@@ -39,6 +39,7 @@ import {
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
+  getLivenessAnchorIssue, // CAT-159: exclude the durable liveness-anchor ticket from dispatch
 } from "./config.mjs";
 // CTL-1397 (Node-loadability): monitor.mjs MUST NOT import replica-read.mjs — that
 // module statically imports `bun:sqlite`, which the Node ESM loader rejects at
@@ -542,6 +543,10 @@ export function handleStateChangedEvent(
     // CTL-1481: worker:<host> label-stamp seam — threaded through to
     // dispatchTriage (undefined → real default; tests inject a fake).
     stampWorkerLabel,
+    // CAT-159: liveness-anchor exclusion seam — threaded through to
+    // dispatchTriage (undefined → real config accessor; tests inject a fixed
+    // value so the guard is deterministic without touching Layer-2 config).
+    livenessAnchorIssue,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -589,6 +594,7 @@ export function handleStateChangedEvent(
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
           stampWorkerLabel, // CTL-1481
+          livenessAnchorIssue, // CAT-159
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -647,6 +653,7 @@ export function handleStateChangedEvent(
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
           stampWorkerLabel, // CTL-1481
+          livenessAnchorIssue, // CAT-159
         });
       } else {
         log.debug(
@@ -815,8 +822,25 @@ function dispatchTriage(
     // Single-host paths never call these.
     readFenceTriageAttempt = readTriageAttemptCountSync,
     bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
+    // CAT-159: the durable cross-host liveness-anchor ticket (config
+    // catalyst.cluster.livenessAnchorIssue) has no completion criteria — it
+    // exists permanently as an attachment point for heartbeat records. It has
+    // nothing to research/implement, so dispatching it here always fails,
+    // escalates to recovery-pass, self-heal-exhausts, and needs a human to
+    // manually clear it back into the identical loop. Checked FIRST — before
+    // orchDir/drain/HRW — so this never costs a Linear call, not even a read.
+    // undefined → the real config accessor (null when unconfigured, matching
+    // every other caller's default).
+    livenessAnchorIssue = getLivenessAnchorIssue(),
   }
 ) {
+  if (livenessAnchorIssue && identifier === livenessAnchorIssue) {
+    log.debug(
+      { identifier },
+      "cat-159: skipping triage dispatch — ticket is the configured liveness anchor (no completion criteria)"
+    );
+    return false;
+  }
   if (!orchDir) {
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
     return false;
