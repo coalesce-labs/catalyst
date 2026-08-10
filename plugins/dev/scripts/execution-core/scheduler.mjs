@@ -314,9 +314,17 @@ import {
   readRecoveryPassConfig,
   readBoardHealthConfig,
   readGithubQuotaBoardHealthConfig,
+  readProductivityBoardHealthConfig,
+  getLivenessAnchorIssue,
+  getLivenessReadSource,
+  getLokiQueryUrl,
   readReclaimGatewayFreshMs,
   isThrottled,
 } from "./config.mjs";
+import { readPeerHeartbeatsSyncCached } from "./cluster-heartbeat-sync.mjs";
+// CAT-57: Loki-source peer read for the productivity signal, so nodeProductivity is
+// observable under CATALYST_LIVENESS_READ_SOURCE=loki instead of going dark.
+import { readClusterLivenessFromLokiSync } from "./loki-liveness-sync.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -6043,6 +6051,10 @@ export function schedulerTick(
           },
           readEventRing: _boardHealth.readEventRing,
           ownerForTicket,
+          // CAT-57: judge board-health ownership over the same live, deflapped
+          // dispatch roster used by the scheduler's new-work admission gate.
+          // Keep this lazy so the board-health interval throttle remains effective.
+          getDispatchRoster: () => _dispatchRoster(),
           // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite
           // (repo, number) PR-status lookup. Daemon-bound below; a bare tick
           // passes none → null → number-only fallback (N=1 byte-identical).
@@ -6064,6 +6076,40 @@ export function schedulerTick(
           getStalledPrState: _boardHealth.getStalledPrState ?? (() => readStalledPrState(orchDir)),
           getGithubQuota: _boardHealth.getGithubQuota ?? (() => readGithubQuota(orchDir)),
           githubQuotaMode: _boardHealth.githubQuotaMode ?? readGithubQuotaBoardHealthConfig().mode,
+          getPeerProductivity:
+            _boardHealth.getPeerProductivity ??
+            (() => {
+              // CAT-57 (Codex P2): single-host is unobservable by construction —
+              // checkNodeProductivity rejects roster.length <= 1 before ever looking
+              // at this value — so never spend a read (nor block the tick on a
+              // subprocess) for data that cannot change the result. Mirrors the
+              // liveness publisher's own single-host exact no-op.
+              if (!Array.isArray(roster) || roster.length <= 1) return null;
+              // CAT-57 (Codex P1, rounds 1+2): READ FROM THE CONFIGURED SOURCE.
+              // Round 1: under =loki the publisher stops updating the Linear anchor
+              // (its tick() returns early once readSource() !== "linear"), so reading
+              // that frozen attachment scored every peer off a stale record — each one
+              // silently skipped for want of a fresh last_advance_at, which surfaces as
+              // "all peers productive" rather than "unobservable", even in enforce — and
+              // reintroduced the Linear read that mode exists to retire.
+              // Round 2: returning null there instead left productivity permanently dark
+              // on the fleet's intended configuration. Both are fixed by carrying
+              // last_advance_at on the Loki transport itself (node.heartbeat attribute
+              // catalyst.node.last_advance_at, emitted by heartbeat-event.mjs) and
+              // reading it here, so each mode reads its OWN source and the invariant is
+              // observable under both. Fail-open on either path: a failed/empty read →
+              // {} / null → nodeProductivity reports observable:false, never a false
+              // escalation.
+              if (getLivenessReadSource() !== "linear") {
+                const lokiUrl = getLokiQueryUrl();
+                if (!lokiUrl) return null;
+                return readClusterLivenessFromLokiSync({ lokiUrl });
+              }
+              const anchorIssue = getLivenessAnchorIssue();
+              return anchorIssue ? readPeerHeartbeatsSyncCached({ anchorIssue }) : null;
+            }),
+          productivityMode:
+            _boardHealth.productivityMode ?? readProductivityBoardHealthConfig().mode,
           // CTL-1524 (C4b): pass a THUNK, not a resolved array. Evaluating it here
           // ran the heartbeat read on EVERY tick, so boardHealthPass's 5-minute
           // internal throttle could never protect it — the cost was paid before the
