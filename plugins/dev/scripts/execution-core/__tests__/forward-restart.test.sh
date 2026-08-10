@@ -73,7 +73,10 @@ PID1="$(cat "$FORWARD_PID_FILE")"
 kill -0 "$PID1" 2>/dev/null || { echo "FAIL: stub forwarder pid $PID1 not alive after cold restart"; exit 1; }
 
 # --- Test 2: forward-restart when running → stops old, starts new; pid file holds NEW pid ---
-run_monitor forward-restart >/dev/null || { echo "FAIL: forward-restart (hot) exit != 0"; exit 1; }
+# Capture the restart's own output: when the assertion below fails, whether the stop
+# path said "Forwarder stopped" or "Forwarder not running" is the single most
+# diagnostic fact, and a bare pid assertion throws it away.
+HOT_OUT="$(run_monitor forward-restart 2>&1)" || { echo "FAIL: forward-restart (hot) exit != 0"; echo "$HOT_OUT"; exit 1; }
 [[ -f "$FORWARD_PID_FILE" ]] || { echo "FAIL: pid file gone after hot restart"; exit 1; }
 PID2="$(cat "$FORWARD_PID_FILE")"
 [[ "$PID2" != "$PID1" ]] || { echo "FAIL: pid did not change on hot restart ($PID1 == $PID2)"; exit 1; }
@@ -97,7 +100,20 @@ for _ in $(seq 1 10); do
   if _forward_pid_gone "$PID1"; then PID1_GONE=1; break; fi
   sleep 0.1
 done
-[[ "$PID1_GONE" == "1" ]] || { echo "FAIL: old forwarder pid $PID1 still alive after restart"; exit 1; }
+if [[ "$PID1_GONE" != "1" ]]; then
+  # Fail LOUDLY with the evidence needed to tell the three causes apart:
+  #   - stop never ran (pid-file/identity gate)  -> restart output says "not running"
+  #   - stop ran but the process survived        -> state is R/S/D
+  #   - stop ran and it is defunct               -> state is Z (predicate regression)
+  echo "FAIL: old forwarder pid $PID1 still alive after restart"
+  echo "  restart output : ${HOT_OUT:-<empty>}"
+  echo "  kill -0        : $(kill -0 "$PID1" 2>/dev/null && echo succeeds || echo fails)"
+  echo "  ps state       : [$(ps -o state= -p "$PID1" 2>/dev/null)] (rc=$?)"
+  echo "  ps command     : [$(ps -o command= -p "$PID1" 2>/dev/null)]"
+  echo "  _forward_pid_gone: $(_forward_pid_gone "$PID1" && echo gone || echo not-gone)"
+  echo "  pid file       : [$(cat "$FORWARD_PID_FILE" 2>/dev/null)]"
+  exit 1
+fi
 
 # --- Test 4: two back-to-back restarts both exit 0 (idempotent) ---
 run_monitor forward-restart >/dev/null || { echo "FAIL: 1st back-to-back restart exit != 0"; exit 1; }
