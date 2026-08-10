@@ -22,6 +22,23 @@ const BASE = {
   linearTerminal: false,
 };
 
+test("a thenable PR-state reader is reported and remains fail-closed (CAT-47)", () => {
+  const warnings = [];
+  const candidates = defaultCollectOrphanMergedCandidates({
+    candidates: [{
+      ticket: "CAT-47",
+      phase: "monitor-merge",
+      signal: { updatedAt: new Date(STALE_UPDATED_AT).toISOString() },
+      evidence: { reason: "orphan-sweep-stale" },
+    }],
+    resolvePrState: () => Promise.resolve("MERGED"),
+    log: { warn: (message) => warnings.push(message) },
+    nowMs: NOW,
+  });
+  expect(candidates[0].evidence.prState).toBeNull();
+  expect(warnings.join(" ")).toContain("pr-state-async-unsupported");
+});
+
 // ---------------------------------------------------------------------------
 // classifyOrphanMergedReconcile — pure classifier
 // ---------------------------------------------------------------------------

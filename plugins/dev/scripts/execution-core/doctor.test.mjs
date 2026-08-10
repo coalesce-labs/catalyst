@@ -3657,6 +3657,13 @@ const nodeClassOf = (over = {}) => ({
   ...over,
 });
 
+// passingSkillsDirCheck — the `skillsDirCheck` seam installChecksForClass exposes, stubbed healthy.
+// The real check probes the live ~/.claude tree, and for class=worker a missing symlink is a hard
+// FAIL (developer/monitor only WARN). Any test that asserts on runDoctor's aggregate FAIL COUNT for
+// a worker must inject this, or it grades the host it happens to run on instead of the code under
+// test — which is exactly how it went red in CI. checkSkillsDirPlugins keeps its own direct coverage.
+const passingSkillsDirCheck = () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }];
+
 describe("checkNodeClass (CTL-1355)", () => {
   it("PASSes an explicit, recognized class", () => {
     const checks = checkNodeClass({ nodeClass: nodeClassOf({ class: "developer", raw: "developer" }) });
@@ -4934,10 +4941,11 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
         hasStackAgent: true,
         hasUpdaterAgent: true, // the two-puller hazard
         pluginPullOwner: "broker",
+        skillsDirCheck: passingSkillsDirCheck,
       }),
       log: () => {},
     });
-    expect(code).toBe(1);
+    expect(code).toBe(1); // exactly one FAIL: the updater agent. The skills-dir seam is stubbed healthy.
   });
 
   it("PASSes a correctly-provisioned worker post-install (stack only, owner=broker)", async () => {
@@ -4947,6 +4955,7 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: true,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker",
+      skillsDirCheck: passingSkillsDirCheck,
       log: () => {},
     });
     expect(code).toBe(0);
@@ -4991,6 +5000,7 @@ describe("runDoctor profile routing (CTL-1369 PR4)", () => {
       hasStackAgent: true,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker",
+      skillsDirCheck: passingSkillsDirCheck,
       log: (m) => logs.push(m),
     });
     const parsed = JSON.parse(logs[0]);
