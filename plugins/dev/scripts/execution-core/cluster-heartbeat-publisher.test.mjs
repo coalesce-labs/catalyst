@@ -76,6 +76,16 @@ describe("startLivenessPublisher (CTL-1090)", () => {
     });
   });
 
+  test("publishes the injected last phase advance and fails open when that seam throws", () => {
+    const calls = [];
+    const base = { roster: ["mini", "laptop"], anchorIssue: "CAT-1", self: "mini", ownedTickets: () => [],
+      publish: (args) => calls.push(args), intervalMs: 60_000 };
+    startLivenessPublisher({ ...base, lastAdvanceAt: () => "2026-08-09T02:00:00Z" }).stop();
+    startLivenessPublisher({ ...base, lastAdvanceAt: () => { throw new Error("bad signal"); } }).stop();
+    expect(calls[0].lastAdvanceAt).toBe("2026-08-09T02:00:00Z");
+    expect(calls[1].lastAdvanceAt).toBeNull();
+  });
+
   test("CTL-1092: publishes this host's currentMaxParallel() with each heartbeat", () => {
     const calls = [];
     const h = startLivenessPublisher({
