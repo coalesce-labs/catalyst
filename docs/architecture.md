@@ -104,6 +104,15 @@ outage (heartbeat read throws / everyone looks dead) degrades to the **full rost
 only its own HRW slice — never double-acts). The Linear-CAS claim (`cluster-claim.mjs` soft-CAS on
 `catalyst://fence/<TICKET>`, applied HRW-first/claim-second) remains the transition-race serializer.
 
+**Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
+scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.
+Its `dispatchLiveness` invariant judges only this host's owned queue, while preserving the raw and
+owned depths in its scan context; dispatch-recency evidence is also host-scoped, fail-open for
+legacy events without host attribution. The separate `nodeProductivity` invariant reports a live
+peer that owns work but has not crossed a phase boundary within the configured window. It defaults
+to `shadow` and proposes only an escalate-only tier-3 move, so it cannot dispatch a recovery
+delegate.
+
 **Worker signal projection (CTL-532 = ADR-018 Phase 3, shipped; Phase 1 retired, CTL-1628).**
 Per-worker `workers/<TICKET>.json` files are still written by ~7 scripts with no inter-process
 locking; ADR-018 originally proposed closing that gap via a `worker.state_changed` command event and
@@ -395,6 +404,29 @@ it as a recovery item. Previously the classifier blindly escalated it to a human
 The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode logs a
 `recovery.would-fix` event without dispatching; enforce dispatches the recovery-pass worker.
 
+### Orphan-stale merged-PR reconciliation (CAT-47)
+
+Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
+PR-state resolver, background-job liveness probe, stall clearer, and status writer once; Pass 0u
+uses them to build its act registry, while Pass 0r receives both that registry and the raw bundle
+for capability-checked fallback construction. An injected partial registry therefore falls back
+to real dependencies instead of either using inert defaults or failing as unavailable.
+
+The recovery candidate contract is `{ ticket, phase, signal }`. `phase` names the exact
+`.unstuck-orphan-merge-<phase>.applied` idempotency marker, and `signal.bg_job_id` feeds the
+liveness gate. Marker construction fails closed when phase is absent, preventing malformed
+`undefined` or `null` marker names. PR-state readers are synchronous; thenables are surfaced as
+`pr-state-async-unsupported` rather than silently interpreted as missing evidence.
+
+Repeated identical fix failures are stored at
+`<orchDir>/.recovery-fix-failures/<ticket>-<fix_class>.json`, outside `workers/` because completed
+tickets may no longer have worker directories. This separate family is not erased by
+`recoveryForgetIntent`. After `RECOVERY_FIX_BACKOFF_THRESHOLD` identical failures (default 3),
+retries use exponential windows controlled by `RECOVERY_FIX_BACKOFF_BASE_MS` (default 30 minutes)
+and `RECOVERY_FIX_BACKOFF_MAX_MS` (default 24 hours). Audit-comment hashes are committed only after
+successful delivery, so an outage leaves the comment eligible for retry while delivered duplicate
+content is suppressed.
+
 ### Delegate-first escalation + explanation chokepoint (CTL-1609)
 
 Two gaps closed at the point where the scheduler labels a ticket `needs-human`:
@@ -658,6 +690,36 @@ percentage, reset time, sampling host, and snapshot age, and emits the scalar va
 `recovery.board-scan`. Sampling and publication are on by default, but actuation is not:
 `CATALYST_BH_GH_QUOTA` defaults to `shadow`, so `rateLimitHeadroom` stays unobservable to Gate 3
 until an operator explicitly selects `enforce`.
+
+**Worktree salvage-before-destroy (CTL-1639).** Every destructive worktree removal — the
+dispatcher's L3 destroy+recreate, the orphan-sweep, phase-teardown, and the JS reaper's PR-merged
+cleanup — first calls the shared `lib/worktree-salvage.sh` primitive, which snapshots the worktree's
+unpushed commits (`git bundle`), tracked uncommitted diff (`.patch`, plus a separate `.index.patch`
+for a staged-only delta), and untracked files (`.tar`) to `~/catalyst/salvage/` and emits one
+`worktree.salvage.{created,skipped,failed}` event (service `catalyst.worktree-salvage`). Every
+recovery-patch `git diff` is routed through a shared `_wsv_diff` helper (`--no-ext-diff` +
+`-c color.ui=false` + `--no-textconv`) so a repo/global `diff.external`/`GIT_EXTERNAL_DIFF`/forced-
+color config or a `.gitattributes` textconv driver can't substitute non-applyable output for the
+real bytes, and a `git update-index --assume-unchanged` bit is cleared before diffing so such a
+file's edit isn't invisible to the salvage the same way it's invisible to plain `git status`. A
+dirty/uninitialized submodule (any depth, via `git submodule status --recursive`) is salvaged
+recursively — its own uncommitted diff + untracked files, not just the superproject's opaque
+`Subproject commit <sha>-dirty` marker. The orphan-sweep's `ORPHAN_GITFILE` case (a stale/missing
+`.git` file pointer — not a usable git worktree, so the git-based primitive above can't inspect it at
+all) instead calls the primitive's sibling `salvage_raw_directory` (plain `tar`, no git involved)
+before its `rm -rf`. Because the sweep runs every 1–3h and revisits a retained
+`SALVAGE_UNPUSHED`/`SALVAGE_DIRTY` worktree every pass, orphan-sweep wraps its own calls in a
+`salvage_worktree_dedup` fingerprint check (HEAD sha + a git-blob-hash of the working diff/staged
+diff/untracked-file set, stored per-worktree under `~/catalyst/salvage/.state/`) so an unchanged tree
+is NOT re-archived under a new unique name every single sweep — this dedup lives in orphan-sweep.sh
+itself, not inside `salvage_worktree`, so the primitive's other callers (each acting on a worktree
+exactly once) and its own multi-call test contract are unaffected. The `worktree.salvage.*` prefix is
+**unprotected** under the CTL-1142 namespace contract (no `isBrokerProtectedName` collision — it
+routes through `shouldSkipEvent` normally). Salvage is best-effort/fail-open — it never blocks a
+removal — layered on top of the existing fail-closed `_removal_guard_ok` live-handle gate, which is
+re-asserted immediately after salvage completes (not just before it starts) at every synchronous call
+site, since salvage's own duration widens the window a live handle could appear in. (Retention/GC of
+`~/catalyst/salvage/` beyond the dedup above is deferred follow-up.)
 
 ### Linear app-actor self-echo guard (`botUserId`)
 

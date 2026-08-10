@@ -93,6 +93,15 @@ export function parseLokiLivenessResponse(body) {
         (meta && meta.catalyst_node_active_tickets) ?? labels.catalyst_node_active_tickets;
       const rawAc = (meta && meta.catalyst_node_active_count) ?? labels.catalyst_node_active_count;
       const ac = Number(rawAc);
+      // CAT-57 (Codex round 2, P1): the productivity signal — this peer's last
+      // phase-boundary advance. Same meta-or-label defensiveness as the fields above.
+      // null (not a synthesized timestamp) when absent or unparseable: an old-daemon
+      // heartbeat must read as "unknown" so nodeProductivity skips the peer, never as
+      // "advanced just now" (which would mask a genuinely stuck host).
+      const rawAdv =
+        (meta && meta.catalyst_node_last_advance_at) ?? labels.catalyst_node_last_advance_at;
+      const lastAdvance =
+        typeof rawAdv === "string" && Number.isFinite(Date.parse(rawAdv)) ? rawAdv : null;
       out[host] = {
         last_seen: new Date(tsMs).toISOString(),
         in_flight_tickets: parseInFlight(rawTickets),
@@ -100,6 +109,7 @@ export function parseLokiLivenessResponse(body) {
         in_flight_count: Number.isInteger(ifc) && ifc >= 0 ? ifc : null,
         active_tickets: rawActive != null ? parseInFlight(rawActive) : null,
         active_count: Number.isInteger(ac) && ac >= 0 ? ac : null,
+        last_advance_at: lastAdvance,
       };
     }
   }
@@ -123,7 +133,8 @@ async function queryLokiStreams(url, timeoutMs, fetcher) {
   return body;
 }
 
-// readClusterLivenessFromLoki — TWO fail-open queries → the peer-liveness map:
+// readClusterLivenessFromLoki — FIVE fail-open queries (A + B/C/D/E enrichment) → the
+// peer-liveness map:
 //   A (liveness): newest node.heartbeat per host → last_seen. NO dependency on the
 //     in-flight structured-metadata field, so it returns EVERY host regardless of code
 //     version — the load-bearing dead-host-detection read.
@@ -221,6 +232,35 @@ export async function readClusterLivenessFromLoki({
       }
     } catch (err) {
       logger?.warn?.({ err: err?.message }, "loki-liveness: active enrichment failed (occupancy → unknown)");
+    }
+    // CAT-57 (query E, best-effort): productivity enrichment. Same reference-to-surface
+    // rule as B/C/D — parsing catalyst_node_last_advance_at is NOT enough; Loki only
+    // puts a structured-metadata field in the response when a query REFERENCES it, so
+    // without this query every record would keep last_advance_at:null and
+    // checkNodeProductivity would skip every peer even in enforce. `.+` (not `.*`) is
+    // right here: the attribute is OMITTED entirely when unknown (heartbeat-event.mjs
+    // never publishes an empty string), so there is no "legitimately empty" case to
+    // preserve the way active_tickets has. Old-daemon lines match neither → the field
+    // stays null (unknown), never a fabricated timestamp.
+    try {
+      const eBody = await queryLokiStreams(
+        mkUrl(`${sel} | catalyst_node_last_advance_at=~\`.+\``),
+        timeoutMs,
+        fetcher,
+      );
+      const advEnriched = eBody ? parseLokiLivenessResponse(eBody) : {};
+      for (const [host, rec] of Object.entries(advEnriched)) {
+        if (!out[host]) continue;
+        // Same rollback guard as D: only merge from a line at least as new as A's
+        // liveness line, so a dual-publish/rollback window cannot pin a STALE advance
+        // onto fresher liveness and make a stuck host look productive.
+        const aMs = Date.parse(out[host].last_seen);
+        const eMs = Date.parse(rec.last_seen);
+        if (!(Number.isFinite(eMs) && Number.isFinite(aMs) && eMs >= aMs)) continue;
+        if (rec.last_advance_at != null) out[host].last_advance_at = rec.last_advance_at;
+      }
+    } catch (err) {
+      logger?.warn?.({ err: err?.message }, "loki-liveness: advance enrichment failed (productivity → unknown)");
     }
     return out;
   } catch (err) {

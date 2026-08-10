@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 const cache = () => createFileBasedPrCache(join(dir, "t.db"));
-const okRunner = (rows: unknown) => async () => ({ ok: true, stdout: JSON.stringify(rows) });
+const okRunner = (rows: unknown) => () => Promise.resolve({ ok: true, stdout: JSON.stringify(rows) });
 
 test("normalizePrState maps GitHub states, preferring merged over closed", () => {
   expect(normalizePrState("MERGED", null)).toBe("merged");
@@ -52,9 +52,9 @@ test("is ONE-SHOT — a non-empty store is left completely alone", async () => {
   const n = await backfillPrStatuses({
     cache: c,
     repos: ["org/x"],
-    runner: async () => {
+    runner: () => {
       called = true;
-      return { ok: true, stdout: "[]" };
+      return Promise.resolve({ ok: true, stdout: "[]" });
     },
   });
   expect(n).toBe(0);
@@ -67,7 +67,7 @@ test("a failing gh invocation is non-fatal and leaves the store unseeded", async
   const n = await backfillPrStatuses({
     cache: c,
     repos: ["org/x"],
-    runner: async () => ({ ok: false, stdout: "" }),
+    runner: () => Promise.resolve({ ok: false, stdout: "" }),
   });
   expect(n).toBe(0);
   expect(c.getAllStatuses()).toHaveLength(0);
@@ -78,9 +78,7 @@ test("a throwing runner is non-fatal (missing gh / spawn failure)", async () => 
   const n = await backfillPrStatuses({
     cache: c,
     repos: ["org/x"],
-    runner: async () => {
-      throw new Error("gh: not found");
-    },
+    runner: () => Promise.reject(new Error("gh: not found")),
   });
   expect(n).toBe(0);
 });
@@ -90,7 +88,7 @@ test("unparseable gh output is non-fatal", async () => {
   const n = await backfillPrStatuses({
     cache: c,
     repos: ["org/x"],
-    runner: async () => ({ ok: true, stdout: "not json" }),
+    runner: () => Promise.resolve({ ok: true, stdout: "not json" }),
   });
   expect(n).toBe(0);
 });
@@ -100,10 +98,12 @@ test("one bad repo does not abort the remaining repos", async () => {
   const n = await backfillPrStatuses({
     cache: c,
     repos: ["org/bad", "org/good"],
-    runner: async (argv: string[]) =>
-      argv.includes("org/bad")
-        ? { ok: false, stdout: "" }
-        : { ok: true, stdout: JSON.stringify([{ number: 5, state: "MERGED", mergedAt: null }]) },
+    runner: (argv: string[]) =>
+      Promise.resolve(
+        argv.includes("org/bad")
+          ? { ok: false, stdout: "" }
+          : { ok: true, stdout: JSON.stringify([{ number: 5, state: "MERGED", mergedAt: null }]) },
+      ),
   });
   expect(n).toBe(1);
   expect(c.getAllStatuses().find((r) => r.pr_number === 5)?.status).toBe("merged");
