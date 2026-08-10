@@ -116,7 +116,7 @@ wait "$IMPOSTER" 2>/dev/null || true
 # mutation wedges forever.
 LOCKDIR="${TMPDIR_T}/otel-forward.lock"
 mkdir -p "$LOCKDIR"
-echo "999999" > "${LOCKDIR}/owner"   # a pid that cannot be alive
+echo "5999999" > "${LOCKDIR}/owner"   # a pid that cannot be alive
 out="$(CATALYST_DIR="$TMPDIR_T" bash "$MONITOR_SH" forward-status 2>&1)"
 CATALYST_DIR="$TMPDIR_T" bash "$MONITOR_SH" forward-stop >/dev/null 2>&1
 if [[ ! -d "$LOCKDIR" ]]; then
