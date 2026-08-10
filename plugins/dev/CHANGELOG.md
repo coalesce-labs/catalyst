@@ -1,5 +1,20 @@
 # Changelog
 
+## [12.51.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.50.0...catalyst-dev-v12.51.0) (2026-08-10)
+
+
+### Features
+
+* **dev:** add triage-aging-prs skill ([#3173](https://github.com/coalesce-labs/catalyst/issues/3173)) ([0fa37c9](https://github.com/coalesce-labs/catalyst/commit/0fa37c9af7a874be4770fe11484a12bef99f2d98))
+* **dev:** CTL-1642 operator adopt command for orphaned worktrees ([#3175](https://github.com/coalesce-labs/catalyst/issues/3175)) ([8180c80](https://github.com/coalesce-labs/catalyst/commit/8180c8023fe133fc324989a5c5e09d8ae83d5ebd))
+
+
+### Bug Fixes
+
+* **dev:** CAT-47 reconcile orphan-stale recovery seams ([#3169](https://github.com/coalesce-labs/catalyst/issues/3169)) ([97d63a4](https://github.com/coalesce-labs/catalyst/commit/97d63a440578ef837824486fc2acbfe3f957082a))
+* **dev:** clear the 7 lint errors red on main in pr-status-backfill ([#3179](https://github.com/coalesce-labs/catalyst/issues/3179)) ([4d43b2e](https://github.com/coalesce-labs/catalyst/commit/4d43b2e577f116e0dec8418604bc3ecb143de770))
+* **dev:** unbreak main — inject the skills-dir seam in the install-profile tests ([#3180](https://github.com/coalesce-labs/catalyst/issues/3180)) ([90a9967](https://github.com/coalesce-labs/catalyst/commit/90a9967b1216751c4744597958f1995e919fac5f))
+
 ## [12.50.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.49.0...catalyst-dev-v12.50.0)
 
 Aug 09, 2026
