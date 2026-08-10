@@ -33,6 +33,8 @@
       "name": "catalyst-execution-core",
       "dependencies": {
         "@catalyst-cloud/read-model": "^0.1.0",
+        "@catalyst-cloud/replicate": "^0.1.3",
+        "@catalyst-cloud/schema": "^0.1.3",
         "@catalyst-cloud/sdk": "^0.8.2",
         "@modelcontextprotocol/sdk": "1.29.0",
         "@opentelemetry/api": "^1.9.1",
