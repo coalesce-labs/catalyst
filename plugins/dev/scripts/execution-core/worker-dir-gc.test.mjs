@@ -77,7 +77,64 @@ function fakeWorkerMeta(map) {
   return async (ticket) => map[ticket] ?? { statuses: {}, shortIds: new Set() };
 }
 
+// Path-aware readDir for the redispatch-race test. `contents` maps an absolute
+// path to its entry names; everything else answers empty. Unlike fakeDirs (which
+// ignores its path) this can model the workers root, a ticket dir, and the
+// quarantine sibling independently — which is what the race turns on.
+function fakeTree(contents) {
+  return async (path) =>
+    (contents[path] ?? []).map((n) => ({ name: n, isDirectory: () => !n.includes(".") }));
+}
+
 describe("sweepWorkerDirs", () => {
+  // CAT-24 (Codex P1 round 2): the atomic rename only protects redispatches that
+  // START after it. phase-agent-dispatch reuses an existing path with `mkdir -p`
+  // and writes its claim and phase signal afterwards, so a dispatch that began
+  // while the gates were awaiting I/O lands its state in the dir being captured —
+  // and the recursive rm would delete a live worker's claim. The sweep therefore
+  // re-reads the dir after detaching and puts it back if anything appeared.
+  it("restores a detached dir that a concurrent redispatch wrote into", async () => {
+    const now = 1_000_000_000_000;
+    const ticket = "CTL-RACE";
+    const dir = join(WORKERS, ticket);
+    const quarantine = quarantineOf(ticket, now);
+    const rm = rmSpy();
+    // The dir is an aged, zero-signal residue at snapshot time...
+    const tree = { [WORKERS]: [ticket], [dir]: [], [quarantine]: [] };
+    const renames = [];
+    const res = await sweep({
+      orchDir: ORCH,
+      readDir: fakeTree(tree),
+      statDir: async () => ({ mtimeMs: now - 25 * HOUR }),
+      rm,
+      readAgents: () => ({ ok: true, agents: [] }),
+      readWorkerMeta: fakeWorkerMeta({ [ticket]: { statuses: {}, shortIds: new Set() } }),
+      isInFlight: () => false,
+      now: () => now,
+      emitReap: emitSpy(),
+      // ...but a redispatch lands its claim + signal in the SAME inode just before
+      // the rename completes, so the renamed dir carries them.
+      renameDir: async (from, to) => {
+        renames.push([from, to]);
+        if (from === dir) {
+          tree[quarantine] = ["research.claim.1", "phase-research.json"];
+          tree[dir] = [];
+        } else {
+          tree[dir] = tree[from];
+        }
+      },
+    });
+
+    // Detached, then put straight back — and never handed to rm.
+    expect(renames).toEqual([
+      [dir, quarantine],
+      [quarantine, dir],
+    ]);
+    expect(rm.calls).toEqual([]);
+    expect(res.reclaimed).toBe(0);
+    expect(res.skippedLive).toBe(1);
+  });
+
   it("deletes a terminal, idle, aged worker dir", async () => {
     const now = 1_000_000_000_000;
     const rm = rmSpy();

@@ -268,6 +268,29 @@ export async function sweepWorkerDirs({
     // stale dir (and a concurrent redispatch mkdirs a brand-new one that we can
     // no longer touch) or the rename fails and we delete nothing.
     const quarantine = join(workersRoot, `${QUARANTINE_PREFIX}${ticket}-${nowMs}`);
+
+    // CAT-24 (Codex P1 round 2): the rename is atomic, but atomicity only protects
+    // redispatches that START after it. phase-agent-dispatch reuses an existing path
+    // with `mkdir -p` and writes its claim and phase signal AFTERWARDS, so a dispatch
+    // that began while the gates above were awaiting I/O lands its state in the very
+    // dir we are about to capture — and the recursive rm below would then delete a
+    // live worker's claim and signal.
+    //
+    // Every such write is, by construction, visible INSIDE the renamed dir: it went
+    // to the inode we just moved. So snapshot the entry names immediately before the
+    // detach and re-read them immediately after; anything that appeared in between is
+    // a concurrent write, and we put the directory back untouched. A dispatch that
+    // starts after the rename mkdirs a brand-new dir at the original path and is
+    // unaffected either way — so the two cases are now both safe.
+    let preNames = null;
+    try {
+      preNames = new Set((await readDir(dir, { withFileTypes: true })).map((e) => e.name));
+    } catch {
+      // Unreadable right before the detach — fail closed and leave it for next sweep.
+      skippedUnreadable++;
+      continue;
+    }
+
     let detached = false;
     try {
       await renameDir(dir, quarantine);
@@ -280,6 +303,38 @@ export async function sweepWorkerDirs({
       }
     }
     if (!detached) continue;
+
+    let racedNames = [];
+    try {
+      racedNames = (await readDir(quarantine, { withFileTypes: true }))
+        .map((e) => e.name)
+        .filter((n) => !preNames.has(n));
+    } catch {
+      // Cannot re-read what we just renamed — fail closed: restore and retry later
+      // rather than recursively deleting a directory whose contents we cannot see.
+      racedNames = ["<unreadable>"];
+    }
+    if (racedNames.length > 0) {
+      let restored = false;
+      try {
+        await renameDir(quarantine, dir);
+        restored = true;
+      } catch (err) {
+        errors++;
+        log.warn(
+          { ticket, err: err?.message, raced: racedNames },
+          "worker-dir-gc: detached a dir that came alive and could not restore it"
+        );
+      }
+      if (restored) {
+        skippedLive++;
+        log.info(
+          { ticket, raced: racedNames },
+          "worker-dir-gc: worker dir came alive during the sweep — detach reverted"
+        );
+      }
+      continue;
+    }
     try {
       await rm(quarantine, { recursive: true, force: true });
       reclaimed++;
