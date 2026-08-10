@@ -2027,6 +2027,75 @@ assert_eq "true" "$T58_HAS_ODIR" "CATALYST_ORCHESTRATOR_DIR still present when s
 assert_eq "yes" "$T58_VALID" "settings JSON valid with a context var omitted"
 
 echo ""
+echo "Test 75: settings.env carries LINEAR_API_TOKEN when the linearis mint (scoped var) is set"
+# Isolated-function technique (same as Test 58): CATALYST_PHASE_AGENT_LINEARIS_TOKEN
+# stands in for whatever linear_app_actor_auth minted before this function is called
+# in the real dispatch flow -- this tests compose_worker_settings_json's OWN
+# JSON-composition logic, not the mint itself (which Test 77 below covers structurally
+# and Test 78 covers end-to-end for the fail-open path).
+SETTINGS_T75=$(
+	ORCH_DIR="${ORCH_DIR}" ORCH_ID="orch-test" PHASE="triage" TICKET="CTL-100" \
+		SCRIPT_DIR="${TEST_DIR}/bin" OTEL_RES_ATTRS="" \
+		CATALYST_PHASE_AGENT_LINEARIS_TOKEN="fake-t75-linearis-token" \
+		bash -c '
+      source <(sed -n "/^compose_worker_settings_json()/,/^}/p" "'"$DISPATCH"'")
+      compose_worker_settings_json'
+)
+T75_TOKEN=$(echo "$SETTINGS_T75" | jq -r '.env["LINEAR_API_TOKEN"] // empty' 2>/dev/null)
+T75_VALID=$(echo "$SETTINGS_T75" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "fake-t75-linearis-token" "$T75_TOKEN" ".settings.env.LINEAR_API_TOKEN carried when the scoped mint var is set"
+assert_eq "yes" "$T75_VALID" "settings JSON remains valid with LINEAR_API_TOKEN present"
+
+echo ""
+echo "Test 76: LINEAR_API_TOKEN is OMITTED (no null key) when the linearis mint var is empty"
+SETTINGS_T76=$(
+	ORCH_DIR="${ORCH_DIR}" ORCH_ID="orch-test" PHASE="triage" TICKET="CTL-100" \
+		SCRIPT_DIR="${TEST_DIR}/bin" OTEL_RES_ATTRS="" \
+		CATALYST_PHASE_AGENT_LINEARIS_TOKEN="" \
+		bash -c '
+      source <(sed -n "/^compose_worker_settings_json()/,/^}/p" "'"$DISPATCH"'")
+      compose_worker_settings_json'
+)
+T76_HAS_TOKEN=$(echo "$SETTINGS_T76" | jq -r '.env | has("LINEAR_API_TOKEN")' 2>/dev/null)
+T76_VALID=$(echo "$SETTINGS_T76" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "false" "$T76_HAS_TOKEN" "empty linearis mint var -> LINEAR_API_TOKEN omitted from .settings.env"
+assert_eq "yes" "$T76_VALID" "settings JSON remains valid with LINEAR_API_TOKEN omitted (fail-open, same shape as the OTLP optionals)"
+
+echo ""
+echo "Test 77: structural -- the real dispatch script mints the linearis identity before composing worker settings"
+MINT_LINE_77="$(grep -n 'linear_app_actor_auth.*linear-linearis-actor' "$DISPATCH" | grep -v '^[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1)"
+COMPOSE_CALL_LINE_77="$(grep -n '^WORKER_SETTINGS_JSON=' "$DISPATCH" | head -1 | cut -d: -f1)"
+assert_eq "yes" "$([[ -n "$MINT_LINE_77" ]] && echo yes || echo no)" "77: dispatch calls linear_app_actor_auth with linear-linearis-actor"
+assert_eq "yes" "$([[ -n "$MINT_LINE_77" && -n "$COMPOSE_CALL_LINE_77" && "$MINT_LINE_77" -lt "$COMPOSE_CALL_LINE_77" ]] && echo yes || echo no)" \
+	"77: the mint call precedes WORKER_SETTINGS_JSON=\$(compose_worker_settings_json)"
+
+echo ""
+echo "Test 78: end-to-end -- dispatch still launches the worker when the linearis mint fails open"
+fresh_env t78
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+# fresh_env already pins CATALYST_MACHINE_CONFIG to a nonexistent path (CTL-689), which
+# is also the fallback tier catalyst_resolve_secret's Layer-2 reader consults -- so the
+# linearis mint attempt here genuinely has no credentials to find, exercising the real
+# fail-open path with no additional stubbing needed.
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+LAUNCHED_T78="no"
+[[ -f $CLAUDE_STUB_LOG ]] && LAUNCHED_T78="yes"
+assert_eq "yes" "$LAUNCHED_T78" "78: worker still launches even though the linearis mint has no credentials to find"
+SETTINGS_T78="$(settings_json_from_log)"
+T78_HAS_TOKEN=$(echo "$SETTINGS_T78" | jq -r '.env | has("LINEAR_API_TOKEN")' 2>/dev/null)
+T78_VALID=$(echo "$SETTINGS_T78" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "false" "$T78_HAS_TOKEN" "78: LINEAR_API_TOKEN omitted end-to-end when the mint genuinely fails"
+assert_eq "yes" "$T78_VALID" "78: settings JSON still valid end-to-end with the mint failed"
+
+echo ""
 echo "Test 59 (CTL-703): teardown dispatches with turnCap 15 + phase-monitor-deploy.json prior gate"
 fresh_env t59_teardown
 # teardown's prior artifact is phase-monitor-deploy.json — create it so the gate passes.
