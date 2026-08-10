@@ -94,6 +94,13 @@ export CATALYST_UPDATER_LOG="${CATALYST_UPDATER_LOG:-${CATALYST_DIR}/updater.log
 export CATALYST_CLOUD_SYNC_LOG="${CATALYST_CLOUD_SYNC_LOG:-${CATALYST_DIR}/cloud-sync.log}"
 # CTL-1509: the health-responder sweep log (7th stream — plain-line pipeline).
 export CATALYST_HEALTH_RESPONDER_LOG="${CATALYST_HEALTH_RESPONDER_LOG:-${CATALYST_DIR}/health-responder.log}"
+# CAT-161: the unified event log glob (8th stream — node.heartbeat lives here,
+# consumed by loki-liveness.mjs's CATALYST_LIVENESS_READ_SOURCE=loki path).
+# Monthly-rotating filename, so config.alloy discovers it via local.file_match
+# (a polling glob) rather than a static loki.source.file target — no
+# pre-create needed below, unlike the other 7 streams: the file already
+# exists once the daemon has ever run, and file_match re-polls on rotation.
+export CATALYST_EVENTS_LOG_GLOB="${CATALYST_EVENTS_LOG_GLOB:-${CATALYST_DIR}/events/*.jsonl}"
 
 mkdir -p "$STORAGE"
 

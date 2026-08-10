@@ -321,3 +321,108 @@ loki.process "plain" {
 	// No stage.json — unstructured passthrough. The whole line becomes the body.
 	forward_to = [otelcol.receiver.loki.catalyst.receiver]
 }
+
+// -----------------------------------------------------------------------------
+// unified event log (~/catalyst/events/YYYY-MM.jsonl)                (CAT-161)
+//
+// PURPOSE
+//   Ship the daemon's OWN unified event log — the same file readClusterHeartbeats
+//   (execution-core/recovery.mjs) tails locally — so the Loki-backed cross-host
+//   liveness read (loki-liveness.mjs, CTL-1420) has real data to query. Without
+//   this, CATALYST_LIVENESS_READ_SOURCE=loki silently returns {} for every host:
+//   verified live 2026-08-10 (a direct Loki query for `node.heartbeat` returned
+//   zero results despite the local file showing fresh entries every ~30s — the
+//   event log was never in this config at all).
+//
+// FILE DISCOVERY
+//   The event log rotates MONTHLY (2026-08.jsonl -> 2026-09.jsonl), unlike the
+//   four fixed-path daemon logs above. local.file_match polls the glob so a
+//   month rollover is picked up without restarting Alloy — the fixed-path
+//   loki.source.file blocks above cannot do this (a static target is one path).
+//
+// SHAPE  (execution-core/canonical-event.mjs's envelope — see a live sample via
+//   `grep node.heartbeat ~/catalyst/events/*.jsonl | tail -1`)
+//   {
+//     "ts": "2026-08-10T18:21:28Z",              <- RFC3339, NOT pino's unix-ms
+//     "resource": { "host.name": "aldebaran", "service.name": "catalyst.execution-core", ... },
+//     "attributes": {
+//       "event.name": "node.heartbeat",           <- loki-liveness.mjs's HEARTBEAT_EVENT filter
+//       "catalyst.node.in_flight_tickets": "...",
+//       "catalyst.node.max_parallel": 3,
+//       "catalyst.node.in_flight_count": 11,
+//       "catalyst.node.active_tickets": "...",
+//       "catalyst.node.active_count": 4,
+//       "catalyst.node.last_advance_at": "...",
+//       ...
+//     }
+//   }
+//   JMESPath quotes dotted keys ("event.name") — bare `attributes.event.name`
+//   would parse as three path segments, not one key containing dots.
+//
+// STRUCTURED METADATA, not stream labels — mirrors the pino pipeline's own
+// convention above (level/name as structured_metadata, not labels): these are
+// per-entry, high-cardinality-ish fields (ticket lists, counts), never safe as
+// Loki stream labels. loki-liveness.mjs's parser (CTL-1551) already expects
+// exactly this: it reads host_name/catalyst_node_* from the STREAM object
+// first (Loki merges structured metadata into `stream` in query responses —
+// "verified live" per that file's own comment) with a per-entry meta fallback,
+// so no code on the read side needs to change for this to start working.
+// -----------------------------------------------------------------------------
+
+local.file_match "events" {
+	path_targets = [{
+		__path__     = coalesce(sys.env("CATALYST_EVENTS_LOG_GLOB"), "/root/catalyst/events/*.jsonl"),
+		service_name = "catalyst.execution-core",
+	}]
+}
+
+loki.source.file "events" {
+	targets       = local.file_match.events.targets
+	forward_to    = [loki.process.events.receiver]
+	tail_from_end = true
+}
+
+loki.process "events" {
+	forward_to = [otelcol.receiver.loki.catalyst.receiver]
+
+	stage.json {
+		expressions = {
+			"ts"                = "ts",
+			"event_name"        = `attributes."event.name"`,
+			"host_name"         = `resource."host.name"`,
+			"in_flight_tickets" = `attributes."catalyst.node.in_flight_tickets"`,
+			"max_parallel"      = `attributes."catalyst.node.max_parallel"`,
+			"in_flight_count"   = `attributes."catalyst.node.in_flight_count"`,
+			"active_tickets"    = `attributes."catalyst.node.active_tickets"`,
+			"active_count"      = `attributes."catalyst.node.active_count"`,
+			"last_advance_at"   = `attributes."catalyst.node.last_advance_at"`,
+		}
+	}
+
+	// The event log's own "ts" is RFC3339 (unlike the pino pipeline's unix-ms
+	// "time") — this is the record's real emit time, not Alloy's tail-discovery
+	// time, so a backfilled/replayed line still gets its true timestamp.
+	stage.timestamp {
+		source = "ts"
+		format = "RFC3339"
+	}
+
+	// event_name is what loki-liveness.mjs's query filters on
+	// (`| event_name=\`node.heartbeat\``); the rest are the CTL-1551 enrichment
+	// fields its queries B-E opportunistically read. host_name has no
+	// service_name-style promotion path to a resource attribute here (this
+	// stream already IS catalyst.execution-core via the target label above), so
+	// it stays structured metadata and the reader's own meta-fallback covers it.
+	stage.structured_metadata {
+		values = {
+			"event_name"                      = "event_name",
+			"host_name"                       = "host_name",
+			"catalyst_node_in_flight_tickets" = "in_flight_tickets",
+			"catalyst_node_max_parallel"      = "max_parallel",
+			"catalyst_node_in_flight_count"   = "in_flight_count",
+			"catalyst_node_active_tickets"    = "active_tickets",
+			"catalyst_node_active_count"      = "active_count",
+			"catalyst_node_last_advance_at"   = "last_advance_at",
+		}
+	}
+}
