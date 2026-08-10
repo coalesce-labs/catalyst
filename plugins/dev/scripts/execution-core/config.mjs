@@ -2071,6 +2071,25 @@ export function readGithubQuotaBoardHealthConfig(env = process.env) {
   return { mode: "shadow" };
 }
 
+// CAT-57: peer-productivity reporting is independently shadow-first even when
+// the broader board-health delegate runs in enforce mode.
+export function readProductivityBoardHealthConfig(env = process.env) {
+  const l2 = readLayer2BoardHealth();
+  const value = env.CATALYST_BH_PRODUCTIVITY;
+  if (typeof value === "string" && BOARD_HEALTH_MODES.has(value)) return { mode: value };
+  // CAT-57 (Codex P2): a SET-but-invalid env value falls back to `shadow` AND still
+  // overrides Layer-2 — the contract this row documents ("Garbage values fall back
+  // to `shadow`. Overrides Layer-2."). Falling through to Layer-2 on a typo meant an
+  // operator reaching for the env var to REDUCE actuation (`=enfore`, `=shadwo`)
+  // silently left a Layer-2 `enforce` live — the failure direction a shadow-first
+  // knob must never have. Only an unset/empty var defers to Layer-2.
+  if (typeof value === "string" && value.trim() !== "") return { mode: "shadow" };
+  if (typeof l2.productivity === "string" && BOARD_HEALTH_MODES.has(l2.productivity)) {
+    return { mode: l2.productivity };
+  }
+  return { mode: "shadow" };
+}
+
 // CTL-1488: coordination-substrate rollout config. Same off→shadow→enforce
 // discipline (ADR-023) and env-override → Layer-2 → default precedence as
 // readBoardHealthConfig, with ONE deliberate difference: the default is "off",

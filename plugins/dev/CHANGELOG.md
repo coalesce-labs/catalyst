@@ -1,5 +1,49 @@
 # Changelog
 
+## [12.51.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.50.0...catalyst-dev-v12.51.0)
+
+Aug 10, 2026
+
+<!-- ai-enhanced -->
+
+### Triage Aging PRs & Orphaned Worktree Adoption
+
+A new `triage-aging-prs` skill encodes a proven method for driving a stale PR backlog to zero — including traps around fork CI secrets, ruleset queries, and reviewer signal interpretation that aren't obvious until they've cost you time. Operators also get a new `adopt` command for claiming orphaned worktrees. Several main-branch test and lint failures that were blocking every open PR from reaching a green check set are fixed as well.
+
+
+
+### PRs
+
+* **dev:** add triage-aging-prs skill ([#3173](https://github.com/coalesce-labs/catalyst/issues/3173)) ([0fa37c9](https://github.com/coalesce-labs/catalyst/commit/0fa37c9af7a874be4770fe11484a12bef99f2d98))
+* **dev:** CTL-1642 operator adopt command for orphaned worktrees ([#3175](https://github.com/coalesce-labs/catalyst/issues/3175)) ([8180c80](https://github.com/coalesce-labs/catalyst/commit/8180c8023fe133fc324989a5c5e09d8ae83d5ebd))
+* **dev:** CAT-47 reconcile orphan-stale recovery seams ([#3169](https://github.com/coalesce-labs/catalyst/issues/3169)) ([97d63a4](https://github.com/coalesce-labs/catalyst/commit/97d63a440578ef837824486fc2acbfe3f957082a))
+* **dev:** clear the 7 lint errors red on main in pr-status-backfill ([#3179](https://github.com/coalesce-labs/catalyst/issues/3179)) ([4d43b2e](https://github.com/coalesce-labs/catalyst/commit/4d43b2e577f116e0dec8418604bc3ecb143de770))
+* **dev:** unbreak main — inject the skills-dir seam in the install-profile tests ([#3180](https://github.com/coalesce-labs/catalyst/issues/3180)) ([90a9967](https://github.com/coalesce-labs/catalyst/commit/90a9967b1216751c4744597958f1995e919fac5f))
+
+## [12.50.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.49.0...catalyst-dev-v12.50.0)
+
+Aug 09, 2026
+
+<!-- ai-enhanced -->
+
+### Skills-Dir Plugin Loading & Reliability Fixes
+
+Plugins now load exclusively from a live `~/catalyst/plugin-source` checkout via `~/.claude/skills/` symlinks, retiring the version-keyed marketplace cache that caused merged changes to stay invisible until the next release bump. This release also fixes the otel-forward DLQ amplification loop (terminal 4xx errors now drop cleanly instead of cycling), ensures worktree salvage snapshots unpushed commits before any destructive removal, and makes escalation comment + `needs-human` label an atomic operation so tickets actually appear in the inbox. Run `setup-plugin-source.sh` on any fleet node not yet cut over — until then, `doctor` will report a worker-FAIL on `skills-dir-plugins`.
+
+
+
+### PRs
+
+* **dev:** CAT-52 — enforce registry team identity contract + doctor drift check ([#3158](https://github.com/coalesce-labs/catalyst/issues/3158)) ([8c12284](https://github.com/coalesce-labs/catalyst/commit/8c12284b67c5fdea8096255cec5c738f0aa0f482))
+* **dev:** CTL-1506 otel-forward HTTP status classification + DLQ-loop fix ([#2742](https://github.com/coalesce-labs/catalyst/issues/2742)) ([ab62f2d](https://github.com/coalesce-labs/catalyst/commit/ab62f2dcbc7f3c38db37dcb368efb1f16dee3caf))
+* **dev:** CTL-1639 salvage worktree unpushed work before destructive removal ([#3026](https://github.com/coalesce-labs/catalyst/issues/3026)) ([0560821](https://github.com/coalesce-labs/catalyst/commit/05608212c49bc9606b2f0e656f27ed1fd3ee4daf))
+* **dev:** load catalyst plugins in-place via skills-dir; retire marketplace ([#2664](https://github.com/coalesce-labs/catalyst/issues/2664)) ([12c454f](https://github.com/coalesce-labs/catalyst/commit/12c454fff814c5cf5535b5ebeb753ea144307488))
+* **dev:** add otel-forward to the post-merge stack-reload chain ([#3164](https://github.com/coalesce-labs/catalyst/issues/3164)) ([edc0ae2](https://github.com/coalesce-labs/catalyst/commit/edc0ae231f6fc71d2fc0b7a958c326f966181aff))
+* **dev:** CAT-29 refuse execution-core blindness to Linear ([#3139](https://github.com/coalesce-labs/catalyst/issues/3139)) ([4761b9e](https://github.com/coalesce-labs/catalyst/commit/4761b9e26bd9570a5800a07ad15efb2844d02620))
+* **dev:** CTL-1240 census tests never ran their census (isTicketKey skip) ([#3148](https://github.com/coalesce-labs/catalyst/issues/3148)) ([7a04cff](https://github.com/coalesce-labs/catalyst/commit/7a04cff88db1a7343524ac201750ce2a353be2b7))
+* **dev:** CTL-1568 make the escalation comment and the needs-human label one atomic act ([#2861](https://github.com/coalesce-labs/catalyst/issues/2861)) ([357a53c](https://github.com/coalesce-labs/catalyst/commit/357a53cb46423e8c09f194c7bffb8f25a25c6cec))
+* **execution-core:** fall back to credentials file when Keychain read fails ([#3130](https://github.com/coalesce-labs/catalyst/issues/3130)) ([62e4401](https://github.com/coalesce-labs/catalyst/commit/62e440102d2bfe42dc1a7638b6dbcb24afa4812b))
+
 ## [12.49.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.48.0...catalyst-dev-v12.49.0)
 
 Aug 08, 2026

@@ -95,6 +95,12 @@ on:
       - "plugins/dev/scripts/migrate-dual-harness.sh"
       - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
+      # CTL-1639: worktree-salvage-sites.test.sh scans phase-teardown/SKILL.md for
+      # the salvage-before-destroy source-order invariant. That skill lives OUTSIDE
+      # plugins/dev/scripts/ (not covered by the scripts/** glob), so a change
+      # confined to the teardown removal block would skip this workflow and the
+      # ordering backstop couldn't catch a destroy-before-salvage regression.
+      - "plugins/dev/skills/phase-teardown/**"
       # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
       # every member package's install (incl. execution-core, broker, otel-forward).
       - "package.json"
@@ -333,6 +339,28 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/linear-app-actor.test.sh
 
+      - name: worktree-salvage primitive + telemetry unit tests (CTL-1639)
+        # lib/worktree-salvage.sh snapshots a worktree's unpushed commits +
+        # uncommitted changes to ~/catalyst/salvage/ BEFORE any destructive
+        # removal. It is the single-source-of-truth primitive four destructive
+        # sites (dispatcher L3, orphan-sweep, phase-teardown, JS reaper) call, so
+        # a regression here silently re-opens the data-loss hole the ticket
+        # closed. Lives under lib/__tests__/ (like linear-app-actor above), so it
+        # needs its own explicit step — the CI job's enumerated allowlist does not
+        # glob that directory.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/worktree-salvage.test.sh
+
+      - name: worktree-salvage destroy-site wiring tests (CTL-1639)
+        # Deterministic source-order invariant: each destructive bash site
+        # (phase-agent-dispatch L3, orphan-sweep, phase-teardown SKILL.md) must
+        # source the salvage lib AND place its salvage_worktree call BEFORE the
+        # destructive git op. The dispatcher + teardown suites are not CI-gated
+        # (locally flaky), so this static guard is the CI backstop that a future
+        # refactor can't move a destroy ahead of its salvage.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/worktree-salvage-sites.test.sh
+
       - name: daemon shared-GitHub-credential projection test (CTL-1612)
         # Covers _project_shared_github_token: the shared SOPS file WINS over a stale
         # inherited GITHUB_TOKEN/GH_TOKEN (the 2026-08-02 fleet outage), an
@@ -565,6 +593,7 @@ jobs:
             autotune-writeback.test.mjs \
             board-health.test.mjs \
             board-health-seam.test.mjs \
+            dispatch-readiness.test.mjs \
             stall-janitor-throttle.test.mjs \
             clear-stall-empty-dir.test.mjs \
             empty-worker-dir-grace-config.test.mjs \
@@ -624,6 +653,7 @@ jobs:
             gateway-read.test.mjs \
             halt-on-complete.test.mjs \
             heartbeat-event.test.mjs \
+            loki-liveness.test.mjs \
             hrw.test.mjs \
             integration-ctl-701.test.mjs \
             integration-ctl-705.test.mjs \
@@ -655,6 +685,7 @@ jobs:
             registry.test.mjs \
             replica-read.test.mjs \
             scan.test.mjs \
+            scheduler-created-at.test.mjs \
             scheduler-perproject.test.mjs \
             scheduler-rank.test.mjs \
             scheduler-replica-freshness.test.mjs \
@@ -682,12 +713,16 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            recovery-fix-backoff.test.mjs \
+            recovery-orphan-stale-e2e.test.mjs \
             pr-block-probe.test.mjs \
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
+            unstuck-orphan-merge.test.mjs \
+            orphan-sweep-explain.test.mjs \
             unstuck-escalate-seam.test.mjs \
             unstuck-sweep.test.mjs \
             lib/catalyst-resource.test.mjs \

@@ -36,6 +36,9 @@ import {
   unlinkSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+// CTL-1568: read-only predicate — is the belief engine the needs-human owner?
+// label-guard imports only node builtins + config.mjs, so this adds no cycle.
+import { beliefOwnsNeedsHuman } from "./label-guard.mjs";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -46,7 +49,25 @@ import {
 } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { defaultProbePrBlock } from "./pr-block-probe.mjs";
+// Static (not requireSync) on purpose. Bun rejects `require()` of a module whose
+// ESM graph is async — but ONLY on a COLD cache: once anything has imported this
+// module, the same requireSync succeeds. That made the empty-registry fallback
+// below silently order-dependent — it worked under the tests (whose own import
+// graph warms the module) and returned `registry build failed: require() async
+// module ... is unsupported` in a production process that reached the fallback
+// first. There is no import cycle to break here (unstuck-act-seams.mjs and its
+// dep closure do not import this module), so a plain static import is both safe
+// and deterministic.
+import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
 import { captureEvidence } from "./diagnostician.mjs";
+import {
+  clearFixFailures,
+  commitFixCommentHash,
+  fixCommentHash,
+  inFixBackoff,
+  recordFixFailure,
+  shouldPostFixComment,
+} from "./recovery-fix-backoff.mjs";
 
 // Wrap defaultLog to ensure it's a function (config.mjs may export an object)
 const defaultLogFn = typeof defaultLog === "function" ? defaultLog : (msg) => {
@@ -110,6 +131,14 @@ export function reasoningRecoveryPass(items, opts = {}) {
     // "deferred" outcome — no action, no cooldown burn — so the next tick picks
     // them up. Prevents a 19-item storm in one sweep. Default 3, env-overridable.
     maxFixesPerTick = Number(process.env.CATALYST_RECOVERY_MAX_FIXES_PER_TICK) || 3,
+    inFixBackoffFn = inFixBackoff,
+    recordFixFailureFn = recordFixFailure,
+    clearFixFailuresFn = clearFixFailures,
+    fixCommentHashFn = fixCommentHash,
+    shouldPostFixCommentFn = shouldPostFixComment,
+    commitFixCommentHashFn = commitFixCommentHash,
+    nowMs = () => Date.now(),
+    orchDir = process.env.CATALYST_ORCHESTRATOR_DIR ?? null,
   } = opts;
 
   // CTL-1176 rung 3: resolve the effective bounded-LLM dispatcher. Precedence:
@@ -347,6 +376,21 @@ export function reasoningRecoveryPass(items, opts = {}) {
     } else if (mode === "enforce") {
       // Enforce mode: actually invoke seams / remediate, record intent
       if (decision === "fix") {
+        const backoff = inFixBackoffFn(orchDir, item.ticket, fix_class, nowMs());
+        if (backoff.blocked) {
+          actionLog.push(`fix backoff: ${fix_class} blocked (${backoff.count} identical failures)`);
+          emitEvent({
+            type: "recovery.fix-backoff",
+            ticket: item.ticket,
+            fix_class,
+            count: backoff.count,
+            until: backoff.until,
+            reason: backoff.lastReason,
+          });
+          tickStats.actions.fixBackoff = (tickStats.actions.fixBackoff ?? 0) + 1;
+          results.push({ ticket: item.ticket, decision: "deferred", fix_class, actionLog, mode });
+          continue;
+        }
         // CTL-1176: per-tick fix cap. Once maxFixesPerTick FIX-actions have been
         // taken this invocation, defer the rest — no action, no cooldown burn —
         // so the next scheduler tick processes them. Bounds a one-sweep storm.
@@ -380,6 +424,19 @@ export function reasoningRecoveryPass(items, opts = {}) {
         actionLog = fixOutcome.actionLog;
         outcome = { ...fixOutcome, decision, fix_class };
 
+        if (fixOutcome.success) {
+          clearFixFailuresFn(orchDir, item.ticket, fix_class);
+        } else {
+          recordFixFailureFn(
+            orchDir,
+            item.ticket,
+            fix_class,
+            fixOutcome.reason,
+            nowMs(),
+            { log },
+          );
+        }
+
         // Record intent
         try {
           recordIntent(item.ticket, {
@@ -396,11 +453,17 @@ export function reasoningRecoveryPass(items, opts = {}) {
 
         // Post audit comment
         const fixComment = formatFixComment(item.ticket, fixOutcome, classification);
-        try {
-          postComment(item.ticket, fixComment, { mode: "enforce" });
-          actionLog.push("posted fix audit comment");
-        } catch (err) {
-          log(`recovery-reasoning: ${item.ticket} comment post failed: ${err.message}`);
+        const commentHash = fixCommentHashFn(fixComment);
+        if (shouldPostFixCommentFn(orchDir, item.ticket, fix_class, commentHash, nowMs())) {
+          try {
+            postComment(item.ticket, fixComment, { mode: "enforce" });
+            commitFixCommentHashFn(orchDir, item.ticket, fix_class, commentHash, nowMs());
+            actionLog.push("posted fix audit comment");
+          } catch (err) {
+            log(`recovery-reasoning: ${item.ticket} comment post failed: ${err.message}`);
+          }
+        } else {
+          actionLog.push("suppressed duplicate fix audit comment");
         }
 
         // Emit result event
@@ -1111,10 +1174,18 @@ function attemptFix(item, classification, { invokeSeam, invokeRecoveryPass, evid
   } else {
     // Invoke seam (for deterministic cases)
     try {
-      const seamResult = invokeSeam(ticket, details.seam_id, {
-        reason: details.reason,
-        fix_class,
-      });
+      const seamResult = invokeSeam(
+        ticket,
+        details.seam_id,
+        { reason: details.reason, fix_class },
+        {
+          candidate: {
+            ticket,
+            phase: item.phase ?? null,
+            signal: evidence?.signal ?? item.evidence?.signal ?? null,
+          },
+        },
+      );
 
       const seamStatus = seamResult.success ? "success" : "failed";
       actionLog.push(`seam ${details.seam_id} invoked: ${seamStatus}`);
@@ -1470,9 +1541,20 @@ export function buildRecoveryEnvelope(event, { now } = {}) {
     reason = null,
     details = null,
     escalation = null,
+    site = null,
+    deferrals = null,
   } = event;
   // Escalations carry WARN severity; fixes/triage carry INFO.
-  const escalated = type === "recovery.would-escalate" || type === "recovery.escalated";
+  //
+  // CTL-1568 (Codex #2861 P1): recovery.escalation.split is an alarm — it fires when
+  // the escalation comment and the needs-human label DISAGREE, i.e. a human was told
+  // to check an inbox row that does not exist. It was serialized as INFO, so the
+  // "loud one-time alarm" was an unclassified log line no severity-based alert or
+  // dashboard would surface. It is WARN, like the other escalation events.
+  const escalated =
+    type === "recovery.would-escalate" ||
+    type === "recovery.escalated" ||
+    type === "recovery.escalation.split";
   return {
     ts,
     id: randomBytes(8).toString("hex"),
@@ -1490,11 +1572,17 @@ export function buildRecoveryEnvelope(event, { now } = {}) {
       // ← the CTL key — what loadRecoveryOutcomes keys its outcome map on.
       "event.label": ticket,
       ...(fix_class != null ? { "recovery.fix_class": fix_class } : {}),
+      // CTL-1568 (Codex #2861 P1): carry the split alarm's own dimensions. Both were
+      // passed by the emitter and silently dropped here, leaving the alarm with no
+      // source site and no retry count — the two things an operator needs to tell a
+      // one-off transient from a ticket wedged against a permanently failing label.
+      ...(site != null ? { "recovery.site": String(site) } : {}),
+      ...(deferrals != null ? { "recovery.deferrals": Number(deferrals) } : {}),
       // CTL-1291: bounded numerics/enums promoted so the numbers are chartable.
       ...promoteNumericAttrs(type, details),
     },
     // human-readable mirror; also the reader's fallback ticket-key source.
-    body: { payload: { ticket, type, fix_class, reason, details, escalation } },
+    body: { payload: { ticket, type, fix_class, reason, details, escalation, site, deferrals } },
   };
 }
 
@@ -1608,16 +1696,21 @@ export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
     return { success: false, reason: `no registry seam for ${seamId}`, details: {} };
   }
 
-  // Build the CTL-1219 frozen registry. unstuck-act-seams.mjs has NO transitive
-  // import of scheduler/recovery-reasoning (verified), so a static import is safe
-  // — no cycle. Production deps (clearStall, resolvePrState, jobLifecycle) fall
-  // back to the module's real defaults; the scheduler can inject richer deps via
-  // deps.actByCategory (a pre-built registry) when it already has them in scope.
+  // Select by capability: partial/empty registries fall back to a registry built
+  // with the production dependency bundle. resolvePrState/jobLifecycle defaults
+  // are deliberately inert, so callers with live evidence must inject them.
   let registry = deps.actByCategory;
-  if (!registry) {
+  if (!registry || typeof registry[category] !== "function") {
     try {
-      const { buildUnstuckActSeams } = requireSync("./unstuck-act-seams.mjs");
-      registry = buildUnstuckActSeams({ orchDir: deps.orchDir ?? resolveOrchDir() });
+      registry = buildUnstuckActSeams({
+        orchDir: deps.orchDir ?? resolveOrchDir(),
+        ...(deps.resolvePrState ? { resolvePrState: deps.resolvePrState } : {}),
+        ...(deps.jobLifecycle ? { jobLifecycle: deps.jobLifecycle } : {}),
+        ...(deps.clearStall ? { clearStall: deps.clearStall } : {}),
+        ...(deps.writeStatus ? { writeStatus: deps.writeStatus } : {}),
+        ...(deps.emitPhaseComplete ? { emitPhaseComplete: deps.emitPhaseComplete } : {}),
+        ...(deps.nowMs ? { nowMs: deps.nowMs } : {}),
+      });
     } catch (err) {
       return {
         success: false,
@@ -2040,6 +2133,15 @@ export const RECOVERY_COOLDOWN_MS =
 export const RECOVERY_MAX_ATTEMPTS =
   Number(process.env.CATALYST_RECOVERY_MAX_ATTEMPTS) || 2;
 
+// CTL-1568: how many consecutive ticks an attempts-exhausted escalation may DEFER
+// because its needs-human label write did not land (fence suppression, rate limit,
+// missing label) before the sweep gives up, latches terminal, and raises the
+// escalation-split alarm. Bounded because the deferred entry stays un-latched so the
+// next tick retries — without a ceiling a permanently-fenced host would re-scan and
+// re-emit forever. Env-overridable, default 5 (NaN/0 → default, matching siblings).
+export const RECOVERY_MAX_ESCALATION_DEFERRALS =
+  Number(process.env.CATALYST_RECOVERY_MAX_ESCALATION_DEFERRALS) || 5;
+
 // CTL-1431: TTL on a terminal (escalated) recovery-intent. An escalated latch is
 // no longer permanent — after this window the intent goes stale and the ticket
 // re-enters the recovery triage funnel, so a months-old escalate cannot pin a
@@ -2352,6 +2454,62 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
   return defaultSkipReason(ticket, opts) !== null;
 }
 
+// ─── CTL-1568: escalation-deferral counter ──────────────────────────────────
+// Deliberately NOT stored in the recovery-intent ledger: defaultRecordIntent
+// latches `escalated` stickily and any write carrying decision:"escalate" trips
+// that latch, which would make the sweep skip the very ticket we still need to
+// retry. A side marker keeps the retry counter orthogonal to the latch.
+// Best-effort throughout — a counter failure must never break the sweep.
+function escalationDeferralPath(orchDir, ticket) {
+  return join(orchDir, ".escalation-deferrals", `${ticket}.json`);
+}
+
+// readEscalationDeferrals — this ticket's consecutive deferral count (0 when
+// absent/malformed). Read separately from the bump so the sweep can cheaply skip a
+// ticket whose deferrals are already exhausted BEFORE spending a Linear label write
+// on it. Never throws.
+export function readEscalationDeferrals(orchDir, ticket) {
+  try {
+    const prior = JSON.parse(readFileSync(escalationDeferralPath(orchDir, ticket), "utf8"));
+    return typeof prior?.count === "number" ? prior.count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// bumpEscalationDeferrals — increment and return this ticket's consecutive deferral
+// count (1 on the first).
+//
+// Returns NULL when the counter could not be persisted. That is deliberate and
+// load-bearing: the reorder that puts the label attempt ahead of the ledger latch
+// weakens Codex R1's "verify the latch before any human-facing side effect" rule,
+// whose purpose was to stop a disk-full/permission failure re-firing every tick. The
+// counter is what restores that bound — so if the counter itself cannot be written,
+// we have no bound, and the caller must stay SILENT (retry quietly, emit nothing)
+// rather than emit a WARN on every tick of a broken disk. Never throws.
+export function bumpEscalationDeferrals(orchDir, ticket, now) {
+  const p = escalationDeferralPath(orchDir, ticket);
+  const next = readEscalationDeferrals(orchDir, ticket) + 1;
+  try {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ ticket, count: next, lastAt: now }));
+  } catch {
+    return null; // unbounded → caller must not emit
+  }
+  return next;
+}
+
+// clearEscalationDeferrals — drop the counter once the escalation completes, so a
+// later unrelated exhaustion starts from a clean slate. Idempotent; never throws.
+export function clearEscalationDeferrals(orchDir, ticket) {
+  try {
+    unlinkSync(escalationDeferralPath(orchDir, ticket));
+    return true;
+  } catch {
+    return false; // absent is the common case
+  }
+}
+
 // escalateExhaustedIntents — CTL-1440 (P0b): the terminal-state policy sweep.
 // An intent whose fix attempts are exhausted (attempts >= max) WITHOUT a verdict
 // must escalate LOUDLY — ledger escalated:true (B1's 7-day TTL then ages it out
@@ -2371,7 +2529,20 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     recordIntent = (t, i) => defaultRecordIntent(t, i, { orchDir, now }),
     postComment = defaultPostComment,
     emitEvent = defaultEmitEvent,
-    labelNeedsHuman = null, // (orchDir, ticket) => void — scheduler wires label-guard
+    // CTL-1568: the seam's contract is now (orchDir, ticket) => boolean — TRUE only
+    // when the needs-human label was CONFIRMED applied on this call. The scheduler
+    // wires labelNeedsHumanUnlessBeliefOwner, which already returns exactly that
+    // (label-guard.mjs:381-411). The escalation comment is gated on it, so a stub
+    // that returns undefined reads as "did not land" and withholds the comment.
+    labelNeedsHuman = null,
+    // CTL-1568: distinguishes the two reasons the label write can report false.
+    // `false` from labelNeedsHuman means EITHER the write was suppressed/failed OR
+    // the belief engine owns the label (CATALYST_INTENTS_ENFORCE=1) and will apply
+    // it out-of-band. Only the first is a broken escalation; the second is the
+    // ticket's sanctioned "hand the escalation to the owning host" remedy, where
+    // the comment stays truthful. Defaults to the real predicate.
+    beliefOwnsLabel = () => beliefOwnsNeedsHuman(process.env),
+    maxDeferrals = RECOVERY_MAX_ESCALATION_DEFERRALS,
     writeSignal = (t, payload) => defaultWriteEscalationSignal(t, payload, { orchDir }),
     // Codex R1: a finished ticket can hold a stale exhausted ledger until the
     // terminal cleanup (recoveryForgetIntent) runs LATER in the tick — the sweep
@@ -2425,6 +2596,72 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       },
       attempts: [],
     };
+    // ─── CTL-1568: the LABEL is attempted FIRST, and it gates everything after ───
+    // The escalation comment claims "(See your inbox.)". For a ticket with no worker
+    // dir — 10 of 12 parked tickets, measured 2026-07-29 (daemon.mjs:431-434) — there
+    // is no signal file, so the board synthesizes that inbox row from the LABEL alone.
+    // A comment without the label therefore advertises an inbox entry that does not
+    // exist, which is the CTL-1568 split.
+    //
+    // The attempt MUST precede the ledger latch. defaultRecordIntent makes the latch
+    // STICKY (`(prior.escalated && !expired) || intent.escalated || decision ===
+    // "escalate"`, CTL-1431 F2), so once `escalated:true` is written no later call can
+    // un-latch it and the sweep would skip the ticket forever. Attempting the label
+    // first means a failed write leaves the ledger untouched, and the next tick
+    // re-scans and retries the whole act naturally.
+    //
+    // Bound the total cost: once a ticket has burned its deferrals the split alarm
+    // has already fired and only a human can resolve it, so stop spending a Linear
+    // label write on it every tick. This ceiling is what keeps the pre-latch attempt
+    // from re-firing forever on a persistently-failing host.
+    if (readEscalationDeferrals(orchDir, ticket) >= maxDeferrals) continue;
+
+    let labelled = false;
+    try {
+      labelled = labelNeedsHuman?.(orchDir, ticket) === true;
+    } catch (err) {
+      log(`recovery-reasoning: ${ticket} exhausted-escalate label failed: ${err.message}`);
+    }
+    // A `false` return has TWO causes and only one is a broken escalation: the belief
+    // engine (CATALYST_INTENTS_ENFORCE=1) owns needs-human and applies it out-of-band
+    // (label-guard.mjs:394-399). That is the ticket's sanctioned "hand the escalation
+    // to the owning host" remedy — ownership transferred, so the comment stays truthful.
+    let ownedByBelief = false;
+    if (!labelled) {
+      try {
+        ownedByBelief = beliefOwnsLabel() === true;
+      } catch {
+        ownedByBelief = false; // unreadable → treat as a real miss, never a transfer
+      }
+    }
+    if (!labelled && !ownedByBelief) {
+      // Half the escalation is missing. Post NO comment, latch NOTHING, and let the
+      // next tick retry. Bounded by maxDeferrals so a persistently-failing host raises
+      // the split alarm once instead of re-emitting a WARN every tick forever.
+      const deferrals = bumpEscalationDeferrals(orchDir, ticket, now());
+      if (deferrals === null) {
+        // Counter unwritable → no bound available. Retry quietly next tick; emitting
+        // here would re-fire on every tick of a broken disk (Codex R1's storm).
+        log(`recovery-reasoning: ${ticket} exhausted-escalate label did not land and the deferral counter is unwritable — retrying silently`);
+      } else if (deferrals < maxDeferrals) {
+        emitEvent({ type: "recovery.escalation.deferred", ticket, reason, deferrals, site: "attempts-exhausted" });
+        log(
+          `recovery-reasoning: ${ticket} exhausted-escalate label did not land — comment withheld, ` +
+            `escalation deferred (${deferrals}/${maxDeferrals}); retrying next tick`,
+        );
+      } else if (deferrals === maxDeferrals) {
+        // AC #5 — the should-never-happen state, raised ONCE, loudly.
+        emitEvent({ type: "recovery.escalation.split", ticket, reason, deferrals, site: "attempts-exhausted" });
+        log(
+          `recovery-reasoning: ${ticket} exhausted-escalate SPLIT — needs-human label has not landed ` +
+            `after ${deferrals} attempts; escalation cannot complete from this host`,
+        );
+      }
+      continue; // the act did not complete — not counted as escalated
+    }
+    // The label landed (or its owner has it) — this escalation can now complete.
+    clearEscalationDeferrals(orchDir, ticket);
+
     try {
       recordIntent(ticket, {
         type: "recovery-pass",
@@ -2458,11 +2695,6 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     } catch (err) {
       log(`recovery-reasoning: ${ticket} exhausted-escalate signal write failed: ${err.message}`);
     }
-    try {
-      labelNeedsHuman?.(orchDir, ticket);
-    } catch (err) {
-      log(`recovery-reasoning: ${ticket} exhausted-escalate label failed: ${err.message}`);
-    }
     emitEvent({ type: "recovery.escalated", ticket, reason, escalation });
     try {
       postComment(
@@ -2473,7 +2705,10 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       /* comment is best-effort; the signal + event are the durable surfaces */
     }
     escalatedTickets.push(ticket);
-    log(`recovery-reasoning: ${ticket} attempts-exhausted → escalated loudly (CTL-1440)`);
+    log(
+      `recovery-reasoning: ${ticket} attempts-exhausted → escalated loudly (CTL-1440)` +
+        (ownedByBelief ? " [label owned by belief engine — CTL-1568 transfer]" : ""),
+    );
   }
   return escalatedTickets;
 }

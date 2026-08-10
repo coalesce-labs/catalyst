@@ -530,6 +530,18 @@ export function labelNeedsHumanUnlessBeliefOwner(
     log: logArg = null,
     explanation = undefined,
     onOutcome = null,
+    // CTL-1568 (Codex #2861 P1): treat a pre-existing `.applied` marker as LANDED.
+    //
+    // labelOnce early-returns false for BOTH `.applied` and `.skipped`, conflating
+    // "the label is already on the ticket" with "the label is not on the ticket".
+    // The CTL-764 worker.transition callers need "confirmed on THIS call" and must
+    // keep the strict meaning, so this is opt-in: only the CTL-1568 sites that gate
+    // a HUMAN-FACING side effect on the label being PRESENT pass it. Without it, a
+    // ticket already parked needs-human by any other producer (scheduler, monitor,
+    // stale-pr-rescue) has its later recovery escalation permanently suppressed —
+    // comment withheld, deferral counter burned — even though the label is right
+    // there on the ticket. `.skipped` still counts as failure either way.
+    treatAlreadyAppliedAsLanded = false,
   } = {}
 ) {
   if (beliefOwnsNeedsHuman(env)) {
@@ -549,6 +561,10 @@ export function labelNeedsHumanUnlessBeliefOwner(
   let applied = false;
   let ran = false;
   let reason = null;
+  // Snapshot BEFORE labelOnce: it is the marker's pre-existence that tells us the
+  // label was already applied (labelOnce writes `.applied` itself on success).
+  const alreadyApplied =
+    existsSync(`${labelMarkerBase(orchDir, ticket, "needs-human")}.applied`) === true;
   labelOnce(orchDir, ticket, "needs-human", writeStatus, {
     onApplyResult: (r) => {
       ran = true;
@@ -575,8 +591,12 @@ export function labelNeedsHumanUnlessBeliefOwner(
     writeExplanationSignal(orchDir, ticket, coerced, { log: logArg });
   }
   if (typeof onOutcome === "function") {
-    onOutcome({ deferred: false, applied, ran, reason });
+    onOutcome({ deferred: false, applied, ran, reason, alreadyApplied });
   }
+  // A marker-guarded no-op (ran === false) on a ticket that ALREADY carries the
+  // label means the label is present — which is what the CTL-1568 gate actually
+  // needs to know. Opt-in only; the default keeps CTL-764's strict semantics.
+  if (treatAlreadyAppliedAsLanded && !applied && !ran && alreadyApplied) return true;
   return applied;
 }
 

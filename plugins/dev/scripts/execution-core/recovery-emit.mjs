@@ -57,16 +57,120 @@ import {
   writeFileSync,
   renameSync,
   existsSync,
+  statSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   buildRecoveryEnvelope,
   defaultEmitEvent,
   defaultRecordIntent,
   recordVerdict,
+  bumpEscalationDeferrals,
+  readEscalationDeferrals,
+  clearEscalationDeferrals,
+  RECOVERY_MAX_ESCALATION_DEFERRALS,
 } from "./recovery-reasoning.mjs";
+// CTL-1568: this shim posts the escalation comment but never applied the
+// needs-human LABEL, so an agent reply could not bring the row back to the inbox.
+import { labelNeedsHumanUnlessBeliefOwner, beliefOwnsNeedsHuman } from "./label-guard.mjs";
+
+// CTL-1568 (Codex #2861 P0): this file's shebang is `#!/usr/bin/env node` and the
+// recovery-pass skill invokes it with `node`. A STATIC `import { applyLabel } from
+// "./linear-write.mjs"` reaches linear-query.mjs → gateway-read.mjs → `bun:sqlite`,
+// and Node throws ERR_UNSUPPORTED_ESM_URL_SCHEME during module LOADING — before
+// subcommand dispatch — so `fixed`, `leave-alone` and `escalated` all died outright,
+// not just the labelling path. Load it LAZILY instead: the import is evaluated only
+// on the one enforce-mode branch that actually labels, so every other subcommand
+// runs under plain Node with the Bun-only graph never touched.
+//
+// Verified by running `node recovery-emit.mjs` directly — the tests missed this
+// because they spawn the CLI through Bun's `process.execPath` (fixed below, so the
+// suite exercises the real `node` entrypoint the skill uses).
+async function loadApplyLabel() {
+  const mod = await import("./linear-write.mjs");
+  return mod.applyLabel;
+}
+
+
+// hasEscalateHumanBelief — CTL-1568 (Codex #2861 P1): is there ACTUAL evidence that
+// the belief engine queued a needs-human escalation for THIS ticket?
+//
+// `beliefOwnsNeedsHuman(env)` is literally `env.CATALYST_INTENTS_ENFORCE === "1"` — it
+// identifies the configured owner and proves nothing about this ticket. But
+// executeEscalations only ever labels tickets that have a current-tick
+// `escalate_human` belief row, and R12 derives solely from the wedged-worker chain — a
+// recovery-pass escalation produces no such row, and most parked tickets have no
+// worker dir at all. So under enforcement the old predicate declared "the belief owner
+// has this" for a ticket the belief engine will never touch: the label was skipped,
+// the "(See your inbox.)" comment was posted anyway, and the intent latched. The human
+// is pointed at an inbox row that does not exist.
+//
+// Node-safe by necessity: this CLI runs under `node` (see loadApplyLabel), so it cannot
+// import the bun:sqlite-backed collector. Shell out to sqlite3 with the SAME query
+// getEscalateHumanBelief uses, including the '/' subject boundary so CTL-1241 matches
+// but CTL-12410 does not.
+//
+// Returns true | false | null(unknown — db absent, sqlite3 missing, or query failed).
+// The caller treats anything other than `true` as NOT-owned, which is the fail-SAFE
+// direction: we page a human rather than silently assume someone else did.
+function hasEscalateHumanBelief(ticket) {
+  const db = join(process.env.CATALYST_DIR || join(homedir(), "catalyst"), "beliefs.db");
+  if (!existsSync(db)) return null;
+  const res = spawnSync(
+    "sqlite3",
+    [
+      "-readonly",
+      db,
+      `SELECT 1 FROM belief WHERE name = 'escalate_human' AND subject LIKE '${String(ticket).replace(/'/g, "''")}/%' ORDER BY tick_id DESC LIMIT 1;`,
+    ],
+    { encoding: "utf8" },
+  );
+  if (res.error || res.status !== 0) return null;
+  return String(res.stdout || "").trim() === "1";
+}
+
+// replicaReadLabels — CTL-1568 (Codex #2861 P1): verify the label write-back against
+// the local SQL replica instead of a live `linearis issues read`.
+//
+// applyLabel's read-back previously always went live. On the recovery-pass skill path
+// that adds a rate-limited single-ticket API call per escalation to a shared fleet
+// quota — exactly what AGENTS.md's read-path rule forbids, and the vector behind the
+// prior 429 flaps.
+//
+// Freshness gate mirrors replica-read.mjs's isReplicaFresh EXACTLY, reimplemented here
+// only because that module is bun:sqlite-backed and this CLI runs under node (same
+// constraint as loadApplyLabel): prefer the writer's `.writer.lock` heartbeat — which
+// advances on writer LIVENESS, not on data changes, so a quiet Linear feed does not
+// look stale — and fall back to the db mtime only when the lock is absent. Threshold
+// CATALYST_LINEAR_REPLICA_STALE_MS, default 5 min.
+//
+// Returns an array of label names, or NULL when the replica is stale/absent/unreadable
+// — and null makes applyLabel fall through to its live read-back, i.e. the pre-existing
+// behavior. So this can only ever REMOVE API calls, never weaken verification.
+function replicaReadLabels(ticket) {
+  const db = process.env.CATALYST_REPLICA_DB
+    || join(process.env.CATALYST_DIR || join(homedir(), "catalyst"), "catalyst-replica.db");
+  if (!existsSync(db)) return null;
+  const thresholdMs = Number(process.env.CATALYST_LINEAR_REPLICA_STALE_MS) || 300_000;
+  let fresh = false;
+  try {
+    fresh = Date.now() - statSync(db + ".writer.lock").mtimeMs <= thresholdMs;
+  } catch {
+    try { fresh = Date.now() - statSync(db).mtimeMs <= thresholdMs; } catch { return null; }
+  }
+  if (!fresh) return null; // stale writer → do NOT serve; caller falls back to live
+  const res = spawnSync(
+    "sqlite3",
+    ["-readonly", db,
+     `SELECT l.name FROM issue_labels il JOIN labels l ON l.id = il.label_id JOIN issues i ON i.id = il.issue_id WHERE i.identifier = '${String(ticket).replace(/'/g, "''")}';`],
+    { encoding: "utf8" },
+  );
+  if (res.error || res.status !== 0) return null;
+  return String(res.stdout || "").split("\n").map((x) => x.trim()).filter(Boolean);
+}
 
 const argv = process.argv.slice(2);
 const sub = argv[0];
@@ -247,37 +351,161 @@ if (sub === "escalated") {
   // (2) Merge the explanation onto the signal → inbox row + push gate.
   mergeExplanationIntoSignal(orchDir, ticket, phase, escalation);
 
-  // (3) Latch the escalated intent (terminal — router stops re-acting).
-  //     CTL-1439 (P0a): carries the verdict fields so the ledger records the
-  //     session's actual conclusion, not just the latch.
-  try {
-    defaultRecordIntent(
-      ticket,
-      {
-        type: "recovery-pass",
-        decision: "escalate",
-        escalated: true,
-        escalation,
-        verdict: "escalate",
-        verdictReason: reason,
-      },
-      { orchDir },
-    );
-  } catch (err) {
-    process.stderr.write(`recovery-emit: intent latch failed: ${err.message}\n`);
+  // (4) CTL-1568: apply the needs-human LABEL. This shim never did, which is why
+  //     an agent reply could not bring the row back to the inbox and the CTL-1569
+  //     ≥3-turn loop could never close. The signal write in (2) flips
+  //     deriveAttention for a ticket that HAS a worker dir — but 10 of 12 parked
+  //     tickets have none on either host (daemon.mjs:431-434), and for those the
+  //     board synthesizes the inbox row from the LABEL alone. The signal is not a
+  //     substitute for it.
+  //
+  //     Deliberately UNFENCED. fenceGuard needs the scheduler's multiHost/gateway/
+  //     self, which a short-lived CLI has no cheap way to build; and every other
+  //     write in this file (signal, ledger, comment) is already unfenced, so
+  //     fencing only the label would recreate the exact CTL-1568 split it is meant
+  //     to close — label suppressed, comment posted. fenceGuard's own fail-closed
+  //     behaviour is untouched (AC #6).
+  //
+  //     Enforce-gated exactly like the comment: shadow mode must never write Linear.
+  let labelled = false;
+  if (RECOVERY_MODE === "enforce" && orchDir) {
+    try {
+      // CTL-1568 (Codex #2861 P0): resolve applyLabel HERE, not at module scope —
+      // this is the only branch that needs linear-write.mjs, and importing it
+      // eagerly killed the whole CLI under Node (see loadApplyLabel above). Top-level
+      // `await` is available: this is an ESM `sub === "escalated"` block, not a
+      // function body. Shadow mode never reaches this line, so it never pays the
+      // import cost either.
+      const applyLabel = await loadApplyLabel();
+      labelled =
+        labelNeedsHumanUnlessBeliefOwner(
+          orchDir,
+          ticket,
+          // Replica-backed read-back (Codex #2861 P1) — falls back to the live
+          // read only when the replica is stale/absent.
+          { applyLabel: (a) => applyLabel({ ...a, readLabels: replicaReadLabels }) },
+          // treatAlreadyAppliedAsLanded: this gate asks "is the label PRESENT?",
+          // not "did I apply it on this call" (Codex #2861 P1).
+          { site: "recovery-emit-escalated", treatAlreadyAppliedAsLanded: true },
+        ) === true;
+    } catch (err) {
+      process.stderr.write(`recovery-emit: needs-human label write threw on ${ticket}: ${err.message}\n`);
+    }
+  }
+  // A false return has two causes; only one is a broken escalation. When the belief
+  // engine owns needs-human it applies the label out-of-band — ownership transferred,
+  // so the comment stays truthful.
+  // CTL-1568 (Codex #2861 P1): ownership requires BOTH the configured owner AND real
+  // evidence the belief engine queued this ticket. Anything else (no row, no db, no
+  // sqlite3) is treated as NOT-owned — fail-safe: page a human rather than assume.
+  const ownedByBelief =
+    !labelled &&
+    beliefOwnsNeedsHuman(process.env) === true &&
+    hasEscalateHumanBelief(ticket) === true;
+
+  // (4b) Latch the escalated intent — ONLY once the label actually landed.
+  //
+  // CTL-1568 (Codex #2861 P1): this latch used to run BEFORE the label was even
+  // attempted. `escalated: true` is TERMINAL — defaultSkipReason treats such an
+  // intent as done for RECOVERY_TERMINAL_INTENT_TTL_MS (7 days) — so a transient
+  // applyLabel failure (its own `{applied:false, reason:"transient"|"rate-limited"|
+  // "verify-failed"}` path) left the ticket latched-but-unlabelled, with the comment
+  // withheld and NOTHING retrying for a week. The sibling escalateExhaustedIntents
+  // already documents and implements the correct order ("The attempt MUST precede
+  // the ledger latch"); this site did the opposite.
+  //
+  // Now: attempt the label first, and only latch when it landed (or when the belief
+  // engine owns it, i.e. ownership genuinely transferred). Otherwise leave the intent
+  // UNLATCHED so the next recovery pass re-enters and retries, and bound that retry
+  // with the same deferral counter escalateExhaustedIntents uses so a permanently
+  // failing label degrades to a loud give-up instead of an infinite loop.
+  if (labelled || ownedByBelief) {
+    // Escalation completed cleanly — drop any deferral counter so a later,
+    // unrelated failure starts from a clean slate.
+    clearEscalationDeferrals(orchDir, ticket);
+    try {
+      defaultRecordIntent(
+        ticket,
+        {
+          type: "recovery-pass",
+          decision: "escalate",
+          escalated: true,
+          escalation,
+          verdict: "escalate",
+          verdictReason: reason,
+        },
+        { orchDir },
+      );
+    } catch (err) {
+      process.stderr.write(`recovery-emit: intent latch failed: ${err.message}\n`);
+    }
+  } else {
+    // bumpEscalationDeferrals returns NULL when the counter cannot be persisted.
+    // Its contract (recovery-reasoning.mjs) is explicit: with no counter there is no
+    // retry bound, so the caller must stay SILENT and retry quietly rather than emit
+    // a WARN every tick of a full/read-only disk. Honor that — no latch, no output.
+    const deferrals = bumpEscalationDeferrals(orchDir, ticket, new Date().toISOString());
+    if (deferrals === null) {
+      // unbounded → quiet retry, exactly as the counter's contract requires
+    } else if (deferrals >= RECOVERY_MAX_ESCALATION_DEFERRALS) {
+      // Retry budget exhausted — latch anyway so we stop re-entering forever, but
+      // say so loudly: the ticket is escalated in the ledger WITHOUT the label.
+      process.stderr.write(
+        `recovery-emit: needs-human label failed ${deferrals}x for ${ticket}; latching escalation WITHOUT the label (retry budget exhausted)\n`,
+      );
+      try {
+        defaultRecordIntent(
+          ticket,
+          { type: "recovery-pass", decision: "escalate", escalated: true, escalation, verdict: "escalate", verdictReason: reason },
+          { orchDir },
+        );
+      } catch (err) {
+        process.stderr.write(`recovery-emit: intent latch failed: ${err.message}\n`);
+      }
+    } else {
+      process.stderr.write(
+        `recovery-emit: needs-human label did not land for ${ticket} (attempt ${deferrals}/${RECOVERY_MAX_ESCALATION_DEFERRALS}); NOT latching so a later pass retries\n`,
+      );
+    }
   }
 
-  // (4) CTL-1439 (P0a): ticket-visible escalation comment — the audit found the
+  // (5) CTL-1439 (P0a): ticket-visible escalation comment — the audit found the
   //     skill-side comment discipline failed in practice (0/7 posted), so the
   //     shim posts it itself. One line; the full briefing lives in the inbox.
-  postTicketComment(
-    ticket,
-    `🔼 **recovery-pass** escalated this to the operator — ${escalation.call_to_action ?? reason}. (See your inbox.)`,
-  );
+  //     CTL-1568: gated on the label, so it never claims an inbox row that is not
+  //     there. In shadow mode both are suppressed together, which is consistent.
+  if (labelled || ownedByBelief || RECOVERY_MODE !== "enforce") {
+    postTicketComment(
+      ticket,
+      `🔼 **recovery-pass** escalated this to the operator — ${escalation.call_to_action ?? reason}. (See your inbox.)`,
+    );
+  } else {
+    // AC #5 — the split is a should-never-happen state; raise it loudly rather than
+    // leaving a WARN line. Exit stays 0 (see below).
+    defaultEmitEvent({
+      type: "recovery.escalation.split",
+      ticket,
+      reason,
+      site: "recovery-emit-escalated",
+      // Codex #2861 P1: carry the retry count so the alarm distinguishes a one-off
+      // transient from a ticket wedged against a permanently failing label.
+      deferrals: readEscalationDeferrals(orchDir, ticket),
+    });
+    process.stderr.write(
+      `recovery-emit: needs-human label did NOT land on ${ticket} — escalation comment withheld ` +
+        `(the inbox row would not exist); raised recovery.escalation.split\n`,
+    );
+  }
 
   process.stdout.write(
-    `recovery.escalated emitted for ${ticket} (type=${escalation.escalation_type})\n`,
+    `recovery.escalated emitted for ${ticket} (type=${escalation.escalation_type}` +
+      `, needs-human=${labelled ? "applied" : ownedByBelief ? "belief-owner" : "NOT-APPLIED"})\n`,
   );
+  // CTL-1568 (O1): exit 0 even when the label did not land. The recovery-pass skill
+  // invokes this shim as a bare bash call with no exit-code contract (SKILL.md:964),
+  // so a non-zero exit would be interpreted ad-hoc by an LLM worker and could retry
+  // the whole pass. recovery.escalation.split is the loud channel instead, and the
+  // durable surfaces (event, signal, ledger) have already landed.
   process.exit(0);
 }
 

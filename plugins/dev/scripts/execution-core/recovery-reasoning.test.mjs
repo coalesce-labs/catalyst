@@ -27,6 +27,7 @@ import {
   recordVerdict,
   defaultSkipReason,
   escalateExhaustedIntents,
+  readEscalationDeferrals, // CTL-1568
   classifyPrNotMerged,
   PR_NOT_MERGED_REASON,
   MONITOR_DEPLOY_EMPTY_SHA_PREFIX,
@@ -2263,7 +2264,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
       now: () => t0 + 1,
       emitEvent: (e) => events.push(e),
       postComment: (t, body) => comments.push({ t, body }),
-      labelNeedsHuman: (dir, t) => labels.push(t),
+      labelNeedsHuman: (dir, t) => { labels.push(t); return true; },
       writeSignal: (t, payload) => signals.push({ t, payload }),
     });
     expect(out).toEqual(["CTL-X"]);
@@ -2278,7 +2279,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     expect(labels).toEqual([orchDir + ":CTL-X"] .map(() => "CTL-X")); // label called with the ticket
     expect(signals[0].payload.escalation_type).toBe("authorization");
     // Idempotent: escalated:true excludes it from the next scan.
-    expect(escalateExhaustedIntents(orchDir, { now: () => t0 + 2, emitEvent: (e) => events.push(e), postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {} })).toEqual([]);
+    expect(escalateExhaustedIntents(orchDir, { now: () => t0 + 2, emitEvent: (e) => events.push(e), postComment: () => {}, labelNeedsHuman: () => true, writeSignal: () => {} })).toEqual([]);
     expect(events.length).toBe(1);
   });
 
@@ -2292,7 +2293,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
       now: () => t0 + 1,
       emitEvent: () => {},
       postComment: () => {},
-      labelNeedsHuman: () => {},
+      labelNeedsHuman: () => true,
       writeSignal: () => {},
     });
     expect(out).toEqual([]);
@@ -2305,7 +2306,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     const out = escalateExhaustedIntents(orchDir, {
       now: () => t0 + 1,
       isActive: (t) => t !== "CTL-DONE",
-      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {},
+      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => true, writeSignal: () => {},
     });
     expect(out).toEqual(["CTL-LIVE"]);
     expect(readLedger("CTL-DONE").escalated).toBe(false); // untouched — terminal cleanup owns it
@@ -2314,7 +2315,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     const out2 = escalateExhaustedIntents(orchDir, {
       now: () => t0 + 2,
       isActive: (t) => { if (t === "CTL-THROW") throw new Error("read failed"); return true; },
-      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {},
+      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => true, writeSignal: () => {},
     });
     expect(out2).toContain("CTL-THROW");
   });
@@ -2323,16 +2324,119 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     const t0 = 1_000_000_000_000;
     defaultRecordIntent("CTL-RO", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
     const events = [];
+    // CTL-1568 reordering: the LABEL attempt now legitimately precedes the ledger
+    // latch (the latch is sticky, so attempting after it would strand a failed
+    // escalation forever — see escalateExhaustedIntents). Codex R1's rule still
+    // holds for every remaining side effect: signal, comment, and the
+    // recovery.escalated event stay behind the latch read-back gate.
     const out = escalateExhaustedIntents(orchDir, {
       now: () => t0 + 1,
       recordIntent: () => ({ escalated: true }), // LIES: never writes the file
       emitEvent: (e) => events.push(e),
       postComment: () => { throw new Error("must not comment"); },
-      labelNeedsHuman: () => { throw new Error("must not label"); },
+      labelNeedsHuman: () => true, // allowed to run — it is the gate, not a side effect
       writeSignal: () => { throw new Error("must not write signal"); },
     });
     expect(out).toEqual([]); // latch verification failed → no side effects, retry next tick
     expect(events).toEqual([]);
+  });
+
+  // ─── CTL-1568: the comment and the label are ONE act ───────────────────────
+  test("CTL-1568: no '(See your inbox.)' comment when the needs-human label did not land", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-NL", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const events = [];
+    const comments = [];
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      emitEvent: (e) => events.push(e),
+      postComment: (t, body) => comments.push({ t, body }),
+      labelNeedsHuman: () => false, // suppressed / rate-limited / missing label
+      beliefOwnsLabel: () => false, // NOT a transfer — a genuine miss
+      writeSignal: () => {},
+    });
+    expect(out).toEqual([]); // the act did not complete
+    expect(comments).toEqual([]); // ← the defect this ticket exists to fix
+    // The ledger is left UN-latched so the next tick retries the whole act.
+    expect(readLedger("CTL-NL").escalated).toBe(false);
+    expect(events.map((e) => e.type)).toEqual(["recovery.escalation.deferred"]);
+    expect(events[0].deferrals).toBe(1);
+  });
+
+  test("CTL-1568: a deferred escalation RETRIES and completes once the label lands", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-RT", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const base = { emitEvent: () => {}, writeSignal: () => {}, beliefOwnsLabel: () => false };
+    // tick 1 — label misses
+    expect(escalateExhaustedIntents(orchDir, { ...base, now: () => t0 + 1, postComment: () => { throw new Error("must not comment"); }, labelNeedsHuman: () => false })).toEqual([]);
+    // tick 2 — label lands → comment posts, ledger latches, counter cleared
+    const comments = [];
+    expect(escalateExhaustedIntents(orchDir, { ...base, now: () => t0 + 2, postComment: (t, b) => comments.push({ t, b }), labelNeedsHuman: () => true })).toEqual(["CTL-RT"]);
+    expect(comments.length).toBe(1);
+    expect(comments[0].b).toContain("(See your inbox.)");
+    expect(readLedger("CTL-RT").escalated).toBe(true);
+    expect(readEscalationDeferrals(orchDir, "CTL-RT")).toBe(0); // cleared on success
+  });
+
+  test("CTL-1568: deferrals are BOUNDED — the split alarm fires once, then the ticket is skipped", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-SP", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const events = [];
+    let labelCalls = 0;
+    const run = (i) =>
+      escalateExhaustedIntents(orchDir, {
+        now: () => t0 + i,
+        maxDeferrals: 3,
+        emitEvent: (e) => events.push(e),
+        postComment: () => { throw new Error("must not comment"); },
+        labelNeedsHuman: () => { labelCalls += 1; return false; },
+        beliefOwnsLabel: () => false,
+        writeSignal: () => {},
+      });
+    for (let i = 1; i <= 6; i++) run(i);
+    expect(events.map((e) => e.type)).toEqual([
+      "recovery.escalation.deferred", // 1
+      "recovery.escalation.deferred", // 2
+      "recovery.escalation.split", // 3 — the AC #5 anomaly, raised ONCE
+    ]);
+    // …and the ticket stops costing a Linear label write once alarmed.
+    expect(labelCalls).toBe(3);
+  });
+
+  test("CTL-1568: a belief-engine transfer is NOT a split — the comment stays truthful", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-BE", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const events = [];
+    const comments = [];
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      emitEvent: (e) => events.push(e),
+      postComment: (t, b) => comments.push({ t, b }),
+      labelNeedsHuman: () => false, // deferred to the belief owner…
+      beliefOwnsLabel: () => true, // …which is a TRANSFER, not a dropped half
+      writeSignal: () => {},
+    });
+    expect(out).toEqual(["CTL-BE"]);
+    expect(comments.length).toBe(1);
+    expect(events.map((e) => e.type)).toEqual(["recovery.escalated"]);
+  });
+
+  test("CTL-1568: an unwritable deferral counter retries SILENTLY (no per-tick WARN storm)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-DF", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    // Make .escalation-deferrals unwritable by planting a FILE where the dir must go.
+    writeFileSync(pathJoin(orchDir, ".escalation-deferrals"), "not-a-dir");
+    const events = [];
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      emitEvent: (e) => events.push(e),
+      postComment: () => { throw new Error("must not comment"); },
+      labelNeedsHuman: () => false,
+      beliefOwnsLabel: () => false,
+      writeSignal: () => {},
+    });
+    expect(out).toEqual([]);
+    expect(events).toEqual([]); // no bound available → stay silent rather than storm
   });
 
   test("(Codex R1) the HOLISTIC gate keys a board-health defer on the frozen deferredSince anchor", () => {
@@ -2351,7 +2455,7 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     const t0 = 1_000_000_000_000;
     defaultRecordIntent("CTL-Y", { decision: "fix", fix_class: "bounded-llm", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + RECOVERY_COOLDOWN_MS * 10 })).toBe("attempts-exhausted");
-    escalateExhaustedIntents(orchDir, { now: () => t0 + 1, emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {} });
+    escalateExhaustedIntents(orchDir, { now: () => t0 + 1, emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => true, writeSignal: () => {} });
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 })).toBe("escalated");
     // …and B1's terminal TTL ages it back into triage.
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 + RECOVERY_TERMINAL_INTENT_TTL_MS })).toBeNull();

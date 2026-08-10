@@ -99,7 +99,49 @@ let _lsofUnavailableWarned = false;
 // port we can probe from here. The waiting/polling between attempts lives in
 // performReload's setTimeoutFn loop (off the event loop) — this function does a
 // SINGLE probe and returns immediately, so it no longer blocks the daemon (M3).
+// readPidFor — the numeric pid a component's PID file currently names, or null.
+// Shared by defaultIsRunningFn and the otel-forward confirmation below.
+export function readPidFor(name) {
+  const pidPath = pidFilePathForComponent(name);
+  if (!pidPath || !existsSync(pidPath)) return null;
+  try {
+    const pid = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+// confirmForwardRestarted — CTL-1506 follow-up (Codex #3164 P1). otel-forward
+// CANNOT use the best-effort `return true` path the other non-monitor components
+// take, because two silent failure modes make a skip indistinguishable from a
+// success — and both leave a STALE forwarder, which is the exact outage this
+// component was added to prevent:
+//   1. `cmd_forward_restart` returns 0 when it cannot take the mutation lock
+//      ("Forwarder busy … skipping restart", catalyst-monitor.sh) — a skip that
+//      reports success.
+//   2. The freshly spawned Bun process can exit during startup, leaving no
+//      forwarder at all.
+// Both are caught by requiring the PID file to name a LIVE pid that DIFFERS from
+// the one observed before the restart: a skip leaves the pid unchanged, a
+// startup crash leaves it dead or absent. Returns false until then, so the
+// existing retry loop keeps polling and an unconfirmed restart lands in
+// `stack.reload.degraded` instead of a false `complete`.
+function confirmForwardRestarted(component) {
+  const pid = readPidFor("otel-forward");
+  if (pid == null) return false; // no pid file yet → still starting (or dead)
+  // Unchanged pid ⇒ nothing actually restarted (lock-contention skip).
+  if (component?.prePid != null && pid === component.prePid) return false;
+  try {
+    process.kill(pid, 0); // alive?
+    return true;
+  } catch {
+    return false; // named a pid that is already gone
+  }
+}
+
 function defaultConfirmReload(component) {
+  if (component?.name === "otel-forward") return confirmForwardRestarted(component);
   if (!component || component.name !== "monitor") return true;
   const port = process.env.MONITOR_PORT || "7400";
   try {
@@ -140,6 +182,13 @@ export function pidFilePathForComponent(name) {
   if (name === "execution-core")
     return process.env.EXECUTION_CORE_PID_FILE
       || resolve(base, "execution-core", "daemon.pid");
+  // CTL-1506 follow-up: otel-forward. Mirrors catalyst-monitor.sh:54
+  // (FORWARD_PID_FILE="${CATALYST_DIR}/otel-forward.pid"), so the running-state
+  // gate below sees the same file the wrapper writes — without this the probe
+  // returns null, the component is treated as not-running, and the reload is
+  // silently skipped exactly like it was before it was wired up at all.
+  if (name === "otel-forward")
+    return process.env.FORWARD_PID_FILE || resolve(base, "otel-forward.pid");
   return null;
 }
 
@@ -202,11 +251,26 @@ export function decideStackReload({ results = [], loadedCommitRoot = null } = {}
   if (changed.length === 0) {
     return { shouldReload: false, brokerSelfReload: false, components: [] };
   }
-  // Both monitor and exec-core run from the advanced checkout — reload both.
+  // Monitor, exec-core AND otel-forward all run from the advanced checkout — reload all.
+  //
+  // CTL-1506 follow-up: otel-forward was MISSING from this list, and the omission
+  // was not theoretical. PR #2742 shipped the Loki age-drop that fixes a live
+  // export outage; the fix reached both minis' disks within seconds of the merge,
+  // but the forwarder processes had been running since the previous day and never
+  // restarted — so the fleet ran pre-fix code with the fix sitting right there,
+  // and the outage continued until the forwarders were restarted by hand. A merged
+  // fix that never restarts is indistinguishable from no fix.
+  //
+  // It restarts via `catalyst-monitor forward-restart` rather than a bare
+  // `restart` (which would bounce the MONITOR), hence the per-component args.
+  // That subcommand takes the same mutation lock as forward-start/-stop
+  // (catalyst-monitor.sh, CTL-1502 Codex P1), so it is safe against launchd's
+  // periodic `catalyst-stack start` and the daemon watchdog racing it.
   const { oldSha = null, newSha = null } = changed[0];
   const components = [
     { name: "monitor", cmd: "catalyst-monitor", oldSha, newSha },
     { name: "execution-core", cmd: "catalyst-execution-core", oldSha, newSha },
+    { name: "otel-forward", cmd: "catalyst-monitor", args: ["forward-restart"], oldSha, newSha },
   ];
   // brokerSelfReload only when restartNeeded for the broker's own checkout root.
   const brokerSelfReload = changed.some(
@@ -268,7 +332,13 @@ function performReload({
   const unconfirmed = [];
   const pending = [];
   for (const c of toReload) {
-    if (trySpawn(spawnFn, c.cmd, ["restart"])) {
+    // CTL-1506 follow-up (Codex #3164 P1): snapshot the pid BEFORE restarting so
+    // confirmation can prove the process actually turned over. Without this a
+    // lock-contention skip (which exits 0) confirms against its own unchanged pid.
+    if (c.name === "otel-forward") c.prePid = readPidFor("otel-forward");
+    // Per-component argv: defaults to ["restart"], but otel-forward is a
+    // sub-service of the monitor wrapper and needs ["forward-restart"].
+    if (trySpawn(spawnFn, c.cmd, c.args ?? ["restart"])) {
       pending.push({ c, attempts: 0, retried: false });
     } else {
       // Spawn threw synchronously — the restart never launched.
