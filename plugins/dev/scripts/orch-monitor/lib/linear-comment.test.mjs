@@ -7,6 +7,7 @@ import {
   linearTokenCandidates,
   resolveLinearToken,
   postOperatorComment,
+  knownBotUserIds,
 } from "./linear-comment.mjs";
 
 describe("linearTokenCandidates", () => {
@@ -304,5 +305,51 @@ describe("postOperatorComment — multi-candidate identity walk (2026-08-02 fix)
     );
     expect(result.status).toBe("posted");
     expect(resolveIdentity.calls).toEqual(["tok-first-human"]);
+  });
+});
+
+describe("knownBotUserIds", () => {
+  it("skips the linearis identity while its botUserId stays the empty string (production state) -- same membership as if the key were absent entirely", () => {
+    const withLinearis = knownBotUserIds({
+      config: {
+        catalyst: {
+          linear: {
+            bot: {
+              orchestrator: { botUserId: "orch-uuid" },
+              worker: { botUserId: "worker-uuid" },
+              linearis: { botUserId: "" },
+            },
+          },
+        },
+      },
+    });
+    const withoutLinearisKey = knownBotUserIds({
+      config: {
+        catalyst: {
+          linear: {
+            bot: {
+              orchestrator: { botUserId: "orch-uuid" },
+              worker: { botUserId: "worker-uuid" },
+            },
+          },
+        },
+      },
+    });
+    expect([...withLinearis].sort()).toEqual([...withoutLinearisKey].sort());
+    expect(withLinearis.has("")).toBe(false);
+    expect(withLinearis.size).toBe(2);
+  });
+
+  it("WOULD pick up the linearis identity if its botUserId were ever populated -- documents the generic-loop behavior so a future change to leave botUserId blank stays a deliberate choice, not an accident", () => {
+    const ids = knownBotUserIds({
+      config: {
+        catalyst: {
+          linear: {
+            bot: { linearis: { botUserId: "linearis-uuid-if-ever-set" } },
+          },
+        },
+      },
+    });
+    expect(ids.has("linearis-uuid-if-ever-set")).toBe(true);
   });
 });
