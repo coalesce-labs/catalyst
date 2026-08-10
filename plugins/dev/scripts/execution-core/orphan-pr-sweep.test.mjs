@@ -8,7 +8,7 @@ test("isOrphanBlocked: DIRTY/BLOCKED/UNSTABLE are blockers; CLEAN/HAS_HOOKS/UNKN
     expect(isOrphanBlocked(s)).toBe(false);
 });
 
-// decideOrphanNotify state machine: skip (not blocker / draft) | stamp (first blocker sighting)
+// decideOrphanNotify state machine: skip (not blocker) | stamp (first blocker sighting)
 //   | wait (within window) | notify (window elapsed, not yet notified) | skip (already notified).
 test("non-blocker state → skip:not_blocked, never stamps", () => {
   const d = decideOrphanNotify({ mergeStateStatus: "CLEAN", isDraft: false, entry: null, nowMs: 1000, stableSeconds: 300 });
@@ -16,10 +16,16 @@ test("non-blocker state → skip:not_blocked, never stamps", () => {
   expect(d.reason).toBe("not_blocked");
 });
 
-test("draft PR in a blocker state → skip:draft", () => {
+test("CAT-15: draft PR in a blocker state → stamp", () => {
   const d = decideOrphanNotify({ mergeStateStatus: "UNSTABLE", isDraft: true, entry: null, nowMs: 1000, stableSeconds: 300 });
-  expect(d.action).toBe("skip");
-  expect(d.reason).toBe("draft");
+  expect(d.action).toBe("stamp");
+  expect(d.reason).toBe("first_sighting");
+});
+
+test("draft blocker past stable window → notify:draft_stable", () => {
+  const entry = { firstSeenAt: new Date(0).toISOString() };
+  const d = decideOrphanNotify({ mergeStateStatus: "BLOCKED", isDraft: true, entry, nowMs: 300_000, stableSeconds: 300 });
+  expect(d).toEqual({ action: "notify", reason: "draft_stable" });
 });
 
 test("first blocker sighting → stamp firstSeenAt", () => {

@@ -743,6 +743,17 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
     };
   }
 
+  if (probe.isDraft) {
+    return {
+      decision: "fix",
+      fix_class: "bounded-llm",
+      details: {
+        reason: `PR #${probe.prNumber} is still a DRAFT; promote it to ready-for-review before merging`,
+        brief: generateRemediateBrief("pr-stuck-in-draft", probe),
+      },
+    };
+  }
+
   // Remediable when there is a concrete LLM-actionable cause (failing checks or
   // unresolved bot threads), or the PR is already CLEAN and just needs merging.
   // A BLOCKED PR with NO actionable cause (awaiting a required approving review
@@ -1075,6 +1086,11 @@ export function generateRemediateBrief(category, probe = null) {
     ]
       .filter(Boolean)
       .join(" "),
+    "pr-stuck-in-draft": [
+      probe ? `PR #${probe.prNumber} is still a draft.` : "The ticket PR is still a draft.",
+      "Run `gh pr ready <n>`, then verify with `gh api repos/{owner}/{repo}/pulls/<n> --jq .draft`.",
+      "Continue only after REST returns false; otherwise escalate with the PR number and API error.",
+    ].join(" "),
     // CTL-1680: the PR merged but monitor-merge recorded an empty merge SHA, so
     // monitor-deploy's empty-SHA guard false-failed. No code fix is needed — the work
     // shipped; recover the SHA and let the pipeline proceed.

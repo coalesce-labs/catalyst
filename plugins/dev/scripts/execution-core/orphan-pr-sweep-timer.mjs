@@ -177,13 +177,9 @@ export async function runOrphanSweep({ repo, nowMs, cfg, prList, readWorkerTrack
     if (decision.action === "skip" && decision.reason === "not_blocked") {
       continue; // not a blocker / recovered → drop (prune)
     }
-    if (decision.action === "skip" && decision.reason === "draft") {
-      continue; // draft → skip
-    }
-
     const base = {
       repo, number: pr.number, url: pr.url, title: pr.title,
-      headRefName: pr.headRefName, mergeStateStatus: pr.mergeStateStatus,
+      headRefName: pr.headRefName, mergeStateStatus: pr.mergeStateStatus, isDraft: pr.isDraft,
     };
 
     if (decision.action === "stamp") {
@@ -192,7 +188,10 @@ export async function runOrphanSweep({ repo, nowMs, cfg, prList, readWorkerTrack
       next[key] = { ...base, firstSeenAt: entry.firstSeenAt }; // carry forward, refresh state
     } else if (decision.action === "notify") {
       next[key] = { ...base, firstSeenAt: entry.firstSeenAt, notifiedAt: new Date(nowMs).toISOString() };
-      emit(`phase.orphan-pr.detected.${pr.number}`, { repo, number: pr.number, url: pr.url, mergeStateStatus: pr.mergeStateStatus });
+      emit(`phase.orphan-pr.detected.${pr.number}`, {
+        repo, number: pr.number, url: pr.url, mergeStateStatus: pr.mergeStateStatus,
+        reason: decision.reason,
+      });
     } else if (decision.action === "skip" && decision.reason === "already_notified") {
       // Keep the entry alive so the inbox row persists across ticks.
       next[key] = { ...base, firstSeenAt: entry.firstSeenAt, notifiedAt: entry.notifiedAt };

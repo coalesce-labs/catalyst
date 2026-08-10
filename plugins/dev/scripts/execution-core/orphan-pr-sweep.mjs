@@ -31,8 +31,6 @@ export function isOrphanBlocked(mergeStateStatus) {
 // The timer owns all side-effects (stamping firstSeenAt, setting notifiedAt, emit).
 export function decideOrphanNotify({ mergeStateStatus, isDraft, entry, nowMs, stableSeconds = DEFAULTS.stableSeconds }) {
   if (!isOrphanBlocked(mergeStateStatus)) return { action: "skip", reason: "not_blocked" };
-  if (isDraft) return { action: "skip", reason: "draft" };
-
   if (!entry?.firstSeenAt) return { action: "stamp", reason: "first_sighting" };
   if (entry.notifiedAt) return { action: "skip", reason: "already_notified" };
 
@@ -40,5 +38,5 @@ export function decideOrphanNotify({ mergeStateStatus, isDraft, entry, nowMs, st
   if (Number.isNaN(seenMs)) return { action: "stamp", reason: "restamp_unparsable" };
   if (nowMs - seenMs < stableSeconds * 1000) return { action: "wait", reason: "stability_window" };
 
-  return { action: "notify", reason: "blocker_stable" };
+  return { action: "notify", reason: isDraft ? "draft_stable" : "blocker_stable" };
 }

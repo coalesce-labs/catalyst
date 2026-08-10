@@ -119,7 +119,7 @@ function emptyProbe() {
 // merge SHA when a PR resolves as MERGED — the empty-mergeCommitSha family fires on
 // PRs that actually merged but whose SHA monitor-merge failed to record.
 const PR_VIEW_FIELDS =
-  "number,state,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision,mergeCommit";
+  "number,state,isDraft,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision,mergeCommit";
 
 // Resolve the ticket's PR EXPLICITLY — never by the daemon's current branch.
 // classifyPrNotMerged runs inside the daemon process (daemon cwd), so a bare
@@ -293,6 +293,7 @@ export function defaultProbePrBlock(
   return {
     prNumber: view.number,
     state: view.state,
+    isDraft: view.isDraft === true,
     // CTL-1680: recovered merge SHA for a PR that resolved as MERGED; null for open PRs.
     mergeCommitSha: view.mergeCommit?.oid ?? null,
     mergeStateStatus: view.mergeStateStatus,

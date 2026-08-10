@@ -2522,6 +2522,41 @@ describe("classifyPrNotMerged (CTL-1496)", () => {
     expect(r.details.reason).not.toBe("Failure reason: pr_not_merged");
   });
 
+  test("draft PR → bounded-llm promotion fix", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 48,
+        isDraft: true,
+        mergeStateStatus: "DRAFT",
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.reason).toContain("DRAFT");
+    expect(r.details.brief).toContain("gh pr ready");
+  });
+
+  test("human CHANGES_REQUESTED takes precedence over draft promotion", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 49,
+        isDraft: true,
+        mergeStateStatus: "DRAFT",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: true,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.fix_class).toBe("human");
+  });
+
   test("no blockers / CLEAN → bounded-llm fix (finish the merge)", () => {
     const r = defaultClassifyTicket(mkEvidence(), {
       probePrBlock: probeReturning({
