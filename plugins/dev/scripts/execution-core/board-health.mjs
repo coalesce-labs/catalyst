@@ -214,6 +214,12 @@ export function isParkedByHuman(d) {
   const ls = labelsOf(d);
   return Array.isArray(ls) && ls.some((l) => labelName(l).toLowerCase() === PARKED_BY_HUMAN_LABEL);
 }
+export function isHumanEscalatedSignal(sig) {
+  if (!sig || typeof sig !== "object") return false;
+  if (!NEEDS_HUMAN_STATUSES.has(String(sig.status ?? "").toLowerCase())) return false;
+  const explanation = sig.explanation;
+  return !!explanation && typeof explanation === "object" && explanation.degraded !== true;
+}
 // CTL-1552: the ONE suppression predicate shared by proposeMoves,
 // eligibleDeferredAnchors, and buildBoardScanEvent's suppressed-set — so the
 // gate, the ranking, and the observability can never disagree (same discipline
@@ -224,8 +230,13 @@ export function isParkedByHuman(d) {
 function makeSuppressed(board) {
   const byId = board?.ticketsById;
   const get = typeof byId?.get === "function" ? (t) => byId.get(t) : () => undefined;
-  return (t) => isParkedByHuman(get(t));
+  const escalated = board?.humanEscalatedTickets instanceof Set
+    ? board.humanEscalatedTickets
+    : new Set();
+  return (t) => isParkedByHuman(get(t)) || escalated.has(t);
 }
+
+const anchorable = (move) => !!(move && move.ticket);
 // suppressedTickets — the flagged ids actually suppressed this scan (flagged ∩
 // suppressed). Feeds the recovery.board-scan event so an operator can see WHICH
 // tickets were held back, not just infer it by differencing flagged vs moves.
@@ -522,6 +533,9 @@ export function assembleBoardState({
   // inert/shadow-safe: !present is always false → nothing is excluded until the
   // daemon binds the real fs check. See selectAnchorCandidates.
   hasTriageArtifact = () => true,
+  // CAT-76: dedicated recovery-pass signal reader. The inert default preserves
+  // existing behavior until the daemon binds workers/<ticket>/phase-recovery-pass.json.
+  readEscalationSignal = () => null,
 } = {}) {
   const nowMs = now();
   const safe = (fn, fallback) => {
@@ -606,6 +620,16 @@ export function assembleBoardState({
   }
 
   const rosterArr = Array.isArray(roster) ? roster : [];
+  const humanEscalatedTickets = new Set();
+  const knownTickets = new Set([...ticketsById.keys(), ...signals.map((s) => s.ticket).filter(Boolean)]);
+  for (const ticket of knownTickets) {
+    const descriptor = ticketsById.get(ticket);
+    if (descriptor && isTerminalLinearState(descriptor)) continue;
+    let escalation = null;
+    try { escalation = readEscalationSignal(ticket); } catch { escalation = null; }
+    if (isHumanEscalatedSignal(escalation)) humanEscalatedTickets.add(ticket);
+  }
+
   return Object.freeze({
     ticketsById,
     signals,
@@ -663,6 +687,7 @@ export function assembleBoardState({
     // hasTriageArtifact seam this is always an empty Set (shadow-safe, inert until
     // the daemon binds the real fs check at the scheduler call site).
     triageLaunchFailureOnlyTickets,
+    humanEscalatedTickets,
   });
 }
 
@@ -1495,8 +1520,11 @@ export function decideBoardHealth(invariants, boardState) {
   // (not sanctioned, live + non-terminal) — a since-terminal / sanctioned defer must not
   // make the gate proceed (it would proceed then no-anchor). Same helper selectAnchorCandidates uses.
   const deferred = eligibleDeferredAnchors(boardState);
+  // CAT-76: ticket-less moves are telemetry notes. They cannot survive
+  // selectAnchorCandidates' ticketsOf filter and must not open the dispatch gate.
   const hasActionableWork =
-    moves.tier1.length > 0 || moves.tier2.length > 0 || deferred.length > 0;
+    moves.tier1.filter(anchorable).length > 0 ||
+    moves.tier2.filter(anchorable).length > 0 || deferred.length > 0;
 
   // Gate 1 — nothing actionable (all green, or every failure suppressed/escalate-only,
   // and no deferred work) → skip the holistic DISPATCH (no LLM thrash). CTL-1432 (Codex
@@ -1696,9 +1724,10 @@ export function selectAnchorCandidates(moves, board, { holistic = false, strande
   // A ticket with a completed triage artifact and a stuck post-triage phase is
   // NOT in this set and remains anchor-eligible. With the default board shape
   // (no hasTriageArtifact seam bound), the set is empty and this is a no-op.
-  const excluded = board?.triageLaunchFailureOnlyTickets instanceof Set
-    ? board.triageLaunchFailureOnlyTickets
-    : new Set();
+  const excluded = new Set([
+    ...(board?.triageLaunchFailureOnlyTickets instanceof Set ? board.triageLaunchFailureOnlyTickets : []),
+    ...(board?.humanEscalatedTickets instanceof Set ? board.humanEscalatedTickets : []),
+  ]);
   const out = [];
   const seen = new Set();
   const add = (t) => {
@@ -1997,6 +2026,7 @@ export function boardHealthPass({
   log = () => {},
   // CTL-1649: triage artifact presence seam (daemon-bound); default inert (→ empty exclusion set).
   hasTriageArtifact = undefined,
+  readEscalationSignal = undefined,
 } = {}) {
   if (mode === "off") return { ran: false, reason: "off" }; // strict no-op
   const nowMs = now();
@@ -2021,6 +2051,7 @@ export function boardHealthPass({
     productivityMode,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).
     ...(hasTriageArtifact !== undefined ? { hasTriageArtifact } : {}),
+    ...(readEscalationSignal !== undefined ? { readEscalationSignal } : {}),
   });
   const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);
@@ -2070,12 +2101,17 @@ export function boardHealthPass({
         const candidates = selectAnchorCandidates(dec.moves, board, { holistic: true, strandedOrDeadHosts });
         const anchor = candidates[0] ?? null;
         if (!anchor) {
-          log({ reason: "no-owned-anchor" }, "board-health: proceed but no actionable ticket anchor — no holistic dispatch this scan");
+          log({ reason: "no-owned-anchor", anchorCandidate: null, dispatchedCandidate: null }, "board-health: proceed but no actionable ticket anchor — no holistic dispatch this scan");
           actOutcome = { dispatched: false, anchor: null, skippedReason: "no-owned-anchor" };
         } else {
           const boardContext = buildBoardContext(board, invariants);
           actResult = act({ anchor, candidates, boardContext, decision: dec, board }) ?? null;
-          log({ anchor, candidates: candidates.length, dispatched: actResult?.dispatched ?? null }, "board-health: holistic recovery-pass delegate actuated");
+          log({
+            anchorCandidate: anchor,
+            dispatchedCandidate: actResult?.dispatched === true ? (actResult?.candidate ?? anchor) : null,
+            candidates: candidates.length,
+            dispatched: actResult?.dispatched ?? null,
+          }, "board-health: holistic recovery-pass delegate actuated");
           const dispatched = actResult?.dispatched === true;
           actOutcome = {
             dispatched,
@@ -2087,7 +2123,7 @@ export function boardHealthPass({
           };
         }
       } catch (err) {
-        log({ err: err.message }, "board-health: act failed (continuing)");
+        log({ err: err.message, anchorCandidate: null, dispatchedCandidate: null }, "board-health: act failed (continuing)");
         actOutcome = { dispatched: false, anchor: null, skippedReason: "act-error" };
       }
     }

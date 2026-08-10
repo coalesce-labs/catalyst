@@ -13,7 +13,7 @@
 // schedulerTick test from doing real board-health IO).
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { schedulerTick, holisticBoardHealthAct } from "./scheduler.mjs";
@@ -36,6 +36,10 @@ afterEach(() => {
 });
 
 describe("schedulerTick — board-health seam (CTL-1290 §9.4)", () => {
+  test("CAT-76 production binding reads the dedicated recovery-pass signal path", () => {
+    const source = readFileSync(join(import.meta.dir, "scheduler.mjs"), "utf8");
+    expect(source).toContain('join(orchDir, "workers", ticket, "phase-recovery-pass.json")');
+  });
   test("threads boardHealth → boardHealthPassFn called once with capacity + eligible", () => {
     const calls = [];
     schedulerTick(orchDir, {
@@ -190,6 +194,17 @@ describe("boardHealthPass — stranded route dispatch (CTL-1644 Phase 3)", () =>
     }));
     expect(actArgs.length).toBe(1);
     expect(actArgs[0].candidates).toContain("CTL-99");
+  });
+
+  test("CAT-76 actuation log separates intended and dispatched candidates", () => {
+    const records = [];
+    boardHealthPass(mkOpts("enforce", ({ candidates }) => ({ dispatched: true, candidate: candidates[1] }), {
+      getEligible: () => [{ identifier: "CTL-100" }],
+      log: (record, message) => records.push({ record, message }),
+    }));
+    const line = records.find((entry) => entry.message === "board-health: holistic recovery-pass delegate actuated");
+    expect(line.record.anchorCandidate).toBe("CTL-99");
+    expect(line.record.dispatchedCandidate).toBe("CTL-100");
   });
 
   test("enforce: boardContext.strandedMidPipeline carries classified route for the delegate", () => {
