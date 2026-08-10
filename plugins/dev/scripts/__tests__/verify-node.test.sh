@@ -199,6 +199,7 @@ HEALTHYDEV_OUT="$(
   _vn_read_replica_base()   { echo 'http://mini:7400'; }
   _vn_updater_ec()          { echo 0; }
   _vn_drained()             { echo no; }
+  _vn_cloud_sync_state()    { echo idle; }
   cmd_verify_node --json 2>/dev/null
 )"; HEALTHYDEV_EC=$?
 expect_eq "cmd: healthy developer exits zero" "0" "$HEALTHYDEV_EC"
@@ -206,6 +207,14 @@ expect_eq "cmd: healthy developer verdict=pass" "pass" "$(printf '%s' "$HEALTHYD
 expect_eq "cmd: healthy developer 0 required failures" "0" "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.required_failures')"
 expect_eq "cmd: healthy developer event-mirror-running PASS" "PASS" \
   "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.checks[] | select(.name=="event-mirror-running") | .status')"
+# CTL-1736: the replica-writer-local check is wired into the developer rubric, is
+# advisory (required=false so a legitimately idle laptop never flips the run), and
+# maps idle → PASS end-to-end (closes the wiring-line coverage gap left by the
+# pure-helper cases above).
+expect_eq "cmd: healthy developer replica-writer-local PASS" "PASS" \
+  "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.checks[] | select(.name=="replica-writer-local") | .status')"
+expect_eq "cmd: healthy developer replica-writer-local advisory" "false" \
+  "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.checks[] | select(.name=="replica-writer-local") | .required')"
 
 # CTL-1662: developer with event-mirror DEAD → FAIL (the doctor blind spot this closes).
 DEVNOMIRROR_OUT="$(
