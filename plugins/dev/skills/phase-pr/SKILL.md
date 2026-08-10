@@ -248,10 +248,18 @@ if [[ -n "$EXISTING_PR_NUMBER" ]]; then
     exit 1
   fi
   if [[ "$EXISTING_PR_IS_DRAFT" == "true" ]]; then
-    if type draft_pr_promote >/dev/null 2>&1; then
-      draft_pr_promote || gh pr ready "$EXISTING_PR_NUMBER" 2>/dev/null || true
+    PROMOTE_RC=0
+    if type draft_pr_promote_verify >/dev/null 2>&1; then
+      draft_pr_promote_verify || PROMOTE_RC=$?
     else
-      gh pr ready "$EXISTING_PR_NUMBER" 2>/dev/null || true
+      gh pr ready "$EXISTING_PR_NUMBER" 2>/dev/null || PROMOTE_RC=5
+    fi
+    if [[ "$PROMOTE_RC" -ne 0 ]]; then
+      echo "phase-pr: PR #${EXISTING_PR_NUMBER} still draft after promote (rc=${PROMOTE_RC})" >&2
+      "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+        --phase "$PHASE" --ticket "$TICKET" --status failed \
+        --reason "draft_promote_failed"
+      exit 1
     fi
   fi
   # Enrich the PR body now that the draft is ready (deferred from phase-implement to keep

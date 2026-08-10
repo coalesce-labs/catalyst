@@ -179,7 +179,7 @@ STUB
 # install_gh_stub_promote <bin_dir> <log_file> [is_draft]
 # gh pr view returns JSON; gh pr ready succeeds.
 install_gh_stub_promote() {
-  local bin_dir="$1" log_file="$2" is_draft="${3:-true}"
+  local bin_dir="$1" log_file="$2" is_draft="${3:-true}" draft_after="${4:-false}" ready_rc="${5:-0}"
   mkdir -p "$bin_dir"
   cat > "${bin_dir}/gh" <<STUB
 #!/usr/bin/env bash
@@ -192,6 +192,14 @@ JSON
   exit 0
 fi
 if [[ "\$1" == "pr" && "\$2" == "ready" ]]; then
+  exit ${ready_rc}
+fi
+if [[ "\$1" == "repo" && "\$2" == "view" ]]; then
+  echo "test/repo"
+  exit 0
+fi
+if [[ "\$1" == "api" ]]; then
+  echo "${draft_after}"
   exit 0
 fi
 exit 0
@@ -258,7 +266,7 @@ echo "Suite 0: library file exists + zsh-safe"
 assert_file "$DRAFT_PR_LIB" "lib/draft-pr.sh exists"
 if [[ -f "$DRAFT_PR_LIB" ]]; then
   # Zsh-safe: sourcing under zsh gives access to all four functions.
-  ZSH_CHECK="$(zsh -c "source '${DRAFT_PR_LIB}' && type draft_pr_push && type draft_pr_ensure && type draft_pr_promote && type draft_pr_enabled" 2>&1)"
+  ZSH_CHECK="$(zsh -c "source '${DRAFT_PR_LIB}' && type draft_pr_push && type draft_pr_ensure && type draft_pr_promote && type draft_pr_promote_verify && type draft_pr_enabled" 2>&1)"
   if echo "$ZSH_CHECK" | grep -qE 'not found|error|Error'; then
     fail "lib is zsh-safe (type all functions) — got: $ZSH_CHECK"
   else
@@ -573,6 +581,23 @@ if [[ "$P3C_EXIT" != "0" ]]; then pass "3c: no-PR returns non-zero"
 else fail "3c: no-PR should return non-zero"; fi
 if grep -q "caller_survived" "${SCRATCH}/p3c.exit" 2>/dev/null; then pass "3c: caller survives no-PR"
 else fail "3c: caller should survive"; fi
+
+# ─── Suite 3v: draft_pr_promote_verify ───────────────────────────────────────
+echo "3v: verified promotion"
+for spec in "a true false 0 0" "b false false 0 0" "c true true 0 5" "d true true 1 5"; do
+  set -- $spec
+  label="$1"; before="$2"; after="$3"; ready_rc="$4"; expected="$5"
+  bin="${SCRATCH}/p3v${label}-bin"; log="${SCRATCH}/p3v${label}.log"
+  install_gh_stub_promote "$bin" "$log" "$before" "$after" "$ready_rc"
+  (
+    cd "$WORK"; PATH="${bin}:${PATH}"; source "$DRAFT_PR_LIB"; set +e
+    draft_pr_promote_verify >/dev/null 2>/dev/null
+    echo "$?" > "${SCRATCH}/p3v${label}.exit"
+  ) || true
+  assert_eq "$expected" "$(cat "${SCRATCH}/p3v${label}.exit")" "3v-${label}: verified promote rc"
+done
+assert_eq "1" "$(grep -c '^ready$' "${SCRATCH}/p3va.log" || true)" "3v-a: promotes exactly once"
+assert_eq "0" "$(grep -c '^ready$' "${SCRATCH}/p3vb.log" || true)" "3v-b: already-ready is idempotent"
 
 # ─── Suite 4: draft_pr_enabled ────────────────────────────────────────────────
 echo ""

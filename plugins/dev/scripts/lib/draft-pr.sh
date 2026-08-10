@@ -13,6 +13,7 @@
 #                                   .github/workflows/ file (CTL-1119)
 #   draft_pr_ensure BASE TICKET   — ensure a draft PR exists; echoes NUM<TAB>URL<TAB>ISDRAFT
 #   draft_pr_promote              — promote current branch's PR from draft to ready
+#   draft_pr_promote_verify       — promote and prove REST .draft == false (rc=5 otherwise)
 #   draft_pr_enabled              — read .catalyst/config.json knob (default true)
 #
 # Reserved return codes:
@@ -22,6 +23,7 @@
 #   4 — draft_pr_push / draft_pr_push_verify: the pre-push safety gate refused the
 #       push (placeholder-identity commit or anomalous tree-wide deletion). Callers
 #       translate this into a push_safety_gate_blocked escalation.
+#   5 — draft_pr_promote_verify: PR is still draft or promotion cannot be verified.
 
 _draft_pr_warn() {
   printf 'draft-pr: %s\n' "$*" >&2
@@ -320,6 +322,27 @@ draft_pr_promote() {
   fi
   if [[ "$is_draft" == "true" ]]; then
     gh pr ready "$num" 2>/dev/null || { _draft_pr_warn "gh pr ready failed (continuing)"; return 1; }
+  fi
+  return 0
+}
+
+# draft_pr_promote_verify — promote AND PROVE the PR left draft. Fail-closed:
+# rc=0 only when a REST re-read confirms .draft=false; rc=5 means still draft
+# or unverifiable; rc=1 means no PR / gh unavailable.
+draft_pr_promote_verify() {
+  command -v gh >/dev/null 2>&1 || { _draft_pr_warn "gh unavailable"; return 1; }
+  local pr_json num repo draft_after
+  pr_json="$(gh pr view --json number,isDraft 2>/dev/null || true)"
+  [[ -z "$pr_json" ]] && { _draft_pr_warn "no PR found for current branch"; return 1; }
+  num="$(printf '%s' "$pr_json" | jq -r '.number // empty' 2>/dev/null || true)"
+  [[ -z "$num" ]] && { _draft_pr_warn "no PR found for current branch"; return 1; }
+  draft_pr_promote || _draft_pr_warn "promote attempt failed; verifying anyway"
+  repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+  [[ -z "$repo" ]] && { _draft_pr_warn "cannot resolve repo for verify"; return 5; }
+  draft_after="$(gh api "repos/${repo}/pulls/${num}" --jq '.draft' 2>/dev/null || true)"
+  if [[ "$draft_after" != "false" ]]; then
+    _draft_pr_warn "PR #${num} still draft after promote (rest=.draft=${draft_after:-<unreadable>})"
+    return 5
   fi
   return 0
 }
