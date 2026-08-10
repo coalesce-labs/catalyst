@@ -41,7 +41,19 @@ const DEFAULT_TTL_MS = Number(process.env.LINEAR_STATE_CACHE_TTL_MS) || 60_000;
 // invariant untouched.
 const DEFAULT_NEG_TTL_MS = Number(process.env.LINEAR_STATE_NEG_TTL_MS) || 5 * 60_000;
 
-export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS, negTtlMs = DEFAULT_NEG_TTL_MS } = {}) {
+// CAT-168: `relationsStore` is an OPTIONAL on-disk L2 behind relationsEntries
+// (see linear-relations-store.mjs) — a {get(id), set(id, desc, expiresAt),
+// invalidate(id)} facade. Omitted entirely by every existing caller/test, so
+// behavior is byte-identical to pre-CAT-168 unless a caller opts in (the
+// daemon does, in production). Never consulted by the string-state store —
+// only ticket state has a durable tier (the CAT-152 replica) already sitting
+// behind it; see CAT-168's ticket for why that store is explicitly excluded.
+export function createTicketStateCache({
+  now = Date.now,
+  ttlMs = DEFAULT_TTL_MS,
+  negTtlMs = DEFAULT_NEG_TTL_MS,
+  relationsStore,
+} = {}) {
   const entries = new Map(); // identifier -> { state, expiresAt }
   const relationsEntries = new Map(); // identifier -> { desc, expiresAt } (CTL-784)
   const negativeEntries = new Map(); // identifier -> expiresAt (CTL-1436 A4)
@@ -90,15 +102,27 @@ export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS,
   // fresh) so a cached descriptor never returns a stale state. Returns undefined
   // on a cold/expired miss so fetchTicketsBatch treats it as a fetch.
   function getRelations(identifier) {
-    const entry = relationsEntries.get(identifier);
-    if (entry && entry.expiresAt > now()) {
+    let entry = relationsEntries.get(identifier);
+    if (entry && entry.expiresAt <= now()) {
+      relationsEntries.delete(identifier); // expired — drop eagerly
+      entry = undefined;
+    }
+    // CAT-168: on a cold Map miss, consult the on-disk L2. A fresh hit
+    // hydrates the Map so a subsequent call this tick needs no store lookup.
+    if (!entry && relationsStore) {
+      const diskEntry = relationsStore.get(identifier);
+      if (diskEntry && diskEntry.expiresAt > now()) {
+        entry = diskEntry;
+        relationsEntries.set(identifier, diskEntry);
+      }
+    }
+    if (entry) {
       relHits += 1;
       const stateEntry = entries.get(identifier);
       const freshState =
         stateEntry && stateEntry.expiresAt > now() ? stateEntry.state : entry.desc.state;
       return { ...entry.desc, state: freshState };
     }
-    if (entry) relationsEntries.delete(identifier); // expired — drop eagerly
     relMisses += 1;
     return undefined;
   }
@@ -110,13 +134,16 @@ export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS,
   // wrote. A null descriptor is never cached (fail-safe, mirrors set()).
   function setRelations(identifier, desc) {
     if (desc == null) return;
-    relationsEntries.set(identifier, { desc, expiresAt: now() + ttlMs });
+    const expiresAt = now() + ttlMs;
+    relationsEntries.set(identifier, { desc, expiresAt });
+    if (relationsStore) relationsStore.set(identifier, desc, expiresAt); // CAT-168 write-through
     set(identifier, desc.state); // prime state (set() null-guards desc.state)
   }
 
   function invalidate(identifier) {
     entries.delete(identifier);
     relationsEntries.delete(identifier);
+    if (relationsStore) relationsStore.invalidate(identifier); // CAT-168
     negativeEntries.delete(identifier); // CTL-1436: clear backoff on explicit invalidation
   }
 

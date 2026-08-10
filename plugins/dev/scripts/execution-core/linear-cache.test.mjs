@@ -218,3 +218,102 @@ describe("createTicketStateCache — relations store (CTL-784)", () => {
     expect(c.isNegativelyCached("CTL-1")).toBe(true);
   });
 });
+
+// CAT-168 — an optional on-disk L2 behind the relations Map, so a fresh entry
+// survives a daemon restart. A lightweight fake stands in for the real
+// linear-relations-store.mjs SQLite store (which has its own dedicated test
+// file covering real disk behavior) — this suite only proves linear-cache.mjs
+// calls the injected store correctly.
+describe("createTicketStateCache — on-disk relations store (CAT-168)", () => {
+  const desc = (state, extra = {}) => ({
+    state,
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+    priority: 2,
+    labels: [],
+    ...extra,
+  });
+
+  function fakeStore() {
+    const rows = new Map();
+    return {
+      rows,
+      get(identifier) {
+        return rows.get(identifier);
+      },
+      set(identifier, d, expiresAt) {
+        rows.set(identifier, { desc: d, expiresAt });
+      },
+      invalidate(identifier) {
+        rows.delete(identifier);
+      },
+    };
+  }
+
+  it("getRelations hydrates from the on-disk store on a cold Map miss", () => {
+    const store = fakeStore();
+    store.rows.set("CTL-1", { desc: desc("Triage", { priority: 4 }), expiresAt: 60_000 });
+    const c = createTicketStateCache({ now: () => 0, relationsStore: store });
+    const got = c.getRelations("CTL-1");
+    expect(got.state).toBe("Triage");
+    expect(got.priority).toBe(4);
+  });
+
+  it("does not hydrate an on-disk entry past its expiresAt", () => {
+    const store = fakeStore();
+    store.rows.set("CTL-1", { desc: desc("Triage"), expiresAt: 1000 });
+    const c = createTicketStateCache({ now: () => 1000, relationsStore: store });
+    expect(c.getRelations("CTL-1")).toBeUndefined();
+  });
+
+  it("setRelations writes through to the on-disk store with the same TTL as the Map entry", () => {
+    const store = fakeStore();
+    let t = 1000;
+    const c = createTicketStateCache({ now: () => t, ttlMs: 60_000, relationsStore: store });
+    c.setRelations("CTL-1", desc("Done"));
+    const row = store.rows.get("CTL-1");
+    expect(row.desc.state).toBe("Done");
+    expect(row.expiresAt).toBe(1000 + 60_000);
+  });
+
+  it("invalidate calls through to the on-disk store", () => {
+    const store = fakeStore();
+    const c = createTicketStateCache({ now: () => 0, relationsStore: store });
+    c.setRelations("CTL-1", desc("Done"));
+    c.invalidate("CTL-1");
+    expect(store.rows.has("CTL-1")).toBe(false);
+  });
+
+  it("a hydrated entry overlays the freshest state from the state cache, same as an in-memory hit", () => {
+    const store = fakeStore();
+    store.rows.set("CTL-1", { desc: desc("Triage"), expiresAt: 60_000 });
+    const c = createTicketStateCache({ now: () => 0, relationsStore: store });
+    c.set("CTL-1", "In Progress"); // monitor write-through
+    const got = c.getRelations("CTL-1");
+    expect(got.state).toBe("In Progress");
+  });
+
+  it("a hydrated entry populates the in-memory Map so a second call needs no store lookup", () => {
+    const store = fakeStore();
+    store.rows.set("CTL-1", { desc: desc("Triage"), expiresAt: 60_000 });
+    let getCalls = 0;
+    const countingStore = {
+      get(id) {
+        getCalls += 1;
+        return store.get(id);
+      },
+      set: store.set,
+      invalidate: store.invalidate,
+    };
+    const c = createTicketStateCache({ now: () => 0, relationsStore: countingStore });
+    c.getRelations("CTL-1");
+    c.getRelations("CTL-1");
+    expect(getCalls).toBe(1); // second call served from the now-hydrated Map
+  });
+
+  it("omitting relationsStore preserves pure in-memory behavior (no throw, cold miss)", () => {
+    const c = createTicketStateCache({ now: () => 0 });
+    expect(() => c.getRelations("CTL-1")).not.toThrow();
+    expect(c.getRelations("CTL-1")).toBeUndefined();
+  });
+});
