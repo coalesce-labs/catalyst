@@ -157,7 +157,9 @@ jobs:
     # ever running. Running whenever detect-changes did NOT succeed (result != 'success') treats
     # an errored/cancelled detector as "assume relevant" and runs the suite; `!cancelled()` still
     # keeps this job from running if the *workflow run itself* was cancelled.
-    if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.relevant == 'true') }}
+    if:
+      ${{ !cancelled() && (needs.detect-changes.result != 'success' ||
+      needs.detect-changes.outputs.relevant == 'true') }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -272,6 +274,14 @@ jobs:
         # zsh install lands hundreds of lines later — so without this step the required
         # check could pass without ever exercising the shell that caused the regression.
         run: command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zsh)
+
+      - name: cloud-sync token probe test
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/cloud-sync-token-probe.test.sh
+
+      - name: catalyst-stack cloud-sync verifier test
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-verify-cloud-sync.test.sh
 
       - name: linear-read-replica helper test (CTL-1397 + CTL-1403 + CAT-35)
         # CTL-1403: the bash linear_read_ticket helper is the canonical agent read
@@ -510,7 +520,9 @@ jobs:
         # without this step the required check could pass without ever exercising
         # the zsh path. Installed explicitly rather than assumed present on the
         # runner image so the regression coverage doesn't silently degrade to a skip.
-        run: command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zsh)
+        run:
+          command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y
+          --no-install-recommends zsh)
 
       - name: phase-artifact-gate contract + zsh regression test
         # Covers match_thoughts_artifact (tail/slug/case forms, cross-ticket
@@ -589,8 +601,12 @@ jobs:
             autotune-writeback.test.mjs \
             board-health.test.mjs \
             board-health-seam.test.mjs \
+            dispatch-readiness.test.mjs \
             stall-janitor-throttle.test.mjs \
+            clear-stall-empty-dir.test.mjs \
+            empty-worker-dir-grace-config.test.mjs \
             phantom-worker-dir.test.mjs \
+            worker-dir-gc.test.mjs \
             in-flight-supersede.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
@@ -677,6 +693,7 @@ jobs:
             registry.test.mjs \
             replica-read.test.mjs \
             scan.test.mjs \
+            scheduler-created-at.test.mjs \
             scheduler-perproject.test.mjs \
             scheduler-rank.test.mjs \
             scheduler-replica-freshness.test.mjs \
@@ -704,12 +721,16 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            recovery-fix-backoff.test.mjs \
+            recovery-orphan-stale-e2e.test.mjs \
             pr-block-probe.test.mjs \
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
+            unstuck-orphan-merge.test.mjs \
+            orphan-sweep-explain.test.mjs \
             unstuck-escalate-seam.test.mjs \
             unstuck-sweep.test.mjs \
             lib/catalyst-resource.test.mjs \
@@ -730,4 +751,6 @@ jobs:
             github-token-candidates-legacy-parity.test.mjs \
             github-quota.test.mjs \
             github-quota-timer.test.mjs \
-            cluster-sync.test.mjs
+            cluster-sync.test.mjs \
+            reconstruct-ticket-state.test.mjs \
+            hosts-json-retired.test.mjs

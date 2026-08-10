@@ -49,7 +49,25 @@ import {
 } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { defaultProbePrBlock } from "./pr-block-probe.mjs";
+// Static (not requireSync) on purpose. Bun rejects `require()` of a module whose
+// ESM graph is async — but ONLY on a COLD cache: once anything has imported this
+// module, the same requireSync succeeds. That made the empty-registry fallback
+// below silently order-dependent — it worked under the tests (whose own import
+// graph warms the module) and returned `registry build failed: require() async
+// module ... is unsupported` in a production process that reached the fallback
+// first. There is no import cycle to break here (unstuck-act-seams.mjs and its
+// dep closure do not import this module), so a plain static import is both safe
+// and deterministic.
+import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
 import { captureEvidence } from "./diagnostician.mjs";
+import {
+  clearFixFailures,
+  commitFixCommentHash,
+  fixCommentHash,
+  inFixBackoff,
+  recordFixFailure,
+  shouldPostFixComment,
+} from "./recovery-fix-backoff.mjs";
 
 // Wrap defaultLog to ensure it's a function (config.mjs may export an object)
 const defaultLogFn = typeof defaultLog === "function" ? defaultLog : (msg) => {
@@ -113,6 +131,14 @@ export function reasoningRecoveryPass(items, opts = {}) {
     // "deferred" outcome — no action, no cooldown burn — so the next tick picks
     // them up. Prevents a 19-item storm in one sweep. Default 3, env-overridable.
     maxFixesPerTick = Number(process.env.CATALYST_RECOVERY_MAX_FIXES_PER_TICK) || 3,
+    inFixBackoffFn = inFixBackoff,
+    recordFixFailureFn = recordFixFailure,
+    clearFixFailuresFn = clearFixFailures,
+    fixCommentHashFn = fixCommentHash,
+    shouldPostFixCommentFn = shouldPostFixComment,
+    commitFixCommentHashFn = commitFixCommentHash,
+    nowMs = () => Date.now(),
+    orchDir = process.env.CATALYST_ORCHESTRATOR_DIR ?? null,
   } = opts;
 
   // CTL-1176 rung 3: resolve the effective bounded-LLM dispatcher. Precedence:
@@ -350,6 +376,21 @@ export function reasoningRecoveryPass(items, opts = {}) {
     } else if (mode === "enforce") {
       // Enforce mode: actually invoke seams / remediate, record intent
       if (decision === "fix") {
+        const backoff = inFixBackoffFn(orchDir, item.ticket, fix_class, nowMs());
+        if (backoff.blocked) {
+          actionLog.push(`fix backoff: ${fix_class} blocked (${backoff.count} identical failures)`);
+          emitEvent({
+            type: "recovery.fix-backoff",
+            ticket: item.ticket,
+            fix_class,
+            count: backoff.count,
+            until: backoff.until,
+            reason: backoff.lastReason,
+          });
+          tickStats.actions.fixBackoff = (tickStats.actions.fixBackoff ?? 0) + 1;
+          results.push({ ticket: item.ticket, decision: "deferred", fix_class, actionLog, mode });
+          continue;
+        }
         // CTL-1176: per-tick fix cap. Once maxFixesPerTick FIX-actions have been
         // taken this invocation, defer the rest — no action, no cooldown burn —
         // so the next scheduler tick processes them. Bounds a one-sweep storm.
@@ -383,6 +424,19 @@ export function reasoningRecoveryPass(items, opts = {}) {
         actionLog = fixOutcome.actionLog;
         outcome = { ...fixOutcome, decision, fix_class };
 
+        if (fixOutcome.success) {
+          clearFixFailuresFn(orchDir, item.ticket, fix_class);
+        } else {
+          recordFixFailureFn(
+            orchDir,
+            item.ticket,
+            fix_class,
+            fixOutcome.reason,
+            nowMs(),
+            { log },
+          );
+        }
+
         // Record intent
         try {
           recordIntent(item.ticket, {
@@ -399,11 +453,17 @@ export function reasoningRecoveryPass(items, opts = {}) {
 
         // Post audit comment
         const fixComment = formatFixComment(item.ticket, fixOutcome, classification);
-        try {
-          postComment(item.ticket, fixComment, { mode: "enforce" });
-          actionLog.push("posted fix audit comment");
-        } catch (err) {
-          log(`recovery-reasoning: ${item.ticket} comment post failed: ${err.message}`);
+        const commentHash = fixCommentHashFn(fixComment);
+        if (shouldPostFixCommentFn(orchDir, item.ticket, fix_class, commentHash, nowMs())) {
+          try {
+            postComment(item.ticket, fixComment, { mode: "enforce" });
+            commitFixCommentHashFn(orchDir, item.ticket, fix_class, commentHash, nowMs());
+            actionLog.push("posted fix audit comment");
+          } catch (err) {
+            log(`recovery-reasoning: ${item.ticket} comment post failed: ${err.message}`);
+          }
+        } else {
+          actionLog.push("suppressed duplicate fix audit comment");
         }
 
         // Emit result event
@@ -1114,10 +1174,18 @@ function attemptFix(item, classification, { invokeSeam, invokeRecoveryPass, evid
   } else {
     // Invoke seam (for deterministic cases)
     try {
-      const seamResult = invokeSeam(ticket, details.seam_id, {
-        reason: details.reason,
-        fix_class,
-      });
+      const seamResult = invokeSeam(
+        ticket,
+        details.seam_id,
+        { reason: details.reason, fix_class },
+        {
+          candidate: {
+            ticket,
+            phase: item.phase ?? null,
+            signal: evidence?.signal ?? item.evidence?.signal ?? null,
+          },
+        },
+      );
 
       const seamStatus = seamResult.success ? "success" : "failed";
       actionLog.push(`seam ${details.seam_id} invoked: ${seamStatus}`);
@@ -1628,16 +1696,21 @@ export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
     return { success: false, reason: `no registry seam for ${seamId}`, details: {} };
   }
 
-  // Build the CTL-1219 frozen registry. unstuck-act-seams.mjs has NO transitive
-  // import of scheduler/recovery-reasoning (verified), so a static import is safe
-  // — no cycle. Production deps (clearStall, resolvePrState, jobLifecycle) fall
-  // back to the module's real defaults; the scheduler can inject richer deps via
-  // deps.actByCategory (a pre-built registry) when it already has them in scope.
+  // Select by capability: partial/empty registries fall back to a registry built
+  // with the production dependency bundle. resolvePrState/jobLifecycle defaults
+  // are deliberately inert, so callers with live evidence must inject them.
   let registry = deps.actByCategory;
-  if (!registry) {
+  if (!registry || typeof registry[category] !== "function") {
     try {
-      const { buildUnstuckActSeams } = requireSync("./unstuck-act-seams.mjs");
-      registry = buildUnstuckActSeams({ orchDir: deps.orchDir ?? resolveOrchDir() });
+      registry = buildUnstuckActSeams({
+        orchDir: deps.orchDir ?? resolveOrchDir(),
+        ...(deps.resolvePrState ? { resolvePrState: deps.resolvePrState } : {}),
+        ...(deps.jobLifecycle ? { jobLifecycle: deps.jobLifecycle } : {}),
+        ...(deps.clearStall ? { clearStall: deps.clearStall } : {}),
+        ...(deps.writeStatus ? { writeStatus: deps.writeStatus } : {}),
+        ...(deps.emitPhaseComplete ? { emitPhaseComplete: deps.emitPhaseComplete } : {}),
+        ...(deps.nowMs ? { nowMs: deps.nowMs } : {}),
+      });
     } catch (err) {
       return {
         success: false,

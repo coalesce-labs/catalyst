@@ -679,6 +679,7 @@ export function runPrelaunch(
     "--orch-id", ticket,
     "--launch-mode", "prelaunch-only",
   ];
+  if (worktreePath) args.push("--worktree", worktreePath);
   if (resumeSession) args.push("--resume-session", resumeSession);
   if (attempt != null) args.push("--attempt", String(attempt));
   const extraEnv = {};
