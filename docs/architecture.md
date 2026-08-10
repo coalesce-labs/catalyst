@@ -314,12 +314,18 @@ via `orchestrate-phase-advance`, and dispatches the next `--bg` job. Dispatcher:
 `plugins/dev/scripts/phase-agent-dispatch` (CTL-448). `oneshot-legacy` (single long-lived
 job/ticket) is the runtime fallback when the key is missing.
 
-### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707)
+### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707 + CAT-31)
 
 On a **fresh** dispatch of a **build** phase (`research`,`plan`,`implement`,`verify`,`review`),
 `phase-agent-dispatch` rebases the ticket's worktree onto current `origin/<base>` before launching
 the worker, so divergence surfaces early instead of riding stale to `monitor-merge` (CTL-608).
 CTL-707 replaced the binary CTL-667 rebase with a 4-layer strategy:
+
+Before config resolution, signal creation, rebase, and worker launch, the dispatcher resolves the
+ticket worktree through an explicit flag, the project registry, the current repository, then a
+backwards-compatible cwd fallback. It changes into that resolved tree, making dispatch safe from
+any caller cwd; the JS caller's `cwd` remains a belt-and-braces reinforcement. This also prevents
+L3 destroy-and-recreate from selecting a bystander worktree.
 
 - **L1 — Periodic background refresh** (`execution-core/worktree-refresh-timer.mjs`): keeps idle
   running worktrees current. Config
@@ -338,12 +344,14 @@ CTL-707 replaced the binary CTL-667 rebase with a 4-layer strategy:
 | `phase.<phase>.auto-rebased.<ticket>`                | INFO     | L1 + L2 (clean/additive) |
 | `phase.<phase>.rebase-conflict-categorized.<ticket>` | WARN     | L2 (pre-stall)           |
 | `phase.<phase>.rebase-conflict-stalled.<ticket>`     | ERROR    | L2 (terminal)            |
+| `phase.<phase>.dispatch-cwd-corrected.<ticket>`      | WARN     | CAT-31 resolver           |
 
 Loki:
 `{job="catalyst-events"} | json | attributes["event.name"] =~ "phase\\..*\\.auto-rebased\\..*"`
 (swap suffix per event).
 
-Invariants (unchanged from CTL-667): **fresh-only** (resume `--resume-session` skips, CTL-658);
+Invariants (unchanged from CTL-667): **cwd-independent** (the target is resolved, not inherited);
+**fresh-only** (resume `--resume-session` skips, CTL-658);
 **build-phase-only** (`is_rebase_phase` in `lib/phase-sequence.sh`;
 `triage`/`pr`/`remediate`/`monitor-*`/`teardown` exempt); **local-only** (never pushes/touches the
 PR; `.catalyst/config.json`,`.trunk/*` stashed across rebase); transient `git fetch` failure (rc=1)

@@ -270,6 +270,8 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
       "/ec",
       "--orch-id",
       "CTL-1",
+      "--worktree",
+      "/wt/CTL-1",
     ]);
   });
 
@@ -1040,6 +1042,8 @@ describe("defaultRunPhaseAgent — attempt arg (CTL-761)", () => {
       "/ec",
       "--orch-id",
       "CTL-1",
+      "--worktree",
+      "/wt/CTL-1",
     ]);
   });
 });
