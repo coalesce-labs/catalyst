@@ -346,7 +346,7 @@ function orphanFixture({ mode = "shadow", killAlive, agentsOk = true, extra = {}
     killProc,
     sleep: async () => {},
     now: () => 0,
-    selfPid: 1,
+    selfPid: 1, parentPid: 5000001,
     daemonPids: [],
     emit,
     log: silentLog(),
@@ -482,7 +482,7 @@ describe("ProcReaper.sweep — allowlist + live-tree sparing", () => {
       killProc,
       sleep: async () => {},
       now: () => 0,
-      selfPid: 14,
+      selfPid: 14, parentPid: 5000001,
       daemonPids: [],
       emit,
       log: silentLog(),
@@ -512,7 +512,7 @@ describe("ProcReaper.sweep — allowlist + live-tree sparing", () => {
       killProc,
       sleep: async () => {},
       now: () => 0,
-      selfPid: 1,
+      selfPid: 1, parentPid: 5000001,
       daemonPids: [],
       emit,
       log: silentLog(),
@@ -545,7 +545,7 @@ describe("ProcReaper.sweep — allowlist + live-tree sparing", () => {
       killProc,
       sleep: async () => {},
       now: () => 0,
-      selfPid: 1,
+      selfPid: 1, parentPid: 5000001,
       daemonPids: [],
       emit,
       log: silentLog(),
@@ -576,7 +576,7 @@ describe("ProcReaper.sweep — allowlist + live-tree sparing", () => {
       killProc,
       sleep: async () => {},
       now: () => 0,
-      selfPid: 1,
+      selfPid: 1, parentPid: 5000001,
       daemonPids: [],
       emit,
       log: silentLog(),
@@ -612,7 +612,7 @@ describe("ProcReaper.sweep — allowlist + live-tree sparing", () => {
       killProc,
       sleep: async () => {},
       now: () => 0,
-      selfPid: 1,
+      selfPid: 1, parentPid: 5000001,
       daemonPids: [],
       emit,
       log: silentLog(),
@@ -641,7 +641,7 @@ describe("ProcReaper.sweep — allowlist + live-tree sparing", () => {
       killProc,
       sleep: async () => {},
       now: () => 0,
-      selfPid: 1,
+      selfPid: 1, parentPid: 5000001,
       daemonPids: [],
       emit,
       log: silentLog(),
@@ -700,7 +700,7 @@ describe("ProcReaper.sweep — degrade-safe + CATASTROPHE GUARD", () => {
       killProc,
       sleep: async () => {},
       now: () => 0,
-      selfPid: 1,
+      selfPid: 1, parentPid: 5000001,
       emit: recordingEmit(),
       log: silentLog(),
     });
@@ -714,7 +714,7 @@ describe("ProcReaper.sweep — async psLister / lsofCwd seams", () => {
   it("awaits an async psLister snapshot (shadow mode would-reap path)", async () => {
     const liveAgents = { ok: true, agents: [] };
     const psLines = [
-      "1001 1 900000 20:00 node /Users/ryanrozich/catalyst/wt/CTL-999/x.mjs",
+      "5001001 1 900000 20:00 node /Users/ryanrozich/catalyst/wt/CTL-999/x.mjs",
     ];
     const reaper = new ProcReaper({
       mode: "shadow",
@@ -728,7 +728,7 @@ describe("ProcReaper.sweep — async psLister / lsofCwd seams", () => {
     });
     await reaper.sweep();
     const report = await reaper.sweep();
-    expect(report.wouldReap.map((r) => r.pid)).toContain(1001);
+    expect(report.wouldReap.map((r) => r.pid)).toContain(5001001);
   });
 
   it("spares when async lsofCwd rejects (cwd-unknown → degrade safe)", async () => {
@@ -737,7 +737,7 @@ describe("ProcReaper.sweep — async psLister / lsofCwd seams", () => {
       worktreeRoot: "/Users/ryanrozich/catalyst/wt",
       minEtimeSec: 0,
       agentsResult: () => ({ ok: true, agents: [] }),
-      psLister: async () => ["1001 1 900000 20:00 node /x/y.mjs"],
+      psLister: async () => ["5001001 1 900000 20:00 node /x/y.mjs"],
       lsofCwd: async () => { throw new Error("lsof failed"); },
       killProc: () => { throw new Error("must not kill"); },
       emit: async () => true,
@@ -768,7 +768,7 @@ describe("ProcReaper.sweep — targeted teardown sweep", () => {
       killProc,
       sleep: async () => {},
       now: () => 0,
-      selfPid: 1,
+      selfPid: 1, parentPid: 5000001,
       emit,
       log: silentLog(),
     });
@@ -2939,52 +2939,52 @@ async function runJsScenario(name) {
 
   switch (name) {
     case "control/baseline":
-      rows = [row(2001)];
-      cwds[2001] = P_GONE;
+      rows = [row(5002001)];
+      cwds[5002001] = P_GONE;
       break;
     case "allowlist":
       rows = [
-        row(2001, { cmd: "/bin/bash /Users/x/plugin-source/plugins/dev/scripts/orphan-sweep.sh" }),
-        row(2002, {
+        row(5002001, { cmd: "/bin/bash /Users/x/plugin-source/plugins/dev/scripts/orphan-sweep.sh" }),
+        row(5002002, {
           cmd: "/bin/bash /Users/x/plugin-source/plugins/dev/scripts/catalyst-stack start",
         }),
       ];
-      cwds[2001] = P_GONE;
-      cwds[2002] = P_GONE;
+      cwds[5002001] = P_GONE;
+      cwds[5002002] = P_GONE;
       break;
     case "denylist":
-      rows = [row(2001, { cmd: "tmux: server (/private/tmp/tmux-501/default)" })];
-      cwds[2001] = P_GONE;
+      rows = [row(5002001, { cmd: "tmux: server (/private/tmp/tmux-501/default)" })];
+      cwds[5002001] = P_GONE;
       break;
     case "age-floor":
-      rows = [row(2001, { etime: "00:30" })];
-      cwds[2001] = P_GONE;
+      rows = [row(5002001, { etime: "00:30" })];
+      cwds[5002001] = P_GONE;
       break;
     case "root-absent-bail":
-      rows = [row(2001), row(2002), row(2003), row(2004), row(2005)];
-      for (const p of [2001, 2002, 2003, 2004, 2005]) cwds[p] = P_GONE;
+      rows = [row(5002001), row(5002002), row(5002003), row(5002004), row(5002005)];
+      for (const p of [5002001, 5002002, 5002003, 5002004, 5002005]) cwds[p] = P_GONE;
       rootExistsFn = () => false; // the ROOT itself is gone
       break;
     case "per-run-cap":
-      rows = [row(2001), row(2002), row(2003), row(2004), row(2005)];
-      for (const p of [2001, 2002, 2003, 2004, 2005]) cwds[p] = P_GONE;
+      rows = [row(5002001), row(5002002), row(5002003), row(5002004), row(5002005)];
+      for (const p of [5002001, 5002002, 5002003, 5002004, 5002005]) cwds[p] = P_GONE;
       cfg.widenMaxKills = 2;
       break;
     case "signal-bound-odd":
-      rows = [row(2001), row(2002), row(2003), row(2004)];
-      for (const p of [2001, 2002, 2003, 2004]) cwds[p] = P_GONE;
+      rows = [row(5002001), row(5002002), row(5002003), row(5002004)];
+      for (const p of [5002001, 5002002, 5002003, 5002004]) cwds[p] = P_GONE;
       cfg.widenMaxKills = 2;
-      alive.add(2002).add(2003).add(2004); // 2001 exits under SIGTERM → ODD parity
+      alive.add(5002002).add(5002003).add(5002004); // 5002001 exits under SIGTERM → ODD parity
       break;
     case "tri-state-cwd-probe":
-      rows = [row(2001)];
-      cwds[2001] = `${P_WT}/unreadable-tree`;
+      rows = [row(5002001)];
+      cwds[5002001] = `${P_WT}/unreadable-tree`;
       cwdExistsFn = () => null; // EIO/ESTALE — the probe cannot ANSWER
       break;
     case "pre-signal-revalidation": {
-      rows = [row(2001)];
-      cwds[2001] = P_GONE;
-      const recycled = [row(2001, { cmd: "sh -c a-completely-different-process" })];
+      rows = [row(5002001)];
+      cwds[5002001] = P_GONE;
+      const recycled = [row(5002001, { cmd: "sh -c a-completely-different-process" })];
       // ps read #1 = sweep 1's snapshot, #2 = sweep 2's snapshot, #3 = the
       // pre-signal revalidation. The scenario asserts the spare REASON below, so
       // if that call sequence ever changes the test fails loudly rather than
@@ -2993,22 +2993,22 @@ async function runJsScenario(name) {
       break;
     }
     case "confirmed-exit":
-      rows = [row(2001)];
-      cwds[2001] = P_GONE;
-      alive.add(2001); // ignores SIGTERM *and* SIGKILL
+      rows = [row(5002001)];
+      cwds[5002001] = P_GONE;
+      alive.add(5002001); // ignores SIGTERM *and* SIGKILL
       break;
     case "probe-deadline":
-      rows = [row(2001)];
-      cwds[2001] = P_GONE;
+      rows = [row(5002001)];
+      cwds[5002001] = P_GONE;
       useRealLsof = true; // a genuinely HUNG `lsof` on $PATH, bounded by the deadline
       break;
     case "argv-redaction":
-      rows = [row(2001, { cmd: `sh -c curl -H Authorization: Bearer ${P_SECRET} https://x/y` })];
-      cwds[2001] = P_GONE;
+      rows = [row(5002001, { cmd: `sh -c curl -H Authorization: Bearer ${P_SECRET} https://x/y` })];
+      cwds[5002001] = P_GONE;
       break;
     case "shadow-default":
-      rows = [row(2001)];
-      cwds[2001] = P_GONE;
+      rows = [row(5002001)];
+      cwds[5002001] = P_GONE;
       break;
     default:
       throw new Error(`unknown JS parity scenario: ${name}`);
@@ -3095,9 +3095,9 @@ async function runJsScenario(name) {
  */
 const BEHAVIOURAL_SCENARIOS = Object.freeze({
   "control/baseline": {
-    outcome: { signalled: [2001], signals: 1, reclaimed: [2001] },
+    outcome: { signalled: [5002001], signals: 1, reclaimed: [5002001] },
     jsProof: { log: "reaped WIDENED orphan" },
-    shProof: { log: "killed 2001" },
+    shProof: { log: "killed 5002001" },
   },
   allowlist: {
     outcome: { signalled: [], signals: 0, reclaimed: [] },
@@ -3123,14 +3123,14 @@ const BEHAVIOURAL_SCENARIOS = Object.freeze({
     shProof: { log: "is absent — skipping" },
   },
   "per-run-cap": {
-    outcome: { signalled: [2001, 2002], signals: 2, reclaimed: [2001, 2002] },
+    outcome: { signalled: [5002001, 5002002], signals: 2, reclaimed: [5002001, 5002002] },
     jsProof: { log: "widened cap reached (2)" },
     shProof: { log: "cap reached (2), 3 deferred" },
   },
   "signal-bound-odd": {
-    // cap 2 ⇒ ceiling 4 DELIVERED signals. 1 (2001 exits under SIGTERM) + 2
-    // (2002 ignores both) = 3; admitting 2003 would deliver 5 = cap*2 + 1.
-    outcome: { signalled: [2001, 2002], signals: 3, reclaimed: [2001] },
+    // cap 2 ⇒ ceiling 4 DELIVERED signals. 1 (5002001 exits under SIGTERM) + 2
+    // (5002002 ignores both) = 3; admitting 5002003 would deliver 5 = cap*2 + 1.
+    outcome: { signalled: [5002001, 5002002], signals: 3, reclaimed: [5002001] },
     jsProof: { log: "widened signal bound reached (4)" },
     shProof: { log: "signal bound reached (4)" },
   },
@@ -3147,7 +3147,7 @@ const BEHAVIOURAL_SCENARIOS = Object.freeze({
   "confirmed-exit": {
     // Two signals DELIVERED, ZERO reclamations: `kill` returning success is not
     // an exit, and an unconfirmed exit must never be reported as one.
-    outcome: { signalled: [2001], signals: 2, reclaimed: [] },
+    outcome: { signalled: [5002001], signals: 2, reclaimed: [] },
     jsProof: { log: "exit NOT confirmed after SIGKILL" },
     shProof: { log: "STILL alive after SIGKILL" },
   },
@@ -3157,14 +3157,14 @@ const BEHAVIOURAL_SCENARIOS = Object.freeze({
     shProof: null, // the timed-out probe spares silently; baseline is the control
   },
   "argv-redaction": {
-    outcome: { signalled: [2001], signals: 1, reclaimed: [2001] },
+    outcome: { signalled: [5002001], signals: 1, reclaimed: [5002001] },
     jsProof: { log: "reaped WIDENED orphan" },
-    shProof: { log: "killed 2001" },
+    shProof: { log: "killed 5002001" },
   },
   "shadow-default": {
     outcome: { signalled: [], signals: 0, reclaimed: [] },
     jsProof: { log: "WOULD reap WIDENED orphan" },
-    shProof: { log: "[shadow] would kill 2001" },
+    shProof: { log: "[shadow] would kill 5002001" },
   },
 });
 
@@ -3257,8 +3257,8 @@ describe("CTL-1531 — BEHAVIOURAL parity (both implementations, same scenario)"
       const sh = runShellScenario("argv-redaction");
       const js = await runJsScenario("argv-redaction");
       // Both DID act on the candidate (otherwise there is nothing to redact).
-      expect(sh.reclaimed).toEqual([2001]);
-      expect(js.reclaimed).toEqual([2001]);
+      expect(sh.reclaimed).toEqual([5002001]);
+      expect(js.reclaimed).toEqual([5002001]);
       // …and neither the persisted sweep log nor the daemon log/event payloads
       // carry the secret that was sitting in argv.
       expect(sh.log).not.toContain(P_SECRET);
