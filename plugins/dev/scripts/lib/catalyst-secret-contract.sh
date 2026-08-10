@@ -26,49 +26,49 @@ _CATALYST_SECRET_CONTRACT_SH_LOADED=1
 # parity test's row-id-set-equality assertion fails loudly if the two drift.
 _CSC_IDS=(
   "github-token" "webhook-secret" "linear-webhook-secret" "claude-accounts.env"
-  "execution-core.env" "linear-api-token" "linear-orchestrator-actor" "linear-worker-actor"
-  "groq-api-key" "cloud-token" "age-key"
+  "execution-core.env" "linear-api-token" "linear-orchestrator-actor" "linear-linearis-actor"
+  "linear-worker-actor" "groq-api-key" "cloud-token" "age-key"
 )
 _CSC_DELIVERY=(
   "bare-file" "bare-file" "bare-file-family" "env-file" "env-file" "env-alias" "config-json"
-  "config-json" "config-json" "platform-env" "local-only"
+  "config-json" "config-json" "config-json" "platform-env" "local-only"
 )
 # Space-joined env-name lists (env var names never contain spaces, so this is a safe
 # poor-man's array-in-a-string; split with `read -ra` / a for-loop, never re-quoted as a
 # single token).
 _CSC_ENV_NAMES=(
   "GH_TOKEN GITHUB_TOKEN" "CATALYST_WEBHOOK_SECRET" "" "" "" "LINEAR_API_TOKEN LINEAR_API_KEY"
-  "" "" "GROQ_API_KEY" "CATALYST_CLOUD_TOKEN" "SOPS_AGE_KEY_FILE"
+  "" "" "" "GROQ_API_KEY" "CATALYST_CLOUD_TOKEN" "SOPS_AGE_KEY_FILE"
 )
 _CSC_CONFIG_JSON_PATH=(
-  "" "" "" "" "" "" "catalyst.linear.bot.orchestrator" "catalyst.linear.bot.worker"
-  "groq.apiKey" "catalyst.cloud.tokenEnv" ""
+  "" "" "" "" "" "" "catalyst.linear.bot.orchestrator" "catalyst.linear.bot.linearis"
+  "catalyst.linear.bot.worker" "groq.apiKey" "catalyst.cloud.tokenEnv" ""
 )
 _CSC_ROTATION_CLASS=(
   "re-armable" "boot-only" "boot-only" "boot-only" "boot-only" "re-armable" "re-armable"
-  "boot-only" "boot-only" "boot-only" "n/a"
+  "re-armable" "boot-only" "boot-only" "boot-only" "n/a"
 )
 _CSC_ROTATION_TRIGGER=(
-  "timer" "" "" "" "" "on-401" "on-401" "" "" "" ""
+  "timer" "" "" "" "" "on-401" "on-401" "on-401" "" "" "" ""
 )
 _CSC_BOOTSTRAP_FOR=(
-  "" "" "" "" "" "" "" "" "" "cloud" "cluster"
+  "" "" "" "" "" "" "" "" "" "" "cloud" "cluster"
 )
 _CSC_FAMILY_PREFIX=(
-  "" "" "linear-webhook-secret-" "" "" "" "" "" "" "" ""
+  "" "" "linear-webhook-secret-" "" "" "" "" "" "" "" "" ""
 )
 _CSC_DEFAULT_LOCAL_PATH=(
-  "" "" "" "" "" "" "" "" "" "" ".config/catalyst/age.key"
+  "" "" "" "" "" "" "" "" "" "" "" ".config/catalyst/age.key"
 )
 # CTL-1616 PR4 (append-only, linear-worker-actor only): the env-credential-pair tier
 # ("IDVAR:SECRETVAR") and the two legacy config-json fallback tiers
 # ("scope:path|scope:path"), mirroring secret-contract.mjs's credentialEnvPair/
 # legacyConfigTiers row fields exactly. Empty string for every row that doesn't declare one.
 _CSC_CREDENTIAL_ENV_PAIR=(
-  "" "" "" "" "" "" "" "CATALYST_LINEAR_AGENT_CLIENT_ID:CATALYST_LINEAR_AGENT_CLIENT_SECRET" "" "" ""
+  "" "" "" "" "" "" "" "" "CATALYST_LINEAR_AGENT_CLIENT_ID:CATALYST_LINEAR_AGENT_CLIENT_SECRET" "" "" ""
 )
 _CSC_LEGACY_TIERS=(
-  "" "" "" "" "" "" "" "per-team-legacy:catalyst.linear.agent|global-legacy:catalyst.linear.agent" "" "" ""
+  "" "" "" "" "" "" "" "" "per-team-legacy:catalyst.linear.agent|global-legacy:catalyst.linear.agent" "" "" ""
 )
 # _CSC_REQUIRED_OBJECT_FIELDS — CTL-1616 PR4 remediation (B1 fix). Space-joined field names
 # a row's OBJECT-shaped config-json value must hold, ALL non-empty, before a tier is allowed
@@ -76,7 +76,7 @@ _CSC_LEGACY_TIERS=(
 # generic, row-declared gate, never a hardcoded id check). Empty string for every row that
 # doesn't declare one (only linear-worker-actor does today).
 _CSC_REQUIRED_OBJECT_FIELDS=(
-  "" "" "" "" "" "" "" "clientId clientSecret" "" "" ""
+  "" "" "" "" "" "" "" "" "clientId clientSecret" "" "" ""
 )
 
 # catalyst_secret_required_object_fields ID — echoes the space-joined required field list
