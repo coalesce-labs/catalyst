@@ -29,6 +29,7 @@ import {
   buildDelegateBatchCurlArgs,
   fetchTicketsDelegateBatch,
   parseTerminalTimeoutMs,
+  normalizeRelations,
   __rawExecForTest,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
@@ -189,6 +190,11 @@ describe("runEligibleQuery", () => {
       stdout: ticketsJson([{ identifier: "ENG-1", state: { name: "Todo" } }]),
     });
     expect(runEligibleQuery(query, { exec })[0].createdAt).toBeNull();
+  });
+
+  test("normalizeRelations preserves a Linear-supplied createdAt", () => {
+    const createdAt = "2026-05-01T00:00:00Z";
+    expect(normalizeRelations({ identifier: "ENG-1", createdAt }).createdAt).toBe(createdAt);
   });
 
   test("passes relations / inverseRelations through verbatim for the dependency graph", () => {
@@ -1054,6 +1060,7 @@ describe("fetchTicketRelations (CTL-755)", () => {
       relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "ADV-1280" } }] },
       inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "ADV-1276" } }] },
       priority: 2,
+      createdAt: null,
       labels: ["feature", "orchestrator"],
     });
   });
@@ -1232,6 +1239,7 @@ describe("fetchTicketsBatch (CTL-784)", () => {
       relations: { nodes: [] },
       inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "CTL-9" } }] },
       priority: 1,
+      createdAt: null,
       labels: ["blocked"],
     });
     expect("identifier" in desc).toBe(false); // shape parity with fetchTicketRelations
