@@ -241,6 +241,17 @@ secret):
 3. Every login/zsh shell — and any cloud daemon **(re)started in a shell context** — inherits
    `CATALYST_CLOUD_TOKEN`.
 
+After the writer has been adopted or restarted on each node, use the end-to-end verifier as the
+per-node acceptance check:
+
+```bash
+catalyst-stack verify-cloud-sync --strict
+```
+
+Do not activate replica reads on that node until this exits successfully. Once it does,
+`catalyst-stack activate-replica` performs the guarded Layer-2 flag change; on worker nodes, restart
+execution-core afterward so the scheduler constructs its replica reader.
+
 ### Apply immediately (instead of waiting for the keep-alive)
 
 On each node that has opted into cloud services:
@@ -250,8 +261,12 @@ On each node that has opted into cloud services:
 catalyst cluster sync
 # 2. project the token into the machine-level env now
 catalyst-stack sync-cloud-env
-# 3. restart the cloud host-sync daemon in a shell context so it inherits the value
-#    (the same pattern used for the per-host Linear keys)
+# 3. adopt the writer, or restart an already-adopted writer so it inherits the value
+catalyst-stack adopt-cloud-sync
+# Already adopted instead? Use:
+# launchctl kickstart -k gui/$(id -u)/ai.coalesce.catalyst-cloud-sync
+# 4. accept the node only after the full token→seed→freshness chain passes
+catalyst-stack verify-cloud-sync --strict
 ```
 
 `catalyst doctor` reports an advisory `cloud-token` check: `INFO` when no token is provisioned
