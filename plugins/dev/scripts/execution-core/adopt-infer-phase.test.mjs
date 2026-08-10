@@ -68,7 +68,11 @@ function runGit(args, cwd) {
 
 // makeGitFixture — create a temp git repo with the ticket branch checked out.
 // Optionally seeds thoughts/ artifacts. Returns { dir, cleanup }.
-function makeGitFixture(ticket, setup = () => {}) {
+//
+// `branch` defaults to the bare ticket, but catalyst-adopt.sh accepts four shapes
+// (`<ticket>`, `<ticket>-*`, `*/<ticket>`, `*/<ticket>-*`), so tests can override it
+// to pin that inference is branch-shape-independent — see Test 7 (CTL-1642 P1).
+function makeGitFixture(ticket, setup = () => {}, branch = ticket) {
   const base = mkdtempSync(join(tmpdir(), "adopt-infer-test-"));
   const origin = join(base, "origin.git");
   const work = join(base, "work");
@@ -86,8 +90,8 @@ function makeGitFixture(ticket, setup = () => {}) {
   runGit(["commit", "--quiet", "-m", "initial"], work);
   runGit(["push", "--quiet", "origin", "main"], work);
 
-  // checkout the ticket branch
-  runGit(["checkout", "--quiet", "-b", ticket], work);
+  // checkout the ticket branch (shape is caller-selectable — see the note above)
+  runGit(["checkout", "--quiet", "-b", branch], work);
 
   // seed thoughts structure
   const thoughtsDir = join(work, "thoughts", "shared");
@@ -228,6 +232,55 @@ console.log("\nadopt-infer-phase.mjs tests\n");
     );
   } finally {
     cleanup();
+  }
+}
+
+// ─── Test 7: inference is BRANCH-SHAPE INDEPENDENT (Codex #3175 P1) ───────────
+// The regression: the worktree-scoped probes used to re-derive the worktree from the
+// branch name via resolveWorktree, whose porcelain match is EXACTLY `refs/heads/<ticket>`.
+// catalyst-adopt.sh accepts three further shapes, so an adopted worktree on any of them
+// resolved to null, every probe returned false, and inference silently collapsed to
+// `research` no matter how much work was actually done — the worst case being a retained
+// `done` research signal, where the dispatcher then exits 0 and adoption reports success
+// having launched nothing.
+//
+// Each shape below seeds an identical research doc, so a correct implementation must
+// infer `plan` for ALL of them. Before the fix only the bare-ticket case did; the other
+// three returned `research`. Note the lowercase forms: Linear's branchName produces
+// `ryan/<ticket>-slug` with a lowercased ticket, and those dominate the real worktree
+// list, so an exact match fails on casing even for the `*/<ticket>-*` shape.
+
+{
+  const shapes = [
+    ["PROJ-7", "PROJ-7", "bare ticket"],
+    ["PROJ-7", "PROJ-7-hotfix", "<ticket>-suffix"],
+    ["PROJ-7", "user/PROJ-7", "prefix/<ticket>"],
+    ["PROJ-7", "ryan/PROJ-7-feature", "prefix/<ticket>-suffix"],
+    ["PROJ-7", "ryan/proj-7-feature", "lowercase prefix/<ticket>-suffix"],
+  ];
+
+  for (const [ticket, branch, label] of shapes) {
+    const { dir, cleanup } = makeGitFixture(
+      ticket,
+      (work, td, t) => {
+        writeFileSync(
+          join(td, "research", `2026-01-01-${t.toLowerCase()}.md`),
+          "## Summary\n" + "x".repeat(220)
+        );
+      },
+      branch
+    );
+    try {
+      const { code, stdout, stderr } = runShim(["--ticket", ticket, "--cwd", dir], GIT_ENV);
+      assert(code === 0, `exits 0 on branch shape: ${label}`, stderr);
+      const token = stdout.trim();
+      assert(
+        token === "plan",
+        `infers 'plan' on branch shape ${label} ('${branch}'), got '${token}'`
+      );
+    } finally {
+      cleanup();
+    }
   }
 }
 

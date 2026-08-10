@@ -47,11 +47,22 @@ const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
 // caller. orchDir is deliberately NOT supplied (see the scope note in the header), so
 // the orchDir-gated post-implement probes short-circuit false — the shim caps at the
 // worktree-detectable range exactly as recovery.mjs's `inferResumePhase(ticket,{cwd})`.
+//
+// worktreePath=cwd is the load-bearing part (CTL-1642 Codex #3175 P1). Passing only
+// repoRoot made every worktree-scoped probe re-derive the worktree by branch name via
+// resolveWorktree, whose porcelain match is EXACTLY `refs/heads/<ticket>`. catalyst-adopt.sh
+// accepts four branch shapes (`<ticket>`, `<ticket>-*`, `*/<ticket>`, `*/<ticket>-*`), so
+// an adopted worktree on any shape but the bare ticket — including the `ryan/<ticket>-slug`
+// form Linear's branchName produces — resolved to null. Every probe then returned false,
+// inference fell back to `research`, and when a retained research signal was already `done`
+// the dispatcher exited 0 idempotently: adoption reported success while launching no worker.
+// cwd IS the worktree here, so handing it over directly is both correct and strictly more
+// robust than re-deriving it — no branch shape, casing, or detached HEAD can defeat it.
 function makeAdaptedProbes(ticket, cwd) {
   return Object.fromEntries(
     Object.entries(WORK_DONE_PROBES).map(([phase, probeFn]) => [
       phase,
-      () => probeFn({ ticket, repoRoot: cwd }),
+      () => probeFn({ ticket, repoRoot: cwd, worktreePath: cwd }),
     ])
   );
 }
