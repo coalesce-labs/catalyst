@@ -858,7 +858,12 @@ _forward_stop_impl() {
   fi
   kill "$pid" 2>/dev/null || true
   local waited=0
-  while [[ $waited -lt 30 ]] && kill -0 "$pid" 2>/dev/null; do
+  # CTL-1502: match acquire_forward_lock/acquire_watchdog_lock's 10s bound above,
+  # not an independent 3s guess — a loaded CI runner can be slower to reap a
+  # SIGTERM'd process, and the old 30-iteration bound intermittently escalated to
+  # SIGKILL under load, occasionally racing a PID-reuse observation in
+  # forward-restart.test.sh.
+  while [[ $waited -lt 100 ]] && kill -0 "$pid" 2>/dev/null; do
     sleep 0.1; waited=$((waited + 1))
   done
   kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
