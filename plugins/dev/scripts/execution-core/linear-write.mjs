@@ -23,13 +23,49 @@ const LINEAR_TRANSITION_BIN = fileURLToPath(
   new URL("../linear-transition.sh", import.meta.url)
 );
 
+// parseDefaultTimeoutMs — mirrors linear-query.mjs's parseTerminalTimeoutMs:
+// "0" disables the floor entirely (undefined); anything else parses to a
+// positive ms value, defaulting to 8000 (matching the read path's CTL-1364
+// floor) when unset/unparseable.
+function parseDefaultTimeoutMs(raw) {
+  if (raw === "0") return undefined;
+  const n = Number(raw);
+  return n > 0 ? n : 8000;
+}
+const RAWEXEC_DEFAULT_TIMEOUT_MS = parseDefaultTimeoutMs(
+  process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS,
+);
+
 // rawExec — spawnSync wrapper normalising the result shape. A spawn error
 // (binary missing, permission) is reported as code 127, never thrown.
-function rawExec(cmd, args) {
-  const res = spawnSync(cmd, args, { encoding: "utf8" });
-  if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
+//
+// DEFAULT TIMEOUT (mirrors linear-query.mjs's CTL-1364 fix): every write here
+// — status transitions, label applies, assignee applies — previously had NO
+// Node timeout at all, so a single stalled/rate-limited call could block the
+// scheduler's synchronous tick indefinitely. Observed live 2026-08-10: a ~19s
+// event-loop stall correlating with a worker-label read/write while the
+// CTL-679 breaker was open. `timedOut` is threaded through identically to the
+// read path so withBreaker (linear-breaker.mjs) still trips on a timeout, not
+// just a 429.
+function rawExec(cmd, args, { timeoutMs } = {}) {
+  const opts = { encoding: "utf8" };
+  const effectiveTimeoutMs =
+    typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : RAWEXEC_DEFAULT_TIMEOUT_MS;
+  if (typeof effectiveTimeoutMs === "number" && effectiveTimeoutMs > 0) {
+    opts.timeout = effectiveTimeoutMs;
+    opts.killSignal = "SIGKILL";
+  }
+  const res = spawnSync(cmd, args, opts);
+  if (res.error) {
+    const timedOut = res.error.code === "ETIMEDOUT" || res.signal === "SIGKILL";
+    return { code: 127, stdout: "", stderr: res.error.message, timedOut };
+  }
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
+
+// __rawExecForTest — the real rawExec, exported for direct unit coverage
+// (mirrors linear-query.mjs's __rawExecForTest).
+export const __rawExecForTest = rawExec;
 
 // defaultExec — rawExec behind the CTL-679 process-wide rate-limit breaker, so
 // the status-write path (which shells linear-transition.sh, itself a Linear
