@@ -28,15 +28,47 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "${SELF_DIR}/../.." && pwd)}"
 source "${SELF_DIR}/phase-artifact-sync-mode.sh"
 SYNC_MODE="$(resolve_phase_artifact_sync_mode)"
 
+# _invalidate_phase_doc — remove the durable phase document that this gate could
+# not publish (CTL-1490 Codex P1). Only ever called on a BLOCKING failure, i.e. a
+# path that does NOT emit complete: `off` + multi-host, and `enforce`. In shadow
+# mode the phase legitimately completes, so the local document stays.
+#
+# Why it must go: reconstruct-ticket-state.mjs treats the mere PRESENCE of the
+# document as proof the phase completed. Leaving it behind means a later
+# same-host reconstruction — or an unrelated sync that eventually publishes the
+# stale file — advances past a phase whose blocking sync failed.
+_invalidate_phase_doc() {
+  local doc="${CATALYST_PHASE_THOUGHTS_DOC:-}"
+  [[ -n "$doc" && -f "$doc" ]] || return 0
+  if rm -f "$doc" 2>/dev/null; then
+    echo "${PHASE}: removed unpublished phase document ${doc} (sync failed — phase did NOT complete)" >&2
+  else
+    # Could not remove it: say so loudly rather than let a stale document
+    # silently stand in for a completed phase.
+    echo "${PHASE}: WARNING could not remove unpublished phase document ${doc} — reconstruction may treat this failed phase as complete" >&2
+  fi
+}
+
 # ── off mode: byte-identical to original (roster-gated) ──────────────────────
 if [[ "$SYNC_MODE" == "off" ]]; then
-  # Resolve roster (mirror getClusterHosts: absent/malformed → single-host default).
-  CFG_DIR="$(dirname "${CATALYST_CONFIG_FILE:-$(pwd)/.catalyst/config.json}")"
-  HOSTS_FILE="${CFG_DIR}/hosts.json"
-  ROSTER_SIZE=1
-  if [[ -f "$HOSTS_FILE" ]]; then
-    n="$(jq -r '[.[] | select(type=="string" and length>0)] | length' "$HOSTS_FILE" 2>/dev/null || echo 0)"
-    [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && ROSTER_SIZE="$n"
+  # Resolve the roster from the CANONICAL source (CTL-1490 Codex P1).
+  #
+  # This used to read the per-repository `.catalyst/hosts.json`, which was retired:
+  # execution-core/config.mjs resolves the roster from the catalyst-cluster repo's
+  # cluster.json, then a static roster, then a single-host default. With the file
+  # gone, every real multi-host install read ROSTER_SIZE=1 and took the
+  # single-host no-op below — so `off` (the DEFAULT mode) silently skipped every
+  # artifact sync and the cross-host durability this ticket adds never engaged.
+  # Verified on a live 2-host install: the canonical resolver answers 2 where the
+  # retired path answered 1.
+  # shellcheck source=lib/cluster-roster-size.sh
+  source "${SELF_DIR}/cluster-roster-size.sh"
+  if ! ROSTER_SIZE="$(resolve_cluster_roster_size "$PLUGIN_ROOT")"; then
+    # Unresolvable (no bun, or config.mjs unreadable). Match the JS resolver's own
+    # single-host default rather than inventing a second answer — but say so, since
+    # a silently-skipped sync on a multi-host node is precisely the failure above.
+    echo "${PHASE}: cluster roster unresolvable (bun/config.mjs unavailable) — assuming single-host, skipping thoughts sync" >&2
+    ROSTER_SIZE=1
   fi
   [[ "$ROSTER_SIZE" -le 1 ]] && exit 0   # single-host → exact no-op
 
@@ -46,6 +78,7 @@ if [[ "$SYNC_MODE" == "off" ]]; then
   fi
 
   echo "${PHASE}: thoughts sync failed (roster=${ROSTER_SIZE}) — not emitting complete" >&2
+  _invalidate_phase_doc
   EMIT="${CATALYST_EMIT_COMPLETE:-${PLUGIN_ROOT}/scripts/phase-agent-emit-complete}"
   "${EMIT}" --phase "$PHASE" --ticket "$TICKET" --status failed \
     --reason "thoughts_sync_failed" || true
@@ -80,6 +113,7 @@ if [[ "$SYNC_MODE" == "shadow" ]]; then
 fi
 
 # enforce mode: treat sync failure as fatal.
+_invalidate_phase_doc
 EMIT="${CATALYST_EMIT_COMPLETE:-${PLUGIN_ROOT}/scripts/phase-agent-emit-complete}"
 "${EMIT}" --phase "$PHASE" --ticket "$TICKET" --status failed \
   --reason "thoughts_sync_failed" || true

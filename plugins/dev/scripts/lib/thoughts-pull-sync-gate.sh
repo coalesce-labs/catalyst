@@ -33,13 +33,16 @@ fi
 
 # ── off mode: original roster-gated behavior ──────────────────────────────────
 if [[ "$SYNC_MODE" == "off" ]]; then
-  # Resolve roster — mirrors getClusterHosts: absent/malformed → single-host default.
-  CFG_DIR="$(dirname "${CATALYST_CONFIG_FILE:-$(pwd)/.catalyst/config.json}")"
-  HOSTS_FILE="${CFG_DIR}/hosts.json"
-  ROSTER_SIZE=1
-  if [[ -f "$HOSTS_FILE" ]]; then
-    n="$(jq -r '[.[] | select(type=="string" and length>0)] | length' "$HOSTS_FILE" 2>/dev/null || echo 0)"
-    [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && ROSTER_SIZE="$n"
+  # Resolve the roster from the CANONICAL source (CTL-1490 Codex P1). The retired
+  # per-repository `.catalyst/hosts.json` read here answered 1 on every real
+  # multi-host install, so this gate never pulled and the read side never saw a
+  # peer's freshly-pushed artifacts. Same defect, same fix, as the write-side gate.
+  PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "${SELF_DIR}/../.." && pwd)}"
+  # shellcheck source=lib/cluster-roster-size.sh
+  source "${SELF_DIR}/cluster-roster-size.sh"
+  if ! ROSTER_SIZE="$(resolve_cluster_roster_size "$PLUGIN_ROOT")"; then
+    echo "thoughts-pull-sync-gate: cluster roster unresolvable — assuming single-host, skipping pull" >&2
+    ROSTER_SIZE=1
   fi
   [[ "$ROSTER_SIZE" -le 1 ]] && exit 0   # single-host → exact no-op
 

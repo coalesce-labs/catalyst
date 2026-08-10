@@ -249,6 +249,26 @@ function defaultBuildWorktree(ticket, { repoRoot, orchDir }) {
   }
 }
 
+// defaultPullThoughts — run the mode-aware, ff-only pull-before-read gate so the
+// thoughts walk below sees a peer's freshly-pushed artifacts (CTL-1490 Codex P1).
+// The gate is NON-FATAL by contract in every mode (read side never blocks the
+// pipeline), and this wrapper is belt-and-braces on top of that: any spawn failure
+// — gate missing, bash absent, non-zero exit — degrades to "walk what is on disk",
+// which is exactly the previous behaviour.
+function defaultPullThoughts({ repoRoot } = {}) {
+  const selfDir = fileURLToPath(new URL(".", import.meta.url));
+  const gate = resolve(selfDir, "..", "lib", "thoughts-pull-sync-gate.sh");
+  try {
+    execFileSync("bash", [gate], {
+      cwd: repoRoot ?? process.cwd(),
+      stdio: "ignore",
+      timeout: 120_000,
+    });
+  } catch {
+    // Non-fatal by design — see above.
+  }
+}
+
 // reconstructTicketState — main export.
 //
 // Returns { nextPhase, completedPhases, pr, worktree }.
@@ -277,6 +297,7 @@ export async function reconstructTicketState(
     getProjection = defaultGetProjection,
     checkOpenPrs = (t) => defaultCheckOpenPrs(t, { cwd: repoRoot }),
     buildWorktree = defaultBuildWorktree,
+    pullThoughts = defaultPullThoughts,
   } = {},
 ) {
   // 1. Archive check — terminal short-circuit. If the ticket is Done/archived,
@@ -304,6 +325,29 @@ export async function reconstructTicketState(
       projCompletedPhases = projection.completedPhases;
       projLastIdx = lastIdx;
     }
+  }
+
+  // 2b. Refresh thoughts BEFORE walking them (CTL-1490 Codex P1).
+  //
+  // The whole point of the durable artifacts is cross-host resume: the previous
+  // host pushes its completed phase documents, a survivor picks the ticket up.
+  // But this walk reads the LOCAL thoughts checkout, and on the survivor that
+  // checkout is stale — the CLI calls reconstructTicketState directly, and the
+  // worktree rebuild (which may init/sync thoughts) happens only AFTER this
+  // scan. So the remote artifacts that justify the feature could never influence
+  // nextPhase, and the survivor silently resumed from an earlier phase, redoing
+  // work that was already durably complete.
+  //
+  // The pull gate is mode-aware and NON-FATAL by contract in every mode, so a
+  // failed or skipped pull degrades to exactly the previous behaviour (walk what
+  // is on disk) rather than blocking reconstruction.
+  try {
+    await pullThoughts({ repoRoot });
+  } catch {
+    // Structurally non-fatal, not merely non-fatal by convention: the contract is
+    // "the read side never blocks the pipeline", so it must hold for ANY injected
+    // implementation, not only the default one that happens to catch internally.
+    // A failed refresh degrades to walking whatever is already on disk.
   }
 
   // 3. Thoughts-artifact walk — source B, ALWAYS computed (not gated on

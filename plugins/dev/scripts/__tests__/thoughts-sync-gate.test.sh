@@ -22,10 +22,34 @@ setup_workdir() {
   echo "$dir"
 }
 
-# Write hosts.json to the workdir's .catalyst/
+# Drive the roster through the CANONICAL source (CTL-1490 Codex P1).
+#
+# The gates used to read the per-repository `.catalyst/hosts.json`, which was
+# retired — that is the bug this suite now guards. The roster comes from
+# execution-core/config.mjs `resolveClusterHosts()`, whose precedence is
+# cluster-repo → static roster → single-host. So a test declares its roster with
+# the real, production-supported CATALYST_STATIC_ROSTER escape hatch, and pins
+# CATALYST_CLUSTER_DIR at a nonexistent path so the higher-precedence cluster-repo
+# source cannot leak the developer's own 2-host roster into the fixture.
+#
+# write_hosts keeps its name and signature so the cases below read unchanged; it
+# now translates the roster into the environment the gate actually consults.
 write_hosts() {
-  local workdir="$1" json="$2"
-  printf '%s\n' "$json" > "${workdir}/.catalyst/hosts.json"
+  local workdir="$1" json="$2" n
+  n="$(printf '%s' "$json" | jq -r '[.[] | select(type=="string" and length>0)] | join(",")' 2>/dev/null || echo "")"
+  export CATALYST_CLUSTER_DIR="${workdir}/.no-cluster-repo"
+  if [[ -n "$n" ]]; then
+    export CATALYST_STATIC_ROSTER="$n"
+  else
+    unset CATALYST_STATIC_ROSTER
+  fi
+}
+
+# Explicitly declare "no roster source at all" — the absent-file case.
+clear_hosts() {
+  local workdir="$1"
+  export CATALYST_CLUSTER_DIR="${workdir}/.no-cluster-repo"
+  unset CATALYST_STATIC_ROSTER
 }
 
 # Create a fake humanlayer on PATH that exits with given code.
@@ -321,6 +345,64 @@ echo "T9: mode=enforce, roster=1, sync OK → exit 0, humanlayer invoked"
     fail "T9: enforce + sync OK: humanlayer was NOT invoked (roster guard should be bypassed)"
   else
     pass "T9: mode=enforce + sync OK → exit 0, humanlayer invoked at roster=1"
+  fi
+  rm -rf "$WD"
+}
+
+# --------------------------------------------------------------------------
+# T10/T11: a BLOCKING sync failure must invalidate the phase document it could
+# not publish (CTL-1490 Codex P1). reconstruct-ticket-state.mjs treats the mere
+# PRESENCE of the doc as proof the phase completed, so leaving it behind lets a
+# later reconstruction advance past a phase whose blocking sync failed.
+# --------------------------------------------------------------------------
+echo "T10: enforce + sync FAIL → unpublished phase document is removed"
+{
+  WD="$(setup_workdir)"
+  BINDIR="${WD}/bin"; mkdir -p "$BINDIR"
+  DOC="${WD}/thoughts/shared/phase-verify/2026-01-01-ctl-t10.md"
+  mkdir -p "$(dirname "$DOC")"; printf 'body\n' > "$DOC"
+  write_hosts "$WD" '["mini"]'
+  make_fake_humanlayer "$BINDIR" 1              # sync FAILS
+  make_fake_emit "$BINDIR" "${WD}/emit.log"
+  rc=0
+  env PATH="${BINDIR}:${PATH}" \
+      CATALYST_CONFIG_FILE="${WD}/.catalyst/config.json" \
+      CATALYST_EMIT_COMPLETE="${BINDIR}/phase-agent-emit-complete" \
+      CATALYST_PHASE_ARTIFACT_SYNC_MODE=enforce \
+      CATALYST_PHASE_THOUGHTS_DOC="$DOC" \
+      bash "$GATE" --phase verify --ticket CTL-T10 || rc=$?
+  if [[ "$rc" -ne 11 ]]; then
+    fail "T10: enforce + sync fail: gate exited $rc, want 11"
+  elif [[ -f "$DOC" ]]; then
+    fail "T10: unpublished phase document survived a blocking sync failure"
+  else
+    pass "T10: enforce + sync fail → unpublished phase document removed"
+  fi
+  rm -rf "$WD"
+}
+
+echo "T11: shadow + sync FAIL → phase document is KEPT (phase still completes)"
+{
+  WD="$(setup_workdir)"
+  BINDIR="${WD}/bin"; mkdir -p "$BINDIR"
+  DOC="${WD}/thoughts/shared/phase-verify/2026-01-01-ctl-t11.md"
+  mkdir -p "$(dirname "$DOC")"; printf 'body\n' > "$DOC"
+  write_hosts "$WD" '["mini"]'
+  make_fake_humanlayer "$BINDIR" 1              # sync FAILS
+  make_fake_emit "$BINDIR" "${WD}/emit.log"
+  rc=0
+  env PATH="${BINDIR}:${PATH}" \
+      CATALYST_CONFIG_FILE="${WD}/.catalyst/config.json" \
+      CATALYST_EMIT_COMPLETE="${BINDIR}/phase-agent-emit-complete" \
+      CATALYST_PHASE_ARTIFACT_SYNC_MODE=shadow \
+      CATALYST_PHASE_THOUGHTS_DOC="$DOC" \
+      bash "$GATE" --phase verify --ticket CTL-T11 || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    fail "T11: shadow + sync fail: gate exited $rc, want 0"
+  elif [[ ! -f "$DOC" ]]; then
+    fail "T11: shadow removed the phase document, but the phase DID complete"
+  else
+    pass "T11: shadow + sync fail → phase document kept"
   fi
   rm -rf "$WD"
 }

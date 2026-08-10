@@ -58,6 +58,7 @@ describe("reconstructTicketState", () => {
     let worktreeCalled = false;
     const result = await reconstructTicketState("CTL-9001", {
       repoRoot: tempDir,
+      pullThoughts: () => {},
       checkArchive: () => ({ terminal: true, completedPhases: ["triage", "research", "plan"] }),
       getProjection: () => null,
       checkOpenPrs: noPrs,
@@ -78,6 +79,7 @@ describe("reconstructTicketState", () => {
     }
     const result = await reconstructTicketState("CTL-9002", {
       repoRoot: tempDir,
+      pullThoughts: () => {},
       checkArchive: () => null,
       getProjection: () => null,
       checkOpenPrs: noPrs,
@@ -91,6 +93,7 @@ describe("reconstructTicketState", () => {
   test("T3: nothing done → nextPhase = research (NEW_WORK_ENTRY_PHASE), empty completedPhases", async () => {
     const result = await reconstructTicketState("CTL-9003", {
       repoRoot: tempDir,
+      pullThoughts: () => {},
       checkArchive: () => null,
       getProjection: () => null,
       checkOpenPrs: noPrs,
@@ -103,6 +106,7 @@ describe("reconstructTicketState", () => {
   test("T4: open PR exists → pr field populated from checkOpenPrs seam", async () => {
     const result = await reconstructTicketState("CTL-9004", {
       repoRoot: tempDir,
+      pullThoughts: () => {},
       checkArchive: () => null,
       getProjection: () => null,
       checkOpenPrs: () => ({ prs: [{ number: 42, state: "OPEN", isDraft: false }] }),
@@ -117,6 +121,7 @@ describe("reconstructTicketState", () => {
     let capturedArgs = null;
     const result = await reconstructTicketState("CTL-9005", {
       repoRoot: tempDir,
+      pullThoughts: () => {},
       checkArchive: () => null,
       getProjection: () => null,
       checkOpenPrs: noPrs,
@@ -135,6 +140,7 @@ describe("reconstructTicketState", () => {
     // No thoughts docs on disk; projection provides phases through plan.
     const result = await reconstructTicketState("CTL-9006", {
       repoRoot: tempDir,
+      pullThoughts: () => {},
       checkArchive: () => null,
       getProjection: () => ({ completedPhases: ["triage", "research", "plan"] }),
       checkOpenPrs: noPrs,
@@ -156,6 +162,7 @@ describe("reconstructTicketState", () => {
     }
     const result = await reconstructTicketState("CTL-9007", {
       repoRoot: tempDir,
+      pullThoughts: () => {},
       checkArchive: () => null,
       // Projection only confirms triage — shallower than the thoughts walk's
       // review-deep evidence.
@@ -177,6 +184,7 @@ describe("reconstructTicketState", () => {
     writeThoughtsDoc("triage", "CTL-9008");
     const result = await reconstructTicketState("CTL-9008", {
       repoRoot: tempDir,
+      pullThoughts: () => {},
       checkArchive: () => null,
       getProjection: () => ({
         completedPhases: ["triage", "research", "plan", "implement", "verify", "review"],
@@ -382,5 +390,55 @@ describe("defaultCheckArchive — only successful statuses are terminal (CTL-149
 
   test("no archived row at all stays non-terminal", async () => {
     expect((await check(null))?.terminal === true).toBe(false);
+  });
+});
+
+// CTL-1490 Codex P1: the thoughts walk reads the LOCAL checkout, so on a
+// cross-host resume the survivor's checkout is stale and the previous host's
+// pushed phase documents cannot influence nextPhase — the survivor silently
+// resumes from an earlier phase and redoes durably-complete work. The pull must
+// therefore run BEFORE the walk, not after (the CLI calls this function directly,
+// and the worktree rebuild that may sync thoughts happens later).
+describe("thoughts refresh ordering", () => {
+  test("pulls thoughts BEFORE walking them, and the pulled artifacts count", async () => {
+    const order = [];
+    const ticket = "CTL-9100";
+    const planDir = join(tempDir, "thoughts", "shared", "plans");
+
+    const result = await reconstructTicketState(ticket, {
+      orchDir: join(tempDir, "orch"),
+      repoRoot: tempDir,
+      checkArchive: () => null,
+      getProjection: () => null,
+      checkOpenPrs: () => null,
+      buildWorktree: () => ({ ok: false, cwd: null }),
+      // The "remote" artifact only lands when the pull runs. If the walk happened
+      // first it would see an empty thoughts tree and fall back to research.
+      pullThoughts: () => {
+        order.push("pull");
+        mkdirSync(planDir, { recursive: true });
+        writeFileSync(join(planDir, `2026-01-01-${ticket.toLowerCase()}.md`), "## Phase 1\n");
+      },
+    });
+
+    expect(order).toEqual(["pull"]);
+    // plan is the deepest artifact present => next phase is the one after plan.
+    expect(result.completedPhases).toContain("plan");
+    expect(result.nextPhase).toBe("implement");
+  });
+
+  test("a failing pull is non-fatal — reconstruction still returns a verdict", async () => {
+    const result = await reconstructTicketState("CTL-9101", {
+      orchDir: join(tempDir, "orch"),
+      repoRoot: tempDir,
+      checkArchive: () => null,
+      getProjection: () => null,
+      checkOpenPrs: () => null,
+      buildWorktree: () => ({ ok: false, cwd: null }),
+      pullThoughts: () => {
+        throw new Error("pull exploded");
+      },
+    });
+    expect(result.nextPhase).toBe("research");
   });
 });

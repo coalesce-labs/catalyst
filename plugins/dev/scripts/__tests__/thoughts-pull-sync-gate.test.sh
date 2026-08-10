@@ -25,9 +25,28 @@ setup_workdir() {
   echo "$dir"
 }
 
+# Drive the roster through the CANONICAL source (CTL-1490 Codex P1). The gate used
+# to read the retired per-repository `.catalyst/hosts.json`; the roster now comes
+# from execution-core/config.mjs `resolveClusterHosts()` (cluster-repo → static →
+# single-host). Declare it with the real CATALYST_STATIC_ROSTER escape hatch, and
+# pin CATALYST_CLUSTER_DIR at a nonexistent path so the higher-precedence
+# cluster-repo source cannot leak the developer's own roster into the fixture.
+# Same name and signature, so the cases below read unchanged.
 write_hosts() {
-  local workdir="$1" json="$2"
-  printf '%s\n' "$json" > "${workdir}/.catalyst/hosts.json"
+  local workdir="$1" json="$2" n
+  n="$(printf '%s' "$json" | jq -r '[.[] | select(type=="string" and length>0)] | join(",")' 2>/dev/null || echo "")"
+  export CATALYST_CLUSTER_DIR="${workdir}/.no-cluster-repo"
+  if [[ -n "$n" ]]; then
+    export CATALYST_STATIC_ROSTER="$n"
+  else
+    unset CATALYST_STATIC_ROSTER
+  fi
+}
+
+clear_hosts() {
+  local workdir="$1"
+  export CATALYST_CLUSTER_DIR="${workdir}/.no-cluster-repo"
+  unset CATALYST_STATIC_ROSTER
 }
 
 # Create a fake pull-sync script that touches a sentinel file when invoked.

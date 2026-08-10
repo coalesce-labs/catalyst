@@ -18,12 +18,24 @@ if [[ -n "${_WRITE_PHASE_THOUGHTS_DOC_LOADED:-}" ]]; then
 fi
 _WRITE_PHASE_THOUGHTS_DOC_LOADED=1
 
+# Exports CATALYST_PHASE_THOUGHTS_DOC — the path actually written, consumed by
+# thoughts-sync-gate.sh so a BLOCKING sync failure can invalidate the document it
+# could not publish (CTL-1490 Codex P1). Without that, the doc survives the failed
+# gate and reconstruct-ticket-state.mjs — which treats mere presence as proof of
+# completion — advances past a phase that did not complete. Handing the path over
+# in the environment keeps the invalidation at the ONE gate all eight phase skills
+# already call, instead of eight copies of the same cleanup that a ninth skill
+# would silently forget.
 write_phase_thoughts_doc() {
   local phase="$1" ticket="$2" body="$3"
   local dir="thoughts/shared/phase-${phase}"
-  local ticket_lc date_prefix
+  local ticket_lc date_prefix path
   ticket_lc="$(printf '%s' "$ticket" | tr '[:upper:]' '[:lower:]')"
   date_prefix="$(date +%Y-%m-%d)"
+  export CATALYST_PHASE_THOUGHTS_DOC=""
   mkdir -p "$dir" 2>/dev/null || return 0
-  printf '%s\n' "$body" > "${dir}/${date_prefix}-${ticket_lc}.md" 2>/dev/null || true
+  path="${dir}/${date_prefix}-${ticket_lc}.md"
+  if printf '%s\n' "$body" > "$path" 2>/dev/null; then
+    export CATALYST_PHASE_THOUGHTS_DOC="$path"
+  fi
 }
