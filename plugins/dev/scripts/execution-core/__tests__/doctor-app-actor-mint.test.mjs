@@ -116,17 +116,23 @@ describe("checkAppActorMint", () => {
 
 describe("--verify-app-actors wiring", () => {
   const worker = { recognized: true, class: "worker" };
+  const developer = { recognized: true, class: "developer" };
+  const monitor = { recognized: true, class: "monitor" };
 
   test("is absent from the default worker suite", () => {
     const source = checksForClass(worker).map((fn) => fn.toString()).join("\n");
     expect(source).not.toContain("checkAppActorMint");
   });
 
-  test("parses the flag and adds the verifier only when requested", () => {
+  test("parses the flag and adds the verifier for every node class only when requested", () => {
     expect(parseArgs([]).verifyAppActors).toBe(false);
     expect(parseArgs(["--verify-app-actors"]).verifyAppActors).toBe(true);
-    const source = checksForClass(worker, { verifyAppActors: true })
-      .map((fn) => fn.toString()).join("\n");
-    expect(source).toContain("checkAppActorMint");
+    for (const nodeClass of [worker, developer, monitor]) {
+      const defaultSource = checksForClass(nodeClass).map((fn) => fn.toString()).join("\n");
+      const requestedSource = checksForClass(nodeClass, { verifyAppActors: true })
+        .map((fn) => fn.toString()).join("\n");
+      expect(defaultSource).not.toContain("checkAppActorMint");
+      expect(requestedSource).toContain("checkAppActorMint");
+    }
   });
 });

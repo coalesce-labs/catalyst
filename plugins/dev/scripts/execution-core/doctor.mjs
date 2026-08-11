@@ -94,15 +94,7 @@ import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; /
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 import { listProjects } from "./registry.mjs";
 
-// readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
-// daemon dependency chain (which includes bun: protocol imports incompatible
-// with node). Logic is identical; deps are already imported above.
-//
-// Collects all known Linear bot user UUIDs from both config layers:
-//   1. ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
-//   2. ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
-//   3. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
-// Returns a Set<string>. Empty set = no filter (fail-open). Never throws.
+// Read the Layer-2 app-actor map without exposing malformed config to callers.
 function readLinearBotConfig(l2Path) {
   if (!l2Path) return {};
   try {
@@ -113,6 +105,14 @@ function readLinearBotConfig(l2Path) {
   }
 }
 
+// readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
+// daemon dependency chain (which includes bun: protocol imports incompatible
+// with node). Logic is identical; deps are already imported above.
+//
+// Collects all known Linear bot user UUIDs from both config layers:
+//   1. ~/.config/catalyst/config.json  every actor under catalyst.linear.bot
+//   2. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
+// Returns a Set<string>. Empty set = no filter (fail-open). Never throws.
 function readLinearBotUserIds(l1Path, l2Path) {
   const ids = new Set();
   function addFromPath(path, extractor) {
@@ -5420,6 +5420,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
       developerBotCredentials,
+      ...(verifyAppActors ? [() => checkAppActorMint()] : []),
       () => checkHrwPartition(), // would-own count (visibility)
       () =>
         checkDaemonlessLocal({
@@ -5459,6 +5460,7 @@ export function checksForClass(nc, opts = {}) {
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
+      ...(verifyAppActors ? [() => checkAppActorMint()] : []),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater

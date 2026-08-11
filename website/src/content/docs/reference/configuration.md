@@ -375,7 +375,7 @@ comment the app posts), but they are account-specific.
 | `catalyst.linear.bot.worker.{clientId,clientSecret,webhookSecret,accessToken}` | OAuth app-actor credentials for the worker identity. Secrets — keep in the un-committed global config                                                                                                                                                                                                                                             |
 
 For credential replacement and verification, follow the
-[Linear app-actor secret rotation runbook](../../../../../docs/runbooks/linear-app-actor-secret-rotation.md).
+[Linear app-actor secret rotation runbook](https://github.com/coalesce-labs/catalyst/blob/main/docs/runbooks/linear-app-actor-secret-rotation.md).
 
 > **Self-assign activation:** `catalyst.linear.bot.orchestrator.botUserId` must be set AND the
 > app-actor token must carry the `app:assignable` OAuth scope for the assignee write to succeed. If

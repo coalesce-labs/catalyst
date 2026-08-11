@@ -1091,9 +1091,9 @@ compose_worker_settings_json() {
         else {} end)'
 }
 
-# CAT-158: stdout dump paths (--dry-run and prelaunch-only) can expose values
-# carried in settings.env. Redact on the dump path only; the spawn path must
-# retain the real settings payload so workers keep their configured identity.
+# CAT-158: the human-facing --dry-run stdout dump can expose values carried in
+# settings.env. Redact only that dump. The prelaunch-only stdout is the
+# in-process executor's launch transport and must retain auth, like spawn.
 redacted_worker_settings_json() {
 	local raw="${1-}"
 	printf '%s' "$raw" | jq -e . >/dev/null 2>&1 || { printf '%s' '{}'; return 0; }
@@ -1113,13 +1113,14 @@ redacted_worker_settings_json() {
 # the same key rule there so the launch-spec envelope cannot become a second
 # secret printer.
 redacted_dispatch_env_json() {
-	printf '%s\n' "$@" | jq -R . | jq -s '
+	jq -nc --args '
+    $ARGS.positional |
     map(
       if test("^[A-Za-z_][A-Za-z0-9_]*=")
          and (split("=")[0] | test("TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY"; "i"))
       then (split("=")[0] + "=[REDACTED]") else . end
     )
-  '
+  ' "$@" 2>/dev/null || printf '%s' '[]'
 }
 WORKER_SETTINGS_JSON="$(compose_worker_settings_json)"
 # Fail-open: never let a malformed settings string reach the spawn or dry-run.
