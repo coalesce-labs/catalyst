@@ -59,6 +59,8 @@ on:
       # directory and the guard never runs — which is how otel-forward/lib/dlq.ts's
       # three unbounded reads sat unnoticed in a long-lived daemon.
       - "plugins/dev/scripts/**"
+      - "docs/**"
+      - "website/src/content/docs/reference/configuration.md"
       # NOTE: the glob above SUBSUMES every plugins/dev/scripts path listed below.
       # They are retained as documentation of WHICH STEP each path feeds, not as
       # triggers — do not read the list as the trigger set.
@@ -127,6 +129,8 @@ jobs:
               - "plugins/dev/scripts/execution-core/**"
               - "plugins/dev/scripts/broker/**"
               - "plugins/dev/scripts/**"
+              - "docs/**"
+              - "website/src/content/docs/reference/configuration.md"
               - "plugins/dev/scripts/catalyst-install"
               - "plugins/dev/scripts/catalyst"
               - "plugins/dev/scripts/catalyst-linear"

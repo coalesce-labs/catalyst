@@ -1,4 +1,7 @@
-import { describe, test, expect } from "bun:test";
+import { afterEach, describe, test, expect } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { checkAppActorMint, checksForClass, parseArgs } from "../doctor.mjs";
 
 const SECRET = "lin_oauth_SENTINELSENTINEL";
@@ -33,6 +36,11 @@ function deps(over = {}) {
 }
 
 describe("checkAppActorMint", () => {
+  const scratchDirs = [];
+  afterEach(() => {
+    for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
   test("mints and verifies every configured actor independently", async () => {
     const calls = [];
     const records = await checkAppActorMint(deps({ fetch: healthyFetch(calls) }));
@@ -86,6 +94,21 @@ describe("checkAppActorMint", () => {
     expect(records).toHaveLength(1);
     expect(records[0].status).toBe("info");
     expect(records[0].detail).toMatch(/no app-actors configured.*nothing to verify/i);
+  });
+
+  test("malformed Layer-2 config FAILs instead of reporting no configured actors", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "doctor-app-actor-mint-"));
+    scratchDirs.push(scratch);
+    const malformedPath = join(scratch, "config.json");
+    writeFileSync(malformedPath, '{"catalyst":{"linear":{"bot":{},}}}');
+
+    const records = await checkAppActorMint({ layer2Path: malformedPath });
+
+    expect(records).toHaveLength(1);
+    expect(records[0].status).toBe("fail");
+    expect(records[0].detail).toContain(malformedPath);
+    expect(records[0].detail).toMatch(/unreadable or malformed/i);
+    expect(records[0].detail).not.toMatch(/no app-actors configured/i);
   });
 
   test("transport errors FAIL with the error but never a credential", async () => {

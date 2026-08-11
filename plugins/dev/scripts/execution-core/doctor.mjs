@@ -96,12 +96,12 @@ import { listProjects } from "./registry.mjs";
 
 // Read the Layer-2 app-actor map without exposing malformed config to callers.
 function readLinearBotConfig(l2Path) {
-  if (!l2Path) return {};
+  if (!l2Path || !existsSync(l2Path)) return {};
   try {
     const bot = JSON.parse(readFileSync(l2Path, "utf8"))?.catalyst?.linear?.bot;
     return bot && typeof bot === "object" && !Array.isArray(bot) ? bot : {};
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -122,7 +122,7 @@ function readLinearBotUserIds(l1Path, l2Path) {
       extractor(parsed, ids);
     } catch { /* ignore unreadable / malformed files */ }
   }
-  const bot = readLinearBotConfig(l2Path);
+  const bot = readLinearBotConfig(l2Path) ?? {};
   for (const actor of Object.values(bot)) {
     if (typeof actor?.botUserId === "string" && actor.botUserId.length > 0) ids.add(actor.botUserId);
   }
@@ -751,7 +751,14 @@ export async function checkAppActorMint(deps = {}) {
     readBotConfig = readLinearBotConfig,
     layer2Path: configuredLayer2Path = layer2Path(),
   } = deps;
-  const actors = readBotConfig(configuredLayer2Path) ?? {};
+  const actors = readBotConfig(configuredLayer2Path);
+  if (actors === null) {
+    return [mkCheck(
+      "app-actors",
+      STATUS.FAIL,
+      `Layer-2 config ${configuredLayer2Path} is unreadable or malformed; app-actor credentials were not verified`,
+    )];
+  }
   const names = Object.keys(actors).sort();
   if (names.length === 0) {
     return [mkCheck("app-actors", STATUS.INFO, "no app-actors configured; nothing to verify")];

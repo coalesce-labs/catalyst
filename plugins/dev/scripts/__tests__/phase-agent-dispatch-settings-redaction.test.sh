@@ -49,7 +49,7 @@ SETTINGS=$(jq -nc --arg token "$TOKEN" '{
     CATALYST_CLOUD_TOKEN: "cloud-secret",
     DATABASE_SECRET: "database-secret",
     PATH: "/test/bin",
-    CATALYST_TICKET: "CAT-158",
+    CATALYST_TICKET: "CTL-100",
     CATALYST_PHASE: "implement",
     OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318",
     AGENT_BROWSER_IDLE_TIMEOUT_MS: "300000"
@@ -103,7 +103,7 @@ setup_fixture() {
 	ORCH_DIR="${TEST_DIR}/orch"
 	WORKTREE="${TEST_DIR}/worktree"
 	BIN_DIR="${TEST_DIR}/bin"
-	mkdir -p "$ORCH_DIR/workers/CAT-158" "$WORKTREE" "$BIN_DIR"
+	mkdir -p "$ORCH_DIR/workers/CTL-100" "$WORKTREE" "$BIN_DIR" "${SCRATCH}/home"
 	cat >"${BIN_DIR}/claude" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >"$CLAUDE_STUB_LOG"
@@ -115,6 +115,7 @@ exit 0
 STUB
 	chmod +x "${BIN_DIR}/claude" "${BIN_DIR}/linearis"
 	export PATH="${BIN_DIR}:${ORIGINAL_PATH}"
+	export HOME="${SCRATCH}/home"
 	export CLAUDE_STUB_LOG="${TEST_DIR}/claude.log"
 	export CATALYST_DISPATCH_CLAUDE_BIN="${BIN_DIR}/claude"
 	export CATALYST_MACHINE_CONFIG="${TEST_DIR}/machine-config-absent.json"
@@ -125,23 +126,23 @@ ORIGINAL_PATH="$PATH"
 
 echo "Test 5: --dry-run dump redacts settings and full stdout"
 setup_fixture dry
-DRY_OUT=$(cd "$WORKTREE" && "$TEST_DISPATCH" --dry-run --phase triage --ticket CAT-158 \
-	--orch-dir "$ORCH_DIR" --orch-id CAT-158 --worktree "$WORKTREE" 2>/dev/null)
+DRY_OUT=$(cd "$WORKTREE" && "$TEST_DISPATCH" --dry-run --phase triage --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id CTL-100 --worktree "$WORKTREE" 2>/dev/null)
 assert_eq "[REDACTED]" "$(jq -r '.settings.env.LINEAR_API_TOKEN' <<<"$DRY_OUT")" "dry-run settings token redacted"
 assert_not_contains "$DRY_OUT" "$TOKEN" "dry-run full stdout contains no raw token"
 
 echo "Test 6: real spawn payload remains unredacted"
 setup_fixture spawn
-(cd "$WORKTREE" && "$TEST_DISPATCH" --phase triage --ticket CAT-158 \
-	--orch-dir "$ORCH_DIR" --orch-id CAT-158 --worktree "$WORKTREE" >/dev/null 2>&1)
+(cd "$WORKTREE" && "$TEST_DISPATCH" --phase triage --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id CTL-100 --worktree "$WORKTREE" >/dev/null 2>&1)
 SPAWN_LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$SPAWN_LOG" "$TOKEN" "claude --settings argv receives the real token"
 assert_not_contains "$SPAWN_LOG" '[REDACTED]' "spawn payload is not redacted"
 
 echo "Test 7: prelaunch-only preserves the in-process executor launch payload"
 setup_fixture prelaunch
-PRE_OUT=$(cd "$WORKTREE" && "$TEST_DISPATCH" --phase triage --ticket CAT-158 \
-	--orch-dir "$ORCH_DIR" --orch-id CAT-158 --worktree "$WORKTREE" --launch-mode prelaunch-only 2>/dev/null)
+PRE_OUT=$(cd "$WORKTREE" && "$TEST_DISPATCH" --phase triage --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id CTL-100 --worktree "$WORKTREE" --launch-mode prelaunch-only 2>/dev/null)
 assert_eq "$TOKEN" "$(jq -r '.settings.env.LINEAR_API_TOKEN' <<<"$PRE_OUT")" "prelaunch settings token remains usable"
 assert_contains "$PRE_OUT" "$TOKEN" "prelaunch transport retains the launch credential"
 assert_eq "prelaunch-ready" "$(jq -r '.status' <<<"$PRE_OUT")" "prelaunch launch spec still emitted"
