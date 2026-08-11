@@ -7,7 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { fenceGuard, readClusterGeneration, readSignalGeneration } from "./fence-guard.mjs";
+import {
+  fenceGuard,
+  FENCE_SUPPRESS_REASONS,
+  readClusterGeneration,
+  readSignalGeneration,
+} from "./fence-guard.mjs";
 
 // A helper to build a `readFence` seam that returns a fixed projection row.
 const fenceRow = (over = {}) => ({
@@ -16,6 +21,99 @@ const fenceRow = (over = {}) => ({
   phase: "implement",
   claimedAt: new Date().toISOString(),
   ...over,
+});
+
+describe("fenceGuard — discriminated suppression verdict (CAT-173)", () => {
+  const base = { ticket: "CTL-1", orchDir: "/tmp/x", multiHost: true, self: "hostA" };
+  const silent = { warn() {}, debug() {} };
+
+  test("confirmed-stale authoritative read reports SUPERSEDED", () => {
+    const seen = [];
+    const ok = fenceGuard(base, {
+      readGen: () => 7,
+      escalate: () => ({ current: false, stale: true }),
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    });
+    expect(ok).toBe(false);
+    expect(seen).toEqual([
+      { ticket: "CTL-1", reason: FENCE_SUPPRESS_REASONS.SUPERSEDED, generation: 7 },
+    ]);
+  });
+
+  test("indeterminate authoritative read reports UNVERIFIABLE — distinct from SUPERSEDED", () => {
+    const seen = [];
+    fenceGuard(base, {
+      readGen: () => 7,
+      escalate: () => ({ current: false, stale: false }),
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    });
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.UNVERIFIABLE);
+    expect(FENCE_SUPPRESS_REASONS.UNVERIFIABLE).not.toBe(FENCE_SUPPRESS_REASONS.SUPERSEDED);
+  });
+
+  test("known-foreign owner reports FOREIGN_OWNER", () => {
+    const seen = [];
+    fenceGuard({ ...base, gateway: {} }, {
+      readGen: () => null,
+      readFence: () => ({ ownerHost: "hostB", generation: 3 }),
+      proceedOnMissingGeneration: true,
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    });
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.FOREIGN_OWNER);
+  });
+
+  test("missing generation at a MUTATING site reports MISSING_GENERATION", () => {
+    const seen = [];
+    fenceGuard(base, { readGen: () => null, onSuppress: (v) => seen.push(v), logger: silent });
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.MISSING_GENERATION);
+  });
+
+  test("a throwing escalate reports THREW", () => {
+    const seen = [];
+    fenceGuard(base, {
+      readGen: () => 7,
+      escalate: () => { throw new Error("boom"); },
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    });
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.THREW);
+  });
+
+  test("onSuppress NEVER fires on a PASS, and a throwing hook cannot flip the verdict", () => {
+    const seen = [];
+    expect(fenceGuard(base, {
+      readGen: () => 7,
+      escalate: () => ({ current: true, stale: false }),
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    })).toBe(true);
+    expect(seen).toEqual([]);
+
+    expect(fenceGuard(base, {
+      readGen: () => null,
+      proceedOnMissingGeneration: true,
+      onSuppress: () => { throw new Error("hook exploded"); },
+      logger: silent,
+    })).toBe(true);
+  });
+
+  test("single-host (multiHost:false) never fires the hook", () => {
+    const seen = [];
+    expect(fenceGuard({ ...base, multiHost: false }, {
+      readGen: () => 1,
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    })).toBe(true);
+    expect(seen).toEqual([]);
+  });
+
+  test("omitting onSuppress leaves every path byte-identical (default no-op)", () => {
+    expect(fenceGuard(base, { readGen: () => 7, escalate: () => ({ current: false, stale: true }), logger: silent })).toBe(false);
+    expect(fenceGuard(base, { readGen: () => 7, escalate: () => ({ current: true }), logger: silent })).toBe(true);
+  });
 });
 
 describe("fenceGuard — N=1 single-host gate (spec §C1)", () => {
