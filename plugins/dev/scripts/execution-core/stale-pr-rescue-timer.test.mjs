@@ -11,7 +11,9 @@ import {
   buildRescueDispatchArgs,
   defaultMergeTree,
   defaultLinearWrite,
+  defaultEscalate,
 } from "./stale-pr-rescue-timer.mjs";
+import { readFenceStandoff } from "./fence-standoff.mjs";
 import * as linearWriteModule from "./linear-write.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
@@ -625,6 +627,46 @@ describe("escalation default seam", () => {
 
     expect(labels).toEqual([{ ticket: "CTL-31", label: "needs-human" }]);
     expect(existsSync(join(orchDir, "workers", "CTL-31", ".linear-label-needs-human.applied"))).toBe(true);
+  });
+
+  it("fence-suppressed rescue records the episode and writes one durable escalation past the bound (CAT-173)", () => {
+    const orchDir = mkOrchDir();
+    const events = [];
+    let now = 1_000;
+    const fenceGuardFn = (_ctx, opts) => {
+      opts.onSuppress?.({ ticket: "CAT-173", reason: "superseded", generation: 7 });
+      return false;
+    };
+    const deps = {
+      orchDir,
+      linearWrite: {},
+      multiHost: true,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "2",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+      },
+      now: () => now,
+      fenceGuardFn,
+      appendStandoffEvent: (payload) => events.push(payload),
+    };
+
+    const first = defaultEscalate("CAT-173", { prNumber: 173, reason: "conflicting" }, deps);
+    expect(first.reason).toBe("fence-suppressed");
+    expect(readFenceStandoff(orchDir, "CAT-173")?.count).toBe(1);
+    expect(existsSync(join(orchDir, ".escalations", "CAT-173.json"))).toBe(false);
+
+    now += 2;
+    const second = defaultEscalate("CAT-173", { prNumber: 173, reason: "conflicting" }, deps);
+    expect(second.reason).toBe("fence-suppressed");
+    const durable = JSON.parse(readFileSync(join(orchDir, ".escalations", "CAT-173.json"), "utf8"));
+    expect(durable.source).toBe("fence-standoff");
+    expect(durable.reason).toMatch(/fence-standoff.*PR #173/);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ ticket: "CAT-173", site: "stale-pr-rescue", count: 2 });
+
+    now += 2;
+    defaultEscalate("CAT-173", { prNumber: 173, reason: "conflicting" }, deps);
+    expect(events).toHaveLength(1);
   });
 });
 

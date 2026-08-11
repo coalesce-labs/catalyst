@@ -60,6 +60,22 @@ function mkPayload(tickets: BoardTicket[]): BoardPayload {
 }
 
 describe("synthesizeDurableEscalations — the pure card builder", () => {
+  it("a fence-standoff durable record round-trips as needs-human attention (CAT-173)", () => {
+    const cards = synthesizeDurableEscalations(
+      [durableRec({
+        ticket: "CAT-53",
+        reason: "fence-standoff: superseded on 2 hosts",
+        escalatedAt: "2026-08-11T00:00:00Z",
+        source: "fence-standoff",
+      })],
+      new Set<string>(),
+      Date.now(),
+    );
+    expect(cards[0].attention).toBe("needs-human");
+    expect(cards[0].humanQuestion).toMatch(/fence-standoff/);
+    expect(cards[0].attentionSince).toBe("2026-08-11T00:00:00Z");
+  });
+
   it("(a) a durable record with labelConfirmed:false and no existing card → attention card (Hole 1)", () => {
     const cards = synthesizeDurableEscalations([durableRec()], new Set<string>(), 600_000);
     expect(cards).toHaveLength(1);

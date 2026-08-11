@@ -23,6 +23,16 @@ import { jobLifecycle } from "./recovery.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { fenceGuard } from "./fence-guard.mjs";
+import {
+  appendFenceStandoffEvent,
+  clearFenceStandoff,
+  evaluateStandoff,
+  markBreakGlass,
+  recordFenceSuppression,
+  resolveStandoffCap,
+  resolveStandoffMinAgeMs,
+} from "./fence-standoff.mjs";
+import { recordDurableEscalation } from "./durable-escalation.mjs";
 import { appendFileSync } from "node:fs";
 // CTL-1785: `tickMultiHost` below is a TOPOLOGY fact that arms the fence
 // zombie-guard — the fenceGuard `!multiHost` disarm must stay EXISTENCE-derived so
@@ -408,6 +418,9 @@ export function defaultEscalate(
     // of applying needs-human. off is byte-identical to shadow minus the log.
     resolveSteward = defaultResolveSteward,
     postConciergePage = defaultPostConciergePage,
+    now = () => Date.now(),
+    fenceGuardFn = fenceGuard,
+    appendStandoffEvent = appendFenceStandoffEvent,
   } = {}
 ) {
   const stewardMode = readStewardEscalationConfig(env).mode; // off | shadow | enforce (default shadow)
@@ -466,12 +479,15 @@ export function defaultEscalate(
     // generation must LOUDLY proceed with the label rather than silently drop a
     // human escalation. A genuine supersession (readable generation, fresh
     // foreign owner / authoritative read says not-current) still suppresses.
-    if (
-      fenceGuard(
-        { ticket, orchDir, multiHost, gateway, self },
-        { proceedOnMissingGeneration: true }
-      )
-    ) {
+    let fenceVerdict = null;
+    if (fenceGuardFn(
+      { ticket, orchDir, multiHost, gateway, self },
+      {
+        proceedOnMissingGeneration: true,
+        onSuppress: (verdict) => { fenceVerdict = verdict; },
+      },
+    )) {
+      clearFenceStandoff(orchDir, ticket);
       const r = routeStuckTicketToDelegate(orchDir, ticket, {
         site: "stale-pr-rescue",
         reason: detail?.reason ?? "unresolvable-conflict",
@@ -496,9 +512,51 @@ export function defaultEscalate(
     } else {
       outcomeReason = "fence-suppressed";
       log.warn(
-        { ticket },
+        { ticket, reason: fenceVerdict?.reason ?? null },
         "ctl-863: stale fence — suppressing stale-pr-rescue labelOnce write (zombie guard)"
       );
+      try {
+        const nowMs = now();
+        const rec = recordFenceSuppression({
+          orchDir,
+          ticket,
+          site: "stale-pr-rescue",
+          reason: fenceVerdict?.reason ?? "unknown",
+          now: nowMs,
+        });
+        const verdict = evaluateStandoff(rec, {
+          now: nowMs,
+          cap: resolveStandoffCap(env),
+          minAgeMs: resolveStandoffMinAgeMs(env),
+        });
+        if (verdict.firstBreakGlass) {
+          markBreakGlass({ orchDir, ticket, now: nowMs });
+          recordDurableEscalation({
+            orchDir,
+            ticket,
+            phase: "pr",
+            reason:
+              `fence-standoff (${rec.reason}): stale PR #${detail?.prNumber ?? "?"} for ${ticket} ` +
+              "needs human attention, but the fence suppressed the Linear label write.",
+            labelConfirmed: false,
+            source: "fence-standoff",
+            now: new Date(nowMs).toISOString(),
+          });
+          appendStandoffEvent({
+            ticket,
+            site: "stale-pr-rescue",
+            reason: rec.reason,
+            count: rec.count,
+            ageMs: verdict.ageMs,
+          });
+          log.warn(
+            { ticket, prNumber: detail?.prNumber, reason: rec.reason, count: rec.count, ageMs: verdict.ageMs },
+            "cat-173: FENCE STANDOFF — wrote a durable stale-PR escalation without a Linear label",
+          );
+        }
+      } catch (err) {
+        log.warn({ ticket, err: err?.message }, "cat-173: stale-pr-rescue standoff bookkeeping failed — continuing");
+      }
     }
   } else {
     log.warn(
@@ -791,7 +849,7 @@ async function processTicket({
     const stalledOutcome = escalate(
       ticket,
       { reason: "rescue_worker_stalled", ...rescueState },
-      { orchDir, orchId: effectiveOrchId, linearWrite, multiHost, maxParallel }
+      { orchDir, orchId: effectiveOrchId, linearWrite, multiHost, maxParallel, now: () => nowMs }
     );
     // CTL-1609 (Codex P1): latch escalatedAt ONLY on a confirmed label write.
     // decideRescue skips forever once escalatedAt exists, so latching on an
@@ -933,6 +991,7 @@ async function processTicket({
         linearWrite,
         multiHost,
         maxParallel,
+        now: () => nowMs,
       });
       // CTL-1609 (Codex P1): see recordEscalationOutcome — escalatedAt is a
       // permanent skip in decideRescue, so it is written only when the needs-human
