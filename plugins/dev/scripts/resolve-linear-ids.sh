@@ -167,11 +167,29 @@ while [ "$STATE_PAGE" -lt "$STATE_MAX_PAGES" ]; do
   [ -n "$PAGE_NODES" ] || PAGE_NODES='[]'
   STATE_NODES=$(jq -nc --argjson acc "$STATE_NODES" --argjson page "$PAGE_NODES" '$acc + $page')
 
-  HAS_NEXT=$(echo "$TEAM_NODE" | jq -r '.states.pageInfo.hasNextPage // false' 2>/dev/null)
-  if [ "$HAS_NEXT" != "true" ]; then
+  # CAT-140 (Codex #3214 round 2 P1): completeness requires POSITIVE evidence —
+  # an explicit boolean `hasNextPage: false` AND no GraphQL errors on the
+  # response. A `// false` fallback was unsafe: GraphQL can return partial data
+  # alongside a field-level error, dropping `pageInfo` while still yielding some
+  # state nodes. Coercing that absence to "drained" would cache a partial set as
+  # authoritative, and a target missing from it would latch the whole team. The
+  # query explicitly asks for pageInfo, so its absence means something went
+  # wrong — treat it as inconclusive, never as proof.
+  PAGE_ERRORS=$(echo "$RESPONSE" | jq -r '(.errors // []) | length' 2>/dev/null || echo 1)
+  [ -n "$PAGE_ERRORS" ] || PAGE_ERRORS=1
+  if [ "$PAGE_ERRORS" != "0" ]; then
+    echo "WARNING: Linear returned GraphQL errors while paging states for '$TEAM_KEY' — recording the set as incomplete" >&2
+    break
+  fi
+  HAS_NEXT=$(echo "$TEAM_NODE" | jq -r \
+    'if (.states.pageInfo.hasNextPage | type) == "boolean"
+     then (.states.pageInfo.hasNextPage | tostring) else "absent" end' 2>/dev/null || echo "absent")
+  if [ "$HAS_NEXT" = "absent" ]; then
+    echo "WARNING: Linear omitted states.pageInfo.hasNextPage for '$TEAM_KEY' — recording the set as incomplete" >&2
+    break
+  fi
+  if [ "$HAS_NEXT" = "false" ]; then
     # The connection drained: this set is provably the team's complete state set.
-    # A server that omits pageInfo entirely also lands here — it returned every
-    # node it intended to, which is the same guarantee.
     STATES_COMPLETE=true
     break
   fi

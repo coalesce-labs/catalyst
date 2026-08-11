@@ -533,7 +533,12 @@ deliberately excludes `Triage`. When they diverge, every Todo→Triage write fai
   `EXECUTION_CORE_TRIAGE_STATE_REPROBE_MS` interval.
 - **The single default** — `registry.mjs` owns `DEFAULT_TRIAGE_STATUS` and
   `resolveTriageStatusForTeam`; a cross-stack parity test pins `linear-transition.sh`'s shell
-  literal to that value.
+  literal to that value. The registry is also the single source of truth for the *effective* triage
+  target: for the `triage` transition `linear-transition.sh` resolves `eligibleQuery.triageStatus`
+  **above** the Layer-1 `stateMap` (only an explicit `--state` outranks it). A config still carrying
+  the template's `stateMap.triage: "Triage"` against a team registered as `Intake` would otherwise
+  write and latch on a state that neither doctor nor `applyTriageStatus` targets — diverging
+  silently while doctor reports PASS.
 
 The observability event families include `monitor.triage_state.missing.<TEAM>` and
 `monitor.triage_state.recovered.<TEAM>`. Their signal-catalog entries belong in the `catalyst-otel`

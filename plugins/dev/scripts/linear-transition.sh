@@ -110,6 +110,7 @@ CONFIG_PATH="$(resolve_config)"
 
 # ─── Resolve target state ──────────────────────────────────────────────────
 # Precedence: explicit --state
+#           > registered eligibleQuery.triageStatus  (triage transition only, CAT-140)
 #           > per-project catalyst.projects[<ticket-prefix>].stateMap[transition]  (CTL-1153)
 #           > global catalyst.linear.stateMap[transition]
 #           > built-in default.
@@ -117,27 +118,37 @@ TARGET_STATE=""
 # Derive team prefix from ticket (e.g. "CTL-123" → "CTL"). Use tr for bash-3.2-safe
 # uppercasing (${x^^} fails as "bad substitution" on macOS /bin/bash 3.2).
 PROJECT_KEY="$(printf '%s' "${TICKET%%-*}" | tr '[:lower:]' '[:upper:]')"
-if [ -n "$STATE" ]; then
-  TARGET_STATE="$STATE"
-elif [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ] && command -v jq >/dev/null 2>&1; then
-  TARGET_STATE=$(jq -r --arg p "$PROJECT_KEY" --arg k "$TRANSITION" \
-    '(.catalyst.projects[]? | select(.key == $p) | .stateMap[$k]) // .catalyst.linear.stateMap[$k] // empty' \
-    "$CONFIG_PATH" 2>/dev/null)
-fi
+
 # A "triage" transition's true target is whatever the project's registered
 # eligibleQuery.triageStatus says (resolveEligibleQuery in registry.mjs, same
 # default "Triage"), NOT necessarily the literal string "Triage" — a project
 # customized to e.g. "Intake" has no reason to also duplicate that into
-# stateMap.triage. Check the execution-core registry BEFORE falling through to
-# default_state_for's hardcoded "Triage", so this stays in sync with what
-# applyTriageStatus() actually verifies against.
-if [ -z "$TARGET_STATE" ] && [ "$TRANSITION" = "triage" ] && command -v jq >/dev/null 2>&1; then
+# stateMap.triage.
+#
+# CAT-140 (Codex #3214 round 2 P1): this MUST outrank the stateMap, not merely
+# the built-in default. A Layer-1 config that still carries the template's
+# `stateMap.triage: "Triage"` while the registry customizes the team to "Intake"
+# would otherwise resolve "Triage" here, while doctor validates and
+# applyTriageStatus verifies against "Intake" — so every dispatch verify-fails,
+# or this script latches the team as state-absent for a state nobody else is
+# targeting, all while doctor reports PASS. The registry is the single source of
+# truth for the triage target, so it wins over the state map for exactly this
+# transition. An explicit --state is an operator override and still outranks it.
+if [ -z "$STATE" ] && [ "$TRANSITION" = "triage" ] && command -v jq >/dev/null 2>&1; then
   EXEC_REGISTRY_PATH="${CATALYST_DIR:-$HOME/catalyst}/execution-core/registry.json"
   if [ -f "$EXEC_REGISTRY_PATH" ]; then
     TARGET_STATE=$(jq -r --arg t "$PROJECT_KEY" \
       '(.projects[]? | select(.team == $t) | .eligibleQuery.triageStatus) // empty' \
       "$EXEC_REGISTRY_PATH" 2>/dev/null)
   fi
+fi
+
+if [ -n "$STATE" ]; then
+  TARGET_STATE="$STATE"
+elif [ -z "$TARGET_STATE" ] && [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ] && command -v jq >/dev/null 2>&1; then
+  TARGET_STATE=$(jq -r --arg p "$PROJECT_KEY" --arg k "$TRANSITION" \
+    '(.catalyst.projects[]? | select(.key == $p) | .stateMap[$k]) // .catalyst.linear.stateMap[$k] // empty' \
+    "$CONFIG_PATH" 2>/dev/null)
 fi
 if [ -z "$TARGET_STATE" ]; then
   TARGET_STATE="$(default_state_for "$TRANSITION")"

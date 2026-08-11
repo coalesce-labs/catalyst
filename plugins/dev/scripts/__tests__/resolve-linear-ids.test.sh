@@ -45,13 +45,15 @@ install_fake_curl() {
   mkdir -p "$bin_dir"
 
   if [ -z "$response" ]; then
+    # Models a real Linear reply: the query explicitly asks for pageInfo, so a
+    # well-formed response always carries it (CAT-140).
     response=$(cat <<JSON
 {"data":{"teams":{"nodes":[{"id":"${FAKE_TEAM_ID}","states":{"nodes":[
   {"id":"${FAKE_STATE_BACKLOG_ID}","name":"Backlog","type":"backlog"},
   {"id":"${FAKE_STATE_INPROG_ID}","name":"In Progress","type":"started"},
   {"id":"${FAKE_STATE_REVIEW_ID}","name":"In Review","type":"started"},
   {"id":"${FAKE_STATE_DONE_ID}","name":"Done","type":"completed"}
-]}}]}}}
+],"pageInfo":{"hasNextPage":false,"endCursor":null}}}]}}}
 JSON
     )
   fi
@@ -360,10 +362,35 @@ run "CAT-140: undrainable connection still exits 0" \
 run "CAT-140: an undrained connection records statesComplete=false" \
   bash -c "jq -e '.TST.statesComplete == false' '$REG15' >/dev/null"
 
-# The pre-existing single-page fixtures omit pageInfo entirely — a server that
-# returned everything it intended to. That must still count as complete.
-run "CAT-140: a response without pageInfo counts as complete" \
+run "CAT-140: a well-formed single-page response is complete" \
   bash -c "jq -e '.TST.statesComplete == true' '$(reg_path "${SCRATCH}/t1/home")' >/dev/null"
+
+# ─── CAT-140 (Codex #3214 round 2 P1): completeness needs POSITIVE evidence ──
+# GraphQL can return partial data alongside a field-level error — some state
+# nodes, no pageInfo. Coercing that absence to "drained" would cache a partial
+# set as authoritative and latch the whole team on a state it may well have.
+run_incomplete_case() {
+  local name="$1" response="$2"
+  local work="${SCRATCH}/${name}" home="${SCRATCH}/${name}/home" bin="${SCRATCH}/${name}/bin"
+  build_config "$work"
+  build_secrets "$home" "test-project"
+  install_fake_curl "$bin" 0 "$response"
+  HOME="$home" PATH="$bin:$PATH" bash "$RESOLVE" \
+    --config "$work/.catalyst/config.json" --force >/dev/null 2>&1 || return 1
+  jq -e '.TST.statesComplete == false' "$(reg_path "$home")" >/dev/null
+}
+
+run "CAT-140: a response omitting pageInfo stays inconclusive" \
+  run_incomplete_case cat140-no-pageinfo \
+  "{\"data\":{\"teams\":{\"nodes\":[{\"id\":\"${FAKE_TEAM_ID}\",\"states\":{\"nodes\":[{\"id\":\"s1\",\"name\":\"Backlog\",\"type\":\"backlog\"}]}}]}}}"
+
+run "CAT-140: partial data plus a GraphQL error stays inconclusive" \
+  run_incomplete_case cat140-partial-error \
+  "{\"errors\":[{\"message\":\"field error\"}],\"data\":{\"teams\":{\"nodes\":[{\"id\":\"${FAKE_TEAM_ID}\",\"states\":{\"nodes\":[{\"id\":\"s1\",\"name\":\"Backlog\",\"type\":\"backlog\"}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}]}}}"
+
+run "CAT-140: a non-boolean hasNextPage stays inconclusive" \
+  run_incomplete_case cat140-bad-pageinfo \
+  "{\"data\":{\"teams\":{\"nodes\":[{\"id\":\"${FAKE_TEAM_ID}\",\"states\":{\"nodes\":[{\"id\":\"s1\",\"name\":\"Backlog\",\"type\":\"backlog\"}],\"pageInfo\":{\"hasNextPage\":null,\"endCursor\":null}}}]}}}"
 
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"

@@ -783,6 +783,49 @@ run "triage transition resolves via the registry's customized eligibleQuery.tria
 run "used the registry's 'Intake' override, not the hardcoded 'Triage' default" \
   expect_contains "$LOG34" "linearis issues update TST-34 --status Intake"
 
+# ─── CAT-140 (Codex #3214 round 2 P1): registry outranks stateMap for triage ──
+# The realistic divergence is not an EMPTY stateMap — it is a Layer-1 config that
+# still carries the template's `stateMap.triage: "Triage"` while the registry
+# customizes the team to "Intake". Resolving stateMap first would target "Triage"
+# here while doctor validates and applyTriageStatus verifies "Intake": every
+# dispatch verify-fails, or this script latches the team as state-absent for a
+# state nothing else targets — all while doctor reports PASS.
+WORK35="${SCRATCH}/t35"
+BIN35="${SCRATCH}/t35/bin"
+LOG35="${SCRATCH}/t35/log"
+mkdir -p "${WORK35}/.catalyst" "${WORK35}/catalyst-dir/execution-core"
+cat > "${WORK35}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"linear":{"stateMap":{"triage":"Triage","done":"Done"}}}}
+EOF
+cat > "${WORK35}/catalyst-dir/execution-core/registry.json" <<'EOF'
+{"projects":[{"team":"TST","repoRoot":"/tmp/nonexistent","eligibleQuery":{"triageStatus":"Intake"}}]}
+EOF
+install_fake_linearis "$BIN35"
+touch "$LOG35"
+
+run "CAT-140: registry triageStatus outranks a populated stateMap.triage" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG35' PATH='$BIN35:$PATH' CATALYST_DIR='$WORK35/catalyst-dir' \
+    '$TRANSITION' --ticket TST-35 --transition triage --config '$WORK35/.catalyst/config.json'"
+
+run "CAT-140: wrote the registry's 'Intake', not stateMap's 'Triage'" \
+  bash -c "grep -qF 'linearis issues update TST-35 --status Intake' '$LOG35' \
+    && ! grep -qF -- '--status Triage' '$LOG35'"
+
+# An explicit --state is an operator override and still outranks the registry.
+run "CAT-140: explicit --state still outranks the registry triageStatus" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG35' PATH='$BIN35:$PATH' CATALYST_DIR='$WORK35/catalyst-dir' \
+    '$TRANSITION' --ticket TST-35 --transition triage --state 'Manual Override' \
+    --config '$WORK35/.catalyst/config.json'"
+run "CAT-140: --state literal reached linearis" \
+  expect_contains "$LOG35" "linearis issues update TST-35 --status Manual Override"
+
+# Non-triage transitions must be untouched by the registry lookup.
+run "CAT-140: a non-triage transition still resolves from stateMap" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG35' PATH='$BIN35:$PATH' CATALYST_DIR='$WORK35/catalyst-dir' \
+    '$TRANSITION' --ticket TST-35 --transition done --config '$WORK35/.catalyst/config.json'"
+run "CAT-140: done transition used stateMap's 'Done'" \
+  expect_contains "$LOG35" "linearis issues update TST-35 --status Done"
+
 # CAT-140: the shell fallback is pinned to registry.mjs's shared JS constant.
 JS_DEFAULT="$(sed -n 's/^export const DEFAULT_TRIAGE_STATUS = "\(.*\)";$/\1/p' \
   "${REPO_ROOT}/plugins/dev/scripts/execution-core/registry.mjs")"
