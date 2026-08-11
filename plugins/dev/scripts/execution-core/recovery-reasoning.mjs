@@ -2823,7 +2823,13 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       }
     }
     if (!anchorCandidate) {
-      for (const candidate of ordered) actOnTicket(candidate);
+      // Every candidate was already attempted above (the loop only breaks on a
+      // success), and a FAILED anchor attempt produces exactly the singleton
+      // path's side effects — the label gate fails before any correlated
+      // escalation is written. Re-running them here would bump each ticket's
+      // escalation-deferral counter twice in one tick, burning the
+      // RECOVERY_MAX_ESCALATION_DEFERRALS budget at 2x rate and double-emitting
+      // recovery.escalation.deferred. Nothing left to do for this group.
       continue;
     }
     for (const candidate of ordered) {
