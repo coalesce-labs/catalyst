@@ -50,6 +50,7 @@ import {
   PUBLISH_PREFLIGHT_WOULD_BLOCK,
 } from "../execution-core/publish-preflight-event.mjs";
 import { ALERT_BOOT_DEPENDENCY_UNUSABLE } from "../execution-core/dispatch-alert.mjs";
+import { FENCE_STANDOFF_EVENT } from "../execution-core/fence-standoff.mjs"; // CAT-173
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -96,6 +97,7 @@ const EXEC_CORE_EVENT_NAMES = [
   PUBLISH_PREFLIGHT_BLOCKED,
   PUBLISH_PREFLIGHT_WOULD_BLOCK,
   ALERT_BOOT_DEPENDENCY_UNUSABLE,
+  FENCE_STANDOFF_EVENT,
   ...INLINE_EVENT_NAMES,
 ];
 
