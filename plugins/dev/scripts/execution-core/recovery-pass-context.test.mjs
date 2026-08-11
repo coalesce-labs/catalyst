@@ -89,6 +89,14 @@ describe("CAT-44 leave-alone sweep suppression", () => {
   });
 });
 
+describe("CAT-44 skill doc parity", () => {
+  it("documents suppression and its escape hatch", () => {
+    const skill = readFileSync(join(import.meta.dir, "..", "..", "skills", "recovery-pass", "SKILL.md"), "utf8");
+    expect(skill).toContain("SUPPRESSED");
+    expect(skill).toContain("CATALYST_RECOVERY_SWEEP_LEDGER_FILTER");
+  });
+});
+
 describe("HRW soft owner-signal — pure ownership sanity", () => {
   it("a single-host roster owns every ticket (every item is YOURS)", () => {
     for (const t of ["CTL-1", "CTL-842", "OTL-7", "ADV-99"]) {

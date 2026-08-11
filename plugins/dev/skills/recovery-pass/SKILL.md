@@ -246,6 +246,12 @@ The script's banner is your context:
   touched this file"). At N=1 every item is YOURS. There is no pre-written brief —
   see the **Sweep SOP** section below for how to reconstruct each item's
   diagnosis yourself.
+  - **`(SUPPRESSED N item(s) carrying a leave-alone verdict …)`** — these tickets
+    were removed because a previous recovery-pass already reviewed them and its
+    `leave-alone` verdict remains inside the TTL (default 24h). They are settled,
+    not missing: do not re-review them. The line names each ticket and verdict
+    age; set `CATALYST_RECOVERY_SWEEP_LEDGER_FILTER=off` to reveal the unfiltered
+    set. Other router skip reasons remain visible.
 
 > **Sweep-mode binding.** In the sweep there is NO dispatcher `CATALYST_TICKET`.
 > Each `STUCK YOURS <ticket>` line the context script printed is one per-item
@@ -914,8 +920,8 @@ node "${EXEC_CORE}/recovery-emit.mjs" leave-alone \
 One call writes all three surfaces: the `recovery.verdict` event (the log
 record), the ledger verdict `decision:"leave-alone"` — which **refunds the
 dispatch attempt** (a reviewed-healthy pass must not burn a fix attempt) and
-suppresses re-review for the leave-alone window (default 24h) — and the
-ticket-visible 🔍 comment (do NOT post a separate `_rp_comment` for this; the
+suppresses both router re-dispatch and operator-sweep re-listing for the
+leave-alone window (default 24h) — and the ticket-visible 🔍 comment (do NOT post a separate `_rp_comment` for this; the
 shim posts it). Without this call the router re-dispatches the same review every
 cooldown until the 2-strike latch silently freezes the ticket — the exact
 act-and-discard failure this verdict exists to close.
