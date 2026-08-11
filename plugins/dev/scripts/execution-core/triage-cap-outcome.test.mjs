@@ -65,6 +65,22 @@ describe("dispatchTriage — outcome-aware cap (CAT-83)", () => {
     expect(events).toBe(1);
   });
 
+  test("failed cap comment delivery retries on the next capped sweep", () => {
+    seed("CAT-83", { status: "failed", count: TRIAGE_DISPATCH_CAP });
+    let comments = 0; let events = 0;
+    const opts = capOpts({
+      postCapComment: () => {
+        comments++;
+        if (comments === 1) throw new Error("temporary Linear failure");
+      },
+      appendCapEvent: () => { events++; },
+    });
+    expect(dispatchTriage("CAT-83", opts)).toBe(false);
+    expect(dispatchTriage("CAT-83", opts)).toBe(false);
+    expect(comments).toBe(2);
+    expect(events).toBe(1);
+  });
+
   test("multi-host fence reset runs only for an owned productive transition", () => {
     const hosts = ["vega", "mini"];
     let ownedTicket = "CAT-83";

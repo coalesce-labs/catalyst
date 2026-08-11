@@ -926,12 +926,26 @@ export function dispatchTriage(
     } catch (err) {
       log.warn({ identifier, err: err.message }, "ctl-1441: needs-human label at triage cap threw — continuing");
     }
-    if (markTriageCapped(orchDir, identifier)) {
-      const evidence = triageCapEvidence(orchDir, identifier, { host: self });
-      try { postCapComment(identifier, formatTriageCapComment(evidence)); }
-      catch (err) { log.warn({ identifier, err: err.message }, "cat-83: triage cap comment failed — continuing"); }
-      try { appendCapEvent(evidence); }
-      catch (err) { log.warn({ identifier, err: err.message }, "cat-83: triage cap event failed — continuing"); }
+    const newlyCapped = markTriageCapped(orchDir, identifier);
+    const evidence = triageCapEvidence(orchDir, identifier, { host: self });
+    const delivery = readTriageDispatchRecord(orchDir, identifier) ?? {};
+    if (!delivery.capCommentDeliveredAt) {
+      try {
+        postCapComment(identifier, formatTriageCapComment(evidence));
+        markTriageCapDelivery(orchDir, identifier, "capCommentDeliveredAt");
+      } catch (err) {
+        log.warn({ identifier, err: err.message }, "cat-83: triage cap comment failed — continuing");
+      }
+    }
+    if (!delivery.capEventDeliveredAt) {
+      try {
+        appendCapEvent(evidence);
+        markTriageCapDelivery(orchDir, identifier, "capEventDeliveredAt");
+      } catch (err) {
+        log.warn({ identifier, err: err.message }, "cat-83: triage cap event failed — continuing");
+      }
+    }
+    if (newlyCapped) {
       log.warn(
         { identifier, cap: TRIAGE_DISPATCH_CAP },
         "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm",
@@ -1318,6 +1332,13 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
   return true;
 }
 
+function markTriageCapDelivery(orchDir, ticket, field, { now = () => new Date().toISOString() } = {}) {
+  const prior = readTriageDispatchRecord(orchDir, ticket) ?? {};
+  if (prior[field]) return false;
+  writeTriageDispatchRecord(orchDir, ticket, { ...prior, [field]: now() });
+  return true;
+}
+
 export function clearTriageDispatchCount(
   orchDir,
   ticket,
@@ -1327,7 +1348,14 @@ export function clearTriageDispatchCount(
   if (!prior) return false;
   const priorCount = typeof prior.count === "number" ? prior.count : 0;
   if (priorCount === 0 && !prior.cappedAt) return false;
-  const { cappedAt: _cappedAt, cap: _cap, firstDispatchAt: _firstDispatchAt, ...rest } = prior;
+  const {
+    cappedAt: _cappedAt,
+    cap: _cap,
+    capCommentDeliveredAt: _capCommentDeliveredAt,
+    capEventDeliveredAt: _capEventDeliveredAt,
+    firstDispatchAt: _firstDispatchAt,
+    ...rest
+  } = prior;
   return writeTriageDispatchRecord(orchDir, ticket, {
     ...rest,
     count: 0,
