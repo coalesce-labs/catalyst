@@ -19,7 +19,7 @@
 // Lifecycle: `catalyst-monitor watchdog-start|watchdog-stop|watchdog-status`
 // supervises this with a pid file, mirroring the forward-* commands.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { startDaemonWatchdogProbe } from "./daemon-watchdog-probe.mjs";
 import { readDaemonWatchdogConfig, log } from "./config.mjs";
@@ -47,6 +47,17 @@ function resolveConfigPath(argv, env) {
     // An explicit path fails closed; falling through would recreate the host
     // config leak this argument exists to prevent.
     if (!existsSync(path)) return { error: `--config file not found: ${path}` };
+    try {
+      if (!statSync(path).isFile()) {
+        return { error: `--config path is not a readable regular file: ${path}` };
+      }
+      JSON.parse(readFileSync(path, "utf8"));
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        return { error: `--config file is not valid JSON: ${path}` };
+      }
+      return { error: `--config path is not a readable regular file: ${path}` };
+    }
     return { path, source: "argv" };
   }
   if (typeof env.CATALYST_CONFIG_FILE === "string" && env.CATALYST_CONFIG_FILE.length > 0) {

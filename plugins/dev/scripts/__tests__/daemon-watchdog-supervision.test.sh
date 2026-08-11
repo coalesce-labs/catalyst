@@ -220,6 +220,25 @@ if command -v bun >/dev/null 2>&1; then
       || fail "expected rc=2 + a clear message, got rc=${rc}: $(cat "$OUT")"
   fi
 
+  printf '%s\n' '{not-json' > "${CFG_OFF}/.catalyst/malformed.json"
+  if _wd_bounded 15 "$OUT" bun run "$RUNNER" --config "${CFG_OFF}/.catalyst/malformed.json"; then
+    fail "a malformed explicit config silently degraded to defaults"
+  else
+    rc=$?
+    [[ "$rc" == 2 ]] && grep -q 'config file is not valid JSON' "$OUT" \
+      && ok "a malformed explicit config exits 2" \
+      || fail "expected rc=2 for malformed config, got rc=${rc}: $(cat "$OUT")"
+  fi
+
+  if _wd_bounded 15 "$OUT" bun run "$RUNNER" --config "${CFG_OFF}/.catalyst"; then
+    fail "a directory supplied as --config silently degraded to defaults"
+  else
+    rc=$?
+    [[ "$rc" == 2 ]] && grep -q 'config path is not a readable regular file' "$OUT" \
+      && ok "a directory supplied as --config exits 2" \
+      || fail "expected rc=2 for config directory, got rc=${rc}: $(cat "$OUT")"
+  fi
+
   if _wd_bounded 15 "$OUT" bun run "$RUNNER" --config; then
     fail "--config without a value silently fell through"
   else
