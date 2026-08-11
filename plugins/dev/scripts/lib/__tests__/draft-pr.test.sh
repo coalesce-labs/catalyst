@@ -1430,6 +1430,115 @@ new_fixture push-remote-missing
 )
 assert_eq "origin" "$(cat "${SCRATCH}/12c.out")" "12c: falls open to origin when the configured remote is absent"
 
+# ─── Suite 14: CAT-202 — gh pr create/view scoped to the push-remote's repo ────
+# gh pr create/view with no --repo resolve against "origin" via gh's own remote
+# detection, regardless of which remote the branch was actually pushed to. For
+# a repo where origin is a read-only upstream (coalesce-labs/catalyst) and the
+# writable fork lives on a separate remote (fork -> thagale/catalyst), every
+# automated PR was landing on origin — a repo this daemon can never merge on —
+# instead of the fork it just pushed to. _draft_pr_repo_slug/_draft_pr_gh_pr
+# fix this by resolving --repo from the SAME push-remote _draft_pr_push_remote
+# already selects.
+echo ""
+echo "Suite 14: CAT-202 — gh pr create/view scoped to the push-remote's repo"
+
+# 14a: _draft_pr_repo_slug parses an https://github.com/... remote URL
+echo "14a: _draft_pr_repo_slug parses an https github remote URL"
+new_fixture repo-slug-https
+(
+  cd "$WORK"
+  git remote set-url origin "https://github.com/thagale/catalyst.git"
+  source "$DRAFT_PR_LIB"
+  _draft_pr_repo_slug origin > "${SCRATCH}/14a.out" 2>/dev/null
+)
+assert_eq "thagale/catalyst" "$(cat "${SCRATCH}/14a.out")" "14a: https URL resolves to owner/repo"
+
+# 14b: _draft_pr_repo_slug parses a git@github.com:... (SSH) remote URL
+echo "14b: _draft_pr_repo_slug parses an ssh github remote URL"
+new_fixture repo-slug-ssh
+(
+  cd "$WORK"
+  git remote set-url origin "git@github.com:thagale/catalyst.git"
+  source "$DRAFT_PR_LIB"
+  _draft_pr_repo_slug origin > "${SCRATCH}/14b.out" 2>/dev/null
+)
+assert_eq "thagale/catalyst" "$(cat "${SCRATCH}/14b.out")" "14b: ssh URL resolves to owner/repo"
+
+# 14c: _draft_pr_repo_slug fails open (empty) for a non-github remote — the
+# local bare-repo fixtures every other suite in this file uses must keep
+# working with no --repo, exactly like before this fix.
+echo "14c: _draft_pr_repo_slug returns empty for a non-github remote (fail-open)"
+new_fixture repo-slug-local
+(
+  cd "$WORK"
+  source "$DRAFT_PR_LIB"
+  _draft_pr_repo_slug origin > "${SCRATCH}/14c.out" 2>/dev/null
+)
+assert_eq "" "$(cat "${SCRATCH}/14c.out")" "14c: local bare-repo remote yields no slug"
+
+# 14d: draft_pr_ensure passes --repo <fork's owner/repo> to `gh pr create`
+# when the configured push remote (fork) has a github.com URL — this is the
+# actual bug: the branch is pushed to fork/thagale/catalyst, but gh pr create
+# used to silently target origin/coalesce-labs-catalyst instead.
+echo "14d: draft_pr_ensure passes --repo (from the push remote) to gh pr create"
+new_fixture repo-scope-create
+git -C "$WORK" remote add fork "https://github.com/thagale/catalyst.git"
+(
+  cd "$WORK"
+  mkdir -p .catalyst
+  printf '{"catalyst":{"pr":{"pushRemote":"fork"}}}' > .catalyst/config.json
+  git push -u origin HEAD --quiet
+)
+P14D_BIN="${SCRATCH}/p14d-bin"
+P14D_LOG="${SCRATCH}/p14d.log"
+install_gh_stub_no_pr "$P14D_BIN" "$P14D_LOG"
+(
+  cd "$WORK"
+  PATH="${P14D_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  draft_pr_ensure "main" "CAT-202" >/dev/null 2>/dev/null
+)
+if grep -A1 -- '--repo' "$P14D_LOG" | grep -q "thagale/catalyst"; then
+  pass "14d: gh pr create scoped to --repo thagale/catalyst (the fork), not origin"
+else
+  fail "14d: gh pr create scoped to --repo thagale/catalyst — log: $(cat "$P14D_LOG" 2>/dev/null)"
+fi
+
+# 14e: the idempotency check (gh pr view) is ALSO scoped to the fork's repo —
+# otherwise draft_pr_ensure would check origin for an existing PR (never find
+# one there) and could create a duplicate on the fork on every re-run.
+echo "14e: draft_pr_ensure's existing-PR check (gh pr view) is also --repo scoped"
+VIEW_HAS_REPO="$(awk '/^view$/{found=1} found && /^--repo$/{print "yes"; exit}' "$P14D_LOG")"
+if [[ "$VIEW_HAS_REPO" == "yes" ]]; then
+  pass "14e: gh pr view (idempotency check) received --repo"
+else
+  fail "14e: gh pr view (idempotency check) received --repo — log: $(cat "$P14D_LOG" 2>/dev/null)"
+fi
+
+# 14f: regression safety — with no fork remote configured (push remote stays
+# "origin", a local bare-repo test fixture with no github.com URL), gh pr
+# create/view are called with NO --repo flag at all, exactly like every
+# pre-CAT-202 test in this file already asserts (Suite 2's p2a). This proves
+# the fix is additive/fail-open and doesn't change behavior for a non-github
+# or single-remote checkout.
+echo "14f: no fork remote configured → gh pr create called with no --repo (unchanged)"
+new_fixture repo-scope-default
+(cd "$WORK" && git push -u origin HEAD --quiet)
+P14F_BIN="${SCRATCH}/p14f-bin"
+P14F_LOG="${SCRATCH}/p14f.log"
+install_gh_stub_no_pr "$P14F_BIN" "$P14F_LOG"
+(
+  cd "$WORK"
+  PATH="${P14F_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  draft_pr_ensure "main" "CAT-202" >/dev/null 2>/dev/null
+)
+if grep -q -- '--repo' "$P14F_LOG" 2>/dev/null; then
+  fail "14f: no --repo expected for a non-github origin — log: $(cat "$P14F_LOG" 2>/dev/null)"
+else
+  pass "14f: gh pr create/view called with no --repo (unchanged, fail-open)"
+fi
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"

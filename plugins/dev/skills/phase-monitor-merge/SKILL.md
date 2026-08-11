@@ -79,7 +79,14 @@ if [[ -x "$SESSION_SCRIPT" ]]; then
   export CATALYST_SESSION_ID
 fi
 
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+# CAT-202: resolve REPO from the PR's OWN recorded url, not the ambient
+# `origin` remote. `gh repo view` (no --repo) resolves against whatever repo
+# `origin` points to — for a checkout where `origin` is a read-only upstream
+# and pushes/PRs are routed to a separate `fork` remote (catalyst.pr.pushRemote),
+# that silently disagreed with the repo the tracked PR actually lives on.
+# phase-pr.json's `.pr.url` is the authoritative record of that repo.
+REPO=$(jq -r '.pr.url // empty' "$PR_SIGNAL" 2>/dev/null | sed -E 's#^https://github\.com/##; s#/pull/[0-9]+$##')
+[[ -n "$REPO" ]] || REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
 [[ -n "$REPO" ]] || { echo "phase-monitor-merge: cannot resolve repo" >&2; exit 1; }
 
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -420,7 +427,10 @@ if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "${HEAD_AGE_SEC:-}" ]]; then
   fi
   echo "phase-monitor-merge: reviewer-arrival window elapsed; proceeding to merge pr#${PR_NUMBER}" >&2
 fi
-gh pr merge "$PR_NUMBER" --squash --delete-branch
+# CAT-202: explicit --repo — a bare `gh pr merge` resolves against the
+# ambient `origin` remote, which can disagree with $REPO (the repo the PR was
+# actually opened on, resolved above from phase-pr.json's .pr.url).
+gh pr merge "$PR_NUMBER" --repo "${REPO}" --squash --delete-branch
 # REST is authoritative — confirm via REST, never GraphQL
 MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
 [[ "$MERGED_OK" = "true" ]] || { echo "phase-monitor-merge: merge not confirmed via REST" >&2; exit 1; }
@@ -539,7 +549,7 @@ if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
   MERGED_AT="$(jq -r '.pr.mergedAt // empty' "${MM_SIGNAL}" 2>/dev/null || true)"
   PR_VIEW="{}"
   if [[ -n "${MM_PR_NUMBER}" ]]; then
-    PR_VIEW="$(gh pr view "${MM_PR_NUMBER}" --json url,baseRefName,createdAt,statusCheckRollup,reviews 2>/dev/null || echo '{}')"
+    PR_VIEW="$(gh pr view "${MM_PR_NUMBER}" --repo "${REPO}" --json url,baseRefName,createdAt,statusCheckRollup,reviews 2>/dev/null || echo '{}')"
   fi
   PR_URL="$(printf '%s' "${PR_VIEW}" | jq -r '.url // empty' 2>/dev/null || true)"
   BASE_REF="$(printf '%s' "${PR_VIEW}" | jq -r '.baseRefName // "main"' 2>/dev/null || echo 'main')"
