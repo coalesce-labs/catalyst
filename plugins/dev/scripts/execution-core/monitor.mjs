@@ -150,6 +150,13 @@ import {
 } from "./reconcile-health-event.mjs";
 import { checkFleetFreeze } from "./fleet-freeze-alert.mjs"; // CTL-1420: fleet-frozen-for-admission alert
 import { recordReplicaRead } from "./replica-health.mjs"; // CAT-35
+import {
+  TRIAGE_DECLINE_REASONS, TRIAGE_REQUEST_ESCALATE_MODE, TRIAGE_REQUEST_ESCALATE_MS,
+  clearTriageRequest, hasTriageArtifact, isTriageInFlight, listTriageRequests,
+  markTriageRequestEscalated, readTriageSignalStatus, recordTriageDecline,
+  shouldEscalateTriageRequest,
+} from "./triage-request.mjs";
+export { readTriageSignalStatus } from "./triage-request.mjs";
 
 const MONITOR_BOOT_TS = Date.now();
 
@@ -1238,13 +1245,6 @@ function dispatchTriage(
   return true;
 }
 
-// hasTriageArtifact — does a triage.json exist for this ticket's worker dir?
-// CTL-625: the marker that distinguishes an already-triaged Ready ticket from
-// a Backlog→Ready-direct entry that skipped the triage phase agent.
-function hasTriageArtifact(orchDir, ticket) {
-  return existsSync(join(orchDir, "workers", ticket, "triage.json"));
-}
-
 // ── CTL-1441: triage re-dispatch guard ───────────────────────────────────────
 // CTL-1403 was re-triaged 12× in ~30h: this sweep keys ONLY on triage.json,
 // while advancement keys phase-triage.json — a triage run whose content
@@ -1263,26 +1263,11 @@ function hasTriageArtifact(orchDir, ticket) {
 //       workers/<t>/.triage-redispatch-capped + .triage-dispatch-count.json.
 export const TRIAGE_DISPATCH_CAP = Number(process.env.CATALYST_TRIAGE_DISPATCH_CAP) || 3;
 
-export function readTriageSignalStatus(orchDir, ticket) {
-  try {
-    const sig = JSON.parse(
-      readFileSync(join(orchDir, "workers", ticket, "phase-triage.json"), "utf8")
-    );
-    return typeof sig?.status === "string" ? sig.status : null;
-  } catch {
-    return null; // absent/malformed → fail-open
-  }
-}
-
 // isTriageInFlight — CTL-1441: a signal the launcher would treat as a live,
 // idempotent no-op (phase-agent-dispatch:513 short-circuits dispatched|running|
 // done; pending is a re-arm in progress). Used to (a) skip cap COUNTING (a
 // no-op dispatch is not a retry) and (b) defer cap PARKING (an allowed attempt
 // may still complete — only park after the signal settles without an artifact).
-function isTriageInFlight(status) {
-  return status === "dispatched" || status === "running" || status === "pending";
-}
-
 // Codex R4: the cap state lives at orchDir level — NOT under workers/<t>/ —
 // because the worker-dir GC deletes terminal dirs after retention, and losing
 // the counter would re-arm the very re-dispatch cycle the cap terminates
