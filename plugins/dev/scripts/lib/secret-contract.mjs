@@ -249,6 +249,25 @@ export const SECRET_REGISTRY = Object.freeze(
       bootstrapFor: null,
     },
     {
+      id: "linear-heartbeat-actor",
+      envNames: [],
+      delivery: "config-json",
+      configJsonPath: "catalyst.linear.bot.heartbeat",
+      // CAT-157: this is deliberately a separate OAuth application from the
+      // orchestrator/worker actors so heartbeat traffic owns its quota bucket.
+      rotation: { class: "re-armable", trigger: "on-401" },
+      requiredObjectFields: ["clientId", "clientSecret"],
+      bootstrapFor: null,
+    },
+    {
+      id: "linear-heartbeat-api-token",
+      envNames: ["CATALYST_HEARTBEAT_APP_ACTOR_TOKEN"],
+      delivery: "env-alias",
+      configJsonPath: null,
+      rotation: { class: "re-armable", trigger: "on-401" },
+      bootstrapFor: null,
+    },
+    {
       id: "groq-api-key",
       envNames: ["GROQ_API_KEY"],
       delivery: "config-json",

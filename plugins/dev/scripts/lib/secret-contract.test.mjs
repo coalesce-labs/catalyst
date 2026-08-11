@@ -47,8 +47,8 @@ beforeEach(() => {
 });
 
 describe("SECRET_REGISTRY — shape", () => {
-  test("11 seed rows, matching the design §2 seed table", () => {
-    expect(SECRET_REGISTRY.length).toBe(11);
+  test("13 seed rows, matching the design §2 seed table", () => {
+    expect(SECRET_REGISTRY.length).toBe(13);
     expect(SECRET_REGISTRY.map((r) => r.id)).toEqual([
       "github-token",
       "webhook-secret",
@@ -58,6 +58,8 @@ describe("SECRET_REGISTRY — shape", () => {
       "linear-api-token",
       "linear-orchestrator-actor",
       "linear-worker-actor",
+      "linear-heartbeat-actor",
+      "linear-heartbeat-api-token",
       "groq-api-key",
       "cloud-token",
       "age-key",
@@ -73,7 +75,7 @@ describe("SECRET_REGISTRY — shape", () => {
     expect(() => {
       SECRET_REGISTRY.push({ id: "bogus" });
     }).toThrow();
-    expect(SECRET_REGISTRY.length).toBe(11);
+    expect(SECRET_REGISTRY.length).toBe(13);
   });
 
   test("DEEP-FREEZE (Codex finding fix): every row's NESTED envNames array is also frozen, not just the outer row object", () => {
@@ -145,6 +147,21 @@ describe("SECRET_REGISTRY — shape", () => {
 
   test("getSecretRow returns undefined for an unknown id (never throws)", () => {
     expect(getSecretRow("does-not-exist")).toBeUndefined();
+  });
+});
+
+describe("CAT-157 heartbeat actor rows", () => {
+  test("dedicated token resolves from its single env alias and misses quietly", () => {
+    expect(resolveSecret("linear-heartbeat-api-token", { env: { CATALYST_HEARTBEAT_APP_ACTOR_TOKEN: "hb" } }).value).toBe("hb");
+    expect(resolveSecret("linear-heartbeat-api-token", { env: {} }).value).toBeNull();
+  });
+
+  test("actor is optional and rejects incomplete Layer-2 credentials", () => {
+    const dir = fixtureDir();
+    const absent = writeFile(dir, "absent.json", JSON.stringify({}));
+    const partial = writeFile(dir, "partial.json", JSON.stringify({ catalyst: { linear: { bot: { heartbeat: { botUserId: "x" } } } } }));
+    expect(resolveSecret("linear-heartbeat-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: absent } }).value).toBeNull();
+    expect(resolveSecret("linear-heartbeat-actor", { env: { CATALYST_LAYER2_CONFIG_FILE: partial } }).value).toBeNull();
   });
 });
 
@@ -999,7 +1016,13 @@ describe("registry validation (§6) — the rearm-hook honesty rules", () => {
     // remains genuinely hookless everywhere in the codebase as of this PR.
     const reArmable = SECRET_REGISTRY.filter((r) => r.rotation.class === "re-armable");
     expect(reArmable.map((r) => r.id).sort()).toEqual(
-      ["github-token", "linear-api-token", "linear-orchestrator-actor"].sort(),
+      [
+        "github-token",
+        "linear-api-token",
+        "linear-heartbeat-actor",
+        "linear-heartbeat-api-token",
+        "linear-orchestrator-actor",
+      ].sort(),
     );
     for (const row of reArmable) {
       const env = { PROBE_UNSET_VAR_FOR_TEST: "x" }; // resolves to none for every one of these rows
