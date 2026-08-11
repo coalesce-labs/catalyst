@@ -16,6 +16,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
 import { getEventLogPath } from "./config.mjs";
+import { claudeConfigDir } from "./doctor.mjs";
 import { emitReapIntent, REAP_INTENT_TYPES } from "./reap-intent.mjs";
 
 const realCatalystDir = resolve(homedir(), "catalyst");
@@ -76,5 +77,30 @@ describe("CTL-810: hermetic CATALYST_DIR preload", () => {
     } finally {
       process.env.CATALYST_DIR = prev;
     }
+  });
+});
+
+// CAT-154: CLAUDE_CONFIG_DIR is the (single) input to claudeConfigDir() (doctor.mjs:5004), which
+// resolves where the skills-dir check looks for ~/.claude/skills/catalyst-* symlinks. Unpinned, a
+// developer's real install grades PASS/WARN and a clean CI runner grades FAIL — the exact
+// host-divergence class the CATALYST_LAYER2_CONFIG_FILE pin above exists to prevent.
+describe("CAT-154: hermetic CLAUDE_CONFIG_DIR preload", () => {
+  const primary = () => (process.env.CLAUDE_CONFIG_DIR ?? "").split(":")[0];
+  const realClaudeDir = resolve(homedir(), ".claude");
+
+  test("preload pinned CLAUDE_CONFIG_DIR under the hermetic dir, never the real ~/.claude", () => {
+    expect(process.env.CLAUDE_CONFIG_DIR).toBeDefined();
+    const p = resolve(primary());
+    expect(p).not.toBe(realClaudeDir);
+    expect(p.startsWith(realClaudeDir + sep)).toBe(false);
+    expect(p.startsWith(resolve(process.env.CATALYST_HERMETIC_DIR))).toBe(true);
+  });
+
+  test("the pinned path is guaranteed-absent (like the Layer-2 pin)", () => {
+    expect(existsSync(primary())).toBe(false);
+  });
+
+  test("claudeConfigDir() resolves to the pin, not the live tree", () => {
+    expect(resolve(claudeConfigDir())).toBe(resolve(primary()));
   });
 });

@@ -57,6 +57,17 @@ process.env.CATALYST_HERMETIC_DIR = hermeticDir;
 // way it handles CATALYST_DIR's hermetic pin.
 process.env.CATALYST_LAYER2_CONFIG_FILE = join(hermeticDir, "layer2-config-absent.json");
 
+// CAT-154: pin CLAUDE_CONFIG_DIR for the same reason as the Layer-2 pin above. Unset,
+// claudeConfigDir() (doctor.mjs:5004) falls back to the REAL ~/.claude — so doctor's skills-dir
+// check grades the developer's live Catalyst install instead of the code under test. Its severity
+// is class-conditional (doctor.mjs:5089: worker→FAIL, developer→WARN) and runDoctor returns only
+// the FAIL count, so the divergence is INVISIBLE locally and hard-red on a clean CI runner: that
+// is how main went red for ~11h on 2026-08-09 (PR #2664 in, PR #3180 out). Point at a
+// guaranteed-absent path so every host resolves the same "no skills dir" branch. Tests that want a
+// real tree inject the seam (installChecksForClass's skillsDirCheck) or checkSkillsDirPlugins's
+// six IO seams directly — both already the established pattern.
+process.env.CLAUDE_CONFIG_DIR = join(hermeticDir, "claude-config-absent");
+
 // Belt: a real linearis reached despite the shim writes nothing without creds.
 delete process.env.LINEAR_API_TOKEN;
 delete process.env.LINEAR_API_KEY;
