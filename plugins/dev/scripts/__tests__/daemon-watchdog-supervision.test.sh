@@ -37,14 +37,42 @@ check() { if [[ "$1" == "yes" ]]; then ok "$2"; else fail "$2"; fi; }
 
 _wd_bounded() { # _wd_bounded <deadline_secs> <outfile> <cmd...>
   local limit="$1" out="$2"; shift 2
-  local mark cpid wpid rc
+  local mark donef cpid wpid rc
   mark="$(mktemp -u)"
+  donef="$(mktemp -u)"
   "$@" > "$out" 2>&1 &
   cpid=$!
-  ( sleep "$limit"; : > "$mark"; kill -9 "$cpid" 2>/dev/null ) >/dev/null 2>&1 &
+  # A SELF-LIMITING timer, deliberately NOT a kill-based watchdog.
+  #
+  # The obvious form — `( sleep "$limit"; kill "$cpid" ) &` reaped with a kill —
+  # leaks: `sleep` is a separate process from the subshell that spawned it, so a
+  # signal aimed at that subshell leaves the sleep reparented to PID 1, running
+  # to full term. One orphan per bounded call, eight call sites, and the suite
+  # still reports every check passed. Nor is it enough to signal more politely:
+  # TERM-plus-trap, a recorded-pid handshake, and a process-group kill were each
+  # measured leaking when the bounded command returns instantly, because they all
+  # race the timer's own fork — the signal can land before the handler exists.
+  #
+  # So the timer owns its deadline instead of being stopped from outside. It
+  # needs no signal, which is exactly why nothing can be orphaned, and it still
+  # terminates on its own even if every cleanup line below were broken (the
+  # AGENTS.md background-process rule). It SLEEPS rather than spinning — an
+  # empty-body deadline loop re-evaluates as fast as the CPU allows and burns a
+  # whole core. The parent's completion marker is a file, not a pid probe, so no
+  # branch here can be confused by a recycled pid.
+  ( i=0
+    while [ "$i" -lt "$limit" ]; do
+      [ -e "$donef" ] && exit 0        # command already finished — retire early
+      sleep 1
+      i=$((i + 1))
+    done
+    : > "$mark"
+    kill -9 "$cpid" 2>/dev/null ) >/dev/null 2>&1 &
   wpid=$!
   wait "$cpid"; rc=$?
-  kill -9 "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+  : > "$donef"                          # release the timer; never signal it
+  wait "$wpid" 2>/dev/null              # retires within ~1s, of its own accord
+  rm -f "$donef"
   if [[ -e "$mark" ]]; then
     rm -f "$mark"
     echo "OVERRAN the ${limit}s deadline" >> "$out"
@@ -177,8 +205,11 @@ fi
 # return {} unconditionally, silently ignoring every documented Layer-1 knob.
 # On a monitor node this runner is the ONLY watchdog host, so that would strand
 # its forwarder shadow-only while workers honored the same config file.
+# Matches the call PREFIX, not a fixed arity: configPath must be the first
+# argument, but the reader also accepts an optional pre-validated Layer-1
+# snapshot, so pinning the closing paren here would fail on an unrelated change.
 if grep -q 'CATALYST_CONFIG_FILE' "$RUNNER" \
-   && grep -q 'readDaemonWatchdogConfig(configPath)' "$RUNNER"; then
+   && grep -q 'readDaemonWatchdogConfig(configPath[,)]' "$RUNNER"; then
   ok "standalone runner resolves + passes a Layer-1 config path"
 else
   fail "standalone runner ignores Layer-1 config (no configPath threaded)"
@@ -249,7 +280,7 @@ if command -v bun >/dev/null 2>&1; then
   fi
 
   # The GNU `--config=<path>` form must select the same tier as the space form.
-  # Before CAT-139 review it fell through to the ambient env tier and started a
+  # Before the PROJ review it fell through to the ambient env tier and started a
   # LIVE watchdog on the decoy config, so this asserts the WIN, not just an exit.
   if _wd_bounded 15 "$OUT" env CATALYST_CONFIG_FILE="${CFG_DECOY}/.catalyst/config.json" \
        bun run "$RUNNER" --config="${CFG_OFF}/.catalyst/config.json" \
