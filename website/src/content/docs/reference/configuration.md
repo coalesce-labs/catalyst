@@ -374,6 +374,9 @@ comment the app posts), but they are account-specific.
 | `catalyst.linear.bot.orchestrator.botUserId`                                   | Linear user UUID of the orchestrator app actor. **Also drives self-assign on claim (CTL-1011)** — the daemon writes this UUID as the Linear assignee when it claims a ticket. When absent, `applyAssignee` emits a single deduped `warn` and leaves the ticket unassigned. Daemon reads it **only at startup** — restart required after changing. |
 | `catalyst.linear.bot.worker.{clientId,clientSecret,webhookSecret,accessToken}` | OAuth app-actor credentials for the worker identity. Secrets — keep in the un-committed global config                                                                                                                                                                                                                                             |
 
+For credential replacement and verification, follow the
+[Linear app-actor secret rotation runbook](../../../../../docs/runbooks/linear-app-actor-secret-rotation.md).
+
 > **Self-assign activation:** `catalyst.linear.bot.orchestrator.botUserId` must be set AND the
 > app-actor token must carry the `app:assignable` OAuth scope for the assignee write to succeed. If
 > the token lacks scope, a deduped `warn` is emitted once per Linear team with the re-mint remedy.
