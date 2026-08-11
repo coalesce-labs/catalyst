@@ -9,7 +9,7 @@
 // is a no-op. Only the escalation sweep (which runs after that loop) executes,
 // so these tests never touch the host's real registry or eligible sets.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sweepMissingTriage } from "./monitor.mjs";
@@ -73,6 +73,47 @@ function runSweep({ mode, now = ESCALATE_MS }) {
 }
 
 describe("CAT-166 triage-request escalation sweep", () => {
+  test("an eligible-state request reaches dispatch without Triage-board revalidation", () => {
+    writeFileSync(
+      join(orchDir, "registry.json"),
+      JSON.stringify({
+        projects: [
+          {
+            team: "CAT",
+            repoRoot: catalystDir,
+            eligibleQuery: { status: "Todo", triageStatus: "Triage" },
+          },
+        ],
+      }),
+    );
+    seedRequest();
+    const dispatches = [];
+    let liveStateReads = 0;
+
+    sweepMissingTriage({
+      orchDir,
+      dispatch: (request) => {
+        dispatches.push(request);
+        return { code: 0 };
+      },
+      applyTriageStatus: () => ({ applied: false }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 1,
+      liveBackgroundCount: () => 0,
+      runTriageState: () => [],
+      hosts: ["test-host"],
+      hostName: "test-host",
+      fetchLiveState: () => {
+        liveStateReads += 1;
+        return "Todo";
+      },
+      triageEscalateMode: "off",
+    });
+
+    expect(dispatches).toEqual([{ orchDir, ticket: TICKET, phase: "triage" }]);
+    expect(liveStateReads).toBe(0);
+  });
+
   test("off: never routes, never emits, never latches", () => {
     seedRequest({ declineReason: "no-free-slots" });
     const { routed, events } = runSweep({ mode: "off" });

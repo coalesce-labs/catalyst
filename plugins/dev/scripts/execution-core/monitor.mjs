@@ -1584,7 +1584,16 @@ export function sweepMissingTriage({
       )
         continue;
       if (hasTriageArtifact(orchDir, t.identifier)) {
-        if (t.fromTriageRequest) clearTriageRequest(orchDir, t.identifier);
+        if (t.fromTriageRequest) {
+          try {
+            clearTriageRequest(orchDir, t.identifier);
+          } catch (err) {
+            log.warn(
+              { identifier: t.identifier, err: String(err) },
+              "cat-166: could not clear fulfilled triage request during sweep",
+            );
+          }
+        }
         continue;
       }
       // CTL-1589 (Codex R4): a Triage-STATE ticket whose triage worker is
@@ -1607,9 +1616,8 @@ export function sweepMissingTriage({
         budget,
         // CTL-1589 (Codex R3): Triage-BOARD candidates must still be in the
         // Triage state at launch; eligible-half candidates skip the check.
-        requireTriageState: t.fromTriageBoard || t.fromTriageRequest ? triageStatusName : null,
-        candidateUpdatedAt:
-          t.fromTriageBoard || t.fromTriageRequest ? (t.updatedAt ?? null) : null,
+        requireTriageState: t.fromTriageBoard ? triageStatusName : null,
+        candidateUpdatedAt: t.fromTriageBoard ? (t.updatedAt ?? null) : null,
         fetchLiveState,
         botUserIds,
         botWriteId,
