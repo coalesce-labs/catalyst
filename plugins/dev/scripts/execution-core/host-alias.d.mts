@@ -13,3 +13,13 @@ export function resolveHostAlias(name: string, aliases?: Record<string, string> 
  * absent, unreadable, or the key is missing/non-object.
  */
 export function loadHostAliases(args?: { configPath?: string }): Record<string, string>;
+
+/**
+ * CAT-197. Collapse a raw-keyed map's keys onto pinned roster names via the alias
+ * table (same forward direction as resolveHostAlias). Last-write-wins if two raw
+ * keys alias to the same pinned name. Null/non-object map or aliases fail open.
+ */
+export function foldMapByAlias<T>(
+  map: Record<string, T> | null | undefined,
+  aliases?: Record<string, string> | null
+): Record<string, T>;

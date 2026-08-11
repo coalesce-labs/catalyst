@@ -6,7 +6,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveHostAlias, loadHostAliases } from "./host-alias.mjs";
+import { resolveHostAlias, loadHostAliases, foldMapByAlias } from "./host-alias.mjs";
 
 describe("resolveHostAlias (CTL-1092)", () => {
   test("maps a pre-pin OS name to the pinned roster name", () => {
@@ -57,5 +57,41 @@ describe("loadHostAliases (CTL-1092)", () => {
     const configPath = join(tmp, "config.json");
     writeFileSync(configPath, JSON.stringify(config));
     expect(loadHostAliases({ configPath })).toEqual({});
+  });
+});
+
+// CAT-197: a raw-keyed map (e.g. a Loki-sourced per-host cache keyed by the pre-pin
+// OS hostname) must be foldable onto pinned roster names at WRITE time — mirrors
+// cluster-view.mjs's existing heartbeat fold, which is why liveness has always
+// worked for an aliased host while capacity (which was never folded) did not.
+describe("foldMapByAlias (CAT-197)", () => {
+  test("folds a raw (pre-pin) key onto the pinned roster name", () => {
+    const map = { cddock: { maxParallel: 3, inFlightCount: 3 } };
+    const aliases = { cddock: "vega", "cddock.hagale.net": "vega" };
+    expect(foldMapByAlias(map, aliases)).toEqual({
+      vega: { maxParallel: 3, inFlightCount: 3 },
+    });
+  });
+
+  test("leaves an already-pinned key untouched when it has no alias entry", () => {
+    const map = { aldebaran: { maxParallel: 3 } };
+    expect(foldMapByAlias(map, { cddock: "vega" })).toEqual({ aldebaran: { maxParallel: 3 } });
+  });
+
+  test("two raw keys aliasing to the same pinned name collapse to one entry", () => {
+    const map = {
+      cddock: { maxParallel: 3 },
+      "cddock.hagale.net": { maxParallel: 3 },
+    };
+    const aliases = { cddock: "vega", "cddock.hagale.net": "vega" };
+    expect(Object.keys(foldMapByAlias(map, aliases))).toEqual(["vega"]);
+  });
+
+  test("empty map or missing aliases → {} / pass-through, never throws", () => {
+    expect(foldMapByAlias({}, { cddock: "vega" })).toEqual({});
+    expect(foldMapByAlias({ cddock: { maxParallel: 3 } }, null)).toEqual({
+      cddock: { maxParallel: 3 },
+    });
+    expect(foldMapByAlias(null, { cddock: "vega" })).toEqual({});
   });
 });
