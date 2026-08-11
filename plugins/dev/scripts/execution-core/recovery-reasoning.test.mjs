@@ -1126,6 +1126,64 @@ describe("recovery-intent ledger (cooldown + max-attempts + escalated)", () => {
     expect(second.attempts).toBe(2);
   });
 
+  // CAT-170 Phase 2: the attempt-time failure signature is durable, but marker
+  // writes must not accidentally erase it before the exhausted-intent sweep.
+  test("failure signature is normalized and preserved across marker writes", () => {
+    const t0 = 1_000_000_000_000;
+    const first = defaultRecordIntent(
+      "CAT-170",
+      { decision: "dispatched", signature: "  Hit your   SESSION limit  " },
+      { orchDir, now: () => t0 },
+    );
+    expect(first.signature).toBe("hit your session limit");
+    expect(first.escalated).toBe(false);
+
+    const marker = defaultRecordIntent(
+      "CAT-170",
+      { decision: "defer", attempts: 0 },
+      { orchDir, now: () => t0 + 1 },
+    );
+    expect(marker.signature).toBe("hit your session limit");
+    expect(marker.escalated).toBe(false);
+  });
+
+  test("classifier writes clear stale signatures and explicit signatures replace them", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent(
+      "CAT-171",
+      { decision: "dispatched", signature: "old failure" },
+      { orchDir, now: () => t0 },
+    );
+    const replaced = defaultRecordIntent(
+      "CAT-171",
+      { decision: "dispatched", signature: "new failure" },
+      { orchDir, now: () => t0 + 1 },
+    );
+    expect(replaced.signature).toBe("new failure");
+
+    const classified = defaultRecordIntent(
+      "CAT-171",
+      { decision: "fix", fix_class: "bounded-llm" },
+      { orchDir, now: () => t0 + 2 },
+    );
+    expect("signature" in classified).toBe(false);
+  });
+
+  test("missing and whitespace-only signatures do not alter the legacy ledger shape", () => {
+    const absent = defaultRecordIntent(
+      "CAT-172",
+      { decision: "dispatched" },
+      { orchDir, now: () => 1 },
+    );
+    const blank = defaultRecordIntent(
+      "CAT-173",
+      { decision: "dispatched", signature: " \n\t " },
+      { orchDir, now: () => 1 },
+    );
+    expect("signature" in absent).toBe(false);
+    expect("signature" in blank).toBe(false);
+  });
+
   test("fail-open: no ledger → shouldSkip returns false", () => {
     expect(defaultShouldSkipItem("CTL-999", { orchDir, now: () => Date.now() })).toBe(false);
   });
@@ -2459,6 +2517,150 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 })).toBe("escalated");
     // …and B1's terminal TTL ages it back into triage.
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 + RECOVERY_TERMINAL_INTENT_TTL_MS })).toBeNull();
+  });
+});
+
+// ─── CAT-170 Phase 3: correlate retry-cap escalations by failure signature ──
+describe("escalateExhaustedIntents correlation (CAT-170)", () => {
+  let orchDir;
+  const t0 = 1_000_000_000_000;
+
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-correlation-"));
+    mkdirSync(pathJoin(orchDir, ".recovery-intents"), { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  const seed = (ticket, signature, lastTs = t0) => {
+    const entry = {
+      ticket,
+      ts: lastTs,
+      lastTs,
+      decision: "dispatched",
+      fix_class: "board-health",
+      attempts: RECOVERY_MAX_ATTEMPTS,
+      escalated: false,
+      ...(signature ? { signature } : {}),
+    };
+    writeFileSync(
+      pathJoin(orchDir, ".recovery-intents", `${ticket}.json`),
+      JSON.stringify(entry),
+    );
+  };
+
+  const run = (overrides = {}) => {
+    const events = [];
+    const comments = [];
+    const labels = [];
+    const signals = [];
+    const result = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 100,
+      correlationMode: "enforce",
+      correlationWindowMs: 60 * 60_000,
+      correlationMinGroup: 2,
+      emitEvent: (event) => events.push(event),
+      postComment: (ticket, body) => comments.push({ ticket, body }),
+      labelNeedsHuman: (_dir, ticket) => { labels.push(ticket); return true; },
+      beliefOwnsLabel: () => false,
+      writeSignal: (ticket, payload) => signals.push({ ticket, payload }),
+      ...overrides,
+    });
+    return { result, events, comments, labels, signals };
+  };
+
+  test("enforce emits one anchored escalation and pointer events for matching signatures", () => {
+    seed("CAT-172", "account-rate-limited", t0 + 2);
+    seed("CAT-170", "account-rate-limited", t0);
+    seed("CAT-171", "account-rate-limited", t0 + 1);
+
+    const out = run();
+    const escalations = out.events.filter((e) => e.type === "recovery.escalated");
+    const pointers = out.events.filter((e) => e.type === "recovery.escalation.correlated");
+    expect(out.result).toEqual(["CAT-170"]);
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0].ticket).toBe("CAT-170");
+    expect(escalations[0].escalation.observed.correlated_tickets).toEqual([
+      "CAT-170", "CAT-171", "CAT-172",
+    ]);
+    expect(escalations[0].escalation.observed.signature).toBe("account-rate-limited");
+    expect(escalations[0].escalation.observed.correlation_id).toMatch(/^corr-/);
+    for (const ticket of ["CAT-170", "CAT-171", "CAT-172"]) {
+      expect(escalations[0].escalation.problem).toContain(ticket);
+      expect(escalations[0].escalation.call_to_action).toContain(ticket);
+    }
+    expect(pointers).toHaveLength(2);
+    expect(new Set(pointers.map((e) => e.correlation_id))).toEqual(
+      new Set([escalations[0].escalation.observed.correlation_id]),
+    );
+    expect(pointers.every((e) => e.anchor === "CAT-170")).toBe(true);
+    expect(out.labels.sort()).toEqual(["CAT-170", "CAT-171", "CAT-172"]);
+    expect(out.comments).toHaveLength(3);
+    const memberComments = out.comments.filter((c) => c.ticket !== "CAT-170");
+    expect(memberComments.every((c) => c.body.includes("CAT-170"))).toBe(true);
+    expect(memberComments.every((c) => !c.body.includes("authorize another recovery cycle"))).toBe(true);
+
+    // Every member is latched, while only the incident anchor is returned.
+    for (const ticket of ["CAT-170", "CAT-171", "CAT-172"]) {
+      const ledger = JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", `${ticket}.json`), "utf8"));
+      expect(ledger.escalated).toBe(true);
+    }
+    expect(run().events).toEqual([]);
+  });
+
+  test("different or absent signatures retain independent escalation behavior", () => {
+    seed("CAT-180", "account-rate-limited");
+    seed("CAT-181", "source-conflict");
+    seed("CAT-182", null);
+    const out = run();
+    expect(out.events.filter((e) => e.type === "recovery.escalated")).toHaveLength(3);
+    expect(out.events.filter((e) => e.type === "recovery.escalation.correlated")).toHaveLength(0);
+    for (const event of out.events.filter((e) => e.type === "recovery.escalated")) {
+      const otherTickets = ["CAT-180", "CAT-181", "CAT-182"].filter((t) => t !== event.ticket);
+      expect(otherTickets.some((t) => JSON.stringify(event.escalation).includes(t))).toBe(false);
+    }
+  });
+
+  test("shadow reports the would-be group but preserves one escalation per ticket", () => {
+    seed("CAT-190", "account-rate-limited", t0);
+    seed("CAT-191", "account-rate-limited", t0 + 1);
+    seed("CAT-192", "account-rate-limited", t0 + 2);
+    const out = run({ correlationMode: "shadow" });
+    expect(out.events.filter((e) => e.type === "recovery.escalated")).toHaveLength(3);
+    expect(out.events.filter((e) => e.type === "recovery.escalation.correlated")).toHaveLength(0);
+    const shadow = out.events.filter((e) => e.type === "recovery.escalation.would-correlate");
+    expect(shadow).toHaveLength(1);
+    expect(shadow[0]).toMatchObject({
+      signature: "account-rate-limited",
+      anchor: "CAT-190",
+      tickets: ["CAT-190", "CAT-191", "CAT-192"],
+    });
+  });
+
+  test("off emits no correlation events and preserves the pre-change brief exactly", () => {
+    seed("CAT-200", "account-rate-limited");
+    seed("CAT-201", "account-rate-limited", t0 + 1);
+    const out = run({ correlationMode: "off" });
+    expect(out.events.map((e) => e.type)).toEqual(["recovery.escalated", "recovery.escalated"]);
+    const event = out.events.find((e) => e.ticket === "CAT-200");
+    expect(event.escalation.problem).toBe(
+      'CAT-200 consumed 2 recovery attempts (last decision "dispatched") without any recorded verdict — the self-heal loop is not resolving it.',
+    );
+    expect(event.escalation.call_to_action).toBe(
+      "look at CAT-200: authorize another recovery cycle (clear its ledger latch), or take it over?",
+    );
+  });
+
+  test("inactive tickets are removed before grouping and cannot appear in anchor text", () => {
+    seed("CAT-210", "same-cause", t0);
+    seed("CAT-211", "same-cause", t0 + 1);
+    seed("CAT-212", "same-cause", t0 + 2);
+    const out = run({ isActive: (ticket) => ticket !== "CAT-210" });
+    const anchor = out.events.find((e) => e.type === "recovery.escalated");
+    expect(anchor.ticket).toBe("CAT-211");
+    expect(JSON.stringify(anchor.escalation)).not.toContain("CAT-210");
+    expect(out.labels).not.toContain("CAT-210");
   });
 });
 

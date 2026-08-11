@@ -68,6 +68,13 @@ import {
   recordFixFailure,
   shouldPostFixComment,
 } from "./recovery-fix-backoff.mjs";
+import {
+  correlationId,
+  groupCandidates,
+  normalizeSignature,
+  RECOVERY_CORRELATION_MIN_GROUP,
+  RECOVERY_CORRELATION_WINDOW_MS,
+} from "./escalation-correlation.mjs";
 
 // Wrap defaultLog to ensure it's a function (config.mjs may export an object)
 const defaultLogFn = typeof defaultLog === "function" ? defaultLog : (msg) => {
@@ -446,6 +453,8 @@ export function reasoningRecoveryPass(items, opts = {}) {
             fix_class,
             outcome: fixOutcome.success,
             details: fixOutcome.details,
+            signature:
+              item.reason ?? item.signal?.stalledReason ?? item.signal?.failureReason ?? null,
           });
           actionLog.push("recorded recovery-pass intent");
         } catch (err) {
@@ -2286,6 +2295,11 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
   // surface — the verdict fields must never contradict the decision).
   const hasVerdict = typeof intent.verdict === "string";
   const isMarkerWrite = intent.decision === "dispatched" || intent.decision === "defer";
+  // CAT-170: best-effort typed failure signature, written on attempt/marker
+  // writes. Absence means no typed signature; terminal writes clear stale data.
+  const signature =
+    normalizeSignature(intent.signature) ??
+    (isMarkerWrite ? normalizeSignature(prior.signature) : null);
   const entry = {
     ticket,
     ts: typeof prior.ts === "number" ? prior.ts : ts, // first-action timestamp
@@ -2307,6 +2321,7 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
             verdictTs: prior.verdictTs ?? null,
           }
         : {}),
+    ...(signature ? { signature } : {}),
   };
 
   try {
@@ -2535,6 +2550,9 @@ export function clearEscalationDeferrals(orchDir, ticket) {
 // no-verdict decisions ("dispatched" dispatch markers and "fix" classifier
 // writes) are swept — leave-alone / escalate / defer / fixed carry their own
 // terminal policies. Never throws; returns the tickets it escalated.
+export const RECOVERY_CORRELATION_MODE = () =>
+  process.env.CATALYST_RECOVERY_CORRELATION ?? "shadow";
+
 export function escalateExhaustedIntents(orchDir, opts = {}) {
   const {
     now = () => Date.now(),
@@ -2563,6 +2581,9 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     // cached terminal/merged check; default keeps the function pure/hermetic.
     isActive = () => true,
     log = defaultLogFn,
+    correlationMode = RECOVERY_CORRELATION_MODE(),
+    correlationWindowMs = RECOVERY_CORRELATION_WINDOW_MS,
+    correlationMinGroup = RECOVERY_CORRELATION_MIN_GROUP,
   } = opts;
   if (!orchDir) return [];
   let files;
@@ -2571,7 +2592,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
   } catch {
     return [];
   }
-  const escalatedTickets = [];
+  const candidates = [];
   for (const f of files) {
     if (!f.endsWith(".json")) continue;
     let data;
@@ -2594,8 +2615,55 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       active = true;
     }
     if (!active) continue;
+    if (readEscalationDeferrals(orchDir, ticket) >= maxDeferrals) continue;
+    candidates.push({
+      ticket,
+      file: f,
+      data,
+      signature: data.signature ?? null,
+      lastTs: data.lastTs ?? data.ts,
+    });
+  }
+
+  const computedGroups = groupCandidates(candidates, {
+    windowMs: correlationWindowMs,
+    minGroup: correlationMinGroup,
+    now: now(),
+  });
+  const candidateByTicket = new Map(candidates.map((candidate) => [candidate.ticket, candidate]));
+  if (correlationMode === "shadow") {
+    for (const group of computedGroups.filter((g) => g.correlated)) {
+      emitEvent({
+        type: "recovery.escalation.would-correlate",
+        correlation_id: correlationId(group.signature, group.anchor),
+        signature: group.signature,
+        anchor: group.anchor,
+        tickets: group.tickets,
+      });
+    }
+  }
+  const groups =
+    correlationMode === "enforce"
+      ? computedGroups.map((group) => ({
+          ...group,
+          anchor: candidateByTicket.get(group.anchor),
+          members: group.members.map((ticket) => candidateByTicket.get(ticket)).filter(Boolean),
+        }))
+      : candidates.map((candidate) => ({
+          signature: candidate.signature,
+          anchor: candidate,
+          members: [],
+          tickets: [candidate.ticket],
+          correlated: false,
+        }));
+  const escalatedTickets = [];
+
+  const actOnTicket = (candidate, { role = "singleton", group = null, anchor = null } = {}) => {
+    const { ticket, data, file: f } = candidate;
     const reason = `self-heal attempts exhausted (${data.attempts} dispatches without a recorded verdict)`;
-    const escalation = {
+    const corrId = group?.correlated ? correlationId(group.signature, anchor ?? ticket) : null;
+    const correlatedTickets = group?.tickets ?? [ticket];
+    const escalation = role === "singleton" ? {
       escalation_type: "authorization",
       problem: `${ticket} consumed ${data.attempts} recovery attempts (last decision "${data.decision}") without any recorded verdict — the self-heal loop is not resolving it.`,
       call_to_action: `look at ${ticket}: authorize another recovery cycle (clear its ledger latch), or take it over?`,
@@ -2606,6 +2674,29 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
         attempts: data.attempts,
         decision: data.decision ?? null,
         fix_class: data.fix_class ?? null,
+      },
+      attempts: [],
+    } : {
+      escalation_type: "authorization",
+      problem:
+        role === "anchor"
+          ? `${correlatedTickets.join(", ")} exhausted recovery attempts for the shared cause "${group.signature}".`
+          : `${ticket} is part of correlated incident ${corrId} — ${correlatedTickets.length} tickets share this cause; the decision is on ${anchor}.`,
+      call_to_action:
+        role === "anchor"
+          ? `look at ${correlatedTickets.join(", ")}: authorize one recovery cycle for this shared cause, or take the incident over?`
+          : `see the escalation on ${anchor}`,
+      recommendation: `inspect the correlated recovery-pass failures on ${anchor ?? ticket}`,
+      risk: `left latched the affected tickets rot silently`,
+      why_asking: reason,
+      observed: {
+        attempts: data.attempts,
+        decision: data.decision ?? null,
+        fix_class: data.fix_class ?? null,
+        correlation_id: corrId,
+        signature: group.signature,
+        correlated_tickets: correlatedTickets,
+        correlated_count: correlatedTickets.length,
       },
       attempts: [],
     };
@@ -2627,8 +2718,6 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     // has already fired and only a human can resolve it, so stop spending a Linear
     // label write on it every tick. This ceiling is what keeps the pre-latch attempt
     // from re-firing forever on a persistently-failing host.
-    if (readEscalationDeferrals(orchDir, ticket) >= maxDeferrals) continue;
-
     let labelled = false;
     try {
       labelled = labelNeedsHuman?.(orchDir, ticket) === true;
@@ -2670,7 +2759,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
             `after ${deferrals} attempts; escalation cannot complete from this host`,
         );
       }
-      continue; // the act did not complete — not counted as escalated
+      return false; // the act did not complete — not counted as escalated
     }
     // The label landed (or its owner has it) — this escalation can now complete.
     clearEscalationDeferrals(orchDir, ticket);
@@ -2686,7 +2775,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       });
     } catch (err) {
       log(`recovery-reasoning: ${ticket} exhausted-escalate ledger write failed: ${err.message}`);
-      continue; // without the latch the sweep would re-fire every tick — try again next tick
+      return false; // without the latch the sweep would re-fire every tick — try again next tick
     }
     // Codex R1: defaultRecordIntent swallows write failures (best-effort by
     // design) — VERIFY the latch actually landed before any human-facing side
@@ -2701,27 +2790,63 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     }
     if (!latched) {
       log(`recovery-reasoning: ${ticket} exhausted-escalate latch did not persist — deferring side effects to the next tick`);
-      continue;
+      return false;
     }
     try {
       writeSignal(ticket, escalation);
     } catch (err) {
       log(`recovery-reasoning: ${ticket} exhausted-escalate signal write failed: ${err.message}`);
     }
-    emitEvent({ type: "recovery.escalated", ticket, reason, escalation });
+    emitEvent({
+      type: role === "member" ? "recovery.escalation.correlated" : "recovery.escalated",
+      ticket,
+      reason,
+      escalation,
+      ...(corrId ? { correlation_id: corrId, anchor: anchor ?? ticket } : {}),
+    });
     try {
       postComment(
         ticket,
-        `🔼 **recovery-pass** self-heal attempts exhausted on this ticket — escalated to the operator. ${reason}. (See your inbox.)`,
+        role === "member"
+          ? `Part of correlated recovery incident ${corrId}; see the operator escalation on ${anchor}.`
+          : `🔼 **recovery-pass** self-heal attempts exhausted on this ticket — escalated to the operator. ${reason}. (See your inbox.)`,
       );
     } catch {
       /* comment is best-effort; the signal + event are the durable surfaces */
     }
-    escalatedTickets.push(ticket);
+    if (role !== "member") escalatedTickets.push(ticket);
     log(
       `recovery-reasoning: ${ticket} attempts-exhausted → escalated loudly (CTL-1440)` +
         (ownedByBelief ? " [label owned by belief engine — CTL-1568 transfer]" : ""),
     );
+    return true;
+  };
+
+  for (const group of groups) {
+    if (!group.correlated) {
+      actOnTicket(group.anchor);
+      continue;
+    }
+    const ordered = [group.anchor, ...group.members];
+    let anchorCandidate = null;
+    for (const candidate of ordered) {
+      if (actOnTicket(candidate, { role: "anchor", group, anchor: candidate.ticket })) {
+        anchorCandidate = candidate;
+        break;
+      }
+    }
+    if (!anchorCandidate) {
+      for (const candidate of ordered) actOnTicket(candidate);
+      continue;
+    }
+    for (const candidate of ordered) {
+      if (candidate.ticket === anchorCandidate.ticket) continue;
+      actOnTicket(candidate, {
+        role: "member",
+        group,
+        anchor: anchorCandidate.ticket,
+      });
+    }
   }
   return escalatedTickets;
 }
