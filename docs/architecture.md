@@ -660,12 +660,34 @@ represented by one deterministic anchor escalation, while each other ticket rece
 pointer to that anchor. Every affected ticket retains its `needs-human` label, but the pointer
 briefs do not represent separate operator decisions.
 
+Signatures are read from the evidence the collector actually produced, not from item-level fields
+the production `buildRecoveryItems` shape never populates, and a board-health attempt is signed with
+the invariant that flagged **that** candidate rather than the gate's count summary — two tickets
+stuck for unrelated reasons must not share a signature. Signature normalization strips ticket ids
+and occurrence timestamps but preserves stable numeric identifiers (account, customer, and build
+numbers), so distinct causes cannot collapse into one incident.
+
 `CATALYST_RECOVERY_CORRELATION` controls rollout: `off` keeps independent escalations, `shadow`
 (the default) computes groups and emits `recovery.escalation.would-correlate` without changing the
 operator-visible path, and `enforce` emits one anchor plus `recovery.escalation.correlated` member
-events. Correlation is intentionally per-host because the intent ledger is host-local; cross-host
-correlation remains separate work. A missing/null signature always forms a singleton and can never
-correlate with another missing signature.
+events. An unrecognized value degrades to `shadow`, never to silence, and the window/group-size
+tunables accept only a finite positive window and an integer group size of at least two.
+Correlation identifiers ride the event envelope as both attributes and body payload, so a shadow
+event can identify the group it proposed. Correlation is intentionally per-host because the intent
+ledger is host-local; cross-host correlation remains separate work. A missing/null signature always
+forms a singleton and can never correlate with another missing signature.
+
+Group membership survives a partial act. Within a tick, a candidate tried as a provisional anchor is
+never acted on a second time in the member loop — that double-act burned the bounded escalation-
+deferral budget at twice the rate. Across ticks, a member whose label write fails records a durable
+pointer at its anchor under `.escalation-correlation/<TICKET>.json`; because the anchor's ledger is
+already latched `escalated:true` it is no longer a candidate and no group can re-form, so without
+that pointer the member would regroup as a singleton and raise a second full operator decision for a
+cause the anchor already covers. The pointer is windowed by the same correlation window, so a
+long-closed incident expires back to normal handling. For a correlated member the escalation signal
+carries a first-class `correlation` block (id, role, anchor, tickets) — the curated explanation
+projection drops the audit `observed` field, so that block is what a board consumer groups or
+suppresses on.
 
 ### Orphan-stale merged-PR reconciliation (CAT-47)
 

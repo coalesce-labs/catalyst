@@ -1,16 +1,50 @@
 import { createHash } from "node:crypto";
 
-export const RECOVERY_CORRELATION_WINDOW_MS =
-  Number(process.env.CATALYST_RECOVERY_CORRELATION_WINDOW_MIN) * 60 * 1000 || 60 * 60 * 1000;
-export const RECOVERY_CORRELATION_MIN_GROUP =
-  Number(process.env.CATALYST_RECOVERY_CORRELATION_MIN_GROUP) || 2;
+export const DEFAULT_CORRELATION_WINDOW_MS = 60 * 60 * 1000;
+export const DEFAULT_CORRELATION_MIN_GROUP = 2;
+
+// CAT-170 (Codex #3209 P2): `Number(value) || default` accepts a NEGATIVE or
+// non-finite setting instead of falling back — a negative window prevents matching
+// tickets from ever grouping, `Infinity` removes the age bound entirely, and
+// MIN_GROUP=-1 marks a single signed ticket as a correlated "incident". Both
+// tunables are validated at their declared domain: a finite positive window, and an
+// integer group size of at least two (a group of one is a singleton by definition).
+export function resolveCorrelationWindowMs(raw, fallback = DEFAULT_CORRELATION_WINDOW_MS) {
+  const minutes = Number(raw);
+  if (!Number.isFinite(minutes) || minutes <= 0) return fallback;
+  return minutes * 60 * 1000;
+}
+
+export function resolveCorrelationMinGroup(raw, fallback = DEFAULT_CORRELATION_MIN_GROUP) {
+  const size = Number(raw);
+  if (!Number.isInteger(size) || size < 2) return fallback;
+  return size;
+}
+
+export const RECOVERY_CORRELATION_WINDOW_MS = resolveCorrelationWindowMs(
+  process.env.CATALYST_RECOVERY_CORRELATION_WINDOW_MIN,
+);
+export const RECOVERY_CORRELATION_MIN_GROUP = resolveCorrelationMinGroup(
+  process.env.CATALYST_RECOVERY_CORRELATION_MIN_GROUP,
+);
 
 // Ticket ids vary per ledger entry even when the underlying failure is shared.
 const TICKET_ID_NOISE = /\b[A-Z]{2,5}-\d+\b/gi;
 // Absolute timestamps describe when a failure occurred, not what caused it.
 const ISO_TIMESTAMP_NOISE = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})\b/gi;
-// Epoch-millisecond values are occurrence-specific and safe to omit from a cause signature.
-const EPOCH_MS_NOISE = /\b\d{12,}\b/g;
+// Epoch-millisecond values are occurrence-specific and safe to omit from a cause
+// signature.
+//
+// CAT-170 (Codex #3209 P2): the old `\b\d{12,}\b` erased EVERY long digit run, not
+// just occurrence timestamps — a 12-digit AWS account id, a customer id, or a build
+// number was normalized away, so `AccessDenied for account 123456789012` and
+// `AccessDenied for account 999999999999` collapsed into ONE operator incident even
+// though they are distinct causes. Epoch-millisecond values have a known shape:
+// exactly 13 digits beginning with 1 (2001-09-09 → 2286-11-20), which covers every
+// timestamp this fleet can observe while leaving stable identifiers of any other
+// length or leading digit intact. Narrowing here can only ever SPLIT signatures that
+// used to collapse — never merge two that previously stayed apart.
+const EPOCH_MS_NOISE = /\b1\d{12}\b/g;
 const MAX_SIGNATURE_LENGTH = 96;
 
 function shortHash(value, length) {
@@ -84,8 +118,14 @@ export function groupCandidates(
     buckets.set(candidate.signature, bucket);
   }
 
-  const effectiveWindowMs = Number(windowMs) || RECOVERY_CORRELATION_WINDOW_MS;
-  const effectiveMinGroup = Number(minGroup) || RECOVERY_CORRELATION_MIN_GROUP;
+  // CAT-170 (Codex #3209 P2): validate the per-call overrides at the same domain as
+  // the env-derived defaults — an injected negative/non-finite value must not slip
+  // past `Number(x) || default` the way it did before.
+  const effectiveWindowMs = resolveCorrelationWindowMs(
+    Number(windowMs) / 60000,
+    RECOVERY_CORRELATION_WINDOW_MS,
+  );
+  const effectiveMinGroup = resolveCorrelationMinGroup(minGroup, RECOVERY_CORRELATION_MIN_GROUP);
   for (const [signature, bucket] of buckets) {
     const ordered = bucket.sort(compareCandidates);
     let cluster = [];

@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_CORRELATION_MIN_GROUP,
+  DEFAULT_CORRELATION_WINDOW_MS,
   RECOVERY_CORRELATION_MIN_GROUP,
   RECOVERY_CORRELATION_WINDOW_MS,
   correlationId,
   groupCandidates,
   normalizeSignature,
+  resolveCorrelationMinGroup,
+  resolveCorrelationWindowMs,
 } from "./escalation-correlation.mjs";
 
 describe("normalizeSignature (CAT-170)", () => {
@@ -145,5 +149,70 @@ describe("correlation tunables (CAT-170)", () => {
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout.toString())).toEqual([60 * 60 * 1000, 2]);
     }
+  });
+});
+
+// ─── CAT-170 (Codex #3209 review remediations) ──────────────────────────────
+describe("correlation tunable validation (Codex #3209 P2)", () => {
+  test("negative, zero, and non-finite values fall back to the documented default", () => {
+    for (const bad of [-1, 0, Number.NaN, Number.POSITIVE_INFINITY, "abc", null, undefined]) {
+      expect(resolveCorrelationWindowMs(bad)).toBe(DEFAULT_CORRELATION_WINDOW_MS);
+      expect(resolveCorrelationMinGroup(bad)).toBe(DEFAULT_CORRELATION_MIN_GROUP);
+    }
+  });
+
+  test("a group size below two is rejected — a group of one is a singleton", () => {
+    expect(resolveCorrelationMinGroup(1)).toBe(DEFAULT_CORRELATION_MIN_GROUP);
+    expect(resolveCorrelationMinGroup(2)).toBe(2);
+    expect(resolveCorrelationMinGroup(5)).toBe(5);
+    // non-integers are not a valid group size
+    expect(resolveCorrelationMinGroup(2.5)).toBe(DEFAULT_CORRELATION_MIN_GROUP);
+  });
+
+  test("a valid positive window is honoured", () => {
+    expect(resolveCorrelationWindowMs(30)).toBe(30 * 60 * 1000);
+  });
+
+  test("MIN_GROUP=-1 can no longer mark a lone signed ticket as an incident", () => {
+    const groups = groupCandidates([{ ticket: "CTL-1", signature: "boom", lastTs: 1000 }], {
+      minGroup: -1,
+      windowMs: 60 * 60 * 1000,
+    });
+    expect(groups).toHaveLength(1);
+    expect(groups[0].correlated).toBe(false);
+  });
+
+  test("a negative window no longer prevents matching tickets from grouping", () => {
+    const groups = groupCandidates(
+      [
+        { ticket: "CTL-1", signature: "boom", lastTs: 1000 },
+        { ticket: "CTL-2", signature: "boom", lastTs: 2000 },
+      ],
+      { windowMs: -1 },
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0].correlated).toBe(true);
+    expect(groups[0].tickets).toEqual(["CTL-1", "CTL-2"]);
+  });
+});
+
+describe("normalizeSignature — stable numeric identifiers (Codex #3209 P2)", () => {
+  test("distinct 12-digit account ids stay distinct", () => {
+    const a = normalizeSignature("AccessDenied for account 123456789012");
+    const b = normalizeSignature("AccessDenied for account 999999999999");
+    expect(a).not.toBe(b);
+    expect(a).toContain("123456789012");
+  });
+
+  test("epoch-millisecond timestamps are still erased", () => {
+    // 13 digits starting with 1 — the real epoch-ms shape.
+    const a = normalizeSignature("worker died at 1786451344871");
+    const b = normalizeSignature("worker died at 1786451399999");
+    expect(a).toBe(b);
+    expect(a).not.toMatch(/\d{13}/);
+  });
+
+  test("a long non-timestamp build number is preserved", () => {
+    expect(normalizeSignature("build 999999999999999 failed")).toContain("999999999999999");
   });
 });
