@@ -248,6 +248,30 @@ if command -v bun >/dev/null 2>&1; then
       || fail "expected rc=2 for valueless --config, got rc=${rc}: $(cat "$OUT")"
   fi
 
+  # The GNU `--config=<path>` form must select the same tier as the space form.
+  # Before CAT-139 review it fell through to the ambient env tier and started a
+  # LIVE watchdog on the decoy config, so this asserts the WIN, not just an exit.
+  if _wd_bounded 15 "$OUT" env CATALYST_CONFIG_FILE="${CFG_DECOY}/.catalyst/config.json" \
+       bun run "$RUNNER" --config="${CFG_OFF}/.catalyst/config.json" \
+     && grep -q 'disabled by config' "$OUT" && grep -q 'argv' "$OUT"; then
+    ok "--config=<path> outranks an ambient CATALYST_CONFIG_FILE"
+  else
+    fail "--config=<path> did not win over the ambient env: $(cat "$OUT")"
+  fi
+
+  # A near-miss flag must NOT silently inherit the host config. This is the
+  # whole point of the explicit tier: fail loudly rather than watch the wrong
+  # daemon under the wrong mode.
+  if _wd_bounded 15 "$OUT" env CATALYST_CONFIG_FILE="${CFG_DECOY}/.catalyst/config.json" \
+       bun run "$RUNNER" --conifg "${CFG_OFF}/.catalyst/config.json"; then
+    fail "a typo'd flag silently fell through to the host config tier"
+  else
+    rc=$?
+    [[ "$rc" == 2 ]] && grep -q 'unrecognized argument' "$OUT" \
+      && ok "a typo'd flag exits 2 instead of inheriting host config" \
+      || fail "expected rc=2 for unknown argv, got rc=${rc}: $(cat "$OUT")"
+  fi
+
   # Functional: mode=off must shut down through the cwd tier too. The old form
   # inherited host config and waited forever; this invocation isolates and bounds.
   if _wd_bounded 15 "$OUT" \

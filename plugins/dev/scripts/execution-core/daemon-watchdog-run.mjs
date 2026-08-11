@@ -36,10 +36,31 @@ import { readDaemonWatchdogConfig, log } from "./config.mjs";
 // callers select a config without inheriting the host's live config. Mirrors
 // lib/deployment-mode.mjs resolveLayer1Path (explicit arg > env > cwd).
 // Production passes no args and continues to pin CATALYST_CONFIG_FILE.
+// Unknown argv is REJECTED rather than ignored. A near-miss invocation
+// (`--conifg <path>`) that fell through to the ambient tier would start a LIVE
+// watchdog on the host's own config — the exact silent leak this argument
+// exists to prevent — and would do so while looking like it had honored the
+// caller's file. Production passes no args, so nothing legitimate is rejected.
 function resolveConfigPath(argv, env) {
-  const i = argv.indexOf("--config");
-  if (i !== -1) {
-    const value = argv[i + 1];
+  let value;
+  let sawConfig = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--config") {
+      sawConfig = true;
+      value = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    // GNU `--config=<path>`. Split on the FIRST `=` only: a path may contain one.
+    if (arg.startsWith("--config=")) {
+      sawConfig = true;
+      value = arg.slice("--config=".length);
+      continue;
+    }
+    return { error: `unrecognized argument: ${arg}` };
+  }
+  if (sawConfig) {
     if (typeof value !== "string" || value.length === 0 || value.startsWith("--")) {
       return { error: "--config requires a path argument" };
     }
@@ -68,7 +89,7 @@ function resolveConfigPath(argv, env) {
 
 const resolved = resolveConfigPath(process.argv.slice(2), process.env);
 if (resolved.error) {
-  log.error({ err: resolved.error }, "daemon-watchdog-run: bad --config");
+  log.error({ err: resolved.error }, "daemon-watchdog-run: bad arguments");
   process.exit(2);
 }
 const { path: configPath, source: configSource } = resolved;
