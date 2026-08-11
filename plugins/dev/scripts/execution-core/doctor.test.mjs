@@ -34,6 +34,7 @@ import {
   checkNodeClass,
   checkDeploymentModeConsistency,
   checkSecretContract,
+  checkHeartbeatActor,
   checkLayer2PathDivergence,
   checkReadReplicaReachable,
   checkMonitorProductionBuild,
@@ -2819,7 +2820,7 @@ describe("checkLayer2PathDivergence (#2930 round-2)", () => {
 });
 
 describe("checkSecretContract (CTL-1616 PR2)", () => {
-  it("emits one INFO observation per shadow-covered secret id (linear-api-token, groq-api-key)", () => {
+  it("emits one INFO observation per shadow-covered secret id, including the heartbeat actor", () => {
     const checks = checkSecretContract({
       resolveSecretFn: (id) => ({ value: `v-${id}`, source: "inherited", provider: "env-alias" }),
     });
@@ -2847,6 +2848,20 @@ describe("checkSecretContract (CTL-1616 PR2)", () => {
     });
     expect(calledWith.map(([id]) => id)).toEqual(["linear-api-token", "groq-api-key"]);
     expect(calledWith[0][1]).toEqual({ env: { X: "1" }, deploymentMode: { mode: "cluster", inferred: false } });
+  });
+});
+
+describe("checkHeartbeatActor (CAT-157)", () => {
+  it("reports absent credentials as INFO without changing the grade", () => {
+    const checks = checkHeartbeatActor({ resolveSecretContract: () => ({ value: null, source: "none" }) });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.INFO);
+    expect(summarize(checks)).toEqual({ pass: 0, warn: 0, fail: 0, ok: true });
+  });
+
+  it("reports provisioned credentials as PASS", () => {
+    const checks = checkHeartbeatActor({ resolveSecretContract: () => ({ value: "configured", source: "config-json" }) });
+    expect(checks[0].status).toBe(STATUS.PASS);
   });
 });
 

@@ -86,8 +86,8 @@ expect_eq "idempotent-source guard set" "1" "${_CATALYST_SECRET_CONTRACT_SH_LOAD
 
 # --- registry shape --------------------------------------------------------
 IDS_OUT="$(catalyst_secret_registry_ids | tr '\n' ',')"
-expect_eq "11 registry ids in order" \
-  "github-token,webhook-secret,linear-webhook-secret,claude-accounts.env,execution-core.env,linear-api-token,linear-orchestrator-actor,linear-worker-actor,groq-api-key,cloud-token,age-key," \
+expect_eq "13 registry ids in order" \
+  "github-token,webhook-secret,linear-webhook-secret,claude-accounts.env,execution-core.env,linear-api-token,linear-orchestrator-actor,linear-worker-actor,linear-heartbeat-actor,linear-heartbeat-api-token,groq-api-key,cloud-token,age-key," \
   "$IDS_OUT"
 
 expect_eq "unknown id delivery is empty, not a crash" "" "$(catalyst_secret_delivery bogus-id-xyz)"
@@ -105,6 +105,12 @@ expect_eq "age-key bootstrapFor" "cluster" "$(catalyst_secret_bootstrap_for age-
 expect_eq "github-token bootstrapFor is empty" "" "$(catalyst_secret_bootstrap_for github-token)"
 expect_eq "linear-orchestrator-actor config path" "catalyst.linear.bot.orchestrator" "$(catalyst_secret_config_json_path linear-orchestrator-actor)"
 expect_eq "linear-worker-actor config path (distinct from orchestrator)" "catalyst.linear.bot.worker" "$(catalyst_secret_config_json_path linear-worker-actor)"
+expect_eq "linear-heartbeat-actor config path" "catalyst.linear.bot.heartbeat" "$(catalyst_secret_config_json_path linear-heartbeat-actor)"
+expect_eq "linear-heartbeat-actor requires complete credentials" "clientId clientSecret" "$(catalyst_secret_required_object_fields linear-heartbeat-actor)"
+expect_eq "linear-heartbeat token env alias" "heartbeat-token|inherited|env-alias" \
+  "$(_run "CATALYST_HEARTBEAT_APP_ACTOR_TOKEN=heartbeat-token" 'catalyst_resolve_secret linear-heartbeat-api-token')"
+expect_eq "linear-heartbeat token absence is a quiet miss" "|none|env-alias" \
+  "$(_run 'catalyst_resolve_secret linear-heartbeat-api-token')"
 
 ENV_NAMES_OUT="$(catalyst_secret_env_names github-token | tr '\n' ',')"
 expect_eq "github-token env names" "GH_TOKEN,GITHUB_TOKEN," "$ENV_NAMES_OUT"

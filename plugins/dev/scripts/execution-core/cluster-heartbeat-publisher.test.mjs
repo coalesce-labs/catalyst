@@ -2,7 +2,15 @@
 // (CTL-1090, Phase 4). Injects fakes for publish, ownedTickets, roster, etc.
 // so no network, fs, or subprocess is touched.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { startLivenessPublisher } from "./cluster-heartbeat-publisher.mjs";
+import { selectHeartbeatBreaker, startLivenessPublisher } from "./cluster-heartbeat-publisher.mjs";
+
+describe("selectHeartbeatBreaker", () => {
+  test("selects the dedicated breaker only for a dedicated token", () => {
+    const shared = {}, own = {};
+    expect(selectHeartbeatBreaker({ dedicated: true, shared, own })).toBe(own);
+    expect(selectHeartbeatBreaker({ dedicated: false, shared, own })).toBe(shared);
+  });
+});
 import { linearBreaker } from "./linear-breaker.mjs";
 
 describe("startLivenessPublisher (CTL-1090)", () => {
@@ -286,6 +294,33 @@ describe("startLivenessPublisher (CTL-1090)", () => {
   // CTL-1420 follow-up: the heartbeat is a ~2min Linear WRITE on the same shared
   // app-actor bucket as reads/writes. It must respect + feed the CTL-679 breaker.
   describe("CTL-1420 breaker coupling", () => {
+    test("dedicated credential publishes through an open shared breaker", () => {
+      let published = 0;
+      const h = startLivenessPublisher({
+        roster: ["mini", "laptop"], anchorIssue: "CTL-9", self: "mini",
+        ownedTickets: () => [], publish: () => { published += 1; return { ok: true }; },
+        breaker: { isOpen: () => true }, ownBreaker: { isOpen: () => false },
+        resolveToken: () => ({ token: "hb", dedicated: true }), intervalMs: 60_000,
+      });
+      h.stop();
+      expect(published).toBe(1);
+    });
+
+    test("dedicated rate rejection feeds only the heartbeat breaker", () => {
+      const sharedEvents = [], ownEvents = [];
+      const h = startLivenessPublisher({
+        roster: ["mini", "laptop"], anchorIssue: "CTL-9", self: "mini",
+        ownedTickets: () => [],
+        publish: () => ({ ok: false, error: "[RATELIMITED]" }),
+        breaker: { isOpen: () => false, recordRateLimited: () => sharedEvents.push("rl") },
+        ownBreaker: { isOpen: () => false, recordRateLimited: () => ownEvents.push("rl") },
+        resolveToken: () => ({ token: "hb", dedicated: true }), intervalMs: 60_000,
+      });
+      h.stop();
+      expect(sharedEvents).toEqual([]);
+      expect(ownEvents).toEqual(["rl"]);
+    });
+
     test("breaker OPEN → SKIP publish (no spawn, no bucket draw), warn once", () => {
       const { logger, warns } = fakeLogger();
       const calls = [];

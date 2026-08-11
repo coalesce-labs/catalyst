@@ -51,7 +51,7 @@ import { dirname, join, resolve as resolvePath } from "node:path";
 // ─── The closed enums ───────────────────────────────────────────────────────
 
 // SECRET_DELIVERY — the ~7 provider TYPES the engine dispatches on. Design §3's own stated
-// goal is that parity cost scales per TYPE, not per row — every one of the 11 seed rows maps
+// goal is that parity cost scales per TYPE, not per row — every one of the 13 seed rows maps
 // onto exactly one of these.
 export const SECRET_DELIVERY = Object.freeze([
   "bare-file", // a single standalone secret file (github-token, webhook-secret)
@@ -246,6 +246,25 @@ export const SECRET_REGISTRY = Object.freeze(
       // Boot-only (per-call mint) per the seed table — distinct from the orchestrator actor,
       // which is proactively re-armed on a timer-adjacent cooldown reminter.
       rotation: { class: "boot-only" },
+      bootstrapFor: null,
+    },
+    {
+      id: "linear-heartbeat-actor",
+      envNames: [],
+      delivery: "config-json",
+      configJsonPath: "catalyst.linear.bot.heartbeat",
+      // CAT-157: this is deliberately a separate OAuth application from the
+      // orchestrator/worker actors so heartbeat traffic owns its quota bucket.
+      rotation: { class: "re-armable", trigger: "on-401" },
+      requiredObjectFields: ["clientId", "clientSecret"],
+      bootstrapFor: null,
+    },
+    {
+      id: "linear-heartbeat-api-token",
+      envNames: ["CATALYST_HEARTBEAT_APP_ACTOR_TOKEN"],
+      delivery: "env-alias",
+      configJsonPath: null,
+      rotation: { class: "re-armable", trigger: "on-401" },
       bootstrapFor: null,
     },
     {
@@ -565,7 +584,7 @@ function canonicalizeConfigJsonValue(raw) {
 }
 
 // meetsRequiredObjectFields — CTL-1616 PR4 remediation (B1 fix; round-2 B3 fix below). A row
-// that declares requiredObjectFields (currently only linear-worker-actor's {clientId,
+// that declares requiredObjectFields (the worker and heartbeat actors' {clientId,
 // clientSecret} shape) must have EVERY named field present in the RAW parsed value as a
 // non-empty (post-EOL-strip — see round-2 fix below) string before a config-json tier is
 // allowed to WIN — mirrors linear-comment-post.sh's own

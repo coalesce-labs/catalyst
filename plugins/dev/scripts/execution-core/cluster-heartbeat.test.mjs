@@ -8,9 +8,52 @@ import {
   parseHeartbeatMetadata,
   publishHeartbeat,
   readPeerHeartbeats,
+  resolveHeartbeatToken,
   resolveIssueId,
   runCli,
 } from "./cluster-heartbeat.mjs";
+
+describe("resolveHeartbeatToken", () => {
+  test("prefers a dedicated token without resolving the shared alias", () => {
+    const calls = [];
+    const result = resolveHeartbeatToken({ resolve: (id) => {
+      calls.push(id);
+      return { value: id === "linear-heartbeat-api-token" ? "hb" : "shared" };
+    } });
+    expect(result).toEqual({ token: "hb", dedicated: true });
+    expect(calls).toEqual(["linear-heartbeat-api-token"]);
+  });
+
+  test("falls back for absent or whitespace-only dedicated values", () => {
+    for (const value of [null, "   "]) {
+      const result = resolveHeartbeatToken({ resolve: (id) => ({
+        value: id === "linear-heartbeat-api-token" ? value : "shared",
+      }) });
+      expect(result).toEqual({ token: "shared", dedicated: false });
+    }
+  });
+
+  test("returns the empty shared shape when neither token exists", () => {
+    expect(resolveHeartbeatToken({ resolve: () => ({ value: null }) }))
+      .toEqual({ token: "", dedicated: false });
+  });
+
+  test("an inherited heartbeat fallback remains on the shared bucket", () => {
+    const result = resolveHeartbeatToken({
+      env: { CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE: "inherited" },
+      resolve: (id) => ({ value: id === "linear-heartbeat-api-token" ? "old-shared" : null }),
+    });
+    expect(result).toEqual({ token: "old-shared", dedicated: false });
+  });
+
+  test("an inherited heartbeat fallback yields to a freshly minted shared alias", () => {
+    const result = resolveHeartbeatToken({
+      env: { CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE: "inherited" },
+      resolve: (id) => ({ value: id === "linear-heartbeat-api-token" ? "old-shared" : "fresh-shared" }),
+    });
+    expect(result).toEqual({ token: "fresh-shared", dedicated: false });
+  });
+});
 
 async function captureStdout(fn) {
   const chunks = [];
@@ -471,6 +514,28 @@ describe("defaultPost — !res.ok body handling (CTL-1420)", () => {
       else process.env.LINEAR_API_TOKEN = savedToken;
       if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = savedKey;
+    }
+  });
+
+  test("defaultPost sends the dedicated OAuth token when it is genuinely minted", async () => {
+    const savedHeartbeat = process.env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN;
+    const savedSource = process.env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE;
+    let seenAuth = null;
+    globalThis.fetch = async (_url, opts) => {
+      seenAuth = opts.headers.Authorization;
+      return { ok: true, json: async () => ({ data: { issue: { id: "issue-hb" } } }) };
+    };
+    try {
+      process.env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN = "lin_oauth_heartbeat";
+      process.env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE = "minted";
+      expect(await resolveIssueId("CTL-9")).toBe("issue-hb");
+      expect(seenAuth).toBe("Bearer lin_oauth_heartbeat");
+    } finally {
+      restore();
+      if (savedHeartbeat === undefined) delete process.env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN;
+      else process.env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN = savedHeartbeat;
+      if (savedSource === undefined) delete process.env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE;
+      else process.env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE = savedSource;
     }
   });
 });

@@ -33,9 +33,13 @@ import {
   log,
 } from "./config.mjs";
 import { publishHeartbeatSync } from "./cluster-heartbeat-sync.mjs";
-import { linearBreaker } from "./linear-breaker.mjs"; // CTL-1420 follow-up: share the CTL-679 breaker
-import { isRateClassLinearError } from "./cluster-heartbeat.mjs"; // rate-class discriminator (pure)
+import { heartbeatBreaker, linearBreaker } from "./linear-breaker.mjs";
+import { isRateClassLinearError, resolveHeartbeatToken } from "./cluster-heartbeat.mjs";
 import { emitFenceClaimed } from "./fence-event.mjs"; // CTL-863: Linear-free fence re-emit
+
+export function selectHeartbeatBreaker({ dedicated, shared = linearBreaker, own = heartbeatBreaker }) {
+  return dedicated ? own : shared;
+}
 
 // localClusterGeneration — read this host's won fence generation for `ticket`
 // from workers/<ticket>/cluster-generation.json (the file writeClusterGeneration
@@ -165,6 +169,8 @@ export function startLivenessPublisher({
   // SKIP publishing while the breaker is open (don't add to a storm), and (2)
   // FEED the breaker on a rate-class rejection. Injectable for tests.
   breaker = linearBreaker,
+  ownBreaker = heartbeatBreaker,
+  resolveToken = resolveHeartbeatToken,
   // CTL-1420 (#17): the active cross-host liveness source. Injectable seam so tests
   // can force loki|linear; defaults to the env-driven getLivenessReadSource().
   readSource = getLivenessReadSource,
@@ -230,17 +236,19 @@ export function startLivenessPublisher({
     // default; the fleet sets CATALYST_LIVENESS_READ_SOURCE=loki after validation).
     if (readSource() !== "linear") return;
     try {
+      const { dedicated } = resolveToken();
+      const activeBreaker = selectHeartbeatBreaker({ dedicated, shared: breaker, own: ownBreaker });
       // CTL-1420 follow-up: if the shared CTL-679 breaker is OPEN (a rate-class
       // 429/RATELIMITED from ANY daemon Linear path tripped it), SKIP this publish
       // — spawning it would just add another ~2min-cadence write to the storm and
       // draw the exhausted app-actor bucket. Peers tolerate a brief stale window
       // (the 10-min grace); the breaker closes when the bucket recovers and
       // publishing resumes on the next tick. Counted as a failure for the throttle.
-      if (breaker?.isOpen?.()) {
+      if (activeBreaker?.isOpen?.()) {
         if (consecutiveFailures === 0) {
           logger.warn(
             { host: self, anchorIssue },
-            "cluster-heartbeat-publisher: SKIPPED publish — Linear breaker open (backing off the shared app-actor bucket)",
+            `cluster-heartbeat-publisher: SKIPPED publish — Linear breaker open (backing off the ${dedicated ? "dedicated heartbeat" : "shared app-actor"} bucket)`,
           );
         }
         consecutiveFailures += 1;
@@ -272,7 +280,7 @@ export function startLivenessPublisher({
         // the caller — the WS-A diagnosis needs to know how much of the flap is
         // this ~2min anchor write vs. the read paths.
         if (isRateClassLinearError(result.error)) {
-          breaker?.recordRateLimited?.(undefined, {
+          activeBreaker?.recordRateLimited?.(undefined, {
             reason: "429",
             caller: "cluster-heartbeat-publisher",
           });

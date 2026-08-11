@@ -514,6 +514,9 @@ cmd_start() {
     linear_app_actor_clear_inherited "catalyst-monitor"
   else
     linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN
+    # CAT-157: the peer-heartbeat anchor read gets its own app-actor bucket.
+    linear_app_actor_auth "catalyst-monitor" CATALYST_HEARTBEAT_APP_ACTOR_TOKEN \
+      linear-heartbeat-actor "Catalyst Heartbeat app-actor"
   fi
 
   # CATALYST_CONFIG_FILE pins the Layer-1 config path explicitly so the spawned

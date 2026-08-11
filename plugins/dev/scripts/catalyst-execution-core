@@ -321,6 +321,9 @@ cmd_start() {
 	# Mint + export live in lib/linear-app-actor.sh (CTL-1577) so the broker start path shares
 	# the same block; fail-open — a failed mint leaves the existing LINEAR_API_TOKEN intact.
 	source "$SCRIPT_DIR/lib/linear-app-actor.sh"
+	# CAT-157: scoped mint must run first because it clears inherited shared aliases.
+	linear_app_actor_auth "catalyst-execution-core" CATALYST_HEARTBEAT_APP_ACTOR_TOKEN \
+		linear-heartbeat-actor "Catalyst Heartbeat app-actor"
 	linear_app_actor_auth "catalyst-execution-core"
 	# CATALYST_CONFIG_FILE pins the Layer-1 config path explicitly so the daemon's
 	# own config resolution (daemon.mjs main(): `process.env.CATALYST_CONFIG_FILE ||

@@ -486,6 +486,26 @@ else
 fi
 
 echo ""
+echo "CAT-157: explicit actor id and display name parameterize the scoped mint"
+OUT_HEARTBEAT="$(env -i HOME="$HOME" PATH="$PATH" bash -c '
+  set -uo pipefail
+  source "'"$LIB"'"
+  catalyst_resolve_secret() {
+    RESOLVED_ID="$1"
+    CATALYST_SECRET_LAST_VALUE="{\"clientId\":\"heartbeat-client\",\"clientSecret\":\"heartbeat-secret\"}"
+  }
+  curl() { printf "{\"access_token\":\"lin_oauth_heartbeat\"}"; }
+  export -f curl
+  linear_app_actor_auth "test-daemon" HB_TARGET linear-heartbeat-actor "Catalyst Heartbeat app-actor"
+  echo "RESOLVED_ID=[${RESOLVED_ID:-}]"
+  echo "HB_TARGET=[${HB_TARGET:-}]"
+  echo "HB_TARGET_SOURCE=[${HB_TARGET_SOURCE:-}]"
+' 2>&1)"
+if echo "$OUT_HEARTBEAT" | grep -qxF "RESOLVED_ID=[linear-heartbeat-actor]"; then pass "explicit secret id is resolved"; else fail "explicit secret id ignored; output: $OUT_HEARTBEAT"; fi
+if echo "$OUT_HEARTBEAT" | grep -qxF "HB_TARGET=[lin_oauth_heartbeat]"; then pass "explicit actor token exported to scoped target"; else fail "heartbeat target missing; output: $OUT_HEARTBEAT"; fi
+if echo "$OUT_HEARTBEAT" | grep -q "authenticated as Catalyst Heartbeat app-actor" && ! echo "$OUT_HEARTBEAT" | grep -q "authenticated as Catalyst Orchestrator"; then pass "explicit display name is logged"; else fail "display name not parameterized; output: $OUT_HEARTBEAT"; fi
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [[ $FAILURES -eq 0 ]] && exit 0 || exit 1

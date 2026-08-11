@@ -328,19 +328,22 @@ setup tool manages. See the
 [Worker-status labels reference](/autonomous-workflow/worker-status-labels/) for what each label
 means and how the HUD displays them.
 
-## Linear app-actor identity (`catalyst.linear.bot.{worker,orchestrator}.botUserId`)
+## Linear app-actor identity (`catalyst.linear.bot.{worker,orchestrator,heartbeat}`)
 
 Catalyst posts to Linear as a Linear OAuth **app actor** — the "Linear for Agents" identity that
 comments **as Catalyst**. Linear OAuth apps are account-level (one app serves every team), so the
 bot identity and OAuth credentials now live in the **global** `~/.config/catalyst/config.json` under
-`catalyst.linear.bot`, split into two app actors:
+`catalyst.linear.bot`, split into three app actors:
 
 - `catalyst.linear.bot.worker` — the worker app that posts phase-agent mirror comments and mints
   tokens via `client_credentials`.
 - `catalyst.linear.bot.orchestrator` — the orchestrator app that posts run-level updates.
+- `catalyst.linear.bot.heartbeat` — a dedicated identity for cross-host heartbeat publish/read.
+  It must use a distinct OAuth application so quota exhaustion on the orchestrator application
+  cannot make live peers look offline.
 
-Each carries a `botUserId` (the Linear user UUID of that app actor). The daemon and orch-monitor
-read **both** `botUserId`s into a single set so the self-echo / loop-prevention guard suppresses
+The worker and orchestrator entries carry a `botUserId` (the Linear user UUID of that app actor).
+The daemon and orch-monitor read those **two** `botUserId`s into a single set so the self-echo / loop-prevention guard suppresses
 comments and issue events from **either** app actor. These UUIDs aren't secret (they appear on every
 comment the app posts), but they are account-specific.
 
@@ -361,6 +364,11 @@ comment the app posts), but they are account-specific.
           "clientSecret": "...",
           "accessToken": "...",
           "botUserId": null
+        },
+        "heartbeat": {
+          "clientId": "...",
+          "clientSecret": "...",
+          "botUserId": null
         }
       }
     }
@@ -373,6 +381,21 @@ comment the app posts), but they are account-specific.
 | `catalyst.linear.bot.worker.botUserId`                                         | Linear user UUID of the worker app actor. Suppresses self-echo on mirror comments / description updates. Also the read ID for the daemon's self-echo filter.                                                                                                                                                                                      |
 | `catalyst.linear.bot.orchestrator.botUserId`                                   | Linear user UUID of the orchestrator app actor. **Also drives self-assign on claim (CTL-1011)** — the daemon writes this UUID as the Linear assignee when it claims a ticket. When absent, `applyAssignee` emits a single deduped `warn` and leaves the ticket unassigned. Daemon reads it **only at startup** — restart required after changing. |
 | `catalyst.linear.bot.worker.{clientId,clientSecret,webhookSecret,accessToken}` | OAuth app-actor credentials for the worker identity. Secrets — keep in the un-committed global config                                                                                                                                                                                                                                             |
+| `catalyst.linear.bot.heartbeat.{clientId,clientSecret}`                       | OAuth credentials for the dedicated heartbeat identity. At startup they mint `CATALYST_HEARTBEAT_APP_ACTOR_TOKEN`; when absent, heartbeat calls fall back to the orchestrator token.                                                                                                                                                                |
+
+### Dedicated heartbeat actor provisioning
+
+1. As a Linear workspace admin, create a separate OAuth application named “Catalyst Heartbeat”.
+   Enable the app actor / `client_credentials` flow with scopes
+   `read,write,comments:create,app:assignable,app:mentionable`.
+2. On every roster host, put its `clientId` and `clientSecret` in the uncommitted Layer-2
+   `~/.config/catalyst/config.json` at `catalyst.linear.bot.heartbeat`.
+3. Run `catalyst-stack restart` on each host.
+4. Verify the daemon log says `authenticated as Catalyst Heartbeat app-actor` and `catalyst doctor`
+   reports that the dedicated heartbeat actor resolves.
+
+Linear quota is bucketed per OAuth application. Reusing the orchestrator application's `clientId`
+for this entry does not isolate heartbeat traffic and defeats the purpose of this configuration.
 
 > **Self-assign activation:** `catalyst.linear.bot.orchestrator.botUserId` must be set AND the
 > app-actor token must carry the `app:assignable` OAuth scope for the assignee write to succeed. If
@@ -874,7 +897,7 @@ Rows with a more specific shape declare additional fields: `familyPrefix` (the o
 every config-file tier) and `legacyConfigTiers` + `requiredObjectFields` (§ Linear worker-actor
 tiers below).
 
-The 11 seed rows:
+The 13 seed rows:
 
 | id                          | delivery          | rotation                | bootstrapFor | notes                                                                 |
 | ---------------------------- | ----------------- | ------------------------ | ------------ | ---------------------------------------------------------------------- |
@@ -886,6 +909,8 @@ The 11 seed rows:
 | `linear-api-token`             | `env-alias`        | `re-armable` / `on-401`  | —            | aliases `LINEAR_API_TOKEN`, `LINEAR_API_KEY`                          |
 | `linear-orchestrator-actor`    | `config-json`      | `re-armable` / `on-401`  | —            | `catalyst.linear.bot.orchestrator` — kept separate from worker-actor  |
 | `linear-worker-actor`          | `config-json`      | `boot-only`              | —            | `catalyst.linear.bot.worker` + a legacy fallback chain (below)        |
+| `linear-heartbeat-actor`       | `config-json`      | `re-armable` / `on-401`  | —            | `catalyst.linear.bot.heartbeat`; separate OAuth application           |
+| `linear-heartbeat-api-token`   | `env-alias`        | `re-armable` / `on-401`  | —            | alias `CATALYST_HEARTBEAT_APP_ACTOR_TOKEN`                            |
 | `groq-api-key`                 | `config-json`      | `boot-only`              | —            | env alias `GROQ_API_KEY`, config path `groq.apiKey`                   |
 | `cloud-token`                  | `platform-env`     | `boot-only`              | `cloud`      | default env-var `CATALYST_CLOUD_TOKEN`; the NAME is itself resolvable |
 | `age-key`                      | `local-only`       | `n/a`                    | `cluster`    | presence-checked only, never value-read; default `~/.config/catalyst/age.key` |

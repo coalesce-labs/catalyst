@@ -184,7 +184,7 @@ in `execution-core/config.mjs`'s `bun:sqlite` graph) and its independently-maint
 `lib/catalyst-secret-contract.sh`, held honest by a cross-stack **three-way parity suite**
 (`__tests__/secret-contract-parity.test.sh`: bash and JS each checked against a computed-expected
 value, never merely against each other, plus row-id-set equality between the two registries). The
-schema — the 11 registered secrets, the 7 delivery types, the resolution result shape, the cloud
+schema — the 13 registered secrets, the 7 delivery types, the resolution result shape, the cloud
 guard, and the Layer-2 path chain — is documented in full in its canonical reference,
 `website/src/content/docs/reference/configuration.md`; this section covers only the architectural
 role.
@@ -228,12 +228,17 @@ moment the value changes. No production call site invokes `armSecret` today (a r
 outside tests finds only the definition and a comment reference in `linear-remint.mjs`), so this
 reporting is not yet wired to any running daemon.
 
-**Consumers folded onto the contract so far**: the 10-file/12-site Linear-token read
-(`linear-query.mjs` — 3 sites, `cluster-heartbeat.mjs`, `cluster-claim.mjs`,
+**Consumers folded onto the contract so far**: the heartbeat path can resolve a dedicated
+`linear-heartbeat-actor` / `linear-heartbeat-api-token`; its distinct OAuth application is the
+quota-isolation boundary, with an unprovisioned host falling back to `linear-api-token`. The
+provisioning runbook lives in the configuration reference. The remaining shared Linear-token readers
+(`linear-query.mjs` — 3 sites, `cluster-claim.mjs`,
 `linear-estimation-method.mjs`, `linear-reconcile-cli.mjs`, three `orch-monitor/lib/linear-*`
 fallback readers, `score-tickets.ts`, and the bash `catalyst_resolve_secret linear-api-token`
 snippet in `plugins/dev/skills/phase-triage/SKILL.md`); the Linear OAuth-mint trio
-(`linear-app-actor.sh`'s bash mint, `linear-remint.mjs`'s orchestrator-actor reminter — registered
+(`linear-app-actor.sh`'s bash mint, including the dedicated heartbeat actor described in the
+[configuration runbook](/reference/configuration#dedicated-heartbeat-actor-provisioning),
+`linear-remint.mjs`'s orchestrator-actor reminter — registered
 as the row's live rearm hook — and `linear-comment-post.sh`'s worker-actor chain, legacy tiers
 preserved verbatim); the cloud-token env-var **name** resolver (`config.mjs`'s
 `resolveNodeCloudTokenEnv` now delegates directly to `resolveCloudTokenName`;
