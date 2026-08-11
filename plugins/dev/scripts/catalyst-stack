@@ -2503,6 +2503,7 @@ cloud_sync_verify_report() {
   local cfg="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}" mode="off" mode_source="default"
   if [[ -n "${CATALYST_LINEAR_REPLICA:-}" ]]; then mode="$CATALYST_LINEAR_REPLICA"; mode_source="env"
   elif [[ -f "$cfg" ]]; then mode="$(jq -r '(.catalyst.linearReplica | if type == "object" then .mode else . end) // "off"' "$cfg" 2>/dev/null || echo off)"; mode_source="layer2"; fi
+  [[ "$mode" == 1 ]] && mode="on"
   [[ "$mode" == on ]] && _cloud_sync_verify_add read-flag PASS "read flag on ($mode_source)" || _cloud_sync_verify_add read-flag INFO "read flag $mode ($mode_source)"
   local report; report="$(jq -nc --argjson ok "$overall" --arg first "$first_failure" --arg db "$db" --argjson checks "$checks" '{ok:$ok,first_failure:$first,db_path:$db,checks:$checks}')"
   if [[ "$json_mode" == yes ]]; then printf '%s\n' "$report"; else jq -r '.checks[] | "\(.status)\t\(.name)\t\(.reason)"' <<<"$report"; fi

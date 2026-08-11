@@ -434,13 +434,13 @@ describe("applyLabel", () => {
       return { code: 1, stdout: "", stderr: 'Label "triaged" not found' };
     };
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
-    expect(r).toEqual({ applied: false, reason: "missing-label" });
+    expect(r).toEqual({ applied: false, reason: "missing-label", retryAfterMs: null });
     expect(calls).toHaveLength(1); // write failed → no read-back attempted
   });
   test("CTL-585: classifies a rate-limit stderr as reason:'rate-limited'", () => {
     const exec = () => ({ code: 1, stdout: "", stderr: "Rate limit exceeded" });
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
-    expect(r).toEqual({ applied: false, reason: "rate-limited" });
+    expect(r).toEqual({ applied: false, reason: "rate-limited", retryAfterMs: null });
   });
   test("CTL-1085: classifies a cross-team label-UUID stderr as reason:'team-mismatch' (unrecoverable, storm-break preserved)", () => {
     // Linear's labels are team-scoped: same name, different UUID per team. When
@@ -456,17 +456,17 @@ describe("applyLabel", () => {
         'GraphQL request failed: LabelIds for incorrect team - The label \'needs-human\' is not associated with the same team as the issue.',
     });
     const r = applyLabel({ ticket: "ADV-1213", label: "needs-human", exec });
-    expect(r).toEqual({ applied: false, reason: "team-mismatch" });
+    expect(r).toEqual({ applied: false, reason: "team-mismatch", retryAfterMs: null });
   });
   test("CTL-585: any other non-zero exit is reason:'transient'", () => {
     const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
-    expect(r).toEqual({ applied: false, reason: "transient" });
+    expect(r).toEqual({ applied: false, reason: "transient", retryAfterMs: null });
   });
   test("CTL-585: a spawn-error (code 127) is reason:'transient'", () => {
     const exec = () => ({ code: 127, stdout: "", stderr: "ENOENT" });
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
-    expect(r).toEqual({ applied: false, reason: "transient" });
+    expect(r).toEqual({ applied: false, reason: "transient", retryAfterMs: null });
   });
   test("CTL-585: a thrown exec is reason:'transient' and never throws", () => {
     const exec = () => {
@@ -485,7 +485,7 @@ describe("applyLabel", () => {
         "GraphQL request failed: LabelIds not exclusive child labels - blocked is in an exclusive group already represented.",
     });
     const r = applyLabel({ ticket: "CTL-838", label: "blocked", exec });
-    expect(r).toEqual({ applied: false, reason: "exclusive-conflict" });
+    expect(r).toEqual({ applied: false, reason: "exclusive-conflict", retryAfterMs: null });
   });
 });
 
@@ -524,7 +524,7 @@ describe("classifyLabelFailure (CTL-834)", () => {
       stderr: 'GraphQL request failed: LabelIds for incorrect team - The label \'needs-human\' is not associated with the same team as the issue.',
     });
     const r = applyLabel({ ticket: "ADV-1213", label: "needs-human", exec });
-    expect(r).toEqual({ applied: false, reason: "team-mismatch" });
+    expect(r).toEqual({ applied: false, reason: "team-mismatch", retryAfterMs: null });
   });
 });
 

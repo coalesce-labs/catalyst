@@ -2431,11 +2431,12 @@ export function convergeHeldLabel(
     }
     if (orchDir && res && res.applied === false && (UNRECOVERABLE_LABEL_REASONS.has(res.reason) || BACKOFF_LABEL_REASONS.has(res.reason))) {
       recordLabelCooldown(orchDir, ticket, desired, now(), { retryAfterMs: res.retryAfterMs });
-      const logger = BACKOFF_LABEL_REASONS.has(res.reason) ? log.debug : log.warn;
-      logger(
-        { ticket, label: desired, reason: res.reason },
-        "ctl-834: held-label apply unrecoverable — backing off (cool-down)"
-      );
+      const details = { ticket, label: desired, reason: res.reason };
+      if (BACKOFF_LABEL_REASONS.has(res.reason)) {
+        log.debug(details, "ctl-834: held-label apply unrecoverable — backing off (cool-down)");
+      } else {
+        log.warn(details, "ctl-834: held-label apply unrecoverable — backing off (cool-down)");
+      }
     }
   }
   return writes;
@@ -2503,11 +2504,12 @@ export function convergeDispositionLabel(
     writes++;
     if (orchDir && res && res.applied === false && (UNRECOVERABLE_LABEL_REASONS.has(res.reason) || BACKOFF_LABEL_REASONS.has(res.reason))) {
       recordLabelCooldown(orchDir, ticket, desired, now(), { retryAfterMs: res.retryAfterMs });
-      const logger = BACKOFF_LABEL_REASONS.has(res.reason) ? log.debug : log.warn;
-      logger(
-        { ticket, label: desired, reason: res.reason },
-        "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
-      );
+      const details = { ticket, label: desired, reason: res.reason };
+      if (BACKOFF_LABEL_REASONS.has(res.reason)) {
+        log.debug(details, "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)");
+      } else {
+        log.warn(details, "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)");
+      }
     }
   }
   return writes;

@@ -47,6 +47,8 @@ CATALYST_LINEAR_REPLICA=off OUT="$(CATALYST_LINEAR_REPLICA=off cloud_sync_verify
 check "environment off overrides layer2 on" jq -e '(.checks[] | select(.name=="read-flag")) | .status == "INFO" and (.reason | contains("env"))' <<<"$OUT"
 rm -f "$CATALYST_LAYER2_CONFIG_FILE"; OUT="$(CATALYST_LINEAR_REPLICA=on cloud_sync_verify_report --json)"
 check "environment on works without layer2" jq -e '(.checks[] | select(.name=="read-flag")) | .status == "PASS" and (.reason | contains("env"))' <<<"$OUT"
+OUT="$(CATALYST_LINEAR_REPLICA=1 cloud_sync_verify_report --json)"
+check "environment 1 enables replica reads" jq -e '(.checks[] | select(.name=="read-flag")) | .status == "PASS" and (.reason | contains("env"))' <<<"$OUT"
 
 fixture badactivate; : > "$CATALYST_REPLICA_DB"; printf '{"keep":true}\n' > "$CATALYST_LAYER2_CONFIG_FILE"; BEFORE="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"; cmd_activate_replica >/dev/null 2>&1; EC=$?; AFTER="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"
 check "activate refuses invalid seed" test "$EC" -ne 0

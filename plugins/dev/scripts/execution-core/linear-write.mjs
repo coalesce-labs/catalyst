@@ -226,11 +226,12 @@ export function applyLabel({ ticket, label, exec = defaultExec, readLabels = nul
     ]);
     if (writeRes.code !== 0) {
       const reason = classifyLabelFailure(writeRes.stderr);
-      const logger = reason === "circuit-open" ? log.debug : log.warn;
-      logger(
-        { ticket, label, code: writeRes.code, reason, stderr: writeRes.stderr },
-        "linear-write: label write failed (exit non-zero)"
-      );
+      const details = { ticket, label, code: writeRes.code, reason, stderr: writeRes.stderr };
+      if (reason === "circuit-open") {
+        log.debug(details, "linear-write: label write failed (exit non-zero)");
+      } else {
+        log.warn(details, "linear-write: label write failed (exit non-zero)");
+      }
       return { applied: false, reason, retryAfterMs: writeRes.retryAfterMs ?? null };
     }
     // A readLabels seam returning null/undefined means "cannot serve this read"
@@ -300,7 +301,7 @@ export async function removeLabel(
     if (!readResult.ok) {
       const reason = isAuthError(readResult.stderr ?? "") ? "auth-error" : "transient";
       log.warn({ ticket, label, reason, stderr: readResult.stderr }, "removeLabel: read failed");
-      return { removed: false, wrote: false, reason, retryAfterMs: res.retryAfterMs ?? null };
+      return { removed: false, wrote: false, reason };
     }
     const current = readResult.labels;
     if (!current.includes(label)) {
