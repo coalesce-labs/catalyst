@@ -22,6 +22,17 @@ test("CAT-15: draft PR in a blocker state → stamp", () => {
   expect(d.reason).toBe("first_sighting");
 });
 
+test("CAT-15: draft PR with CLEAN merge state → stamp", () => {
+  const d = decideOrphanNotify({ mergeStateStatus: "CLEAN", isDraft: true, entry: null, nowMs: 1000, stableSeconds: 300 });
+  expect(d).toEqual({ action: "stamp", reason: "first_sighting" });
+});
+
+test("draft PR with CLEAN merge state past stable window → notify:draft_stable", () => {
+  const entry = { firstSeenAt: new Date(0).toISOString() };
+  const d = decideOrphanNotify({ mergeStateStatus: "CLEAN", isDraft: true, entry, nowMs: 300_000, stableSeconds: 300 });
+  expect(d).toEqual({ action: "notify", reason: "draft_stable" });
+});
+
 test("draft blocker past stable window → notify:draft_stable", () => {
   const entry = { firstSeenAt: new Date(0).toISOString() };
   const d = decideOrphanNotify({ mergeStateStatus: "BLOCKED", isDraft: true, entry, nowMs: 300_000, stableSeconds: 300 });

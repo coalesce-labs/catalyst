@@ -128,7 +128,8 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    wait can block far past the window (600s broker / 180+7200s raw) and delay an already-earned merge.
 
 2. **REST is authoritative.** Every loop iteration calls `gh api repos/${REPO}/pulls/${PR_NUMBER}`
-   and reads `.merged` + `.mergeable_state`. Never use `gh pr view --json mergeable` (GraphQL is
+   and reads `.merged` + `.draft` + `.mergeable_state` into `MERGED_OK`, `PR_IS_DRAFT`, and
+   `MERGEABLE_STATE`. Never use `gh pr view --json mergeable` (GraphQL is
    eventually consistent for the merge-state fields and frequently lies).
 
 3. **State machine.** Branch on `mergeable_state`:
@@ -139,6 +140,7 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    | blocked          | resolve via `/catalyst-dev:review-comments` (bot threads) or run an inline CI fix-up commit (up to 3 attempts); 4th attempt → `stalled` |
    | behind           | `git fetch && git rebase origin/<base> && git -c core.hooksPath=/dev/null push --force-with-lease`                                      |
    | dirty            | merge conflicts — emit `failed` with reason "merge conflicts (DIRTY)"                                                                   |
+   | draft            | when REST `.draft` is true, attempt `draft_pr_promote_verify` once; re-enter the event wait on success, otherwise fail                  |
    | unknown/unstable | continue waiting for the next event                                                                                                     |
 
 4. **Human reviewer changes-requested.** After every wake, query `gh pr view --json reviews` for the
@@ -157,15 +159,16 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
 Before the `clean` merge handler, handle a draft exactly once per phase run:
 
 ```bash
-if [[ "$MERGEABLE_STATE" == "draft" ]]; then
-  if [[ -n "${DRAFT_PROMOTE_ATTEMPTED:-}" ]]; then
+if [[ "$PR_IS_DRAFT" == "true" ]]; then
+  DRAFT_PROMOTE_MARKER="${ORCH_DIR}/workers/${TICKET}/.draft-promote-${PHASE}"
+  if [[ -e "$DRAFT_PROMOTE_MARKER" ]]; then
     echo "phase-monitor-merge: PR #${PR_NUMBER} still draft after one promote attempt" >&2
     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
       --phase "$PHASE" --ticket "$TICKET" --status failed \
       --reason "pr_stuck_in_draft"
     exit 1
   fi
-  DRAFT_PROMOTE_ATTEMPTED=1
+  : > "$DRAFT_PROMOTE_MARKER"
   source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
   if ! draft_pr_promote_verify; then
     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
@@ -174,9 +177,11 @@ if [[ "$MERGEABLE_STATE" == "draft" ]]; then
     exit 1
   fi
   echo "wake: pr#${PR_NUMBER} — PR was draft; promoted to ready"
-  continue
 fi
 ```
+
+After a successful promotion, re-enter step 1's event wait. Do not evaluate the
+`clean` handler using the REST payload captured before promotion.
 
 ## Merge
 
@@ -701,4 +706,3 @@ Plan architectural commitment #3. The listen loop logic lives in [[oneshot]] SKI
 exercised every day. Lifting it into a phase-agent skill without duplicating the body keeps both
 paths in lockstep — when the legacy oneshot path retires (plan §Initiative 1 Phase 6), this skill
 becomes the sole owner.
-   | draft            | attempt `draft_pr_promote_verify` once; re-read on success, otherwise fail with `pr_stuck_in_draft`                                    |

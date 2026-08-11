@@ -100,6 +100,7 @@ function emptyProbe() {
   return {
     prNumber: null,
     state: null,
+    isDraft: false,
     mergeCommitSha: null,
     mergeStateStatus: null,
     mergeable: null,

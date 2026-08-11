@@ -130,6 +130,22 @@ else
 fi
 
 echo ""
+echo "CAT-15: draft self-heal keys off REST .draft and persists its attempt"
+
+if [[ -f "$SKILL" ]]; then
+  assert_contains "$BODY" 'PR_IS_DRAFT' \
+    "draft self-heal keys off the REST draft field"
+  assert_contains "$BODY" '.draft-promote-${PHASE}' \
+    "draft promotion attempt persists across agent-driven loop iterations"
+  assert_not_contains "$BODY" 'MERGEABLE_STATE" == "draft' \
+    "draft self-heal does not expect mergeable_state=draft"
+  assert_not_contains "$BODY" 'DRAFT_PROMOTE_ATTEMPTED' \
+    "draft self-heal does not use a process-local attempt variable"
+else
+  fail "SKILL.md missing for CAT-15 draft checks: $SKILL"
+fi
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-monitor-merge-guard: ${PASSES} passed, ${FAILURES} failed"
 echo "─────────────────────────────────────────────"

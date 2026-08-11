@@ -30,7 +30,7 @@ export function isOrphanBlocked(mergeStateStatus) {
 //   Returns { action: 'skip'|'stamp'|'wait'|'notify', reason }.
 // The timer owns all side-effects (stamping firstSeenAt, setting notifiedAt, emit).
 export function decideOrphanNotify({ mergeStateStatus, isDraft, entry, nowMs, stableSeconds = DEFAULTS.stableSeconds }) {
-  if (!isOrphanBlocked(mergeStateStatus)) return { action: "skip", reason: "not_blocked" };
+  if (!isOrphanBlocked(mergeStateStatus) && !isDraft) return { action: "skip", reason: "not_blocked" };
   if (!entry?.firstSeenAt) return { action: "stamp", reason: "first_sighting" };
   if (entry.notifiedAt) return { action: "skip", reason: "already_notified" };
 
