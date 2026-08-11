@@ -110,9 +110,16 @@ function readLinearBotConfig(l2Path) {
 // with node). Logic is identical; deps are already imported above.
 //
 // Collects all known Linear bot user UUIDs from both config layers:
-//   1. ~/.config/catalyst/config.json  every actor under catalyst.linear.bot
-//   2. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
+//   1. ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
+//   2. ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
+//   3. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
 // Returns a Set<string>. Empty set = no filter (fail-open). Never throws.
+//
+// The Layer-2 extraction deliberately reads ONLY worker + orchestrator, mirroring
+// daemon.mjs's self-echo filter. Enumerating every configured actor here would make
+// this check grade green on identities the daemon does not actually filter. (The
+// separate checkAppActorMint DOES enumerate the live map — that check verifies
+// mintability, not self-echo coverage.)
 function readLinearBotUserIds(l1Path, l2Path) {
   const ids = new Set();
   function addFromPath(path, extractor) {
@@ -123,8 +130,9 @@ function readLinearBotUserIds(l1Path, l2Path) {
     } catch { /* ignore unreadable / malformed files */ }
   }
   const bot = readLinearBotConfig(l2Path) ?? {};
-  for (const actor of Object.values(bot)) {
-    if (typeof actor?.botUserId === "string" && actor.botUserId.length > 0) ids.add(actor.botUserId);
+  for (const key of ["worker", "orchestrator"]) {
+    const uid = bot?.[key]?.botUserId;
+    if (typeof uid === "string" && uid.length > 0) ids.add(uid);
   }
   addFromPath(l1Path, (p, s) => {
     const uid = p?.catalyst?.monitor?.linear?.botUserId;
