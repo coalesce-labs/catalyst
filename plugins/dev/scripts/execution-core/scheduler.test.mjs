@@ -2474,6 +2474,46 @@ describe("CTL-712: dispatch retry ceiling (schedulerTick)", () => {
 });
 
 describe("schedulerTick — new-work pull", () => {
+  test("excludes the configured liveness anchor while dispatching ordinary ready work", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch();
+    const eligible = ["CAT-1", "CAT-2"].map((identifier) => ({
+      identifier,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    }));
+    const base = {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+      hosts: ["test-host"],
+      hostName: "test-host",
+    };
+    expect(schedulerTick(orchDir, { ...base, anchorIssue: "CAT-1" }).dispatched).toEqual(["CAT-2"]);
+  });
+
+  test("dispatches the same identifier when no liveness anchor is configured", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch();
+    const eligible = [{ identifier: "CAT-1", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } }];
+    expect(schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+      anchorIssue: null,
+      hosts: ["test-host"],
+      hostName: "test-host",
+    }).dispatched).toEqual(["CAT-1"]);
+  });
   test("dispatches research for the top-ranked ready ticket into a free slot", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     // CTL-1150: seed real triage.json files so the default filesystem predicate passes.

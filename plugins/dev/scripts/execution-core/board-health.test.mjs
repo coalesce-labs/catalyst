@@ -27,6 +27,8 @@ import {
   classifyRevivalRoute,
   // CAT-58: the account-usage-cliff test below derives a ring snapshot directly.
   deriveRing,
+  // CAT-159: the shared suppression predicate the anchor-exclusion tests assert on.
+  makeSuppressed,
   makeOwnsFilter,
   resolveRosterSeam,
   // CTL-1552: the parked-by-human label reader + the human-escalated signal check.
@@ -113,6 +115,15 @@ function mkBoard(o = {}) {
   }
   return {
     ticketsById,
+    // CAT-159: ALWAYS carry the key. makeSuppressed falls through to
+    // resolveAnchorIssueCached() (the machine's real Layer-2
+    // catalyst.cluster.livenessAnchorIssue) whenever the board omits it, which
+    // made this suite's verdicts depend on the host it runs on — a box whose
+    // anchor happens to be CTL-1/CTL-2/CTL-9 silently suppressed the ticket
+    // these fixtures assert a move for. Default null pins every fixture to the
+    // no-anchor-configured behavior; tests exercising the exclusion pass an
+    // explicit identifier.
+    anchorIssue: Object.hasOwn(o, "anchorIssue") ? o.anchorIssue : null,
     signals: o.signals ?? [],
     eligible: o.eligible ?? [],
     roster: o.roster ?? [],
@@ -200,6 +211,34 @@ describe("isParkedByHuman — descriptor label reader", () => {
   });
   test("case-insensitive on the label name", () => {
     expect(isParkedByHuman({ labels: [{ name: "Parked-By-Human" }] })).toBe(true);
+  });
+});
+
+describe("CAT-159 liveness-anchor board-health suppression", () => {
+  test("suppresses the anchor independently of descriptor labels", () => {
+    const suppressed = makeSuppressed(mkBoard({
+      anchorIssue: "CAT-1",
+      ticketsById: new Map([["CAT-1", { labels: [] }], ["CAT-2", { labels: [] }]]),
+    }));
+    expect(suppressed("CAT-1")).toBe(true);
+    expect(suppressed("CAT-2")).toBe(false);
+  });
+  test("preserves parked-by-human and fails open with no anchor configured", () => {
+    const suppressed = makeSuppressed(mkBoard({ anchorIssue: null, ticketsById: parkedMap("CAT-2") }));
+    expect(suppressed("CAT-1")).toBe(false);
+    expect(suppressed("CAT-2")).toBe(true);
+  });
+  test("a flagged anchor is sanctioned and receives no move", () => {
+    const board = mkBoard({ anchorIssue: "CAT-1", ticketsById: new Map([["CAT-1", { labels: [] }]]) });
+    const invariants = { needsHumanPile: { ok: false, failed: 1, observable: true, flagged: ["CAT-1"], note: "stuck" } };
+    const moves = proposeMoves(invariants, board);
+    expect(moves.tier1).toEqual([]);
+    const decision = decideBoardHealth(invariants, board);
+    expect(decision.sanctioned).toContain("CAT-1");
+    const event = buildBoardScanEvent({ mode: "shadow", invariants, decision, board });
+    expect(event.details.sanctioned).toContain("CAT-1");
+    expect([...event.details.tier1Moves, ...event.details.tier2Moves, ...event.details.tier3Moves]
+      .some((move) => move.ticket === "CAT-1")).toBe(false);
   });
 });
 
@@ -2169,7 +2208,7 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
     // detected, reported, and then left as stuck as before. That is precisely how
     // this cohort sat untouched for 13 days. It must be anchorable.
     const inv = evaluateInvariants(board({ ticketsById: one() }));
-    const moves = proposeMoves(inv, {});
+    const moves = proposeMoves(inv, { anchorIssue: null }); // CAT-159: pin the no-anchor board
     const m = moves.tier2.find((x) => x.move === "recover-unowned-in-flight");
     expect(m).toBeTruthy();
     expect(m.ticket).toBe("CTL-9");
@@ -2178,7 +2217,7 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
 
   test("an operator-parked ticket is not re-proposed", () => {
     const inv = evaluateInvariants(board({ ticketsById: one() }));
-    const moves = proposeMoves(inv, { ticketsById: parkedMap("CTL-9") });
+    const moves = proposeMoves(inv, { ticketsById: parkedMap("CTL-9"), anchorIssue: null });
     expect(moves.tier2.some((x) => x.move === "recover-unowned-in-flight")).toBe(false);
   });
 
@@ -2706,7 +2745,7 @@ describe("checkStrandedMidPipeline (CTL-1644)", () => {
       ownerForTicket: () => "mini",
       strandedEvidence: ev([noActuation]),
     });
-    const moves = proposeMoves(evaluateInvariants(b), { sanctionedNeedsHuman: [] });
+    const moves = proposeMoves(evaluateInvariants(b), { sanctionedNeedsHuman: [], anchorIssue: null });
     const m = moves.tier2.find((x) => x.move === "route-stranded-mid-pipeline");
     expect(m).toBeTruthy();
     expect(m.ticket).toBe("CTL-9");
@@ -2723,7 +2762,7 @@ describe("checkStrandedMidPipeline (CTL-1644)", () => {
       ownerForTicket: () => "mini",
       strandedEvidence: ev([noActuation]),
     });
-    const moves = proposeMoves(evaluateInvariants(b), { sanctionedNeedsHuman: [] });
+    const moves = proposeMoves(evaluateInvariants(b), { sanctionedNeedsHuman: [], anchorIssue: null });
     const ctlNineMoves = moves.tier2.filter((m) => m.ticket === "CTL-9");
     expect(ctlNineMoves.some((m) => m.move === "recover-unowned-in-flight")).toBe(false);
     expect(ctlNineMoves.some((m) => m.move === "route-stranded-mid-pipeline")).toBe(true);

@@ -37,6 +37,10 @@ import { HEARTBEAT_GRACE_MS, isThrottled } from "./config.mjs";
 import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecoveryEnvelope (CTL-1291 promotes the numbers)
 import { evaluateQuotaHeadroom, GITHUB_QUOTA_DEFAULTS } from "./github-quota.mjs";
 import { describeReplicaState, evaluateReplicaCompleteness } from "./replica-completeness.mjs";
+import {
+  isLivenessAnchorTicket,
+  resolveAnchorIssueCached,
+} from "./dispatch-exclusions.mjs";
 
 // ── thresholds + cadence (env-tunable, bounded defaults) ─────────────────────
 export const DEFAULT_THRESHOLDS = {
@@ -237,15 +241,24 @@ export function isHumanEscalatedSignal(sig) {
 // gate, the ranking, and the observability can never disagree (same discipline
 // eligibleDeferredAnchors' shared-helper comment documents). A ticket is
 // suppressed iff it carries the parked-by-human label (read from the descriptor
-// board-health already receives). CTL-1552: this replaced the per-host
-// sanctioned-latch env var (CTL-1432 B3), which never synced across the cluster.
-function makeSuppressed(board) {
+// board-health already receives), it is in the human-escalated set, or its
+// identifier is the CAT-159 operational liveness anchor. CTL-1552: the label
+// replaced the per-host sanctioned-latch env var (CTL-1432 B3), which never
+// synced across the cluster. The anchor resolution fails open when unset,
+// preserving all ordinary recovery behavior on an unconfigured host.
+export function makeSuppressed(board) {
   const byId = board?.ticketsById;
   const get = typeof byId?.get === "function" ? (t) => byId.get(t) : () => undefined;
   const escalated = board?.humanEscalatedTickets instanceof Set
     ? board.humanEscalatedTickets
     : new Set();
-  return (t) => isParkedByHuman(get(t)) || escalated.has(t);
+  const anchorIssue = Object.hasOwn(board ?? {}, "anchorIssue")
+    ? board.anchorIssue
+    : resolveAnchorIssueCached();
+  return (t) =>
+    isLivenessAnchorTicket(t, { anchorIssue }) ||
+    isParkedByHuman(get(t)) ||
+    escalated.has(t);
 }
 
 const anchorable = (move) => !!(move && move.ticket);

@@ -365,6 +365,15 @@ that lane marker is active, phase-aware dispatch routes `bg` work to `codex-exec
 is healthy and emits an audit-only fallback event. Account rate-limit samples also derive the board
 health `nearCliff` invariant from five-hour and seven-day utilization (90% by default).
 
+### Operational liveness-anchor exclusion
+
+The Linear issue configured by `catalyst.cluster.livenessAnchorIssue` is a durable heartbeat
+bulletin board, not pipeline work. `dispatch-exclusions.mjs` identifies it, and execution-core
+excludes it at all three action boundaries: `dispatch-readiness.mjs:canOccupySlotNow` for new-work
+admission, `monitor.mjs:dispatchTriage` (plus the `sweepMissingTriage` candidate filter) for triage,
+and `board-health.mjs:makeSuppressed` for recovery moves. The exclusion fails open when the
+machine-local key is unset or unreadable, so no unidentified work ticket is suppressed.
+
 ### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707 + CAT-31)
 
 On a **fresh** dispatch of a **build** phase (`research`,`plan`,`implement`,`verify`,`review`),
