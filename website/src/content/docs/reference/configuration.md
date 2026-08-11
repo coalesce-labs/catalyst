@@ -374,6 +374,7 @@ comment the app posts), but they are account-specific.
 | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `catalyst.linear.bot.worker.botUserId`                                         | Linear user UUID of the worker app actor. Suppresses self-echo on mirror comments / description updates. Also the read ID for the daemon's self-echo filter.                                                                                                                                                                                      |
 | `catalyst.linear.bot.orchestrator.botUserId`                                   | Linear user UUID of the orchestrator app actor. **Also drives self-assign on claim (CTL-1011)** — the daemon writes this UUID as the Linear assignee when it claims a ticket. When absent, `applyAssignee` emits a single deduped `warn` and leaves the ticket unassigned. Daemon reads it **only at startup** — restart required after changing. |
+| `catalyst.linear.bot.peerUserIds`                                              | Linear user UUIDs for the other hosts' app actors. These are recognition-only: peer comments and assignments are treated as bot-authored, but writes still use this host's orchestrator identity. |
 | `catalyst.linear.bot.worker.{clientId,clientSecret,webhookSecret,accessToken}` | OAuth app-actor credentials for the worker identity. Secrets — keep in the un-committed global config                                                                                                                                                                                                                                             |
 
 > **Self-assign activation:** `catalyst.linear.bot.orchestrator.botUserId` must be set AND the
@@ -381,6 +382,18 @@ comment the app posts), but they are account-specific.
 > the token lacks scope, a deduped `warn` is emitted once per Linear team with the re-mint remedy.
 > See [Self-assign activation runbook](/reference/configuration#self-assign-activation-runbook)
 > below.
+
+### Per-host Linear app-actor provisioning
+
+To isolate Linear's 5,000-request/hour app-user bucket, register one OAuth application per host and
+put that host's `clientId`, `clientSecret`, and `botUserId` under
+`catalyst.linear.bot.orchestrator` in its machine-local Layer-2 config. Add every other host's
+`botUserId` to `catalyst.linear.bot.peerUserIds`; this prevents peer bot comments and assignments
+from being mistaken for human activity. Never put these credentials in Layer-1 or source control.
+
+Restart the execution-core daemon after changing these boot-only credentials. `catalyst doctor`
+reports `linear-actor-sharing` from truncated SHA-256 fingerprints so an operator can verify that
+live hosts use distinct Linear app-actor buckets without exposing a raw client ID or secret.
 
 ### Back-compat (transition period)
 
@@ -678,6 +691,18 @@ a host with its own Linear key, preserving per-host rate-limit isolation.
 > endpoint is the "split" deployment topology tracked in CTL-1347 / CTL-1354.
 
 ### Local Linear replica + cloud-sync writer (`catalyst.linearReplica`, CTL-1394)
+
+### Per-host Linear app-actor quota isolation
+
+Linear applies its request budget to an OAuth app-user. To isolate host budgets, a workspace
+administrator registers one OAuth application per host and places that host's values only in its
+machine-local Layer-2 file under
+`catalyst.linear.bot.orchestrator.{clientId,clientSecret,botUserId}`. Add every other host's
+`botUserId` to `catalyst.linear.bot.peerUserIds`; peer IDs are recognition-only and are never used
+as the local write or assignment identity. Restart execution-core after changing these boot-only
+credentials. Quota snapshots and `catalyst doctor` expose only truncated SHA-256 client
+fingerprints—never raw client IDs or client secrets—so operators can confirm whether hosts share a
+Linear app-actor bucket.
 
 > **Not the same thing as `readReplica`.** `catalyst.readReplica.baseUrl` (above) is the **HTTP
 > board endpoint** the terminal HUD reads. `catalyst.linearReplica` is the **local SQLite

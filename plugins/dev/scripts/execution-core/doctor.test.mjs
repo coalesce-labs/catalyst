@@ -33,6 +33,7 @@ import {
   defaultConfiguredRepos,
   checkNodeClass,
   checkDeploymentModeConsistency,
+  checkLinearActorSharing,
   checkSecretContract,
   checkLayer2PathDivergence,
   checkReadReplicaReachable,
@@ -54,6 +55,16 @@ import {
   parseArgs,
   runDoctor,
 } from "./doctor.mjs";
+
+describe("checkLinearActorSharing", () => {
+  it("warns on a shared fingerprint and passes distinct hosts", () => {
+    expect(checkLinearActorSharing({ hosts: [{ host: "a", linearActorFingerprint: "same" }, { host: "b", linearActorFingerprint: "same" }] })[0].status).toBe(STATUS.WARN);
+    expect(checkLinearActorSharing({ hosts: [{ host: "a", clientId: "one" }, { host: "b", clientId: "two" }] })[0].status).toBe(STATUS.PASS);
+  });
+  it("is informational when fewer than two fingerprints are visible", () => {
+    expect(checkLinearActorSharing({ hosts: [{ host: "a" }] })[0].status).toBe(STATUS.INFO);
+  });
+});
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
 import { validateLayer1Config } from "../lib/validate-catalyst-config.mjs";

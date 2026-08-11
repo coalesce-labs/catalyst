@@ -93,6 +93,24 @@ import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CT
 import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 import { listProjects } from "./registry.mjs";
+import { fingerprintLinearActor } from "./linear-actor-fingerprint.mjs";
+
+// Advisory-only: callers supply the live hosts' quota snapshots. Raw client ids
+// are accepted only at this pure seam and immediately hashed; messages contain
+// fingerprints, never credentials.
+export function checkLinearActorSharing({ hosts = [] } = {}) {
+  const visible = hosts.map((h) => ({
+    host: h.host ?? h.name ?? "unknown",
+    fingerprint: h.linearActorFingerprint ?? fingerprintLinearActor(h.clientId),
+  })).filter((h) => h.fingerprint);
+  if (visible.length < 2) return [mkCheck("linear-actor-sharing", STATUS.INFO, "Linear app-actor bucket sharing could not be compared (fewer than two live host fingerprints)")];
+  const distinct = new Set(visible.map((h) => h.fingerprint));
+  const summary = visible.map((h) => `${h.host}=${h.fingerprint}`).join(", ");
+  return [mkCheck("linear-actor-sharing", distinct.size === visible.length ? STATUS.PASS : STATUS.WARN,
+    distinct.size === visible.length
+      ? `Linear app-actor buckets are isolated per host (${summary})`
+      : `one shared 5000/hr Linear app-actor bucket across ${visible.length} hosts (${summary})`)];
+}
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -114,10 +132,9 @@ function readLinearBotUserIds(l1Path, l2Path) {
   }
   addFromPath(l2Path, (p, s) => {
     const bot = p?.catalyst?.linear?.bot;
-    if (typeof bot?.worker?.botUserId === "string" && bot.worker.botUserId.length > 0)
-      s.add(bot.worker.botUserId);
-    if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
-      s.add(bot.orchestrator.botUserId);
+    for (const value of [bot?.worker?.botUserId, bot?.orchestrator?.botUserId, ...(Array.isArray(bot?.peerUserIds) ? bot.peerUserIds : [])]) {
+      if (typeof value === "string" && value.trim()) s.add(value.trim());
+    }
   });
   addFromPath(l1Path, (p, s) => {
     const uid = p?.catalyst?.monitor?.linear?.botUserId;
@@ -5220,6 +5237,7 @@ export function checksForClass(nc, opts = {}) {
     // CTL-1473: pre-install flag downgrades install-remediable checks (shipper, agents-for-class)
     // from FAIL to WARN when the join gate runs BEFORE install-services (which creates the services).
     preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
+    linearActorHosts = [],
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
@@ -5230,6 +5248,7 @@ export function checksForClass(nc, opts = {}) {
   // CTL-1523 convention); the strict install-profile escalation branch exists
   // in checkDeploymentModeConsistency but is not wired into any profile yet.
   const deploymentModeCheck = () => checkDeploymentModeConsistency({ resolveRoster });
+  const linearActorSharingCheck = () => checkLinearActorSharing({ hosts: linearActorHosts });
   // #2930 round-2: split-brain Layer-2 path layout is unsupported until the
   // canonical sweep — zero rows on every non-divergent host.
   const layer2PathDivergenceCheck = () => checkLayer2PathDivergence();
@@ -5303,6 +5322,7 @@ export function checksForClass(nc, opts = {}) {
     return [
       nodeClassCheck,
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      linearActorSharingCheck,
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
@@ -5344,6 +5364,7 @@ export function checksForClass(nc, opts = {}) {
     return [
       nodeClassCheck,
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      linearActorSharingCheck,
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
@@ -5372,6 +5393,7 @@ export function checksForClass(nc, opts = {}) {
   return [
     nodeClassCheck,
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+    linearActorSharingCheck,
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
     () => checkHostIdentity(),

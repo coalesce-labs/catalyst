@@ -3,6 +3,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { log as defaultLog } from "./config.mjs";
 import { parseLinearQuotaHeaders } from "./linear-quota.mjs";
+import { readLinearActorFingerprint } from "./linear-actor-fingerprint.mjs";
 
 export function readLinearQuota(orchDir, { log = defaultLog } = {}) {
   const path = join(orchDir, "linear-quota.json");
@@ -33,5 +34,6 @@ export function publishLinearQuota(orchDir, snapshot, { log = defaultLog, fileOp
 
 export function sampleAndPublish(headers, { orchDir = process.env.CATALYST_ORCHESTRATOR_DIR, host = hostname(), nowMs = Date.now(), ...deps } = {}) {
   const snapshot = parseLinearQuotaHeaders(headers, { host, nowMs });
+  if (snapshot) snapshot.linearActorFingerprint = readLinearActorFingerprint();
   return snapshot ? publishLinearQuota(orchDir, snapshot, deps) : false;
 }
