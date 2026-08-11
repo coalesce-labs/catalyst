@@ -96,4 +96,3 @@ land in `daemon.log`.
 - Actor availability differs between the installed plugin-source tree and older checkouts. The
   verifier enumerates the live Layer-2 `catalyst.linear.bot` object rather than assuming a fixed
   actor registry.
-
