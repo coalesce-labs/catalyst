@@ -2250,6 +2250,70 @@ export function checkReaper(deps = {}) {
   return checks;
 }
 
+// The stack keep-alive must be both installed and migrated to the supervised
+// invocation. Keep all host I/O outside checkStackAgent: its three required
+// seams make an incomplete unit fixture fail loudly instead of probing launchd.
+export function checkStackAgent(deps = {}) {
+  for (const seam of ["readPlist", "runLaunchctl", "readHaltMarker"]) {
+    if (typeof deps[seam] !== "function") throw new TypeError(`checkStackAgent requires ${seam}`);
+  }
+  const { readPlist, runLaunchctl, readHaltMarker, nowMs = () => Date.now() } = deps;
+  const checks = [];
+  let xml;
+  try { xml = readPlist(); } catch { xml = null; }
+  if (!xml) {
+    return [mkCheck("stack-agent", STATUS.FAIL,
+      "catalyst-stack LaunchAgent is not installed — run 'catalyst-stack install-services'")];
+  }
+  let state;
+  try { state = runLaunchctl(); } catch { state = { loaded: false }; }
+  if (!state?.loaded) {
+    return [mkCheck("stack-agent", STATUS.FAIL,
+      "catalyst-stack LaunchAgent is present but not loaded — run 'catalyst-stack install-services'")];
+  }
+  const interval = Number(xml.match(/<key>StartInterval<\/key>\s*<integer>(\d+)<\/integer>/)?.[1] ?? 600);
+  if (!/<string>--supervised<\/string>/.test(xml)) {
+    checks.push(mkCheck("stack-agent", STATUS.WARN,
+      `catalyst-stack agent is stale: operator stops will be undone within ${interval}s; run 'catalyst-stack install-services'`));
+  } else {
+    checks.push(mkCheck("stack-agent", STATUS.PASS,
+      `catalyst-stack agent is loaded with --supervised (interval ${interval}s)`));
+  }
+  let marker = null;
+  try { marker = readHaltMarker(); } catch { marker = null; }
+  if (marker && (typeof marker.haltedAt === "number" || typeof marker.haltedAt === "string")) {
+    const haltedMs = typeof marker.haltedAt === "number"
+      ? marker.haltedAt * 1000
+      : Date.parse(marker.haltedAt);
+    const ttlSecs = Number(marker.ttlSecs);
+    if (Number.isFinite(haltedMs) && Number.isFinite(ttlSecs) && ttlSecs > 0 && nowMs() < haltedMs + ttlSecs * 1000) {
+      checks.push(mkCheck("stack-halt", STATUS.INFO,
+        `stack deliberately halted at ${marker.haltedAt}${marker.reason ? ` (reason: ${marker.reason})` : ""}`));
+    }
+  }
+  return checks;
+}
+
+function productionStackAgentDeps() {
+  const plistPath = resolve(homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-stack.plist");
+  // Read the marker basename from the Bash library that owns the constant;
+  // doctor intentionally does not duplicate the marker filename literal.
+  const haltLib = resolve(dirname(fileURLToPath(import.meta.url)), "../lib/stack-halt.sh");
+  return {
+    readPlist: () => readFileSync(plistPath, "utf8"),
+    runLaunchctl: () => {
+      const r = spawnSync("launchctl", ["list", "ai.coalesce.catalyst-stack"], { encoding: "utf8", timeout: 5_000 });
+      return { loaded: r.status === 0 };
+    },
+    readHaltMarker: () => {
+      const source = readFileSync(haltLib, "utf8");
+      const basename = source.match(/STACK_HALT_FILE=.*[\/$]([A-Za-z0-9_.-]+\.json)/)?.[1];
+      if (!basename) throw new Error("STACK_HALT_FILE constant not found");
+      return JSON.parse(readFileSync(resolve(process.env.CATALYST_DIR || resolve(homedir(), "catalyst"), basename), "utf8"));
+    },
+  };
+}
+
 // defaultResponderState — load state + last exit of the health-responder
 // LaunchAgent. Same launchctl contract as defaultReaperState: `launchctl list
 // <label>` exits 0 and prints a dict containing `"LastExitStatus" = N;` only
@@ -5411,6 +5475,7 @@ export function checksForClass(nc, opts = {}) {
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+      () => checkStackAgent(productionStackAgentDeps()), // CAT-163: stale keep-alive plists undo deliberate stops
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
@@ -5439,6 +5504,7 @@ export function checksForClass(nc, opts = {}) {
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+    () => checkStackAgent(productionStackAgentDeps()), // CAT-163: grade installation + --supervised migration
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),

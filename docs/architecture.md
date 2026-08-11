@@ -581,6 +581,12 @@ the terminal sweep applies `needs-human` via `labelOnce`.
 
 ### Stuck-but-alive daemon watchdog (CTL-1502)
 
+The periodic whole-stack launchd supervisor is gated by durable operator intent. An operator
+`catalyst-stack stop` records a bounded halt marker; launchd calls `start --supervised` and leaves
+the stack down while it is active, whereas a direct `start` clears it. The timer remains the crash
+self-heal layer. See the [catalyst-stack reference](../website/src/content/docs/reference/catalyst-stack.md)
+for the marker schema, TTL, and migration check.
+
 Both existing daemon-supervision paths — the launchd `KeepAlive`/`StartInterval` agents and
 `catalyst-monitor forward-start` — are **pid-liveness only** (`kill -0`), so a wedged process that
 holds its pid passes every check. The stuck-but-alive watchdog closes that emit→act gap for the

@@ -54,6 +54,11 @@ import { ALERT_BOOT_DEPENDENCY_UNUSABLE } from "../execution-core/dispatch-alert
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
 const INLINE_EVENT_NAMES = [
+  "node.stack.halted",
+  "node.stack.resumed",
+  "node.stack.start-suppressed",
+  "node.stack.halt-expired",
+  "node.stack.self-heal",
   "node.boot",                        // boot-event.mjs:32
   "monitor.reconcile.failing.team",   // reconcile-health-event.mjs:66 (team is param; prefix is safe)
   "monitor.reconcile.recovered.team", // reconcile-health-event.mjs:66

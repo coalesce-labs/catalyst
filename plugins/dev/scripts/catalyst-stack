@@ -168,6 +168,8 @@ while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 
+# shellcheck source=lib/stack-halt.sh
+source "$SCRIPT_DIR/lib/stack-halt.sh"
 # shellcheck source=lib/cloud-sync-token-probe.sh
 [[ -f "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh" ]] && . "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
 # shellcheck source=lib/catalyst-agent-path.sh
@@ -806,7 +808,7 @@ _stop_coordination_unlocked() {
 }
 
 start_broker()   { catalyst-broker start 2>&1 | sed 's/^/  /'; }
-stop_broker()    { catalyst-broker stop  2>&1 | sed 's/^/  /'; }
+stop_broker()    { catalyst-broker stop  2>&1 | sed 's/^/  /'; return "${PIPESTATUS[0]}"; }
 # _broker_running — true only when a broker is actually UP. Matches the "running (pid N)"
 # status line (NOT "not running"). Used to avoid catalyst-broker restart (= stop+start)
 # accidentally STARTING a broker on a daemonless developer/monitor node (Codex P2).
@@ -848,7 +850,7 @@ start_daemon() {
   fi
 }
 
-stop_daemon() { catalyst-execution-core stop 2>&1 | sed 's/^/  /'; }
+stop_daemon() { catalyst-execution-core stop 2>&1 | sed 's/^/  /'; return "${PIPESTATUS[0]}"; }
 
 # CTL-1654: event-mirror service — fans fleet event logs into the local event file
 # on observation nodes (monitor/developer) so `catalyst-events tail`/`wait-for`
@@ -910,11 +912,9 @@ _vn_event_mirror_running() {
 # pluginDirs checkout, so updating a node is a single ff-only pull of that
 # checkout. The marketplace plugin cache is never written on this path.
 
-# _emit_checkout_updated CHECKOUT OLD_SHA NEW_SHA — best-effort telemetry
-# (CTL-941: the update is logged + evented with old and new commits).
-# Never fails the hotpatch.
-_emit_checkout_updated() {
-  local checkout="$1" old="$2" new="$3"
+# Best-effort stack telemetry. A telemetry failure never blocks lifecycle work.
+_emit_stack_event() {
+  local name="$1" severity="$2" message="$3" payload="${4:-null}"
   (
     set +e
     # shellcheck source=lib/canonical-event.sh
@@ -924,16 +924,30 @@ _emit_checkout_updated() {
     mkdir -p "$events_dir" 2>/dev/null || exit 0
     build_canonical_line \
       --ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
-      --severity INFO \
+      --severity "$severity" \
       --service catalyst.stack \
-      --event-name node.checkout.updated \
-      --entity checkout --action updated \
-      --label "$checkout" \
-      --message "plugin checkout updated ${old:0:8} → ${new:0:8}" \
-      --payload-json "$(jq -nc --arg c "$checkout" --arg o "$old" --arg n "$new" \
-        '{checkout:$c, old_commit:$o, new_commit:$n}')" \
+      --event-name "$name" --entity stack --action lifecycle \
+      --message "$message" --payload-json "$payload" \
       >> "${events_dir}/$(date -u +%Y-%m).jsonl"
   ) || true
+}
+
+# _emit_checkout_updated CHECKOUT OLD_SHA NEW_SHA — best-effort telemetry.
+_emit_checkout_updated() {
+  local checkout="$1" old="$2" new="$3" payload
+  payload="$(jq -nc --arg c "$checkout" --arg o "$old" --arg n "$new" '{checkout:$c, old_commit:$o, new_commit:$n}' 2>/dev/null)" || return 0
+  _emit_stack_event node.checkout.updated INFO \
+    "plugin checkout updated ${old:0:8} → ${new:0:8}" "$payload"
+}
+
+_stack_service_running() {
+  case "$1" in
+    monitor) catalyst-monitor status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' ;;
+    broker) catalyst-broker status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' ;;
+    execution-core) catalyst-execution-core status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' ;;
+    otel-forward) catalyst-monitor forward-status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' ;;
+    *) return 1 ;;
+  esac
 }
 
 # _hotpatch_checkout CHECKOUT_ROOT — ff-only update of one checkout.
@@ -1158,6 +1172,7 @@ cmd_sync_cloud_env() {
 cmd_start() {
   local use_proxy="no"
   local hotpatch="no"
+  local supervised="no"
   ASSUME_YES="${ASSUME_YES:-no}"
   for arg in "$@"; do
     case "$arg" in
@@ -1165,6 +1180,7 @@ cmd_start() {
       --no-proxy) : ;;
       --hotpatch) hotpatch="yes" ;;
       --yes)      ASSUME_YES="yes" ;;
+      --supervised) supervised="yes" ;;
       *) fail "unknown arg: $arg" ;;
     esac
   done
@@ -1193,6 +1209,35 @@ cmd_start() {
   # here would immediately fail that node's own `verify-node broker-stopped` check
   # (Codex P2 "keep developer starts daemonless").
   local node_class; node_class="$(_resolve_node_class)"
+  local had_halt="no" down_before=""
+
+  if [[ "$supervised" == "yes" ]]; then
+    if stack_halt_active; then
+      log "stack start suppressed by active halt marker (${STACK_HALT_FILE}); run 'catalyst-stack start' to clear it"
+      _emit_stack_event node.stack.start-suppressed INFO "supervised stack start suppressed by operator halt" \
+        "$(jq -nc --argjson haltedAt "$STACK_HALT_HALTED_AT" --arg reason "$STACK_HALT_REASON" --argjson ageSecs "$STACK_HALT_AGE_SECS" '{haltedAt:$haltedAt,reason:$reason,ageSecs:$ageSecs}' 2>/dev/null || echo null)"
+      return 0
+    fi
+    if [[ "$STACK_HALT_STATE" == "expired" ]]; then
+      log "halt marker EXPIRED after ${STACK_HALT_AGE_SECS}s — resuming"
+      _emit_stack_event node.stack.halt-expired WARN "operator halt expired; supervised start resuming" \
+        "$(jq -nc --argjson ageSecs "$STACK_HALT_AGE_SECS" '{ageSecs:$ageSecs}' 2>/dev/null || echo null)"
+      stack_halt_clear
+    elif [[ "$STACK_HALT_STATE" == "malformed" ]]; then
+      warn "malformed halt marker renamed aside — resuming"
+    fi
+  else
+    stack_halt_active && had_halt="yes"
+    stack_halt_clear
+    [[ "$had_halt" == "yes" ]] && _emit_stack_event node.stack.resumed INFO "operator resumed catalyst stack" null
+  fi
+
+  if [[ "$supervised" == "yes" ]]; then
+    [[ "$node_class" != "developer" ]] && ! catalyst-monitor status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' && down_before="monitor"
+    [[ "$node_class" != "developer" ]] && ! catalyst-broker status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' && down_before="${down_before:+$down_before,}broker"
+    [[ "$node_class" == "worker" ]] && ! catalyst-execution-core status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' && down_before="${down_before:+$down_before,}execution-core"
+    [[ "$node_class" != "developer" ]] && ! catalyst-monitor forward-status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' && down_before="${down_before:+$down_before,}otel-forward"
+  fi
 
   # CTL-1084: known-good start order is monitor → broker → execution-core
   # (encoded here instead of operator memory; daemon always last).
@@ -1252,6 +1297,19 @@ cmd_start() {
     start_event_mirror || warn "continuing without event-mirror (local tail/wait-for see only local events)"
   fi
 
+  if [[ "$supervised" == "yes" && -n "$down_before" ]]; then
+    local healed="" service old_ifs="$IFS"
+    IFS=','
+    for service in $down_before; do
+      _stack_service_running "$service" && healed="${healed:+$healed,}$service"
+    done
+    IFS="$old_ifs"
+    if [[ -n "$healed" ]]; then
+    _emit_stack_event node.stack.self-heal WARN "supervised stack tick revived services" \
+      "$(printf '%s' "$healed" | jq -R 'split(",") | {services:.}' 2>/dev/null || echo null)"
+    fi
+  fi
+
   # (CTL-1307 token projection now runs BEFORE start_coordination above, so the publisher
   # launches with cluster.env already present — see the Codex-P1 note there.)
 
@@ -1261,6 +1319,11 @@ cmd_start() {
 }
 
 cmd_stop() {
+  local halt="yes" stop_failed="no" halt_written="no"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --halt) halt="yes" ;; --no-halt) halt="no" ;; *) fail "unknown stop arg: $1 (try: --no-halt)" ;; esac
+    shift
+  done
   # Reverse of start order: the shipper started last, so stop it first.
   stop_shipper
   # CTL-1654: stop event-mirror on observation nodes; idempotent no-op on workers.
@@ -1268,7 +1331,7 @@ cmd_stop() {
   # CTL-1494: coordination-publish started after forward/before shipper, so stop it
   # here (after the shipper/event-mirror, before stop_daemon/stop_forward).
   stop_coordination
-  stop_daemon
+  stop_daemon || stop_failed="yes"
   # CTL-1502: stop the standalone watchdog BEFORE the forwarder it supervises —
   # otherwise an in-flight enforced restart could relaunch otel-forward after
   # stop_forward already took it down. Unconditional: it's an idempotent no-op on
@@ -1276,14 +1339,31 @@ cmd_stop() {
   stop_daemon_watchdog
   stop_forward
   stop_monitor
-  stop_broker
+  stop_broker || stop_failed="yes"
   stop_mitmproxy
+  if [[ "$halt" == "yes" ]]; then
+    if stack_halt_write "operator requested stop"; then
+      halt_written="yes"
+    else
+      warn "could not record halt intent (${STACK_HALT_FILE}); the launchd keep-alive WILL restart this stack"
+    fi
+    if [[ "$halt_written" == "yes" && "$stop_failed" == "no" ]]; then
+      _emit_stack_event node.stack.halted INFO "operator halted catalyst stack" \
+        "$(jq -c '{haltedAt,host,reason,by,ttlSecs}' "$STACK_HALT_FILE" 2>/dev/null || echo null)"
+    fi
+  fi
+  if [[ "$stop_failed" == "yes" ]]; then
+    warn "one or more daemons did not confirm stop; stack halt is incomplete"
+    return 1
+  fi
+  [[ "$halt" != "yes" || "$halt_written" == "yes" ]] || return 1
+  return 0
 }
 
 cmd_restart() {
   local hotpatch="no"
   for a in "$@"; do [[ "$a" == "--hotpatch" ]] && hotpatch="yes"; done
-  cmd_stop
+  cmd_stop --no-halt
   if [[ "$hotpatch" == "yes" ]]; then
     cmd_hotpatch
   fi
@@ -1306,6 +1386,16 @@ latest_boot_event() {
 }
 
 cmd_status() {
+  echo "  supervision      $(stack_halt_describe)"
+  if command -v launchctl >/dev/null 2>&1 && launchctl list 2>/dev/null | grep -q "$STACK_AGENT_LABEL"; then
+    if grep -q -- '<string>--supervised</string>' "$STACK_AGENT_PLIST" 2>/dev/null; then
+      echo "  stack agent      loaded (${STACK_AGENT_LABEL}, --supervised: yes)"
+    else
+      echo "  stack agent      loaded (${STACK_AGENT_LABEL}, --supervised: NO — stale agent, operator stops will be undone; run 'catalyst-stack install-services')"
+    fi
+  else
+    echo "  stack agent      not loaded (${STACK_AGENT_LABEL})"
+  fi
   local mp; mp="$(mitm_pid)"
   if pid_alive "$mp"; then echo "  mitmproxy        running  pid=$mp"; else echo "  mitmproxy        stopped"; fi
   echo -n "  broker           "; catalyst-broker status 2>&1 | head -1
@@ -1671,6 +1761,7 @@ render_stack_plist() {
     <string>${cmd}</string>
     <string>start</string>
     <string>--yes</string>
+    <string>--supervised</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -3430,7 +3521,7 @@ _vn_resolve() {
 _vn_broker_running()    { if _broker_running; then echo yes; else echo no; fi; }
 _vn_exec_core_running() {
   if command -v catalyst-execution-core >/dev/null 2>&1 \
-     && catalyst-execution-core status 2>/dev/null | grep -q '^running'; then echo yes; else echo no; fi
+     && catalyst-execution-core status 2>/dev/null | grep -qiE '(^|[[:space:]])running \(pid'; then echo yes; else echo no; fi
 }
 _vn_monitor_running() {
   if command -v catalyst-monitor >/dev/null 2>&1 \
@@ -4321,7 +4412,7 @@ cmd_claude_account() {
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 case "${1:-}" in
   start)    shift; cmd_start "$@" ;;
-  stop)     cmd_stop ;;
+  stop)     shift; cmd_stop "$@" ;;
   restart)  shift; cmd_restart "$@" ;;
   hotpatch) shift; cmd_hotpatch "$@" ;;
   parity)   shift; cmd_parity "$@" ;;

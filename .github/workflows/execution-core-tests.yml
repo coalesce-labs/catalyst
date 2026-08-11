@@ -243,6 +243,31 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/daemon-watchdog-supervision.test.sh
 
+      - name: process identity library test (CAT-163)
+        # Shared fail-closed process ownership and bounded-stop contract.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/process-identity.test.sh
+
+      - name: catalyst-broker orphan-aware stop test (CAT-163)
+        # Proves recycled pids are preserved and uniquely identified orphans are stopped.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-broker-stop.test.sh
+
+      - name: catalyst-execution-core orphan-aware stop test (CAT-163)
+        # Mirrors the broker stop contract for execution-core.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-execution-core-stop.test.sh
+
+      - name: catalyst-otel-forward strict argument test (CAT-163)
+        # Prevents lifecycle-looking arguments from launching a second foreground forwarder.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-otel-forward-args.test.sh
+
+      - name: catalyst-stack deliberate halt test (CAT-163)
+        # Covers marker lifecycle, supervised suppression, events, and plist migration wiring.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-halt.test.sh
+
       - name: forward-restart subcommand test (CTL-1502)
         # Exercises the real catalyst-monitor.sh forward-restart transaction
         # (cold start, hot swap, back-to-back idempotence, usage/dispatch wiring)
@@ -646,6 +671,7 @@ jobs:
             __tests__/config-drain-disabled.test.mjs \
             __tests__/doctor-drain-disabled.test.mjs \
             __tests__/doctor-registry-team-identity.test.mjs \
+            __tests__/doctor-stack-agent.test.mjs \
             __tests__/registry-team-identity.test.mjs \
             cli/drain.test.mjs \
             drain-event.test.mjs \
