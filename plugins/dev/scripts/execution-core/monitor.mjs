@@ -150,6 +150,7 @@ import {
 } from "./reconcile-health-event.mjs";
 import { checkFleetFreeze } from "./fleet-freeze-alert.mjs"; // CTL-1420: fleet-frozen-for-admission alert
 import { recordReplicaRead } from "./replica-health.mjs"; // CAT-35
+import { defaultAppendTriageDeclinedEvent, defaultAppendTriageEscalatedEvent } from "./recovery.mjs";
 import {
   TRIAGE_DECLINE_REASONS, TRIAGE_REQUEST_ESCALATE_MODE, TRIAGE_REQUEST_ESCALATE_MS,
   clearTriageRequest, hasTriageArtifact, isTriageInFlight, listTriageRequests,
@@ -868,16 +869,21 @@ function dispatchTriage(
     // Single-host paths never call these.
     readFenceTriageAttempt = readTriageAttemptCountSync,
     bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
+    appendTriageDeclinedEvent = defaultAppendTriageDeclinedEvent,
   }
 ) {
+  const hold = (reason) => {
+    try { const { changed }=recordTriageDecline(orchDir,identifier,reason); if(changed) appendTriageDeclinedEvent({orchId:orchId??identifier,orchDir,ticket:identifier,reason}); } catch { /* diagnostics fail open */ }
+    return false;
+  };
   if (!orchDir) {
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
-    return false;
+    return hold(TRIAGE_DECLINE_REASONS.NO_ORCH_DIR);
   }
   // CTL-1095: drain gate — refuse new triage dispatch before HRW filter.
   if (isDraining(orchDir)) {
     log.debug({ identifier }, "drain: skipping triage dispatch — node draining (CTL-1095)");
-    return false;
+    return hold(TRIAGE_DECLINE_REASONS.DRAIN_ACTIVE);
   }
   // CTL-862/CTL-1057: HRW ownership filter. Resolve roster/self lazily per call
   // so hot roster reloads need no restart. Single-host (multiHost===false) is a
@@ -920,7 +926,7 @@ function dispatchTriage(
       { identifier, self, roster, dispatchRoster },
       "ctl-1091: ticket not owned by this host under HRW over the live roster — skipping triage dispatch"
     );
-    return false;
+    return hold(TRIAGE_DECLINE_REASONS.NOT_OWNED_HRW);
   }
   // CTL-1441 guard (b) — placed BEFORE the capacity gate (Codex R4: parking is
   // capacity-independent; at a saturated fleet the budget return would keep a
@@ -939,7 +945,7 @@ function dispatchTriage(
   ) {
     // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
     // naturally absent until it finishes. Defer the park while in flight.
-    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
+    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return hold(TRIAGE_DECLINE_REASONS.CAP_DEFERRED_IN_FLIGHT);
     try {
       labelNeedsHuman(orchDir, identifier);
     } catch (err) {
@@ -954,14 +960,14 @@ function dispatchTriage(
         "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm"
       );
     }
-    return false;
+    return hold(TRIAGE_DECLINE_REASONS.TRIAGE_DISPATCH_CAP);
   }
   if (budget && budget.remaining <= 0) {
     log.info(
       { identifier },
       "monitor: triage dispatch deferred — no free slots (maxParallel); sweepMissingTriage will retry (CTL-716)"
     );
-    return false;
+    return hold(TRIAGE_DECLINE_REASONS.NO_FREE_SLOTS);
   }
   // CTL-781/CTL-1174: respect-assignment + delegate gate. A →Triage/→Todo
   // ticket assigned to a human, or delegated to a non-bot, is not ours.
@@ -976,7 +982,7 @@ function dispatchTriage(
         { identifier, known: false },
         "monitor: triage dispatch held — delegate unreadable (CTL-1174)"
       );
-      return false;
+      return hold(TRIAGE_DECLINE_REASONS.DELEGATE_UNREADABLE);
     }
     if (a.delegate == null) {
       // CTL-1174 DELEGATE-ON-TODO: an undelegated Todo ticket is claimed by
@@ -993,7 +999,7 @@ function dispatchTriage(
         { identifier, applied: d.applied, reason: d.reason },
         "monitor: delegated to orchestrator — will dispatch once delegate lands (CTL-1174)"
       );
-      return false;
+      return hold(TRIAGE_DECLINE_REASONS.DELEGATE_PENDING);
     }
     if (!isClaimable(a.assignee, a.delegate, botUserIds)) {
       // Delegated to a different actor (another bot/human) → not ours.
@@ -1001,7 +1007,7 @@ function dispatchTriage(
         { identifier, delegate: a.delegate ?? null },
         "monitor: triage dispatch skipped — delegated to another actor (CTL-1174)"
       );
-      return false;
+      return hold(TRIAGE_DECLINE_REASONS.DELEGATED_OTHER_ACTOR);
     }
   }
   // CTL-862: cross-host claim soft-CAS immediately before the spawn. Skipped on
@@ -1048,7 +1054,7 @@ function dispatchTriage(
           { identifier, cachedLive: m.live ?? null },
           "dispatchTriage: Triage-board revalidation negative still cached — skipping without a read (CTL-1589)"
         );
-        return false;
+        return hold(TRIAGE_DECLINE_REASONS.TRIAGE_STATE_REVALIDATION);
       }
     } catch {
       /* absent/corrupt marker → read */
@@ -1077,7 +1083,7 @@ function dispatchTriage(
           ? "dispatchTriage: Triage-board candidate's live state unreadable — holding this sweep (CTL-1589)"
           : "dispatchTriage: replica Triage row is stale — ticket already advanced; skipping (CTL-1589)"
       );
-      return false;
+      return hold(TRIAGE_DECLINE_REASONS.TRIAGE_STATE_REVALIDATION);
     }
     // Positive: clear any expired negative so a healed ticket never waits on
     // stale forensics. Best-effort.
@@ -1095,7 +1101,7 @@ function dispatchTriage(
         { identifier, self },
         "ctl-862: lost cross-host claim — another host owns this triage dispatch, deferring"
       );
-      return false;
+      return hold(TRIAGE_DECLINE_REASONS.LOST_CROSS_HOST_CLAIM);
     }
     clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)
   }
@@ -1128,7 +1134,7 @@ function dispatchTriage(
         { identifier, err: err.message },
         "ctl-1441: could not retire the stale done triage signal — skipping this dispatch (a counted no-op would burn the cap)"
       );
-      return false;
+      return hold(TRIAGE_DECLINE_REASONS.STALE_SIGNAL_RETIRE_FAILED);
     }
   }
   // CTL-1441: count the REAL spawn attempt — post-gates, post-claim, and BEFORE
@@ -1180,11 +1186,12 @@ function dispatchTriage(
   );
   if (r.code !== 0) {
     log.warn({ identifier, code: r.code }, "monitor: triage dispatch failed");
-    return false;
+    return hold(TRIAGE_DECLINE_REASONS.SPAWN_FAILED);
   }
   // CTL-1028: persist the won generation so a later flapping-host triage worker
   // is fenced. null (single-host) is a no-op inside writeClusterGeneration.
   writeClusterGeneration(orchDir, identifier, clusterGeneration);
+  try { clearTriageRequest(orchDir, identifier); } catch { /* diagnostics fail open */ }
   // CTL-863: emit the authoritative fence.claimed event (Linear-free local append)
   // so the broker projects this triage claim into ticket_state's fence columns.
   // Multi-host only (clusterGeneration non-null); single-host never fences.
@@ -1483,6 +1490,11 @@ export function sweepMissingTriage({
   runTriageState = defaultRunTriageStateQuery,
   // CTL-1589 (Codex R2): live-state read for stale-row revalidation; injectable.
   fetchLiveState = defaultFetchTicketState,
+  triageEscalateMode = TRIAGE_REQUEST_ESCALATE_MODE,
+  triageEscalateMs = TRIAGE_REQUEST_ESCALATE_MS,
+  now = () => Date.now(),
+  routeTriageEscalation = routeStuckTicketToDelegate,
+  appendTriageEscalatedEvent = defaultAppendTriageEscalatedEvent,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -1498,7 +1510,11 @@ export function sweepMissingTriage({
     countSdkInflight, // CTL-1367 P1
     hasInProcessRoute, // CTL-1457 (N1)
   });
-  for (const p of listProjects()) {
+  const projects=listProjects();
+  const requests=listTriageRequests(orchDir);
+  const projectTeams=new Set(projects.map((p)=>p.team));
+  for (const request of requests) if (!request.team || !projectTeams.has(request.team)) log.warn({ticket:request.ticket,team:request.team},"cat-166: triage request has no matching project — skipping");
+  for (const p of projects) {
     const triageStatusName = resolveEligibleQuery(p)?.triageStatus ?? null;
     // CTL-1589: Triage-state board ∪ eligible set, deduped by ticket id. The
     // STRANDED half walks first (Codex R1): under sustained admission load an
@@ -1517,11 +1533,13 @@ export function sweepMissingTriage({
     const eligibleSet = getEligibleSet(p.team);
     const eligibleIds = new Set(eligibleSet.map((t) => t.identifier));
     const seen = new Set();
+    const requested = requests.filter((r)=>r.team===p.team).map((r)=>({identifier:r.ticket,fromTriageBoard:false,fromTriageRequest:true}));
     const candidates = [
       ...triageStateTickets(p, { replica, runTriageState }).filter(
         (t) => !eligibleIds.has(t.identifier)
       ),
       ...eligibleSet,
+      ...requested,
     ];
     for (const t of candidates) {
       if (seen.has(t.identifier)) continue;
@@ -1534,7 +1552,10 @@ export function sweepMissingTriage({
         readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP
       )
         continue;
-      if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      if (hasTriageArtifact(orchDir, t.identifier)) {
+        if (t.fromTriageRequest) clearTriageRequest(orchDir, t.identifier);
+        continue;
+      }
       // CTL-1589 (Codex R4): a Triage-STATE ticket whose triage worker is
       // in-flight right now has no artifact yet and would route to an
       // idempotent no-op launch — which still decrements the sweep budget
@@ -1574,6 +1595,21 @@ export function sweepMissingTriage({
       });
     }
   }
+  try {
+    for (const request of listTriageRequests(orchDir)) {
+      const verdict=shouldEscalateTriageRequest(request,{now:now(),escalateMs:triageEscalateMs});
+      if(!verdict.escalate||triageEscalateMode==="off") continue;
+      const age_ms=now()-request.firstRequestedAt;
+      if(triageEscalateMode==="shadow") {
+        log.warn({ticket:request.ticket,reason:verdict.reason,age_ms},"cat-166: triage request would escalate (shadow)");
+        appendTriageEscalatedEvent({orchId:request.ticket,orchDir,ticket:request.ticket,reason:verdict.reason,shadow:true,age_ms});
+      } else if(triageEscalateMode==="enforce") {
+        routeTriageEscalation(orchDir,request.ticket,{site:"triage-request-escalation",reason:verdict.reason,explanation:{problem:`${request.ticket} has been held at CTL-1150 since ${request.firstRequestedAt}; triage dispatch declined with ${verdict.reason}`,call_to_action:`resolve triage dispatch decline: ${verdict.reason}`},deps:{orchDir,maxParallel:()=>readMaxParallel(orchDir)}});
+        markTriageRequestEscalated(orchDir,request.ticket,{now:now()});
+        appendTriageEscalatedEvent({orchId:request.ticket,orchDir,ticket:request.ticket,reason:verdict.reason,shadow:false,age_ms});
+      }
+    }
+  } catch(err) { log.warn({err:String(err)},"cat-166: triage request escalation sweep failed"); }
 }
 
 // CTL-681 removed scheduleDirtyReconcile + its dirtyTimers Map. The
