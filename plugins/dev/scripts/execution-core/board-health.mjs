@@ -72,6 +72,10 @@ const DEFAULT_THRESHOLDS = {
   // CAT-57: 24h is already past any legitimate inter-phase gap while staying
   // well inside "a human would call this stuck".
   unproductiveNodeMs: Number(process.env.CATALYST_BH_UNPRODUCTIVE_MS) || 24 * 3_600_000,
+  // CAT-53: maximum age of the freshest ticket_state row before cache-derived
+  // invariants stop trusting the board. The cache is webhook-fed, so a monitor
+  // outage freezes every descriptor at once.
+  boardCacheFrozenMs: Number(process.env.CATALYST_BH_CACHE_FROZEN_MS) || 60 * 60_000,
   // CTL-1608: stalled-PR staleness thresholds (review-latency / CI-health /
   // no-push), independent of worker liveness. Conservative defaults — longer
   // than orphanedPrAgeMs (48h) to avoid false positives on normal review cadence.
@@ -522,6 +526,7 @@ export function assembleBoardState({
   // inert/shadow-safe: !present is always false → nothing is excluded until the
   // daemon binds the real fs check. See selectAnchorCandidates.
   hasTriageArtifact = () => true,
+  thresholds = DEFAULT_THRESHOLDS,
 } = {}) {
   const nowMs = now();
   const safe = (fn, fallback) => {
@@ -539,6 +544,20 @@ export function assembleBoardState({
     const id = d.identifier ?? d.ticket ?? d.id;
     if (id) ticketsById.set(id, d);
   }
+
+  let freshestMs = null;
+  for (const d of ticketsById.values()) {
+    const timestampMs = tsMillis(d?.updatedAt ?? d?.updated_at ?? null);
+    if (Number.isFinite(timestampMs) && (freshestMs === null || timestampMs > freshestMs)) {
+      freshestMs = timestampMs;
+    }
+  }
+  const boardCacheAgeMs = freshestMs === null ? null : nowMs - freshestMs;
+  // Empty/unreadable input is not called frozen: the invariants' existing empty
+  // and unreadable guards remain the fail-safe authority for those shapes.
+  const boardCacheFrozen =
+    boardCacheAgeMs !== null &&
+    boardCacheAgeMs >= (thresholds?.boardCacheFrozenMs ?? DEFAULT_THRESHOLDS.boardCacheFrozenMs);
 
   const signals = safe(() => getWorkerSignals(), []).map((s) => {
     const updatedAt = s.updatedAt ?? s.updated_at ?? null;
@@ -608,6 +627,8 @@ export function assembleBoardState({
   const rosterArr = Array.isArray(roster) ? roster : [];
   return Object.freeze({
     ticketsById,
+    boardCacheAgeMs,
+    boardCacheFrozen,
     signals,
     eligible,
     roster: rosterArr,
@@ -1071,6 +1092,15 @@ function checkUnownedInFlight(b, t) {
   if (!(tickets instanceof Map) || tickets.size === 0) {
     return invariant(true, 0, false, [], "no ticket descriptors → unowned-in-flight not observable");
   }
+  if (b?.boardCacheFrozen) {
+    return invariant(
+      true,
+      0,
+      false,
+      [],
+      `board cache frozen (${Math.round((b.boardCacheAgeMs ?? 0) / 60_000)}m since the last ticket_state write) → unowned-in-flight not observable`,
+    );
+  }
   const nowMs = Number.isFinite(b?.now) ? b.now : Date.now();
   const limit = t?.unownedInFlightMs ?? DEFAULT_THRESHOLDS.unownedInFlightMs;
   // Only a LIVE signal proves ownership. Counting terminal artifacts too made the
@@ -1182,6 +1212,15 @@ function checkStrandedMidPipeline(b, t) {
   if (!(tickets instanceof Map) || tickets.size === 0 || !evidence || evidence.size === 0) {
     // Shadow-first: no evidence seam ⇒ cannot prove actuation-absence ⇒ not observable.
     return invariant(true, 0, false, [], "no stranded-evidence seam → not observable");
+  }
+  if (b?.boardCacheFrozen) {
+    return invariant(
+      true,
+      0,
+      false,
+      [],
+      `board cache frozen (${Math.round((b.boardCacheAgeMs ?? 0) / 60_000)}m since the last ticket_state write) → stranded-mid-pipeline not observable`,
+    );
   }
   const nowMs = Number.isFinite(b?.now) ? b.now : Date.now();
   const limit = t?.strandedMidPipelineMs ?? DEFAULT_THRESHOLDS.strandedMidPipelineMs;
@@ -1903,6 +1942,7 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       proposedTier1: decision.proposed.tier1,
       proposedTier2: decision.proposed.tier2,
       proposedTier3: decision.proposed.tier3,
+      boardCacheAgeMs: board?.boardCacheAgeMs ?? null,
       // CTL-1435 (C1): 0/1 so Grafana can chart the dispatch RATE alongside the
       // proposal counts (proposed-vs-dispatched is the actuation-liveness signal).
       actDispatched: actOutcome.dispatched ? 1 : 0,

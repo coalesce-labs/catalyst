@@ -52,6 +52,14 @@ make_sandbox() {
   # Stub binaries dir
   mkdir -p "$root/bin"
 
+  # CAT-53: cmd_start now classifies the listen port fail-closed. This sandbox
+  # models a free port explicitly rather than relying on the host's lsof.
+  cat > "$root/bin/lsof" <<'LSOF'
+#!/usr/bin/env bash
+exit 0
+LSOF
+  chmod +x "$root/bin/lsof"
+
   # Stub vite: writes marker files into $MONITOR_UI_DIST_DIR.
   # Honor STUB_VITE_FAIL=1 to exit non-zero without writing (Phase 2, Test 10).
   cat > "$root/bin/vite" <<'VITE'

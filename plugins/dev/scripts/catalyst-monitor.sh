@@ -236,6 +236,42 @@ read_pid() {
   return 1
 }
 
+# ─── Port-holder classification (CAT-53) ────────────────────────────────────
+_monitor_port_holder_pids() {
+  command -v lsof >/dev/null 2>&1 || return 1
+  lsof -ti "tcp:${PORT}" -sTCP:LISTEN 2>/dev/null || true
+}
+
+_monitor_pid_is_ours() {
+  local pid="$1" cmd
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || return 1
+  [[ -n "$cmd" ]] || return 1
+  [[ "$cmd" == *"orch-monitor/server.ts"* ]]
+}
+
+# Pure classification: probes only; never writes or signals.
+classify_port_holder() {
+  local pids recorded="" pid saw_ours=0 saw_orphan=0 saw_foreign=0 saw_unknown=0
+  if ! pids="$(_monitor_port_holder_pids)"; then echo unknown; return 0; fi
+  [[ -z "$pids" ]] && { echo free; return 0; }
+  [[ -f "$PID_FILE" ]] && recorded="$(cat "$PID_FILE" 2>/dev/null || true)"
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    if ! [[ "$pid" =~ ^[0-9]+$ ]]; then saw_unknown=1; continue; fi
+    if _monitor_pid_is_ours "$pid"; then
+      if [[ -n "$recorded" && "$pid" == "$recorded" ]]; then saw_ours=1; else saw_orphan=1; fi
+    else
+      # An unreadable command is ambiguous, while a readable non-monitor is foreign.
+      if ps -o command= -p "$pid" >/dev/null 2>&1; then saw_foreign=1; else saw_unknown=1; fi
+    fi
+  done <<< "$pids"
+  [[ $saw_foreign -eq 1 ]] && { echo foreign; return 0; }
+  [[ $saw_unknown -eq 1 ]] && { echo unknown; return 0; }
+  [[ $saw_orphan -eq 1 ]] && { echo orphan; return 0; }
+  [[ $saw_ours -eq 1 ]] && { echo ours; return 0; }
+  echo unknown
+}
+
 bootstrap() {
   if [[ "${MONITOR_SKIP_BOOTSTRAP:-}" == "1" ]]; then
     return 0
@@ -410,26 +446,51 @@ bootstrap() {
   fi
 }
 
-cmd_start() {
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --port) PORT="$2"; shift 2 ;;
-      *) echo "error: unknown flag for start: $1" >&2; return 1 ;;
-    esac
-  done
-
-  local existing_pid
-  if existing_pid=$(read_pid); then
-    echo "Monitor already running (pid $existing_pid)"
-    return 0
-  fi
-
+_monitor_launch() {
   print_version_warning
 
   bootstrap || return 1
 
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
   mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
+
+  # The remaining body launches and verifies the child.
+  _monitor_launch_body
+}
+
+_monitor_start_impl() {
+  local existing_pid holder orphan_pid
+  if existing_pid=$(read_pid); then
+    echo "Monitor already running (pid $existing_pid)"
+    return 0
+  fi
+  holder="$(classify_port_holder)"
+  case "$holder" in
+    free) ;;
+    ours)
+      existing_pid="$(_monitor_port_holder_pids | head -1)"
+      [[ -n "$existing_pid" ]] && printf '%s\n' "$existing_pid" > "$PID_FILE" 2>/dev/null || true
+      echo "Monitor already running (pid ${existing_pid:-unknown})"
+      return 0 ;;
+    orphan)
+      if [[ "${CATALYST_MONITOR_PORT_REAP:-1}" != "1" ]]; then
+        echo "error: port ${PORT} is held by an orphaned monitor and CATALYST_MONITOR_PORT_REAP=0 — refusing to start" >&2
+        return 1
+      fi
+      while IFS= read -r orphan_pid; do
+        [[ -n "$orphan_pid" ]] && _monitor_reap_pid "$orphan_pid" || return 1
+      done < <(_monitor_port_holder_pids) ;;
+    foreign)
+      echo "error: port ${PORT} is held by pid $(_monitor_port_holder_pids | head -1), which is NOT an orch-monitor — refusing to start" >&2
+      return 1 ;;
+    *)
+      echo "error: cannot determine what holds port ${PORT} — refusing to start" >&2
+      return 1 ;;
+  esac
+  _monitor_launch
+}
+
+_monitor_launch_body() {
 
   # CTL-1612: project the webhook signing secret from the SOPS-managed file, matching
   # what the launchd wrapper (orch-monitor/dist/catalyst-monitor-launchd.sh) already
@@ -566,7 +627,7 @@ cmd_start() {
   return 1
 }
 
-cmd_stop() {
+_monitor_stop_impl() {
   local pid
   if ! pid=$(read_pid); then
     echo "Monitor not running"
@@ -587,13 +648,6 @@ cmd_stop() {
 
   rm -f "$PID_FILE" 2>/dev/null || true
   echo "Monitor stopped"
-}
-
-cmd_restart() {
-  if read_pid >/dev/null; then
-    cmd_stop
-  fi
-  cmd_start "$@"
 }
 
 cmd_status() {
@@ -696,6 +750,8 @@ cmd_url() {
 # `mkdir` is the portable atomic test-and-set (stock macOS ships no flock).
 FORWARD_LOCK_DIR="${CATALYST_DIR}/otel-forward.lock"
 FORWARD_LOCK_HELD=""
+MONITOR_LOCK_DIR="${CATALYST_DIR}/monitor.lock"
+MONITOR_LOCK_HELD=""
 # The watchdog lifecycle needs the SAME serialization (Codex P1): two concurrent
 # `watchdog-start`s (launchd's periodic `catalyst-stack start` overlapping an
 # operator start) could both pass read_watchdog_pid before either writes the pid
@@ -729,6 +785,7 @@ release_forward_lock() {
 # forwarder after shutdown was requested, while another lifecycle command races
 # under the lock we just dropped. Signal handling must terminate the process.
 _release_all_catalyst_locks() {
+  release_monitor_lock
   release_forward_lock
   release_watchdog_lock
 }
@@ -736,6 +793,76 @@ _release_all_catalyst_locks() {
 _forward_lock_signal_exit() {
   _release_all_catalyst_locks
   exit 143 # 128 + SIGTERM — the conventional signal-terminated status
+}
+
+_monitor_lock_is_stale() {
+  local owner
+  owner="$(cat "${MONITOR_LOCK_DIR}/owner" 2>/dev/null)" || return 1
+  [[ -n "$owner" ]] || return 0
+  kill -0 "$owner" 2>/dev/null && return 1
+  return 0
+}
+
+release_monitor_lock() {
+  [[ -n "$MONITOR_LOCK_HELD" ]] || return 0
+  rm -rf "$MONITOR_LOCK_DIR" 2>/dev/null || true
+  MONITOR_LOCK_HELD=""
+}
+
+acquire_monitor_lock() {
+  local waited=0
+  [[ -n "$MONITOR_LOCK_HELD" ]] && return 0
+  mkdir -p "$CATALYST_DIR" 2>/dev/null || true
+  while [[ $waited -lt 100 ]]; do
+    if mkdir "$MONITOR_LOCK_DIR" 2>/dev/null; then
+      echo "$$" > "${MONITOR_LOCK_DIR}/owner" 2>/dev/null || true
+      MONITOR_LOCK_HELD=1
+      trap _release_all_catalyst_locks EXIT
+      trap _forward_lock_signal_exit INT TERM
+      return 0
+    fi
+    if _monitor_lock_is_stale; then rm -rf "$MONITOR_LOCK_DIR" 2>/dev/null || true; continue; fi
+    sleep 0.1; waited=$((waited + 1))
+  done
+  return 1
+}
+
+_monitor_reap_pid() {
+  local pid="$1" waited=0
+  _monitor_pid_is_ours "$pid" || { echo "refusing to reap pid $pid — no longer identifiable as our monitor" >&2; return 1; }
+  echo "reaping orphaned monitor (pid $pid) holding port ${PORT}" >&2
+  kill "$pid" 2>/dev/null || true
+  while [[ $waited -lt 50 ]] && kill -0 "$pid" 2>/dev/null; do sleep 0.1; waited=$((waited + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    _monitor_pid_is_ours "$pid" || { echo "refusing SIGKILL — pid $pid is no longer our monitor" >&2; return 1; }
+    kill -9 "$pid" 2>/dev/null || true
+    waited=0
+    while [[ $waited -lt 30 ]] && kill -0 "$pid" 2>/dev/null; do sleep 0.1; waited=$((waited + 1)); done
+  fi
+  if kill -0 "$pid" 2>/dev/null; then echo "error: pid $pid survived SIGKILL — port ${PORT} still held" >&2; return 1; fi
+  rm -f "$PID_FILE" 2>/dev/null || true
+}
+
+cmd_start() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --port) PORT="$2"; shift 2 ;; *) echo "error: unknown flag for start: $1" >&2; return 1 ;; esac
+  done
+  if ! acquire_monitor_lock; then echo "Monitor busy (another start/stop/restart in progress)" >&2; return 1; fi
+  _monitor_start_impl; local rc=$?; release_monitor_lock; return $rc
+}
+
+cmd_stop() {
+  if ! acquire_monitor_lock; then echo "Monitor busy (another start/stop/restart in progress)" >&2; return 1; fi
+  _monitor_stop_impl; local rc=$?; release_monitor_lock; return $rc
+}
+
+cmd_restart() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --port) PORT="$2"; shift 2 ;; *) echo "error: unknown flag for restart: $1" >&2; return 1 ;; esac
+  done
+  if ! acquire_monitor_lock; then echo "Monitor busy (another start/stop/restart in progress)" >&2; return 1; fi
+  _monitor_stop_impl
+  _monitor_start_impl; local rc=$?; release_monitor_lock; return $rc
 }
 
 # ── watchdog lifecycle lock ────────────────────────────────────────────────

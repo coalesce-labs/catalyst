@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { schedulerTick, holisticBoardHealthAct } from "./scheduler.mjs";
-import { boardHealthPass } from "./board-health.mjs";
+import { assembleBoardState, boardHealthPass } from "./board-health.mjs";
 
 let orchDir;
 let catalystDir;
@@ -36,6 +36,40 @@ afterEach(() => {
 });
 
 describe("schedulerTick — board-health seam (CTL-1290 §9.4)", () => {
+  test("assembleBoardState computes cache freshness from the real getBoard descriptor shape", () => {
+    const nowMs = Date.parse("2026-08-08T12:00:00Z");
+    const board = assembleBoardState({
+      // broker-state rowToTicketDescriptor uses `ticket` + snake_case updated_at.
+      getBoard: () => [{ ticket: "CAT-53", updated_at: nowMs - 15 * 60_000 }],
+      now: () => nowMs,
+    });
+    expect(board.ticketsById.has("CAT-53")).toBe(true);
+    expect(board.boardCacheAgeMs).toBe(15 * 60_000);
+    expect(board.boardCacheFrozen).toBe(false);
+  });
+
+  test("scheduler-bound getBoard descriptors carry a timestamp consumed by the freshness gate", () => {
+    const nowMs = Date.parse("2026-08-08T12:00:00Z");
+    let assembled = null;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: () => {},
+      reclaimDeadWork: () => "noop",
+      liveBackgroundCount: () => 0,
+      boardHealth: {
+        mode: "shadow",
+        getBoard: () => [{ ticket: "CAT-53", updated_at: nowMs - 2 * 3_600_000 }],
+      },
+      boardHealthPassFn: (opts) => {
+        assembled = assembleBoardState({ ...opts, now: () => nowMs });
+        return { ran: true, ranAtMs: nowMs };
+      },
+    });
+    expect(assembled.boardCacheAgeMs).toBe(2 * 3_600_000);
+    expect(assembled.boardCacheFrozen).toBe(true);
+  });
+
   test("threads boardHealth → boardHealthPassFn called once with capacity + eligible", () => {
     const calls = [];
     schedulerTick(orchDir, {
@@ -168,8 +202,12 @@ describe("boardHealthPass — stranded route dispatch (CTL-1644 Phase 3)", () =>
   const mkOpts = (mode, actStub, extraOpts = {}) => ({
     mode,
     orchDir,
-    getBoard: () => [{ identifier: "CTL-99", state: "Implement",
-      updatedAt: STALE_TS, labels: [] }],
+    getBoard: () => [
+      { identifier: "CTL-99", state: "Implement", updatedAt: STALE_TS, labels: [] },
+      // Cache freshness is fleet-wide: another recently written row proves the
+      // writer is alive while CTL-99 itself remains stale enough to classify.
+      { identifier: "CTL-FRESH", state: "Todo", updatedAt: new Date(NOW_MS).toISOString(), labels: [] },
+    ],
     getWorkerSignals: () => [],
     getEligible: () => [],
     getStrandedEvidence: () => strandedEvidence("CTL-99"),

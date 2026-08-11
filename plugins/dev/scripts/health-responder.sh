@@ -1095,6 +1095,12 @@ if [[ "$CONDITION" -eq 0 ]]; then
   if [[ "$SETTLING" -eq 1 ]]; then
     log "settling: self-heal breadcrumb is ${SELFHEAL_AGE}s old (grace ${RESPONDER_SELFHEAL_GRACE_SECS}s) — holding for the expected launchd relaunch"
     heartbeat "settling"
+  elif [[ "$INSTALLED" -eq 0 ]]; then
+    # CAT-53: every actionable condition is installed-gated. A writer that was
+    # never adopted can therefore trigger none of them; call that absence what
+    # it is instead of reporting a never-started replica tier as healthy.
+    log "not-adopted: no ${CLOUD_SYNC_PLIST} — the replica writer has never been adopted on this host; run 'catalyst-stack adopt-cloud-sync'"
+    heartbeat "not-adopted"
   else
     heartbeat "healthy"
   fi

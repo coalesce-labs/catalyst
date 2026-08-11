@@ -14,6 +14,38 @@ import {
   createReplicaFetcher,
 } from "./cache-reconcile.mjs";
 
+describe("readCacheReconcileConfig — durable config ladder (CAT-53)", () => {
+  test("default is off with no env and no config", () => {
+    expect(readCacheReconcileConfig({}, {})).toEqual({ mode: "off", intervalMs: 600_000, perPassCap: 250 });
+  });
+
+  test("Layer-1 config enables shadow mode and supplies numeric knobs", () => {
+    expect(readCacheReconcileConfig({}, {
+      catalyst: { broker: { cacheReconcile: { mode: "shadow", intervalSeconds: 42, perPassCap: 17 } } },
+    })).toEqual({ mode: "shadow", intervalMs: 42_000, perPassCap: 17 });
+  });
+
+  test("merged Layer-2 values override Layer-1 values", () => {
+    expect(readCacheReconcileConfig({}, {
+      catalyst: { broker: { cacheReconcile: { mode: "enforce", intervalSeconds: 30, perPassCap: 9 } } },
+    }).mode).toBe("enforce");
+  });
+
+  test("env overrides durable config", () => {
+    const cfg = { catalyst: { broker: { cacheReconcile: { mode: "shadow", intervalSeconds: 42, perPassCap: 17 } } } };
+    expect(readCacheReconcileConfig({
+      CATALYST_CACHE_RECONCILE: "enforce",
+      CATALYST_CACHE_RECONCILE_INTERVAL_MS: "1234",
+      CATALYST_CACHE_RECONCILE_CAP: "5",
+    }, cfg)).toEqual({ mode: "enforce", intervalMs: 1234, perPassCap: 5 });
+  });
+
+  test("invalid values degrade safely", () => {
+    const cfg = { catalyst: { broker: { cacheReconcile: { mode: "wat", intervalSeconds: -1, perPassCap: "x" } } } };
+    expect(readCacheReconcileConfig({}, cfg)).toEqual({ mode: "off", intervalMs: 600_000, perPassCap: 250 });
+  });
+});
+
 // pinoLikeLogger — methods THROW if invoked with the wrong `this`, exactly like
 // pino (which dereferences this[msgPrefixSym]). Reproduces the CTL-1277 broker
 // boot-crash: the old wiring pulled the method out of the logger and called it
