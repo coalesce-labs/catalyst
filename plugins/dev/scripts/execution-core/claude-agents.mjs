@@ -474,7 +474,8 @@ export function livenessForBgJob(bgJobId, { exec, agents } = {}) {
 // research §4) — so the set is duplicated locally, exactly as board-data.mjs does.
 // `blocked` is terminal-for-counting (CTL-768: parked sessions are excluded from
 // capacity) but this path NEVER kills — only the count changes.
-const TERMINAL_JOB_STATES = new Set(["stopped", "failed", "done", "blocked"]);
+// Exported solely so terminal-states-parity.test.mjs can pin all three copies.
+export const TERMINAL_JOB_STATES = new Set(["stopped", "failed", "done", "blocked"]);
 
 // isBgJobDead — PURE verdict over a job-state shape ({ state, firstTerminalAt }),
 // mirroring recovery.jobLifecycle / board-data.bgJobLifecycle:
