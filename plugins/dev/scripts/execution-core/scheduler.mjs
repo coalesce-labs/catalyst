@@ -200,6 +200,8 @@ import {
   // opted in (an unprovable window throws → each consumer's existing catch
   // degrades to the FULL roster).
   makeTickHeartbeatReader,
+  readPeerLivenessRecords,
+  peerLivenessConfigured,
   deadHosts,
   survivingRoster,
   defaultAppendDispatchFailedEvent,
@@ -326,15 +328,9 @@ import {
   readGithubQuotaBoardHealthConfig,
   readProductivityBoardHealthConfig,
   getLivenessAnchorIssue,
-  getLivenessReadSource,
-  getLokiQueryUrl,
   readReclaimGatewayFreshMs,
   isThrottled,
 } from "./config.mjs";
-import { readPeerHeartbeatsSyncCached } from "./cluster-heartbeat-sync.mjs";
-// CAT-57: Loki-source peer read for the productivity signal, so nodeProductivity is
-// observable under CATALYST_LIVENESS_READ_SOURCE=loki instead of going dark.
-import { readClusterLivenessFromLokiSync } from "./loki-liveness-sync.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -451,21 +447,29 @@ import {
 // isTicketInFlight).
 const TERMINAL_SIGNAL_STATUSES = new Set(["failed", "stalled", "aborted"]);
 
+// CAT-126: bind board-health productivity to recovery.mjs's canonical,
+// source-aware peer-record seam. Dependencies are injectable so the scheduler
+// contract can be tested without spawning either liveness transport.
+export function makePeerProductivityReader({
+  roster,
+  getAnchorIssue = getLivenessAnchorIssue,
+  configured = peerLivenessConfigured,
+  readRecords = readPeerLivenessRecords,
+} = {}) {
+  return () => {
+    // CAT-57 (Codex P2): single-host is unobservable by construction. Keep this
+    // ahead of transport configuration so a single-host box never spends a read.
+    if (!Array.isArray(roster) || roster.length <= 1) return null;
+    const anchorIssue = getAnchorIssue();
+    if (!configured(anchorIssue)) return null;
+    return readRecords(anchorIssue);
+  };
+}
+
 // CTL-1191: computeSurvivingRoster — the roster minus hosts whose heartbeat is
-// older than the grace window. SHARED by both recovery-pass HRW gates
-// (schedulerTick's ownsForRecovery and runTick's diagnostician ownsSubject) so
-// the two never disagree about who is alive. Mirrors reclaimDeadHostWork's
-// survivor computation (recovery.mjs:2979-2983) exactly.
-//
-// FAIL-SAFE: a thrown heartbeat read, or a roster where EVERY host looks dead
-// (e.g. an empty/garbled event log), degrades to the FULL roster — each node
-// then owns only its own HRW slice (NEVER double-acts) and we merely forgo the
-// dead-owner failover for this tick (no worse than the pre-CTL-1191 strand).
-// Single-host (roster.length <= 1) returns the roster unchanged with no read.
-// CTL-1091: exported so monitor.mjs can route its triage-dispatch ownership gate
-// through the same surviving-roster read as the scheduler's new-work gate (both
-// dispatch sites then agree with recovery on who is alive). Safe to import from
-// monitor.mjs — this helper pulls in no bun:sqlite dependency (CTL-1397).
+// older than the grace window. SHARED by both recovery-pass HRW gates so they
+// never disagree about who is alive. A thrown read or all-dead result degrades
+// to the full roster; single-host returns without reading.
 export function computeSurvivingRoster(
   roster,
   { readHeartbeats = readClusterHeartbeats, nowMs = Date.now() } = {}
@@ -6267,13 +6271,13 @@ export function schedulerTick(
           githubQuotaMode: _boardHealth.githubQuotaMode ?? readGithubQuotaBoardHealthConfig().mode,
           getPeerProductivity:
             _boardHealth.getPeerProductivity ??
-            (() => {
+            makePeerProductivityReader({
+              roster,
               // CAT-57 (Codex P2): single-host is unobservable by construction —
               // checkNodeProductivity rejects roster.length <= 1 before ever looking
               // at this value — so never spend a read (nor block the tick on a
               // subprocess) for data that cannot change the result. Mirrors the
               // liveness publisher's own single-host exact no-op.
-              if (!Array.isArray(roster) || roster.length <= 1) return null;
               // CAT-57 (Codex P1, rounds 1+2): READ FROM THE CONFIGURED SOURCE.
               // Round 1: under =loki the publisher stops updating the Linear anchor
               // (its tick() returns early once readSource() !== "linear"), so reading
@@ -6289,13 +6293,8 @@ export function schedulerTick(
               // observable under both. Fail-open on either path: a failed/empty read →
               // {} / null → nodeProductivity reports observable:false, never a false
               // escalation.
-              if (getLivenessReadSource() !== "linear") {
-                const lokiUrl = getLokiQueryUrl();
-                if (!lokiUrl) return null;
-                return readClusterLivenessFromLokiSync({ lokiUrl });
-              }
-              const anchorIssue = getLivenessAnchorIssue();
-              return anchorIssue ? readPeerHeartbeatsSyncCached({ anchorIssue }) : null;
+              // CAT-126: the shared recovery seam preserves that mode-awareness
+              // and uses the cached Loki reader rather than a divergent inline read.
             }),
           productivityMode:
             _boardHealth.productivityMode ?? readProductivityBoardHealthConfig().mode,
