@@ -349,8 +349,11 @@ export function fenceGuard(
     if (effectiveReadSource === "projection-first" && gateway) {
       const f = readFence(ticket);
       if (f && isFresh(f, env)) {
-        if (f.ownerHost !== self) return false; // foreign owner (incl. released→null) → suppress
-        return f.generation === generation; // higher/other gen → suppress
+        if (f.ownerHost !== self) {
+          return suppress(FENCE_SUPPRESS_REASONS.FOREIGN_OWNER, f.generation ?? null);
+        }
+        if (f.generation === generation) return true;
+        return suppress(FENCE_SUPPRESS_REASONS.SUPERSEDED, generation);
       }
       // stale/absent projection → fall through to the authoritative read.
     }
