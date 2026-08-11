@@ -53,11 +53,34 @@ export function labelMarkerBase(orchDir, ticket, label) {
 // stop the per-tick retry storm. "missing-label": the workspace lacks the label;
 // "exclusive-conflict": the label's exclusive-group sibling is already present;
 // "team-mismatch": name resolution used the wrong team's UUID context (CTL-1085).
-const UNRECOVERABLE_LABEL_REASONS = new Set([
+export const UNRECOVERABLE_LABEL_REASONS = new Set([
   "missing-label",
   "exclusive-conflict",
   "team-mismatch",
 ]);
+export const BACKOFF_LABEL_REASONS = new Set(["circuit-open"]);
+export const LABEL_COOLDOWN_MS = Number(process.env.SCHEDULER_LABEL_COOLDOWN_MS) || 60_000;
+
+export function labelCooldownPath(orchDir, ticket, label) {
+  return join(orchDir, ".label-cooldowns", `${ticket}-${label}.json`);
+}
+export function inLabelCooldown(orchDir, ticket, label, now) {
+  try {
+    const marker = JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8"));
+    const explicit = Number(marker.retryAfterMs);
+    const window = Number.isFinite(explicit) && explicit > 0 ? explicit : LABEL_COOLDOWN_MS;
+    return typeof marker.failedAt === "number" && now - marker.failedAt < window;
+  } catch {
+    return false;
+  }
+}
+export function recordLabelCooldown(orchDir, ticket, label, now, { retryAfterMs = null } = {}) {
+  const p = labelCooldownPath(orchDir, ticket, label);
+  mkdirSync(dirname(p), { recursive: true });
+  const marker = { failedAt: now };
+  if (retryAfterMs != null) marker.retryAfterMs = retryAfterMs;
+  writeFileSync(p, JSON.stringify(marker));
+}
 
 // CTL-936: labelOnce now accepts an optional `appendEvent` seam. When provided
 // AND CATALYST_INTENTS_ENFORCE=1, an unrecoverable label-write failure emits an
@@ -76,10 +99,11 @@ export function labelOnce(
   ticket,
   label,
   writeStatus,
-  { appendEvent = null, env = process.env, onApplyResult = null } = {}
+  { appendEvent = null, env = process.env, onApplyResult = null, now = Date.now } = {}
 ) {
   const base = labelMarkerBase(orchDir, ticket, label);
   if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return false;
+  if (orchDir && inLabelCooldown(orchDir, ticket, label, now())) return false;
   try {
     const res = writeStatus.applyLabel({ ticket, label });
     // A fake that returns undefined (test stubs) is treated as success so
@@ -95,6 +119,9 @@ export function labelOnce(
     }
     if (applied) {
       writeFileSync(`${base}.applied`, "");
+    } else if (BACKOFF_LABEL_REASONS.has(res?.reason)) {
+      recordLabelCooldown(orchDir, ticket, label, now(), { retryAfterMs: res.retryAfterMs });
+      log.debug({ ticket, label, reason: res.reason, retryAfterMs: res.retryAfterMs }, "scheduler: label circuit open — backing off");
     } else if (UNRECOVERABLE_LABEL_REASONS.has(res?.reason)) {
       writeFileSync(`${base}.skipped`, "");
       const reason = res.reason;

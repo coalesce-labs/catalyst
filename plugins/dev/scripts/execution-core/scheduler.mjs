@@ -371,7 +371,13 @@ import {
   resolveAndApplyWorkerStatusLabel,
   WORKER_STATUS_LABELS,
   labelMarkerBase, // CTL-1571: convergeHeldLabel writes the same once-marker labelOnce does
+  labelCooldownPath,
+  inLabelCooldown,
+  recordLabelCooldown,
+  UNRECOVERABLE_LABEL_REASONS,
+  BACKOFF_LABEL_REASONS,
 } from "./label-guard.mjs";
+export { labelCooldownPath } from "./label-guard.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs"; // CTL-1605: precedence order for the onTerminalCleared aggregate-arg → pre-clear `from` resolution
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
@@ -2423,9 +2429,10 @@ export function convergeHeldLabel(
         );
       }
     }
-    if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
-      recordLabelCooldown(orchDir, ticket, desired, now());
-      log.warn(
+    if (orchDir && res && res.applied === false && (UNRECOVERABLE_LABEL_REASONS.has(res.reason) || BACKOFF_LABEL_REASONS.has(res.reason))) {
+      recordLabelCooldown(orchDir, ticket, desired, now(), { retryAfterMs: res.retryAfterMs });
+      const logger = BACKOFF_LABEL_REASONS.has(res.reason) ? log.debug : log.warn;
+      logger(
         { ticket, label: desired, reason: res.reason },
         "ctl-834: held-label apply unrecoverable — backing off (cool-down)"
       );
@@ -2440,12 +2447,6 @@ export function convergeHeldLabel(
 // "team-mismatch": CTL-1085 split it out of "missing-label" in classifyLabelFailure;
 // it MUST stay in this set or convergeHeldLabel loses its cool-down on cross-team
 // (ADV) label failures and re-introduces the CTL-834 per-tick retry storm.
-const UNRECOVERABLE_LABEL_REASONS = new Set([
-  "missing-label",
-  "exclusive-conflict",
-  "team-mismatch",
-]);
-
 // convergeDispositionLabel — generalised version of convergeHeldLabel covering the
 // full worker-status disposition set (CTL-764 Phase 4). Like convergeHeldLabel it
 // diffs current labels and applies/removes on change (steady-state zero writes),
@@ -2500,9 +2501,10 @@ export function convergeDispositionLabel(
       );
     }
     writes++;
-    if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
-      recordLabelCooldown(orchDir, ticket, desired, now());
-      log.warn(
+    if (orchDir && res && res.applied === false && (UNRECOVERABLE_LABEL_REASONS.has(res.reason) || BACKOFF_LABEL_REASONS.has(res.reason))) {
+      recordLabelCooldown(orchDir, ticket, desired, now(), { retryAfterMs: res.retryAfterMs });
+      const logger = BACKOFF_LABEL_REASONS.has(res.reason) ? log.debug : log.warn;
+      logger(
         { ticket, label: desired, reason: res.reason },
         "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
       );
@@ -2577,23 +2579,6 @@ export function convergeStartedHeldLabels(
 // kept OUTSIDE workers/<T>/ so it survives worker-dir GC (see dispatchCooldownPath
 // + memory project_scheduler_marker_under_workers_excludes_ticket). The window
 // self-heals so an exclusive conflict that later clears lets the label re-apply.
-export function labelCooldownPath(orchDir, ticket, label) {
-  return join(orchDir, ".label-cooldowns", `${ticket}-${label}.json`);
-}
-function inLabelCooldown(orchDir, ticket, label, now) {
-  try {
-    const marker = JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8"));
-    return typeof marker.failedAt === "number" && now - marker.failedAt < LABEL_COOLDOWN_MS;
-  } catch {
-    return false;
-  }
-}
-function recordLabelCooldown(orchDir, ticket, label, now) {
-  const p = labelCooldownPath(orchDir, ticket, label);
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify({ failedAt: now }));
-}
-
 // CTL-624: dispatch cool-down marker. Conceptually mirrors the labelOnce
 // once-marker (workers/<T>/.linear-label-*), but with two deliberate
 // differences: (1) the marker carries a timestamp and the guard is time-based —
@@ -8447,7 +8432,6 @@ const TICK_DEBOUNCE_MS = Number(process.env.SCHEDULER_DEBOUNCE_MS) || 2_000;
 const DISPATCH_COOLDOWN_MS = Number(process.env.SCHEDULER_DISPATCH_COOLDOWN_MS) || 60_000;
 // CTL-834: held-label apply cool-down window (convergeHeldLabel). Same default as
 // the dispatch cool-down; overridable for tests / quieter quota budgets.
-const LABEL_COOLDOWN_MS = Number(process.env.SCHEDULER_LABEL_COOLDOWN_MS) || 60_000;
 // CTL-713: permanent-failure cooldown. code=2 (prior_artifact_missing,
 // phase-agent-dispatch exit 2) is a structural refusal — back it off longer than
 // the 60s transient window. GC reaps the marker once the ticket leaves the eligible set.

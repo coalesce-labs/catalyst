@@ -49,6 +49,10 @@ export function createLinearBreaker({
       return now < openUntil;
     },
 
+    remainingMs(now = Date.now()) {
+      return Math.max(0, openUntil - now);
+    },
+
     // recordRateLimited — a real spawn just returned a 429 or blew the CTL-1341
     // wall-clock cap. Open (or re-arm) the breaker with exponential backoff
     // (base × 2^(n-1), capped), honoring a larger Retry-After hint when present.
@@ -139,7 +143,7 @@ export function withBreaker(rawExec, { breaker = linearBreaker, now = Date.now }
   return (cmd, args, opts) => {
     const t = now();
     if (breaker.isOpen(t)) {
-      return { code: 1, stdout: "", stderr: "circuit-open" };
+      return { code: 1, stdout: "", stderr: "circuit-open", retryAfterMs: breaker.remainingMs(t) };
     }
     const res = rawExec(cmd, args, opts);
     // CTL-1341: a wall-clock TIMEOUT (the CTL-1339 per-call cap fired) is a
