@@ -18,6 +18,7 @@ import {
   __resetForTests,
   writeWorkerPriority,
   nextStarvationState,
+  SLOT_RESERVATION_LAPSE_MS,
 } from "./scheduler.mjs";
 import { log } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs";
@@ -673,6 +674,138 @@ describe("CTL-705 acceptance scenario — preemption + resume", () => {
     );
     expect(resumeEvent).toBeDefined();
     expect(resumeEvent.body.payload.resume_session).toBe("resume-uuid-ctL2");
+  });
+});
+
+describe("CAT-105 acceptance scenario — preemption reserves its freed slot", () => {
+  test("freed slot is not stolen by a different triaged waiter; lapses if unconsumed", () => {
+    const T0 = 200_000;
+    // One Low in-flight worker — the only preemption victim. maxParallel=1.
+    seedWorker("CTL-LOW", "research", 4, T0 - 90_000, "bg-low");
+    // A DIFFERENT, already-triaged waiter — ranks below the urgent ticket but
+    // would normally win any freed slot on priority alone.
+    seedTriagedWaiter(orchDir, "CTL-WAITER");
+    writeWorkerPriority(orchDir, "CTL-WAITER", { priority: 3, createdAt: "2026-05-01T00:00:00Z" });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+
+    const kill = makeKillStub();
+    const baseOpts = {
+      // CTL-URGENT: no worker dir → genuinely untriaged, topQueued candidate.
+      readEligible: () => [
+        { identifier: "CTL-URGENT", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+        { identifier: "CTL-WAITER", priority: 3, createdAt: "2026-05-01T00:00:00Z" },
+      ],
+      reclaimDeadWork: noopReclaim,
+      hasTriageArtifact: (od, t) => t === "CTL-WAITER",
+      listStartedTickets: () => new Set(["CTL-LOW", "CTL-WAITER"]),
+      fetchBatch: (ids) =>
+        new Map(
+          ids.map((id) => [
+            id,
+            {
+              state: "In Progress",
+              priority: 1,
+              labels: [],
+              relations: { nodes: [] },
+              inverseRelations: { nodes: [] },
+            },
+          ])
+        ),
+      livenessIsFresh: () => true,
+      isDraining: () => false,
+      recoveryPass: { mode: "off" },
+      boardHealth: { mode: "off" },
+      writeStatus: {
+        applyPhaseStatus: () => {},
+        applyTerminalDone: () => {},
+        applyLabel: () => {},
+        removeLabel: () => ({ removed: true }),
+      },
+    };
+
+    // Tick 1: hysteresis opens, no preemption yet.
+    schedulerTick(orchDir, {
+      ...baseOpts,
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 1,
+      now: () => T0,
+      killBgJob: kill,
+    });
+    expect(kill.calls).toHaveLength(0);
+
+    // Tick 2 (T0+35s): preemption fires — CTL-LOW parked, slot reserved for CTL-URGENT.
+    schedulerTick(orchDir, {
+      ...baseOpts,
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 1,
+      now: () => T0 + 35_000,
+      killBgJob: kill,
+    });
+    expect(kill.calls.map((c) => c.bgJobId)).toContain("bg-low");
+    expect(readSignal("CTL-LOW", "research")?.status).toBe("preempted");
+
+    // Tick 3 (T0+36s, slot now free): WITHOUT the fix, CTL-WAITER would be admitted
+    // here. WITH the fix, the reservation for CTL-URGENT holds the slot.
+    const dispatch3 = makeRealDispatch();
+    schedulerTick(orchDir, {
+      ...baseOpts,
+      dispatch: dispatch3,
+      liveBackgroundCount: () => 0,
+      now: () => T0 + 36_000,
+      killBgJob: makeKillStub(),
+    });
+    expect(dispatch3.calls.find((c) => c.ticket === "CTL-WAITER")).toBeUndefined();
+
+    // Well past the lapse window, unconsumed: the slot releases back to ready work.
+    const dispatch4 = makeRealDispatch();
+    schedulerTick(orchDir, {
+      ...baseOpts,
+      dispatch: dispatch4,
+      liveBackgroundCount: () => 0,
+      now: () => T0 + 36_000 + SLOT_RESERVATION_LAPSE_MS + 1_000,
+      killBgJob: makeKillStub(),
+    });
+    expect(dispatch4.calls.find((c) => c.ticket === "CTL-WAITER")).toBeDefined();
+  });
+
+  test("does not preempt a second victim while a reservation for the same ticket is still active", () => {
+    const T0 = 200_000;
+    seedWorker("CTL-LOW1", "research", 4, T0 - 90_000, "bg-low1");
+    seedWorker("CTL-LOW2", "research", 4, T0 - 90_000, "bg-low2");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const kill = makeKillStub();
+    const baseOpts = {
+      readEligible: () => [{ identifier: "CTL-URGENT", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
+      reclaimDeadWork: noopReclaim,
+      hasTriageArtifact: () => true,
+      writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => {} },
+    };
+    schedulerTick(orchDir, {
+      ...baseOpts,
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 2,
+      now: () => T0,
+      killBgJob: kill,
+    });
+    schedulerTick(orchDir, {
+      ...baseOpts,
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 2,
+      now: () => T0 + 35_000,
+      killBgJob: kill,
+    });
+    expect(kill.calls).toHaveLength(1); // one victim preempted, reservation now active for CTL-URGENT
+
+    // Board still saturated (nothing consumed the freed slot yet) — a second preemption
+    // must NOT fire for the same still-reserved CTL-URGENT.
+    schedulerTick(orchDir, {
+      ...baseOpts,
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 2,
+      now: () => T0 + 70_000,
+      killBgJob: kill,
+    });
+    expect(kill.calls).toHaveLength(1); // unchanged
   });
 });
 

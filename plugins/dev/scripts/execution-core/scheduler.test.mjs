@@ -94,6 +94,11 @@ import {
   computeDeadHosts,
   // CTL-1667: current-run PR reader (for terminalDoneOnce gate tests)
   readCurrentRunPrNumber,
+  // CAT-105: preemption slot reservation
+  reserveSlotFor,
+  hasActiveReservation,
+  pruneExpiredReservations,
+  SLOT_RESERVATION_LAPSE_MS,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
@@ -7250,6 +7255,11 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
   // ticket (computeTriageBudget == computeFreeSlots). No hasTriageArtifact
   // injection here — that is the point: this mirrors production.
   test("preemption still fires for an urgent queued ticket that has no triage artifact", () => {
+    // CAT-105: reset module-level preemption state (rankedAboveSince, slotReservations) —
+    // this test reuses the "CTL-9" fixture ticket id also used by sibling tests in this
+    // block, so a leftover reservation from a prior test's preemption would otherwise
+    // block this one.
+    __resetForTests();
     const T0 = 100_000;
     seedWorker("CTL-1", "research", 4, T0 - 90_000, "bg-ctl1");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
@@ -7386,6 +7396,10 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
   });
 
   test("guard: hysteresis 30s — first observation skips, ≥30s observation preempts", () => {
+    // CAT-105: reset module-level preemption state — this test reuses the "CTL-9"
+    // fixture ticket id also used by sibling tests in this block, so a leftover
+    // reservation from a prior test's preemption would otherwise block this one.
+    __resetForTests();
     const T0 = 100_000;
     seedWorker("CTL-H", "research", 4, T0 - 90_000, "bg-h");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
@@ -13985,5 +13999,43 @@ describe("CTL-1667 (review fix, round 3): sanitize stale post-PR signals before 
     // is monitor-merge — proof the ticket was reachable, not excluded.
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-84", phase: "monitor-merge" }]);
     expect(r.advanced).toEqual([{ ticket: "CTL-84", phase: "monitor-merge" }]);
+  });
+});
+
+describe("CAT-105 slot reservations", () => {
+  test("reserveSlotFor + hasActiveReservation: set then read within the window", () => {
+    __resetForTests();
+    reserveSlotFor("CTL-1", 1000);
+    expect(hasActiveReservation("CTL-1", 1000)).toBe(true);
+    expect(hasActiveReservation("CTL-1", 1000 + SLOT_RESERVATION_LAPSE_MS - 1)).toBe(true);
+  });
+
+  test("hasActiveReservation: false after the lapse window", () => {
+    __resetForTests();
+    reserveSlotFor("CTL-1", 1000);
+    expect(hasActiveReservation("CTL-1", 1000 + SLOT_RESERVATION_LAPSE_MS + 1)).toBe(false);
+  });
+
+  test("hasActiveReservation: false for a ticket with no reservation", () => {
+    __resetForTests();
+    expect(hasActiveReservation("CTL-NONE", 1000)).toBe(false);
+  });
+
+  test("pruneExpiredReservations: removes expired entries and logs the lapse", () => {
+    __resetForTests();
+    reserveSlotFor("CTL-1", 1000);
+    const logged = [];
+    pruneExpiredReservations(1000 + SLOT_RESERVATION_LAPSE_MS + 1, {
+      warn: (fields, msg) => logged.push({ fields, msg }),
+    });
+    expect(hasActiveReservation("CTL-1", 1000 + SLOT_RESERVATION_LAPSE_MS + 1)).toBe(false);
+    expect(logged).toHaveLength(1);
+    expect(logged[0].fields.ticket).toBe("CTL-1");
+  });
+
+  test("__resetForTests clears reservation state", () => {
+    reserveSlotFor("CTL-1", 1000);
+    __resetForTests();
+    expect(hasActiveReservation("CTL-1", 1000)).toBe(false);
   });
 });
