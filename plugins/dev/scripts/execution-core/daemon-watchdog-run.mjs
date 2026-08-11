@@ -19,6 +19,7 @@
 // Lifecycle: `catalyst-monitor watchdog-start|watchdog-stop|watchdog-status`
 // supervises this with a pid file, mirroring the forward-* commands.
 
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { startDaemonWatchdogProbe } from "./daemon-watchdog-probe.mjs";
 import { readDaemonWatchdogConfig, log } from "./config.mjs";
@@ -31,20 +32,50 @@ import { readDaemonWatchdogConfig, log } from "./config.mjs";
 // silently ignored here. On a monitor node this is the ONLY watchdog host, so
 // that would strand its forwarder shadow-only while workers honored the very
 // same config file.
-const configPath =
-  process.env.CATALYST_CONFIG_FILE || resolve(process.cwd(), ".catalyst", "config.json");
+// CAT-139: a third, explicit tier ahead of the two ambient ones lets direct
+// callers select a config without inheriting the host's live config. Mirrors
+// lib/deployment-mode.mjs resolveLayer1Path (explicit arg > env > cwd).
+// Production passes no args and continues to pin CATALYST_CONFIG_FILE.
+function resolveConfigPath(argv, env) {
+  const i = argv.indexOf("--config");
+  if (i !== -1) {
+    const value = argv[i + 1];
+    if (typeof value !== "string" || value.length === 0 || value.startsWith("--")) {
+      return { error: "--config requires a path argument" };
+    }
+    const path = resolve(value);
+    // An explicit path fails closed; falling through would recreate the host
+    // config leak this argument exists to prevent.
+    if (!existsSync(path)) return { error: `--config file not found: ${path}` };
+    return { path, source: "argv" };
+  }
+  if (typeof env.CATALYST_CONFIG_FILE === "string" && env.CATALYST_CONFIG_FILE.length > 0) {
+    return { path: env.CATALYST_CONFIG_FILE, source: "env" };
+  }
+  return { path: resolve(process.cwd(), ".catalyst", "config.json"), source: "cwd" };
+}
+
+const resolved = resolveConfigPath(process.argv.slice(2), process.env);
+if (resolved.error) {
+  log.error({ err: resolved.error }, "daemon-watchdog-run: bad --config");
+  process.exit(2);
+}
+const { path: configPath, source: configSource } = resolved;
 
 const config = readDaemonWatchdogConfig(configPath);
 
 if (!config.enabled) {
   // Not an error: the knob is off for this node. Exit 0 so a supervisor treats
   // it as a clean no-op rather than a crash to restart forever.
-  log.info({ mode: config.mode }, "daemon-watchdog-run: disabled by config — exiting");
+  log.info(
+    { mode: config.mode, configPath, configSource },
+    "daemon-watchdog-run: disabled by config — exiting",
+  );
   process.exit(0);
 }
 
 log.info(
-  { mode: config.mode, intervalMs: config.intervalMs, configPath },
+  { mode: config.mode, intervalMs: config.intervalMs, configPath, configSource },
   "daemon-watchdog-run: standalone watchdog started (observation node)",
 );
 
