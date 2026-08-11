@@ -9666,6 +9666,7 @@ export function holisticBoardHealthAct(
         type: "recovery-pass",
         decision: "dispatched",
         fix_class: "board-health",
+        signature: decision?.gate?.reason ?? null,
         outcome: !!r?.dispatched,
         source: "board-health",
       });
