@@ -40,6 +40,13 @@ describe("leaveAloneSuppression", () => {
     ["timestamp-less", "CAT-4", { verdict: "leave-alone", verdictTs: null }],
     ["expired", "CAT-5", { verdict: "leave-alone", verdictTs: t0 - RECOVERY_LEAVE_ALONE_TTL_MS - 1 }],
     ["future-skew", "CAT-6", { verdict: "leave-alone", verdictTs: t0 + 1 }],
+    // Codex #3217 P2: an escalated ticket is human-owned. `recordVerdict` keeps the
+    // sticky `escalated` latch when a later leave-alone verdict lands (see
+    // recovery-reasoning.test.mjs "escalated latch takes precedence over a later
+    // leave-alone decision"), and defaultSkipReason gives that 7-day latch
+    // precedence over the shorter leave-alone TTL. Suppressing here would hide a
+    // still-human-owned ticket from the operator sweep for up to 24h.
+    ["escalated latch", "CAT-7", { verdict: "leave-alone", verdictTs: t0, escalated: true }],
   ])("fails open for %s", (_name, ticket, entry) => {
     if (entry) write(ticket, entry);
     expect(leaveAloneSuppression(ticket, { orchDir, now: () => t0 })).toBeNull();

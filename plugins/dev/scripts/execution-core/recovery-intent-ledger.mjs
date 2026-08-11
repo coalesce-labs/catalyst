@@ -21,6 +21,15 @@ export function readRecoveryIntent(orchDir, ticket) {
 export function leaveAloneSuppression(ticket, { orchDir, now = () => Date.now() } = {}) {
   const data = readRecoveryIntent(orchDir, ticket);
   if (!data || data.verdict !== "leave-alone") return null;
+  // Codex #3217 P2: NEVER suppress a ticket still carrying the escalated latch.
+  // `recordVerdict` deliberately preserves `escalated: true` when a later
+  // leave-alone verdict lands, and the authoritative `defaultSkipReason` gives
+  // that latch (7-day terminal TTL) precedence over the shorter leave-alone TTL —
+  // the ticket is handed off to a human. Suppressing it here would drop a
+  // still-human-owned ticket out of the operator sweep for up to the leave-alone
+  // TTL and report that no action is needed. Defer to the authoritative
+  // precedence instead.
+  if (data.escalated === true) return null;
   const verdictTs = data.verdictTs;
   if (typeof verdictTs !== "number" || !Number.isFinite(verdictTs)) return null;
   const ageMs = now() - verdictTs;

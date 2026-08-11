@@ -35,10 +35,18 @@ function rosterEnv(baseDir, roster, self) {
     join(clusterDir, "cluster.json"),
     JSON.stringify({ schemaVersion: 1, roster }),
   );
+  // Pin the unified event log (source 2) at an EMPTY per-test dir. Without this the
+  // sweep scans the machine's real ~/catalyst/events/<YYYY-MM>.jsonl, so every
+  // live fleet host's escalations leak into the assertions below — the strict
+  // `TOTAL: N items` expectations then fail locally while passing in CI (whose
+  // event log is empty). CATALYST_EVENTS_DIR is eventLogPath()'s existing seam.
+  const eventsDir = join(baseDir, "events");
+  mkdirSync(eventsDir, { recursive: true });
   return {
     CATALYST_CONFIG_FILE: join(catalystCfgDir, "config.json"),
     CATALYST_CLUSTER_DIR: clusterDir,
     CATALYST_HOST_NAME: self,
+    CATALYST_EVENTS_DIR: eventsDir,
   };
 }
 
