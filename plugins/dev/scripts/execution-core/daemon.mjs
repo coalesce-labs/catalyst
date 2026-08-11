@@ -62,6 +62,8 @@ import {
   readGovernanceConfig, // CTL-1552: boot governance-mode + source self-report
   readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
   resolvePublishPreflightMode,
+  readReplicaReseedConfig,
+  resolveNodeCloudTokenEnv,
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readDeflapState } from "./liveness-deflap.mjs"; // CAT-23: distinguish never-live peers at boot
@@ -113,6 +115,10 @@ import { startDelegateRunnerTimer, reapOrphanedRunners } from "./delegate-runner
 import { startStalePrRescueTimer, readStalePrRescueConfig } from "./stale-pr-rescue-timer.mjs";
 import { startStalledPrTimer as realStartStalledPrTimer, readStalledPrSweepConfig, DEFAULTS as STALLED_DEFAULTS } from "./stalled-pr-timer.mjs";
 import { startGithubQuotaTimer as realStartGithubQuotaTimer, readGithubQuotaSweepConfig, DEFAULTS as GITHUB_QUOTA_TIMER_DEFAULTS } from "./github-quota-timer.mjs";
+import { startReplicaSampleTimer as realStartReplicaSampleTimer, readReplicaSweepConfig, DEFAULTS as REPLICA_SAMPLE_TIMER_DEFAULTS } from "./replica-sample-timer.mjs";
+import { readReplicaState } from "./replica-sample-timer.mjs";
+import { evaluateReplicaCompleteness } from "./replica-completeness.mjs";
+import { emitReseedEvent, kickstartCloudSync, readReseedMarker, requestReplicaReseed, writeReseedMarker } from "./replica-reseed.mjs";
 import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
 import { startOrphanPrSweepTimer, readOrphanPrSweepConfig } from "./orphan-pr-sweep-timer.mjs";
 import { DEFAULTS as ORPHAN_DEFAULTS } from "./orphan-pr-sweep.mjs";
@@ -227,6 +233,7 @@ let _linearReconcileTimer = null;
 let _stalledPrTimer = null;
 // CAT-40: periodic GitHub core REST quota snapshot sampler.
 let _githubQuotaTimer = null;
+let _replicaSampleTimer = null;
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
@@ -855,6 +862,7 @@ export function startDaemon({
   startStalledPrTimer: startStalledPrTimerFn = realStartStalledPrTimer,
   // CAT-40: injectable GitHub quota sampler seam.
   startGithubQuotaTimer: startGithubQuotaTimerFn = realStartGithubQuotaTimer,
+  startReplicaSampleTimer: startReplicaSampleTimerFn = realStartReplicaSampleTimer,
   // CTL-650: the session wait-state watcher. Injectable for tests; gated by a
   // config knob (default-on, CATALYST_WAIT_WATCHER=0 disables) like the reaper.
   startWaitWatcher = realStartWaitWatcher,
@@ -1346,6 +1354,35 @@ export function startDaemon({
         orchDir,
         primeImmediately: true,
       });
+    }
+    {
+      const replicaCfg = readReplicaSweepConfig(configPath);
+      _replicaSampleTimer = startReplicaSampleTimerFn({
+        enabled: replicaCfg.enabled ?? true,
+        intervalSeconds: replicaCfg.intervalSeconds ?? REPLICA_SAMPLE_TIMER_DEFAULTS.intervalSeconds,
+        orchDir,
+        primeImmediately: true,
+      });
+    }
+    try {
+      const completeness = evaluateReplicaCompleteness(readReplicaState(orchDir), {}, Date.now());
+      const tokenEnv = resolveNodeCloudTokenEnv().envVar;
+      requestReplicaReseed({
+        mode: readReplicaReseedConfig().mode,
+        completeness,
+        ctx: {
+          agentInstalled: existsSync(join(homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-cloud-sync.plist")),
+          tokenPresent: Boolean(process.env[tokenEnv]),
+          lastAttemptMs: readReseedMarker(orchDir)?.lastAttemptMs ?? null,
+          now: Date.now(),
+        },
+        kickstart: kickstartCloudSync,
+        emit: emitReseedEvent,
+        writeMarker: (marker) => writeReseedMarker(orchDir, marker),
+        log,
+      });
+    } catch (err) {
+      log.warn({ err: err?.message }, "replica reseed hook failed — continuing boot");
     }
 
     // CTL-1654: the actuator arming below (monitorFn + schedulerFn + auto-tuner) is
@@ -2390,6 +2427,10 @@ export function stopDaemon() {
       /* timer already stopped */
     }
     _githubQuotaTimer = null;
+  }
+  if (_replicaSampleTimer) {
+    try { _replicaSampleTimer.stop(); } catch { /* timer already stopped */ }
+    _replicaSampleTimer = null;
   }
   _reaper = null;
   // CTL-650: stop the wait-state watcher.

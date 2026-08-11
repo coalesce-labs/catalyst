@@ -71,6 +71,7 @@ const INLINE_EVENT_NAMES = [
   "delegate.routed",                  // CTL-1609 delegate-first.mjs (enforce mode — enqueued ok)
   "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
   "catalyst.replica.writer_idle",     // CAT-21 cloud-sync.mjs (tokenless writer provisioning gap)
+  "catalyst.replica.reseed_requested", // CAT-49 boot-time empty-replica reseed
 ];
 
 // Build the flat list of all static exec-core event names.

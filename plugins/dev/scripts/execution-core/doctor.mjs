@@ -3125,6 +3125,13 @@ function defaultReadDbTables(path) {
   return r.stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
 }
 
+function defaultReadIssueRowCount(path) {
+  const r = spawnSync("sqlite3", ["-readonly", path, "SELECT COUNT(*) FROM issues"], { encoding: "utf8", timeout: 10_000 });
+  if (r.error || r.status !== 0 || typeof r.stdout !== "string") return null;
+  const n = Number(r.stdout.trim());
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 // checkCloudSync — CTL-1394. Advisory health of the per-node supervised Linear-replica
 // writer + its read tier. EVERY condition is WARN/INFO/PASS, NEVER FAIL: doctor's exit code
 // is the FAIL count and gates catalyst-join activation — a FAIL here would block a node that
@@ -3153,6 +3160,7 @@ export function checkCloudSync(deps = {}) {
     sizeFloorBytes = 65_536,
     isSqliteFile = defaultIsSqliteFile, // CAT-35
     readDbTables = defaultReadDbTables, // CAT-35
+    readIssueRowCount = defaultReadIssueRowCount,
   } = deps;
 
   const installed = agentInstalled(label, laDir);
@@ -3241,6 +3249,14 @@ export function checkCloudSync(deps = {}) {
             ? mkCheck("replica-schema", STATUS.WARN, `replica db ${Math.round(size / 1024)}KiB is missing required table(s): ${missing.join(", ")} — the reader cannot prepare its queries`)
             : mkCheck("replica-schema", STATUS.PASS, `replica db ${Math.round(size / 1024)}KiB — schema seeded (${REQUIRED_REPLICA_TABLES.join(" + ")} present)`),
         );
+        if (missing.length === 0) {
+          const n = readIssueRowCount(dbPath);
+          checks.push(n === null
+            ? mkCheck("replica-rows", STATUS.INFO, "issue row count unverified (no sqlite3 reader available)")
+            : n === 0
+              ? mkCheck("replica-rows", STATUS.WARN, "replica `issues` table has 0 rows — schema seeded but no data; every read falls through to live linearis")
+              : mkCheck("replica-rows", STATUS.PASS, `replica \`issues\` holds ${n} row(s)`));
+        }
       }
     }
   }

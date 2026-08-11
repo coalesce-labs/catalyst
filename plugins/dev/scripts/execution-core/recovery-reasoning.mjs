@@ -1577,6 +1577,8 @@ function promoteNumericAttrs(type, details) {
     // rather than charting a fake zero.
     num("recovery.github.core_remaining", details.githubCoreRemaining);
     num("recovery.github.core_remaining_pct", details.githubCoreRemainingPct);
+    num("recovery.replica.issue_rows", details.replicaIssueRows);
+    num("recovery.replica.team_coverage_pct", details.replicaTeamCoveragePct);
   }
   return a;
 }

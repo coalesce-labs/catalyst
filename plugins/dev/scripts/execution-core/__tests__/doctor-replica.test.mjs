@@ -30,6 +30,7 @@ function deps(over = {}) {
     // fs/spawn. Healthy default = a real SQLite file carrying both required tables.
     isSqliteFile: () => true,
     readDbTables: () => ["issues", "sync_meta", "labels"],
+    readIssueRowCount: () => 269,
     ...over,
   };
 }
@@ -125,6 +126,12 @@ describe("checkCloudSync", () => {
     for (const over of [{ isSqliteFile: () => false }, { readDbTables: () => [] }, { readDbTables: () => null }]) {
       expect(noFail(checkCloudSync(deps(over)))).toBe(true);
     }
+  });
+
+  test("replica row count distinguishes empty, populated, and unverified data", () => {
+    expect(byName(checkCloudSync(deps({ readIssueRowCount: () => 0 })))["replica-rows"]).toMatchObject({ status: "warn" });
+    expect(byName(checkCloudSync(deps({ readIssueRowCount: () => 269 })))["replica-rows"]).toMatchObject({ status: "pass" });
+    expect(byName(checkCloudSync(deps({ readIssueRowCount: () => null })))["replica-rows"]).toMatchObject({ status: "info" });
   });
 
   test("tier-inert summary names token and read flag gaps", () => {

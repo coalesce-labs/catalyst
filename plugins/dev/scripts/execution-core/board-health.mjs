@@ -36,9 +36,12 @@
 import { HEARTBEAT_GRACE_MS, isThrottled } from "./config.mjs";
 import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecoveryEnvelope (CTL-1291 promotes the numbers)
 import { evaluateQuotaHeadroom, GITHUB_QUOTA_DEFAULTS } from "./github-quota.mjs";
+import { describeReplicaState, evaluateReplicaCompleteness } from "./replica-completeness.mjs";
 
 // ── thresholds + cadence (env-tunable, bounded defaults) ─────────────────────
 export const DEFAULT_THRESHOLDS = {
+  replicaLockStaleMs: 60_000,
+  replicaStaleMs: 15 * 60_000,
   dispatchStallMs: Number(process.env.CATALYST_BH_DISPATCH_STALL_MS) || 10 * 60_000,
   workerAgeMs: Number(process.env.CATALYST_BH_WORKER_AGE_MS) || 4 * 3_600_000,
   projectSilenceMs: Number(process.env.CATALYST_BH_PROJECT_SILENCE_MS) || 24 * 3_600_000,
@@ -578,6 +581,8 @@ export function assembleBoardState({
   // shadow (the default) reads and publishes but cannot actuate.
   getGithubQuota = () => null,
   githubQuotaMode = process.env.CATALYST_BH_GH_QUOTA || "shadow",
+  getReplicaState = () => null,
+  replicaMode = process.env.CATALYST_BH_REPLICA || "shadow",
   getPeerProductivity = () => null,
   productivityMode = process.env.CATALYST_BH_PRODUCTIVITY || "shadow",
   now = () => Date.now(),
@@ -723,6 +728,8 @@ export function assembleBoardState({
     stalledPrMap: mode === "off" ? new Map() : safe(() => getStalledPrState(), new Map()),
     githubQuota: mode === "off" || githubQuotaMode === "off" ? null : safe(() => getGithubQuota(), null),
     githubQuotaMode: ["off", "shadow", "enforce"].includes(githubQuotaMode) ? githubQuotaMode : "shadow",
+    replicaState: mode === "off" || replicaMode === "off" ? null : safe(() => getReplicaState(), null),
+    replicaMode: ["off", "shadow", "enforce"].includes(replicaMode) ? replicaMode : "shadow",
     productivityMode: ["off", "shadow", "enforce"].includes(productivityMode) ? productivityMode : "shadow",
     peerProductivity: mode === "off" || productivityMode === "off" ? null : safe(() => getPeerProductivity(), null),
     ring: deriveRing(safe(() => readEventRing({ orchDir }), []), nowMs, self ?? ""),
@@ -792,6 +799,7 @@ export function evaluateInvariants(
       // observable:false when no evidence seam is provided (shadow-first: Phase 1
       // dark, Phase 2 wires the real getStrandedEvidence builder).
       strandedMidPipeline: () => checkStrandedMidPipeline(boardState, thresholds),
+      replicaHealth: () => checkReplicaHealth(boardState, thresholds),
       // CTL-1608: the review-latency / CI-health / no-push cohort — the PR that
       // stopped progressing while its worker is technically still alive. Cohort-
       // gated like its siblings so the off set stays byte-identical.
@@ -1003,6 +1011,19 @@ function checkAccountUsageHeadroom(b) {
       nearCliffPct: NEAR_CLIFF_PCT,
     }
   );
+}
+
+// #5c — Linear read-replica completeness (CAT-49). Reads the sampled
+// replica-state snapshot rather than the replica file itself, so the scan path
+// never opens the DB. Shadow-by-default like the other sampled invariants.
+function checkReplicaHealth(b, t) {
+  if (b.replicaMode === "off") return invariant(true, 0, false, [], "replica sampling off", { state: "unknown" });
+  const q = evaluateReplicaCompleteness(b.replicaState, { lockStaleMs: t.replicaLockStaleMs, stalenessMs: t.replicaStaleMs }, b.now);
+  if (q.state === "unknown") return invariant(true, 0, false, [], q.stale ? "replica snapshot stale" : "no replica snapshot", { state: "unknown" });
+  const extra = { state: q.state, issueRows: q.issueRows, teamCoveragePct: q.teamCoveragePct, missingTeams: q.missingTeams };
+  if (b.replicaMode !== "enforce") return invariant(true, 0, false, [], describeReplicaState(q), extra);
+  const failed = ["absent", "no-schema", "empty", "stale"].includes(q.state);
+  return invariant(!failed, failed ? 1 : 0, true, [], describeReplicaState(q), extra);
 }
 
 // #6 — stranded node: a rostered host that HRW-owns a share of the board but is
@@ -2218,10 +2239,19 @@ export function buildUnownedInFlightDetail(boardState, invariants, { thresholds 
   });
 }
 
+function replicaForPublication(board) {
+  const q = evaluateReplicaCompleteness(board?.replicaState, {}, board?.now);
+  if (q.state === "unknown") return null;
+  return { state: q.state, issueRows: q.issueRows, teamCount: q.teamCount,
+    teamCoveragePct: q.teamCoveragePct, missingTeams: q.missingTeams,
+    lockAgeMs: q.lockAgeMs, host: board.replicaState?.host ?? null, ageMs: q.ageMs };
+}
+
 // ── (5) buildBoardContext — PURE. The whole-board brief the dispatched delegate
 // gets injected into recovery-pass.json (today it gets NONE).
 export function buildBoardContext(boardState, invariants) {
   const githubQuota = quotaForPublication(boardState);
+  const replica = replicaForPublication(boardState);
   const owns = makeOwnsFilter(boardState, { scope: "dispatch" });
   const ownedEligible = boardState.eligible.filter((e) => owns(e.id));
   // CTL-1157: the stuck-worker set is the UNION of the age-flagged workers and the
@@ -2286,6 +2316,7 @@ export function buildBoardContext(boardState, invariants) {
     // CTL-1608 v3: the stalled-PR cohort, surfaced additively for the delegate.
     stalledPrs: invariants.stalledPr?.flagged ?? [],
     githubQuota,
+    replica,
     strandedNodes: (invariants.strandedNode?.flagged ?? []).map((host) => ({
       host,
       // the tickets HRW-owned by this stranded host — the delegate's actionable
@@ -2317,6 +2348,7 @@ export function buildBoardContext(boardState, invariants) {
 // chartable attributes); rosters/move arrays stay in details → body.payload.
 export function buildBoardScanEvent({ mode, invariants, decision, act = null, board = null }) {
   const githubQuota = quotaForPublication(board);
+  const replica = replicaForPublication(board);
   const owns = board == null ? null : makeOwnsFilter(board, { scope: "dispatch" });
   const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
   // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
@@ -2399,6 +2431,8 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       unproductiveNodeCount: invariants.nodeProductivity?.flagged?.length ?? 0,
       githubCoreRemaining: githubQuota?.remaining ?? null,
       githubCoreRemainingPct: githubQuota?.remainingPct ?? null,
+      replicaIssueRows: replica?.issueRows ?? null,
+      replicaTeamCoveragePct: replica?.teamCoveragePct ?? null,
       invariants: Object.fromEntries(
         Object.entries(invariants).map(([k, v]) => [
           k,
@@ -2427,6 +2461,8 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       act: actOutcome,
       githubQuotaResetAt: githubQuota?.resetAt ?? null,
       githubQuotaHost: githubQuota?.host ?? null,
+      replicaState: replica?.state ?? null,
+      replicaMissingTeams: replica?.missingTeams ?? [],
     },
   };
 }
@@ -2468,6 +2504,8 @@ export function boardHealthPass({
   unownedPrVerifyCursor = 0,
   monotonicNowMs,
   repoRootForTicket,
+  getReplicaState,
+  replicaMode,
   getPeerProductivity,
   productivityMode,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
@@ -2509,6 +2547,8 @@ export function boardHealthPass({
     unownedPrVerifyCursor,
     ...(monotonicNowMs !== undefined ? { monotonicNowMs } : {}),
     repoRootForTicket,
+    getReplicaState,
+    replicaMode,
     getPeerProductivity,
     productivityMode,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).

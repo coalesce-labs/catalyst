@@ -1,5 +1,11 @@
 # Architecture
 
+## Replica completeness chain
+
+Linear replica completeness follows a sampler → atomic `replica-state.json` snapshot → board-health
+invariant chain. The daemon primes the snapshot before the first scan. Empty or absent replicas feed
+a shadow-first, cooldown-bounded boot reseed decision; populated replicas are never actuated.
+
 For the local Linear writer, freshness gate, read tiers, configuration order, and health signals,
 see [Linear read replica](linear-replica.md).
 

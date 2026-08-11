@@ -347,6 +347,7 @@ import {
   readBoardHealthConfig,
   readGithubQuotaBoardHealthConfig,
   readProductivityBoardHealthConfig,
+  readReplicaBoardHealthConfig,
   getLivenessAnchorIssue,
   getLivenessReadSource,
   getLokiQueryUrl,
@@ -438,6 +439,7 @@ import {
 import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
 import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
 import { readGithubQuota } from "./github-quota-timer.mjs";
+import { readReplicaState } from "./replica-sample-timer.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609: delegate-first escalation seam
 import {
   getAllTicketDescriptors,
@@ -6508,6 +6510,8 @@ export function schedulerTick(
           getStalledPrState: _boardHealth.getStalledPrState ?? (() => readStalledPrState(orchDir)),
           getGithubQuota: _boardHealth.getGithubQuota ?? (() => readGithubQuota(orchDir)),
           githubQuotaMode: _boardHealth.githubQuotaMode ?? readGithubQuotaBoardHealthConfig().mode,
+          getReplicaState: _boardHealth.getReplicaState ?? (() => readReplicaState(orchDir)),
+          replicaMode: _boardHealth.replicaMode ?? readReplicaBoardHealthConfig().mode,
           getPeerProductivity:
             _boardHealth.getPeerProductivity ??
             (() => {
