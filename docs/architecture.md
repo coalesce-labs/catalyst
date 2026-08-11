@@ -127,6 +127,16 @@ peer that owns work but has not crossed a phase boundary within the configured w
 to `shadow` and proposes only an escalate-only tier-3 move, so it cannot dispatch a recovery
 delegate.
 
+**Fence-standoff bound (CAT-173).** Two live hosts can each hold evidence that the other owns a
+ticket, causing every fence-guarded human escalation to be suppressed. Each escalation site records
+that suppression in the host-local, GC-surviving `.fence-standoff/<TICKET>.json` ledger. After both
+the configured count (default 4) and age (default 45 minutes) are reached, Catalyst writes an
+unfenced `.escalations/<TICKET>.json` record and emits `escalation.fence-standoff.<TICKET>`; the
+board renders that record as `needs-human` and the notification bridge can surface it without a
+Linear write. The post-bound retry cooldown defaults to 6 hours. This changes no `fenceGuard`
+decision: every write suppressed before CAT-173 remains suppressed; only the out-of-band human
+signal is bounded.
+
 **Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
 scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.
 Its `dispatchLiveness` invariant judges only this host's owned queue, while preserving the raw and

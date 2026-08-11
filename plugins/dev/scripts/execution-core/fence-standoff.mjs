@@ -9,6 +9,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlink
 import { dirname, join } from "node:path";
 import { getEventLogPath, log } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
+import { recordDurableEscalation } from "./durable-escalation.mjs";
 
 export const FENCE_STANDOFF_CAP_DEFAULT = 4;
 export const FENCE_STANDOFF_MIN_AGE_MS_DEFAULT = 45 * 60_000;
@@ -155,5 +156,70 @@ export function appendFenceStandoffEvent(payload, { append = defaultAppend, buil
   } catch (err) {
     log.error({ err: err?.message, ticket: payload?.ticket }, "fence-standoff: append failed");
     return false;
+  }
+}
+
+// maybeBreakGlass — shared best-effort suppression accounting for every
+// escalation site. The caller still owns its fence decision; this helper only
+// records a durable, out-of-band human signal once the count+age bound is met.
+export function maybeBreakGlass({
+  orchDir,
+  ticket,
+  site,
+  verdict,
+  phase = site,
+  now,
+  env = process.env,
+  appendEvent = appendFenceStandoffEvent,
+  recordEscalation = recordDurableEscalation,
+  logger = log,
+  detail = "",
+}) {
+  try {
+    const rec = recordFenceSuppression({
+      orchDir,
+      ticket,
+      site,
+      reason: verdict?.reason ?? "unknown",
+      now,
+    });
+    const evaluation = evaluateStandoff(rec, {
+      now,
+      cap: resolveStandoffCap(env),
+      minAgeMs: resolveStandoffMinAgeMs(env),
+    });
+    if (evaluation.firstBreakGlass) {
+      markBreakGlass({ orchDir, ticket, now });
+      recordEscalation({
+        orchDir,
+        ticket,
+        phase,
+        reason:
+          `fence-standoff (${rec.reason}) at ${site}: ${ticket} is stuck but the ` +
+          `fence suppressed every needs-human write${detail ? `; ${detail}` : ""}. ` +
+          "Check cluster-generation.json divergence across hosts.",
+        labelConfirmed: false,
+        source: "fence-standoff",
+        now,
+      });
+      appendEvent({
+        ticket,
+        site,
+        reason: rec.reason,
+        count: rec.count,
+        ageMs: evaluation.ageMs,
+      });
+      logger?.warn?.(
+        { ticket, site, reason: rec.reason, count: rec.count, ageMs: evaluation.ageMs },
+        "cat-173: FENCE STANDOFF — wrote a durable escalation without a Linear label",
+      );
+    }
+    return { ...evaluation, record: rec };
+  } catch (err) {
+    logger?.warn?.(
+      { ticket, site, err: err?.message },
+      "cat-173: standoff bookkeeping failed — continuing",
+    );
+    return { breakGlass: false, firstBreakGlass: false, ageMs: 0, record: null };
   }
 }
