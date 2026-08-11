@@ -346,6 +346,20 @@ remain authoritative state; comms is observability + coordination. Full protocol
 
 ## Phase-Agent Communication
 
+### Triage-request bridge (CAT-166)
+
+When the scheduler's CTL-1150 gate holds a new-work ticket without `triage.json`, it records a
+durable request at `<orchDir>/.triage-requests/<TICKET>.json`. The scheduler creates and refreshes
+the request, the monitor records the stable reason for every declined triage dispatch and clears it
+after a successful dispatch, and the scheduler removes it once the artifact exists. The monitor
+also sweeps request-only tickets, bridging temporary divergence between its in-memory eligible set
+and the scheduler's on-disk projection.
+
+Requests older than 45 minutes are escalated in `shadow` mode by default. `off` disables the
+backstop; `enforce` routes once through the delegate-first seam and records `escalatedAt` for episode
+idempotency. This bridge does not dispatch from the scheduler: CTL-1150 still filters the ticket
+before slot selection, preserving the zero-dispatch-budget invariant.
+
 In `dispatchMode = "phase-agents"` (template default; also used internally by the `execution-core`
 daemon) the orchestrator spawns one short-lived `claude --bg` job per phase, walking the 10-phase
 pipeline (triage → research → plan → implement → verify → review → pr → monitor-merge →

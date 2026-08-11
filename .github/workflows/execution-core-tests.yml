@@ -783,6 +783,8 @@ jobs:
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
+            triage-request.test.mjs \
+            triage-request-bridge.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
             unstuck-orphan-merge.test.mjs \
