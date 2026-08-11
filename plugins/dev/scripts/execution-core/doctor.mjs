@@ -4289,7 +4289,7 @@ export async function checkDeploymentModeConsistency(deps = {}) {
 export function checkSecretContract(deps = {}) {
   const { env = process.env, deploymentMode = resolveDeploymentModeForShadow(env), resolveSecretFn = resolveSecret } = deps;
   const checks = [];
-  for (const id of ["linear-api-token", "groq-api-key"]) {
+  for (const id of ["linear-api-token", "linear-heartbeat-actor", "groq-api-key"]) {
     // CTL-1616 PR2 (B1): isolated via safeResolveSecretContract — a throwing
     // resolver surfaces as a shadowThrowCheck INFO row for this id instead of
     // crashing the whole doctor run (there is no per-check isolation in
@@ -4311,6 +4311,22 @@ export function checkSecretContract(deps = {}) {
     );
   }
   return checks;
+}
+
+// CAT-157: advisory visibility for the dedicated heartbeat OAuth credential.
+// Absence is an intentional, fail-open rollout state and never changes grade.
+export function checkHeartbeatActor(deps = {}) {
+  const { resolveSecretContract = resolveSecret } = deps;
+  const resolution = safeResolveSecretContract(resolveSecretContract, "linear-heartbeat-actor", {
+    env: process.env,
+    deploymentMode: resolveDeploymentModeForShadow(),
+  });
+  if (!resolution.ok) {
+    return [mkCheck("heartbeat-app-actor", STATUS.INFO, `secret resolution failed: ${resolution.error}`)];
+  }
+  return resolution.value?.value != null
+    ? [mkCheck("heartbeat-app-actor", STATUS.PASS, "dedicated heartbeat app-actor credentials resolve")]
+    : [mkCheck("heartbeat-app-actor", STATUS.INFO, "dedicated heartbeat app-actor is not provisioned; heartbeat falls back to the shared orchestrator bucket")];
 }
 
 // ─── Developer/monitor: read-replica REACHABILITY (CTL-1346 + CTL-1355) ───────
@@ -5240,6 +5256,7 @@ export function checksForClass(nc, opts = {}) {
   // checkPeerUniqueness/checkCloudTokenEnv/checkWorkerLabels) emits is
   // STATUS.INFO — zero grade change (design §7/§9). PR3 flips this to graded.
   const secretContractCheck = () => checkSecretContract();
+  const heartbeatActorCheck = () => checkHeartbeatActor();
 
   // Unrecognized explicit class → a single hard FAIL; grade no profile (CTL-1355).
   if (!nc.recognized) {
@@ -5305,6 +5322,7 @@ export function checksForClass(nc, opts = {}) {
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+      heartbeatActorCheck,
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
       developerBotCredentials,
@@ -5346,6 +5364,7 @@ export function checksForClass(nc, opts = {}) {
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+      heartbeatActorCheck,
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
@@ -5374,6 +5393,7 @@ export function checksForClass(nc, opts = {}) {
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+    heartbeatActorCheck,
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),
