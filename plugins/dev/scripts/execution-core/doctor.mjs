@@ -777,6 +777,8 @@ export async function checkAppActorMint(deps = {}) {
         grant_type: "client_credentials",
         client_id: clientId,
         client_secret: clientSecret,
+        scope: "read,write,comments:create,app:assignable,app:mentionable",
+        actor: "app",
       });
       const mint = await _fetch("https://api.linear.app/oauth/token", {
         method: "POST",
@@ -805,7 +807,7 @@ export async function checkAppActorMint(deps = {}) {
       const viewerResponse = await _fetch(LINEAR_GQL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-        body: JSON.stringify({ query: "query { viewer { id name email } }" }),
+        body: JSON.stringify({ query: "query { viewer { id name } }" }),
         signal: AbortSignal.timeout(5000),
       });
       if (!viewerResponse.ok) throw new Error(`viewer query returned HTTP ${viewerResponse.status}`);
@@ -823,7 +825,7 @@ export async function checkAppActorMint(deps = {}) {
       checks.push(mkCheck(
         `app-actor:${name}`,
         STATUS.PASS,
-        `actor "${name}" minted successfully as ${viewer.email ?? viewer.id}; identity matches ${configKey}.botUserId`,
+        `actor "${name}" minted successfully with matching viewer id ${viewer.id}`,
       ));
     } catch (err) {
       let errorDetail = err?.message ?? String(err);

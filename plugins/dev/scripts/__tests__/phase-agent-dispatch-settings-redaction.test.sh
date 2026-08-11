@@ -138,12 +138,12 @@ SPAWN_LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$SPAWN_LOG" "$TOKEN" "claude --settings argv receives the real token"
 assert_not_contains "$SPAWN_LOG" '[REDACTED]' "spawn payload is not redacted"
 
-echo "Test 7: prelaunch-only dump has the same redaction guarantee"
+echo "Test 7: prelaunch-only preserves the in-process executor launch payload"
 setup_fixture prelaunch
 PRE_OUT=$(cd "$WORKTREE" && "$TEST_DISPATCH" --phase triage --ticket CAT-158 \
 	--orch-dir "$ORCH_DIR" --orch-id CAT-158 --worktree "$WORKTREE" --launch-mode prelaunch-only 2>/dev/null)
-assert_eq "[REDACTED]" "$(jq -r '.settings.env.LINEAR_API_TOKEN' <<<"$PRE_OUT")" "prelaunch settings token redacted"
-assert_not_contains "$PRE_OUT" "$TOKEN" "prelaunch full stdout contains no raw token"
+assert_eq "$TOKEN" "$(jq -r '.settings.env.LINEAR_API_TOKEN' <<<"$PRE_OUT")" "prelaunch settings token remains usable"
+assert_contains "$PRE_OUT" "$TOKEN" "prelaunch transport retains the launch credential"
 assert_eq "prelaunch-ready" "$(jq -r '.status' <<<"$PRE_OUT")" "prelaunch launch spec still emitted"
 [[ ! -f $CLAUDE_STUB_LOG ]] && pass "prelaunch-only does not spawn claude" || fail "prelaunch-only unexpectedly spawned claude"
 

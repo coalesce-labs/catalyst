@@ -1432,8 +1432,8 @@ emit_launch_spec() {
 		--arg worktreePath "$TICKET_WORKTREE" \
 		--argjson generation "$GENERATION" \
 		--arg pluginDirs "$PLUGIN_DIRS_RESOLVED" \
-		--argjson env "$(redacted_dispatch_env_json "${DISPATCH_ENV[@]}")" \
-		--argjson settings "$(redacted_worker_settings_json "$WORKER_SETTINGS_JSON")" \
+		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
+		--argjson settings "$(printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && printf '%s' "$WORKER_SETTINGS_JSON" || echo '{}')" \
 		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, prompt: $prompt, signalFile: $signal,
       sessionName: $sessionName, attempt: $attempt,

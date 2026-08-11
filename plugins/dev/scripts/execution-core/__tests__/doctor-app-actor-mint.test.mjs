@@ -34,12 +34,16 @@ function deps(over = {}) {
 
 describe("checkAppActorMint", () => {
   test("mints and verifies every configured actor independently", async () => {
-    const records = await checkAppActorMint(deps());
+    const calls = [];
+    const records = await checkAppActorMint(deps({ fetch: healthyFetch(calls) }));
     expect(records).toHaveLength(2);
     expect(records.map((r) => r.name)).toEqual(["app-actor:linearis", "app-actor:orchestrator"]);
     expect(records.every((r) => r.status === "pass")).toBe(true);
-    expect(records[0].detail).toContain("linearis@example.com");
-    expect(records[1].detail).toContain("orchestrator@example.com");
+    expect(JSON.stringify(records)).not.toContain("@example.com");
+    for (const call of calls.filter(({ url }) => url.endsWith("/oauth/token"))) {
+      expect(call.options.body.get("actor")).toBe("app");
+      expect(call.options.body.get("scope")).toBe("read,write,comments:create,app:assignable,app:mentionable");
+    }
   });
 
   test("a rejected mint FAILs that actor without short-circuiting the others", async () => {
