@@ -16,6 +16,7 @@ import { getEventLogPath, log } from "./config.mjs";
 // at this emitter and was silently lost. Importing the list (instead of
 // re-typing it) makes that class of bug structurally impossible.
 import { JANITOR_EVENT_TYPES } from "./janitor-event-types.mjs";
+import { TERMINAL_SWEEP_REAP_EVENT_TYPES } from "./terminal-sweep-reap-event-types.mjs";
 
 export const REAP_INTENT_TYPES = Object.freeze([
   "phase.yield.reap-requested",
@@ -68,6 +69,7 @@ export const REAP_INTENT_TYPES = Object.freeze([
   // new janitor emit type (CTL-1056): J1 deferred/would.defer/would.reap-request,
   // J2 would.kill-intent, J3 stall.cleared/would.clear.
   ...JANITOR_EVENT_TYPES,
+  ...TERMINAL_SWEEP_REAP_EVENT_TYPES,
 ]);
 
 // camelCase → snake_case key mapping. The on-disk schema uses snake_case so

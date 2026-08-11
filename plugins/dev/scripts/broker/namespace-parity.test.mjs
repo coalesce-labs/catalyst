@@ -43,6 +43,7 @@ import {
   MEMORY_EVENT_KILLED,
 } from "../execution-core/memory-event.mjs";
 import { JANITOR_EVENT_TYPES } from "../execution-core/janitor-event-types.mjs";
+import { TERMINAL_SWEEP_REAP_EVENT_TYPES } from "../execution-core/terminal-sweep-reap-event-types.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "../execution-core/unstuck-sweep-event-types.mjs";
 import { LINEAR_READ_EVENT } from "../execution-core/linear-read-event.mjs"; // CTL-1403
 import { ALERT_BOOT_DEPENDENCY_UNUSABLE } from "../execution-core/dispatch-alert.mjs";
@@ -81,6 +82,7 @@ const EXEC_CORE_EVENT_NAMES = [
   MEMORY_EVENT_WARN,
   MEMORY_EVENT_KILLED,
   ...JANITOR_EVENT_TYPES,
+  ...TERMINAL_SWEEP_REAP_EVENT_TYPES,
   ...UNSTUCK_SWEEP_EVENT_TYPES,
   LINEAR_READ_EVENT, // CTL-1403 reads-by-source (catalyst.linear.read)
   ALERT_BOOT_DEPENDENCY_UNUSABLE,
