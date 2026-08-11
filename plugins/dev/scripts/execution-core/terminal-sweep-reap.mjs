@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseBranchForWorktree, parseWorktreeForBranch } from "./worktree.mjs";
@@ -73,7 +73,12 @@ export function defaultResolveTerminalSweepReapTarget({
   if (target.worktreePath) {
     for (const porcelain of lists) {
       const branch = parseBranchForWorktree(porcelain, target.worktreePath);
-      if (branch) { target.branch = branch; target.worktreeOnDisk = existsSync(target.worktreePath); break; }
+      const registered = (porcelain ?? "").split("\n").some((line) => line === `worktree ${target.worktreePath}`);
+      if (registered) {
+        target.branch = branch;
+        target.worktreeOnDisk = existsSync(target.worktreePath);
+        break;
+      }
     }
     target.liveSessionInWorktree = agents.some((agent) => cwdUnder(agent?.cwd, target.worktreePath));
   }
@@ -81,9 +86,10 @@ export function defaultResolveTerminalSweepReapTarget({
   try {
     const workerDir = join(orchDir, "workers", ticket);
     const files = readdirSync(workerDir).filter((name) => /^phase-.*\.json$/.test(name))
-      .map((name) => ({ name, mtime: (() => { try { return readFileSync(join(workerDir, name), "utf8"); } catch { return null; } })() }));
+      .map((name) => ({ name, mtime: statSync(join(workerDir, name)).mtimeMs }))
+      .sort((a, b) => a.mtime - b.mtime);
     for (const file of files) {
-      try { const id = JSON.parse(file.mtime)?.bg_job_id; if (id) target.bgJobId = id; } catch { /* malformed signal */ }
+      try { const id = JSON.parse(readFileSync(join(workerDir, file.name), "utf8"))?.bg_job_id; if (id) target.bgJobId = id; } catch { /* malformed signal */ }
     }
   } catch { /* unreadable worker dir */ }
   return target;

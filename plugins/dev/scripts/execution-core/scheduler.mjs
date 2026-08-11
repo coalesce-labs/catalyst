@@ -224,6 +224,7 @@ import {
   readWatchdogConfig,
   phaseBudgetMs,
   readStallJanitorConfig,
+  readTerminalSweepReapConfig,
   readCostCapConfig,
   readEmptyWorkerDirGraceMs,
   EMPTY_WORKER_DIR_GRACE_DEFAULT_MS,
@@ -251,6 +252,12 @@ import {
   defaultNoEvict, // CTL-1605: guarded fast-path eviction seam default (no-op)
   makeEvictWorkerDir, // CTL-1605: armed live-session-fenced eviction seam (runTick)
 } from "./stall-janitor.mjs";
+import {
+  classifyTerminalSweepReap,
+  defaultResolveTerminalSweepReapTarget,
+  hasRequestedTerminalSweepReap,
+  markTerminalSweepReapRequested,
+} from "./terminal-sweep-reap.mjs";
 // CTL-1064: unstuck-sweep (Pass 0u) — throttled classify-then-act sweep for
 // the stalled/needs-human ticket backlog. Pure classifiers + action driver in
 // unstuck-sweep.mjs; census producers below. Mode='off' by default; operators
@@ -3831,6 +3838,36 @@ function emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEv
   }
 }
 
+export function maybeRequestTerminalSweepReap(orchDir, ticket, term, seam) {
+  if (!seam || typeof seam.resolveTarget !== "function") return;
+  try {
+    const hasRequested = seam.hasRequested ?? hasRequestedTerminalSweepReap;
+    const markRequested = seam.markRequested ?? markTerminalSweepReapRequested;
+    if (seam.mode === "off" || hasRequested(orchDir, ticket)) return;
+    const target = seam.resolveTarget(ticket);
+    const decision = classifyTerminalSweepReap({
+      alreadyRequested: false,
+      terminal: term.terminal === true,
+      terminalReason: term.reason,
+      linearState: term.state ?? null,
+      ...target,
+    });
+    if (decision.action !== "reap-request") return;
+    if (!markRequested(orchDir, ticket)) {
+      log.warn({ ticket }, "cat-169: reap-request marker write failed — emitting anyway");
+    }
+    const fields = { ticket, worktreePath: target.worktreePath, branch: target.branch,
+      bgJobId: target.bgJobId, reason: "terminal-sweep-out-of-band-merge" };
+    const type = seam.mode === "enforce" ? "orphans.reap-requested" : "terminalSweep.would.reap-request";
+    const emitted = seam.emit(type, fields);
+    if (emitted && typeof emitted.catch === "function") {
+      emitted.catch((err) => log.warn({ ticket, type, err: err?.message }, "cat-169: reap emit failed"));
+    }
+  } catch (err) {
+    log.warn({ ticket, err: err?.message }, "cat-169: terminal-sweep reap step threw — continuing tick");
+  }
+}
+
 // defaultJanitorKillIntentRecorder — CTL-1004 J2's kill seam, backed by the
 // CTL-936 intentDb (beliefs.db) already threaded into the tick. Mirrors
 // recovery.mjs's intentAwareKill EXACTLY: it BOTH issues the real stop
@@ -4534,6 +4571,9 @@ export function schedulerTick(
       censusIntervalMs: _janitorCensusIntervalMs = undefined,
       nowMs: _janitorNowMs = undefined,
     } = {},
+    // CAT-169: undefined keeps a bare unit tick fully inert. Production wires
+    // the real target resolver and canonical event emitter in runTick.
+    terminalSweepReap = undefined,
     // CTL-1064: unstuck-sweep seams (Pass 0u). Mode resolves from
     // readUnstuckSweepConfig() (env > Layer-2 > 'off') unless overridden.
     // Defaults keep a bare tick fully inert — no census means nothing runs.
@@ -8114,6 +8154,7 @@ export function schedulerTick(
           // latch so a finished ticket's escalated/cooldown ledger entry doesn't
           // linger (hygiene — the recovery router already drops terminal tickets).
           recoveryForgetIntent(ticket, { orchDir });
+          maybeRequestTerminalSweepReap(orchDir, ticket, term, terminalSweepReap);
         } else {
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
@@ -9049,6 +9090,21 @@ function runTick() {
           removeLabel: (runningOpts.writeStatus ?? linearWrite).removeLabel,
         }),
       },
+      // CAT-169: arm terminal-sweep target naming in production. The scheduler
+      // emits intent only; the reaper independently re-confirms merge safety.
+      terminalSweepReap: runningOpts.terminalSweepReap ?? {
+        mode: readTerminalSweepReapConfig().mode,
+        resolveTarget: (ticket) =>
+          defaultResolveTerminalSweepReapTarget({
+            orchDir: runningOpts.orchDir,
+            ticket,
+            projects: listProjects(),
+            agents: getAgentsCached().agents,
+            inFlight: listInFlightTickets(runningOpts.orchDir).has(ticket),
+            readWorkerSignals,
+          }),
+        emit: (type, fields) => emitReapIntent(type, fields),
+      },
       // CTL-1064: wire the unstuck-sweep census (Pass 0u). The census collects
       // stalled/failed workers lazily; the pass only runs when mode !== 'off'
       // AND the 15-min throttle window has elapsed. Mode defaults to 'off' so
@@ -9668,6 +9724,7 @@ export function startScheduler({
   // enumerator. Undefined → runTick arms the real defaultCheckOpenPrs (production);
   // a test may inject its own to exercise the alarm branch hermetically.
   checkOpenPrs,
+  terminalSweepReap,
   // CTL-671: phantom-sweep seams. Undefined → schedulerTick's safe no-op
   // defaults (hermetic for unit tests that call startScheduler directly). The
   // real daemon (startDaemon) and the standalone main() pass the real impls.
@@ -9710,6 +9767,7 @@ export function startScheduler({
     appendWorkerTransitionEvent, // CTL-764: optional worker.transition emitter override (test seam; runTick defaults to defaultAppendWorkerTransitionEvent)
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
     checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)
+    terminalSweepReap, // CAT-169: optional production-wiring override
     classifyResolution, // CTL-671: optional phantom-sweep Linear-probe seam
     isBgJobAlive, // CTL-671: optional phantom-sweep bg-liveness seam
     botUserIds, // CTL-781: respect-assignment predicate membership set
