@@ -76,7 +76,7 @@ _CSC_LEGACY_TIERS=(
 # a row's OBJECT-shaped config-json value must hold, ALL non-empty, before a tier is allowed
 # to WIN — mirrors secret-contract.mjs's row-declared requiredObjectFields exactly (a
 # generic, row-declared gate, never a hardcoded id check). Empty string for every row that
-# doesn't declare one (only linear-worker-actor does today).
+# doesn't declare one (the worker and heartbeat actor rows declare it).
 _CSC_REQUIRED_OBJECT_FIELDS=(
   "" "" "" "" "" "" "" "clientId clientSecret" "clientId clientSecret" "" "" "" ""
 )
