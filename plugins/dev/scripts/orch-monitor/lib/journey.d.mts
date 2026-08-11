@@ -56,6 +56,7 @@ export interface JourneyOptions {
   dbPath?: string;
 }
 
+export declare function eventLogPathFor(catalystDir: string, now?: Date): string;
 export declare function scanHops(ticket: string, opts?: { eventLogPath?: string }): JourneyHop[];
 export declare function dedupeHops(hops: JourneyHop[]): JourneyHop[];
 export declare function readVerifyVerdictDetail(ticket: string, opts?: { orchDir?: string }): VerifyVerdictDetail;
