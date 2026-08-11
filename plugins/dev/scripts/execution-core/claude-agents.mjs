@@ -399,14 +399,23 @@ export function agentStateForShortId(shortId, agents) {
   return typeof agent?.state === "string" && agent.state ? agent.state : null;
 }
 
-// isBgJobAlive — true iff a live `claude agents` session matches bgJobId. This
-// replaces the pid-file keep-alive check: a crashed worker disappears from
-// `claude agents`, whereas a live one (busy OR idle between turns) is still
-// listed. Best-effort — a malformed id or a failed `claude agents` read returns
-// false so the caller falls through to its existing revive path. A non-short-id
-// (e.g. the "bg-9" test fixture) short-circuits to false WITHOUT shelling out,
-// keeping the pre-CTL-657 revive tests deterministic.
-export function isBgJobAlive(bgJobId, { exec, agents } = {}) {
+// CAT-171: this is deliberately separate from TERMINAL_JOB_STATES below. The
+// listing and state.json vocabularies are independent and can disagree; only
+// `blocked` has fleet evidence as a registered-but-dead listing state.
+export const TERMINAL_AGENT_STATES = new Set(["blocked"]);
+
+export function isTerminalAgentState(state) {
+  return typeof state === "string" && TERMINAL_AGENT_STATES.has(state);
+}
+
+// isBgJobAlive — true iff a `claude agents` listing matches bgJobId. The
+// terminalStates option is opt-in, preserving presence-only behavior for every
+// existing caller. When supplied, a listed record with a matching state reads
+// not alive. Missing/unreadable state remains alive (fail-alive).
+// Best-effort — a malformed id or failed listing read returns false so callers
+// fall through to their existing revive path without shelling out for malformed
+// ids such as the "bg-9" test fixture.
+export function isBgJobAlive(bgJobId, { exec, agents, terminalStates } = {}) {
   if (!bgJobId) return false;
   let shortId;
   try {
@@ -415,7 +424,12 @@ export function isBgJobAlive(bgJobId, { exec, agents } = {}) {
     return false;
   }
   const list = agents ?? listClaudeAgents({ exec });
-  return agentForShortId(shortId, list) !== null;
+  if (agentForShortId(shortId, list) === null) return false;
+  if (terminalStates?.size) {
+    const state = agentStateForShortId(shortId, list);
+    if (state !== null && terminalStates.has(state)) return false;
+  }
+  return true;
 }
 
 // livenessForBgJob — the THREE-valued liveness CTL-662's reclaim keys on:
