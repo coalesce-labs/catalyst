@@ -100,17 +100,24 @@ describe("assembleClusterView capacityReader seam (CTL-1092)", () => {
   });
 
   it("applies alias map so pre-pin heartbeat key resolves onto the roster node", () => {
+    // CAT-197: host-aware stub (not a fixed return) — proves assembleClusterView
+    // queries capacityReader with the PINNED name ("mini"), not the raw pre-pin
+    // heartbeat key. A capacityReader whose real cache is raw-keyed (server.ts's
+    // bug before CAT-197) would be asked for "mini" and find nothing; this test
+    // only passes if the caller resolves to the pinned name before asking.
     const view = assembleClusterView({
       board: board([ticket("CTL-1")]),
       hosts: ["mini"],
       heartbeats: { "Ryans-Mac-mini-250233": "2026-06-13T10:00:00Z" },
       aliases: { "Ryans-Mac-mini-250233": "mini" },
-      capacityReader: () => ({ maxParallel: 6, inFlightCount: 1, freeSlots: 5 }),
+      capacityReader: (h) =>
+        h === "mini" ? { maxParallel: 6, inFlightCount: 1, freeSlots: 5 } : null,
       now,
     });
     expect(view.nodes).toHaveLength(1);
     expect(view.nodes[0].host).toBe("mini");
     expect(view.nodes[0].status).toBe("live");
+    expect(view.nodes[0]).toMatchObject({ maxParallel: 6, inFlightCount: 1, freeSlots: 5 });
   });
 });
 
