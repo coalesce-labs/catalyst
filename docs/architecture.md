@@ -656,19 +656,21 @@ The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode 
 Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
 PR-state resolver, background-job liveness probe, stall clearer, and status writer once; Pass 0u
 uses them to build its act registry, while Pass 0r receives both that registry and the raw bundle
-for capability-checked fallback construction. An injected partial registry therefore falls back to
-real dependencies instead of either using inert defaults or failing as unavailable.
+for capability-checked fallback construction. With no injected registry, a missing capability can
+therefore fall back to real dependencies instead of either using inert defaults or failing as
+unavailable.
 
-An operator-supplied `unstuckActByCategory` is a posture binding both passes. A partial registry or
-`{}` sets `seamFallbackSuppressed`, so Pass 0r reports suppression instead of rebuilding a live
-registry behind the override. With no operator registry, capability fallback remains active.
+An embedder- or test-supplied `unstuckActByCategory` is a posture binding both passes. A partial
+registry or `{}` sets `seamFallbackSuppressed`, so Pass 0r reports suppression instead of rebuilding
+a live registry behind the override. With no injected registry, capability fallback remains active.
 
 The recovery candidate contract is `{ ticket, phase, signal }`. `phase` names the exact
 `.unstuck-orphan-merge-<phase>.applied` idempotency marker, and `signal.bg_job_id` feeds the
 liveness gate. Marker construction fails closed when phase is absent, preventing malformed
-`undefined` or `null` marker names. PR-state readers are synchronous; thenables are surfaced as
-`pr-state-async-unsupported` with an error-code identity rather than silently interpreted as missing
-evidence. A resolver error merely mentioning that text still fails closed to `pr-state-unknown`.
+`undefined` or `null` marker names. PR-state readers are synchronous. The act seam surfaces a
+thenable as `pr-state-async-unsupported` with an error-code identity; the Pass 0u census warns and
+returns `null`, which classifies as `pr-state-unknown`. A resolver error merely mentioning the
+unsupported code still fails closed to `pr-state-unknown`.
 `linearTerminal` is deliberately absent from Pass 0r candidates because both drivers pre-filter
 terminal tickets; sourcing a truthy value elsewhere would skip the merged-orphan cohort.
 
