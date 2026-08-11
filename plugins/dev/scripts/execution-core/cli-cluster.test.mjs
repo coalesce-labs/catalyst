@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   buildStatus,
   renderStatus,
+  runStatus,
   addHost,
   removeHost,
   renameHost,
@@ -18,8 +19,8 @@ describe("cluster status anchor disambiguation (CAT-46)", () => {
   const base = { roster: ["a", "b"], self: "a", peers: {}, draining: false };
 
   test("buildStatus carries anchor + readSource through", () => {
-    const status = buildStatus({ ...base, anchor: "CAT-1", readSource: "linear" });
-    expect(status.anchor).toBe("CAT-1");
+    const status = buildStatus({ ...base, anchor: "PROJ-1", readSource: "linear" });
+    expect(status.anchor).toBe("PROJ-1");
     expect(status.readSource).toBe("linear");
   });
 
@@ -30,20 +31,20 @@ describe("cluster status anchor disambiguation (CAT-46)", () => {
   });
 
   test("anchor set but nothing live names it and points at doctor", () => {
-    const out = renderStatus(buildStatus({ ...base, anchor: "CAT-1", readSource: "linear" }));
-    expect(out).toContain("CAT-1");
+    const out = renderStatus(buildStatus({ ...base, anchor: "PROJ-1", readSource: "linear" }));
+    expect(out).toContain("PROJ-1");
     expect(out).toMatch(/catalyst doctor/);
   });
 
   test("loki read source explains why anchor attachments are unused", () => {
-    const out = renderStatus(buildStatus({ ...base, anchor: "CAT-1", readSource: "loki" }));
+    const out = renderStatus(buildStatus({ ...base, anchor: "PROJ-1", readSource: "loki" }));
     expect(out).toMatch(/loki/i);
   });
 
   test("no hedge line when a host is live", () => {
     const out = renderStatus(buildStatus({
       ...base,
-      anchor: "CAT-1",
+      anchor: "PROJ-1",
       readSource: "linear",
       peers: { a: { last_seen: "2026-08-11T00:00:00.000Z", in_flight_tickets: [] } },
     }));
@@ -54,6 +55,27 @@ describe("cluster status anchor disambiguation (CAT-46)", () => {
     const status = buildStatus(base);
     expect(status.anchor).toBeNull();
     expect(() => renderStatus(status)).not.toThrow();
+  });
+
+  test("runStatus does not consult Linear attachments in loki mode", () => {
+    let readCalls = 0;
+    const chunks = [];
+    const originalWrite = process.stdout.write;
+    process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true; };
+    try {
+      expect(runStatus(["--json"], {
+        getAnchor: () => "PROJ-1",
+        getReadSource: () => "loki",
+        getRoster: () => ["a"],
+        getSelf: () => "a",
+        readPeers: () => { readCalls += 1; return { a: { last_seen: "stale" } }; },
+        getDraining: () => false,
+      })).toBe(0);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+    expect(readCalls).toBe(0);
+    expect(JSON.parse(chunks.join(""))).toMatchObject({ anchor: "PROJ-1", readSource: "loki" });
   });
 });
 

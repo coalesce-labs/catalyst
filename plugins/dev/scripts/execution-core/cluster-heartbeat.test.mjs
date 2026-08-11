@@ -17,10 +17,10 @@ describe("readAnchorHealth (CAT-46)", () => {
   const stub = (data) => async () => data;
 
   test("resolves a healthy open anchor", async () => {
-    expect(await readAnchorHealth("CAT-1", {
-      post: stub({ issue: { id: "uuid-1", identifier: "CAT-1", state: { name: "In Progress", type: "started" }, archivedAt: null } }),
+    expect(await readAnchorHealth("PROJ-1", {
+      post: stub({ issue: { id: "uuid-1", identifier: "PROJ-1", state: { name: "In Progress", type: "started" }, archivedAt: null } }),
     })).toEqual({
-      ok: true, found: true, identifier: "CAT-1", stateName: "In Progress",
+      ok: true, found: true, identifier: "PROJ-1", stateName: "In Progress",
       stateType: "started", archived: false, closed: false, error: null,
     });
   });
@@ -33,8 +33,8 @@ describe("readAnchorHealth (CAT-46)", () => {
   });
 
   test("an archived anchor is archived:true, ok:false", async () => {
-    const health = await readAnchorHealth("CAT-1", { post: stub({ issue: {
-      id: "u", identifier: "CAT-1", state: { name: "Done", type: "completed" },
+    const health = await readAnchorHealth("PROJ-1", { post: stub({ issue: {
+      id: "u", identifier: "PROJ-1", state: { name: "Done", type: "completed" },
       archivedAt: "2026-08-01T00:00:00.000Z",
     } }) });
     expect(health.archived).toBe(true);
@@ -42,15 +42,15 @@ describe("readAnchorHealth (CAT-46)", () => {
   });
 
   test.each(["completed", "canceled"])("a %s anchor is closed:true but still ok", async (type) => {
-    const health = await readAnchorHealth("CAT-1", { post: stub({ issue: {
-      id: "u", identifier: "CAT-1", state: { name: "Done", type }, archivedAt: null,
+    const health = await readAnchorHealth("PROJ-1", { post: stub({ issue: {
+      id: "u", identifier: "PROJ-1", state: { name: "Done", type }, archivedAt: null,
     } }) });
     expect(health.closed).toBe(true);
     expect(health.ok).toBe(true);
   });
 
   test("a transport throw is captured, never rethrown", async () => {
-    const health = await readAnchorHealth("CAT-1", { post: async () => { throw new Error("linear graphql http 500: boom"); } });
+    const health = await readAnchorHealth("PROJ-1", { post: async () => { throw new Error("linear graphql http 500: boom"); } });
     expect(health.ok).toBe(false);
     expect(health.found).toBeNull();
     expect(health.error).toContain("http 500");
@@ -74,7 +74,7 @@ describe("readAnchorHealth (CAT-46)", () => {
   });
 
   test("tolerates a partial issue payload (no state block)", async () => {
-    const health = await readAnchorHealth("CAT-1", { post: stub({ issue: { id: "u" } }) });
+    const health = await readAnchorHealth("PROJ-1", { post: stub({ issue: { id: "u" } }) });
     expect(health.found).toBe(true);
     expect(health.stateType).toBeNull();
     expect(health.closed).toBe(false);

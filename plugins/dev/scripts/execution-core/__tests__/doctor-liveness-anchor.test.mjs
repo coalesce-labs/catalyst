@@ -2,12 +2,12 @@ import { describe, test, expect } from "bun:test";
 import { checkLivenessAnchor, STATUS } from "../doctor.mjs";
 
 const ok = {
-  ok: true, found: true, identifier: "CAT-1", stateName: "In Progress",
+  ok: true, found: true, identifier: "PROJ-1", stateName: "In Progress",
   stateType: "started", archived: false, closed: false, error: null,
 };
 
 const deps = (over = {}) => ({
-  getLivenessAnchorIssue: () => "CAT-1",
+  getLivenessAnchorIssue: () => "PROJ-1",
   getLivenessReadSource: () => "linear",
   hasLinearToken: () => true,
   readAnchorHealth: async () => ok,
@@ -19,7 +19,7 @@ describe("checkLivenessAnchor (CAT-46)", () => {
     const [check] = await checkLivenessAnchor(deps());
     expect(check.name).toBe("liveness-anchor");
     expect(check.status).toBe(STATUS.PASS);
-    expect(check.detail).toContain("CAT-1");
+    expect(check.detail).toContain("PROJ-1");
   });
 
   test("INFO when no anchor is configured", async () => {
