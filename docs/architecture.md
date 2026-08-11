@@ -3,6 +3,11 @@
 For the local Linear writer, freshness gate, read tiers, configuration order, and health signals,
 see [Linear read replica](linear-replica.md).
 
+The replica tier's observation surfaces are opt-in graded rather than uniformly advisory. Doctor
+may FAIL cloud-sync, schema, freshness, token, and per-team replica-health latch findings only when
+the writer LaunchAgent is installed or `CATALYST_LINEAR_REPLICA=on`; nodes with neither signal retain
+advisory grading.
+
 ## Three-Layer System
 
 1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/pm/`, `plugins/legacy/`, …) —

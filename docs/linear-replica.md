@@ -29,11 +29,41 @@ The canonical seed-before-flip runbook, including every key's precedence, lives 
 
 | Signal | Where | Meaning |
 | --- | --- | --- |
-| `replica-schema WARN … 0 bytes` | `catalyst doctor` | The database was never seeded. |
-| `replica-tier WARN … INERT` | `catalyst doctor` | The token and read flag gaps are both open. |
+| `replica-schema FAIL … 0 bytes` | `catalyst doctor` | An opted-in node's database was never seeded. An opted-out node retains advisory WARN grading. |
+| `replica-tier FAIL … INERT` | `catalyst doctor` | An opted-in node has both the token and read-flag gaps open. |
+| `replica-health FAIL` | `catalyst doctor` | An opted-in node has one or more teams whose degraded-read latch is alerting. |
 | `monitor.replica.degraded.<TEAM>` | Event log / Loki | N consecutive triage sweeps could not read the replica. |
 | `monitor.replica.recovered.<TEAM>` | Event log / Loki | A degraded team's replica read recovered. |
 | `catalyst.replica.read_fallback` | Event log / Loki | An agent read fell back to `linearis`. |
+
+Doctor treats either an installed cloud-sync LaunchAgent or `CATALYST_LINEAR_REPLICA=on` as an
+opt-in signal. Broken-tier findings can FAIL only after one of those signals is present, so a fresh
+node that never requested the tier keeps the prior advisory-only behavior.
+
+## Writer died and was never restarted
+
+The characteristic symptoms are `triage_source: replica-miss`, an alerting `replica-health`
+marker with a set `lastHealthyTs`, and a stale `<db>.writer.lock`. A set timestamp means the tier
+worked and regressed; `null` means it was never healthy on this node.
+
+Recover in this order:
+
+1. Run `catalyst-stack verify-cloud-sync`.
+2. Provision the resolved cloud token in `~/.config/catalyst/cloud-sync.env` and run `chmod 600 ~/.config/catalyst/cloud-sync.env`.
+3. Run `catalyst-stack adopt-cloud-sync`.
+4. Re-run `catalyst-stack verify-cloud-sync` until every gating check is green.
+5. Run `catalyst-stack activate-replica`.
+
+The LaunchAgent uses `KeepAlive={SuccessfulExit:false}`. A tokenless writer deliberately exits 0,
+so launchd does not restart it; “agent installed” does not imply “writer running.”
+
+Label writes short-circuited by the Linear breaker now report `circuit-open` and write a temporary
+marker under `~/catalyst/execution-core/.label-cooldowns/`. The marker carries the breaker's
+remaining window, suppresses per-tick retries, and is not terminal: the label is retried after expiry.
+
+Known divergences remain: the read path, doctor, and setup check use different freshness windows,
+and doctor verifies the two tables it reads while `verify-cloud-sync` verifies the full six-table
+writer schema. These are documented follow-up work rather than silently reconciled here.
 
 ## Loki queries
 
