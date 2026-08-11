@@ -251,12 +251,13 @@ export function deriveAttention({
   phaseFailed = false, // CTL-1180: a terminal failed/stalled phase, ticket NOT pipeline-done
   escalationType = null, // CTL-1180: passthrough of explanation.escalation_type (forensic/render)
   linearTerminal = false, // CTL-1239: live Linear state is Done/Canceled
+  correlationRole = null, // CAT-170: passthrough of correlation.role ("anchor"|"member")
 } = {}) {
   // CTL-1239: a ticket terminal in Linear (Done/Canceled) is finished regardless of
   // any stale failed/stalled phase-*.json left on disk. Short-circuit BEFORE the
   // needs-human/waiting computation so a stale signal can never re-raise attention.
   if (linearTerminal === true) {
-    return { attention: null, attentionSince: null, escalationType: null };
+    return { attention: null, attentionSince: null, escalationType: null, correlationRole: null };
   }
   const set = new Set(Array.isArray(labels) ? labels : []);
   const labelNeedsHuman =
@@ -271,6 +272,10 @@ export function deriveAttention({
       attention: "needs-human",
       attentionSince: needsHumanSince ?? (prStuck ? prStuckSince : null),
       escalationType: escalationType ?? null, // CTL-1180 passthrough; null when not a failed-phase source
+      // CAT-170: only the needs-human branch carries the correlation role — that is
+      // the one branch the notification projector acts on, so a member's alert can
+      // be suppressed in favour of its anchor's single correlated alert.
+      correlationRole: correlationRole ?? null,
     };
   }
   if (waitingOnUser === true) {
@@ -278,9 +283,10 @@ export function deriveAttention({
       attention: "waiting-on-you",
       attentionSince: waitingSince ?? null,
       escalationType: null,
+      correlationRole: null,
     };
   }
-  return { attention: null, attentionSince: null, escalationType: null };
+  return { attention: null, attentionSince: null, escalationType: null, correlationRole: null };
 }
 
 // phase → Linear workflow state (board columns for the Tickets/Linear lens).
@@ -1034,6 +1040,29 @@ export function deriveEscalationType(phaseSigs) {
     const expl = sig.explanation;
     if (expl && typeof expl === "object" && typeof expl.escalation_type === "string") {
       return expl.escalation_type;
+    }
+  }
+  return null;
+}
+
+/** CAT-170: extract the escalation-correlation role from the most-recent phase
+ *  signal that carries one. Mirrors deriveEscalationType's newest-phase-first
+ *  scan, but reads the TOP-LEVEL `correlation` field (a sibling of
+ *  `explanation`, not a member of it — synthesizeEscalationExplanation projects
+ *  the payload down to its six render fields and drops `observed`, which is why
+ *  the correlation identity is persisted top-level in the first place).
+ *
+ *  Returns "anchor" | "member" | null. This is the projection the notification
+ *  path needs to collapse a multi-ticket incident into ONE operator alert: every
+ *  correlated member still earns its own needs-human label and signal (the
+ *  operator can open any of them), but only the anchor is allowed to notify. */
+export function deriveCorrelationRole(phaseSigs) {
+  for (let i = phaseSigs.length - 1; i >= 0; i--) {
+    const sig = phaseSigs[i];
+    if (!sig || typeof sig !== "object") continue;
+    const corr = sig.correlation;
+    if (corr && typeof corr === "object" && typeof corr.role === "string") {
+      return corr.role;
     }
   }
   return null;
@@ -2193,6 +2222,10 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // surfaces this in the needs-human branch, so it stays null elsewhere.
         escalationType: escalationType ?? failedEscalationType,
         linearTerminal, // CTL-1239
+        // CAT-170: the correlation role rides the same explSigs scan (canonical +
+        // ancillary) so a recovery-pass escalation signal — which is where the
+        // correlation identity is written — is seen here.
+        correlationRole: deriveCorrelationRole(explSigs),
       });
       return {
         id,
@@ -2271,6 +2304,12 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // yellow board accent + the Inbox "Needs you" section. needs-human wins.
         attention: attn.attention,
         attentionSince: attn.attentionSince,
+        // CAT-170: "anchor" | "member" | null. The notification projectors (web
+        // push/SSE via shouldNotify, and the desktop poller) suppress a "member"
+        // so a three-ticket correlated incident produces ONE operator alert
+        // instead of three. Rendering is unaffected — every member still shows in
+        // the Needs-you list with its own card.
+        correlationRole: attn.correlationRole ?? null,
         // CTL-1220: recovery-sweep outcome flags, read from the unified event
         // log. id is the CTL key — exactly what attributes["event.label"] carries.
         autoFixed: recoveryByTicket.get(id)?.autoFixed ?? false,
