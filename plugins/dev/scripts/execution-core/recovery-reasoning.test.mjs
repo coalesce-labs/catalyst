@@ -460,6 +460,64 @@ describe("reasoningRecoveryPass", () => {
     expect(events.some((e) => e.type === "recovery.fixed")).toBe(true);
   });
 
+  // CAT-203: a successful deterministic-seam fix must stamp a verdict, the
+  // same way the escalate branch already self-stamps verdict:"escalate". Without
+  // one, escalateExhaustedIntents' "N attempts, no recorded verdict" sweep can't
+  // tell a fixed ticket from one still being worked, so a ticket fixed on
+  // attempt 1 can spuriously escalate on a later re-evaluation of the same
+  // ticket. Uses a deterministic (non-bounded-llm) fix_class so it goes through
+  // the invokeSeam path, not invokeRemediateCapped/invokeRecoveryPass.
+  test("mode=enforce seam fix success stamps verdict:fixed", () => {
+    const items = [
+      {
+        ...baseItem,
+        ticket: "CTL-1",
+        evidence: { logsOutput: "push rejected no workflow scope" },
+      },
+    ];
+
+    const intents = [];
+
+    const result = reasoningRecoveryPass(items, {
+      mode: "enforce",
+      invokeSeam: () => ({ success: true, reason: "pushed via fallback token", details: {} }),
+      recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+      postComment: () => {},
+      emitEvent: () => {},
+    });
+
+    expect(result.results[0].decision).toBe("fix");
+    expect(intents.length).toBe(1);
+    expect(intents[0].intent.verdict).toBe("fixed");
+    expect(intents[0].intent.verdictReason).toBe("pushed via fallback token");
+  });
+
+  // A FAILED seam fix must NOT get a premature "fixed" verdict — it should
+  // still count toward the attempts-exhausted escalation budget like today.
+  test("mode=enforce seam fix failure does NOT stamp a verdict", () => {
+    const items = [
+      {
+        ...baseItem,
+        ticket: "CTL-1",
+        evidence: { logsOutput: "push rejected no workflow scope" },
+      },
+    ];
+
+    const intents = [];
+
+    const result = reasoningRecoveryPass(items, {
+      mode: "enforce",
+      invokeSeam: () => ({ success: false, reason: "still rejected", details: {} }),
+      recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+      postComment: () => {},
+      emitEvent: () => {},
+    });
+
+    expect(result.results[0].decision).toBe("fix");
+    expect(intents.length).toBe(1);
+    expect(intents[0].intent.verdict).toBeUndefined();
+  });
+
   test("mode=enforce escalates with payload", () => {
     const items = [
       {
@@ -1433,6 +1491,28 @@ describe("recordVerdict + leave-alone TTL (CTL-1439 P0a)", () => {
     expect(entry.decision).toBe("fixed");
     expect(entry.attempts).toBe(1); // pinned — the dispatch already counted this attempt
     expect(entry.verdict).toBe("fixed");
+  });
+
+  // CAT-196: a verified "fixed" verdict must clear any stale escalated:true
+  // latch from an earlier attempt — otherwise defaultShouldSkipItem (which
+  // checks escalated BEFORE ever looking at decision) keeps skipping a ticket
+  // that recovery-pass just confirmed is fixed, for up to the full 7-day TTL.
+  test("fixed verdict clears a stale prior escalated:true latch", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-413", { verdict: "escalate", reason: "value judgment" }, { orchDir, now: () => t0 });
+    const entry = recordVerdict(
+      "CTL-413",
+      { verdict: "fixed", reason: "re-dispatched, now running under a fresh bg job" },
+      { orchDir, now: () => t0 + 1 },
+    );
+    expect(entry.decision).toBe("fixed");
+    expect(entry.escalated).toBe(false);
+    // Past the (unrelated) cooldown window, the ticket must be free to be
+    // reconsidered — before this fix it stayed skipped as "escalated" for up
+    // to the full 7-day RECOVERY_TERMINAL_INTENT_TTL_MS regardless of cooldown.
+    expect(
+      defaultShouldSkipItem("CTL-413", { orchDir, now: () => t0 + 1 + RECOVERY_COOLDOWN_MS + 1 }),
+    ).toBe(false);
   });
 
   test("escalate verdict latches escalated:true (existing terminal semantics)", () => {
