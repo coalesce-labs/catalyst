@@ -908,26 +908,36 @@ export function dispatchTriage(
   // done. triage.json is durable across episodes, so existence alone must not
   // re-arm the cap after a later failed or missing triage dispatch.
   if (hasTriageArtifact(orchDir, identifier) && triageSignalStatus === "done") {
-    if (clearTriageDispatchCount(orchDir, identifier, { reason: "artifact-present" })) {
-      log.info({ identifier }, "cat-83: triage artifact present — cleared stale re-dispatch count");
-      if (multiHost) {
-        try { resetFenceTriageAttempt({ ticket: identifier }); }
-        catch (err) { log.warn({ identifier, err: err.message }, "cat-83: triage fence-count reset failed — continuing"); }
-      }
-    }
+    clearTriageCountOnSuccess(orchDir, identifier, { multiHost, resetFence: resetFenceTriageAttempt });
     return false;
   }
-  if (fleetTriageDispatchCount(orchDir, identifier, { multiHost, readFenceCount: readFenceTriageAttempt }) >= TRIAGE_DISPATCH_CAP) {
+  // CAT-83 (Codex #3218 P2): compute the fleet count ONCE and reuse it for both the
+  // cap decision and the operator-facing evidence. triageCapEvidence reads only the
+  // host-local record, so after ownership churn a host with local count 1 and fence
+  // count 3 would park the ticket while its Linear comment, event, and delegate
+  // explanation all claimed "1 of 3" — evidence contradicting the decision it
+  // explains.
+  const fleetCount = fleetTriageDispatchCount(orchDir, identifier, {
+    multiHost,
+    readFenceCount: readFenceTriageAttempt,
+  });
+  if (fleetCount >= TRIAGE_DISPATCH_CAP) {
     // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
     // naturally absent until it finishes. Defer the park while in flight.
     if (isTriageInFlight(triageSignalStatus)) return false;
+    // CAT-83 (Codex #3218 P2): persist the cap record BEFORE labelNeedsHuman. The
+    // default labelNeedsHuman closure builds its delegate explanation from
+    // triageCapEvidence(dir, t) with no count argument, so the fleet count has to be
+    // on disk by the time it runs or that explanation alone would report the stale
+    // host-local tally. Ordering is otherwise immaterial — markTriageCapped only
+    // writes the counter record and never touches Linear.
+    const newlyCapped = markTriageCapped(orchDir, identifier, { fleetCount });
     try {
       labelNeedsHuman(orchDir, identifier);
     } catch (err) {
       log.warn({ identifier, err: err.message }, "ctl-1441: needs-human label at triage cap threw — continuing");
     }
-    const newlyCapped = markTriageCapped(orchDir, identifier);
-    const evidence = triageCapEvidence(orchDir, identifier, { host: self });
+    const evidence = triageCapEvidence(orchDir, identifier, { host: self, count: fleetCount });
     const delivery = readTriageDispatchRecord(orchDir, identifier) ?? {};
     if (!delivery.capCommentDeliveredAt) {
       try {
@@ -939,8 +949,17 @@ export function dispatchTriage(
     }
     if (!delivery.capEventDeliveredAt) {
       try {
-        appendCapEvent(evidence);
-        markTriageCapDelivery(orchDir, identifier, "capEventDeliveredAt");
+        // CAT-83 (Codex #3218 P2): appendTriageCapEvent SWALLOWS append failures and
+        // reports them as `false` rather than throwing, so the try/catch alone never
+        // sees a disk/permission error. Marking delivery unconditionally would
+        // permanently suppress the event on every later capped sweep even though it
+        // never reached the unified log — leaving the broker, HUD, and dashboards
+        // blind to the escalation. Only record delivery on a confirmed append.
+        if (appendCapEvent(evidence) === false) {
+          log.warn({ identifier }, "cat-83: triage cap event append reported failure — leaving undelivered for retry");
+        } else {
+          markTriageCapDelivery(orchDir, identifier, "capEventDeliveredAt");
+        }
       } catch (err) {
         log.warn({ identifier, err: err.message }, "cat-83: triage cap event failed — continuing");
       }
@@ -1325,10 +1344,27 @@ export function bumpTriageDispatchCount(orchDir, ticket, { now = () => new Date(
   return count;
 }
 
-export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISOString() } = {}) {
+// CAT-83 (Codex #3218 P2): persist the FLEET count that actually tripped the cap.
+// The record itself only ever holds this host's local tally, but the decision is
+// made on max(host-local, fence) — so every consumer that renders evidence from the
+// record (the Linear comment, the cap event, and the delegate explanation built
+// inside the default labelNeedsHuman closure, which has no access to the caller's
+// computed value) would otherwise report a smaller number than the one it is
+// explaining. Persisting it once at cap time keeps all three consistent without
+// threading the value through three different call paths.
+export function markTriageCapped(
+  orchDir,
+  ticket,
+  { now = () => new Date().toISOString(), fleetCount = null } = {},
+) {
   const prior = readTriageDispatchRecord(orchDir, ticket) ?? {};
   if (prior.cappedAt) return false; // already parked once
-  writeTriageDispatchRecord(orchDir, ticket, { ...prior, cappedAt: now(), cap: TRIAGE_DISPATCH_CAP });
+  writeTriageDispatchRecord(orchDir, ticket, {
+    ...prior,
+    cappedAt: now(),
+    cap: TRIAGE_DISPATCH_CAP,
+    ...(typeof fleetCount === "number" ? { fleetCount } : {}),
+  });
   return true;
 }
 
@@ -1365,12 +1401,56 @@ export function clearTriageDispatchCount(
   });
 }
 
+// clearTriageCountOnSuccess — CAT-83 (Codex #3218 P1): the ONE seam that retires
+// a ticket's re-dispatch counter once a triage episode genuinely succeeded.
+//
+// Extracted because the reset must fire from the path that actually OBSERVES the
+// success. dispatchTriage's own reset branch is reachable only from the →Triage
+// lifecycle transition (monitor.mjs:594); the two other routes into dispatchTriage
+// —  the →Ready fold and sweepMissingTriage — both short-circuit on
+// `hasTriageArtifact` BEFORE calling it, so after a normal successful triage the
+// counter was never cleared. It then survived worker-dir GC (the counter lives at
+// orchDir level, deliberately, so the GC cannot re-arm the cap), and a later
+// reopen/requeue of the same ticket inherited the old attempts — parking it after
+// fewer than the configured number of retries.
+//
+// Callers must gate on "artifact present AND current phase signal is done":
+// triage.json is durable across episodes, so existence alone must not retire a
+// counter whose latest dispatch failed or never landed.
+function clearTriageCountOnSuccess(
+  orchDir,
+  ticket,
+  { multiHost = false, resetFence = resetTriageAttemptCountSync } = {},
+) {
+  if (!clearTriageDispatchCount(orchDir, ticket, { reason: "artifact-present" })) return false;
+  log.info({ identifier: ticket }, "cat-83: triage artifact present — cleared stale re-dispatch count");
+  if (multiHost) {
+    try {
+      resetFence({ ticket });
+    } catch (err) {
+      log.warn({ identifier: ticket, err: err.message }, "cat-83: triage fence-count reset failed — continuing");
+    }
+  }
+  return true;
+}
+
 export function triageCapEvidence(orchDir, ticket, extra = {}) {
   const record = readTriageDispatchRecord(orchDir, ticket) ?? {};
+  // CAT-83 (Codex #3218 P2): prefer the caller's freshly-computed fleet count, then
+  // the one persisted by markTriageCapped, and only then this host's local tally —
+  // so the reported "N of CAP" always matches the count the cap decision used.
+  const count =
+    typeof extra.count === "number"
+      ? extra.count
+      : typeof record.fleetCount === "number"
+        ? record.fleetCount
+        : typeof record.count === "number"
+          ? record.count
+          : TRIAGE_DISPATCH_CAP;
   return {
     ticket,
     cap: TRIAGE_DISPATCH_CAP,
-    count: typeof record.count === "number" ? record.count : TRIAGE_DISPATCH_CAP,
+    count,
     firstDispatchAt: record.firstDispatchAt ?? null,
     lastDispatchAt: record.lastDispatchAt ?? null,
     artifactPresent: hasTriageArtifact(orchDir, ticket),
@@ -1525,11 +1605,19 @@ export function sweepMissingTriage({
   runTriageState = defaultRunTriageStateQuery,
   // CTL-1589 (Codex R2): live-state read for stale-row revalidation; injectable.
   fetchLiveState = defaultFetchTicketState,
+  // CAT-83 (Codex #3218 P1): fence-count reset seam for the successful-triage
+  // clear below (undefined → real default; tests inject a spy).
+  resetFenceTriageAttempt = resetTriageAttemptCountSync,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
     return;
   }
+  // CAT-83 (Codex #3218 P1): resolve the roster ONCE per sweep (not per candidate)
+  // so the successful-triage counter clear below knows whether to also reset the
+  // fleet-wide fence count. Mirrors dispatchTriage's own derivation.
+  const sweepRoster = hosts ?? getClusterHosts();
+  const sweepMultiHost = sweepRoster.length > 1;
   // CTL-716: read liveness once per sweep (mirrors schedulerTick's once-per-tick read).
   const budget = computeTriageBudget({
     orchDir,
@@ -1572,7 +1660,21 @@ export function sweepMissingTriage({
       // capacity-independent and dispatchTriage's cap gate runs before its
       // budget gate); everything else waits for the next sweep.
       if (budget.remaining <= 0 && readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP) continue;
-      if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      if (hasTriageArtifact(orchDir, t.identifier)) {
+        // CAT-83 (Codex #3218 P1): this short-circuit — not dispatchTriage's own
+        // reset branch — is where a NORMAL successful triage is observed, so the
+        // counter must be retired HERE. Reaching dispatchTriage is impossible once
+        // the artifact exists (both this line and the →Ready fold return first),
+        // which left the counter alive through worker-dir GC and short-changed the
+        // retry budget of any later episode for the same ticket.
+        if (readTriageSignalStatus(orchDir, t.identifier) === "done") {
+          clearTriageCountOnSuccess(orchDir, t.identifier, {
+            multiHost: sweepMultiHost,
+            resetFence: resetFenceTriageAttempt,
+          });
+        }
+        continue;
+      }
       // CTL-1589 (Codex R4): a Triage-STATE ticket whose triage worker is
       // in-flight right now has no artifact yet and would route to an
       // idempotent no-op launch — which still decrements the sweep budget

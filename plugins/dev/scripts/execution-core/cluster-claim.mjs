@@ -260,19 +260,48 @@ export async function bumpTriageAttemptCount(ticket, { post = defaultPost, issue
   return newCount;
 }
 
+// resetTriageAttemptCount — zero the fleet-wide triage attempt count after a
+// genuinely successful triage episode. Like bumpTriageAttemptCount it preserves
+// owner_host, catalyst_generation, phase, and claimed_at (a count reset is not a
+// takeover) and is best-effort — a missing fence is a no-op, not an error.
+//
+// CAT-83 (Codex #3218 P1): writeClaim has no compare-and-set, so a bare
+// read-then-write can ROLL BACK a newer fencing token. Another host's claimTicket
+// can land between our read and our write; writing back the generation we read
+// would restore the superseded value, and the live worker that just accepted the
+// new claim would then start failing its own fence checks. Since the whole point
+// of this call is to change ONE field, re-read immediately before writing and
+// abort if the fence moved under us — a reset we skip is harmless (the counter is
+// merely retired one episode later), whereas a rolled-back generation strands a
+// running worker. The window is not fully closable without a real CAS; this
+// narrows it to the read→write gap and, critically, never writes a value already
+// known to be stale.
 export async function resetTriageAttemptCount(ticket, { post = defaultPost, issueId = null } = {}) {
   const current = await readClaim(ticket, { post });
   if (!current) return null;
   if ((current.triage_attempt_count ?? 0) === 0) return 0;
+  // Verify the fencing token is still the one we read before overwriting it.
+  const verify = await readClaim(ticket, { post });
+  if (!verify) return null; // fence vanished mid-flight — nothing safe to write
+  if (verify.generation !== current.generation || verify.owner_host !== current.owner_host) {
+    // stderr, not a logger import — this module stays dependency-light by design
+    // (see the PR-order-independence note at the top of the file).
+    process.stderr.write(
+      `cluster-claim: fence for ${ticket} changed during triage-count reset ` +
+        `(gen ${current.generation}→${verify.generation}); skipping to avoid rolling back the generation\n`,
+    );
+    return null;
+  }
+  if ((verify.triage_attempt_count ?? 0) === 0) return 0; // someone else already reset it
   await writeClaim(
     ticket,
     {
-      owner_host: current.owner_host,
-      generation: current.generation,
-      phase: current.phase,
+      owner_host: verify.owner_host,
+      generation: verify.generation,
+      phase: verify.phase,
       triage_attempt_count: 0,
     },
-    { post, issueId, preserveClaimedAt: current.claimed_at },
+    { post, issueId, preserveClaimedAt: verify.claimed_at },
   );
   return 0;
 }

@@ -4,9 +4,18 @@ export function buildTriageCapExplanation(ev = {}) {
   const ticket = ev.ticket ?? "this ticket";
   const cap = ev.cap ?? 3;
   const count = ev.count ?? cap;
+  // CAT-83 (Codex #3218 P2): the cap path deliberately parks a ticket that HAS a
+  // triage.json when the current phase signal is failed or missing (the durable
+  // artifact is stale, from an earlier episode). Asserting "no artifact" flatly
+  // would hand the operator evidence that contradicts the observed.artifactPresent
+  // value printed directly beneath it, in exactly that stale-artifact case.
+  const artifactPresent = ev.artifactPresent ?? false;
+  const artifactClause = artifactPresent
+    ? "still has no SUCCESSFUL triage (its triage.json is stale — left by an earlier episode)"
+    : "still has no triage.json artifact";
   const fields = {
     escalation_type: "decision",
-    problem: `${ticket} reached ${count} of ${cap} triage dispatches and still has no triage.json artifact${ev.signalStatus ? ` (last signal: ${ev.signalStatus})` : ""}.`,
+    problem: `${ticket} reached ${count} of ${cap} triage dispatches and ${artifactClause}${ev.signalStatus ? ` (last signal: ${ev.signalStatus})` : ""}.`,
     call_to_action: `Choose whether to re-arm ${ticket}, triage it by hand, or remove it from the queue.`,
     options: [
       { label: "Re-arm daemon triage", tradeoff: "Allows another dispatch budget but may repeat the failure if its cause remains." },
