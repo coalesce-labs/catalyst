@@ -66,6 +66,8 @@ const INLINE_EVENT_NAMES = [
   "monitor.reconcile.eligible_persist_failure.team", // reconcile-health-event.mjs (CTL-1628 persist-write escalation)
   "monitor.replica.degraded.team", // replica-health-event.mjs (CAT-35)
   "monitor.replica.recovered.team", // replica-health-event.mjs (CAT-35)
+  "monitor.triage.held.team", // triage-sweep-health-event.mjs (CAT-82)
+  "monitor.triage.recovered.team", // triage-sweep-health-event.mjs (CAT-82)
   "phase.triage.linear-transition.CTL-1", // triage-transition-event.mjs:53
   "phase.advance.held.CTL-1",         // CTL-755 recovery.mjs defaultAppendPhaseAdvanceHeldEvent
   "phase.advance.applied.CTL-1",      // CTL-1789 recovery.mjs defaultAppendPhaseAdvanceAppliedEvent
