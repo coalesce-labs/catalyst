@@ -874,7 +874,6 @@ function dispatchTriage(
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
     return false;
   }
-  holdTally?.consider();
   // CTL-1095: drain gate — refuse new triage dispatch before HRW filter.
   if (isDraining(orchDir)) {
     log.debug({ identifier }, "drain: skipping triage dispatch — node draining (CTL-1095)");
@@ -923,6 +922,12 @@ function dispatchTriage(
     );
     return false;
   }
+  // CAT-82: the held-sweep denominator covers only candidates this host can
+  // actually attempt. Counting before the drain/HRW gates made peer-owned
+  // tickets impossible to classify while still inflating `considered`, so a
+  // total delegate-read outage could never satisfy the fully-held predicate on
+  // a multi-host roster.
+  holdTally?.consider();
   // CTL-1441 guard (b) — placed BEFORE the capacity gate (Codex R4: parking is
   // capacity-independent; at a saturated fleet the budget return would keep a
   // capped ticket invisible forever) and AFTER the drain/HRW gates (only the

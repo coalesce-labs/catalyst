@@ -1588,6 +1588,8 @@ describe("CAT-82 triage hold tally", () => {
       readMaxParallelFn: () => 10,
       liveBackgroundCount: () => 0,
       recordSweepHealth: health,
+      hosts: ["vega"],
+      hostName: "vega",
       ...overrides,
     });
     return health;
@@ -1623,6 +1625,21 @@ describe("CAT-82 triage hold tally", () => {
     expect(summaries).toHaveLength(1);
     expect(summaries[0][0]).toEqual({ team: "ENG", considered: 3, heldDelegateUnreadable: 2 });
     info.mockRestore();
+  });
+
+  test("a multi-host delegate outage counts only candidates owned by this host", () => {
+    const warn = spyOn(log, "warn");
+    const health = heldSweep(["ENG-1", "ENG-2", "ENG-3", "ENG-4", "ENG-5"], {
+      hosts: ["vega", "peer"],
+      hostName: "vega",
+      survivingRosterOverride: ["vega", "peer"],
+    });
+    const [, snapshot] = health.mock.calls[0];
+    expect(snapshot.considered).toBeGreaterThan(0);
+    expect(snapshot.considered).toBeLessThan(5);
+    expect(snapshot.heldDelegateUnreadable).toBe(snapshot.considered);
+    expect(warn.mock.calls.filter((c) => c[1]?.includes("held EVERY candidate"))).toHaveLength(1);
+    warn.mockRestore();
   });
 
   test("zero candidates emits no CAT-82 summary and records a healthy sweep", () => {
