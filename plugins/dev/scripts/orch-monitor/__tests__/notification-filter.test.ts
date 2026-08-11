@@ -1,4 +1,6 @@
 import { describe, it, expect } from "bun:test";
+import { readFileSync } from "fs";
+import { join } from "path";
 import {
   shouldNotify,
   createNotificationProjector,
@@ -170,6 +172,21 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
       }),
     );
     expect(out.map((n) => n.title)).toEqual(["CTL-1 needs your decision"]);
+  });
+
+  // CAT-170 (Codex #3209 round-3 P1): the suppression above only works if the role
+  // actually REACHES the projector. server.ts's `toProjectorBoard` rebuilds each
+  // ticket field-by-field, and both server notification paths (SSE + web push) go
+  // through it — so an omitted `correlationRole` there silently re-broke the feature
+  // one layer below these tests, which construct ProjectorBoard tickets directly and
+  // therefore cannot catch it. Pin the adapter's forwarding at the source level
+  // (same technique as the broker namespace-parity source-scan).
+  it("server.ts's toProjectorBoard forwards correlationRole to the projector", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "server.ts"), "utf8");
+    const start = src.indexOf("const toProjectorBoard");
+    expect(start).toBeGreaterThan(-1);
+    const mapping = src.slice(start, src.indexOf("daemon: nav.daemon", start));
+    expect(mapping).toContain("correlationRole");
   });
 
   it("a suppressed member still notifies later if it becomes its own anchor", () => {
