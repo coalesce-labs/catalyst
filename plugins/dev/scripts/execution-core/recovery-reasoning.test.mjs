@@ -216,6 +216,42 @@ describe("defaultInvokeSeam — revive-stale-phase", () => {
   });
 });
 
+describe("merge permission recovery rung (CAT-222)", () => {
+  const cleanProbe = (over = {}) => ({
+    prNumber: 3218, state: "OPEN", mergeCommitSha: null,
+    mergeStateStatus: "CLEAN", mergeable: "MERGEABLE",
+    failingChecks: [], pendingChecks: [], unresolvedBotThreads: [],
+    unresolvedHumanThreads: [], hasChangesRequested: false,
+    viewerPermission: "WRITE", ...over,
+  });
+
+  test("READ permission escalates to a human", () => {
+    const r = classifyPrNotMerged({ ticket: "CAT-222" }, {
+      probePrBlock: () => cleanProbe({ viewerPermission: "READ" }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.fix_class).toBe("human");
+    expect(r.details.reason).toContain("READ");
+  });
+
+  for (const permission of ["WRITE", "MAINTAIN", "ADMIN", null]) {
+    test(`${permission ?? "unknown"} remains fail-open`, () => {
+      const r = classifyPrNotMerged({ ticket: "CAT-222" }, {
+        probePrBlock: () => cleanProbe({ viewerPermission: permission }),
+      });
+      expect(r.decision).toBe("fix");
+      expect(r.fix_class).toBe("bounded-llm");
+    });
+  }
+
+  test("an already merged PR recovers ahead of the permission rung", () => {
+    const r = classifyPrNotMerged({ ticket: "CAT-222" }, {
+      probePrBlock: () => cleanProbe({ state: "MERGED", viewerPermission: "READ" }),
+    });
+    expect(r.decision).toBe("fix");
+  });
+});
+
 describe("checkBoundedLlmFixes", () => {
   // ── Merge / rebase conflict patterns ───────────────────────────────────────
   test("detects conflict.*merge.*tree log pattern as bounded-LLM", () => {

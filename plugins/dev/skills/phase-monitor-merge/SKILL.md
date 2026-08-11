@@ -89,6 +89,17 @@ REPO=$(jq -r '.pr.url // empty' "$PR_SIGNAL" 2>/dev/null | sed -E 's#^https://gi
 [[ -n "$REPO" ]] || REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
 [[ -n "$REPO" ]] || { echo "phase-monitor-merge: cannot resolve repo" >&2; exit 1; }
 
+# CAT-222: an affirmative read-only grant is terminal; probe errors fail open.
+MERGE_PERMISSION_LIB="${PLUGIN_ROOT}/scripts/lib/escalate-merge-permission.sh"
+if [[ -r "$MERGE_PERMISSION_LIB" ]]; then
+  source "$MERGE_PERMISSION_LIB"
+  MERGE_PERMISSION="$(merge_permission_probe "$REPO")"
+  if [[ "$MERGE_PERMISSION" == "denied" ]]; then
+    _escalate_merge_permission "$REPO" "$PR_NUMBER" "READ"
+    exit 1
+  fi
+fi
+
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TMP="${SIGNAL_FILE}.tmp.$$"
 # CTL-496: persist catalystSessionId so orchestrate-roll-usage --phase can
@@ -430,7 +441,20 @@ fi
 # CAT-202: explicit --repo — a bare `gh pr merge` resolves against the
 # ambient `origin` remote, which can disagree with $REPO (the repo the PR was
 # actually opened on, resolved above from phase-pr.json's .pr.url).
-gh pr merge "$PR_NUMBER" --repo "${REPO}" --squash --delete-branch
+# CAT-222: wrapped so a permission-wall denial escalates instead of surfacing
+# as an opaque non-zero exit.
+MERGE_ERR_FILE="$(mktemp)"
+if ! gh pr merge "$PR_NUMBER" --repo "${REPO}" --squash --delete-branch 2>"$MERGE_ERR_FILE"; then
+  MERGE_ERR="$(cat "$MERGE_ERR_FILE" 2>/dev/null || true)"
+  rm -f "$MERGE_ERR_FILE"
+  if merge_denial_is_permission "$MERGE_ERR"; then
+    _escalate_merge_permission "$REPO" "$PR_NUMBER"
+    exit 1
+  fi
+  echo "phase-monitor-merge: gh pr merge exited non-zero: ${MERGE_ERR}" >&2
+else
+  rm -f "$MERGE_ERR_FILE"
+fi
 # REST is authoritative — confirm via REST, never GraphQL
 MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
 [[ "$MERGED_OK" = "true" ]] || { echo "phase-monitor-merge: merge not confirmed via REST" >&2; exit 1; }

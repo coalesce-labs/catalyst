@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 // null = start from the beginning). pageInfo lets the caller walk every page so
 // a review thread beyond the first 100 is never silently dropped (CTL-1496 P2).
 export const REVIEW_THREADS_QUERY = `query($owner:String!,$name:String!,$pr:Int!,$after:String){
-  repository(owner:$owner,name:$name){ pullRequest(number:$pr){
+  repository(owner:$owner,name:$name){ viewerPermission pullRequest(number:$pr){
     reviewThreads(first:100, after:$after){
       pageInfo { hasNextPage endCursor }
       nodes { id isResolved
@@ -108,6 +108,7 @@ function emptyProbe() {
     unresolvedBotThreads: [],
     unresolvedHumanThreads: [],
     hasChangesRequested: false,
+    viewerPermission: null,
   };
 }
 
@@ -189,6 +190,7 @@ function resolveTicketPr(gh, ticket, branch, owner, name, prNumber) {
 function fetchAllReviewThreads(gh, owner, name, prNumber) {
   const nodes = [];
   let after = null;
+  let viewerPermission = null;
   for (let page = 0; page < MAX_THREAD_PAGES; page++) {
     const args = [
       "api",
@@ -216,10 +218,11 @@ function fetchAllReviewThreads(gh, owner, name, prNumber) {
         "review-threads GraphQL returned no usable data (partial/errored response)",
       );
     }
+    if (page === 0) viewerPermission = json.data.repository.viewerPermission ?? null;
     const rt = json.data.repository.pullRequest.reviewThreads;
     for (const n of rt?.nodes || []) nodes.push(n);
     const pageInfo = rt?.pageInfo;
-    if (!pageInfo?.hasNextPage || !pageInfo?.endCursor) return nodes;
+    if (!pageInfo?.hasNextPage || !pageInfo?.endCursor) return { nodes, viewerPermission };
     after = pageInfo.endCursor;
   }
   throw new Error(
@@ -269,7 +272,7 @@ export function defaultProbePrBlock(
   // threads; if an omitted one is an unresolved human conversation while
   // reviewDecision !== CHANGES_REQUESTED, the classifier would take the
   // autonomous fix/merge path despite an unresolved human review (CTL-1496 P2).
-  const nodes = fetchAllReviewThreads(gh, owner, name, view.number);
+  const { nodes, viewerPermission } = fetchAllReviewThreads(gh, owner, name, view.number);
   // A thread with no first comment cannot be attributed to bot vs human; skip it
   // rather than defaulting it into unresolvedHumanThreads (spurious escalate).
   const unresolved = nodes.filter((n) => !n.isResolved && n.comments?.nodes?.[0]);
@@ -302,5 +305,6 @@ export function defaultProbePrBlock(
     unresolvedBotThreads,
     unresolvedHumanThreads,
     hasChangesRequested,
+    viewerPermission,
   };
 }

@@ -661,6 +661,8 @@ export function isPrMergeUnconfirmedReason(reason) {
 // CTL-1496: classify a pr_not_merged recovery item by probing live PR state.
 // All GitHub calls are behind the injectable probePrBlock seam so this function
 // stays pure and unit-testable with a fake probe.
+const MERGE_CAPABLE_PERMISSIONS = new Set(["WRITE", "MAINTAIN", "ADMIN"]);
+
 export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlock, log } = {}) {
   const ticket = evidence.ticket ?? evidence.signal?.ticket;
   // CTL-1496: thread the ticket's head branch to the probe when the evidence
@@ -750,6 +752,20 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
           (t
             ? ` — "${(t.body || "").slice(0, 120)}" (${t.path}:${t.line})`
             : " (CHANGES_REQUESTED)"),
+      },
+    };
+  }
+
+  // CAT-222: an affirmative non-merge-capable repository grant is terminal.
+  // Unknown/absent permission remains fail-open for older or partial probes.
+  if (probe.viewerPermission && !MERGE_CAPABLE_PERMISSIONS.has(probe.viewerPermission)) {
+    return {
+      decision: "escalate",
+      fix_class: "human",
+      details: {
+        reason:
+          `pr_not_merged: this account has ${probe.viewerPermission} permission on the ` +
+          `repository and cannot merge pr#${probe.prNumber} — grant write access or merge manually`,
       },
     };
   }

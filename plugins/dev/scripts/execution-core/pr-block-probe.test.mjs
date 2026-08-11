@@ -142,6 +142,21 @@ describe("defaultProbePrBlock — PR resolution contract (CTL-1496)", () => {
   });
 });
 
+describe("viewerPermission (CAT-222)", () => {
+  test("surfaces the repository permission without another API call", () => {
+    const gh = makeGh([
+      ["pr list", [{ number: 42, state: "OPEN", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", statusCheckRollup: [] }]],
+      ["api graphql", { data: { repository: { viewerPermission: "READ", pullRequest: { reviewThreads: { nodes: [] } } } } }],
+    ]);
+    expect(defaultProbePrBlock("CAT-222", { gh, repo: "o/r" }).viewerPermission).toBe("READ");
+  });
+
+  test("empty probes carry null permission", () => {
+    const gh = makeGh([["pr list", []]]);
+    expect(defaultProbePrBlock("CAT-222", { gh, repo: "o/r" }).viewerPermission).toBeNull();
+  });
+});
+
 describe("defaultProbePrBlock", () => {
   test("no PR for ticket → { prNumber: null }", () => {
     const gh = makeGh([["pr list", []]]);
