@@ -9648,28 +9648,38 @@ export function holisticBoardHealthAct(
   // causes into one operator incident — the precise failure the per-candidate
   // signature exists to prevent. Collect the ticketless moves in tier order and
   // sign with them instead.
-  const globalMoves = [];
+  // CAT-170 (Codex #3209 round-4 P1): the scan-level fallback names the moves that
+  // actually TRIGGERED this scan — ticketed and ticketless alike. Round 3 covered
+  // only ticketless global moves, which left the other half of the same hole open:
+  // when every ticket-specific candidate is cooldown/terminal-skipped,
+  // selectAnchorCandidates dispatches an eligible-queue FALLBACK ticket that has no
+  // entry in moveByTicket, so a scan whose moves are all ticketed still fell through
+  // to the gate reason. Two scans triggered by unrelated causes (e.g. `nudge` vs
+  // `finish-or-close-pr`) then persisted the same "N invariant(s) flagged" signature
+  // and their exhausted tickets could collapse into one operator incident.
+  const scanMoves = new Set();
   for (const tier of ["tier1", "tier2", "tier3"]) {
     for (const m of decision?.moves?.[tier] ?? []) {
       // First writer wins: tier1 outranks tier2 outranks tier3, matching
       // selectAnchorCandidates' own ordering.
       if (m?.ticket && !moveByTicket.has(m.ticket)) moveByTicket.set(m.ticket, m.move ?? null);
-      else if (!m?.ticket && m?.move && !globalMoves.includes(m.move)) globalMoves.push(m.move);
+      if (m?.move) scanMoves.add(m.move);
     }
   }
-  // Deterministic regardless of proposal order, so the same pair of global moves
-  // always yields the same signature (and two different pairs never coincide).
-  const globalSignature = globalMoves.length
-    ? `board-health: ${[...globalMoves].sort().join("+")}`
+  // Sorted, so the signature depends on the SET of causes and not on proposal
+  // order — two scans with the same causes always agree, two with different
+  // causes never coincide.
+  const scanSignature = scanMoves.size
+    ? `board-health: ${[...scanMoves].sort().join("+")}`
     : null;
-  // A candidate with no proposed move (a deferred-intent anchor, or the
-  // eligible-queue fallback) has no per-ticket invariant to name — prefer the
-  // scan's global moves, and only then the gate reason, which is at least
-  // truthful about why the scan proceeded.
+  // A candidate with no proposed move of its own (a deferred-intent anchor, or the
+  // eligible-queue fallback) has no per-ticket invariant to name — fall back to the
+  // scan's triggering moves, and only then to the gate reason, which is at least
+  // truthful about why the scan proceeded even though it cannot distinguish causes.
   const signatureFor = (cand) => {
     const move = moveByTicket.get(cand);
     if (move) return `board-health: ${move}`;
-    return globalSignature ?? decision?.gate?.reason ?? null;
+    return scanSignature ?? decision?.gate?.reason ?? null;
   };
   // CTL-1440 (P0b): track WHY candidates were ledger-skipped so the no-dispatch
   // return distinguishes "everything is terminally attempts-exhausted" (a
