@@ -46,9 +46,27 @@ export function delegateClaimPath(orchDir, ticket) {
   return join(orchDir, DELEGATE_CLAIMS_DIR, `${ticket}.json`);
 }
 
-// recordDelegateClaim — stamp WHEN a ticket was delegated to the orchestrator.
+// recordDelegateClaim — stamp WHEN a ticket was FIRST delegated to the orchestrator.
 // Returns true when a marker was written. Never throws: a marker write must
 // never break the claim path it is only observing.
+//
+// FIRST-CLAIM-WINS (CTC review, turn 113). An existing marker is never
+// overwritten, so `claimedAt` measures the age of the REAL wait rather than the
+// most recent re-claim. Without this the window is RENEWABLE: the pass-1 gate can
+// re-run and re-stamp, sliding `claimedAt` forward on every tick, and grace would
+// then last as long as the re-claim loop does instead of `graceMs` — suppressing
+// dispatch-liveness for exactly the ticket that is genuinely stuck.
+//
+// Two upstream brakes already make that loop hard to reach — the CTL-1174 latch
+// fix live-confirms a cached-null delegate before treating it as undelegated
+// (linear-query.mjs), and applyAssignee's read-back is a LIVE query so a write
+// that did not stick returns applied:false and never stamps — but the bound must
+// be STRUCTURAL, not contingent on two other mechanisms staying correct. A
+// flapping delegate, or any future change to either brake, would otherwise
+// silently reopen it.
+//
+// Costs nothing in the happy path: clearDelegateClaim removes the marker when the
+// ticket dispatches, so the next legitimate claim writes a fresh timestamp.
 export function recordDelegateClaim(orchDir, ticket, { now = () => Date.now() } = {}) {
   // Never manufacture the orch dir itself — a missing one means a hermetic or
   // mocked context (several suites use a shared literal orchDir), and writing
@@ -57,10 +75,18 @@ export function recordDelegateClaim(orchDir, ticket, { now = () => Date.now() } 
   try {
     const p = delegateClaimPath(orchDir, ticket);
     mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, JSON.stringify({ ticket, claimedAt: now() }));
+    // ATOMIC first-claim-wins (MIGRATION turn 115): `wx` = create-exclusive, so
+    // the existence check and the write are one syscall. An `existsSync(p)` guard
+    // followed by a write would be TOCTOU — two callers could both observe
+    // "absent" and the second would slide `claimedAt` forward, reintroducing the
+    // renewable window this guard exists to close. EEXIST lands in the catch and
+    // returns false, which is the correct outcome: an existing marker (even a
+    // malformed one, which grants no grace anyway) is left exactly as it is.
+    // Bounding suppression matters more than refreshing an unreadable stamp.
+    writeFileSync(p, JSON.stringify({ ticket, claimedAt: now() }), { flag: "wx" });
     return true;
   } catch {
-    return false; // no marker ⇒ no grace ⇒ prior behavior
+    return false; // existing marker OR write failure ⇒ no NEW window ⇒ bounded
   }
 }
 

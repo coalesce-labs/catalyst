@@ -53,10 +53,47 @@ describe("recordDelegateClaim", () => {
     expect(recordDelegateClaim(orchDir, null)).toBe(false);
   });
 
-  test("re-claiming overwrites with the newer timestamp", () => {
+  // CTC review (turn 113): FIRST-CLAIM-WINS. This test previously asserted the
+  // OPPOSITE (overwrite) and was therefore encoding the defect — an unconditional
+  // overwrite makes the grace window RENEWABLE, so `graceMs` stops being a bound
+  // on suppression and instead lasts as long as a re-claim loop does.
+  test("re-claiming does NOT extend the window — first claim wins", () => {
+    expect(recordDelegateClaim(orchDir, "CTL-1", { now: () => 1000 })).toBe(true);
+    expect(recordDelegateClaim(orchDir, "CTL-1", { now: () => 2000 })).toBe(false);
+    expect(recordDelegateClaim(orchDir, "CTL-1", { now: () => 9_999_999 })).toBe(false);
+    expect(readDelegateClaims(orchDir).get("CTL-1")).toBe(1000); // the REAL wait start
+  });
+
+  test("suppression stays bounded across an unbounded re-claim loop", () => {
+    // The invariant that actually constrains blast radius: no number of re-claims
+    // can slide the window forward, so a genuinely stuck ticket always exits grace
+    // graceMs after its FIRST claim regardless of tick rate or cache lag.
+    let clock = 1000;
+    recordDelegateClaim(orchDir, "CTL-STUCK", { now: () => clock });
+    for (let i = 0; i < 500; i++) {
+      clock += 2000; // 2s ticks, ~16 minutes of re-claiming
+      recordDelegateClaim(orchDir, "CTL-STUCK", { now: () => clock });
+    }
+    expect(readDelegateClaims(orchDir).get("CTL-STUCK")).toBe(1000);
+    // age is now the FULL elapsed span, not ~0 — so the grace check will reject it
+    expect(clock - readDelegateClaims(orchDir).get("CTL-STUCK")).toBe(1_000_000);
+  });
+
+  test("after clearDelegateClaim, the NEXT legitimate claim writes fresh", () => {
+    // first-claim-wins must not permanently pin a ticket to its first-ever claim:
+    // the dispatch path clears the marker, so a later cycle starts a new window.
     recordDelegateClaim(orchDir, "CTL-1", { now: () => 1000 });
-    recordDelegateClaim(orchDir, "CTL-1", { now: () => 2000 });
-    expect(readDelegateClaims(orchDir).get("CTL-1")).toBe(2000);
+    clearDelegateClaim(orchDir, "CTL-1");
+    expect(recordDelegateClaim(orchDir, "CTL-1", { now: () => 5000 })).toBe(true);
+    expect(readDelegateClaims(orchDir).get("CTL-1")).toBe(5000);
+  });
+
+  test("an existing MALFORMED marker is left alone (bounding beats refreshing)", () => {
+    // A malformed marker grants no grace anyway, so overwriting it would only
+    // reintroduce the sliding window for no benefit.
+    writeRaw("CTL-BADEXIST", "}{");
+    expect(recordDelegateClaim(orchDir, "CTL-BADEXIST", { now: () => 1000 })).toBe(false);
+    expect(readDelegateClaims(orchDir).has("CTL-BADEXIST")).toBe(false);
   });
 });
 
