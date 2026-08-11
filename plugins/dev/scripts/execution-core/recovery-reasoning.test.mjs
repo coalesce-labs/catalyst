@@ -18,6 +18,7 @@ import {
   defaultInvokeRemediateCapped,
   defaultInvokeRecoveryPass,
   defaultWriteEscalationSignal,
+  defaultInvokeSeam,
   RECOVERY_PASS_CYCLE_CAP,
   RECOVERY_PASS_PHASE,
   RECOVERY_MAX_ATTEMPTS,
@@ -77,11 +78,42 @@ describe("checkDeterministicErrors", () => {
     expect(result).toBeNull();
   });
 
-  test("detects orphan-sweep-stale via failureReason", () => {
+  test("orphan-sweep-stale with no phase arg keeps the pre-existing routing (backward compat)", () => {
     const result = checkDeterministicErrors(null, "orphan-sweep-stale");
     expect(result).not.toBeNull();
     expect(result.fix_class).toBe("orphan_stale");
+    expect(result.seam_id).toBe("orphan-reconcile");
   });
+
+  // CAT-150: a pre-PR phase can never have a PR to reconcile — classifyOrphanMergedReconcile
+  // would deterministically return pr-state-unknown every time, burning a self-heal attempt on
+  // a guaranteed failure. Route to a plain revive/redispatch instead.
+  test("routes orphan-sweep-stale on a pre-PR phase (research) to a plain revive", () => {
+    const result = checkDeterministicErrors(null, "orphan-sweep-stale", "research");
+    expect(result).not.toBeNull();
+    expect(result.fix_class).toBe("orphan_stale_prepr");
+    expect(result.seam_id).toBe("revive-stale-phase");
+  });
+
+  test.each(["triage", "plan", "implement", "verify", "review"])(
+    "routes orphan-sweep-stale on pre-PR phase %s to the revive seam",
+    (phase) => {
+      const result = checkDeterministicErrors(null, "orphan-sweep-stale", phase);
+      expect(result.seam_id).toBe("revive-stale-phase");
+    },
+  );
+
+  // "pr" is the phase THAT CREATES the PR — a stale signal there is ambiguous (the dying
+  // worker may have already created the PR before it could record success), so it must keep
+  // the real PR-existence check rather than a blind revive that risks a duplicate PR.
+  test.each(["pr", "monitor-merge", "monitor-deploy", "teardown"])(
+    "keeps orphan-reconcile routing for phase %s (PR may already exist)",
+    (phase) => {
+      const result = checkDeterministicErrors(null, "orphan-sweep-stale", phase);
+      expect(result.fix_class).toBe("orphan_stale");
+      expect(result.seam_id).toBe("orphan-reconcile");
+    },
+  );
 
   // CTL-1186: the push_rejected_no_workflow_scope failureReason shortcut must
   // classify as FIX (re-dispatch via the workflow-token-redispatch seam) even
@@ -103,6 +135,18 @@ describe("checkDeterministicErrors", () => {
     expect(result.details.seam_id).toBe("workflow-token-redispatch");
   });
 
+  // CAT-150: threading signal.phase from defaultClassifyTicket into checkDeterministicErrors.
+  test("orphan-sweep-stale on a pre-PR phase classifies as fix via the revive seam", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: null,
+      failureReason: "orphan-sweep-stale",
+      signal: { phase: "plan", failureReason: "orphan-sweep-stale" },
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("orphan_stale_prepr");
+    expect(result.details.seam_id).toBe("revive-stale-phase");
+  });
+
   // merge-conflict / rebase-failed failureReasons fall through to bounded-LLM
   test("returns null for merge-conflict failureReason (falls to bounded-LLM)", () => {
     const result = checkDeterministicErrors(null, "merge-conflict");
@@ -117,6 +161,58 @@ describe("checkDeterministicErrors", () => {
   test("returns null for unknown errors", () => {
     const result = checkDeterministicErrors("some random error", null);
     expect(result).toBeNull();
+  });
+});
+
+// CAT-150: defaultInvokeSeam's revive-stale-phase branch — reuses defaultReviveDispatch
+// (recovery.mjs) via the file's established requireSync lazy-load, injectable here as
+// deps.reviveDispatchMod for tests (mirrors deps.dispatchMod/eventScanMod/fsmMod).
+describe("defaultInvokeSeam — revive-stale-phase", () => {
+  test("calls the injected revive dispatch with orchDir/ticket/phase", () => {
+    const calls = [];
+    const fakeRevive = (args) => {
+      calls.push(args);
+      return { code: 0 };
+    };
+    const result = defaultInvokeSeam(
+      "CAT-999",
+      "revive-stale-phase",
+      { reason: "test" },
+      {
+        orchDir: "/tmp/fake-orch",
+        candidate: { ticket: "CAT-999", phase: "research" },
+        reviveDispatchMod: { defaultReviveDispatch: fakeRevive },
+      },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ orchDir: "/tmp/fake-orch", ticket: "CAT-999", phase: "research" });
+    expect(result.success).toBe(true);
+  });
+
+  test("reports failure when the dispatch fails", () => {
+    const fakeRevive = () => ({ code: 1, stderr: "signal-missing" });
+    const result = defaultInvokeSeam(
+      "CAT-999",
+      "revive-stale-phase",
+      {},
+      {
+        orchDir: "/tmp/fake-orch",
+        candidate: { ticket: "CAT-999", phase: "plan" },
+        reviveDispatchMod: { defaultReviveDispatch: fakeRevive },
+      },
+    );
+    expect(result.success).toBe(false);
+  });
+
+  test("fails cleanly when phase is missing from the candidate", () => {
+    const result = defaultInvokeSeam(
+      "CAT-999",
+      "revive-stale-phase",
+      {},
+      { orchDir: "/tmp/fake-orch", candidate: { ticket: "CAT-999" } },
+    );
+    expect(result.success).toBe(false);
+    expect(result.reason).toMatch(/phase/i);
   });
 });
 
