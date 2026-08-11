@@ -38,6 +38,15 @@ export function authHeader(token = "") {
   return /^lin_oauth/i.test(token) ? `Bearer ${token}` : token;
 }
 
+// CAT-157: heartbeat alone prefers its dedicated app-actor token. Other Linear
+// consumers intentionally retain the shared linear-api-token resolution.
+export function resolveHeartbeatToken({ resolve = resolveSecret } = {}) {
+  const dedicated = String(resolve("linear-heartbeat-api-token")?.value ?? "").trim();
+  if (dedicated) return { token: dedicated, dedicated: true };
+  const shared = String(resolve("linear-api-token")?.value ?? "").trim();
+  return { token: shared, dedicated: false };
+}
+
 // isRateClassLinearError — CTL-1420 follow-up. Recognize a RATE-class Linear
 // rejection from a response body OR an error string. Linear serves its
 // complexity / soft-rate limit as HTTP **400** with `errors[].extensions.code
@@ -53,7 +62,7 @@ export function isRateClassLinearError(text) {
 // defaultPost — the production GraphQL POST. Injectable via `post` option on every
 // public function so tests never touch the network.
 async function defaultPost(query, variables) {
-  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
+  const { token } = resolveHeartbeatToken();
   const res = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
     method: "POST",
     headers: {

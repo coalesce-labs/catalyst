@@ -8,9 +8,36 @@ import {
   parseHeartbeatMetadata,
   publishHeartbeat,
   readPeerHeartbeats,
+  resolveHeartbeatToken,
   resolveIssueId,
   runCli,
 } from "./cluster-heartbeat.mjs";
+
+describe("resolveHeartbeatToken", () => {
+  test("prefers a dedicated token without resolving the shared alias", () => {
+    const calls = [];
+    const result = resolveHeartbeatToken({ resolve: (id) => {
+      calls.push(id);
+      return { value: id === "linear-heartbeat-api-token" ? "hb" : "shared" };
+    } });
+    expect(result).toEqual({ token: "hb", dedicated: true });
+    expect(calls).toEqual(["linear-heartbeat-api-token"]);
+  });
+
+  test("falls back for absent or whitespace-only dedicated values", () => {
+    for (const value of [null, "   "]) {
+      const result = resolveHeartbeatToken({ resolve: (id) => ({
+        value: id === "linear-heartbeat-api-token" ? value : "shared",
+      }) });
+      expect(result).toEqual({ token: "shared", dedicated: false });
+    }
+  });
+
+  test("returns the empty shared shape when neither token exists", () => {
+    expect(resolveHeartbeatToken({ resolve: () => ({ value: null }) }))
+      .toEqual({ token: "", dedicated: false });
+  });
+});
 
 async function captureStdout(fn) {
   const chunks = [];
