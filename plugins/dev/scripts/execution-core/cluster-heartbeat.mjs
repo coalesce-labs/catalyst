@@ -105,6 +105,58 @@ export async function resolveIssueId(ticket, { post = defaultPost } = {}) {
   return data?.issue?.id ?? null;
 }
 
+// ─── anchor health (CAT-46) ──────────────────────────────────────────────────
+
+const ANCHOR_HEALTH_QUERY = `query AnchorHealth($id: String!) {
+  issue(id: $id) { id identifier archivedAt state { name type } }
+}`;
+
+const CLOSED_STATE_TYPES = new Set(["completed", "canceled"]);
+
+/**
+ * Probe whether `ticket` is a live, usable liveness-attachment target.
+ * Never throws; `found: null` distinguishes an unknown transport result from
+ * an issue that Linear definitively reported as missing.
+ */
+export async function readAnchorHealth(ticket, { post = defaultPost } = {}) {
+  const base = {
+    ok: false,
+    found: null,
+    identifier: null,
+    stateName: null,
+    stateType: null,
+    archived: false,
+    closed: false,
+    error: null,
+  };
+  if (typeof ticket !== "string" || ticket.trim() === "") {
+    return { ...base, error: "no anchor issue configured" };
+  }
+
+  let data;
+  try {
+    data = await post(ANCHOR_HEALTH_QUERY, { id: ticket.trim() });
+  } catch (err) {
+    return { ...base, error: String(err?.message ?? err) };
+  }
+
+  const issue = data?.issue ?? null;
+  if (!issue) return { ...base, found: false };
+
+  const stateType = typeof issue.state?.type === "string" ? issue.state.type : null;
+  const archived = Boolean(issue.archivedAt);
+  return {
+    ok: !archived,
+    found: true,
+    identifier: typeof issue.identifier === "string" ? issue.identifier : null,
+    stateName: typeof issue.state?.name === "string" ? issue.state.name : null,
+    stateType,
+    archived,
+    closed: stateType != null && CLOSED_STATE_TYPES.has(stateType),
+    error: null,
+  };
+}
+
 // ─── read ────────────────────────────────────────────────────────────────────
 
 const READ_ATTACHMENTS_QUERY = `query ReadFence($id: String!) {
