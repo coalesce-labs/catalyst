@@ -26,7 +26,7 @@ describe("readAnchorHealth (CAT-46)", () => {
   });
 
   test("a missing issue is found:false, ok:false", async () => {
-    const health = await readAnchorHealth("CAT-999", { post: stub({ issue: null }) });
+    const health = await readAnchorHealth("PROJ-999", { post: stub({ issue: null }) });
     expect(health.found).toBe(false);
     expect(health.ok).toBe(false);
     expect(health.error).toBeNull();
@@ -57,7 +57,7 @@ describe("readAnchorHealth (CAT-46)", () => {
   });
 
   test("Linear's Entity not found GraphQL error is a definitive missing issue", async () => {
-    const health = await readAnchorHealth("CAT-999999", {
+    const health = await readAnchorHealth("PROJ-999999", {
       post: async () => { throw new Error("linear graphql errors: Entity not found: Issue"); },
     });
     expect(health.found).toBe(false);
