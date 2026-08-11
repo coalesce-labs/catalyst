@@ -380,4 +380,16 @@ describe("CAT-55 artifact response mapping", () => {
     expect(out).toMatchObject({ status: "rejected", reason: "artifact_missing" });
     expect(out.status === "rejected" ? out.message : "").toContain("thoughts/shared/research");
   });
+  it("sends the operator-reachable force override", async () => {
+    let body = "";
+    const fetchImpl: typeof fetch = Object.assign(
+      (_url: string | URL | Request, init?: RequestInit) => {
+        body = String(init?.body ?? "");
+        return Promise.resolve(new Response(JSON.stringify({ status: "resuming", ticket: "CAT-55", phase: "verify" })));
+      },
+      { preconnect: fetch.preconnect },
+    );
+    await respondTicket({ ticket: "CAT-55", response: "override", force: true }, { fetchImpl });
+    expect(JSON.parse(body)).toMatchObject({ force: true });
+  });
 });

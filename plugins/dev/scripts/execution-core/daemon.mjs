@@ -80,12 +80,11 @@ import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.m
 import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-health-probe.mjs"; // CTL-1165 D5: pre-exhaustion fleet-health guardrail
 import { startDaemonWatchdogProbe as realStartDaemonWatchdogProbe } from "./daemon-watchdog-probe.mjs"; // CTL-1502: stuck-but-alive daemon watchdog
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
-import { getProjectConfig, listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
-import { defaultPriorArtifactComplete } from "./stall-janitor.mjs";
-import { resolveWorktree } from "./work-done-probes.mjs";
+import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import {
   PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE,
   isPriorArtifactBlock,
+  priorArtifactPresence,
   resolvePriorArtifactRespondGateMode,
 } from "./prior-artifact-block.mjs";
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
@@ -168,7 +167,7 @@ import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dep
 import { getReconcileHealth } from "./reconcile-health.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
-import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn, teamOf } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
+import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
 import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
 import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: codex boot gate (auth.json + `codex --version`) that degrades routed codex phases + emits execution-core.executor.codex-fallback
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
@@ -465,20 +464,8 @@ export function clearNeedsHumanMarkers(orchDir, ticket, { rm = unlinkSync } = {}
 // status === "stalled", clears the stall via the J3 seam (CTL-1067).
 // Fail-open throughout — a bad signal file or clearStall failure is logged
 // and skipped, never fatal.
-function defaultArtifactPresent({ ticket, phase, orchDir, repoRoot }) {
-  if (!ticket || !phase || !orchDir || !repoRoot) return null;
-  try {
-    const worktreePath = resolveWorktree({ ticket, repoRoot });
-    if (!worktreePath) return null;
-    return defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot, worktreePath });
-  } catch {
-    return null;
-  }
-}
-
-function defaultRepoRootFor(ticket) {
-  const team = teamOf(ticket);
-  return team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
+function defaultArtifactPresent(input) {
+  return priorArtifactPresence({ ...input, exists: existsSync, list: readdirSync });
 }
 
 function defaultPostComment(ticket, body) {
@@ -519,7 +506,6 @@ export async function handleCommentWake(
     // the signal that another attempt is warranted.
     forgetIntent = defaultForgetIntent,
     artifactPresent = defaultArtifactPresent,
-    repoRootFor = defaultRepoRootFor,
     gateMode = resolvePriorArtifactRespondGateMode(),
     postComment = defaultPostComment,
   }
@@ -536,7 +522,8 @@ export async function handleCommentWake(
   // CAT-55: gate before ANY label, marker, intent, or stall mutation. A reply
   // cannot clear the condition it is answering while the required document is
   // still positively absent. Unknown probes remain fail-open.
-  if (gateMode !== "off") {
+  const humanProvenance = Boolean(parsed.authorId) && Boolean(botUserId);
+  if (gateMode !== "off" && humanProvenance && isManagedTicket(ticket, orchDir)) {
     let files = [];
     try {
       files = readdirSync(workerDir).filter((name) => name.startsWith("phase-") && name.endsWith(".json"));
@@ -549,12 +536,19 @@ export async function handleCommentWake(
       if (!isPriorArtifactBlock(sig)) continue;
       const phase = fname.slice("phase-".length, -".json".length);
       let present = null;
-      try { present = artifactPresent({ ticket, phase, orchDir, repoRoot: repoRootFor(ticket) }); } catch { /* fail open */ }
+      try { present = artifactPresent({
+        ticket,
+        artifact: sig.dispatchFailureArtifact,
+        artifactDir: sig.dispatchFailureArtifactDir,
+        searchedPath: sig.dispatchFailureSearchedPath,
+      }); } catch { /* fail open */ }
       if (present !== false) continue;
       if (gateMode === "shadow") {
         log.info({ ticket, phase }, "comment-wake: would hold artifact block (CAT-55 shadow)");
         break;
       }
+      if (/\bforce prior artifact retry\b/i.test(parsed.body ?? "")) break;
+      log.info({ ticket, phase }, "comment-wake: held artifact block (CAT-55 enforce)");
       const marker = join(workerDir, `.artifact-blocked-reply-${phase}.applied`);
       if (!existsSync(marker)) {
         const where = sig.dispatchFailureSearchedPath ?? sig.dispatchFailureArtifactDir ?? "the prior-phase artifact directory";
@@ -599,7 +593,6 @@ export async function handleCommentWake(
   //      configured bot set before believing a human answered.
   //  (b) MANAGED ticket. The daemon sees every workspace comment; only clear on
   //      tickets this installation actually manages.
-  const humanProvenance = Boolean(parsed.authorId) && Boolean(botUserId);
   let clearedNeedsHuman = false;
   // Codex #2970 round 3: distinct from clearedNeedsHuman (which also covers the
   // idempotent already-absent case and gates the marker reconcile below — that

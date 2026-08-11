@@ -560,6 +560,7 @@ if [[ -n $ARTIFACT_SPEC ]]; then
 	case "$ARTIFACT_SPEC" in
 	signal:*)
 		ARTIFACT_FILE="${ORCH_DIR}/workers/${TICKET}/${ARTIFACT_SPEC#signal:}"
+		GATE_SEARCHED_PATH="$ARTIFACT_FILE"
 		[[ -f $ARTIFACT_FILE ]] || ARTIFACT_OK=0
 		;;
 	glob:*)

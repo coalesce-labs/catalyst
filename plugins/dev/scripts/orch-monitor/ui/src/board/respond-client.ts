@@ -97,6 +97,8 @@ export interface RespondInput {
   response: string;
   /** Typed-confirm token; defaults to the ticket id. */
   confirm?: string;
+  /** Explicitly bypass a still-missing prior-artifact hold. */
+  force?: boolean;
 }
 
 interface RespondDeps {
@@ -129,7 +131,7 @@ interface RespondServerResult {
  * cluster code on the hot path.
  */
 export async function respondTicket(
-  { ticket, response, confirm }: RespondInput,
+  { ticket, response, confirm, force = false }: RespondInput,
   { fetchImpl = fetch }: RespondDeps = {},
 ): Promise<RespondOutcome> {
   const url = `/api/ticket/${encodeURIComponent(ticket)}/respond`;
@@ -138,7 +140,7 @@ export async function respondTicket(
     const res = await fetchImpl(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ response, confirm: confirm ?? ticket }),
+      body: JSON.stringify({ response, confirm: confirm ?? ticket, force }),
     });
     raw = (await res.json()) as RespondServerResult;
   } catch (e) {

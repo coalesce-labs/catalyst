@@ -46,20 +46,17 @@
 // without a real worker dir, a real hosts.json, a real `linearis`, or a real
 // event log.
 
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { readClusterHostCount, runFenceCheck } from "./stop-worker.mjs";
 import { PHASE_ORDER } from "./board-data.mjs";
 import { nodeClass } from "./canonical-event-shared.ts";
-import { defaultPriorArtifactComplete } from "../../execution-core/stall-janitor.mjs";
-import { resolveWorktree } from "../../execution-core/work-done-probes.mjs";
-import { teamOf } from "../../execution-core/dispatch.mjs";
-import { getProjectConfig } from "../../execution-core/registry.mjs";
 import {
   PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE,
   isPriorArtifactBlock,
+  priorArtifactPresence,
   resolvePriorArtifactRespondGateMode,
 } from "../../execution-core/prior-artifact-block.mjs";
 
@@ -255,20 +252,8 @@ export function findHeldRun(
   return null;
 }
 
-export function defaultArtifactPresent({ ticket, phase, orchDir, repoRoot }) {
-  if (!ticket || !phase || !orchDir || !repoRoot) return null;
-  try {
-    const worktreePath = resolveWorktree({ ticket, repoRoot });
-    if (!worktreePath) return null;
-    return defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot, worktreePath });
-  } catch {
-    return null;
-  }
-}
-
-function defaultRepoRootFor(ticket) {
-  const team = teamOf(ticket);
-  return team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
+export function defaultArtifactPresent(input) {
+  return priorArtifactPresence({ ...input, exists: existsSync, list: readdirSync });
 }
 
 // ── orchestration: the endpoint body ─────────────────────────────────────────
@@ -305,7 +290,6 @@ export function respondTicket(
     artifactPresent = defaultArtifactPresent,
     mode = resolvePriorArtifactRespondGateMode(),
     orchDir = dirname(DEFAULT_WORKERS_DIR),
-    repoRootFor = defaultRepoRootFor,
     log = console,
   } = {},
 ) {
@@ -339,7 +323,12 @@ export function respondTicket(
   if (mode !== "off" && !force && isPriorArtifactBlock(signal)) {
     let present = null;
     try {
-      present = artifactPresent({ ticket, phase, orchDir, repoRoot: repoRootFor(ticket) });
+      present = artifactPresent({
+        ticket,
+        artifact: signal.dispatchFailureArtifact,
+        artifactDir: signal.dispatchFailureArtifactDir,
+        searchedPath: signal.dispatchFailureSearchedPath,
+      });
     } catch {
       // Indeterminate probes fail open.
     }

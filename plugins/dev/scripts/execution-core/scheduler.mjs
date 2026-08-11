@@ -2966,12 +2966,14 @@ export function escalateDispatchExhausted(
     cause === PRIOR_ARTIFACT_MISSING_REASON &&
     typeof refusal?.artifactDir === "string" &&
     refusal.artifactDir !== "";
-  const explanationFields = artifactBlock ? buildPriorArtifactExplanationFields({
+  const artifactExplanation = artifactBlock ? buildPriorArtifactExplanationFields({
     ticket,
     phase,
+    artifact: refusal.artifact,
     artifactDir: refusal.artifactDir,
     searchedPath: refusal.searchedPath,
-  }) : {
+  }) : null;
+  const explanationFields = artifactExplanation ?? {
     escalation_type: "decision",
     problem: `${phase} dispatch retries exhausted (${cause ?? code})`,
     call_to_action: `${ticket}/${phase} dispatch has exhausted retries. Re-dispatch or abandon / re-scope?`,
@@ -3007,6 +3009,7 @@ export function escalateDispatchExhausted(
         dispatchFailureCode: code, // CTL-1045 Bug 2: exit code that exhausted retries (2 = prior_artifact_missing)
         dispatchFailureCause: cause, // CTL-1045 Bug 2: human-readable reason (observability)
         ...(artifactBlock ? {
+          dispatchFailureArtifact: refusal.artifact ?? null,
           dispatchFailureArtifactDir: refusal.artifactDir,
           dispatchFailureSearchedPath: refusal.searchedPath ?? null,
         } : {}),

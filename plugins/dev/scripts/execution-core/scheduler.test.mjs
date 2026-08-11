@@ -2292,17 +2292,35 @@ describe("CTL-712: escalateDispatchExhausted — retry ceiling → stalled", () 
       code: 2,
       cause: "prior_artifact_missing",
       refusal: {
+        artifact: "glob:thoughts/shared/research",
         artifactDir: "thoughts/shared/research",
         searchedPath: "/wt/CAT-55/thoughts/shared/research",
       },
     });
     const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CAT-55", "phase-plan.json"), "utf8"));
     expect(sig.dispatchFailureArtifactDir).toBe("thoughts/shared/research");
+    expect(sig.dispatchFailureArtifact).toBe("glob:thoughts/shared/research");
     expect(sig.dispatchFailureSearchedPath).toBe("/wt/CAT-55/thoughts/shared/research");
     expect(sig.explanation.escalation_type).toBe("manual");
     expect(sig.explanation.problem).toContain("/wt/CAT-55/thoughts/shared/research");
     expect(sig.explanation.why_not_auto).toMatch(/re-dispatching alone will not clear/i);
     expect(sig.explanation.options).toBeUndefined();
+  });
+
+  test("CAT-55: signal refusal keeps the generic decision wording", () => {
+    escalateDispatchExhausted(orchDir, "CAT-57", "verify", {
+      code: 2,
+      cause: "prior_artifact_missing",
+      refusal: {
+        artifact: "signal:phase-implement.json",
+        artifactDir: "phase-implement.json",
+        searchedPath: "/orch/workers/CAT-57/phase-implement.json",
+      },
+    });
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CAT-57", "phase-verify.json"), "utf8"));
+    expect(sig.dispatchFailureArtifact).toBe("signal:phase-implement.json");
+    expect(sig.explanation.escalation_type).toBe("decision");
+    expect(sig.explanation.options).toHaveLength(2);
   });
 
   test("CAT-55: missing refusal detail preserves the generic decision explanation", () => {

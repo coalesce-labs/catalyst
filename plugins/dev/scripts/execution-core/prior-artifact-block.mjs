@@ -35,13 +35,31 @@ export function resolvePriorArtifactRespondGateMode(value = process.env.CATALYST
   return value === "off" || value === "shadow" || value === "enforce" ? value : "enforce";
 }
 
+export function priorArtifactPresence({ ticket, artifact, artifactDir, searchedPath, exists, list }) {
+  if (!ticket || !searchedPath || typeof exists !== "function" || typeof list !== "function") return null;
+  const spec = artifact ?? (artifactDir?.startsWith("thoughts/") ? `glob:${artifactDir}` : artifactDir ? `signal:${artifactDir}` : null);
+  if (!spec) return null;
+  if (spec.startsWith("signal:")) {
+    try { return Boolean(exists(searchedPath)); } catch { return null; }
+  }
+  if (!spec.startsWith("glob:")) return null;
+  let names;
+  try { names = list(searchedPath); } catch { return false; }
+  if (!Array.isArray(names)) return null;
+  const escaped = ticket.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const boundarySafe = new RegExp(`-${escaped}(?:\\.md|-.*\\.md)$`, "i");
+  return names.some((name) => typeof name === "string" && !name.startsWith(".") && boundarySafe.test(name));
+}
+
 export const PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE = (where) =>
   `Re-dispatching alone will not clear this: the gate re-checks ${where} and refuses again ` +
   `(exit ${PRIOR_ARTIFACT_MISSING_EXIT_CODE}) for as long as the document is absent. ` +
   "The document has to appear first.";
 
-export function buildPriorArtifactExplanationFields({ ticket, phase, artifactDir, searchedPath }) {
+export function buildPriorArtifactExplanationFields({ ticket, phase, artifact, artifactDir, searchedPath }) {
   const where = searchedPath ?? artifactDir;
+  const isGlob = artifact?.startsWith("glob:") ?? artifactDir?.startsWith("thoughts/");
+  if (!isGlob) return null;
   return {
     escalation_type: "manual",
     problem: `${phase} cannot start for ${ticket}: no ${artifactDir} document for ${ticket} was found. Searched: ${where}`,
