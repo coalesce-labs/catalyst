@@ -26,7 +26,9 @@ Retention is controlled by `CATALYST_LOG_RETAIN` (default `5`; `0` disables rota
 
 A daemon started by hand with its output redirected elsewhere leaves `daemon.log` frozen on a previous run's shutdown line — the file looks dead while a separate daemon instance is actively dispatching.
 
-Every daemon log line carries a `pid` field. When reading a log to judge daemon liveness, **confirm the newest line's `pid` matches the running process**: compare `cat <pidfile>` against the `pid` in the newest log line rather than trusting the file's last line or mtime alone.
+The **structured (pino) daemon logs** — execution-core, broker, and otel-forward — carry a `pid` field on every line. When reading one of those to judge daemon liveness, **confirm the newest line's `pid` matches the running process**: compare `cat <pidfile>` against the `pid` in the newest log line rather than trusting the file's last line or mtime alone.
+
+orch-monitor's `monitor.log` is a raw `console.*` stream, so its routine lines (the ~30s heartbeat, startup/shutdown) carry **no** `pid` field — the check above does not apply to it. Judge the monitor's liveness from its pidfile / running process directly (e.g. `catalyst-monitor status`) instead.
 
 ## Dependency order
 

@@ -28,10 +28,13 @@ teardown() {
 	rm -rf "${SCRATCH:-}"
 }
 
-# Cross-platform inode probe
+# Cross-platform inode probe. Try GNU coreutils (`stat -c %i`) FIRST: on Linux it
+# yields the real inode and short-circuits, so we never reach the BSD `stat -f %i`
+# form — on GNU, `-f` means "filesystem status" (mutable, changes when `.1` is
+# created) and would silently return the wrong value instead of the inode. macOS
+# stat rejects `-c`, so it falls through to the BSD `-f` form there.
 inode_of() {
-	if stat -f %i "$1" 2>/dev/null; then return; fi
-	stat -c %i "$1" 2>/dev/null
+	stat -c %i "$1" 2>/dev/null || stat -f %i "$1" 2>/dev/null
 }
 
 # -----------------------------------------------------------------------
@@ -189,6 +192,22 @@ else
 	chmod 755 "$UNWRITABLE_DIR"
 	rm -rf "$UNWRITABLE_DIR"
 fi
+
+# -----------------------------------------------------------------------
+echo "Test 8: leading-zero retention is decimal, not octal"
+setup
+source "$HELPER" 2>/dev/null || true
+# '08' is a fatal octal arithmetic error unless forced to base-10; the helper must
+# still start cleanly (fail-open) AND treat 08 as decimal 8 (rotates, not disabled).
+export CATALYST_LOG_RETAIN=08
+printf 'run-1\n' > "$LOG"
+if rotate_log_on_start "$LOG" && [[ -f "${LOG}.1" ]] && grep -q 'run-1' "${LOG}.1" 2>/dev/null; then
+	pass "retain=08 parsed as decimal 8 (rotated, no octal crash)"
+else
+	fail "leading-zero retention" "retain=08 did not rotate (octal misparse or crash)"
+fi
+unset CATALYST_LOG_RETAIN
+teardown
 
 # -----------------------------------------------------------------------
 echo ""

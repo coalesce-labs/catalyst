@@ -15,6 +15,10 @@ rotate_log_on_start() {
 
   local retain="${CATALYST_LOG_RETAIN:-5}"
   case "$retain" in (*[!0-9]*) retain=5 ;; esac   # non-numeric → default
+  # Force base-10: an all-digit value with a leading zero (e.g. 08, 09, 010)
+  # is otherwise read as octal by every `$(( ))` below — 08/09 are a fatal
+  # arithmetic error and 010 would mean 8, not 10. All-digit is guaranteed above.
+  retain=$((10#$retain))
   [ "$retain" -gt 0 ] 2>/dev/null || return 0     # 0 (or invalid) → disabled
 
   # No-op unless there is real prior content to preserve.
