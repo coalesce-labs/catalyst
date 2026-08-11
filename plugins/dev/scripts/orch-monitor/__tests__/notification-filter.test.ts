@@ -56,6 +56,52 @@ describe("shouldNotify (template parity with lib.rs)", () => {
     ).toBeNull();
   });
 
+  // CAT-170: one correlated incident → ONE alert. Members are labeled/rendered
+  // normally; only their push is suppressed so the anchor speaks for the group.
+  it("correlated MEMBER ticket → suppressed (the anchor carries the alert)", () => {
+    expect(
+      shouldNotify({
+        kind: "ticket",
+        id: "CTL-11",
+        attention: "needs-human",
+        humanQuestion: "Approve plan?",
+        correlationRole: "member",
+      }),
+    ).toBeNull();
+  });
+
+  it("correlated ANCHOR ticket → still notifies", () => {
+    expect(
+      shouldNotify({
+        kind: "ticket",
+        id: "CTL-10",
+        attention: "needs-human",
+        humanQuestion: "Approve plan?",
+        correlationRole: "anchor",
+      }),
+    ).toEqual({
+      title: "CTL-10 needs your decision",
+      body: "Approve plan?",
+      deepLink: "/?ticket=CTL-10",
+    });
+  });
+
+  it("uncorrelated singleton (no role) → notifies as before", () => {
+    expect(
+      shouldNotify({
+        kind: "ticket",
+        id: "CTL-12",
+        attention: "needs-human",
+        humanQuestion: "Approve plan?",
+        correlationRole: null,
+      }),
+    ).toEqual({
+      title: "CTL-12 needs your decision",
+      body: "Approve plan?",
+      deepLink: "/?ticket=CTL-12",
+    });
+  });
+
   it("daemon → healthy → 'Catalyst — daemon recovered'", () => {
     expect(shouldNotify({ kind: "daemon", to: "healthy" })).toEqual({
       title: "Catalyst — daemon recovered",
@@ -89,6 +135,7 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
       attentionSince?: string | null;
       humanQuestion?: string;
       title?: string;
+      correlationRole?: string | null;
     }>,
     daemon: "healthy" as "healthy" | "degraded" | "offline",
     anomaly: false,
@@ -106,6 +153,44 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
       }),
     );
     expect(out.map((n) => n.title)).toEqual(["CTL-1 needs your decision"]);
+  });
+
+  // CAT-170 regression pin: THE bug this ticket exists to fix. A three-ticket
+  // correlated incident used to produce three separate operator pushes because the
+  // projector keys purely on ticket id. Exactly one alert — the anchor's — now escapes.
+  it("a 3-ticket correlated incident emits exactly ONE alert (the anchor's)", () => {
+    const p = createNotificationProjector();
+    const out = p.project(
+      board({
+        tickets: [
+          { id: "CTL-1", attention: "needs-human", attentionSince: "s1", correlationRole: "anchor" },
+          { id: "CTL-2", attention: "needs-human", attentionSince: "s1", correlationRole: "member" },
+          { id: "CTL-3", attention: "needs-human", attentionSince: "s1", correlationRole: "member" },
+        ],
+      }),
+    );
+    expect(out.map((n) => n.title)).toEqual(["CTL-1 needs your decision"]);
+  });
+
+  it("a suppressed member still notifies later if it becomes its own anchor", () => {
+    const p = createNotificationProjector();
+    p.project(
+      board({
+        tickets: [
+          { id: "CTL-2", attention: "needs-human", attentionSince: "s1", correlationRole: "member" },
+        ],
+      }),
+    );
+    // Same episode, now promoted to anchor: suppression must not have latched the
+    // dedup key (fired.add only runs on a real emit), so the alert still lands.
+    const out = p.project(
+      board({
+        tickets: [
+          { id: "CTL-2", attention: "needs-human", attentionSince: "s1", correlationRole: "anchor" },
+        ],
+      }),
+    );
+    expect(out.map((n) => n.title)).toEqual(["CTL-2 needs your decision"]);
   });
 
   it("does not re-fire the same ticket attention episode", () => {

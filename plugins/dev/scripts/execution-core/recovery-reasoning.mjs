@@ -2983,10 +2983,6 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     }
     // The label landed (or its owner has it) — this escalation can now complete.
     clearEscalationDeferrals(orchDir, ticket);
-    // CAT-170: this ticket's escalation is proceeding under its own steam, so any
-    // pending member pointer has served its purpose. Cleared BEFORE the ledger latch
-    // so a later failure path cannot leave a stale pointer behind.
-    clearCorrelationPointer(orchDir, ticket);
 
     try {
       recordIntent(ticket, {
@@ -3016,6 +3012,16 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       log(`recovery-reasoning: ${ticket} exhausted-escalate latch did not persist — deferring side effects to the next tick`);
       return false;
     }
+    // CAT-170 (Codex #3209 P2): clear the member pointer ONLY once the latch is
+    // verified. It used to be cleared before recordIntent, which meant a throwing
+    // ledger write or a latch that did not persist dropped the durable anchor
+    // pointer while the escalation itself returned for retry. The next sweep then
+    // saw an unlatched ticket with no pointer, regrouped it as a singleton, and
+    // raised a SECOND full operator escalation — the exact duplicate-alert failure
+    // this correlation work exists to prevent. Retaining the pointer until the
+    // latch is proven costs at most a stale pointer on a permanently-failing host,
+    // which the correlation window expires anyway.
+    clearCorrelationPointer(orchDir, ticket);
     try {
       writeSignal(ticket, escalation);
     } catch (err) {
