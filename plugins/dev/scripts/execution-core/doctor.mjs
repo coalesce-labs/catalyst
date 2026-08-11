@@ -66,6 +66,7 @@ import {
   resolveClusterHosts,
   hostMembershipWarning,
   getLivenessAnchorIssue,
+  getLivenessReadSource,
   getExecutor, // CTL-1367 item 9: resolve the phase-worker executor for the sdk-auth gate
   // CTL-1355: class-aware grading — resolveNodeClass selects the rubric, isDraining
   // + getExecutionCoreDir drive the developer/monitor "will NOT pick up work" gate.
@@ -131,7 +132,7 @@ import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-l
 // only), like lib/secret-contract.mjs — safe under doctor's bare-Node runtime.
 import { evaluateDepSkew, readDepsBreadcrumb } from "./cloud-sync-deps.mjs";
 import { ownedBy } from "./hrw.mjs";
-import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
+import { readAnchorHealth, readPeerHeartbeats } from "./cluster-heartbeat.mjs";
 // CTL-1616 PR2: the shared secret-contract engine, imported DIRECTLY from the
 // zero-import lib leaf (node:fs/os/path only) — same pattern cluster-sync.mjs
 // already uses (`../lib/secret-contract.mjs`), NOT re-exported through
@@ -644,7 +645,8 @@ export async function checkPeerUniqueness(deps = {}) {
       mkCheck(
         "peer-uniqueness",
         STATUS.WARN,
-        `peer heartbeats returned empty — cluster may be freshly initialized or anchor is stale`,
+        `peer heartbeats returned empty — cluster may be freshly initialized or anchor is stale ` +
+          `(see the liveness-anchor check for whether the anchor itself resolves)`,
       ),
     ];
   }
@@ -667,6 +669,91 @@ export async function checkPeerUniqueness(deps = {}) {
       `no live peer is using host name "${self}" (${peerKeys.length} peer(s) seen)`,
     ),
   ];
+}
+
+// checkLivenessAnchor — grades the configured Linear attachment anchor without
+// conflating a definitive missing/archived issue with an unknown transport error.
+export async function checkLivenessAnchor(deps = {}) {
+  const {
+    getLivenessAnchorIssue: _getAnchor = getLivenessAnchorIssue,
+    getLivenessReadSource: _getReadSource = getLivenessReadSource,
+    resolveSecretContract = resolveSecret,
+    hasLinearToken = () => resolveLinearTokenLive(resolveSecretContract) != null,
+    readAnchorHealth: _readAnchorHealth = readAnchorHealth,
+  } = deps;
+  const name = "liveness-anchor";
+
+  let anchor;
+  let source;
+  try {
+    anchor = _getAnchor();
+    source = _getReadSource();
+  } catch (err) {
+    return [mkCheck(name, STATUS.WARN, `could not resolve the liveness anchor config: ${err?.message ?? err}`)];
+  }
+
+  if (!anchor) {
+    return [mkCheck(
+      name,
+      STATUS.INFO,
+      `no liveness anchor issue configured — set CATALYST_LIVENESS_ANCHOR_ISSUE or ` +
+        `catalyst.cluster.livenessAnchorIssue (see 'catalyst-cluster set-anchor <ticket>')`,
+    )];
+  }
+  if (source !== "linear") {
+    return [mkCheck(
+      name,
+      STATUS.INFO,
+      `liveness read source is '${source}' — anchor '${anchor}' is configured but not load-bearing`,
+    )];
+  }
+  if (!hasLinearToken()) {
+    return [mkCheck(name, STATUS.WARN, `no Linear API token — cannot verify anchor '${anchor}'`)];
+  }
+
+  let health;
+  try {
+    health = await _readAnchorHealth(anchor);
+  } catch (err) {
+    return [mkCheck(name, STATUS.WARN, `anchor probe failed for '${anchor}': ${err?.message ?? err}`)];
+  }
+
+  if (health.error) {
+    return [mkCheck(name, STATUS.WARN, `could not read anchor '${anchor}': ${health.error}`)];
+  }
+  if (health.found === false) {
+    return [mkCheck(
+      name,
+      STATUS.FAIL,
+      `liveness anchor '${anchor}' does not resolve in Linear (deleted or wrong identifier) — ` +
+        `every host's heartbeat publish aborts, so cross-host failover is dead. Point ` +
+        `catalyst.cluster.livenessAnchorIssue at a live ticket ('catalyst-cluster set-anchor <ticket>') ` +
+        `and restart the stack on every host.`,
+    )];
+  }
+  if (health.archived) {
+    return [mkCheck(
+      name,
+      STATUS.FAIL,
+      `liveness anchor '${anchor}' is ARCHIVED in Linear — un-archive it, or move the anchor ` +
+        `with 'catalyst-cluster set-anchor <ticket>' on every host. This ticket is fleet ` +
+        `infrastructure and must stay open.`,
+    )];
+  }
+  if (health.closed) {
+    return [mkCheck(
+      name,
+      STATUS.WARN,
+      `liveness anchor '${anchor}' is in a closed state ('${health.stateName ?? health.stateType}') — ` +
+        `Linear still serves its attachments so liveness works today, but a completed issue is ` +
+        `auto-archived eventually and archival DOES break the fleet. Reopen it.`,
+    )];
+  }
+  return [mkCheck(
+    name,
+    STATUS.PASS,
+    `liveness anchor '${anchor}' is open and resolvable (${health.stateName ?? "state unknown"})`,
+  )];
 }
 
 // ─── Phase 4: Bot-credential identity + Linear connectivity ──────────────────
@@ -6578,6 +6665,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),
+    () => checkLivenessAnchor(),
     () => checkBotCredentials({ expectedBotUserId }),
     () => checkConnectivity({ seed, otel }),
     () => checkSecretsHygiene(),
