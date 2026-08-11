@@ -98,6 +98,21 @@ scan_for_zsh_special_locals() {
   local lineno=0
   while IFS= read -r line; do
     lineno=$((lineno + 1))
+    # Prefilter (CTL-1777 Codex P2, #3238): only pay the subshell+awk cost for
+    # lines that actually carry a `local `/`typeset ` declaration keyword. The
+    # live scan covers ~7,900 lines of lib/*.sh; without this, each line spawns a
+    # command-substitution subshell plus an awk, so one suite creates thousands
+    # of processes and runs slowly enough to risk CI timeouts. Tab-normalize
+    # first so `local<TAB>path` still qualifies — this is byte-identical to
+    # check_line_for_specials' own keyword `case`, so any line it would flag
+    # necessarily passes this gate (no detection semantics change; a comment that
+    # merely mentions the keyword still falls through to the real tokenizer,
+    # which strips the trailing comment and returns clean).
+    local norm_pf="${line//$'\t'/ }"
+    case "$norm_pf" in
+      *"local "*|*"typeset "*) : ;;
+      *) continue ;;
+    esac
     local hit
     hit="$(check_line_for_specials "$line")"
     if [[ -n "$hit" ]]; then
