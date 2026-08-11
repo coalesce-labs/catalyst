@@ -597,7 +597,9 @@ export function runBatchOnce(ids, { spawn = spawnSync, sample = sampleAndPublish
   const trailer = lines.pop() ?? "";
   let httpCode;
   try {
-    headers = JSON.parse(trailer || "null");
+    const parsedTrailer = JSON.parse(trailer || "null");
+    if (!parsedTrailer || typeof parsedTrailer !== "object" || Array.isArray(parsedTrailer)) throw new Error("legacy trailer");
+    headers = parsedTrailer;
     httpCode = Number((lines.pop() ?? "").trim());
   } catch {
     // curl < 7.83 does not understand header_json. Preserve the historic
