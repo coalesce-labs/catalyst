@@ -13,12 +13,15 @@ import {
   countSdkInflight,
   hasFreshClaim,
   computeLastPhaseAdvanceTs,
+  readLastPhaseAdvanceCached,
+  clearLastPhaseAdvanceCache,
 } from "./signal-reader.mjs";
 
 let orchDir;
 
 beforeEach(() => {
   orchDir = mkdtempSync(join(tmpdir(), "exec-core-sigreader-"));
+  clearLastPhaseAdvanceCache();
 });
 
 afterEach(() => {
@@ -73,6 +76,73 @@ describe("computeLastPhaseAdvanceTs", () => {
     expect(computeLastPhaseAdvanceTs(null, { self: "mini", now })).toBeNull();
     expect(computeLastPhaseAdvanceTs([null, 3, { status: "complete", updatedAt: "bad" }], { self: "mini", now })).toBeNull();
     expect(computeLastPhaseAdvanceTs([{ status: "complete", updatedAt: "2026-08-09T04:00:00Z" }], { self: "mini", now })).toBeNull();
+  });
+});
+
+describe("readLastPhaseAdvanceCached (CAT-126)", () => {
+  const terminal = (host, updatedAt) => [{ status: "done", updatedAt, raw: { host: { name: host } } }];
+  const env = { EXECUTION_CORE_LAST_ADVANCE_CACHE_MS: "25000" };
+  const baseNow = Date.parse("2026-08-09T03:00:00Z");
+
+  test("walks once within the TTL and re-walks after it expires", () => {
+    let clock = baseNow;
+    let walks = 0;
+    const readSignals = () => terminal("mini", `2026-08-09T02:00:0${walks++}Z`);
+    const options = { now: () => clock, env, readSignals };
+    const first = readLastPhaseAdvanceCached({ orchDir, self: "mini" }, options);
+    const second = readLastPhaseAdvanceCached({ orchDir, self: "mini" }, options);
+    expect(second).toBe(first);
+    expect(walks).toBe(1);
+    clock += 25_001;
+    expect(readLastPhaseAdvanceCached({ orchDir, self: "mini" }, options)).not.toBe(first);
+    expect(walks).toBe(2);
+  });
+
+  test("keys the cache on orchDir and self", () => {
+    let walks = 0;
+    const readSignals = () => {
+      walks += 1;
+      return [
+        ...terminal("mini", "2026-08-09T01:00:00Z"),
+        ...terminal("peer", "2026-08-09T02:00:00Z"),
+      ];
+    };
+    expect(readLastPhaseAdvanceCached({ orchDir, self: "mini" }, { now: () => baseNow, env, readSignals }))
+      .toBe("2026-08-09T01:00:00.000Z");
+    expect(readLastPhaseAdvanceCached({ orchDir, self: "peer" }, { now: () => baseNow, env, readSignals }))
+      .toBe("2026-08-09T02:00:00.000Z");
+    expect(walks).toBe(2);
+  });
+
+  test("TTL 0 disables caching", () => {
+    let walks = 0;
+    const options = {
+      now: () => baseNow,
+      env: { EXECUTION_CORE_LAST_ADVANCE_CACHE_MS: "0" },
+      readSignals: () => (walks += 1, []),
+    };
+    readLastPhaseAdvanceCached({ orchDir, self: "mini" }, options);
+    readLastPhaseAdvanceCached({ orchDir, self: "mini" }, options);
+    expect(walks).toBe(2);
+  });
+
+  test("caches null results but does not cache throws", () => {
+    let walks = 0;
+    const nullReader = () => (walks += 1, []);
+    expect(readLastPhaseAdvanceCached({ orchDir, self: "mini" }, { now: () => baseNow, env, readSignals: nullReader })).toBeNull();
+    expect(readLastPhaseAdvanceCached({ orchDir, self: "mini" }, { now: () => baseNow + 1, env, readSignals: nullReader })).toBeNull();
+    expect(walks).toBe(1);
+
+    clearLastPhaseAdvanceCache();
+    const retryReader = () => {
+      walks += 1;
+      if (walks === 2) throw new Error("transient");
+      return terminal("mini", "2026-08-09T02:00:00Z");
+    };
+    expect(readLastPhaseAdvanceCached({ orchDir, self: "mini" }, { now: () => baseNow, env, readSignals: retryReader })).toBeNull();
+    expect(readLastPhaseAdvanceCached({ orchDir, self: "mini" }, { now: () => baseNow + 1, env, readSignals: retryReader }))
+      .toBe("2026-08-09T02:00:00.000Z");
+    expect(walks).toBe(3);
   });
 });
 

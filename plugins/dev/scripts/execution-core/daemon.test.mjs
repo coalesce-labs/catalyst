@@ -35,10 +35,12 @@ import {
   _isBotId,
   writeBootFacts,
 } from "./daemon.mjs";
-import { getEventLogPath, log } from "./config.mjs";
+import { getEventLogPath, getHostName, log } from "./config.mjs";
 import { BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { defaultDispatch, makeCommentWakeDispatch } from "./dispatch.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
+import { startLivenessPublisher } from "./cluster-heartbeat-publisher.mjs";
+import { clearLastPhaseAdvanceCache } from "./signal-reader.mjs";
 import {
   recordHoldStop,
   holdStopCooldownPath,
@@ -255,6 +257,54 @@ describe("startDaemon heartbeat admission wiring (CTL-1322)", () => {
     expect(admission).toHaveProperty("holdReason");
     expect(admission).toHaveProperty("effectiveCapacity");
     expect(admission).toHaveProperty("activeWorkers");
+  });
+});
+
+describe("startDaemon last phase advance wiring (CAT-126)", () => {
+  test("both publishers observe one shared cached last-advance value", () => {
+    const worker = join(catalystDir, "execution-core", "workers", "CAT-126");
+    mkdirSync(worker, { recursive: true });
+    const signalPath = join(worker, "phase-implement.json");
+    writeFileSync(signalPath, JSON.stringify({
+      ticket: "CAT-126",
+      phase: "implement",
+      status: "done",
+      completedAt: "2026-08-09T02:00:00Z",
+    }));
+    clearLastPhaseAdvanceCache();
+    let captured = null;
+    startDaemon({
+      recover: () => ({}),
+      reconcileBoot: () => ({}),
+      startMonitor: () => {},
+      startScheduler: () => {},
+      startHeartbeat: (opts) => {
+        captured = opts;
+        return { stop() {}, started: Promise.resolve() };
+      },
+      watchRegistry: false,
+    });
+    expect(captured).not.toBeNull();
+    const heartbeatValue = captured.lastAdvanceAtFn();
+    writeFileSync(signalPath, JSON.stringify({
+      ticket: "CAT-126",
+      phase: "implement",
+      status: "done",
+      completedAt: "2026-08-09T03:00:00Z",
+    }));
+    const calls = [];
+    startLivenessPublisher({
+      orchDir: join(catalystDir, "execution-core"),
+      roster: [getHostName(), "peer"],
+      self: getHostName(),
+      anchorIssue: "CAT-1",
+      readSource: () => "linear",
+      ownedTickets: () => [],
+      publish: (args) => calls.push(args),
+      intervalMs: 60_000,
+    }).stop();
+    expect(heartbeatValue).toBe("2026-08-09T02:00:00.000Z");
+    expect(calls[0].lastAdvanceAt).toBe(heartbeatValue);
   });
 });
 

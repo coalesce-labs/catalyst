@@ -97,6 +97,49 @@ export function computeLastPhaseAdvanceTs(signals, { self, now = Date.now() } = 
   return latest == null ? null : new Date(latest).toISOString();
 }
 
+// CAT-126 (deferred CAT-57 finding 5): readAllPhaseSignals is a readdir +
+// JSON.parse of every retained per-phase signal, and two publishers in the same
+// daemon need the same derived value on different cadences. A short shared TTL
+// memo drops the slower publisher's duplicate walk while remaining below the
+// 30-second heartbeat cadence. Null is a legitimate result and is cached; a
+// failed walk is not, so the next call retries.
+const LAST_ADVANCE_CACHE_MS_DEFAULT = 25_000;
+const lastAdvanceCache = new Map();
+
+function resolveLastAdvanceCacheMs(env) {
+  const configured = Number(env?.EXECUTION_CORE_LAST_ADVANCE_CACHE_MS);
+  return Number.isFinite(configured) && configured >= 0
+    ? configured
+    : LAST_ADVANCE_CACHE_MS_DEFAULT;
+}
+
+export function clearLastPhaseAdvanceCache() {
+  lastAdvanceCache.clear();
+}
+
+export function readLastPhaseAdvanceCached(
+  { orchDir, self },
+  { now = Date.now, env = process.env, readSignals = readAllPhaseSignals } = {},
+) {
+  const ttlMs = resolveLastAdvanceCacheMs(env);
+  const timestamp = now();
+  const key = `${orchDir}\0${self ?? ""}`;
+  if (ttlMs > 0) {
+    const cached = lastAdvanceCache.get(key);
+    if (cached && timestamp - cached.cachedAt < ttlMs) return cached.value;
+  }
+
+  let signals;
+  try {
+    signals = readSignals(orchDir);
+  } catch {
+    return null;
+  }
+  const value = computeLastPhaseAdvanceTs(signals, { self, now: timestamp });
+  if (ttlMs > 0) lastAdvanceCache.set(key, { cachedAt: timestamp, value });
+  return value;
+}
+
 // readWorkerSignals — glob both layouts under ${orchDir}/workers/ and return
 // a canonical WorkerSignal per worker:
 //   { ticket, layout:'flat'|'nested', signalPath, phase, status,
