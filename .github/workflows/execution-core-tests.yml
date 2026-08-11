@@ -721,6 +721,8 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            recovery-intent-ledger.test.mjs \
+            recovery-pass-context.test.mjs \
             recovery-fix-backoff.test.mjs \
             recovery-orphan-stale-e2e.test.mjs \
             pr-block-probe.test.mjs \
