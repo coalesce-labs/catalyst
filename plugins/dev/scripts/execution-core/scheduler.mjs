@@ -4085,6 +4085,58 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
   };
 }
 
+export function buildRecoverySeamDeps(
+  opts = {},
+  {
+    readSignals = readWorkerSignals,
+    getAgents = getAgentsCached,
+    clearStallFactory = defaultClearStall,
+  } = {}
+) {
+  // CAT-124 F3: an operator-supplied act registry is an intentional posture
+  // that binds BOTH passes — `unstuckActByCategory: {}` means inert everywhere.
+  // `!= null` deliberately agrees with the `??` at the Pass 0u wiring below:
+  // undefined is absent. The ternary mirrors the wholesale unstuckSweep override,
+  // which replaces the default block including actByCategory. Keep them in lockstep.
+  const unstuckActOverride = opts.unstuckSweep
+    ? opts.unstuckSweep.actByCategory
+    : opts.unstuckActByCategory;
+  const seamFallbackSuppressed = unstuckActOverride != null;
+  return {
+    orchDir: opts.orchDir,
+    seamFallbackSuppressed,
+    clearStall: clearStallFactory(opts.orchDir, opts.writeStatus ?? linearWrite),
+    writeStatus: opts.writeStatus ?? linearWrite,
+    resolvePrState: (ticket) => {
+      const adapter = opts.prAdapter;
+      if (!adapter || typeof adapter.prView !== "function") return null;
+      let pr = null;
+      for (const sig of readSignals(opts.orchDir)) {
+        if (sig.ticket === ticket) {
+          pr = sig.raw?.pr ?? sig.pr ?? null;
+          if (pr?.number) break;
+        }
+      }
+      if (!pr?.number) return null;
+      try {
+        const view = adapter.prView(ticket, pr);
+        if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
+        return view?.state ?? null;
+      } catch {
+        return null; // fail-closed: a gh error is never treated as MERGED.
+      }
+    },
+    jobLifecycle: (bgJobId) => {
+      if (typeof opts.isBgJobAlive !== "function" || !bgJobId) return false;
+      try {
+        return Boolean(opts.isBgJobAlive(bgJobId, { agents: getAgents().agents }));
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
 // CTL-1290: board-health throttle state (host-local, mirrors the unstuck-sweep /
 // recovery-pass cadence vars). The single-LLM cadence floor lives in
 // BOARD_HEALTH_INTERVAL_MS; this holds the last run ms across ticks.
@@ -8912,38 +8964,7 @@ function runTick() {
     // re-deriving them. The bare call is replaced by const tickResult = ...
     // CAT-47: one production dependency bundle is shared by Pass 0u's registry
     // and Pass 0r's fallback registry construction.
-    const unstuckSeamDeps = {
-      orchDir: runningOpts.orchDir,
-      clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
-      writeStatus: runningOpts.writeStatus ?? linearWrite,
-      resolvePrState: (ticket) => {
-        const adapter = runningOpts.prAdapter;
-        if (!adapter || typeof adapter.prView !== "function") return null;
-        let pr = null;
-        for (const sig of readWorkerSignals(runningOpts.orchDir)) {
-          if (sig.ticket === ticket) {
-            pr = sig.raw?.pr ?? sig.pr ?? null;
-            if (pr?.number) break;
-          }
-        }
-        if (!pr?.number) return null;
-        try {
-          const view = adapter.prView(ticket, pr);
-          if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
-          return view?.state ?? null;
-        } catch {
-          return null;
-        }
-      },
-      jobLifecycle: (bgJobId) => {
-        if (typeof runningOpts.isBgJobAlive !== "function" || !bgJobId) return false;
-        try {
-          return Boolean(runningOpts.isBgJobAlive(bgJobId, { agents: getAgentsCached().agents }));
-        } catch {
-          return false;
-        }
-      },
-    };
+    const unstuckSeamDeps = buildRecoverySeamDeps(runningOpts);
 
     const tickResult = schedulerTick(runningOpts.orchDir, {
       recoverySeamDeps: unstuckSeamDeps,
@@ -9207,58 +9228,16 @@ function runTick() {
         // actByCategory[decision.category] solely on the enforce branch); the mode
         // gate (readUnstuckSweepConfig, default 'off') is UNTOUCHED, so production
         // stays inert until an operator opts in — enforce is an operator decision
-        // per ADR-023. Operators can still fully override via
-        // runningOpts.unstuckActByCategory (e.g. a partial registry during staged
-        // rollout, or {} to preserve the prior shadow-/escalate-only posture); the
-        // ?? precedence keeps every existing scheduler test that injects
-        // unstuckActByCategory:{} working unchanged. The seams are pure-cored +
-        // injectable; here we bind the production deps already in scope.
+        // per ADR-023. An operator override is a posture that binds BOTH passes:
+        // buildRecoverySeamDeps derives seamFallbackSuppressed from a partial
+        // registry or {}, preventing Pass 0r from rebuilding live seams behind it.
+        // The earlier claim that existing scheduler tests injected {} was wrong;
+        // no pre-existing test did. The seams are pure-cored + injectable; here we
+        // bind the production deps already in scope.
         actByCategory:
           runningOpts.unstuckActByCategory ??
           buildUnstuckActSeams({
-            orchDir: runningOpts.orchDir,
-            // re-arm seam: deletes the stalled signal so the phase re-dispatches.
-            clearStall: defaultClearStall(
-              runningOpts.orchDir,
-              runningOpts.writeStatus ?? linearWrite
-            ),
-            // label-removal seam for the stale-label category.
-            writeStatus: runningOpts.writeStatus ?? linearWrite,
-            // resolvePrState: normalize the live PR view ("MERGED" | other) for the
-            // orphan-stale gate. Reuses the SAME prAdapter the recovery short-circuit
-            // + reconcile backstop use (built once at boot, gh only fires inside
-            // prView). Inert when no prAdapter / PR number is wired.
-            resolvePrState: (ticket) => {
-              const adapter = runningOpts.prAdapter;
-              if (!adapter || typeof adapter.prView !== "function") return null;
-              let pr = null;
-              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
-                if (sig.ticket === ticket) {
-                  pr = sig.raw?.pr ?? sig.pr ?? null;
-                  if (pr?.number) break;
-                }
-              }
-              if (!pr?.number) return null;
-              try {
-                const view = adapter.prView(ticket, pr);
-                if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
-                return view?.state ?? null;
-              } catch {
-                return null; // fail-closed: a gh error is never treated as MERGED.
-              }
-            },
-            // jobLifecycle: the same bg-liveness probe the reclaim sweep uses; bound
-            // to the warm agents snapshot. Inert (→ not-alive) without isBgJobAlive.
-            jobLifecycle: (bgJobId) => {
-              if (typeof runningOpts.isBgJobAlive !== "function" || !bgJobId) return false;
-              try {
-                return Boolean(
-                  runningOpts.isBgJobAlive(bgJobId, { agents: getAgentsCached().agents })
-                );
-              } catch {
-                return false;
-              }
-            },
+            ...unstuckSeamDeps,
             // runGit / fs primitives / emitPhaseComplete fall back to real defaults
             // inside unstuck-act-seams.mjs (git, node:fs, phase-agent-emit-complete).
           }),

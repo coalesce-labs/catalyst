@@ -5,19 +5,37 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-function envNum(name, fallback) {
-  const raw = process.env[name];
-  if (raw == null || raw === "") return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) && value >= 0 ? value : fallback;
+function envNum(names, fallback) {
+  for (const name of names) {
+    const raw = process.env[name];
+    if (raw == null || raw === "") continue;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= 0 ? value : fallback;
+  }
+  return fallback;
 }
 
-export const RECOVERY_FIX_BACKOFF_THRESHOLD = envNum("RECOVERY_FIX_BACKOFF_THRESHOLD", 3);
-export const RECOVERY_FIX_BACKOFF_BASE_MS = envNum("RECOVERY_FIX_BACKOFF_BASE_MS", 30 * 60 * 1000);
-export const RECOVERY_FIX_BACKOFF_MAX_MS = envNum("RECOVERY_FIX_BACKOFF_MAX_MS", 24 * 60 * 60 * 1000);
+// The attempts ledger owns the in-lifetime bound: threshold 3 deliberately exceeds its two
+// attempts, so this history engages only after forgetIntent resets that ledger. BASE_MS must
+// exceed the ledger's 30-minute cooldown or this layered guard never blocks. Values are captured
+// once at boot; CATALYST_-prefixed names are canonical and the CAT-47 names remain deprecated aliases.
+export const RECOVERY_FIX_BACKOFF_THRESHOLD = envNum(
+  ["CATALYST_RECOVERY_FIX_BACKOFF_THRESHOLD", "RECOVERY_FIX_BACKOFF_THRESHOLD"],
+  3
+);
+export const RECOVERY_FIX_BACKOFF_BASE_MS = envNum(
+  ["CATALYST_RECOVERY_FIX_BACKOFF_BASE_MS", "RECOVERY_FIX_BACKOFF_BASE_MS"],
+  2 * 60 * 60 * 1000
+);
+export const RECOVERY_FIX_BACKOFF_MAX_MS = envNum(
+  ["CATALYST_RECOVERY_FIX_BACKOFF_MAX_MS", "RECOVERY_FIX_BACKOFF_MAX_MS"],
+  24 * 60 * 60 * 1000
+);
+
+export const RECOVERY_FIX_FAILURES_DIR = ".recovery-fix-failures";
 
 export function fixFailurePath(orchDir, ticket, fixClass) {
-  return join(orchDir, ".recovery-fix-failures", `${ticket}-${fixClass}.json`);
+  return join(orchDir, RECOVERY_FIX_FAILURES_DIR, `${ticket}-${fixClass}.json`);
 }
 
 function readState(path) {

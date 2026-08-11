@@ -779,6 +779,7 @@ jobs:
             recovery-reasoning.test.mjs \
             recovery-fix-backoff.test.mjs \
             recovery-orphan-stale-e2e.test.mjs \
+            recovery-seam-deps.test.mjs \
             pr-block-probe.test.mjs \
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \

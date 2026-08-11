@@ -100,6 +100,13 @@ function markerPath(orchDir, ticket, phase, name) {
   return join(orchDir ?? ".", "workers", ticket, `.unstuck-${name}-${phase}.applied`);
 }
 
+// CAT-124 F5: Pass 0u sets this flag in BOTH slots from one lookup
+// (unstuck-sweep.mjs:189,198,206); Pass 0r's { ticket, phase, signal } candidate
+// (recovery-reasoning.mjs:1182-1186) sets neither, so it resolves false there deliberately.
+function readLinearTerminal(candidate) {
+  return Boolean(candidate?.linearTerminal ?? candidate?.evidence?.linearTerminal ?? false);
+}
+
 // ─── Phase 1: dirty-tree act seam ─────────────────────────────────────────────
 //
 // Clears machine-local rebase noise (REBASE_NOISE_PATHS + deleted node_modules)
@@ -232,7 +239,7 @@ export function buildSourceConflictActSeam(deps = {}) {
       commitSubjects,
       headIsDescendant,
       liveSessionInWorktree: false,
-      linearTerminal: candidate.evidence?.linearTerminal ?? false,
+      linearTerminal: readLinearTerminal(candidate),
       alreadyPushed: false,
     });
     if (decision.action !== "force-push") {
@@ -291,17 +298,23 @@ export function buildOrphanStaleActSeam(deps = {}) {
     );
 
     // Resolve LIVE evidence the way defaultCollectOrphanMergedCandidates does.
-    let prState = null;
+    let raw = null;
     try {
-      const r = resolvePrState(ticket);
-      if (r && typeof r.then === "function") {
-        throw new Error(`orphan-stale: pr-state-async-unsupported (${ticket})`);
-      }
-      prState = r;
-    } catch (err) {
-      if (err?.message?.includes("pr-state-async-unsupported")) throw err;
-      prState = null;
+      raw = resolvePrState(ticket);
+    } catch {
+      raw = null; // fail closed → classifier skip/pr-state-unknown
     }
+    // CAT-124 F6: checked OUTSIDE the try, and tagged by identity. Keying the rethrow on message
+    // text rethrew any injected reader whose own error merely MENTIONED the marker, instead of
+    // failing closed. We deliberately do NOT converge on the census's warn-and-null shape
+    // (unstuck-orphan-merge.mjs:91-99): that path still throws one line later as the generic
+    // pr-state-unknown, which erases the diagnostic while leaving the fail-loud contract identical.
+    if (raw && typeof raw.then === "function") {
+      const err = new Error(`orphan-stale: pr-state-async-unsupported (${ticket})`);
+      err.code = "pr-state-async-unsupported";
+      throw err;
+    }
+    const prState = raw;
 
     const bgJobId = signal?.bg_job_id ?? null;
     let bgJobAlive = false;
@@ -327,7 +340,11 @@ export function buildOrphanStaleActSeam(deps = {}) {
       nowMs: nowMs(),
       alreadyEmitted: false, // marker already gated above
       terminalDoneApplied,
-      linearTerminal: candidate.linearTerminal ?? false,
+      // Defense-in-depth: both live drivers make this gate unreachable. Pass 0u pre-skips terminal
+      // tickets before acting; Pass 0r's census and reasoning pass exclude them and never forward
+      // this field. Forwarding the CAT-47 plan's proposed value is therefore a no-op, while sourcing
+      // a truthy value elsewhere would skip the merged-orphan cohort this seam exists to reconcile.
+      linearTerminal: readLinearTerminal(candidate),
     });
     if (decision.action !== "emit-complete") {
       throw new Error(`orphan-stale: ${decision.reason ?? "gate-failed"} (${ticket})`);

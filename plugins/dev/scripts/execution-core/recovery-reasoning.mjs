@@ -376,6 +376,8 @@ export function reasoningRecoveryPass(items, opts = {}) {
     } else if (mode === "enforce") {
       // Enforce mode: actually invoke seams / remediate, record intent
       if (decision === "fix") {
+        // Deliberately after shouldSkipItem: the attempts ledger bounds failures within one
+        // lifetime. This history survives forgetIntent and guards identical post-reset re-entry.
         const backoff = inFixBackoffFn(orchDir, item.ticket, fix_class, nowMs());
         if (backoff.blocked) {
           actionLog.push(`fix backoff: ${fix_class} blocked (${backoff.count} identical failures)`);
@@ -1707,6 +1709,15 @@ export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
   // are deliberately inert, so callers with live evidence must inject them.
   let registry = deps.actByCategory;
   if (!registry || typeof registry[category] !== "function") {
+    // An explicit operator registry is a posture binding both passes. Do not rebuild a live
+    // fallback behind an empty or partial registry supplied to keep this category inert.
+    if (deps.seamFallbackSuppressed === true) {
+      return {
+        success: false,
+        reason: `registry seam '${category}' suppressed by operator override`,
+        details: { suppressed: true, category },
+      };
+    }
     try {
       registry = buildUnstuckActSeams({
         orchDir: deps.orchDir ?? resolveOrchDir(),

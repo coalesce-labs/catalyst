@@ -75,3 +75,32 @@ describe("comment dedup latch (CAT-47)", () => {
     expect(JSON.parse(readFileSync(join(root, ".recovery-fix-failures", "CAT-9-orphan_stale.json"), "utf8")).lastCommentHash).toBe(first);
   });
 });
+
+describe("CAT-124 backoff invariants and env-name resolution", () => {
+  test("the post-reset guard outlasts the recovery cooldown", async () => {
+    const { RECOVERY_COOLDOWN_MS } = await import("./recovery-reasoning.mjs");
+    expect(RECOVERY_FIX_BACKOFF_BASE_MS).toBeGreaterThan(RECOVERY_COOLDOWN_MS);
+  });
+
+  test("the canonical CATALYST_ name wins while the legacy alias remains supported", async () => {
+    const canonical = "CATALYST_RECOVERY_FIX_BACKOFF_THRESHOLD";
+    const legacy = "RECOVERY_FIX_BACKOFF_THRESHOLD";
+    try {
+      process.env[canonical] = "2";
+      process.env[legacy] = "5";
+      const preferred = await import("./recovery-fix-backoff.mjs?cat124=preferred");
+      expect(preferred.RECOVERY_FIX_BACKOFF_THRESHOLD).toBe(2);
+      const root = fresh();
+      preferred.recordFixFailure(root, "CAT-9", "orphan_stale", "same", 1000);
+      preferred.recordFixFailure(root, "CAT-9", "orphan_stale", "same", 1000);
+      expect(preferred.inFixBackoff(root, "CAT-9", "orphan_stale", 1000).blocked).toBe(true);
+
+      delete process.env[canonical];
+      const compatible = await import("./recovery-fix-backoff.mjs?cat124=legacy");
+      expect(compatible.RECOVERY_FIX_BACKOFF_THRESHOLD).toBe(5);
+    } finally {
+      delete process.env[canonical];
+      delete process.env[legacy];
+    }
+  });
+});
