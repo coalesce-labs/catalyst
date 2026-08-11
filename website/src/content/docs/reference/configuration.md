@@ -342,8 +342,8 @@ bot identity and OAuth credentials now live in the **global** `~/.config/catalys
   It must use a distinct OAuth application so quota exhaustion on the orchestrator application
   cannot make live peers look offline.
 
-Each carries a `botUserId` (the Linear user UUID of that app actor). The daemon and orch-monitor
-read **both** `botUserId`s into a single set so the self-echo / loop-prevention guard suppresses
+The worker and orchestrator entries carry a `botUserId` (the Linear user UUID of that app actor).
+The daemon and orch-monitor read those **two** `botUserId`s into a single set so the self-echo / loop-prevention guard suppresses
 comments and issue events from **either** app actor. These UUIDs aren't secret (they appear on every
 comment the app posts), but they are account-specific.
 
