@@ -820,7 +820,7 @@ export function defaultClassifyTicket(evidence, opts = {}) {
   }
 
   // Rule 1: Check for deterministic errors in logs
-  const deterministic = checkDeterministicErrors(logsOutput, failureReason);
+  const deterministic = checkDeterministicErrors(logsOutput, failureReason, signal?.phase);
   if (deterministic) {
     return {
       decision: "fix",
@@ -870,9 +870,33 @@ export function defaultClassifyTicket(evidence, opts = {}) {
 }
 
 // Check for deterministic errors that have registered seams
-export function checkDeterministicErrors(logsOutput, failureReason) {
+// PREPR_REVIVE_PHASES — the phases that, per lib/workflow.default.json's canonical pipeline
+// order (triage=0, research=1, plan=2, implement=3, verify=5, review=6, pr=7, monitor-merge,
+// monitor-deploy, teardown), run STRICTLY BEFORE "pr" and therefore can never have a PR to
+// reconcile. "pr" itself is deliberately EXCLUDED even though it's the last pre-PR-creation
+// phase: a stale "pr" signal is ambiguous — the dying worker may have already created the PR
+// before it could write its own success signal, so it still needs classifyOrphanMergedReconcile's
+// actual PR-existence check, not a blind revive (which risks a duplicate PR). An allowlist
+// (not "not in POST_PR_PHASES") is deliberate: an unrecognized/future phase falls through to the
+// existing orphan-reconcile routing, the same fail-safe direction this codebase uses elsewhere
+// ("a data gap never invents staleness, it only ever fails to detect a genuine one").
+const PREPR_REVIVE_PHASES = new Set(["triage", "research", "plan", "implement", "verify", "review"]);
+
+export function checkDeterministicErrors(logsOutput, failureReason, phase) {
   // Check failureReason shortcuts first (no log scan needed)
   if (failureReason === "orphan-sweep-stale") {
+    // CAT-150: a stale signal on a phase that runs strictly before "pr" can never have a PR to
+    // reconcile — classifyOrphanMergedReconcile would deterministically return pr-state-unknown
+    // every time, burning a self-heal attempt on a guaranteed failure. Route to a plain
+    // revive/redispatch of the same phase instead. An absent/unrecognized phase (including "pr"
+    // itself) keeps the pre-existing routing.
+    if (typeof phase === "string" && PREPR_REVIVE_PHASES.has(phase)) {
+      return {
+        fix_class: "orphan_stale_prepr",
+        seam_id: "revive-stale-phase",
+        reason: "Pre-PR phase stale — no PR could exist yet, reviving the same phase",
+      };
+    }
     return {
       fix_class: "orphan_stale",
       seam_id: "orphan-reconcile",
@@ -1684,6 +1708,31 @@ export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
         success: res.status === 0 || res.status == null,
         reason: "re-armed phase-pr (reset failed→pending) and woke the scheduler",
         details: { phase, signalPath, wakeStatus: res.status ?? null, seam_id: seamId },
+      };
+    } catch (err) {
+      return { success: false, reason: err.message, details: { error: err.message } };
+    }
+  }
+
+  // CAT-150: a pre-PR orphan-sweep-stale signal gets a plain revive/redispatch of the same
+  // phase, reusing recovery.mjs's already-battle-tested defaultReviveDispatch (used by
+  // boot-resume.mjs and watchdog-action.mjs for the same purpose). recovery.mjs imports FROM
+  // this file (RECOVERY_PASS_PHASE), so a static import back here would cycle — loaded via the
+  // same requireSync lazy-load already used for ./dispatch.mjs/./event-scan.mjs above.
+  // Injectable via deps.reviveDispatchMod for tests.
+  if (seamId === "revive-stale-phase") {
+    const orchDir = deps.orchDir ?? resolveOrchDir();
+    const phase = deps.candidate?.phase;
+    if (!orchDir || !phase) {
+      return { success: false, reason: "missing orchDir or phase for stale-phase revive", details: {} };
+    }
+    try {
+      const { defaultReviveDispatch } = deps.reviveDispatchMod ?? requireSync("./recovery.mjs");
+      const res = defaultReviveDispatch({ orchDir, ticket, phase });
+      return {
+        success: res?.code === 0,
+        reason: res?.code === 0 ? "revived stale pre-PR phase" : (res?.stderr || "revive dispatch failed"),
+        details: { phase, code: res?.code ?? null },
       };
     } catch (err) {
       return { success: false, reason: err.message, details: { error: err.message } };
