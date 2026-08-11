@@ -14,6 +14,7 @@ import {
   defaultEscalate,
 } from "./stale-pr-rescue-timer.mjs";
 import { readFenceStandoff } from "./fence-standoff.mjs";
+import { recordDurableEscalation } from "./durable-escalation.mjs";
 import * as linearWriteModule from "./linear-write.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
@@ -690,9 +691,9 @@ describe("escalation default seam", () => {
         opts.onSuppress?.({ ticket: "CAT-174", reason: "superseded", generation: 8 });
         return false;
       },
-      recordDurableEscalationFn: () => {
+      recordDurableEscalationFn: (record) => {
         durableAttempts += 1;
-        return durableAttempts > 1;
+        return durableAttempts > 1 ? recordDurableEscalation(record) : null;
       },
       appendStandoffEvent: () => {
         eventAttempts += 1;

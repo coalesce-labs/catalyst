@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { recordDurableEscalation } from "./durable-escalation.mjs";
 import {
   recordFenceSuppression, readFenceStandoff, clearFenceStandoff,
   evaluateStandoff, markBreakGlass, buildFenceStandoffEvent,
@@ -115,7 +116,7 @@ test("maybeBreakGlass emits and records exactly once after the bound", () => {
       verdict: { reason: "superseded" },
       env: { CATALYST_FENCE_STANDOFF_CAP: "2", CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1" },
       appendEvent: (event) => { events.push(event); return true; },
-      recordEscalation: (record) => { escalations.push(record); return { confirmed: true }; },
+      recordEscalation: (record) => { escalations.push(record); return recordDurableEscalation(record); },
       logger: { warn() {} },
     };
     maybeBreakGlass({ ...opts, now: 1 });
@@ -124,6 +125,7 @@ test("maybeBreakGlass emits and records exactly once after the bound", () => {
     expect(events).toHaveLength(1);
     expect(escalations).toHaveLength(1);
     expect(escalations[0]).toMatchObject({ labelConfirmed: false, source: "fence-standoff" });
+    expect(escalations[0].now).toBe("1970-01-01T00:00:00.002Z");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -139,7 +141,6 @@ test("maybeBreakGlass retries delivery before latching the episode", () => {
       site: "terminal-sweep",
       verdict: { reason: "superseded" },
       env: { CATALYST_FENCE_STANDOFF_CAP: "1", CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1" },
-      recordEscalation: () => ({ confirmed: true }),
       appendEvent: () => { eventAttempts += 1; return eventAttempts > 1; },
       logger: { warn() {} },
     };
