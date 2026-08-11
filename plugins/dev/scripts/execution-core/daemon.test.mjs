@@ -1604,6 +1604,47 @@ describe("handleCommentWake (CTL-549)", () => {
     );
   };
 
+  test("CAT-55: holds an artifact stall while the document is absent and replies once", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CAT-55", "plan", {
+      status: "stalled",
+      stalledReason: "prior-artifact-retry-exhausted",
+      dispatchFailureCode: 2,
+      dispatchFailureArtifactDir: "thoughts/shared/research",
+      dispatchFailureSearchedPath: "/wt/CAT-55/thoughts/shared/research",
+    });
+    let cleared = 0;
+    const posts = [];
+    const opts = {
+      orchDir: orch,
+      dispatch: () => {},
+      removeLabel: async () => {},
+      clearStall: () => cleared++,
+      artifactPresent: () => false,
+      repoRootFor: () => "/repo",
+      postComment: (_ticket, body) => { posts.push(body); return true; },
+    };
+    await handleCommentWake({ ticket: "CAT-55", body: "retry" }, opts);
+    await handleCommentWake({ ticket: "CAT-55", body: "retry again" }, opts);
+    expect(cleared).toBe(0);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toContain("thoughts/shared/research");
+  });
+
+  test("CAT-55: clears when present or indeterminate, and ignores non-artifact stalls", async () => {
+    const orch = tmpOrcDir();
+    for (const [ticket, signal, probe] of [
+      ["CAT-551", { status: "stalled", stalledReason: "prior-artifact-retry-exhausted", dispatchFailureCode: 2 }, () => true],
+      ["CAT-552", { status: "stalled", stalledReason: "prior-artifact-retry-exhausted", dispatchFailureCode: 2 }, () => null],
+      ["CAT-553", { status: "stalled", stalledReason: "dispatch-circuit-breaker", dispatchFailureCode: 2 }, () => false],
+    ]) {
+      writeSignal(orch, ticket, "plan", signal);
+      let cleared = 0;
+      await handleCommentWake({ ticket, body: "retry" }, { orchDir: orch, dispatch: () => {}, removeLabel: async () => {}, clearStall: () => cleared++, artifactPresent: probe, repoRootFor: () => "/repo" });
+      expect(cleared).toBe(1);
+    }
+  });
+
   test("re-dispatches ticket whose signal has status=needs-input", async () => {
     const orch = tmpOrcDir();
     writeSignal(orch, "CTL-1", "implement", {

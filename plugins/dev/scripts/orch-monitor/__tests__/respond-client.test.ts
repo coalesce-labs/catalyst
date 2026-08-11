@@ -366,3 +366,14 @@ describe("RespondOutcome is a closed discriminated union", () => {
     expect(outcomes).toHaveLength(3);
   });
 });
+
+describe("CAT-55 artifact response mapping", () => {
+  it("maps artifact_missing to an actionable rejection", async () => {
+    const out = await respondTicket(
+      { ticket: "CAT-55", response: "re-dispatch" },
+      { fetchImpl: (() => Promise.resolve(new Response(JSON.stringify({ status: "artifact_missing", ticket: "CAT-55", error: "missing thoughts/shared/research" }), { status: 409 }))) as unknown as typeof fetch },
+    );
+    expect(out).toMatchObject({ status: "rejected", reason: "artifact_missing" });
+    expect(out.status === "rejected" ? out.message : "").toContain("thoughts/shared/research");
+  });
+});

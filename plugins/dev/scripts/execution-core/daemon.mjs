@@ -28,6 +28,7 @@ import {
 } from "node:fs";
 import { resolve, dirname, basename, join } from "node:path";
 import { homedir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { parseEventTailChunk } from "./event-tail.mjs";
 import {
   getExecutionCoreDir,
@@ -78,7 +79,13 @@ import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.m
 import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-health-probe.mjs"; // CTL-1165 D5: pre-exhaustion fleet-health guardrail
 import { startDaemonWatchdogProbe as realStartDaemonWatchdogProbe } from "./daemon-watchdog-probe.mjs"; // CTL-1502: stuck-but-alive daemon watchdog
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
-import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
+import { getProjectConfig, listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
+import { defaultPriorArtifactComplete } from "./stall-janitor.mjs";
+import {
+  PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE,
+  isPriorArtifactBlock,
+  resolvePriorArtifactRespondGateMode,
+} from "./prior-artifact-block.mjs";
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
 // CAT-57: same advance computation the Linear-anchor liveness publisher uses, so the
 // Loki and Linear transports agree on what counts as a phase-boundary advance.
@@ -159,7 +166,7 @@ import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dep
 import { getReconcileHealth } from "./reconcile-health.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
-import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
+import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn, teamOf } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
 import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
 import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: codex boot gate (auth.json + `codex --version`) that degrades routed codex phases + emits execution-core.executor.codex-fallback
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
@@ -456,6 +463,26 @@ export function clearNeedsHumanMarkers(orchDir, ticket, { rm = unlinkSync } = {}
 // status === "stalled", clears the stall via the J3 seam (CTL-1067).
 // Fail-open throughout — a bad signal file or clearStall failure is logged
 // and skipped, never fatal.
+function defaultArtifactPresent({ ticket, phase, orchDir, repoRoot }) {
+  if (!ticket || !phase || !orchDir || !repoRoot) return null;
+  try {
+    return defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot });
+  } catch {
+    return null;
+  }
+}
+
+function defaultRepoRootFor(ticket) {
+  const team = teamOf(ticket);
+  return team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
+}
+
+function defaultPostComment(ticket, body) {
+  const helper = new URL("../lib/linear-comment-post.sh", import.meta.url);
+  const result = spawnSync(helper, [ticket, body], { encoding: "utf8", shell: false });
+  return result.status === 0;
+}
+
 export async function handleCommentWake(
   parsed,
   {
@@ -487,6 +514,10 @@ export async function handleCommentWake(
     // silently returns to the inbox and cannot be retried. A human answering IS
     // the signal that another attempt is warranted.
     forgetIntent = defaultForgetIntent,
+    artifactPresent = defaultArtifactPresent,
+    repoRootFor = defaultRepoRootFor,
+    gateMode = resolvePriorArtifactRespondGateMode(),
+    postComment = defaultPostComment,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -690,6 +721,30 @@ export async function handleCommentWake(
     // until the duplicate status is normalized away (CTL-1552).
     if (sig.status === "stalled" || sig.status === "needs-human") {
       const phase = fname.slice("phase-".length, -".json".length);
+      if (gateMode !== "off" && isPriorArtifactBlock(sig)) {
+        let present = null;
+        try {
+          present = artifactPresent({ ticket, phase, orchDir, repoRoot: repoRootFor(ticket) });
+        } catch {
+          present = null;
+        }
+        if (present === false) {
+          if (gateMode === "enforce") {
+            const marker = join(workerDir, `.artifact-blocked-reply-${phase}.applied`);
+            if (!existsSync(marker)) {
+              const where = sig.dispatchFailureSearchedPath ?? sig.dispatchFailureArtifactDir ?? "the prior-phase artifact directory";
+              const body = `${ticket}/${phase} is still blocked because the required document is missing from ${where}. ${PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE(where)}`;
+              try {
+                if (postComment(ticket, body)) writeFileSync(marker, "");
+              } catch {
+                /* fail-open comment transport; the stall remains held */
+              }
+            }
+            continue;
+          }
+          log.info({ ticket, phase }, "comment-wake: would hold artifact block (CAT-55 shadow)");
+        }
+      }
       try {
         clearStall({ ticket, phase });
       } catch (err) {

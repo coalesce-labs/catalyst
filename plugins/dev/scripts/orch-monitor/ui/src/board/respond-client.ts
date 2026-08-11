@@ -83,7 +83,7 @@ export type RespondOutcome =
       status: "rejected";
       ticket: string;
       /** Why it was rejected — drives the "it didn't take" surface copy. */
-      reason: "fenced" | "fence_indeterminate" | "confirm_mismatch" | "error";
+      reason: "fenced" | "fence_indeterminate" | "confirm_mismatch" | "artifact_missing" | "error";
       message?: string;
     };
 
@@ -170,6 +170,13 @@ export async function respondTicket(
         status: "rejected",
         ticket: raw.ticket ?? ticket,
         reason: "confirm_mismatch",
+        message: raw.error,
+      };
+    case "artifact_missing":
+      return {
+        status: "rejected",
+        ticket: raw.ticket ?? ticket,
+        reason: "artifact_missing",
         message: raw.error,
       };
     default:

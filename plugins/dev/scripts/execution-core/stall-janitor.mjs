@@ -38,6 +38,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { log } from "./config.mjs";
+import { PRIOR_ARTIFACT_MISSING_EXIT_CODE } from "./prior-artifact-block.mjs";
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on J4 terminal GC
 import { clearStalledLabel } from "./label-guard.mjs"; // CTL-1552: reconcile needs-human label before J4 dir removal
 import { parseWorktreeForBranch } from "./worktree.mjs";
@@ -161,8 +162,6 @@ export function classifyGhostSession(ctx = {}) {
 // artifact (PERMANENT_FAILURE_CODES in scheduler.mjs). It is the ONLY benign cause
 // that J3 is safe to auto-clear; any other code means re-dispatch would repeat the
 // same failure class.
-const PRIOR_ARTIFACT_MISSING_EXIT_CODE = 2;
-
 export function classifyStallClear(ctx = {}) {
   // Only the transient prior-artifact-retry-exhausted stall is auto-clearable.
   // A dispatch-circuit-breaker / phantom-ticket / any other stall is operator-owned.

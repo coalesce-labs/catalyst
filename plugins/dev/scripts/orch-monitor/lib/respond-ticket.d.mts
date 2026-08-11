@@ -81,6 +81,13 @@ export function findHeldRun(
   },
 ): HeldRun | null;
 
+export function defaultArtifactPresent(args: {
+  ticket: string;
+  phase: string;
+  orchDir: string;
+  repoRoot: string | null;
+}): boolean | null;
+
 export function readClusterHostCount(opts?: {
   env?: Record<string, string | undefined>;
   read?: (path: string, encoding: "utf8") => string;
@@ -111,15 +118,21 @@ export type RespondTicketResult =
   | { status: "confirm_mismatch"; expected: string }
   | { status: "fenced"; ticket: string; phase: string }
   | { status: "fence_indeterminate"; ticket: string; phase: string }
+  | { status: "artifact_missing"; ticket: string; phase: string; artifactDir: string | null; searchedPath: string | null; message: string }
   | { status: "resuming"; ticket: string; phase: string; fenceNoop: boolean };
 
 export function respondTicket(
-  args: { ticket: string; response: unknown; confirm: unknown },
+  args: { ticket: string; response: unknown; confirm: unknown; force?: boolean },
   opts?: {
     findHeld?: (ticket: string) => HeldRun | null;
     fenceCheck?: (args: { ticket: string; generation: number | null }) => FenceOutcome;
     record?: (args: { ticket: string; phase: string; response: unknown }) => unknown;
     clearMarker?: (args: { ticket: string }) => unknown;
     emit?: (args: { ticket: string; response: unknown }) => unknown;
+    artifactPresent?: (args: { ticket: string; phase: string; orchDir: string; repoRoot: string | null }) => boolean | null | undefined;
+    mode?: "off" | "shadow" | "enforce";
+    orchDir?: string;
+    repoRootFor?: (ticket: string) => string | null;
+    log?: { info?: (...args: unknown[]) => void };
   },
 ): RespondTicketResult;

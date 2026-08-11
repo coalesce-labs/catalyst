@@ -4429,6 +4429,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
             ticket,
             response,
             confirm: body.confirm,
+            force: body.force === true,
           });
           switch (result.status) {
             case "not_held":
@@ -4465,6 +4466,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
                 },
                 { status: 409 },
               );
+            case "artifact_missing":
+              return Response.json({ ...result, error: result.message }, { status: 409 });
             case "resuming":
               // Response recorded + marker cleared + resume event emitted; the UI
               // marks the row `resuming` and arms its optimistic-rollback timer.

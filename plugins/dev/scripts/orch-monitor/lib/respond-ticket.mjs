@@ -53,6 +53,14 @@ import { dirname, join } from "node:path";
 import { readClusterHostCount, runFenceCheck } from "./stop-worker.mjs";
 import { PHASE_ORDER } from "./board-data.mjs";
 import { nodeClass } from "./canonical-event-shared.ts";
+import { defaultPriorArtifactComplete } from "../../execution-core/stall-janitor.mjs";
+import { teamOf } from "../../execution-core/dispatch.mjs";
+import { getProjectConfig } from "../../execution-core/registry.mjs";
+import {
+  PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE,
+  isPriorArtifactBlock,
+  resolvePriorArtifactRespondGateMode,
+} from "../../execution-core/prior-artifact-block.mjs";
 
 // The execution-core worker tree root — ~/catalyst/execution-core/workers/<T>/.
 // Byte-identical to ticket-runs.mjs::DEFAULT_WORKERS_DIR and board-data.mjs's
@@ -246,6 +254,20 @@ export function findHeldRun(
   return null;
 }
 
+export function defaultArtifactPresent({ ticket, phase, orchDir, repoRoot }) {
+  if (!ticket || !phase || !orchDir || !repoRoot) return null;
+  try {
+    return defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot });
+  } catch {
+    return null;
+  }
+}
+
+function defaultRepoRootFor(ticket) {
+  const team = teamOf(ticket);
+  return team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
+}
+
 // ── orchestration: the endpoint body ─────────────────────────────────────────
 // respondTicket — drive the full BFF12 contract for
 // `POST /api/ticket/<ticket>/respond`. Outcome is a discriminated result the route
@@ -270,13 +292,18 @@ export function findHeldRun(
 // same gate BFF8 uses; mismatch is a hard 400 BEFORE any mutation. All
 // collaborators are injectable so tests cover every branch deterministically.
 export function respondTicket(
-  { ticket, response, confirm },
+  { ticket, response, confirm, force = false },
   {
     findHeld = findHeldRun,
     fenceCheck = runFenceCheck,
     record = recordResponse,
     clearMarker = clearNeedsHumanMarker,
     emit = emitResumeEvent,
+    artifactPresent = defaultArtifactPresent,
+    mode = resolvePriorArtifactRespondGateMode(),
+    orchDir = dirname(DEFAULT_WORKERS_DIR),
+    repoRootFor = defaultRepoRootFor,
+    log = console,
   } = {},
 ) {
   // Read first — the held run is BOTH the existence check and the source of the
@@ -304,6 +331,30 @@ export function respondTicket(
     return fence.stale
       ? { status: "fenced", ticket, phase }
       : { status: "fence_indeterminate", ticket, phase };
+  }
+
+  if (mode !== "off" && !force && isPriorArtifactBlock(signal)) {
+    let present = null;
+    try {
+      present = artifactPresent({ ticket, phase, orchDir, repoRoot: repoRootFor(ticket) });
+    } catch {
+      // Indeterminate probes fail open.
+    }
+    if (present === false) {
+      const artifactDir = signal.dispatchFailureArtifactDir ?? null;
+      const searchedPath = signal.dispatchFailureSearchedPath ?? null;
+      const where = searchedPath ?? artifactDir ?? "the prior-phase artifact directory";
+      const result = {
+        status: "artifact_missing",
+        ticket,
+        phase,
+        artifactDir,
+        searchedPath,
+        message: `${ticket}/${phase} is blocked on a document that is still missing from ${where}. ${PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE(where)}`,
+      };
+      if (mode === "enforce") return result;
+      log.info?.({ ticket, phase, ...result }, "respond: would refuse (CAT-55 shadow)");
+    }
   }
 
   // Fence current (or single-host no-op): mutate. Record the human's response,

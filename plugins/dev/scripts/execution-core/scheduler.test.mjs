@@ -2286,6 +2286,31 @@ describe("CTL-712: escalateDispatchExhausted — retry ceiling → stalled", () 
     expect(typeof sig.explanation.call_to_action).toBe("string");
     expect(sig.explanation.call_to_action.trim()).not.toBe("");
   });
+
+  test("CAT-55: artifact exhaustion persists facts and writes a manual explanation", () => {
+    escalateDispatchExhausted(orchDir, "CAT-55", "plan", {
+      code: 2,
+      cause: "prior_artifact_missing",
+      refusal: {
+        artifactDir: "thoughts/shared/research",
+        searchedPath: "/wt/CAT-55/thoughts/shared/research",
+      },
+    });
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CAT-55", "phase-plan.json"), "utf8"));
+    expect(sig.dispatchFailureArtifactDir).toBe("thoughts/shared/research");
+    expect(sig.dispatchFailureSearchedPath).toBe("/wt/CAT-55/thoughts/shared/research");
+    expect(sig.explanation.escalation_type).toBe("manual");
+    expect(sig.explanation.problem).toContain("/wt/CAT-55/thoughts/shared/research");
+    expect(sig.explanation.why_not_auto).toMatch(/re-dispatching alone will not clear/i);
+    expect(sig.explanation.options).toBeUndefined();
+  });
+
+  test("CAT-55: missing refusal detail preserves the generic decision explanation", () => {
+    escalateDispatchExhausted(orchDir, "CAT-56", "plan", { code: 2, cause: "prior_artifact_missing" });
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CAT-56", "phase-plan.json"), "utf8"));
+    expect(sig.explanation.escalation_type).toBe("decision");
+    expect(sig.explanation.options).toHaveLength(2);
+  });
 });
 
 // ─── CTL-1108: writeTerminalStalled explanation coverage ───

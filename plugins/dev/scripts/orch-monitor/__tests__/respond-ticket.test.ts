@@ -90,6 +90,56 @@ describe("respondTicket — Scenario 1: answer/unblock records the response and 
   });
 });
 
+describe("respondTicket — CAT-55 prior-artifact refusal", () => {
+  const blocked = {
+    status: "stalled",
+    stalledReason: "prior-artifact-retry-exhausted",
+    dispatchFailureCode: 2,
+    dispatchFailureArtifactDir: "thoughts/shared/research",
+    dispatchFailureSearchedPath: "/wt/CAT-55/thoughts/shared/research",
+  };
+
+  it("refuses while the document is positively absent and mutates nothing", () => {
+    const calls = { record: 0, clear: 0, emit: 0 };
+    const res = respondTicket(
+      { ticket: "CAT-55", response: "re-dispatch", confirm: "CAT-55" },
+      deps({
+        findHeld: () => ({ phase: "plan", signal: blocked }),
+        artifactPresent: () => false,
+        repoRootFor: () => "/repo",
+        record: () => calls.record++,
+        clearMarker: () => calls.clear++,
+        emit: () => calls.emit++,
+      }),
+    );
+    expect(res).toMatchObject({ status: "artifact_missing", artifactDir: "thoughts/shared/research" });
+    expect(res.status === "artifact_missing" ? res.message : "").toMatch(/re-dispatching alone will not clear/i);
+    expect(calls).toEqual({ record: 0, clear: 0, emit: 0 });
+  });
+
+  it("fails open on indeterminate probes and force overrides", () => {
+    for (const artifactPresent of [() => null, () => undefined, () => { throw new Error("probe"); }]) {
+      expect(respondTicket(
+        { ticket: "CAT-55", response: "retry", confirm: "CAT-55" },
+        deps({ findHeld: () => ({ phase: "plan", signal: blocked }), artifactPresent, repoRootFor: () => "/repo" }),
+      ).status).toBe("resuming");
+    }
+    expect(respondTicket(
+      { ticket: "CAT-55", response: "retry", confirm: "CAT-55", force: true },
+      deps({ findHeld: () => ({ phase: "plan", signal: blocked }), artifactPresent: () => false, repoRootFor: () => "/repo" }),
+    ).status).toBe("resuming");
+  });
+
+  it("off and shadow observe without refusing", () => {
+    for (const mode of ["off", "shadow"] as const) {
+      expect(respondTicket(
+        { ticket: "CAT-55", response: "retry", confirm: "CAT-55" },
+        deps({ findHeld: () => ({ phase: "plan", signal: blocked }), artifactPresent: () => false, repoRootFor: () => "/repo", mode, log: { info: () => {} } }),
+      ).status).toBe("resuming");
+    }
+  });
+});
+
 describe("respondTicket — no held run", () => {
   it("no parked needs-input run for the ticket → not_held, NOTHING mutated", () => {
     let mutated = false;
