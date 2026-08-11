@@ -434,6 +434,17 @@ and `RECOVERY_FIX_BACKOFF_MAX_MS` (default 24 hours). Audit-comment hashes are c
 successful delivery, so an outage leaves the comment eligible for retry while delivered duplicate
 content is suppressed.
 
+### Terminal-sweep worktree reap (CAT-169)
+
+The CTL-1242 terminal sweep also names the worktree of a ticket it confirms terminal or merged, so
+a ticket merged outside `monitor-merge → monitor-deploy → teardown` remains reachable by the
+reaper. It emits targeted `orphans.reap-requested` intent (or the
+`terminalSweep.would.reap-request` shadow twin) carrying the worktree, branch, and background-job
+identity. The event follows `reaper._handleOrphansSweep → _handlePrMergedCleanup`, the same
+presweep, CTL-791 evidence gate, salvage, re-check, archive, and removal path used by teardown. The
+scheduler never removes the tree or writes `.terminal-done.applied`; canceled tickets are excluded,
+and a dedicated `.terminal-sweep-reap.applied` marker makes the request one-shot.
+
 ### Delegate-first escalation + explanation chokepoint (CTL-1609)
 
 Two gaps closed at the point where the scheduler labels a ticket `needs-human`:
