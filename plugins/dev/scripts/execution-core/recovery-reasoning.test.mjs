@@ -35,6 +35,10 @@ import {
   defaultClearIntentCooldown,
   defaultLatchHasNoClock,
   restampNoClockEscalations,
+  deriveFailureSignature, // CAT-170
+  resolveCorrelationMode, // CAT-170
+  readCorrelationPointer, // CAT-170
+  writeCorrelationPointer, // CAT-170
 } from "./recovery-reasoning.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
@@ -3392,5 +3396,214 @@ describe("prNumberFromWorkerDir / resolvePrNumberForRecovery (CTL-1680)", () => 
     expect(
       resolvePrNumberForRecovery({ signal: { failureReason: "stalled" }, signalPath: signalPath() }),
     ).toBe(77);
+  });
+});
+
+// ─── CAT-170 (Codex #3209 review remediations) ──────────────────────────────
+
+describe("deriveFailureSignature (Codex #3209 P1)", () => {
+  test("reads the production item shape — fields live under .evidence, not .reason/.signal", () => {
+    // Exactly what buildRecoveryItems (recovery-evidence.mjs) emits.
+    const item = {
+      ticket: "CTL-1",
+      phase: "implement",
+      bgJobId: null,
+      evidence: { failureReason: "hit your session limit", signal: { failureReason: "hit your session limit" } },
+    };
+    expect(deriveFailureSignature(item)).toBe("hit your session limit");
+  });
+
+  test("stalledReason outranks failureReason at both altitudes", () => {
+    expect(
+      deriveFailureSignature({ evidence: { stalledReason: "phantom-ticket", failureReason: "other" } }),
+    ).toBe("phantom-ticket");
+    expect(
+      deriveFailureSignature({ evidence: { signal: { stalledReason: "nested", failureReason: "other" } } }),
+    ).toBe("nested");
+  });
+
+  test("an explicitly-supplied item-level field still wins", () => {
+    expect(
+      deriveFailureSignature({ reason: "explicit", evidence: { failureReason: "evidence" } }),
+    ).toBe("explicit");
+  });
+
+  test("nothing anywhere → null (a missing signature never correlates)", () => {
+    expect(deriveFailureSignature({})).toBeNull();
+    expect(deriveFailureSignature({ evidence: {} })).toBeNull();
+  });
+
+  test("an explicit evidence argument overrides item.evidence", () => {
+    expect(
+      deriveFailureSignature({ evidence: { failureReason: "stale" } }, { failureReason: "fresh" }),
+    ).toBe("fresh");
+  });
+});
+
+describe("resolveCorrelationMode (Codex #3209 P2)", () => {
+  test("the three supported modes pass through", () => {
+    for (const m of ["off", "shadow", "enforce"]) expect(resolveCorrelationMode(m)).toBe(m);
+  });
+
+  test("case and surrounding whitespace are normalized", () => {
+    expect(resolveCorrelationMode("  Enforce ")).toBe("enforce");
+    expect(resolveCorrelationMode("SHADOW")).toBe("shadow");
+  });
+
+  test("empty/misspelled/non-string values fall back to shadow, never silently to off", () => {
+    for (const bad of ["", "   ", "shdow", "on", null, undefined, 7, {}]) {
+      expect(resolveCorrelationMode(bad)).toBe("shadow");
+    }
+  });
+});
+
+describe("buildRecoveryEnvelope — correlation identifiers (Codex #3209 P2)", () => {
+  test("a shadow would-correlate event can identify its proposed group", () => {
+    const env = buildRecoveryEnvelope({
+      type: "recovery.escalation.would-correlate",
+      correlation_id: "corr-abc123",
+      signature: "hit your session limit",
+      anchor: "CTL-1",
+      tickets: ["CTL-1", "CTL-2", "CTL-3"],
+    });
+    expect(env.attributes["recovery.correlation_id"]).toBe("corr-abc123");
+    expect(env.attributes["recovery.signature"]).toBe("hit your session limit");
+    expect(env.attributes["recovery.anchor"]).toBe("CTL-1");
+    expect(env.attributes["recovery.correlated_count"]).toBe(3);
+    expect(env.body.payload.tickets).toEqual(["CTL-1", "CTL-2", "CTL-3"]);
+    expect(env.body.payload.correlation_id).toBe("corr-abc123");
+  });
+
+  test("an uncorrelated event is unchanged — no correlation keys are fabricated", () => {
+    const env = buildRecoveryEnvelope({ type: "recovery.escalated", ticket: "CTL-9" });
+    expect(env.attributes["recovery.correlation_id"]).toBeUndefined();
+    expect(env.attributes["recovery.anchor"]).toBeUndefined();
+    expect(env.body.payload).not.toHaveProperty("correlation_id");
+    expect(env.body.payload).not.toHaveProperty("tickets");
+  });
+});
+
+describe("escalateExhaustedIntents — correlation remediations (CAT-170 / Codex #3209)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-corr-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  const t0 = 1_000_000_000_000;
+  const seed = (ticket, signature, at = t0) =>
+    defaultRecordIntent(
+      ticket,
+      { decision: "dispatched", fix_class: "board-health", attempts: RECOVERY_MAX_ATTEMPTS, signature },
+      { orchDir, now: () => at },
+    );
+  const inert = { postComment: () => {}, writeSignal: () => {} };
+
+  test("P1 — a member whose label write fails is retried as a POINTER, not a new escalation", () => {
+    seed("CTL-1", "hit your session limit");
+    seed("CTL-2", "hit your session limit", t0 + 1000);
+
+    // Tick 1: the anchor (CTL-1, oldest) succeeds; the member's label write fails.
+    const events1 = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 2000,
+      correlationMode: "enforce",
+      emitEvent: (e) => events1.push(e),
+      labelNeedsHuman: (_d, t) => t === "CTL-1",
+      beliefOwnsLabel: () => false,
+      ...inert,
+    });
+    expect(events1.filter((e) => e.type === "recovery.escalated").map((e) => e.ticket)).toEqual(["CTL-1"]);
+    // CTL-2 did not complete — it deferred, and left a pointer at its anchor.
+    const pointer = readCorrelationPointer(orchDir, "CTL-2", { windowMs: 60 * 60 * 1000, now: t0 + 2000 });
+    expect(pointer).not.toBeNull();
+    expect(pointer.anchor).toBe("CTL-1");
+
+    // Tick 2: CTL-1 is now escalated:true, so it is NOT a candidate and no group can
+    // re-form. Pre-fix, CTL-2 regrouped as a singleton and got its own full
+    // recovery.escalated. It must stay a MEMBER pointer at CTL-1.
+    const events2 = [];
+    const signals2 = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 3000,
+      correlationMode: "enforce",
+      emitEvent: (e) => events2.push(e),
+      labelNeedsHuman: () => true,
+      beliefOwnsLabel: () => false,
+      postComment: () => {},
+      writeSignal: (t, payload) => signals2.push({ t, payload }),
+    });
+    expect(events2.filter((e) => e.type === "recovery.escalated")).toHaveLength(0);
+    const correlated = events2.filter((e) => e.type === "recovery.escalation.correlated");
+    expect(correlated).toHaveLength(1);
+    expect(correlated[0].ticket).toBe("CTL-2");
+    expect(correlated[0].anchor).toBe("CTL-1");
+    // and the pointer is cleared once the member completes
+    expect(readCorrelationPointer(orchDir, "CTL-2", {})).toBeNull();
+    // P1 — the correlation identity is board-readable on the written signal
+    expect(signals2[0].payload.correlation.role).toBe("member");
+    expect(signals2[0].payload.correlation.anchor).toBe("CTL-1");
+    expect(signals2[0].payload.correlation.id).toBe(correlated[0].correlation_id);
+  });
+
+  test("P2 — a candidate tried as a provisional anchor is not acted on twice in one tick", () => {
+    seed("CTL-1", "hit your session limit");
+    seed("CTL-2", "hit your session limit", t0 + 1000);
+
+    const deferred = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 2000,
+      correlationMode: "enforce",
+      emitEvent: (e) => {
+        if (e.type === "recovery.escalation.deferred") deferred.push(e.ticket);
+      },
+      // CTL-1 (the provisional anchor) always fails; CTL-2 succeeds as anchor.
+      labelNeedsHuman: (_d, t) => t === "CTL-2",
+      beliefOwnsLabel: () => false,
+      ...inert,
+    });
+    // Pre-fix CTL-1 was acted on twice (anchor attempt + member loop), bumping its
+    // bounded deferral counter twice and double-emitting the deferred event.
+    expect(deferred.filter((t) => t === "CTL-1")).toHaveLength(1);
+    expect(readEscalationDeferrals(orchDir, "CTL-1")).toBe(1);
+    // and it still carries a pointer at the anchor that actually won
+    expect(readCorrelationPointer(orchDir, "CTL-1", {}).anchor).toBe("CTL-2");
+  });
+
+  test("a stale pointer past the correlation window expires back to normal handling", () => {
+    seed("CTL-2", "hit your session limit");
+    writeCorrelationPointer(orchDir, "CTL-2", { anchor: "CTL-1", correlation_id: "corr-x" }, t0);
+    expect(readCorrelationPointer(orchDir, "CTL-2", { windowMs: 1000, now: t0 + 999 })).not.toBeNull();
+    expect(readCorrelationPointer(orchDir, "CTL-2", { windowMs: 1000, now: t0 + 5000 })).toBeNull();
+  });
+
+  test("a pointer at the ticket's own id is ignored (never self-anchors)", () => {
+    writeCorrelationPointer(orchDir, "CTL-2", { anchor: "CTL-2" }, t0);
+    expect(readCorrelationPointer(orchDir, "CTL-2", {})).toBeNull();
+  });
+
+  test("off/shadow modes ignore pointers entirely and stay independent escalations", () => {
+    seed("CTL-1", "hit your session limit");
+    seed("CTL-2", "hit your session limit", t0 + 1000);
+    writeCorrelationPointer(orchDir, "CTL-2", { anchor: "CTL-1", correlation_id: "corr-x" }, t0 + 1000);
+    const events = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 2000,
+      correlationMode: "off",
+      emitEvent: (e) => events.push(e),
+      labelNeedsHuman: () => true,
+      beliefOwnsLabel: () => false,
+      ...inert,
+    });
+    expect(events.filter((e) => e.type === "recovery.escalated").map((e) => e.ticket).sort()).toEqual([
+      "CTL-1",
+      "CTL-2",
+    ]);
   });
 });

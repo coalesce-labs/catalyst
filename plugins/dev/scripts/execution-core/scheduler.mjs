@@ -9627,6 +9627,30 @@ export function holisticBoardHealthAct(
   } = {}
 ) {
   const ordered = candidates.length ? candidates : anchor ? [anchor] : [];
+  // CAT-170 (Codex #3209 P1): sign each dispatch with the invariant that actually
+  // flagged THIS candidate, not the gate's count summary. `decision.gate.reason` on a
+  // proceeding scan is "N invariant(s) flagged" — identical for every ticket in the
+  // scan and identical across unrelated scans that happened to flag the same NUMBER
+  // of invariants, so two tickets stuck for completely different reasons received the
+  // same signature and the correlation sweep could collapse them into one operator
+  // incident. proposeMoves already records the per-ticket cause as the move name
+  // (kick-dispatch / judge-done-or-reopen / recover-unowned-in-flight / …), so the
+  // ticket→move map is the invariant evidence, keyed per candidate.
+  const moveByTicket = new Map();
+  for (const tier of ["tier1", "tier2", "tier3"]) {
+    for (const m of decision?.moves?.[tier] ?? []) {
+      // First writer wins: tier1 outranks tier2 outranks tier3, matching
+      // selectAnchorCandidates' own ordering.
+      if (m?.ticket && !moveByTicket.has(m.ticket)) moveByTicket.set(m.ticket, m.move ?? null);
+    }
+  }
+  // A candidate with no proposed move (a deferred-intent anchor, or the
+  // eligible-queue fallback) has no per-ticket invariant to name — fall back to the
+  // gate reason, which is at least truthful about why the scan proceeded.
+  const signatureFor = (cand) => {
+    const move = moveByTicket.get(cand);
+    return move ? `board-health: ${move}` : (decision?.gate?.reason ?? null);
+  };
   // CTL-1440 (P0b): track WHY candidates were ledger-skipped so the no-dispatch
   // return distinguishes "everything is terminally attempts-exhausted" (a
   // truthful non-wedge — the exhaustion sweep has escalated them to a human)
@@ -9666,7 +9690,7 @@ export function holisticBoardHealthAct(
         type: "recovery-pass",
         decision: "dispatched",
         fix_class: "board-health",
-        signature: decision?.gate?.reason ?? null,
+        signature: signatureFor(cand),
         outcome: !!r?.dispatched,
         source: "board-health",
       });
