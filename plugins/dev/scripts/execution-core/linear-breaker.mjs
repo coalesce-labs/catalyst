@@ -99,6 +99,8 @@ export function createLinearBreaker({
 // the ONE production instance wired to the real durable-event emitter (factory
 // default is a no-op so test breakers stay hermetic).
 export const linearBreaker = createLinearBreaker({ emitEvent: emitLinearBreakerEvent });
+// CAT-157: used only when the heartbeat has a genuinely separate app credential.
+export const heartbeatBreaker = createLinearBreaker({ emitEvent: emitLinearBreakerEvent });
 
 // deriveCaller — a compact, allocation-free tag for WHICH Linear path spawned the
 // failing call, derived from the exec argv (e.g. "linearis" + ["issues","list"] →
