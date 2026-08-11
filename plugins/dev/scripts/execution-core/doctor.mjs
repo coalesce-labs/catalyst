@@ -98,7 +98,21 @@ import { fingerprintLinearActor } from "./linear-actor-fingerprint.mjs";
 // Advisory-only: callers supply the live hosts' quota snapshots. Raw client ids
 // are accepted only at this pure seam and immediately hashed; messages contain
 // fingerprints, never credentials.
-export function checkLinearActorSharing({ hosts = [] } = {}) {
+function readFleetLinearActorSnapshots({ resolveRoster = resolveClusterHosts, self = getHostName(), run = spawnSync } = {}) {
+  const roster = resolveRoster()?.hosts ?? [];
+  const snapshotPath = resolve(process.env.CATALYST_ORCHESTRATOR_DIR || join(homedir(), "catalyst", "execution-core"), "linear-quota.json");
+  return roster.map((host) => {
+    try {
+      const raw = host === self
+        ? readFileSync(snapshotPath, "utf8")
+        : run("ssh", [host, "cat", snapshotPath], { encoding: "utf8", timeout: 5_000 })?.stdout;
+      return { host, ...JSON.parse(raw) };
+    } catch { return { host }; }
+  });
+}
+
+export function checkLinearActorSharing({ hosts, resolveRoster, readSnapshots = readFleetLinearActorSnapshots } = {}) {
+  hosts ??= readSnapshots({ resolveRoster });
   const visible = hosts.map((h) => ({
     host: h.host ?? h.name ?? "unknown",
     fingerprint: h.linearActorFingerprint ?? fingerprintLinearActor(h.clientId),
@@ -5237,7 +5251,7 @@ export function checksForClass(nc, opts = {}) {
     // CTL-1473: pre-install flag downgrades install-remediable checks (shipper, agents-for-class)
     // from FAIL to WARN when the join gate runs BEFORE install-services (which creates the services).
     preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
-    linearActorHosts = [],
+    linearActorHosts,
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
@@ -5248,7 +5262,7 @@ export function checksForClass(nc, opts = {}) {
   // CTL-1523 convention); the strict install-profile escalation branch exists
   // in checkDeploymentModeConsistency but is not wired into any profile yet.
   const deploymentModeCheck = () => checkDeploymentModeConsistency({ resolveRoster });
-  const linearActorSharingCheck = () => checkLinearActorSharing({ hosts: linearActorHosts });
+  const linearActorSharingCheck = () => checkLinearActorSharing({ hosts: linearActorHosts, resolveRoster });
   // #2930 round-2: split-brain Layer-2 path layout is unsupported until the
   // canonical sweep — zero rows on every non-divergent host.
   const layer2PathDivergenceCheck = () => checkLayer2PathDivergence();
