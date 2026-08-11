@@ -231,8 +231,8 @@ reporting is not yet wired to any running daemon.
 **Consumers folded onto the contract so far**: the heartbeat path can resolve a dedicated
 `linear-heartbeat-actor` / `linear-heartbeat-api-token`; its distinct OAuth application is the
 quota-isolation boundary, with an unprovisioned host falling back to `linear-api-token`. The
-provisioning runbook lives in the configuration reference. The remaining 10-file/12-site Linear-token read
-(`linear-query.mjs` — 3 sites, `cluster-heartbeat.mjs`, `cluster-claim.mjs`,
+provisioning runbook lives in the configuration reference. The remaining shared Linear-token readers
+(`linear-query.mjs` — 3 sites, `cluster-claim.mjs`,
 `linear-estimation-method.mjs`, `linear-reconcile-cli.mjs`, three `orch-monitor/lib/linear-*`
 fallback readers, `score-tickets.ts`, and the bash `catalyst_resolve_secret linear-api-token`
 snippet in `plugins/dev/skills/phase-triage/SKILL.md`); the Linear OAuth-mint trio

@@ -4289,7 +4289,7 @@ export async function checkDeploymentModeConsistency(deps = {}) {
 export function checkSecretContract(deps = {}) {
   const { env = process.env, deploymentMode = resolveDeploymentModeForShadow(env), resolveSecretFn = resolveSecret } = deps;
   const checks = [];
-  for (const id of ["linear-api-token", "linear-heartbeat-actor", "groq-api-key"]) {
+  for (const id of ["linear-api-token", "groq-api-key"]) {
     // CTL-1616 PR2 (B1): isolated via safeResolveSecretContract — a throwing
     // resolver surfaces as a shadowThrowCheck INFO row for this id instead of
     // crashing the whole doctor run (there is no per-check isolation in
@@ -4316,10 +4316,14 @@ export function checkSecretContract(deps = {}) {
 // CAT-157: advisory visibility for the dedicated heartbeat OAuth credential.
 // Absence is an intentional, fail-open rollout state and never changes grade.
 export function checkHeartbeatActor(deps = {}) {
-  const { resolveSecretContract = resolveSecret } = deps;
+  const {
+    env = process.env,
+    deploymentMode = resolveDeploymentModeForShadow(env),
+    resolveSecretContract = resolveSecret,
+  } = deps;
   const resolution = safeResolveSecretContract(resolveSecretContract, "linear-heartbeat-actor", {
-    env: process.env,
-    deploymentMode: resolveDeploymentModeForShadow(),
+    env,
+    deploymentMode,
   });
   if (!resolution.ok) {
     return [mkCheck("heartbeat-app-actor", STATUS.INFO, `secret resolution failed: ${resolution.error}`)];

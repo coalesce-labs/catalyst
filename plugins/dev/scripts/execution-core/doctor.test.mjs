@@ -2665,7 +2665,7 @@ describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)"
         return { value: null, source: "none", provider: "none" };
       },
     });
-    expect(seen.length).toBe(3);
+    expect(seen.length).toBe(2);
     for (const dm of seen) expect(dm).toEqual(CLOUD_MODE);
   });
 
@@ -2677,7 +2677,7 @@ describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)"
         return { value: null, source: "none", provider: "none" };
       },
     });
-    expect(seen.length).toBe(3);
+    expect(seen.length).toBe(2);
     // resolveDeploymentMode() never throws and always returns a resolution
     // object — the shadow must thread it, not undefined.
     for (const dm of seen) {
@@ -2727,7 +2727,7 @@ describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)"
           throw thrown;
         },
       });
-      expect(checks.length).toBe(3);
+      expect(checks.length).toBe(2);
       for (const c of checks) {
         expect(c.status).toBe(STATUS.INFO);
         expect(c.detail).toContain("SHADOW RESOLVER THREW");
@@ -2748,7 +2748,7 @@ describe("secret-contract shadow — deployment-mode threading (#2916 Codex P2)"
     }
     // Control: same env WITHOUT cloud mode — the normal ladder resolves both.
     const control = checkSecretContract({ env, deploymentMode: { mode: "single-host", source: "default", inferred: true, recognized: false }, resolveSecretFn: resolveSecretReal });
-    for (const c of control.filter((row) => row.name !== "secret-contract-linear-heartbeat-actor")) {
+    for (const c of control) {
       expect(c.status).toBe(STATUS.INFO);
       expect(c.detail).toContain("resolves");
     }
@@ -2826,7 +2826,6 @@ describe("checkSecretContract (CTL-1616 PR2)", () => {
     });
     const names = checks.map((c) => c.name);
     expect(names).toContain("secret-contract-linear-api-token");
-    expect(names).toContain("secret-contract-linear-heartbeat-actor");
     expect(names).toContain("secret-contract-groq-api-key");
     for (const c of checks) expect(c.status).toBe(STATUS.INFO);
   });
@@ -2847,7 +2846,7 @@ describe("checkSecretContract (CTL-1616 PR2)", () => {
         return { value: null, source: "none", provider: null };
       },
     });
-    expect(calledWith.map(([id]) => id)).toEqual(["linear-api-token", "linear-heartbeat-actor", "groq-api-key"]);
+    expect(calledWith.map(([id]) => id)).toEqual(["linear-api-token", "groq-api-key"]);
     expect(calledWith[0][1]).toEqual({ env: { X: "1" }, deploymentMode: { mode: "cluster", inferred: false } });
   });
 });
@@ -3462,7 +3461,7 @@ describe("secret-contract shadow — resolver throw-safety (CTL-1616 PR2/PR3)", 
 
   it("checkSecretContract: a resolver that always throws never produces a FAIL/WARN or an empty result", () => {
     const checks = checkSecretContract({ resolveSecretFn: THROWING_RESOLVER });
-    expect(checks.length).toBe(3); // one throw-row per shadow-covered id
+    expect(checks.length).toBe(2); // one throw-row per shadow-covered id
     for (const c of checks) {
       expect(c.status).toBe(STATUS.INFO);
       expect(c.detail).toContain("SHADOW RESOLVER THREW");

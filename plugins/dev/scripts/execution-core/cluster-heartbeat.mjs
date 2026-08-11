@@ -40,9 +40,14 @@ export function authHeader(token = "") {
 
 // CAT-157: heartbeat alone prefers its dedicated app-actor token. Other Linear
 // consumers intentionally retain the shared linear-api-token resolution.
-export function resolveHeartbeatToken({ resolve = resolveSecret } = {}) {
+export function resolveHeartbeatToken({ resolve = resolveSecret, env = process.env } = {}) {
   const dedicated = String(resolve("linear-heartbeat-api-token")?.value ?? "").trim();
-  if (dedicated) return { token: dedicated, dedicated: true };
+  // Scoped app-actor minting may preserve an inherited shared token as a
+  // fail-open fallback. Its provenance marker is load-bearing: that token still
+  // consumes the shared bucket and must therefore keep using the shared breaker.
+  if (dedicated && env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE !== "inherited") {
+    return { token: dedicated, dedicated: true };
+  }
   const shared = String(resolve("linear-api-token")?.value ?? "").trim();
   return { token: shared, dedicated: false };
 }
