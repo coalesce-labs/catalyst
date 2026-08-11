@@ -1146,12 +1146,20 @@ tickets receive pointer briefs rather than separate decisions.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `CATALYST_RECOVERY_CORRELATION` | `shadow` | `off` preserves independent escalation and emits no correlation events; `shadow` computes candidate groups and emits `recovery.escalation.would-correlate` without changing operator-visible behavior; `enforce` raises one anchored escalation per group and emits `recovery.escalation.correlated` for each member. |
-| `CATALYST_RECOVERY_CORRELATION_WINDOW_MIN` | `60` | Maximum span, in minutes, for matching signatures to belong to one correlated group. `0` or a non-number falls back to the default. |
-| `CATALYST_RECOVERY_CORRELATION_MIN_GROUP` | `2` | Minimum number of matching candidates required for correlation. `0` or a non-number falls back to the default. |
+| `CATALYST_RECOVERY_CORRELATION` | `shadow` | `off` preserves independent escalation and emits no correlation events; `shadow` computes candidate groups and emits `recovery.escalation.would-correlate` without changing operator-visible behavior; `enforce` raises one anchored escalation per group and emits `recovery.escalation.correlated` for each member. Matching is case-insensitive and trims surrounding whitespace. Any unrecognized value (empty, misspelled) falls back to `shadow` — never to `off`, so a typo degrades to observe-only rather than silently disabling the telemetry. |
+| `CATALYST_RECOVERY_CORRELATION_WINDOW_MIN` | `60` | Maximum span, in minutes, for matching signatures to belong to one correlated group. Must be a **finite positive** number; `0`, a negative value, `Infinity`, or a non-number falls back to the default. |
+| `CATALYST_RECOVERY_CORRELATION_MIN_GROUP` | `2` | Minimum number of matching candidates required for correlation. Must be an **integer of at least 2** (a group of one is a singleton by definition); anything smaller, non-integer, or non-numeric falls back to the default. |
+
+Both tunables are read once at module load, so a window or group-size change needs a daemon
+restart; the mode is re-read per call and takes effect without one.
 
 A missing or null signature never correlates with another missing signature. Changing the mode to
 `off` restores the independent escalation path; there is no on-disk migration to reverse.
+
+In `enforce` mode a member whose escalation cannot complete (for example a failed `needs-human`
+label write) records a pointer at its anchor under `<orchDir>/.escalation-correlation/<TICKET>.json`,
+so its retry on a later tick stays a pointer instead of becoming a second operator decision. The
+pointer expires with `CATALYST_RECOVERY_CORRELATION_WINDOW_MIN`.
 
 ### Board-health delegate (CTL-1290)
 
