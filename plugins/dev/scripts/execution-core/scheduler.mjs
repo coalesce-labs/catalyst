@@ -9287,10 +9287,18 @@ export function schedulerTick(
             });
             if (standoff.breakGlass && !standoff.deliveryPending) {
               stampFenceStandoffCooldown(orchDir, ticket, now(), env);
-            } else if (standoff.deliveryPending) {
+            } else if (standoff.deliveryPending && standoff.deliveryRetryable === true) {
               // Delivery is intentionally retryable on the next tick. The ordinary
               // 15-minute suppression marker was stamped immediately above; remove
               // it so it cannot accidentally become a delivery-retry latch.
+              //
+              // BOUNDED (CAT-173 review): only while maybeBreakGlass still reports the
+              // failure as retryable. Dropping the marker every tick on a PERSISTENTLY
+              // failing sink (unwritable `.escalations`, full disk) re-runs this block's
+              // terminal Linear probe + fence-check subprocess ~2x/sec forever — exactly
+              // the CTL-1329 burn that drained the OAuth bucket and froze fleet dispatch.
+              // Past the bound we leave the marker, so delivery still retries — once per
+              // 15-minute cooldown instead of every tick. Fail-closed on an absent flag.
               try {
                 unlinkSync(fenceSuppressMarkerPath(orchDir, ticket));
               } catch {
