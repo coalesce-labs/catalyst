@@ -53,6 +53,8 @@ import {
   // CTL-1394: the supervised cloud-sync health check. All node-safe (node:fs/os/path) —
   // do NOT import replica-read.mjs (it pulls bun:sqlite; doctor runs under bare node).
   getReplicaDbPath,
+  getReplicaHealthDir,
+  REPLICA_DEGRADED_ALERT_THRESHOLD,
   readLinearReplica,
   resolveNodeCloudTokenEnv,
   // CTL-1393: cluster-secret freshness check — clone dir + the durable
@@ -3249,6 +3251,52 @@ export function checkCloudSync(deps = {}) {
   return checks;
 }
 
+// CAT-134: first in-repo consumer of replica-health's durable alert latch.
+export function checkReplicaHealth(deps = {}) {
+  const {
+    dir = getReplicaHealthDir(),
+    readDir = (p) => readdirSync(p),
+    readFile = (p) => readFileSync(p, "utf8"),
+    optedIn = replicaTierOptedIn({
+      installed: defaultAgentInstalled(CLOUD_SYNC_AGENT_LABEL, defaultLaunchAgentsDir()),
+      mode: readLinearReplica().mode,
+    }),
+    now = Date.now(),
+    threshold = REPLICA_DEGRADED_ALERT_THRESHOLD,
+  } = deps;
+  let files;
+  try { files = readDir(dir).filter((f) => f.endsWith(".json")); }
+  catch { return [mkCheck("replica-health", STATUS.INFO, "no replica-health markers yet")]; }
+  if (files.length === 0) return [mkCheck("replica-health", STATUS.INFO, "no replica-health markers yet")];
+  const alerting = [];
+  const malformed = [];
+  for (const file of files) {
+    try {
+      const marker = JSON.parse(readFile(join(dir, file)));
+      if (marker.alerting !== true) continue;
+      alerting.push({
+        team: marker.team || file.replace(/\.json$/, ""),
+        streak: Number(marker.consecutiveDegraded) || threshold,
+        lastHealthyTs: marker.lastHealthyTs ?? null,
+      });
+    } catch { malformed.push(file); }
+  }
+  if (alerting.length === 0) {
+    const detail = `${files.length - malformed.length} team marker(s) healthy${malformed.length ? `; skipped malformed: ${malformed.join(", ")}` : ""}`;
+    return [mkCheck("replica-health", malformed.length ? STATUS.WARN : STATUS.PASS, detail)];
+  }
+  alerting.sort((a, b) => b.streak - a.streak || a.team.localeCompare(b.team));
+  const shown = alerting.slice(0, 5).map((m) => {
+    if (!m.lastHealthyTs) return `${m.team} (${m.streak}, never healthy on this node (unfinished provisioning))`;
+    const ageMs = Math.max(0, now - Date.parse(m.lastHealthyTs));
+    const age = ageMs >= 3_600_000 ? `${Math.round(ageMs / 3_600_000)}h` : `${Math.round(ageMs / 60_000)}m`;
+    return `${m.team} (${m.streak}, last healthy ${age} ago (regressed))`;
+  });
+  if (alerting.length > 5) shown.push(`+${alerting.length - 5} more`);
+  if (malformed.length) shown.push(`skipped malformed: ${malformed.join(", ")}`);
+  return [mkCheck("replica-health", optedIn ? STATUS.FAIL : STATUS.WARN, `replica reads degraded: ${shown.join("; ")}; run: catalyst-stack verify-cloud-sync`)];
+}
+
 // defaultClusterGit — a capturing git runner for the freshness check. Returns
 // { status, stdout }; never throws. Injectable so the check stays hermetic.
 function defaultClusterGit(args) {
@@ -5338,6 +5386,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkCloudTokenEnv(), // advisory
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
       () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
+      () => checkReplicaHealth(), // CAT-134: durable per-team replica degradation latch
       () => checkConfigScopeLeak(), // advisory
       () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
     ];
@@ -5405,6 +5454,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)
+    () => checkReplicaHealth(), // CAT-134: durable per-team replica degradation latch
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)

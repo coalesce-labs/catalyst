@@ -1,5 +1,6 @@
 // replica-health.mjs — per-team replica-read health escalation (CAT-35).
 // SIBLING: reconcile-health.mjs — same shape, deliberately not shared (CAT-35).
+// Consumer: doctor.mjs checkReplicaHealth surfaces the durable alert latch (CAT-134).
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getReplicaHealthDir, REPLICA_DEGRADED_ALERT_THRESHOLD, log } from "./config.mjs";
