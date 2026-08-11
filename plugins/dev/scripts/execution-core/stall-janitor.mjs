@@ -739,13 +739,13 @@ const PRIOR_PHASE = Object.freeze(
 // it means everywhere else: MIN_ARTIFACT_BYTES + the schema's closing markers for a
 // thoughts/ doc, a content-validated JSON for a worker-dir signal. Returns false on
 // any unknown phase / missing probe / throwing seam (the safe default — stay frozen).
-export function defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot } = {}) {
+export function defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot, worktreePath } = {}) {
   const prior = PRIOR_PHASE[phase];
   if (!prior) return false; // entry phase (no prior) or unknown — never auto-clear
   const probe = WORK_DONE_PROBES[prior];
   if (typeof probe !== "function") return false;
   try {
-    return probe({ ticket, orchDir, repoRoot }) === true;
+    return probe({ ticket, orchDir, repoRoot, worktreePath }) === true;
   } catch (err) {
     log.warn({ ticket, phase, prior, err: err?.message }, "stall-janitor: prior-artifact probe threw (CTL-1005)");
     return false;

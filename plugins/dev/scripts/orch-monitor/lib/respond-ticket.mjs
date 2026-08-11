@@ -54,6 +54,7 @@ import { readClusterHostCount, runFenceCheck } from "./stop-worker.mjs";
 import { PHASE_ORDER } from "./board-data.mjs";
 import { nodeClass } from "./canonical-event-shared.ts";
 import { defaultPriorArtifactComplete } from "../../execution-core/stall-janitor.mjs";
+import { resolveWorktree } from "../../execution-core/work-done-probes.mjs";
 import { teamOf } from "../../execution-core/dispatch.mjs";
 import { getProjectConfig } from "../../execution-core/registry.mjs";
 import {
@@ -257,7 +258,9 @@ export function findHeldRun(
 export function defaultArtifactPresent({ ticket, phase, orchDir, repoRoot }) {
   if (!ticket || !phase || !orchDir || !repoRoot) return null;
   try {
-    return defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot });
+    const worktreePath = resolveWorktree({ ticket, repoRoot });
+    if (!worktreePath) return null;
+    return defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot, worktreePath });
   } catch {
     return null;
   }

@@ -27,6 +27,7 @@ import {
   readdirSync,
 } from "node:fs";
 import { resolve, dirname, basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { parseEventTailChunk } from "./event-tail.mjs";
@@ -81,6 +82,7 @@ import { startDaemonWatchdogProbe as realStartDaemonWatchdogProbe } from "./daem
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { getProjectConfig, listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { defaultPriorArtifactComplete } from "./stall-janitor.mjs";
+import { resolveWorktree } from "./work-done-probes.mjs";
 import {
   PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE,
   isPriorArtifactBlock,
@@ -466,7 +468,9 @@ export function clearNeedsHumanMarkers(orchDir, ticket, { rm = unlinkSync } = {}
 function defaultArtifactPresent({ ticket, phase, orchDir, repoRoot }) {
   if (!ticket || !phase || !orchDir || !repoRoot) return null;
   try {
-    return defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot });
+    const worktreePath = resolveWorktree({ ticket, repoRoot });
+    if (!worktreePath) return null;
+    return defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot, worktreePath });
   } catch {
     return null;
   }
@@ -478,7 +482,7 @@ function defaultRepoRootFor(ticket) {
 }
 
 function defaultPostComment(ticket, body) {
-  const helper = new URL("../lib/linear-comment-post.sh", import.meta.url);
+  const helper = fileURLToPath(new URL("../lib/linear-comment-post.sh", import.meta.url));
   const result = spawnSync(helper, [ticket, body], { encoding: "utf8", shell: false });
   return result.status === 0;
 }
@@ -527,6 +531,39 @@ export async function handleCommentWake(
   // Catalyst app actor). Fail-open when botUserId is unset. Mirrors the inbox
   // writers' guard. botUserId accepts a string or Set<string>.
   if (_isBotId(botUserId, parsed.authorId)) return;
+
+  const workerDir = join(orchDir, "workers", ticket);
+  // CAT-55: gate before ANY label, marker, intent, or stall mutation. A reply
+  // cannot clear the condition it is answering while the required document is
+  // still positively absent. Unknown probes remain fail-open.
+  if (gateMode !== "off") {
+    let files = [];
+    try {
+      files = readdirSync(workerDir).filter((name) => name.startsWith("phase-") && name.endsWith(".json"));
+    } catch {
+      /* no local signal → legacy wake behavior */
+    }
+    for (const fname of files) {
+      let sig;
+      try { sig = JSON.parse(readFileSync(join(workerDir, fname), "utf8")); } catch { continue; }
+      if (!isPriorArtifactBlock(sig)) continue;
+      const phase = fname.slice("phase-".length, -".json".length);
+      let present = null;
+      try { present = artifactPresent({ ticket, phase, orchDir, repoRoot: repoRootFor(ticket) }); } catch { /* fail open */ }
+      if (present !== false) continue;
+      if (gateMode === "shadow") {
+        log.info({ ticket, phase }, "comment-wake: would hold artifact block (CAT-55 shadow)");
+        break;
+      }
+      const marker = join(workerDir, `.artifact-blocked-reply-${phase}.applied`);
+      if (!existsSync(marker)) {
+        const where = sig.dispatchFailureSearchedPath ?? sig.dispatchFailureArtifactDir ?? "the prior-phase artifact directory";
+        const body = `${ticket}/${phase} is still blocked because the required document is missing from ${where}. ${PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE(where)}`;
+        try { if (postComment(ticket, body)) writeFileSync(marker, ""); } catch { /* stall remains held */ }
+      }
+      return;
+    }
+  }
 
   // CTL-1567: CLEAR FIRST — a human answered, so the ticket must drop off the
   // "Needs you" list before anything else is attempted, and regardless of whether
@@ -691,7 +728,6 @@ export async function handleCommentWake(
     }
   }
 
-  const workerDir = join(orchDir, "workers", ticket);
   let signalFiles;
   try {
     signalFiles = readdirSync(workerDir).filter(
@@ -721,30 +757,6 @@ export async function handleCommentWake(
     // until the duplicate status is normalized away (CTL-1552).
     if (sig.status === "stalled" || sig.status === "needs-human") {
       const phase = fname.slice("phase-".length, -".json".length);
-      if (gateMode !== "off" && isPriorArtifactBlock(sig)) {
-        let present = null;
-        try {
-          present = artifactPresent({ ticket, phase, orchDir, repoRoot: repoRootFor(ticket) });
-        } catch {
-          present = null;
-        }
-        if (present === false) {
-          if (gateMode === "enforce") {
-            const marker = join(workerDir, `.artifact-blocked-reply-${phase}.applied`);
-            if (!existsSync(marker)) {
-              const where = sig.dispatchFailureSearchedPath ?? sig.dispatchFailureArtifactDir ?? "the prior-phase artifact directory";
-              const body = `${ticket}/${phase} is still blocked because the required document is missing from ${where}. ${PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE(where)}`;
-              try {
-                if (postComment(ticket, body)) writeFileSync(marker, "");
-              } catch {
-                /* fail-open comment transport; the stall remains held */
-              }
-            }
-            continue;
-          }
-          log.info({ ticket, phase }, "comment-wake: would hold artifact block (CAT-55 shadow)");
-        }
-      }
       try {
         clearStall({ ticket, phase });
       } catch (err) {

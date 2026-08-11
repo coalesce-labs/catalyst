@@ -18,6 +18,7 @@ import {
   buildResumeEvent,
   emitResumeEvent,
   eventLogPath,
+  defaultArtifactPresent,
 } from "../lib/respond-ticket.mjs";
 
 // A minimal held phase signal (status:"needs-input" is the parked predicate the
@@ -137,6 +138,10 @@ describe("respondTicket — CAT-55 prior-artifact refusal", () => {
         deps({ findHeld: () => ({ phase: "plan", signal: blocked }), artifactPresent: () => false, repoRootFor: () => "/repo", mode, log: { info: () => {} } }),
       ).status).toBe("resuming");
     }
+  });
+
+  it("the production probe is indeterminate when the worktree cannot resolve", () => {
+    expect(defaultArtifactPresent({ ticket: "CAT-55", phase: "plan", orchDir: "/orch", repoRoot: "/definitely/missing" })).toBeNull();
   });
 });
 

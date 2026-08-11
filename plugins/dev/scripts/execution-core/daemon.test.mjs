@@ -1614,19 +1614,26 @@ describe("handleCommentWake (CTL-549)", () => {
       dispatchFailureSearchedPath: "/wt/CAT-55/thoughts/shared/research",
     });
     let cleared = 0;
+    let removed = 0;
+    let forgotten = 0;
     const posts = [];
     const opts = {
       orchDir: orch,
       dispatch: () => {},
-      removeLabel: async () => {},
+      removeLabel: async () => { removed++; },
+      botUserId: new Set(["bot"]),
+      isManagedTicket: () => true,
+      forgetIntent: () => { forgotten++; },
       clearStall: () => cleared++,
       artifactPresent: () => false,
       repoRootFor: () => "/repo",
       postComment: (_ticket, body) => { posts.push(body); return true; },
     };
-    await handleCommentWake({ ticket: "CAT-55", body: "retry" }, opts);
-    await handleCommentWake({ ticket: "CAT-55", body: "retry again" }, opts);
+    await handleCommentWake({ ticket: "CAT-55", authorId: "human", body: "retry" }, opts);
+    await handleCommentWake({ ticket: "CAT-55", authorId: "human", body: "retry again" }, opts);
     expect(cleared).toBe(0);
+    expect(removed).toBe(0);
+    expect(forgotten).toBe(0);
     expect(posts).toHaveLength(1);
     expect(posts[0]).toContain("thoughts/shared/research");
   });

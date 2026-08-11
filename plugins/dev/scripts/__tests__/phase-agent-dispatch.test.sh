@@ -322,6 +322,9 @@ mkdir -p "${TEST_DIR}/empty-proj"
 		>"${TEST_DIR}/plan.out" 2>/dev/null)
 RC_PLAN=$?
 assert_eq "2" "$RC_PLAN" "plan-phase refusal also exits 2"
+PLAN_SEARCHED_PATH=$(jq -r '.searchedPath // empty' "${TEST_DIR}/plan.out")
+assert_eq "${TEST_DIR}/empty-proj/thoughts/shared/research" "$PLAN_SEARCHED_PATH" \
+	"plan refusal names the absolute research directory searched (CAT-55)"
 PLAN_EVT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
 if [[ -z $PLAN_EVT_FILE ]]; then
 	fail "plan-phase refusal: event log not created"
