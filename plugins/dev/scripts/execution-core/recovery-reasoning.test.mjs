@@ -2609,6 +2609,28 @@ describe("escalateExhaustedIntents correlation (CAT-170)", () => {
     expect(run().events).toEqual([]);
   });
 
+  // Regression (phase-review, CAT-170): when NO candidate in a correlated group
+  // can carry the anchor (every label write fails), each ticket must still be
+  // attempted exactly ONCE per tick. The pre-fix fallback re-ran every already-
+  // attempted candidate as a singleton, bumping each escalation-deferral counter
+  // twice and burning the RECOVERY_MAX_ESCALATION_DEFERRALS budget at 2x rate.
+  test("a correlated group whose anchor never lands bumps each deferral counter once per tick", () => {
+    seed("CAT-220", "account-rate-limited", t0);
+    seed("CAT-221", "account-rate-limited", t0 + 1);
+
+    const out = run({ labelNeedsHuman: () => false });
+
+    expect(out.result).toEqual([]);
+    expect(out.events.filter((e) => e.type === "recovery.escalated")).toHaveLength(0);
+    expect(out.events.filter((e) => e.type === "recovery.escalation.correlated")).toHaveLength(0);
+    const deferred = out.events.filter((e) => e.type === "recovery.escalation.deferred");
+    expect(deferred).toHaveLength(2);
+    expect(deferred.map((e) => e.ticket).sort()).toEqual(["CAT-220", "CAT-221"]);
+    for (const ticket of ["CAT-220", "CAT-221"]) {
+      expect(readEscalationDeferrals(orchDir, ticket)).toBe(1);
+    }
+  });
+
   test("different or absent signatures retain independent escalation behavior", () => {
     seed("CAT-180", "account-rate-limited");
     seed("CAT-181", "source-conflict");
