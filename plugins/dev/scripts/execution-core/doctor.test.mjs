@@ -46,6 +46,7 @@ import {
   checkStaleLock,
   checkSkillsDirPlugins,
   classifySkillsDirPlugins,
+  HOST_STATE_SEAMS,
   checksForClass,
   installChecksForClass,
   summarize,
@@ -4968,9 +4969,23 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: false,
       hasUpdaterAgent: true,
       pluginPullOwner: "updater",
+      skillsDirCheck: passingSkillsDirCheck,
       log: () => {},
     });
     expect(code).toBe(0);
+  });
+
+  it("FAILs a developer post-install when the skills-dir seam reports FAIL", async () => {
+    const code = await runDoctor({
+      resolveClass: () => nodeClassOf({ class: "developer", source: "layer2", raw: "developer" }),
+      profile: "install",
+      hasStackAgent: false,
+      hasUpdaterAgent: true,
+      pluginPullOwner: "updater",
+      skillsDirCheck: () => [{ name: "skills-dir-plugins", status: STATUS.FAIL, detail: "stubbed fail" }],
+      log: () => {},
+    });
+    expect(code).toBe(1);
   });
 });
 
@@ -5512,6 +5527,123 @@ describe("checksForClass — checkSkillsDirPlugins registration", () => {
   for (const cls of ["worker", "developer", "monitor"]) {
     it(`wires checkSkillsDirPlugins into the ${cls} suite`, () => {
       expect(src({ recognized: true, class: cls })).toContain("checkSkillsDirPlugins");
+    });
+  }
+});
+
+describe("checksForClass — skillsDirCheck seam (CAT-135)", () => {
+  for (const cls of ["worker", "developer", "monitor"]) {
+    it(`${cls} honors the seam exactly once by reference`, () => {
+      const sentinel = () => [{ name: "skills-dir-plugins", status: STATUS.PASS, detail: "SENTINEL" }];
+      const fns = checksForClass(nodeClassOf({ class: cls, raw: cls }), { skillsDirCheck: sentinel });
+      expect(fns).toContain(sentinel);
+      expect(fns.filter((fn) => fn === sentinel)).toHaveLength(1);
+    });
+
+    it(`${cls} keeps the live check as the default`, () => {
+      const source = checksForClass(nodeClassOf({ class: cls, raw: cls }))
+        .map((fn) => fn.toString())
+        .join("\n");
+      expect(source).toContain("checkSkillsDirPlugins");
+    });
+  }
+});
+
+describe("HOST_STATE_SEAMS — the host-state seam contract (CAT-135)", () => {
+  const classes = ["worker", "developer", "monitor"];
+  const buildRubric = (rubric, nc, opts) =>
+    rubric === "activation" ? checksForClass(nc, opts) : installChecksForClass(nc, opts);
+
+  it("is a frozen, unique, well-formed registry", () => {
+    expect(Object.isFrozen(HOST_STATE_SEAMS)).toBe(true);
+    expect(HOST_STATE_SEAMS.length).toBeGreaterThan(0);
+    expect(HOST_STATE_SEAMS.map(({ seam, checkName, rubrics }) => ({ seam, checkName, rubrics }))).toEqual([
+      { seam: "skillsDirCheck", checkName: "skills-dir-plugins", rubrics: ["activation", "install"] },
+      { seam: "pluginSourceFreshnessCheck", checkName: "plugin-source-freshness", rubrics: ["activation"] },
+      { seam: "staleLockCheck", checkName: "stale-lock", rubrics: ["activation"] },
+    ]);
+    expect(new Set(HOST_STATE_SEAMS.map(({ seam }) => seam)).size).toBe(HOST_STATE_SEAMS.length);
+    expect(new Set(HOST_STATE_SEAMS.map(({ checkName }) => checkName)).size).toBe(HOST_STATE_SEAMS.length);
+    for (const entry of HOST_STATE_SEAMS) {
+      expect(Object.isFrozen(entry)).toBe(true);
+      expect(Object.isFrozen(entry.rubrics)).toBe(true);
+      expect(entry.seam.length).toBeGreaterThan(0);
+      expect(entry.checkName.length).toBeGreaterThan(0);
+      expect(entry.rubrics.length).toBeGreaterThan(0);
+      expect(entry.rubrics.every((rubric) => ["activation", "install"].includes(rubric))).toBe(true);
+    }
+  });
+
+  it("honors every registered seam exactly once by identity in each declared rubric", () => {
+    for (const entry of HOST_STATE_SEAMS) {
+      for (const rubric of entry.rubrics) {
+        for (const cls of classes) {
+          const sentinel = () => [{ name: entry.checkName, status: STATUS.PASS, detail: "sentinel" }];
+          const fns = buildRubric(rubric, nodeClassOf({ class: cls, raw: cls }), { [entry.seam]: sentinel });
+          expect(fns.filter((fn) => fn === sentinel)).toHaveLength(1);
+        }
+      }
+    }
+  });
+
+  it("registers each underlying live check in every declared rubric", () => {
+    for (const entry of HOST_STATE_SEAMS) {
+      const needle = entry.checkName.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join("");
+      for (const rubric of entry.rubrics) {
+        for (const cls of classes) {
+          const source = buildRubric(rubric, nodeClassOf({ class: cls, raw: cls }), {})
+            .map((fn) => fn.toString()).join("\n");
+          expect(source).toContain(`check${needle}`);
+        }
+      }
+    }
+  });
+
+  it("keeps the install profile independent of divergent HOME trees", async () => {
+    const savedHome = process.env.HOME;
+    const savedClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+    const emptyHome = mkdtempSync(join(tmpdir(), "doctor-home-empty-"));
+    const decoyHome = mkdtempSync(join(tmpdir(), "doctor-home-decoy-"));
+    try {
+      const codes = [];
+      for (const home of [emptyHome, decoyHome]) {
+        process.env.HOME = home;
+        process.env.CLAUDE_CONFIG_DIR = join(home, ".claude");
+        for (const cls of ["worker", "developer"]) {
+          const opts = Object.fromEntries(HOST_STATE_SEAMS.map(({ seam, checkName }) => [
+            seam, () => [{ name: checkName, status: STATUS.PASS, detail: "stubbed" }],
+          ]));
+          codes.push(await runDoctor({
+            profile: "install",
+            resolveClass: () => nodeClassOf({ class: cls, raw: cls }),
+            hasStackAgent: cls === "worker",
+            hasUpdaterAgent: cls === "developer",
+            pluginPullOwner: cls === "worker" ? "broker" : "updater",
+            ...opts,
+            log: () => {},
+          }));
+        }
+      }
+      expect(codes).toEqual([0, 0, 0, 0]);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+      if (savedClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = savedClaudeConfig;
+      rmSync(emptyHome, { recursive: true, force: true });
+      rmSync(decoyHome, { recursive: true, force: true });
+    }
+  });
+
+  for (const [seam, checkName] of [
+    ["pluginSourceFreshnessCheck", "plugin-source-freshness"],
+    ["staleLockCheck", "stale-lock"],
+  ]) {
+    it(`${seam} is load-bearing and surfaces its injected FAIL`, async () => {
+      const sentinel = () => [{ name: checkName, status: STATUS.FAIL, detail: "stubbed fail" }];
+      const suite = checksForClass(nodeClassOf({ class: "worker", raw: "worker" }), { [seam]: sentinel });
+      const thunk = suite.find((fn) => fn === sentinel);
+      expect(thunk).toBe(sentinel);
+      expect((await thunk())[0].status).toBe(STATUS.FAIL);
     });
   }
 });
