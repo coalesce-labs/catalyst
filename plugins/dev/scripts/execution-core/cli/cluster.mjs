@@ -166,14 +166,22 @@ export function renderStatus(s) {
   return lines.join("\n") + "\n";
 }
 
-export function runStatus(argv = []) {
-  const anchor = getLivenessAnchorIssue();
-  const readSource = getLivenessReadSource();
+export function runStatus(argv = [], deps = {}) {
+  const {
+    getAnchor = getLivenessAnchorIssue,
+    getReadSource = getLivenessReadSource,
+    getRoster = getExistenceHosts,
+    getSelf = getHostName,
+    readPeers = readPeerHeartbeatsSync,
+    getDraining = () => isDraining(getExecutionCoreDir()),
+  } = deps;
+  const anchor = getAnchor();
+  const readSource = getReadSource();
   const status = buildStatus({
-    roster: getExistenceHosts(),
-    self: getHostName(),
-    peers: anchor ? readPeerHeartbeatsSync({ anchorIssue: anchor }) : {},
-    draining: isDraining(getExecutionCoreDir()),
+    roster: getRoster(),
+    self: getSelf(),
+    peers: readSource === "linear" && anchor ? readPeers({ anchorIssue: anchor }) : {},
+    draining: getDraining(),
     anchor,
     readSource,
   });
