@@ -33,7 +33,7 @@
 // kill-switch; enforce (CTL-1300) dispatches ONE holistic recovery-pass delegate
 // per proceeding scan, anchored + carrying the whole-board context — operator-gated.
 
-import { HEARTBEAT_GRACE_MS, isThrottled } from "./config.mjs";
+import { HEARTBEAT_GRACE_MS, isThrottled, RECONCILE_INTERVAL_MS } from "./config.mjs";
 import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecoveryEnvelope (CTL-1291 promotes the numbers)
 import { evaluateQuotaHeadroom, GITHUB_QUOTA_DEFAULTS } from "./github-quota.mjs";
 
@@ -80,6 +80,20 @@ const DEFAULT_THRESHOLDS = {
   stalledPrNoPushMs: Number(process.env.CATALYST_BH_STALLED_PR_NOPUSH_MS) || 5 * 24 * 3_600_000,
   githubCoreRemainingPct: GITHUB_QUOTA_DEFAULTS.coreRemainingPct,
   githubQuotaStaleMs: GITHUB_QUOTA_DEFAULTS.stalenessMs,
+  // CTL-1744: the delegate-lands grace window. The CTL-1174 triage gate
+  // (monitor.mjs dispatchTriage) is deliberately TWO-PASS: pass 1 sees no
+  // delegate, CLAIMS the ticket by delegating it to the orchestrator app-actor,
+  // and returns false (holding this tick); pass 2 dispatches triage — but only
+  // on the next sweepMissingTriage, which runs on the RECONCILE timer. So every
+  // freshly-claimed ticket is eligible-but-undispatched for up to one reconcile
+  // interval BY DESIGN, and must not be counted as dispatch-stall evidence.
+  //
+  // Derived from the real interval rather than a magic number, plus 60s of slack
+  // so a sweep landing just after a board-health scan cannot race the grace
+  // expiring. Observed 2026-08-10: without this, a 2-minute-old claim actuated a
+  // holistic recovery-pass delegate (opus, worktree, slot) on a healthy board.
+  delegateGraceMs:
+    Number(process.env.CATALYST_BH_DELEGATE_GRACE_MS) || RECONCILE_INTERVAL_MS + 60_000,
 };
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
@@ -461,6 +475,41 @@ export function resolveRosterSeam(value, fallback) {
   }
 }
 
+// normalizeDelegateClaims — CTL-1744. Coerce whatever the delegate-claim seam
+// returns into a clean Map<ticketId, claimedAtMs> of USABLE evidence only.
+//
+// This is the single place the fail-closed contract is enforced, and it is
+// deliberately strict: grace is a SUPPRESSION of a recovery signal, so it may be
+// granted only on positive, well-formed evidence. Anything ambiguous — a missing
+// map, a non-Map, a non-numeric / NaN / Infinity / non-positive timestamp — is
+// DROPPED rather than coerced, which means that ticket gets no grace and
+// checkDispatchLiveness treats it exactly as it does today.
+//
+// A future-dated claim is kept here (not dropped) so the age check downstream can
+// distinguish "clock skew" from "no evidence" and reject it explicitly; dropping
+// it here would make the two indistinguishable in the published census.
+// Accepts a Map or any [key, value] iterable (plain objects are NOT accepted —
+// an object would silently pick up prototype keys). Never throws.
+export function normalizeDelegateClaims(raw) {
+  const out = new Map();
+  try {
+    if (!raw) return out;
+    const entries =
+      raw instanceof Map ? raw.entries() : typeof raw[Symbol.iterator] === "function" ? raw : null;
+    if (!entries) return out;
+    for (const entry of entries) {
+      if (!Array.isArray(entry) || entry.length < 2) continue;
+      const [ticket, ts] = entry;
+      if (typeof ticket !== "string" || ticket === "") continue;
+      if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0) continue;
+      out.set(ticket, ts);
+    }
+  } catch {
+    return new Map();
+  }
+  return out;
+}
+
 export function assembleBoardState({
   orchDir,
   getBoard = () => [],
@@ -522,6 +571,13 @@ export function assembleBoardState({
   // inert/shadow-safe: !present is always false → nothing is excluded until the
   // daemon binds the real fs check. See selectAnchorCandidates.
   hasTriageArtifact = () => true,
+  // CTL-1744: Map<ticketId, claimedAtMs> — when the monitor DELEGATED each
+  // ticket to the orchestrator app-actor (the CTL-1174 pass-1 claim). Injected
+  // so board-health.mjs stays fs-free, same seam shape as getStalledPrState /
+  // getStrandedEvidence. The empty-Map default is inert AND fail-closed: with no
+  // claim evidence no ticket is ever granted grace, so an unwired daemon behaves
+  // byte-identically to before this change. See checkDispatchLiveness.
+  getDelegateClaims = () => new Map(),
 } = {}) {
   const nowMs = now();
   const safe = (fn, fallback) => {
@@ -647,6 +703,12 @@ export function assembleBoardState({
     githubQuotaMode: ["off", "shadow", "enforce"].includes(githubQuotaMode) ? githubQuotaMode : "shadow",
     productivityMode: ["off", "shadow", "enforce"].includes(productivityMode) ? productivityMode : "shadow",
     peerProductivity: mode === "off" || productivityMode === "off" ? null : safe(() => getPeerProductivity(), null),
+    // CTL-1744: per-ticket delegate-claim timestamps for the dispatch-liveness
+    // grace. `safe()` collapses a throwing/absent reader to the empty Map, which
+    // is the fail-closed direction (no evidence → no grace → recovery unchanged).
+    // Not gated on mode: an `off` scan never reaches evaluateInvariants anyway,
+    // and the reader is a cheap host-local marker read with no network cost.
+    delegateClaims: normalizeDelegateClaims(safe(() => getDelegateClaims(), new Map())),
     ring: deriveRing(safe(() => readEventRing({ orchDir }), []), nowMs, self ?? ""),
     ownerForTicket: typeof ownerForTicket === "function" ? ownerForTicket : null,
     // CTL-1157 (Codex #4): the ticket→owner/repo resolver for the composite
@@ -741,13 +803,53 @@ function checkCacheCoherence(b) {
 function checkDispatchLiveness(b, t) {
   const free = b.capacity.freeSlots;
   const owns = makeOwnsFilter(b, { scope: "dispatch" });
-  const ownedEligible = b.eligible.filter((e) => owns(e.id));
+  // CTL-1744: ownership is resolved FIRST and grace never touches it. Grace
+  // narrows the EVIDENCE set only, so the multi-host HRW path (makeOwnsFilter,
+  // dispatch scope) behaves exactly as before — a ticket this host does not own
+  // is still not this host's business, grace or no grace.
+  const owned = b.eligible.filter((e) => owns(e.id));
+
+  // CTL-1744: exclude tickets inside the legitimate delegate-lands wait. The
+  // CTL-1174 triage gate claims a ticket by delegating it, then HOLDS until the
+  // next reconcile sweep (up to RECONCILE_INTERVAL_MS later). Such a ticket is
+  // queued-and-undispatched BY DESIGN and is not evidence of a wedge.
+  //
+  // FAIL-CLOSED in every ambiguous case — grace suppresses a recovery signal, so
+  // it is granted only on positive, well-formed, non-future evidence:
+  //   no claims map / no entry / non-numeric ts → NO grace (today's behavior)
+  //   future-dated claim (clock skew)           → NO grace (age < 0)
+  const graceMs = t?.delegateGraceMs ?? DEFAULT_THRESHOLDS.delegateGraceMs;
+  const claims = b.delegateClaims instanceof Map ? b.delegateClaims : null;
+  const inDelegateGrace = (id) => {
+    if (!claims || !id) return false;
+    const claimedAt = claims.get(id);
+    if (typeof claimedAt !== "number" || !Number.isFinite(claimedAt)) return false;
+    const age = b.now - claimedAt;
+    if (!Number.isFinite(age) || age < 0) return false;
+    return age <= graceMs;
+  };
+  const waiting = owned.filter((e) => inDelegateGrace(e.id));
+  const ownedEligible = owned.filter((e) => !inDelegateGrace(e.id));
+
   const queuedTotal = b.eligible.length;
   const queued = ownedEligible.length;
-  const extra = { queuedTotal, queuedOwned: queued };
+  const extra = {
+    queuedTotal,
+    // Unchanged meaning: every owned candidate, grace or not. Kept stable so
+    // existing census consumers do not silently shift.
+    queuedOwned: owned.length,
+    // CTL-1744: publish the suppression rather than shrinking a count in
+    // silence — a census that quietly excludes work reads as "nothing queued".
+    queuedOwnedInDelegateGrace: waiting.length,
+    queuedOwnedEvidence: queued,
+    delegateGraceMs: graceMs,
+  };
+  const graceNote = waiting.length
+    ? ` (${waiting.length} in delegate-lands grace)`
+    : "";
   if (free <= 0 || queued <= 0) {
     return invariant(true, 0, true, [],
-      `no wedge (free=${free}, ${queued} owned of ${queuedTotal} queued)`, extra);
+      `no wedge (free=${free}, ${queued} owned of ${queuedTotal} queued)${graceNote}`, extra);
   }
   const last = b.ring?.recentDispatchTs ?? null;
   const staleMs = last == null ? null : b.now - last;
@@ -758,8 +860,8 @@ function checkDispatchLiveness(b, t) {
     true,
     wedged ? ownedEligible.slice(0, 5).map((e) => e.id).filter(Boolean) : [],
     wedged
-      ? `${free} free slot(s) + ${queued} owned queued (of ${queuedTotal}) + ${last == null ? "no recent dispatch seen" : `${Math.round(staleMs / 60_000)}m since dispatch`} → wedge`
-      : "dispatch live",
+      ? `${free} free slot(s) + ${queued} owned queued (of ${queuedTotal}) + ${last == null ? "no recent dispatch seen" : `${Math.round(staleMs / 60_000)}m since dispatch`} → wedge${graceNote}`
+      : `dispatch live${graceNote}`,
     extra,
   );
 }
