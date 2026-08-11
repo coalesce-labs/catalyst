@@ -5523,7 +5523,7 @@ describe("checksForClass — checkSkillsDirPlugins registration", () => {
   }
 });
 
-// ─── CAT-154 seam guard — SENTINEL: no installChecksForClass/runDoctor call sites below ───
+// ─── CAT-154 seam guard — REGION BEGIN ───
 //
 // The CAT-154 incident: `skillsDirCheck` (doctor.mjs:5425) is a WHOLE-THUNK seam with a LIVE
 // default — omitting it does not disable the check, it runs the real one against ~/.claude and
@@ -5531,11 +5531,50 @@ describe("checksForClass — checkSkillsDirPlugins registration", () => {
 // developer→WARN) and runDoctor returns the FAIL count only, so an omission is green on a
 // developer Mac and red on every CI runner. That is how main went red for ~11h on 2026-08-09.
 // This guard makes the omission fail HERE, locally, at authoring time.
+//
+// The two markers delimit the guard's OWN body, which is the only region excluded from the scan.
+// Everything else in this file — above AND below — is scanned, so a call site appended after the
+// guard is covered too. The exclusion exists because the body talks about the things it matches on:
+// the runDoctor test's title below contains a literal `runDoctor({ profile: "install" })` that the
+// extractor does pick up. It is a non-offender today only because that same title happens to end
+// in the word skillsDirCheck — reword the title and the guard would report itself. Excluding the
+// body removes that coupling rather than relying on it.
 describe("CAT-154: install-profile call sites must inject the skillsDirCheck seam", () => {
   const SELF = readFileSync(new URL(import.meta.url), "utf8");
-  const SENTINEL = "CAT-154 seam guard — SENTINEL";
-  // Scan only the region above the sentinel: this describe block's own literals must not match.
-  const SRC = SELF.slice(0, SELF.indexOf(SENTINEL));
+  const REGION_BEGIN = "CAT-154 seam guard — REGION BEGIN";
+  const REGION_END = "CAT-154 seam guard — REGION END";
+  // A phrase that occurs only in the trailing comment below the guard. Used to prove the scan
+  // really includes the tail; keep it verbatim there.
+  const TAIL_WITNESS = "ARE scanned by the guard above";
+  // Each marker must appear EXACTLY twice — once in its delimiting comment, once in the constant
+  // above. Counting (rather than a bare indexOf) is what makes every way of breaking a marker
+  // LOUD: delete the comment, or rename only the constant, and the count drops to 1 and throws.
+  // A bare indexOf would instead silently retarget the region at the surviving copy and shrink the
+  // scan with zero signal — the degrade-quietly shape this whole guard exists to catch, which
+  // would be the bug moved up one level rather than fixed.
+  const occurrencesOf = (needle) => {
+    let n = 0;
+    for (let i = SELF.indexOf(needle); i !== -1; i = SELF.indexOf(needle, i + needle.length)) n++;
+    return n;
+  };
+  for (const [label, marker] of [["BEGIN", REGION_BEGIN], ["END", REGION_END]]) {
+    const n = occurrencesOf(marker);
+    if (n !== 2) {
+      throw new Error(
+        `CAT-154 seam guard: expected the REGION ${label} marker exactly twice (its delimiting ` +
+          `comment + its constant), found ${n}. The guard cannot define its scan region — restore ` +
+          `the marker verbatim in both places rather than deleting or renaming just one.`,
+      );
+    }
+  }
+  const beginAt = SELF.indexOf(REGION_BEGIN); // the delimiting comment (the constant is below it)
+  const endAt = SELF.lastIndexOf(REGION_END); // the delimiting comment (the constant is above it)
+  if (beginAt <= 0 || endAt <= beginAt) {
+    throw new Error(
+      `CAT-154 seam guard: region markers out of order (begin=${beginAt}, end=${endAt}).`,
+    );
+  }
+  const SRC = SELF.slice(0, beginAt) + SELF.slice(endAt);
 
   // Extract the full parenthesised call expression starting at the `(` that follows `fnName`.
   // Naive w.r.t. parens inside string literals — acceptable here (no call site has one) and it
@@ -5560,9 +5599,21 @@ describe("CAT-154: install-profile call sites must inject the skillsDirCheck sea
   };
 
   // A call that passes an options object is configuring seams — it must configure ALL of them.
-  // A single-argument call cannot execute the live seam: an unrecognized class short-circuits to
-  // one thunk (doctor.mjs:5431) and the .toString() site never invokes its thunks.
-  const withOpts = (c) => /,\s*\{/.test(c.text);
+  // Detect the options object by scanning for a comma at paren depth 1, i.e. an actual argument
+  // separator. A whole-text /,\s*\{/ would also match a comma-brace nested inside argument ONE —
+  // e.g. installChecksForClass(nodeClassOf({ class: "worker", extra: { x: 1 } })) — misclassifying
+  // a single-argument call as seam-configuring and firing two spurious failures at once (a bogus
+  // offender below, plus the single-arg tripwire count dropping 2→1).
+  const withOpts = (c) => {
+    let depth = 0;
+    for (let i = 0; i < c.text.length; i++) {
+      const ch = c.text[i];
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      else if (ch === "," && depth === 1) return /^\s*\{/.test(c.text.slice(i + 1));
+    }
+    return false;
+  };
 
   it("every seam-configuring installChecksForClass call injects skillsDirCheck", () => {
     const offenders = callsTo(SRC, "installChecksForClass")
@@ -5580,9 +5631,32 @@ describe("CAT-154: install-profile call sites must inject the skillsDirCheck sea
     expect(offenders).toEqual([]);
   });
 
-  // Tripwire: the two single-arg sites are exempt only because they provably cannot reach the live
-  // seam. If a third appears, someone must re-derive that — the count forces the conversation.
-  it("exactly two single-argument installChecksForClass call sites exist (both provably inert)", () => {
+  // Tripwire: the two single-arg sites are exempt because NEITHER can reach the live seam today —
+  // one passes an unrecognized class (short-circuits to one thunk, doctor.mjs:5431) and the other
+  // only calls .toString() on the returned thunks, never invoking them. That is a property of
+  // these two sites, NOT a general property of single-argument calls: a single-arg call with a
+  // recognized class that DOES invoke its thunks would run the real check. The count alone cannot
+  // see that — swapping one exempt site for such a call keeps the count at 2. So the count is a
+  // conversation-forcing tripwire, not a proof; re-derive the exemption whenever it fires.
+  it("exactly two single-argument installChecksForClass call sites exist (exemption is site-specific)", () => {
     expect(callsTo(SRC, "installChecksForClass").filter((c) => !withOpts(c)).length).toBe(2);
   });
+
+  // The scan region must span BOTH sides of the guard. Without this, a call site appended below
+  // the guard is invisible to every assertion above and passes silently — verified by mutation.
+  // Assertions are kept scalar/boolean on purpose: a whole-file `toContain` would dump ~260KB of
+  // source into the failure output and bury the signal.
+  it("scans the file on both sides of the guard, excluding only the guard's own body", () => {
+    // A string that exists ONLY below the guard: its presence proves the tail is really included.
+    // (`SELF.length - endAt > 0` would NOT prove it — lastIndexOf returns a match start, so that
+    // difference is always at least the marker's own length and the assertion can never fail.)
+    // SRC is head[0..beginAt) + tail, so any hit at or past beginAt came from the tail half.
+    expect(SRC.lastIndexOf(TAIL_WITNESS)).toBeGreaterThanOrEqual(beginAt);
+    expect(SRC.length).toBe(beginAt + (SELF.length - endAt)); // exactly both sides, nothing else
+    expect(SRC.includes("const withOpts =")).toBe(false); // guard's own body is the only exclusion
+  });
 });
+
+// ─── CAT-154 seam guard — REGION END ───
+// Call sites added below this line ARE scanned by the guard above. Keep both region markers
+// verbatim; the guard throws on startup if either is missing or reordered.

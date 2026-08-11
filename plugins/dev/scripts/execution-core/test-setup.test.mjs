@@ -85,22 +85,35 @@ describe("CTL-810: hermetic CATALYST_DIR preload", () => {
 // developer's real install grades PASS/WARN and a clean CI runner grades FAIL — the exact
 // host-divergence class the CATALYST_LAYER2_CONFIG_FILE pin above exists to prevent.
 describe("CAT-154: hermetic CLAUDE_CONFIG_DIR preload", () => {
-  const primary = () => (process.env.CLAUDE_CONFIG_DIR ?? "").split(":")[0];
+  // Assert against the preload's RECORD, not the live var — the same rule this file's header
+  // states for CATALYST_DIR/CATALYST_HERMETIC_DIR. bun runs the whole suite in one process, so a
+  // sibling test that legitimately overwrites and restores CLAUDE_CONFIG_DIR mid-suite would
+  // otherwise make these assertions order-dependent: exactly the cross-file shared-state class
+  // CAT-154 exists to eliminate. The record is the invariant; the live var is not.
+  const pinned = () => (process.env.CATALYST_HERMETIC_CLAUDE_CONFIG_DIR ?? "").split(":")[0];
+  const live = () => (process.env.CLAUDE_CONFIG_DIR ?? "").split(":")[0];
   const realClaudeDir = resolve(homedir(), ".claude");
 
   test("preload pinned CLAUDE_CONFIG_DIR under the hermetic dir, never the real ~/.claude", () => {
-    expect(process.env.CLAUDE_CONFIG_DIR).toBeDefined();
-    const p = resolve(primary());
+    expect(process.env.CATALYST_HERMETIC_CLAUDE_CONFIG_DIR).toBeDefined();
+    const p = resolve(pinned());
     expect(p).not.toBe(realClaudeDir);
     expect(p.startsWith(realClaudeDir + sep)).toBe(false);
     expect(p.startsWith(resolve(process.env.CATALYST_HERMETIC_DIR))).toBe(true);
   });
 
   test("the pinned path is guaranteed-absent (like the Layer-2 pin)", () => {
-    expect(existsSync(primary())).toBe(false);
+    expect(existsSync(pinned())).toBe(false);
   });
 
-  test("claudeConfigDir() resolves to the pin, not the live tree", () => {
-    expect(resolve(claudeConfigDir())).toBe(resolve(primary()));
+  // This one reads the LIVE var on purpose: the property under test is that claudeConfigDir()
+  // honors whatever CLAUDE_CONFIG_DIR currently says, so both sides must come from the same
+  // source to stay self-consistent under a sibling's temporary override.
+  test("claudeConfigDir() resolves to the live pin, not the real tree", () => {
+    expect(resolve(claudeConfigDir())).toBe(resolve(live()));
+  });
+
+  test("the preload's live pin and its record agree at rest", () => {
+    expect(resolve(live())).toBe(resolve(pinned()));
   });
 });

@@ -63,10 +63,24 @@ process.env.CATALYST_LAYER2_CONFIG_FILE = join(hermeticDir, "layer2-config-absen
 // is class-conditional (doctor.mjs:5089: worker→FAIL, developer→WARN) and runDoctor returns only
 // the FAIL count, so the divergence is INVISIBLE locally and hard-red on a clean CI runner: that
 // is how main went red for ~11h on 2026-08-09 (PR #2664 in, PR #3180 out). Point at a
-// guaranteed-absent path so every host resolves the same "no skills dir" branch. Tests that want a
+// guaranteed-absent path so every host resolves the same symlink-lookup branch. Tests that want a
 // real tree inject the seam (installChecksForClass's skillsDirCheck) or checkSkillsDirPlugins's
 // six IO seams directly — both already the established pattern.
+//
+// SCOPE, precisely: this pin covers the ONE reader that honors it, `defaultSkillLink`. Three
+// sibling inputs to the same check still read real host state regardless of this line —
+// `defaultReadClaudeSettings` (doctor.mjs:1502) and `defaultReadInstalledPlugins` (:5056) hardcode
+// `homedir()/.claude` instead of `claudeConfigDir()`, and `defaultWrapperRcFiles` (:5066) reads the
+// real `~/.zshrc`/`~/.bashrc`. So this is a partial hermeticity fix, not a total one: if
+// `expectedPlugins` ever resolves empty, the verdict is decided entirely by those unpinned readers
+// and can still diverge dev-Mac vs CI. Closing that is CAT-248 (a production change to doctor.mjs,
+// deliberately out of scope for this test-only branch). Do not read this pin as "the skills-dir
+// check is now host-independent" — it is not.
 process.env.CLAUDE_CONFIG_DIR = join(hermeticDir, "claude-config-absent");
+// Stable record of the pin, mirroring CATALYST_HERMETIC_DIR above: sibling tests may legitimately
+// overwrite and restore CLAUDE_CONFIG_DIR mid-suite (bun runs the suite in one process), so the
+// record is the invariant and the live var is not. Assertions about the pin key off this.
+process.env.CATALYST_HERMETIC_CLAUDE_CONFIG_DIR = join(hermeticDir, "claude-config-absent");
 
 // Belt: a real linearis reached despite the shim writes nothing without creds.
 delete process.env.LINEAR_API_TOKEN;
