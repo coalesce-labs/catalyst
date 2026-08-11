@@ -177,6 +177,30 @@ else
   echo "  SKIP: t10 (catalyst-events not executable)"
 fi
 
+# ── 11. zsh source-safety: _cv_real_path resolves symlink identically under zsh (CTL-1777) ───
+# Under zsh, `local path` in _cv_real_path clobbers $PATH → readlink and
+# related utilities become unresolvable → function returns raw input instead
+# of the canonical path. Skip if zsh is absent.
+echo ""
+echo "Test 11: _cv_real_path symlink result matches bash under zsh (CTL-1777)"
+if command -v zsh >/dev/null 2>&1; then
+  _t11_dir="$(mktemp -d)"
+  touch "$_t11_dir/target.txt"
+  ln -s "$_t11_dir/target.txt" "$_t11_dir/link.txt"
+  _bash_rp="$(bash -c "source '$HELPER'; _cv_real_path '$_t11_dir/link.txt'")"
+  _zsh_rp="$(zsh -c "source '$HELPER'; _cv_real_path '$_t11_dir/link.txt'" 2>/dev/null)"
+  rm -rf "$_t11_dir"
+  if [[ -n "$_bash_rp" && "$_bash_rp" == "$_zsh_rp" ]]; then
+    PASSES=$((PASSES + 1)); echo "  PASS: t11: zsh _cv_real_path matches bash ($_bash_rp)"
+  else
+    FAILURES=$((FAILURES + 1)); echo "  FAIL: t11: zsh _cv_real_path mismatch"
+    echo "    bash: $_bash_rp"
+    echo "    zsh:  $_zsh_rp"
+  fi
+else
+  echo "  SKIP: t11 (zsh not installed)"
+fi
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [[ "$FAILURES" -eq 0 ]] || exit 1

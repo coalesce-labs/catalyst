@@ -70,13 +70,18 @@ _wtr_branch_serves_ticket() {
 # serving this ticket closes that without loosening anything: the in-tree caller
 # passes a freshly created worktree root checked out on the ticket branch.
 _wtr_path_serves_ticket() {
-	local path="$1" ticket="$2" top="" branch=""
-	[[ -n $path && -n $ticket ]] || return 1
-	top="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)" || return 1
+	# NB: the first local is named wt_path, NOT path. Under zsh, `path` is a
+	# special array tied to $PATH; `local path` scopes it locally and resets it
+	# to empty, making `git` unresolvable (command not found) so the function
+	# always returns 1. Bash treats `path` as ordinary. CTL-1777; see also
+	# linear-team-keys.sh:22-27 for the prior fix in the same class.
+	local wt_path="$1" ticket="$2" top="" branch=""
+	[[ -n $wt_path && -n $ticket ]] || return 1
+	top="$(git -C "$wt_path" rev-parse --show-toplevel 2>/dev/null)" || return 1
 	[[ -n $top ]] || return 1
 	top="$(cd "$top" 2>/dev/null && pwd -P)" || return 1
-	[[ $top == "$path" ]] || return 1
-	branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 1
+	[[ $top == "$wt_path" ]] || return 1
+	branch="$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 1
 	_wtr_branch_serves_ticket "$branch" "$ticket"
 }
 
