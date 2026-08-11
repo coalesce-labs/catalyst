@@ -1431,6 +1431,45 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     expect(emits[0].details.mode).toBe("enforce");
   });
 
+  // CTL-1744 / Codex #3206 P1 — REGRESSION GUARD for a silent seam drop.
+  //
+  // The scheduler binds getDelegateClaims at the daemon call site, but
+  // boardHealthPass originally neither destructured nor forwarded it. JavaScript
+  // discards an undeclared property silently, so assembleBoardState always fell
+  // back to its empty-Map default: no ticket was ever granted grace and enforce
+  // could still launch the very delegate this fix exists to prevent — i.e. the
+  // whole change was INERT in production.
+  //
+  // It survived review because every other CTL-1744 test calls assembleBoardState
+  // DIRECTLY; none went through boardHealthPass, which is the only path the daemon
+  // actually uses. So assert the PRODUCTION path, and assert both halves: that the
+  // injected reader is really consulted, and that its value reaches the invariant.
+  test("CTL-1744: boardHealthPass FORWARDS getDelegateClaims through to assembleBoardState", () => {
+    const emits = [];
+    let calls = 0;
+    // flaggedDeps is, by construction, a dispatch wedge: free slots + a queue of
+    // CTL-1/CTL-2 + no dispatch events. Claim BOTH queued tickets well inside the
+    // grace window (grace = RECONCILE_INTERVAL_MS + 60s = 11 min; these are 1 min old)
+    // so a correctly-forwarded reader must clear the wedge entirely.
+    const r = boardHealthPass(
+      flaggedDeps({
+        mode: "shadow",
+        emit: (e) => emits.push(e),
+        getDelegateClaims: () => {
+          calls += 1;
+          return new Map([["CTL-1", NOW - 60_000], ["CTL-2", NOW - 60_000]]);
+        },
+      }),
+    );
+    expect(r.ran).toBe(true);
+    // (1) the forwarding contract itself: the reader was actually invoked.
+    //     Pre-fix this was 0 — the property never survived the destructure.
+    expect(calls).toBeGreaterThan(0);
+    // (2) the behavior that contract buys: every queued ticket is inside the
+    //     delegate-lands grace, so the board is NOT a wedge. Pre-fix: ok === false.
+    expect(emits[0].details.invariants.dispatchLiveness.ok).toBe(true);
+  });
+
   test("mode:enforce WITH act → ONE holistic dispatch carrying anchor + boardContext (CTL-1300)", () => {
     const emits = [];
     const acted = [];

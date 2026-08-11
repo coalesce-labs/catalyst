@@ -2085,6 +2085,13 @@ export function boardHealthPass({
   // dropped by the destructure, which would pin checkStalledPr to the empty-Map
   // default and make `nudge-stalled-pr` unreachable even with the sweep enabled.
   getStalledPrState,
+  // CTL-1744: delegate-lands claim timestamps. Same forwarding contract as
+  // getStalledPrState above — and the same trap: the scheduler binds this at the
+  // daemon call site, but an undeclared property is silently dropped here, which
+  // would pin checkDispatchLiveness to assembleBoardState's empty-Map default and
+  // make the grace window unreachable in production while every direct-to-
+  // assembleBoardState unit test still passed. Declared AND forwarded below.
+  getDelegateClaims,
   getGithubQuota,
   githubQuotaMode,
   getPeerProductivity,
@@ -2117,6 +2124,7 @@ export function boardHealthPass({
     getDeferredBoardHealthTickets, // CTL-1432 (B2). CTL-1552: sanctionedNeedsHuman removed.
     getStrandedEvidence, // CTL-1644: per-ticket evidence seam (empty-Map default if unbound)
     getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)
+    getDelegateClaims, // CTL-1744: delegate-lands claim seam (empty-Map default if unbound)
     getGithubQuota,
     githubQuotaMode,
     getPeerProductivity,
