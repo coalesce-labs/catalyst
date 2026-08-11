@@ -672,7 +672,10 @@ async function processTicket({
     }
     const stalledOutcome = escalate(
       ticket,
-      { reason: "rescue_worker_stalled", ...rescueState },
+      // CAT-173: thread the known PR number — rescueState carries attempt/behind/
+      // conflict fields but never prNumber, so the standoff detail rendered
+      // "stale PR #?" and dropped the primary actionable identifier.
+      { reason: "rescue_worker_stalled", prNumber: prInfo.number, ...rescueState },
       { orchDir, orchId: effectiveOrchId, linearWrite, multiHost, maxParallel, now: () => nowMs }
     );
     // CTL-1609 (Codex P1): latch escalatedAt ONLY on a confirmed label write.
@@ -799,7 +802,9 @@ async function processTicket({
     }
 
     case "escalate": {
-      const outcome = escalate(ticket, decision.detail ?? {}, {
+      // CAT-173: decideRescue's detail supplies attempt/behind/conflict only —
+      // thread prNumber so the standoff/escalation reason names the actual PR.
+      const outcome = escalate(ticket, { prNumber: prInfo.number, ...(decision.detail ?? {}) }, {
         orchDir,
         orchId: effectiveOrchId,
         linearWrite,

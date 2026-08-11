@@ -10,6 +10,20 @@ import { dirname, join } from "node:path";
 import { getEventLogPath, log } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { recordDurableEscalation } from "./durable-escalation.mjs";
+import { FENCE_SUPPRESS_REASONS } from "./fence-guard.mjs";
+
+// A STANDOFF is mutual: every live host believes some OTHER host owns the ticket,
+// so nobody writes the escalation. `foreign-owner` is not that — it is positive,
+// confirmed evidence that a specific other host holds the claim, which is the
+// CORRECT outcome on the old host after a healthy takeover. fenceGuard
+// deliberately leaves the escalation to the current owner there, and that owner's
+// own fence passes, so it escalates normally.
+//
+// Counting those suppressions would let a lingering failed / stale-PR worker
+// directory on the superseded host accumulate the bound over 45 minutes and page
+// an operator about a ticket the NEW owner is actively processing — turning
+// correct zombie fencing into a false page. Excluded from accounting entirely.
+const NON_STANDOFF_SUPPRESS_REASONS = new Set([FENCE_SUPPRESS_REASONS.FOREIGN_OWNER]);
 
 export const FENCE_STANDOFF_CAP_DEFAULT = 4;
 export const FENCE_STANDOFF_MIN_AGE_MS_DEFAULT = 45 * 60_000;
@@ -19,7 +33,10 @@ export const FENCE_STANDOFF_COOLDOWN_MS_DEFAULT = 6 * 60 * 60_000;
 // A transient disk/event blip is retried immediately; a PERSISTENT one must not
 // re-run the caller's per-tick probe forever (the CTL-1329 quota burn).
 export const FENCE_STANDOFF_DELIVERY_RETRY_MAX_DEFAULT = 5;
-export const FENCE_STANDOFF_EVENT = "escalation.fence-standoff.CTL-1";
+// Namespace specimen only — the `<ticket>` slot is filled per-emit by
+// buildFenceStandoffEvent. Uses the repo-neutral `PROJ` prefix so this
+// distributed plugin encodes no project-specific ticket namespace.
+export const FENCE_STANDOFF_EVENT = "escalation.fence-standoff.PROJ-1";
 
 function positiveNumber(value, fallback) {
   const parsed = Number(value);
@@ -113,18 +130,29 @@ export function markBreakGlass({ orchDir, ticket, now }) {
   }
 }
 
-// markDeliveryAttempt — count one FAILED break-glass delivery and return the new
-// running total. Fail-open: an unwritable record still reports the incremented
-// count so the caller's bound is applied to this tick rather than skipped.
+// markDeliveryAttempt — count one FAILED break-glass delivery and report both the
+// new running total AND whether that total actually reached disk.
+//
+// The `persisted` half is load-bearing, not diagnostic. The retry bound is only
+// enforceable if the count SURVIVES the tick: when the ledger is unwritable the
+// next tick re-reads the OLD `deliveryAttempts`, recomputes the same total, and
+// would report "still under the bound" forever — so an unbounded caller re-runs
+// its terminal probe + fence check + delivery on EVERY tick against a full disk
+// or read-only mount. That is precisely the CTL-1329 per-tick burn this bound
+// exists to prevent, so a non-persisted attempt must fail CLOSED (see the
+// `deliveryRetryable` computation in maybeBreakGlass): delivery still retries,
+// on the caller's ordinary cooldown cadence instead of every tick.
+//
+// Never throws — bookkeeping must not interrupt a scheduler tick.
 export function markDeliveryAttempt({ orchDir, ticket, record }) {
   const prior = Number.isFinite(record?.deliveryAttempts) ? record.deliveryAttempts : 0;
   const attempts = prior + 1;
   try {
     writeRecord(orchDir, ticket, { ...record, deliveryAttempts: attempts });
+    return { attempts, persisted: true };
   } catch {
-    // Fail open: bookkeeping must never interrupt a scheduler tick.
+    return { attempts, persisted: false };
   }
-  return attempts;
 }
 
 export function clearFenceStandoff(orchDir, ticket) {
@@ -210,6 +238,19 @@ export function maybeBreakGlass({
 }) {
   try {
     standoffPath(orchDir, ticket); // validate containment before any sink path is built
+    // A confirmed takeover is not a standoff — the new owner escalates. Clear any
+    // ledger this host built up BEFORE the takeover so a later genuine standoff
+    // starts a fresh episode rather than inheriting a stale count/age.
+    if (NON_STANDOFF_SUPPRESS_REASONS.has(verdict?.reason)) {
+      clearFenceStandoff(orchDir, ticket);
+      return {
+        breakGlass: false,
+        firstBreakGlass: false,
+        ageMs: 0,
+        record: null,
+        skipped: verdict.reason,
+      };
+    }
     const rec = recordFenceSuppression({
       orchDir,
       ticket,
@@ -266,14 +307,22 @@ export function maybeBreakGlass({
         // sink — the CTL-1329 burn that froze fleet dispatch. Past the bound the
         // caller keeps its ordinary cooldown, so delivery still retries, just on the
         // ordinary cadence instead of every tick.
-        const deliveryAttempts = markDeliveryAttempt({ orchDir, ticket, record: rec });
+        const { attempts: deliveryAttempts, persisted } = markDeliveryAttempt({
+          orchDir,
+          ticket,
+          record: rec,
+        });
         return {
           ...evaluation,
           firstBreakGlass: true,
           record: rec,
           deliveryPending: true,
           deliveryAttempts,
-          deliveryRetryable: deliveryAttempts <= resolveStandoffDeliveryRetryMax(env),
+          // Fail CLOSED when the incremented count did not reach disk: an
+          // unpersisted counter can never grow, so treating it as retryable
+          // would drop the caller's cooldown on every tick forever.
+          deliveryRetryable:
+            persisted && deliveryAttempts <= resolveStandoffDeliveryRetryMax(env),
         };
       }
       logger?.warn?.(

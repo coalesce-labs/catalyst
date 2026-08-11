@@ -241,3 +241,80 @@ describe("assembleBoard wiring — durable escalation cards", () => {
     expect(boardDataSrc).toContain("...durableTickets");
   });
 });
+
+// ─── CAT-173 (Codex #3241 round-1 P1) ───────────────────────────────────────
+// The id dedupe in synthesizeDurableEscalations DROPS a record whose ticket
+// already has a card. Correct for terminal-sweep (that card already renders
+// needs-human via deriveAttention's phaseFailed path), but it silently swallowed
+// a fence-standoff break-glass on a BEHIND PR: the rescue timer only reaches
+// break-glass through an existing worker dir (so a card always exists), BEHIND is
+// excluded from PR_BLOCKER_STATES, and the fence suppressed the needs-human
+// label — leaving the escalation on no operator surface at all.
+const mergeDurableEscalationsIntoCards = (boardMod as Record<string, unknown>)
+  .mergeDurableEscalationsIntoCards as (
+  tickets: unknown,
+  records: unknown,
+  linfo?: unknown,
+  terminalIds?: unknown,
+) => BoardTicket[];
+
+describe("mergeDurableEscalationsIntoCards — CAT-173 standoff visibility", () => {
+  const card = (over: Record<string, unknown> = {}): BoardTicket =>
+    ({
+      id: "CTL-9",
+      title: "a behind PR",
+      attention: null,
+      attentionSince: null,
+      humanQuestion: null,
+      ...over,
+    }) as unknown as BoardTicket;
+
+  it("fills attention on an existing attention-less card (the BEHIND-PR hole)", () => {
+    const tickets = [card()];
+    mergeDurableEscalationsIntoCards(tickets, [durableRec({ source: "fence-standoff" })]);
+    expect(tickets[0].attention).toBe("needs-human");
+    expect(tickets[0].humanQuestion).toBe("Worker stuck > 24h, no progress");
+    // Anchored to the ORIGINAL escalation, not this tick.
+    expect(tickets[0].attentionSince).toBe(new Date(100_000).toISOString());
+  });
+
+  it("never overwrites an attention that is already set (live reason wins)", () => {
+    const tickets = [
+      card({ attention: "waiting-on-you", humanQuestion: "answer my question", attentionSince: "X" }),
+    ];
+    mergeDurableEscalationsIntoCards(tickets, [durableRec()]);
+    expect(tickets[0].attention).toBe("waiting-on-you");
+    expect(tickets[0].humanQuestion).toBe("answer my question");
+    expect(tickets[0].attentionSince).toBe("X");
+  });
+
+  it("never pages on a terminal ticket", () => {
+    const bySet = [card()];
+    mergeDurableEscalationsIntoCards(bySet, [durableRec()], {}, new Set(["CTL-9"]));
+    expect(bySet[0].attention).toBeNull();
+
+    const byLinfo = [card()];
+    mergeDurableEscalationsIntoCards(byLinfo, [durableRec()], { "CTL-9": { linearState: "Done" } });
+    expect(byLinfo[0].attention).toBeNull();
+  });
+
+  it("ignores records with no matching card — synthesis owns those", () => {
+    const tickets = [card({ id: "CTL-OTHER" })];
+    mergeDurableEscalationsIntoCards(tickets, [durableRec()]);
+    expect(tickets[0].attention).toBeNull();
+    expect(tickets).toHaveLength(1);
+  });
+
+  it("is total on junk input and never throws", () => {
+    expect(() => mergeDurableEscalationsIntoCards(null, null)).not.toThrow();
+    expect(() => mergeDurableEscalationsIntoCards([card()], [null, {}, { ticket: "" }])).not.toThrow();
+  });
+
+  it("leaves the dedupe path intact: a merged card still yields no second card", () => {
+    const tickets = [card()];
+    const recs = [durableRec({ source: "fence-standoff" })];
+    mergeDurableEscalationsIntoCards(tickets, recs);
+    const extra = synthesizeDurableEscalations(recs, new Set(tickets.map((t) => t.id)), 600_000);
+    expect(extra).toHaveLength(0);
+  });
+});

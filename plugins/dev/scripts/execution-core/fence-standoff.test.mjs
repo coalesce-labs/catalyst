@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { recordDurableEscalation } from "./durable-escalation.mjs";
@@ -101,7 +101,12 @@ describe("buildFenceStandoffEvent (CAT-173)", () => {
     expect(ev.body.payload).toMatchObject({ ticket: "CAT-53", site: "terminal-sweep", reason: "superseded", count: 4 });
   });
   test("FENCE_STANDOFF_EVENT is the registrable prefix form", () => {
-    expect(FENCE_STANDOFF_EVENT).toBe("escalation.fence-standoff.CTL-1");
+    expect(FENCE_STANDOFF_EVENT).toBe("escalation.fence-standoff.PROJ-1");
+  });
+  // AGENTS.md → Version Control: this plugin ships to other projects, so the
+  // shipped module must not encode a specific ticket prefix in its specimen.
+  test("FENCE_STANDOFF_EVENT carries no project-specific ticket prefix", () => {
+    expect(FENCE_STANDOFF_EVENT).not.toMatch(/\.(CTL|CAT)-\d+$/);
   });
 });
 
@@ -208,6 +213,99 @@ test("the delivery-retry bound defaults to 5 and survives across suppression tic
     clearFenceStandoff(dir, "CAT-53");
     recordFenceSuppression({ orchDir: dir, ticket: "CAT-53", site: "terminal-sweep", reason: "superseded", now: 100 });
     expect(maybeBreakGlass({ ...opts, now: 101 }).deliveryRetryable).toBe(true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── Codex #3241 round-1 P1 remediations ────────────────────────────────────
+
+describe("foreign-owner is not a standoff (CAT-173, Codex #3241 P1)", () => {
+  let dir;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fs-foreign-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  const opts = (now) => ({
+    orchDir: dir,
+    ticket: "CAT-53",
+    site: "terminal-sweep",
+    verdict: { reason: "foreign-owner" },
+    now,
+    env: { CATALYST_FENCE_STANDOFF_CAP: "1", CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "0" },
+    appendEvent: () => true,
+    logger: { warn() {} },
+  });
+
+  test("a confirmed takeover is never counted, so it can never break glass", () => {
+    const events = [];
+    // Well past the cap+age bound: a counted reason would have paged several times.
+    for (let i = 1; i <= 10; i++) {
+      const r = maybeBreakGlass({ ...opts(i * 1000), appendEvent: (p) => { events.push(p); return true; } });
+      expect(r.breakGlass).toBe(false);
+      expect(r.skipped).toBe("foreign-owner");
+    }
+    expect(events).toEqual([]);
+    expect(readFenceStandoff(dir, "CAT-53")).toBeNull();
+  });
+
+  test("a takeover CLEARS a prior episode so a later standoff starts fresh", () => {
+    // Three genuine standoff suppressions accumulate...
+    for (let i = 1; i <= 3; i++) {
+      recordFenceSuppression({ orchDir: dir, ticket: "CAT-53", site: "terminal-sweep", reason: "superseded", now: i });
+    }
+    expect(readFenceStandoff(dir, "CAT-53").count).toBe(3);
+    // ...then the ticket is legitimately taken over.
+    maybeBreakGlass(opts(4));
+    expect(readFenceStandoff(dir, "CAT-53")).toBeNull();
+    // A later genuine standoff must re-earn the bound from count 1, not inherit 3.
+    const r = recordFenceSuppression({ orchDir: dir, ticket: "CAT-53", site: "terminal-sweep", reason: "superseded", now: 5 });
+    expect(r.count).toBe(1);
+    expect(r.firstSuppressedAt).toBe(5);
+  });
+
+  test("genuine standoff reasons are still counted (negative control)", () => {
+    for (const reason of ["superseded", "unverifiable", "missing-generation", "threw"]) {
+      const d = mkdtempSync(join(tmpdir(), "fs-ctl-"));
+      try {
+        const r = maybeBreakGlass({ ...opts(1000), orchDir: d, verdict: { reason } });
+        expect(r.skipped).toBeUndefined();
+        expect(readFenceStandoff(d, "CAT-53")?.count).toBe(1);
+      } finally {
+        rmSync(d, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
+test("an UNPERSISTABLE delivery count fails closed, not retryable-forever (Codex #3241 P1)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fs-unwritable-"));
+  try {
+    const opts = {
+      orchDir: dir,
+      ticket: "CAT-53",
+      site: "terminal-sweep",
+      verdict: { reason: "superseded" },
+      env: { CATALYST_FENCE_STANDOFF_CAP: "1", CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1" },
+      appendEvent: () => false, // delivery keeps failing
+      logger: { warn() {} },
+    };
+    recordFenceSuppression({ orchDir: dir, ticket: "CAT-53", site: "terminal-sweep", reason: "superseded", now: 0 });
+    // Baseline: a writable ledger reports the attempt as retryable.
+    expect(maybeBreakGlass({ ...opts, now: 1 }).deliveryRetryable).toBe(true);
+
+    // Now make the ledger directory unwritable so the incremented count cannot
+    // reach disk. Without the fix the count silently resets every tick and
+    // deliveryRetryable stays true forever — the CTL-1329 per-tick burn.
+    const ledgerDir = join(dir, ".fence-standoff");
+    const mode = 0o500;
+    chmodSync(ledgerDir, mode);
+    try {
+      const r = maybeBreakGlass({ ...opts, now: 2 });
+      expect(r.deliveryPending).toBe(true);
+      expect(r.deliveryRetryable).toBe(false);
+    } finally {
+      chmodSync(ledgerDir, 0o700);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
