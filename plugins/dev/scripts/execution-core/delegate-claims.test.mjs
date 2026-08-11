@@ -9,7 +9,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test delegate-claims.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,6 +19,9 @@ import {
   clearDelegateClaim,
   readDelegateClaims,
 } from "./delegate-claims.mjs";
+// MIGRATION turn 119: the integrated bound test drives the REAL invariant off the
+// REAL reader, so the wiring is proven end-to-end rather than the arithmetic alone.
+import { assembleBoardState, evaluateInvariants } from "./board-health.mjs";
 
 let orchDir;
 const claimsDir = () => join(orchDir, DELEGATE_CLAIMS_DIR);
@@ -94,6 +97,94 @@ describe("recordDelegateClaim", () => {
     writeRaw("CTL-BADEXIST", "}{");
     expect(recordDelegateClaim(orchDir, "CTL-BADEXIST", { now: () => 1000 })).toBe(false);
     expect(readDelegateClaims(orchDir).has("CTL-BADEXIST")).toBe(false);
+  });
+
+  // MIGRATION turn 119: assert the file is BYTE-FOR-BYTE untouched, not merely that
+  // the parsed claim is unchanged. A re-claim that rewrote equivalent-but-different
+  // bytes would still prove the write path ran, which is what must not happen.
+  test("a colliding re-claim preserves the existing file BYTE-FOR-BYTE (valid / malformed / zero-byte)", () => {
+    const cases = [
+      ["CTL-VALID", JSON.stringify({ ticket: "CTL-VALID", claimedAt: 1000 })],
+      ["CTL-MALFORMED", "}{ not json at all"],
+      ["CTL-ZEROBYTE", ""],
+    ];
+    for (const [ticket, original] of cases) {
+      writeRaw(ticket, original);
+      const before = readFileSync(join(claimsDir(), `${ticket}.json`));
+      const beforeStat = statSync(join(claimsDir(), `${ticket}.json`));
+
+      // Attempt several re-claims with clocks that would obviously change the bytes.
+      expect(recordDelegateClaim(orchDir, ticket, { now: () => 777777 })).toBe(false);
+      expect(recordDelegateClaim(orchDir, ticket, { now: () => 888888 })).toBe(false);
+
+      const after = readFileSync(join(claimsDir(), `${ticket}.json`));
+      const afterStat = statSync(join(claimsDir(), `${ticket}.json`));
+      expect(`${ticket}: ${after.equals(before)}`).toBe(`${ticket}: true`);
+      expect(`${ticket}: ${afterStat.size}`).toBe(`${ticket}: ${beforeStat.size}`);
+      expect(after.toString()).toBe(original);
+    }
+  });
+
+  test("a ZERO-BYTE existing marker collides and is NOT replaced (explicit)", () => {
+    // The interesting case on its own: an empty file is falsy-looking but must
+    // still win the collision, or a crashed write would hand back a fresh window.
+    writeRaw("CTL-EMPTY0", "");
+    expect(statSync(join(claimsDir(), "CTL-EMPTY0.json")).size).toBe(0);
+    expect(recordDelegateClaim(orchDir, "CTL-EMPTY0", { now: () => 424242 })).toBe(false);
+    expect(statSync(join(claimsDir(), "CTL-EMPTY0.json")).size).toBe(0);
+    expect(readFileSync(join(claimsDir(), "CTL-EMPTY0.json")).length).toBe(0);
+    expect(readDelegateClaims(orchDir).has("CTL-EMPTY0")).toBe(false); // still no grace
+  });
+});
+
+// ── MIGRATION turn 119: INTEGRATED post-grace evaluation ─────────────────────
+//
+// The 500-reclaim test above proves timestamp arithmetic. This proves the thing
+// that actually matters: that the immutable claim map, read by the REAL reader off
+// REAL files, drives the REAL invariant to flag the ticket once the window elapses.
+// Arithmetic could be right while the wiring silently dropped the map.
+describe("CTL-1744 integrated: repeated re-claims still expire into a wedge", () => {
+  // Production default: RECONCILE_INTERVAL_MS (10m) + 60s slack.
+  const GRACE_MS = 10 * 60_000 + 60_000;
+  const T0 = 1_700_000_000_000;
+  const TICKET = "CTL-STUCK";
+
+  const boardAt = (nowMs) =>
+    assembleBoardState({
+      orchDir,
+      getEligible: () => [{ id: TICKET }],
+      capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
+      // No dispatch events → ring.recentDispatchTs === null → "no recent dispatch
+      // seen", i.e. the wedge precondition. Grace is then the ONLY thing that can
+      // hold the invariant green.
+      readEventRing: () => [],
+      getDelegateClaims: () => readDelegateClaims(orchDir),
+      now: () => nowMs,
+    });
+
+  test("inside grace → green; at graceMs+1 after 500 re-claims → wedge flagged", () => {
+    let clock = T0;
+    recordDelegateClaim(orchDir, TICKET, { now: () => clock });
+    for (let i = 0; i < 500; i++) {
+      clock += 2000; // 2s ticks — ~16 minutes of re-claiming, far beyond graceMs
+      recordDelegateClaim(orchDir, TICKET, { now: () => clock });
+    }
+    // The claim map really is immutable, read back off disk by the real reader.
+    expect(readDelegateClaims(orchDir).get(TICKET)).toBe(T0);
+
+    // Inside the window the invariant is suppressed...
+    const inside = evaluateInvariants(boardAt(T0 + GRACE_MS - 1));
+    expect(inside.dispatchLiveness.ok).toBe(true);
+    expect(inside.dispatchLiveness.queuedOwnedInDelegateGrace).toBe(1);
+
+    // ...and one millisecond past it, the ticket IS wedge evidence — despite 500
+    // re-claims that, pre-fix, would have kept sliding the window forward.
+    const past = evaluateInvariants(boardAt(T0 + GRACE_MS + 1));
+    expect(past.dispatchLiveness.ok).toBe(false);
+    expect(past.dispatchLiveness.failed).toBe(1);
+    expect(past.dispatchLiveness.flagged).toContain(TICKET);
+    expect(past.dispatchLiveness.queuedOwnedInDelegateGrace).toBe(0);
+    expect(past.dispatchLiveness.queuedOwnedEvidence).toBe(1);
   });
 });
 
