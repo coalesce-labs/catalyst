@@ -14,6 +14,11 @@ import { recordDurableEscalation } from "./durable-escalation.mjs";
 export const FENCE_STANDOFF_CAP_DEFAULT = 4;
 export const FENCE_STANDOFF_MIN_AGE_MS_DEFAULT = 45 * 60_000;
 export const FENCE_STANDOFF_COOLDOWN_MS_DEFAULT = 6 * 60 * 60_000;
+// How many consecutive FAILED deliveries may bypass the caller's ordinary
+// suppression cooldown before the retry falls back to that cooldown's cadence.
+// A transient disk/event blip is retried immediately; a PERSISTENT one must not
+// re-run the caller's per-tick probe forever (the CTL-1329 quota burn).
+export const FENCE_STANDOFF_DELIVERY_RETRY_MAX_DEFAULT = 5;
 export const FENCE_STANDOFF_EVENT = "escalation.fence-standoff.CTL-1";
 
 function positiveNumber(value, fallback) {
@@ -31,6 +36,13 @@ export function resolveStandoffMinAgeMs(env = process.env) {
 
 export function resolveStandoffCooldownMs(env = process.env) {
   return positiveNumber(env?.CATALYST_FENCE_STANDOFF_COOLDOWN_MS, FENCE_STANDOFF_COOLDOWN_MS_DEFAULT);
+}
+
+export function resolveStandoffDeliveryRetryMax(env = process.env) {
+  return positiveNumber(
+    env?.CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX,
+    FENCE_STANDOFF_DELIVERY_RETRY_MAX_DEFAULT,
+  );
 }
 
 function standoffDir(orchDir) {
@@ -75,6 +87,10 @@ export function recordFenceSuppression({ orchDir, ticket, site, reason, now }) {
     lastSuppressedAt: now,
     count: Number.isFinite(prior?.count) ? prior.count + 1 : 1,
     breakGlassAt: Number.isFinite(prior?.breakGlassAt) ? prior.breakGlassAt : null,
+    // Consecutive failed break-glass deliveries. Preserved across suppression
+    // ticks so a persistent failure can be bounded; reset only by
+    // clearFenceStandoff (the episode ending).
+    deliveryAttempts: Number.isFinite(prior?.deliveryAttempts) ? prior.deliveryAttempts : 0,
   };
   try {
     return writeRecord(orchDir, ticket, rec);
@@ -95,6 +111,20 @@ export function markBreakGlass({ orchDir, ticket, now }) {
   } catch {
     return rec;
   }
+}
+
+// markDeliveryAttempt — count one FAILED break-glass delivery and return the new
+// running total. Fail-open: an unwritable record still reports the incremented
+// count so the caller's bound is applied to this tick rather than skipped.
+export function markDeliveryAttempt({ orchDir, ticket, record }) {
+  const prior = Number.isFinite(record?.deliveryAttempts) ? record.deliveryAttempts : 0;
+  const attempts = prior + 1;
+  try {
+    writeRecord(orchDir, ticket, { ...record, deliveryAttempts: attempts });
+  } catch {
+    // Fail open: bookkeeping must never interrupt a scheduler tick.
+  }
+  return attempts;
 }
 
 export function clearFenceStandoff(orchDir, ticket) {
@@ -229,7 +259,22 @@ export function maybeBreakGlass({
       if (durableConfirmed && eventConfirmed === true) {
         markBreakGlass({ orchDir, ticket, now });
       } else {
-        return { ...evaluation, firstBreakGlass: true, record: rec, deliveryPending: true };
+        // Delivery failed. Report it as retryable ONLY while the consecutive-failure
+        // count is under the bound: the caller drops its own suppression cooldown to
+        // retry next tick, and an unbounded version of that re-runs the caller's
+        // per-tick terminal probe + fence check forever on a PERSISTENTLY failing
+        // sink — the CTL-1329 burn that froze fleet dispatch. Past the bound the
+        // caller keeps its ordinary cooldown, so delivery still retries, just on the
+        // ordinary cadence instead of every tick.
+        const deliveryAttempts = markDeliveryAttempt({ orchDir, ticket, record: rec });
+        return {
+          ...evaluation,
+          firstBreakGlass: true,
+          record: rec,
+          deliveryPending: true,
+          deliveryAttempts,
+          deliveryRetryable: deliveryAttempts <= resolveStandoffDeliveryRetryMax(env),
+        };
       }
       logger?.warn?.(
         { ticket, site, reason: rec.reason, count: rec.count, ageMs: evaluation.ageMs },

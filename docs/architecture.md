@@ -131,11 +131,22 @@ delegate.
 ticket, causing every fence-guarded human escalation to be suppressed. Each escalation site records
 that suppression in the host-local, GC-surviving `.fence-standoff/<TICKET>.json` ledger. After both
 the configured count (default 4) and age (default 45 minutes) are reached, Catalyst writes an
-unfenced `.escalations/<TICKET>.json` record and emits `escalation.fence-standoff.<TICKET>`; the
-board renders that record as `needs-human` and the notification bridge can surface it without a
-Linear write. The post-bound retry cooldown defaults to 6 hours. This changes no `fenceGuard`
-decision: every write suppressed before CAT-173 remains suppressed; only the out-of-band human
-signal is bounded.
+unfenced `.escalations/<TICKET>.json` record and emits `escalation.fence-standoff.<TICKET>`, so the
+notification bridge can surface the ticket without a Linear write. The record is GC-surviving and
+renders as a `needs-human` board card **only when the ticket has no card already** —
+`synthesizeDurableEscalations` dedupes by ticket id — so for a terminal-sweep standoff (which by
+construction has a live `failed`/`stalled` signal, hence a card, hence `deriveAttention`'s
+`phaseFailed` → `needs-human`) the operator sees the attention state but not the record's
+standoff-specific reason.
+
+This changes no `fenceGuard` decision: every write suppressed before CAT-173 remains suppressed.
+It does change the **retry cadence** of those suppressed writes. Crossing the bound stamps a
+`.fence-standoff-cooldown` (default 6 h) that gates the same terminal-sweep probe+write block
+`.fence-suppressed` (15 min) already gated, so after a break-glass a healed standoff's `needs-human`
+label write — and the terminal-clear branch that retracts it on a late Done — is retried every 6 h
+rather than every 15 min. A break-glass whose delivery FAILS drops the 15-minute marker to retry on
+the next tick, bounded by `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` (default 5) so a persistently
+unwritable sink cannot reintroduce the CTL-1329 per-tick probe burn.
 
 **Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
 scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.

@@ -8,6 +8,7 @@ import {
   evaluateStandoff, markBreakGlass, buildFenceStandoffEvent,
   maybeBreakGlass,
   FENCE_STANDOFF_EVENT, FENCE_STANDOFF_CAP_DEFAULT, FENCE_STANDOFF_MIN_AGE_MS_DEFAULT,
+  FENCE_STANDOFF_DELIVERY_RETRY_MAX_DEFAULT,
 } from "./fence-standoff.mjs";
 
 describe("fence-standoff ledger (CAT-173)", () => {
@@ -150,6 +151,63 @@ test("maybeBreakGlass retries delivery before latching the episode", () => {
     expect(maybeBreakGlass({ ...opts, now: 2 }).deliveryPending).toBeUndefined();
     expect(readFenceStandoff(dir, "CAT-53").breakGlassAt).toBe(2);
     expect(eventAttempts).toBe(2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// CAT-173 review: the retry above lets the caller drop its own suppression cooldown
+// to re-try next tick. A PERSISTENTLY failing sink must stop earning that bypass, or
+// the caller's per-tick probe runs forever (the CTL-1329 quota burn).
+test("maybeBreakGlass stops reporting a persistently failing delivery as retryable", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fs-retry-bound-"));
+  try {
+    const opts = {
+      orchDir: dir,
+      ticket: "CAT-53",
+      site: "terminal-sweep",
+      verdict: { reason: "superseded" },
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "1",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+        CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX: "3",
+      },
+      appendEvent: () => false, // never succeeds
+      logger: { warn() {} },
+    };
+    recordFenceSuppression({ orchDir: dir, ticket: "CAT-53", site: "terminal-sweep", reason: "superseded", now: 0 });
+    const verdicts = [1, 2, 3, 4, 5].map((now) => maybeBreakGlass({ ...opts, now }));
+    expect(verdicts.map((v) => v.deliveryPending)).toEqual([true, true, true, true, true]);
+    expect(verdicts.map((v) => v.deliveryAttempts)).toEqual([1, 2, 3, 4, 5]);
+    expect(verdicts.map((v) => v.deliveryRetryable)).toEqual([true, true, true, false, false]);
+    // The episode is still unlatched, so delivery keeps being ATTEMPTED — only the
+    // caller's cooldown bypass is withdrawn.
+    expect(readFenceStandoff(dir, "CAT-53").breakGlassAt).toBeNull();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the delivery-retry bound defaults to 5 and survives across suppression ticks", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fs-retry-default-"));
+  try {
+    expect(FENCE_STANDOFF_DELIVERY_RETRY_MAX_DEFAULT).toBe(5);
+    const opts = {
+      orchDir: dir,
+      ticket: "CAT-53",
+      site: "terminal-sweep",
+      verdict: { reason: "superseded" },
+      env: { CATALYST_FENCE_STANDOFF_CAP: "1", CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1" },
+      appendEvent: () => false,
+      logger: { warn() {} },
+    };
+    recordFenceSuppression({ orchDir: dir, ticket: "CAT-53", site: "terminal-sweep", reason: "superseded", now: 0 });
+    for (let i = 1; i <= 5; i++) expect(maybeBreakGlass({ ...opts, now: i }).deliveryRetryable).toBe(true);
+    expect(maybeBreakGlass({ ...opts, now: 6 }).deliveryRetryable).toBe(false);
+    // Ending the episode resets the counter — a later recurrence retries promptly again.
+    clearFenceStandoff(dir, "CAT-53");
+    recordFenceSuppression({ orchDir: dir, ticket: "CAT-53", site: "terminal-sweep", reason: "superseded", now: 100 });
+    expect(maybeBreakGlass({ ...opts, now: 101 }).deliveryRetryable).toBe(true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
