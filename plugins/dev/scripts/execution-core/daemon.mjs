@@ -161,7 +161,7 @@ import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
 import { refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
-import { makeBlockedGhostAwareIsBgJobAlive } from "./blocked-ghost.mjs";
+import { createConfiguredBlockedGhostProbe } from "./blocked-ghost.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
 import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
@@ -1274,8 +1274,7 @@ export function startDaemon({
     // CAT-171: boot-only shadow-first wrapper for every scheduler liveness
     // consumer. The adapter preserves the scheduler's operator-event envelope.
     const blockedGhostMode = readBlockedGhostConfig().mode;
-    const isBgJobAliveGhostAware = makeBlockedGhostAwareIsBgJobAlive({
-      mode: blockedGhostMode,
+    const isBgJobAliveGhostAware = createConfiguredBlockedGhostProbe({
       emit: (name, payload) => defaultAppendOperatorEvent({ "event.name": name, payload }),
       emitReap: emitReapIntent,
     });

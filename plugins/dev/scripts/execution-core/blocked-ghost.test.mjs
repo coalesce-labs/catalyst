@@ -1,11 +1,45 @@
 import { describe, expect, mock, test } from "bun:test";
-import { makeBlockedGhostAwareIsBgJobAlive } from "./blocked-ghost.mjs";
+import {
+  createConfiguredBlockedGhostProbe,
+  makeBlockedGhostAwareIsBgJobAlive,
+} from "./blocked-ghost.mjs";
 
 const sessionId = "5ad5c1ff-0000-0000-0000-000000000000";
 const blocked = [{ sessionId, kind: "background", status: "idle", state: "blocked" }];
 const working = [{ sessionId, kind: "background", status: "busy", state: "working" }];
 
 describe("makeBlockedGhostAwareIsBgJobAlive (CAT-171)", () => {
+  test("configured builder honors enforce and defaults to shadow", () => {
+    const agents = [{ sessionId: "aaaaaaaa", state: "blocked" }];
+    const enforce = createConfiguredBlockedGhostProbe({
+      env: { CATALYST_BLOCKED_GHOST: "enforce" },
+      base: () => true,
+      emit: () => {},
+      emitReap: () => true,
+    });
+    const shadow = createConfiguredBlockedGhostProbe({
+      env: {},
+      base: () => true,
+      emit: () => {},
+      emitReap: () => true,
+    });
+    expect(enforce("aaaaaaaa-0000", { agents })).toBe(false);
+    expect(shadow("aaaaaaaa-0000", { agents })).toBe(true);
+  });
+
+  test("configured builder remains a fail-open function when hooks throw", () => {
+    const probe = createConfiguredBlockedGhostProbe({
+      env: {},
+      base: () => true,
+      emit: () => { throw new Error("telemetry down"); },
+      emitReap: () => { throw new Error("append down"); },
+    });
+    expect(typeof probe).toBe("function");
+    expect(probe("aaaaaaaa-0000", {
+      agents: [{ sessionId: "aaaaaaaa", state: "blocked" }],
+    })).toBe(true);
+  });
+
   test("off delegates to the base probe without events", () => {
     const emit = mock();
     const probe = makeBlockedGhostAwareIsBgJobAlive({ mode: "off", emit });

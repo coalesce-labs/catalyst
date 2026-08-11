@@ -2,10 +2,11 @@
 
 import {
   agentStateForShortId,
+  cachedListClaudeAgents,
   isBgJobAlive,
-  listClaudeAgents,
   TERMINAL_AGENT_STATES,
 } from "./claude-agents.mjs";
+import { readBlockedGhostConfig } from "./config.mjs";
 
 // Return a drop-in isBgJobAlive probe. `off` is the exact base verdict;
 // `shadow` observes blocked listings while preserving that verdict; `enforce`
@@ -24,9 +25,9 @@ export function makeBlockedGhostAwareIsBgJobAlive({
   return (bgJobId, options = {}) => {
     if (mode === "off") return base(bgJobId, options);
     // Resolve one listing and thread it through both the base presence probe and
-    // the state lookup. Production scheduler callers already supply the warm
-    // snapshot; the detached runner uses this fallback without double-spawning.
-    const agents = options.agents ?? listClaudeAgents({ exec: options.exec });
+    // the state lookup. The fallback uses the shared TTL cache so repeated
+    // callers never multiply synchronous `claude agents --json` spawns.
+    const agents = options.agents ?? cachedListClaudeAgents({ exec: options.exec });
     const alive = base(bgJobId, { ...options, agents });
     if (!alive) return alive;
 
@@ -71,4 +72,20 @@ export function makeBlockedGhostAwareIsBgJobAlive({
 
     return mode === "enforce" ? false : alive;
   };
+}
+
+// CAT-171: the single production construction site. Every entrypoint arms the
+// probe through this builder so policy resolution cannot drift by entrypoint.
+export function createConfiguredBlockedGhostProbe({
+  env = process.env,
+  base = isBgJobAlive,
+  emit = null,
+  emitReap = null,
+} = {}) {
+  return makeBlockedGhostAwareIsBgJobAlive({
+    mode: readBlockedGhostConfig({ env }).mode,
+    base,
+    emit,
+    emitReap,
+  });
 }

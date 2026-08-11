@@ -179,6 +179,7 @@ import {
   emitLivenessRefreshSpan,
 } from "./tracing.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
+import { createConfiguredBlockedGhostProbe } from "./blocked-ghost.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
 // is the real recovery-module function; tests inject a fake. See
 // reclaimDeadWorkIfPossible in recovery.mjs for the decision tree.
@@ -10000,13 +10001,19 @@ function main() {
     process.exit(1);
   }
   log.info({ orchDir }, "execution-core scheduler starting");
+  const blockedGhostMode = readBlockedGhostConfig().mode;
+  const isBgJobAliveGhostAware = createConfiguredBlockedGhostProbe({
+    emit: (name, payload) => defaultAppendOperatorEvent({ "event.name": name, payload }),
+    emitReap: emitReapIntent,
+  });
+  log.info({ blockedGhostMode }, "execution-core scheduler: blocked-ghost mode resolved");
   // CTL-671: arm the phantom worker-dir validity sweep + bg-liveness reader with
   // the real impls (startScheduler defaults them to safe no-ops for hermetic
   // unit tests). This standalone dry-run mirrors the real daemon's behavior.
   startScheduler({
     orchDir,
     classifyResolution: classifyTicketResolution,
-    isBgJobAlive: defaultIsBgJobAlive,
+    isBgJobAlive: isBgJobAliveGhostAware,
   });
   const shutdown = (sig) => {
     log.info({ sig }, "execution-core scheduler shutting down");
