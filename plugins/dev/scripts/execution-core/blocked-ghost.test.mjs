@@ -40,6 +40,21 @@ describe("makeBlockedGhostAwareIsBgJobAlive (CAT-171)", () => {
     })).toBe(true);
   });
 
+  test("repeated probes without an injected snapshot spawn the listing at most once", () => {
+    let execCalls = 0;
+    const exec = () => {
+      execCalls++;
+      return JSON.stringify(blocked);
+    };
+    const probe = createConfiguredBlockedGhostProbe({
+      env: { CATALYST_BLOCKED_GHOST: "shadow" },
+    });
+    probe(sessionId, { exec });
+    probe(sessionId, { exec });
+    probe(sessionId, { exec });
+    expect(execCalls).toBeLessThanOrEqual(1);
+  });
+
   test("off delegates to the base probe without events", () => {
     const emit = mock();
     const probe = makeBlockedGhostAwareIsBgJobAlive({ mode: "off", emit });

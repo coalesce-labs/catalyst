@@ -138,6 +138,27 @@ function makeDeps(over = {}) {
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("drainOnce — drains a queued intent → launched", () => {
+  test("threads one shared agents snapshot through every supersede probe in a drain pass", () => {
+    const seen = [];
+    for (const ticket of ["CTL-A", "CTL-B", "CTL-C"]) {
+      seedQueued(ticket);
+      seedRecoveryPassSignal(ticket, "running", `bg-${ticket}`);
+    }
+    const deps = makeDeps({
+      isBgJobAlive: (_id, opts) => {
+        seen.push(opts.agents);
+        return false;
+      },
+    });
+
+    const result = drainOnce(deps);
+
+    expect(result.drained).toBe(3);
+    expect(seen).toHaveLength(3);
+    expect(seen[0]).toBe(seen[1]);
+    expect(seen[1]).toBe(seen[2]);
+  });
+
   test("claims the intent, invokes recovery-pass, flips to launched + records bg_job_id/worktreePath/launchedAt", () => {
     seedQueued("CTL-1");
     const deps = makeDeps();
