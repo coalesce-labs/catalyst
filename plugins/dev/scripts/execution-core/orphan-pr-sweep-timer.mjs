@@ -17,8 +17,9 @@ import {
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { appendFileSync } from "node:fs";
-import { log, getEventLogPath } from "./config.mjs";
+import { log, getEventLogPath, getClusterHosts, getHostName } from "./config.mjs";
 import { DEFAULTS, decideOrphanNotify } from "./orphan-pr-sweep.mjs";
+import { ownedBy } from "./hrw.mjs";
 
 // readOrphanPrSweepConfig — read catalyst.orchestration.orphanPrSweep.*
 // from .catalyst/config.json. Returns {} for missing/unreadable/absent key.
@@ -87,6 +88,15 @@ export function defaultReadWorkerTrackedNumbers(orchDir) {
     }
   }
   return tracked;
+}
+
+// draftTicket — recover the Linear identifier from the PR branch name so draft
+// notification can use the same fleet-wide HRW ownership boundary as dispatch.
+// A branch without an identifier cannot be safely assigned to this host.
+export function draftTicket(headRefName) {
+  return typeof headRefName === "string"
+    ? headRefName.match(/(?:^|\/)([A-Z][A-Z0-9]+-\d+)(?:$|[-_/])/i)?.[1]?.toUpperCase() ?? null
+    : null;
 }
 
 // defaultResolveRepoSlug — determine the repo slug for gh pr list.
@@ -162,7 +172,7 @@ function defaultEmit(name, payload) {
  * All seams are injected; this function has no I/O of its own.
  * Exported for unit tests.
  */
-export async function runOrphanSweep({ repo, nowMs, cfg, prList, readWorkerTrackedNumbers, readState, persist, emit }) {
+export async function runOrphanSweep({ repo, nowMs, cfg, prList, readWorkerTrackedNumbers, ownsDraft = () => true, readState, persist, emit }) {
   if (!repo) return; // fail-open: no slug → no-op
 
   const prs = await prList(repo); // may throw → per-tick catch in the timer
@@ -173,6 +183,10 @@ export async function runOrphanSweep({ repo, nowMs, cfg, prList, readWorkerTrack
   const next = {}; // rebuilt each tick → prunes vanished/recovered PRs
   for (const pr of prs) {
     if (tracked.has(pr.number)) continue; // worker-tracked → not an orphan
+    // Drafts legitimately remain open throughout implement→verify→review. Only
+    // their HRW owner may classify one as orphaned; otherwise every peer lacks
+    // the owner's local worker signal and emits a duplicate false escalation.
+    if (pr.isDraft && !ownsDraft(pr)) continue;
     const key = `${repo}#${pr.number}`;
     const entry = prior[key] ?? null;
     const decision = decideOrphanNotify({
@@ -223,6 +237,10 @@ export function startOrphanPrSweepTimer({
   readState: readStateFn = (od) => defaultReadState(od),
   persist: persistFn = (od, s) => defaultPersist(od, s),
   emit = defaultEmit,
+  ownsDraft = (pr) => {
+    const ticket = draftTicket(pr.headRefName);
+    return ticket !== null && ownedBy(ticket, getClusterHosts(), getHostName());
+  },
   clock = realClock(),
 } = {}) {
   if (!enabled || !orchDir) return { stop: () => {} };
@@ -241,6 +259,7 @@ export function startOrphanPrSweepTimer({
         cfg,
         prList,
         readWorkerTrackedNumbers: () => readWorkerTrackedNumbersFn(orchDir),
+        ownsDraft,
         readState: () => readStateFn(orchDir),
         persist: (s) => persistFn(orchDir, s),
         emit,

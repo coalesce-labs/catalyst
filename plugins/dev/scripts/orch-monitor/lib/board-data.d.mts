@@ -378,7 +378,8 @@ export function isPrStuck(
 /** CTL-1158: operator CTA string for a stuck PR; null when not a blocker state. */
 export function prStuckReason(
   mergeStateStatus: string | null | undefined,
-  prNumber: number | null | undefined
+  prNumber: number | null | undefined,
+  isDraft?: boolean
 ): string | null;
 
 /** CTL-928: a single ticket's lane on the queue board (live | between-phases |

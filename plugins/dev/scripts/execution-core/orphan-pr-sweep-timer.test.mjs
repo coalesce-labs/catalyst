@@ -34,6 +34,25 @@ test("draft PR tracked by phase-implement is filtered out", async () => {
   expect(Object.keys(persisted)).toHaveLength(0);
 });
 
+test("draft PR owned by a peer is filtered out when no local worker tracks it", async () => {
+  const persisted = {}; const events = [];
+  await runOrphanSweep({
+    repo, nowMs: 300_000, cfg: { stableSeconds: 300 },
+    prList: async () => [mkPr(2061, {
+      headRefName: "fork/CAT-15", isDraft: true, mergeStateStatus: "CLEAN",
+    })],
+    readWorkerTrackedNumbers: () => new Set(),
+    ownsDraft: () => false,
+    readState: () => ({ [`${repo}#2061`]: {
+      repo, number: 2061, firstSeenAt: new Date(0).toISOString(),
+    } }),
+    persist: (s) => Object.assign(persisted, s),
+    emit: (n, p) => events.push({ n, p }),
+  });
+  expect(Object.keys(persisted)).toHaveLength(0);
+  expect(events).toHaveLength(0);
+});
+
 test("orphan blocker, first sighting → stamps firstSeenAt, no notify event yet", async () => {
   let persisted = null; const events = [];
   await runOrphanSweep({
