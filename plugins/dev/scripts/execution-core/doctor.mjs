@@ -3089,6 +3089,36 @@ export function replicaTierOptedIn({ installed, mode }) {
   return installed || mode === "on";
 }
 
+// CAT-134 (Codex #3215 P1): the launchd writer does NOT inherit doctor's shell env — it
+// sources its token from two 0600 files (cloud-sync/launch.sh: cluster.env, then
+// cloud-sync.env, last-wins). Grading token presence off `process.env` alone therefore
+// reports "not set" for a correctly-provisioned, authenticated writer, and because the
+// installed agent sets `optedIn` that lands as a FAIL (plus a second `replica-tier` FAIL),
+// rejecting normally provisioned nodes at the activation gate. Probe the same sources the
+// writer reads, in the same precedence order.
+const CLOUD_SYNC_TOKEN_FILES = ["cluster.env", "cloud-sync.env"];
+
+// Presence probe, BY NAME ONLY — it answers "is this var assigned a non-empty value?" and
+// never returns, stores, or logs the value itself (same contract as the check it feeds).
+// Shell semantics: last assignment wins, so scan all matches and judge the final one.
+export function tokenAssignedInEnvFile(text, varName) {
+  if (typeof text !== "string" || !text || !varName) return false;
+  const re = new RegExp(
+    String.raw`^[ \t]*(?:export[ \t]+)?${varName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[ \t]*=[ \t]*(.*)$`,
+    "gm",
+  );
+  let assigned = false;
+  for (const m of text.matchAll(re)) {
+    let v = m[1].trim();
+    // Strip ONE matching quote pair, then ask only "is anything left?" — never keep it.
+    if (v.length >= 2 && ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"')))) {
+      v = v.slice(1, -1);
+    }
+    assigned = v.length > 0;
+  }
+  return assigned;
+}
+
 // checkCloudSync — CTL-1394. Advisory health of the per-node supervised Linear-replica
 // writer + its read tier. Doctor's exit code is the FAIL count and gates catalyst-join
 // activation — a FAIL here would block a node that simply hasn't opted into the replica yet.
@@ -3118,6 +3148,10 @@ export function checkCloudSync(deps = {}) {
     sizeFloorBytes = 65_536,
     isSqliteFile = defaultIsSqliteFile, // CAT-35
     readDbTables = defaultReadDbTables, // CAT-35
+    // CAT-134 (Codex #3215 P1): launchd-visible token sources, so a token provisioned
+    // only in those 0600 files is not misgraded as absent.
+    configDir = process.env.CATALYST_CONFIG_DIR || resolve(homedir(), ".config", "catalyst"),
+    readTokenFile = (p) => readFileSync(p, "utf8"),
   } = deps;
 
   const installed = agentInstalled(label, laDir);
@@ -3215,12 +3249,26 @@ export function checkCloudSync(deps = {}) {
   }
 
   // (c) token presence — by NAME only, NEVER the value.
+  // The authenticating process is the launchd writer, not this shell, so doctor's own env
+  // is only ONE of the sources that count. When the var is absent here, fall back to the
+  // files launch.sh sources (last-wins order) before declaring the writer unauthenticated.
   const tokenVal = env[tokenEnv.envVar];
-  const tokenSet = typeof tokenVal === "string" && tokenVal.length > 0;
+  const tokenSetInEnv = typeof tokenVal === "string" && tokenVal.length > 0;
+  let tokenFileSource = "";
+  if (!tokenSetInEnv) {
+    for (const f of CLOUD_SYNC_TOKEN_FILES) {
+      let text = "";
+      try { text = readTokenFile(resolve(configDir, f)); } catch { continue; /* absent/unreadable → not a source */ }
+      if (tokenAssignedInEnvFile(text, tokenEnv.envVar)) tokenFileSource = f;
+    }
+  }
+  const tokenSet = tokenSetInEnv || tokenFileSource !== "";
   checks.push(
-    tokenSet
+    tokenSetInEnv
       ? mkCheck("replica-token", STATUS.PASS, `${tokenEnv.envVar} is set (len>0, source=${tokenEnv.source})`)
-      : mkCheck("replica-token", tierGrade(), `${tokenEnv.envVar} not set — the writer cannot authenticate; provision ~/.config/catalyst/cloud-sync.env as a 0600 file, then run catalyst-stack adopt-cloud-sync`),
+      : tokenFileSource
+        ? mkCheck("replica-token", STATUS.PASS, `${tokenEnv.envVar} provisioned in ~/.config/catalyst/${tokenFileSource} — the launchd writer sources it there (not visible in this shell's env)`)
+        : mkCheck("replica-token", tierGrade(), `${tokenEnv.envVar} not set in this env nor assigned in ~/.config/catalyst/{${CLOUD_SYNC_TOKEN_FILES.join(",")}} — the writer cannot authenticate; provision ~/.config/catalyst/cloud-sync.env as a 0600 file, then run catalyst-stack adopt-cloud-sync`),
   );
 
   // (d) read-flag ↔ writer consistency.
@@ -3266,7 +3314,16 @@ export function checkReplicaHealth(deps = {}) {
   } = deps;
   let files;
   try { files = readDir(dir).filter((f) => f.endsWith(".json")); }
-  catch { return [mkCheck("replica-health", STATUS.INFO, "no replica-health markers yet")]; }
+  catch (err) {
+    // CAT-134 (Codex #3215 P2): only an ABSENT directory means "no markers yet". EACCES /
+    // EIO / ENOTDIR mean the durable degradation latch could not be inspected at all —
+    // grading that as INFO lets an opted-in node exit 0 while an active alert latch goes
+    // unread, which is exactly the silence this check exists to break.
+    const code = err?.code || (/ENOENT/.test(err?.message || "") ? "ENOENT" : "");
+    if (code === "ENOENT") return [mkCheck("replica-health", STATUS.INFO, "no replica-health markers yet")];
+    return [mkCheck("replica-health", optedIn ? STATUS.FAIL : STATUS.WARN,
+      `replica-health state unreadable (${code || "unknown error"}) — cannot tell whether a degradation latch is active; check permissions on ${dir}`)];
+  }
   if (files.length === 0) return [mkCheck("replica-health", STATUS.INFO, "no replica-health markers yet")];
   const alerting = [];
   const malformed = [];

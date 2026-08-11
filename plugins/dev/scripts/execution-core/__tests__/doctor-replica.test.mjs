@@ -30,6 +30,12 @@ function deps(over = {}) {
     // fs/spawn. Healthy default = a real SQLite file carrying both required tables.
     isSqliteFile: () => true,
     readDbTables: () => ["issues", "sync_meta", "labels"],
+    // CAT-134: the launchd-visible token-file probe is a dep too — default it to "no such
+    // file" so this suite keeps touching no fs. Without this the token-unset test would
+    // read the DEVELOPER'S real ~/.config/catalyst/cloud-sync.env and pass or fail by
+    // machine rather than by input.
+    configDir: "/tmp/ctl1394/config",
+    readTokenFile: () => { const e = new Error("ENOENT: no such file"); e.code = "ENOENT"; throw e; },
     ...over,
   };
 }
@@ -67,6 +73,46 @@ describe("checkCloudSync", () => {
     const recs = checkCloudSync(deps({ env: { [TOKEN_ENV.envVar]: SECRET } }));
     expect(JSON.stringify(recs)).not.toContain(SECRET);
     expect(byName(recs)["replica-token"].status).toBe("pass");
+  });
+
+  // CAT-134 (Codex #3215 P1): the writer is launchd-launched and sources its token from
+  // 0600 files doctor's shell never sees. A token provisioned ONLY there must not be
+  // graded "not set" — that FAIL blocks activation on a correctly provisioned node.
+  test("token only in cloud-sync.env → replica-token PASS, value never leaks", () => {
+    const SECRET = "lin_only_in_the_file";
+    const recs = checkCloudSync(deps({
+      env: {},
+      readTokenFile: (p) => {
+        if (p.endsWith("cloud-sync.env")) return `export ${TOKEN_ENV.envVar}='${SECRET}'\n`;
+        const e = new Error("ENOENT"); e.code = "ENOENT"; throw e;
+      },
+    }));
+    const m = byName(recs);
+    expect(m["replica-token"].status).toBe("pass");
+    expect(m["replica-token"].detail).toContain("cloud-sync.env");
+    expect(JSON.stringify(recs)).not.toContain(SECRET);
+    // and the derived end-to-end roll-up must not still call the tier partially configured
+    expect(m["replica-tier"].status).toBe("pass");
+  });
+
+  test("token only in cluster.env → replica-token PASS (the writer sources it too)", () => {
+    const m = byName(checkCloudSync(deps({
+      env: {},
+      readTokenFile: (p) => {
+        if (p.endsWith("cluster.env")) return `export ${TOKEN_ENV.envVar}=abc123\n`;
+        const e = new Error("ENOENT"); e.code = "ENOENT"; throw e;
+      },
+    })));
+    expect(m["replica-token"].status).toBe("pass");
+    expect(m["replica-token"].detail).toContain("cluster.env");
+  });
+
+  test("token file present but assigned EMPTY → still FAIL (presence ≠ assignment)", () => {
+    const m = byName(checkCloudSync(deps({
+      env: {},
+      readTokenFile: () => `# provisioning stub\nexport ${TOKEN_ENV.envVar}=''\n`,
+    })));
+    expect(m["replica-token"].status).toBe("fail");
   });
 
   test("db absent while opted in → replica-fresh FAIL (not connected)", () => {
