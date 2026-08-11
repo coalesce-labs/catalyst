@@ -47,12 +47,39 @@ export function priorArtifactPresence({ ticket, artifact, artifactDir, searchedP
   try {
     names = list(searchedPath);
   } catch (err) {
-    return err?.code === "ENOENT" || err?.code === "ENOTDIR" ? false : null;
+    if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") return null;
+    // CAT-55 review finding 2: searchedPath is `${worktree}/${artifactDir}` captured at
+    // dispatch time, and that worktree routinely stops existing (CTL-707 L3 destroy+recreate,
+    // orphan sweep, cross-host reclaim, or an orch-monitor node that never had it). A missing
+    // worktree ROOT is no evidence about the document — thoughts/ is a symlink into the shared
+    // git-backed repo and the doc is still there for the next fresh worktree. Only a readable
+    // directory that lacks a matching file proves absence; a vanished root is indeterminate.
+    const suffix = `/${spec.slice("glob:".length)}`;
+    const root = searchedPath.endsWith(suffix) ? searchedPath.slice(0, -suffix.length) : null;
+    if (root) {
+      try { if (!exists(root)) return null; } catch { return null; }
+    }
+    return false;
   }
   if (!Array.isArray(names)) return null;
   const escaped = ticket.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const boundarySafe = new RegExp(`-${escaped}(?:\\.md|-.*\\.md)$`, "i");
   return names.some((name) => typeof name === "string" && !name.startsWith(".") && boundarySafe.test(name));
+}
+
+// CAT-55 review finding 1: the hold explanation publishes the override phrase verbatim, so the
+// daemon's OWN comment echoes back through the Linear webhook carrying the token that breaks the
+// hold. `_isBotId` cannot be relied on to filter it — botUserId is truthy-but-empty on a host with
+// no bot ids configured, and the helper may post as the worker actor while only the orchestrator
+// actor is registered. Every comment this module authors carries this signature; the force check
+// refuses to honour a body that has it, so the announcement can never defeat the announcement.
+export const PRIOR_ARTIFACT_HOLD_SIGNATURE = "<!-- catalyst:prior-artifact-hold -->";
+export const PRIOR_ARTIFACT_FORCE_PHRASE = /\bforce prior artifact retry\b/i;
+
+export function isPriorArtifactForceRequest(body) {
+  if (typeof body !== "string") return false;
+  if (body.includes(PRIOR_ARTIFACT_HOLD_SIGNATURE)) return false; // our own echoed comment
+  return PRIOR_ARTIFACT_FORCE_PHRASE.test(body);
 }
 
 export const PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE = (where) =>

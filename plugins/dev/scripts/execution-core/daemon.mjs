@@ -83,7 +83,9 @@ import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-po
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import {
   PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE,
+  PRIOR_ARTIFACT_HOLD_SIGNATURE,
   isPriorArtifactBlock,
+  isPriorArtifactForceRequest,
   priorArtifactPresence,
   resolvePriorArtifactRespondGateMode,
 } from "./prior-artifact-block.mjs";
@@ -468,9 +470,21 @@ function defaultArtifactPresent(input) {
   return priorArtifactPresence({ ...input, exists: existsSync, list: readdirSync });
 }
 
+// CAT-55 review finding 4: this runs synchronously on the daemon's event-loop thread, and the
+// helper makes three curl calls with no --max-time. Without a spawn timeout a hung socket to
+// api.linear.app wedges scheduler ticks, heartbeat, reaper and watchdog for as long as it hangs.
+// maxBuffer + the CATALYST_COMMENT_POST_HELPER override match every sibling call site
+// (recovery-emit.mjs, unstuck-escalate-seam.mjs).
 function defaultPostComment(ticket, body) {
-  const helper = fileURLToPath(new URL("../lib/linear-comment-post.sh", import.meta.url));
-  const result = spawnSync(helper, [ticket, body], { encoding: "utf8", shell: false });
+  const helper =
+    process.env.CATALYST_COMMENT_POST_HELPER ||
+    fileURLToPath(new URL("../lib/linear-comment-post.sh", import.meta.url));
+  const result = spawnSync(helper, [ticket, body], {
+    encoding: "utf8",
+    shell: false,
+    timeout: 30_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
   return result.status === 0;
 }
 
@@ -547,12 +561,12 @@ export async function handleCommentWake(
         log.info({ ticket, phase }, "comment-wake: would hold artifact block (CAT-55 shadow)");
         break;
       }
-      if (/\bforce prior artifact retry\b/i.test(parsed.body ?? "")) break;
+      if (isPriorArtifactForceRequest(parsed.body ?? "")) break;
       log.info({ ticket, phase }, "comment-wake: held artifact block (CAT-55 enforce)");
       const marker = join(workerDir, `.artifact-blocked-reply-${phase}.applied`);
       if (!existsSync(marker)) {
         const where = sig.dispatchFailureSearchedPath ?? sig.dispatchFailureArtifactDir ?? "the prior-phase artifact directory";
-        const body = `${ticket}/${phase} is still blocked because the required document is missing from ${where}. ${PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE(where)} Reply with “force prior artifact retry” to override this hold.`;
+        const body = `${ticket}/${phase} is still blocked because the required document is missing from ${where}. ${PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE(where)} Reply with “force prior artifact retry” to override this hold.\n\n${PRIOR_ARTIFACT_HOLD_SIGNATURE}`;
         try {
           if (postComment(ticket, body)) writeFileSync(marker, "");
           else log.warn({ ticket, phase }, "comment-wake: artifact-block explanation post failed; stall remains held");
