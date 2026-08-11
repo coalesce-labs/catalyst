@@ -77,6 +77,10 @@ import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import { canOccupySlotNow, defaultHasTriageArtifact } from "./dispatch-readiness.mjs";
 import {
+  TRIAGE_REQUEST_TTL_MS, classifyTriageHold, clearTriageRequest,
+  readTriageRequest, reapStaleTriageRequests, recordTriageRequest,
+} from "./triage-request.mjs";
+import {
   defaultDispatch,
   dispatchTicket,
   teamOf,
@@ -204,6 +208,7 @@ import {
   survivingRoster,
   defaultAppendDispatchFailedEvent,
   defaultAppendDispatchRequestedEvent,
+  defaultAppendTriageRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
   defaultAppendYieldFileSkipEvent,
   defaultKillBgJob,
@@ -1989,7 +1994,10 @@ export function readAllEligibleTickets() {
     if (!f.endsWith(".json")) continue;
     try {
       const proj = JSON.parse(readFileSync(join(getEligibleDir(), f), "utf8"));
-      if (Array.isArray(proj?.tickets)) all.push(...proj.tickets);
+      if (Array.isArray(proj?.tickets)) {
+        const team = proj.team ?? basename(f, ".json");
+        all.push(...proj.tickets.map((ticket) => ({ ...ticket, team: ticket.team ?? team })));
+      }
     } catch (err) {
       log.warn(
         { err: err.message, file: f },
@@ -4633,6 +4641,11 @@ export function schedulerTick(
     // creates workers/<ticket>/) inject `() => new Set()` so the seeded ticket
     // is not excluded from Pass 2 by dir-existence before the guard fires.
     listStartedTickets: listStartedTicketsOpt = undefined,
+    recordTriageRequest: recordTriageRequestOpt = recordTriageRequest,
+    clearTriageRequest: clearTriageRequestOpt = clearTriageRequest,
+    readTriageRequest: readTriageRequestOpt = readTriageRequest,
+    classifyTriageHold: classifyTriageHoldOpt = classifyTriageHold,
+    appendTriageRequestedEvent = defaultAppendTriageRequestedEvent,
     // CTL-1241: env binding for the three labelNeedsHumanUnlessBeliefOwner
     // escalation sites (dependency-cycle 3825, ctl-925-cycle 4530, terminal-sweep
     // 4913). Mirrors maybeEscalateDispatchFailures' `env = process.env` so the
@@ -7745,6 +7758,9 @@ export function schedulerTick(
     });
     if (readiness.ok) {
       lastHoldLogged.delete(t.identifier);
+      try { clearTriageRequestOpt(orchDir, t.identifier); } catch (err) {
+        log.warn({ ticket: t.identifier, err: String(err) }, "cat-166: could not clear triage request");
+      }
       return true;
     }
     if (heldReasons.length < HELD_LOG_CAP) {
@@ -7753,11 +7769,27 @@ export function schedulerTick(
     const previousHold = lastHoldLogged.get(t.identifier);
     const holdStreak = previousHold?.reason === readiness.reason ? previousHold.streak + 1 : 1;
     lastHoldLogged.set(t.identifier, { reason: readiness.reason, streak: holdStreak });
+    let holdClass = null;
+    let priorRequest = null;
+    if (readiness.reason === "untriaged-no-triage-artifact") {
+      try {
+        holdClass = classifyTriageHoldOpt(orchDir, t.identifier);
+        if (holdClass) {
+          priorRequest = readTriageRequestOpt(orchDir, t.identifier);
+          recordTriageRequestOpt(orchDir, t.identifier, { team: t.team ?? null, class: holdClass, reason: readiness.reason, holdStreak });
+          if (!priorRequest) appendTriageRequestedEvent({ orchId: t.identifier, orchDir, ticket: t.identifier, reason: holdClass });
+        }
+      } catch (err) {
+        log.warn({ ticket: t.identifier, err: String(err) }, "cat-166: could not record triage request — holding");
+      }
+    }
     if (holdStreak === 1 || holdStreak % HOLD_RELOG_EVERY === 0) {
       const context = {
         ticket: t.identifier,
         reason: readiness.reason,
         held_ticks: holdStreak,
+        ...(holdClass ? { triage_hold_class: holdClass } : { triage_in_flight: true }),
+        ...(priorRequest?.lastDecline ? { triage_decline: priorRequest.lastDecline.reason, triage_decline_at: priorRequest.lastDecline.at } : {}),
         ...(readiness.error ? { error: String(readiness.error) } : {}),
       };
       if (readiness.error) {
@@ -7783,6 +7815,9 @@ export function schedulerTick(
     for (const ticket of lastHoldLogged.keys()) {
       if (!readyNow.has(ticket)) lastHoldLogged.delete(ticket);
     }
+  }
+  try { reapStaleTriageRequests(orchDir, { ttlMs: TRIAGE_REQUEST_TTL_MS }); } catch (err) {
+    log.warn({ err: String(err) }, "cat-166: could not reap stale triage requests");
   }
 
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With

@@ -1112,6 +1112,19 @@ export function defaultAppendDispatchRequestedEvent({
   );
 }
 
+function appendTriageBridgeEvent({ orchId, orchDir, ticket, action, reason, payloadExtras, severityText = "INFO", severityNumber = 9 }) {
+  return appendEnvelopeBestEffort(buildEventEnvelope({ phase:"dispatch", ticket, orchId, action, reason, payloadExtras, severityText, severityNumber, ticketType:resolveTicketType(orchDir,ticket) }), `triage-${action}`);
+}
+export function defaultAppendTriageRequestedEvent({ orchId, orchDir, ticket, reason }) {
+  return appendTriageBridgeEvent({ orchId, orchDir, ticket, action:"triage-requested", reason, payloadExtras:{ hold_class:reason } });
+}
+export function defaultAppendTriageDeclinedEvent({ orchId, orchDir, ticket, reason }) {
+  return appendTriageBridgeEvent({ orchId, orchDir, ticket, action:"triage-declined", reason, payloadExtras:{ decline_reason:reason }, severityText:"WARN", severityNumber:13 });
+}
+export function defaultAppendTriageEscalatedEvent({ orchId, orchDir, ticket, reason, shadow, age_ms }) {
+  return appendTriageBridgeEvent({ orchId, orchDir, ticket, action:"triage-escalated", reason, payloadExtras:{ decline_reason:reason, shadow, age_ms }, severityText:"WARN", severityNumber:13 });
+}
+
 // defaultAppendDispatchLaunchedEvent — phase.dispatch.launched.<TICKET>.
 // Emitted after `claude --bg` returns and the signal is verified, carrying the
 // bg-job shortId (the de-facto session discriminator) + worktree path so the
