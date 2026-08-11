@@ -22,12 +22,19 @@ printf '%s\n' "$exec_block" | grep -q 'linear-heartbeat-actor "Catalyst Heartbea
   || fail "execution-core dedicated actor arguments are missing"
 
 monitor_branch="$(sed -n '/if \[\[ "\$_liveness_source" == "loki"/,/^  fi$/p' "$MONITOR")"
-printf '%s\n' "$monitor_branch" | grep -q 'linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN' \
-  && pass "monitor anchor branch keeps the monitor actor mint" \
-  || fail "monitor actor mint is missing"
-printf '%s\n' "$monitor_branch" | grep -q 'linear_app_actor_auth "catalyst-monitor" CATALYST_HEARTBEAT_APP_ACTOR_TOKEN' \
-  && printf '%s\n' "$monitor_branch" | grep -q 'linear-heartbeat-actor "Catalyst Heartbeat app-actor"' \
-  && pass "monitor anchor branch mints the dedicated heartbeat actor" \
-  || fail "monitor heartbeat actor arguments are missing"
+else_line="$(printf '%s\n' "$monitor_branch" | grep -n '^  else$' | cut -d: -f1)"
+monitor_line="$(printf '%s\n' "$monitor_branch" | grep -n 'linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN' | cut -d: -f1)"
+monitor_heartbeat_line="$(printf '%s\n' "$monitor_branch" | grep -n 'linear_app_actor_auth "catalyst-monitor" CATALYST_HEARTBEAT_APP_ACTOR_TOKEN' | cut -d: -f1)"
+if [[ -n "$else_line" && -n "$monitor_line" && "$monitor_line" -gt "$else_line" ]]; then
+  pass "monitor actor mint is confined to the anchor else branch"
+else
+  fail "monitor actor mint is missing or reachable from a skip branch"
+fi
+if [[ -n "$else_line" && -n "$monitor_heartbeat_line" && "$monitor_heartbeat_line" -gt "$else_line" ]] \
+  && printf '%s\n' "$monitor_branch" | grep -q 'linear-heartbeat-actor "Catalyst Heartbeat app-actor"'; then
+  pass "monitor heartbeat mint is confined to the anchor else branch"
+else
+  fail "monitor heartbeat mint is missing, mis-parameterized, or reachable from a skip branch"
+fi
 
 [[ "$failures" -eq 0 ]]

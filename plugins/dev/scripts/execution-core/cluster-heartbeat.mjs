@@ -45,8 +45,15 @@ export function resolveHeartbeatToken({ resolve = resolveSecret, env = process.e
   // Scoped app-actor minting may preserve an inherited shared token as a
   // fail-open fallback. Its provenance marker is load-bearing: that token still
   // consumes the shared bucket and must therefore keep using the shared breaker.
-  if (dedicated && env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE !== "inherited") {
-    return { token: dedicated, dedicated: true };
+  if (dedicated) {
+    if (env.CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE === "inherited") {
+      const refreshedShared = String(resolve("linear-api-token")?.value ?? "").trim();
+      return { token: refreshedShared || dedicated, dedicated: false };
+    }
+    return {
+      token: dedicated,
+      dedicated: true,
+    };
   }
   const shared = String(resolve("linear-api-token")?.value ?? "").trim();
   return { token: shared, dedicated: false };

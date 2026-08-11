@@ -41,6 +41,14 @@ describe("resolveHeartbeatToken", () => {
   test("an inherited heartbeat fallback remains on the shared bucket", () => {
     const result = resolveHeartbeatToken({
       env: { CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE: "inherited" },
+      resolve: (id) => ({ value: id === "linear-heartbeat-api-token" ? "old-shared" : null }),
+    });
+    expect(result).toEqual({ token: "old-shared", dedicated: false });
+  });
+
+  test("an inherited heartbeat fallback yields to a freshly minted shared alias", () => {
+    const result = resolveHeartbeatToken({
+      env: { CATALYST_HEARTBEAT_APP_ACTOR_TOKEN_SOURCE: "inherited" },
       resolve: (id) => ({ value: id === "linear-heartbeat-api-token" ? "old-shared" : "fresh-shared" }),
     });
     expect(result).toEqual({ token: "fresh-shared", dedicated: false });
