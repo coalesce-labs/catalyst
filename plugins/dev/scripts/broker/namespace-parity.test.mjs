@@ -69,6 +69,8 @@ const INLINE_EVENT_NAMES = [
   "delegate.routed",                  // CTL-1609 delegate-first.mjs (enforce mode — enqueued ok)
   "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
   "catalyst.replica.writer_idle",     // CAT-21 cloud-sync.mjs (tokenless writer provisioning gap)
+  "recovery.escalation.correlated",   // CAT-170 recovery-reasoning.mjs (enforced member pointer)
+  "recovery.escalation.would-correlate", // CAT-170 recovery-reasoning.mjs (shadow group)
 ];
 
 // Build the flat list of all static exec-core event names.
@@ -108,6 +110,27 @@ describe("exec-core static event names", () => {
           `exec-core event "${name}" has phase slot "${slot}" not in KNOWN_PHASES or exceptions`
         ).toBe(true);
       }
+    }
+  });
+});
+
+describe("CAT-170 recovery escalation correlation event names", () => {
+  const CORRELATION_EVENT_NAMES = [
+    "recovery.escalation.correlated",
+    "recovery.escalation.would-correlate",
+  ];
+
+  test("both names are registered and outside protected namespaces", () => {
+    expect(
+      INLINE_EVENT_NAMES.filter((name) => CORRELATION_EVENT_NAMES.includes(name))
+    ).toEqual(CORRELATION_EVENT_NAMES);
+
+    for (const name of CORRELATION_EVENT_NAMES) {
+      expect(name.startsWith("filter.")).toBe(false);
+      expect(name.startsWith("broker.daemon")).toBe(false);
+      expect(name).not.toBe("session.heartbeat");
+      expect(isBrokerProtectedName(name)).toBe(false);
+      expect(phaseSlotOf(name)).toBeNull();
     }
   });
 });

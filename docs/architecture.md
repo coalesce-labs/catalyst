@@ -442,6 +442,22 @@ as a recovery item. Previously the classifier blindly escalated it to a human. W
 The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode logs a
 `recovery.would-fix` event without dispatching; enforce dispatches the recovery-pass worker.
 
+### Correlated retry-cap escalation (CAT-170)
+
+Retry-cap escalation records a normalized failure signature at attempt time in the host-local
+`.recovery-intents/<TICKET>.json` ledger. The exhausted-intent sweep then follows a
+**collect → group → act** flow: candidates sharing a signature inside the configured window are
+represented by one deterministic anchor escalation, while each other ticket receives a member
+pointer to that anchor. Every affected ticket retains its `needs-human` label, but the pointer
+briefs do not represent separate operator decisions.
+
+`CATALYST_RECOVERY_CORRELATION` controls rollout: `off` keeps independent escalations, `shadow`
+(the default) computes groups and emits `recovery.escalation.would-correlate` without changing the
+operator-visible path, and `enforce` emits one anchor plus `recovery.escalation.correlated` member
+events. Correlation is intentionally per-host because the intent ledger is host-local; cross-host
+correlation remains separate work. A missing/null signature always forms a singleton and can never
+correlate with another missing signature.
+
 ### Orphan-stale merged-PR reconciliation (CAT-47)
 
 Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
