@@ -5342,6 +5342,68 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
   });
 });
 
+describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
+  test("delivery failure does not extend fence suppression and retries next tick", () => {
+    const ticket = "CAT-173-RETRY";
+    const nowMs = Date.now();
+    writeSignal(ticket, "implement", "failed");
+    mkdirSync(join(orchDir, ".fence-standoff"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".fence-standoff", `${ticket}.json`),
+      JSON.stringify({
+        ticket,
+        site: "terminal-sweep",
+        reason: "foreign-owner",
+        firstSuppressedAt: nowMs - 2,
+        lastSuppressedAt: nowMs - 2,
+        count: 0,
+        breakGlassAt: null,
+      }),
+    );
+
+    let fenceCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      now: () => nowMs,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "1",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+        CATALYST_FENCE_STANDOFF_COOLDOWN_MS: "21600000",
+      },
+      gateway: {
+        getDescriptor: () => ({
+          state: "In Progress",
+          removed: false,
+          updatedAt: new Date(nowMs).toISOString(),
+        }),
+      },
+      writeStatus: {
+        applyPhaseStatus() {},
+        applyTerminalDone() {},
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      terminalFenceGuard: (_subject, hooks) => {
+        fenceCalls += 1;
+        hooks.onSuppress?.({ reason: "foreign-owner" });
+        return false;
+      },
+      appendFenceStandoffEvent: () => {
+        throw new Error("injected append failure");
+      },
+    };
+
+    schedulerTick(orchDir, opts);
+    expect(fenceCalls).toBe(1);
+    expect(existsSync(join(orchDir, "workers", ticket, ".fence-suppressed"))).toBe(false);
+    expect(existsSync(join(orchDir, "workers", ticket, ".fence-standoff-cooldown"))).toBe(false);
+
+    schedulerTick(orchDir, opts);
+    expect(fenceCalls).toBe(2);
+  });
+});
+
 // ── CTL-1079: retraction sweep reads from broker cache instead of live API ──
 // These tests use an exec spy + the real removeLabel (from linear-write.mjs)
 // to verify that gateway cache hits suppress the live `linearis issues read`

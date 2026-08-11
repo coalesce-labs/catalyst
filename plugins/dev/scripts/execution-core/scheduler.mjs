@@ -3875,6 +3875,35 @@ function escalationProbeCooldownPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ".escalation-probe-cooldown");
 }
 
+// CAT-173: successful fence-standoff delivery has its own long cooldown. Keep it
+// separate from `.fence-suppressed`: terminalDoneOnce consumes that marker and
+// must remain free to write Done while standoff re-escalation is rate-bounded.
+function fenceStandoffCooldownPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".fence-standoff-cooldown");
+}
+
+function stampFenceStandoffCooldown(orchDir, ticket, nowMs, env = process.env) {
+  try {
+    writeFileSync(
+      fenceStandoffCooldownPath(orchDir, ticket),
+      JSON.stringify({ expiresAt: nowMs + resolveStandoffCooldownMs(env) }),
+    );
+  } catch {
+    /* best-effort — re-probe next tick */
+  }
+}
+
+function isFenceStandoffCooldownFresh(orchDir, ticket, nowMs) {
+  try {
+    const { expiresAt } = JSON.parse(
+      readFileSync(fenceStandoffCooldownPath(orchDir, ticket), "utf8"),
+    );
+    return Number.isFinite(expiresAt) && nowMs < expiresAt;
+  } catch {
+    return false;
+  }
+}
+
 // Best-effort: a failed write just means we re-probe next tick (no worse than before).
 function stampCooldownMarker(path, nowMs) {
   try {
@@ -5054,6 +5083,8 @@ export function schedulerTick(
     // pass a spy, production uses the canonical unified-event-log appender.
     appendOrphanDetectedEvent = defaultAppendOrphanDetectedEvent,
     appendFenceStandoffEvent = defaultAppendFenceStandoffEvent,
+    // CAT-173: injectable terminal-sweep fence seam for scheduler integration tests.
+    terminalFenceGuard = fenceGuard,
     // CTL-537: sequencing seam. Default undefined → the new-work gate is skipped
     // entirely (byte-for-byte legacy dispatch for every test that doesn't inject
     // it). Production wires defaultCheckSequencing via runTick/startScheduler.
@@ -9130,7 +9161,8 @@ export function schedulerTick(
       // fence-check runs before we've proven a write is needed.
       if (
         isFenceSuppressFresh(orchDir, ticket, now()) ||
-        isEscalationProbeCooldownFresh(orchDir, ticket, now())
+        isEscalationProbeCooldownFresh(orchDir, ticket, now()) ||
+        isFenceStandoffCooldownFresh(orchDir, ticket, now())
       ) {
         // Still surface the orphan once for the dashboard (the probe/write is what we
         // skip, not the visibility signal).
@@ -9179,7 +9211,7 @@ export function schedulerTick(
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
           let fenceVerdict = null;
           if (
-            fenceGuard(
+            terminalFenceGuard(
               { ticket, orchDir, multiHost, gateway, self },
               {
                 proceedOnMissingGeneration: true,
@@ -9244,14 +9276,26 @@ export function schedulerTick(
               phase: signalByTicket.get(ticket)?.phase ?? "terminal-sweep",
               now: now(),
               env,
-              appendEvent: appendFenceStandoffEvent,
+              appendEvent: (payload) => {
+                try {
+                  return appendFenceStandoffEvent(payload);
+                } catch {
+                  return false;
+                }
+              },
               logger: log,
             });
-            if (standoff.breakGlass) {
-              stampCooldownMarker(
-                fenceSuppressMarkerPath(orchDir, ticket),
-                now() + resolveStandoffCooldownMs(env) - FENCE_SUPPRESS_COOLDOWN_MS
-              );
+            if (standoff.breakGlass && !standoff.deliveryPending) {
+              stampFenceStandoffCooldown(orchDir, ticket, now(), env);
+            } else if (standoff.deliveryPending) {
+              // Delivery is intentionally retryable on the next tick. The ordinary
+              // 15-minute suppression marker was stamped immediately above; remove
+              // it so it cannot accidentally become a delivery-retry latch.
+              try {
+                unlinkSync(fenceSuppressMarkerPath(orchDir, ticket));
+              } catch {
+                /* best-effort — a missing marker already permits retry */
+              }
             }
           }
           // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
