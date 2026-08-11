@@ -2573,6 +2573,142 @@ describe("classifyPrNotMerged (CTL-1496)", () => {
     expect(r.decision).toBe("fix");
   });
 
+  // ─── CTL-1680 (Codex #3192 P1): a now-ready draft failure must resume its
+  // ORIGINATING phase, not collapse into direct-merge remediation ────────────
+  //
+  // `pr_stuck_in_draft` / `draft_promote_failed` both enter classifyPrNotMerged.
+  // When the promotion actually succeeded (REST verification merely failed, or a
+  // human promoted the PR first), `isDraft` is false and the PR is CLEAN, so the
+  // generic `remediable` branch produced a "pr-not-merged" brief that instructs
+  // `gh pr merge --squash`. For pr_stuck_in_draft that bypasses
+  // phase-monitor-merge's reviewer-arrival window; for draft_promote_failed it
+  // additionally skips phase-pr's describe-pr + Linear state-transition work.
+  const mkDraftEvidence = (reason) => ({
+    logsOutput: null,
+    signal: { failureReason: reason },
+    failureReason: reason,
+    ticket: "CTL-1",
+  });
+  const nowReadyCleanProbe = (prNumber) =>
+    probeReturning({
+      prNumber,
+      isDraft: false,
+      mergeStateStatus: "CLEAN",
+      failingChecks: [],
+      pendingChecks: [],
+      unresolvedBotThreads: [],
+      unresolvedHumanThreads: [],
+      hasChangesRequested: false,
+    });
+
+  test("pr_stuck_in_draft + PR now ready/CLEAN → resume monitor-merge, never direct-merge", () => {
+    const r = defaultClassifyTicket(mkDraftEvidence(PR_STUCK_IN_DRAFT_REASON), {
+      probePrBlock: nowReadyCleanProbe(50),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    // The whole point: the worker must NOT be told to merge it itself.
+    expect(r.details.brief).not.toContain("gh pr merge");
+    expect(r.details.brief).toContain("monitor-merge");
+    expect(r.details.reason).toContain("50");
+  });
+
+  test("draft_promote_failed + PR now ready/CLEAN → resume phase-pr, never direct-merge", () => {
+    const r = defaultClassifyTicket(mkDraftEvidence(DRAFT_PROMOTE_FAILED_REASON), {
+      probePrBlock: nowReadyCleanProbe(51),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.brief).not.toContain("gh pr merge");
+    // phase-pr still owes describe-pr + the Linear inReview transition.
+    expect(r.details.brief).toContain("pr");
+    expect(r.details.reason).toContain("51");
+  });
+
+  // CTL-1680 (Codex #3192 P2): a CLOSED draft cannot be promoted — `gh pr ready`
+  // fails on it — so dispatching the promotion fix burns recovery attempts on an
+  // impossible action. Reopening is a human decision, so this escalates.
+  test("CLOSED draft → escalate, never a gh-pr-ready promotion fix", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 55,
+        state: "CLOSED",
+        isDraft: true,
+        mergeStateStatus: "DRAFT",
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.fix_class).toBe("human");
+    expect(r.details.reason).toContain("55");
+    expect(r.details.reason).toMatch(/closed/i);
+    expect(r.details.brief ?? "").not.toContain("gh pr ready");
+  });
+
+  test("OPEN draft still gets the promotion fix (closed-gate regression guard)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 56,
+        state: "OPEN",
+        isDraft: true,
+        mergeStateStatus: "DRAFT",
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.details.brief).toContain("gh pr ready");
+  });
+
+  test("draft-origin resume does NOT apply while the PR is still a draft", () => {
+    const r = defaultClassifyTicket(mkDraftEvidence(PR_STUCK_IN_DRAFT_REASON), {
+      probePrBlock: probeReturning({
+        prNumber: 52,
+        isDraft: true,
+        mergeStateStatus: "DRAFT",
+        failingChecks: [],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    // Still the promotion fix — the draft branch wins.
+    expect(r.details.brief).toContain("gh pr ready");
+  });
+
+  test("draft-origin resume does NOT apply when the now-ready PR still has blockers", () => {
+    const r = defaultClassifyTicket(mkDraftEvidence(PR_STUCK_IN_DRAFT_REASON), {
+      probePrBlock: probeReturning({
+        prNumber: 53,
+        isDraft: false,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "quality", detailsUrl: null }],
+        pendingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    // A real blocker is still LLM-actionable remediation, not a phase resume.
+    expect(r.details.brief).toContain("quality");
+  });
+
+  test("plain pr_not_merged + CLEAN keeps the direct-merge brief (no regression)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: nowReadyCleanProbe(54),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.details.brief).toContain("gh pr merge");
+  });
+
   test("BLOCKED with no actionable cause → escalate (awaiting required approval, not LLM-fixable)", () => {
     const r = defaultClassifyTicket(mkEvidence(), {
       probePrBlock: probeReturning({

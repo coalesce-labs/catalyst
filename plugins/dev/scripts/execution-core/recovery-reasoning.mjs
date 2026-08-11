@@ -682,6 +682,10 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
   // production reasons carry no `pr#<N>` at all, so fall back to the sibling phase
   // artifacts on disk, where the exact number is still recorded.
   const prNumber = resolvePrNumberForRecovery(evidence);
+  // CTL-1680 (Codex #3192 P1): the ORIGINATING failure reason decides where a
+  // now-ready draft resumes (see the draft-resume branch below). Read from the
+  // same two places defaultClassifyTicket used to route here, so the two agree.
+  const originReason = evidence.failureReason ?? evidence.signal?.failureReason;
   let probe;
   try {
     probe = probePrBlock(ticket, { branch, repo, worktreePath, prNumber });
@@ -750,12 +754,72 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
   }
 
   if (probe.isDraft) {
+    // CTL-1680 (Codex #3192 P2): a CLOSED draft is terminal for this fix path.
+    // `gh pr ready` cannot promote a closed PR, so dispatching the bounded worker
+    // would burn recovery attempts on an impossible action, once per cycle until
+    // the attempt budget is exhausted. Whether to reopen it is a human decision,
+    // so escalate with the concrete state rather than deferring or silently
+    // skipping. Gated on an explicit CLOSED (not `!== "OPEN"`) so a probe that
+    // never resolved `state` keeps its existing promotion behavior — MERGED is
+    // already returned above, and the only other value is OPEN.
+    if (probe.state === "CLOSED") {
+      return {
+        decision: "escalate",
+        fix_class: "human",
+        details: {
+          reason:
+            `PR #${probe.prNumber} is CLOSED and still a draft; it cannot be promoted — ` +
+            `reopen it or close out the ticket`,
+        },
+      };
+    }
     return {
       decision: "fix",
       fix_class: "bounded-llm",
       details: {
         reason: `PR #${probe.prNumber} is still a DRAFT; promote it to ready-for-review before merging`,
         brief: generateRemediateBrief("pr-stuck-in-draft", probe),
+      },
+    };
+  }
+
+  // CTL-1680 (Codex #3192 P1): a DRAFT-ORIGIN failure whose PR is now ready and
+  // CLEAN must resume its ORIGINATING phase — never collapse into direct-merge
+  // remediation. Both draft reasons can reach here with `isDraft === false`:
+  // the promotion actually succeeded and only the REST verification failed, or a
+  // human promoted the PR before recovery ran. Falling through to the generic
+  // `remediable` branch below hands the worker a "pr-not-merged" brief that says
+  // `gh pr merge --squash` outright, which (a) for pr_stuck_in_draft bypasses
+  // phase-monitor-merge's reviewer-arrival window — the guard that stops a fresh
+  // CLEAN PR merging before the automated reviewer lands its verdict — and
+  // (b) for draft_promote_failed additionally skips phase-pr's still-unfinished
+  // describe-pr and Linear state-transition work.
+  //
+  // Scoped deliberately to the CLEAN sub-case: when the now-ready PR still has a
+  // failing check or an unresolved bot thread, that IS genuine LLM-actionable
+  // remediation, so the generic branch below still owns it. Once the worker
+  // clears those blockers the item re-enters, the PR is CLEAN, and this branch
+  // then routes it back to its phase — convergent, not a bypass.
+  const draftResumePhase =
+    originReason === PR_STUCK_IN_DRAFT_REASON
+      ? "monitor-merge"
+      : originReason === DRAFT_PROMOTE_FAILED_REASON
+        ? "pr"
+        : null;
+  if (
+    draftResumePhase &&
+    probe.mergeStateStatus === "CLEAN" &&
+    probe.failingChecks.length === 0 &&
+    probe.unresolvedBotThreads.length === 0
+  ) {
+    return {
+      decision: "fix",
+      fix_class: "bounded-llm",
+      details: {
+        reason:
+          `PR #${probe.prNumber} is no longer a draft (mergeState=CLEAN); ` +
+          `resume phase-${draftResumePhase} rather than merging directly`,
+        brief: generateRemediateBrief(`pr-draft-resume-${draftResumePhase}`, probe),
       },
     };
   }
@@ -1096,6 +1160,34 @@ export function generateRemediateBrief(category, probe = null) {
       probe ? `PR #${probe.prNumber} is still a draft.` : "The ticket PR is still a draft.",
       "Run `gh pr ready <n>`, then verify with `gh api repos/{owner}/{repo}/pulls/<n> --jq .draft`.",
       "Continue only after REST returns false; otherwise escalate with the PR number and API error.",
+    ].join(" "),
+    // CTL-1680 (Codex #3192 P1): the draft-origin failure resolved itself — the PR
+    // is ready and CLEAN. Hand the work back to the phase that owns the remaining
+    // steps instead of merging here. Neither brief mentions `gh pr merge`: the
+    // merge is monitor-merge's to perform, behind its reviewer-arrival window.
+    "pr-draft-resume-monitor-merge": [
+      probe
+        ? `PR #${probe.prNumber} is no longer a draft and is CLEAN.`
+        : "The ticket PR is no longer a draft and is CLEAN.",
+      "Do NOT merge it here. phase-monitor-merge owns the merge, and it gates on a",
+      "reviewer-arrival window that stops a fresh CLEAN PR from merging before the",
+      "automated reviewer has posted a verdict on the CURRENT head — merging directly",
+      "would skip that window entirely.",
+      "Clear the stale failure and re-dispatch phase-monitor-merge for this ticket so",
+      "it re-reads live PR state and completes the merge through its own gates.",
+      "Escalate ONLY if the PR cannot be re-entered into monitor-merge, with the PR number linked.",
+    ].join(" "),
+    "pr-draft-resume-pr": [
+      probe
+        ? `PR #${probe.prNumber} was promoted out of draft after phase-pr's promotion step failed.`
+        : "The ticket PR was promoted out of draft after phase-pr's promotion step failed.",
+      "Do NOT merge it here. phase-pr had not finished its remaining work when it failed —",
+      "the generated PR description (describe-pr) and the Linear transition to inReview —",
+      "and merging now would ship the ticket with neither.",
+      "Re-dispatch phase-pr for this ticket; it is idempotent about an already-ready PR and",
+      "will complete the description and state transition, after which the pipeline advances",
+      "to monitor-merge normally.",
+      "Escalate ONLY if phase-pr cannot be re-entered, with the PR number linked.",
     ].join(" "),
     // CTL-1680: the PR merged but monitor-merge recorded an empty merge SHA, so
     // monitor-deploy's empty-SHA guard false-failed. No code fix is needed — the work
