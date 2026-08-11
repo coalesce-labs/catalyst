@@ -3666,7 +3666,15 @@ export async function checkRegistryTriageState(deps = {}) {
 
   // Linear's TeamFilter key comparator supports `eq` but not a batched `in`
   // predicate. Fetch the small workspace team set once and join locally.
-  const query = "query { teams(first: 100) { nodes { key states(first: 50) { nodes { name } } } } }";
+  // CAT-140 (Codex #3214 P2): request the max page size AND carry
+  // `pageInfo.hasNextPage`. A truncated `states` page is not evidence of
+  // absence — the configured triage state may simply sit on a later page — so a
+  // team whose connection did not drain is classified UNVERIFIED below rather
+  // than producing a blocking FAIL. (Per-team cursors would need one follow-up
+  // query per team; this check is advisory, so treating truncation as
+  // inconclusive is both cheaper and the safer direction.)
+  const query =
+    "query { teams(first: 100) { nodes { key states(first: 250) { nodes { name } pageInfo { hasNextPage } } } } }";
   let nodes;
   try {
     const json = await post(query, token);
@@ -3682,14 +3690,25 @@ export async function checkRegistryTriageState(deps = {}) {
   }
 
   const actual = new Map(
-    nodes.map((team) => [team?.key, new Set((team?.states?.nodes ?? []).map((state) => state?.name))]),
+    nodes.map((team) => [
+      team?.key,
+      {
+        names: new Set((team?.states?.nodes ?? []).map((state) => state?.name)),
+        // Only a drained connection proves the set is the team's complete one.
+        complete: team?.states?.pageInfo?.hasNextPage !== true,
+      },
+    ]),
   );
   const missing = [];
   const unverified = [];
   for (const [team, state] of wanted) {
     const states = actual.get(team);
     if (!states) unverified.push(team);
-    else if (!states.has(state)) missing.push(`${team} → "${state}"`);
+    else if (states.names.has(state)) continue;
+    // Absent from a TRUNCATED page says nothing — the state may be on a later
+    // page. Only absence from a complete set is definitive enough to FAIL.
+    else if (!states.complete) unverified.push(team);
+    else missing.push(`${team} → "${state}"`);
   }
 
   if (missing.length > 0) {
@@ -3706,7 +3725,8 @@ export async function checkRegistryTriageState(deps = {}) {
       name,
       STATUS.INFO,
       `${wanted.size - unverified.length}/${wanted.size} registered teams verified against their Linear state ` +
-        `set; ${unverified.length} not returned by the query (team key renamed, or not visible to this token): ` +
+        `set; ${unverified.length} inconclusive (team key renamed, not visible to this token, or its ` +
+        "state list was truncated by pagination): " +
         `${unverified.join(", ")} — no missing state found, but the contract is unverified for those (CAT-140)`,
     )];
   }

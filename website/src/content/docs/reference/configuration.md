@@ -1085,6 +1085,20 @@ These knobs are env vars on the `catalyst-execution-core` process:
 - `CATALYST_DOCTOR_TRIAGE_STATE_SEVERITY` (`fail` or `warn`, default `fail`) — changes a definitive
   `registry-triage-state` absence from FAIL to WARN. Uncertain results are already INFO/WARN;
   `CATALYST_DOCTOR_PREINSTALL=1` also downgrades a definitive failure for the join gate.
+- `CATALYST_LINEAR_STATE_IDS_TTL_SEC` (default `86400`, 24 h; `0` disables) — how long
+  `linear-transition.sh` trusts a cached entry in the derived state-id registry
+  `~/.config/catalyst/linear-state-ids.json`. The cache is keyed by state **name**, so a state
+  renamed in Linear would otherwise keep hitting a stale UUID forever — the write lands in the
+  renamed state and never latches the team fault. Past the TTL the cached id is re-resolved before
+  use; the cost is one resolve per team per window, not per transition. Independently, a write that
+  fails on a cached id triggers a revalidation and is re-classified as `state-absent` when the
+  target turns out to be gone.
+
+Each registry entry also records `statesComplete`. Linear's `states` connection is paginated, so a
+team with more workflow states than one page returns a truncated set; only a connection the resolver
+proved it drained is authoritative enough for `linear-transition.sh` to refuse a write with
+`state-absent`. A truncated or legacy (flag-absent) entry stays inconclusive and falls through to
+the normal name-based path, so a team can never be frozen on a state that actually exists.
 
 The **phantom worker-dir validity sweep** quarantines a `workers/<ticket>/` dir only when all three
 hold: the ticket is definitively **not-found** in Linear (a clean exit-0 not-found body — a nonzero

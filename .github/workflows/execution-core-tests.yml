@@ -290,6 +290,25 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/linear-read-replica.test.sh
 
+      - name: linear-transition state-absent contract test (CAT-140)
+        # CAT-140: linear-transition.sh's `state-absent` gate is what latches a
+        # team whose configured triage state does not exist. Both directions are
+        # load-bearing and were untested in CI: latching on a TRUNCATED or STALE
+        # state set freezes a whole team's queue on a state that actually exists,
+        # while failing to latch leaves tickets burning their per-ticket dispatch
+        # caps one by one. Covers the statesComplete gate, the cached-id freshness
+        # TTL, and the post-write-failure revalidation.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/linear-transition.test.sh
+
+      - name: resolve-linear-ids pagination test (CAT-140)
+        # CAT-140: the resolver is the sole producer of the state-id cache the gate
+        # above trusts. Linear's `states` connection is paginated, so this asserts
+        # the loop drains it and records `statesComplete` honestly — an undrained
+        # connection must never be cached as authoritative.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/resolve-linear-ids.test.sh
+
       - name: canonical-event builder test (CTL-1403 linear.read.* attrs)
         # Covers build_canonical_line incl. the CTL-1403 --linear-read-* attribute
         # flags (source/result/op top-level attrs + numeric age_ms).

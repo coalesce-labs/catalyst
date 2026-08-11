@@ -802,12 +802,20 @@ cat140_transition_case() {
   install_fake_linearis "$bin"
   : > "$log"
   rm -f "$REGISTRY"
+  # `resolvedAt` is stamped at call time so the freshness gate (CAT-140, Codex
+  # #3214 P1) sees a just-written entry as fresh; the staleness cases below pin
+  # an explicitly old timestamp instead. `truncated` models a resolver that
+  # could not drain the paginated `states` connection.
   cat > "$resolver" <<'EOF'
 #!/usr/bin/env bash
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+REG="${HOME}/.config/catalyst/linear-state-ids.json"
 case "${CAT140_RESOLVER_MODE}" in
-  absent) jq -n '{CAT:{resolvedAt:"2026-08-11T00:00:00Z",stateIds:{Todo:"id-todo","In Progress":"id-progress"}}}' > "${HOME}/.config/catalyst/linear-state-ids.json" ;;
-  present) jq -n '{CAT:{resolvedAt:"2026-08-11T00:00:00Z",stateIds:{Triage:"id-triage"}}}' > "${HOME}/.config/catalyst/linear-state-ids.json" ;;
-  empty) jq -n '{CAT:{resolvedAt:"2026-08-11T00:00:00Z",stateIds:{}}}' > "${HOME}/.config/catalyst/linear-state-ids.json" ;;
+  absent) jq -n --arg at "$NOW" '{CAT:{resolvedAt:$at,statesComplete:true,stateIds:{Todo:"id-todo","In Progress":"id-progress"}}}' > "$REG" ;;
+  present) jq -n --arg at "$NOW" '{CAT:{resolvedAt:$at,statesComplete:true,stateIds:{Triage:"id-triage"}}}' > "$REG" ;;
+  empty) jq -n --arg at "$NOW" '{CAT:{resolvedAt:$at,statesComplete:true,stateIds:{}}}' > "$REG" ;;
+  truncated) jq -n --arg at "$NOW" '{CAT:{resolvedAt:$at,statesComplete:false,stateIds:{Todo:"id-todo","In Progress":"id-progress"}}}' > "$REG" ;;
+  legacy) jq -n --arg at "$NOW" '{CAT:{resolvedAt:$at,stateIds:{Todo:"id-todo","In Progress":"id-progress"}}}' > "$REG" ;;
   fail) exit 1 ;;
 esac
 EOF
@@ -848,6 +856,80 @@ run "CAT-140: dry-run neither resolves nor reports state-absent" \
   cat140_transition_case cat140-dry absent "" CAT yes dry-run 0 0
 run "CAT-140: explicit missing state also reports state-absent" \
   cat140_transition_case cat140-explicit absent NoSuchState CAT no state-absent 2 0
+
+# ─── CAT-140 (Codex #3214 P1): a TRUNCATED state set is not authoritative ──
+# Linear's `states` connection is paginated. A team with more states than one
+# page yields a nonempty-but-incomplete set in which a perfectly valid target is
+# simply absent. Latching the team off that would freeze its whole queue on a
+# state that exists, so only a set the resolver proved it drained
+# (statesComplete) may refuse a write.
+run "CAT-140: truncated state set never latches absence" \
+  cat140_transition_case cat140-truncated truncated "" CAT no transitioned 0 1
+run "CAT-140: legacy cache entry without statesComplete fails open" \
+  cat140_transition_case cat140-legacy legacy "" CAT no transitioned 0 1
+
+# ─── CAT-140 (Codex #3214 P1): stale cached ids are revalidated ────────────
+# The cache is keyed by state NAME, so a renamed/deleted state leaves the old
+# pair cached forever: every lookup "hits", the forced resolve never runs, and
+# the failure surfaces as a generic update-failed that latches nothing.
+cat140_stale_case() {
+  local name="$1" mode="$2" ttl="$3" update_exit="$4"
+  local expected_action="$5" expected_rc="$6"
+  local work="${SCRATCH}/${name}" bin="${SCRATCH}/${name}/bin"
+  local log="${SCRATCH}/${name}/linearis.log" resolver="${SCRATCH}/${name}/resolver.sh"
+  mkdir -p "${work}/.catalyst"
+  printf '{"catalyst":{"linear":{"teamKey":"CAT","stateMap":{}}}}\n' > "${work}/.catalyst/config.json"
+  install_fake_linearis "$bin"
+  : > "$log"
+  # Seed a cache that HITS on "Triage" but is a year old — the stale UUID a
+  # since-renamed/deleted state leaves behind.
+  jq -n '{CAT:{resolvedAt:"2025-01-01T00:00:00Z",statesComplete:true,stateIds:{Triage:"id-stale"}}}' \
+    > "$REGISTRY"
+  cat > "$resolver" <<'EOF'
+#!/usr/bin/env bash
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+REG="${HOME}/.config/catalyst/linear-state-ids.json"
+case "${CAT140_RESOLVER_MODE}" in
+  gone) jq -n --arg at "$NOW" '{CAT:{resolvedAt:$at,statesComplete:true,stateIds:{Todo:"id-todo"}}}' > "$REG" ;;
+  renamed) jq -n --arg at "$NOW" '{CAT:{resolvedAt:$at,statesComplete:true,stateIds:{Triage:"id-fresh"}}}' > "$REG" ;;
+esac
+EOF
+  chmod +x "$resolver"
+
+  local out rc action
+  out="$(CAT140_RESOLVER_MODE="$mode" CATALYST_LINEAR_ID_RESOLVER="$resolver" \
+    CATALYST_LINEAR_STATE_IDS_TTL_SEC="$ttl" FAKE_LINEARIS_UPDATE_EXIT="$update_exit" \
+    FAKE_LINEARIS_LOG="$log" PATH="$bin:$PATH" \
+    bash "$TRANSITION" --ticket CAT-140 --transition triage \
+      --config "$work/.catalyst/config.json" --json 2>&1)"
+  rc=$?
+  action="$(printf '%s' "$out" | jq -r '.action // empty' 2>/dev/null)"
+  [ "$rc" = "$expected_rc" ] && [ "$action" = "$expected_action" ] || {
+    printf 'rc=%s action=%s out=%s\n' "$rc" "$action" "$out"
+    return 1
+  }
+  if [ "$expected_action" = "state-absent" ]; then
+    # Name + team must be in the message so the operator knows what to fix.
+    printf '%s' "$out" | grep -q 'Triage' && printf '%s' "$out" | grep -q 'CAT' || return 1
+    # With the freshness gate armed the stale id must never reach linearis at
+    # all. With it disabled the stale id is tried once — that failure is exactly
+    # what triggers the revalidation — so only the verdict is asserted there.
+    if [ "$ttl" -gt 0 ]; then
+      ! grep -q 'id-stale' "$log" || return 1
+    fi
+  fi
+}
+
+# TTL expired → the cached id is not trusted, the resolver runs up front, and the
+# now-absent target latches the team instead of reporting a transient failure.
+run "CAT-140: stale cache past TTL detects a deleted state as state-absent" \
+  cat140_stale_case cat140-ttl-gone gone 3600 0 state-absent 2
+run "CAT-140: stale cache past TTL re-resolves and transitions on a live state" \
+  cat140_stale_case cat140-ttl-live renamed 3600 0 transitioned 0
+# TTL disabled → the stale id IS used and the write fails; the post-failure
+# revalidation must re-classify that as state-absent rather than update-failed.
+run "CAT-140: write failure on a cached id revalidates into state-absent" \
+  cat140_stale_case cat140-revalidate gone 0 1 state-absent 2
 
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"

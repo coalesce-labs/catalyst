@@ -111,41 +111,88 @@ if [ -z "$API_TOKEN" ]; then
   exit 1
 fi
 
-QUERY='query($teamKey: String!) { teams(filter: { key: { eq: $teamKey } }) { nodes { id states { nodes { id name type } } } } }'
-PAYLOAD=$(jq -nc --arg q "$QUERY" --arg k "$TEAM_KEY" '{query: $q, variables: {teamKey: $k}}')
+# CAT-140 (Codex #3214 P1): the `states` connection MUST be paginated. Linear's
+# GraphQL connections default to 50 nodes per page, so a team with more workflow
+# states than one page silently yielded a TRUNCATED-but-nonempty set. That set
+# was then written to the cache and treated as authoritative by
+# linear-transition.sh's `state-absent` gate — which would latch an entire team's
+# dispatch on a state that actually exists, just on a later page. Walk
+# `pageInfo.hasNextPage` to exhaustion and record `statesComplete` so consumers
+# can PROVE the set is complete before ever latching absence; anything short of a
+# fully-drained connection leaves the set inconclusive (fail-open).
+QUERY='query($teamKey: String!, $after: String) { teams(filter: { key: { eq: $teamKey } }) { nodes { id states(first: 250, after: $after) { nodes { id name type } pageInfo { hasNextPage endCursor } } } } }'
 
-RESPONSE=$(curl -s -f -X POST https://api.linear.app/graphql \
-  -H "Content-Type: application/json" \
-  -H "Authorization: $API_TOKEN" \
-  -d "$PAYLOAD" 2>&1) || {
-  echo "ERROR: Linear API call failed" >&2
-  [ -n "$RESPONSE" ] && echo "$RESPONSE" >&2
-  exit 2
-}
+TEAM_ID=""
+STATE_NODES='[]'
+STATES_COMPLETE=false
+STATE_AFTER=""
+STATE_PAGE=0
+# 250 states/page × 20 pages = 5000 — orders of magnitude above any real team,
+# so exhausting this bound means something is wrong; stop and stay inconclusive
+# rather than looping forever against the API.
+STATE_MAX_PAGES=20
 
-TEAM_NODE=$(echo "$RESPONSE" | jq '.data.teams.nodes[0] // empty' 2>/dev/null)
-if [ -z "$TEAM_NODE" ] || [ "$TEAM_NODE" = "null" ]; then
-  ERRORS=$(echo "$RESPONSE" | jq -r '.errors[0].message // empty' 2>/dev/null)
-  if [ -n "$ERRORS" ]; then
-    echo "ERROR: Linear API error: $ERRORS" >&2
+while [ "$STATE_PAGE" -lt "$STATE_MAX_PAGES" ]; do
+  STATE_PAGE=$((STATE_PAGE + 1))
+  if [ -n "$STATE_AFTER" ]; then
+    PAYLOAD=$(jq -nc --arg q "$QUERY" --arg k "$TEAM_KEY" --arg a "$STATE_AFTER" \
+      '{query: $q, variables: {teamKey: $k, after: $a}}')
   else
-    echo "ERROR: team '$TEAM_KEY' not found in Linear" >&2
+    PAYLOAD=$(jq -nc --arg q "$QUERY" --arg k "$TEAM_KEY" \
+      '{query: $q, variables: {teamKey: $k, after: null}}')
   fi
-  exit 2
-fi
 
-TEAM_ID=$(echo "$TEAM_NODE" | jq -r '.id')
-STATE_IDS=$(echo "$TEAM_NODE" | jq '.states.nodes | map({(.name): .id}) | add')
-STATE_COUNT=$(echo "$TEAM_NODE" | jq '.states.nodes | length')
+  RESPONSE=$(curl -s -f -X POST https://api.linear.app/graphql \
+    -H "Content-Type: application/json" \
+    -H "Authorization: $API_TOKEN" \
+    -d "$PAYLOAD" 2>&1) || {
+    echo "ERROR: Linear API call failed" >&2
+    [ -n "$RESPONSE" ] && echo "$RESPONSE" >&2
+    exit 2
+  }
+
+  TEAM_NODE=$(echo "$RESPONSE" | jq '.data.teams.nodes[0] // empty' 2>/dev/null)
+  if [ -z "$TEAM_NODE" ] || [ "$TEAM_NODE" = "null" ]; then
+    ERRORS=$(echo "$RESPONSE" | jq -r '.errors[0].message // empty' 2>/dev/null)
+    if [ -n "$ERRORS" ]; then
+      echo "ERROR: Linear API error: $ERRORS" >&2
+    else
+      echo "ERROR: team '$TEAM_KEY' not found in Linear" >&2
+    fi
+    exit 2
+  fi
+
+  TEAM_ID=$(echo "$TEAM_NODE" | jq -r '.id')
+  PAGE_NODES=$(echo "$TEAM_NODE" | jq -c '.states.nodes // []' 2>/dev/null)
+  [ -n "$PAGE_NODES" ] || PAGE_NODES='[]'
+  STATE_NODES=$(jq -nc --argjson acc "$STATE_NODES" --argjson page "$PAGE_NODES" '$acc + $page')
+
+  HAS_NEXT=$(echo "$TEAM_NODE" | jq -r '.states.pageInfo.hasNextPage // false' 2>/dev/null)
+  if [ "$HAS_NEXT" != "true" ]; then
+    # The connection drained: this set is provably the team's complete state set.
+    # A server that omits pageInfo entirely also lands here — it returned every
+    # node it intended to, which is the same guarantee.
+    STATES_COMPLETE=true
+    break
+  fi
+  STATE_AFTER=$(echo "$TEAM_NODE" | jq -r '.states.pageInfo.endCursor // empty' 2>/dev/null)
+  # hasNextPage=true with no cursor to advance on: we cannot drain the
+  # connection, so the set stays incomplete rather than pretending otherwise.
+  [ -n "$STATE_AFTER" ] || break
+done
+
+STATE_IDS=$(echo "$STATE_NODES" | jq '(map({(.name): .id}) | add) // {}')
+STATE_COUNT=$(echo "$STATE_NODES" | jq 'length')
 
 if [ "$DRY_RUN" -eq 1 ]; then
   if [ "$JSON_OUT" -eq 1 ]; then
     jq -nc --arg tid "$TEAM_ID" --argjson sids "$STATE_IDS" --argjson count "$STATE_COUNT" \
-      '{action:"dry-run",teamId:$tid,stateIds:$sids,stateCount:$count}'
+      --argjson complete "$STATES_COMPLETE" \
+      '{action:"dry-run",teamId:$tid,stateIds:$sids,stateCount:$count,statesComplete:$complete}'
   else
     echo "Would write teamId to $CONFIG_PATH:"
     echo "  teamId: $TEAM_ID"
-    echo "Would write stateIds to $REGISTRY_PATH (team $TEAM_KEY, $STATE_COUNT states):"
+    echo "Would write stateIds to $REGISTRY_PATH (team $TEAM_KEY, $STATE_COUNT states, complete=$STATES_COMPLETE):"
     echo "$STATE_IDS" | jq -r 'to_entries[] | "    \(.key): \(.value)"'
   fi
   exit 0
@@ -164,8 +211,12 @@ mkdir -p "$(dirname "$REGISTRY_PATH")"
 if [ ! -f "$REGISTRY_PATH" ] || ! jq -e . "$REGISTRY_PATH" >/dev/null 2>&1; then
   echo '{}' > "$REGISTRY_PATH"
 fi
+# CAT-140: `statesComplete` records whether the connection was fully drained.
+# linear-transition.sh's absence gate requires it to be true before refusing a
+# write, so a truncated page can never latch a team on a state that exists.
 if jq --arg t "$TEAM_KEY" --argjson sids "$STATE_IDS" --arg at "$RESOLVED_AT" \
-    '.[$t] = {resolvedAt: $at, stateIds: $sids}' \
+    --argjson complete "$STATES_COMPLETE" \
+    '.[$t] = {resolvedAt: $at, statesComplete: $complete, stateIds: $sids}' \
     "$REGISTRY_PATH" > "${REGISTRY_PATH}.tmp" && mv "${REGISTRY_PATH}.tmp" "$REGISTRY_PATH"; then
   :
 else
@@ -176,10 +227,10 @@ fi
 
 if [ "$JSON_OUT" -eq 1 ]; then
   jq -nc --arg tid "$TEAM_ID" --argjson sids "$STATE_IDS" --argjson count "$STATE_COUNT" \
-    --arg reg "$REGISTRY_PATH" \
-    '{action:"resolved",teamId:$tid,stateIds:$sids,stateCount:$count,registry:$reg}'
+    --arg reg "$REGISTRY_PATH" --argjson complete "$STATES_COMPLETE" \
+    '{action:"resolved",teamId:$tid,stateIds:$sids,stateCount:$count,statesComplete:$complete,registry:$reg}'
 else
-  echo "Resolved and cached $STATE_COUNT workflow states for team $TEAM_KEY"
+  echo "Resolved and cached $STATE_COUNT workflow states for team $TEAM_KEY (complete=$STATES_COMPLETE)"
   echo "  teamId:   $TEAM_ID  ($CONFIG_PATH)"
   echo "  stateIds: $REGISTRY_PATH"
 fi

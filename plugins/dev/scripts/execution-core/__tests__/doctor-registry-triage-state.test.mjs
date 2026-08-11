@@ -6,13 +6,21 @@ const PROJECTS = [
   { team: "PAN", repoRoot: "/r/pan", eligibleQuery: { triageStatus: "Intake" } },
 ];
 
+// A team's entry is either a plain state-name list (a fully drained connection)
+// or `{ states, truncated: true }` to model a page that did NOT drain.
 const teamsPayload = (map) => ({
   data: {
     teams: {
-      nodes: Object.entries(map).map(([key, states]) => ({
-        key,
-        states: { nodes: states.map((name) => ({ name })) },
-      })),
+      nodes: Object.entries(map).map(([key, entry]) => {
+        const { states, truncated } = Array.isArray(entry) ? { states: entry, truncated: false } : entry;
+        return {
+          key,
+          states: {
+            nodes: states.map((name) => ({ name })),
+            pageInfo: { hasNextPage: !!truncated },
+          },
+        };
+      }),
     },
   },
 });
@@ -62,6 +70,52 @@ describe("checkRegistryTriageState (CAT-140)", () => {
     expect((await checkRegistryTriageState(deps({ post: async () => ({ errors: [{ message: "denied" }] }) })))[0].status).toBe("warn");
     expect((await checkRegistryTriageState(deps({ post: async () => ({ data: {} }) })))[0].status).toBe("warn");
     expect((await checkRegistryTriageState(deps({ post: async () => { throw new Error("offline"); } })))[0].status).toBe("warn");
+  });
+
+  // Codex #3214 P2: absence from a page that did not drain is not absence.
+  test("a truncated state page is unverified, not absent", async () => {
+    const [result] = await checkRegistryTriageState(deps({
+      post: async () => teamsPayload({
+        CAT: { states: ["Todo", "Done"], truncated: true },
+        PAN: ["Todo", "Intake"],
+      }),
+    }));
+    expect(result.status).toBe("info");
+    expect(result.detail).toContain("CAT");
+    expect(result.detail).toMatch(/truncated/i);
+  });
+
+  test("a truncated page that already contains the state still passes", async () => {
+    const [result] = await checkRegistryTriageState(deps({
+      post: async () => teamsPayload({
+        CAT: { states: ["Todo", "Triage"], truncated: true },
+        PAN: ["Todo", "Intake"],
+      }),
+    }));
+    expect(result.status).toBe("pass");
+  });
+
+  test("absence from a drained page is still a definitive failure", async () => {
+    const [result] = await checkRegistryTriageState(deps({
+      post: async () => teamsPayload({
+        CAT: { states: ["Todo", "Done"], truncated: false },
+        PAN: ["Todo", "Intake"],
+      }),
+    }));
+    expect(result.status).toBe("fail");
+    expect(result.detail).toContain("CAT");
+  });
+
+  test("requests the max page size and carries pageInfo", async () => {
+    let seen = "";
+    await checkRegistryTriageState(deps({
+      post: async (query) => {
+        seen = query;
+        return teamsPayload({ CAT: ["Todo", "Triage"], PAN: ["Todo", "Intake"] });
+      },
+    }));
+    expect(seen).toContain("states(first: 250)");
+    expect(seen).toContain("hasNextPage");
   });
 
   test("a team omitted by Linear is unverified, not absent", async () => {

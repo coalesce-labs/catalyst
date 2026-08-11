@@ -167,25 +167,69 @@ lookup_state_id() {
 
 TARGET_STATE_ID="$(lookup_state_id)"
 
-# Cache miss → resolve once, then re-read. Skipped under --dry-run (no side
-# effects) and when there is no teamKey (the resolver requires one).
+# CAT-140 (Codex #3214 P1): a cache HIT is not proof the cached UUID is still
+# valid. The cache is keyed by state NAME, so when a state is renamed in Linear
+# the old name→UUID pair survives in the cache forever: every subsequent lookup
+# "hits", the forced re-resolve below never runs, and the write lands in the
+# renamed state — surfacing as a generic update-failed (state deleted) or a
+# successful write whose read-back mismatches (state renamed, linear-write.mjs
+# verify-failed). Neither latches the team fault, so affected tickets keep
+# launching triage workers until they exhaust their individual dispatch caps.
+# A freshness policy bounds that staleness: past the TTL the cached id is not
+# trusted and we take the same forced-resolve path as a cache miss. Cost is one
+# resolve per team per TTL window, not per transition.
+STATE_IDS_TTL_SEC="${CATALYST_LINEAR_STATE_IDS_TTL_SEC:-86400}"
+
+cached_entry_is_fresh() {
+  # No TTL configured (<=0) disables the freshness gate entirely.
+  [ "$STATE_IDS_TTL_SEC" -gt 0 ] 2>/dev/null || return 0
+  [ -n "$TEAM_KEY" ] && [ -f "$REGISTRY_PATH" ] && command -v jq >/dev/null 2>&1 || return 0
+  local age
+  # An absent/unparseable resolvedAt yields empty → treated as STALE, which only
+  # costs one extra resolve and can never mis-trust an unknown-age entry.
+  age="$(jq -r --arg t "$TEAM_KEY" --argjson now "$(date -u +%s)" \
+    '(.[$t].resolvedAt // empty) as $at
+     | if $at == null or $at == "" then empty
+       else ($now - ($at | fromdateiso8601)) end' \
+    "$REGISTRY_PATH" 2>/dev/null || true)"
+  [ -n "$age" ] || return 1
+  [ "$age" -ge 0 ] 2>/dev/null || return 1
+  [ "$age" -lt "$STATE_IDS_TTL_SEC" ] 2>/dev/null
+}
+
+if [ -n "$TARGET_STATE_ID" ] && ! cached_entry_is_fresh; then
+  TARGET_STATE_ID=""
+fi
+
+# Cache miss (or a stale entry, above) → resolve once, then re-read. Skipped
+# under --dry-run (no side effects) and when there is no teamKey (the resolver
+# requires one).
 RESOLVE_ATTEMPTED=0
 RESOLVE_RC=1
-if [ -z "$TARGET_STATE_ID" ] && [ -n "$TEAM_KEY" ] && [ "$DRY_RUN" -ne 1 ]; then
-  RESOLVER="${CATALYST_LINEAR_ID_RESOLVER:-${SCRIPT_DIR}/resolve-linear-ids.sh}"
-  if [ -x "$RESOLVER" ] && [ -n "$CONFIG_PATH" ]; then
-    RESOLVE_ATTEMPTED=1
-    bash "$RESOLVER" --config "$CONFIG_PATH" --force >/dev/null 2>&1
-    RESOLVE_RC=$?
-    TARGET_STATE_ID="$(lookup_state_id)"
-  fi
-fi
+maybe_resolve_state_ids() {
+  [ -z "$TARGET_STATE_ID" ] && [ -n "$TEAM_KEY" ] && [ "$DRY_RUN" -ne 1 ] || return 0
+  local resolver="${CATALYST_LINEAR_ID_RESOLVER:-${SCRIPT_DIR}/resolve-linear-ids.sh}"
+  [ -x "$resolver" ] && [ -n "$CONFIG_PATH" ] || return 0
+  RESOLVE_ATTEMPTED=1
+  bash "$resolver" --config "$CONFIG_PATH" --force >/dev/null 2>&1
+  RESOLVE_RC=$?
+  TARGET_STATE_ID="$(lookup_state_id)"
+}
+maybe_resolve_state_ids
 STATUS_ARG="${TARGET_STATE_ID:-$TARGET_STATE}"
 
 team_state_set_known() {
   [ "$RESOLVE_ATTEMPTED" -eq 1 ] && [ "$RESOLVE_RC" -eq 0 ] || return 1
   [ -n "$TEAM_KEY" ] && [ -f "$REGISTRY_PATH" ] && command -v jq >/dev/null 2>&1 || return 1
-  jq -e --arg t "$TEAM_KEY" '((.[$t].stateIds // {}) | length) > 0' \
+  # CAT-140 (Codex #3214 P1): nonempty is NOT the same as complete. Linear's
+  # `states` connection is paginated, so a team with more states than one page
+  # yields a truncated-but-nonempty set in which a perfectly valid target simply
+  # is not present. Latching absence off that would freeze the whole team's
+  # dispatch on a state that exists. Only a set the resolver proved it drained
+  # (statesComplete) is authoritative enough to refuse a write; anything else
+  # stays inconclusive and falls through to the normal name-based path.
+  jq -e --arg t "$TEAM_KEY" \
+    '(.[$t].statesComplete == true) and (((.[$t].stateIds // {}) | length) > 0)' \
     "$REGISTRY_PATH" >/dev/null 2>&1
 }
 
@@ -256,7 +300,32 @@ fi
 if linearis issues update "$TICKET" --status "$STATUS_ARG" >/dev/null 2>&1; then
   emit "transitioned" "$CURRENT_STATE" ""
   exit 0
-else
-  emit "update-failed" "$CURRENT_STATE" "linearis update call returned non-zero"
-  exit 2
 fi
+
+# CAT-140 (Codex #3214 P1): the write failed. If it was driven by a CACHED state
+# id that this run never revalidated, the failure is exactly what a since-deleted
+# state looks like — and reporting the generic `update-failed` would leave the
+# team unlatched while its tickets burn their per-ticket dispatch caps one by
+# one. Revalidate the cache against Linear once and re-classify: a definitively
+# absent target becomes `state-absent` (latching the team fault), while a target
+# that is still there gets one retry with the refreshed id before the failure is
+# reported as genuinely transient.
+if [ "$RESOLVE_ATTEMPTED" -eq 0 ] && [ -n "$TEAM_KEY" ]; then
+  TARGET_STATE_ID=""
+  maybe_resolve_state_ids
+  if [ -z "$TARGET_STATE_ID" ] && team_state_set_known; then
+    emit "state-absent" "$CURRENT_STATE" "target state '${TARGET_STATE}' no longer exists on team '${TEAM_KEY}' (cached id was stale) — enable the team's Linear Triage mode or set eligibleQuery.triageStatus to a state it has (CAT-140)"
+    exit 2
+  fi
+  # Still present (or still inconclusive) — retry once with whatever the
+  # revalidated cache now says. The first attempt failed, so no state changed.
+  if [ -n "$TARGET_STATE_ID" ] && [ "$TARGET_STATE_ID" != "$STATUS_ARG" ]; then
+    if linearis issues update "$TICKET" --status "$TARGET_STATE_ID" >/dev/null 2>&1; then
+      emit "transitioned" "$CURRENT_STATE" "succeeded after revalidating a stale cached state id"
+      exit 0
+    fi
+  fi
+fi
+
+emit "update-failed" "$CURRENT_STATE" "linearis update call returned non-zero"
+exit 2

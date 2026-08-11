@@ -303,6 +303,68 @@ REG13_AFTER=$(cat "$REG13")
 run "--dry-run does not modify the existing registry" \
   bash -c "[ '$REG13_BEFORE' = '$REG13_AFTER' ]"
 
+# ─── CAT-140 (Codex #3214 P1): the `states` connection is paginated ────────
+# Linear returns at most one page per request. Before this, a team with more
+# states than a page silently cached a TRUNCATED set that linear-transition.sh
+# then trusted as authoritative, latching the team on a state that exists.
+# Install a curl that serves a different page per call, keyed by whether the
+# request payload carries an `after` cursor.
+install_paging_curl() {
+  local bin_dir="$1" last_page_has_next="$2"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/curl" <<SCRIPT
+#!/usr/bin/env bash
+# The GraphQL payload is the final -d argument.
+PAYLOAD="\${!#}"
+AFTER="\$(printf '%s' "\$PAYLOAD" | jq -r '.variables.after // empty' 2>/dev/null)"
+if [ -z "\$AFTER" ]; then
+  echo '{"data":{"teams":{"nodes":[{"id":"${FAKE_TEAM_ID}","states":{"nodes":[{"id":"p1a","name":"Backlog","type":"backlog"},{"id":"p1b","name":"Todo","type":"unstarted"}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR1"}}}]}}}'
+elif [ "\$AFTER" = "CURSOR1" ]; then
+  echo '{"data":{"teams":{"nodes":[{"id":"${FAKE_TEAM_ID}","states":{"nodes":[{"id":"p2a","name":"Triage","type":"triage"},{"id":"p2b","name":"Done","type":"completed"}],"pageInfo":{"hasNextPage":${last_page_has_next},"endCursor":"CURSOR2"}}}]}}}'
+else
+  echo '{"data":{"teams":{"nodes":[{"id":"${FAKE_TEAM_ID}","states":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":null}}}]}}}'
+fi
+SCRIPT
+  chmod +x "${bin_dir}/curl"
+}
+
+WORK14="${SCRATCH}/t14"; HOME14="${WORK14}/home"; BIN14="${WORK14}/bin"
+build_config "$WORK14"
+build_secrets "$HOME14" "test-project"
+install_paging_curl "$BIN14" false
+REG14="$(reg_path "$HOME14")"
+
+run "CAT-140: paginates the states connection to exhaustion" \
+  bash -c "HOME='$HOME14' PATH='$BIN14:$PATH' \
+    '$RESOLVE' --config '$WORK14/.catalyst/config.json' --force"
+
+run "CAT-140: second-page state present in the cached set" \
+  bash -c "jq -e '.TST.stateIds.Triage == \"p2a\"' '$REG14' >/dev/null"
+run "CAT-140: first-page state also retained" \
+  bash -c "jq -e '.TST.stateIds.Backlog == \"p1a\"' '$REG14' >/dev/null"
+run "CAT-140: a drained connection records statesComplete=true" \
+  bash -c "jq -e '.TST.statesComplete == true' '$REG14' >/dev/null"
+
+# A connection that still reports hasNextPage with no usable cursor cannot be
+# drained — the set must be recorded as INCOMPLETE so the absence gate downstream
+# stays inconclusive instead of latching a team on a state it may well have.
+WORK15="${SCRATCH}/t15"; HOME15="${WORK15}/home"; BIN15="${WORK15}/bin"
+build_config "$WORK15"
+build_secrets "$HOME15" "test-project"
+install_paging_curl "$BIN15" true
+REG15="$(reg_path "$HOME15")"
+
+run "CAT-140: undrainable connection still exits 0" \
+  bash -c "HOME='$HOME15' PATH='$BIN15:$PATH' \
+    '$RESOLVE' --config '$WORK15/.catalyst/config.json' --force"
+run "CAT-140: an undrained connection records statesComplete=false" \
+  bash -c "jq -e '.TST.statesComplete == false' '$REG15' >/dev/null"
+
+# The pre-existing single-page fixtures omit pageInfo entirely — a server that
+# returned everything it intended to. That must still count as complete.
+run "CAT-140: a response without pageInfo counts as complete" \
+  bash -c "jq -e '.TST.statesComplete == true' '$(reg_path "${SCRATCH}/t1/home")' >/dev/null"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

@@ -510,11 +510,21 @@ deliberately excludes `Triage`. When they diverge, every Todo→Triage write fai
 - **Detection** — `doctor.mjs` provides the worker-only `registry-triage-state` check. One batched
   Linear query joins registered teams to their state sets. The check FAILs only when a fetched set
   definitively lacks the configured state; uncertainty is INFO/WARN, and
-  `CATALYST_DOCTOR_PREINSTALL=1` downgrades a definitive failure for the join gate.
+  `CATALYST_DOCTOR_PREINSTALL=1` downgrades a definitive failure for the join gate. A team whose
+  `states` page did not drain (`pageInfo.hasNextPage`) is classified **unverified**, never absent —
+  the configured state may simply sit on a later page.
 - **Classification** — `linear-transition.sh` refuses a write when a freshly resolved team state
   set lacks the target (`action=state-absent`, exit 2, no `linearis` call).
   `linear-write.mjs` maps that result to `reason: "state-absent"`; other failures retain their
   existing `exit-${code}` reason.
+- **Absence must be provable, never inferred** — the two ways a nonexistent-looking state can be a
+  lie are both closed. `resolve-linear-ids.sh` paginates the `states` connection to exhaustion and
+  records `statesComplete` in `~/.config/catalyst/linear-state-ids.json`; the absence gate refuses a
+  write only against a set proved complete, so a truncated page (or a legacy entry predating the
+  flag) stays inconclusive and falls through to the name-based path. And because that cache is keyed
+  by state **name**, a renamed state would otherwise keep hitting a stale UUID forever — so a cached
+  entry is trusted only within `CATALYST_LINEAR_STATE_IDS_TTL_SEC` (default 24 h), and a write that
+  fails on a cached id revalidates and is re-classified as `state-absent` when the target is gone.
 - **Team-level surfacing** — `triage-state-health.mjs` stores a per-team marker under
   `<execution-core>/triage-state-health/<TEAM>.json`. `monitor.mjs` emits
   `monitor.triage_state.missing.<TEAM>` once per fault episode and
