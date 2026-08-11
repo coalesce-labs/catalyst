@@ -1344,9 +1344,14 @@ export function synthesizeEscalationExplanation(escalationPayload = {}) {
 // real Needs-You brief for a router-originated escalation. Read-modify-write
 // (preserve a prior needsHumanSince) + atomic tmp+rename (mkdir -p the worker
 // dir). Best-effort: catches all, logs via opts.log, NEVER throws.
+// CAT-170 (Codex #3209 round-2 P1): reports SUCCESS as a boolean. It still never
+// throws, but a silent catch-and-log gave the caller no way to tell a persisted
+// signal from a lost one — and for a correlated member the `correlation` block
+// written here is the ONLY durable carrier of its member role. The escalate path
+// below needs that answer to decide whether the act may latch.
 function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
   const log = opts.log ?? defaultLogFn;
-  if (!orchDir || !ticket) return;
+  if (!orchDir || !ticket) return false;
   try {
     const p = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
     const explanation = synthesizeEscalationExplanation(escalationPayload);
@@ -1396,12 +1401,14 @@ function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
     const tmp = `${p}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(signal, null, 2));
     renameSync(tmp, p); // atomic
+    return true;
   } catch (err) {
     try {
       log(`recovery-reasoning: ${ticket} escalation signal write failed: ${err.message}`);
     } catch {
       /* logging must never break the escalate path */
     }
+    return false;
   }
 }
 
@@ -1409,8 +1416,10 @@ function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
 // tick's orchDir. Resolves orchDir from opts/env (a no-op when unset).
 export function defaultWriteEscalationSignal(ticket, escalationPayload, opts = {}) {
   const orchDir = opts.orchDir ?? resolveOrchDir();
-  if (!orchDir) return;
-  writeEscalationSignal(orchDir, ticket, escalationPayload, opts);
+  // CAT-170 (Codex #3209 round-2 P1): propagate the boolean. With no orchDir there
+  // is nowhere to persist the member role, which is a failed write, not a success.
+  if (!orchDir) return false;
+  return writeEscalationSignal(orchDir, ticket, escalationPayload, opts);
 }
 
 // buildEscalationPayload — the composer-ready EscalationPayload for the router's
@@ -2997,6 +3006,52 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     // The label landed (or its owner has it) — this escalation can now complete.
     clearEscalationDeferrals(orchDir, ticket);
 
+    // CAT-170 (Codex #3209 round-2 P1): persist the escalation signal BEFORE the
+    // ledger latch, and treat a failed write as a failed act. The `correlation`
+    // block on this signal is the ONLY durable carrier of a member's role, and the
+    // latch below is IRREVERSIBLE: `escalated:true` drops the ticket from every
+    // later candidate sweep, so its pointer is never re-read and the role can never
+    // be retried. Latching first turned one lost write into a PERMANENTLY
+    // uncorrelated member — both notification projectors then treat it as
+    // independent and emit exactly the duplicate operator alert this feature exists
+    // to suppress. Writing first keeps that failure recoverable: no latch, pointer
+    // retained, so the next sweep re-acts it as a member. Ordering is safe because
+    // this write is an idempotent atomic tmp+rename keyed by ticket — a retry
+    // rewrites one file rather than re-posting anything operator-visible. The
+    // comment/event below stay gated behind the VERIFIED latch, exactly as before,
+    // so the at-most-once discipline for those surfaces is unchanged.
+    let signalWritten = true;
+    try {
+      // `!== false` so an injected double returning undefined still reads as success.
+      signalWritten = writeSignal(ticket, escalation) !== false;
+    } catch (err) {
+      log(`recovery-reasoning: ${ticket} exhausted-escalate signal write failed: ${err.message}`);
+      signalWritten = false;
+    }
+    if (!signalWritten) {
+      // Same reasoning as the label-failure branch above: this act failed for a
+      // ticket whose anchor may have already latched this tick, so the group cannot
+      // re-form next tick. Record (or refresh) the pointer or the member regroups as
+      // a singleton and raises the duplicate escalation anyway.
+      if (group?.correlated && anchor && anchor !== ticket) {
+        writeCorrelationPointer(
+          orchDir,
+          ticket,
+          {
+            anchor,
+            correlation_id: corrId,
+            signature: group.signature,
+            tickets: correlatedTickets,
+          },
+          now(),
+        );
+      }
+      log(
+        `recovery-reasoning: ${ticket} exhausted-escalate signal did not persist — retrying next tick (correlation pointer retained)`,
+      );
+      return false; // unlatched → still a candidate, pointer intact → retried as a member
+    }
+
     try {
       recordIntent(ticket, {
         type: "recovery-pass",
@@ -3034,12 +3089,10 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     // this correlation work exists to prevent. Retaining the pointer until the
     // latch is proven costs at most a stale pointer on a permanently-failing host,
     // which the correlation window expires anyway.
+    // The signal (and with it the member's correlation role) is already durable —
+    // written and confirmed above, before the latch — so dropping the pointer here
+    // can no longer lose the role.
     clearCorrelationPointer(orchDir, ticket);
-    try {
-      writeSignal(ticket, escalation);
-    } catch (err) {
-      log(`recovery-reasoning: ${ticket} exhausted-escalate signal write failed: ${err.message}`);
-    }
     emitEvent({
       type: role === "member" ? "recovery.escalation.correlated" : "recovery.escalated",
       ticket,

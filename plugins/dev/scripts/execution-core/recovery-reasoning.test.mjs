@@ -3552,6 +3552,66 @@ describe("escalateExhaustedIntents — correlation remediations (CAT-170 / Codex
     expect(signals2[0].payload.correlation.id).toBe(correlated[0].correlation_id);
   });
 
+  test("P1 (round 2) — a member whose SIGNAL write fails keeps its pointer and retries as a member", () => {
+    seed("CTL-1", "hit your session limit");
+    seed("CTL-2", "hit your session limit", t0 + 1000);
+
+    // Tick 1: the anchor completes; the MEMBER's signal write fails. The signal is
+    // the only durable carrier of correlation.role, so this act must not latch.
+    const events1 = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 2000,
+      correlationMode: "enforce",
+      emitEvent: (e) => events1.push(e),
+      labelNeedsHuman: () => true,
+      beliefOwnsLabel: () => false,
+      postComment: () => {},
+      writeSignal: (t) => t !== "CTL-2",
+    });
+    expect(events1.filter((e) => e.type === "recovery.escalated").map((e) => e.ticket)).toEqual([
+      "CTL-1",
+    ]);
+    // The member did NOT complete — no correlated event, and no comment/event fired.
+    expect(events1.filter((e) => e.type === "recovery.escalation.correlated")).toHaveLength(0);
+    // Its pointer survives, so the next tick still knows which incident it belongs to.
+    const pointer = readCorrelationPointer(orchDir, "CTL-2", {
+      windowMs: 60 * 60 * 1000,
+      now: t0 + 2000,
+    });
+    expect(pointer).not.toBeNull();
+    expect(pointer.anchor).toBe("CTL-1");
+
+    // Tick 2: the write succeeds. Pre-fix the member had ALREADY latched
+    // escalated:true (the latch ran before the write) with its pointer cleared, so it
+    // was never a candidate again and its member role was lost permanently — the
+    // board then treated it as independent and sent the duplicate operator alert this
+    // feature exists to suppress. It must now land as a member of the same anchor.
+    const events2 = [];
+    const signals2 = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 3000,
+      correlationMode: "enforce",
+      emitEvent: (e) => events2.push(e),
+      labelNeedsHuman: () => true,
+      beliefOwnsLabel: () => false,
+      postComment: () => {},
+      writeSignal: (t, payload) => {
+        signals2.push({ t, payload });
+        return true;
+      },
+    });
+    expect(events2.filter((e) => e.type === "recovery.escalated")).toHaveLength(0);
+    const correlated = events2.filter((e) => e.type === "recovery.escalation.correlated");
+    expect(correlated).toHaveLength(1);
+    expect(correlated[0].ticket).toBe("CTL-2");
+    expect(correlated[0].anchor).toBe("CTL-1");
+    // and the role is board-readable on the signal that finally persisted
+    const memberSignal = signals2.find((s) => s.t === "CTL-2");
+    expect(memberSignal.payload.correlation.role).toBe("member");
+    expect(memberSignal.payload.correlation.anchor).toBe("CTL-1");
+    expect(readCorrelationPointer(orchDir, "CTL-2", {})).toBeNull();
+  });
+
   test("P2 — a candidate tried as a provisional anchor is not acted on twice in one tick", () => {
     seed("CTL-1", "hit your session limit");
     seed("CTL-2", "hit your session limit", t0 + 1000);
