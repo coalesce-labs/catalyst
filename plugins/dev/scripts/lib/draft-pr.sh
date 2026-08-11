@@ -107,6 +107,53 @@ _draft_pr_push_remote() {
   printf '%s\n' "$candidate"
 }
 
+# _draft_pr_repo_slug REMOTE — resolve "OWNER/REPO" for a git remote's URL.
+# Handles github.com HTTPS and SSH remote URL forms. Empty output (rc=1) for
+# anything else (non-github host, local/bare-repo test fixture, unknown
+# remote) — callers fall back to gh's own remote-derived default.
+_draft_pr_repo_slug() {
+  local remote="$1" url
+  url="$(git remote get-url "$remote" 2>/dev/null || true)"
+  [[ -z "$url" ]] && return 1
+  case "$url" in
+    https://github.com/*|http://github.com/*)
+      printf '%s\n' "${url#*github.com/}" | sed -E 's#\.git$##'
+      ;;
+    git@github.com:*)
+      printf '%s\n' "${url#git@github.com:}" | sed -E 's#\.git$##'
+      ;;
+    ssh://git@github.com/*)
+      printf '%s\n' "${url#ssh://git@github.com/}" | sed -E 's#\.git$##'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# _draft_pr_gh_pr SUBCMD [ARGS...] — run `gh pr SUBCMD` scoped to the repo
+# behind the configured push remote (CAT-202). `gh pr create`/`view`/`ready`
+# with no --repo resolve against "origin" via gh's own remote detection,
+# regardless of which remote the branch was actually pushed to. When origin
+# is a read-only upstream (e.g. coalesce-labs/catalyst) and pushes are routed
+# to a separate writable "fork" remote via catalyst.pr.pushRemote (see
+# _draft_pr_push_remote), every PR created/viewed with no --repo silently
+# targets origin instead of the fork that actually holds the branch — a repo
+# this daemon can never merge on. Falls open to gh's default remote
+# resolution when the push remote's URL isn't a parseable github.com slug
+# (local test fixtures, non-github remotes).
+_draft_pr_gh_pr() {
+  local subcmd="$1"; shift
+  local remote repo_slug
+  remote="$(_draft_pr_push_remote)"
+  repo_slug="$(_draft_pr_repo_slug "$remote" 2>/dev/null || true)"
+  if [[ -n "$repo_slug" ]]; then
+    gh pr "$subcmd" --repo "$repo_slug" "$@"
+  else
+    gh pr "$subcmd" "$@"
+  fi
+}
+
 # _draft_pr_pending_range — the commit range about to be pushed: unpushed
 # local commits ahead of the upstream tracking branch, or ahead of
 # origin/<default-base> when there is no upstream yet (first push of a new
@@ -329,7 +376,7 @@ draft_pr_ensure() {
 
   # Idempotency: check for an existing open PR on this branch.
   local existing_json
-  existing_json="$(gh pr view --json number,url,isDraft 2>/dev/null || true)"
+  existing_json="$(_draft_pr_gh_pr view --json number,url,isDraft 2>/dev/null || true)"
   if [[ -n "$existing_json" ]]; then
     local ex_num ex_url ex_draft
     ex_num="$(printf '%s' "$existing_json" | jq -r '.number // empty' 2>/dev/null || true)"
@@ -359,7 +406,7 @@ draft_pr_ensure() {
 
   # Try --draft first.
   local create_out
-  if create_out="$(gh pr create --draft --base "$base" --title "$title" --body "$body" 2>/dev/null)"; then
+  if create_out="$(_draft_pr_gh_pr create --draft --base "$base" --title "$title" --body "$body" 2>/dev/null)"; then
     local new_num new_url
     new_url="$(printf '%s' "$create_out" | grep -oE 'https://[^ ]*/pull/[0-9]+' | head -1 || true)"
     new_num="$(printf '%s' "$new_url" | grep -oE '[0-9]+$' || true)"
@@ -369,7 +416,7 @@ draft_pr_ensure() {
 
   # --draft rejected; retry without --draft (graceful fallback per deliverable #3).
   _draft_pr_warn "--draft rejected, retrying without --draft"
-  if create_out="$(gh pr create --base "$base" --title "$title" --body "$body" 2>/dev/null)"; then
+  if create_out="$(_draft_pr_gh_pr create --base "$base" --title "$title" --body "$body" 2>/dev/null)"; then
     local new_num new_url
     new_url="$(printf '%s' "$create_out" | grep -oE 'https://[^ ]*/pull/[0-9]+' | head -1 || true)"
     new_num="$(printf '%s' "$new_url" | grep -oE '[0-9]+$' || true)"
@@ -385,7 +432,7 @@ draft_pr_ensure() {
 draft_pr_promote() {
   command -v gh >/dev/null 2>&1 || { _draft_pr_warn "gh unavailable"; return 1; }
   local pr_json is_draft num
-  pr_json="$(gh pr view --json number,isDraft 2>/dev/null || true)"
+  pr_json="$(_draft_pr_gh_pr view --json number,isDraft 2>/dev/null || true)"
   [[ -z "$pr_json" ]] && { _draft_pr_warn "no PR found for current branch"; return 1; }
   is_draft="$(printf '%s' "$pr_json" | jq -r '.isDraft // false' 2>/dev/null || echo 'false')"
   num="$(printf '%s' "$pr_json" | jq -r '.number // empty' 2>/dev/null || true)"
@@ -394,7 +441,7 @@ draft_pr_promote() {
     return 1
   fi
   if [[ "$is_draft" == "true" ]]; then
-    gh pr ready "$num" 2>/dev/null || { _draft_pr_warn "gh pr ready failed (continuing)"; return 1; }
+    _draft_pr_gh_pr ready "$num" 2>/dev/null || { _draft_pr_warn "gh pr ready failed (continuing)"; return 1; }
   fi
   return 0
 }
@@ -517,7 +564,7 @@ draft_pr_push_verify() {
 draft_pr_head_oid() {
   command -v gh >/dev/null 2>&1 || return 1
   local oid
-  oid="$(gh pr view --json headRefOid -q '.headRefOid' 2>/dev/null || true)"
+  oid="$(_draft_pr_gh_pr view --json headRefOid -q '.headRefOid' 2>/dev/null || true)"
   [[ -n "$oid" ]] && { printf '%s\n' "$oid"; return 0; }
   return 1
 }
