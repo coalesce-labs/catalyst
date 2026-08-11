@@ -1258,7 +1258,10 @@ export function startDaemon({
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into
     // both is what turns a write-through into a guaranteed next-tick hit.
-    const cache = createTicketStateCache();
+    let linearCacheConfig = {};
+    try { linearCacheConfig = JSON.parse(readFileSync(configPath, "utf8")); }
+    catch { /* missing/unreadable config retains the documented defaults */ }
+    const cache = createTicketStateCache({ config: linearCacheConfig, log });
     // CTL-823: readonly client over the broker's durable descriptor store
     // (~/catalyst/filter-state.db). Fail-open — see gateway-read.mjs.
     const gatewayReader = createGatewayReader();

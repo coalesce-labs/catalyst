@@ -7,7 +7,22 @@
 // pattern in the repo (no fake-timer lib), per scheduler.test.mjs:282-288.
 
 import { describe, it, expect } from "bun:test";
-import { createTicketStateCache } from "./linear-cache.mjs";
+import { createTicketStateCache, resolveCacheTtls } from "./linear-cache.mjs";
+
+describe("resolveCacheTtls", () => {
+  it("uses env before Layer-1 config and retains defaults", () => {
+    const config = { catalyst: { orchestration: { linearCache: { ttlSeconds: 120, negativeTtlSeconds: 600 } } } };
+    expect(resolveCacheTtls({ env: {}, config })).toEqual({ ttlMs: 120_000, negTtlMs: 600_000 });
+    expect(resolveCacheTtls({ env: { LINEAR_STATE_CACHE_TTL_MS: "3000" }, config }).ttlMs).toBe(3000);
+    expect(resolveCacheTtls({ env: {}, config: {} })).toEqual({ ttlMs: 60_000, negTtlMs: 300_000 });
+  });
+  it("rejects unsafe configured values loudly", () => {
+    const warnings = [];
+    const got = resolveCacheTtls({ env: {}, config: { catalyst: { orchestration: { linearCache: { ttlSeconds: 0, negativeTtlSeconds: "bad" } } } }, log: { warn: (...x) => warnings.push(x) } });
+    expect(got).toEqual({ ttlMs: 60_000, negTtlMs: 300_000 });
+    expect(warnings).toHaveLength(2);
+  });
+});
 
 describe("createTicketStateCache", () => {
   it("returns undefined on a cold miss", () => {
