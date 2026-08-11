@@ -112,4 +112,66 @@ describe("CAT-124 backoff invariants and env-name resolution", () => {
       delete process.env[legacy];
     }
   });
+
+  // CAT-124 Tier A item 1 asked for this explicitly: the CAT-47 coverage drove the
+  // backoff past a `shouldSkipItem: () => false` stub, which masked the very ordering
+  // question the ticket raised. This drives the REAL defaultRecordIntent /
+  // defaultShouldSkipItem / defaultForgetIntent so the documented posture — the
+  // attempts ledger owns the in-lifetime bound, this history guards post-reset
+  // re-entry — is demonstrated end to end rather than only asserted in prose.
+  test("the real attempts ledger latches first; the backoff guards post-reset re-entry", async () => {
+    const {
+      defaultRecordIntent,
+      defaultShouldSkipItem,
+      defaultForgetIntent,
+      RECOVERY_MAX_ATTEMPTS,
+      RECOVERY_COOLDOWN_MS,
+    } = await import("./recovery-reasoning.mjs");
+    const orchDir = fresh();
+    const ticket = "CAT-999";
+    const fixClass = "orphan_stale";
+    const reason = "same-failure";
+    // Step past BOTH the intent cooldown and the backoff window every pass, so the only
+    // thing that can stop the loop is the attempts latch itself.
+    const step = Math.max(RECOVERY_COOLDOWN_MS, RECOVERY_FIX_BACKOFF_BASE_MS) * 2 + 1;
+
+    let now = step;
+    let reached = 0;
+    // Run more passes than the ledger allows; the latch must stop us early.
+    for (let pass = 0; pass < RECOVERY_MAX_ATTEMPTS + 2; pass += 1, now += step) {
+      if (defaultShouldSkipItem(ticket, { orchDir, now: () => now })) continue;
+      reached += 1;
+      expect(inFixBackoff(orchDir, ticket, fixClass, now).blocked).toBe(false);
+      recordFixFailure(orchDir, ticket, fixClass, reason, now);
+      defaultRecordIntent(
+        ticket,
+        { decision: "fix", fix_class: fixClass },
+        { orchDir, now: () => now }
+      );
+    }
+
+    // Within one lifetime the ledger — not the backoff — is what bounds the retries.
+    expect(reached).toBe(RECOVERY_MAX_ATTEMPTS);
+    expect(defaultShouldSkipItem(ticket, { orchDir, now: () => now })).toBe(true);
+    // …and because the threshold sits above that bound, the backoff never armed.
+    const inLifetime = inFixBackoff(orchDir, ticket, fixClass, now);
+    expect(inLifetime.count).toBe(RECOVERY_MAX_ATTEMPTS);
+    expect(inLifetime.count).toBeLessThan(RECOVERY_FIX_BACKOFF_THRESHOLD);
+    expect(inLifetime.blocked).toBe(false);
+
+    // Resetting the ledger re-opens the item, but the fix-failure history survives it.
+    expect(defaultForgetIntent(ticket, { orchDir })).toBe(true);
+    now += step;
+    expect(defaultShouldSkipItem(ticket, { orchDir, now: () => now })).toBe(false);
+    expect(inFixBackoff(orchDir, ticket, fixClass, now).count).toBe(RECOVERY_MAX_ATTEMPTS);
+
+    // Identical failures on re-entry carry the count to the threshold and arm the block.
+    for (let i = RECOVERY_MAX_ATTEMPTS; i < RECOVERY_FIX_BACKOFF_THRESHOLD; i += 1) {
+      recordFixFailure(orchDir, ticket, fixClass, reason, now);
+    }
+    const armed = inFixBackoff(orchDir, ticket, fixClass, now);
+    expect(armed.count).toBe(RECOVERY_FIX_BACKOFF_THRESHOLD);
+    expect(armed.blocked).toBe(true);
+    expect(armed.until).toBe(now + RECOVERY_FIX_BACKOFF_BASE_MS);
+  });
 });
