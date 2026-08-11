@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readBlockedGhostConfig } from "./config.mjs";
+import { readBlockedGhostConfig, readGovernanceSources } from "./config.mjs";
 
 describe("readBlockedGhostConfig (CAT-171)", () => {
   let saved;
@@ -54,5 +54,16 @@ describe("readBlockedGhostConfig (CAT-171)", () => {
   test("an unrecognized env value falls through to shadow", () => {
     process.env.CATALYST_BLOCKED_GHOST = "yes-please";
     expect(readBlockedGhostConfig().mode).toBe("shadow");
+  });
+
+  test("governance provenance reports env, config, and default sources", () => {
+    expect(readGovernanceSources().blockedGhost).toBe("default");
+    writeFileSync(
+      process.env.CATALYST_LAYER2_CONFIG_FILE,
+      JSON.stringify({ catalyst: { blockedGhost: { mode: "enforce" } } }),
+    );
+    expect(readGovernanceSources().blockedGhost).toBe("config");
+    process.env.CATALYST_BLOCKED_GHOST = "off";
+    expect(readGovernanceSources().blockedGhost).toBe("env-override");
   });
 });

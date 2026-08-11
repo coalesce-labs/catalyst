@@ -2643,6 +2643,11 @@ export function readGovernanceSources(env = process.env) {
     readLayer2UnstuckSweep().mode,
     UNSTUCK_SWEEP_MODES
   );
+  out.blockedGhost = resolveModeSource(
+    env.CATALYST_BLOCKED_GHOST,
+    readLayer2BlockedGhost().mode,
+    BLOCKED_GHOST_MODES,
+  );
   out.deadDocWorker = resolveModeSource(
     env.CATALYST_DEAD_DOC_WORKER_RECLAIM,
     readLayer2DeadDocWorker().mode,

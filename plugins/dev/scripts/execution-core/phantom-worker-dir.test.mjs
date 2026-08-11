@@ -21,6 +21,7 @@ import {
   listInFlightTickets,
   buildGlobalRanking,
   bgLivenessProtects,
+  delegateBgLivenessProtects,
   isReclaimableEmptyWorkerDir,
 } from "./scheduler.mjs";
 import { makeBlockedGhostAwareIsBgJobAlive } from "./blocked-ghost.mjs";
@@ -284,6 +285,13 @@ describe("bgLivenessProtects + blocked-ghost wrapper (CAT-171)", () => {
     const emit = mock();
     const probe = makeBlockedGhostAwareIsBgJobAlive({ mode: "enforce", emit });
     expect(bgLivenessProtects(sessionId, cold, probe)).toBe(true);
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  test("delegate GC also treats a cold snapshot as alive without emitting", () => {
+    const emit = mock();
+    const probe = makeBlockedGhostAwareIsBgJobAlive({ mode: "enforce", emit });
+    expect(delegateBgLivenessProtects(sessionId, cold, probe)).toBe(true);
     expect(emit).not.toHaveBeenCalled();
   });
 });

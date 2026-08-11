@@ -97,4 +97,16 @@ describe("makeBlockedGhostAwareIsBgJobAlive (CAT-171)", () => {
     });
     expect(probe(sessionId, { agents: blocked })).toBe(false);
   });
+
+  test("a failed reap append is retried on the next classification", () => {
+    const emitReap = mock(() => false);
+    const probe = makeBlockedGhostAwareIsBgJobAlive({
+      mode: "enforce",
+      emit: () => {},
+      emitReap,
+    });
+    probe(sessionId, { agents: blocked });
+    probe(sessionId, { agents: blocked });
+    expect(emitReap).toHaveBeenCalledTimes(2);
+  });
 });

@@ -1293,6 +1293,14 @@ export function bgLivenessProtects(bgId, snapshot, isBgJobAlive) {
   return Boolean(isBgJobAlive(bgId, { agents: snapshot.agents }));
 }
 
+// CAT-171: delegate GC uses the same cold-snapshot fail-open contract as Pass
+// 0a. A stale cache may never prove a listed session blocked/dead.
+export function delegateBgLivenessProtects(bgId, snapshot, isBgJobAlive) {
+  if (!bgId) return false;
+  if (!snapshot?.isFresh) return true;
+  return Boolean(isBgJobAlive(bgId, { agents: snapshot.agents }));
+}
+
 // listInFlightTickets — Set of ticket ids currently occupying a worker slot.
 export function listInFlightTickets(orchDir) {
   const inFlight = new Set();
@@ -6159,9 +6167,10 @@ export function schedulerTick(
     // it as a dead bg job — dropping it would free the reservation/existence guard and
     // let the next scan re-dispatch the same in-flight ticket. Inert under bg (executor
     // null → the no-bg_job_id launched intent still drops exactly as today).
+    const delegateSnapshot = getAgents();
     gcDelegateIntents(orchDir, now(), {
       executor: dispatchMode === "sdk" ? "sdk" : null,
-      isBgJobAlive: (id) => isBgJobAlive(id, { agents: getAgents().agents }),
+      isBgJobAlive: (id) => delegateBgLivenessProtects(id, delegateSnapshot, isBgJobAlive),
     });
   } catch {
     /* GC is best-effort — never block the tick */

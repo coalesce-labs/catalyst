@@ -18,6 +18,8 @@ export function makeBlockedGhostAwareIsBgJobAlive({
   terminalStates = TERMINAL_AGENT_STATES,
 } = {}) {
   const emitted = new Set();
+  const reaped = new Set();
+  const reapPending = new Set();
 
   return (bgJobId, options = {}) => {
     if (mode === "off") return base(bgJobId, options);
@@ -44,16 +46,26 @@ export function makeBlockedGhostAwareIsBgJobAlive({
       } catch {
         // Telemetry must never change the liveness verdict.
       }
-      if (mode === "enforce") {
-        try {
-          const pending = emitReap?.("phase.terminal.reap-requested", {
-            reason: "cat-171-blocked-ghost",
-            bgJobId,
-          });
-          pending?.catch?.(() => {});
-        } catch {
-          // Cleanup intent emission is best-effort and cannot alter liveness.
+    }
+    if (mode === "enforce" && !reaped.has(shortId) && !reapPending.has(shortId)) {
+      try {
+        const result = emitReap?.("phase.terminal.reap-requested", {
+          reason: "cat-171-blocked-ghost",
+          bgJobId,
+        });
+        if (result?.then) {
+          reapPending.add(shortId);
+          Promise.resolve(result)
+            .then((ok) => {
+              if (ok !== false) reaped.add(shortId);
+            })
+            .catch(() => {})
+            .finally(() => reapPending.delete(shortId));
+        } else if (result !== false) {
+          reaped.add(shortId);
         }
+      } catch {
+        // Cleanup intent emission is best-effort and cannot alter liveness.
       }
     }
 
