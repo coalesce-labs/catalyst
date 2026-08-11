@@ -78,6 +78,25 @@ describe("defaultInvokeSeam registry selection (CAT-47 Defect A)", () => {
     expect(emits).toBe(1);
   });
 
+  test("an operator-suppressed registry never rebuilds a live fallback (CAT-124 F3)", () => {
+    let emits = 0;
+    const root = fresh();
+    const result = defaultInvokeSeam("CAT-47", "orphan-reconcile", {}, {
+      ...merged,
+      orchDir: root,
+      actByCategory: {},
+      seamFallbackSuppressed: true,
+      emitPhaseComplete: () => {
+        emits += 1;
+        return true;
+      },
+    });
+    expect(result.success).toBe(false);
+    expect(result.reason).toContain("suppressed by operator override");
+    expect(result.details.suppressed).toBe(true);
+    expect(emits).toBe(0);
+  });
+
   test("a registry MISSING this category falls back rather than reporting unavailable", () => {
     const result = defaultInvokeSeam("CAT-47", "orphan-reconcile", {}, {
       ...merged,
