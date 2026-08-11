@@ -415,7 +415,7 @@ describe("catalyst-monitor.sh orphan port reap (CAT-53)", () => {
 
     // The orphan must be gone — reaped before the real monitor tried to bind.
     expect(pidAlive(orphanPid)).toBe(false);
-    expect(exitCode.exitCode ?? exitCode).toBe(0);
+    expect(exitCode).toBe(0);
 
     Bun.sleepSync(500);
     expect(existsSync(cat53PidFile)).toBe(true);
@@ -448,12 +448,11 @@ describe("catalyst-monitor.sh orphan port reap (CAT-53)", () => {
       cwd: cat53Dir,
     });
 
-    // Fails closed: the live, non-orphan holder is left alone, and cmd_start
-    // fails naturally (real bun server can't bind an occupied port) rather
-    // than reporting a false success.
+    // Fails closed: the live, non-orphan holder is left alone, and
+    // cmd_start explicitly refuses to start rather than risk a second
+    // monitor silently binding alongside it.
     expect(pidAlive(holderPid)).toBe(true);
-    const code = exitCode.exitCode ?? exitCode;
-    expect(code).not.toBe(0);
+    expect(exitCode).not.toBe(0);
     expect(existsSync(cat53PidFile)).toBe(false);
 
     proc.kill();
