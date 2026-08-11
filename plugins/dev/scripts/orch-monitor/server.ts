@@ -1860,6 +1860,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // humanQuestion lives in explanation.call_to_action (CTL-1130).
         humanQuestion: t.explanation?.call_to_action ?? undefined,
         title: t.title,
+        // CAT-170 (Codex #3209 round-3 P1): forward the correlation role. This
+        // adapter rebuilds each ticket field-by-field, so omitting it silently
+        // stripped the role board-data had just projected — and BOTH server
+        // notification paths (the SSE stream and the web-push bridge) reach the
+        // projector only through here. Without it `shouldNotify` never sees
+        // role === "member", so every member of a correlated incident still
+        // emitted its own push: the exact per-ticket operator spam this ticket
+        // exists to collapse, reintroduced one layer below the fix.
+        correlationRole: t.correlationRole,
       })),
       daemon: nav.daemon,
       anomaly: nav.anomaly,

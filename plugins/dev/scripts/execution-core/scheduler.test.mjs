@@ -13129,6 +13129,72 @@ describe("Pass 0a live-probe bounding for non-phantom dirs (CTL-1580)", () => {
   });
 });
 
+// ─── CAT-170 (Codex #3209 round-3 P1): global-move signatures ────────────────
+describe("holisticBoardHealthAct — global moves sign their own cause (CAT-170)", () => {
+  const runWith = (decision) => {
+    const intents = [];
+    holisticBoardHealthAct(
+      { candidates: ["CTL-1"], boardContext: {}, decision },
+      {
+        shouldSkipItem: () => false,
+        invokeRecoveryPass: () => ({ dispatched: true }),
+        recordIntent: (ticket, entry) => intents.push({ ticket, ...entry }),
+      },
+    );
+    return intents[0]?.signature ?? null;
+  };
+
+  test("(CAT-170) a ticketless global move names itself, not the gate count summary", () => {
+    // kick-dispatch / note-cache-drift carry no ticket, so moveByTicket cannot
+    // recover their cause and the candidate used to fall through to gate.reason.
+    const sig = runWith({
+      gate: { reason: "1 invariant(s) flagged" },
+      moves: { tier1: [{ move: "kick-dispatch", rationale: "dispatch liveness" }] },
+    });
+    expect(sig).toBe("board-health: kick-dispatch");
+    expect(sig).not.toBe("1 invariant(s) flagged");
+  });
+
+  test("(CAT-170) two unrelated global-move scans do NOT collapse into one incident", () => {
+    const dispatchScan = runWith({
+      gate: { reason: "1 invariant(s) flagged" },
+      moves: { tier1: [{ move: "kick-dispatch" }] },
+    });
+    const cacheScan = runWith({
+      gate: { reason: "1 invariant(s) flagged" },
+      moves: { tier1: [{ move: "note-cache-drift" }] },
+    });
+    // Pre-fix both signed "1 invariant(s) flagged" and correlated together.
+    expect(dispatchScan).not.toBe(cacheScan);
+  });
+
+  test("(CAT-170) a per-ticket move still outranks the scan's global moves", () => {
+    const sig = runWith({
+      gate: { reason: "2 invariant(s) flagged" },
+      moves: {
+        tier1: [{ move: "kick-dispatch" }, { ticket: "CTL-1", move: "nudge" }],
+      },
+    });
+    expect(sig).toBe("board-health: nudge");
+  });
+
+  test("(CAT-170) the global signature is order-independent", () => {
+    const a = runWith({
+      moves: { tier1: [{ move: "kick-dispatch" }, { move: "note-cache-drift" }] },
+    });
+    const b = runWith({
+      moves: { tier1: [{ move: "note-cache-drift" }, { move: "kick-dispatch" }] },
+    });
+    expect(a).toBe(b);
+  });
+
+  test("(CAT-170) with no moves at all the gate reason is still the fallback", () => {
+    expect(runWith({ gate: { reason: "3 invariant(s) flagged" }, moves: {} })).toBe(
+      "3 invariant(s) flagged",
+    );
+  });
+});
+
 // ─── CTL-1610 (Phase 2): holisticBoardHealthAct latchedNoClock ───────────────
 describe("holisticBoardHealthAct — latchedNoClock (CTL-1610)", () => {
   test("(CTL-1610) all-candidates-exhausted with a no-clock latch → latchedNoClock:true", () => {

@@ -9637,19 +9637,39 @@ export function holisticBoardHealthAct(
   // (kick-dispatch / judge-done-or-reopen / recover-unowned-in-flight / …), so the
   // ticket→move map is the invariant evidence, keyed per candidate.
   const moveByTicket = new Map();
+  // CAT-170 (Codex #3209 round-3 P1): GLOBAL moves carry no ticket. proposeMoves
+  // emits `kick-dispatch` (dispatch-liveness) and `note-cache-drift`
+  // (cache-coherence) as scan-wide findings, while selectAnchorCandidates still
+  // services those scans by picking an eligible ticket — so moveByTicket cannot
+  // name their cause and every such candidate fell through to the gate reason
+  // ("N invariant(s) flagged"). That string is identical across UNRELATED scans
+  // flagging the same count, so a dispatch-liveness scan and a cache-coherence
+  // scan signed identically and the correlation sweep collapsed two unrelated
+  // causes into one operator incident — the precise failure the per-candidate
+  // signature exists to prevent. Collect the ticketless moves in tier order and
+  // sign with them instead.
+  const globalMoves = [];
   for (const tier of ["tier1", "tier2", "tier3"]) {
     for (const m of decision?.moves?.[tier] ?? []) {
       // First writer wins: tier1 outranks tier2 outranks tier3, matching
       // selectAnchorCandidates' own ordering.
       if (m?.ticket && !moveByTicket.has(m.ticket)) moveByTicket.set(m.ticket, m.move ?? null);
+      else if (!m?.ticket && m?.move && !globalMoves.includes(m.move)) globalMoves.push(m.move);
     }
   }
+  // Deterministic regardless of proposal order, so the same pair of global moves
+  // always yields the same signature (and two different pairs never coincide).
+  const globalSignature = globalMoves.length
+    ? `board-health: ${[...globalMoves].sort().join("+")}`
+    : null;
   // A candidate with no proposed move (a deferred-intent anchor, or the
-  // eligible-queue fallback) has no per-ticket invariant to name — fall back to the
-  // gate reason, which is at least truthful about why the scan proceeded.
+  // eligible-queue fallback) has no per-ticket invariant to name — prefer the
+  // scan's global moves, and only then the gate reason, which is at least
+  // truthful about why the scan proceeded.
   const signatureFor = (cand) => {
     const move = moveByTicket.get(cand);
-    return move ? `board-health: ${move}` : (decision?.gate?.reason ?? null);
+    if (move) return `board-health: ${move}`;
+    return globalSignature ?? decision?.gate?.reason ?? null;
   };
   // CTL-1440 (P0b): track WHY candidates were ledger-skipped so the no-dispatch
   // return distinguishes "everything is terminally attempts-exhausted" (a
