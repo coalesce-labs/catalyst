@@ -873,7 +873,22 @@ function dispatchTriage(
   }
 ) {
   const hold = (reason) => {
-    try { const { changed }=recordTriageDecline(orchDir,identifier,reason); if(changed) appendTriageDeclinedEvent({orchId:orchId??identifier,orchDir,ticket:identifier,reason}); } catch { /* diagnostics fail open */ }
+    try {
+      const { changed } = recordTriageDecline(orchDir, identifier, reason);
+      if (changed) {
+        appendTriageDeclinedEvent({
+          orchId: orchId ?? identifier,
+          orchDir,
+          ticket: identifier,
+          reason,
+        });
+      }
+    } catch (err) {
+      log.warn(
+        { identifier, reason, err: String(err) },
+        "cat-166: could not record triage dispatch decline",
+      );
+    }
     return false;
   };
   if (!orchDir) {
@@ -1191,7 +1206,14 @@ function dispatchTriage(
   // CTL-1028: persist the won generation so a later flapping-host triage worker
   // is fenced. null (single-host) is a no-op inside writeClusterGeneration.
   writeClusterGeneration(orchDir, identifier, clusterGeneration);
-  try { clearTriageRequest(orchDir, identifier); } catch { /* diagnostics fail open */ }
+  try {
+    clearTriageRequest(orchDir, identifier);
+  } catch (err) {
+    log.warn(
+      { identifier, err: String(err) },
+      "cat-166: could not clear triage request after dispatch",
+    );
+  }
   // CTL-863: emit the authoritative fence.claimed event (Linear-free local append)
   // so the broker projects this triage claim into ticket_state's fence columns.
   // Multi-host only (clusterGeneration non-null); single-host never fences.
@@ -1533,7 +1555,16 @@ export function sweepMissingTriage({
     const eligibleSet = getEligibleSet(p.team);
     const eligibleIds = new Set(eligibleSet.map((t) => t.identifier));
     const seen = new Set();
-    const requested = requests.filter((r)=>r.team===p.team).map((r)=>({identifier:r.ticket,fromTriageBoard:false,fromTriageRequest:true}));
+    const requested = requests
+      .filter((request) => request.team === p.team)
+      .map((request) => ({
+        identifier: request.ticket,
+        updatedAt: Number.isFinite(request.lastRequestedAt)
+          ? new Date(request.lastRequestedAt).toISOString()
+          : null,
+        fromTriageBoard: false,
+        fromTriageRequest: true,
+      }));
     const candidates = [
       ...triageStateTickets(p, { replica, runTriageState }).filter(
         (t) => !eligibleIds.has(t.identifier)
@@ -1576,8 +1607,9 @@ export function sweepMissingTriage({
         budget,
         // CTL-1589 (Codex R3): Triage-BOARD candidates must still be in the
         // Triage state at launch; eligible-half candidates skip the check.
-        requireTriageState: t.fromTriageBoard ? triageStatusName : null,
-        candidateUpdatedAt: t.fromTriageBoard ? (t.updatedAt ?? null) : null,
+        requireTriageState: t.fromTriageBoard || t.fromTriageRequest ? triageStatusName : null,
+        candidateUpdatedAt:
+          t.fromTriageBoard || t.fromTriageRequest ? (t.updatedAt ?? null) : null,
         fetchLiveState,
         botUserIds,
         botWriteId,
@@ -1597,12 +1629,17 @@ export function sweepMissingTriage({
   }
   try {
     for (const request of listTriageRequests(orchDir)) {
-      const verdict=shouldEscalateTriageRequest(request,{now:now(),escalateMs:triageEscalateMs});
+      const verdict = shouldEscalateTriageRequest(request, {
+        now: now(),
+        escalateMs: triageEscalateMs,
+        shadow: triageEscalateMode === "shadow",
+      });
       if(!verdict.escalate||triageEscalateMode==="off") continue;
       const age_ms=now()-request.firstRequestedAt;
       if(triageEscalateMode==="shadow") {
         log.warn({ticket:request.ticket,reason:verdict.reason,age_ms},"cat-166: triage request would escalate (shadow)");
         appendTriageEscalatedEvent({orchId:request.ticket,orchDir,ticket:request.ticket,reason:verdict.reason,shadow:true,age_ms});
+        markTriageRequestEscalated(orchDir, request.ticket, { now: now(), shadow: true });
       } else if(triageEscalateMode==="enforce") {
         routeTriageEscalation(orchDir,request.ticket,{site:"triage-request-escalation",reason:verdict.reason,explanation:{problem:`${request.ticket} has been held at CTL-1150 since ${request.firstRequestedAt}; triage dispatch declined with ${verdict.reason}`,call_to_action:`resolve triage dispatch decline: ${verdict.reason}`},deps:{orchDir,maxParallel:()=>readMaxParallel(orchDir)}});
         markTriageRequestEscalated(orchDir,request.ticket,{now:now()});

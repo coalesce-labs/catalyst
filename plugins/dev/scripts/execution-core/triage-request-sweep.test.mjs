@@ -81,15 +81,21 @@ describe("CAT-166 triage-request escalation sweep", () => {
     expect(readTriageRequest(orchDir, TICKET).escalatedAt).toBeNull();
   });
 
-  test("shadow: emits a shadow event but takes NO action and does NOT latch", () => {
+  test("shadow: emits once, latches shadow separately, and leaves enforce actionable", () => {
     seedRequest({ declineReason: "no-free-slots" });
     const { routed, events } = runSweep({ mode: "shadow" });
     expect(routed).toHaveLength(0);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ ticket: TICKET, shadow: true, reason: "no-free-slots", age_ms: ESCALATE_MS });
-    // Shadow is a dry run: leaving escalatedAt null is what lets a later
-    // enforce flip act on the same episode.
-    expect(readTriageRequest(orchDir, TICKET).escalatedAt).toBeNull();
+    const request = readTriageRequest(orchDir, TICKET);
+    expect(request.shadowEscalatedAt).toBe(ESCALATE_MS);
+    expect(request.escalatedAt).toBeNull();
+
+    const repeated = runSweep({ mode: "shadow", now: ESCALATE_MS * 2 });
+    expect(repeated.events).toHaveLength(0);
+
+    const enforced = runSweep({ mode: "enforce", now: ESCALATE_MS * 3 });
+    expect(enforced.routed).toHaveLength(1);
   });
 
   test("enforce: routes once through the delegate-first seam and latches the episode", () => {

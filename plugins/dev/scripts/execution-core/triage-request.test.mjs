@@ -39,7 +39,7 @@ describe("triage request leaf", () => {
   test("writes the literal record shape and preserves episode state", () => {
     const d = fixture();
     const first = recordTriageRequest(d, "CAT-166", { team: "CAT", class: "untriaged", reason: "hold", holdStreak: 1 }, { now: 100, hostName: "h1" });
-    expect(JSON.parse(readFileSync(join(d, ".triage-requests", "CAT-166.json"), "utf8"))).toEqual({ ticket:"CAT-166", team:"CAT", class:"untriaged", reason:"hold", firstRequestedAt:100, lastRequestedAt:100, holdStreak:1, requestedByHost:"h1", lastDecline:null, escalatedAt:null });
+    expect(JSON.parse(readFileSync(join(d, ".triage-requests", "CAT-166.json"), "utf8"))).toEqual({ ticket:"CAT-166", team:"CAT", class:"untriaged", reason:"hold", firstRequestedAt:100, lastRequestedAt:100, holdStreak:1, requestedByHost:"h1", lastDecline:null, shadowEscalatedAt:null, escalatedAt:null });
     recordTriageDecline(d, "CAT-166", "drain-active", { now: 150, hostName: "h2" });
     const second = recordTriageRequest(d, "CAT-166", { team:"CAT", class:"untriaged", reason:"hold", holdStreak:2 }, { now:200, hostName:"h1" });
     expect(second.firstRequestedAt).toBe(first.firstRequestedAt); expect(second.lastDecline.reason).toBe("drain-active");
@@ -57,6 +57,17 @@ describe("triage request leaf", () => {
     expect(readTriageRequest(d,"CAT-166").team).toBeNull(); expect(listTriageRequests(d)).toHaveLength(1);
     expect(reapStaleTriageRequests(d,{ttlMs:5,now:7})).toEqual(["CAT-166"]);
     expect(clearTriageRequest(d,"CAT-166")).toBe(false);
+  });
+  test("reaps a request with a missing or non-numeric lastRequestedAt", () => {
+    const d = fixture();
+    const requestDir = join(d, ".triage-requests");
+    mkdirSync(requestDir);
+    writeFileSync(
+      join(requestDir, "CAT-166.json"),
+      JSON.stringify({ ticket: "CAT-166", team: "CAT", firstRequestedAt: 1 }),
+    );
+    expect(reapStaleTriageRequests(d, { ttlMs: 5, now: 7 })).toEqual(["CAT-166"]);
+    expect(readTriageRequest(d, "CAT-166")).toBeNull();
   });
   test("escalation is age- and episode-bounded", () => {
     const base={firstRequestedAt:10,lastDecline:null,escalatedAt:null};

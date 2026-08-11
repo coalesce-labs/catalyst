@@ -1353,9 +1353,6 @@ export const CLUSTER_SYNC_INTERVAL_MS =
 // The periodic reconcile poll — the missed-webhook correctness backstop.
 export const RECONCILE_INTERVAL_MS =
   Number(process.env.EXECUTION_CORE_RECONCILE_INTERVAL_MS) || 10 * 60_000;
-export const TRIAGE_REQUEST_ESCALATE = process.env.CATALYST_TRIAGE_REQUEST_ESCALATE || "shadow";
-export const TRIAGE_REQUEST_ESCALATE_MS = Number(process.env.CATALYST_TRIAGE_REQUEST_ESCALATE_MS) || 45 * 60_000;
-export const TRIAGE_REQUEST_TTL_MS = Number(process.env.CATALYST_TRIAGE_REQUEST_TTL_MS) || 24 * 3600_000;
 
 // CTL-867 — per-team reconcile-health escalation threshold. A team's
 // eligibleQuery can error every poll (e.g. its status references a removed
