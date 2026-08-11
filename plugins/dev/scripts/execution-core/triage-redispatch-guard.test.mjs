@@ -17,11 +17,40 @@ import {
   readTriageDispatchCount,
   bumpTriageDispatchCount,
   fleetTriageDispatchCount,
+  clearTriageDispatchCount,
+  markTriageCapped,
+  readTriageDispatchRecord,
 } from "./monitor.mjs";
 
 let orchDir;
 beforeEach(() => {
   orchDir = mkdtempSync(pathJoin(tmpdir(), "triage-guard-"));
+});
+
+describe("clearTriageDispatchCount — outcome-aware reset (CAT-83)", () => {
+  test("clears count, preserves forensic count, and re-arms a cap", () => {
+    bumpTriageDispatchCount(orchDir, "CTL-20");
+    bumpTriageDispatchCount(orchDir, "CTL-20");
+    markTriageCapped(orchDir, "CTL-20");
+    expect(clearTriageDispatchCount(orchDir, "CTL-20")).toBe(true);
+    expect(readTriageDispatchRecord(orchDir, "CTL-20")).toMatchObject({
+      count: 0,
+      priorCount: 2,
+      clearedReason: "artifact-present",
+    });
+    expect(readTriageDispatchRecord(orchDir, "CTL-20").cappedAt).toBeUndefined();
+    expect(markTriageCapped(orchDir, "CTL-20")).toBe(true);
+  });
+
+  test("absent and already-cleared records are no-write no-ops", () => {
+    expect(clearTriageDispatchCount(orchDir, "CTL-21")).toBe(false);
+    expect(existsSync(pathJoin(orchDir, ".triage-dispatch-counts", "CTL-21.json"))).toBe(false);
+    bumpTriageDispatchCount(orchDir, "CTL-22");
+    clearTriageDispatchCount(orchDir, "CTL-22");
+    const before = readFileSync(pathJoin(orchDir, ".triage-dispatch-counts", "CTL-22.json"), "utf8");
+    expect(clearTriageDispatchCount(orchDir, "CTL-22")).toBe(false);
+    expect(readFileSync(pathJoin(orchDir, ".triage-dispatch-counts", "CTL-22.json"), "utf8")).toBe(before);
+  });
 });
 afterEach(() => {
   try {

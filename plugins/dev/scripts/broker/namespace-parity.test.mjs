@@ -57,6 +57,7 @@ const INLINE_EVENT_NAMES = [
   "monitor.replica.degraded.team", // replica-health-event.mjs (CAT-35)
   "monitor.replica.recovered.team", // replica-health-event.mjs (CAT-35)
   "phase.triage.linear-transition.CTL-1", // triage-transition-event.mjs:53
+  "triage.redispatch.capped.CTL-1", // triage-cap-event.mjs
   "linear.state.write.CTL-1",         // linear-state-write-event.mjs:77
   "agent.waiting_on_user",            // wait-event.mjs:buildWaitEnvelope
   "agent.resumed",                    // wait-event.mjs:buildWaitEnvelope

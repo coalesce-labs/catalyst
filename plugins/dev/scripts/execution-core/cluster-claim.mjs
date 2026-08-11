@@ -260,6 +260,23 @@ export async function bumpTriageAttemptCount(ticket, { post = defaultPost, issue
   return newCount;
 }
 
+export async function resetTriageAttemptCount(ticket, { post = defaultPost, issueId = null } = {}) {
+  const current = await readClaim(ticket, { post });
+  if (!current) return null;
+  if ((current.triage_attempt_count ?? 0) === 0) return 0;
+  await writeClaim(
+    ticket,
+    {
+      owner_host: current.owner_host,
+      generation: current.generation,
+      phase: current.phase,
+      triage_attempt_count: 0,
+    },
+    { post, issueId, preserveClaimedAt: current.claimed_at },
+  );
+  return 0;
+}
+
 // ─── soft-CAS claim ──────────────────────────────────────────────────────────
 
 // claimTicket — the soft compare-and-set that is the actual cross-host mutex.
@@ -385,10 +402,16 @@ export async function runCli(argv, { post = defaultPost } = {}) {
       process.stdout.write(JSON.stringify({ count }) + "\n");
       return 0;
     }
+    case "reset-triage-attempt": {
+      const [ticket] = rest;
+      const count = await resetTriageAttemptCount(ticket, { post });
+      process.stdout.write(JSON.stringify({ count }) + "\n");
+      return 0;
+    }
     default:
       process.stderr.write(
         `cluster-claim.mjs: unknown subcommand: ${cmd ?? "(none)"}\n` +
-          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> [issueId] | fence-check <ticket> <gen> | resolve-issue-id <ticket> | read-triage-attempt <ticket> | bump-triage-attempt <ticket>>\n",
+          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> [issueId] | fence-check <ticket> <gen> | resolve-issue-id <ticket> | read-triage-attempt <ticket> | bump-triage-attempt <ticket> | reset-triage-attempt <ticket>>\n",
       );
       return 1;
   }

@@ -403,3 +403,29 @@ export function bumpTriageAttemptCountSync(
     return { count: null };
   }
 }
+
+export function resetTriageAttemptCountSync(
+  { ticket },
+  {
+    spawn = spawnSync,
+    nodeBin = process.execPath,
+    cli = CLUSTER_CLAIM_CLI,
+    env = process.env,
+    timeout = CLAIM_TIMEOUT_MS,
+  } = {},
+) {
+  triageAttemptCache.delete(ticket);
+  try {
+    const res = spawn(nodeBin, [cli, "reset-triage-attempt", ticket], {
+      encoding: "utf8",
+      env,
+      timeout,
+    });
+    if (!res || res.status !== 0 || typeof res.stdout !== "string") return { count: null };
+    const line = res.stdout.trim().split("\n").filter(Boolean).pop();
+    const parsed = JSON.parse(line);
+    return { count: typeof parsed?.count === "number" ? parsed.count : null };
+  } catch {
+    return { count: null };
+  }
+}
