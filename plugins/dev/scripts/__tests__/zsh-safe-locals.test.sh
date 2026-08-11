@@ -49,26 +49,22 @@ check_line_for_specials() {
   local stripped="${line#"${line%%[![:space:]]*}"}"
   # Skip pure comment lines.
   [[ "${stripped:0:1}" == "#" ]] && return 0
-  # Skip lines where '#' appears before any local/typeset keyword.
-  # We only care about `local `  or `typeset ` (with trailing space).
-  local before_keyword=""
-  case "$line" in
-    *"local "*|*"typeset "*)
-      # Extract everything before the first occurrence of local/typeset.
-      # Hack: remove from 'local '/'typeset ' onwards and check if '#' is in what's left.
-      before_keyword="${line%%local *}"
-      case "$before_keyword" in *"#"*) return 0;; esac
-      before_keyword="${line%%typeset *}"
-      case "$before_keyword" in *"#"*) return 0;; esac
-      ;;
-    *) return 0 ;;
-  esac
+  # Normalize tabs to spaces so a tab-separated declaration (`local\tpath`) is
+  # detected the same as a space-separated one, then strip any trailing inline
+  # comment (from the first ` #`). Stripping the comment BEFORE keyword
+  # detection closes two holes at once (CTL-1777 phase-review remediation):
+  #  - false-negative: `local path="$1"  # note` previously slipped through
+  #    because a `#` anywhere on the line short-circuited the scan.
+  #  - false-positive: a `#`-comment that merely mentions a special name (or
+  #    the keyword) can no longer be mistaken for a declaration.
+  local norm="${line//$'\t'/ }"
+  local nocomment="${norm%% #*}"
 
-  # Extract rest after 'local '/'typeset '.
+  # Extract rest after 'local '/'typeset ' (comment-free, tab-normalized).
   local rest=""
-  case "$line" in
-    *"local "*)  rest="${line#*local }"  ;;
-    *"typeset "*) rest="${line#*typeset }" ;;
+  case "$nocomment" in
+    *"local "*)   rest="${nocomment#*local }"  ;;
+    *"typeset "*) rest="${nocomment#*typeset }" ;;
     *) return 0 ;;
   esac
 
@@ -125,6 +121,13 @@ POSITIVE_FIXTURES=(
   'typeset path'
   '  local status="ok"'
   '  local argv'
+  # CTL-1777 phase-review remediation: trailing inline comment must not hide
+  # the declaration (false-negative fix).
+  'local path="$1"  # sets the resolved path'
+  '	local content="$1" path="$2" tmp  # atomic writer'
+  # Tab (not space) between keyword and name must still flag (false-negative fix).
+  'local	path="$1"'
+  'typeset	fpath'
 )
 for fixture_line in "${POSITIVE_FIXTURES[@]}"; do
   result="$(check_line_for_specials "$fixture_line")"
@@ -147,6 +150,10 @@ NEGATIVE_FIXTURES=(
   '  local dest_path="$2"'
   '  local wt_path="$1"'
   '  local p="$path"'
+  # CTL-1777 phase-review remediation: a trailing comment that merely mentions a
+  # special name (or the keyword) must not be mistaken for a declaration.
+  '  local doc_path="x"  # not path, doc_path'
+  '  count=1  # local path would wipe PATH'
 )
 for fixture_line in "${NEGATIVE_FIXTURES[@]}"; do
   result="$(check_line_for_specials "$fixture_line")"
