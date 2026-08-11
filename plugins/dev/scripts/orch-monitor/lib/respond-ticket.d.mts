@@ -83,9 +83,9 @@ export function findHeldRun(
 
 export function defaultArtifactPresent(args: {
   ticket: string;
-  phase: string;
-  orchDir: string;
-  repoRoot: string | null;
+  artifact: string | null | undefined;
+  artifactDir: string | null | undefined;
+  searchedPath: string | null | undefined;
 }): boolean | null;
 
 export function readClusterHostCount(opts?: {
@@ -129,10 +129,8 @@ export function respondTicket(
     record?: (args: { ticket: string; phase: string; response: unknown }) => unknown;
     clearMarker?: (args: { ticket: string }) => unknown;
     emit?: (args: { ticket: string; response: unknown }) => unknown;
-    artifactPresent?: (args: { ticket: string; phase: string; orchDir: string; repoRoot: string | null }) => boolean | null | undefined;
+    artifactPresent?: (args: { ticket: string; artifact: string | null | undefined; artifactDir: string | null | undefined; searchedPath: string | null | undefined }) => boolean | null | undefined;
     mode?: "off" | "shadow" | "enforce";
-    orchDir?: string;
-    repoRootFor?: (ticket: string) => string | null;
     log?: { info?: (...args: unknown[]) => void };
   },
 ): RespondTicketResult;

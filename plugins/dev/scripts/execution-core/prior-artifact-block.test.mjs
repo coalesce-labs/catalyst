@@ -42,6 +42,7 @@ describe("prior artifact block", () => {
     const input = { ticket: "CAT-55", artifact: "glob:thoughts/shared/plans", artifactDir: "thoughts/shared/plans", searchedPath: "/wt/thoughts/shared/plans", exists: () => false };
     expect(priorArtifactPresence({ ...input, list: () => ["2026-08-11-cat-551.md"] })).toBe(false);
     expect(priorArtifactPresence({ ...input, list: () => ["2026-08-11-CAT-55-plan.md"] })).toBe(true);
-    expect(priorArtifactPresence({ ...input, list: () => { throw new Error("unreadable"); } })).toBe(false);
+    expect(priorArtifactPresence({ ...input, list: () => { throw new Error("unreadable"); } })).toBe(null);
+    expect(priorArtifactPresence({ ...input, list: () => { const err = new Error("missing"); err.code = "ENOENT"; throw err; } })).toBe(false);
   });
 });

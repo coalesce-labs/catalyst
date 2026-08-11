@@ -552,8 +552,13 @@ export async function handleCommentWake(
       const marker = join(workerDir, `.artifact-blocked-reply-${phase}.applied`);
       if (!existsSync(marker)) {
         const where = sig.dispatchFailureSearchedPath ?? sig.dispatchFailureArtifactDir ?? "the prior-phase artifact directory";
-        const body = `${ticket}/${phase} is still blocked because the required document is missing from ${where}. ${PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE(where)}`;
-        try { if (postComment(ticket, body)) writeFileSync(marker, ""); } catch { /* stall remains held */ }
+        const body = `${ticket}/${phase} is still blocked because the required document is missing from ${where}. ${PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE(where)} Reply with “force prior artifact retry” to override this hold.`;
+        try {
+          if (postComment(ticket, body)) writeFileSync(marker, "");
+          else log.warn({ ticket, phase }, "comment-wake: artifact-block explanation post failed; stall remains held");
+        } catch (err) {
+          log.warn({ ticket, phase, err: err?.message }, "comment-wake: artifact-block explanation post threw; stall remains held");
+        }
       }
       return;
     }

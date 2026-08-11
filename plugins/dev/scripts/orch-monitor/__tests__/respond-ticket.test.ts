@@ -107,7 +107,6 @@ describe("respondTicket — CAT-55 prior-artifact refusal", () => {
       deps({
         findHeld: () => ({ phase: "plan", signal: blocked }),
         artifactPresent: () => false,
-        repoRootFor: () => "/repo",
         record: () => calls.record++,
         clearMarker: () => calls.clear++,
         emit: () => calls.emit++,
@@ -122,12 +121,12 @@ describe("respondTicket — CAT-55 prior-artifact refusal", () => {
     for (const artifactPresent of [() => null, () => undefined, () => { throw new Error("probe"); }]) {
       expect(respondTicket(
         { ticket: "CAT-55", response: "retry", confirm: "CAT-55" },
-        deps({ findHeld: () => ({ phase: "plan", signal: blocked }), artifactPresent, repoRootFor: () => "/repo" }),
+        deps({ findHeld: () => ({ phase: "plan", signal: blocked }), artifactPresent }),
       ).status).toBe("resuming");
     }
     expect(respondTicket(
       { ticket: "CAT-55", response: "retry", confirm: "CAT-55", force: true },
-      deps({ findHeld: () => ({ phase: "plan", signal: blocked }), artifactPresent: () => false, repoRootFor: () => "/repo" }),
+      deps({ findHeld: () => ({ phase: "plan", signal: blocked }), artifactPresent: () => false }),
     ).status).toBe("resuming");
   });
 
@@ -135,13 +134,13 @@ describe("respondTicket — CAT-55 prior-artifact refusal", () => {
     for (const mode of ["off", "shadow"] as const) {
       expect(respondTicket(
         { ticket: "CAT-55", response: "retry", confirm: "CAT-55" },
-        deps({ findHeld: () => ({ phase: "plan", signal: blocked }), artifactPresent: () => false, repoRootFor: () => "/repo", mode, log: { info: () => {} } }),
+        deps({ findHeld: () => ({ phase: "plan", signal: blocked }), artifactPresent: () => false, mode, log: { info: () => {} } }),
       ).status).toBe("resuming");
     }
   });
 
-  it("the production probe is indeterminate when the worktree cannot resolve", () => {
-    expect(defaultArtifactPresent({ ticket: "CAT-55", phase: "plan", orchDir: "/orch", repoRoot: "/definitely/missing" })).toBeNull();
+  it("the production probe reports an absent artifact directory", () => {
+    expect(defaultArtifactPresent({ ticket: "CAT-55", artifact: "glob:thoughts/shared/research", artifactDir: "thoughts/shared/research", searchedPath: "/definitely/missing" })).toBe(false);
   });
 });
 

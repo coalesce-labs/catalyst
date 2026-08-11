@@ -848,7 +848,7 @@ export function defaultCollectStallClearCandidates({
 
       // Artifact completeness: a complete artifact is necessarily present, so
       // presence defaults to completeness unless a dedicated presence probe is given.
-      const probeCtx = { ticket, phase: stalledPhase, orchDir, repoRoot: repoRootFor(ticket) };
+      const probeCtx = { ticket, phase: stalledPhase, orchDir, repoRoot: repoRootFor(ticket), worktreePath };
       const complete =
         (artifactComplete ?? defaultPriorArtifactComplete)(probeCtx) === true;
       const present = artifactPresent ? artifactPresent(probeCtx) === true : complete;

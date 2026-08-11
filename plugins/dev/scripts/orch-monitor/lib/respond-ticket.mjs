@@ -289,7 +289,6 @@ export function respondTicket(
     emit = emitResumeEvent,
     artifactPresent = defaultArtifactPresent,
     mode = resolvePriorArtifactRespondGateMode(),
-    orchDir = dirname(DEFAULT_WORKERS_DIR),
     log = console,
   } = {},
 ) {

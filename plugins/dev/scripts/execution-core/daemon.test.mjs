@@ -1626,7 +1626,6 @@ describe("handleCommentWake (CTL-549)", () => {
       forgetIntent: () => { forgotten++; },
       clearStall: () => cleared++,
       artifactPresent: () => false,
-      repoRootFor: () => "/repo",
       postComment: (_ticket, body) => { posts.push(body); return true; },
     };
     await handleCommentWake({ ticket: "CAT-55", authorId: "human", body: "retry" }, opts);
@@ -1636,6 +1635,32 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(forgotten).toBe(0);
     expect(posts).toHaveLength(1);
     expect(posts[0]).toContain("thoughts/shared/research");
+    expect(posts[0]).toContain("force prior artifact retry");
+  });
+
+  test("CAT-55: explicit force phrase overrides an absent artifact hold", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CAT-55", "plan", {
+      status: "stalled",
+      stalledReason: "prior-artifact-retry-exhausted",
+      dispatchFailureCode: 2,
+      dispatchFailureArtifactDir: "thoughts/shared/research",
+      dispatchFailureSearchedPath: "/wt/CAT-55/thoughts/shared/research",
+    });
+    let cleared = 0;
+    await handleCommentWake(
+      { ticket: "CAT-55", authorId: "human", body: "force prior artifact retry" },
+      {
+        orchDir: orch,
+        dispatch: () => {},
+        removeLabel: async () => {},
+        botUserId: new Set(["bot"]),
+        isManagedTicket: () => true,
+        clearStall: () => { cleared++; return true; },
+        artifactPresent: () => false,
+      },
+    );
+    expect(cleared).toBe(1);
   });
 
   test("CAT-55: clears when present or indeterminate, and ignores non-artifact stalls", async () => {
@@ -1647,7 +1672,7 @@ describe("handleCommentWake (CTL-549)", () => {
     ]) {
       writeSignal(orch, ticket, "plan", signal);
       let cleared = 0;
-      await handleCommentWake({ ticket, body: "retry" }, { orchDir: orch, dispatch: () => {}, removeLabel: async () => {}, clearStall: () => cleared++, artifactPresent: probe, repoRootFor: () => "/repo" });
+      await handleCommentWake({ ticket, body: "retry" }, { orchDir: orch, dispatch: () => {}, removeLabel: async () => {}, clearStall: () => cleared++, artifactPresent: probe });
       expect(cleared).toBe(1);
     }
   });

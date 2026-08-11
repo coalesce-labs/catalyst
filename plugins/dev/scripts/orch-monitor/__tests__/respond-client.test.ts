@@ -384,7 +384,7 @@ describe("CAT-55 artifact response mapping", () => {
     let body = "";
     const fetchImpl: typeof fetch = Object.assign(
       (_url: string | URL | Request, init?: RequestInit) => {
-        body = String(init?.body ?? "");
+        body = typeof init?.body === "string" ? init.body : "";
         return Promise.resolve(new Response(JSON.stringify({ status: "resuming", ticket: "CAT-55", phase: "verify" })));
       },
       { preconnect: fetch.preconnect },

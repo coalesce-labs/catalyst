@@ -44,7 +44,11 @@ export function priorArtifactPresence({ ticket, artifact, artifactDir, searchedP
   }
   if (!spec.startsWith("glob:")) return null;
   let names;
-  try { names = list(searchedPath); } catch { return false; }
+  try {
+    names = list(searchedPath);
+  } catch (err) {
+    return err?.code === "ENOENT" || err?.code === "ENOTDIR" ? false : null;
+  }
   if (!Array.isArray(names)) return null;
   const escaped = ticket.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const boundarySafe = new RegExp(`-${escaped}(?:\\.md|-.*\\.md)$`, "i");
