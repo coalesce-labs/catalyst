@@ -332,7 +332,7 @@ draft_pr_promote() {
 draft_pr_promote_verify() {
   command -v gh >/dev/null 2>&1 || { _draft_pr_warn "gh unavailable"; return 1; }
   local pr_json num repo draft_after
-  pr_json="$(gh pr view --json number,isDraft 2>/dev/null || true)"
+  pr_json="$(gh pr view --json number 2>/dev/null || true)"
   [[ -z "$pr_json" ]] && { _draft_pr_warn "no PR found for current branch"; return 1; }
   num="$(printf '%s' "$pr_json" | jq -r '.number // empty' 2>/dev/null || true)"
   [[ -z "$num" ]] && { _draft_pr_warn "no PR found for current branch"; return 1; }

@@ -1244,8 +1244,11 @@ export function isPrStuck(prStatus, prPhaseStartedAt, now) {
   return now - startedMs >= PR_STUCK_DEBOUNCE_MS;
 }
 
-export function prStuckReason(mergeStateStatus, prNumber) {
+export function prStuckReason(mergeStateStatus, prNumber, isDraft = false) {
   const n = prNumber ? `#${prNumber}` : "the PR";
+  if (isDraft) {
+    return `PR ${n} is still a draft and no worker is tracking it — promote it or close it`;
+  }
   switch (mergeStateStatus) {
     case "DIRTY":
       return `PR ${n} has a merge conflict the pipeline couldn't auto-resolve — decide which change wins`;
@@ -1380,7 +1383,7 @@ export function synthesizeOrphanTickets(orphanState, now) {
   return Object.values(orphanState)
     .filter((e) => e && e.notifiedAt)
     .map((e) => {
-      const reason = prStuckReason(e.mergeStateStatus, e.number);
+      const reason = prStuckReason(e.mergeStateStatus, e.number, e.isDraft === true);
       return {
         id: `orphan:${e.repo}#${e.number}`,
         title: e.title || `Orphan PR #${e.number}`,

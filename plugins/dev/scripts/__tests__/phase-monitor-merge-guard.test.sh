@@ -135,8 +135,12 @@ echo "CAT-15: draft self-heal keys off REST .draft and persists its attempt"
 if [[ -f "$SKILL" ]]; then
   assert_contains "$BODY" 'PR_IS_DRAFT' \
     "draft self-heal keys off the REST draft field"
-  assert_contains "$BODY" '.draft-promote-${PHASE}' \
-    "draft promotion attempt persists across agent-driven loop iterations"
+  assert_contains "$BODY" '.draft-promote-${PHASE}-${DRAFT_PROMOTE_RUN_ID}' \
+    "draft promotion attempt persists across loop iterations but is scoped to one phase run"
+  assert_contains "$BODY" 'PR_IS_DRAFT="$(gh api' \
+    "REST read concretely assigns PR_IS_DRAFT"
+  assert_contains "$BODY" '[[ "${PR_IS_DRAFT:-}" == "true" ]]' \
+    "draft comparison remains safe under nounset"
   assert_not_contains "$BODY" 'MERGEABLE_STATE" == "draft' \
     "draft self-heal does not expect mergeable_state=draft"
   assert_not_contains "$BODY" 'DRAFT_PROMOTE_ATTEMPTED' \

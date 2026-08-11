@@ -159,8 +159,11 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
 Before the `clean` merge handler, handle a draft exactly once per phase run:
 
 ```bash
-if [[ "$PR_IS_DRAFT" == "true" ]]; then
-  DRAFT_PROMOTE_MARKER="${ORCH_DIR}/workers/${TICKET}/.draft-promote-${PHASE}"
+PR_IS_DRAFT="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft' 2>/dev/null || true)"
+if [[ "${PR_IS_DRAFT:-}" == "true" ]]; then
+  DRAFT_PROMOTE_RUN_ID="$(jq -r '.bg_job_id // .bgJobId // empty' "$SIGNAL_FILE" 2>/dev/null || true)"
+  : "${DRAFT_PROMOTE_RUN_ID:=${CATALYST_SESSION_ID:-${CATALYST_GENERATION:-run}}}"
+  DRAFT_PROMOTE_MARKER="${ORCH_DIR}/workers/${TICKET}/.draft-promote-${PHASE}-${DRAFT_PROMOTE_RUN_ID}"
   if [[ -e "$DRAFT_PROMOTE_MARKER" ]]; then
     echo "phase-monitor-merge: PR #${PR_NUMBER} still draft after one promote attempt" >&2
     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \

@@ -63,7 +63,7 @@ async function defaultPrList(repo) {
 
 // defaultReadWorkerTrackedNumbers — scan worker phase signal files for PR numbers.
 // Returns a Set of PR numbers that the pipeline is already tracking.
-function defaultReadWorkerTrackedNumbers(orchDir) {
+export function defaultReadWorkerTrackedNumbers(orchDir) {
   const tracked = new Set();
   let ticketDirs;
   try {
@@ -73,10 +73,16 @@ function defaultReadWorkerTrackedNumbers(orchDir) {
   } catch { return tracked; }
 
   for (const ticket of ticketDirs) {
-    for (const fname of ["phase-pr.json", "phase-monitor-merge.json"]) {
+    const sources = [
+      ["phase-pr.json", (raw) => raw?.pr?.number],
+      ["phase-monitor-merge.json", (raw) => raw?.pr?.number],
+      ["phase-implement.json", (raw) => raw?.draftPr?.number],
+    ];
+    for (const [fname, pick] of sources) {
       try {
         const raw = JSON.parse(readFileSync(join(orchDir, "workers", ticket, fname), "utf8"));
-        if (raw?.pr?.number) tracked.add(raw.pr.number);
+        const number = pick(raw);
+        if (number) tracked.add(number);
       } catch { /* absent or unreadable */ }
     }
   }

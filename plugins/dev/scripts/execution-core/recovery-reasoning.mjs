@@ -564,6 +564,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
 
 // CTL-1496: the failureReason value emitted by phase-teardown's pr_not_merged gate.
 export const PR_NOT_MERGED_REASON = "pr_not_merged";
+export const DRAFT_PROMOTE_FAILED_REASON = "draft_promote_failed";
 
 // CTL-1680: phase-monitor-deploy's empty-mergeCommitSha false-done guard emits bespoke prose
 // reasons (not teardown's literal "pr_not_merged"). They all share this recognizable prefix.
@@ -643,6 +644,7 @@ export function resolvePrNumberForRecovery(evidence, { readFile = readFileSync }
 export function isPrMergeUnconfirmedReason(reason) {
   return (
     reason === PR_NOT_MERGED_REASON ||
+    reason === DRAFT_PROMOTE_FAILED_REASON ||
     (typeof reason === "string" && reason.startsWith(MONITOR_DEPLOY_EMPTY_SHA_PREFIX))
   );
 }

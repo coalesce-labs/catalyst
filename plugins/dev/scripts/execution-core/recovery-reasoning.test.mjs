@@ -30,6 +30,7 @@ import {
   readEscalationDeferrals, // CTL-1568
   classifyPrNotMerged,
   PR_NOT_MERGED_REASON,
+  DRAFT_PROMOTE_FAILED_REASON,
   MONITOR_DEPLOY_EMPTY_SHA_PREFIX,
   isPrMergeUnconfirmedReason,
   defaultClearIntentCooldown,
@@ -2965,6 +2966,10 @@ describe("CTL-1680: monitor-deploy empty-SHA routes to PR-state probe", () => {
   // isPrMergeUnconfirmedReason predicate unit tests
   test("isPrMergeUnconfirmedReason: true for pr_not_merged", () => {
     expect(isPrMergeUnconfirmedReason(PR_NOT_MERGED_REASON)).toBe(true);
+  });
+
+  test("isPrMergeUnconfirmedReason: true for draft promotion failures", () => {
+    expect(isPrMergeUnconfirmedReason(DRAFT_PROMOTE_FAILED_REASON)).toBe(true);
   });
 
   test("isPrMergeUnconfirmedReason: true for empty-SHA prefixed reasons", () => {

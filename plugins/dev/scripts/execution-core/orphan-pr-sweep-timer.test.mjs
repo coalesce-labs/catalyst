@@ -1,5 +1,8 @@
 import { test, expect } from "bun:test";
-import { runOrphanSweep } from "./orphan-pr-sweep-timer.mjs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { defaultReadWorkerTrackedNumbers, runOrphanSweep } from "./orphan-pr-sweep-timer.mjs";
 
 const repo = "org/repo";
 const mkPr = (n, o = {}) => ({ number: n, url: `https://github.com/${repo}/pull/${n}`,
@@ -11,6 +14,21 @@ test("PR tracked by a worker is filtered out (not an orphan)", async () => {
     repo, nowMs: 1000, cfg: { stableSeconds: 300 },
     prList: async () => [mkPr(2061)],
     readWorkerTrackedNumbers: () => new Set([2061]),
+    readState: () => ({}), persist: (s) => Object.assign(persisted, s), emit: () => {},
+  });
+  expect(Object.keys(persisted)).toHaveLength(0);
+});
+
+test("draft PR tracked by phase-implement is filtered out", async () => {
+  const orchDir = mkdtempSync(join(tmpdir(), "orphan-pr-sweep-"));
+  const workerDir = join(orchDir, "workers", "CAT-15");
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(join(workerDir, "phase-implement.json"), JSON.stringify({ draftPr: { number: 2061 } }));
+  const persisted = {};
+  await runOrphanSweep({
+    orchDir, repo, nowMs: 1000, cfg: { stableSeconds: 300 },
+    prList: async () => [mkPr(2061, { isDraft: true, mergeStateStatus: "CLEAN" })],
+    readWorkerTrackedNumbers: () => defaultReadWorkerTrackedNumbers(orchDir),
     readState: () => ({}), persist: (s) => Object.assign(persisted, s), emit: () => {},
   });
   expect(Object.keys(persisted)).toHaveLength(0);

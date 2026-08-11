@@ -47,6 +47,12 @@ describe("synthesizeOrphanTickets", () => {
     expect(cards[0].prStuckReason).toBeTruthy();
   });
 
+  it("draft orphan always has an actionable reason regardless of merge state", () => {
+    const cards = synthesizeOrphanTickets(notified({ isDraft: true, mergeStateStatus: "CLEAN" }), 600_000);
+    expect(cards[0].humanQuestion).toContain("still a draft");
+    expect(cards[0].prStuckReason).toContain("promote it or close it");
+  });
+
   it("does NOT emit a card for an entry that has firstSeenAt but no notifiedAt (still in window)", () => {
     const state = notified();
     delete (state["org/repo#2061"] as Record<string, unknown>).notifiedAt;
