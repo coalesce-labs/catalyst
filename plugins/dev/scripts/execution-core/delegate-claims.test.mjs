@@ -112,6 +112,32 @@ describe("readDelegateClaims — FAIL-CLOSED on every unusable marker", () => {
     expect([...readDelegateClaims(orchDir).keys()]).toEqual(["CTL-OK"]);
   });
 
+  test("PARTIAL / truncated marker files (interrupted write, full disk, kill -9) are dropped", () => {
+    // writeFileSync is not atomic, so a crash mid-write can leave a prefix of the
+    // JSON on disk. Every truncation point must read as "no evidence" rather than
+    // throwing or, worse, parsing into something that grants grace.
+    const full = JSON.stringify({ ticket: "CTL-T", claimedAt: 1699999999999 });
+    for (let cut = 1; cut < full.length; cut++) {
+      rmSync(claimsDir(), { recursive: true, force: true });
+      writeRaw("CTL-T", full.slice(0, cut));
+      const claims = readDelegateClaims(orchDir);
+      // A truncated prefix must never yield a usable claim. (The only way it could
+      // is if a prefix happened to be valid JSON with a numeric claimedAt — assert
+      // that never happens rather than assuming it.)
+      expect(`cut@${cut}: ${claims.has("CTL-T")}`).toBe(`cut@${cut}: false`);
+    }
+    // ...and the untruncated original is still accepted, so the loop above is
+    // proving truncation-rejection rather than a reader that rejects everything.
+    rmSync(claimsDir(), { recursive: true, force: true });
+    writeRaw("CTL-T", full);
+    expect(readDelegateClaims(orchDir).get("CTL-T")).toBe(1699999999999);
+  });
+
+  test("a zero-byte marker (file created, write never landed) is dropped", () => {
+    writeRaw("CTL-EMPTYFILE", "");
+    expect(readDelegateClaims(orchDir).has("CTL-EMPTYFILE")).toBe(false);
+  });
+
   test("a FUTURE-dated marker is returned as-is — the age check, not the reader, rejects it", () => {
     // Deliberate: the reader must not silently drop clock-skewed evidence, or the
     // invariant could not distinguish "skew" from "no evidence" in its census.
