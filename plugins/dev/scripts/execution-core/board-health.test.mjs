@@ -149,6 +149,8 @@ function mkBoard(o = {}) {
     githubQuotaMode: o.githubQuotaMode ?? "shadow",
     peerProductivity: o.peerProductivity ?? null,
     productivityMode: o.productivityMode ?? "shadow",
+    triageProductionMode: o.triageProductionMode ?? "shadow",
+    untriagedEligible: o.untriagedEligible ?? new Set(),
     ring: {
       recentDispatchTs: null,
       cacheReconcile: null,
@@ -1432,7 +1434,7 @@ describe("buildBoardContext", () => {
     const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-OLD"]) };
     const ctx = buildBoardContext(board, invs);
 
-    expect(ctx.schema).toBe("recovery-board-context/v4");
+    expect(ctx.schema).toBe("recovery-board-context/v5");
     expect(ctx.slots).toEqual({ capacity: 4, inUse: 2, free: 2 });
     expect(ctx.eligibleQueue.depth).toBe(2);
     expect(ctx.eligibleQueue.topTickets).toEqual(["CTL-1", "CTL-2"]);
@@ -1662,7 +1664,7 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     // falls back to the top eligible ticket.
     expect(acted[0].anchor).toBe("CTL-1");
     // the delegate gets the WHOLE-board context, not a per-item brief.
-    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v4");
+    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v5");
     expect(acted[0].decision.gate.decision).toBe("proceed");
     // the act result is threaded back into the pass result (observability).
     expect(r.act).toEqual({ dispatched: true, attempts: 1 });
@@ -3620,7 +3622,7 @@ describe("CAT-57 host-scoped board health", () => {
     const b = mkOwnedBoard({ eligible: [{ id: "A" }, { id: "B" }], owner: (id) => id === "A" ? "mini" : "peer" });
     const invs = evaluateInvariants(b);
     const ctx = buildBoardContext(b, invs);
-    expect(ctx.schema).toBe("recovery-board-context/v4");
+    expect(ctx.schema).toBe("recovery-board-context/v5");
     expect(ctx.eligibleQueue).toMatchObject({ depth: 2, topTickets: ["A", "B"], ownedDepth: 1, ownedTopTickets: ["A"] });
     const event = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, b), board: b });
     expect(event.details.eligibleOwnedDepth).toBe(1);
@@ -3727,5 +3729,70 @@ describe("CAT-57 nodeProductivity invariant", () => {
     let called = 0;
     expect(() => assembleBoardState({ mode: "off", productivityMode: "enforce", getPeerProductivity: () => { called += 1; throw new Error("must not run"); } })).not.toThrow();
     expect(called).toBe(0);
+  });
+});
+
+describe("CAT-82 triage evidence and production", () => {
+  const eligible = Array.from({ length: 12 }, (_, i) => ({ id: `CAT-${i + 1}` }));
+  const triageBoard = (o = {}) => mkBoard({
+    eligible,
+    untriagedEligible: new Set(eligible.map((e) => e.id)),
+    triageProductionMode: "enforce",
+    ring: { recentTriageCompleteTs: NOW - HOUR, triageSweepHeld: new Set(), ...(o.ring ?? {}) },
+    ...o,
+  });
+
+  test("deriveRing records host-scoped completions, clamps future time, and applies held edges", () => {
+    const board = assembleBoardState({
+      mode: "shadow", self: "mini", now: () => NOW,
+      readEventRing: () => [
+        { ts: new Date(NOW - HOUR).toISOString(), attributes: { "event.name": "phase.triage.complete.CAT-1" }, resource: { "host.name": "peer" } },
+        { ts: new Date(NOW + HOUR).toISOString(), attributes: { "event.name": "phase.triage.complete.CAT-2" }, resource: { "host.name": "mini" } },
+        { ts: new Date(NOW - 3).toISOString(), attributes: { "event.name": "monitor.triage.held.CAT" } },
+        { ts: new Date(NOW - 2).toISOString(), attributes: { "event.name": "monitor.triage.recovered.CAT" } },
+        { ts: new Date(NOW - 1).toISOString(), attributes: { "event.name": "monitor.triage.held.DOG" } },
+      ],
+    });
+    expect(board.ring.recentTriageCompleteTs).toBe(NOW);
+    expect([...board.ring.triageSweepHeld]).toEqual(["DOG"]);
+    expect(board.ring.recentDispatchTs).toBeNull();
+  });
+
+  test("artifact seam builds untriaged set, defaults empty, fails open, and stays dark off", () => {
+    expect([...assembleBoardState({ mode: "shadow", getEligible: () => [{ id: "CAT-1" }], hasTriageArtifact: () => false }).untriagedEligible]).toEqual(["CAT-1"]);
+    expect(assembleBoardState({ mode: "shadow", getEligible: () => [{ id: "CAT-1" }] }).untriagedEligible.size).toBe(0);
+    expect(assembleBoardState({ mode: "shadow", getEligible: () => [{ id: "CAT-1" }], hasTriageArtifact: () => { throw new Error("fs"); } }).untriagedEligible.size).toBe(0);
+    let called = 0;
+    assembleBoardState({ mode: "off", getEligible: () => [{ id: "CAT-1" }], hasTriageArtifact: () => { called++; return false; } });
+    expect(called).toBe(0);
+  });
+
+  test("enforce detects stale production and caps flagged ids", () => {
+    expect(evaluateInvariants(triageBoard()).triageProduction).toMatchObject({ ok: false, observable: true, failed: 1, flagged: eligible.slice(0, 5).map((e) => e.id) });
+  });
+
+  test("capacity, queue, freshness, HRW, and bounded-tail corroboration gates", () => {
+    expect(evaluateInvariants(triageBoard({ capacity: { freeSlots: 0 } })).triageProduction.ok).toBe(true);
+    expect(evaluateInvariants(triageBoard({ untriagedEligible: new Set() })).triageProduction.ok).toBe(true);
+    expect(evaluateInvariants(triageBoard({ ring: { recentTriageCompleteTs: NOW - MIN } })).triageProduction.ok).toBe(true);
+    expect(evaluateInvariants(triageBoard({ multiHost: true, ownerForTicket: () => "peer", dispatchRoster: ["mini", "peer"] })).triageProduction.ok).toBe(true);
+    expect(evaluateInvariants(triageBoard({ ring: { recentTriageCompleteTs: null, triageSweepHeld: new Set() } })).triageProduction.observable).toBe(false);
+    expect(evaluateInvariants(triageBoard({ ring: { recentTriageCompleteTs: null, triageSweepHeld: new Set(["CAT"]) } })).triageProduction.ok).toBe(false);
+  });
+
+  test("sub-mode ladder reports shadow and enforce is tier3-only with telemetry", () => {
+    expect(evaluateInvariants(triageBoard({ triageProductionMode: "off" })).triageProduction.observable).toBe(false);
+    const shadowBoard = triageBoard({ triageProductionMode: "shadow" });
+    const shadow = evaluateInvariants(shadowBoard).triageProduction;
+    expect(shadow).toMatchObject({ ok: true, observable: false, flagged: eligible.slice(0, 5).map((e) => e.id) });
+    const b = triageBoard();
+    const invs = evaluateInvariants(b);
+    const moves = proposeMoves({ triageProduction: invs.triageProduction }, b);
+    expect(moves.tier1).toEqual([]); expect(moves.tier2).toEqual([]);
+    expect(moves.tier3).toEqual([expect.objectContaining({ move: "escalate-triage-production" })]);
+    expect(decideBoardHealth({ triageProduction: invs.triageProduction }, b).gate).toMatchObject({ decision: "skip", reason: "no-actionable-moves" });
+    expect(buildBoardContext(b, invs).triageProduction.untriaged).toHaveLength(5);
+    const ev = buildBoardScanEvent({ mode: "enforce", invariants: invs, decision: decideBoardHealth(invs, b), board: b });
+    expect(ev.details).toMatchObject({ triageUntriagedEligible: 12, triageLastCompleteAgeMs: HOUR });
   });
 });
