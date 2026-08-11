@@ -25,11 +25,7 @@ import { fenceGuard } from "./fence-guard.mjs";
 import {
   appendFenceStandoffEvent,
   clearFenceStandoff,
-  evaluateStandoff,
-  markBreakGlass,
-  recordFenceSuppression,
-  resolveStandoffCap,
-  resolveStandoffMinAgeMs,
+  maybeBreakGlass,
 } from "./fence-standoff.mjs";
 import { recordDurableEscalation } from "./durable-escalation.mjs";
 import { appendFileSync } from "node:fs";
@@ -391,58 +387,18 @@ export function defaultEscalate(
         { ticket, reason: fenceVerdict?.reason ?? null },
         "ctl-863: stale fence — suppressing stale-pr-rescue labelOnce write (zombie guard)"
       );
-      try {
-        const nowMs = now();
-        const rec = recordFenceSuppression({
-          orchDir,
-          ticket,
-          site: "stale-pr-rescue",
-          reason: fenceVerdict?.reason ?? "unknown",
-          now: nowMs,
-        });
-        const verdict = evaluateStandoff(rec, {
-          now: nowMs,
-          cap: resolveStandoffCap(env),
-          minAgeMs: resolveStandoffMinAgeMs(env),
-        });
-        if (verdict.firstBreakGlass) {
-          const durableResult = recordDurableEscalationFn({
-            orchDir,
-            ticket,
-            phase: "pr",
-            reason:
-              `fence-standoff (${rec.reason}): stale PR #${detail?.prNumber ?? "?"} for ${ticket} ` +
-              "needs human attention, but the fence suppressed the Linear label write.",
-            labelConfirmed: false,
-            source: "fence-standoff",
-            now: new Date(nowMs).toISOString(),
-          });
-          const durableWritten = durableResult === true || (
-            durableResult !== false && existsSync(join(orchDir, ".escalations", `${ticket}.json`))
-          );
-          const eventWritten = durableWritten && appendStandoffEvent({
-            ticket,
-            site: "stale-pr-rescue",
-            reason: rec.reason,
-            count: rec.count,
-            ageMs: verdict.ageMs,
-          }) === true;
-          if (durableWritten && eventWritten) {
-            markBreakGlass({ orchDir, ticket, now: nowMs });
-            log.warn(
-              { ticket, prNumber: detail?.prNumber, reason: rec.reason, count: rec.count, ageMs: verdict.ageMs },
-              "cat-173: FENCE STANDOFF — wrote a durable stale-PR escalation without a Linear label",
-            );
-          } else {
-            log.warn(
-              { ticket, durableWritten, eventWritten },
-              "cat-173: fence-standoff surfacing incomplete — leaving break-glass unlatched for retry",
-            );
-          }
-        }
-      } catch (err) {
-        log.warn({ ticket, err: err?.message }, "cat-173: stale-pr-rescue standoff bookkeeping failed — continuing");
-      }
+      maybeBreakGlass({
+        orchDir,
+        ticket,
+        site: "stale-pr-rescue",
+        verdict: fenceVerdict,
+        phase: "pr",
+        now: now(),
+        env,
+        appendEvent: appendStandoffEvent,
+        recordEscalation: recordDurableEscalationFn,
+        detail: `stale PR #${detail?.prNumber ?? "?"}`,
+      });
     }
   } else {
     log.warn(

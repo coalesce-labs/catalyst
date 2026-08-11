@@ -203,11 +203,20 @@ export function maybeBreakGlass({
           "Check cluster-generation.json divergence across hosts.",
         labelConfirmed: false,
         source: "fence-standoff",
-        now,
+        now: new Date(now).toISOString(),
       });
-      const durableConfirmed = durableResult?.confirmed === true || existsSync(
-        join(orchDir, ".escalations", `${ticket}.json`),
-      );
+      let persistedDurable = null;
+      try {
+        persistedDurable = JSON.parse(readFileSync(
+          join(orchDir, ".escalations", `${ticket}.json`),
+          "utf8",
+        ));
+      } catch {
+        persistedDurable = null;
+      }
+      const durableConfirmed = durableResult?.source === "fence-standoff"
+        && persistedDurable?.source === "fence-standoff"
+        && persistedDurable?.lastTs === new Date(now).toISOString();
       const eventConfirmed = durableConfirmed && appendEvent({
         ticket,
         site,
