@@ -11,6 +11,7 @@ import {
   getClusterHosts,
   getHostName,
   getLivenessAnchorIssue,
+  getLivenessReadSource,
   getCatalystRepoDirHostsPath,
   getClusterRepoDir,
   getLayer2ConfigPath,
@@ -107,7 +108,14 @@ function commitAndPushCluster(git, clusterDir, message, { push = true } = {}) {
 
 // ── buildStatus — pure merge of roster ⊕ live heartbeats ⊕ drain ──────────
 
-export function buildStatus({ roster, self, peers, draining }) {
+export function buildStatus({
+  roster,
+  self,
+  peers,
+  draining,
+  anchor = null,
+  readSource = "linear",
+}) {
   const hosts = roster.map((name) => {
     const rec = peers[name];
     return {
@@ -118,10 +126,10 @@ export function buildStatus({ roster, self, peers, draining }) {
       inFlight: Array.isArray(rec?.in_flight_tickets) ? rec.in_flight_tickets : [],
     };
   });
-  return { roster, self, draining, hosts };
+  return { roster, self, draining, hosts, anchor, readSource };
 }
 
-function renderStatus(s) {
+export function renderStatus(s) {
   const lines = [`Cluster roster (${s.hosts.length} host${s.hosts.length === 1 ? "" : "s"}):`];
   for (const h of s.hosts) {
     const tags = [];
@@ -131,17 +139,34 @@ function renderStatus(s) {
     const inFlight = h.inFlight.length > 0 ? ` [${h.inFlight.join(", ")}]` : "";
     lines.push(`  ${h.name}${tags.length ? " (" + tags.join(", ") + ")" : ""}${inFlight}`);
   }
-  if (!s.hosts.some((h) => h.live)) lines.push("  (no live heartbeats — liveness anchor may be unset)");
+  if (!s.hosts.some((h) => h.live)) {
+    if (s.readSource && s.readSource !== "linear") {
+      lines.push(`  (liveness read source is '${s.readSource}' — anchor attachments are not consulted)`);
+    } else if (!s.anchor) {
+      lines.push(
+        `  (no liveness anchor configured — set catalyst.cluster.livenessAnchorIssue, ` +
+          `e.g. 'catalyst-cluster set-anchor <ticket>')`,
+      );
+    } else {
+      lines.push(
+        `  (no live heartbeats on anchor '${s.anchor}' — every host is stale, or the ` +
+          `anchor is broken; run 'catalyst doctor' and read the liveness-anchor check)`,
+      );
+    }
+  }
   return lines.join("\n") + "\n";
 }
 
 export function runStatus(argv = []) {
   const anchor = getLivenessAnchorIssue();
+  const readSource = getLivenessReadSource();
   const status = buildStatus({
     roster: getClusterHosts(),
     self: getHostName(),
     peers: anchor ? readPeerHeartbeatsSync({ anchorIssue: anchor }) : {},
     draining: isDraining(getExecutionCoreDir()),
+    anchor,
+    readSource,
   });
   if (argv.includes("--json")) {
     process.stdout.write(JSON.stringify(status) + "\n");
