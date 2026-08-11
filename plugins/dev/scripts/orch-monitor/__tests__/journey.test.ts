@@ -100,9 +100,11 @@ describe("event log path resolution", () => {
   });
 
   it("the test preload pins CATALYST_DIR away from the host catalyst dir", () => {
-    expect(process.env.CATALYST_DIR).toBeDefined();
-    expect(isAbsolute(process.env.CATALYST_DIR!)).toBe(true);
-    expect(process.env.CATALYST_DIR).not.toBe(join(homedir(), "catalyst"));
+    const catalystDir = process.env.CATALYST_DIR;
+    expect(catalystDir).toBeDefined();
+    if (catalystDir === undefined) throw new Error("test preload did not set CATALYST_DIR");
+    expect(isAbsolute(catalystDir)).toBe(true);
+    expect(catalystDir).not.toBe(join(homedir(), "catalyst"));
   });
 
   it("scanHops degrades to empty for a missing injected event log", () => {
