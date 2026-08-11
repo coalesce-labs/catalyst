@@ -565,6 +565,9 @@ export function reasoningRecoveryPass(items, opts = {}) {
 // CTL-1496: the failureReason value emitted by phase-teardown's pr_not_merged gate.
 export const PR_NOT_MERGED_REASON = "pr_not_merged";
 export const DRAFT_PROMOTE_FAILED_REASON = "draft_promote_failed";
+// CAT-15: phase-monitor-merge's draft handler emits its own reason (two sites) when a
+// PR is still draft after one promote attempt. Distinct string, same recovery route.
+export const PR_STUCK_IN_DRAFT_REASON = "pr_stuck_in_draft";
 
 // CTL-1680: phase-monitor-deploy's empty-mergeCommitSha false-done guard emits bespoke prose
 // reasons (not teardown's literal "pr_not_merged"). They all share this recognizable prefix.
@@ -645,6 +648,7 @@ export function isPrMergeUnconfirmedReason(reason) {
   return (
     reason === PR_NOT_MERGED_REASON ||
     reason === DRAFT_PROMOTE_FAILED_REASON ||
+    reason === PR_STUCK_IN_DRAFT_REASON ||
     (typeof reason === "string" && reason.startsWith(MONITOR_DEPLOY_EMPTY_SHA_PREFIX))
   );
 }

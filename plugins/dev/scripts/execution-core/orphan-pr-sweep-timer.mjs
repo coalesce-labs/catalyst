@@ -13,6 +13,8 @@ import {
   renameSync,
   readdirSync,
   mkdirSync,
+  statSync,
+  existsSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
@@ -88,6 +90,25 @@ export function defaultReadWorkerTrackedNumbers(orchDir) {
     }
   }
   return tracked;
+}
+
+// defaultDraftExpected — a draft PR is EXPECTED (not an orphan) while the pipeline is
+// still pre-`pr` for its ticket. `.draftPr` is written only by phase-implement's End-block
+// backstop, but implement-plan opens the draft at the FIRST plan-phase commit, so for the
+// whole implement phase — far longer than stableSeconds — no signal file names the number
+// and the number-based tracked set cannot see it. Fall back to the ticket: a worker dir
+// that has not yet produced phase-pr.json is actively working a legitimately-draft PR.
+// Once phase-pr has run (or the worker dir is gone), a still-draft PR IS the stuck case.
+export function defaultDraftExpected(orchDir, headRefName) {
+  const ticket = draftTicket(headRefName);
+  if (!ticket || !orchDir) return false;
+  try {
+    // Worker dir present + no phase-pr.json → pre-PR pipeline, draft is expected.
+    return (
+      statSync(join(orchDir, "workers", ticket)).isDirectory() &&
+      !existsSync(join(orchDir, "workers", ticket, "phase-pr.json"))
+    );
+  } catch { return false; } // no worker dir → nothing is tracking it → orphan candidate
 }
 
 // draftTicket — recover the Linear identifier from the PR branch name so draft
@@ -172,7 +193,7 @@ function defaultEmit(name, payload) {
  * All seams are injected; this function has no I/O of its own.
  * Exported for unit tests.
  */
-export async function runOrphanSweep({ repo, nowMs, cfg, prList, readWorkerTrackedNumbers, ownsDraft = () => true, readState, persist, emit }) {
+export async function runOrphanSweep({ repo, nowMs, cfg, prList, readWorkerTrackedNumbers, ownsDraft = () => true, draftExpected = () => false, readState, persist, emit }) {
   if (!repo) return; // fail-open: no slug → no-op
 
   const prs = await prList(repo); // may throw → per-tick catch in the timer
@@ -187,6 +208,9 @@ export async function runOrphanSweep({ repo, nowMs, cfg, prList, readWorkerTrack
     // their HRW owner may classify one as orphaned; otherwise every peer lacks
     // the owner's local worker signal and emits a duplicate false escalation.
     if (pr.isDraft && !ownsDraft(pr)) continue;
+    // A draft opened by implement-plan's early fence is not yet named by any signal
+    // file, so the number-based tracked set above cannot see it. Resolve by ticket.
+    if (pr.isDraft && draftExpected(pr)) continue;
     const key = `${repo}#${pr.number}`;
     const entry = prior[key] ?? null;
     const decision = decideOrphanNotify({
@@ -241,6 +265,7 @@ export function startOrphanPrSweepTimer({
     const ticket = draftTicket(pr.headRefName);
     return ticket !== null && ownedBy(ticket, getClusterHosts(), getHostName());
   },
+  draftExpected = (pr) => defaultDraftExpected(orchDir, pr.headRefName),
   clock = realClock(),
 } = {}) {
   if (!enabled || !orchDir) return { stop: () => {} };
@@ -260,6 +285,7 @@ export function startOrphanPrSweepTimer({
         prList,
         readWorkerTrackedNumbers: () => readWorkerTrackedNumbersFn(orchDir),
         ownsDraft,
+        draftExpected,
         readState: () => readStateFn(orchDir),
         persist: (s) => persistFn(orchDir, s),
         emit,

@@ -31,6 +31,7 @@ import {
   classifyPrNotMerged,
   PR_NOT_MERGED_REASON,
   DRAFT_PROMOTE_FAILED_REASON,
+  PR_STUCK_IN_DRAFT_REASON,
   MONITOR_DEPLOY_EMPTY_SHA_PREFIX,
   isPrMergeUnconfirmedReason,
   defaultClearIntentCooldown,
@@ -2970,6 +2971,11 @@ describe("CTL-1680: monitor-deploy empty-SHA routes to PR-state probe", () => {
 
   test("isPrMergeUnconfirmedReason: true for draft promotion failures", () => {
     expect(isPrMergeUnconfirmedReason(DRAFT_PROMOTE_FAILED_REASON)).toBe(true);
+  });
+
+  test("isPrMergeUnconfirmedReason: true for phase-monitor-merge's pr_stuck_in_draft", () => {
+    expect(PR_STUCK_IN_DRAFT_REASON).toBe("pr_stuck_in_draft");
+    expect(isPrMergeUnconfirmedReason(PR_STUCK_IN_DRAFT_REASON)).toBe(true);
   });
 
   test("isPrMergeUnconfirmedReason: true for empty-SHA prefixed reasons", () => {

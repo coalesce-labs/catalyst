@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { defaultReadWorkerTrackedNumbers, runOrphanSweep } from "./orphan-pr-sweep-timer.mjs";
+import { defaultDraftExpected, defaultReadWorkerTrackedNumbers, runOrphanSweep } from "./orphan-pr-sweep-timer.mjs";
 
 const repo = "org/repo";
 const mkPr = (n, o = {}) => ({ number: n, url: `https://github.com/${repo}/pull/${n}`,
@@ -32,6 +32,43 @@ test("draft PR tracked by phase-implement is filtered out", async () => {
     readState: () => ({}), persist: (s) => Object.assign(persisted, s), emit: () => {},
   });
   expect(Object.keys(persisted)).toHaveLength(0);
+});
+
+// CAT-15 review: implement-plan opens the draft at the first plan-phase commit, but
+// .draftPr is only written by phase-implement's End block — so a draft is untracked by
+// number for the whole implement phase and would false-notify past the stable window.
+test("draft PR of a pre-PR worker dir is expected, not an orphan", async () => {
+  const orchDir = mkdtempSync(join(tmpdir(), "orphan-pr-sweep-"));
+  mkdirSync(join(orchDir, "workers", "CAT-15"), { recursive: true });
+  writeFileSync(join(orchDir, "workers", "CAT-15", "phase-implement.json"), JSON.stringify({}));
+  expect(defaultDraftExpected(orchDir, "ryan/cat-15-promote-drafts")).toBe(true);
+
+  const persisted = {}; const events = [];
+  await runOrphanSweep({
+    repo, nowMs: 300_000, cfg: { stableSeconds: 300 },
+    prList: async () => [mkPr(2061, {
+      headRefName: "ryan/cat-15-promote-drafts", isDraft: true, mergeStateStatus: "CLEAN",
+    })],
+    readWorkerTrackedNumbers: () => new Set(),
+    draftExpected: (pr) => defaultDraftExpected(orchDir, pr.headRefName),
+    readState: () => ({ [`${repo}#2061`]: {
+      repo, number: 2061, firstSeenAt: new Date(0).toISOString(),
+    } }),
+    persist: (s) => Object.assign(persisted, s),
+    emit: (n, p) => events.push({ n, p }),
+  });
+  expect(Object.keys(persisted)).toHaveLength(0);
+  expect(events).toHaveLength(0);
+});
+
+test("draft PR is NOT expected once phase-pr has run, or with no worker dir", () => {
+  const orchDir = mkdtempSync(join(tmpdir(), "orphan-pr-sweep-"));
+  const workerDir = join(orchDir, "workers", "CAT-15");
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(join(workerDir, "phase-pr.json"), JSON.stringify({ pr: {} }));
+  expect(defaultDraftExpected(orchDir, "ryan/cat-15-promote-drafts")).toBe(false);
+  expect(defaultDraftExpected(orchDir, "ryan/cat-99-never-dispatched")).toBe(false);
+  expect(defaultDraftExpected(orchDir, "hand-opened-branch")).toBe(false);
 });
 
 test("draft PR owned by a peer is filtered out when no local worker tracks it", async () => {
