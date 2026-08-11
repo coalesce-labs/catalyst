@@ -56,13 +56,26 @@ run_stack() {
 make_stubs() {
   local dir="$1"
   mkdir -p "$dir"
-  for svc in catalyst-broker catalyst-monitor; do
-    cat > "$dir/$svc" <<'EOF'
+  cat > "$dir/catalyst-broker" <<'EOF'
 #!/usr/bin/env bash
 echo "running"; exit 0
 EOF
-    chmod +x "$dir/$svc"
-  done
+  chmod +x "$dir/catalyst-broker"
+  # CAT-53: subcommand-aware so _vn_monitor_running's real grep pattern
+  # ('monitor running', case-insensitive against a "status" call) sees the
+  # same shape of text catalyst-monitor.sh actually emits ("Monitor running
+  # (pid N) at http://..."), not the old blanket "running" every subcommand
+  # returned — that would have made "status" mismatch _vn_monitor_running's
+  # pattern even for this healthy stub, tripping the new stack-degraded gate
+  # on every existing test that calls `start`.
+  cat > "$dir/catalyst-monitor" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status) echo "Monitor running (pid 12345) at http://localhost:7400"; exit 0 ;;
+  *) echo "running"; exit 0 ;;
+esac
+EOF
+  chmod +x "$dir/catalyst-monitor"
   cat > "$dir/catalyst-execution-core" <<'EOF'
 #!/usr/bin/env bash
 echo "running"; exit 0
@@ -149,6 +162,41 @@ run "unknown arg fails with exit 1" bash -c "
 
 run "status lists execution-core" bash -c "
   PATH='${STUBDIR}:${REAL_PATH}' '${STACK}' status 2>&1 | grep -q execution-core
+"
+
+run "default start reports stack up (healthy monitor)" bash -c "
+  PATH='${STUBDIR}:${REAL_PATH}' '${STACK}' start 2>&1 | grep -q 'stack up'
+"
+
+# ── CAT-53: monitor start failure must raise a real alarm, never a swallowed
+# stderr line under a false "stack up" banner ──────────────────────────────
+STUBDIR_MONITOR_DOWN="${SCRATCH}/stubs_monitor_down"
+make_stubs "$STUBDIR_MONITOR_DOWN"
+cat > "$STUBDIR_MONITOR_DOWN/catalyst-monitor" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  start) echo "error: failed to start monitor server" >&2; exit 1 ;;
+  status) echo "Monitor stopped"; exit 1 ;;
+  *) echo "running"; exit 0 ;;
+esac
+EOF
+chmod +x "$STUBDIR_MONITOR_DOWN/catalyst-monitor"
+
+run "start with a failing monitor does NOT report stack up" bash -c "
+  out=\$(PATH='${STUBDIR_MONITOR_DOWN}:${REAL_PATH}' '${STACK}' start 2>&1)
+  ! echo \"\$out\" | grep -q 'stack up'
+"
+
+run "start with a failing monitor reports stack degraded" bash -c "
+  PATH='${STUBDIR_MONITOR_DOWN}:${REAL_PATH}' '${STACK}' start 2>&1 | grep -q 'stack degraded'
+"
+
+run "start with a failing monitor surfaces a WARN alarm (not a swallowed stderr line)" bash -c "
+  PATH='${STUBDIR_MONITOR_DOWN}:${REAL_PATH}' '${STACK}' start 2>&1 | grep -q 'WARN.*monitor'
+"
+
+run "start with a failing monitor still starts broker (non-fatal to the rest of the stack)" bash -c "
+  PATH='${STUBDIR_MONITOR_DOWN}:${REAL_PATH}' '${STACK}' start >/dev/null 2>&1
 "
 
 # CTL-1494: status must inventory the coordination-publish daemon. With no

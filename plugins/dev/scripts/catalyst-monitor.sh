@@ -223,6 +223,60 @@ is_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# _monitor_port_holder_pid — CAT-53. PID of the process currently LISTENing on
+# $PORT, or empty if nothing is, lsof is unavailable, or the probe times out.
+# Bounded the same way orphan-sweep.sh's _proc_cwd probes lsof (CTL-1531):
+# lsof can block in the kernel on a hung mount, so a runaway probe must never
+# hang cmd_start itself.
+_monitor_port_holder_pid() {
+  command -v lsof >/dev/null 2>&1 || return 0
+  local tmp lpid wpid limit=5
+  tmp="$(mktemp -t catalyst-monitor-port.XXXXXX 2>/dev/null || echo "/tmp/catalyst-monitor-port.$$")"
+  lsof -ti ":${PORT}" -sTCP:LISTEN > "$tmp" 2>/dev/null &
+  lpid=$!
+  ( sleep "$limit"; kill -9 "$lpid" 2>/dev/null ) >/dev/null 2>&1 &
+  wpid=$!
+  wait "$lpid" 2>/dev/null
+  kill -9 "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+  head -1 "$tmp" 2>/dev/null
+  rm -f "$tmp"
+}
+
+# _monitor_check_port_holder — CAT-53. We only reach here when read_pid has
+# already failed (no tracked-alive PID), so anything on $PORT belongs to
+# either an orphan from an earlier stack generation or some other process
+# entirely. Returns 0 when it is safe to proceed with a start (nothing on the
+# port, or an orphan was just reaped off it); returns 1 when it is NOT (a
+# live, non-orphan process holds it) — the caller must refuse to start.
+#
+# This does NOT rely on the spawned server failing naturally on an occupied
+# port (EADDRINUSE): confirmed empirically that Bun's listener can bind
+# successfully ALONGSIDE an existing holder on the same port rather than
+# erroring, so two monitor processes can end up silently coexisting on one
+# port with unpredictable request routing between them — arguably worse than
+# the original "stack up while stopped" bug. So this checks and refuses
+# BEFORE ever attempting to spawn, rather than trusting the OS to prevent it.
+#
+# Orphan signature: PPID 1 (reparented to init/launchd after its supervising
+# shell died) — matches the ticket's own "earlier stack generation" scenario.
+# A live, non-1 PPID is some other real, currently-supervised process; left
+# alone and refused, never killed (fail-closed on identity, not just presence).
+_monitor_check_port_holder() {
+  local holder_pid ppid
+  holder_pid="$(_monitor_port_holder_pid)"
+  [[ -n "$holder_pid" ]] || return 0
+  ppid="$(ps -o ppid= -p "$holder_pid" 2>/dev/null | tr -d ' ')"
+  if [[ "$ppid" == "1" ]]; then
+    echo "catalyst-monitor: reaping orphaned process on port $PORT (pid $holder_pid, ppid 1, no tracked pidfile)" >&2
+    kill "$holder_pid" 2>/dev/null
+    sleep 1
+    is_alive "$holder_pid" && kill -9 "$holder_pid" 2>/dev/null
+    return 0
+  fi
+  echo "catalyst-monitor: error: port $PORT is already held by pid $holder_pid (ppid $ppid) — not an orphan (live parent), refusing to start a second monitor on the same port" >&2
+  return 1
+}
+
 read_pid() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
@@ -423,6 +477,12 @@ cmd_start() {
     echo "Monitor already running (pid $existing_pid)"
     return 0
   fi
+
+  # CAT-53: no tracked-alive PID. If the port is squatted, reap it if it's an
+  # orphan; refuse to start if it's a live, non-orphan holder (see the
+  # function's own comment for why this must be checked BEFORE spawning,
+  # not left to a natural bind failure).
+  _monitor_check_port_holder || return 1
 
   print_version_warning
 

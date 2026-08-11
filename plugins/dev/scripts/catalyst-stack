@@ -1196,8 +1196,12 @@ cmd_start() {
 
   # CTL-1084: known-good start order is monitor → broker → execution-core
   # (encoded here instead of operator memory; daemon always last).
+  # CAT-53: start_monitor's failure used to be silently discarded (no ||,
+  # no set -e) — captured here so cmd_start can raise a real alarm and the
+  # "stack up" banner below can't lie about a monitor that never came up.
+  local _monitor_start_failed=""
   if [[ "$node_class" != "developer" ]]; then
-    start_monitor
+    start_monitor || _monitor_start_failed=1
     start_broker
   fi
   if [[ "$node_class" == "worker" ]]; then
@@ -1255,8 +1259,20 @@ cmd_start() {
   # (CTL-1307 token projection now runs BEFORE start_coordination above, so the publisher
   # launches with cluster.env already present — see the Codex-P1 note there.)
 
+  # CAT-53: never print "stack up" while the monitor is actually stopped — it
+  # owns the Linear webhook handler and is the only writer of ticket_state, so
+  # a dead monitor under a "stack up" banner previously looked healthy for
+  # 1d13h before anyone noticed (see ticket). Real liveness check
+  # (_vn_monitor_running), not just start_monitor's own exit code, so a
+  # monitor that started but died immediately after is still caught.
   log ""
-  log "stack up — current state:"
+  if [[ "$node_class" != "developer" ]] \
+     && { [[ -n "$_monitor_start_failed" ]] || [[ "$(_vn_monitor_running)" != "yes" ]]; }; then
+    warn "monitor failed to start or is not running — stack is NOT fully up"
+    log "stack degraded — current state:"
+  else
+    log "stack up — current state:"
+  fi
   cmd_status
 }
 
