@@ -3024,8 +3024,23 @@ describe("CAT-57 host-scoped board health", () => {
     const fallback = ["mini"];
     expect(resolveRosterSeam(["peer"], fallback)).toEqual(["peer"]);
     expect(resolveRosterSeam(() => ["peer"], fallback)).toEqual(["peer"]);
+    expect(resolveRosterSeam([], fallback)).toBe(fallback);
+    expect(resolveRosterSeam(() => [], fallback)).toBe(fallback);
     expect(resolveRosterSeam(null, fallback)).toBe(fallback);
     expect(resolveRosterSeam(() => { throw new Error("down"); }, fallback)).toBe(fallback);
+  });
+
+  test("dispatch liveness is unobservable only for multi-host empty rosters", () => {
+    const multi = mkOwnedBoard({
+      roster: [], dispatchRoster: [], eligible: [{ id: "CAT-QUEUED" }],
+      capacity: { freeSlots: 1 }, owner: () => null,
+    });
+    expect(evaluateInvariants(multi).dispatchLiveness).toMatchObject({ ok: true, observable: false });
+    const single = mkOwnedBoard({
+      multiHost: false, roster: [], dispatchRoster: [], eligible: [{ id: "CAT-QUEUED" }],
+      capacity: { freeSlots: 1 }, owner: null,
+    });
+    expect(evaluateInvariants(single).dispatchLiveness).toMatchObject({ ok: false, observable: true });
   });
 
   test("dispatch liveness judges only this host's eligible share and reports both depths", () => {
@@ -3164,6 +3179,44 @@ describe("CAT-57 nodeProductivity invariant", () => {
         ["CAT-PEER", { identifier: "CAT-PEER", state: "Todo" }],
       ]),
     })).nodeProductivity.unproductive.peer.ownedTickets).toEqual(["CAT-PEER"]);
+  });
+
+  test("non-advanceable tickets are excluded from a peer's owned share", () => {
+    const cases = [
+      { identifier: "CAT-PEER", labels: ["needs-human"] },
+      { identifier: "CAT-PEER", labels: ["parked-by-human"] },
+      { identifier: "CAT-PEER", status: "needs-human" },
+      { identifier: "CAT-PEER", relations: [{ type: "blocked_by", identifier: "CAT-BLOCKER" }] },
+    ];
+    for (const descriptor of cases) {
+      const tickets = new Map([["CAT-PEER", descriptor]]);
+      if (descriptor.relations) tickets.set("CAT-BLOCKER", { identifier: "CAT-BLOCKER", state: "In Progress" });
+      expect(evaluateInvariants(productivityBoard({
+        ticketsById: tickets,
+        owner: (id) => id === "CAT-BLOCKER" ? "mini" : "peer",
+      })).nodeProductivity.flagged).toEqual([]);
+    }
+  });
+
+  test("mixed and terminal-blocker shares retain advanceable tickets", () => {
+    const mixed = new Map([
+      ["CAT-BLOCKED", { relations: [{ type: "blocked_by", identifier: "CAT-BLOCKER" }] }],
+      ["CAT-BLOCKER", { state: "In Progress" }],
+      ["CAT-READY", { state: "Todo" }],
+    ]);
+    expect(evaluateInvariants(productivityBoard({
+      ticketsById: mixed,
+      owner: (id) => id === "CAT-BLOCKER" ? "mini" : "peer",
+    })).nodeProductivity.unproductive.peer.ownedTickets)
+      .toEqual(["CAT-READY"]);
+    const doneBlocker = new Map([
+      ["CAT-PEER", { relations: [{ type: "blocked_by", identifier: "CAT-BLOCKER" }] }],
+      ["CAT-BLOCKER", { state: "Done" }],
+    ]);
+    expect(evaluateInvariants(productivityBoard({
+      ticketsById: doneBlocker,
+      owner: (id) => id === "CAT-BLOCKER" ? "mini" : "peer",
+    })).nodeProductivity.flagged).toEqual(["peer"]);
   });
 
   test("off omits key and never reads productivity seam", () => {
