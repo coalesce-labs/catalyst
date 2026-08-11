@@ -58,7 +58,8 @@ describe("cluster status anchor disambiguation (CAT-46)", () => {
   });
 
   test("runStatus does not consult Linear attachments in loki mode", () => {
-    let readCalls = 0;
+    let linearReadCalls = 0;
+    let lokiReadCalls = 0;
     const chunks = [];
     const originalWrite = process.stdout.write;
     process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true; };
@@ -68,14 +69,25 @@ describe("cluster status anchor disambiguation (CAT-46)", () => {
         getReadSource: () => "loki",
         getRoster: () => ["a"],
         getSelf: () => "a",
-        readPeers: () => { readCalls += 1; return { a: { last_seen: "stale" } }; },
+        readLinearPeers: () => { linearReadCalls += 1; return {}; },
+        readLokiPeers: ({ lokiUrl }) => {
+          lokiReadCalls += 1;
+          expect(lokiUrl).toBe("http://loki.example");
+          return { a: { last_seen: "2026-08-11T05:00:00Z", in_flight_tickets: [] } };
+        },
+        getLokiUrl: () => "http://loki.example",
         getDraining: () => false,
       })).toBe(0);
     } finally {
       process.stdout.write = originalWrite;
     }
-    expect(readCalls).toBe(0);
-    expect(JSON.parse(chunks.join(""))).toMatchObject({ anchor: "PROJ-1", readSource: "loki" });
+    expect(linearReadCalls).toBe(0);
+    expect(lokiReadCalls).toBe(1);
+    expect(JSON.parse(chunks.join(""))).toMatchObject({
+      anchor: "PROJ-1",
+      readSource: "loki",
+      hosts: [{ name: "a", live: true }],
+    });
   });
 });
 

@@ -21,6 +21,7 @@ import {
   getHostName,
   getLivenessAnchorIssue,
   getLivenessReadSource,
+  getLokiQueryUrl,
   getCatalystRepoDirHostsPath,
   getClusterRepoDir,
   getLayer2ConfigPath,
@@ -29,6 +30,7 @@ import {
   readClusterConfig,
 } from "../config.mjs";
 import { readPeerHeartbeatsSync } from "../cluster-heartbeat-sync.mjs";
+import { readClusterLivenessFromLokiSync } from "../loki-liveness-sync.mjs";
 import { writeSecretConfig } from "../write-secret-config.mjs";
 import { listInFlightTickets } from "../scheduler.mjs";
 import { clusterSync } from "../cluster-sync.mjs";
@@ -172,15 +174,22 @@ export function runStatus(argv = [], deps = {}) {
     getReadSource = getLivenessReadSource,
     getRoster = getExistenceHosts,
     getSelf = getHostName,
-    readPeers = readPeerHeartbeatsSync,
+    readLinearPeers = readPeerHeartbeatsSync,
+    readLokiPeers = readClusterLivenessFromLokiSync,
+    getLokiUrl = getLokiQueryUrl,
     getDraining = () => isDraining(getExecutionCoreDir()),
   } = deps;
   const anchor = getAnchor();
   const readSource = getReadSource();
+  const peers = readSource === "loki"
+    ? readLokiPeers({ lokiUrl: getLokiUrl() })
+    : anchor
+      ? readLinearPeers({ anchorIssue: anchor })
+      : {};
   const status = buildStatus({
     roster: getRoster(),
     self: getSelf(),
-    peers: readSource === "linear" && anchor ? readPeers({ anchorIssue: anchor }) : {},
+    peers,
     draining: getDraining(),
     anchor,
     readSource,
