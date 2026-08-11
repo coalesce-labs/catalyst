@@ -325,6 +325,11 @@ export function getReplicaHealthDir() {
   return resolve(getExecutionCoreDir(), "replica-health");
 }
 
+// CAT-82 — per-team durable latch for sustained fully-held triage sweeps.
+export function getTriageSweepHealthDir() {
+  return resolve(getExecutionCoreDir(), ".triage-sweep-health");
+}
+
 // CTL-1503 — fleet-health durable-latch dir. Holds the edge-trigger latch marker
 // (fleet-health-latch.json) the probe persists on the healthy→degraded /
 // degraded→healthy edges and hydrates on start, so a daemon restart mid-episode
@@ -1348,6 +1353,9 @@ export const RECONCILE_FAILURE_ALERT_THRESHOLD =
 export const REPLICA_DEGRADED_ALERT_THRESHOLD =
   Number(process.env.EXECUTION_CORE_REPLICA_DEGRADED_ALERT_THRESHOLD) || 3;
 
+export const TRIAGE_SWEEP_HELD_ALERT_THRESHOLD =
+  Number(process.env.EXECUTION_CORE_TRIAGE_SWEEP_HELD_THRESHOLD) || 3;
+
 // CAT-29: time-based total-blindness tripwire. This complements the count-based
 // threshold above, whose 10-minute polling cadence can otherwise delay an alarm
 // for 20–30 minutes during a from-boot outage.
@@ -2163,33 +2171,28 @@ export function readStalledRepullConfig(env = process.env) {
 
 // CAT-40: GitHub quota actuation is independently shadow-first even when the
 // broader board-health delegate runs in enforce mode.
-export function readGithubQuotaBoardHealthConfig(env = process.env) {
+function readBoardHealthSubMode(envKey, layer2Key, env = process.env) {
   const l2 = readLayer2BoardHealth();
-  const value = env.CATALYST_BH_GH_QUOTA;
+  const value = env[envKey];
   if (typeof value === "string" && BOARD_HEALTH_MODES.has(value)) return { mode: value };
-  if (typeof l2.githubQuota === "string" && BOARD_HEALTH_MODES.has(l2.githubQuota)) {
-    return { mode: l2.githubQuota };
-  }
+  if (typeof value === "string" && value.trim() !== "") return { mode: "shadow" };
+  const layer2Value = l2[layer2Key];
+  if (typeof layer2Value === "string" && BOARD_HEALTH_MODES.has(layer2Value)) return { mode: layer2Value };
   return { mode: "shadow" };
+}
+
+export function readGithubQuotaBoardHealthConfig(env = process.env) {
+  return readBoardHealthSubMode("CATALYST_BH_GH_QUOTA", "githubQuota", env);
 }
 
 // CAT-57: peer-productivity reporting is independently shadow-first even when
 // the broader board-health delegate runs in enforce mode.
 export function readProductivityBoardHealthConfig(env = process.env) {
-  const l2 = readLayer2BoardHealth();
-  const value = env.CATALYST_BH_PRODUCTIVITY;
-  if (typeof value === "string" && BOARD_HEALTH_MODES.has(value)) return { mode: value };
-  // CAT-57 (Codex P2): a SET-but-invalid env value falls back to `shadow` AND still
-  // overrides Layer-2 — the contract this row documents ("Garbage values fall back
-  // to `shadow`. Overrides Layer-2."). Falling through to Layer-2 on a typo meant an
-  // operator reaching for the env var to REDUCE actuation (`=enfore`, `=shadwo`)
-  // silently left a Layer-2 `enforce` live — the failure direction a shadow-first
-  // knob must never have. Only an unset/empty var defers to Layer-2.
-  if (typeof value === "string" && value.trim() !== "") return { mode: "shadow" };
-  if (typeof l2.productivity === "string" && BOARD_HEALTH_MODES.has(l2.productivity)) {
-    return { mode: l2.productivity };
-  }
-  return { mode: "shadow" };
+  return readBoardHealthSubMode("CATALYST_BH_PRODUCTIVITY", "productivity", env);
+}
+
+export function readTriageProductionBoardHealthConfig(env = process.env) {
+  return readBoardHealthSubMode("CATALYST_BH_TRIAGE_PRODUCTION", "triageProduction", env);
 }
 
 export function readReplicaBoardHealthConfig(env = process.env) {

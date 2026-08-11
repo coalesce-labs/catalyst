@@ -82,10 +82,10 @@ GitHub organization. Three keys, and the first two are easy to confuse:
 }
 ```
 
-| Key         | What it does                                                                                                 |
-| ----------- | ------------------------------------------------------------------------------------------------------------ |
+| Key         | What it does                                                                                                  |
+| ----------- | ------------------------------------------------------------------------------------------------------------- |
 | `org`       | **GitHub owner** hosting this project's `thoughts` repo — provisioning clones `github.com/<org>/thoughts.git` |
-| `profile`   | **HumanLayer profile name** — the key under `.thoughts.profiles` in `humanlayer.json`                        |
+| `profile`   | **HumanLayer profile name** — the key under `.thoughts.profiles` in `humanlayer.json`                         |
 | `directory` | Subdirectory inside the thoughts repo for this project's notes (defaults to the repo's own basename)          |
 | `user`      | Username passed to the thoughts CLI; `null` uses the CLI default                                              |
 
@@ -97,8 +97,8 @@ above is the real shape: code under `github.com/groundworkapp/Adva`, thoughts un
 `provision-thoughts.sh` reads `org` from each registered project's own `.catalyst/config.json`. If
 `org` is absent it falls back to `profile`, then to the org segment of the project's checkout path —
 each fallback prints a `WARN` naming the project, because both are guesses that are only right when
-the names happen to coincide. Set `org` explicitly on every project; a missing `org` degrades
-loudly but never aborts a node join.
+the names happen to coincide. Set `org` explicitly on every project; a missing `org` degrades loudly
+but never aborts a node join.
 
 ## How work runs: `dispatchMode`
 
@@ -160,22 +160,22 @@ failure in `enforce`.
 | Key                                                           | Default                      | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `orchestration.dispatchMode`                                  | `oneshot-legacy`             | Which run mode to use (above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `catalyst.orchestration.publishPreflight.mode` _(Layer-2)_    | `shadow`                     | Before dispatch, verify that the resolved GitHub identity can push to the configured push remote. `off` skips the probe; `shadow` reports denied capability but still dispatches; `enforce` blocks dispatch only on a definitive denied verdict. `CATALYST_PUBLISH_PREFLIGHT` overrides this value. Unknown values fall back to `shadow`. |
+| `catalyst.orchestration.publishPreflight.mode` _(Layer-2)_    | `shadow`                     | Before dispatch, verify that the resolved GitHub identity can push to the configured push remote. `off` skips the probe; `shadow` reports denied capability but still dispatches; `enforce` blocks dispatch only on a definitive denied verdict. `CATALYST_PUBLISH_PREFLIGHT` overrides this value. Unknown values fall back to `shadow`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `orchestration.executor`                                      | `bg`                         | Which substrate runs a phase worker: `bg` (a `claude --bg` background job, today's behavior), `oneshot-legacy`, or `sdk` (the in-process Claude Agent SDK — **not yet implemented; falls back to `bg`**, CTL-1365b). Resolution: `CATALYST_EXECUTOR` env → this key → node-class default (all classes → `bg` today). Distinct from `dispatchMode`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `orchestration.maxParallel`                                   | `3`                          | How many tickets run at once                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `orchestration.worktreeDir`                                   | `~/catalyst/wt/<projectKey>` | Where worktrees are created                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `orchestration.pluginDirs`                                    | unset                        | Path(s) to the plugin checkout(s) workers run from (`<checkout>/plugins/dev`). Set by `setup-plugin-source.sh`; resolved by `phase-agent-dispatch` and refreshed by `catalyst-stack hotpatch` / merge-to-main. String or `:`-joined array. May also live in the machine config (Layer 2); the `CATALYST_PLUGIN_DIRS` env var overrides both.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `orchestration.pluginPullOwner` _(Layer-2, machine-local)_    | `broker`                     | Which process pulls plugin checkouts current on this node: `broker` (the drift-check timer does `git fetch` + `reset --hard`, today's default — skipped when the checkout has uncommitted tracked changes, CAT-167) or `updater` (the standalone `catalyst-updater` LaunchAgent owns the pull; the broker keeps drift **detection** + lag alerting but skips the pull — detect-only). Read fresh each broker tick; env override `CATALYST_PLUGIN_PULL_OWNER`. Flipped to `updater` only by the supervised `catalyst-stack adopt-updater` cutover, which first confirms the updater agent is running (fail-closed to `broker`). A daemonless **developer** node runs no broker, so the updater is the only thing keeping it fresh. (CTL-1348)                                                                                                                                                                                                                                                         |
+| `orchestration.pluginPullOwner` _(Layer-2, machine-local)_    | `broker`                     | Which process pulls plugin checkouts current on this node: `broker` (the drift-check timer does `git fetch` + `reset --hard`, today's default — skipped when the checkout has uncommitted tracked changes, CAT-167) or `updater` (the standalone `catalyst-updater` LaunchAgent owns the pull; the broker keeps drift **detection** + lag alerting but skips the pull — detect-only). Read fresh each broker tick; env override `CATALYST_PLUGIN_PULL_OWNER`. Flipped to `updater` only by the supervised `catalyst-stack adopt-updater` cutover, which first confirms the updater agent is running (fail-closed to `broker`). A daemonless **developer** node runs no broker, so the updater is the only thing keeping it fresh. (CTL-1348)                                                                                                                                                                                    |
 | `orchestration.phaseAgents.models[phase]`                     | `opus`                       | Model per step (`opus`, `sonnet`, or `haiku`). Phases: `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `orchestration.phaseAgents.turnCaps[phase]`                   | per-phase                    | Max Claude turns per step                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `orchestration.draftPr.enabled`                               | `true`                       | Open a draft PR at the first implement commit; phase-pr flips it ready. Set `false` to create the PR only at the pr phase.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `orchestration.stalledRepull.mode`                            | `shadow`                     | Re-pull behavior for eligible tickets held by a machine-owned terminal worker directory: `off` disables evaluation, `shadow` reports without mutation, and `enforce` detaches the directory before a fresh dispatch. Env `CATALYST_STALLED_REPULL` overrides this key. |
-| `orchestration.stalledRepull.graceMs`                         | `1800000`                    | Minimum terminal worker-directory age before it is eligible for re-pull. |
-| `orchestration.stalledRepull.maxRepullAttempts`               | `2`                          | Persistent per-ticket cap on automatic stalled re-pulls. |
-| `orchestration.stalledRepull.repullBackoffMs`                 | `7200000`                    | Minimum delay between automatic re-pull attempts for the same ticket. |
+| `orchestration.stalledRepull.mode`                            | `shadow`                     | Re-pull behavior for eligible tickets held by a machine-owned terminal worker directory: `off` disables evaluation, `shadow` reports without mutation, and `enforce` detaches the directory before a fresh dispatch. Env `CATALYST_STALLED_REPULL` overrides this key.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `orchestration.stalledRepull.graceMs`                         | `1800000`                    | Minimum terminal worker-directory age before it is eligible for re-pull.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `orchestration.stalledRepull.maxRepullAttempts`               | `2`                          | Persistent per-ticket cap on automatic stalled re-pulls.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `orchestration.stalledRepull.repullBackoffMs`                 | `7200000`                    | Minimum delay between automatic re-pull attempts for the same ticket.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `CATALYST_WORKFLOW_GITHUB_TOKEN` _(env var, never committed)_ | unset                        | A GitHub PAT with the `workflow` OAuth scope. When set, phase-pr automatically routes pushes that touch `.github/workflows/` through this token instead of the ambient `GITHUB_TOKEN` (which lacks `workflow` scope). When unset and such a push is attempted, phase-pr escalates with an actionable `human_question` telling the operator to grant the scope or push manually. Provision via the daemon launch environment or `~/.config/catalyst/config-<projectKey>.json`. Alternative: `gh auth refresh -s workflow` re-auths the host token.                                                                                                                                                                                                                                                                                                                                                                               |
-| `CATALYST_PLUGIN_DIRTY_GUARD` _(env var)_                     | `enforce`                    | Controls whether plugin refresh refuses to `git reset --hard` over uncommitted tracked changes. `enforce` skips and emits `plugin.checkout.dirty_skipped`, escalating to `plugin.checkout.dirty_stale`; `shadow` emits `plugin.checkout.would_skip_dirty` and resets; `off` restores unconditional reset. Unknown values fail safe to `enforce`. Untracked files do not block refresh. (CAT-167)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `CATALYST_PLUGIN_DIRTY_SKIP_GRACE_MS` _(env var)_             | `1800000`                    | Time a checkout may remain blocked by tracked dirt before the one-shot `plugin.checkout.dirty_stale` ERROR. A successful refresh clears the episode. (CAT-167)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `CATALYST_PLUGIN_DIRTY_GUARD` _(env var)_                     | `enforce`                    | Controls whether plugin refresh refuses to `git reset --hard` over uncommitted tracked changes. `enforce` skips and emits `plugin.checkout.dirty_skipped`, escalating to `plugin.checkout.dirty_stale`; `shadow` emits `plugin.checkout.would_skip_dirty` and resets; `off` restores unconditional reset. Unknown values fail safe to `enforce`. Untracked files do not block refresh. (CAT-167)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `CATALYST_PLUGIN_DIRTY_SKIP_GRACE_MS` _(env var)_             | `1800000`                    | Time a checkout may remain blocked by tracked dirt before the one-shot `plugin.checkout.dirty_stale` ERROR. A successful refresh clears the episode. (CAT-167)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `orchestration.stalePrRescue.enabled`                         | `true`                       | Periodically rescue orphaned PRs that drifted to DIRTY or BEHIND after their workers died.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `orchestration.stalePrRescue.intervalSeconds`                 | `600`                        | How often the rescue timer ticks (seconds).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `orchestration.stalePrRescue.stableSeconds`                   | `300`                        | How long a PR must sit DIRTY/BEHIND before a rescue is attempted (avoids reacting to transient states).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -188,14 +188,14 @@ failure in `enforce`.
 | `orchestration.orphanPrSweep.repo`                            | _(auto-detected)_            | The `org/repo` slug to pass to `gh pr list`. Falls back to top-level `.catalyst/config.json` repo fields, then `gh repo view`. Set this explicitly when auto-detection is unreliable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `orchestration.stalledPrSweep.enabled`                        | `false`                      | Periodically sweep all in-flight worker PRs for review-latency, CI-health, and no-push signals independent of worker liveness (CTL-1608). **Default-off** — enable only after validating thresholds on the live board. When enabled the timer writes `workers/<TICKET>/stalled-pr.json`; board-health reads those stamps via `getStalledPrState` and emits `nudge-stalled-pr` moves.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `orchestration.stalledPrSweep.intervalSeconds`                | `900`                        | How often the stalled-PR sweep ticks (seconds). Configurable per the `CATALYST_BH_STALLED_PR_*` env thresholds below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `orchestration.githubQuotaSweep.enabled`                      | `true`                       | Sample the host's GitHub core REST quota and atomically publish it to `<orchDir>/github-quota.json`. Set `false` to disable the timer; a previous snapshot may remain on disk but becomes stale and cannot arm board-health.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `orchestration.githubQuotaSweep.intervalSeconds`              | `300`                        | How often the daemon runs the quota sampler (seconds). The sampler calls the quota-reporting endpoint, which does not consume the core quota it reports.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `orchestration.replicaSweep.enabled`                          | `true`                       | Sample local Linear replica completeness into `<orchDir>/replica-state.json`. |
-| `orchestration.replicaSweep.intervalSeconds`                  | `300`                        | Replica completeness sampling cadence. |
-| `responder.intervalSeconds`                                   | `180`                        | How often the daemon-health responder launchd sweep runs (seconds, clamped 60–900). The responder (`health-responder.sh`, CTL-1509) detects a dead/stale cloud-sync replica writer and issues bounded `launchctl kickstart`s, escalating after the attempt cap. Baked into the launchd plist at install time (`install-health-responder.sh`); re-run `catalyst-stack install-services` after changing it.                                                                                                                                                                                                                                                                                                          |
+| `orchestration.githubQuotaSweep.enabled`                      | `true`                       | Sample the host's GitHub core REST quota and atomically publish it to `<orchDir>/github-quota.json`. Set `false` to disable the timer; a previous snapshot may remain on disk but becomes stale and cannot arm board-health.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `orchestration.githubQuotaSweep.intervalSeconds`              | `300`                        | How often the daemon runs the quota sampler (seconds). The sampler calls the quota-reporting endpoint, which does not consume the core quota it reports.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `orchestration.replicaSweep.enabled`                          | `true`                       | Sample local Linear replica completeness into `<orchDir>/replica-state.json`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `orchestration.replicaSweep.intervalSeconds`                  | `300`                        | Replica completeness sampling cadence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `responder.intervalSeconds`                                   | `180`                        | How often the daemon-health responder launchd sweep runs (seconds, clamped 60–900). The responder (`health-responder.sh`, CTL-1509) detects a dead/stale cloud-sync replica writer and issues bounded `launchctl kickstart`s, escalating after the attempt cap. Baked into the launchd plist at install time (`install-health-responder.sh`); re-run `catalyst-stack install-services` after changing it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `orchestration.reconcile.mode`                                | `off`                        | Completion-declaration reconcile timer (CTL-1371). Linear state is driven by **explicit completion declarations** — the model/pipeline/human says "this is done" via `catalyst-linear-reconcile declare <TICKET>` — **never** inferred from PR/merge state (a draft PR opens while work is in progress; a merged PR is not yet Done — the pipeline puts deploy-verification + teardown between merge and Done). The timer drains _pending_ declarations and makes Linear reflect them, retrying any write that didn't land. `off` = inert (also the default); `notify` = compute drift + emit `ticket.completion.drift.<ticket>` events but **never write** (safe first-ship); `write` = write the declared state via the canonical primitive. Runs on the daemon event loop, separate from the dispatch scheduler. Idempotent + CTL-758 backward-write guard (never resurrects a Canceled ticket, never regresses a Done one). |
 | `orchestration.reconcile.intervalSeconds`                     | `600`                        | How often the drain timer ticks (seconds).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `EXECUTION_CORE_RECONCILE_BLIND_ALERT_MS`                     | `300000`                     | Time-based total-board-blindness alarm. When every registered team's reconcile is failing and no team has succeeded inside this window, execution-core raises the fleet admission alert and emits `fleet.health.degraded`. This complements `EXECUTION_CORE_RECONCILE_FAILURE_ALERT_THRESHOLD`; it does not replace the count-based per-team latch. |
+| `EXECUTION_CORE_RECONCILE_BLIND_ALERT_MS`                     | `300000`                     | Time-based total-board-blindness alarm. When every registered team's reconcile is failing and no team has succeeded inside this window, execution-core raises the fleet admission alert and emits `fleet.health.degraded`. This complements `EXECUTION_CORE_RECONCILE_FAILURE_ALERT_THRESHOLD`; it does not replace the count-based per-team latch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `orchestration.reconcile.declarationsDir`                     | `~/catalyst/completions`     | Directory holding the durable per-ticket completion markers (`<TICKET>.json`). Overridable via `CATALYST_COMPLETIONS_DIR`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `orchestration.orphanReaper.jobGc.enabled`                    | `true`                       | Enable periodic GC of stale `~/.claude/jobs/<id>` dirs (CTL-1165 D3). Set `false` to disable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `orchestration.orphanReaper.jobGc.retentionSeconds`           | `86400`                      | Delete a job dir only if its mtime is older than this many seconds (default 24 h). Env `CATALYST_JOB_GC_RETENTION_SECONDS` overrides.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -203,9 +203,9 @@ failure in `enforce`.
 | `orchestration.orphanReaper.workerGc.enabled`                 | `true`                       | Enable periodic GC of stale `execution-core/workers/<TICKET>/` dirs (CTL-1205). Set `false` to disable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `orchestration.orphanReaper.workerGc.retentionSeconds`        | `86400`                      | Delete a worker dir only if its mtime is older than this many seconds (default 24 h). Env `CATALYST_WORKER_GC_RETENTION_SECONDS` overrides.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `orchestration.orphanReaper.workerGc.batchCap`                | `100`                        | Max worker dirs deleted per sweep tick. Env `CATALYST_WORKER_GC_BATCH_CAP` overrides.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `orchestration.orphanReaper.procReaper.mode`                  | `shadow`                     | Orphan child-process reaper mode. `off` disables it; `shadow` (the default) logs `procOrphans.would-reap` for each candidate but **kills nothing**; `enforce` actually `SIGTERM`→grace→`SIGKILL`s them. Candidates are (a) orphaned reparented `node`/`bun` grandchildren a dead worker left behind, and (b) since CTL-1531, an orphan of **any** command that satisfies the ownership conjunction `ppid == 1` **and** cwd under `worktreeRoot` **and** that cwd definitely no longer exists (the `sh -c` runaway class) — that widened class is gated by its own `widenMode` knob and is **not** armed by setting this one to `enforce`. Ships in `shadow` so the never-kill allowlist + live-agent process-tree correlation — and the widened class in particular — can be audited on real hosts before any `enforce` flip.                                                                                                                                                                                                                                 |
-| `orchestration.orphanReaper.procReaper.widenMode`             | `shadow`                     | **Independent** rollout mode for the CTL-1531 *widened* (any-command) orphan class, deliberately NOT derived from `mode`. `off` removes the widened admission entirely (a byte-identical revert of the feature); `shadow` (the default) classifies and reports widened candidates via `procOrphans.would-reap` but **never signals them, even when `mode` is already `enforce`**; `enforce` lets a widened candidate follow `mode`, so BOTH knobs must be open before an arbitrary PPID-1 command is signalled. An unrecognized value degrades to `shadow`, never to `enforce`. This exists because a host that already carries `mode: "enforce"` — granted for the narrow `node`/`bun` class after *its* shadow bake — must not inherit authority over the widened class on deploy; ADR-023 requires a per-actuator shadow window and an operator-owned flip. Mirrors `orphan-sweep.sh`'s `SWEEP_PROC_WIDEN`. |
-| `orchestration.orphanReaper.procReaper.widenMaxKills`         | `5`                          | Per-run cap on **confirmed** terminations from the widened class (`0` = uncapped), mirroring `orphan-sweep.sh`'s `SWEEP_PROC_WIDEN_MAX_KILLS` and vector 2's `SWEEP_MAX_REMOVALS`. Delivered signals carry a second ceiling of `widenMaxKills × 2`, since a candidate is worth at most SIGTERM + SIGKILL; counting confirmed exits (not attempts) against the first ceiling is what stops a process that ignores SIGTERM from consuming a slot forever. The widened class's authorizing evidence — "this cwd no longer exists" — is **correlated** across a host, so a run that wants to kill more than a handful is a root-level event that wants a human. A non-numeric **or non-integer** value degrades to `5`, never to uncapped — a fractional cap such as `0.5` used to floor to `0`, which is the documented *uncapped* value, so a config typo silently removed the ceiling. |
+| `orchestration.orphanReaper.procReaper.mode`                  | `shadow`                     | Orphan child-process reaper mode. `off` disables it; `shadow` (the default) logs `procOrphans.would-reap` for each candidate but **kills nothing**; `enforce` actually `SIGTERM`→grace→`SIGKILL`s them. Candidates are (a) orphaned reparented `node`/`bun` grandchildren a dead worker left behind, and (b) since CTL-1531, an orphan of **any** command that satisfies the ownership conjunction `ppid == 1` **and** cwd under `worktreeRoot` **and** that cwd definitely no longer exists (the `sh -c` runaway class) — that widened class is gated by its own `widenMode` knob and is **not** armed by setting this one to `enforce`. Ships in `shadow` so the never-kill allowlist + live-agent process-tree correlation — and the widened class in particular — can be audited on real hosts before any `enforce` flip.                                                                                                   |
+| `orchestration.orphanReaper.procReaper.widenMode`             | `shadow`                     | **Independent** rollout mode for the CTL-1531 _widened_ (any-command) orphan class, deliberately NOT derived from `mode`. `off` removes the widened admission entirely (a byte-identical revert of the feature); `shadow` (the default) classifies and reports widened candidates via `procOrphans.would-reap` but **never signals them, even when `mode` is already `enforce`**; `enforce` lets a widened candidate follow `mode`, so BOTH knobs must be open before an arbitrary PPID-1 command is signalled. An unrecognized value degrades to `shadow`, never to `enforce`. This exists because a host that already carries `mode: "enforce"` — granted for the narrow `node`/`bun` class after _its_ shadow bake — must not inherit authority over the widened class on deploy; ADR-023 requires a per-actuator shadow window and an operator-owned flip. Mirrors `orphan-sweep.sh`'s `SWEEP_PROC_WIDEN`.                  |
+| `orchestration.orphanReaper.procReaper.widenMaxKills`         | `5`                          | Per-run cap on **confirmed** terminations from the widened class (`0` = uncapped), mirroring `orphan-sweep.sh`'s `SWEEP_PROC_WIDEN_MAX_KILLS` and vector 2's `SWEEP_MAX_REMOVALS`. Delivered signals carry a second ceiling of `widenMaxKills × 2`, since a candidate is worth at most SIGTERM + SIGKILL; counting confirmed exits (not attempts) against the first ceiling is what stops a process that ignores SIGTERM from consuming a slot forever. The widened class's authorizing evidence — "this cwd no longer exists" — is **correlated** across a host, so a run that wants to kill more than a handful is a root-level event that wants a human. A non-numeric **or non-integer** value degrades to `5`, never to uncapped — a fractional cap such as `0.5` used to floor to `0`, which is the documented _uncapped_ value, so a config typo silently removed the ceiling.                                           |
 | `orchestration.orphanReaper.procReaper.graceMs`               | `5000`                       | Milliseconds to wait after `SIGTERM` before re-probing and (only if still alive) `SIGKILL`ing, so `node`/`bun` can flush.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `orchestration.orphanReaper.procReaper.minEtimeSec`           | `900`                        | A process must have run at least this long (elapsed time) before it is eligible — corroboration only, never the sole gate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `orchestration.orphanReaper.procReaper.worktreeRoot`          | `~/catalyst/wt`              | Only orphans whose working directory is under this root are reapable; an interactive `claude` or dev shell outside it is never touched.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -215,17 +215,17 @@ failure in `enforce`.
 | `orchestration.fleetHealth.jobsThreshold`                     | `500`                        | `~/.claude/jobs` dir count at or above which the `jobs` signal trips.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `orchestration.fleetHealth.agentsThreshold`                   | `12`                         | Live background-agent count at or above which the `agents` signal trips.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `orchestration.fleetHealth.procsThreshold`                    | `40`                         | Resident `node`/`bun` worker-process count at or above which the `procs` signal trips.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `orchestration.fleetHealth.swapUsedMbThreshold`               | `24576`                      | macOS swap-used MB at or above which the `swap` signal TRIPS (edge-triggered since CTL-1503). Raised above a 16 GB Mac's normal-swap ceiling so it stops firing every tick. Env `EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `orchestration.fleetHealth.swapUsedMbClearThreshold`          | `16384`                      | CTL-1503 hysteresis band — the latched swap degradation CLEARS (fires `fleet.health.recovered` once) only when swap drops strictly below this LOWER threshold, so a value hovering in `[clear, trip)` can't re-flap. Clamped below `swapUsedMbThreshold` if misconfigured. Env `EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD`. |
+| `orchestration.fleetHealth.swapUsedMbThreshold`               | `24576`                      | macOS swap-used MB at or above which the `swap` signal TRIPS (edge-triggered since CTL-1503). Raised above a 16 GB Mac's normal-swap ceiling so it stops firing every tick. Env `EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `orchestration.fleetHealth.swapUsedMbClearThreshold`          | `16384`                      | CTL-1503 hysteresis band — the latched swap degradation CLEARS (fires `fleet.health.recovered` once) only when swap drops strictly below this LOWER threshold, so a value hovering in `[clear, trip)` can't re-flap. Clamped below `swapUsedMbThreshold` if misconfigured. Env `EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `orchestration.fleetHealth.selfHealEnabled`                   | `false`                      | Whether a sustained breach triggers self-heal (the two orphan-reaper intents plus a bounded `ppid==1` `node`/`bun` child sweep). **Default OFF** — the first ship is a pure alert. Enable with `EXECUTION_CORE_FLEET_SELF_HEAL=1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `orchestration.fleetHealth.sustainedTicks`                    | `2`                          | Consecutive degraded ticks required before self-heal fires (once per breach episode; re-armed only after a healthy tick).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `orchestration.daemonWatchdog.mode`                           | `shadow`                     | Stuck-but-alive daemon watchdog (CTL-1502). `off` disables; `shadow` detects + logs `would-restart` but never restarts; `enforce` restarts a stuck daemon (otel-forward) once per breach episode. Precedence: `CATALYST_DAEMON_WATCHDOG=0` (kill-switch → `off`) → `EXECUTION_CORE_DAEMON_WATCHDOG_MODE` → this key → `shadow`. |
-| `orchestration.daemonWatchdog.intervalMs`                     | `120000`                     | How often the probe checks the stuck predicates (ms). Env `EXECUTION_CORE_DAEMON_WATCHDOG_INTERVAL_MS`. |
-| `orchestration.daemonWatchdog.dlqMaxBytes`                    | `1073741824`                 | DLQ-file size (bytes, via `statSync` — O(1), robust past 2 GB) at or above which the `dlq` predicate trips. Default 1 GiB. Env `EXECUTION_CORE_DAEMON_WATCHDOG_DLQ_MAX_BYTES`. |
-| `orchestration.daemonWatchdog.stalenessMs`                    | `900000`                     | How long the checkpoint's `lastForwardedTs` may stay frozen — while the event log has fresher writes (real backlog) — before the `lag` predicate trips. Default 15 min. Env `EXECUTION_CORE_DAEMON_WATCHDOG_STALENESS_MS`. |
-| `orchestration.daemonWatchdog.cooldownMs`                     | `900000`                     | Minimum time between restarts (ms). Default 15 min — deliberately > the 600s launchd `StartInterval` so the two supervision layers never race. Env `EXECUTION_CORE_DAEMON_WATCHDOG_COOLDOWN_MS`. |
-| `orchestration.daemonWatchdog.sustainedTicks`                 | `2`                          | Consecutive breach ticks required before the watchdog acts (hysteresis). Env `EXECUTION_CORE_DAEMON_WATCHDOG_SUSTAINED_TICKS`. |
-| `orchestration.daemonWatchdog.verifyTicks`                    | `2`                          | Post-restart re-check window: if the predicate is still tripped after this many ticks, the watchdog escalates (latched alert + `severity:high` finding) instead of restarting again. Env `EXECUTION_CORE_DAEMON_WATCHDOG_VERIFY_TICKS`. |
+| `orchestration.daemonWatchdog.mode`                           | `shadow`                     | Stuck-but-alive daemon watchdog (CTL-1502). `off` disables; `shadow` detects + logs `would-restart` but never restarts; `enforce` restarts a stuck daemon (otel-forward) once per breach episode. Precedence: `CATALYST_DAEMON_WATCHDOG=0` (kill-switch → `off`) → `EXECUTION_CORE_DAEMON_WATCHDOG_MODE` → this key → `shadow`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `orchestration.daemonWatchdog.intervalMs`                     | `120000`                     | How often the probe checks the stuck predicates (ms). Env `EXECUTION_CORE_DAEMON_WATCHDOG_INTERVAL_MS`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `orchestration.daemonWatchdog.dlqMaxBytes`                    | `1073741824`                 | DLQ-file size (bytes, via `statSync` — O(1), robust past 2 GB) at or above which the `dlq` predicate trips. Default 1 GiB. Env `EXECUTION_CORE_DAEMON_WATCHDOG_DLQ_MAX_BYTES`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `orchestration.daemonWatchdog.stalenessMs`                    | `900000`                     | How long the checkpoint's `lastForwardedTs` may stay frozen — while the event log has fresher writes (real backlog) — before the `lag` predicate trips. Default 15 min. Env `EXECUTION_CORE_DAEMON_WATCHDOG_STALENESS_MS`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `orchestration.daemonWatchdog.cooldownMs`                     | `900000`                     | Minimum time between restarts (ms). Default 15 min — deliberately > the 600s launchd `StartInterval` so the two supervision layers never race. Env `EXECUTION_CORE_DAEMON_WATCHDOG_COOLDOWN_MS`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `orchestration.daemonWatchdog.sustainedTicks`                 | `2`                          | Consecutive breach ticks required before the watchdog acts (hysteresis). Env `EXECUTION_CORE_DAEMON_WATCHDOG_SUSTAINED_TICKS`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `orchestration.daemonWatchdog.verifyTicks`                    | `2`                          | Post-restart re-check window: if the predicate is still tripped after this many ticks, the watchdog escalates (latched alert + `severity:high` finding) instead of restarting again. Env `EXECUTION_CORE_DAEMON_WATCHDOG_VERIFY_TICKS`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `catalyst.stallJanitor.censusIntervalSeconds` _(Layer 2)_     | `900` (15 min)               | How often the stall-janitor's git-heavy worktree/stall censuses (J1 orphan-worktree, J3 stall-clear, J4 terminal-signal GC) may run, off the per-tick scheduler hot path. Each fires a `git worktree list` per repo plus a `git status` per terminal worktree, so running them every tick on a many-worktree host ages the daemon heartbeat and holds new-work dispatch; this cadence keeps them off the hot path while the cheap J2 ghost-session kill still runs every tick (CTL-1324). Env `CATALYST_STALL_JANITOR_INTERVAL_MS` (milliseconds) overrides.                                                                                                                                                                                                                                                                                                                                                                    |
 
 The orphan child-process reaper is the corroboration-heavy companion to the session-level reaper:
@@ -236,7 +236,7 @@ to act unless every signal corroborates: a successful `claude agents` read this 
 aborts the whole sweep), the process is reparented and outside the live-agent process tree, its
 command and working directory match, and it has persisted across two consecutive sweeps.
 
-CTL-1531 widened *which commands* can be a candidate without relaxing any of that corroboration. A
+CTL-1531 widened _which commands_ can be a candidate without relaxing any of that corroboration. A
 non-`node`/`bun` orphan — the motivating case was four `sh -c "while :; do :; done"` loops that
 pegged ~4 cores for 16.5 h from a worktree that had been deleted — is admitted **only** on positive
 ownership evidence: strictly `ppid == 1`, cwd under `worktreeRoot`, and that cwd path no longer
@@ -244,14 +244,14 @@ existing. Both new probes fail closed (an unresolvable cwd, or a cwd-existence c
 answer, spares the process), nothing outside `worktreeRoot` is ever a candidate regardless of ppid
 or command, and the widened row still passes through every pre-existing gate.
 
-That "cwd no longer exists" probe is **tri-state**, not a boolean: it distinguishes *definitely gone*
-(a `stat` errno of `ENOENT`) from *cannot tell* (`EACCES` on an unreadable parent, `EIO` on a failing
-disk, `ESTALE`/`ENOTCONN` on a dropped network mount), and spares on the latter. A plain
+That "cwd no longer exists" probe is **tri-state**, not a boolean: it distinguishes _definitely
+gone_ (a `stat` errno of `ENOENT`) from _cannot tell_ (`EACCES` on an unreadable parent, `EIO` on a
+failing disk, `ESTALE`/`ENOTCONN` on a dropped network mount), and spares on the latter. A plain
 `existsSync`/`[[ -d ]]` collapses both into `false`, which would read an unanswerable probe as
 positive evidence the worktree was deleted — the inversion of the fail-closed rule, on the one
 conjunct that authorizes killing an arbitrary command.
 
-Because the widened class can signal *any* command, it is staged behind its **own** rollout mode —
+Because the widened class can signal _any_ command, it is staged behind its **own** rollout mode —
 `procReaper.widenMode` in the daemon, `SWEEP_PROC_WIDEN` in the shell sweep — which defaults to
 `shadow` **independently of `procReaper.mode`**. A host already running `mode: "enforce"` therefore
 merely observes the new class until an operator flips the second knob (ADR-023: dark by default, one
@@ -264,33 +264,35 @@ line or event payload: an arbitrary command's argv routinely carries tokens, pas
 URLs, and both logs are persisted (the daemon's is shipped to Loki), so only pid, command basename
 and reason are recorded.
 
-The same widening lands in the hourly `orphan-sweep.sh` vector 1 as an **additional** branch alongside the legacy
-`bun run|turbo|node` branch (which stays path-unrestricted). Both implementations also carry a
-widened-class-only **command denylist** (`tmux`, `screen`, `sshd`, `ssh`, `mosh-server`, `login`,
-`launchd`, `init`, `systemd`, `nohup` — anchored so the `progname: ` setproctitle form such as
-`tmux: server …` and `sshd: ryan [priv]` is matched): a session multiplexer is `ppid == 1` by
-construction and inherits its cwd from whatever shell started it, so one kill would close every pane
-the operator has open.
+The same widening lands in the hourly `orphan-sweep.sh` vector 1 as an **additional** branch
+alongside the legacy `bun run|turbo|node` branch (which stays path-unrestricted). Both
+implementations also carry a widened-class-only **command denylist** (`tmux`, `screen`, `sshd`,
+`ssh`, `mosh-server`, `login`, `launchd`, `init`, `systemd`, `nohup` — anchored so the `progname: `
+setproctitle form such as `tmux: server …` and `sshd: ryan [priv]` is matched): a session
+multiplexer is `ppid == 1` by construction and inherits its cwd from whatever shell started it, so
+one kill would close every pane the operator has open.
 
 The shell branch is staged by these env vars (set them in the LaunchAgent's `EnvironmentVariables`;
-`SWEEP_PROC_WIDEN` is baked into the shipped plist template by `install-orphan-sweep.sh`, which preserves an existing flip across the plist regeneration that every routine `install-services` performs — see `docs/orphan-sweep.md` → "Flipping the widened branch to enforce"):
+`SWEEP_PROC_WIDEN` is baked into the shipped plist template by `install-orphan-sweep.sh`, which
+preserves an existing flip across the plist regeneration that every routine `install-services`
+performs — see `docs/orphan-sweep.md` → "Flipping the widened branch to enforce"):
 
-| Env                             | Default  | Meaning                                                                                                                                                                                                                     |
-| ------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SWEEP_PROC_WIDEN`              | `shadow` | `off` \| `shadow` \| `enforce` for the widened branch. **Dark by default** per ADR-023 — the flip to `enforce` is operator-owned, never enable-on-merge. Any other value logs a warning and falls back to `shadow`.            |
+| Env                             | Default  | Meaning                                                                                                                                                                                                                                                                                                      |
+| ------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SWEEP_PROC_WIDEN`              | `shadow` | `off` \| `shadow` \| `enforce` for the widened branch. **Dark by default** per ADR-023 — the flip to `enforce` is operator-owned, never enable-on-merge. Any other value logs a warning and falls back to `shadow`.                                                                                          |
 | `SWEEP_PROC_WIDEN_MAX_KILLS`    | `5`      | Per-run cap on **confirmed** widened terminations (`0` = uncapped), mirroring vector 2's `SWEEP_MAX_REMOVALS`. Counted on the enforcing path only, so `shadow` still reports the full candidate set. Overflow is logged and deferred to the next run. Delivered signals carry a second ceiling of `cap × 2`. |
-| `SWEEP_PROC_WIDEN_MIN_AGE_SECS` | `900`    | Minimum process age (elapsed seconds) for a widened kill, matching `procReaper.minEtimeSec`. An unreadable age fails closed.                                                                                                  |
-| `SWEEP_PROC_WIDEN_GRACE_SECS`   | `5`      | Seconds to wait for a **confirmed exit** after each of SIGTERM and SIGKILL. `kill` reports delivery, not exit — only a process observed to have actually gone is logged and emitted as reclaimed.                              |
-| `SWEEP_PROC_CWD_TIMEOUT_SECS`   | `5`      | Deadline for the per-pid `lsof` cwd probe, so one hung/stale mount cannot wedge the LaunchAgent run. A timed-out probe yields an unknown cwd (spare), never a truncated path.                                                    |
-| `CATALYST_LSOF_TIMEOUT_MS`      | `5000`   | The daemon-side sibling: the deadline `proc-reaper.mjs` puts on its own `lsof` cwd probe (single-pid and batched). A value outside `(0, 600000]` degrades to `5000`, never to unbounded. Scope is `lsof` only — the cwd **existence** probe is unbounded on both sides (declared, not implied). |
+| `SWEEP_PROC_WIDEN_MIN_AGE_SECS` | `900`    | Minimum process age (elapsed seconds) for a widened kill, matching `procReaper.minEtimeSec`. An unreadable age fails closed.                                                                                                                                                                                 |
+| `SWEEP_PROC_WIDEN_GRACE_SECS`   | `5`      | Seconds to wait for a **confirmed exit** after each of SIGTERM and SIGKILL. `kill` reports delivery, not exit — only a process observed to have actually gone is logged and emitted as reclaimed.                                                                                                            |
+| `SWEEP_PROC_CWD_TIMEOUT_SECS`   | `5`      | Deadline for the per-pid `lsof` cwd probe, so one hung/stale mount cannot wedge the LaunchAgent run. A timed-out probe yields an unknown cwd (spare), never a truncated path.                                                                                                                                |
+| `CATALYST_LSOF_TIMEOUT_MS`      | `5000`   | The daemon-side sibling: the deadline `proc-reaper.mjs` puts on its own `lsof` cwd probe (single-pid and batched). A value outside `(0, 600000]` degrades to `5000`, never to unbounded. Scope is `lsof` only — the cwd **existence** probe is unbounded on both sides (declared, not implied).              |
 
 Both implementations refuse to run the widened branch at all when the worktree root itself is
 missing or unreadable (`SWEEP_WT_ROOT` in the shell, `procReaper.worktreeRoot` in the daemon): a
-renamed or unmounted root makes *every* cwd beneath it look deleted in the same pass, which is a
+renamed or unmounted root makes _every_ cwd beneath it look deleted in the same pass, which is a
 root-level fault rather than N independent orphans — and two-sweep persistence is no defense there,
 because the same correlated fault answers both sweeps. Both also bound the widened class per run
 (`widenMaxKills` / `SWEEP_PROC_WIDEN_MAX_KILLS`), bound the `lsof` cwd probe with a deadline so one
-hung mount cannot wedge the sweep, and treat a liveness probe that *could not answer* as unknown
+hung mount cannot wedge the sweep, and treat a liveness probe that _could not answer_ as unknown
 rather than as a confirmed exit — so a reclamation is only ever recorded for a process observed to
 have actually gone.
 
@@ -490,11 +492,11 @@ Never commit this. One file per project, linked by `projectKey`. It holds API ke
 }
 ```
 
-| Integration | Required fields               | Used by                   |
-| ----------- | ----------------------------- | ------------------------- |
+| Integration | Required fields               | Used by                                             |
+| ----------- | ----------------------------- | --------------------------------------------------- |
 | Linear      | `apiToken`, `teamKey`         | catalyst-dev, catalyst-pm, orch-monitor inbox reply |
-| Sentry      | `org`, `project`, `authToken` | catalyst-debugging        |
-| PostHog     | `apiKey`, `projectId`         | catalyst-analytics        |
+| Sentry      | `org`, `project`, `authToken` | catalyst-debugging                                  |
+| PostHog     | `apiKey`, `projectId`         | catalyst-analytics                                  |
 
 Only set up the integrations you use — the setup script asks about each one.
 
@@ -502,29 +504,28 @@ Only set up the integrations you use — the setup script asks about each one.
 
 The orch-monitor Inbox's reply/unblock feature
 ([`lib/linear-comment.mjs`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/orch-monitor/lib/linear-comment.mjs))
-posts comments as **you**, not as the Catalyst app — a Linear provenance gate (CTL-1567) deliberately
-ignores app-authored comments, so a reply posted as the bot would silently do nothing. It resolves a
-candidate token from, in priority order: env `LINEAR_API_TOKEN` → env `LINEAR_API_KEY` → this file's
-`linear.apiToken` → the nested `catalyst.linear.apiToken` — and identity-checks EACH candidate, using
-the first one that resolves to a real human (skipping, not failing on, any that resolve to an app
-actor).
+posts comments as **you**, not as the Catalyst app — a Linear provenance gate (CTL-1567)
+deliberately ignores app-authored comments, so a reply posted as the bot would silently do nothing.
+It resolves a candidate token from, in priority order: env `LINEAR_API_TOKEN` → env `LINEAR_API_KEY`
+→ this file's `linear.apiToken` → the nested `catalyst.linear.apiToken` — and identity-checks EACH
+candidate, using the first one that resolves to a real human (skipping, not failing on, any that
+resolve to an app actor).
 
 This matters because `LINEAR_API_TOKEN`/`LINEAR_API_KEY` are not exclusively a personal-token slot:
-`lib/linear-app-actor.sh` exports the app-actor's own OAuth token into those same two env vars for any
-daemon that needs bot credentials (broker/execution-core/monitor heartbeats). If your monitor process
-sources that script, its env will always carry a non-empty (but bot) token — the identity walk exists
-precisely so your real `linear.apiToken` here still gets tried and used instead of being permanently
-shadowed. Generate a personal key at Linear → Settings → API → Personal API keys (`lin_api_...`, not
-an OAuth `lin_oauth_...` value) and put it here.
+`lib/linear-app-actor.sh` exports the app-actor's own OAuth token into those same two env vars for
+any daemon that needs bot credentials (broker/execution-core/monitor heartbeats). If your monitor
+process sources that script, its env will always carry a non-empty (but bot) token — the identity
+walk exists precisely so your real `linear.apiToken` here still gets tried and used instead of being
+permanently shadowed. Generate a personal key at Linear → Settings → API → Personal API keys
+(`lin_api_...`, not an OAuth `lin_oauth_...` value) and put it here.
 
 ## Event forwarders (`catalyst.observability.forwarders`)
 
-The `catalyst-otel-forward` daemon tails the canonical event log
-(`~/catalyst/events/YYYY-MM.jsonl`) and fans events out to OTLP/HTTP, PostHog, and Cloudflare
-Analytics Engine. Config lives in the Layer-2 file above under
-`catalyst.observability.forwarders`. **All forwarders are disabled by default.** This section is
-the authoritative schema; the developer reference `plugins/dev/references/event-forwarding.md`
-covers architecture, lifecycle, and DLQ operations.
+The `catalyst-otel-forward` daemon tails the canonical event log (`~/catalyst/events/YYYY-MM.jsonl`)
+and fans events out to OTLP/HTTP, PostHog, and Cloudflare Analytics Engine. Config lives in the
+Layer-2 file above under `catalyst.observability.forwarders`. **All forwarders are disabled by
+default.** This section is the authoritative schema; the developer reference
+`plugins/dev/references/event-forwarding.md` covers architecture, lifecycle, and DLQ operations.
 
 ```json
 {
@@ -562,17 +563,17 @@ covers architecture, lifecycle, and DLQ operations.
 
 ### OTLP forwarder keys
 
-| Key                  | Default                | Description                                                                                                                                             |
-| -------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`            | `false`                | Enable the OTLP/HTTP forwarder.                                                                                                                        |
-| `endpoint`           | `http://localhost:4318`| Collector ingest. `OTEL_EXPORTER_OTLP_ENDPOINT` overrides it; a `:4317` port is auto-rewritten to `:4318` for HTTP.                                     |
-| `batchSize`          | `100`                  | Advisory target only — **not currently enforced**. Each flush sends the whole accumulated buffer for that destination in one request; a hard per-request cap is a follow-up (CTL-1506). |
-| `flushIntervalMs`    | `5000`                 | Per-forwarder flush cadence — each enabled destination runs its own timer at its own interval (CTL-1506). A destination's flushes are serialized independently: a tick arriving while its previous flush is still in flight is a no-op, so this is a floor. |
-| `lokiAcceptWindowMs` | `3600000` (1 h)        | Age cutoff for Loki records (CTL-1506). Records older than this are dropped with a `forward_dropped` (`drop_reason: "aged"`) event before any send. Note the *effective* send cutoff is slightly stricter — `lokiAcceptWindowMs − min(timeoutMs, lokiAcceptWindowMs/4)` — a delivery margin so a near-cutoff record can't age past the window mid-request. Tune to your Loki `reject_old_samples_max_age`. |
-| `maxRetryElapsedMs`  | `60000` (60 s)         | Max elapsed time for HTTP retry backoff on a retryable failure (`429`/`5xx`/network) before the batch is dead-lettered (CTL-1506). Terminal `4xx` (not `429`) is dropped immediately, never retried or DLQ'd. |
+| Key                  | Default                 | Description                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | `false`                 | Enable the OTLP/HTTP forwarder.                                                                                                                                                                                                                                                                                                                                                                            |
+| `endpoint`           | `http://localhost:4318` | Collector ingest. `OTEL_EXPORTER_OTLP_ENDPOINT` overrides it; a `:4317` port is auto-rewritten to `:4318` for HTTP.                                                                                                                                                                                                                                                                                        |
+| `batchSize`          | `100`                   | Advisory target only — **not currently enforced**. Each flush sends the whole accumulated buffer for that destination in one request; a hard per-request cap is a follow-up (CTL-1506).                                                                                                                                                                                                                    |
+| `flushIntervalMs`    | `5000`                  | Per-forwarder flush cadence — each enabled destination runs its own timer at its own interval (CTL-1506). A destination's flushes are serialized independently: a tick arriving while its previous flush is still in flight is a no-op, so this is a floor.                                                                                                                                                |
+| `lokiAcceptWindowMs` | `3600000` (1 h)         | Age cutoff for Loki records (CTL-1506). Records older than this are dropped with a `forward_dropped` (`drop_reason: "aged"`) event before any send. Note the _effective_ send cutoff is slightly stricter — `lokiAcceptWindowMs − min(timeoutMs, lokiAcceptWindowMs/4)` — a delivery margin so a near-cutoff record can't age past the window mid-request. Tune to your Loki `reject_old_samples_max_age`. |
+| `maxRetryElapsedMs`  | `60000` (60 s)          | Max elapsed time for HTTP retry backoff on a retryable failure (`429`/`5xx`/network) before the batch is dead-lettered (CTL-1506). Terminal `4xx` (not `429`) is dropped immediately, never retried or DLQ'd.                                                                                                                                                                                              |
 
-PostHog and Cloudflare AE keys mirror the JSON above; see the developer reference for their
-delivery semantics.
+PostHog and Cloudflare AE keys mirror the JSON above; see the developer reference for their delivery
+semantics.
 
 ## Cluster machine-level cloud token (`CATALYST_CLOUD_TOKEN`, CTL-1307)
 
@@ -619,10 +620,10 @@ packaging — one declarative field that sets sensible **defaults for levers tha
 (cluster-roster membership, boot-drain, which daemons start, where board reads come from). It adds
 **no** new dispatch gate; the scheduler is unchanged.
 
-| Class       | What it is                                                                                                                                                                                                                                                                            |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `developer` | A daemonless client you chat on. Not in the cluster roster, boots drained, runs no execution-core daemon or broker — it reads board UI data from a worker's monitor (agent Linear reads follow the two-mode rule — see the `catalyst-dev:linearis` skill's "Reading Linear" section). On `catalyst-stack start`, the event-mirror daemon fans worker host event logs into the local copy so `catalyst-events tail`/`wait-for` see fleet events. |
-| `worker`    | Runs the full stack and picks up work (the default; a laptop that both runs the daemon and is chatted on is a "head-full worker").                                                                                                                                                    |
+| Class       | What it is                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `developer` | A daemonless client you chat on. Not in the cluster roster, boots drained, runs no execution-core daemon or broker — it reads board UI data from a worker's monitor (agent Linear reads follow the two-mode rule — see the `catalyst-dev:linearis` skill's "Reading Linear" section). On `catalyst-stack start`, the event-mirror daemon fans worker host event logs into the local copy so `catalyst-events tail`/`wait-for` see fleet events.                                                                     |
+| `worker`    | Runs the full stack and picks up work (the default; a laptop that both runs the daemon and is chatted on is a "head-full worker").                                                                                                                                                                                                                                                                                                                                                                                  |
 | `monitor`   | A dedicated reporting host (CTL-1654). Like `developer` it carries the observation substrate (broker + monitor + event-mirror) without the execution layer (no heartbeat, no dispatch, no recovery). The event-mirror daemon (`event-mirror/index.ts`, launchd-supervised) fans each worker host's event log into the local `~/catalyst/events/YYYY-MM.jsonl` via ssh-tail with per-host byte cursors, so `catalyst-events tail`/`wait-for` resolve fleet events locally. Verify with `catalyst-stack verify-node`. |
 
 The class is **machine-local**, so it lives in **Layer-2** (`~/.config/catalyst/config.json`) beside
@@ -652,8 +653,8 @@ not per-repo:
 
 `CATALYST_DRAIN_DISABLED=1` is a **worker-only, per-node** override that makes the node
 **permanently ignore the drain flag**. It exists because an unattributed recurring writer (CTL-1675)
-keeps silently setting the drain sentinel fleet-wide, halting all new-work admission; this env lets a
-worker neutralize that flag durably without a code change.
+keeps silently setting the drain sentinel fleet-wide, halting all new-work admission; this env lets
+a worker neutralize that flag durably without a code change.
 
 - **Where to set it:** in the durable **Layer-2** `~/.config/catalyst/execution-core.env` (it is
   `source`d into the daemon's environment at launch), then `catalyst-stack restart`.
@@ -661,9 +662,9 @@ worker neutralize that flag durably without a code change.
   unset, `0`, `true`, empty — leaves the node honoring the flag. **Unset (the fleet default) is a
   byte-for-byte no-op**; nothing changes until it is set.
 - **What it does:** it makes `isDraining()` return `false` at the single admission chokepoint, so
-  **every** new-work consumer (the scheduler dispatch gate, the monitor triage-dispatch gate, and the
-  admission-state reporter) admits work again through one seam. The physical `drain` file is left in
-  place — the override neutralizes it, it does not delete it.
+  **every** new-work consumer (the scheduler dispatch gate, the monitor triage-dispatch gate, and
+  the admission-state reporter) admits work again through one seam. The physical `drain` file is
+  left in place — the override neutralizes it, it does not delete it.
 - **Tripwire (attribution):** whenever the flag is present but ignored, the daemon emits a
   once-per-episode **`node.drain.ignored`** event carrying the flag's mtime and a truncated `ps`
   snapshot, to keep gathering evidence for CTL-1675. It re-arms once the flag is removed and
@@ -768,8 +769,8 @@ plist; the launcher sources it from a `0600` file at run time.
    ```
 
    If the name is set via Layer-2 `catalyst.cloud.tokenEnv` rather than the env override, set
-   `TOKEN_VAR` to that value by hand. After step 2, `catalyst doctor`'s `replica-token` line
-   reports the name this host actually resolved — use it to confirm you provisioned the right one.
+   `TOKEN_VAR` to that value by hand. After step 2, `catalyst doctor`'s `replica-token` line reports
+   the name this host actually resolved — use it to confirm you provisioned the right one.
 
 2. Install and start the supervised writer:
 
@@ -801,7 +802,8 @@ plist; the launcher sources it from a `0600` file at run time.
    ```
 
    The command refuses to change the Layer-2 read flag until the seed checks in step 3 are genuinely
-   green. Use `catalyst-stack activate-replica --dry-run` to preview the config merge without writing.
+   green. Use `catalyst-stack activate-replica --dry-run` to preview the config merge without
+   writing.
 
 5. On a worker node, restart execution-core so the scheduler constructs its replica reader:
 
@@ -823,24 +825,25 @@ authoritative acceptance check—an installed service alone is not proof of a us
 ## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
 
 `catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from
-side effects — whether a webhook tunnel happens to be configured, whether a cluster roster happens to
-resolve to more than one host. It is resolved **identically** by two independently maintained
+side effects — whether a webhook tunnel happens to be configured, whether a cluster roster happens
+to resolve to more than one host. It is resolved **identically** by two independently maintained
 implementations — `lib/deployment-mode.mjs` (Node/ESM) and `lib/catalyst-deployment-mode.sh` (the
-Bash mirror, since Bash cannot import a JS leaf) — kept honest by a fixture-matrix cross-stack parity
-test (`__tests__/deployment-mode-parity.test.sh`).
+Bash mirror, since Bash cannot import a JS leaf) — kept honest by a fixture-matrix cross-stack
+parity test (`__tests__/deployment-mode-parity.test.sh`).
 
-| Value                  | Meaning                                                                                                                       |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `single-host` (default) | A lone node — no cluster substrate expected.                                                                                  |
-| `cluster`               | A coordinated multi-host fleet; roster/HRW/liveness are graded by `catalyst doctor`.                                          |
-| `cloud`                 | A managed-container node; the smee webhook tunnel must NOT be live and secrets are platform-delivered.                       |
+| Value                   | Meaning                                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------------------ |
+| `single-host` (default) | A lone node — no cluster substrate expected.                                                           |
+| `cluster`               | A coordinated multi-host fleet; roster/HRW/liveness are graded by `catalyst doctor`.                   |
+| `cloud`                 | A managed-container node; the smee webhook tunnel must NOT be live and secrets are platform-delivered. |
 
 A 4th `both` value was deliberately rejected (CTL-1617 design §2) — the provider's own
 `webhook.delivery.id` already makes concurrent smee+cloud ingestion dedup-safe without one.
 
-Deployment mode is genuinely **fleet-scoped**, so — unlike `catalyst.node.class` — it lives primarily
-in **Layer-1** (committed, shared by the whole repo checkout), with a **Layer-2 override** as the
-exception hatch (e.g. a laptop dev-clone of a cluster-declared repo overriding to `single-host`):
+Deployment mode is genuinely **fleet-scoped**, so — unlike `catalyst.node.class` — it lives
+primarily in **Layer-1** (committed, shared by the whole repo checkout), with a **Layer-2 override**
+as the exception hatch (e.g. a laptop dev-clone of a cluster-declared repo overriding to
+`single-host`):
 
 In `.catalyst/config.json` (Layer-1, fleet-wide default):
 
@@ -861,12 +864,12 @@ deployment-mode WARN (advisory only — nothing else changes).
 
 **Resolution** (`resolveDeploymentMode()` / `catalyst_resolve_deployment_mode`):
 
-| Precedence | Source                                                |
-| ---------- | ------------------------------------------------------ |
-| 1          | `CATALYST_DEPLOYMENT_MODE` env var                     |
-| 2          | `catalyst.deployment.mode` in the Layer-2 config       |
-| 3          | `catalyst.deployment.mode` in the Layer-1 config       |
-| 4          | constant default `single-host`                         |
+| Precedence | Source                                           |
+| ---------- | ------------------------------------------------ |
+| 1          | `CATALYST_DEPLOYMENT_MODE` env var               |
+| 2          | `catalyst.deployment.mode` in the Layer-2 config |
+| 3          | `catalyst.deployment.mode` in the Layer-1 config |
+| 4          | constant default `single-host`                   |
 
 - **Absent everywhere ⇒ `single-host`** — zero-config, zero-behavior-change. (Once wired: a WARN
   will note the value was inferred — the resolver itself is deliberately log-free; the WARN lives in
@@ -876,8 +879,8 @@ deployment-mode WARN (advisory only — nothing else changes).
   it degrades to `single-host` (the safest direction) at the layer it was found. (Future behavior,
   PR2: `catalyst doctor` will FAIL until the value is corrected.)
 - A missing/malformed config file, or a present-but-non-string value (`true`, `123`, `[]`), both
-  settle rather than throw — see `lib/deployment-mode.mjs`'s `classifyCandidate` for the full validity
-  ladder.
+  settle rather than throw — see `lib/deployment-mode.mjs`'s `classifyCandidate` for the full
+  validity ladder.
 - **ENV-vs-FILE asymmetry**: `CATALYST_DEPLOYMENT_MODE` is captured into a long-lived daemon's
   environment once, at launch. Layer-1/Layer-2 file edits are picked up **live**, on every call. A
   daemon needs restarting for an env change to take effect.
@@ -887,68 +890,68 @@ deployment-mode WARN (advisory only — nothing else changes).
   start of every resolution, so it always reflects the latest call). Grading that breadcrumb is
   future doctor work (PR2) — nothing consumes it yet.
 
-PR1 (this file) ships the resolver in isolation — nothing outside its own tests imports it yet; wiring
-into webhook ingestion gating, secret-provider selection, and `catalyst doctor`'s roster-consistency
-checks lands in later PRs of the CTL-1617 migration plan.
+PR1 (this file) ships the resolver in isolation — nothing outside its own tests imports it yet;
+wiring into webhook ingestion gating, secret-provider selection, and `catalyst doctor`'s
+roster-consistency checks lands in later PRs of the CTL-1617 migration plan.
 
 ## Secret contract registry (CTL-1616)
 
-Every secret Catalyst resolves — the GitHub token, the Linear API token, the OAuth-mint
-credentials, the cloud token, the Groq key, the cluster age-key — is a row in **one frozen
-registry**, `SECRET_REGISTRY` in `plugins/dev/scripts/lib/secret-contract.mjs`. It **models** what
-used to be independently hand-rolled resolution ladders per secret (the 2026-08-02 fleet 401
-outage was four divergent copies of one chain) — the Linear-token read and the Linear OAuth-mint
-trio are live consumers of it, but the `github-token`/`webhook-secret` rows and the `groq-api-key`
-row are not yet RESOLVED through the registry: the live GitHub-token/webhook-secret value paths
-(CTL-1612's `catalyst-secret-env.sh` / `github-auth-preflight.mjs`) and Groq's pre-existing
+Every secret Catalyst resolves — the GitHub token, the Linear API token, the OAuth-mint credentials,
+the cloud token, the Groq key, the cluster age-key — is a row in **one frozen registry**,
+`SECRET_REGISTRY` in `plugins/dev/scripts/lib/secret-contract.mjs`. It **models** what used to be
+independently hand-rolled resolution ladders per secret (the 2026-08-02 fleet 401 outage was four
+divergent copies of one chain) — the Linear-token read and the Linear OAuth-mint trio are live
+consumers of it, but the `github-token`/`webhook-secret` rows and the `groq-api-key` row are not yet
+RESOLVED through the registry: the live GitHub-token/webhook-secret value paths (CTL-1612's
+`catalyst-secret-env.sh` / `github-auth-preflight.mjs`) and Groq's pre-existing
 `lib/api-key-health.mjs` ladder remain their own, unrepointed implementations — but the
 `github-token`/`webhook-secret` ROWS do have one live production consumer already:
 `execution-core/cluster-sync.mjs` imports `SECRET_REGISTRY` and derives its boot-captured secret
 membership (which changed credentials require daemon-restart signaling) from these rows' delivery
 types, so their fields are load-bearing even before the resolution cutover (`docs/architecture.md`'s
-Secret Contract section has the full per-row cutover status). Bash cannot import a JS leaf, so the registry has a
-second, independently-maintained encoding — `plugins/dev/scripts/lib/catalyst-secret-contract.sh` —
-kept honest by a cross-stack **three-way parity test**
-(`__tests__/secret-contract-parity.test.sh`): bash and JS must each match a computed-expected
-value, never merely match each other, and the two registries must enumerate identical row-id sets.
-Both files are zero-import leaves (`node:fs`/`node:os`/`node:path` only on the JS side) so
-`catalyst doctor`, which runs under bare Node, can import the engine without pulling in
-`execution-core/config.mjs`'s `bun:sqlite`-reaching module graph.
+Secret Contract section has the full per-row cutover status). Bash cannot import a JS leaf, so the
+registry has a second, independently-maintained encoding —
+`plugins/dev/scripts/lib/catalyst-secret-contract.sh` — kept honest by a cross-stack **three-way
+parity test** (`__tests__/secret-contract-parity.test.sh`): bash and JS must each match a
+computed-expected value, never merely match each other, and the two registries must enumerate
+identical row-id sets. Both files are zero-import leaves (`node:fs`/`node:os`/`node:path` only on
+the JS side) so `catalyst doctor`, which runs under bare Node, can import the engine without pulling
+in `execution-core/config.mjs`'s `bun:sqlite`-reaching module graph.
 
 ### Registry rows
 
 A row is a data fact, not code — the ~7-case engine below is what walks it. Every row declares:
 
-| Field           | Meaning                                                                                                     |
-| --------------- | ------------------------------------------------------------------------------------------------------------- |
-| `id`            | Canonical identity; doubles as the SOPS bare-file basename for file-backed rows.                             |
-| `envNames`      | Env-var aliases, precedence order (empty for rows with no direct env alias).                                |
-| `delivery`      | One of the 7 delivery types below.                                                                           |
-| `configJsonPath`| Dotted path inside the resolved Layer-2 JSON, for `config-json`/`platform-env` rows; `null` otherwise.       |
-| `rotation`      | `{ class, trigger? }` — see Rotation below.                                                                  |
-| `bootstrapFor`  | `"cluster"` \| `"cloud"` \| `null` — the deployment mode this row bootstraps.                                |
+| Field            | Meaning                                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------------------ |
+| `id`             | Canonical identity; doubles as the SOPS bare-file basename for file-backed rows.                       |
+| `envNames`       | Env-var aliases, precedence order (empty for rows with no direct env alias).                           |
+| `delivery`       | One of the 7 delivery types below.                                                                     |
+| `configJsonPath` | Dotted path inside the resolved Layer-2 JSON, for `config-json`/`platform-env` rows; `null` otherwise. |
+| `rotation`       | `{ class, trigger? }` — see Rotation below.                                                            |
+| `bootstrapFor`   | `"cluster"` \| `"cloud"` \| `null` — the deployment mode this row bootstraps.                          |
 
 Rows with a more specific shape declare additional fields: `familyPrefix` (the one
-`bare-file-family` row), `defaultLocalPath` (the one `local-only` row, resolved relative to
-`HOME`), and — `linear-worker-actor` only — `credentialEnvPair` (an env-var pair checked ahead of
-every config-file tier) and `legacyConfigTiers` + `requiredObjectFields` (§ Linear worker-actor
-tiers below).
+`bare-file-family` row), `defaultLocalPath` (the one `local-only` row, resolved relative to `HOME`),
+and — `linear-worker-actor` only — `credentialEnvPair` (an env-var pair checked ahead of every
+config-file tier) and `legacyConfigTiers` + `requiredObjectFields` (§ Linear worker-actor tiers
+below).
 
 The 11 seed rows:
 
-| id                          | delivery          | rotation                | bootstrapFor | notes                                                                 |
-| ---------------------------- | ----------------- | ------------------------ | ------------ | ---------------------------------------------------------------------- |
-| `github-token`                | `bare-file`        | `re-armable` / `timer`   | —            | aliases `GH_TOKEN`, `GITHUB_TOKEN`                                    |
-| `webhook-secret`               | `bare-file`        | `boot-only`              | —            | env alias `CATALYST_WEBHOOK_SECRET`                                   |
-| `linear-webhook-secret`        | `bare-file-family` | `boot-only`              | —            | `familyPrefix: "linear-webhook-secret-"`; a predicate, not a scalar   |
-| `claude-accounts.env`          | `env-file`         | `boot-only`              | —            | presence-only (a whole sourced env file, not one value)               |
-| `execution-core.env`           | `env-file`         | `boot-only`              | —            | same shape as `claude-accounts.env`                                   |
-| `linear-api-token`             | `env-alias`        | `re-armable` / `on-401`  | —            | aliases `LINEAR_API_TOKEN`, `LINEAR_API_KEY`                          |
-| `linear-orchestrator-actor`    | `config-json`      | `re-armable` / `on-401`  | —            | `catalyst.linear.bot.orchestrator` — kept separate from worker-actor  |
-| `linear-worker-actor`          | `config-json`      | `boot-only`              | —            | `catalyst.linear.bot.worker` + a legacy fallback chain (below)        |
-| `groq-api-key`                 | `config-json`      | `boot-only`              | —            | env alias `GROQ_API_KEY`, config path `groq.apiKey`                   |
-| `cloud-token`                  | `platform-env`     | `boot-only`              | `cloud`      | default env-var `CATALYST_CLOUD_TOKEN`; the NAME is itself resolvable |
-| `age-key`                      | `local-only`       | `n/a`                    | `cluster`    | presence-checked only, never value-read; default `~/.config/catalyst/age.key` |
+| id                          | delivery           | rotation                | bootstrapFor | notes                                                                         |
+| --------------------------- | ------------------ | ----------------------- | ------------ | ----------------------------------------------------------------------------- |
+| `github-token`              | `bare-file`        | `re-armable` / `timer`  | —            | aliases `GH_TOKEN`, `GITHUB_TOKEN`                                            |
+| `webhook-secret`            | `bare-file`        | `boot-only`             | —            | env alias `CATALYST_WEBHOOK_SECRET`                                           |
+| `linear-webhook-secret`     | `bare-file-family` | `boot-only`             | —            | `familyPrefix: "linear-webhook-secret-"`; a predicate, not a scalar           |
+| `claude-accounts.env`       | `env-file`         | `boot-only`             | —            | presence-only (a whole sourced env file, not one value)                       |
+| `execution-core.env`        | `env-file`         | `boot-only`             | —            | same shape as `claude-accounts.env`                                           |
+| `linear-api-token`          | `env-alias`        | `re-armable` / `on-401` | —            | aliases `LINEAR_API_TOKEN`, `LINEAR_API_KEY`                                  |
+| `linear-orchestrator-actor` | `config-json`      | `re-armable` / `on-401` | —            | `catalyst.linear.bot.orchestrator` — kept separate from worker-actor          |
+| `linear-worker-actor`       | `config-json`      | `boot-only`             | —            | `catalyst.linear.bot.worker` + a legacy fallback chain (below)                |
+| `groq-api-key`              | `config-json`      | `boot-only`             | —            | env alias `GROQ_API_KEY`, config path `groq.apiKey`                           |
+| `cloud-token`               | `platform-env`     | `boot-only`             | `cloud`      | default env-var `CATALYST_CLOUD_TOKEN`; the NAME is itself resolvable         |
+| `age-key`                   | `local-only`       | `n/a`                   | `cluster`    | presence-checked only, never value-read; default `~/.config/catalyst/age.key` |
 
 `linear-orchestrator-actor` and `linear-worker-actor` are deliberately separate rows — they mint
 identically and differ only in their config path, an easy-to-collapse-wrongly refactor the registry
@@ -959,15 +962,15 @@ exists to prevent.
 The engine dispatches on exactly one of 7 delivery types — parity cost between the bash and JS
 implementations scales per type, not per row:
 
-| Delivery           | Resolution chain                                                                                                     |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `bare-file`          | explicit `CATALYST_<ID>_FILE` override → `CATALYST_CONFIG_DIR` → the directory holding `CATALYST_LAYER2_CONFIG_FILE` (or its `~/.config/catalyst/config.json` default) → XDG dir → falls back to an inherited env alias if no file is found |
-| `bare-file-family`   | not a resolvable scalar — a membership predicate (`isSecretFamilyMember`) over an open-ended prefix family          |
-| `env-file`           | presence/non-empty check of a whole file at the same bare-file candidate paths (the file is *sourced*, not read for one value) |
-| `env-alias`          | first non-empty `envNames` entry, in order — no file search at all                                                  |
-| `config-json`        | env alias (if any) → the resolved Layer-2 JSON's `configJsonPath`                                                   |
-| `platform-env`       | the row's env-var **name** is itself resolved (env override → Layer-2 name override → default), then that variable's value is read |
-| `local-only`         | `statSync` presence check of a single path only — the value is never read                                           |
+| Delivery           | Resolution chain                                                                                                                                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bare-file`        | explicit `CATALYST_<ID>_FILE` override → `CATALYST_CONFIG_DIR` → the directory holding `CATALYST_LAYER2_CONFIG_FILE` (or its `~/.config/catalyst/config.json` default) → XDG dir → falls back to an inherited env alias if no file is found |
+| `bare-file-family` | not a resolvable scalar — a membership predicate (`isSecretFamilyMember`) over an open-ended prefix family                                                                                                                                  |
+| `env-file`         | presence/non-empty check of a whole file at the same bare-file candidate paths (the file is _sourced_, not read for one value)                                                                                                              |
+| `env-alias`        | first non-empty `envNames` entry, in order — no file search at all                                                                                                                                                                          |
+| `config-json`      | env alias (if any) → the resolved Layer-2 JSON's `configJsonPath`                                                                                                                                                                           |
+| `platform-env`     | the row's env-var **name** is itself resolved (env override → Layer-2 name override → default), then that variable's value is read                                                                                                          |
+| `local-only`       | `statSync` presence check of a single path only — the value is never read                                                                                                                                                                   |
 
 **Bare-file candidate directory ≠ `resolveLayer2Path()`.** `secretFileCandidates()`
 (`secret-contract.mjs:607-620`, mirrored in `catalyst-secret-contract.sh:355-380`) builds its
@@ -976,27 +979,27 @@ Layer-2-directory candidate straight from `CATALYST_LAYER2_CONFIG_FILE` (or the 
 `CATALYST_MACHINE_CONFIG`-only override is never consulted here, unlike every `config-json`/
 `platform-env` row (below). An operator who sets only `CATALYST_MACHINE_CONFIG=/custom/config.json`
 and drops a sibling `/custom/github-token` next to it will find that file skipped: both engines
-still search the home/XDG locations. Provision bare-file secrets via `CATALYST_CONFIG_DIR`, the
-XDG directory, or `CATALYST_LAYER2_CONFIG_FILE` itself so both engines look in the same place.
+still search the home/XDG locations. Provision bare-file secrets via `CATALYST_CONFIG_DIR`, the XDG
+directory, or `CATALYST_LAYER2_CONFIG_FILE` itself so both engines look in the same place.
 
 ### Resolution result
 
-`resolveSecret(id, { env, deploymentMode, cwd })` (JS) / `catalyst_resolve_secret <id>` (bash)
-never throws. It returns `{ value, source, provider, rotation, ...extras }` for a known id, or
+`resolveSecret(id, { env, deploymentMode, cwd })` (JS) / `catalyst_resolve_secret <id>` (bash) never
+throws. It returns `{ value, source, provider, rotation, ...extras }` for a known id, or
 `{ value: null, source: null, provider: null, rotation: null }` for an unknown one. `provider` is
 the row's `delivery` — a logging breadcrumb only; callers never branch on it. `source` is one of
 `shared-file` | `operator-override` | `inherited` | `config-json` | `legacy-config-json` |
-`platform-env` | `present` | `absent` | `none` — with two exceptions, both of them a *known* id
-whose `source` collapses to `null` while `provider`/`rotation` stay populated (unlike the
-unknown-id shape, where every field is `null`): the one `bare-file-family` row
-(`linear-webhook-secret`) has no scalar value, so it resolves to
+`platform-env` | `present` | `absent` | `none` — with two exceptions, both of them a _known_ id
+whose `source` collapses to `null` while `provider`/`rotation` stay populated (unlike the unknown-id
+shape, where every field is `null`): the one `bare-file-family` row (`linear-webhook-secret`) has no
+scalar value, so it resolves to
 `{ value: null, source: null, provider: "bare-file-family", rotation: {...} }`; and, in genuine
 cloud mode, any row other than the `cloud-token` bootstrap row itself resolves the identical
 `{ value: null, source: null, provider, rotation }` shape (that row's own `provider`/`rotation`)
 when `cloud-token` fails to resolve — the bootstrap short-circuit, § Cloud guard below. Both are
 normal, expected states — not evidence of an unknown id — so callers must not treat a `null`
-`source` as impossible or unknown-id-only. The bash mirror echoes the same three fields
-pipe-joined (`value|source|provider`) and additionally exports non-secret
+`source` as impossible or unknown-id-only. The bash mirror echoes the same three fields pipe-joined
+(`value|source|provider`) and additionally exports non-secret
 `CATALYST_SECRET_LAST_SOURCE`/`_PROVIDER` breadcrumbs for the calling shell — but deliberately
 **never exports the resolved value** (`export -n` is reasserted on every call, since bash's export
 attribute is sticky across reassignment), so a long-lived daemon shell can't leak a credential into
@@ -1004,23 +1007,23 @@ every child process it launches.
 
 ### Cloud guard
 
-The cloud provider only ever activates when the full CTL-1617 deployment-mode object satisfies
-**all three**: `mode === "cloud"`, `inferred === false`, and `recognized !== false`. Because the
-guard lives once in the shared engine, every row gets it for free. When genuinely cloud, resolution
+The cloud provider only ever activates when the full CTL-1617 deployment-mode object satisfies **all
+three**: `mode === "cloud"`, `inferred === false`, and `recognized !== false`. Because the guard
+lives once in the shared engine, every row gets it for free. When genuinely cloud, resolution
 short-circuits to a pure env-alias read of `envNames` for the secret **value** — no file search for
 the value, ever — with one carve-out: `cloud-token` itself is `platform-env` delivery, and even in
 genuine cloud mode it first resolves its env-var **name** via `resolveCloudTokenName()` (env
-override → the Layer-2 file's `catalyst.cloud.tokenEnv` → default), so a managed container can
-still consult a config file to learn *which* variable to read before reading that variable's
-value. Anything else (single-host, cluster, or an inferred/unrecognized cloud guess) runs the row's
-normal delivery-type chain unchanged.
+override → the Layer-2 file's `catalyst.cloud.tokenEnv` → default), so a managed container can still
+consult a config file to learn _which_ variable to read before reading that variable's value.
+Anything else (single-host, cluster, or an inferred/unrecognized cloud guess) runs the row's normal
+delivery-type chain unchanged.
 
 A second gate — the **bootstrap short-circuit** — applies only in genuine cloud mode: if the active
-mode's `bootstrapFor` row (`cloud-token`) fails to resolve, every *other* cloud-mode secret
+mode's `bootstrapFor` row (`cloud-token`) fails to resolve, every _other_ cloud-mode secret
 resolution returns `{ value: null, source: null, provider, rotation }` (that row's own `provider`
 and `rotation`, populated) without probing further, so a half-provisioned managed container fails
-loudly and coherently instead of limping through partial resolution. The
-bootstrap row itself is exempt from this check (it must resolve on its own terms).
+loudly and coherently instead of limping through partial resolution. The bootstrap row itself is
+exempt from this check (it must resolve on its own terms).
 
 ### Layer-2 path resolution
 
@@ -1043,24 +1046,25 @@ in which case the canonical (new) path wins and a one-time-per-message `WARN` is
 
 Every row declares a rotation class:
 
-| Class                   | Meaning                                                                                          |
-| ------------------------ | ------------------------------------------------------------------------------------------------- |
-| `boot-only`              | Captured once (at daemon boot, or per-call for a config-json mint) — a value change requires a restart to take effect. |
-| `re-armable` / `timer`   | Proactively re-checked on a recurring tick — the row's declared shape (`github-token`). Its actual re-arm today still runs through the pre-existing CTL-1612 `rearmGithubTokenFromFile` (called every daemon cluster-sync tick in `execution-core/daemon.mjs`), not through this contract's own `registerRearmHook`/`armSecret` seam — see below, `github-token` remains hookless. |
-| `re-armable` / `on-401`  | Reactively re-minted on an observed auth failure, not a timer (the Linear OAuth-mint shape).      |
-| `n/a`                    | The row's value is never fetched at all (only `age-key` — rotation isn't a question the contract can answer for a presence-only row). |
+| Class                   | Meaning                                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `boot-only`             | Captured once (at daemon boot, or per-call for a config-json mint) — a value change requires a restart to take effect.                                                                                                                                                                                                                                                             |
+| `re-armable` / `timer`  | Proactively re-checked on a recurring tick — the row's declared shape (`github-token`). Its actual re-arm today still runs through the pre-existing CTL-1612 `rearmGithubTokenFromFile` (called every daemon cluster-sync tick in `execution-core/daemon.mjs`), not through this contract's own `registerRearmHook`/`armSecret` seam — see below, `github-token` remains hookless. |
+| `re-armable` / `on-401` | Reactively re-minted on an observed auth failure, not a timer (the Linear OAuth-mint shape).                                                                                                                                                                                                                                                                                       |
+| `n/a`                   | The row's value is never fetched at all (only `age-key` — rotation isn't a question the contract can answer for a presence-only row).                                                                                                                                                                                                                                              |
 
-`armSecret(id, { env, deploymentMode })` never throws and returns `{ armed, rotated,
-restartRequired }`. `restartRequired` is the literal signal the 2026-08-02 outage lacked: it is
-`true` exactly when a `boot-only` row's resolved value has changed since the last observation.
-`registerRearmHook(id, fn)` attaches an in-process rearm implementation to a `re-armable` row — it
-refuses (returns `false`, never throws) against a `boot-only`/`n/a` row, an unknown id, or a
-non-function, so a hookless row can never silently claim "no restart needed". A `re-armable` row
-with **no** hook registered degrades to exactly the same `boot-only`-shaped behavior (resolve
-fresh, diff against the last-observed value, report `restartRequired` on change) — the capability
-ceiling is honest either way. As shipped, `linear-orchestrator-actor` has a real hook (registered
-by `execution-core/linear-remint.mjs` against its cooldown-guarded reminter); `github-token` and
-`linear-api-token` remain hookless, so both currently take the degrade path in practice.
+`armSecret(id, { env, deploymentMode })` never throws and returns
+`{ armed, rotated, restartRequired }`. `restartRequired` is the literal signal the 2026-08-02 outage
+lacked: it is `true` exactly when a `boot-only` row's resolved value has changed since the last
+observation. `registerRearmHook(id, fn)` attaches an in-process rearm implementation to a
+`re-armable` row — it refuses (returns `false`, never throws) against a `boot-only`/`n/a` row, an
+unknown id, or a non-function, so a hookless row can never silently claim "no restart needed". A
+`re-armable` row with **no** hook registered degrades to exactly the same `boot-only`-shaped
+behavior (resolve fresh, diff against the last-observed value, report `restartRequired` on change) —
+the capability ceiling is honest either way. As shipped, `linear-orchestrator-actor` has a real hook
+(registered by `execution-core/linear-remint.mjs` against its cooldown-guarded reminter);
+`github-token` and `linear-api-token` remain hookless, so both currently take the degrade path in
+practice.
 
 ### Linear worker-actor's legacy fallback tiers
 
@@ -1080,18 +1084,18 @@ part of this fold.)
    legacy file (walking up from `cwd` for a `.catalyst/config.json` `projectKey`, reading a sibling
    `config-<key>.json`) — **the generalization**: that sibling now resolves relative to the
    canonical `resolveLayer2Path()` directory, not the old script's hardcoded
-   `$HOME/.config/catalyst`, so it moves with `CATALYST_LAYER2_CONFIG_FILE`/`CATALYST_MACHINE_CONFIG`
-   overrides exactly like every other row's Layer-2-relative path. An operator relying on the old
-   hardcoded location under a custom Layer-2 path gets a different (but now-correct-for-the-chain)
-   file here than the pre-fold script read.
+   `$HOME/.config/catalyst`, so it moves with
+   `CATALYST_LAYER2_CONFIG_FILE`/`CATALYST_MACHINE_CONFIG` overrides exactly like every other row's
+   Layer-2-relative path. An operator relying on the old hardcoded location under a custom Layer-2
+   path gets a different (but now-correct-for-the-chain) file here than the pre-fold script read.
 4. `legacyConfigTiers`' `global-legacy` tier, tried only once tier 3 also misses: the global
    `catalyst.linear.agent` path in the canonical Layer-2 file.
 
 A row that declares `requiredObjectFields` (only `linear-worker-actor`, requiring `clientId` and
-`clientSecret`) must find every named field present and non-blank in a candidate tier's raw
-object value before that tier is allowed to win — a partially-populated tier (e.g. a
-credential-free `{webhookSecret, botUserId}` object) falls through to the next tier instead of
-capturing resolution and failing downstream.
+`clientSecret`) must find every named field present and non-blank in a candidate tier's raw object
+value before that tier is allowed to win — a partially-populated tier (e.g. a credential-free
+`{webhookSecret, botUserId}` object) falls through to the next tier instead of capturing resolution
+and failing downstream.
 
 ### Doctor integration
 
@@ -1154,20 +1158,20 @@ These execution-core environment variables bound how long repeated fence suppres
 invisible to a human. The count and age must both be reached; the 45-minute floor spans three
 15-minute fence cooldowns, preventing a fast tick loop from paging on a transient blip.
 
-| Variable | Default | Meaning |
-| --- | ---: | --- |
-| `CATALYST_FENCE_STANDOFF_CAP` | `4` | Consecutive suppressions required before out-of-band escalation. |
-| `CATALYST_FENCE_STANDOFF_MIN_AGE_MS` | `2700000` (45 min) | Minimum episode age before out-of-band escalation. |
-| `CATALYST_FENCE_STANDOFF_COOLDOWN_MS` | `21600000` (6 h) | After a delivered break-glass, how long the terminal sweep skips this ticket's probe + fence check + `needs-human` write. |
-| `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` | `5` | Consecutive FAILED break-glass deliveries that may bypass the ordinary 15-minute suppression cooldown to retry on the very next tick. |
+| Variable                                     |            Default | Meaning                                                                                                                               |
+| -------------------------------------------- | -----------------: | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `CATALYST_FENCE_STANDOFF_CAP`                |                `4` | Consecutive suppressions required before out-of-band escalation.                                                                      |
+| `CATALYST_FENCE_STANDOFF_MIN_AGE_MS`         | `2700000` (45 min) | Minimum episode age before out-of-band escalation.                                                                                    |
+| `CATALYST_FENCE_STANDOFF_COOLDOWN_MS`        |   `21600000` (6 h) | After a delivered break-glass, how long the terminal sweep skips this ticket's probe + fence check + `needs-human` write.             |
+| `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` |                `5` | Consecutive FAILED break-glass deliveries that may bypass the ordinary 15-minute suppression cooldown to retry on the very next tick. |
 
-Crossing the bound writes a durable board/push escalation and does not loosen the fence or perform
-a Linear write. Two cadence caveats:
+Crossing the bound writes a durable board/push escalation and does not loosen the fence or perform a
+Linear write. Two cadence caveats:
 
 - The out-of-band escalation fires **once per episode**. `breakGlassAt` latches on the first
   delivered break-glass and is reset only by `clearFenceStandoff` (a later fence PASS, or the
-  terminal branch of the sweep), so `CATALYST_FENCE_STANDOFF_COOLDOWN_MS` paces the ticket's
-  *fence re-probe*, not a repeat page.
+  terminal branch of the sweep), so `CATALYST_FENCE_STANDOFF_COOLDOWN_MS` paces the ticket's _fence
+  re-probe_, not a repeat page.
 - Because that cooldown gates the whole terminal-sweep probe+write block, a standoff that heals
   after a break-glass has its `needs-human` Linear write — and the terminal-clear retraction on a
   late Done — deferred by up to one cooldown window (6 h by default, versus the 15 min the
@@ -1175,22 +1179,23 @@ a Linear write. Two cadence caveats:
 - A break-glass whose durable-record or event write fails drops the 15-minute marker so delivery
   retries next tick. `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` bounds that bypass: past it the
   ordinary cooldown is retained, so a persistently unwritable sink degrades to a 15-minute retry
-  cadence instead of re-running the per-tick Linear probe + fence-check subprocess forever
-  (the CTL-1329 quota burn).
+  cadence instead of re-running the per-tick Linear probe + fence-check subprocess forever (the
+  CTL-1329 quota burn).
 
 ### Broker watchdog session eviction (CTL-1516)
 
 The broker's watchdog tick keeps per-session bookkeeping (`lastHeartbeat`, `workerToOrchestrator`)
-and a wake-dedup cache (`_emittedWakeCache`). So these stay bounded over a long-lived broker process,
-the tick sweeps expired wake-cache entries every pass and evicts a session's heartbeat/orchestrator
-rows once it is definitively finished. This knob is an env var on the `catalyst-broker` process:
+and a wake-dedup cache (`_emittedWakeCache`). So these stay bounded over a long-lived broker
+process, the tick sweeps expired wake-cache entries every pass and evicts a session's
+heartbeat/orchestrator rows once it is definitively finished. This knob is an env var on the
+`catalyst-broker` process:
 
 - `FILTER_HEARTBEAT_EVICT_MS` (default `1800000`, 30 min) — horizon past which a **stale** session's
   `lastHeartbeat` + `workerToOrchestrator` rows are evicted even if it never matched an interest. A
   session reported `dead` by `claude agents` is evicted immediately; an unknown-liveness session is
   evicted only once it is both stale (past `FILTER_HEARTBEAT_STALE_MS`) **and** older than this
-  horizon, so eviction can never precede the stale threshold. Generous by default
-  (≈10× `FILTER_HEARTBEAT_STALE_MS`) so only unambiguously-finished sessions are dropped — a genuine
+  horizon, so eviction can never precede the stale threshold. Generous by default (≈10×
+  `FILTER_HEARTBEAT_STALE_MS`) so only unambiguously-finished sessions are dropped — a genuine
   revival simply re-checks-in and recreates the rows.
 
 ### Phase-artifact thoughts sync (`catalyst.phaseArtifactSync.mode`, CTL-1490)
@@ -1198,23 +1203,23 @@ rows once it is definitively finished. This knob is an env var on the `catalyst-
 Phase skills write a durable local thoughts doc after each phase (the record
 `reconstruct-ticket-state.mjs`'s thoughts-artifact walk reads to figure out where a ticket left off
 after a crash or cross-host takeover — see `docs/orchestrator-overview.md`). Pushing that doc
-off-machine (`humanlayer thoughts sync`) is what makes it survive the *local* disk being lost too,
+off-machine (`humanlayer thoughts sync`) is what makes it survive the _local_ disk being lost too,
 not just the process. `catalyst.phaseArtifactSync.mode` controls when that push happens:
 
-| Mode (`resolve_phase_artifact_sync_mode` in `plugins/dev/scripts/lib/phase-artifact-sync-mode.sh`) | Behavior |
-| --- | --- |
-| `off` (default) | Roster-gated, byte-identical to pre-CTL-1490 behavior: a single-host roster (`.catalyst/hosts.json` absent or ≤1 entry) skips the sync entirely (exit 0, no push); a multi-host roster syncs, and a sync failure blocks the phase (`exit 11`, terminal event `failed`, reason `thoughts_sync_failed`). |
-| `shadow` | Always syncs regardless of roster size, but a failure never blocks the phase — it appends a `thoughts.sync.failed.<phase>.<ticket>` WARN event to the unified event log and continues (`exit 0`). Use this to observe sync reliability on a single-host node before turning `enforce` on. |
-| `enforce` | Always syncs regardless of roster size, and a failure blocks the phase exactly like `off`'s multi-host path (`exit 11`, terminal event `failed`, reason `thoughts_sync_failed`). |
+| Mode (`resolve_phase_artifact_sync_mode` in `plugins/dev/scripts/lib/phase-artifact-sync-mode.sh`) | Behavior                                                                                                                                                                                                                                                                                               |
+| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `off` (default)                                                                                    | Roster-gated, byte-identical to pre-CTL-1490 behavior: a single-host roster (`.catalyst/hosts.json` absent or ≤1 entry) skips the sync entirely (exit 0, no push); a multi-host roster syncs, and a sync failure blocks the phase (`exit 11`, terminal event `failed`, reason `thoughts_sync_failed`). |
+| `shadow`                                                                                           | Always syncs regardless of roster size, but a failure never blocks the phase — it appends a `thoughts.sync.failed.<phase>.<ticket>` WARN event to the unified event log and continues (`exit 0`). Use this to observe sync reliability on a single-host node before turning `enforce` on.              |
+| `enforce`                                                                                          | Always syncs regardless of roster size, and a failure blocks the phase exactly like `off`'s multi-host path (`exit 11`, terminal event `failed`, reason `thoughts_sync_failed`).                                                                                                                       |
 
 Any unrecognized value fails safe to `off` — a typo can never silently start (or silently stop)
 pushing thoughts docs off-machine.
 
-**Precedence** (`plugins/dev/scripts/lib/phase-artifact-sync-mode.sh`): the `CATALYST_PHASE_ARTIFACT_SYNC_MODE`
-env var (case-insensitive, whitespace-stripped) wins over `.catalyst/config.json`'s
-`catalyst.phaseArtifactSync.mode`, which wins over the `off` default. Consumed by
-`plugins/dev/scripts/lib/thoughts-sync-gate.sh`, called from every phase skill immediately before its
-terminal `phase-agent-emit-complete` call.
+**Precedence** (`plugins/dev/scripts/lib/phase-artifact-sync-mode.sh`): the
+`CATALYST_PHASE_ARTIFACT_SYNC_MODE` env var (case-insensitive, whitespace-stripped) wins over
+`.catalyst/config.json`'s `catalyst.phaseArtifactSync.mode`, which wins over the `off` default.
+Consumed by `plugins/dev/scripts/lib/thoughts-sync-gate.sh`, called from every phase skill
+immediately before its terminal `phase-agent-emit-complete` call.
 
 ```json
 {
@@ -1228,8 +1233,8 @@ terminal `phase-agent-emit-complete` call.
 
 ### Board-health delegate (CTL-1290)
 
-`CATALYST_BH_REPLICA` independently controls the replica completeness invariant (`off`, `shadow`,
-or `enforce`; default `shadow`).
+`CATALYST_BH_REPLICA` independently controls the replica completeness invariant (`off`, `shadow`, or
+`enforce`; default `shadow`).
 
 On a low-frequency cadence the scheduler runs a **whole-board health scan**: a read-only pass that
 evaluates board-level invariants the per-item signals never surface — a silently-held dispatch (open
@@ -1245,29 +1250,32 @@ rest of the recovery family (which ships `off`), the board-health delegate **def
 shadow is itself a dark state — it emits the scan and mutates nothing (the no-mutation guarantee is
 structural, not configured), so the telemetry that is the feature's whole point ships on.
 
-| Key                                                     | Default           | Notes                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ------------------------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CATALYST_BOARD_HEALTH` _(env var)_                     | `shadow`          | `off` / `0` (kill-switch — strict no-op), `shadow` (scan + emit `recovery.board-scan`, take no action), `enforce` (CTL-1300 — on a proceeding scan, dispatch **one holistic recovery-pass delegate** anchored to a flagged ticket and carrying the whole-board context; reuses the capped + cooldown'd recovery-pass actuator. **Operator-gated — never auto-enabled**). Garbage values fall back to `shadow`. Overrides Layer-2. |
-| `catalyst.boardHealth.mode` _(Layer-2)_                 | `shadow`          | Same three values; honored when the env var is unset.                                                                                                                                                                                                                                                                                                                                                                             |
-| `CATALYST_BH_GH_QUOTA` _(env var)_                      | `shadow`          | GitHub core REST quota invariant mode: `off` skips the snapshot read, `shadow` publishes quota state but keeps the invariant unobservable, and `enforce` lets a fresh low/exhausted snapshot trip Gate 3 with `rate-limit-cliff`. Garbage values fall back to `shadow`. Overrides Layer-2.                                                                                                                        |
-| `catalyst.boardHealth.githubQuota` _(Layer-2)_           | `shadow`          | Same three values; honored when `CATALYST_BH_GH_QUOTA` is unset.                                                                                                                                                                                                                                                                                                                                                                  |
-| `CATALYST_BH_GH_CORE_PCT`                                | `10`              | Remaining core REST percentage at or below which the quota state is `low`.                                                                                                                                                                                                                                                                                                                                                        |
-| `CATALYST_BH_GH_QUOTA_STALE_MS`                          | `900000` (15 min) | Maximum snapshot age. A missing or older snapshot is unknown and unobservable, even in `enforce`.                                                                                                                                                                                                                                                                                                                                  |
-| `CATALYST_BH_PRODUCTIVITY` _(env var)_                   | `shadow`          | Per-host productivity invariant mode: `off` skips the peer-heartbeat read, `shadow` publishes productivity status but keeps the invariant unobservable, and `enforce` reports a live peer that owns work but has not advanced past a phase boundary within the configured window. The resulting move is escalate-only and cannot dispatch a recovery delegate. Garbage values fall back to `shadow`. Overrides Layer-2. |
-| `catalyst.boardHealth.productivity` _(Layer-2)_          | `shadow`          | Same three values; honored when `CATALYST_BH_PRODUCTIVITY` is unset. |
-| `CATALYST_BH_UNPRODUCTIVE_MS`                            | `86400000` (24 h) | Maximum age of a live owning peer's last phase-boundary advance before the productivity invariant reports it as unproductive. |
-| `CATALYST_BH_INTERVAL_MS`                               | `300000` (5 min)  | Cadence floor — the scan runs at most once per interval per host.                                                                                                                                                                                                                                                                                                                                                                 |
-| `CATALYST_BH_DISPATCH_STALL_MS`                         | `600000` (10 min) | Dispatch-liveness threshold: free slots + a queue + no dispatch within this window flags a wedge.                                                                                                                                                                                                                                                                                                                                 |
-| `CATALYST_BH_WORKER_AGE_MS`                             | `14400000` (4 h)  | Fallback worker-age threshold (per-phase normals override it).                                                                                                                                                                                                                                                                                                                                                                    |
-| `CATALYST_BH_PROJECT_SILENCE_MS`                        | `86400000` (24 h) | Project-silence threshold (no ticket movement in the project past this window).                                                                                                                                                                                                                                                                                                                                                   |
-| `CATALYST_BH_UNOWNED_INFLIGHT_MS`                       | `86400000` (24 h)   | Stale-unowned threshold (CTL-1475). A Linear state like `Implement` is a **claim** that a worker is on the ticket, not a label — and nothing takes the claim back when the worker dies. Past this age with **no live worker signal and no confirmed-open PR**, the ticket is flagged `unownedInFlight` and proposed as a **tier2 (anchorable)** `recover-unowned-in-flight` move, so the delegate dispatches a recovery pass rather than merely reporting it. “No confirmed-open PR” is established by the authoritative union of ticket-key search, branch-head search, and Linear PR attachments, not only the webhook cache. Such tickets are invisible to every other path: admission only pulls `Todo`, and the recovery census scans worker dirs they have no entry in. Deliberately conservative — any evidence of ownership spares the ticket, since a false negative costs one more scan while a false positive re-dispatches work a human is holding. Actuation remains operator-gated by `CATALYST_BOARD_HEALTH=enforce`. |
-| `CATALYST_BH_UNOWNED_PR_VERIFY`                         | enabled             | Kill switch for authoritative open-PR verification of stale unowned candidates. Set `0` to disable the live union check. This does not enable actuation; `CATALYST_BOARD_HEALTH=enforce` is still required. |
-| `CATALYST_BH_UNOWNED_PR_VERIFY_MAX`                     | `5`                 | Maximum stale-unowned candidates verified per board scan, bounding GitHub API cost. Overflow candidates are conservatively left unconfirmed for a later scan. |
-| `CATALYST_BH_UNOWNED_PR_VERIFY_TTL_MS`                  | `1800000` (30 min)  | Memo lifetime for an authoritative open-PR result. The recovery delegate re-verifies before acting because its brief may contain a cached snapshot this old. |
-| `CATALYST_BH_UNOWNED_PR_MIN_QUOTA`                      | `500`               | Minimum remaining GitHub core REST requests required before live verification proceeds. A known lower balance makes the check unverifiable and spares the candidate; an absent snapshot is advisory and does not disable verification. |
-| `CATALYST_BH_STALLED_PR_REVIEW_MS`                     | `259200000` (72 h / 3 d)  | CTL-1608. How long a PR may sit without a review-request being responded to before board-health emits a `nudge-stalled-pr` move. Requires `orchestration.stalledPrSweep.enabled: true`. The stalled-PR timer stamps `reviewRequestedAt` in `workers/<TICKET>/stalled-pr.json`; board-health compares `now - reviewRequestedAt` against this threshold. |
-| `CATALYST_BH_STALLED_PR_CI_MS`                         | `172800000` (48 h / 2 d)     | CTL-1608. How long a PR may have a continuously-failing CI check before it is flagged stalled. The timer stamps `ciFirstFailedAt` on first CI failure detection. |
-| `CATALYST_BH_STALLED_PR_NOPUSH_MS`                     | `432000000` (120 h / 5 d)   | CTL-1608. How long a PR may go without a push (no new commits) while still open before it is flagged stalled. The timer stamps `lastPushAt` on each push detected. |
+| Key                                                 | Default                   | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CATALYST_BOARD_HEALTH` _(env var)_                 | `shadow`                  | `off` / `0` (kill-switch — strict no-op), `shadow` (scan + emit `recovery.board-scan`, take no action), `enforce` (CTL-1300 — on a proceeding scan, dispatch **one holistic recovery-pass delegate** anchored to a flagged ticket and carrying the whole-board context; reuses the capped + cooldown'd recovery-pass actuator. **Operator-gated — never auto-enabled**). Garbage values fall back to `shadow`. Overrides Layer-2.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `catalyst.boardHealth.mode` _(Layer-2)_             | `shadow`                  | Same three values; honored when the env var is unset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `CATALYST_BH_GH_QUOTA` _(env var)_                  | `shadow`                  | GitHub core REST quota invariant mode: `off` skips the snapshot read, `shadow` publishes quota state but keeps the invariant unobservable, and `enforce` lets a fresh low/exhausted snapshot trip Gate 3 with `rate-limit-cliff`. Garbage values fall back to `shadow`. Overrides Layer-2.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `catalyst.boardHealth.githubQuota` _(Layer-2)_      | `shadow`                  | Same three values; honored when `CATALYST_BH_GH_QUOTA` is unset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `CATALYST_BH_GH_CORE_PCT`                           | `10`                      | Remaining core REST percentage at or below which the quota state is `low`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `CATALYST_BH_GH_QUOTA_STALE_MS`                     | `900000` (15 min)         | Maximum snapshot age. A missing or older snapshot is unknown and unobservable, even in `enforce`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `CATALYST_BH_PRODUCTIVITY` _(env var)_              | `shadow`                  | Per-host productivity invariant mode: `off` skips the peer-heartbeat read, `shadow` publishes productivity status but keeps the invariant unobservable, and `enforce` reports a live peer that owns work but has not advanced past a phase boundary within the configured window. The resulting move is escalate-only and cannot dispatch a recovery delegate. Garbage values fall back to `shadow`. Overrides Layer-2.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `catalyst.boardHealth.productivity` _(Layer-2)_     | `shadow`                  | Same three values; honored when `CATALYST_BH_PRODUCTIVITY` is unset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `CATALYST_BH_UNPRODUCTIVE_MS`                       | `86400000` (24 h)         | Maximum age of a live owning peer's last phase-boundary advance before the productivity invariant reports it as unproductive.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `CATALYST_BH_TRIAGE_PRODUCTION` _(env var)_         | `shadow`                  | Triage-production invariant mode: `off` skips triage-artifact inspection, `shadow` publishes stalled candidates without making the invariant actionable, and `enforce` reports free capacity plus owned eligible tickets missing `triage.json` when production is stale or a held-sweep event corroborates the outage. The move is escalate-only and cannot dispatch a recovery delegate. Garbage values fall back to `shadow`. Overrides Layer-2.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `catalyst.boardHealth.triageProduction` _(Layer-2)_ | `shadow`                  | Same three values; honored when `CATALYST_BH_TRIAGE_PRODUCTION` is unset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `CATALYST_BH_TRIAGE_STALL_MS`                       | `1800000` (30 min)        | Maximum age of the most recent successful triage completion before owned, untriaged eligible work with free capacity is reported as stalled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `CATALYST_BH_INTERVAL_MS`                           | `300000` (5 min)          | Cadence floor — the scan runs at most once per interval per host.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `CATALYST_BH_DISPATCH_STALL_MS`                     | `600000` (10 min)         | Dispatch-liveness threshold: free slots + a queue + no dispatch within this window flags a wedge.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `CATALYST_BH_WORKER_AGE_MS`                         | `14400000` (4 h)          | Fallback worker-age threshold (per-phase normals override it).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `CATALYST_BH_PROJECT_SILENCE_MS`                    | `86400000` (24 h)         | Project-silence threshold (no ticket movement in the project past this window).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `CATALYST_BH_UNOWNED_INFLIGHT_MS`                   | `86400000` (24 h)         | Stale-unowned threshold (CTL-1475). A Linear state like `Implement` is a **claim** that a worker is on the ticket, not a label — and nothing takes the claim back when the worker dies. Past this age with **no live worker signal and no confirmed-open PR**, the ticket is flagged `unownedInFlight` and proposed as a **tier2 (anchorable)** `recover-unowned-in-flight` move, so the delegate dispatches a recovery pass rather than merely reporting it. “No confirmed-open PR” is established by the authoritative union of ticket-key search, branch-head search, and Linear PR attachments, not only the webhook cache. Such tickets are invisible to every other path: admission only pulls `Todo`, and the recovery census scans worker dirs they have no entry in. Deliberately conservative — any evidence of ownership spares the ticket, since a false negative costs one more scan while a false positive re-dispatches work a human is holding. Actuation remains operator-gated by `CATALYST_BOARD_HEALTH=enforce`. |
+| `CATALYST_BH_UNOWNED_PR_VERIFY`                     | enabled                   | Kill switch for authoritative open-PR verification of stale unowned candidates. Set `0` to disable the live union check. This does not enable actuation; `CATALYST_BOARD_HEALTH=enforce` is still required.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `CATALYST_BH_UNOWNED_PR_VERIFY_MAX`                 | `5`                       | Maximum stale-unowned candidates verified per board scan, bounding GitHub API cost. Overflow candidates are conservatively left unconfirmed for a later scan.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `CATALYST_BH_UNOWNED_PR_VERIFY_TTL_MS`              | `1800000` (30 min)        | Memo lifetime for an authoritative open-PR result. The recovery delegate re-verifies before acting because its brief may contain a cached snapshot this old.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `CATALYST_BH_UNOWNED_PR_MIN_QUOTA`                  | `500`                     | Minimum remaining GitHub core REST requests required before live verification proceeds. A known lower balance makes the check unverifiable and spares the candidate; an absent snapshot is advisory and does not disable verification.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `CATALYST_BH_STALLED_PR_REVIEW_MS`                  | `259200000` (72 h / 3 d)  | CTL-1608. How long a PR may sit without a review-request being responded to before board-health emits a `nudge-stalled-pr` move. Requires `orchestration.stalledPrSweep.enabled: true`. The stalled-PR timer stamps `reviewRequestedAt` in `workers/<TICKET>/stalled-pr.json`; board-health compares `now - reviewRequestedAt` against this threshold.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `CATALYST_BH_STALLED_PR_CI_MS`                      | `172800000` (48 h / 2 d)  | CTL-1608. How long a PR may have a continuously-failing CI check before it is flagged stalled. The timer stamps `ciFirstFailedAt` on first CI failure detection.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `CATALYST_BH_STALLED_PR_NOPUSH_MS`                  | `432000000` (120 h / 5 d) | CTL-1608. How long a PR may go without a push (no new commits) while still open before it is flagged stalled. The timer stamps `lastPushAt` on each push detected.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 The productivity signal requires peers to publish `last_advance_at` in their heartbeat records.
 During a mixed-version fleet rollout, a peer without that field is treated as unknown and is not
@@ -1283,9 +1291,15 @@ it existed for.)
 
 Trusted **by default**, all qualified with the port the server actually bound:
 
-- loopback — on a wildcard bind the **whole `127.0.0.0/8` range** (so `127.0.0.2` and the Debian-conventional `127.0.1.1` work), otherwise only when the bind is itself the loopback address — a LAN-bound monitor does not own `<loopback>:<port>`) — `localhost`, plus the literal(s) matching the **bound address family**
+- loopback — on a wildcard bind the **whole `127.0.0.0/8` range** (so `127.0.0.2` and the
+  Debian-conventional `127.0.1.1` work), otherwise only when the bind is itself the loopback address
+  — a LAN-bound monitor does not own `<loopback>:<port>`) — `localhost`, plus the literal(s)
+  matching the **bound address family**
 
-**Residual, and the real fix.** Host *names* (`localhost`, `os.hostname()`) are family-ambiguous — the browser picks. Under a single-family bind, a process squatting the other family's port can serve a page whose `Origin` is one of those names. No allowlist setting closes this; **bind dual-stack** and the squat becomes impossible rather than merely untrusted:
+**Residual, and the real fix.** Host _names_ (`localhost`, `os.hostname()`) are family-ambiguous —
+the browser picks. Under a single-family bind, a process squatting the other family's port can serve
+a page whose `Origin` is one of those names. No allowlist setting closes this; **bind dual-stack**
+and the squat becomes impossible rather than merely untrusted:
 
 ```bash
 MONITOR_HOST=:: catalyst-monitor restart   # `start` no-ops when a monitor is already running
@@ -1293,49 +1307,59 @@ MONITOR_HOST=:: catalyst-monitor restart   # `start` no-ops when a monitor is al
 
 > **Dev-server note.** A prefix assignment (`MONITOR_HOST=:: catalyst-monitor restart`) exists only
 > for that command. `bun run dev:ui` is a separate process, so **export** `MONITOR_HOST` (and
-> `MONITOR_PORT`) in the shell that runs it, or the Vite proxy will target the default `127.0.0.1:7400`
-> instead of the monitor's actual bind.
+> `MONITOR_PORT`) in the shell that runs it, or the Vite proxy will target the default
+> `127.0.0.1:7400` instead of the monitor's actual bind.
 
 > **Management-CLI gap (CTL-1599).** `catalyst-monitor.sh` still prints, opens, and health-probes
 > `http://localhost:$PORT` regardless of `MONITOR_HOST`, so a specific non-loopback bind will show a
 > wrong URL and a failing probe even when the monitor is healthy. Wiring the CLI through is tracked
 > separately; the allowlist itself honors the bind correctly.
 
-| Env var | Default | Notes |
-| ------- | ------- | ----- |
-| `MONITOR_HOST` | `0.0.0.0` | Bind address. `::` binds dual-stack (accepts IPv4-mapped too) and is the remedy above. A **specific** address or hostname narrows the allowlist to that socket only — the monitor stops trusting other local interfaces and this host's own names, since it no longer owns those sockets. (binding `0.0.0.0` is IPv4-only, so `[::1]` is not trusted: another service can bind `[::1]` on the same port and its origin would otherwise pass)
-- this machine's own names, **wildcard binds only** (the bare label of an FQDN is included so `http://mini:7400` works when `os.hostname()` is `mini.corp.example`; this trusts whatever that label resolves to, so on a network where a search domain or stale record maps it elsewhere, prefer a specific bind or an explicit `MONITOR_TRUSTED_ORIGINS`) (a name resolves to whichever interface DNS/mDNS picks, which need not be the one a specific bind listens on) — `os.hostname()` and its short label, plus the **actual** mDNS name on macOS (`scutil --get LocalHostName`). A `<short>.local` alias is **not** synthesized: when it is not the name the system really advertises, nothing owns it, so any LAN host could claim it over mDNS and pass the guard.
-- this machine's own non-loopback addresses (LAN, Tailscale `100.x`) — but **only for a wildcard bind** (`0.0.0.0`/`::`). A server bound to one specific address trusts only that address, since another service can hold the same port on a different interface
+| Env var        | Default   | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MONITOR_HOST` | `0.0.0.0` | Bind address. `::` binds dual-stack (accepts IPv4-mapped too) and is the remedy above. A **specific** address or hostname narrows the allowlist to that socket only — the monitor stops trusting other local interfaces and this host's own names, since it no longer owns those sockets. (binding `0.0.0.0` is IPv4-only, so `[::1]` is not trusted: another service can bind `[::1]` on the same port and its origin would otherwise pass) |
+
+- this machine's own names, **wildcard binds only** (the bare label of an FQDN is included so
+  `http://mini:7400` works when `os.hostname()` is `mini.corp.example`; this trusts whatever that
+  label resolves to, so on a network where a search domain or stale record maps it elsewhere, prefer
+  a specific bind or an explicit `MONITOR_TRUSTED_ORIGINS`) (a name resolves to whichever interface
+  DNS/mDNS picks, which need not be the one a specific bind listens on) — `os.hostname()` and its
+  short label, plus the **actual** mDNS name on macOS (`scutil --get LocalHostName`). A
+  `<short>.local` alias is **not** synthesized: when it is not the name the system really
+  advertises, nothing owns it, so any LAN host could claim it over mDNS and pass the guard.
+- this machine's own non-loopback addresses (LAN, Tailscale `100.x`) — but **only for a wildcard
+  bind** (`0.0.0.0`/`::`). A server bound to one specific address trusts only that address, since
+  another service can hold the same port on a different interface
 
 Own names are trusted **only on the bound port, and only under the scheme the monitor serves
-(`http`)**: a bare `http://mini` would let any *other* service on the same machine (e.g. something on
-`:80`) drive the reply route. Comparison keys are full origins (`scheme://host[:port]`), so `http`
-and `https` on the same host are distinct — a compromised plaintext endpoint cannot drive an HTTPS
-route. On macOS the machine's real Bonjour name (`scutil --get LocalHostName`) is included, since it need
-not share the first label of `os.hostname()`; it is cached for **5 minutes** (the lookup spawns a
-subprocess and the allowlist rebuilds on rejected requests, so it must not run per-request — but a
-renamed `LocalHostName` then takes effect without a daemon restart). Only `http`/`https` origins are
-accepted — a non-special scheme such as `chrome-extension://` serializes to the opaque `"null"`,
-which would otherwise match every opaque origin.
+(`http`)**: a bare `http://mini` would let any _other_ service on the same machine (e.g. something
+on `:80`) drive the reply route. Comparison keys are full origins (`scheme://host[:port]`), so
+`http` and `https` on the same host are distinct — a compromised plaintext endpoint cannot drive an
+HTTPS route. On macOS the machine's real Bonjour name (`scutil --get LocalHostName`) is included,
+since it need not share the first label of `os.hostname()`; it is cached for **5 minutes** (the
+lookup spawns a subprocess and the allowlist rebuilds on rejected requests, so it must not run
+per-request — but a renamed `LocalHostName` then takes effect without a daemon restart). Only
+`http`/`https` origins are accepted — a non-special scheme such as `chrome-extension://` serializes
+to the opaque `"null"`, which would otherwise match every opaque origin.
 
 The allowlist is rebuilt on a **60s TTL** and again on any rejection, so an address that appears
-later (Tailscale connecting, a DHCP change) is trusted without a restart, and one that is *removed*
+later (Tailscale connecting, a DHCP change) is trusted without a restart, and one that is _removed_
 stops being trusted within the TTL rather than lingering until the daemon restarts.
 
-| Env var                    | Default | Notes                                                                                                                                                                                                                                                                                                                       |
-| -------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MONITOR_TRUSTED_ORIGINS`  | unset   | Comma- or whitespace-separated extra origins for deployments reached by a name that cannot be derived from `os.hostname()` — a **reverse proxy** or a full **Tailscale MagicDNS** alias. Accepts full origins (`https://catalyst.example`) or bare `host:port` (`mini-2.tail1234.ts.net:7400`). Entries are taken **exactly as given** (not widened to the bound port) and canonicalized the way a browser serializes `Origin`, so an IDN name may be written in either Unicode or punycode. |
-| `MONITOR_TLS_PROXY_PEERS` | unset | Peer addresses of the **TLS-terminating reverse proxy** (comma-separated, e.g. `127.0.0.1,::1`). Requests arriving *from these peers* are classified `https` when the accounts `?refresh=true` guard probes the trusted-origin set — **required** when `MONITOR_TRUSTED_ORIGINS` lists an `https://` origin served through a local proxy, or every proxied refresh 403s (with it unset, all requests are plaintext). This is a deliberate operator declaration: `X-Forwarded-Proto` is never trusted (client-spoofable, and appending proxies put the client's value first). IPv4-mapped spellings are normalized, so `127.0.0.1` also matches a dual-stack bind's `::ffff:127.0.0.1`. |
-| `MONITOR_DEV_UI=1` / `NODE_ENV=development` | unset | Trusts the Vite dev origin (`http://localhost:5173` — one spelling, since Vite binds a single address family and the other would be available to any local process). **Not needed for the standard `bun run dev:ui` flow** — the Vite proxy sends the monitor's own origin (`ui/vite.config.ts`), so proxied replies are already trusted. Accepts `1`/`true`/`yes`/`on`. Use only for a dev setup that bypasses that proxy, and note it must be set on the **monitor** process (`dev:ui` starts Vite only; the monitor runs out-of-band). |
-| `MONITOR_DEV_UI_ORIGINS` | unset | Overrides the dev origins above (same format), for a non-default Vite port. Same caveat: set it on the monitor process. |
+| Env var                                     | Default | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MONITOR_TRUSTED_ORIGINS`                   | unset   | Comma- or whitespace-separated extra origins for deployments reached by a name that cannot be derived from `os.hostname()` — a **reverse proxy** or a full **Tailscale MagicDNS** alias. Accepts full origins (`https://catalyst.example`) or bare `host:port` (`mini-2.tail1234.ts.net:7400`). Entries are taken **exactly as given** (not widened to the bound port) and canonicalized the way a browser serializes `Origin`, so an IDN name may be written in either Unicode or punycode.                                                                                                                                                                                           |
+| `MONITOR_TLS_PROXY_PEERS`                   | unset   | Peer addresses of the **TLS-terminating reverse proxy** (comma-separated, e.g. `127.0.0.1,::1`). Requests arriving _from these peers_ are classified `https` when the accounts `?refresh=true` guard probes the trusted-origin set — **required** when `MONITOR_TRUSTED_ORIGINS` lists an `https://` origin served through a local proxy, or every proxied refresh 403s (with it unset, all requests are plaintext). This is a deliberate operator declaration: `X-Forwarded-Proto` is never trusted (client-spoofable, and appending proxies put the client's value first). IPv4-mapped spellings are normalized, so `127.0.0.1` also matches a dual-stack bind's `::ffff:127.0.0.1`. |
+| `MONITOR_DEV_UI=1` / `NODE_ENV=development` | unset   | Trusts the Vite dev origin (`http://localhost:5173` — one spelling, since Vite binds a single address family and the other would be available to any local process). **Not needed for the standard `bun run dev:ui` flow** — the Vite proxy sends the monitor's own origin (`ui/vite.config.ts`), so proxied replies are already trusted. Accepts `1`/`true`/`yes`/`on`. Use only for a dev setup that bypasses that proxy, and note it must be set on the **monitor** process (`dev:ui` starts Vite only; the monitor runs out-of-band).                                                                                                                                              |
+| `MONITOR_DEV_UI_ORIGINS`                    | unset   | Overrides the dev origins above (same format), for a non-default Vite port. Same caveat: set it on the monitor process.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 **Set this if replies 403.** A monitor opened through a proxy/alias not in the default set will
 reject every reply until the name is listed here. Addresses are re-derived automatically (see the
-TTL above); a *name* the daemon cannot derive still needs this variable.
+TTL above); a _name_ the daemon cannot derive still needs this variable.
 
 Prefer writing a **full origin** (`https://catalyst.example`) over a bare host: a full origin pins
-the scheme, whereas a bare `host[:port]` cannot state one and is therefore trusted under both
-`http` and `https`.
+the scheme, whereas a bare `host[:port]` cannot state one and is therefore trusted under both `http`
+and `https`.
 
 Requests with **no** `Origin` are allowed — browsers always send it on a POST, so only non-browser
 clients (`curl`, tests) omit it, and those are not CSRF vectors. This guard stops a browser being
@@ -1407,19 +1431,20 @@ daemon. These knobs are env vars on the `catalyst-broker` process:
 
 The broker's watchdog can edge-trigger a `broker.daemon.degraded` / `broker.daemon.recovered` pair
 when its **interest table is empty while the fleet is actively working** — an empty table on an idle
-fleet is the healthy steady state, so the fleet-activity reading is the discriminator. The episode is
-edge-triggered with a **durable latch** (`~/catalyst/broker-degraded-latch.json`), so a broker
+fleet is the healthy steady state, so the fleet-activity reading is the discriminator. The episode
+is edge-triggered with a **durable latch** (`~/catalyst/broker-degraded-latch.json`), so a broker
 restart mid-episode resumes rather than re-emitting.
 
 **The detector is dormant by default and only meaningful on legacy-wave hosts.** Under
 **execution-core dispatch** nothing registers interests at all, so `interests.size === 0` is
 permanently true and the gate carries no information. That is a property of execution-core, **not**
 of every configuration named `phase-agents`: a **legacy-wave** host — one driving
-`/catalyst-legacy:orchestrate`, which invokes `plugins/dev/scripts/orchestrate-register-interests.sh`
-— does register interests (`pr_lifecycle` + `ticket_lifecycle` + `comms_lifecycle` unconditionally,
-plus a per-ticket `phase_lifecycle` when `dispatchMode` is `phase-agents`). There an empty interest
-table IS anomalous, and that is the deployment where enabling this is appropriate. These knobs are
-env vars on the `catalyst-broker` process:
+`/catalyst-legacy:orchestrate`, which invokes
+`plugins/dev/scripts/orchestrate-register-interests.sh` — does register interests (`pr_lifecycle` +
+`ticket_lifecycle` + `comms_lifecycle` unconditionally, plus a per-ticket `phase_lifecycle` when
+`dispatchMode` is `phase-agents`). There an empty interest table IS anomalous, and that is the
+deployment where enabling this is appropriate. These knobs are env vars on the `catalyst-broker`
+process:
 
 - `FILTER_BROKER_DEGRADED_ENABLED` (default **off**; set to exactly `1` to enable) — opt-in
   kill-switch. Unset (or any other value) means the detector evaluates nothing and emits nothing.
@@ -1428,26 +1453,26 @@ env vars on the `catalyst-broker` process:
   runtime control path that mutates it, so editing the env file (or exporting in a shell) does
   **not** reach a live broker. Restart it, or you will believe the detector is armed while it is
   still dormant. Flipping it **off** discards any in-progress debounce run, so a re-enable re-earns
-  the full sustained-tick threshold; an already-open episode survives the switch and still emits
-  its paired `recovered`.
+  the full sustained-tick threshold; an already-open episode survives the switch and still emits its
+  paired `recovered`.
 - `FILTER_BROKER_DEGRADED_GRACE_MS` (default `300000`, 5 min) — startup grace. An empty interest
-  table is not judged at all until the broker has been up this long, so a still-warming process never
-  trips.
+  table is not judged at all until the broker has been up this long, so a still-warming process
+  never trips.
 - `FILTER_BROKER_DEGRADED_SUSTAINED_TICKS` (default `5`) — consecutive anomalous watchdog ticks
   (~60s each) required before the degraded edge fires. The run must be contiguous: any non-anomalous
   tick resets it, so a single-tick blip cannot page.
 
-The fleet-activity reading is **tri-state** — active, proven idle, or *unknown* (the worker-table read
-failed). Only a proven-idle fleet closes an open episode (`recovered`, reason `fleet idle`); an
+The fleet-activity reading is **tri-state** — active, proven idle, or _unknown_ (the worker-table
+read failed). Only a proven-idle fleet closes an open episode (`recovered`, reason `fleet idle`); an
 unknown reading neither trips nor clears, so a transient DB failure cannot manufacture a false
 recovery followed by a duplicate degraded edge.
 
-**This is not a dead-broker detector**, and neither is the ingestion-silence detector above: both run
-inside the broker process, so a dead broker emits neither. `checkSourceRecency` detects an ingestion
-**stall** while the broker is **alive**. Detecting a fully-dead broker requires an **external,
-absence-based** check on the broker's own heartbeat/log series — e.g. a Loki `absent_over_time` alert
-on `broker.daemon.heartbeat` or the broker `.log` stream (absence, because a fully-dead daemon is a
-*missing series*, which `count_over_time == 0` cannot assert).
+**This is not a dead-broker detector**, and neither is the ingestion-silence detector above: both
+run inside the broker process, so a dead broker emits neither. `checkSourceRecency` detects an
+ingestion **stall** while the broker is **alive**. Detecting a fully-dead broker requires an
+**external, absence-based** check on the broker's own heartbeat/log series — e.g. a Loki
+`absent_over_time` alert on `broker.daemon.heartbeat` or the broker `.log` stream (absence, because
+a fully-dead daemon is a _missing series_, which `count_over_time == 0` cannot assert).
 
 ### Node admission state on the heartbeat (CTL-1322)
 
@@ -1497,52 +1522,54 @@ The distributed-coordination epic (ADR-022/023) adds a subsystem that durably or
 **coordination events** across hosts via a `coordination-publish` background process: it tails the
 unified event log, writes the ordered coordination subset to a local-first mirror
 (`~/catalyst/coordination.jsonl`, carrying a monotonic `local_seq`) synchronously before any network
-call, and — in `enforce` — exchanges those rows with a catalyst-cloud coordination hub (or, until the
-hub is wired, an interim Loki-tail transport).
+call, and — in `enforce` — exchanges those rows with a catalyst-cloud coordination hub (or, until
+the hub is wired, an interim Loki-tail transport).
 
 It ships behind the same **off→shadow→enforce** rollout discipline as the recovery family, but —
 unlike the board-health delegate — its floor is **`off`**, not `shadow`: coordination adds an
-always-on publisher process and, in enforce, network egress, so the safe default is fully inert until
-an operator promotes it.
+always-on publisher process and, in enforce, network egress, so the safe default is fully inert
+until an operator promotes it.
 
 The publisher is launched by `catalyst-stack` — after `otel-forward`, on **worker + monitor** nodes
 (gated `catalyst.node.class != developer`, following the reporting substrate) — as a self-managed
-nohup child ([`catalyst-stack`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-stack)
+nohup child
+([`catalyst-stack`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-stack)
 `start_coordination`). Because the daemon self-exits when the resolved mode is `off` (the default),
 `catalyst-stack` short-circuits before spawning it, so launching it unconditionally is safe and an
-unconfigured node is byte-identical to before: no publisher process, no PID file, no mirror. When the
-mode is `shadow`/`enforce`, the daemon comes up idempotently (a re-run of `catalyst-stack start` — or
-the keep-alive tick — never double-starts it); `catalyst-stack status` reports a `coordination` line
-(`off (inert)`, or `running … mode=<mode>`). A missing `bun` is non-fatal (a bun-less host resolves to
-`off` and never blocks the rest of the stack). **Enforce and the hub transport stay operator-gated** —
-this wiring only makes `shadow`/`enforce` take effect where they were previously dark.
+unconfigured node is byte-identical to before: no publisher process, no PID file, no mirror. When
+the mode is `shadow`/`enforce`, the daemon comes up idempotently (a re-run of `catalyst-stack start`
+— or the keep-alive tick — never double-starts it); `catalyst-stack status` reports a `coordination`
+line (`off (inert)`, or `running … mode=<mode>`). A missing `bun` is non-fatal (a bun-less host
+resolves to `off` and never blocks the rest of the stack). **Enforce and the hub transport stay
+operator-gated** — this wiring only makes `shadow`/`enforce` take effect where they were previously
+dark.
 
 Mode resolves from the env var (a single operator knob) over Layer-2 over the default. The `0`
 kill-switch and any unset/garbage value both resolve to `off`.
 
-| Key | Default | Notes |
-| --- | --- | --- |
-| `CATALYST_COORDINATION_MODE` _(env var)_ | `off` | `off` / `0` (kill-switch — strict no-op: no publisher, no mirror, no egress), `shadow` (run the publisher and write the local `~/catalyst/coordination.jsonl` mirror only — no outbound publish, no inbound pull), `enforce` (also exchange rows with the hub: outbound buffer + inbound merge; **operator-gated, never auto-enabled**). Unset or garbage falls back to `off`. Overrides Layer-2. |
-| `catalyst.coordination.mode` _(Layer-2)_ | `off` | Same three values; honored when the env var is unset. |
-| `CATALYST_COORDINATION_HUB_URL` _(env var)_ | _(none)_ | Base URL of the catalyst-cloud coordination changefeed used in `enforce`. Overrides Layer-2. When empty/unset the publisher uses the interim Loki-tail transport instead. |
-| `catalyst.coordination.hubUrl` _(Layer-2)_ | `null` | Same; honored when the env var is unset. |
+| Key                                         | Default  | Notes                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CATALYST_COORDINATION_MODE` _(env var)_    | `off`    | `off` / `0` (kill-switch — strict no-op: no publisher, no mirror, no egress), `shadow` (run the publisher and write the local `~/catalyst/coordination.jsonl` mirror only — no outbound publish, no inbound pull), `enforce` (also exchange rows with the hub: outbound buffer + inbound merge; **operator-gated, never auto-enabled**). Unset or garbage falls back to `off`. Overrides Layer-2. |
+| `catalyst.coordination.mode` _(Layer-2)_    | `off`    | Same three values; honored when the env var is unset.                                                                                                                                                                                                                                                                                                                                             |
+| `CATALYST_COORDINATION_HUB_URL` _(env var)_ | _(none)_ | Base URL of the catalyst-cloud coordination changefeed used in `enforce`. Overrides Layer-2. When empty/unset the publisher uses the interim Loki-tail transport instead.                                                                                                                                                                                                                         |
+| `catalyst.coordination.hubUrl` _(Layer-2)_  | `null`   | Same; honored when the env var is unset.                                                                                                                                                                                                                                                                                                                                                          |
 
 **Cloud token (enforce delivery).** In `enforce` mode the publisher sends each batch to
 `<hubUrl>/coordination/publish` with an `Authorization: Bearer <token>` header. The **payload
 carries no tenant field** — the server derives tenant from the token. The token comes from the
 `cloud-token` secret-contract row (ADR-0008 leg-3 credential): `~/.config/catalyst/cloud-sync.env`
 must export the resolved var name (default `CATALYST_CLOUD_TOKEN`; the exact name is
-`CATALYST_CLOUD_TOKEN_ENV` → Layer-2 → `CATALYST_CLOUD_TOKEN`). `catalyst-stack start` sources
-this file in a subshell when spawning the daemon so the credential is inherited without leaking into
-the long-lived shell process.
+`CATALYST_CLOUD_TOKEN_ENV` → Layer-2 → `CATALYST_CLOUD_TOKEN`). `catalyst-stack start` sources this
+file in a subshell when spawning the daemon so the credential is inherited without leaking into the
+long-lived shell process.
 
 An enforce host with a valid `hubUrl` but **no** token degrades to inbound-only with a one-time
 warning — it never hammers the hub with 401s. Provisioning a token and restarting
 (`catalyst-stack start`) bounces the daemon (token presence is part of the restart fingerprint).
 
-**Shadow → enforce promotion (ADR-023 rollout gate).** Do not flip hosts to enforce until all of
-the following are true, verified by `bun coordination-publish/parity-check.ts` on each candidate
-host over a ≥3–5 day window:
+**Shadow → enforce promotion (ADR-023 rollout gate).** Do not flip hosts to enforce until all of the
+following are true, verified by `bun coordination-publish/parity-check.ts` on each candidate host
+over a ≥3–5 day window:
 
 1. Non-zero matched pairs (the mirror contains coordination rows that align with the `worker_state`
    projection — meaning the outbound stream is non-empty and well-formed).
@@ -1551,6 +1578,6 @@ host over a ≥3–5 day window:
 3. Each candidate has been spot-checked for false positives.
 
 Once criteria are met, flip **one host at a time** to `enforce`. Rollback = unset the mode +
-`catalyst-stack start` (the daemon self-exits on `off`, ADR-023 rule 5). The three-way exit
-contract of `parity-check.ts`: `0` = healthy, `1` = divergent, `2` = inconclusive (mirror empty
-or no matching pairs — not an error, just not yet evaluable).
+`catalyst-stack start` (the daemon self-exits on `off`, ADR-023 rule 5). The three-way exit contract
+of `parity-check.ts`: `0` = healthy, `1` = divergent, `2` = inconclusive (mirror empty or no
+matching pairs — not an error, just not yet evaluable).

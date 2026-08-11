@@ -48,6 +48,8 @@ import {
   readDeadDocWorkerConfig,
   readBoardHealthConfig,
   readProductivityBoardHealthConfig,
+  readGithubQuotaBoardHealthConfig,
+  readTriageProductionBoardHealthConfig,
   readCoordinationConfig,
   getCoordinationMirrorPath,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
@@ -1517,6 +1519,52 @@ describe("readProductivityBoardHealthConfig (CAT-57)", () => {
       process.env.CATALYST_BH_PRODUCTIVITY = empty;
       expect(readProductivityBoardHealthConfig().mode).toBe("enforce");
     }
+  });
+});
+
+describe("board-health submode config (CAT-82)", () => {
+  const ENVS = ["CATALYST_BH_GH_QUOTA", "CATALYST_BH_TRIAGE_PRODUCTION", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "cat82-bh-triage-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("triage production defaults to shadow and unset env defers to Layer-2", () => {
+    expect(readTriageProductionBoardHealthConfig().mode).toBe("shadow");
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { triageProduction: "off" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readTriageProductionBoardHealthConfig().mode).toBe("off");
+  });
+
+  test("triage production env wins over Layer-2", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { triageProduction: "off" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_BH_TRIAGE_PRODUCTION = "enforce";
+    expect(readTriageProductionBoardHealthConfig().mode).toBe("enforce");
+  });
+
+  test("set-but-invalid triage env shadows and overrides Layer-2 enforce", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { triageProduction: "enforce" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_BH_TRIAGE_PRODUCTION = "enfore";
+    expect(readTriageProductionBoardHealthConfig().mode).toBe("shadow");
+  });
+
+  test("GitHub quota uses the shared hardened invalid-env precedence", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { githubQuota: "enforce" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_BH_GH_QUOTA = "enfore";
+    expect(readGithubQuotaBoardHealthConfig().mode).toBe("shadow");
   });
 });
 

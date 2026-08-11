@@ -374,6 +374,7 @@ import {
   readGithubQuotaBoardHealthConfig,
   readProductivityBoardHealthConfig,
   readReplicaBoardHealthConfig,
+  readTriageProductionBoardHealthConfig,
   getLivenessAnchorIssue,
   getLivenessReadSource,
   getLokiQueryUrl,
@@ -6763,6 +6764,8 @@ export function schedulerTick(
             }),
           productivityMode:
             _boardHealth.productivityMode ?? readProductivityBoardHealthConfig().mode,
+          triageProductionMode:
+            _boardHealth.triageProductionMode ?? readTriageProductionBoardHealthConfig().mode,
           // CTL-1524 (C4b): pass a THUNK, not a resolved array. Evaluating it here
           // ran the heartbeat read on EVERY tick, so boardHealthPass's 5-minute
           // internal throttle could never protect it — the cost was paid before the
