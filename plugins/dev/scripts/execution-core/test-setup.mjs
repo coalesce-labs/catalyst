@@ -57,6 +57,11 @@ process.env.CATALYST_HERMETIC_DIR = hermeticDir;
 // way it handles CATALYST_DIR's hermetic pin.
 process.env.CATALYST_LAYER2_CONFIG_FILE = join(hermeticDir, "layer2-config-absent.json");
 
+// CAT-135 deferral: do not globally pin HOME/CLAUDE_CONFIG_DIR yet. An empty
+// HOME produced 26 failures across CI's explicit execution-core file list on
+// macOS (none in doctor.test.mjs). Doctor rubric host-state probes instead use
+// the enforced HOST_STATE_SEAMS registry until that broader surface is handled.
+
 // Belt: a real linearis reached despite the shim writes nothing without creds.
 delete process.env.LINEAR_API_TOKEN;
 delete process.env.LINEAR_API_KEY;

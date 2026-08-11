@@ -5190,6 +5190,31 @@ export function checkSkillsDirPlugins(deps = {}) {
 
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
+// HOST_STATE_SEAMS — CAT-135. A check that inspects host state outside the
+// repository ships an injectable rubric seam. runDoctor forwards opts opaquely,
+// so the guard test verifies by function-reference identity that every seam is
+// actually honored. Add an entry here with every new host-state rubric check.
+export const HOST_STATE_SEAMS = Object.freeze([
+  // Reads the user-scope ~/.claude plugin and skills tree.
+  Object.freeze({
+    seam: "skillsDirCheck",
+    checkName: "skills-dir-plugins",
+    rubrics: Object.freeze(["activation", "install"]),
+  }),
+  // Resolves and inspects plugin-source checkouts outside the repository.
+  Object.freeze({
+    seam: "pluginSourceFreshnessCheck",
+    checkName: "plugin-source-freshness",
+    rubrics: Object.freeze(["activation"]),
+  }),
+  // Inspects plugin-source Git locks, including the home-directory fallback.
+  Object.freeze({
+    seam: "staleLockCheck",
+    checkName: "stale-lock",
+    rubrics: Object.freeze(["activation"]),
+  }),
+]);
+
 // checksForClass — build the check-thunk suite for a resolved node class. This is
 // the single class switch; runDoctor calls it unless an explicit `checks` array is
 // injected. `opts` carries seed/otel/expectedBotUserId plus the injectable seams
@@ -5217,6 +5242,12 @@ export function checksForClass(nc, opts = {}) {
     hasStackAgent,
     hasUpdaterAgent,
     pluginPullOwner,
+    // CAT-135: host-state checks use whole-check seams registered above.
+    pluginSourceFreshnessCheck = () => checkPluginSourceFreshness({ nodeClass: nc.class }),
+    staleLockCheck = () => checkStaleLock(),
+    // CAT-135: Altitude-B seam for the environment-dependent ~/.claude tree.
+    // Tests replace the whole check; production keeps the live probe by default.
+    skillsDirCheck = () => checkSkillsDirPlugins({ nodeClass: nc.class }),
     // CTL-1473: pre-install flag downgrades install-remediable checks (shipper, agents-for-class)
     // from FAIL to WARN when the join gate runs BEFORE install-services (which creates the services).
     preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
@@ -5253,13 +5284,13 @@ export function checksForClass(nc, opts = {}) {
   const pullOwnerThunk = () => checkPluginPullOwner({ nodeClass: nc.class, strict, owner: pluginPullOwner });
   // CTL-1421: assert the worker plugin path resolves to a healthy pristine plugin-source
   // (else workers silently serve stale marketplace-cache code). worker=FAIL, dev/monitor=WARN.
-  const pluginSourceFreshThunk = () => checkPluginSourceFreshness({ nodeClass: nc.class });
+  const pluginSourceFreshThunk = pluginSourceFreshnessCheck;
   // CTL-1415: a stale plugin-source .git/index.lock freezes pulls on ANY node class.
-  const staleLockThunk = () => checkStaleLock();
+  const staleLockThunk = staleLockCheck;
   // skills-dir-plugin migration: catalyst loads in-place via ~/.claude/skills symlinks
   // for every session type Claude Code resolves plugins for; no marketplace/wrapper
   // residue. worker=FAIL, dev/monitor=WARN.
-  const skillsDirPluginsThunk = () => checkSkillsDirPlugins({ nodeClass: nc.class });
+  const skillsDirPluginsThunk = skillsDirCheck;
 
   const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
   const wontOwnThunk = () =>
@@ -5420,8 +5451,8 @@ export function installChecksForClass(nc, opts = {}) {
     hasStackAgent,
     hasUpdaterAgent,
     pluginPullOwner,
-    // Injectable like the sibling probes — the skills-dir state is environment-dependent
-    // (a real ~/.claude tree), so tests supply a stub rather than the live filesystem.
+    // CAT-135: Altitude-B seam for the environment-dependent ~/.claude tree.
+    // Tests replace the whole check; production keeps the live probe by default.
     skillsDirCheck = () => checkSkillsDirPlugins({ nodeClass: nc.class }),
   } = opts;
   // strict:true — under install verification an INFERRED/unpersisted class is a FAIL (the install's
