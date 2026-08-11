@@ -126,7 +126,8 @@ export function readLastPhaseAdvanceCached(
   const key = `${orchDir}\0${self ?? ""}`;
   if (ttlMs > 0) {
     const cached = lastAdvanceCache.get(key);
-    if (cached && timestamp - cached.cachedAt < ttlMs) return cached.value;
+    const ageMs = cached ? timestamp - cached.cachedAt : -1;
+    if (cached && ageMs >= 0 && ageMs < ttlMs) return cached.value;
   }
 
   let signals;

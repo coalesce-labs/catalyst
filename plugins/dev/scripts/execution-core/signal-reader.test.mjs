@@ -98,6 +98,16 @@ describe("readLastPhaseAdvanceCached (CAT-126)", () => {
     expect(walks).toBe(2);
   });
 
+  test("re-walks when the wall clock moves backwards", () => {
+    let clock = baseNow;
+    let walks = 0;
+    const options = { now: () => clock, env, readSignals: () => (walks += 1, []) };
+    readLastPhaseAdvanceCached({ orchDir, self: "mini" }, options);
+    clock -= 1;
+    readLastPhaseAdvanceCached({ orchDir, self: "mini" }, options);
+    expect(walks).toBe(2);
+  });
+
   test("keys the cache on orchDir and self", () => {
     let walks = 0;
     const readSignals = () => {
