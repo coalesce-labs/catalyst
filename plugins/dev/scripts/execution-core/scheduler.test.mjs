@@ -13451,6 +13451,25 @@ describe("holisticBoardHealthAct — global moves sign their own cause (CAT-170)
     expect(a).toBe(b);
   });
 
+  test("(CAT-170 round 4) an eligible-queue FALLBACK candidate is signed with the scan's triggering move", () => {
+    // Every ticket-specific candidate was cooldown/terminal-skipped, so the
+    // dispatching candidate (CTL-1) is the eligible-queue fallback and has no entry
+    // in moveByTicket. Round 3 only rescued ticketless moves, so an all-ticketed
+    // scan like this still fell through to the gate count.
+    const nudgeScan = runWith({
+      gate: { reason: "1 invariant(s) flagged" },
+      moves: { tier1: [{ ticket: "OTHER-1", move: "nudge" }] },
+    });
+    const prScan = runWith({
+      gate: { reason: "1 invariant(s) flagged" },
+      moves: { tier1: [{ ticket: "OTHER-2", move: "finish-or-close-pr" }] },
+    });
+    expect(nudgeScan).toBe("board-health: nudge");
+    expect(prScan).toBe("board-health: finish-or-close-pr");
+    // Pre-fix both were "1 invariant(s) flagged" and correlated into one incident.
+    expect(nudgeScan).not.toBe(prScan);
+  });
+
   test("(CAT-170) with no moves at all the gate reason is still the fallback", () => {
     expect(runWith({ gate: { reason: "3 invariant(s) flagged" }, moves: {} })).toBe(
       "3 invariant(s) flagged",
