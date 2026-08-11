@@ -647,7 +647,10 @@ describe("escalation default seam", () => {
       },
       now: () => now,
       fenceGuardFn,
-      appendStandoffEvent: (payload) => events.push(payload),
+      appendStandoffEvent: (payload) => {
+        events.push(payload);
+        return true;
+      },
     };
 
     const first = defaultEscalate("CAT-173", { prNumber: 173, reason: "conflicting" }, deps);
@@ -667,6 +670,59 @@ describe("escalation default seam", () => {
     now += 2;
     defaultEscalate("CAT-173", { prNumber: 173, reason: "conflicting" }, deps);
     expect(events).toHaveLength(1);
+  });
+
+  it("retries break-glass until both the durable record and event append succeed (CAT-173 P1)", () => {
+    const orchDir = mkOrchDir();
+    let now = 2_000;
+    let durableAttempts = 0;
+    let eventAttempts = 0;
+    const deps = {
+      orchDir,
+      linearWrite: {},
+      multiHost: true,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "1",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+      },
+      now: () => now,
+      fenceGuardFn: (_ctx, opts) => {
+        opts.onSuppress?.({ ticket: "CAT-174", reason: "superseded", generation: 8 });
+        return false;
+      },
+      recordDurableEscalationFn: () => {
+        durableAttempts += 1;
+        return durableAttempts > 1;
+      },
+      appendStandoffEvent: () => {
+        eventAttempts += 1;
+        return eventAttempts > 1;
+      },
+    };
+
+    now += 2;
+    defaultEscalate("CAT-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "CAT-174")?.breakGlassAt).toBeNull();
+    expect(eventAttempts).toBe(0);
+
+    now += 2;
+    defaultEscalate("CAT-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "CAT-174")?.breakGlassAt).toBeNull();
+    expect(eventAttempts).toBe(0);
+
+    now += 2;
+    defaultEscalate("CAT-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "CAT-174")?.breakGlassAt).toBeNull();
+    expect(eventAttempts).toBe(1);
+
+    now += 2;
+    defaultEscalate("CAT-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "CAT-174")?.breakGlassAt).toBe(now);
+    expect(eventAttempts).toBe(2);
+
+    now += 2;
+    defaultEscalate("CAT-174", { prNumber: 174 }, deps);
+    expect(eventAttempts).toBe(2);
   });
 });
 

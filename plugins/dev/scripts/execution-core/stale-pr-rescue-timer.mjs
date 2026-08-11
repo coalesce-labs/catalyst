@@ -343,6 +343,7 @@ export function defaultEscalate(
     maxParallel = undefined,
     now = () => Date.now(),
     fenceGuardFn = fenceGuard,
+    recordDurableEscalationFn = recordDurableEscalation,
     appendStandoffEvent = appendFenceStandoffEvent,
   } = {}
 ) {
@@ -405,8 +406,7 @@ export function defaultEscalate(
           minAgeMs: resolveStandoffMinAgeMs(env),
         });
         if (verdict.firstBreakGlass) {
-          markBreakGlass({ orchDir, ticket, now: nowMs });
-          recordDurableEscalation({
+          const durableResult = recordDurableEscalationFn({
             orchDir,
             ticket,
             phase: "pr",
@@ -417,17 +417,28 @@ export function defaultEscalate(
             source: "fence-standoff",
             now: new Date(nowMs).toISOString(),
           });
-          appendStandoffEvent({
+          const durableWritten = durableResult === true || (
+            durableResult !== false && existsSync(join(orchDir, ".escalations", `${ticket}.json`))
+          );
+          const eventWritten = durableWritten && appendStandoffEvent({
             ticket,
             site: "stale-pr-rescue",
             reason: rec.reason,
             count: rec.count,
             ageMs: verdict.ageMs,
-          });
-          log.warn(
-            { ticket, prNumber: detail?.prNumber, reason: rec.reason, count: rec.count, ageMs: verdict.ageMs },
-            "cat-173: FENCE STANDOFF — wrote a durable stale-PR escalation without a Linear label",
-          );
+          }) === true;
+          if (durableWritten && eventWritten) {
+            markBreakGlass({ orchDir, ticket, now: nowMs });
+            log.warn(
+              { ticket, prNumber: detail?.prNumber, reason: rec.reason, count: rec.count, ageMs: verdict.ageMs },
+              "cat-173: FENCE STANDOFF — wrote a durable stale-PR escalation without a Linear label",
+            );
+          } else {
+            log.warn(
+              { ticket, durableWritten, eventWritten },
+              "cat-173: fence-standoff surfacing incomplete — leaving break-glass unlatched for retry",
+            );
+          }
         }
       } catch (err) {
         log.warn({ ticket, err: err?.message }, "cat-173: stale-pr-rescue standoff bookkeeping failed — continuing");
