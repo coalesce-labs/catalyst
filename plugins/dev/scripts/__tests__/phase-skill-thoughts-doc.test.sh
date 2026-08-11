@@ -184,6 +184,62 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# CTL-1777 regression: write_phase_thoughts_doc must work under BOTH bash and
+# zsh. Under zsh, `local path` clobbers $PATH (zsh special array), making `tr`
+# and `date` unresolvable → DOC empty → gate miss → artifact_not_gate_visible.
+# Skips zsh rows (not a failure) when zsh is absent on the host.
+# --------------------------------------------------------------------------
+echo ""
+echo "=== multi-shell: write_phase_thoughts_doc gate-visible under bash + zsh (CTL-1777) ==="
+
+_WRITER="${REPO_ROOT}/plugins/dev/scripts/lib/write-phase-thoughts-doc.sh"
+_GATE="${REPO_ROOT}/plugins/dev/scripts/lib/phase-artifact-gate.sh"
+
+for _shell in bash zsh; do
+  if ! command -v "$_shell" >/dev/null 2>&1; then
+    echo "  SKIP: ${_shell} not installed on this host"
+    continue
+  fi
+  for _skill in phase-triage phase-verify phase-review phase-pr phase-monitor-merge phase-monitor-deploy; do
+    _phase="${_skill#phase-}"
+    echo ""
+    echo "--- ${_shell}/${_skill} (phase=${_phase}) ---"
+    _tmp="$(mktemp -d)"
+    _gate_result="$(
+      cd "$_tmp" || exit 3
+      "$_shell" -c "
+        source '$_WRITER' || exit 3
+        source '$_GATE' || exit 3
+        write_phase_thoughts_doc '$_phase' 'CTL-9999' 'body-for-${_phase}'
+        printf 'DOC=%s\n' \"\${CATALYST_PHASE_THOUGHTS_DOC:-}\"
+        if match_thoughts_artifact \"\$(own_thoughts_artifact_dir_for_phase '$_phase')\" CTL-9999 >/dev/null 2>&1; then
+          echo GATE_OK
+        else
+          echo GATE_MISS
+        fi
+      " 2>/dev/null
+    )"
+    rm -rf "$_tmp"
+    echo "Test: ${_shell}/${_skill} — DOC non-empty"
+    _doc_line="$(printf '%s' "$_gate_result" | grep '^DOC=')"
+    _doc_val="${_doc_line#DOC=}"
+    if [[ -n "$_doc_val" ]]; then
+      pass "${_shell}/${_skill} DOC non-empty (${_doc_val})"
+    else
+      fail "${_shell}/${_skill} DOC is empty — CATALYST_PHASE_THOUGHTS_DOC not set" \
+        "(result: ${_gate_result})"
+    fi
+    echo "Test: ${_shell}/${_skill} — gate visible"
+    if printf '%s' "$_gate_result" | grep -q '^GATE_OK$'; then
+      pass "${_shell}/${_skill} gate visible"
+    else
+      fail "${_shell}/${_skill} gate MISS — artifact not gate-visible" \
+        "(result: ${_gate_result})"
+    fi
+  done
+done
+
+# --------------------------------------------------------------------------
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-skill-thoughts-doc: ${PASSES} passed, ${FAILURES} failed"
