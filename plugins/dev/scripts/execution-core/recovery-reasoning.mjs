@@ -445,6 +445,17 @@ export function reasoningRecoveryPass(items, opts = {}) {
             fix_class,
             outcome: fixOutcome.success,
             details: fixOutcome.details,
+            // CAT-203 (extends CTL-1439): a successful seam-dispatched fix IS a
+            // verdict — without one, escalateExhaustedIntents' "N attempts, no
+            // recorded verdict" sweep can't tell a fixed ticket from one still
+            // being worked, so a ticket fixed on attempt 1 can spuriously
+            // escalate on a later re-evaluation. Mirrors the escalate branch
+            // below, which already self-stamps verdict:"escalate" for the
+            // identical reason. A FAILED attempt intentionally gets no verdict —
+            // it must still count toward the attempts-exhausted budget.
+            ...(fixOutcome.success
+              ? { verdict: "fixed", verdictReason: fixOutcome.reason ?? null }
+              : {}),
           });
           actionLog.push("recorded recovery-pass intent");
         } catch (err) {
@@ -2316,10 +2327,19 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
     Boolean(prior.escalated) &&
     typeof priorLast === "number" &&
     ts - priorLast >= RECOVERY_TERMINAL_INTENT_TTL_MS;
+  // CAT-196: a verified "fixed" verdict always clears any prior escalation —
+  // without this, recordVerdict's "fixed" branch (which never itself passes
+  // escalated:false) fell through to the first clause below and kept a stale
+  // escalated:true from an earlier attempt, so the ledger read "decision:fixed"
+  // with a real verdictReason but stayed latched — and defaultShouldSkipItem
+  // checks escalated BEFORE ever looking at decision, silently stranding a
+  // verified-fixed ticket out of recovery-pass/board-health rotation for up to
+  // the full 7-day RECOVERY_TERMINAL_INTENT_TTL_MS.
   const escalated =
-    (Boolean(prior.escalated) && !priorEscalationExpired) ||
-    Boolean(intent.escalated) ||
-    intent.decision === "escalate"; // an escalate-pass latches escalated
+    intent.decision !== "fixed" &&
+    ((Boolean(prior.escalated) && !priorEscalationExpired) ||
+      Boolean(intent.escalated) ||
+      intent.decision === "escalate"); // an escalate-pass latches escalated
 
   // CTL-1440 (P0b, replaces the CTL-1432 lastTs FREEZE): the freeze shared one
   // field between two consumers wanting OPPOSITE semantics — the board-health
