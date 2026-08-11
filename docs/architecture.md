@@ -499,6 +499,36 @@ reclaim storms). Three additive defenses:
 Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlight` drop the ticket;
 the terminal sweep applies `needs-human` via `labelOnce`.
 
+### Triage-state contract (CAT-140)
+
+A team can be registered in `execution-core/registry.json` while the Linear workflow state named by
+its `eligibleQuery.triageStatus` does not exist on that team. The registry upsert and
+`setup-execution-core-states.sh`'s six-state contract are separate writers, and that contract
+deliberately excludes `Triage`. When they diverge, every Todo→Triage write fails, tickets remain in
+`Todo`, and the team's queue freezes.
+
+- **Detection** — `doctor.mjs` provides the worker-only `registry-triage-state` check. One batched
+  Linear query joins registered teams to their state sets. The check FAILs only when a fetched set
+  definitively lacks the configured state; uncertainty is INFO/WARN, and
+  `CATALYST_DOCTOR_PREINSTALL=1` downgrades a definitive failure for the join gate.
+- **Classification** — `linear-transition.sh` refuses a write when a freshly resolved team state
+  set lacks the target (`action=state-absent`, exit 2, no `linearis` call).
+  `linear-write.mjs` maps that result to `reason: "state-absent"`; other failures retain their
+  existing `exit-${code}` reason.
+- **Team-level surfacing** — `triage-state-health.mjs` stores a per-team marker under
+  `<execution-core>/triage-state-health/<TEAM>.json`. `monitor.mjs` emits
+  `monitor.triage_state.missing.<TEAM>` once per fault episode and
+  `monitor.triage_state.recovered.<TEAM>` on the first verified recovery. While latched, dispatch
+  is held without incrementing the ticket count or applying `needs-human`, except for one probe per
+  `EXECUTION_CORE_TRIAGE_STATE_REPROBE_MS` interval.
+- **The single default** — `registry.mjs` owns `DEFAULT_TRIAGE_STATUS` and
+  `resolveTriageStatusForTeam`; a cross-stack parity test pins `linear-transition.sh`'s shell
+  literal to that value.
+
+The observability event families include `monitor.triage_state.missing.<TEAM>` and
+`monitor.triage_state.recovered.<TEAM>`. Their signal-catalog entries belong in the `catalyst-otel`
+sister repository.
+
 A worker directory must not persist with zero phase signals (CAT-24). The shared stall-clear seam
 removes the directory when it deletes the last real signal — but only once `clearStalledLabel`
 reports a CONFIRMED label removal (`onSettled`), since production's `removeLabel` is async: removing

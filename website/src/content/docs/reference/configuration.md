@@ -1079,6 +1079,12 @@ These knobs are env vars on the `catalyst-execution-core` process:
   Observability only — it surfaces a dominating ticket without quarantining it.
 - `SCHEDULER_RUNAWAY_WINDOW_MS` (default `600000`, 10 min) — rolling window for the runaway-rate
   alert and its once-per-window suppression marker.
+- `EXECUTION_CORE_TRIAGE_STATE_REPROBE_MS` (default `900000`, 15 min) — minimum interval between
+  recovery probes while a team's missing-triage-state fault is latched. Other triage dispatch for
+  that team remains held until a probe verifies the configured state.
+- `CATALYST_DOCTOR_TRIAGE_STATE_SEVERITY` (`fail` or `warn`, default `fail`) — changes a definitive
+  `registry-triage-state` absence from FAIL to WARN. Uncertain results are already INFO/WARN;
+  `CATALYST_DOCTOR_PREINSTALL=1` also downgrades a definitive failure for the join gate.
 
 The **phantom worker-dir validity sweep** quarantines a `workers/<ticket>/` dir only when all three
 hold: the ticket is definitively **not-found** in Linear (a clean exit-0 not-found body — a nonzero

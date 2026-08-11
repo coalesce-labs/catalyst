@@ -73,6 +73,7 @@ import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
 import {
   applyTriageStatus as defaultApplyTriageStatus,
   applyAssignee as defaultApplyAssignee,
+  teamOf,
   applyLabel, // CTL-1441: needs-human at the triage re-dispatch cap
   removeLabel, // CTL-1481: worker:<host> swap (remove-before-add)
 } from "./linear-write.mjs";
@@ -108,6 +109,12 @@ import { emitFenceClaimed } from "./fence-event.mjs";
 // CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
 // won cluster claim. Never the claim arbiter — see worker-label.mjs header.
 import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
+import {
+  isTriageStateFaulted,
+  shouldProbeTriageState,
+  markTriageStateProbe,
+  recordTriageStateWrite,
+} from "./triage-state-health.mjs";
 import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1367 P1: executor=sdk occupancy reader for the triage budget
 import {
   recordReconcileSuccess,
@@ -738,7 +745,7 @@ export function computeTriageBudget({
 // CTL-716: budget param — a mutable { remaining } object; when provided and
 // remaining <= 0, the dispatch is deferred (dropped; sweepMissingTriage retries).
 // Only decrements on a successful (code === 0) dispatch. Returns true on success.
-function dispatchTriage(
+export function dispatchTriage(
   identifier,
   {
     dispatch,
@@ -815,6 +822,11 @@ function dispatchTriage(
     // Single-host paths never call these.
     readFenceTriageAttempt = readTriageAttemptCountSync,
     bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
+    // CAT-140: injectable per-team structural triage-state latch seams.
+    isTeamTriageStateFaulted = (team) => isTriageStateFaulted(team),
+    shouldProbeTeamTriageState = (team) => shouldProbeTriageState(team),
+    markTeamTriageStateProbe = (team) => markTriageStateProbe(team),
+    recordTeamTriageStateWrite = (team, result) => recordTriageStateWrite(team, result),
   }
 ) {
   if (!orchDir) {
@@ -869,6 +881,22 @@ function dispatchTriage(
     );
     return false;
   }
+  // CAT-140: a missing workflow state is a TEAM fault. Hold dispatch before
+  // the per-ticket cap and admit one periodic probe so recovery self-clears.
+  const _team = teamOf(identifier);
+  let _teamFaultProbe = false;
+  try {
+    if (_team && isTeamTriageStateFaulted(_team)) {
+      if (!shouldProbeTeamTriageState(_team)) {
+        log.debug({ identifier, team: _team }, "cat-140: team triage-state faulted — holding dispatch");
+        return false;
+      }
+      _teamFaultProbe = true;
+      log.info({ identifier, team: _team }, "cat-140: team triage-state faulted — allowing one probe dispatch");
+    }
+  } catch (err) {
+    log.warn({ identifier, err: err.message }, "cat-140: triage-state fault gate threw — proceeding (fail-open)");
+  }
   // CTL-1441 guard (b) — placed BEFORE the capacity gate (Codex R4: parking is
   // capacity-independent; at a saturated fleet the budget return would keep a
   // capped ticket invisible forever) and AFTER the drain/HRW gates (only the
@@ -882,18 +910,27 @@ function dispatchTriage(
     // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
     // naturally absent until it finishes. Defer the park while in flight.
     if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
-    try {
-      labelNeedsHuman(orchDir, identifier);
-    } catch (err) {
-      log.warn({ identifier, err: err.message }, "ctl-1441: needs-human label at triage cap threw — continuing");
+    let teamFaulted = false;
+    try { teamFaulted = !!(_team && isTeamTriageStateFaulted(_team)); } catch { /* fail-open */ }
+    if (teamFaulted) {
+      if (!_teamFaultProbe) {
+        log.warn({ identifier, team: _team, cap: TRIAGE_DISPATCH_CAP }, "cat-140: at triage cap under a team triage-state fault — skipping needs-human");
+        return false;
+      }
+    } else {
+      try {
+        labelNeedsHuman(orchDir, identifier);
+      } catch (err) {
+        log.warn({ identifier, err: err.message }, "ctl-1441: needs-human label at triage cap threw — continuing");
+      }
+      if (markTriageCapped(orchDir, identifier)) {
+        log.warn(
+          { identifier, cap: TRIAGE_DISPATCH_CAP },
+          "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm",
+        );
+      }
+      return false;
     }
-    if (markTriageCapped(orchDir, identifier)) {
-      log.warn(
-        { identifier, cap: TRIAGE_DISPATCH_CAP },
-        "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm",
-      );
-    }
-    return false;
   }
   if (budget && budget.remaining <= 0) {
     log.info(
@@ -1067,6 +1104,11 @@ function dispatchTriage(
   // signal is reset to stalled by the reclaim/revive path, after which counting
   // resumes; "failed"/"stalled" re-dispatches launch real workers and count.
   const statusAtLaunch = readTriageSignalStatus(orchDir, identifier);
+  if (_teamFaultProbe && !isTriageInFlight(statusAtLaunch) && statusAtLaunch !== "done") {
+    // Consume the re-probe window only once every later admission gate has
+    // passed and a real launch is imminent.
+    markTeamTriageStateProbe(_team);
+  }
   if (!isTriageInFlight(statusAtLaunch) && statusAtLaunch !== "done") {
     bumpTriageDispatchCount(orchDir, identifier);
     // CTL-1649: mirror the host-local bump on the fence attachment so the fleet-wide
@@ -1133,6 +1175,15 @@ function dispatchTriage(
     applied: res.applied,
     reason: res.reason,
   });
+  try {
+    recordTeamTriageStateWrite(_team, {
+      reason: res.reason,
+      verified: res.verified,
+      expectedState: res.to_state ?? null,
+    });
+  } catch (err) {
+    log.warn({ identifier, err: err.message }, "cat-140: triage-state health record threw — continuing");
+  }
   // CTL-781 + CTL-1011: self-assign the bot on claim — always invoked so a
   // missing botUserId surfaces the deduped config-missing warn (invalid-user)
   // instead of silently skipping. Best-effort, never blocks triage.

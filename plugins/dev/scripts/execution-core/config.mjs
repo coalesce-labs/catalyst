@@ -310,6 +310,11 @@ export function getReplicaHealthDir() {
   return resolve(getExecutionCoreDir(), "replica-health");
 }
 
+// CAT-140 — durable per-team latch for a structurally absent triage state.
+export function getTriageStateHealthDir() {
+  return resolve(getExecutionCoreDir(), "triage-state-health");
+}
+
 // CTL-1503 — fleet-health durable-latch dir. Holds the edge-trigger latch marker
 // (fleet-health-latch.json) the probe persists on the healthy→degraded /
 // degraded→healthy edges and hydrates on start, so a daemon restart mid-episode
@@ -1300,6 +1305,9 @@ export const RECONCILE_FAILURE_ALERT_THRESHOLD =
 
 export const REPLICA_DEGRADED_ALERT_THRESHOLD =
   Number(process.env.EXECUTION_CORE_REPLICA_DEGRADED_ALERT_THRESHOLD) || 3;
+
+export const TRIAGE_STATE_REPROBE_MS =
+  Number(process.env.EXECUTION_CORE_TRIAGE_STATE_REPROBE_MS) || 15 * 60 * 1000;
 
 // CAT-29: time-based total-blindness tripwire. This complements the count-based
 // threshold above, whose 10-minute polling cadence can otherwise delay an alarm

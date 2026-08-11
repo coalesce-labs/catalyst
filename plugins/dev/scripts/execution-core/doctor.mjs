@@ -92,7 +92,7 @@ import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-cat
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
 import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
-import { listProjects } from "./registry.mjs";
+import { listProjects, resolveEligibleQuery } from "./registry.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -3459,15 +3459,16 @@ export function checkConfigScopeLeak(deps = {}) {
 // defaultLinearGraphQLPost — minimal fetch-based Linear GraphQL POST, mirroring
 // checkBotCredentials' inline probe above. Injectable via deps.post so tests
 // never hit the network; throws on a non-2xx response (caught by the caller).
-async function defaultLinearGraphQLPost(query, token) {
+async function defaultLinearGraphQLPost(query, token, variables) {
   const res = await fetch(LINEAR_GQL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: token },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify(variables === undefined ? { query } : { query, variables }),
     signal: AbortSignal.timeout(5000),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  const body = await res.text();
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${body.slice(0, 500)}`);
+  return JSON.parse(body);
 }
 
 // parseEnvFileVar / overlayDaemonDrainEnv — CTL-1678 (Codex P2). Read a single
@@ -3618,6 +3619,98 @@ export function checkRegistryTeamIdentity(deps = {}) {
     `${known}/${projects.length} registry entries verified against their repoRoot's declared ` +
       "teamKey; no mismatches (CAT-52)",
   );
+}
+
+// CAT-140: verify that every registered team's configured triage state actually
+// exists in Linear. Only definitive absence is a failure; missing credentials,
+// network failures, and incomplete query results remain explicitly unverified.
+export async function checkRegistryTriageState(deps = {}) {
+  const name = "registry-triage-state";
+  const {
+    listProjects: readProjects = listProjects,
+    resolveSecretContract = resolveSecret,
+    linearToken = () => resolveLinearTokenLive(resolveSecretContract) ?? "",
+    post = defaultLinearGraphQLPost,
+    preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
+    severityOverride = process.env.CATALYST_DOCTOR_TRIAGE_STATE_SEVERITY ?? null,
+  } = deps;
+  const remediation =
+    "enable the team's native Linear Triage mode (Team settings → Triage), or set " +
+    "eligibleQuery.triageStatus in ~/catalyst/execution-core/registry.json to a state the team has";
+  const absenceStatus = severityOverride === "warn" || preinstall ? STATUS.WARN : STATUS.FAIL;
+
+  let projects;
+  try {
+    projects = readProjects();
+  } catch (err) {
+    return [mkCheck(name, STATUS.INFO, `registry unreadable — triage-state contract not checked (${err?.message ?? "unknown"}) (CAT-140)`)];
+  }
+  if (!Array.isArray(projects) || projects.length === 0) {
+    return [mkCheck(name, STATUS.INFO, "registry has no projects — nothing to check (CAT-140)")];
+  }
+
+  const wanted = new Map();
+  for (const project of projects) {
+    if (typeof project?.team === "string" && project.team) {
+      wanted.set(project.team, resolveEligibleQuery(project).triageStatus);
+    }
+  }
+  if (wanted.size === 0) {
+    return [mkCheck(name, STATUS.INFO, "no registry entry carries a team key — nothing to check (CAT-140)")];
+  }
+
+  const token = linearToken();
+  if (!token) {
+    return [mkCheck(name, STATUS.INFO, "no LINEAR_API_TOKEN / LINEAR_API_KEY — skipping triage-state contract check (CAT-140)")];
+  }
+
+  // Linear's TeamFilter key comparator supports `eq` but not a batched `in`
+  // predicate. Fetch the small workspace team set once and join locally.
+  const query = "query { teams(first: 100) { nodes { key states(first: 50) { nodes { name } } } } }";
+  let nodes;
+  try {
+    const json = await post(query, token);
+    if (json?.errors?.length) {
+      return [mkCheck(name, STATUS.WARN, `Linear GraphQL error: ${JSON.stringify(json.errors)} (CAT-140)`)];
+    }
+    nodes = json?.data?.teams?.nodes;
+    if (!Array.isArray(nodes)) {
+      return [mkCheck(name, STATUS.WARN, "unexpected teams response shape from Linear (CAT-140)")];
+    }
+  } catch (err) {
+    return [mkCheck(name, STATUS.WARN, `Linear unreachable: ${err?.message ?? err} (CAT-140)`)];
+  }
+
+  const actual = new Map(
+    nodes.map((team) => [team?.key, new Set((team?.states?.nodes ?? []).map((state) => state?.name))]),
+  );
+  const missing = [];
+  const unverified = [];
+  for (const [team, state] of wanted) {
+    const states = actual.get(team);
+    if (!states) unverified.push(team);
+    else if (!states.has(state)) missing.push(`${team} → "${state}"`);
+  }
+
+  if (missing.length > 0) {
+    return [mkCheck(
+      name,
+      absenceStatus,
+      `${missing.length} registered team${missing.length === 1 ? "" : "s"} name a triage state that ` +
+        `does not exist on the team — dispatch into ${missing.length === 1 ? "it" : "them"} cannot leave ` +
+        `Todo (every Todo→Triage write is structurally impossible): ${missing.join("; ")} — ${remediation} (CAT-140)`,
+    )];
+  }
+  if (unverified.length > 0) {
+    return [mkCheck(
+      name,
+      STATUS.INFO,
+      `${wanted.size - unverified.length}/${wanted.size} registered teams verified against their Linear state ` +
+        `set; ${unverified.length} not returned by the query (team key renamed, or not visible to this token): ` +
+        `${unverified.join(", ")} — no missing state found, but the contract is unverified for those (CAT-140)`,
+    )];
+  }
+  return [mkCheck(name, STATUS.PASS, `${wanted.size}/${wanted.size} registered teams have the triage state their eligibleQuery names (CAT-140)`)];
 }
 
 // checkWorkerLabels — CTL-1481. Advisory health of the workspace `worker`
@@ -5404,6 +5497,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
     () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
     () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
+    () => checkRegistryTriageState({ preinstall }), // CAT-140: registry triageStatus must exist in the team's Linear workflow
   ];
 }
 

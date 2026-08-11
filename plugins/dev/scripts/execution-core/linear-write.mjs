@@ -7,7 +7,11 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { linearKeyForPhase, TERMINAL_LINEAR_KEY } from "../lib/phase-fsm.mjs";
-import { getProjectConfig } from "./registry.mjs";
+import {
+  getProjectConfig,
+  resolveTriageStatusForTeam,
+  DEFAULT_TRIAGE_STATUS,
+} from "./registry.mjs";
 import { log } from "./config.mjs";
 import { fetchTicketLabels, readTicketLabels, readTicketLabelNodes, fetchTicketState, fetchTicketDelegate } from "./linear-query.mjs";
 import { withBreaker } from "./linear-breaker.mjs";
@@ -141,11 +145,13 @@ function runTransition({
     } catch {
       /* non-JSON stdout — leave action/from_state/to_state null */
     }
-    const applied = code === 0 && action !== "update-failed";
+    const applied =
+      code === 0 && action !== "update-failed" && action !== TRANSITION_STATE_ABSENT;
+    const reason = applied ? null : classifyTransitionFailure({ code, action });
     if (!applied) {
-      log.warn({ ticket, key, code, action }, "linear-write: status write not applied");
+      log.warn({ ticket, key, code, action, reason }, "linear-write: status write not applied");
     }
-    return { applied, reason: applied ? null : `exit-${code}`, action, from_state, to_state };
+    return { applied, reason, action, from_state, to_state };
   } catch (err) {
     log.warn(
       { ticket, key, err: err.message },
@@ -355,11 +361,15 @@ export function applyTriageStatus({
   resolveRepoRoot = defaultResolveRepoRoot,
   exec = defaultExec,
   fetchState = fetchTicketState,
+  resolveTriageStatus = resolveTriageStatusForTeam,
 }) {
   let from_state = null;
   try {
     // 1. Capture pre-transition state (best-effort — null is acceptable).
     from_state = fetchState(ticket, { exec });
+
+    const team = teamOf(ticket);
+    const expectedState = resolveTriageStatus(team) ?? DEFAULT_TRIAGE_STATUS;
 
     // 2. Shell the transition. CTL-758: pass the from_state we just read as
     //    knownCurrentState so the backward-write guard reuses it (no second read).
@@ -374,15 +384,10 @@ export function applyTriageStatus({
       knownCurrentState: from_state,
     });
     if (!t.applied) {
-      return { applied: false, verified: false, from_state, to_state: null, reason: t.reason };
+      return { applied: false, verified: false, from_state, to_state: t.to_state ?? expectedState, reason: t.reason };
     }
 
-    // 3. Resolve expected target state from the project config (stateMap.triage).
-    const team = teamOf(ticket);
-    const cfg = team ? getProjectConfig(team) : null;
-    const expectedState = cfg?.eligibleQuery?.triageStatus ?? "Triage";
-
-    // 4. Re-read to verify the state actually landed.
+    // 3. Re-read to verify the state actually landed.
     const to_state = fetchState(ticket, { exec });
     if (to_state == null) {
       log.warn({ ticket }, "linear-write: triage verify-unreadable — cannot confirm state landed");
@@ -593,4 +598,19 @@ export function classifyLabelFailure(stderr) {
   if (s.includes("Rate limit")) return "rate-limited";
   if (isAuthError(s)) return "auth-error";
   return "transient";
+}
+
+// CAT-140: status-write failure classification. Only a target absent from a
+// freshly resolved team state set is known to be structurally unrecoverable;
+// every other failure retains the legacy opaque exit-code reason.
+export const TRANSITION_STATE_ABSENT = "state-absent";
+export const UNRECOVERABLE_TRANSITION_REASONS = new Set([TRANSITION_STATE_ABSENT]);
+
+export function classifyTransitionFailure({ code, action } = {}) {
+  if (action === TRANSITION_STATE_ABSENT) return TRANSITION_STATE_ABSENT;
+  return `exit-${code}`;
+}
+
+export function isUnrecoverableTransitionReason(reason) {
+  return UNRECOVERABLE_TRANSITION_REASONS.has(reason);
 }

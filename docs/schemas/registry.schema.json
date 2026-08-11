@@ -40,7 +40,7 @@
               "triageStatus": {
                 "type": "string",
                 "default": "Triage",
-                "description": "Linear workflow state name for one-shot triage dispatch. When the daemon finds tickets in this state, it dispatches a triage phase-agent job. Default is 'Triage'.",
+                "description": "Linear workflow state name for one-shot triage dispatch. The state must exist on this team, normally through Linear's native Triage mode; Catalyst does not create it. The registry-triage-state check in catalyst doctor verifies this contract. When the daemon finds tickets in this state, it dispatches a triage phase-agent job. Default is 'Triage'.",
                 "examples": ["Triage"]
               },
               "project": {

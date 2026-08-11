@@ -144,6 +144,10 @@ export function ownerRepoFromRepoRoot(repoRoot) {
   return seg.length >= 2 ? `${seg[0]}/${seg[1]}` : null;
 }
 
+// CAT-140: the single fallback triage state name. The shell copy is pinned by
+// the linear-transition cross-stack parity test.
+export const DEFAULT_TRIAGE_STATUS = "Triage";
+
 // resolveEligibleQuery — normalize a registry entry into the runnable query the
 // monitor + linear-query layer needs. The entry's `team` lives at the top level
 // (the eligibleQuery object never carries it); this is the single place it is
@@ -155,11 +159,19 @@ export function resolveEligibleQuery(entry) {
   return {
     team: entry?.team ?? null,
     status: eq.status ?? "Todo",
-    triageStatus: eq.triageStatus ?? "Triage",
+    triageStatus: eq.triageStatus ?? DEFAULT_TRIAGE_STATUS,
     project: eq.project ?? null,
     label: eq.label ?? null,
     priority: eq.priority ?? null,
   };
+}
+
+// Resolve through the same normalization layer used by eligible queries. A
+// registered team may customize the target; an unknown team still gets the
+// shared fallback. Only a missing team identifier produces null.
+export function resolveTriageStatusForTeam(team, { getConfig = getProjectConfig } = {}) {
+  if (!team) return null;
+  return resolveEligibleQuery(getConfig(team) ?? { team }).triageStatus;
 }
 
 // upsertProjectEntry — idempotently write a team's registry entry. Creates the

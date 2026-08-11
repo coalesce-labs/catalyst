@@ -12,6 +12,10 @@ import {
   applyAssignee,
   teamOf,
   classifyLabelFailure,
+  classifyTransitionFailure,
+  isUnrecoverableTransitionReason,
+  TRANSITION_STATE_ABSENT,
+  UNRECOVERABLE_TRANSITION_REASONS,
   _resetAssigneeWarnDedup,
 } from "./linear-write.mjs";
 import { log } from "./config.mjs";
@@ -600,6 +604,97 @@ describe("applyTriageStatus", () => {
     const r = applyTriageStatus({ ticket: "CTL-704", resolveRepoRoot, exec, fetchState });
     expect(r.applied).toBe(false);
     expect(r.verified).toBe(false);
+  });
+});
+
+test("applyTriageStatus verifies against the team's customized triageStatus (CAT-140)", () => {
+  const exec = () => ({
+    code: 0,
+    stdout: JSON.stringify({
+      action: "transitioned",
+      currentState: "Todo",
+      targetState: "Intake",
+    }),
+    stderr: "",
+  });
+  const states = ["Todo", "Intake"];
+  const r = applyTriageStatus({
+    ticket: "ACME-1",
+    resolveRepoRoot: () => "/repo",
+    exec,
+    fetchState: () => states.shift(),
+    resolveTriageStatus: () => "Intake",
+  });
+  expect(r).toMatchObject({ applied: true, verified: true, to_state: "Intake", reason: null });
+});
+
+describe("classifyTransitionFailure (CAT-140)", () => {
+  test("action=state-absent maps to the structural reason", () => {
+    expect(classifyTransitionFailure({ code: 2, action: "state-absent" })).toBe(
+      TRANSITION_STATE_ABSENT,
+    );
+  });
+
+  test("action=update-failed keeps the opaque exit code", () => {
+    expect(classifyTransitionFailure({ code: 2, action: "update-failed" })).toBe("exit-2");
+  });
+
+  test("non-JSON stdout keeps the opaque exit code", () => {
+    expect(classifyTransitionFailure({ code: 127, action: null })).toBe("exit-127");
+  });
+
+  test("only state-absent is unrecoverable", () => {
+    expect(isUnrecoverableTransitionReason(TRANSITION_STATE_ABSENT)).toBe(true);
+    expect(isUnrecoverableTransitionReason("exit-2")).toBe(false);
+    expect(UNRECOVERABLE_TRANSITION_REASONS.has("exit-2")).toBe(false);
+  });
+});
+
+describe("runTransition surfaces the structural reason (CAT-140)", () => {
+  const shell = (action) => () => ({
+    code: action === "transitioned" ? 0 : 2,
+    stdout: JSON.stringify({ action, currentState: "Todo", targetState: "Triage" }),
+    stderr: "",
+  });
+
+  test("state-absent preserves from_state and reports the structural reason", () => {
+    const r = applyPhaseStatus({
+      ticket: "CAT-140",
+      phase: "research",
+      resolveRepoRoot: () => "/r",
+      exec: shell("state-absent"),
+    });
+    expect(r).toMatchObject({
+      applied: false,
+      reason: TRANSITION_STATE_ABSENT,
+      from_state: "Todo",
+    });
+  });
+
+  test("update-failed still reports exit-2", () => {
+    const r = applyPhaseStatus({
+      ticket: "CAT-140",
+      phase: "research",
+      resolveRepoRoot: () => "/r",
+      exec: shell("update-failed"),
+    });
+    expect(r.reason).toBe("exit-2");
+  });
+
+  test("applyTriageStatus propagates state-absent unchanged", () => {
+    const r = applyTriageStatus({
+      ticket: "CAT-140",
+      resolveRepoRoot: () => "/r",
+      exec: shell("state-absent"),
+      fetchState: () => "Todo",
+      resolveTriageStatus: () => "Triage",
+    });
+    expect(r).toMatchObject({
+      applied: false,
+      verified: false,
+      to_state: "Triage",
+      reason: TRANSITION_STATE_ABSENT,
+    });
   });
 });
 

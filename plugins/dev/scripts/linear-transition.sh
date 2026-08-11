@@ -24,7 +24,9 @@
 # Exit codes:
 #   0  success (transitioned, idempotent skip, dry-run, or linearis missing)
 #   1  usage error (missing required args)
-#   2  linearis update call failed
+#   2  transition not applied; with --json inspect action:
+#        update-failed — transient linearis failure
+#        state-absent — target state is absent from the team's resolved state set
 
 set -uo pipefail
 
@@ -39,7 +41,9 @@ default_state_for() {
   case "$1" in
     backlog)     echo "Backlog" ;;
     todo)        echo "Todo" ;;
-    triage)      echo "Triage" ;;  # requires the team's native Linear Triage mode enabled (triageEnabled), else no such state exists to resolve
+    # CAT-140: keep in sync with registry.mjs DEFAULT_TRIAGE_STATUS (pinned by
+    # __tests__/linear-transition.test.sh).
+    triage)      echo "Triage" ;;
     research)    echo "In Progress" ;;
     planning)    echo "In Progress" ;;
     inProgress)  echo "In Progress" ;;
@@ -165,14 +169,25 @@ TARGET_STATE_ID="$(lookup_state_id)"
 
 # Cache miss → resolve once, then re-read. Skipped under --dry-run (no side
 # effects) and when there is no teamKey (the resolver requires one).
+RESOLVE_ATTEMPTED=0
+RESOLVE_RC=1
 if [ -z "$TARGET_STATE_ID" ] && [ -n "$TEAM_KEY" ] && [ "$DRY_RUN" -ne 1 ]; then
-  RESOLVER="${SCRIPT_DIR}/resolve-linear-ids.sh"
+  RESOLVER="${CATALYST_LINEAR_ID_RESOLVER:-${SCRIPT_DIR}/resolve-linear-ids.sh}"
   if [ -x "$RESOLVER" ] && [ -n "$CONFIG_PATH" ]; then
-    bash "$RESOLVER" --config "$CONFIG_PATH" --force >/dev/null 2>&1 || true
+    RESOLVE_ATTEMPTED=1
+    bash "$RESOLVER" --config "$CONFIG_PATH" --force >/dev/null 2>&1
+    RESOLVE_RC=$?
     TARGET_STATE_ID="$(lookup_state_id)"
   fi
 fi
 STATUS_ARG="${TARGET_STATE_ID:-$TARGET_STATE}"
+
+team_state_set_known() {
+  [ "$RESOLVE_ATTEMPTED" -eq 1 ] && [ "$RESOLVE_RC" -eq 0 ] || return 1
+  [ -n "$TEAM_KEY" ] && [ -f "$REGISTRY_PATH" ] && command -v jq >/dev/null 2>&1 || return 1
+  jq -e --arg t "$TEAM_KEY" '((.[$t].stateIds // {}) | length) > 0' \
+    "$REGISTRY_PATH" >/dev/null 2>&1
+}
 
 # ─── Emit a JSON or human-readable result ──────────────────────────────────
 emit() {
@@ -199,6 +214,14 @@ emit() {
 if ! command -v linearis >/dev/null 2>&1; then
   emit "skipped-no-linearis" "" "linearis CLI not installed; cannot transition ticket"
   exit 0
+fi
+
+# A successful forced resolve wrote the team's complete, non-empty state set.
+# If the target remains missing, the transition cannot succeed and linearis is
+# deliberately not called.
+if [ -z "$TARGET_STATE_ID" ] && team_state_set_known; then
+  emit "state-absent" "" "target state '${TARGET_STATE}' does not exist on team '${TEAM_KEY}' — enable the team's Linear Triage mode or set eligibleQuery.triageStatus to a state it has (CAT-140)"
+  exit 2
 fi
 
 # ─── Idempotency check (read current state first) ──────────────────────────

@@ -783,6 +783,72 @@ run "triage transition resolves via the registry's customized eligibleQuery.tria
 run "used the registry's 'Intake' override, not the hardcoded 'Triage' default" \
   expect_contains "$LOG34" "linearis issues update TST-34 --status Intake"
 
+# CAT-140: the shell fallback is pinned to registry.mjs's shared JS constant.
+JS_DEFAULT="$(sed -n 's/^export const DEFAULT_TRIAGE_STATUS = "\(.*\)";$/\1/p' \
+  "${REPO_ROOT}/plugins/dev/scripts/execution-core/registry.mjs")"
+SH_DEFAULT="$(sed -n 's/^    triage)      echo "\([^"]*\)".*$/\1/p' "${TRANSITION}")"
+run "CAT-140: bash triage default equals JS DEFAULT_TRIAGE_STATUS" \
+  test "$JS_DEFAULT" = "$SH_DEFAULT"
+
+# ─── CAT-140: authoritative state-set absence detection ────────────────────
+cat140_transition_case() {
+  local name="$1" mode="$2" state="$3" team_key="$4" dry_run="$5"
+  local expected_action="$6" expected_rc="$7" expected_updates="$8"
+  local work="${SCRATCH}/${name}" bin="${SCRATCH}/${name}/bin"
+  local log="${SCRATCH}/${name}/linearis.log" resolver="${SCRATCH}/${name}/resolver.sh"
+  mkdir -p "${work}/.catalyst"
+  printf '{"catalyst":{"linear":{"teamKey":"%s","stateMap":{}}}}\n' "$team_key" \
+    > "${work}/.catalyst/config.json"
+  install_fake_linearis "$bin"
+  : > "$log"
+  rm -f "$REGISTRY"
+  cat > "$resolver" <<'EOF'
+#!/usr/bin/env bash
+case "${CAT140_RESOLVER_MODE}" in
+  absent) jq -n '{CAT:{resolvedAt:"2026-08-11T00:00:00Z",stateIds:{Todo:"id-todo","In Progress":"id-progress"}}}' > "${HOME}/.config/catalyst/linear-state-ids.json" ;;
+  present) jq -n '{CAT:{resolvedAt:"2026-08-11T00:00:00Z",stateIds:{Triage:"id-triage"}}}' > "${HOME}/.config/catalyst/linear-state-ids.json" ;;
+  empty) jq -n '{CAT:{resolvedAt:"2026-08-11T00:00:00Z",stateIds:{}}}' > "${HOME}/.config/catalyst/linear-state-ids.json" ;;
+  fail) exit 1 ;;
+esac
+EOF
+  chmod +x "$resolver"
+
+  local state_args=(--transition triage)
+  [ -n "$state" ] && state_args=(--state "$state")
+  [ "$dry_run" = "yes" ] && state_args+=(--dry-run)
+  local out rc action updates
+  out="$(CAT140_RESOLVER_MODE="$mode" CATALYST_LINEAR_ID_RESOLVER="$resolver" \
+    FAKE_LINEARIS_LOG="$log" PATH="$bin:$PATH" \
+    bash "$TRANSITION" --ticket CAT-140 "${state_args[@]}" \
+      --config "$work/.catalyst/config.json" --json 2>&1)"
+  rc=$?
+  action="$(printf '%s' "$out" | jq -r '.action // empty' 2>/dev/null)"
+  updates="$(grep -c 'linearis issues update' "$log" || true)"
+  [ "$rc" = "$expected_rc" ] && [ "$action" = "$expected_action" ] && \
+    [ "$updates" = "$expected_updates" ] || {
+      printf 'rc=%s action=%s updates=%s out=%s\n' "$rc" "$action" "$updates" "$out"
+      return 1
+    }
+  if [ "$expected_action" = "state-absent" ]; then
+    printf '%s' "$out" | grep -q "${state:-Triage}" && printf '%s' "$out" | grep -q "CAT"
+  fi
+}
+
+run "CAT-140: successful fresh resolve without target refuses write" \
+  cat140_transition_case cat140-absent absent "" CAT no state-absent 2 0
+run "CAT-140: fresh resolve containing target follows normal transition path" \
+  cat140_transition_case cat140-present present "" CAT no transitioned 0 1
+run "CAT-140: failed resolver fails open to the state name" \
+  cat140_transition_case cat140-failed fail "" CAT no transitioned 0 1
+run "CAT-140: empty resolved state set fails open" \
+  cat140_transition_case cat140-empty empty "" CAT no transitioned 0 1
+run "CAT-140: missing teamKey skips resolver and fails open" \
+  cat140_transition_case cat140-no-team absent "" "" no transitioned 0 1
+run "CAT-140: dry-run neither resolves nor reports state-absent" \
+  cat140_transition_case cat140-dry absent "" CAT yes dry-run 0 0
+run "CAT-140: explicit missing state also reports state-absent" \
+  cat140_transition_case cat140-explicit absent NoSuchState CAT no state-absent 2 0
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]
