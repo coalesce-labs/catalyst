@@ -38,6 +38,9 @@ function standoffDir(orchDir) {
 }
 
 function standoffPath(orchDir, ticket) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(String(ticket ?? ""))) {
+    throw new Error("fence-standoff: invalid ticket identifier");
+  }
   return join(standoffDir(orchDir), `${ticket}.json`);
 }
 
@@ -176,6 +179,7 @@ export function maybeBreakGlass({
   detail = "",
 }) {
   try {
+    standoffPath(orchDir, ticket); // validate containment before any sink path is built
     const rec = recordFenceSuppression({
       orchDir,
       ticket,
@@ -189,8 +193,7 @@ export function maybeBreakGlass({
       minAgeMs: resolveStandoffMinAgeMs(env),
     });
     if (evaluation.firstBreakGlass) {
-      markBreakGlass({ orchDir, ticket, now });
-      recordEscalation({
+      const durableResult = recordEscalation({
         orchDir,
         ticket,
         phase,
@@ -202,13 +205,23 @@ export function maybeBreakGlass({
         source: "fence-standoff",
         now,
       });
-      appendEvent({
+      const durableConfirmed = durableResult?.confirmed === true || existsSync(
+        join(orchDir, ".escalations", `${ticket}.json`),
+      );
+      const eventConfirmed = durableConfirmed && appendEvent({
         ticket,
         site,
         reason: rec.reason,
         count: rec.count,
         ageMs: evaluation.ageMs,
       });
+      // Persist the once-per-episode latch only after BOTH human-facing outputs
+      // confirm. A transient disk/event failure stays retryable next tick.
+      if (durableConfirmed && eventConfirmed === true) {
+        markBreakGlass({ orchDir, ticket, now });
+      } else {
+        return { ...evaluation, firstBreakGlass: true, record: rec, deliveryPending: true };
+      }
       logger?.warn?.(
         { ticket, site, reason: rec.reason, count: rec.count, ageMs: evaluation.ageMs },
         "cat-173: FENCE STANDOFF — wrote a durable escalation without a Linear label",

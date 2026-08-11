@@ -234,6 +234,7 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in, marker-gat
   });
 
   test("fresh row showing a FOREIGN owner → suppress (the partitioned-zombie catch)", () => {
+    const seen = [];
     const result = fenceGuard(base, {
       readGen: () => 5,
       readFence: () => fenceRow({ ownerHost: "laptop", generation: 6 }), // peer took over
@@ -241,11 +242,14 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in, marker-gat
       escalate: () => ({ current: true }), // even if Linear lied, we must not reach it
       readSource: "projection-first",
       env: STAGE1,
+      onSuppress: (verdict) => seen.push(verdict),
     });
     expect(result).toBe(false);
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.FOREIGN_OWNER);
   });
 
   test("fresh self-owned row at a HIGHER generation → suppress", () => {
+    const seen = [];
     const result = fenceGuard(base, {
       readGen: () => 5,
       readFence: () => fenceRow({ ownerHost: "mini", generation: 6 }),
@@ -253,8 +257,10 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in, marker-gat
       escalate: () => ({ current: true }),
       readSource: "projection-first",
       env: STAGE1,
+      onSuppress: (verdict) => seen.push(verdict),
     });
     expect(result).toBe(false);
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.SUPERSEDED);
   });
 
   test("STALE self-owned row → escalates (does NOT trust local; regression guard for findings 1/2/7)", () => {

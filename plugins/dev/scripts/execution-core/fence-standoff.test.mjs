@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -49,6 +49,12 @@ describe("fence-standoff ledger (CAT-173)", () => {
     const r = recordFenceSuppression({ orchDir: "/proc/nonexistent-cat173", ticket: "CAT-53", site: "s", reason: "superseded", now: 3 });
     expect(r.count).toBe(1);
     expect(r.ticket).toBe("CAT-53");
+  });
+
+  test("ticket identifiers cannot escape the ledger directory", () => {
+    recordFenceSuppression({ orchDir: dir, ticket: "../../escaped", site: "s", reason: "superseded", now: 3 });
+    clearFenceStandoff(dir, "../../escaped");
+    expect(existsSync(join(dir, "..", "..", "escaped.json"))).toBe(false);
   });
 
   test("markBreakGlass preserves the first break-glass timestamp", () => {
@@ -108,8 +114,8 @@ test("maybeBreakGlass emits and records exactly once after the bound", () => {
       site: "terminal-sweep",
       verdict: { reason: "superseded" },
       env: { CATALYST_FENCE_STANDOFF_CAP: "2", CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1" },
-      appendEvent: (event) => events.push(event),
-      recordEscalation: (record) => escalations.push(record),
+      appendEvent: (event) => { events.push(event); return true; },
+      recordEscalation: (record) => { escalations.push(record); return { confirmed: true }; },
       logger: { warn() {} },
     };
     maybeBreakGlass({ ...opts, now: 1 });
@@ -118,6 +124,31 @@ test("maybeBreakGlass emits and records exactly once after the bound", () => {
     expect(events).toHaveLength(1);
     expect(escalations).toHaveLength(1);
     expect(escalations[0]).toMatchObject({ labelConfirmed: false, source: "fence-standoff" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("maybeBreakGlass retries delivery before latching the episode", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fs-retry-"));
+  let eventAttempts = 0;
+  try {
+    const opts = {
+      orchDir: dir,
+      ticket: "CAT-53",
+      site: "terminal-sweep",
+      verdict: { reason: "superseded" },
+      env: { CATALYST_FENCE_STANDOFF_CAP: "1", CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1" },
+      recordEscalation: () => ({ confirmed: true }),
+      appendEvent: () => { eventAttempts += 1; return eventAttempts > 1; },
+      logger: { warn() {} },
+    };
+    recordFenceSuppression({ orchDir: dir, ticket: "CAT-53", site: "terminal-sweep", reason: "superseded", now: 0 });
+    expect(maybeBreakGlass({ ...opts, now: 1 }).deliveryPending).toBe(true);
+    expect(readFenceStandoff(dir, "CAT-53").breakGlassAt).toBeNull();
+    expect(maybeBreakGlass({ ...opts, now: 2 }).deliveryPending).toBeUndefined();
+    expect(readFenceStandoff(dir, "CAT-53").breakGlassAt).toBe(2);
+    expect(eventAttempts).toBe(2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
