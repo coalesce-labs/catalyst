@@ -69,7 +69,12 @@ import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow, countResolveConflictAttempts } from "./event-scan.mjs"; // #1461 Fix 2: countResolveConflictAttempts (complete+failed, not completions-only)
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
-import { canOccupySlotNow, defaultHasTriageArtifact } from "./dispatch-readiness.mjs";
+import {
+  canOccupySlotNow,
+  defaultHasTriageArtifact,
+  NOT_DISPATCHABLE_LIVENESS_ANCHOR,
+} from "./dispatch-readiness.mjs";
+import { resolveAnchorIssueCached } from "./dispatch-exclusions.mjs";
 import {
   defaultDispatch,
   dispatchTicket,
@@ -4674,6 +4679,7 @@ export function schedulerTick(
     // `() => true` to opt out of the filesystem check when the subject is not
     // the triage gate itself.
     hasTriageArtifact = undefined,
+    anchorIssue = null,
     // CTL-1150: injectable listStartedTickets override. Default undefined → the
     // real listStartedTickets(orchDir) runs. Tests that seed triage.json (which
     // creates workers/<ticket>/) inject `() => new Set()` so the seeded ticket
@@ -7948,6 +7954,7 @@ export function schedulerTick(
   const dispatchableReady = ready.filter((t) => {
     const readiness = canOccupySlotNow(orchDir, t.identifier, {
       hasTriageArtifact: _hasTriageArtifact,
+      anchorIssue,
     });
     if (readiness.ok) {
       lastHoldLogged.delete(t.identifier);
@@ -7966,7 +7973,12 @@ export function schedulerTick(
         held_ticks: holdStreak,
         ...(readiness.error ? { error: String(readiness.error) } : {}),
       };
-      if (readiness.error) {
+      if (readiness.reason === NOT_DISPATCHABLE_LIVENESS_ANCHOR) {
+        log.info(
+          context,
+          "cat-159: liveness anchor excluded from new-work dispatch (configured by catalyst.cluster.livenessAnchorIssue)"
+        );
+      } else if (readiness.error) {
         log.warn(context, "ctl-1150: triage artifact probe failed — holding new-work candidate");
       } else {
         log.info(
@@ -9659,6 +9671,13 @@ function runTick() {
       // CTL-1150: thread the triage-artifact predicate (undefined → inline
       // existsSync default in schedulerTick; test seam via startScheduler).
       hasTriageArtifact: runningOpts.hasTriageArtifact,
+      // Resolve on every tick so the 60s cache TTL applies to new-work
+      // admission too. Explicit startScheduler overrides remain pinned for
+      // hermetic tests and callers that intentionally supply one.
+      anchorIssue:
+        runningOpts.anchorIssue === undefined
+          ? resolveAnchorIssueCached()
+          : runningOpts.anchorIssue,
       // CTL-1290: thread the board-health delegate's real-IO seams. Like the
       // stallJanitor/unstuckSweep censuses above, these are bound ONLY in the
       // daemon — a bare schedulerTick (unit test) passes no `boardHealth` so the
@@ -10140,6 +10159,7 @@ export function startScheduler({
   // schedulerTick's inline existsSync default applies. Tests that are not
   // exercising the triage gate inject () => true to unblock Pass 2 dispatch.
   hasTriageArtifact = undefined,
+  anchorIssue,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
@@ -10177,6 +10197,7 @@ export function startScheduler({
     botWriteId, // CTL-781: orchestrator bot UUID to write as assignee on claim
     appendIntentEvent, // CTL-936: operator-event seam for intent.ineffective
     hasTriageArtifact, // CTL-1150: triage-artifact predicate for Pass 2
+    anchorIssue,
   };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels

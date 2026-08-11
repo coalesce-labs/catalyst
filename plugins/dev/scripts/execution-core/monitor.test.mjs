@@ -34,6 +34,7 @@ import { loadCursor, saveCursor } from "./event-cursor.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
 import { linearBreaker } from "./linear-breaker.mjs"; // close the shared breaker so the D2 replica-miss fall-through is deterministic
+import { _resetAnchorCacheForTests } from "./dispatch-exclusions.mjs";
 import {
   getReconcileHealth,
   readReconcileHealthMarkers,
@@ -53,6 +54,7 @@ import {
 
 let catalystDir;
 let prevCatalystDir;
+let prevLivenessAnchorIssue;
 const enrolledTeams = new Set();
 const registryEntries = [];
 
@@ -60,10 +62,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 beforeEach(() => {
   prevCatalystDir = process.env.CATALYST_DIR;
+  prevLivenessAnchorIssue = process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
+  // CAT-159: saving/restoring is not enough — an AMBIENT anchor on the host
+  // running the suite leaks into every startMonitor()/sweepMissingTriage()
+  // default and silently excludes fixture tickets. Clear it; the tests that
+  // exercise the exclusion set it themselves.
+  delete process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
   catalystDir = mkdtempSync(join(tmpdir(), "exec-core-mon-"));
   process.env.CATALYST_DIR = catalystDir;
   mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
   __resetForTests();
+  _resetAnchorCacheForTests();
   __resetFleetFreezeLatch(); // CTL-1420: the fleet-freeze latch is module-global + now persisted — reset per test
   enrolledTeams.clear();
   registryEntries.length = 0;
@@ -75,6 +84,9 @@ afterEach(() => {
   for (const t of enrolledTeams) dropProject(t);
   if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
   else process.env.CATALYST_DIR = prevCatalystDir;
+  if (prevLivenessAnchorIssue === undefined) delete process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
+  else process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = prevLivenessAnchorIssue;
+  _resetAnchorCacheForTests();
   rmSync(catalystDir, { recursive: true, force: true });
 });
 
@@ -1426,6 +1438,37 @@ describe("sweepMissingTriage (CTL-711)", () => {
     reconcileAll({ exec });
     const dispatch = mock(() => ({ code: 0 }));
     sweepMissingTriage({ orchDir: realOrchDir, dispatch });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("excludes the configured liveness anchor from sweep candidates", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("CAT-1")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      anchorIssue: "CAT-1",
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("startMonitor resolves and excludes the configured liveness anchor", () => {
+    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CAT-1";
+    _resetAnchorCacheForTests();
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const dispatch = mock(() => ({ code: 0 }));
+
+    startMonitor({
+      exec: execReturning({ ENG: [node("CAT-1")] }),
+      orchDir: realOrchDir,
+      dispatch,
+      reconcileIntervalMs: 60_000,
+      tailerPollMs: 0,
+    });
+
     expect(dispatch).not.toHaveBeenCalled();
   });
 
@@ -2882,6 +2925,60 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
 
   const fakeOrchDir = "/fake-orch-862";
 
+  test("liveness anchor is refused before HRW, claims, counters, budget, and launch", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = mock(() => ({ won: true, generation: 1 }));
+    const bumpFenceTriageAttempt = mock(() => 1);
+    const budget = { remaining: 2 };
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: OTHER,
+      survivingRosterOverride: ROSTER,
+      claimDispatch,
+      bumpFenceTriageAttempt,
+      triageBudget: budget,
+      anchorIssue: TICKET,
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(claimDispatch).not.toHaveBeenCalled();
+    expect(bumpFenceTriageAttempt).not.toHaveBeenCalled();
+    expect(budget.remaining).toBe(2);
+  });
+
+  test("liveness anchor is also refused by its HRW owner", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: OWNER,
+      survivingRosterOverride: ROSTER,
+      anchorIssue: TICKET,
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("ordinary and fail-open tickets still dispatch", () => {
+    enroll("ENG", { status: "Ready" });
+    for (const anchorIssue of ["ENG-OTHER", null]) {
+      const dispatch = mock(() => ({ code: 0 }));
+      handleStateChangedEvent(triageEvent(), {
+        dispatch,
+        orchDir: fakeOrchDir,
+        hosts: ["solo"],
+        hostName: "solo",
+        anchorIssue,
+        applyTriageStatus: () => ({ applied: false, verified: false }),
+        appendEvent: () => {},
+      });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    }
+  });
+
   test("single-host roster is an exact no-op: claim NEVER attempted, dispatch proceeds", () => {
     enroll("ENG", { status: "Ready" });
     const dispatch = mock(() => ({ code: 0 }));
@@ -3231,7 +3328,7 @@ describe("dispatchTriage — liveness-anchor exclusion (CAT-159)", () => {
     handleStateChangedEvent(toTriageEvent("CAT-1"), {
       dispatch,
       orchDir,
-      livenessAnchorIssue: "CAT-1",
+      anchorIssue: "CAT-1",
       triageBudget: { remaining: 5 },
     });
     expect(dispatch).not.toHaveBeenCalled();
@@ -3243,7 +3340,7 @@ describe("dispatchTriage — liveness-anchor exclusion (CAT-159)", () => {
     handleStateChangedEvent(toTriageEvent("ENG-ANCHOR-2"), {
       dispatch,
       orchDir,
-      livenessAnchorIssue: "CAT-1",
+      anchorIssue: "CAT-1",
       triageBudget: { remaining: 5 },
     });
     expect(dispatch).toHaveBeenCalledTimes(1);
@@ -3255,7 +3352,7 @@ describe("dispatchTriage — liveness-anchor exclusion (CAT-159)", () => {
     handleStateChangedEvent(toTriageEvent("ENG-ANCHOR-3"), {
       dispatch,
       orchDir,
-      livenessAnchorIssue: null,
+      anchorIssue: null,
       triageBudget: { remaining: 5 },
     });
     expect(dispatch).toHaveBeenCalledTimes(1);

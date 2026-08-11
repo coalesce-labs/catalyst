@@ -66,7 +66,10 @@ installer — the durable provisioning lives in `catalyst-join` itself.
 - [ ] **mini/plugin-source on merged main** — `git -C ~/catalyst/plugin-source log -1 --oneline`
 - [ ] **Join bundle prepared** — `ls -la ~/catalyst/join-bundle.json` (size ~500 bytes)
 - [ ] **GitHub CLI authenticated** — `gh auth status` (used for token fetch)
-- [ ] **Anchor ticket created** — one Linear issue for cluster liveness anchor (CTL-1217 or similar)
+- [ ] **Anchor ticket created** — one Linear issue for cluster liveness anchor (CTL-1217 or similar).
+  The configured issue is structurally excluded from new-work dispatch, triage dispatch, and
+  board-health recovery moves. A node missing its Layer-2 `catalyst.cluster.livenessAnchorIssue`
+  key does not apply that exclusion.
 
 ## Step-by-Step Setup
 
@@ -528,6 +531,13 @@ catalyst-stack install-services
 - **SHADOW mode:** nodes own zero tickets until added to the cluster roster (see [Activation](#activation-m2) for the current mechanism — the roster is no longer a per-repo committed `hosts.json`)
 
 ## Related Tickets
+
+### Liveness-anchor residue cleanup
+
+After enabling the structural exclusion, an operator removes any stale
+`~/catalyst/execution-core/workers/<ANCHOR-TICKET>/` directory, clears `needs-human` and any
+`worker-status` label from the anchor, and returns it to the cluster's chosen resting workflow
+state. The anchor remains open; do not close or complete it.
 
 - **CTL-1214** — This ticket (thoughts provisioning + mini-2 install)
 - **CTL-1217** — Cluster liveness anchor (one Linear ticket that must never be closed)
