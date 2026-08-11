@@ -166,7 +166,6 @@ import {
 import {
   countBackgroundAgents,
   getAgentsCached,
-  isBgJobAlive as defaultIsBgJobAlive,
   livenessForBgJob as defaultLivenessForBgJob, // CTL-768
   setLivenessLogger, // CTL-1330: wire the liveness-refresh observability sink
   setLivenessSpanSink, // CTL-1330 Tier 3: wire the liveness.refresh span sink
@@ -217,6 +216,7 @@ import {
   defaultAppendPhaseAdvanceAppliedEvent, // CTL-1789: the positive half of the advancement gate
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
+  defaultAppendOperatorEvent,
 } from "./recovery.mjs";
 import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolve.mjs";
 // CTL-729: progress-watchdog imports.
@@ -229,6 +229,7 @@ import {
   readStallJanitorConfig,
   readCostCapConfig,
   readEmptyWorkerDirGraceMs,
+  readBlockedGhostConfig,
   EMPTY_WORKER_DIR_GRACE_DEFAULT_MS,
 } from "./config.mjs";
 // CTL-1137: cost-cap watcher (Pass 0c) — out-of-process per-session $ preemption.
@@ -6168,10 +6169,15 @@ export function schedulerTick(
     // it as a dead bg job — dropping it would free the reservation/existence guard and
     // let the next scan re-dispatch the same in-flight ticket. Inert under bg (executor
     // null → the no-bg_job_id launched intent still drops exactly as today).
-    const delegateSnapshot = getAgents();
+    // Resolve the expensive agents snapshot only if GC encounters a launched
+    // intent with a bg_job_id. Queued/claimed/empty passes stay spawn-free.
+    let delegateSnapshot;
     gcDelegateIntents(orchDir, now(), {
       executor: dispatchMode === "sdk" ? "sdk" : null,
-      isBgJobAlive: (id) => delegateBgLivenessProtects(id, delegateSnapshot, isBgJobAlive),
+      isBgJobAlive: (id) => {
+        delegateSnapshot ??= getAgents();
+        return delegateBgLivenessProtects(id, delegateSnapshot, isBgJobAlive);
+      },
     });
   } catch {
     /* GC is best-effort — never block the tick */

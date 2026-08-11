@@ -216,9 +216,11 @@ export function drainOnce(deps = {}) {
   const pending = [];
 
   // CAT-171: one Tier-1 listing per drain pass, shared by every queued ticket.
-  const passAgents = cachedListClaudeAgents({});
-  const isBgJobAliveForPass = (id, opts = {}) =>
-    isBgJobAlive(id, { agents: passAgents, ...opts });
+  let passAgents;
+  const isBgJobAliveForPass = (id, opts = {}) => {
+    passAgents ??= deps.agents ?? cachedListClaudeAgents({});
+    return isBgJobAlive(id, { agents: passAgents, ...opts });
+  };
 
   // (0) Crash safety: reclaim claimed-* sidecars older than one ceiling window
   //     back to queued so a dead runner doesn't strand an intent forever.

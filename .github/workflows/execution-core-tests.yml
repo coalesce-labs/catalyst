@@ -657,6 +657,9 @@ jobs:
             autotune-writeback.test.mjs \
             board-health.test.mjs \
             board-health-seam.test.mjs \
+            blocked-ghost.test.mjs \
+            blocked-ghost-config.test.mjs \
+            blocked-ghost-wiring.test.mjs \
             dispatch-readiness.test.mjs \
             stall-janitor-throttle.test.mjs \
             clear-stall-empty-dir.test.mjs \
@@ -671,6 +674,7 @@ jobs:
             claude-ids.test.mjs \
             tick-timing.test.mjs \
             tracing.test.mjs \
+            terminal-states-parity.test.mjs \
             cloud-token-env.test.mjs \
             cluster-claim-sync.test.mjs \
             cluster-claim.test.mjs \

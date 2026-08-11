@@ -23,3 +23,13 @@ test("every entrypoint arms the configured probe", () => {
     expect(read(name)).toContain("createConfiguredBlockedGhostProbe");
   }
 });
+
+test("scheduler standalone wiring imports every configured-probe dependency", () => {
+  const scheduler = read("scheduler.mjs");
+  expect(scheduler).toMatch(
+    /import\s*\{[^}]*\breadBlockedGhostConfig\b[^}]*\}\s*from\s*["']\.\/config\.mjs["']/s,
+  );
+  expect(scheduler).toMatch(
+    /import\s*\{[^}]*\bdefaultAppendOperatorEvent\b[^}]*\}\s*from\s*["']\.\/recovery\.mjs["']/s,
+  );
+});
