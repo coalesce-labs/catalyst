@@ -23,6 +23,7 @@
 // cluster-sync.mjs and doctor.mjs already set, to fold this file's own
 // LINEAR_API_TOKEN/LINEAR_API_KEY ladder onto the shared contract.
 import { resolveSecret } from "../lib/secret-contract.mjs";
+import { sampleAndPublish } from "./linear-quota-publish.mjs";
 
 const HEARTBEAT_URL_PREFIX = "catalyst://heartbeat/";
 const HEARTBEAT_ATTACHMENT_TITLE = "catalyst-liveness";
@@ -52,7 +53,7 @@ export function isRateClassLinearError(text) {
 
 // defaultPost — the production GraphQL POST. Injectable via `post` option on every
 // public function so tests never touch the network.
-async function defaultPost(query, variables) {
+export async function defaultPost(query, variables) {
   const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   const res = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
     method: "POST",
@@ -62,6 +63,7 @@ async function defaultPost(query, variables) {
     },
     body: JSON.stringify({ query, variables }),
   });
+  try { sampleAndPublish(res.headers); } catch { /* quota telemetry is best-effort */ }
   if (!res.ok) {
     // CTL-1420 follow-up: READ the body before throwing. It was previously
     // discarded (throw on !res.ok fired before res.json()), so a rate-class 400

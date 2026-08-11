@@ -275,10 +275,14 @@ export function readLinearBotUserIds(layer1Path, layer2Path) {
   // NEW global path: both worker and orchestrator bot identities (Layer 2).
   addFromPath(layer2Path, (p, s) => {
     const bot = p?.catalyst?.linear?.bot;
-    if (typeof bot?.worker?.botUserId === "string" && bot.worker.botUserId.length > 0)
-      s.add(bot.worker.botUserId);
-    if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
-      s.add(bot.orchestrator.botUserId);
+    for (const value of [bot?.worker?.botUserId, bot?.orchestrator?.botUserId]) {
+      if (typeof value === "string" && value.trim()) s.add(value.trim());
+    }
+    if (bot?.peerUserIds != null && !Array.isArray(bot.peerUserIds)) {
+      log.warn({}, "linear bot peerUserIds must be an array — ignoring");
+    } else {
+      for (const value of bot?.peerUserIds ?? []) if (typeof value === "string" && value.trim()) s.add(value.trim());
+    }
   });
   // OLD Layer-1 path: catalyst.monitor.linear.botUserId (back-compat). CTL-749.
   addFromPath(layer1Path, (p, s) => {
@@ -1258,7 +1262,10 @@ export function startDaemon({
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into
     // both is what turns a write-through into a guaranteed next-tick hit.
-    const cache = createTicketStateCache();
+    let linearCacheConfig = {};
+    try { linearCacheConfig = JSON.parse(readFileSync(configPath, "utf8")); }
+    catch { /* missing/unreadable config retains the documented defaults */ }
+    const cache = createTicketStateCache({ config: linearCacheConfig, log });
     // CTL-823: readonly client over the broker's durable descriptor store
     // (~/catalyst/filter-state.db). Fail-open — see gateway-read.mjs.
     const gatewayReader = createGatewayReader();

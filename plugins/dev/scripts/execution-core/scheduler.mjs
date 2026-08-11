@@ -399,6 +399,7 @@ import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-129
 import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
 import { readDelegateClaims } from "./delegate-claims.mjs"; // CTL-1744: orchDir/.delegate-claims/*.json → Map for the dispatch-liveness grace (zero-import leaf: monitor.mjs imports scheduler.mjs, so the reader cannot live there)
 import { readGithubQuota } from "./github-quota-timer.mjs";
+import { readLinearQuota } from "./linear-quota-publish.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609: delegate-first escalation seam
 import {
   getAllTicketDescriptors,
@@ -6218,6 +6219,8 @@ export function schedulerTick(
           getDelegateClaims: _boardHealth.getDelegateClaims ?? (() => readDelegateClaims(orchDir)),
           getGithubQuota: _boardHealth.getGithubQuota ?? (() => readGithubQuota(orchDir)),
           githubQuotaMode: _boardHealth.githubQuotaMode ?? readGithubQuotaBoardHealthConfig().mode,
+          getLinearQuota: _boardHealth.getLinearQuota ?? (() => readLinearQuota(orchDir)),
+          linearQuotaMode: _boardHealth.linearQuotaMode ?? process.env.CATALYST_LINEAR_QUOTA ?? "shadow",
           getPeerProductivity:
             _boardHealth.getPeerProductivity ??
             (() => {

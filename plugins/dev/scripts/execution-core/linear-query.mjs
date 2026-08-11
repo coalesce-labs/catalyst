@@ -11,6 +11,7 @@ import { withBreaker, linearBreaker, isRateLimitError } from "./linear-breaker.m
 import { withAuthRemint, linearReminter, isBatchAuthError } from "./linear-remint.mjs";
 import { emitEligibleSourceUnavailable, emitTicketStateLiveFallback } from "./dispatch-alert.mjs";
 import { emitLinearReadEvent } from "./linear-read-event.mjs";
+import { sampleAndPublish } from "./linear-quota-publish.mjs";
 // CTL-1616 PR3: fold this file's 3 inline LINEAR_API_TOKEN/LINEAR_API_KEY
 // ladders onto the shared secret-contract engine (design §8 PR3 table).
 import { resolveSecret } from "../lib/secret-contract.mjs";
@@ -389,6 +390,7 @@ export function fetchTicketState(
   const execStart = onExec ? Date.now() : 0;
   const { code, stdout, stderr, timedOut } = exec("linearis", ["issues", "read", identifier], {
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
+    ...(probeBackoff ? { callerClass: "probe", caller: "linearis:issues-read" } : {}),
   });
   if (code !== 0) {
     recordDaemonRead(liveSource, "failed", identifier); // live read errored/timed-out — no data served
@@ -572,7 +574,7 @@ export function buildBatchCurlArgs(ids, { token = "", ca } = {}) {
     "-H",
     "Content-Type: application/json",
     "-w",
-    "\n%{http_code}",
+    "\n%{http_code}\n%{header_json}",
     "--data",
     "@-", // read the payload from stdin (no argv length limit / shell escaping)
   ];
@@ -582,17 +584,30 @@ export function buildBatchCurlArgs(ids, { token = "", ca } = {}) {
 // runBatchOnce — executes ONE curl GraphQL POST and classifies the result.
 // Returns { nodes, auth, ratelimit, curlFailed }. Never throws. Internal to
 // defaultBatchExec; extracted so the auth-retry path can call it a second time.
-function runBatchOnce(ids) {
+export function runBatchOnce(ids, { spawn = spawnSync, sample = sampleAndPublish } = {}) {
   const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   const { args, payload } = buildBatchCurlArgs(ids, { token, ca: process.env.NODE_EXTRA_CA_CERTS });
-  const res = spawnSync("curl", args, { input: payload, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const res = spawn("curl", args, { input: payload, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   if (res.status !== 0) {
     return { nodes: null, auth: false, ratelimit: false, curlFailed: true };
   }
   const out = res.stdout ?? "";
-  const nl = out.lastIndexOf("\n");
-  const httpCode = Number(out.slice(nl + 1).trim());
-  const body = out.slice(0, Math.max(0, nl));
+  const lines = out.split("\n");
+  let headers = null;
+  const trailer = lines.pop() ?? "";
+  let httpCode;
+  try {
+    const parsedTrailer = JSON.parse(trailer || "null");
+    if (!parsedTrailer || typeof parsedTrailer !== "object" || Array.isArray(parsedTrailer)) throw new Error("legacy trailer");
+    headers = parsedTrailer;
+    httpCode = Number((lines.pop() ?? "").trim());
+  } catch {
+    // curl < 7.83 does not understand header_json. Preserve the historic
+    // body + final-http-code contract and simply omit telemetry.
+    httpCode = Number(trailer.trim());
+  }
+  const body = lines.join("\n");
+  try { if (headers) sample(headers); } catch { /* telemetry never breaks reads */ }
   if (httpCode === 401) {
     return { nodes: null, auth: true, ratelimit: false, curlFailed: false };
   }

@@ -19,6 +19,7 @@ import {
   fetchTicketsBatch,
   authHeader,
   buildBatchCurlArgs,
+  runBatchOnce,
   isBatchRateLimited,
   classifyTicketResolution,
   fetchTicketAssignee,
@@ -32,6 +33,20 @@ import {
   normalizeRelations,
   __rawExecForTest,
 } from "./linear-query.mjs";
+
+describe("runBatchOnce curl trailers", () => {
+  const body = JSON.stringify({ data: { issues: { nodes: [{ identifier: "CAT-1" }] } } });
+  test("parses modern header_json and samples it", () => {
+    const samples = [];
+    const result = runBatchOnce(["CAT-1"], { spawn: () => ({ status: 0, stdout: `${body}\n200\n${JSON.stringify({ "x-ratelimit-requests-limit": "5000" })}` }), sample: (h) => samples.push(h) });
+    expect(result.nodes).toHaveLength(1);
+    expect(samples).toHaveLength(1);
+  });
+  test("preserves the legacy body plus http-code format", () => {
+    const result = runBatchOnce(["CAT-1"], { spawn: () => ({ status: 0, stdout: `${body}\n200` }), sample() { throw new Error("must not sample"); } });
+    expect(result.nodes).toHaveLength(1);
+  });
+});
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { isLinearTerminal } from "./terminal-state.mjs"; // CTL-1340: replica-tier terminal assertions
 import { linearBreaker } from "./linear-breaker.mjs"; // CTL-1420: reset the shared breaker singleton between empty-path tests

@@ -2790,6 +2790,26 @@ describe("readLinearBotUserIds", () => {
     const ids = readLinearBotUserIds(null, layer2);
     expect(ids.size).toBe(0);
   });
+
+  test("merges normalized peer bot ids for cross-host self-echo recognition", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({ catalyst: { linear: { bot: {
+      orchestrator: { botUserId: " local " }, peerUserIds: [" peer-a ", "peer-a", "", 42],
+    } } } }));
+    expect([...readLinearBotUserIds(null, layer2)].sort()).toEqual(["local", "peer-a"]);
+  });
+
+  test("merges normalized peer bot IDs and ignores malformed peerUserIds", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({ catalyst: { linear: { bot: {
+      orchestrator: { botUserId: " local " }, peerUserIds: [" peer-a ", "peer-a", "", null],
+    } } } }));
+    expect([...readLinearBotUserIds(null, layer2)].sort()).toEqual(["local", "peer-a"]);
+    writeFileSync(layer2, JSON.stringify({ catalyst: { linear: { bot: {
+      orchestrator: { botUserId: "local" }, peerUserIds: "bad",
+    } } } }));
+    expect([...readLinearBotUserIds(null, layer2)]).toEqual(["local"]);
+  });
 });
 
 // _isBotId — normalises string vs Set so guard callers are consistent

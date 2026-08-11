@@ -31,7 +31,7 @@
 //      string-typed terminal-state checks and silently corrupt them.
 
 // Default 60 s TTL; env-overridable to match the SCHEDULER_*_MS env idiom.
-const DEFAULT_TTL_MS = Number(process.env.LINEAR_STATE_CACHE_TTL_MS) || 60_000;
+const DEFAULT_TTL_MS = 60_000;
 // CTL-1436 (A4): the NEGATIVE-cache TTL — how long a probeBackoff caller (the
 // terminal-probe / GC census) backs off from re-reading a ticket live after a
 // FAILED live read (429 / timeout / unparseable). Longer than the positive TTL:
@@ -39,9 +39,28 @@ const DEFAULT_TTL_MS = Number(process.env.LINEAR_STATE_CACHE_TTL_MS) || 60_000;
 // need not retry every tick. This store is CONSULTED ONLY on probeBackoff calls,
 // so the blocker-hydration path keeps the CTL-634 "a null read re-reads promptly"
 // invariant untouched.
-const DEFAULT_NEG_TTL_MS = Number(process.env.LINEAR_STATE_NEG_TTL_MS) || 5 * 60_000;
+const DEFAULT_NEG_TTL_MS = 5 * 60_000;
 
-export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS, negTtlMs = DEFAULT_NEG_TTL_MS } = {}) {
+function positiveMs(value, fallback, name, log) {
+  if (value == null || value === "") return fallback;
+  const n = Number(value);
+  if (Number.isFinite(n) && n > 0) return n;
+  log?.warn?.({ [name]: value, fallbackMs: fallback }, `linear-cache: ${name} must be positive and finite — using default`);
+  return fallback;
+}
+
+export function resolveCacheTtls({ env = process.env, config = {}, log } = {}) {
+  const cfg = config?.catalyst?.orchestration?.linearCache ?? {};
+  return {
+    ttlMs: positiveMs(env.LINEAR_STATE_CACHE_TTL_MS ?? (cfg.ttlSeconds == null ? null : Number(cfg.ttlSeconds) * 1_000), DEFAULT_TTL_MS, "ttl", log),
+    negTtlMs: positiveMs(env.LINEAR_STATE_NEG_TTL_MS ?? (cfg.negativeTtlSeconds == null ? null : Number(cfg.negativeTtlSeconds) * 1_000), DEFAULT_NEG_TTL_MS, "negativeTtl", log),
+  };
+}
+
+export function createTicketStateCache({ now = Date.now, ttlMs, negTtlMs, env, config, log } = {}) {
+  const resolved = resolveCacheTtls({ env, config, log });
+  ttlMs ??= resolved.ttlMs;
+  negTtlMs ??= resolved.negTtlMs;
   const entries = new Map(); // identifier -> { state, expiresAt }
   const relationsEntries = new Map(); // identifier -> { desc, expiresAt } (CTL-784)
   const negativeEntries = new Map(); // identifier -> expiresAt (CTL-1436 A4)
