@@ -356,6 +356,16 @@ export function createCommentInboxWriter(orchDir, botUserId) {
     const ticket = parsed.ticket ?? parsed.identifier ?? null;
     if (!ticket) return;
     if (_isBotId(botUserId, parsed.authorId)) return;
+    // CAT-55 (Codex #3243 P2): botUserId is the primary self-echo filter, but the
+    // artifact-hold explanation this daemon posts can return through the webhook
+    // under an actor that is NOT in the configured bot set — precisely the
+    // unregistered-worker-actor case handleCommentWake's signature check exists
+    // for. That check runs on the wake path, AFTER this writer has already
+    // appended; the stall-clear path preserves a nonempty inbox, so the
+    // re-dispatched phase would read Catalyst's own text — including the
+    // force-retry instruction — as operator context. Filter the signature here
+    // too, so the boundary that writes the inbox enforces it as well.
+    if (String(parsed.body ?? "").includes(PRIOR_ARTIFACT_HOLD_SIGNATURE)) return;
     const workerDir = join(orchDir, "workers", ticket);
     if (!existsSync(workerDir)) return;
     const entry = JSON.stringify({

@@ -5239,8 +5239,15 @@ export function schedulerTick(
 
     // rc != 0 — real dispatch failure.
     const refusal = parseDispatchRefusal(r.stdout);
+    // CAT-55 (Codex #3243 P2): the structured refusal describes THIS dispatch; the
+    // on-disk failureReason can only describe a PRIOR one. A prelaunch refusal means
+    // no worker ever launched, so it wrote no signal — any reason still on disk is
+    // stale by construction. Reading it first let a leftover reason mask the current
+    // `prior_artifact_missing` cause, and escalateDispatchExhausted gates its artifact
+    // metadata + manual explanation on that exact cause, so the operator lost both.
+    // Fall back to the on-disk reason only when this dispatch printed no refusal.
     const reason =
-      readDispatchFailureReason(orchDir, ticket, phase) ?? refusal?.reason ?? "dispatch_nonzero_exit";
+      refusal?.reason ?? readDispatchFailureReason(orchDir, ticket, phase) ?? "dispatch_nonzero_exit";
     // CTL-1004/CTL-1056 Bug 2: pull the captured stderr tail + spawn error/signal
     // off the dispatch result so the failure is diagnosable from BOTH the warn log
     // and the phase.dispatch.failed event (the old log was a bare {ticket,code}).

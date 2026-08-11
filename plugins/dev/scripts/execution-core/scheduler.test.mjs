@@ -12180,6 +12180,60 @@ describe("dispatchAndVerify shared core (CTL-826)", () => {
     });
   });
 
+  // CAT-55 (Codex #3243 P2): a prelaunch refusal launched no worker, so any
+  // failureReason already on the target signal is from a PRIOR attempt. Reading
+  // it first masked the current `prior_artifact_missing` cause — and
+  // escalateDispatchExhausted gates its artifact metadata + manual explanation on
+  // that exact cause, so the operator lost both.
+  // The stale reason is seeded by the dispatch fake rather than before the tick:
+  // what matters is that a failureReason is on disk when readDispatchFailureReason
+  // runs (just after rc!=0), and a pre-seeded `failed` plan signal would instead
+  // route the ticket down the failure ladder before it ever re-dispatches.
+  test("rc!=0 branch: the current structured refusal outranks a stale on-disk failureReason", () => {
+    writeSignal("CTL-826R", "research", "done"); // FSM owes plan
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const refusalLine = JSON.stringify({
+      status: "refused",
+      reason: "prior_artifact_missing",
+      artifact: "glob:thoughts/shared/research",
+      searchedPath: "/wt/CTL-826R/thoughts/shared/research",
+    });
+    const dispatch = ({ orchDir: od, ticket, phase }) => {
+      writeFileSync(
+        join(od, "workers", ticket, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status: "failed", failureReason: "stale_reason_from_a_prior_attempt" })
+      );
+      return { code: 2, stdout: `${refusalLine}\n`, stderr: "" };
+    };
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
+
+    const events = dispatchFailedEvents("CTL-826R");
+    expect(events).toHaveLength(1);
+    expect(events[0].body.payload.reason).toBe("prior_artifact_missing");
+    expect(events[0].body.payload.reason).not.toBe("stale_reason_from_a_prior_attempt");
+    expect(events[0].body.payload.artifact_dir).toBe("thoughts/shared/research");
+    expect(events[0].body.payload.searched_path).toBe("/wt/CTL-826R/thoughts/shared/research");
+  });
+
+  test("rc!=0 branch: with NO refusal on stdout the on-disk reason is still used", () => {
+    writeSignal("CTL-826S", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = ({ orchDir: od, ticket, phase }) => {
+      writeFileSync(
+        join(od, "workers", ticket, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status: "failed", failureReason: "worker_wrote_this_reason" })
+      );
+      return { code: 1, stdout: "", stderr: "" };
+    };
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
+
+    const events = dispatchFailedEvents("CTL-826S");
+    expect(events).toHaveLength(1);
+    expect(events[0].body.payload.reason).toBe("worker_wrote_this_reason");
+  });
+
   // ─── Reduced ladder: resume-after-preemption keeps the lighter failure path ───
   test("reduced ladder (resume sweep): failed event omits consecutiveFailures/expiresAt; no escalation at the ceiling", () => {
     seedPreempted("CTL-826D", "research", "bg-826d", 2);

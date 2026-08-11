@@ -37,6 +37,7 @@ import {
   writeBootFacts,
 } from "./daemon.mjs";
 import { getEventLogPath, log } from "./config.mjs";
+import { PRIOR_ARTIFACT_HOLD_SIGNATURE } from "./prior-artifact-block.mjs";
 import { BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { defaultDispatch, makeCommentWakeDispatch } from "./dispatch.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
@@ -2680,6 +2681,38 @@ describe("inbox writer — createCommentInboxWriter (CTL-749)", () => {
       ticket,
       commentId: "c2",
       body: "human reply",
+      authorId: "human-user",
+      authorName: "Alice",
+    });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(true);
+  });
+
+  // CAT-55 (Codex #3243 P2): the daemon's own artifact-hold explanation can return
+  // through the webhook under an actor that is NOT in the configured bot set. Without
+  // this filter it lands in the inbox and the re-dispatched phase reads Catalyst's own
+  // force-retry instruction as operator context.
+  test("CAT-55: skips the artifact-hold self-echo even from a non-bot author", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "bot-user-id");
+    writer({
+      ticket,
+      commentId: "c1",
+      body: `CTL-99/plan is still blocked.\n\n${PRIOR_ARTIFACT_HOLD_SIGNATURE}`,
+      authorId: "unregistered-worker-actor",
+      authorName: "Catalyst",
+    });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("CAT-55: an ordinary human reply mentioning the hold is still written", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "bot-user-id");
+    writer({
+      ticket,
+      commentId: "c1",
+      body: "I put the research doc back — force prior artifact retry",
       authorId: "human-user",
       authorName: "Alice",
     });

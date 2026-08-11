@@ -1041,6 +1041,12 @@ export function defaultAppendDispatchFailedEvent({
   stderr_tail,
   spawn_error,
   signal,
+  // CAT-55: this emitter destructures an EXPLICIT key set, so any payload key a
+  // caller passes but this signature omits is silently dropped. The prior-artifact
+  // refusal's artifact_dir / searched_path are exactly what an operator asking
+  // "which document was missing?" needs off the event log, so they are named here.
+  artifact_dir,
+  searched_path,
 }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
@@ -1057,6 +1063,8 @@ export function defaultAppendDispatchFailedEvent({
         ...(stderr_tail !== undefined && stderr_tail !== "" && { stderr_tail }),
         ...(spawn_error !== undefined && spawn_error !== "" && { spawn_error }),
         ...(signal !== undefined && signal !== null && signal !== "" && { signal }),
+        ...(artifact_dir !== undefined && artifact_dir !== "" && { artifact_dir }),
+        ...(searched_path !== undefined && searched_path !== "" && { searched_path }),
       },
     }),
     "dispatch-failed"
