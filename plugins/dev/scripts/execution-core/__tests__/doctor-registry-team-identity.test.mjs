@@ -132,6 +132,52 @@ describe("checkRegistryTeamIdentity", () => {
     expect(rec.detail).not.toContain("checkout that declares a DIFFERENT");
   });
 
+  // Codex #3232 P2: category precedence is per ENTRY. It must never hide a
+  // DIFFERENT entry's defect — one doctor run has to name every affected
+  // registration, not just the strongest category's.
+  test("reports every affected entry across all three categories at once", () => {
+    const rec = checkRegistryTeamIdentity(deps([
+      {
+        team: "CAT", repoRoot: "/rev",
+        identity: { declared: "CAT", matches: true },
+        dispatchIdentity: { declared: "CTL", matches: false, rev: "refs/heads/main" },
+      },
+      {
+        team: "PAN", repoRoot: "/drift",
+        identity: { declared: "OLD", matches: false },
+        dispatchIdentity: { declared: "PAN", matches: true, rev: "refs/remotes/origin/main" },
+      },
+      {
+        team: "ADV", repoRoot: "/checkout",
+        identity: { declared: "WRONG", matches: false },
+        dispatchIdentity: { declared: null, matches: null, rev: null },
+      },
+    ]));
+    expect(rec.status).toBe(STATUS.WARN);
+    // entry 1 — dispatch-revision mismatch
+    expect(rec.detail).toContain("/rev");
+    expect(rec.detail).toContain("would receive a DIFFERENT Linear team");
+    // entry 2 — checkout ↔ dispatch drift, NOT suppressed by entry 1
+    expect(rec.detail).toContain("/drift");
+    expect(rec.detail).toContain("drift");
+    // entry 3 — plain checkout mismatch, NOT suppressed by entries 1-2
+    expect(rec.detail).toContain("/checkout");
+    expect(rec.detail).toContain("WRONG");
+    expect(rec.detail).toContain("CAT-52");
+  });
+
+  test("an entry counted as a revision mismatch is not double-reported", () => {
+    const rec = checkRegistryTeamIdentity(deps([{
+      team: "CAT", repoRoot: "/r",
+      identity: { declared: "OLD", matches: false },
+      dispatchIdentity: { declared: "CTL", matches: false, rev: "refs/heads/main" },
+    }]));
+    expect(rec.status).toBe(STATUS.WARN);
+    expect(rec.detail).toContain("1 registry entry would receive a DIFFERENT");
+    expect(rec.detail).not.toContain("checkout that declares a DIFFERENT");
+    expect(rec.detail).not.toContain("drift");
+  });
+
   test("still never FAILs when every entry mismatches on both arms", () => {
     const rec = checkRegistryTeamIdentity(deps([{
       team: "A", repoRoot: "/a",

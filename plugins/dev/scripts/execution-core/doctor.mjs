@@ -4608,11 +4608,32 @@ export function checkRegistryTeamIdentity(deps = {}) {
     );
   }
 
-  // What dispatch installs outranks checkout state: create-worktree.sh restores
-  // tracked .catalyst paths from its start revision after copying the checkout.
-  const revisionMismatches = projects.filter(
-    (project) => project?.dispatchIdentity?.matches === false,
+  // Every defect category is classified in ONE pass and reported TOGETHER
+  // (Codex #3232 P2). Precedence is per ENTRY, not per report: an entry whose
+  // dispatch revision mismatches is described only by that (strongest) category,
+  // because what dispatch installs outranks checkout state — create-worktree.sh
+  // restores tracked .catalyst paths from its start revision after copying the
+  // checkout. But precedence must never SUPPRESS a different entry's defect:
+  // returning on the first non-empty category let a multi-project run name one
+  // project while leaving another project's known mismatch undisclosed until the
+  // first was repaired and doctor rerun.
+  const classified = new Set();
+  const claim = (list) => {
+    list.forEach((project) => classified.add(project));
+    return list;
+  };
+  const revisionMismatches = claim(
+    projects.filter((project) => project?.dispatchIdentity?.matches === false),
   );
+  const drifted = claim(projects.filter((project) =>
+    !classified.has(project) &&
+    typeof project?.identity?.declared === "string" &&
+    typeof project?.dispatchIdentity?.declared === "string" &&
+    project.identity.declared !== project.dispatchIdentity.declared));
+  const mismatches = claim(projects.filter((project) =>
+    !classified.has(project) && project?.identity?.matches === false));
+
+  const findings = [];
   if (revisionMismatches.length) {
     const details = revisionMismatches
       .map((project) =>
@@ -4620,19 +4641,12 @@ export function checkRegistryTeamIdentity(deps = {}) {
         `${project.dispatchIdentity.rev ?? "unknown"} declares ` +
         `"${project.dispatchIdentity.declared}")`)
       .join("; ");
-    return mkCheck(
-      "registry-team-identity",
-      STATUS.WARN,
+    findings.push(
       `${revisionMismatches.length} registry entr${revisionMismatches.length === 1 ? "y" : "ies"} ` +
         "would receive a DIFFERENT Linear team from the dispatch revision: " +
         `${details} — a fresh worktree follows that revision (CAT-116)`,
     );
   }
-
-  const drifted = projects.filter((project) =>
-    typeof project?.identity?.declared === "string" &&
-    typeof project?.dispatchIdentity?.declared === "string" &&
-    project.identity.declared !== project.dispatchIdentity.declared);
   if (drifted.length) {
     const details = drifted
       .map((project) =>
@@ -4641,27 +4655,24 @@ export function checkRegistryTeamIdentity(deps = {}) {
         `"${project.dispatchIdentity.declared}" at ` +
         `${project.dispatchIdentity.rev ?? "unknown"})`)
       .join("; ");
-    return mkCheck(
-      "registry-team-identity",
-      STATUS.WARN,
+    findings.push(
       `${drifted.length} registry entr${drifted.length === 1 ? "y has" : "ies have"} ` +
         `checkout ↔ dispatch-revision team identity drift: ${details} (CAT-116)`,
     );
   }
-
-  const mismatches = projects.filter((project) => project?.identity?.matches === false);
   if (mismatches.length) {
     const details = mismatches
       .map((project) =>
         `${project.team} → ${project.repoRoot} (declares "${project.identity.declared}")`)
       .join("; ");
-    return mkCheck(
-      "registry-team-identity",
-      STATUS.WARN,
+    findings.push(
       `${mismatches.length} registry entr${mismatches.length === 1 ? "y" : "ies"} point at a ` +
         "checkout that declares a DIFFERENT Linear team — worktrees cut from it inherit that " +
         `checkout's Layer-1 catalyst.linear config and ticket prefix: ${details} (CAT-52)`,
     );
+  }
+  if (findings.length) {
+    return mkCheck("registry-team-identity", STATUS.WARN, findings.join(" | "));
   }
   // Preserve the pre-CAT-116 injectable project shape: when no entry carries
   // dispatchIdentity, grade checkout identity exactly as before. Once any
