@@ -3659,9 +3659,9 @@ const nodeClassOf = (over = {}) => ({
 
 // passingSkillsDirCheck — the `skillsDirCheck` seam installChecksForClass exposes, stubbed healthy.
 // The real check probes the live ~/.claude tree, and for class=worker a missing symlink is a hard
-// FAIL (developer/monitor only WARN). Any test that asserts on runDoctor's aggregate FAIL COUNT for
-// a worker must inject this, or it grades the host it happens to run on instead of the code under
-// test — which is exactly how it went red in CI. checkSkillsDirPlugins keeps its own direct coverage.
+// FAIL (developer/monitor only WARN). Every call that configures seams must inject this, or it grades
+// the host it happens to run on instead of the code under test — which is exactly how it went red in
+// CI. The CAT-154 seam guard below enforces that rule; checkSkillsDirPlugins keeps direct coverage.
 const passingSkillsDirCheck = () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }];
 
 describe("checkNodeClass (CTL-1355)", () => {
@@ -4929,6 +4929,7 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: false,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker", // a worker w/ broker is fine; the FAIL here is the missing stack agent
+      skillsDirCheck: passingSkillsDirCheck, // CAT-154: was executing the real ~/.claude probe + `git rev-parse`
     });
     const results = (await Promise.all(fns.map((f) => Promise.resolve().then(f)))).flat();
     const agents = results.find((c) => c.name === "agents-for-class");
@@ -4968,6 +4969,7 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: false,
       hasUpdaterAgent: true,
       pluginPullOwner: "updater",
+      skillsDirCheck: passingSkillsDirCheck,
       log: () => {},
     });
     expect(code).toBe(0);
@@ -5061,7 +5063,12 @@ describe("strict node-class — install profile requires an explicitly persisted
   it("installChecksForClass FAILs an inferred/unpersisted class even when agents + owner look correct", async () => {
     // a worker-shaped node (stack agent present, owner broker) but catalyst.node.class never persisted →
     // the post-install verifier must FAIL (the class write did not take), not exit 0.
-    const fns = installChecksForClass(inferred, { hasStackAgent: true, hasUpdaterAgent: false, pluginPullOwner: "broker" });
+    const fns = installChecksForClass(inferred, {
+      hasStackAgent: true,
+      hasUpdaterAgent: false,
+      pluginPullOwner: "broker",
+      skillsDirCheck: passingSkillsDirCheck, // CAT-154: keep this assertion independent of the host tree
+    });
     const results = (await Promise.all(fns.map((f) => Promise.resolve().then(f)))).flat();
     expect(results.find((c) => c.name === "node-class").status).toBe(STATUS.FAIL);
   });
@@ -5514,4 +5521,68 @@ describe("checksForClass — checkSkillsDirPlugins registration", () => {
       expect(src({ recognized: true, class: cls })).toContain("checkSkillsDirPlugins");
     });
   }
+});
+
+// ─── CAT-154 seam guard — SENTINEL: no installChecksForClass/runDoctor call sites below ───
+//
+// The CAT-154 incident: `skillsDirCheck` (doctor.mjs:5425) is a WHOLE-THUNK seam with a LIVE
+// default — omitting it does not disable the check, it runs the real one against ~/.claude and
+// spawns `git rev-parse`. Severity is class-conditional (doctor.mjs:5089: worker→FAIL,
+// developer→WARN) and runDoctor returns the FAIL count only, so an omission is green on a
+// developer Mac and red on every CI runner. That is how main went red for ~11h on 2026-08-09.
+// This guard makes the omission fail HERE, locally, at authoring time.
+describe("CAT-154: install-profile call sites must inject the skillsDirCheck seam", () => {
+  const SELF = readFileSync(new URL(import.meta.url), "utf8");
+  const SENTINEL = "CAT-154 seam guard — SENTINEL";
+  // Scan only the region above the sentinel: this describe block's own literals must not match.
+  const SRC = SELF.slice(0, SELF.indexOf(SENTINEL));
+
+  // Extract the full parenthesised call expression starting at the `(` that follows `fnName`.
+  // Naive w.r.t. parens inside string literals — acceptable here (no call site has one) and it
+  // throws rather than silently truncating if that ever stops holding.
+  const callsTo = (src, fnName) => {
+    const out = [];
+    let from = 0;
+    for (;;) {
+      const hit = src.indexOf(`${fnName}(`, from);
+      if (hit === -1) return out;
+      const open = hit + fnName.length;
+      let depth = 0;
+      let end = -1;
+      for (let i = open; i < src.length; i++) {
+        if (src[i] === "(") depth++;
+        else if (src[i] === ")" && --depth === 0) { end = i; break; }
+      }
+      if (end === -1) throw new Error(`unbalanced ${fnName}( at offset ${hit}`);
+      out.push({ offset: hit, text: src.slice(hit, end + 1) });
+      from = end + 1;
+    }
+  };
+
+  // A call that passes an options object is configuring seams — it must configure ALL of them.
+  // A single-argument call cannot execute the live seam: an unrecognized class short-circuits to
+  // one thunk (doctor.mjs:5431) and the .toString() site never invokes its thunks.
+  const withOpts = (c) => /,\s*\{/.test(c.text);
+
+  it("every seam-configuring installChecksForClass call injects skillsDirCheck", () => {
+    const offenders = callsTo(SRC, "installChecksForClass")
+      .filter(withOpts)
+      .filter((c) => !c.text.includes("skillsDirCheck"))
+      .map((c) => c.text.slice(0, 120));
+    expect(offenders).toEqual([]);
+  });
+
+  it("every runDoctor({ profile: \"install\" }) call injects skillsDirCheck", () => {
+    const offenders = callsTo(SRC, "runDoctor")
+      .filter((c) => c.text.includes(`profile: "install"`))
+      .filter((c) => !c.text.includes("skillsDirCheck"))
+      .map((c) => c.text.slice(0, 120));
+    expect(offenders).toEqual([]);
+  });
+
+  // Tripwire: the two single-arg sites are exempt only because they provably cannot reach the live
+  // seam. If a third appears, someone must re-derive that — the count forces the conversation.
+  it("exactly two single-argument installChecksForClass call sites exist (both provably inert)", () => {
+    expect(callsTo(SRC, "installChecksForClass").filter((c) => !withOpts(c)).length).toBe(2);
+  });
 });
