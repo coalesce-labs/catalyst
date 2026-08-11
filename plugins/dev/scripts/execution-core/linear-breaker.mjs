@@ -12,7 +12,9 @@
 // exponentially-backed-off cooldown — without spawning linearis at all — until
 // the cooldown elapses. A clean call CLOSES it and resets the backoff.
 import { log } from "./config.mjs";
-import { emitLinearBreakerEvent } from "./linear-ratelimit-event.mjs";
+import { emitLinearBreakerEvent, emitLinearQuotaEvent } from "./linear-ratelimit-event.mjs";
+import { readLinearQuota } from "./linear-quota-publish.mjs";
+import { evaluateLinearQuota, LINEAR_QUOTA_DEFAULTS } from "./linear-quota.mjs";
 
 // The 429 shape linearis surfaces on stderr: "Rate limit exceeded. Only 2500
 // requests are allowed per 1 hour". Matched case-insensitively and loosely so a
@@ -135,11 +137,25 @@ export function deriveCaller(cmd, args) {
 // rawExec untouched — opt-in per-call wall-clock cap for the hot terminal reads.
 // The breaker logic is unchanged; an open breaker still short-circuits before
 // any spawn (so the cap is moot when open).
-export function withBreaker(rawExec, { breaker = linearBreaker, now = Date.now } = {}) {
+export function withBreaker(rawExec, {
+  breaker = linearBreaker,
+  now = Date.now,
+  quotaMode = process.env.CATALYST_LINEAR_QUOTA || "shadow",
+  getQuota = () => readLinearQuota(process.env.CATALYST_ORCHESTRATOR_DIR),
+  emitQuotaEvent = emitLinearQuotaEvent,
+} = {}) {
   return (cmd, args, opts) => {
     const t = now();
     if (breaker.isOpen(t)) {
       return { code: 1, stdout: "", stderr: "circuit-open" };
+    }
+    if (opts?.callerClass === "probe" && quotaMode !== "off") {
+      let quota = null;
+      try { quota = evaluateLinearQuota(getQuota(), { nowMs: t, ...LINEAR_QUOTA_DEFAULTS }); } catch { /* fail open */ }
+      if (quota?.state === "low" || quota?.state === "exhausted") {
+        emitQuotaEvent({ enforced: quotaMode === "enforce", caller: opts?.caller ?? deriveCaller(cmd, args), quota });
+        if (quotaMode === "enforce") return { code: 1, stdout: "", stderr: "quota-deferred" };
+      }
     }
     const res = rawExec(cmd, args, opts);
     // CTL-1341: a wall-clock TIMEOUT (the CTL-1339 per-call cap fired) is a

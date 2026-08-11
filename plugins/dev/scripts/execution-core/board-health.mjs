@@ -36,6 +36,7 @@
 import { HEARTBEAT_GRACE_MS, isThrottled } from "./config.mjs";
 import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecoveryEnvelope (CTL-1291 promotes the numbers)
 import { evaluateQuotaHeadroom, GITHUB_QUOTA_DEFAULTS } from "./github-quota.mjs";
+import { evaluateLinearQuota, LINEAR_QUOTA_DEFAULTS } from "./linear-quota.mjs";
 
 // ── thresholds + cadence (env-tunable, bounded defaults) ─────────────────────
 const DEFAULT_THRESHOLDS = {
@@ -399,7 +400,7 @@ function deriveRing(events, nowMs, self) {
         failed: payload.failed ?? 0,
         mode: payload.mode ?? null,
       };
-    } else if (/account\.ratelimit|ratelimit\.sampled/i.test(name)) {
+    } else if (/account\.ratelimit|ratelimit\.sampled|linear\.ratelimit\.breaker/i.test(name)) {
       // Anthropic subscription telemetry only. GitHub core quota arrives through
       // the dedicated githubQuota snapshot seam below, never through this ring.
       ring.accountRatelimit = { ...payload };
@@ -514,6 +515,8 @@ export function assembleBoardState({
   // shadow (the default) reads and publishes but cannot actuate.
   getGithubQuota = () => null,
   githubQuotaMode = process.env.CATALYST_BH_GH_QUOTA || "shadow",
+  getLinearQuota = () => null,
+  linearQuotaMode = process.env.CATALYST_LINEAR_QUOTA || "shadow",
   getPeerProductivity = () => null,
   productivityMode = process.env.CATALYST_BH_PRODUCTIVITY || "shadow",
   now = () => Date.now(),
@@ -645,6 +648,8 @@ export function assembleBoardState({
     stalledPrMap: mode === "off" ? new Map() : safe(() => getStalledPrState(), new Map()),
     githubQuota: mode === "off" || githubQuotaMode === "off" ? null : safe(() => getGithubQuota(), null),
     githubQuotaMode: ["off", "shadow", "enforce"].includes(githubQuotaMode) ? githubQuotaMode : "shadow",
+    linearQuota: mode === "off" || linearQuotaMode === "off" ? null : safe(() => getLinearQuota(), null),
+    linearQuotaMode: ["off", "shadow", "enforce"].includes(linearQuotaMode) ? linearQuotaMode : "shadow",
     productivityMode: ["off", "shadow", "enforce"].includes(productivityMode) ? productivityMode : "shadow",
     peerProductivity: mode === "off" || productivityMode === "off" ? null : safe(() => getPeerProductivity(), null),
     ring: deriveRing(safe(() => readEventRing({ orchDir }), []), nowMs, self ?? ""),
@@ -1755,10 +1760,17 @@ function quotaForPublication(board) {
   };
 }
 
+function linearQuotaForPublication(board) {
+  if (!board?.linearQuota) return null;
+  const q = evaluateLinearQuota(board.linearQuota, { nowMs: board.now, ...LINEAR_QUOTA_DEFAULTS });
+  return { ...q, host: board.linearQuota.host ?? null, linearActorFingerprint: board.linearQuota.linearActorFingerprint ?? null };
+}
+
 // ── (5) buildBoardContext — PURE. The whole-board brief the dispatched delegate
 // gets injected into recovery-pass.json (today it gets NONE).
 export function buildBoardContext(boardState, invariants) {
   const githubQuota = quotaForPublication(boardState);
+  const linearQuota = linearQuotaForPublication(boardState);
   const owns = makeOwnsFilter(boardState, { scope: "dispatch" });
   const ownedEligible = boardState.eligible.filter((e) => owns(e.id));
   // CTL-1157: the stuck-worker set is the UNION of the age-flagged workers and the
@@ -1815,6 +1827,7 @@ export function buildBoardContext(boardState, invariants) {
     // CTL-1608 v3: the stalled-PR cohort, surfaced additively for the delegate.
     stalledPrs: invariants.stalledPr?.flagged ?? [],
     githubQuota,
+    linearQuota,
     strandedNodes: (invariants.strandedNode?.flagged ?? []).map((host) => ({
       host,
       // the tickets HRW-owned by this stranded host — the delegate's actionable
@@ -1846,6 +1859,7 @@ export function buildBoardContext(boardState, invariants) {
 // chartable attributes); rosters/move arrays stay in details → body.payload.
 export function buildBoardScanEvent({ mode, invariants, decision, act = null, board = null }) {
   const githubQuota = quotaForPublication(board);
+  const linearQuota = linearQuotaForPublication(board);
   const owns = board == null ? null : makeOwnsFilter(board, { scope: "dispatch" });
   const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
   // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
@@ -1927,6 +1941,9 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       unproductiveNodeCount: invariants.nodeProductivity?.flagged?.length ?? 0,
       githubCoreRemaining: githubQuota?.remaining ?? null,
       githubCoreRemainingPct: githubQuota?.remainingPct ?? null,
+      linearRemaining: linearQuota?.remaining ?? null,
+      linearRemainingPct: linearQuota?.remainingPct ?? null,
+      linearQuotaState: linearQuota?.state ?? "unknown",
       invariants: Object.fromEntries(
         Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed, observable: v.observable }]),
       ),
@@ -1952,6 +1969,10 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       act: actOutcome,
       githubQuotaResetAt: githubQuota?.resetAt ?? null,
       githubQuotaHost: githubQuota?.host ?? null,
+      linearQuotaResetAt: linearQuota?.resetAt ?? null,
+      linearQuotaSampledAt: linearQuota?.sampledAt ?? null,
+      linearQuotaHost: linearQuota?.host ?? null,
+      linearActorFingerprint: linearQuota?.linearActorFingerprint ?? null,
     },
   };
 }
@@ -1985,6 +2006,8 @@ export function boardHealthPass({
   getStalledPrState,
   getGithubQuota,
   githubQuotaMode,
+  getLinearQuota,
+  linearQuotaMode,
   getPeerProductivity,
   productivityMode,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
@@ -2017,6 +2040,8 @@ export function boardHealthPass({
     getStalledPrState, // CTL-1608: stalled-PR stamp seam (empty-Map default if unbound)
     getGithubQuota,
     githubQuotaMode,
+    getLinearQuota,
+    linearQuotaMode,
     getPeerProductivity,
     productivityMode,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).

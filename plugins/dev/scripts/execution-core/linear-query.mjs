@@ -390,6 +390,7 @@ export function fetchTicketState(
   const execStart = onExec ? Date.now() : 0;
   const { code, stdout, stderr, timedOut } = exec("linearis", ["issues", "read", identifier], {
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
+    ...(probeBackoff ? { callerClass: "probe", caller: "linearis:issues-read" } : {}),
   });
   if (code !== 0) {
     recordDaemonRead(liveSource, "failed", identifier); // live read errored/timed-out — no data served

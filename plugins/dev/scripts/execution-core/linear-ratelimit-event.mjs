@@ -25,6 +25,22 @@ import { getEventLogPath, getHostName, log } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
 export const LINEAR_BREAKER_EVENT = "linear.ratelimit.breaker";
+export const LINEAR_QUOTA_WOULD_DEFER_EVENT = "linear.quota.would-defer";
+export const LINEAR_QUOTA_DEFERRED_EVENT = "linear.quota.deferred";
+
+export function emitLinearQuotaEvent({ enforced = false, caller = null, quota = null, logPath = getEventLogPath(), now } = {}) {
+  const ts = now ? now() : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const name = enforced ? LINEAR_QUOTA_DEFERRED_EVENT : LINEAR_QUOTA_WOULD_DEFER_EVENT;
+  const envelope = {
+    ts, id: randomBytes(8).toString("hex"), observedTs: ts, severityText: "WARN", severityNumber: 13,
+    traceId: null, spanId: null,
+    resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
+    attributes: { "event.name": name, "event.entity": "linear", "event.action": enforced ? "quota.deferred" : "quota.would-defer", "event.label": getHostName() },
+    body: { payload: { "host.name": getHostName(), caller, ...quota } },
+  };
+  try { mkdirSync(dirname(logPath), { recursive: true }); appendFileSync(logPath, `${JSON.stringify(envelope)}\n`); return true; }
+  catch (err) { log.warn({ err: err?.message }, "linear-ratelimit-event: quota event append failed"); return false; }
+}
 
 /**
  * buildLinearBreakerEnvelope — pure OTel envelope for a breaker state change.

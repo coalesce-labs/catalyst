@@ -19,6 +19,28 @@ describe("isRateLimitError", () => {
   });
 });
 
+describe("quota backpressure", () => {
+  const low = { requests: { limit: 5000, remaining: 100, resetAt: null }, sampledAt: new Date(1000).toISOString() };
+  test("shadow reports but does not defer probe reads", () => {
+    let calls = 0; const events = [];
+    const exec = withBreaker(() => { calls++; return { code: 0, stdout: "{}", stderr: "" }; }, {
+      breaker: createLinearBreaker({ logger: silentLogger }), now: () => 1000,
+      quotaMode: "shadow", getQuota: () => low, emitQuotaEvent: (e) => events.push(e),
+    });
+    expect(exec("linearis", ["issues", "read"], { callerClass: "probe" }).code).toBe(0);
+    expect(calls).toBe(1); expect(events[0].enforced).toBe(false);
+  });
+  test("enforce defers only probe reads and fails open on unreadable snapshots", () => {
+    let calls = 0;
+    const raw = () => { calls++; return { code: 0, stdout: "{}", stderr: "" }; };
+    const opts = { breaker: createLinearBreaker({ logger: silentLogger }), now: () => 1000, quotaMode: "enforce", getQuota: () => low, emitQuotaEvent() {} };
+    expect(withBreaker(raw, opts)("linearis", ["issues", "read"], { callerClass: "probe" }).stderr).toBe("quota-deferred");
+    expect(withBreaker(raw, opts)("linearis", ["issues", "update"], { callerClass: "write" }).code).toBe(0);
+    expect(calls).toBe(1);
+    expect(withBreaker(raw, { ...opts, getQuota: () => { throw new Error("bad"); } })("linearis", ["issues", "read"], { callerClass: "probe" }).code).toBe(0);
+  });
+});
+
 describe("createLinearBreaker", () => {
   test("starts closed", () => {
     const b = createLinearBreaker({ logger: silentLogger });
