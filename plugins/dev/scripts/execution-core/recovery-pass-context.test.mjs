@@ -5,7 +5,7 @@
 // dispatched-mode brief read. The end-to-end no-throw behavior is covered by the
 // PR's smoke run (sweep over a nonexistent orch-dir prints MODE=sweep / TOTAL: 0).
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -41,6 +41,53 @@ function rosterEnv(baseDir, roster, self) {
     CATALYST_HOST_NAME: self,
   };
 }
+
+describe("CAT-44 leave-alone sweep suppression", () => {
+  let orchDir;
+  beforeEach(() => { orchDir = mkdtempSync(join(tmpdir(), "cat44-sweep-")); });
+  afterEach(() => rmSync(orchDir, { recursive: true, force: true }));
+  const stuck = (ticket) => {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-recovery-pass.json"), JSON.stringify({ ticket, status: "needs-human", failureReason: "stuck" }));
+  };
+  const verdict = (ticket, ageMs) => {
+    const dir = join(orchDir, ".recovery-intents");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${ticket}.json`), JSON.stringify({ verdict: "leave-alone", verdictTs: Date.now() - ageMs, verdictReason: "verified healthy" }));
+  };
+  it("drops a fresh verdict from STUCK and TOTAL, loudly", () => {
+    stuck("CTL-300"); stuck("CTL-301"); verdict("CTL-301", 60_000);
+    const out = runScript(["--orch-dir", orchDir], rosterEnv(orchDir, ["solo"], "solo"));
+    expect(out).toContain("STUCK YOURS CTL-300");
+    expect(out).not.toContain("STUCK YOURS CTL-301");
+    expect(out).toMatch(/SUPPRESSED 1 item.*CTL-301/);
+    expect(out).toContain("TOTAL: 1 items (1 yours, 0 context)");
+  });
+  it("surfaces expired and malformed entries", () => {
+    stuck("CTL-302"); verdict("CTL-302", 25 * 3600e3);
+    stuck("CTL-303");
+    mkdirSync(join(orchDir, ".recovery-intents"), { recursive: true });
+    writeFileSync(join(orchDir, ".recovery-intents", "CTL-303.json"), "{bad");
+    const out = runScript(["--orch-dir", orchDir], rosterEnv(orchDir, ["solo"], "solo"));
+    expect(out).toContain("STUCK YOURS CTL-302");
+    expect(out).toContain("STUCK YOURS CTL-303");
+  });
+  it("honours TTL override and off escape hatch", () => {
+    stuck("CTL-304"); verdict("CTL-304", 3 * 3600e3);
+    let env = { ...rosterEnv(orchDir, ["solo"], "solo"), CATALYST_RECOVERY_LEAVE_ALONE_TTL_HOURS: "1" };
+    expect(runScript(["--orch-dir", orchDir], env)).toContain("STUCK YOURS CTL-304");
+    env = { ...env, CATALYST_RECOVERY_LEAVE_ALONE_TTL_HOURS: "24", CATALYST_RECOVERY_SWEEP_LEDGER_FILTER: "off" };
+    expect(runScript(["--orch-dir", orchDir], env)).toContain("STUCK YOURS CTL-304");
+  });
+  it("annotates but does not drop ticket-scoped fallback", () => {
+    stuck("CTL-305"); verdict("CTL-305", 60_000);
+    const out = runScript(["--ticket", "CTL-305", "--orch-dir", orchDir], rosterEnv(orchDir, ["solo"], "solo"));
+    expect(out).toContain("STUCK CTL-305");
+    expect(out).toMatch(/leave-alone verdict/);
+    expect(out).toContain("TOTAL: 1 items (ticket-scoped)");
+  });
+});
 
 describe("HRW soft owner-signal — pure ownership sanity", () => {
   it("a single-host roster owns every ticket (every item is YOURS)", () => {

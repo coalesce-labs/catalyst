@@ -14,7 +14,9 @@
 //                    here, NOT a hard filter: items are KEPT and ANNOTATED YOURS
 //                    (you own it — act) vs CONTEXT (another host owns it — awareness
 //                    only; a sibling you don't own may explain your conflict). At
-//                    N=1 every item is YOURS (identity).
+//                    N=1 every item is YOURS (identity). Fresh leave-alone verdicts
+//                    are removed through the host-local recovery-intent ledger and
+//                    reported in a loud SUPPRESSED summary.
 //
 // The three sweep sources (union, dedupe by ticket key):
 //   1. Worker signals    — ${ORCH_DIR}/workers/*/phase-*.json, status ∈
@@ -36,6 +38,46 @@ import { fileURLToPath } from "node:url";
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { ownerForTicket } from "./hrw.mjs";
 import { getClusterHosts, getHostName } from "./config.mjs";
+import {
+  leaveAloneSuppression,
+  RECOVERY_LEAVE_ALONE_TTL_MS,
+} from "./recovery-intent-ledger.mjs";
+
+const LEDGER_FILTER_ENABLED = process.env.CATALYST_RECOVERY_SWEEP_LEDGER_FILTER !== "off";
+
+function safeSuppression(ticket, { orchDir, now = () => Date.now() } = {}) {
+  if (!LEDGER_FILTER_ENABLED) return null;
+  try {
+    return leaveAloneSuppression(ticket, { orchDir, now });
+  } catch {
+    return null;
+  }
+}
+
+export function partitionLeaveAlone(items, { orchDir, now = () => Date.now() } = {}) {
+  if (!LEDGER_FILTER_ENABLED) return { kept: items, suppressed: [] };
+  const kept = [];
+  const suppressed = [];
+  for (const item of items) {
+    const result = safeSuppression(item.ticket, { orchDir, now });
+    if (result) suppressed.push({ ...item, ...result });
+    else kept.push(item);
+  }
+  return { kept, suppressed };
+}
+
+export function formatLeaveAloneSuppression(suppressed) {
+  if (!suppressed.length) return null;
+  const hours = (RECOVERY_LEAVE_ALONE_TTL_MS / 3600e3).toFixed(1);
+  const detail = suppressed
+    .map((item) => `${item.ticket} (${(item.ageMs / 3600e3).toFixed(1)}h ago${item.verdictReason ? `: ${item.verdictReason.slice(0, 80)}` : ""})`)
+    .join("; ");
+  return (
+    `(SUPPRESSED ${suppressed.length} item(s) carrying a leave-alone verdict inside the ${hours}h TTL ` +
+    `— a recovery-pass already reviewed these and concluded no action is needed; do NOT re-review. ` +
+    `Set CATALYST_RECOVERY_SWEEP_LEDGER_FILTER=off to see them: ${detail})`
+  );
+}
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
 function parseArgs(argv) {
@@ -413,7 +455,17 @@ async function main() {
     // actually covered — a short window must never masquerade as the full one.
     const truncated = formatEscalationCoverage(log);
     if (truncated) console.log(truncated);
-    for (const it of all) console.log(formatSweepItem(it));
+    for (const it of all) {
+      console.log(formatSweepItem(it));
+      const suppression = safeSuppression(it.ticket, { orchDir });
+      if (suppression) {
+        console.log(
+          `  (NOTE: ${it.ticket} carries a leave-alone verdict ${(suppression.ageMs / 3600e3).toFixed(1)}h old ` +
+            `— inside the TTL; a pass already concluded no action is needed` +
+            `${suppression.verdictReason ? `: ${suppression.verdictReason.slice(0, 120)}` : ""})`
+        );
+      }
+    }
     console.log(`TOTAL: ${all.length} items (ticket-scoped)`);
     return;
   }
@@ -431,7 +483,10 @@ async function main() {
   const truncated = formatEscalationCoverage(events);
   if (truncated) console.log(truncated);
 
-  const union = unionDedupe(signals, events.items, cache.items);
+  const unfiltered = unionDedupe(signals, events.items, cache.items);
+  const { kept: union, suppressed } = partitionLeaveAlone(unfiltered, { orchDir });
+  const suppressionLine = formatLeaveAloneSuppression(suppressed);
+  if (suppressionLine) console.log(suppressionLine);
 
   // HRW is a SOFT owner-signal, NOT a hard filter (a sibling ticket you don't own
   // may explain YOUR conflict). KEEP the whole stuck set; ANNOTATE each item with
