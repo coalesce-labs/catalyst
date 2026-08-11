@@ -9,6 +9,7 @@ FAILURES=0; PASSES=0
 check() { local n="$1"; shift; if "$@"; then PASSES=$((PASSES+1)); echo "  PASS: $n"; else FAILURES=$((FAILURES+1)); echo "  FAIL: $n"; fi; }
 fixture() {
   local n="$1"; export HOME="$TMP_ROOT/$n" CATALYST_DIR="$TMP_ROOT/$n/catalyst" CATALYST_REPLICA_DB="$TMP_ROOT/$n/catalyst/catalyst-replica.db" CATALYST_LAYER2_CONFIG_FILE="$TMP_ROOT/$n/config.json" CATALYST_CLOUD_SYNC_TEST_MODE=1
+  unset CATALYST_LINEAR_REPLICA
   mkdir -p "$HOME/.config/catalyst" "$CATALYST_DIR"
   printf 'export CATALYST_CLOUD_TOKEN=test-secret\n' > "$HOME/.config/catalyst/cloud-sync.env"; chmod 600 "$HOME/.config/catalyst/cloud-sync.env"
 }
@@ -42,6 +43,10 @@ check "happy fixture passes" jq -e '.ok == true and (.checks|length) >= 8' <<<"$
 cloud_sync_verify_report --strict >/dev/null; check "strict happy exit zero" test "$?" -eq 0
 printf '{"catalyst":{"linearReplica":"on"}}\n' > "$CATALYST_LAYER2_CONFIG_FILE"; OUT="$(cloud_sync_verify_report --json)"
 check "legacy read flag reports on" jq -e '(.checks[] | select(.name=="read-flag")).status == "PASS"' <<<"$OUT"
+CATALYST_LINEAR_REPLICA=off OUT="$(CATALYST_LINEAR_REPLICA=off cloud_sync_verify_report --json)"
+check "environment off overrides layer2 on" jq -e '(.checks[] | select(.name=="read-flag")) | .status == "INFO" and (.reason | contains("env"))' <<<"$OUT"
+rm -f "$CATALYST_LAYER2_CONFIG_FILE"; OUT="$(CATALYST_LINEAR_REPLICA=on cloud_sync_verify_report --json)"
+check "environment on works without layer2" jq -e '(.checks[] | select(.name=="read-flag")) | .status == "PASS" and (.reason | contains("env"))' <<<"$OUT"
 
 fixture badactivate; : > "$CATALYST_REPLICA_DB"; printf '{"keep":true}\n' > "$CATALYST_LAYER2_CONFIG_FILE"; BEFORE="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"; cmd_activate_replica >/dev/null 2>&1; EC=$?; AFTER="$(shasum "$CATALYST_LAYER2_CONFIG_FILE")"
 check "activate refuses invalid seed" test "$EC" -ne 0

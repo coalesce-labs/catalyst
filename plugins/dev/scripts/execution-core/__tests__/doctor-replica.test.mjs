@@ -53,11 +53,11 @@ describe("checkCloudSync", () => {
     expect(m["replica-read-flag"].status).toBe("pass");
   });
 
-  test("token unset → replica-token WARN; the value never leaks", () => {
+  test("token unset on opted-in node → replica-token FAIL; the value never leaks", () => {
     const SECRET = "lin_should_never_appear";
     const recs = checkCloudSync(deps({ env: { SOME_OTHER: SECRET } }));
     const m = byName(recs);
-    expect(m["replica-token"].status).toBe("warn");
+    expect(m["replica-token"].status).toBe("fail");
     expect(m["replica-token"].detail).toContain(TOKEN_ENV.envVar);
     expect(JSON.stringify(recs)).not.toContain(SECRET);
   });
@@ -69,27 +69,27 @@ describe("checkCloudSync", () => {
     expect(byName(recs)["replica-token"].status).toBe("pass");
   });
 
-  test("db absent → replica-fresh WARN (not connected)", () => {
+  test("db absent while opted in → replica-fresh FAIL (not connected)", () => {
     const m = byName(checkCloudSync(deps({ fileExists: () => false })));
-    expect(m["replica-fresh"].status).toBe("warn");
+    expect(m["replica-fresh"].status).toBe("fail");
     expect(m["replica-fresh"].detail).toMatch(/not connected|seeded/i);
   });
 
-  test("db tiny → replica-fresh WARN (seed not applied)", () => {
+  test("db tiny while opted in → replica-fresh FAIL (seed not applied)", () => {
     const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 1000, mtimeMs: NOW }) })));
-    expect(m["replica-fresh"].status).toBe("warn");
+    expect(m["replica-fresh"].status).toBe("fail");
     expect(m["replica-fresh"].detail).toMatch(/tiny|seed/i);
   });
 
   test("0-byte replica reports never-seeded schema", () => {
     const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 0, mtimeMs: NOW }) })));
-    expect(m["replica-schema"].status).toBe("warn");
+    expect(m["replica-schema"].status).toBe("fail");
     expect(m["replica-schema"].detail).toMatch(/never seeded|no schema|0 bytes/i);
   });
 
   test("unreadable replica does not report a never-seeded schema", () => {
     const m = byName(checkCloudSync(deps({ statFile: () => { throw new Error("permission denied"); } })));
-    expect(m["replica-schema"].status).toBe("warn");
+    expect(m["replica-schema"].status).toBe("fail");
     expect(m["replica-schema"].detail).toMatch(/unreadable/i);
     expect(m["replica-schema"].detail).not.toMatch(/never seeded|0 bytes/i);
   });
@@ -105,13 +105,13 @@ describe("checkCloudSync", () => {
   // prepares against, previously reported "schema seeded" while every read missed.
   test("large non-SQLite file above the floor does NOT pass schema check", () => {
     const m = byName(checkCloudSync(deps({ isSqliteFile: () => false })));
-    expect(m["replica-schema"].status).toBe("warn");
+    expect(m["replica-schema"].status).toBe("fail");
     expect(m["replica-schema"].detail).toMatch(/no SQLite header|corrupt/i);
   });
 
   test("valid SQLite file missing a required table does NOT pass schema check", () => {
     const m = byName(checkCloudSync(deps({ readDbTables: () => ["issues"] })));
-    expect(m["replica-schema"].status).toBe("warn");
+    expect(m["replica-schema"].status).toBe("fail");
     expect(m["replica-schema"].detail).toMatch(/sync_meta/);
   });
 
@@ -121,22 +121,20 @@ describe("checkCloudSync", () => {
     expect(m["replica-schema"].detail).toMatch(/unverified/i);
   });
 
-  test("header/table verification never introduces a FAIL", () => {
-    for (const over of [{ isSqliteFile: () => false }, { readDbTables: () => [] }, { readDbTables: () => null }]) {
-      expect(noFail(checkCloudSync(deps(over)))).toBe(true);
-    }
+  test("unperformed sqlite verification stays INFO, never FAIL", () => {
+    expect(byName(checkCloudSync(deps({ readDbTables: () => null })))["replica-schema"].status).toBe("info");
   });
 
   test("tier-inert summary names token and read flag gaps", () => {
     const m = byName(checkCloudSync(deps({ mode: "off", env: {}, statFile: () => ({ size: 0, mtimeMs: NOW }) })));
-    expect(m["replica-tier"].status).toBe("warn");
+    expect(m["replica-tier"].status).toBe("fail");
     expect(m["replica-tier"].detail).toMatch(/token/i);
     expect(m["replica-tier"].detail).toMatch(/CATALYST_LINEAR_REPLICA/);
   });
 
   test("all mtimes old incl the writer-lock (heartbeat stopped) → replica-fresh WARN (likely down)", () => {
     const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 64_000_000, mtimeMs: NOW - 600_000 }) })));
-    expect(m["replica-fresh"].status).toBe("warn");
+    expect(m["replica-fresh"].status).toBe("fail");
     expect(m["replica-fresh"].detail).toMatch(/heartbeat stale|likely down/i);
   });
 
@@ -164,7 +162,7 @@ describe("checkCloudSync", () => {
       return { size: 64_000_000, mtimeMs: mtime };
     };
     const stale = byName(checkCloudSync(deps({ statFile: noLock(NOW - 600_000) })));
-    expect(stale["replica-fresh"].status).toBe("warn");
+    expect(stale["replica-fresh"].status).toBe("fail");
     expect(stale["replica-fresh"].detail).toMatch(/no writer-lock/i);
     const fresh = byName(checkCloudSync(deps({ statFile: noLock(NOW - 5_000) })));
     expect(fresh["replica-fresh"].status).toBe("pass");
@@ -176,9 +174,9 @@ describe("checkCloudSync", () => {
     expect(m["replica-read-flag"].detail).toMatch(/flip it on/i);
   });
 
-  test("flag ON but db absent → replica-read-flag WARN (MISS-fallthrough)", () => {
+  test("flag ON but db absent → replica-read-flag FAIL (MISS-fallthrough)", () => {
     const m = byName(checkCloudSync(deps({ fileExists: () => false })));
-    expect(m["replica-read-flag"].status).toBe("warn");
+    expect(m["replica-read-flag"].status).toBe("fail");
     expect(m["replica-read-flag"].detail).toMatch(/MISS/i);
   });
 
@@ -187,7 +185,7 @@ describe("checkCloudSync", () => {
     expect(m["cloud-sync"].status).toBe("warn");
   });
 
-  test("INVARIANT: no permutation ever yields a FAIL record", () => {
+  test("INVARIANT: opted-out permutations never yield a FAIL record", () => {
     const bools = [() => true, () => false];
     const stats = [
       () => ({ size: 64_000_000, mtimeMs: NOW }),
@@ -196,12 +194,18 @@ describe("checkCloudSync", () => {
     ];
     for (const agentInstalled of bools)
       for (const processAlive of bools)
-        for (const mode of ["on", "off"])
+        for (const mode of ["off"])
           for (const fileExists of bools)
             for (const statFile of stats)
               for (const env of [{ [TOKEN_ENV.envVar]: "x" }, {}]) {
-                const recs = checkCloudSync(deps({ agentInstalled, processAlive, mode, fileExists, statFile, env }));
+                const recs = checkCloudSync(deps({ agentInstalled: () => false, processAlive, mode, fileExists, statFile, env }));
                 expect(recs.every((r) => r.status !== "fail")).toBe(true);
               }
+  });
+
+  test("every opted-in FAIL gives an actionable next step", () => {
+    const recs = checkCloudSync(deps({ env: {}, statFile: () => ({ size: 0, mtimeMs: NOW - 600_000 }) }));
+    for (const rec of recs.filter((r) => r.status === "fail"))
+      expect(rec.detail).toMatch(/adopt-cloud-sync|verify-cloud-sync|cloud-sync\.env/);
   });
 });

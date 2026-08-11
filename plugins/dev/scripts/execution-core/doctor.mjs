@@ -3083,10 +3083,15 @@ function defaultReadDbTables(path) {
   return r.stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
 }
 
+export function replicaTierOptedIn({ installed, mode }) {
+  return installed || mode === "on";
+}
+
 // checkCloudSync — CTL-1394. Advisory health of the per-node supervised Linear-replica
-// writer + its read tier. EVERY condition is WARN/INFO/PASS, NEVER FAIL: doctor's exit code
-// is the FAIL count and gates catalyst-join activation — a FAIL here would block a node that
-// simply hasn't opted into the replica yet. All deps injectable so tests touch no
+// writer + its read tier. Doctor's exit code is the FAIL count and gates catalyst-join
+// activation — a FAIL here would block a node that simply hasn't opted into the replica yet.
+// CAT-134 preserves that invariant with an explicit opt-in gate: opted-out nodes remain
+// advisory-only, while a node that asked for this tier now FAILs when it is broken. All deps injectable so tests touch no
 // fs/pgrep/launchctl. NODE-SAFE: file-mtime freshness only (no bun:sqlite); rowcount /
 // MAX(updated_at) freshness is check-setup.sh's richer job.
 export function checkCloudSync(deps = {}) {
@@ -3115,6 +3120,10 @@ export function checkCloudSync(deps = {}) {
 
   const installed = agentInstalled(label, laDir);
   const dbPresent = fileExists(dbPath);
+  // FAIL is reachable only after an explicit opt-in. Fresh catalyst-join nodes
+  // retain the historical advisory-only grading for a tier they never requested.
+  const optedIn = replicaTierOptedIn({ installed, mode });
+  const tierGrade = () => optedIn ? STATUS.FAIL : STATUS.WARN;
 
   // Gate: a node with NO writer agent, the read flag OFF, and NO replica file is simply not
   // on the replica tier — one INFO and out, so this check is safe to wire into every class.
@@ -3143,7 +3152,7 @@ export function checkCloudSync(deps = {}) {
   let size = 0;
   let statOk = false;
   if (!dbPresent) {
-    checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
+    checks.push(mkCheck("replica-fresh", tierGrade(), "replica db not present — writer has not seeded yet (run: catalyst-stack adopt-cloud-sync, then verify-cloud-sync)"));
   } else {
     let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
     try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; statOk = true; } catch { /* unreadable → handled below */ }
@@ -3153,19 +3162,19 @@ export function checkCloudSync(deps = {}) {
     const dataAge = dataNewest ? `${Math.round((now - dataNewest) / 1000)}s` : "unknown";
 
     if (size < sizeFloorBytes) {
-      checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica present but tiny — snapshot seed not applied yet (not connected)"));
+      checks.push(mkCheck("replica-fresh", tierGrade(), "replica present but tiny — snapshot seed not applied yet (run: catalyst-stack verify-cloud-sync)"));
     } else if (lockMtime > 0) {
       // Writer-lock heartbeat is the truth (feed-independent). A quiet feed never trips this.
       const lockAge = Math.round((now - lockMtime) / 1000);
       if (now - lockMtime <= lockStaleMs) {
         checks.push(mkCheck("replica-fresh", STATUS.PASS, `writer live (heartbeat ${lockAge}s ago); last mirrored change ${dataAge} ago`));
       } else {
-        checks.push(mkCheck("replica-fresh", STATUS.WARN, `writer heartbeat stale (${lockAge}s > ${Math.round(lockStaleMs / 1000)}s) — writer likely down`));
+        checks.push(mkCheck("replica-fresh", tierGrade(), `writer heartbeat stale (${lockAge}s > ${Math.round(lockStaleMs / 1000)}s) — writer likely down (run: catalyst-stack verify-cloud-sync)`));
       }
     } else if (dataNewest === 0 || now - dataNewest > staleMs) {
       // No writer-lock (guard disabled / not started) — fall back to the DB data-mtime as a
       // COARSE proxy, but word it ambiguously since a quiet feed is indistinguishable here.
-      checks.push(mkCheck("replica-fresh", STATUS.WARN, `no writer-lock + no mirrored change in ${dataAge} — writer may be down (or the feed is quiet)`));
+      checks.push(mkCheck("replica-fresh", tierGrade(), `no writer-lock + no mirrored change in ${dataAge} — writer may be down (or the feed is quiet); run: catalyst-stack verify-cloud-sync`));
     } else {
       checks.push(mkCheck("replica-fresh", STATUS.PASS, `replica updated ${dataAge} ago (no writer-lock present)`));
     }
@@ -3181,13 +3190,13 @@ export function checkCloudSync(deps = {}) {
   // claiming verification we did not perform.
   if (dbPresent) {
     if (!statOk) {
-      checks.push(mkCheck("replica-schema", STATUS.WARN, "replica db is present but unreadable — cannot determine whether schema is seeded"));
+      checks.push(mkCheck("replica-schema", tierGrade(), "replica db is present but unreadable — cannot determine whether schema is seeded (run: catalyst-stack verify-cloud-sync)"));
     } else if (size === 0) {
-      checks.push(mkCheck("replica-schema", STATUS.WARN, "replica db is 0 bytes — no schema, never seeded; the writer has never authenticated"));
+      checks.push(mkCheck("replica-schema", tierGrade(), "replica db is 0 bytes — no schema, never seeded; the writer has never authenticated (run: catalyst-stack adopt-cloud-sync)"));
     } else if (size < sizeFloorBytes) {
-      checks.push(mkCheck("replica-schema", STATUS.WARN, `replica db is ${size}B (< ${sizeFloorBytes}B floor) — seed incomplete`));
+      checks.push(mkCheck("replica-schema", tierGrade(), `replica db is ${size}B (< ${sizeFloorBytes}B floor) — seed incomplete (run: catalyst-stack verify-cloud-sync)`));
     } else if (!isSqliteFile(dbPath)) {
-      checks.push(mkCheck("replica-schema", STATUS.WARN, `replica db is ${Math.round(size / 1024)}KiB but has no SQLite header — corrupt or not a database; every read will miss`));
+      checks.push(mkCheck("replica-schema", tierGrade(), `replica db is ${Math.round(size / 1024)}KiB but has no SQLite header — corrupt or not a database; run: catalyst-stack verify-cloud-sync`));
     } else {
       const tables = readDbTables(dbPath);
       if (tables === null) {
@@ -3196,7 +3205,7 @@ export function checkCloudSync(deps = {}) {
         const missing = REQUIRED_REPLICA_TABLES.filter((t) => !tables.includes(t));
         checks.push(
           missing.length > 0
-            ? mkCheck("replica-schema", STATUS.WARN, `replica db ${Math.round(size / 1024)}KiB is missing required table(s): ${missing.join(", ")} — the reader cannot prepare its queries`)
+            ? mkCheck("replica-schema", tierGrade(), `replica db ${Math.round(size / 1024)}KiB is missing required table(s): ${missing.join(", ")} — run: catalyst-stack verify-cloud-sync`)
             : mkCheck("replica-schema", STATUS.PASS, `replica db ${Math.round(size / 1024)}KiB — schema seeded (${REQUIRED_REPLICA_TABLES.join(" + ")} present)`),
         );
       }
@@ -3209,7 +3218,7 @@ export function checkCloudSync(deps = {}) {
   checks.push(
     tokenSet
       ? mkCheck("replica-token", STATUS.PASS, `${tokenEnv.envVar} is set (len>0, source=${tokenEnv.source})`)
-      : mkCheck("replica-token", STATUS.WARN, `${tokenEnv.envVar} not set — the writer cannot authenticate (idle no-op); provision it in a 0600 file the launcher sources`),
+      : mkCheck("replica-token", tierGrade(), `${tokenEnv.envVar} not set — the writer cannot authenticate; provision ~/.config/catalyst/cloud-sync.env as a 0600 file, then run catalyst-stack adopt-cloud-sync`),
   );
 
   // (d) read-flag ↔ writer consistency.
@@ -3217,7 +3226,7 @@ export function checkCloudSync(deps = {}) {
     checks.push(
       dbPresent
         ? mkCheck("replica-read-flag", STATUS.PASS, "CATALYST_LINEAR_REPLICA=on with a local replica present — reads served locally")
-        : mkCheck("replica-read-flag", STATUS.WARN, "CATALYST_LINEAR_REPLICA=on but no local replica db — every read MISSES through to live linearis (no relief)"),
+        : mkCheck("replica-read-flag", tierGrade(), "CATALYST_LINEAR_REPLICA=on but no local replica db — every read MISSES; run: catalyst-stack adopt-cloud-sync"),
     );
   } else if (installed && dbPresent) {
     checks.push(mkCheck("replica-read-flag", STATUS.WARN, "writer running + replica present but CATALYST_LINEAR_REPLICA=off — flip it on to read from the replica"));
@@ -3228,11 +3237,11 @@ export function checkCloudSync(deps = {}) {
   const tokenMissing = !tokenSet;
   const flagOff = mode !== "on";
   if (tokenMissing && flagOff) {
-    checks.push(mkCheck("replica-tier", STATUS.WARN,
-      `replica tier INERT end-to-end: token ${tokenEnv.envVar} unset AND CATALYST_LINEAR_REPLICA off. Both must be fixed, token FIRST`));
+    checks.push(mkCheck("replica-tier", tierGrade(),
+      `replica tier INERT end-to-end: token ${tokenEnv.envVar} unset AND CATALYST_LINEAR_REPLICA off. Provision ~/.config/catalyst/cloud-sync.env, then run catalyst-stack verify-cloud-sync`));
   } else if (tokenMissing || flagOff) {
-    checks.push(mkCheck("replica-tier", STATUS.WARN,
-      `replica tier partially configured (${tokenMissing ? `token ${tokenEnv.envVar} unset` : "CATALYST_LINEAR_REPLICA off"}) — reads still fall back`));
+    checks.push(mkCheck("replica-tier", tierGrade(),
+      `replica tier partially configured (${tokenMissing ? `token ${tokenEnv.envVar} unset` : "CATALYST_LINEAR_REPLICA off"}) — run: catalyst-stack verify-cloud-sync`));
   } else {
     checks.push(mkCheck("replica-tier", STATUS.PASS, "replica tier fully configured (token set + read flag on)"));
   }
