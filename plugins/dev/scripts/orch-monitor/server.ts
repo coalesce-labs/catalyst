@@ -45,7 +45,7 @@ import type { ClusterView } from "./lib/cluster-view.mjs";
 // loadHostAliases reads catalyst.host.aliases (fail-open {}); resolveHostAlias
 // folds a pre-pin heartbeat key onto its pinned roster name. Pure file/string
 // helpers — safe to import statically (no execution-core network deps).
-import { loadHostAliases, resolveHostAlias } from "../execution-core/host-alias.mjs";
+import { loadHostAliases, resolveHostAlias, foldMapByAlias } from "../execution-core/host-alias.mjs";
 import { mergeHeartbeatsNewestWins } from "./lib/node-liveness.mjs";
 import { deriveClusterSignal } from "./lib/cluster-signal.mjs";
 import type { ClusterSignal } from "./lib/cluster-signal.mjs";
@@ -2067,7 +2067,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }
       }
       anchorHeartbeatCache.map = folded.heartbeats;
-      anchorCapacityCache.map = folded.capacity;
+      // CAT-197: fold onto pinned roster names BEFORE caching — capacityReader
+      // resolves the QUERIED (already-pinned) host through hostAliases, which is a
+      // no-op for a pinned name (the table only maps raw → pinned, never the other
+      // way), so an unfolded cache stays keyed by the raw name (e.g. "cddock") and
+      // is never found when looked up by the pinned name ("vega"). Mirrors
+      // cluster-view.mjs's existing heartbeat fold, which is why liveness has
+      // always resolved correctly for an aliased host while capacity did not.
+      anchorCapacityCache.map = foldMapByAlias(folded.capacity, hostAliases);
     } catch {
       // fail-open: keep the last caches; stale entries age out via node-liveness
     }
