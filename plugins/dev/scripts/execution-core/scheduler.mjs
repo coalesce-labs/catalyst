@@ -1087,6 +1087,51 @@ export const PREEMPTED_STATUS = "preempted";
 // Cleared on stopScheduler/__resetForTests (see daemon module state section).
 const rankedAboveSince = new Map();
 
+// CAT-105: slotReservations — module state recording which ticket a preemption-freed
+// slot was reserved for, so STEP A's admission budget doesn't hand that slot to a
+// DIFFERENT already-triaged waiter before the ticket it was freed for gets a real
+// chance to use it. Mirrors rankedAboveSince's shape exactly: keyed by ticket id,
+// cleared on stopScheduler/__resetForTests.
+const slotReservations = new Map(); // ticketId -> expiresAtMs
+
+// Bounded reservation window — long enough for the monitor's own triage-sweep cadence
+// to consume it, short enough not to idle real ready work for long if unconsumed.
+// Same order of magnitude as the existing preemption guards (PREEMPT_HYSTERESIS_MS=30s,
+// PREEMPT_MIN_RUNTIME_MS=60s).
+export const SLOT_RESERVATION_LAPSE_MS =
+  Number(process.env.CATALYST_SLOT_RESERVATION_LAPSE_MS) || 120_000;
+
+// reserveSlotFor — record that a just-freed slot is earmarked for `ticketId`.
+export function reserveSlotFor(ticketId, nowMs) {
+  slotReservations.set(ticketId, nowMs + SLOT_RESERVATION_LAPSE_MS);
+}
+
+// hasActiveReservation — true iff `ticketId` holds an unexpired reservation. Pure read
+// (does not prune) so it's safe to call from a budget computation without side effects.
+export function hasActiveReservation(ticketId, nowMs) {
+  const expiresAt = slotReservations.get(ticketId);
+  return typeof expiresAt === "number" && nowMs < expiresAt;
+}
+
+// pruneExpiredReservations — remove + log every lapsed reservation. Called once per
+// tick (STEP A) so a lapse is observable exactly once, at the tick it actually expires.
+export function pruneExpiredReservations(nowMs, logger = log) {
+  for (const [ticketId, expiresAt] of slotReservations) {
+    if (nowMs >= expiresAt) {
+      slotReservations.delete(ticketId);
+      logger.warn({ ticket: ticketId }, "scheduler: CAT-105 slot reservation lapsed unconsumed");
+    }
+  }
+}
+
+// countActiveReservations — how many currently-unexpired reservations exist, for
+// subtracting from STEP A's promotion budget. O(reservations), always small.
+function countActiveReservations(nowMs) {
+  let n = 0;
+  for (const expiresAt of slotReservations.values()) if (nowMs < expiresAt) n += 1;
+  return n;
+}
+
 // readCurrentRunPrNumber — return the current run's PR number from phase-pr.json,
 // or null if the file is absent or malformed (CTL-1667).
 export function readCurrentRunPrNumber(orchDir, ticket) {
@@ -6832,8 +6877,12 @@ export function schedulerTick(
       // free-slot ceiling. Eligible candidates must be able to consume any slot
       // they win; triaged-waiting members are dispatchable by construction.
       const triagedWaitingSet = new Set(triagedWaiting);
+      // CAT-105: a slot preemption freed for a specific (untriaged) ticket must not
+      // be spent here on a DIFFERENT, already-triaged waiter before that ticket gets
+      // a real chance to use it — subtract active reservations from the budget.
+      pruneExpiredReservations(now(), log);
       const freeSlotsForPromotion = livenessIsFresh()
-        ? Math.max(0, computeFreeSlots(maxParallel, occupiedCount))
+        ? Math.max(0, computeFreeSlots(maxParallel, occupiedCount) - countActiveReservations(now()))
         : 0;
       const admissionContenders = admissionPool.filter((t) => {
         if (!readyIds.has(t.identifier)) return false;
@@ -7200,6 +7249,9 @@ export function schedulerTick(
       const nowMs = now();
       for (let i = inFlightRanked.length - 1; i >= 0; i--) {
         if (!topQueued) break; // no queued ticket wants a slot
+        // CAT-105: don't preempt again for a ticket that already holds an active,
+        // unconsumed reservation from an earlier preemption this cycle.
+        if (hasActiveReservation(topQueued.identifier, nowMs)) break;
         const candidate = inFlightRanked[i];
         // Only preempt if topQueued strictly out-ranks this candidate.
         if (compareTickets(topQueued, candidate) >= 0) break; // sorted, so remaining are worse
@@ -7291,6 +7343,7 @@ export function schedulerTick(
         );
 
         rankedAboveSince.delete(hysteresisKey); // clear after successful preemption
+        reserveSlotFor(topQueued.identifier, nowMs); // CAT-105: earmark the freed slot
         break; // one preemption per tick
       }
 
@@ -10217,6 +10270,7 @@ export function stopScheduler() {
   watcher = null;
   runningOpts = null;
   rankedAboveSince.clear(); // CTL-705: reset hysteresis state on daemon stop
+  slotReservations.clear(); // CAT-105: reset slot-reservation state on daemon stop
   // CTL-1330: tear down the event-loop monitor + liveness sink so a restart
   // re-arms cleanly (and tests don't leak the pino sink across cases).
   if (_eventLoopMonitor) {
