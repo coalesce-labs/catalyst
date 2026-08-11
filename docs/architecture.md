@@ -536,7 +536,13 @@ can disagree for the same session. The `catalyst.blockedGhost.mode` guard applie
 observed `state:"blocked"`: its default `shadow` mode records the ghost without changing the
 presence verdict, while `enforce` treats it as not alive and routes deregistration through the
 existing `phase.terminal.reap-requested` pipeline. A cold listing snapshot still fails open and
-protects the worker.
+protects the worker. `enforce` intentionally covers every listed blocked session, including one
+that did work before blocking; CTL-932 already handles only the never-started subset. Its bounded
+action stops the registered session without removing its worktree, branch, or commits. Before an
+operator enables it, run `shadow` for at least 24 hours with one observation and confirm every
+observed short ID is terminal in the Tier-2 job state. Roll out one host per day in the order
+aldebaran, vega, sophon. Query `{service_name="catalyst.execution-core"} | field="event.name" |
+event_name =~ "liveness\\.blocked-ghost\\..*"`.
 - **Dispatch circuit breaker** (Linear-independent backstop): the CTL-624 cool-down marker carries
   `consecutiveFailures`; after `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` (default 8) consecutive failed
   dispatches with no progress → quarantine `stalled` (`stalledReason:"dispatch-circuit-breaker"`). A
