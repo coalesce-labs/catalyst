@@ -14,7 +14,10 @@ import {
 } from "./recovery-fix-backoff.mjs";
 
 let dir;
-afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); dir = null; });
+afterEach(() => {
+  if (dir) rmSync(dir, { recursive: true, force: true });
+  dir = null;
+});
 const fresh = () => (dir = mkdtempSync(join(tmpdir(), "cat-47-backoff-")));
 
 describe("recovery-fix-backoff (CAT-47)", () => {
@@ -43,7 +46,9 @@ describe("recovery-fix-backoff (CAT-47)", () => {
     for (let i = 0; i < RECOVERY_FIX_BACKOFF_THRESHOLD; i += 1) {
       recordFixFailure(root, "CAT-9", "orphan_stale", "same", 1000);
     }
-    expect(inFixBackoff(root, "CAT-9", "orphan_stale", 1000 + RECOVERY_FIX_BACKOFF_BASE_MS).blocked).toBe(false);
+    expect(
+      inFixBackoff(root, "CAT-9", "orphan_stale", 1000 + RECOVERY_FIX_BACKOFF_BASE_MS).blocked
+    ).toBe(false);
   });
 
   test("state is outside workers and success clears failure fields", () => {
@@ -72,7 +77,11 @@ describe("comment dedup latch (CAT-47)", () => {
     commitFixCommentHash(root, "CAT-9", "orphan_stale", first, 1000);
     expect(shouldPostFixComment(root, "CAT-9", "orphan_stale", first, 1000)).toBe(false);
     expect(shouldPostFixComment(root, "CAT-9", "orphan_stale", second, 1000)).toBe(true);
-    expect(JSON.parse(readFileSync(join(root, ".recovery-fix-failures", "CAT-9-orphan_stale.json"), "utf8")).lastCommentHash).toBe(first);
+    expect(
+      JSON.parse(
+        readFileSync(join(root, ".recovery-fix-failures", "CAT-9-orphan_stale.json"), "utf8")
+      ).lastCommentHash
+    ).toBe(first);
   });
 });
 

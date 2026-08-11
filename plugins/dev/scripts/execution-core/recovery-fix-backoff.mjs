@@ -62,7 +62,10 @@ export function inFixBackoff(orchDir, ticket, fixClass, nowMs = Date.now()) {
     return { blocked: false, count, until: null, lastReason: state.lastReason ?? null };
   }
   const exponent = Math.max(0, count - RECOVERY_FIX_BACKOFF_THRESHOLD);
-  const windowMs = Math.min(RECOVERY_FIX_BACKOFF_BASE_MS * (2 ** exponent), RECOVERY_FIX_BACKOFF_MAX_MS);
+  const windowMs = Math.min(
+    RECOVERY_FIX_BACKOFF_BASE_MS * 2 ** exponent,
+    RECOVERY_FIX_BACKOFF_MAX_MS
+  );
   const until = state.lastTs + windowMs;
   return { blocked: nowMs < until, count, until, lastReason: state.lastReason ?? null };
 }
@@ -73,7 +76,7 @@ export function recordFixFailure(
   fixClass,
   failureReason,
   nowMs = Date.now(),
-  { log = console.warn } = {},
+  { log = console.warn } = {}
 ) {
   if (!orchDir) return null;
   const path = fixFailurePath(orchDir, ticket, fixClass);
@@ -94,9 +97,16 @@ export function clearFixFailures(orchDir, ticket, fixClass) {
   const path = fixFailurePath(orchDir, ticket, fixClass);
   const prior = readState(path);
   if (prior.lastCommentHash) {
-    try { writeState(path, { lastCommentHash: prior.lastCommentHash, lastCommentTs: prior.lastCommentTs }); } catch {}
+    try {
+      writeState(path, {
+        lastCommentHash: prior.lastCommentHash,
+        lastCommentTs: prior.lastCommentTs,
+      });
+    } catch {}
   } else {
-    try { unlinkSync(path); } catch {}
+    try {
+      unlinkSync(path);
+    } catch {}
   }
 }
 
