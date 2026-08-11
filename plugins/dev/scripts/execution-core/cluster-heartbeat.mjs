@@ -61,7 +61,7 @@ export function isRateClassLinearError(text) {
 
 // defaultPost — the production GraphQL POST. Injectable via `post` option on every
 // public function so tests never touch the network.
-async function defaultPost(query, variables) {
+async function defaultPost(query, variables, { signal } = {}) {
   const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   const res = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
     method: "POST",
@@ -70,6 +70,7 @@ async function defaultPost(query, variables) {
       Authorization: authHeader(token),
     },
     body: JSON.stringify({ query, variables }),
+    signal,
   });
   if (!res.ok) {
     // CTL-1420 follow-up: READ the body before throwing. It was previously
@@ -149,6 +150,7 @@ export async function readAnchorHealth(ticket, { post = defaultPost } = {}) {
     archived: false,
     closed: false,
     error: null,
+    rawError: null,
   };
   if (typeof ticket !== "string" || ticket.trim() === "") {
     return { ...base, error: "no anchor issue configured" };
@@ -156,14 +158,16 @@ export async function readAnchorHealth(ticket, { post = defaultPost } = {}) {
 
   let data;
   try {
-    data = await post(ANCHOR_HEALTH_QUERY, { id: ticket.trim() });
+    data = await post(ANCHOR_HEALTH_QUERY, { id: ticket.trim() }, {
+      signal: AbortSignal.timeout(5000),
+    });
   } catch (err) {
     const error = String(err?.message ?? err);
     // Linear's `issue(id:)` resolver reports a missing identifier as a
     // GraphQL INPUT_ERROR rather than `{ issue: null }`. This is still a
     // definitive observation that the anchor does not resolve, not a
     // transport outage.
-    if (/Entity not found:\s*Issue/i.test(error)) return { ...base, found: false };
+    if (/Entity not found:\s*Issue/i.test(error)) return { ...base, found: false, rawError: error };
     return { ...base, error };
   }
 
@@ -181,6 +185,7 @@ export async function readAnchorHealth(ticket, { post = defaultPost } = {}) {
     archived,
     closed: stateType != null && CLOSED_STATE_TYPES.has(stateType),
     error: null,
+    rawError: null,
   };
 }
 

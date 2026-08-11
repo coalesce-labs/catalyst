@@ -4,6 +4,7 @@ import { checkLivenessAnchor, STATUS } from "../doctor.mjs";
 const ok = {
   ok: true, found: true, identifier: "PROJ-1", stateName: "In Progress",
   stateType: "started", archived: false, closed: false, error: null,
+  rawError: null,
 };
 
 const deps = (over = {}) => ({
@@ -22,10 +23,22 @@ describe("checkLivenessAnchor (CAT-46)", () => {
     expect(check.detail).toContain("PROJ-1");
   });
 
-  test("INFO when no anchor is configured", async () => {
-    const [check] = await checkLivenessAnchor(deps({ getLivenessAnchorIssue: () => null }));
+  test("INFO when no anchor is configured for a single-host roster", async () => {
+    const [check] = await checkLivenessAnchor(deps({
+      getLivenessAnchorIssue: () => null,
+      resolveClusterHosts: () => ({ hosts: ["a"], multiHost: false }),
+    }));
     expect(check.status).toBe(STATUS.INFO);
     expect(check.detail).toContain("catalyst.cluster.livenessAnchorIssue");
+  });
+
+  test("FAIL when no anchor is configured for a multi-host linear roster", async () => {
+    const [check] = await checkLivenessAnchor(deps({
+      getLivenessAnchorIssue: () => null,
+      resolveClusterHosts: () => ({ hosts: ["a", "b"], multiHost: true }),
+    }));
+    expect(check.status).toBe(STATUS.FAIL);
+    expect(check.detail).toMatch(/multi-host|cross-host/i);
   });
 
   test("INFO when the read source is loki without probing", async () => {
@@ -73,6 +86,14 @@ describe("checkLivenessAnchor (CAT-46)", () => {
     }));
     expect(check.status).toBe(STATUS.WARN);
     expect(check.detail).toContain("http 500");
+  });
+
+  test("WARN when anchor health is indeterminate", async () => {
+    const [check] = await checkLivenessAnchor(deps({
+      readAnchorHealth: async () => ({ ...ok, ok: false, found: null, error: null }),
+    }));
+    expect(check.status).toBe(STATUS.WARN);
+    expect(check.detail).toMatch(/indeterminate/i);
   });
 
   test("never throws even if a dependency throws", async () => {

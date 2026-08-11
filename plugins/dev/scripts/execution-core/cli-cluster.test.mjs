@@ -39,6 +39,7 @@ describe("cluster status anchor disambiguation (CAT-46)", () => {
   test("loki read source explains why anchor attachments are unused", () => {
     const out = renderStatus(buildStatus({ ...base, anchor: "PROJ-1", readSource: "loki" }));
     expect(out).toMatch(/loki/i);
+    expect(out).toMatch(/no live heartbeats/i);
   });
 
   test("no hedge line when a host is live", () => {

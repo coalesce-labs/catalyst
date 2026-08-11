@@ -152,7 +152,10 @@ export function renderStatus(s) {
   }
   if (!s.hosts.some((h) => h.live)) {
     if (s.readSource && s.readSource !== "linear") {
-      lines.push(`  (liveness read source is '${s.readSource}' — anchor attachments are not consulted)`);
+      lines.push(
+        `  (no live heartbeats from liveness read source '${s.readSource}' — ` +
+          `anchor attachments are not consulted)`,
+      );
     } else if (!s.anchor) {
       lines.push(
         `  (no liveness anchor configured — set catalyst.cluster.livenessAnchorIssue, ` +
