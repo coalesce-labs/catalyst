@@ -58,7 +58,15 @@ export function recordTriageSweep(team, { considered = 0, heldDelegateUnreadable
 } = {}) {
   try {
     const entry = ensureEntry(team, readMarker);
-    const fullyHeld = considered > 0 && heldDelegateUnreadable === considered;
+    // CAT-82 (review R1): a sweep with NO candidates is absence of evidence, not
+    // evidence of recovery. Falling into the healthy branch here cleared a latched
+    // outage the moment the queue emptied for an unrelated reason (every candidate
+    // parked at TRIAGE_DISPATCH_CAP, or filtered by hasTriageArtifact) — emitting a
+    // spurious monitor.triage.recovered.<team> mid-outage and deleting the team from
+    // board-health's triageSweepHeld ring, which is the corroboration
+    // checkTriageProduction depends on. Leave the streak and the latch untouched.
+    if (considered === 0) return;
+    const fullyHeld = heldDelegateUnreadable === considered;
     if (fullyHeld) {
       entry.consecutiveHeld += 1;
       if (entry.consecutiveHeld >= threshold && !entry.alerting) {

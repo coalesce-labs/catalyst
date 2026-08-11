@@ -3758,6 +3758,31 @@ describe("CAT-82 triage evidence and production", () => {
     expect(board.ring.recentDispatchTs).toBeNull();
   });
 
+  // Review R1: held/recovered is host-filtered exactly like phase.triage.complete.*
+  // — a peer's latch must not corroborate on a node that filters that peer's
+  // completions out of the positive evidence.
+  test("deriveRing host-filters held/recovered the same way as completions", () => {
+    const board = assembleBoardState({
+      mode: "shadow", self: "mini", now: () => NOW,
+      readEventRing: () => [
+        { ts: new Date(NOW - 3).toISOString(), attributes: { "event.name": "monitor.triage.held.CAT" }, resource: { "host.name": "peer" } },
+        { ts: new Date(NOW - 2).toISOString(), attributes: { "event.name": "monitor.triage.held.DOG" }, resource: { "host.name": "mini" } },
+      ],
+    });
+    expect([...board.ring.triageSweepHeld]).toEqual(["DOG"]);
+  });
+
+  test("a peer's recovered event cannot clear this host's held latch", () => {
+    const board = assembleBoardState({
+      mode: "shadow", self: "mini", now: () => NOW,
+      readEventRing: () => [
+        { ts: new Date(NOW - 2).toISOString(), attributes: { "event.name": "monitor.triage.held.CAT" }, resource: { "host.name": "mini" } },
+        { ts: new Date(NOW - 1).toISOString(), attributes: { "event.name": "monitor.triage.recovered.CAT" }, resource: { "host.name": "peer" } },
+      ],
+    });
+    expect([...board.ring.triageSweepHeld]).toEqual(["CAT"]);
+  });
+
   test("artifact seam builds untriaged set, defaults empty, fails open, and stays dark off", () => {
     expect([...assembleBoardState({ mode: "shadow", getEligible: () => [{ id: "CAT-1" }], hasTriageArtifact: () => false }).untriagedEligible]).toEqual(["CAT-1"]);
     expect(assembleBoardState({ mode: "shadow", getEligible: () => [{ id: "CAT-1" }] }).untriagedEligible.size).toBe(0);
@@ -3778,6 +3803,23 @@ describe("CAT-82 triage evidence and production", () => {
     expect(evaluateInvariants(triageBoard({ multiHost: true, ownerForTicket: () => "peer", dispatchRoster: ["mini", "peer"] })).triageProduction.ok).toBe(true);
     expect(evaluateInvariants(triageBoard({ ring: { recentTriageCompleteTs: null, triageSweepHeld: new Set() } })).triageProduction.observable).toBe(false);
     expect(evaluateInvariants(triageBoard({ ring: { recentTriageCompleteTs: null, triageSweepHeld: new Set(["CAT"]) } })).triageProduction.ok).toBe(false);
+  });
+
+  // Review R1: a latch held for a DIFFERENT team must not escalate this team's
+  // untriaged tickets — the eligible ids here are all CAT-*.
+  test("held-sweep corroboration is correlated with the untriaged tickets' team", () => {
+    const foreign = evaluateInvariants(triageBoard({
+      ring: { recentTriageCompleteTs: null, triageSweepHeld: new Set(["DOG"]) },
+    })).triageProduction;
+    expect(foreign.ok).toBe(true);
+    expect(foreign.observable).toBe(false);
+    expect(foreign.sweepHeldTeams).toEqual([]);
+
+    const mixed = evaluateInvariants(triageBoard({
+      ring: { recentTriageCompleteTs: null, triageSweepHeld: new Set(["DOG", "CAT"]) },
+    })).triageProduction;
+    expect(mixed.ok).toBe(false);
+    expect(mixed.sweepHeldTeams).toEqual(["CAT"]);
   });
 
   test("sub-mode ladder reports shadow and enforce is tier3-only with telemetry", () => {

@@ -476,7 +476,14 @@ export function deriveRing(events, nowMs, self) {
       const isOurs = !self || !evHost || evHost === self;
       if (isOurs && Number.isFinite(tsMs)) ring.recentTriageCompleteTs = Math.max(ring.recentTriageCompleteTs ?? 0, tsMs);
     } else if (/^monitor\.triage\.(held|recovered)\./.test(name)) {
-      const team = name.split(".").pop();
+      // CAT-82 (review R1): host-filter this the SAME way as the positive
+      // phase.triage.complete.* evidence above. On a node whose log carries peer
+      // events (event-mirror fan-in / a shared log), admitting a peer's held latch
+      // while filtering out that same peer's completions biased the invariant
+      // toward `starved` — corroboration from a host whose counter-evidence is
+      // deliberately excluded.
+      const evHost = ev?.resource?.["host.name"] ?? ev?.body?.payload?.["host.name"] ?? null;
+      const team = !self || !evHost || evHost === self ? name.split(".").pop() : null;
       if (team) {
         if (/\.held\./.test(name)) ring.triageSweepHeld.add(team);
         else ring.triageSweepHeld.delete(team);
@@ -1343,7 +1350,13 @@ function checkTriageProduction(b, t) {
     .filter((id) => id && b?.untriagedEligible?.has?.(id) && owns(id));
   const last = b?.ring?.recentTriageCompleteTs ?? null;
   const lastCompleteAgeMs = last == null ? null : Math.max(0, b.now - last);
-  const sweepHeldTeams = [...(b?.ring?.triageSweepHeld ?? [])];
+  // CAT-82 (review R1): a held latch only corroborates THIS starvation if it is
+  // held for a team that actually owns one of the untriaged tickets. A host serving
+  // two teams (CAT healthy, DOG's delegate reads failing) would otherwise escalate
+  // CAT's untriaged tickets on DOG's latch whenever the bounded tail happened to
+  // carry no completion — a false tier-3 escalation on a healthy team in `enforce`.
+  const untriagedTeams = new Set(untriaged.map((id) => String(id).split("-")[0]));
+  const sweepHeldTeams = [...(b?.ring?.triageSweepHeld ?? [])].filter((team) => untriagedTeams.has(team));
   let starved = false;
   let observable = true;
   let note = "triage production healthy";

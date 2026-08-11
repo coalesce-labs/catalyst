@@ -922,12 +922,6 @@ function dispatchTriage(
     );
     return false;
   }
-  // CAT-82: the held-sweep denominator covers only candidates this host can
-  // actually attempt. Counting before the drain/HRW gates made peer-owned
-  // tickets impossible to classify while still inflating `considered`, so a
-  // total delegate-read outage could never satisfy the fully-held predicate on
-  // a multi-host roster.
-  holdTally?.consider();
   // CTL-1441 guard (b) — placed BEFORE the capacity gate (Codex R4: parking is
   // capacity-independent; at a saturated fleet the budget return would keep a
   // capped ticket invisible forever) and AFTER the drain/HRW gates (only the
@@ -967,6 +961,16 @@ function dispatchTriage(
   // retries next reconcile). Empty/absent botUserIds disables the gate
   // (CTL-749 fail-open convention).
   if (botUserIds instanceof Set && botUserIds.size > 0) {
+    // CAT-82: the held-sweep denominator counts ONLY candidates that reach this
+    // gate — the sole gate whose hold reason the tally can classify. It sits after
+    // the drain/HRW gates (peer-owned tickets are not ours to attempt), after the
+    // CTL-1441 cap gate, and after the capacity gate: counting a cap-parked or
+    // budget-deferred ticket inflated `considered` with a candidate that can never
+    // be recorded as held, so the strict fullyHeld equality broke and the latch
+    // reset mid-outage. Worst case at a saturated fleet — where only capped
+    // tickets reach dispatchTriage — every sweep read considered>0/held=0 and
+    // looked healthy while the delegate read was down for every ticket.
+    holdTally?.consider();
     const a = fetchAssignee(identifier, { gateway, replica });
     if (!a.known) {
       // Unreadable delegate → HOLD (sweepMissingTriage retries next reconcile).

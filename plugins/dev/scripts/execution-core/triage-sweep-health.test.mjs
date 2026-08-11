@@ -50,10 +50,24 @@ describe("CAT-82 triage sweep health", () => {
     expect(h.marker()).toEqual({ consecutiveHeld: 0, alerting: false });
   });
 
-  test("zero candidates is healthy and clears a raised latch", () => {
+  // Review R1: a candidate-less sweep is absence of evidence, not recovery.
+  test("zero candidates leaves both the streak and a raised latch untouched", () => {
     const h = harness({ consecutiveHeld: 3, alerting: true });
     recordTriageSweep("CAT", { considered: 0, heldDelegateUnreadable: 0 }, h.deps);
+    expect(h.events).toHaveLength(0);
+    expect(h.marker()).toEqual({ consecutiveHeld: 3, alerting: true });
+    // and the latch still recovers on a real, candidate-bearing healthy sweep
+    recordTriageSweep("CAT", { considered: 2, heldDelegateUnreadable: 0 }, h.deps);
     expect(h.events.map((e) => e.action)).toEqual([TRIAGE_RECOVERED_ACTION]);
+    expect(h.marker()).toEqual({ consecutiveHeld: 0, alerting: false });
+  });
+
+  test("zero candidates does not restart an un-raised streak either", () => {
+    const h = harness({ consecutiveHeld: 2, alerting: false });
+    recordTriageSweep("CAT", { considered: 0, heldDelegateUnreadable: 0 }, h.deps);
+    expect(h.marker()).toEqual({ consecutiveHeld: 2, alerting: false });
+    recordTriageSweep("CAT", { considered: 1, heldDelegateUnreadable: 1 }, h.deps);
+    expect(h.events.map((e) => e.action)).toEqual([TRIAGE_HELD_ACTION]);
   });
 
   test("failed event appends leave both raise and recovery latches retryable", () => {
@@ -65,9 +79,9 @@ describe("CAT-82 triage sweep health", () => {
 
     resetTriageSweepHealth();
     const recover = harness({ consecutiveHeld: 3, alerting: true }, false);
-    recordTriageSweep("CAT", { considered: 0, heldDelegateUnreadable: 0 }, recover.deps);
+    recordTriageSweep("CAT", { considered: 2, heldDelegateUnreadable: 0 }, recover.deps);
     expect(recover.marker().alerting).toBe(true);
-    recordTriageSweep("CAT", { considered: 0, heldDelegateUnreadable: 0 }, recover.deps);
+    recordTriageSweep("CAT", { considered: 2, heldDelegateUnreadable: 0 }, recover.deps);
     expect(recover.events).toHaveLength(2);
   });
 

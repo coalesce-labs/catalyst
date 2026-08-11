@@ -1642,6 +1642,36 @@ describe("CAT-82 triage hold tally", () => {
     warn.mockRestore();
   });
 
+  // Review R1: `considered` counts only candidates that reach the delegate gate.
+  // A candidate parked at TRIAGE_DISPATCH_CAP returns before the gate, so it can
+  // never be recorded as held — counting it broke the strict fullyHeld equality
+  // and reset the latch mid-outage.
+  test("a cap-parked candidate does not dilute the fully-held predicate", () => {
+    enroll("ENG", { status: "Ready" });
+    const orchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-1"), node("ENG-2"), node("ENG-3")] }) });
+    // Park ENG-3 at the dispatch cap: it returns before the delegate gate.
+    const countsDir = join(orchDir, ".triage-dispatch-counts");
+    mkdirSync(countsDir, { recursive: true });
+    writeFileSync(join(countsDir, "ENG-3.json"), JSON.stringify({ count: 99 }));
+    const health = mock(() => {});
+    sweepMissingTriage({
+      orchDir,
+      dispatch: mock(() => ({ code: 0 })),
+      botUserIds: new Set(["bot"]),
+      fetchAssignee: () => ({ known: false }),
+      readMaxParallelFn: () => 10,
+      liveBackgroundCount: () => 0,
+      labelNeedsHuman: () => {},
+      recordSweepHealth: health,
+      hosts: ["vega"],
+      hostName: "vega",
+    });
+    const [, snapshot] = health.mock.calls[0];
+    expect(snapshot.considered).toBe(2);
+    expect(snapshot.heldDelegateUnreadable).toBe(2);
+  });
+
   test("zero candidates emits no CAT-82 summary and records a healthy sweep", () => {
     const info = spyOn(log, "info");
     const warn = spyOn(log, "warn");
