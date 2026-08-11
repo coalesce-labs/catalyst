@@ -74,6 +74,9 @@ move genuinely requires the operator, author a clear executive briefing and hand
    degrades-other-functionality / real-cost-benefit / serious-architecture / ADR
    cases (the Step-3 checklist). A mere conflict or failed check is never one.
 
+An escalation may be the anchor for a correlated retry-cap incident covering several tickets;
+member pointer briefs refer to that anchor and are not separate decisions for the operator.
+
 ## Two invocation modes
 
 1. **Router-dispatched (the bounded-LLM recovery path).** The scheduler's recovery

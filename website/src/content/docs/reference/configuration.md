@@ -1576,6 +1576,23 @@ immediately before its terminal `phase-agent-emit-complete` call.
 }
 ```
 
+### Retry-cap escalation correlation (CAT-170)
+
+The exhausted recovery-intent sweep can correlate tickets that reached the retry cap for the same
+normalized failure signature. Signatures are recorded at attempt time in the host-local intent
+ledger, so grouping is per host; legacy or null-signature entries continue to escalate
+individually. In enforce mode, one deterministic anchor carries the operator decision and the other
+tickets receive pointer briefs rather than separate decisions.
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `CATALYST_RECOVERY_CORRELATION` | `shadow` | `off` preserves independent escalation and emits no correlation events; `shadow` computes candidate groups and emits `recovery.escalation.would-correlate` without changing operator-visible behavior; `enforce` raises one anchored escalation per group and emits `recovery.escalation.correlated` for each member. |
+| `CATALYST_RECOVERY_CORRELATION_WINDOW_MIN` | `60` | Maximum span, in minutes, for matching signatures to belong to one correlated group. `0` or a non-number falls back to the default. |
+| `CATALYST_RECOVERY_CORRELATION_MIN_GROUP` | `2` | Minimum number of matching candidates required for correlation. `0` or a non-number falls back to the default. |
+
+A missing or null signature never correlates with another missing signature. Changing the mode to
+`off` restores the independent escalation path; there is no on-disk migration to reverse.
+
 ### Board-health delegate (CTL-1290)
 
 On a low-frequency cadence the scheduler runs a **whole-board health scan**: a read-only pass that
