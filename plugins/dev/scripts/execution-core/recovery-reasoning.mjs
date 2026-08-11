@@ -49,6 +49,11 @@ import {
 } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { defaultProbePrBlock } from "./pr-block-probe.mjs";
+import {
+  recoveryIntentPath,
+  RECOVERY_LEAVE_ALONE_TTL_MS,
+} from "./recovery-intent-ledger.mjs";
+export { RECOVERY_LEAVE_ALONE_TTL_MS } from "./recovery-intent-ledger.mjs";
 // Static (not requireSync) on purpose. Bun rejects `require()` of a module whose
 // ESM graph is async — but ONLY on a COLD cache: once anything has imported this
 // module, the same requireSync succeeds. That made the empty-registry fallback
@@ -2156,13 +2161,6 @@ export const RECOVERY_TERMINAL_INTENT_TTL_MS =
 // (conditions change). Deliberately much longer than the 30-min action cooldown —
 // re-reviewing a verified-healthy ticket every half hour is the RC2 waste loop.
 // Env-only, matching its siblings (NaN*x and 0*x are falsy → 24h default).
-export const RECOVERY_LEAVE_ALONE_TTL_MS =
-  Number(process.env.CATALYST_RECOVERY_LEAVE_ALONE_TTL_HOURS) * 3600e3 || 24 * 3600e3;
-
-function recoveryIntentPath(orchDir, ticket) {
-  return join(orchDir, ".recovery-intents", `${ticket}.json`);
-}
-
 // readDeferredBoardHealthIntents — CTL-1432 (B2). Enumerate the tickets whose
 // recovery-intent is a DEFERRAL to the holistic board-health delegate
 // (decision:"defer" + fix_class:"board-health" — the classifier's "no typed
