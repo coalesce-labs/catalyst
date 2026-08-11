@@ -56,6 +56,15 @@ describe("readAnchorHealth (CAT-46)", () => {
     expect(health.error).toContain("http 500");
   });
 
+  test("Linear's Entity not found GraphQL error is a definitive missing issue", async () => {
+    const health = await readAnchorHealth("CAT-999999", {
+      post: async () => { throw new Error("linear graphql errors: Entity not found: Issue"); },
+    });
+    expect(health.found).toBe(false);
+    expect(health.ok).toBe(false);
+    expect(health.error).toBeNull();
+  });
+
   test("an empty/absent ticket short-circuits without a network call", async () => {
     let called = false;
     const health = await readAnchorHealth("", { post: async () => { called = true; return {}; } });

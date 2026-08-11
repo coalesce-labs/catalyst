@@ -137,7 +137,13 @@ export async function readAnchorHealth(ticket, { post = defaultPost } = {}) {
   try {
     data = await post(ANCHOR_HEALTH_QUERY, { id: ticket.trim() });
   } catch (err) {
-    return { ...base, error: String(err?.message ?? err) };
+    const error = String(err?.message ?? err);
+    // Linear's `issue(id:)` resolver reports a missing identifier as a
+    // GraphQL INPUT_ERROR rather than `{ issue: null }`. This is still a
+    // definitive observation that the anchor does not resolve, not a
+    // transport outage.
+    if (/Entity not found:\s*Issue/i.test(error)) return { ...base, found: false };
+    return { ...base, error };
   }
 
   const issue = data?.issue ?? null;
