@@ -32,7 +32,7 @@ import { readDaemonWatchdogConfig, log } from "./config.mjs";
 // silently ignored here. On a monitor node this is the ONLY watchdog host, so
 // that would strand its forwarder shadow-only while workers honored the very
 // same config file.
-// CAT-139: a third, explicit tier ahead of the two ambient ones lets direct
+// PROJ: a third, explicit tier ahead of the two ambient ones lets direct
 // callers select a config without inheriting the host's live config. Mirrors
 // lib/deployment-mode.mjs resolveLayer1Path (explicit arg > env > cwd).
 // Production passes no args and continues to pin CATALYST_CONFIG_FILE.
@@ -68,18 +68,23 @@ function resolveConfigPath(argv, env) {
     // An explicit path fails closed; falling through would recreate the host
     // config leak this argument exists to prevent.
     if (!existsSync(path)) return { error: `--config file not found: ${path}` };
+    let document;
     try {
       if (!statSync(path).isFile()) {
         return { error: `--config path is not a readable regular file: ${path}` };
       }
-      JSON.parse(readFileSync(path, "utf8"));
+      // KEEP this parsed snapshot — it is the one the caller consumes below.
+      // Re-reading the file at use time would let an atomic replace land between
+      // the two reads, so the contents validated here need not be the contents
+      // acted on (see the readDaemonWatchdogConfig `layer1Override` note).
+      document = JSON.parse(readFileSync(path, "utf8"));
     } catch (err) {
       if (err instanceof SyntaxError) {
         return { error: `--config file is not valid JSON: ${path}` };
       }
       return { error: `--config path is not a readable regular file: ${path}` };
     }
-    return { path, source: "argv" };
+    return { path, source: "argv", document };
   }
   if (typeof env.CATALYST_CONFIG_FILE === "string" && env.CATALYST_CONFIG_FILE.length > 0) {
     return { path: env.CATALYST_CONFIG_FILE, source: "env" };
@@ -94,7 +99,20 @@ if (resolved.error) {
 }
 const { path: configPath, source: configSource } = resolved;
 
-const config = readDaemonWatchdogConfig(configPath);
+// Consume the SAME snapshot resolveConfigPath validated. Only the explicit
+// --config tier carries one; the ambient env/cwd tiers are read at use time as
+// before (they are never validated up front, so there is no divergence to close).
+// Mirrors readDaemonWatchdogConfigLayer1's coercion: a non-object daemonWatchdog
+// key — or a document that is null / not an object at all — resolves to {}.
+const layer1FromSnapshot =
+  resolved.document === undefined
+    ? undefined
+    : (() => {
+        const dw = resolved.document?.catalyst?.orchestration?.daemonWatchdog;
+        return dw && typeof dw === "object" ? dw : {};
+      })();
+
+const config = readDaemonWatchdogConfig(configPath, layer1FromSnapshot);
 
 if (!config.enabled) {
   // Not an error: the knob is off for this node. Exit 0 so a supervisor treats

@@ -1741,8 +1741,15 @@ export function readDaemonWatchdogConfigLayer1(configPath) {
   }
 }
 
-export function readDaemonWatchdogConfig(configPath) {
-  const l1 = readDaemonWatchdogConfigLayer1(configPath);
+// `layer1Override` lets a caller that has ALREADY read and validated the config
+// file hand in that exact snapshot instead of having it re-read here. Without it
+// a caller validates one read and this function consumes a second, so a file
+// replaced between the two is validated in one state and consumed in another —
+// and since readDaemonWatchdogConfigLayer1 swallows a parse failure and returns
+// {}, that divergence degrades silently to defaults. Omitted (undefined) keeps
+// the previous read-at-use behaviour for every existing caller.
+export function readDaemonWatchdogConfig(configPath, layer1Override) {
+  const l1 = layer1Override ?? readDaemonWatchdogConfigLayer1(configPath);
   // CATALYST_DAEMON_WATCHDOG=0 is the kill-switch → mode:off (mirrors
   // readWatchdogConfig's CATALYST_WATCHDOG=0). Otherwise env > Layer-1 > shadow.
   const mode =
