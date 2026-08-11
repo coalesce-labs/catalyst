@@ -61,6 +61,7 @@ import {
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
   readGovernanceConfig, // CTL-1552: boot governance-mode + source self-report
   readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
+  readBlockedGhostConfig, // CAT-171: Source-A blocked-session liveness policy
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -159,7 +160,9 @@ import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-5
 import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
-import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
+import { refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
+import { makeBlockedGhostAwareIsBgJobAlive } from "./blocked-ghost.mjs";
+import { emitReapIntent } from "./reap-intent.mjs";
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
 import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
 
@@ -1268,6 +1271,15 @@ export function startDaemon({
     // byte-identical to pre-CTL-1340. HIT-only acceleration of the hot
     // per-signal terminal reads once a Catalyst-Cloud replica is seeded on host.
     const replicaReader = readLinearReplica().mode === "on" ? createReplicaReader() : undefined;
+    // CAT-171: boot-only shadow-first wrapper for every scheduler liveness
+    // consumer. The adapter preserves the scheduler's operator-event envelope.
+    const blockedGhostMode = readBlockedGhostConfig().mode;
+    const isBgJobAliveGhostAware = makeBlockedGhostAwareIsBgJobAlive({
+      mode: blockedGhostMode,
+      emit: (name, payload) => defaultAppendOperatorEvent({ "event.name": name, payload }),
+      emitReap: emitReapIntent,
+    });
+    log.info({ blockedGhostMode }, "execution-core daemon: blocked-ghost mode resolved");
     // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
     // agent on a →Triage transition. `dispatch` stays an injectable default
     // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
@@ -1400,7 +1412,7 @@ export function startDaemon({
       // on) so the scheduler's per-signal terminal checks can resolve
       // terminal-ness from the local Catalyst-Cloud replica. undefined → inert.
       replica: replicaReader,
-      isBgJobAlive,
+      isBgJobAlive: isBgJobAliveGhostAware,
       // CTL-1044: provide the production operator-event appender for the
       // scheduler's `appendIntentEvent` seam (scheduler.mjs:4300). Without this
       // the seam is null and the advance-shadow comparator's disagree/tick

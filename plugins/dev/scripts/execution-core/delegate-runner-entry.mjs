@@ -34,7 +34,7 @@ import {
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { log, getExecutor } from "./config.mjs";
+import { log, getExecutor, readBlockedGhostConfig } from "./config.mjs";
 // CTL-1157 F3: route the detached delegate's dispatch through the node's executor
 // (sdk vs bg) instead of the hardcoded bg path baked into defaultInvokeRecoveryPass.
 import { dispatchForExecutor, dispatchTicket as dispatchTicketSeam } from "./dispatch.mjs";
@@ -55,6 +55,8 @@ import {
 import { defaultInvokeRecoveryPass } from "./recovery-reasoning.mjs";
 import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-agents.mjs";
 import { isBgJobAlive as defaultIsBgJobAlive } from "./claude-agents.mjs";
+import { makeBlockedGhostAwareIsBgJobAlive } from "./blocked-ghost.mjs";
+import { emitReapIntent } from "./reap-intent.mjs";
 import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1157 Codex round-6: existing dispatched/running sdk workers occupancy (no bg job → countBg misses them)
 import { computeFreeSlots, readMaxParallel } from "./scheduler.mjs";
 
@@ -162,7 +164,13 @@ export function drainOnce(deps = {}) {
   const invokeFn = deps.invokeFn ?? defaultInvokeRecoveryPass;
   const countBg = deps.countBackgroundAgents ?? defaultCountBackgroundAgents;
   const countSdkInflight = deps.countSdkInflight ?? defaultCountSdkInflight;
-  const isBgJobAlive = deps.isBgJobAlive ?? defaultIsBgJobAlive;
+  const isBgJobAlive =
+    deps.isBgJobAlive ??
+    makeBlockedGhostAwareIsBgJobAlive({
+      mode: readBlockedGhostConfig().mode,
+      base: defaultIsBgJobAlive,
+      emitReap: emitReapIntent,
+    });
   const appendRequested =
     deps.appendRequested ?? defaultAppendDispatchRequestedEvent;
   const appendLaunched =

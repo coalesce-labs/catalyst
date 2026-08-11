@@ -62,4 +62,39 @@ describe("makeBlockedGhostAwareIsBgJobAlive (CAT-171)", () => {
     });
     expect(probe(sessionId, { agents: blocked })).toBe(false);
   });
+
+  test("enforce emits one reap intent per ghost", () => {
+    const emitReap = mock();
+    const probe = makeBlockedGhostAwareIsBgJobAlive({
+      mode: "enforce",
+      emit: () => {},
+      emitReap,
+    });
+    probe(sessionId, { agents: blocked });
+    probe(sessionId, { agents: blocked });
+    expect(emitReap).toHaveBeenCalledTimes(1);
+    expect(emitReap.mock.calls[0][0]).toBe("phase.terminal.reap-requested");
+    expect(emitReap.mock.calls[0][1]).toMatchObject({
+      reason: "cat-171-blocked-ghost",
+      bgJobId: sessionId,
+    });
+  });
+
+  test("shadow never emits a reap intent", () => {
+    const emitReap = mock();
+    const probe = makeBlockedGhostAwareIsBgJobAlive({ mode: "shadow", emit: () => {}, emitReap });
+    probe(sessionId, { agents: blocked });
+    expect(emitReap).not.toHaveBeenCalled();
+  });
+
+  test("throwing reap emission never changes the enforce verdict", () => {
+    const probe = makeBlockedGhostAwareIsBgJobAlive({
+      mode: "enforce",
+      emit: () => {},
+      emitReap: () => {
+        throw new Error("down");
+      },
+    });
+    expect(probe(sessionId, { agents: blocked })).toBe(false);
+  });
 });

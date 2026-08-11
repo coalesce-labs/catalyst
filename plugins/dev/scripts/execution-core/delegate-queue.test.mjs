@@ -38,6 +38,7 @@ import {
   DELEGATE_QUEUE_DIR,
   delegateQueueDir,
 } from "./delegate-queue.mjs";
+import { makeBlockedGhostAwareIsBgJobAlive } from "./blocked-ghost.mjs";
 
 let orchDir;
 const FIXED_NOW = 1_700_000_000_000;
@@ -254,6 +255,24 @@ describe("enqueueDelegateIntent — idempotent (queue-file existence)", () => {
 // ─── enqueue idempotency layer 2: live recovery-pass worker ──────────────────
 
 describe("enqueueDelegateIntent — live-worker idempotency", () => {
+  const sessionId = "5ad5c1ff-0000-0000-0000-000000000000";
+  const blockedAgents = [{ sessionId, kind: "background", status: "idle", state: "blocked" }];
+  const ghostProbe = (mode) => {
+    const probe = makeBlockedGhostAwareIsBgJobAlive({ mode, emit: () => {}, emitReap: () => {} });
+    return (id) => probe(id, { agents: blockedAgents });
+  };
+
+  test("enforce allows enqueue past a blocked ghost while shadow preserves worker-live", () => {
+    seedRecoveryPassSignal("CTL-enforce", "running", sessionId);
+    seedRecoveryPassSignal("CTL-shadow", "running", sessionId);
+    expect(
+      enqueueDelegateIntent("CTL-enforce", INTENT, deps({ isBgJobAlive: ghostProbe("enforce") })),
+    ).toMatchObject({ enqueued: true });
+    expect(
+      enqueueDelegateIntent("CTL-shadow", INTENT, deps({ isBgJobAlive: ghostProbe("shadow") })),
+    ).toEqual({ enqueued: false, reason: "worker-live" });
+  });
+
   test("a running recovery-pass worker with a live bg job no-ops with worker-live", () => {
     seedRecoveryPassSignal("CTL-1", "running", "bg-live-1");
     const r = enqueueDelegateIntent(
@@ -446,6 +465,23 @@ describe("gcDelegateIntents — removal & retention", () => {
     const removed = gcDelegateIntents(orchDir, FIXED_NOW, deps({ isBgJobAlive: () => false }));
     expect(removed).toBe(1);
     expect(existsSync(intentPath("CTL-dead"))).toBe(false);
+  });
+
+  test("enforce drops a launched intent backed by a blocked ghost", () => {
+    const sessionId = "5ad5c1ff-0000-0000-0000-000000000000";
+    const agents = [{ sessionId, kind: "background", status: "idle", state: "blocked" }];
+    const wrapped = makeBlockedGhostAwareIsBgJobAlive({
+      mode: "enforce",
+      emit: () => {},
+      emitReap: () => {},
+    });
+    seedIntent("CTL-ghost", { status: "launched", bg_job_id: sessionId, launchedAt: FIXED_NOW });
+    const removed = gcDelegateIntents(
+      orchDir,
+      FIXED_NOW,
+      deps({ isBgJobAlive: (id) => wrapped(id, { agents }) }),
+    );
+    expect(removed).toBe(1);
   });
 
   test("removes any intent older than the TTL regardless of status", () => {

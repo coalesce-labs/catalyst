@@ -11,7 +11,7 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test phantom-worker-dir.test.mjs
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +23,7 @@ import {
   bgLivenessProtects,
   isReclaimableEmptyWorkerDir,
 } from "./scheduler.mjs";
+import { makeBlockedGhostAwareIsBgJobAlive } from "./blocked-ghost.mjs";
 
 let orchDir;
 
@@ -258,5 +259,31 @@ describe("bgLivenessProtects — Pass 0a zero-spawn bg-liveness gate (CTL-1336)"
 
   test("fresh snapshot + bg dead → false (fall through → quarantine path)", () => {
     expect(bgLivenessProtects("bg-1", { isFresh: true, agents: [] }, () => false)).toBe(false);
+  });
+});
+
+describe("bgLivenessProtects + blocked-ghost wrapper (CAT-171)", () => {
+  const sessionId = "5ad5c1ff-0000-0000-0000-000000000000";
+  const fresh = {
+    isFresh: true,
+    agents: [{ sessionId, kind: "background", status: "idle", state: "blocked" }],
+  };
+  const cold = { isFresh: false, agents: [] };
+
+  test("shadow keeps a blocked ghost protective", () => {
+    const probe = makeBlockedGhostAwareIsBgJobAlive({ mode: "shadow", emit: () => {} });
+    expect(bgLivenessProtects(sessionId, fresh, probe)).toBe(true);
+  });
+
+  test("enforce removes protection from a blocked ghost", () => {
+    const probe = makeBlockedGhostAwareIsBgJobAlive({ mode: "enforce", emit: () => {} });
+    expect(bgLivenessProtects(sessionId, fresh, probe)).toBe(false);
+  });
+
+  test("enforce still fails open on a cold snapshot without emitting", () => {
+    const emit = mock();
+    const probe = makeBlockedGhostAwareIsBgJobAlive({ mode: "enforce", emit });
+    expect(bgLivenessProtects(sessionId, cold, probe)).toBe(true);
+    expect(emit).not.toHaveBeenCalled();
   });
 });

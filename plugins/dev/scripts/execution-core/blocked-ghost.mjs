@@ -3,6 +3,7 @@
 import {
   agentStateForShortId,
   isBgJobAlive,
+  listClaudeAgents,
   TERMINAL_AGENT_STATES,
 } from "./claude-agents.mjs";
 
@@ -12,17 +13,22 @@ import {
 export function makeBlockedGhostAwareIsBgJobAlive({
   mode = "shadow",
   emit = null,
+  emitReap = null,
   base = isBgJobAlive,
   terminalStates = TERMINAL_AGENT_STATES,
 } = {}) {
   const emitted = new Set();
 
   return (bgJobId, options = {}) => {
-    const alive = base(bgJobId, options);
-    if (!alive || mode === "off") return alive;
+    if (mode === "off") return base(bgJobId, options);
+    // Resolve one listing and thread it through both the base presence probe and
+    // the state lookup. Production scheduler callers already supply the warm
+    // snapshot; the detached runner uses this fallback without double-spawning.
+    const agents = options.agents ?? listClaudeAgents({ exec: options.exec });
+    const alive = base(bgJobId, { ...options, agents });
+    if (!alive) return alive;
 
     const shortId = String(bgJobId).slice(0, 8);
-    const agents = options.agents;
     const state = agentStateForShortId(shortId, agents);
     if (state === null || !terminalStates.has(state)) return alive;
 
@@ -37,6 +43,17 @@ export function makeBlockedGhostAwareIsBgJobAlive({
         );
       } catch {
         // Telemetry must never change the liveness verdict.
+      }
+      if (mode === "enforce") {
+        try {
+          const pending = emitReap?.("phase.terminal.reap-requested", {
+            reason: "cat-171-blocked-ghost",
+            bgJobId,
+          });
+          pending?.catch?.(() => {});
+        } catch {
+          // Cleanup intent emission is best-effort and cannot alter liveness.
+        }
       }
     }
 

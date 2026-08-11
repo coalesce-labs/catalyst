@@ -529,6 +529,14 @@ reclaim storms). Three additive defenses:
   `not-found`) means a Linear outage can't quarantine a healthy in-flight ticket.
   `classifyTicketResolution`/`isBgJobAlive` are safe no-ops by default in `schedulerTick`, armed
   with real impls by the daemon's `runTick`.
+
+Background liveness has two deliberately distinct `state` sources (CAT-171). Tier 1 reads the raw
+`claude agents --json` listing; Tier 2 reads `~/.claude/jobs/<id>/state.json`, and their vocabularies
+can disagree for the same session. The `catalyst.blockedGhost.mode` guard applies only to Tier 1's
+observed `state:"blocked"`: its default `shadow` mode records the ghost without changing the
+presence verdict, while `enforce` treats it as not alive and routes deregistration through the
+existing `phase.terminal.reap-requested` pipeline. A cold listing snapshot still fails open and
+protects the worker.
 - **Dispatch circuit breaker** (Linear-independent backstop): the CTL-624 cool-down marker carries
   `consecutiveFailures`; after `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` (default 8) consecutive failed
   dispatches with no progress → quarantine `stalled` (`stalledReason:"dispatch-circuit-breaker"`). A

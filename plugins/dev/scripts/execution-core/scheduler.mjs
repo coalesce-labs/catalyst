@@ -4447,8 +4447,8 @@ export function schedulerTick(
     // here are deliberately SAFE no-ops (resolution always "unknown", liveness
     // always alive) so a bare unit tick never shells out to linearis /
     // `claude agents` and never quarantines. The daemon (runTick) injects the
-    // real classifyTicketResolution + isBgJobAlive to arm the sweep in
-    // production; sweep-specific tests inject their own stubs.
+    // real classifyTicketResolution plus a mode-aware isBgJobAlive wrapper to
+    // arm the sweep in production; sweep-specific tests inject their own stubs.
     classifyResolution = () => "unknown",
     isBgJobAlive = () => true,
     // CTL-1410 Phase B: in-process SDK-worker probe for the sweep. The REAL
@@ -6159,7 +6159,10 @@ export function schedulerTick(
     // it as a dead bg job — dropping it would free the reservation/existence guard and
     // let the next scan re-dispatch the same in-flight ticket. Inert under bg (executor
     // null → the no-bg_job_id launched intent still drops exactly as today).
-    gcDelegateIntents(orchDir, now(), { executor: dispatchMode === "sdk" ? "sdk" : null });
+    gcDelegateIntents(orchDir, now(), {
+      executor: dispatchMode === "sdk" ? "sdk" : null,
+      isBgJobAlive: (id) => isBgJobAlive(id, { agents: getAgents().agents }),
+    });
   } catch {
     /* GC is best-effort — never block the tick */
   }
@@ -9793,7 +9796,8 @@ export function startScheduler({
   checkOpenPrs,
   // CTL-671: phantom-sweep seams. Undefined → schedulerTick's safe no-op
   // defaults (hermetic for unit tests that call startScheduler directly). The
-  // real daemon (startDaemon) and the standalone main() pass the real impls.
+  // real daemon (startDaemon) passes the blocked-ghost-aware implementation;
+  // standalone/test callers may inject their own probe.
   classifyResolution,
   isBgJobAlive,
   // CTL-781: respect-assignment + self-assign. Undefined → gate off (fail-open).
