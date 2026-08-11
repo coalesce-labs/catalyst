@@ -107,6 +107,10 @@ cmd_start() {
   # shared 2500/hr per-user bucket. Fail-open: a failed mint keeps the env token.
   source "$SCRIPT_DIR/lib/linear-app-actor.sh"
   linear_app_actor_auth "catalyst-broker"
+  # CTL-1755: bounded rotate-on-boot so the previous run's log survives a restart.
+  # shellcheck source=lib/rotate-log-on-start.sh
+  [ -f "$SCRIPT_DIR/lib/rotate-log-on-start.sh" ] && . "$SCRIPT_DIR/lib/rotate-log-on-start.sh"
+  rotate_log_on_start "$LOG_FILE" 2>/dev/null || true
   nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" > "$LOG_FILE" 2>&1 &
   local server_pid=$!
   disown "$server_pid" 2>/dev/null || true
