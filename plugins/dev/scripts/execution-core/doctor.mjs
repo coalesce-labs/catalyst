@@ -559,6 +559,7 @@ export async function checkLivenessAnchor(deps = {}) {
   const {
     getLivenessAnchorIssue: _getAnchor = getLivenessAnchorIssue,
     getLivenessReadSource: _getReadSource = getLivenessReadSource,
+    resolveClusterHosts: _resolveClusterHosts = resolveClusterHosts,
     resolveSecretContract = resolveSecret,
     hasLinearToken = () => resolveLinearTokenLive(resolveSecretContract) != null,
     readAnchorHealth: _readAnchorHealth = readAnchorHealth,
@@ -575,11 +576,15 @@ export async function checkLivenessAnchor(deps = {}) {
   }
 
   if (!anchor) {
+    const multiHost = _resolveClusterHosts().multiHost;
     return [mkCheck(
       name,
-      STATUS.INFO,
+      source === "linear" && multiHost ? STATUS.FAIL : STATUS.INFO,
       `no liveness anchor issue configured — set CATALYST_LIVENESS_ANCHOR_ISSUE or ` +
-        `catalyst.cluster.livenessAnchorIssue (see 'catalyst-cluster set-anchor <ticket>')`,
+        `catalyst.cluster.livenessAnchorIssue (see 'catalyst-cluster set-anchor <ticket>')` +
+        (source === "linear" && multiHost
+          ? `; this multi-host roster cannot publish cross-host heartbeats without an anchor`
+          : ""),
     )];
   }
   if (source !== "linear") {
@@ -608,7 +613,8 @@ export async function checkLivenessAnchor(deps = {}) {
       name,
       STATUS.FAIL,
       `liveness anchor '${anchor}' does not resolve in Linear (deleted or wrong identifier) — ` +
-        `every host's heartbeat publish aborts, so cross-host failover is dead. Point ` +
+        `${health.rawError ? `Linear reported: ${health.rawError}. ` : ""}` +
+        `Every host's heartbeat publish aborts, so cross-host failover is dead. Point ` +
         `catalyst.cluster.livenessAnchorIssue at a live ticket ('catalyst-cluster set-anchor <ticket>') ` +
         `and restart the stack on every host.`,
     )];
@@ -630,6 +636,9 @@ export async function checkLivenessAnchor(deps = {}) {
         `Linear still serves its attachments so liveness works today, but a completed issue is ` +
         `auto-archived eventually and archival DOES break the fleet. Reopen it.`,
     )];
+  }
+  if (health.found !== true) {
+    return [mkCheck(name, STATUS.WARN, `anchor health for '${anchor}' is indeterminate`)];
   }
   return [mkCheck(
     name,

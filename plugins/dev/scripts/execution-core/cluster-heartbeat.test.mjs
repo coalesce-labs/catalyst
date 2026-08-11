@@ -22,6 +22,7 @@ describe("readAnchorHealth (CAT-46)", () => {
     })).toEqual({
       ok: true, found: true, identifier: "PROJ-1", stateName: "In Progress",
       stateType: "started", archived: false, closed: false, error: null,
+      rawError: null,
     });
   });
 
@@ -30,6 +31,7 @@ describe("readAnchorHealth (CAT-46)", () => {
     expect(health.found).toBe(false);
     expect(health.ok).toBe(false);
     expect(health.error).toBeNull();
+    expect(health.rawError).toBeNull();
   });
 
   test("an archived anchor is archived:true, ok:false", async () => {
@@ -63,6 +65,7 @@ describe("readAnchorHealth (CAT-46)", () => {
     expect(health.found).toBe(false);
     expect(health.ok).toBe(false);
     expect(health.error).toBeNull();
+    expect(health.rawError).toContain("Entity not found");
   });
 
   test("an empty/absent ticket short-circuits without a network call", async () => {
