@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import {
   recordFenceSuppression, readFenceStandoff, clearFenceStandoff,
   evaluateStandoff, markBreakGlass, buildFenceStandoffEvent,
+  maybeBreakGlass,
   FENCE_STANDOFF_EVENT, FENCE_STANDOFF_CAP_DEFAULT, FENCE_STANDOFF_MIN_AGE_MS_DEFAULT,
 } from "./fence-standoff.mjs";
 
@@ -94,4 +95,30 @@ describe("buildFenceStandoffEvent (CAT-173)", () => {
   test("FENCE_STANDOFF_EVENT is the registrable prefix form", () => {
     expect(FENCE_STANDOFF_EVENT).toBe("escalation.fence-standoff.CTL-1");
   });
+});
+
+test("maybeBreakGlass emits and records exactly once after the bound", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fs-break-"));
+  const events = [];
+  const escalations = [];
+  try {
+    const opts = {
+      orchDir: dir,
+      ticket: "CAT-53",
+      site: "terminal-sweep",
+      verdict: { reason: "superseded" },
+      env: { CATALYST_FENCE_STANDOFF_CAP: "2", CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1" },
+      appendEvent: (event) => events.push(event),
+      recordEscalation: (record) => escalations.push(record),
+      logger: { warn() {} },
+    };
+    maybeBreakGlass({ ...opts, now: 1 });
+    maybeBreakGlass({ ...opts, now: 2 });
+    maybeBreakGlass({ ...opts, now: 3 });
+    expect(events).toHaveLength(1);
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0]).toMatchObject({ labelConfirmed: false, source: "fence-standoff" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

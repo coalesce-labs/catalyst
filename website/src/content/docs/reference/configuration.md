@@ -1527,6 +1527,21 @@ write-budget unit). These env vars on the `catalyst-execution-core` process boun
   since-resolved conflict can still land (the label is never permanently abandoned — COORD-236); a
   successful apply resets the counter.
 
+### Fence-standoff human-surfacing bound (CAT-173)
+
+These execution-core environment variables bound how long repeated fence suppression can remain
+invisible to a human. The count and age must both be reached; the 45-minute floor spans three
+15-minute fence cooldowns, preventing a fast tick loop from paging on a transient blip.
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `CATALYST_FENCE_STANDOFF_CAP` | `4` | Consecutive suppressions required before out-of-band escalation. |
+| `CATALYST_FENCE_STANDOFF_MIN_AGE_MS` | `2700000` (45 min) | Minimum episode age before out-of-band escalation. |
+| `CATALYST_FENCE_STANDOFF_COOLDOWN_MS` | `21600000` (6 h) | Retry cooldown after the bound is crossed; rate-bounded, never a permanent stop. |
+
+Crossing the bound writes a durable board/push escalation and does not loosen the fence or perform
+a Linear write.
+
 ### Broker watchdog session eviction (CTL-1516)
 
 The broker's watchdog tick keeps per-session bookkeeping (`lastHeartbeat`, `workerToOrchestrator`)
