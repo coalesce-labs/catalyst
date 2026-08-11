@@ -137,9 +137,18 @@ import { recordReplicaRead } from "./replica-health.mjs"; // CAT-35
 const MONITOR_BOOT_TS = Date.now();
 const TRIAGE_CAP_COMMENT_HELPER = process.env.CATALYST_COMMENT_POST_HELPER ||
   fileURLToPath(new URL("../lib/linear-comment-post.sh", import.meta.url));
+const TRIAGE_CAP_COMMENT_TIMEOUT_MS = 30_000;
+const TRIAGE_CAP_COMMENT_MAX_BUFFER = 10 * 1024 * 1024;
 
 function defaultPostCapComment(ticket, body) {
-  const result = spawnSync(TRIAGE_CAP_COMMENT_HELPER, [ticket, body], { encoding: "utf8" });
+  // Keep this daemon-path copy aligned with the bounded wrappers in
+  // recovery-emit.mjs, recovery-reasoning.mjs, recovery.mjs, and
+  // unstuck-escalate-seam.mjs. Consolidation is tracked separately.
+  const result = spawnSync(TRIAGE_CAP_COMMENT_HELPER, [ticket, body], {
+    encoding: "utf8",
+    timeout: TRIAGE_CAP_COMMENT_TIMEOUT_MS,
+    maxBuffer: TRIAGE_CAP_COMMENT_MAX_BUFFER,
+  });
   if (result.error || result.status !== 0) throw result.error ?? new Error(result.stderr || "comment helper failed");
   return true;
 }
@@ -754,7 +763,7 @@ export function computeTriageBudget({
 // CTL-716: budget param — a mutable { remaining } object; when provided and
 // remaining <= 0, the dispatch is deferred (dropped; sweepMissingTriage retries).
 // Only decrements on a successful (code === 0) dispatch. Returns true on success.
-function dispatchTriage(
+export function dispatchTriage(
   identifier,
   {
     dispatch,
@@ -894,18 +903,24 @@ function dispatchTriage(
   // deleting orchDir/.triage-dispatch-counts/<ticket>.json.
   // CTL-1649: use fleet-wide count (max of host-local and fence) so an ownership
   // churn cannot restart the counter at 0 on the new owner.
-  if (hasTriageArtifact(orchDir, identifier)) {
+  const triageSignalStatus = readTriageSignalStatus(orchDir, identifier);
+  // A triage artifact proves productivity only when the CURRENT phase signal is
+  // done. triage.json is durable across episodes, so existence alone must not
+  // re-arm the cap after a later failed or missing triage dispatch.
+  if (hasTriageArtifact(orchDir, identifier) && triageSignalStatus === "done") {
     if (clearTriageDispatchCount(orchDir, identifier, { reason: "artifact-present" })) {
       log.info({ identifier }, "cat-83: triage artifact present — cleared stale re-dispatch count");
+      if (multiHost) {
+        try { resetFenceTriageAttempt({ ticket: identifier }); }
+        catch (err) { log.warn({ identifier, err: err.message }, "cat-83: triage fence-count reset failed — continuing"); }
+      }
     }
-    if (multiHost) {
-      try { resetFenceTriageAttempt({ ticket: identifier }); } catch { /* fail-open */ }
-    }
-    if (readTriageSignalStatus(orchDir, identifier) === "done") return false;
-  } else if (fleetTriageDispatchCount(orchDir, identifier, { multiHost, readFenceCount: readFenceTriageAttempt }) >= TRIAGE_DISPATCH_CAP) {
+    return false;
+  }
+  if (fleetTriageDispatchCount(orchDir, identifier, { multiHost, readFenceCount: readFenceTriageAttempt }) >= TRIAGE_DISPATCH_CAP) {
     // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
     // naturally absent until it finishes. Defer the park while in flight.
-    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
+    if (isTriageInFlight(triageSignalStatus)) return false;
     try {
       labelNeedsHuman(orchDir, identifier);
     } catch (err) {
@@ -1312,7 +1327,7 @@ export function clearTriageDispatchCount(
   if (!prior) return false;
   const priorCount = typeof prior.count === "number" ? prior.count : 0;
   if (priorCount === 0 && !prior.cappedAt) return false;
-  const { cappedAt: _cappedAt, cap: _cap, ...rest } = prior;
+  const { cappedAt: _cappedAt, cap: _cap, firstDispatchAt: _firstDispatchAt, ...rest } = prior;
   return writeTriageDispatchRecord(orchDir, ticket, {
     ...rest,
     count: 0,

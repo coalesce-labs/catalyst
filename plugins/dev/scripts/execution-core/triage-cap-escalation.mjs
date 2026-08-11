@@ -36,3 +36,5 @@ export function formatTriageCapComment(ev = {}) {
   const options = e.options.map((o) => `- **${o.label}** — ${o.tradeoff}`).join("\n");
   return `**Triage dispatches capped**\n\n${e.problem}\n\nNo triage.json was produced after ${e.observed.count} of ${e.observed.cap} attempts. To re-arm automated triage, clear the dispatch counter after addressing the failure.\n\n${options}`;
 }
+// triage-cap-escalation.mjs — CAT-83: operator-facing CTL-1441 park evidence
+// and Linear comment formatting. Pure; the monitor owns all writes.

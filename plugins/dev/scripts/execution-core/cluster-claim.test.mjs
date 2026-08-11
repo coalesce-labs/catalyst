@@ -18,6 +18,7 @@ import {
   isFenceCurrent,
   readTriageAttemptCount,
   bumpTriageAttemptCount,
+  resetTriageAttemptCount,
   runCli,
 } from "./cluster-claim.mjs";
 
@@ -749,6 +750,35 @@ describe("bumpTriageAttemptCount (CTL-1649)", () => {
   });
 });
 
+describe("resetTriageAttemptCount (CAT-83)", () => {
+  it("resets the count while preserving fence ownership and claimed_at", async () => {
+    const claimedAt = "2026-07-01T00:00:00Z";
+    const { post, store } = makeFakeLinear({ seed: {
+      "CAT-83": { owner_host: "vega", catalyst_generation: 7, phase: "triage", claimed_at: claimedAt, triage_attempt_count: 3 },
+    } });
+    expect(await resetTriageAttemptCount("CAT-83", { post })).toBe(0);
+    expect(store.get("CAT-83")).toMatchObject({
+      owner_host: "vega", catalyst_generation: 7, phase: "triage",
+      claimed_at: claimedAt, triage_attempt_count: 0,
+    });
+  });
+
+  it("returns null without a fence and avoids a write when already zero", async () => {
+    const absent = makeFakeLinear();
+    expect(await resetTriageAttemptCount("CAT-83", { post: absent.post })).toBeNull();
+    let writes = 0;
+    const seeded = makeFakeLinear({ seed: {
+      "CAT-83": { owner_host: "vega", catalyst_generation: 1, phase: "triage", claimed_at: "t", triage_attempt_count: 0 },
+    } });
+    const post = async (query, variables) => {
+      if (query.includes("attachmentCreate")) writes++;
+      return seeded.post(query, variables);
+    };
+    expect(await resetTriageAttemptCount("CAT-83", { post })).toBe(0);
+    expect(writes).toBe(0);
+  });
+});
+
 describe("runCli — read-triage-attempt / bump-triage-attempt (CTL-1649)", () => {
   it("read-triage-attempt prints { count } and exits 0 when fence exists", async () => {
     const { post } = makeFakeLinear({
@@ -773,6 +803,15 @@ describe("runCli — read-triage-attempt / bump-triage-attempt (CTL-1649)", () =
     const { code, out } = await captureStdout(() => runCli(["bump-triage-attempt", "CTL-1649"], { post }));
     expect(code).toBe(0);
     expect(JSON.parse(out.trim())).toEqual({ count: 2 });
+  });
+
+  it("reset-triage-attempt prints { count } and exits 0", async () => {
+    const { post } = makeFakeLinear({ seed: {
+      "CAT-83": { owner_host: "vega", catalyst_generation: 1, phase: "triage", claimed_at: "t", triage_attempt_count: 2 },
+    } });
+    const { code, out } = await captureStdout(() => runCli(["reset-triage-attempt", "CAT-83"], { post }));
+    expect(code).toBe(0);
+    expect(JSON.parse(out.trim())).toEqual({ count: 0 });
   });
 
   it("unknown subcommand still exits 1 with usage", async () => {

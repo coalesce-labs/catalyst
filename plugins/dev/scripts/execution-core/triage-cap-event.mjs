@@ -43,3 +43,4 @@ export function appendTriageCapEvent({ append = defaultAppend, ...fields } = {})
     return false;
   }
 }
+// triage-cap-event.mjs — CAT-83: append the canonical CTL-1441 park event.

@@ -14,6 +14,7 @@ import {
   clearIssueIdCache,
   readTriageAttemptCountSync,
   bumpTriageAttemptCountSync,
+  resetTriageAttemptCountSync,
   clearTriageAttemptCacheSync,
 } from "./cluster-claim-sync.mjs";
 
@@ -586,5 +587,33 @@ describe("bumpTriageAttemptCountSync — argv + parsing (CTL-1649)", () => {
     now += 1_000;
     readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
     expect(calls).toBe(2);
+  });
+});
+
+describe("resetTriageAttemptCountSync — argv + parsing (CAT-83)", () => {
+  beforeEach(() => clearTriageAttemptCacheSync());
+
+  it("invalidates cache before spawning and builds reset argv", () => {
+    let calls = 0;
+    let captured;
+    const spawn = (bin, args) => {
+      calls++;
+      captured = { bin, args };
+      return { status: 0, stdout: JSON.stringify({ count: 0 }) + "\n" };
+    };
+    const env = { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "30000" };
+    readTriageAttemptCountSync({ ticket: "CAT-83" }, { spawn, env, now: () => 1 });
+    expect(resetTriageAttemptCountSync(
+      { ticket: "CAT-83" },
+      { spawn, env, nodeBin: "/usr/bin/node", cli: "/x/cluster-claim.mjs" },
+    )).toEqual({ count: 0 });
+    expect(captured).toEqual({ bin: "/usr/bin/node", args: ["/x/cluster-claim.mjs", "reset-triage-attempt", "CAT-83"] });
+    readTriageAttemptCountSync({ ticket: "CAT-83" }, { spawn, env, now: () => 2 });
+    expect(calls).toBe(3);
+  });
+
+  it("spawn failure returns { count: null }", () => {
+    expect(resetTriageAttemptCountSync({ ticket: "CAT-83" }, { spawn: () => { throw new Error("boom"); } }))
+      .toEqual({ count: null });
   });
 });

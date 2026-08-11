@@ -372,7 +372,8 @@ export function readTriageAttemptCountSync(
 // stored count is now stale — the next read must go live). Returns `{ count }`
 // where `count` is the new fleet-wide count on success, or null on any failure
 // (best-effort — never throws).
-export function bumpTriageAttemptCountSync(
+function triageAttemptWriteSync(
+  subcommand,
   { ticket },
   {
     spawn = spawnSync,
@@ -387,7 +388,7 @@ export function bumpTriageAttemptCountSync(
   // having changed — stale cached reads post-bump are always wrong.
   triageAttemptCache.delete(ticket);
   try {
-    const res = spawn(nodeBin, [cli, "bump-triage-attempt", ticket], {
+    const res = spawn(nodeBin, [cli, subcommand, ticket], {
       encoding: "utf8",
       env,
       timeout,
@@ -404,28 +405,13 @@ export function bumpTriageAttemptCountSync(
   }
 }
 
+export function bumpTriageAttemptCountSync(args, opts = {}) {
+  return triageAttemptWriteSync("bump-triage-attempt", args, opts);
+}
+
 export function resetTriageAttemptCountSync(
-  { ticket },
-  {
-    spawn = spawnSync,
-    nodeBin = process.execPath,
-    cli = CLUSTER_CLAIM_CLI,
-    env = process.env,
-    timeout = CLAIM_TIMEOUT_MS,
-  } = {},
+  args,
+  opts = {},
 ) {
-  triageAttemptCache.delete(ticket);
-  try {
-    const res = spawn(nodeBin, [cli, "reset-triage-attempt", ticket], {
-      encoding: "utf8",
-      env,
-      timeout,
-    });
-    if (!res || res.status !== 0 || typeof res.stdout !== "string") return { count: null };
-    const line = res.stdout.trim().split("\n").filter(Boolean).pop();
-    const parsed = JSON.parse(line);
-    return { count: typeof parsed?.count === "number" ? parsed.count : null };
-  } catch {
-    return { count: null };
-  }
+  return triageAttemptWriteSync("reset-triage-attempt", args, opts);
 }
