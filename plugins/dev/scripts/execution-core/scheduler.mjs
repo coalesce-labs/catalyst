@@ -75,6 +75,13 @@ import {
   NOT_DISPATCHABLE_LIVENESS_ANCHOR,
 } from "./dispatch-readiness.mjs";
 import { resolveAnchorIssueCached } from "./dispatch-exclusions.mjs";
+import { describeSkip, summarizeSkips, hasStarvingWork } from "./dispatch-skip.mjs";
+import {
+  isStalledRepullable,
+  detachWorkerDir,
+  readRepullAttempts,
+  recordRepullAttempt,
+} from "./stalled-repull.mjs";
 import {
   defaultDispatch,
   dispatchTicket,
@@ -218,6 +225,8 @@ import {
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
   defaultAppendYieldFileSkipEvent,
+  defaultAppendDispatchSkippedEvent,
+  defaultAppendStalledRepullEvent,
   defaultKillBgJob,
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
@@ -358,6 +367,7 @@ import {
   readUnstuckSweepConfig,
   readRecoveryPassConfig,
   readBoardHealthConfig,
+  readStalledRepullConfig,
   readGithubQuotaBoardHealthConfig,
   readProductivityBoardHealthConfig,
   readReplicaBoardHealthConfig,
@@ -4424,6 +4434,8 @@ export function schedulerTick(
     // CTL-702: injectable yield-file-skip emitter. Deduped by observedYieldFiles
     // (module-level set) so only the first observation per daemon lifetime fires.
     appendYieldFileSkipEvent = defaultAppendYieldFileSkipEvent,
+    appendDispatchSkippedEvent = defaultAppendDispatchSkippedEvent,
+    appendStalledRepullEvent = defaultAppendStalledRepullEvent,
     // CTL-705: preemption seams — injectable for tests, default to real helpers.
     killBgJob = defaultKillBgJob,
     appendPreemptedEvent = defaultAppendPreemptedEvent,
@@ -8118,9 +8130,66 @@ export function schedulerTick(
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
   // inFlightTickets was already computed above for the reclaim sweep.
+  const startedTickets = _listStartedTickets(orchDir);
+  const skips = dispatchableReady
+    .filter((t) => startedTickets.has(t.identifier))
+    .map((t) => {
+      const signals = readPhaseSignals(orchDir, t.identifier);
+      const raw = {};
+      for (const phase of Object.keys(signals)) {
+        raw[phase] = readPhaseSignalRaw(orchDir, t.identifier, phase);
+      }
+      return { ticket: t.identifier, ...describeSkip({ signals, raw }) };
+    });
+  const skipSummary = summarizeSkips(skips, { cap: HELD_LOG_CAP });
+  const readyNow = new Set(ready.map((t) => t.identifier));
+  for (const ticket of lastSkipEmit.keys()) if (!readyNow.has(ticket)) lastSkipEmit.delete(ticket);
+  for (const skip of skips) {
+    if (lastSkipEmit.get(skip.ticket) !== skip.class) {
+      appendDispatchSkippedEvent({ ticket: skip.ticket, orchId: skip.ticket, descriptor: skip });
+      lastSkipEmit.set(skip.ticket, skip.class);
+    }
+  }
+
+  const repullConfig = readStalledRepullConfig(env);
+  const repullMode = repullConfig.mode;
+  if (repullMode !== "off") {
+    for (const skip of skips.filter((entry) => entry.class === "machine-owned")) {
+      try {
+        const signals = readPhaseSignals(orchDir, skip.ticket);
+        const live = livePhaseEntries(signals);
+        const raw = live.map(([phase]) => readPhaseSignalRaw(orchDir, skip.ticket, phase)).filter(Boolean).at(-1);
+        const dirStat = statSync(join(orchDir, "workers", skip.ticket));
+        const attempt = readRepullAttempts(orchDir, skip.ticket);
+        const currentMs = now();
+        const backoffOk = attempt.lastRepullAt == null || currentMs - attempt.lastRepullAt >= repullConfig.repullBackoffMs;
+        const verdict = isStalledRepullable({
+          signals: Object.fromEntries(live),
+          class: skip.class,
+          bgProtected: raw?.bg_job_id ? bgLivenessProtects(raw.bg_job_id, getAgents(), isBgJobAlive) : false,
+          ageMs: currentMs - dirStat.mtimeMs,
+          attempts: attempt.attempts,
+          opts: repullConfig,
+        });
+        if (verdict.ok && backoffOk) {
+          if (repullMode === "enforce") {
+            recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
+            detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
+            startedTickets.delete(skip.ticket);
+            appendStalledRepullEvent({ ticket: skip.ticket, orchId: skip.ticket, mode: repullMode, outcome: "detached", reason: verdict.reason });
+          } else {
+            appendStalledRepullEvent({ ticket: skip.ticket, orchId: skip.ticket, mode: repullMode, outcome: "would-detach", reason: verdict.reason });
+          }
+        }
+      } catch (error) {
+        log.warn({ ticket: skip.ticket, error: String(error) }, "scheduler: stalled repull failed closed (CAT-223)");
+      }
+    }
+  }
+
   const selected = selectDispatchablePerProject(
     dispatchableReady,
-    _listStartedTickets(orchDir),
+    startedTickets,
     freeSlots,
     {
       perProject: concurrency?.perProject,
@@ -8802,7 +8871,10 @@ export function schedulerTick(
   // in `ready`, so the intended wedge signal is preserved.
   // triagedWaitingReadyCount, NOT triagedWaitingCount — same reason, applied to
   // the other pool: a triaged waiter behind an open dependency is not starved.
-  const hasWaitingWork = ready.length > 0 || triagedWaitingReadyCount > 0;
+  const hasWaitingWork = hasStarvingWork({
+    readyIds: ready.map((t) => t.identifier),
+    skips,
+  }) || triagedWaitingReadyCount > 0;
   const starvation = nextStarvationState(starvationStreak, {
     didWork,
     freeSlots,
@@ -8823,6 +8895,10 @@ export function schedulerTick(
         triaged_waiting_ready: triagedWaitingReadyCount,
         held: heldReasons,
         admission_held: admissionHeld,
+        skipped: skipSummary.entries,
+        skipped_count: skipSummary.count,
+        skipped_operator_owned: skipSummary.operatorOwned,
+        dispatch_candidates: Math.max(0, ready.length - skipSummary.count),
       },
       "scheduler: board appears frozen — queued work cannot make progress (CAT-36)"
     );
@@ -9067,6 +9143,7 @@ const lastHeldEmitState = new Map();
 const lastHoldLogged = new Map();
 // Admission probe failures have an independent cadence from sweep 2 holds.
 const lastAdmissionProbeLogged = new Map();
+const lastSkipEmit = new Map();
 const STARVATION_WARN_STREAK = 3;
 const STARVATION_REWARN_EVERY = 10;
 const HOLD_RELOG_EVERY = 10;
@@ -10485,6 +10562,7 @@ export function __resetForTests() {
   lastHeldEmitState.clear(); // CTL-755: reset held-event only-on-change dedup
   lastHoldLogged.clear();
   lastAdmissionProbeLogged.clear();
+  lastSkipEmit.clear();
   starvationStreak = 0;
   lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests

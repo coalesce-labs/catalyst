@@ -1008,6 +1008,21 @@ export function defaultAppendYieldFileSkipEvent({ ticket, orchId, filename }) {
   );
 }
 
+export function defaultAppendDispatchSkippedEvent({ ticket, orchId, descriptor }) {
+  return appendEnvelopeBestEffort(buildEventEnvelope({
+    phase: "scheduler", ticket, orchId, action: "dispatch-skipped",
+    reason: descriptor?.reason ?? "unknown",
+    payloadExtras: descriptor ?? {},
+  }), "dispatch-skipped");
+}
+
+export function defaultAppendStalledRepullEvent({ ticket, orchId, mode, outcome, reason }) {
+  return appendEnvelopeBestEffort(buildEventEnvelope({
+    phase: "scheduler", ticket, orchId, action: "stalled-repull", reason,
+    payloadExtras: { mode, outcome },
+  }), "stalled-repull");
+}
+
 // CTL-932: `extras` rides into the payload so an escalation can carry evidence
 // (the wedged-never-started cap escalation embeds the screen captures from all
 // attempts). Absent for every pre-existing caller — shape unchanged.
