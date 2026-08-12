@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { jobLifecycle } from "./recovery.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
+import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
 import { log, getEventLogPath, getClusterHosts } from "./config.mjs";
@@ -323,7 +324,7 @@ function defaultDispatchRescue(ticket, opts) {
 export function defaultEscalate(
   ticket,
   detail,
-  { orchDir, linearWrite, multiHost = false, gateway = undefined, self = undefined, env = process.env, maxParallel = undefined } = {}
+  { orchDir, linearWrite, multiHost = false, gateway = undefined, self = undefined, env = process.env, maxParallel = undefined, appendDelegateEvent = defaultAppendDelegateEvent } = {}
 ) {
   let routed = false;
   let labelled = false;
@@ -342,6 +343,7 @@ export function defaultEscalate(
         applyLabel: linearWrite,
         env,
         log,
+        appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: ticket }), // CTL-1774
         explanation: {
           problem: `stale PR for ${ticket} could not be rescued: ${detail?.reason ?? "unresolvable conflict"}`,
           call_to_action: `resolve the PR conflict for ${ticket} or close the PR`,

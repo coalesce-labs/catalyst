@@ -352,6 +352,7 @@ import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs"
 // phase.triage.linear-transition event). Best-effort: swallow-on-error.
 import { appendLinearStateWriteEvent } from "./linear-state-write-event.mjs";
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 Phase 5
+import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { resolveTicketType } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 // CTL-642 + CTL-758: the SHARED Linear terminal-state predicate. isLinearTerminal
 // ({Done,Canceled} — its OWN set) backs both the reconcile-backstop's
@@ -2807,7 +2808,7 @@ export function gcDispatchCooldowns(orchDir, eligibleIdentifiers, now) {
 export function maybeEscalateDispatchFailures(
   orchDir,
   marker,
-  { writeStatus, appendEvent, env = process.env } = {}
+  { writeStatus, appendEvent, env = process.env, appendDelegateEvent = defaultAppendDelegateEvent } = {}
 ) {
   if (!marker || marker.consecutiveFailures < DISPATCH_FAILURE_ESCALATION_THRESHOLD) return false;
   const result = routeStuckTicketToDelegate(orchDir, marker.ticket, {
@@ -2817,6 +2818,7 @@ export function maybeEscalateDispatchFailures(
     applyLabel: writeStatus,
     env,
     log,
+    appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: marker.ticket }), // CTL-1774
     explanation: {
       escalation_type: "authorization",
       problem: `dispatch failed ${marker.consecutiveFailures}× on ${marker.phase} (${marker.code})`,
@@ -4647,6 +4649,10 @@ export function schedulerTick(
     // false → the bg node with no in-process route is byte-identical (countSdkInflight
     // is never called; and even when armed it is 0 on a node nothing routes in-process).
     hasInProcessRoute = false,
+    // CTL-1774: delegate.* event emitter for shadow/enforce mode observability.
+    // Default-on (real event-log append) so production never loses a signal;
+    // unit tests inject a spy to assert calls without writing to disk.
+    appendDelegateEvent = defaultAppendDelegateEvent,
   } = {}
 ) {
   const _hasTriageArtifact = hasTriageArtifact ?? defaultHasTriageArtifact;
@@ -6574,6 +6580,7 @@ export function schedulerTick(
                 applyLabel: writeStatus,
                 env,
                 log,
+                appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: member }), // CTL-1774
                 explanation: {
                   escalation_type: "decision",
                   problem: `${member} is in a dependency cycle: ${anomaly.members.join(" → ")}`,
@@ -7541,6 +7548,7 @@ export function schedulerTick(
               applyLabel: writeStatus,
               env,
               log,
+              appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: member }), // CTL-1774
               explanation: {
                 escalation_type: "decision",
                 problem: `${member} is in a dependency cycle among eligible tickets: ${anomaly.members.join(" → ")}`,
@@ -8241,6 +8249,7 @@ export function schedulerTick(
               applyLabel: writeStatus,
               env,
               log,
+              appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: ticket }), // CTL-1774
               explanation: {
                 problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${stalledSig?.stalledReason ?? "no reason"}) and is not terminal`,
                 call_to_action: `decide whether to retry ${ticket} or close it`,
@@ -9023,6 +9032,12 @@ function runTick() {
       // startScheduler({ appendWorkerTransitionEvent }).
       appendWorkerTransitionEvent:
         runningOpts.appendWorkerTransitionEvent ?? defaultAppendWorkerTransitionEvent,
+      // CTL-1774: the LIVE delegate-event emitter. schedulerTick defaults to
+      // defaultAppendDelegateEvent, so bare unit ticks that don't inject it are
+      // already wired to the real log. runTick threads it explicitly so tests
+      // injected via startScheduler({ appendDelegateEvent }) reach all tick sites.
+      appendDelegateEvent:
+        runningOpts.appendDelegateEvent ?? defaultAppendDelegateEvent,
       // CTL-642/758: the LIVE PR-merged adapter. Without this the recovery
       // short-circuit's pr-merged branch (terminal-state.mjs) AND the reconcile
       // backstop (reconcileTerminalBackstop gate 2) are BOTH inert in production —
@@ -9748,6 +9763,10 @@ export function startScheduler({
   // the per-tick schedulerTick opts (production). A test injects a spy here to
   // capture transitions through the production runTick path.
   appendWorkerTransitionEvent,
+  // CTL-1774: optional delegate-event emitter override (test seam). Undefined →
+  // runTick threads defaultAppendDelegateEvent (the real log append). A test
+  // injects a spy here to capture delegate events through the production runTick path.
+  appendDelegateEvent,
   // CTL-642/758: the LIVE PR-merged adapter, wired into the production daemon
   // path so the recovery short-circuit's pr-merged branch + the reconcile
   // backstop actually fire (both inert while prAdapter === undefined). Built
@@ -9812,6 +9831,7 @@ export function startScheduler({
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
     appendPhaseAdvanceAppliedEvent, // CTL-1789: optional applied-advance emit seam
     appendWorkerTransitionEvent, // CTL-764: optional worker.transition emitter override (test seam; runTick defaults to defaultAppendWorkerTransitionEvent)
+    appendDelegateEvent, // CTL-1774: optional delegate-event emitter override (test seam; runTick defaults to defaultAppendDelegateEvent)
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
     checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)
     classifyResolution, // CTL-671: optional phantom-sweep Linear-probe seam

@@ -81,6 +81,7 @@ import {
   removeLabel, // CTL-1481: worker:<host> swap (remove-before-add)
 } from "./linear-write.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
+import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import {
@@ -546,6 +547,10 @@ export function handleStateChangedEvent(
     // CTL-1481: worker:<host> label-stamp seam — threaded through to
     // dispatchTriage (undefined → real default; tests inject a fake).
     stampWorkerLabel,
+    // CTL-1774: injectable delegate-event emitter — threaded through to
+    // dispatchTriage so its default labelNeedsHuman closure emits delegate.*
+    // events in shadow/enforce mode. Default = real event-log append.
+    appendDelegateEvent = defaultAppendDelegateEvent,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -593,6 +598,7 @@ export function handleStateChangedEvent(
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
           stampWorkerLabel, // CTL-1481
+          appendDelegateEvent, // CTL-1774
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -651,6 +657,7 @@ export function handleStateChangedEvent(
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
           stampWorkerLabel, // CTL-1481
+          appendDelegateEvent, // CTL-1774
         });
       } else {
         log.debug(
@@ -787,6 +794,10 @@ function dispatchTriage(
     // tests inject a spy. The bg path is synchronous → the detached handler never
     // fires, so this is a no-op on bg.
     emitBackstop,
+    // CTL-1774: injectable emitter for delegate.* events (shadow/enforce observability).
+    // Default = real event-log append; tests inject a spy. Must appear before
+    // labelNeedsHuman so the default closure can close over it.
+    appendDelegateEvent = defaultAppendDelegateEvent,
     // CTL-1441: needs-human application at the re-dispatch cap. Injectable so
     // tests never spawn a real linearis write; default = the label-guard path.
     labelNeedsHuman = (dir, t) =>
@@ -804,6 +815,7 @@ function dispatchTriage(
         // defaulting to Infinity. Lazy: the state.json read is paid only on the
         // enforce path that actually enqueues.
         deps: { orchDir: dir, maxParallel: () => readMaxParallel(dir) },
+        appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId }), // CTL-1774
       }),
     // CTL-1589 (Codex R3): when set (the sweep's Triage-BOARD candidates), the
     // ticket's LIVE state must still equal this workflow-state name at launch.
@@ -1408,6 +1420,10 @@ export function sweepMissingTriage({
   // CTL-1441: needs-human at the re-dispatch cap — threaded through to
   // dispatchTriage (undefined → real label-guard default; tests inject a spy).
   labelNeedsHuman,
+  // CTL-1774: injectable delegate-event emitter — threaded through to
+  // dispatchTriage so its default labelNeedsHuman closure can emit delegate.*
+  // events in shadow/enforce mode. Default = real event-log append.
+  appendDelegateEvent = defaultAppendDelegateEvent,
   // CTL-1481: worker:<host> label-stamp seam — threaded through to
   // dispatchTriage (undefined → real default; tests inject a fake).
   stampWorkerLabel,
@@ -1499,6 +1515,7 @@ export function sweepMissingTriage({
         claimDispatch, // CTL-862
         emitBackstop, // CTL-1367 P1
         ...(labelNeedsHuman ? { labelNeedsHuman } : {}), // CTL-1441
+        appendDelegateEvent, // CTL-1774
         stampWorkerLabel, // CTL-1481
       });
     }
