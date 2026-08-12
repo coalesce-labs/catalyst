@@ -41,22 +41,24 @@ try {
   // sees stdout, which stays pure JSON.
   log = pino({ name: "execution-core", level: process.env.LOG_LEVEL ?? "info" }, process.stderr);
 } catch (err) {
-  const emit = (level) => (...args) => {
-    // pino-style: log.info(obj, msg) OR log.info(msg). Console-shim flattens.
-    // warn/error/fatal → stderr so CLI commands that write JSON to stdout are
-    // not polluted by log messages (CTL-854). info/debug/trace → stdout to
-    // preserve the existing observable behavior for test suites that capture
-    // stdout for informational output.
-    const stream =
-      level === "warn" || level === "error" || level === "fatal"
-        ? process.stderr
-        : process.stdout;
-    stream.write(
-      `[execution-core:${level}] ${args
-        .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
-        .join(" ")}\n`,
-    );
-  };
+  const emit =
+    (level) =>
+    (...args) => {
+      // pino-style: log.info(obj, msg) OR log.info(msg). Console-shim flattens.
+      // warn/error/fatal → stderr so CLI commands that write JSON to stdout are
+      // not polluted by log messages (CTL-854). info/debug/trace → stdout to
+      // preserve the existing observable behavior for test suites that capture
+      // stdout for informational output.
+      const stream =
+        level === "warn" || level === "error" || level === "fatal"
+          ? process.stderr
+          : process.stdout;
+      stream.write(
+        `[execution-core:${level}] ${args
+          .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+          .join(" ")}\n`
+      );
+    };
   log = {
     info: emit("info"),
     warn: emit("warn"),
@@ -67,7 +69,7 @@ try {
     child: () => log,
   };
   process.stderr.write(
-    `[execution-core] WARN: pino unavailable (${err?.message ?? err}); using console shim\n`,
+    `[execution-core] WARN: pino unavailable (${err?.message ?? err}); using console shim\n`
   );
 }
 export { log };
@@ -78,7 +80,11 @@ export { log };
 // reimplemented here. See lib/deployment-mode.mjs's file header for the
 // naming rule ("deployment mode", never bare "mode") and the env-vs-file
 // asymmetry caveat.
-export { DEPLOYMENT_MODES, resolveDeploymentMode, getDeploymentMode } from "../lib/deployment-mode.mjs";
+export {
+  DEPLOYMENT_MODES,
+  resolveDeploymentMode,
+  getDeploymentMode,
+} from "../lib/deployment-mode.mjs";
 
 // --- Paths ---
 // Re-resolved per call so tests can redirect by setting CATALYST_DIR;
@@ -156,7 +162,12 @@ export function getDaemonRuntimeEnvPath(orchDir) {
 // the boot-drain-is-authoritative rule), so readers consume it without re-deriving.
 export function writeDaemonRuntimeEnv(
   orchDir,
-  { env = process.env, pid = process.pid, pidFile = null, now = () => new Date().toISOString() } = {}
+  {
+    env = process.env,
+    pid = process.pid,
+    pidFile = null,
+    now = () => new Date().toISOString(),
+  } = {}
 ) {
   const payload = {
     pid,
@@ -177,7 +188,9 @@ export function writeDaemonRuntimeEnv(
     const tmp = `${p}.tmp`;
     writeFileSync(tmp, JSON.stringify(payload));
     renameSync(tmp, p);
-  } catch { /* best-effort */ }
+  } catch {
+    /* best-effort */
+  }
   return payload;
 }
 
@@ -241,12 +254,21 @@ export function readDaemonRuntimeEnv(
 // (which read surfaces pre-source from execution-core.env — correct for a stopped
 // daemon, where next-start config is the running truth-to-be). `source` names which
 // tier answered so operator surfaces can say so.
-export function resolveDrainStateForRead(orchDir, { env = process.env, readRuntime = readDaemonRuntimeEnv } = {}) {
+export function resolveDrainStateForRead(
+  orchDir,
+  { env = process.env, readRuntime = readDaemonRuntimeEnv } = {}
+) {
   const runtime = readRuntime(orchDir);
   if (runtime) {
     const flagPresent = existsSync(getDrainFlagPath(orchDir));
     const disabled = !!runtime.drainDisabled;
-    return { flagPresent, disabled, draining: flagPresent && !disabled, source: "daemon-runtime", daemonPid: runtime.pid };
+    return {
+      flagPresent,
+      disabled,
+      draining: flagPresent && !disabled,
+      source: "daemon-runtime",
+      daemonPid: runtime.pid,
+    };
   }
   return { ...resolveDrainState(orchDir, { env }), source: "env" };
 }
@@ -279,11 +301,23 @@ export function getDrainedMarkerPath(orchDir) {
 export function applyBootDrainPolicy(orchDir, { env = process.env } = {}) {
   const flag = getDrainFlagPath(orchDir);
   const drainedMarker = getDrainedMarkerPath(orchDir);
-  try { rmSync(flag, { force: true }); } catch { /* best-effort */ }
-  try { rmSync(drainedMarker, { force: true }); } catch { /* best-effort */ }
+  try {
+    rmSync(flag, { force: true });
+  } catch {
+    /* best-effort */
+  }
+  try {
+    rmSync(drainedMarker, { force: true });
+  } catch {
+    /* best-effort */
+  }
   const drained = env.CATALYST_BOOT_DRAINED === "1";
   if (drained) {
-    try { writeFileSync(flag, ""); } catch { /* best-effort */ }
+    try {
+      writeFileSync(flag, "");
+    } catch {
+      /* best-effort */
+    }
   }
   return { drained };
 }
@@ -346,10 +380,7 @@ export function getRunsRoot() {
 // Env name matches orchestrate-healthcheck's CATALYST_HEALTHCHECK_JOBS_ROOT so
 // tests override one variable for both.
 export function getJobsRoot() {
-  return (
-    process.env.CATALYST_HEALTHCHECK_JOBS_ROOT ??
-    resolve(homedir(), ".claude", "jobs")
-  );
+  return process.env.CATALYST_HEALTHCHECK_JOBS_ROOT ?? resolve(homedir(), ".claude", "jobs");
 }
 
 // The unified monthly event log. UTC month to match the writer —
@@ -490,9 +521,10 @@ export function isHostNamePinnedFromConfig() {
   if (typeof env === "string" && env.length > 0) return true;
   try {
     const parsed = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"));
-    return typeof parsed?.catalyst?.host?.name === "string" &&
-           parsed.catalyst.host.name.length > 0;
-  } catch { return false; }
+    return typeof parsed?.catalyst?.host?.name === "string" && parsed.catalyst.host.name.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 // --- Node class (CTL-1344) ---
@@ -562,7 +594,13 @@ export function resolveNodeClass() {
 
   // Absent / explicit "unset" sentinel (undefined key or JSON null) ⇒ worker.
   if (raw === undefined || raw === null) {
-    return { class: NODE_CLASS_DEFAULT, source: "default", inferred: true, recognized: true, raw: null };
+    return {
+      class: NODE_CLASS_DEFAULT,
+      source: "default",
+      inferred: true,
+      recognized: true,
+      raw: null,
+    };
   }
   // Present but not a string ⇒ explicit misconfiguration, never a silent worker.
   if (typeof raw !== "string") {
@@ -571,7 +609,13 @@ export function resolveNodeClass() {
   const normalized = raw.trim().toLowerCase();
   // Empty/whitespace string ⇒ "cleared" (mirrors an empty env var) ⇒ worker.
   if (normalized.length === 0) {
-    return { class: NODE_CLASS_DEFAULT, source: "default", inferred: true, recognized: true, raw: null };
+    return {
+      class: NODE_CLASS_DEFAULT,
+      source: "default",
+      inferred: true,
+      recognized: true,
+      raw: null,
+    };
   }
   if (NODE_CLASSES.includes(normalized)) {
     return { class: normalized, source, inferred: false, recognized: true, raw };
@@ -653,7 +697,12 @@ const EXECUTOR_ALIASES = Object.freeze({
 // executor → catalyst.dispatch.mode value. Closed enum {phase-agents |
 // oneshot-legacy | sdk | codex-exec}: "bg" maps to the existing "phase-agents"
 // label so the telemetry name is stable across the rename.
-export const DISPATCH_MODES = Object.freeze(["phase-agents", "oneshot-legacy", "sdk", "codex-exec"]);
+export const DISPATCH_MODES = Object.freeze([
+  "phase-agents",
+  "oneshot-legacy",
+  "sdk",
+  "codex-exec",
+]);
 const DISPATCH_MODE_BY_EXECUTOR = Object.freeze({
   bg: "phase-agents",
   sdk: "sdk",
@@ -732,7 +781,13 @@ export function resolveExecutor(configPath) {
 
   // Absent / explicit "unset" sentinel (undefined key or JSON null) ⇒ node-class default.
   if (raw === undefined || raw === null) {
-    return { executor: nodeClassDefault, source: "default", inferred: true, recognized: true, raw: null };
+    return {
+      executor: nodeClassDefault,
+      source: "default",
+      inferred: true,
+      recognized: true,
+      raw: null,
+    };
   }
   // Present but not a string ⇒ explicit misconfiguration, never a silent sdk.
   if (typeof raw !== "string") {
@@ -741,7 +796,13 @@ export function resolveExecutor(configPath) {
   const normalized = raw.trim().toLowerCase();
   // Empty/whitespace string ⇒ "cleared" (mirrors an empty env var) ⇒ node-class default.
   if (normalized.length === 0) {
-    return { executor: nodeClassDefault, source: "default", inferred: true, recognized: true, raw: null };
+    return {
+      executor: nodeClassDefault,
+      source: "default",
+      inferred: true,
+      recognized: true,
+      raw: null,
+    };
   }
   // CTL-1457: canonicalize a compound alias (claude-bg→bg …) before the membership
   // check. An alias is never "" so this stays after the cleared-string short-circuit.
@@ -937,7 +998,11 @@ export function codexConfig({ configPath, env = process.env } = {}) {
     ? l1.writableRoots.filter((v) => typeof v === "string" && v.trim() !== "")
     : [];
   return {
-    codexHome: resolveNonEmptyString(env.CATALYST_CODEX_HOME, l1.codexHome, `${catalystDir()}/codex-home`),
+    codexHome: resolveNonEmptyString(
+      env.CATALYST_CODEX_HOME,
+      l1.codexHome,
+      `${catalystDir()}/codex-home`
+    ),
     bin: resolveNonEmptyString(env.CATALYST_CODEX_BIN, l1.bin, "codex"),
     model: resolveNonEmptyString(env.CATALYST_CODEX_MODEL, l1.model, null),
     writableRoots: writableRoots.length > 0 ? writableRoots : [catalystDir()],
@@ -961,8 +1026,8 @@ export function getStaticRoster() {
     if (hosts.length > 0) return hosts;
   }
   try {
-    const raw = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))
-      ?.catalyst?.cluster?.staticRoster;
+    const raw = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cluster
+      ?.staticRoster;
     if (Array.isArray(raw)) {
       const hosts = raw.filter((h) => typeof h === "string" && h.length > 0);
       if (hosts.length > 0) return hosts;
@@ -984,7 +1049,11 @@ export function getStaticRoster() {
 // (it never empties the roster, which would mass-evict the fleet under HRW).
 function readClusterRepoRoster() {
   const cluster = readClusterConfig();
-  if (cluster && schemaCompat(cluster.schemaVersion) !== "too-new" && Array.isArray(cluster.roster)) {
+  if (
+    cluster &&
+    schemaCompat(cluster.schemaVersion) !== "too-new" &&
+    Array.isArray(cluster.roster)
+  ) {
     const hosts = cluster.roster.filter((h) => typeof h === "string" && h.length > 0);
     if (hosts.length > 0) return hosts;
   }
@@ -1070,10 +1139,12 @@ export function getLivenessAnchorIssue() {
   const env = process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
   if (typeof env === "string" && env.length > 0) return env;
   try {
-    const a = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))
-      ?.catalyst?.cluster?.livenessAnchorIssue;
+    const a = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cluster
+      ?.livenessAnchorIssue;
     if (typeof a === "string" && a.length > 0) return a;
-  } catch { /* missing/malformed → null */ }
+  } catch {
+    /* missing/malformed → null */
+  }
   return null;
 }
 
@@ -1129,8 +1200,7 @@ export const HEARTBEAT_INTERVAL_MS =
 // HEARTBEAT_GRACE_MS — how long after the last heartbeat a host is considered
 // dead (CTL-863). 10 minutes is deliberately generous: a false eviction on a
 // live-but-slow host is worse than a slow takeover. Env-overridable for tests.
-export const HEARTBEAT_GRACE_MS =
-  Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
+export const HEARTBEAT_GRACE_MS = Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
 
 // CTL-1529 — how far back the BOUNDED heartbeat tail read tries to reach.
 //
@@ -1205,7 +1275,7 @@ export function resolveHeartbeatTailWindowMs(
     min = HEARTBEAT_TAIL_WINDOW_MIN_MS,
     max = HEARTBEAT_TAIL_WINDOW_MAX_MS,
     onInvalid = null,
-  } = {},
+  } = {}
 ) {
   // Unset / empty is the documented way to take the default — stay silent.
   if (raw === undefined || raw === null) return defaultMs;
@@ -1218,7 +1288,8 @@ export function resolveHeartbeatTailWindowMs(
     reason = "not a finite number"; // NaN ("abc"), Infinity, -Infinity, 1e400
   } else {
     const v = Math.floor(n);
-    if (v < min) reason = `below the ${min}ms minimum (must exceed HEARTBEAT_GRACE_MS to make stale-vs-absent decidable)`;
+    if (v < min)
+      reason = `below the ${min}ms minimum (must exceed HEARTBEAT_GRACE_MS to make stale-vs-absent decidable)`;
     else if (v > max) reason = `above the ${max}ms maximum (the monthly log's own horizon)`;
     else return v;
   }
@@ -1233,13 +1304,13 @@ export const HEARTBEAT_TAIL_WINDOW_MS = resolveHeartbeatTailWindowMs(
       try {
         log.warn(
           { raw, reason, min, max, usingMs: defaultMs },
-          "ctl-1529: EXECUTION_CORE_HEARTBEAT_TAIL_WINDOW_MS is invalid — ignoring it and using the default window",
+          "ctl-1529: EXECUTION_CORE_HEARTBEAT_TAIL_WINDOW_MS is invalid — ignoring it and using the default window"
         );
       } catch {
         /* logger unavailable (bare import in a test) — the fallback still applies */
       }
     },
-  },
+  }
 );
 
 // resolveRestoreHoldMs — parse the CTL-1091 restore-hold override with the
@@ -1266,7 +1337,7 @@ export function resolveRestoreHoldMs(rawStr, defaultMs) {
 // for the validation contract — explicit 0 opt-out honored; empty/negative → default).
 export const HEARTBEAT_RESTORE_HOLD_MS = resolveRestoreHoldMs(
   process.env.EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS,
-  HEARTBEAT_GRACE_MS,
+  HEARTBEAT_GRACE_MS
 );
 
 // CLUSTER_SYNC_INTERVAL_MS — how often the daemon git-pulls the catalyst-cluster
@@ -1309,8 +1380,7 @@ export const RECONCILE_BLIND_ALERT_MS =
 
 // Debounce window: state_changed events that enter the eligible state coalesce
 // into one reconcile poll per affected project per burst.
-export const EVENT_DEBOUNCE_MS =
-  Number(process.env.EXECUTION_CORE_DEBOUNCE_MS) || 5_000;
+export const EVENT_DEBOUNCE_MS = Number(process.env.EXECUTION_CORE_DEBOUNCE_MS) || 5_000;
 
 // CTL triage-entry fix (Phase 0): poll interval for draining the unified event
 // log. The fs.watch tailer (startTailing) is unreliable for cross-process
@@ -1319,8 +1389,7 @@ export const EVENT_DEBOUNCE_MS =
 // readNewEvents() deterministically so new-work discovery is near-instant.
 // readNewEvents is cheap (fstat + read of only the bytes appended since the
 // durable cursor) and idempotent, so a tight interval is safe.
-export const TAILER_POLL_INTERVAL_MS =
-  Number(process.env.EXECUTION_CORE_TAILER_POLL_MS) || 2_000;
+export const TAILER_POLL_INTERVAL_MS = Number(process.env.EXECUTION_CORE_TAILER_POLL_MS) || 2_000;
 
 // CTL-533: a worker whose signal has not been updated within this window is
 // "stale" — a precondition for the Step G stalled scan to consult git/PR
@@ -1347,8 +1416,7 @@ export const BUSY_CEILING_MS =
 // wedged-never-started (stop + replace via the normal revive path; escalate
 // needs-human after repeated ineffective replacements). 120s comfortably
 // exceeds registration + first-turn latency. Env-overridable.
-export const NEVER_STARTED_MS =
-  Number(process.env.CATALYST_NEVER_STARTED_MS) || 120_000;
+export const NEVER_STARTED_MS = Number(process.env.CATALYST_NEVER_STARTED_MS) || 120_000;
 
 // CTL-809 — ghost-breaker just-dispatched grace. The reclaim alive-branch
 // cross-checks the FRESH `claude agents` snapshot to catch a jobLifecycle-alive
@@ -1358,8 +1426,7 @@ export const NEVER_STARTED_MS =
 // `claude agents` yet, so its absence is NOT proof of death — only reclaim on
 // absence once past this window. Comfortably exceeds observed `claude --bg`
 // registration latency + one warmer interval. Env-overridable.
-export const GHOST_GRACE_MS =
-  Number(process.env.EXECUTION_CORE_GHOST_GRACE_MS) || 90_000;
+export const GHOST_GRACE_MS = Number(process.env.EXECUTION_CORE_GHOST_GRACE_MS) || 90_000;
 
 // CTL-868 — zombie state.json staleness floor. The CTL-809 ghost-breaker only
 // fires when the `claude agents` snapshot is FRESH (absent-from-fresh = ghost).
@@ -1437,14 +1504,11 @@ export function readWaitWatcherConfig() {
 export const MEMORY_SAMPLE_INTERVAL_MS =
   Number(process.env.EXECUTION_CORE_MEMORY_SAMPLE_INTERVAL_MS) || 30_000;
 
-export const WORKER_RSS_WARN_MB =
-  Number(process.env.EXECUTION_CORE_WORKER_RSS_WARN_MB) || 1500;
+export const WORKER_RSS_WARN_MB = Number(process.env.EXECUTION_CORE_WORKER_RSS_WARN_MB) || 1500;
 
-export const WORKER_RSS_KILL_MB =
-  Number(process.env.EXECUTION_CORE_WORKER_RSS_KILL_MB) || 4000;
+export const WORKER_RSS_KILL_MB = Number(process.env.EXECUTION_CORE_WORKER_RSS_KILL_MB) || 4000;
 
-export const WORKER_OOM_KILLER =
-  process.env.EXECUTION_CORE_WORKER_OOM_KILLER !== "0";
+export const WORKER_OOM_KILLER = process.env.EXECUTION_CORE_WORKER_OOM_KILLER !== "0";
 
 export const KILL_SUSTAINED_SAMPLES =
   Number(process.env.EXECUTION_CORE_KILL_SUSTAINED_SAMPLES) || 3;
@@ -1498,7 +1562,10 @@ export function readFleetHealthConfigLayer1(configPath) {
     return fh && typeof fh === "object" ? fh : {};
   } catch (err) {
     if (err?.code !== "ENOENT") {
-      log.warn({ configPath, err: err.message }, "fleet-health: Layer-1 config unreadable; using defaults");
+      log.warn(
+        { configPath, err: err.message },
+        "fleet-health: Layer-1 config unreadable; using defaults"
+      );
     }
     return {};
   }
@@ -1523,18 +1590,18 @@ export function readFleetHealthConfig(configPath) {
   const swapTrip = fleetHealthNumber(
     process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD,
     l1.swapUsedMbThreshold,
-    FLEET_HEALTH_DEFAULTS.swapUsedMbThreshold,
+    FLEET_HEALTH_DEFAULTS.swapUsedMbThreshold
   );
   let swapClear = fleetHealthNumber(
     process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD,
     l1.swapUsedMbClearThreshold,
-    FLEET_HEALTH_DEFAULTS.swapUsedMbClearThreshold,
+    FLEET_HEALTH_DEFAULTS.swapUsedMbClearThreshold
   );
   if (swapClear >= swapTrip) {
     const clamped = Math.max(0, swapTrip - 1);
     log.warn(
       { swapClear, swapTrip, clamped },
-      "fleet-health: swapUsedMbClearThreshold >= swapUsedMbThreshold — clamping clear below trip to keep a real hysteresis band",
+      "fleet-health: swapUsedMbClearThreshold >= swapUsedMbThreshold — clamping clear below trip to keep a real hysteresis band"
     );
     swapClear = clamped;
   }
@@ -1549,12 +1616,12 @@ export function readFleetHealthConfig(configPath) {
     intervalMs: fleetHealthNumber(
       process.env.EXECUTION_CORE_FLEET_HEALTH_INTERVAL_MS,
       l1.intervalMs,
-      FLEET_HEALTH_DEFAULTS.intervalMs,
+      FLEET_HEALTH_DEFAULTS.intervalMs
     ),
     jobsThreshold: fleetHealthNumber(
       process.env.EXECUTION_CORE_FLEET_JOBS_THRESHOLD,
       l1.jobsThreshold,
-      FLEET_HEALTH_DEFAULTS.jobsThreshold,
+      FLEET_HEALTH_DEFAULTS.jobsThreshold
     ),
     swapUsedMbThreshold: swapTrip,
     // CTL-1503 — lower clear threshold for the swap hysteresis band; the latch
@@ -1563,12 +1630,12 @@ export function readFleetHealthConfig(configPath) {
     agentsThreshold: fleetHealthNumber(
       process.env.EXECUTION_CORE_FLEET_AGENTS_THRESHOLD,
       l1.agentsThreshold,
-      FLEET_HEALTH_DEFAULTS.agentsThreshold,
+      FLEET_HEALTH_DEFAULTS.agentsThreshold
     ),
     procsThreshold: fleetHealthNumber(
       process.env.EXECUTION_CORE_FLEET_PROCS_THRESHOLD,
       l1.procsThreshold,
-      FLEET_HEALTH_DEFAULTS.procsThreshold,
+      FLEET_HEALTH_DEFAULTS.procsThreshold
     ),
     // Self-heal: env=1 enables; otherwise Layer-1 selfHealEnabled===true enables;
     // else DEFAULT OFF (emit-only).
@@ -1583,7 +1650,7 @@ export function readFleetHealthConfig(configPath) {
     sustainedTicks: fleetHealthNumber(
       process.env.EXECUTION_CORE_FLEET_SUSTAINED_TICKS,
       l1.sustainedTicks,
-      FLEET_HEALTH_DEFAULTS.sustainedTicks,
+      FLEET_HEALTH_DEFAULTS.sustainedTicks
     ),
   };
 }
@@ -1625,8 +1692,7 @@ export const AUTOTUNE_MEM_CRITICAL_PCT =
   Number(process.env.EXECUTION_CORE_AUTOTUNE_MEM_CRITICAL_PCT) || 5;
 
 // Memory-free threshold for warn guard (below this → suppress growth).
-export const AUTOTUNE_MEM_WARN_PCT =
-  Number(process.env.EXECUTION_CORE_AUTOTUNE_MEM_WARN_PCT) || 20;
+export const AUTOTUNE_MEM_WARN_PCT = Number(process.env.EXECUTION_CORE_AUTOTUNE_MEM_WARN_PCT) || 20;
 
 // Kill-switch: EXECUTION_CORE_AUTOTUNE=0 disables all sampling and Layer-2 writes.
 export const AUTOTUNE_ENABLED = process.env.EXECUTION_CORE_AUTOTUNE !== "0";
@@ -1662,15 +1728,17 @@ export const AUTOTUNE_CLAUDE_SHED_FACTOR =
 
 export const WATCHDOG_MINUTES_PER_TURN =
   Number(process.env.EXECUTION_CORE_WATCHDOG_MINUTES_PER_TURN) || 2;
-const WATCHDOG_MIN_PHASE_BUDGET_MS = 20 * 60_000;   // absolute floor
-const WATCHDOG_FALLBACK_BUDGET_MS = 90 * 60_000;    // when turnCap unparseable
+const WATCHDOG_MIN_PHASE_BUDGET_MS = 20 * 60_000; // absolute floor
+const WATCHDOG_FALLBACK_BUDGET_MS = 90 * 60_000; // when turnCap unparseable
 const WATCHDOG_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2Watchdog() {
   try {
     const w = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.watchdog;
     return w && typeof w === "object" ? w : {};
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 function resolveMode(envVal, l2Val) {
   for (const v of [envVal, l2Val]) {
@@ -1690,18 +1758,23 @@ function resolveCount(envVal, l2Val, def) {
 export function readWatchdogConfig() {
   const l2 = readLayer2Watchdog();
   // CATALYST_WATCHDOG=0 is the kill-switch → mode:off (back-compat).
-  const mode = process.env.CATALYST_WATCHDOG === "0"
-    ? "off"
-    : resolveMode(process.env.EXECUTION_CORE_WATCHDOG_MODE, l2.mode);
+  const mode =
+    process.env.CATALYST_WATCHDOG === "0"
+      ? "off"
+      : resolveMode(process.env.EXECUTION_CORE_WATCHDOG_MODE, l2.mode);
   const silenceThresholdMs =
     Number(process.env.EXECUTION_CORE_WATCHDOG_SILENCE_MS) ||
     (Number(l2.silenceThresholdMinutes) || 0) * 60_000 ||
     30 * 60_000;
   const phaseBudgetMultiplier =
     Number(process.env.EXECUTION_CORE_WATCHDOG_BUDGET_MULTIPLIER) ||
-    Number(l2.phaseBudgetMultiplier) || 1.5;
+    Number(l2.phaseBudgetMultiplier) ||
+    1.5;
   const reviveBudget = resolveCount(
-    process.env.EXECUTION_CORE_WATCHDOG_REVIVE_BUDGET, l2.reviveBudget, 0);
+    process.env.EXECUTION_CORE_WATCHDOG_REVIVE_BUDGET,
+    l2.reviveBudget,
+    0
+  );
   return { mode, silenceThresholdMs, phaseBudgetMultiplier, reviveBudget };
 }
 
@@ -1734,7 +1807,7 @@ export function readDaemonWatchdogConfigLayer1(configPath) {
     if (err?.code !== "ENOENT") {
       log.warn(
         { configPath, err: err.message },
-        "daemon-watchdog: Layer-1 config unreadable; using defaults",
+        "daemon-watchdog: Layer-1 config unreadable; using defaults"
       );
     }
     return {};
@@ -1762,32 +1835,32 @@ export function readDaemonWatchdogConfig(configPath, layer1Override) {
     intervalMs: fleetHealthNumber(
       process.env.EXECUTION_CORE_DAEMON_WATCHDOG_INTERVAL_MS,
       l1.intervalMs,
-      DAEMON_WATCHDOG_DEFAULTS.intervalMs,
+      DAEMON_WATCHDOG_DEFAULTS.intervalMs
     ),
     dlqMaxBytes: fleetHealthNumber(
       process.env.EXECUTION_CORE_DAEMON_WATCHDOG_DLQ_MAX_BYTES,
       l1.dlqMaxBytes,
-      DAEMON_WATCHDOG_DEFAULTS.dlqMaxBytes,
+      DAEMON_WATCHDOG_DEFAULTS.dlqMaxBytes
     ),
     stalenessMs: fleetHealthNumber(
       process.env.EXECUTION_CORE_DAEMON_WATCHDOG_STALENESS_MS,
       l1.stalenessMs,
-      DAEMON_WATCHDOG_DEFAULTS.stalenessMs,
+      DAEMON_WATCHDOG_DEFAULTS.stalenessMs
     ),
     cooldownMs: fleetHealthNumber(
       process.env.EXECUTION_CORE_DAEMON_WATCHDOG_COOLDOWN_MS,
       l1.cooldownMs,
-      DAEMON_WATCHDOG_DEFAULTS.cooldownMs,
+      DAEMON_WATCHDOG_DEFAULTS.cooldownMs
     ),
     sustainedTicks: fleetHealthNumber(
       process.env.EXECUTION_CORE_DAEMON_WATCHDOG_SUSTAINED_TICKS,
       l1.sustainedTicks,
-      DAEMON_WATCHDOG_DEFAULTS.sustainedTicks,
+      DAEMON_WATCHDOG_DEFAULTS.sustainedTicks
     ),
     verifyTicks: fleetHealthNumber(
       process.env.EXECUTION_CORE_DAEMON_WATCHDOG_VERIFY_TICKS,
       l1.verifyTicks,
-      DAEMON_WATCHDOG_DEFAULTS.verifyTicks,
+      DAEMON_WATCHDOG_DEFAULTS.verifyTicks
     ),
   };
 }
@@ -1798,15 +1871,17 @@ export function readDaemonWatchdogConfig(configPath, layer1Override) {
 // "enforce"). CATALYST_COST_CAP=0 is the kill-switch → "off". The cost SIGNAL is
 // Prometheus (the single source of truth — claude_code_cost_usage_USD_total by
 // session_id); enforcement FAILS OPEN when Prom is unreachable.
-const COST_CAP_DEFAULT_USD = 40;          // $40/phase-session ≈ 1.6× the most expensive legit autonomous run ever (28d, n=1548; max $24.97)
-const COST_CAP_DEFAULT_POLL_SEC = 30;     // per-session Prom cadence — NOT every tick
+const COST_CAP_DEFAULT_USD = 40; // $40/phase-session ≈ 1.6× the most expensive legit autonomous run ever (28d, n=1548; max $24.97)
+const COST_CAP_DEFAULT_POLL_SEC = 30; // per-session Prom cadence — NOT every tick
 const COST_CAP_DEFAULT_PROM_URL = "http://100.65.193.30:9098"; // OTel/Prom stack on Tailscale
 
 function readLayer2CostCap() {
   try {
     const c = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.costCap;
     return c && typeof c === "object" ? c : {};
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 function resolvePositiveNumber(envVal, l2Val, def) {
   for (const v of [envVal, l2Val]) {
@@ -1825,15 +1900,26 @@ function resolveNonEmptyString(envVal, l2Val, def) {
 
 export function readCostCapConfig() {
   const l2 = readLayer2CostCap();
-  const mode = process.env.CATALYST_COST_CAP === "0"
-    ? "off"
-    : resolveMode(process.env.EXECUTION_CORE_COST_CAP_MODE, l2.mode); // shares {off,shadow,enforce}
+  const mode =
+    process.env.CATALYST_COST_CAP === "0"
+      ? "off"
+      : resolveMode(process.env.EXECUTION_CORE_COST_CAP_MODE, l2.mode); // shares {off,shadow,enforce}
   const capUsd = resolvePositiveNumber(
-    process.env.EXECUTION_CORE_COST_CAP_USD, l2.perSessionUsd, COST_CAP_DEFAULT_USD);
-  const pollMs = resolvePositiveNumber(
-    process.env.EXECUTION_CORE_COST_CAP_POLL_SEC, l2.pollEverySec, COST_CAP_DEFAULT_POLL_SEC) * 1000;
+    process.env.EXECUTION_CORE_COST_CAP_USD,
+    l2.perSessionUsd,
+    COST_CAP_DEFAULT_USD
+  );
+  const pollMs =
+    resolvePositiveNumber(
+      process.env.EXECUTION_CORE_COST_CAP_POLL_SEC,
+      l2.pollEverySec,
+      COST_CAP_DEFAULT_POLL_SEC
+    ) * 1000;
   const promBaseUrl = resolveNonEmptyString(
-    process.env.EXECUTION_CORE_COST_CAP_PROM_URL, l2.promBaseUrl, COST_CAP_DEFAULT_PROM_URL);
+    process.env.EXECUTION_CORE_COST_CAP_PROM_URL,
+    l2.promBaseUrl,
+    COST_CAP_DEFAULT_PROM_URL
+  );
   return { mode, capUsd, pollMs, promBaseUrl };
 }
 
@@ -1873,7 +1959,9 @@ function readLayer2StallJanitor() {
   try {
     const sj = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.stallJanitor;
     return sj && typeof sj === "object" ? sj : {};
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
 export function readStallJanitorConfig() {
@@ -1916,7 +2004,9 @@ function readLayer2UnstuckSweep() {
   try {
     const us = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.unstuckSweep;
     return us && typeof us === "object" ? us : {};
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
 export function readUnstuckSweepConfig() {
@@ -1945,7 +2035,7 @@ export function readUnstuckSweepConfig() {
 // Extracted as a standalone export so tests can assert the throttle guard
 // and future low-frequency passes can reuse the same helper.
 export function isThrottled(lastRunMs, intervalMs, nowMs) {
-  return (nowMs - lastRunMs) < intervalMs;
+  return nowMs - lastRunMs < intervalMs;
 }
 
 // CTL-1176: Pass 0r — LLM reasoning recovery pass config reader.
@@ -1958,7 +2048,9 @@ function readLayer2RecoveryPass() {
   try {
     const rp = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.recovery?.pass;
     return rp && typeof rp === "object" ? rp : {};
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
 export function readRecoveryPassConfig(envObj = process.env) {
@@ -1982,6 +2074,32 @@ export function readRecoveryPassConfig(envObj = process.env) {
   return { mode };
 }
 
+// CTL-1774: delegate-first mode reader. Mirrors readRecoveryPassConfig exactly:
+// env (CATALYST_DELEGATE_FIRST) overrides Layer-2 config
+// (.catalyst.delegateFirst.mode), which overrides the safe default of 'off'.
+// Ships off; operators opt in to shadow (dry-run evidence) then enforce.
+const DELEGATE_FIRST_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2DelegateFirst() {
+  try {
+    const df = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.delegateFirst;
+    return df && typeof df === "object" ? df : {};
+  } catch {
+    return {};
+  }
+}
+
+export function readDelegateFirstConfig(envObj = process.env) {
+  const l2 = readLayer2DelegateFirst();
+  const env = envObj.CATALYST_DELEGATE_FIRST;
+  let mode;
+  if (env === "0") mode = "off";
+  else if (typeof env === "string" && DELEGATE_FIRST_MODES.has(env)) mode = env;
+  else if (typeof l2.mode === "string" && DELEGATE_FIRST_MODES.has(l2.mode)) mode = l2.mode;
+  else mode = "off";
+  return { mode };
+}
+
 // CTL-1245: dead-but-running doc-worker reclaim mode reader. Mirrors
 // readRecoveryPassConfig / readUnstuckSweepConfig exactly: env
 // (CATALYST_DEAD_DOC_WORKER_RECLAIM) overrides Layer-2 config
@@ -1997,9 +2115,12 @@ const DEAD_DOC_WORKER_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2DeadDocWorker() {
   try {
-    const d = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.recovery?.deadDocWorker;
+    const d = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.recovery
+      ?.deadDocWorker;
     return d && typeof d === "object" ? d : {};
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
 export function readDeadDocWorkerConfig() {
@@ -2047,7 +2168,9 @@ function readLayer2BoardHealth() {
   try {
     const b = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.boardHealth;
     return b && typeof b === "object" ? b : {};
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
 export function readBoardHealthConfig(env = process.env) {
@@ -2109,7 +2232,9 @@ function readLayer2Coordination() {
   try {
     const c = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.coordination;
     return c && typeof c === "object" ? c : {};
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
 export function readCoordinationConfig(env = process.env) {
@@ -2164,9 +2289,7 @@ export const DELEGATE_RUNNER_MODES = new Set(["on", "off"]);
 
 function readPositiveIntEnv(raw, fallback) {
   const n = Number(raw);
-  return typeof raw === "string" && raw !== "" && Number.isFinite(n) && n > 0
-    ? n
-    : fallback;
+  return typeof raw === "string" && raw !== "" && Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 // CTL-1331 follow-up: the gateway freshness window for the RECLAIM sweep's per-signal
@@ -2403,22 +2526,24 @@ function readLayer2Governance() {
   try {
     const g = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.governance;
     return g && typeof g === "object" ? g : {};
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
 // Three-layer beliefs flag: explicit env ("1"/"0") > Layer-2 boolean > default false.
 // Returns both the effective boolean and its source so the boot self-report can flag overrides.
 function resolveBeliefsFlag(envVal, l2Val) {
-  if (envVal === "1") return { value: true,  source: "env-override" };
+  if (envVal === "1") return { value: true, source: "env-override" };
   if (envVal === "0") return { value: false, source: "env-override" };
   if (typeof l2Val === "boolean") return { value: l2Val, source: "config" };
   return { value: false, source: "default" };
 }
 
 const BELIEFS_FLAGS = {
-  beliefsShadow:        "CATALYST_BELIEFS_SHADOW",
-  diagnostician:        "CATALYST_DIAGNOSTICIAN",
-  intentsEnforce:       "CATALYST_INTENTS_ENFORCE",
+  beliefsShadow: "CATALYST_BELIEFS_SHADOW",
+  diagnostician: "CATALYST_DIAGNOSTICIAN",
+  intentsEnforce: "CATALYST_INTENTS_ENFORCE",
   advanceShadowSummary: "CATALYST_ADVANCE_SHADOW_SUMMARY",
 };
 
@@ -2474,22 +2599,22 @@ export function readGovernanceSources(env = process.env) {
   out.boardHealth = resolveModeSource(
     env.CATALYST_BOARD_HEALTH,
     readLayer2BoardHealth().mode,
-    BOARD_HEALTH_MODES,
+    BOARD_HEALTH_MODES
   );
   out.recoveryPass = resolveModeSource(
     env.CATALYST_RECOVERY_PASS,
     readLayer2RecoveryPass().mode,
-    RECOVERY_PASS_MODES,
+    RECOVERY_PASS_MODES
   );
   out.unstuckSweep = resolveModeSource(
     env.CATALYST_UNSTUCK_SWEEP ?? env.EXECUTION_CORE_UNSTUCK_SWEEP_MODE,
     readLayer2UnstuckSweep().mode,
-    UNSTUCK_SWEEP_MODES,
+    UNSTUCK_SWEEP_MODES
   );
   out.deadDocWorker = resolveModeSource(
     env.CATALYST_DEAD_DOC_WORKER_RECLAIM,
     readLayer2DeadDocWorker().mode,
-    DEAD_DOC_WORKER_MODES,
+    DEAD_DOC_WORKER_MODES
   );
   return out;
 }
