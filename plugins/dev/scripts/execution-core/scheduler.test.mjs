@@ -5463,7 +5463,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       JSON.stringify({
         ticket,
         site: "terminal-sweep",
-        reason: "foreign-owner",
+        reason: "superseded",
         firstSuppressedAt: nowMs - 2,
         lastSuppressedAt: nowMs - 2,
         count: 0,
@@ -5496,7 +5496,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       },
       terminalFenceGuard: (_subject, hooks) => {
         fenceCalls += 1;
-        hooks.onSuppress?.({ reason: "foreign-owner" });
+        hooks.onSuppress?.({ reason: "superseded" });
         return false;
       },
       appendFenceStandoffEvent: () => {
@@ -5526,7 +5526,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       JSON.stringify({
         ticket,
         site: "terminal-sweep",
-        reason: "foreign-owner",
+        reason: "superseded",
         firstSuppressedAt: nowMs - 2,
         lastSuppressedAt: nowMs - 2,
         count: 0,
@@ -5560,7 +5560,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       },
       terminalFenceGuard: (_subject, hooks) => {
         fenceCalls += 1;
-        hooks.onSuppress?.({ reason: "foreign-owner" });
+        hooks.onSuppress?.({ reason: "superseded" });
         return false;
       },
       appendFenceStandoffEvent: () => {
@@ -5589,7 +5589,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       JSON.stringify({
         ticket,
         site: "terminal-sweep",
-        reason: "foreign-owner",
+        reason: "superseded",
         firstSuppressedAt: nowMs - 2,
         lastSuppressedAt: nowMs - 2,
         count: 0,
@@ -5623,7 +5623,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       },
       terminalFenceGuard: (_subject, hooks) => {
         fenceCalls += 1;
-        hooks.onSuppress?.({ reason: "foreign-owner" });
+        hooks.onSuppress?.({ reason: "superseded" });
         return false;
       },
       appendFenceStandoffEvent: () => {
