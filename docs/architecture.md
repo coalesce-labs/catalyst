@@ -837,7 +837,9 @@ a revive, a resume, and a new-work pull).
   owning `ASSERTED_BY` + `classifyAdvanceEvidence`/`explainAdvanceEvidence`). Three producers can
   write a terminal `done` and were previously byte-indistinguishable: the agent's own
   `phase-agent-emit-complete` (**declared**), `flipSignalDoneOnSuccess`'s clean-SDK-exit flip
-  (**fabricated** — the agent never declared anything), and the recovery-reclaim / legacy-revive
+  (**fabricated** — the agent never declared anything; **retired as a producer by CTL-1790**, see
+  below — the id stays registered so signals already on disk still classify `fabricated`), and the
+  recovery-reclaim / legacy-revive
   synthetic completes (**fabricated** — inferred from a work-done probe). Writers stamp their id:
   the wrapper defaults to `phase-agent-emit-complete` and accepts `--asserted-by` so infrastructure
   callers self-identify. Unknown/missing markers classify **absent**, never `declared` — the
@@ -849,6 +851,43 @@ a revive, a resume, and a new-work pull).
   `stalled`/`failed`/`aborted`/`needs-human` writers are deliberately unstamped — those statuses are
   never advance-eligible (`deriveAdvancement` gates on `done`, or `skipped` for `monitor-deploy`
   only), so they can never be the `from` signal of an applied advance.
+
+### Clean exit without a declaration is a FAILURE, not a success (CTL-1790)
+
+CTL-1789 made the fabricated terminal *visible*; CTL-1790 stops producing it. `mapResult` returns
+`backstop:null` **only** for `subtype === "success"`, so `flipSignalDoneOnSuccess`
+(`execution-core/sdk-run-phase-agent.mjs`, shared verbatim by the SDK and codex-exec launch verbs)
+is the **sole** handler of "the worker process exited clean and the phase skill never declared
+completion". It used to write `status: "done"` there. That is the CTL-1778 root cause:
+`monitor-merge` blocked on a permission prompt, the query ended cleanly, the signal was flipped to
+`done`, the pipeline advanced, and PR #3238 was never merged — with `fatals:0`, `gate:0`, and every
+health signal green.
+
+- **Inverted, not deleted.** The handler now writes a terminal **`failed`** with reason
+  `ended-without-declaration` (via `defaultWriteSignalTerminal`) and appends the matching canonical
+  `phase.<phase>.failed.<ticket>` event (via `defaultAppendEventLog`). Deleting it instead — the
+  intuitive fix — wedges the node: the signal stays `running`, so `isTicketInFlight` stays true,
+  `classifyWorker` returns `unknown` (never `dead`) for an SDK signal that carries no `bg_job_id`,
+  the CTL-574 reclaim never fires, and `countSdkInflight` counts the signal with **no clock and no
+  age gate** — at `maxParallel: 6`, six such exits occupy every slot permanently and silently,
+  unrecoverable without a human `rm`. Writing a TERMINAL status is what releases the slot; making
+  that terminal a FAILURE is what stops the lie. Both are required.
+- **Preserved verbatim**: the in-flight-only precondition (a skill that DID declare has already
+  written a terminal, so the handler is a no-op for it; a `needs-input` park stays parked), the
+  CTL-736 generation fence (a superseded gen-N worker writes no outcome for gen-N+1 — and therefore
+  deliberately does **not** release the slot), and both call sites.
+- **Retry vs escalate is a named, frozen table** (`ENDED_WITHOUT_DECLARATION_POLICY`), not an inline
+  conditional, because it encodes a judgement about side effects. `research`/`plan`/`implement`/
+  `verify`/`review` → the reason lands on **`.attentionReason`** → revive Loop 2 **retries**.
+  `pr`/`monitor-merge`/`teardown` → **`.failureReason`** → revive **escalates, no retry**: re-running
+  `gh pr merge` against an already-merged PR is a non-idempotent external mutation, re-running
+  research is not. An unlisted/unknown/absent phase fails **closed** to escalate — a wrong escalation
+  is a visible human ping, a wrong retry is a silent double-mutation. `defaultWriteSignalTerminal`
+  takes an optional `{ reasonField }` (default `attentionReason`, so every pre-existing caller is
+  byte-identical) and writes exactly one reason key, never both.
+- **Downstream**: under execution-core a `failed` phase signal drops out of `isTicketInFlight`
+  (slot released) and is swept by the recovery/escalation path — the ticket surfaces instead of the
+  pipeline silently advancing past work that never happened.
 
 **Enforcement surfaces:**
 
