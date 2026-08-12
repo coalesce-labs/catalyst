@@ -18,19 +18,36 @@ const KNOWN_UNREGISTERED = Object.freeze([
   "checkLayer2PathDivergence", // ~/.config/catalyst/config.json
 ]);
 
-function checksReadingHomedirDirectly(src) {
+export function checksReadingHomedirDirectly(src) {
   const found = new Set();
-  const decl = /^export function (check[A-Za-z0-9_]*)\s*\(/gm;
+  const decl = /^(?:export\s+)?(?:function\s+(check[A-Za-z0-9_]*)\s*\(|const\s+(check[A-Za-z0-9_]*)\s*=)/gm;
   for (const match of src.matchAll(decl)) {
-    const parametersStart = src.indexOf("(", match.index);
-    let parameterDepth = 0;
-    let parametersEnd = parametersStart;
-    for (; parametersEnd < src.length; parametersEnd += 1) {
-      if (src[parametersEnd] === "(") parameterDepth += 1;
-      if (src[parametersEnd] === ")") parameterDepth -= 1;
-      if (parameterDepth === 0) break;
+    const checkName = match[1] ?? match[2];
+    let bodyStart;
+    if (match[1]) {
+      const parametersStart = src.indexOf("(", match.index);
+      let parameterDepth = 0;
+      let parametersEnd = parametersStart;
+      for (; parametersEnd < src.length; parametersEnd += 1) {
+        if (src[parametersEnd] === "(") parameterDepth += 1;
+        if (src[parametersEnd] === ")") parameterDepth -= 1;
+        if (parameterDepth === 0) break;
+      }
+      bodyStart = src.indexOf("{", parametersEnd);
+    } else {
+      const declarationEnd = src.indexOf(";", match.index);
+      const arrow = src.indexOf("=>", match.index);
+      const functionKeyword = src.indexOf("function", match.index);
+      const isArrow = arrow !== -1 && (declarationEnd === -1 || arrow < declarationEnd);
+      const isFunction = functionKeyword !== -1 && (declarationEnd === -1 || functionKeyword < declarationEnd);
+      if (!isArrow && !isFunction) continue;
+      bodyStart = src.indexOf("{", isArrow ? arrow : functionKeyword);
+      if (bodyStart === -1 || (declarationEnd !== -1 && bodyStart > declarationEnd)) {
+        const expression = src.slice(match.index, declarationEnd === -1 ? src.length : declarationEnd + 1);
+        if (/\bhomedir\(\)/.test(expression)) found.add(checkName);
+        continue;
+      }
     }
-    const bodyStart = src.indexOf("{", parametersEnd);
     let depth = 0;
     let bodyEnd = bodyStart;
     for (; bodyEnd < src.length; bodyEnd += 1) {
@@ -38,8 +55,8 @@ function checksReadingHomedirDirectly(src) {
       if (src[bodyEnd] === "}") depth -= 1;
       if (depth === 0) break;
     }
-    const body = src.slice(bodyStart, bodyEnd + 1);
-    if (/\bhomedir\(\)/.test(body)) found.add(match[1]);
+    const declaration = src.slice(match.index, bodyEnd + 1);
+    if (/\bhomedir\(\)/.test(declaration)) found.add(checkName);
   }
   return found;
 }
@@ -70,5 +87,20 @@ describe("HOST_STATE_SEAMS registry completeness (CAT-179)", () => {
 
   it("pins the currently unregistered set", () => {
     expect([...reading].filter((name) => !registered.has(name)).sort()).toEqual([...KNOWN_UNREGISTERED].sort());
+  });
+
+  it("detects host-state checks regardless of declaration shape", () => {
+    const synthetic = [
+      "export function checkAlpha() { return homedir(); }",
+      "export const checkBeta = (deps = { root: homedir() }) => deps;",
+      'function checkGamma() { const p = join(homedir(), ".config"); return p; }',
+      'export function checkDelta() { return "no host state"; }',
+    ].join("\n\n");
+    const found = checksReadingHomedirDirectly(synthetic);
+    expect([...found].sort()).toEqual(["checkAlpha", "checkBeta", "checkGamma"]);
+  });
+
+  it("fails closed when no declaration anchor matches", () => {
+    expect(checksReadingHomedirDirectly("const nothing = 1;").size).toBe(0);
   });
 });
