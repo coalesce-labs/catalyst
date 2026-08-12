@@ -1251,7 +1251,21 @@ export function readPhaseSignals(orchDir, ticket) {
     }
     entries.push({ phase: m[1], status, mtimeMs });
   }
-  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  // CAT-259: the sort must be TOTAL. mtime is still the primary key — recency
+  // decides supersession (CTL-1660 P1 r2) — but on an EXACT tie mtime carries no
+  // information, and leaving the order to readdirSync made livePhaseEntries (and
+  // therefore deriveAdvancement's verdict routing) a filesystem property. macOS/APFS
+  // records distinct sub-millisecond timestamps so ties rarely occur there; Linux
+  // can stamp two small writes inside one timer tick with the same mtimeMs.
+  // On a tie we fall back to pipeline ordinal, then phase name. phaseIndex throws
+  // on unknown phases and this reader legitimately sees non-pipeline signals, so
+  // guard it; unknown phases sort first and remain inert to latestKnownPhase.
+  const ordinalOf = (phase) => (isKnownPhase(phase) ? phaseIndex(phase) : -1);
+  entries.sort((a, b) =>
+    a.mtimeMs - b.mtimeMs ||
+    ordinalOf(a.phase) - ordinalOf(b.phase) ||
+    (a.phase < b.phase ? -1 : a.phase > b.phase ? 1 : 0)
+  );
   for (const e of entries) signals[e.phase] = e.status;
   return signals;
 }

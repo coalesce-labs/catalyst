@@ -5,7 +5,7 @@ description: |
   Phase 3). Lifts the active listen loop from the legacy `oneshot` Phase 5
   body: event-driven wait on `catalyst-events wait-for`, inline resolution of
   CI fix-ups, bot review threads, and BEHIND rebases, then `gh pr merge
-  --squash --delete-branch` when the PR reaches CLEAN. Linear Done transition
+  --squash` (worktree-safe, CTL-56) when the PR reaches CLEAN. Linear Done transition
   and worktree teardown are owned by phase-teardown (CTL-703). Dispatched as
   a `claude --bg` job by `phase-agent-dispatch`, which invokes it via slash
   command — hence `user-invocable: true`.
@@ -456,8 +456,16 @@ fi
 [[ "$MERGE_PERM_LIB_OK" == true ]] || echo "phase-monitor-merge: ${MERGE_PERMISSION_LIB} not readable; merge-permission classification DISABLED (a permission wall will be reported as an unclassified merge failure)" >&2
 COMMS="${COMMS:-${PLUGIN_ROOT}/scripts/catalyst-comms}"
 [[ -x "$COMMS" ]] || COMMS="$(command -v catalyst-comms 2>/dev/null || true)"
+# CTL-56: capture head ref BEFORE merge so we can delete it checkout-free after confirm.
+HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref' 2>/dev/null || true)
 MERGE_ERR_FILE="$(mktemp)"
-if ! gh pr merge "$PR_NUMBER" --repo "${REPO}" --squash --delete-branch 2>"$MERGE_ERR_FILE"; then
+# CTL-56: deliberately no local branch-cleanup flag on this call — it triggers a
+# local `git checkout <base>` that fails inside a linked worktree when the base
+# branch is already checked out in the primary clone, and it auto-closes any
+# OTHER open PR sharing this head branch name (breaks the dual-PR courtesy-PR
+# policy). Branch cleanup happens below, checkout-free, via the REST ref-delete
+# after the merge is confirmed.
+if ! gh pr merge "$PR_NUMBER" --repo "${REPO}" --squash 2>"$MERGE_ERR_FILE"; then
   MERGE_ERR="$(cat "$MERGE_ERR_FILE" 2>/dev/null || true)"
   rm -f "$MERGE_ERR_FILE"
   if [[ "$MERGE_PERM_LIB_OK" == true ]] && merge_denial_is_permission "$MERGE_ERR"; then
@@ -510,6 +518,17 @@ jq --arg ts "$MERGED_AT" --arg sha "${MERGE_COMMIT_SHA:-}" \
     | (if $sha != "" then .pr.mergeCommitSha = $sha else . end)
     | .updatedAt = $ts' \
    "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+
+# CTL-56: delete the remote head ref checkout-free, AFTER merge is REST-confirmed and SHA
+# recorded. Idempotent + best-effort: a 404/422 means the ref is already gone or protected;
+# never fail the phase on branch cleanup — the merge already landed.
+if [[ -n "${HEAD_REF:-}" ]]; then
+  # CTL-56: URL-encode the head ref (preserve '/') so a metacharacter like '#' in a branch name
+  # (e.g. feature#123) can't truncate the endpoint into deleting the wrong ref.
+  enc_ref=$(printf '%s' "$HEAD_REF" | jq -sRr @uri | sed 's|%2F|/|g')
+  gh api --method DELETE "repos/${REPO}/git/refs/heads/${enc_ref}" >/dev/null 2>&1 \
+    || echo "CTL-56: remote branch ${HEAD_REF} delete skipped (already gone or protected)" >&2
+fi
 
 # CTL-703: Linear Done is written by phase-teardown (10th phase), not here.
 echo "phase-monitor-merge: pr#${PR_NUMBER} merged at ${MERGED_AT}"
