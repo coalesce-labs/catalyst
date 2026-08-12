@@ -5454,7 +5454,7 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
 
 describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
   test("delivery failure does not extend fence suppression and retries next tick", () => {
-    const ticket = "CAT-173-RETRY";
+    const ticket = "PROJ-173-RETRY";
     const nowMs = Date.now();
     writeSignal(ticket, "implement", "failed");
     mkdirSync(join(orchDir, ".fence-standoff"), { recursive: true });
@@ -5463,7 +5463,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       JSON.stringify({
         ticket,
         site: "terminal-sweep",
-        reason: "superseded",
+        reason: "unverifiable",
         firstSuppressedAt: nowMs - 2,
         lastSuppressedAt: nowMs - 2,
         count: 0,
@@ -5496,7 +5496,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       },
       terminalFenceGuard: (_subject, hooks) => {
         fenceCalls += 1;
-        hooks.onSuppress?.({ reason: "superseded" });
+        hooks.onSuppress?.({ reason: "unverifiable" });
         return false;
       },
       appendFenceStandoffEvent: () => {
@@ -5517,7 +5517,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
   // terminal Linear probe + fence-check every tick on a persistently failing sink —
   // the CTL-1329 burn. Past the bound the ordinary 15-minute marker is retained.
   test("a persistently failing delivery stops bypassing the 15-minute cooldown", () => {
-    const ticket = "CAT-173-RETRY-BOUND";
+    const ticket = "PROJ-173-RETRY-BOUND";
     const nowMs = Date.now();
     writeSignal(ticket, "implement", "failed");
     mkdirSync(join(orchDir, ".fence-standoff"), { recursive: true });
@@ -5526,7 +5526,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       JSON.stringify({
         ticket,
         site: "terminal-sweep",
-        reason: "superseded",
+        reason: "unverifiable",
         firstSuppressedAt: nowMs - 2,
         lastSuppressedAt: nowMs - 2,
         count: 0,
@@ -5560,7 +5560,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       },
       terminalFenceGuard: (_subject, hooks) => {
         fenceCalls += 1;
-        hooks.onSuppress?.({ reason: "superseded" });
+        hooks.onSuppress?.({ reason: "unverifiable" });
         return false;
       },
       appendFenceStandoffEvent: () => {
@@ -5580,7 +5580,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
   // that a successful break-glass stamps the cooldown, nor that the cooldown then
   // short-circuits the next tick's probe+write block.
   test("a successful break-glass stamps the cooldown and short-circuits the next tick", () => {
-    const ticket = "CAT-173-COOLDOWN";
+    const ticket = "PROJ-173-COOLDOWN";
     const nowMs = Date.now();
     writeSignal(ticket, "implement", "failed");
     mkdirSync(join(orchDir, ".fence-standoff"), { recursive: true });
@@ -5589,7 +5589,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       JSON.stringify({
         ticket,
         site: "terminal-sweep",
-        reason: "superseded",
+        reason: "unverifiable",
         firstSuppressedAt: nowMs - 2,
         lastSuppressedAt: nowMs - 2,
         count: 0,
@@ -5623,7 +5623,7 @@ describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
       },
       terminalFenceGuard: (_subject, hooks) => {
         fenceCalls += 1;
-        hooks.onSuppress?.({ reason: "superseded" });
+        hooks.onSuppress?.({ reason: "unverifiable" });
         return false;
       },
       appendFenceStandoffEvent: () => {

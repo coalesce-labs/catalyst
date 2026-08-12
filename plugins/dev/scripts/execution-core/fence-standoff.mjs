@@ -13,17 +13,32 @@ import { recordDurableEscalation } from "./durable-escalation.mjs";
 import { FENCE_SUPPRESS_REASONS } from "./fence-guard.mjs";
 
 // A STANDOFF is mutual: every live host believes some OTHER host owns the ticket,
-// so nobody writes the escalation. `foreign-owner` is not that — it is positive,
-// confirmed evidence that a specific other host holds the claim, which is the
-// CORRECT outcome on the old host after a healthy takeover. fenceGuard
-// deliberately leaves the escalation to the current owner there, and that owner's
-// own fence passes, so it escalates normally.
+// so nobody writes the escalation. That is the AMBIGUOUS class of verdict —
+// `unverifiable` (the authoritative read could neither confirm nor refute this
+// host's generation) and `threw` (fail-closed on an error). Only those can be a
+// standoff, because only there is it genuinely unknown who owns the ticket.
 //
-// Counting those suppressions would let a lingering failed / stale-PR worker
-// directory on the superseded host accumulate the bound over 45 minutes and page
-// an operator about a ticket the NEW owner is actively processing — turning
-// correct zombie fencing into a false page. Excluded from accounting entirely.
-const NON_STANDOFF_SUPPRESS_REASONS = new Set([FENCE_SUPPRESS_REASONS.FOREIGN_OWNER]);
+// The CONFIRMED-TAKEOVER verdicts are the opposite: positive evidence that a
+// specific other host holds the claim, which is the CORRECT outcome on the old
+// host after a healthy takeover. fenceGuard deliberately leaves the escalation to
+// the current owner there, and that owner's own fence passes, so it escalates
+// normally. There are TWO such verdicts, and both must be excluded:
+//   * `foreign-owner` — the projection names a different owner host outright.
+//   * `superseded`    — the authoritative read returned stale:true, i.e. a NEWER
+//                       generation exists. A healthy takeover bumps the generation,
+//                       so this is the shape an ordinary supersession takes on the
+//                       old host; it is confirmed takeover evidence just like
+//                       `foreign-owner`, only discovered via generation rather than
+//                       owner identity.
+//
+// Counting either would let a lingering failed / stale-PR worker directory on the
+// superseded host accumulate the bound over 45 minutes and page an operator about a
+// ticket the NEW owner is actively processing — turning correct zombie fencing into
+// a false page. Excluded from accounting entirely.
+const NON_STANDOFF_SUPPRESS_REASONS = new Set([
+  FENCE_SUPPRESS_REASONS.FOREIGN_OWNER,
+  FENCE_SUPPRESS_REASONS.SUPERSEDED,
+]);
 
 export const FENCE_STANDOFF_CAP_DEFAULT = 4;
 export const FENCE_STANDOFF_MIN_AGE_MS_DEFAULT = 45 * 60_000;

@@ -134,12 +134,20 @@ the configured count (default 4) and age (default 45 minutes) are reached, Catal
 unfenced `.escalations/<TICKET>.json` record and emits `escalation.fence-standoff.<TICKET>`, so the
 notification bridge can surface the ticket without a Linear write.
 
-Only a MUTUAL standoff counts. A `foreign-owner` verdict is positive, confirmed evidence that a
-specific other host holds the claim — the correct outcome on the superseded host after a healthy
-takeover, where `fenceGuard` deliberately leaves the escalation to the current owner (whose own
-fence passes). Counting it would let a lingering worker directory on the old host cross the bound
-and page an operator about a ticket the new owner is actively processing, so `foreign-owner` is
-excluded from accounting and additionally CLEARS the ledger, letting a later genuine standoff start
+Only a MUTUAL standoff counts, and a standoff is by definition AMBIGUOUS — nobody can tell who owns
+the ticket. Just two `fenceGuard` verdicts are ambiguous in that sense and so accumulate toward the
+bound: `unverifiable` (the authoritative read neither confirmed nor refuted this host's generation)
+and `threw` (fail-closed on an error), alongside a non-fail-open `missing-generation`.
+
+The CONFIRMED-TAKEOVER verdicts are the opposite — positive evidence that a specific other host holds
+the claim, which is the correct outcome on the superseded host after a healthy takeover, where
+`fenceGuard` deliberately leaves the escalation to the current owner (whose own fence passes).
+There are TWO of them and BOTH are excluded: `foreign-owner` (the projection names a different owner
+host) and `superseded` (the authoritative read returned `stale: true`, i.e. a newer generation
+exists — the shape an ordinary healthy takeover takes on the old host, discovered via generation
+rather than owner identity). Counting either would let a lingering worker directory on the old host
+cross the bound and page an operator about a ticket the new owner is actively processing, so both are
+excluded from accounting and additionally CLEAR the ledger, letting a later genuine standoff start
 a fresh episode instead of inheriting a stale count and age.
 
 The record is GC-surviving and reaches the board two ways. When the ticket has **no** card,
