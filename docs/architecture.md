@@ -47,18 +47,25 @@ per-orchestrator local state in worktrees stays the source of truth for crash re
 only; the execution-core daemon writes none of it, so on an execution-core host the file is
 routinely **absent** (measured: no `~/catalyst/state.json`, `catalyst.db.orchestrators` = 0 rows).
 Absence is therefore not evidence the machinery is dead. `catalyst-state.sh` is nonetheless **not**
-removable, because it retains live callers in the two **legacy fallback modes** — wave-orchestration
-(`plugins/legacy/skills/orchestrate/SKILL.md`: `ensure-run-dir`, `register`, `update`, `worker`,
-`heartbeat`, `attention`, `resolve-attention`, `archive`, `event`) and oneshot
-(`plugins/legacy/skills/oneshot/SKILL.md`: `event`, `worker`, `attention`) — **and** in
-standalone/helper tooling outside the legacy plugin: `setup-orchestrator.sh` (`init`,
-`ensure-run-dir`), `emit-worker-status-change.sh`, `compound-log.sh`, `orchestrate-roll-usage.sh`,
-`orchestrate-status.sh`, and the `orchestrate-*` helper family, with `install-cli.sh` /
-`check-setup.sh` installing and verifying it as the `catalyst-state` CLI. Those two categories are
-what "retains live callers" means here — **execution-core is not one of them**: a search of
-`plugins/dev/scripts/execution-core` finds no `catalyst-state.sh` invocation at all (0 files;
-positive control — the same search over `plugins/legacy` returns 2). Read this paragraph as evidence
-about `catalyst-state.sh`'s **callers**, not as an execution-core dependency.
+removable, because it retains live callers in two places:
+
+1. **The legacy-wave path** — its coordinator `plugins/legacy/skills/orchestrate/SKILL.md`
+   (`ensure-run-dir`, `register`, `update`, `worker`, `heartbeat`, `attention`, `resolve-attention`,
+   `archive`, `event`) together with the `/oneshot` worker it dispatches under
+   `dispatchMode: "oneshot-legacy"` (`plugins/legacy/skills/oneshot/SKILL.md`: `event`, `worker`,
+   `attention`). These are **one path, not two modes**: `oneshot-legacy` is a worker-dispatch
+   strategy the wave coordinator selects, and those `worker`/`attention` calls are the worker half
+   of that same path. (Standalone `/oneshot` as a direct single-ticket lifecycle is documented
+   separately and is not a second orchestration mode.)
+2. **Standalone/helper tooling** outside the legacy plugin — `setup-orchestrator.sh` (`init`,
+   `ensure-run-dir`), `emit-worker-status-change.sh`, `compound-log.sh`, `orchestrate-roll-usage.sh`,
+   `orchestrate-status.sh`, and the `orchestrate-*` helper family, with `install-cli.sh` /
+   `check-setup.sh` installing and verifying it as the `catalyst-state` CLI.
+
+Those two are what "retains live callers" means here — **execution-core is not one of them**: a
+search of `plugins/dev/scripts/execution-core` finds no `catalyst-state.sh` invocation at all
+(0 files; positive control — the same search over `plugins/legacy` returns 2). Read this paragraph as
+evidence about `catalyst-state.sh`'s **callers**, not as an execution-core dependency.
 
 ```
 ~/catalyst/
