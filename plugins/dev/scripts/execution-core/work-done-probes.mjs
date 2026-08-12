@@ -11,6 +11,7 @@
 
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
+import { isTicketKey } from "./ticket-key.mjs";
 import { parseWorktreeForBranch } from "./worktree.mjs";
 
 // MIN_ARTIFACT_BYTES — a small size floor below which an artifact is treated as a
@@ -321,13 +322,67 @@ function implementProbe(
   return true;
 }
 
-// matchesTicket — true when `filename` is a markdown file naming `ticket`. Mirrors
-// the dispatcher's CTL-494 two-step match (strict `*-<ticket-lower>.md` then a
-// wider case-insensitive `*<ticket>*.md`): the strict tail is a subset of the
-// case-insensitive substring, so the substring check is the effective behavior.
+// matchesTicket — true when `filename` is a markdown file naming `ticket` as a
+// WHOLE TOKEN: delimited on the left by start-of-name or a non-alphanumeric
+// separator, and on the right by a non-alphanumeric character (or end).
+//
+// WHY THE BOUNDARIES ARE LOAD-BEARING. The old rule was a bare
+// `lf.includes(ticket)`, and `<worktree>/thoughts/shared` is a SYMLINK into one
+// shared repo — every worktree lists the identical corpus (measured: 695
+// research + 630 plans docs, same realpath from every worktree). Over that live
+// corpus the substring rule let **144 distinct ticket ids match a DIFFERENT
+// ticket's document** (2721 foreign pairs), and 100 of those ids own no document
+// at all. `CTL-56` owns nothing yet matched `2026-05-21-CTL-564.md`,
+// `-CTL-565.md`, `-CTL-567.md` — so `researchProbe`/`planProbe` returned TRUE for
+// CTL-56 off CTL-564's completed work. All three call sites turn that into a
+// wrong conclusion: a false "work is done" (:368), a wrong plan-phase commit
+// gate (:311), and a large forward-progress mark for a ticket with zero progress
+// (:501), which makes the reclaim path revive instead of stop.
+//
+// This is the un-fixed JS twin of an already-solved bash problem: the
+// dispatcher's gate `match_thoughts_artifact` (lib/phase-artifact-gate.sh,
+// CTL-1081) is boundary-safe and states the same goal — "the word-boundary guard
+// rejects cross-ticket lookalikes (e.g. ctl-10812 does NOT satisfy a ctl-1081
+// gate)". The stale comment this replaces claimed to mirror the dispatcher's
+// CTL-494 two-step match; the dispatcher moved to CTL-1081 and this copy never
+// followed.
+//
+// The grammar is the bash gate's, widened only to accept `_` as a left delimiter
+// so the six real `YYYY-MM-DD_ctl-NNNN_slug.md` docs on disk keep matching (the
+// bash gate's `-`-only rule loses them — a pre-existing gap, verified live).
+//
+// Measured against the real corpus: foreign matches 2721 pairs / 144 ids -> 0;
+// legitimate files newly unmatched -> 0. The new rule matches a STRICT SUBSET of
+// what the old one matched (same substring, plus boundaries).
+//
+// What that subset means per call site — it is NOT uniformly "more conservative":
+//   :368 artifactProbe    — fewer matches => fewer "work is done" returns. Strictly safer.
+//   :501 progress mark    — fewer matches => no progress invented for a foreign doc. Safer.
+//   :311 implement's gate — a non-match SKIPS the gate (the probe then returns true
+//        on >=1 commit + clean tree), so dropping a match here removes a gate rather
+//        than tightening one. That is still the right call: the gate being removed was
+//        computing a commit threshold from ANOTHER ticket's plan, whose error direction
+//        is arbitrary (too few phases => premature done; too many => a false "not done"
+//        revive loop). Removing a wrong gate is correct; it is just not "more conservative".
+//
+// The ticket-id shape is validated with the CANONICAL predicate
+// (`ticket-key.mjs` TICKET_KEY_RE, CTL-1504) rather than a local pattern. A
+// narrower private copy here would reject a legitimate team key that carries a
+// digit or underscore (`OPS_2-17`) or a long prefix/number, and a rejected id
+// returns false from every call site above — silently reporting real artifacts as
+// absent. That is the exact defect ticket-key.mjs was created to fix, and
+// re-deriving the grammar here would have reintroduced it as a second un-fixed
+// twin, which is the very failure this function's own history demonstrates.
+// Uppercased before the test because the canonical predicate is uppercase-only
+// while this matcher has always been case-insensitive about its input.
 function matchesTicket(filename, ticket) {
+  if (typeof filename !== "string" || typeof ticket !== "string") return false;
   const lf = filename.toLowerCase();
-  return lf.endsWith(".md") && lf.includes(ticket.toLowerCase());
+  if (!lf.endsWith(".md")) return false;
+  // Reject a malformed ticket id rather than building a garbage regex from it.
+  if (!isTicketKey(ticket.toUpperCase())) return false;
+  const esc = ticket.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^0-9a-z])${esc}(?![0-9a-z])`).test(lf);
 }
 
 // bodyHasMarkers — completeness gate. `anyOf` requires at least one marker

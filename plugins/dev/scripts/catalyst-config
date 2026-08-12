@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# catalyst-config — inspect this host's effective Catalyst configuration (CTL-1793).
+#
+# READ-ONLY. It opens the Layer-1 config, the Layer-2 config, and the daemon's
+# execution-core.env, and prints one row per knob with its value and PROVENANCE
+# (env-override / config / default) plus a content fingerprint. It writes nothing,
+# starts nothing, and is imported by no daemon.
+#
+# Usage: catalyst-config dump [--json]
+#
+# Compare two hosts:
+#   diff <(ssh a catalyst config dump --json) <(ssh b catalyst config dump --json)
+#
+# Reached as `catalyst config ...` through the router's auto-delegation (the
+# `catalyst-<command>` convention) — no curated verb needed in `catalyst`.
+#
+# All logic lives in execution-core/config-dump.mjs; this is the thin POSIX
+# entry-point that resolves the JS runtime and forwards argv (the catalyst-doctor
+# shape).
+set -uo pipefail
+
+# Resolve symlinks before deriving SCRIPT_DIR — install-cli.sh installs this as a
+# symlink in the bin dir (~/.catalyst/bin), so a bare dirname would point there and
+# the execution-core/config-dump.mjs lookup would miss. Normalize each hop against
+# the symlink's own dir so a RELATIVE target resolves too (same idiom as
+# catalyst / catalyst-doctor / catalyst-install).
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L "$_SRC" ]]; do
+	_DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
+	_SRC="$(readlink "$_SRC")"
+	[[ "$_SRC" != /* ]] && _SRC="$_DIR/$_SRC"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
+CONFIG_DUMP_MJS="${CONFIG_DUMP_MJS:-${SCRIPT_DIR}/execution-core/config-dump.mjs}"
+
+usage() {
+	cat <<'EOF'
+catalyst-config — inspect this host's effective Catalyst configuration (read-only).
+
+Usage: catalyst-config <command> [options]
+
+Commands:
+  dump            Per-key value + provenance, layer paths, fingerprint.
+
+Options:
+  --json          machine-readable output (stable key order; diffable)
+  -h, --help      this help
+
+`dump` reports, for every load-bearing knob, its effective value and WHERE that
+value came from (env-override / config / default), plus the resolved Layer-1 and
+Layer-2 paths, the Layer-1 file the DAEMON actually reads (which is not always
+the one doctor grades), and a content fingerprint.
+
+Compare two hosts:
+  diff <(ssh a catalyst config dump --json) <(ssh b catalyst config dump --json)
+EOF
+}
+
+# --help/-h is answered HERE (exit 0, stdout) so it works even without a JS
+# runtime — the cli-help-usage.test.sh contract.
+for arg in "$@"; do
+	case "$arg" in
+	-h | --help)
+		usage
+		exit 0
+		;;
+	esac
+done
+
+# Bare invocation → usage on stderr, non-zero (the same contract).
+if [[ $# -eq 0 ]]; then
+	echo "catalyst-config: a command is required" >&2
+	usage >&2
+	exit 2
+fi
+
+# Resolve a JS runtime (bun preferred, node fallback) — matches sibling .mjs CLIs.
+JS_RUN="$(command -v bun || command -v node || true)"
+
+[[ -n "$JS_RUN" ]] || {
+	echo "catalyst-config: no bun/node runtime found" >&2
+	exit 1
+}
+[[ -f "$CONFIG_DUMP_MJS" ]] || {
+	echo "catalyst-config: missing $CONFIG_DUMP_MJS" >&2
+	exit 1
+}
+
+exec "$JS_RUN" "$CONFIG_DUMP_MJS" "$@"
