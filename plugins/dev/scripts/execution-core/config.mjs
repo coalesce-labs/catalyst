@@ -2577,5 +2577,16 @@ export function readGovernanceSources(env = process.env) {
     readLayer2DeadDocWorker().mode,
     DEAD_DOC_WORKER_MODES,
   );
+  // CAT-82: any non-empty env value owns provenance, including a typo that the
+  // value reader safely degrades to shadow. Operators need to see that their
+  // environment, rather than Layer-2/default, selected the effective mode.
+  const triageProductionEnv = env.CATALYST_BH_TRIAGE_PRODUCTION;
+  out.triageProduction = resolveModeSource(
+    typeof triageProductionEnv === "string" && triageProductionEnv.trim() !== ""
+      ? (BOARD_HEALTH_MODES.has(triageProductionEnv) ? triageProductionEnv : "shadow")
+      : triageProductionEnv,
+    readLayer2BoardHealth().triageProduction,
+    BOARD_HEALTH_MODES
+  );
   return out;
 }

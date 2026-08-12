@@ -1379,7 +1379,7 @@ describe("readDeadDocWorkerConfig (CTL-1245)", () => {
 // suppression now rides on the parked-by-human label (see board-health.test.mjs).
 
 describe("readGovernanceSources — governance-mode layers (CTL-1552)", () => {
-  const MODE_KEYS = ["boardHealth", "recoveryPass", "unstuckSweep", "deadDocWorker"];
+  const MODE_KEYS = ["boardHealth", "recoveryPass", "unstuckSweep", "deadDocWorker", "triageProduction"];
   const LAYERS = new Set(["env-override", "config", "default"]);
 
   test("reports a resolved layer for each governance mode (not just the beliefs flags)", () => {
@@ -1557,6 +1557,17 @@ describe("board-health submode config (CAT-82)", () => {
     process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
     process.env.CATALYST_BH_TRIAGE_PRODUCTION = "enfore";
     expect(readTriageProductionBoardHealthConfig().mode).toBe("shadow");
+  });
+
+  test("triage production governance provenance reports default, env, invalid env, and Layer-2", () => {
+    expect(readGovernanceSources({}).triageProduction).toBe("default");
+    expect(readGovernanceSources({ CATALYST_BH_TRIAGE_PRODUCTION: "enforce" }).triageProduction).toBe("env-override");
+    expect(readGovernanceSources({ CATALYST_BH_TRIAGE_PRODUCTION: "enfore" }).triageProduction).toBe("env-override");
+
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { triageProduction: "off" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readGovernanceSources({}).triageProduction).toBe("config");
   });
 
   test("GitHub quota uses the shared hardened invalid-env precedence", () => {
