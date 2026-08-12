@@ -1,5 +1,70 @@
 # Changelog
 
+## [12.53.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.52.0...catalyst-dev-v12.53.0)
+
+Aug 12, 2026
+
+<!-- ai-enhanced -->
+
+### Daemon Reliability & Pipeline Hardening
+
+Daemon logs are now rotated on restart instead of truncated — the previous run's output is preserved as `daemon.log.1` through `.5` (configurable via `CATALYST_LOG_RETAIN`) so you have evidence when diagnosing a wedge. Two daemon-killing bugs are also fixed: an async `EAGAIN` spawn failure that could take down execution-core, and a zsh `local path` variable that silently emptied `$PATH` and caused phantom `artifact_not_gate_visible` phase failures. Automated merges from linked worktrees no longer fail with `fatal: 'main' is already used by worktree` — the merge now splits into a REST merge and a checkout-free remote ref delete.
+
+
+
+### PRs
+
+* **dev:** CTL-1755 preserve daemon logs across restarts ([#3231](https://github.com/coalesce-labs/catalyst/issues/3231)) ([9acf3c5](https://github.com/coalesce-labs/catalyst/commit/9acf3c5e5a0c3902fe713076cffdea6cec492650))
+* **dev:** CTL-1774 — thread appendDelegateEvent through delegate-first routing seam ([#3280](https://github.com/coalesce-labs/catalyst/issues/3280)) ([4cb5ca0](https://github.com/coalesce-labs/catalyst/commit/4cb5ca0bd26de76cfd1c5b766f7343f4a33977cd))
+* **dev:** CTL-1789 — emit phase.advance.applied and attribute who asserted each terminal ([#3268](https://github.com/coalesce-labs/catalyst/issues/3268)) ([52984b6](https://github.com/coalesce-labs/catalyst/commit/52984b650fadde0b3bf97a2bd18c3b24d388ebd9))
+* **dev:** bound board-health delegate-lands grace ([#3206](https://github.com/coalesce-labs/catalyst/issues/3206)) ([6ec4226](https://github.com/coalesce-labs/catalyst/commit/6ec4226499625e5dd8440ef2e4aadee76ac591b4))
+* **dev:** CTL-1764 handle async spawn 'error' so EAGAIN cannot kill the daemon ([#3230](https://github.com/coalesce-labs/catalyst/issues/3230)) ([3a03870](https://github.com/coalesce-labs/catalyst/commit/3a038701683ae5d832f64a28089b16851fef7f31))
+* **dev:** CTL-1777 — fix write_phase_thoughts_doc under zsh (rename local path vars + static lint) ([#3238](https://github.com/coalesce-labs/catalyst/issues/3238)) ([05a10a5](https://github.com/coalesce-labs/catalyst/commit/05a10a5a844338141d9fa803f2ef8a660a656193))
+* **dev:** CTL-1791 — delete claim.mjs dispatch-claim, the high-water+1 generation the CTL-736 fence forbids ([#3269](https://github.com/coalesce-labs/catalyst/issues/3269)) ([3a9025f](https://github.com/coalesce-labs/catalyst/commit/3a9025ff32cc32dbbffe21cd5861ea82adeec7c5))
+* **dev:** CTL-56 — worktree-safe merge (drop --delete-branch, checkout-free ref cleanup) ([#3277](https://github.com/coalesce-labs/catalyst/issues/3277)) ([f9690b5](https://github.com/coalesce-labs/catalyst/commit/f9690b58dc48a2684810a96aa1b7abb5dcc7dffb))
+
+## [12.52.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.51.0...catalyst-dev-v12.52.0)
+
+Aug 10, 2026
+
+<!-- ai-enhanced -->
+
+### Durable Phase Artifacts & Cross-Host Recovery
+
+Six phase skills now write durable thought docs to the shared repo before emitting complete, enabling `reconstruct-ticket-state.mjs` to rebuild any in-flight ticket's history from scratch on a fresh host. The sync gate rolls out behind `catalyst.phaseArtifactSync.mode` — default `off` is behavior-identical to today; set `shadow` to observe without blocking, or `enforce` to make sync failures fatal. This release also fixes orphaned worker directories that held tickets in-flight indefinitely, corrects `claude-accounts.env` sourcing on bg-executor nodes where it was silently never loading, and resolves a `ps` truncation bug that caused the forwarder identity check to fail on Linux CI.
+
+
+
+### PRs
+
+* **dev:** CAT-31 resolve ticket worktrees before dispatch ([#3141](https://github.com/coalesce-labs/catalyst/issues/3141)) ([5b40163](https://github.com/coalesce-labs/catalyst/commit/5b401630ea4b7abc36e433ef0f40b8be65beba9f))
+* **dev:** CTL-1490 — durable phase artifacts + cross-host ticket-state reconstruction ([#2697](https://github.com/coalesce-labs/catalyst/issues/2697)) ([797dfdc](https://github.com/coalesce-labs/catalyst/commit/797dfdc4e9a3c02c2a3c7dc663a3b472f352ef8a))
+* **dev:** CAT-24 reclaim empty and signal-less worker directories ([#3176](https://github.com/coalesce-labs/catalyst/issues/3176)) ([228fb4f](https://github.com/coalesce-labs/catalyst/commit/228fb4f63d15a927324f3a53cf17dbb2871530bc))
+* **dev:** CAT-90 — source claude-accounts.env unconditionally, not gated on CATALYST_EXECUTOR ([#3186](https://github.com/coalesce-labs/catalyst/issues/3186)) ([27670c7](https://github.com/coalesce-labs/catalyst/commit/27670c729fb9002a88ee63b21649f0673dea7c36))
+* **dev:** confirm SIGKILL reap before returning in forward-stop (CTL-1502) ([#3172](https://github.com/coalesce-labs/catalyst/issues/3172)) ([ec9f51b](https://github.com/coalesce-labs/catalyst/commit/ec9f51b80b1b7ff087fa5b106df2a526c92aa78f))
+* **dev:** CTL-1701 move synthetic test pids above the real-pid ceiling ([#3197](https://github.com/coalesce-labs/catalyst/issues/3197)) ([c051400](https://github.com/coalesce-labs/catalyst/commit/c051400a171c2ab1698f849a3eb56b6865ea99ed))
+* **dev:** unbreak main — stop ps truncating the forwarder identity check ([#3196](https://github.com/coalesce-labs/catalyst/issues/3196)) ([e8ab2e4](https://github.com/coalesce-labs/catalyst/commit/e8ab2e4530f51aca188c1ce9262f58e7a8c9e2e4))
+
+## [12.51.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.50.0...catalyst-dev-v12.51.0)
+
+Aug 10, 2026
+
+<!-- ai-enhanced -->
+
+### Triage Aging PRs & Orphaned Worktree Adoption
+
+A new `triage-aging-prs` skill encodes a proven method for driving a stale PR backlog to zero — including traps around fork CI secrets, ruleset queries, and reviewer signal interpretation that aren't obvious until they've cost you time. Operators also get a new `adopt` command for claiming orphaned worktrees. Several main-branch test and lint failures that were blocking every open PR from reaching a green check set are fixed as well.
+
+
+
+### PRs
+
+* **dev:** add triage-aging-prs skill ([#3173](https://github.com/coalesce-labs/catalyst/issues/3173)) ([0fa37c9](https://github.com/coalesce-labs/catalyst/commit/0fa37c9af7a874be4770fe11484a12bef99f2d98))
+* **dev:** CTL-1642 operator adopt command for orphaned worktrees ([#3175](https://github.com/coalesce-labs/catalyst/issues/3175)) ([8180c80](https://github.com/coalesce-labs/catalyst/commit/8180c8023fe133fc324989a5c5e09d8ae83d5ebd))
+* **dev:** CAT-47 reconcile orphan-stale recovery seams ([#3169](https://github.com/coalesce-labs/catalyst/issues/3169)) ([97d63a4](https://github.com/coalesce-labs/catalyst/commit/97d63a440578ef837824486fc2acbfe3f957082a))
+* **dev:** clear the 7 lint errors red on main in pr-status-backfill ([#3179](https://github.com/coalesce-labs/catalyst/issues/3179)) ([4d43b2e](https://github.com/coalesce-labs/catalyst/commit/4d43b2e577f116e0dec8418604bc3ecb143de770))
+* **dev:** unbreak main — inject the skills-dir seam in the install-profile tests ([#3180](https://github.com/coalesce-labs/catalyst/issues/3180)) ([90a9967](https://github.com/coalesce-labs/catalyst/commit/90a9967b1216751c4744597958f1995e919fac5f))
+
 ## [12.50.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.49.0...catalyst-dev-v12.50.0)
 
 Aug 09, 2026

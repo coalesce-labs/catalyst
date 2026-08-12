@@ -5,7 +5,7 @@ description: |
   Phase 3). Lifts the active listen loop from the legacy `oneshot` Phase 5
   body: event-driven wait on `catalyst-events wait-for`, inline resolution of
   CI fix-ups, bot review threads, and BEHIND rebases, then `gh pr merge
-  --squash --delete-branch` when the PR reaches CLEAN. Linear Done transition
+  --squash` (worktree-safe, CTL-56) when the PR reaches CLEAN. Linear Done transition
   and worktree teardown are owned by phase-teardown (CTL-703). Dispatched as
   a `claude --bg` job by `phase-agent-dispatch`, which invokes it via slash
   command — hence `user-invocable: true`.
@@ -420,7 +420,13 @@ if [[ "$REVIEWER_VERDICT_PRESENT" != true && -n "${HEAD_AGE_SEC:-}" ]]; then
   fi
   echo "phase-monitor-merge: reviewer-arrival window elapsed; proceeding to merge pr#${PR_NUMBER}" >&2
 fi
-gh pr merge "$PR_NUMBER" --squash --delete-branch
+# CTL-56: capture head ref BEFORE merge so we can delete it checkout-free after confirm.
+HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref' 2>/dev/null || true)
+# Merge via REST only (CTL-56: dropping the local branch-cleanup flag avoids the
+# `git checkout <base>` that fails inside a linked worktree when main is checked
+# out in the primary clone). The exit code is now meaningful; REST confirm below
+# is the authoritative success gate.
+gh pr merge "$PR_NUMBER" --squash
 # REST is authoritative — confirm via REST, never GraphQL
 MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
 [[ "$MERGED_OK" = "true" ]] || { echo "phase-monitor-merge: merge not confirmed via REST" >&2; exit 1; }
@@ -453,6 +459,17 @@ jq --arg ts "$MERGED_AT" --arg sha "${MERGE_COMMIT_SHA:-}" \
     | (if $sha != "" then .pr.mergeCommitSha = $sha else . end)
     | .updatedAt = $ts' \
    "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+
+# CTL-56: delete the remote head ref checkout-free, AFTER merge is REST-confirmed and SHA
+# recorded. Idempotent + best-effort: a 404/422 means the ref is already gone or protected;
+# never fail the phase on branch cleanup — the merge already landed.
+if [[ -n "${HEAD_REF:-}" ]]; then
+  # CTL-56: URL-encode the head ref (preserve '/') so a metacharacter like '#' in a branch name
+  # (e.g. feature#123) can't truncate the endpoint into deleting the wrong ref.
+  enc_ref=$(printf '%s' "$HEAD_REF" | jq -sRr @uri | sed 's|%2F|/|g')
+  gh api --method DELETE "repos/${REPO}/git/refs/heads/${enc_ref}" >/dev/null 2>&1 \
+    || echo "CTL-56: remote branch ${HEAD_REF} delete skipped (already gone or protected)" >&2
+fi
 
 # CTL-703: Linear Done is written by phase-teardown (10th phase), not here.
 echo "phase-monitor-merge: pr#${PR_NUMBER} merged at ${MERGED_AT}"
@@ -602,6 +619,14 @@ _... (truncated)_"
     echo "phase-monitor-merge: linear-comment-post failed (continuing)" >&2
   fi
 fi
+```
+
+```bash phase-monitor-merge-thoughts-doc
+# CTL-1490: write durable local thoughts doc (unconditional; push is mode-gated).
+# Reuses MIRROR_BODY already computed in the mirror block above.
+source "${PLUGIN_ROOT}/scripts/lib/write-phase-thoughts-doc.sh"
+write_phase_thoughts_doc "monitor-merge" "$TICKET" "${MIRROR_BODY:-}" || true
+"${PLUGIN_ROOT}/scripts/lib/thoughts-sync-gate.sh" --phase "$PHASE" --ticket "$TICKET" || exit 11
 ```
 
 ```bash

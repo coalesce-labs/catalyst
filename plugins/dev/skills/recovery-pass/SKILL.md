@@ -671,8 +671,16 @@ above), and this worker's allowed tools don't include `Skill`. Do the equivalent
 **Step 3 — Merge** (when the probe returns `mergeStateStatus: "CLEAN"`):
 - Run `gh pr view <n> --json mergeable,mergeStateStatus` to confirm.
 - Run the cluster fence guard: `"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase recovery-pass --ticket <T>`.
-- Merge: `gh pr merge <n> --squash --delete-branch`. **NEVER `--admin` or force-merge past a
-  failing or pending check** — this is the load-bearing safety property (Rubric Two invariant).
+- Merge: capture the head ref first (`gh api repos/<owner/repo>/pulls/<n> --jq '.head.ref'`),
+  then `gh pr merge <n> --squash` (worktree-safe — CTL-56: no local branch-cleanup side effect).
+  **NEVER `--admin` or force-merge past a failing or pending check** — this is the load-bearing
+  safety property (Rubric Two invariant).
+- After REST-confirm (`.merged == true`), delete the remote head ref checkout-free:
+  `gh api --method DELETE repos/<owner/repo>/git/refs/heads/<head_ref>` — but ONLY when the head
+  branch lives in that repo (`.head.repo.full_name == <owner/repo>`). A fork PR's `.head.ref` names
+  a branch in the FORK, so deleting it from the base repo could hit an unrelated same-named branch
+  (CTL-56). URL-encode `<head_ref>` (preserve `/`) first, so a metacharacter like `#` in the branch
+  name can't truncate the endpoint and delete the wrong ref. Idempotent + best-effort.
 
 **Step 4 — Escalate** only when:
 - A human reviewer (not a bot) left `CHANGES_REQUESTED` → escalate with the reviewer's SPECIFIC
@@ -698,13 +706,20 @@ above), and this worker's allowed tools don't include `Skill`. Do the equivalent
 >     This is bounded-LLM engineering, NOT an automatic escalation.
 > - Green PR just sitting there → `gh pr view <n> --json mergeable,mergeStateStatus,reviewDecision`,
 >   then run the cluster fence guard (`"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase
->   recovery-pass --ticket <T>`), then `gh pr merge <n> --squash --delete-branch`. **When the open-PR
->   enumerator printed this PR as `owner/repo#n` (a cross-repo Linear attachment, a DIFFERENT repo than
->   the ticket's), you MUST pass `-R <owner/repo>` on the view AND the merge (`gh pr merge <n> -R
->   <owner/repo> …`)** — a bare `gh pr merge <n>` runs against the ticket's repo and would merge the
->   wrong same-numbered PR (landing unintended code + deleting its branch) while the attached one stays
->   open. Verify the merge via REST (`gh api repos/<owner/repo>/pulls/<n> --jq '.merged'`) —
->   `--delete-branch` exits non-zero from a worktree even when the squash succeeded.
+>   recovery-pass --ticket <T>`), then capture the head ref
+>   (`gh api repos/<owner/repo>/pulls/<n> --jq '.head.ref'`) and
+>   `gh pr merge <n> --squash` (CTL-56: worktree-safe — no local branch-cleanup side effect). **When
+>   the open-PR enumerator printed this PR as `owner/repo#n` (a cross-repo Linear attachment, a
+>   DIFFERENT repo than the ticket's), you MUST pass `-R <owner/repo>` on the view AND the merge
+>   (`gh pr merge <n> -R <owner/repo> …`)** — a bare `gh pr merge <n>` runs against the ticket's
+>   repo and would merge the wrong same-numbered PR while the attached one stays open. Verify via REST
+>   (`gh api repos/<owner/repo>/pulls/<n> --jq '.merged'`), then delete the remote head ref
+>   checkout-free: `gh api --method DELETE repos/<owner/repo>/git/refs/heads/<head_ref>` against the
+>   same `<owner/repo>` — but ONLY when the head branch lives in that repo
+>   (`.head.repo.full_name == <owner/repo>`); a fork PR's `.head.ref` lives in the fork, so deleting
+>   it from the base repo could hit an unrelated same-named branch (CTL-56). URL-encode `<head_ref>`
+>   (preserve `/`) first so a metacharacter like `#` can't truncate the endpoint. Idempotent +
+>   best-effort — a 404/422 means already gone or protected.
 > - Red CI with a deterministic cause (type error, lint, a flaky test) → fix it, push, re-check
 >   (bounded by the attempts cap of 2 — after honest attempts that still fail on a *genuine design
 >   incompatibility*, it becomes an escalation, below).
@@ -853,11 +868,17 @@ then declare Done autonomously via `declare --by recovery-pass`, which now just 
 - **CI failure after rebase/push** → `gh run view --log-failed`, fix the root
   cause (type error / lint / test), commit, push to re-trigger.
 - **A green PR just sitting there** → verify it is CLEAN
-  (`gh pr view <n> --json mergeable,mergeStateStatus,reviewDecision`), then
-  `gh pr merge <n> --squash --delete-branch`. **For a cross-repo PR the enumerator
-  printed as `owner/repo#n`, pass `-R <owner/repo>` on both** (`gh pr merge <n> -R
-  <owner/repo> …`) — a bare merge targets the ticket's repo and would land the wrong
-  same-numbered PR while the attached one stays open.
+  (`gh pr view <n> --json mergeable,mergeStateStatus,reviewDecision`), capture the head ref
+  (`gh api repos/<owner/repo>/pulls/<n> --jq '.head.ref'`), then `gh pr merge <n> --squash`
+  (CTL-56: worktree-safe). **For a cross-repo PR the enumerator printed as `owner/repo#n`,
+  pass `-R <owner/repo>` on both** (`gh pr merge <n> -R <owner/repo> …`) — a bare merge
+  targets the ticket's repo and would land the wrong same-numbered PR while the attached one
+  stays open. After REST-confirm, delete the remote head ref checkout-free:
+  `gh api --method DELETE repos/<owner/repo>/git/refs/heads/<head_ref>` — but ONLY when the head
+  branch lives in that repo (`.head.repo.full_name == <owner/repo>`); a fork PR's head ref lives in
+  the fork, so deleting it from the base repo could hit an unrelated same-named branch (CTL-56).
+  URL-encode `<head_ref>` (preserve `/`) first so a metacharacter like `#` can't truncate the
+  endpoint and delete the wrong ref. Idempotent + best-effort.
 
 > **NEVER `--admin` / force-merge past a failing or pending check.** You may merge
 > a PR ONLY when its required checks are genuinely GREEN (`gh pr checks <n>` all
@@ -871,8 +892,10 @@ then declare Done autonomously via `declare --by recovery-pass`, which now just 
 > Bringing the branch to green is the job; overriding the gate never is.
 
 - **A stalled phase that died mid-flight** → re-dispatch it
-  (`phase-agent-dispatch --phase <phase> --ticket <T> --orch-dir <ORCH_DIR>`),
+  (`phase-agent-dispatch --phase <phase> --ticket <T> --orch-dir <ORCH_DIR> --worktree ~/catalyst/wt/<project>/<T>`),
   or re-arm its signal (failed→pending) and wake the scheduler.
+  CAT-31 makes dispatch resolve the ticket worktree itself, but pass `--worktree`
+  when it is known so multi-ticket sweeps state the target unambiguously.
 - **bun install / cannot find package** → `bun install` in the affected package,
   retry.
 - **TypeScript / lint error** → fix it (`/catalyst-dev:validate-type-safety`

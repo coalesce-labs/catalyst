@@ -69,6 +69,7 @@ import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
 import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
+import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
 
 // phase-agent-dispatch + phase-agent-emit-complete sit one directory up.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(
@@ -451,6 +452,8 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
     const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     sig.status = status;
     sig.attentionReason = reason || "sdk-backstop";
+    // CTL-1789: record WHO asserted this terminal. Infrastructure, not the agent.
+    sig.assertedBy = ASSERTED_BY.SDK_BACKSTOP;
     sig.updatedAt = ts;
     sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), [status]: ts };
     const tmp = `${signalFile}.tmp.${process.pid}`;
@@ -531,6 +534,11 @@ export function flipSignalDoneOnSuccess(signalFile, generation) {
     }
     const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     sig.status = "done";
+    // CTL-1789: this flip fires on a CLEAN SDK EXIT, not on an agent declaring
+    // completion — the agent never ran its wrapper (if it had, `status` would
+    // already be terminal and the in-flight precondition above would have
+    // returned). Stamp it FABRICATED so the advancement audit can subtract it.
+    sig.assertedBy = ASSERTED_BY.SDK_SUCCESS_FLIP;
     sig.completedAt = ts;
     sig.updatedAt = ts;
     sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), done: ts };
@@ -679,6 +687,7 @@ export function runPrelaunch(
     "--orch-id", ticket,
     "--launch-mode", "prelaunch-only",
   ];
+  if (worktreePath) args.push("--worktree", worktreePath);
   if (resumeSession) args.push("--resume-session", resumeSession);
   if (attempt != null) args.push("--attempt", String(attempt));
   const extraEnv = {};

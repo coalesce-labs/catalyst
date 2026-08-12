@@ -61,8 +61,11 @@ export const KNOWN_PHASES = Object.freeze([
 //     do NOT match PHASE_EVENT_PATTERN's (complete|failed|…) set, so they create
 //     no routing collisions. Listed here for completeness.
 //   "advance" — recovery.mjs emits `phase.advance.held.<ticket>` when the
-//     phase-advance step is blocked by a safety gate. Same as "scheduler": the
-//     action "held" does not match PHASE_EVENT_PATTERN's routing suffixes.
+//     phase-advance step is blocked by a safety gate, and (CTL-1789)
+//     `phase.advance.applied.<ticket>` when it performs one. Same as
+//     "scheduler": neither action ("held", "applied") matches
+//     PHASE_EVENT_PATTERN's routing suffixes, so tryPhaseLifecycleRoute returns
+//     [] for both — zero routing/wake side effect.
 export const INTENTIONAL_PHASE_SLOT_EXCEPTIONS = Object.freeze([
   "dispatch",
   "scheduler",
