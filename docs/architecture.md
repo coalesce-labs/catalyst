@@ -46,14 +46,19 @@ per-orchestrator local state in worktrees stays the source of truth for crash re
 **Liveness (audited CTL-1791, 2026-08-11).** `state.json` is written by the **legacy-wave** path
 only; the execution-core daemon writes none of it, so on an execution-core host the file is
 routinely **absent** (measured: no `~/catalyst/state.json`, `catalyst.db.orchestrators` = 0 rows).
-Absence is therefore not evidence the machinery is dead. `catalyst-state.sh` retains live callers on
-both paths and is **not** removable: `plugins/legacy/skills/orchestrate/SKILL.md` (`ensure-run-dir`,
-`register`, `update`, `worker`, `heartbeat`, `attention`, `resolve-attention`, `archive`, `event`)
-and `plugins/legacy/skills/oneshot/SKILL.md` (`event`, `worker`, `attention`) — the documented
-runtime fallback — plus, outside the legacy plugin, `setup-orchestrator.sh` (`init`,
+Absence is therefore not evidence the machinery is dead. `catalyst-state.sh` is nonetheless **not**
+removable, because it retains live callers in the two **legacy fallback modes** — wave-orchestration
+(`plugins/legacy/skills/orchestrate/SKILL.md`: `ensure-run-dir`, `register`, `update`, `worker`,
+`heartbeat`, `attention`, `resolve-attention`, `archive`, `event`) and oneshot
+(`plugins/legacy/skills/oneshot/SKILL.md`: `event`, `worker`, `attention`) — **and** in
+standalone/helper tooling outside the legacy plugin: `setup-orchestrator.sh` (`init`,
 `ensure-run-dir`), `emit-worker-status-change.sh`, `compound-log.sh`, `orchestrate-roll-usage.sh`,
 `orchestrate-status.sh`, and the `orchestrate-*` helper family, with `install-cli.sh` /
-`check-setup.sh` installing and verifying it as the `catalyst-state` CLI.
+`check-setup.sh` installing and verifying it as the `catalyst-state` CLI. Those two categories are
+what "retains live callers" means here — **execution-core is not one of them**: a search of
+`plugins/dev/scripts/execution-core` finds no `catalyst-state.sh` invocation at all (0 files;
+positive control — the same search over `plugins/legacy` returns 2). Read this paragraph as evidence
+about `catalyst-state.sh`'s **callers**, not as an execution-core dependency.
 
 ```
 ~/catalyst/
