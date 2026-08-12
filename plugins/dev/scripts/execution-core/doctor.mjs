@@ -5190,10 +5190,15 @@ export function checkSkillsDirPlugins(deps = {}) {
 
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
-// HOST_STATE_SEAMS — CAT-135. A check that inspects host state outside the
-// repository ships an injectable rubric seam. runDoctor forwards opts opaquely,
-// so the guard test verifies by function-reference identity that every seam is
-// actually honored. Add an entry here with every new host-state rubric check.
+// HOST_STATE_SEAMS — CAT-135. The registry of whole-check ("Altitude B") seams:
+// rubric checks a test can replace outright, rather than by injecting their
+// individual default* parameters. It is not an inventory of every check that
+// touches host state — many read it through already-injectable default* helpers.
+//
+// runDoctor forwards opts opaquely, so an unregistered or misspelled seam is a
+// silent no-op. The guard below verifies registered seams by function identity;
+// doctor-host-state-registry.test.mjs (CAT-179) accounts for checks that call
+// homedir() directly through either this registry or an explicit allowlist.
 export const HOST_STATE_SEAMS = Object.freeze([
   // Reads the user-scope ~/.claude plugin and skills tree.
   Object.freeze({

@@ -699,6 +699,7 @@ jobs:
             cloud-sync-log.test.mjs \
             dispatch.test.mjs \
             doctor.test.mjs \
+            doctor-host-state-registry.test.mjs \
             doctor-replica.test.mjs \
             __tests__/replica-health.test.mjs \
             __tests__/replica-health-event.test.mjs \
