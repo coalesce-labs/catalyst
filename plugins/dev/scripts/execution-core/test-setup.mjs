@@ -57,10 +57,26 @@ process.env.CATALYST_HERMETIC_DIR = hermeticDir;
 // way it handles CATALYST_DIR's hermetic pin.
 process.env.CATALYST_LAYER2_CONFIG_FILE = join(hermeticDir, "layer2-config-absent.json");
 
-// CAT-135 deferral: do not globally pin HOME/CLAUDE_CONFIG_DIR yet. An empty
-// HOME produced 26 failures across CI's explicit execution-core file list on
-// macOS (none in doctor.test.mjs). Doctor rubric host-state probes instead use
-// the enforced HOST_STATE_SEAMS registry until that broader surface is handled.
+// CAT-135 deferral: HOME / CLAUDE_CONFIG_DIR are deliberately not pinned here.
+//
+// Observed during CAT-135 review (macOS, host sophon, CI's explicit
+// execution-core file list): the list failed 30 tests under the real HOME and
+// 26 under an empty HOME — the 26 a strict subset of the 30, none in
+// doctor.test.mjs. An empty HOME therefore did not cause those failures; it is
+// simply a state in which a pre-existing failure set persists. This
+// host-specific observation has not been re-measured.
+//
+// CAT-179: a HOME pin here would not do what it sounds like. This preload is an
+// in-process mutation, and under bun 1.3.14 an in-process process.env.HOME
+// change does not move os.homedir() or reach child processes unless env is
+// passed explicitly; node behaves oppositely on both counts. doctor.mjs calls
+// homedir() at 20 sites and reads process.env.HOME at zero, so host-state
+// hermeticity for its rubric comes from HOST_STATE_SEAMS and injectable
+// default* parameters, not an env pin.
+//
+// CLAUDE_CONFIG_DIR is different: claudeConfigDir() reads it through
+// process.env, so pinning it here would take effect. Doing so independently is
+// untaken scope, not a considered rejection.
 
 // Belt: a real linearis reached despite the shim writes nothing without creds.
 delete process.env.LINEAR_API_TOKEN;
