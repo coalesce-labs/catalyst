@@ -1340,6 +1340,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
     backfillTeam: (teamKey: string) => Promise<void>;
   }> | null = null;
   const backfilledTeams = new Set<string>();
+  // CATALYST_WEBHOOK_REPLICA_WRITER_DISABLED=1 — kill switch for cutting this
+  // node over to Catalyst Cloud's cloud-sync.mjs as the replica's sole writer.
+  // ADR-0008 is single-writer/many-reader; running both writers against the
+  // same catalyst-replica.db races the writer lock (whichever claims first
+  // wins, the other's writes silently no-op via the fail-open catch below).
+  function webhookReplicaWriterDisabled(): boolean {
+    return process.env.CATALYST_WEBHOOK_REPLICA_WRITER_DISABLED === "1";
+  }
   function loadWebhookReplicaWriter() {
     if (!webhookReplicaWriterPromise) {
       webhookReplicaWriterPromise = (async () => {
@@ -1406,7 +1414,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // CAT-152: feed the webhook-fed catalyst-replica.db writer. Fail-open —
         // a replica-write failure must never break the webhook response, same
         // contract as every other replica-tier seam in this codebase.
-        if (event.kind === "issue" || event.kind === "comment") {
+        if ((event.kind === "issue" || event.kind === "comment") && !webhookReplicaWriterDisabled()) {
           try {
             const writer = await loadWebhookReplicaWriter();
             if (event.kind === "issue" && event.teamKey !== null && !backfilledTeams.has(event.teamKey)) {
