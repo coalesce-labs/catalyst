@@ -33,6 +33,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventEmitter } from "node:events"; // CTL-1764: authentic unhandled-'error' semantics
 import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
 import { drainOnce, resolveEffectiveDelegateExecutor } from "./delegate-runner-entry.mjs";
 import { DELEGATE_QUEUE_DIR, claimIntent } from "./delegate-queue.mjs";
@@ -674,6 +675,48 @@ function makeSpawnSpy() {
 }
 
 describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
+  // CTL-1764 REGRESSION GUARD.
+  //
+  // A spawn FAILURE (EAGAIN/EMFILE/ENOMEM) is not a synchronous throw — Node
+  // reports it by emitting 'error' on the returned child, asynchronously. So the
+  // kick's `try { spawn } finally { closeLogFd }` and even the outer try/catch
+  // are both blind to it: an unhandled 'error' on an EventEmitter is re-raised as
+  // a top-level uncaughtException. That is exactly how a transient EAGAIN killed
+  // the execution-core daemon twice in 18 minutes on 2026-08-11, at a call site
+  // whose own comment claimed to handle "EAGAIN/EMFILE".
+  //
+  // Uses a REAL EventEmitter as the child so the semantics are authentic rather
+  // than mocked: with no listener attached, .emit("error") throws.
+  test("CTL-1764: an async spawn 'error' (EAGAIN) is handled, never re-raised", () => {
+    const clock = fakeClock();
+    let child = null;
+    const spawn = () => {
+      child = new EventEmitter();
+      child.unref = () => {};
+      return child;
+    };
+    startDelegateRunnerTimer({
+      enabled: true,
+      intervalMs: 15000,
+      orchDir,
+      entryPath: "/fake/delegate-runner-entry.mjs",
+      spawn,
+      clock,
+      isRunnerRunning: () => false,
+    });
+    clock.advance(15000);
+    expect(child).not.toBeNull();
+
+    const eagain = Object.assign(
+      new Error("EAGAIN: resource temporarily unavailable, posix_spawn '/path/to/bun'"),
+      { code: "EAGAIN", errno: -35, syscall: "spawn" }
+    );
+    // Pre-fix this THROWS (unhandled 'error' → uncaughtException → daemon exits).
+    expect(() => child.emit("error", eagain)).not.toThrow();
+    // And the timer survives: the next interval still kicks (best-effort retry).
+    expect(() => clock.advance(15000)).not.toThrow();
+  });
+
   test("each interval kicks the entry via spawn(process.execPath, [entry], {detached}).unref()", () => {
     const clock = fakeClock();
     const spy = makeSpawnSpy();

@@ -59,6 +59,8 @@ const INLINE_EVENT_NAMES = [
   "monitor.triage_state.missing.team", // triage-state-health-event.mjs (CAT-140)
   "monitor.triage_state.recovered.team", // triage-state-health-event.mjs (CAT-140)
   "phase.triage.linear-transition.CTL-1", // triage-transition-event.mjs:53
+  "phase.advance.held.CTL-1",         // CTL-755 recovery.mjs defaultAppendPhaseAdvanceHeldEvent
+  "phase.advance.applied.CTL-1",      // CTL-1789 recovery.mjs defaultAppendPhaseAdvanceAppliedEvent
   "linear.state.write.CTL-1",         // linear-state-write-event.mjs:77
   "agent.waiting_on_user",            // wait-event.mjs:buildWaitEnvelope
   "agent.resumed",                    // wait-event.mjs:buildWaitEnvelope
@@ -161,6 +163,29 @@ describe("recovery.mjs dynamic phase-slot producers", () => {
     expect(isAllowedPhaseSlot("dispatch")).toBe(true);
     // "dispatch" is NOT a canonical pipeline phase
     expect(KNOWN_PHASES.includes("dispatch")).toBe(false);
+  });
+
+  // CTL-1789: the new applied-advance event joins phase.advance.held in the
+  // "advance" exception slot. The load-bearing property is that its ACTION
+  // ("applied") stays OUT of PHASE_EVENT_PATTERN's routing suffix set — if a
+  // future edit added it there, router.mjs's tryPhaseLifecycleRoute would start
+  // waking orchestrator sessions on every phase advance (a wake storm at ~9
+  // events/ticket) and the event would stop being pure audit.
+  test("CTL-1789: phase.advance.applied is allowed but creates NO routing match", () => {
+    const appliedName = "phase.advance.applied.CTL-1";
+    const heldName = "phase.advance.held.CTL-1";
+    for (const name of [appliedName, heldName]) {
+      // Not broker-protected → shouldSkipEvent ingests it normally.
+      expect(isBrokerProtectedName(name), `${name} must not be broker-protected`).toBe(false);
+      // Not in the routing namespace → tryPhaseLifecycleRoute returns [].
+      expect(PHASE_EVENT_PATTERN.test(name), `${name} must not match the routing pattern`).toBe(
+        false
+      );
+      expect(phaseSlotOf(name), `${name} must not resolve to a routable phase slot`).toBeNull();
+    }
+    // The slot itself is a documented exception (used by both actions).
+    expect(isAllowedPhaseSlot("advance")).toBe(true);
+    expect(KNOWN_PHASES.includes("advance")).toBe(false);
   });
 });
 

@@ -30,16 +30,21 @@ _cv_read_trim() {
 # Resolve the real (symlink-followed) path of $1. Uses readlink -f when
 # available, falls back to a portable loop.
 _cv_real_path() {
-  local path="$1"
-  if [[ -z "$path" ]]; then return 0; fi
+  # NB: the local is named real_path_arg, NOT path. Under zsh, `path` is a
+  # special array tied to $PATH; `local path` scopes it locally and resets it
+  # to empty, making `readlink` and related utilities unresolvable for the rest
+  # of the function. Bash treats `path` as ordinary. CTL-1777; see also
+  # linear-team-keys.sh:22-27 for the prior fix in the same class.
+  local real_path_arg="$1"
+  if [[ -z "$real_path_arg" ]]; then return 0; fi
   # readlink -f works on Linux + macOS GNU coreutils; macOS BSD readlink does
   # not. Try GNU first, then fall back.
   local resolved
-  resolved=$(readlink -f "$path" 2>/dev/null) && [[ -n "$resolved" ]] && {
+  resolved=$(readlink -f "$real_path_arg" 2>/dev/null) && [[ -n "$resolved" ]] && {
     printf '%s' "$resolved"; return 0;
   }
   # Portable fallback — walk symlinks manually.
-  local p="$path" dir
+  local p="$real_path_arg" dir
   while [[ -L "$p" ]]; do
     dir=$(cd -P "$(dirname "$p")" 2>/dev/null && pwd) || break
     p=$(readlink "$p" 2>/dev/null) || break
@@ -49,10 +54,10 @@ _cv_real_path() {
     esac
   done
   if [[ -e "$p" ]]; then
-    dir=$(cd -P "$(dirname "$p")" 2>/dev/null && pwd) || { printf '%s' "$path"; return 0; }
+    dir=$(cd -P "$(dirname "$p")" 2>/dev/null && pwd) || { printf '%s' "$real_path_arg"; return 0; }
     printf '%s/%s' "$dir" "$(basename "$p")"
   else
-    printf '%s' "$path"
+    printf '%s' "$real_path_arg"
   fi
 }
 
