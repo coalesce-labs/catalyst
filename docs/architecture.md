@@ -852,7 +852,7 @@ a revive, a resume, and a new-work pull).
   never advance-eligible (`deriveAdvancement` gates on `done`, or `skipped` for `monitor-deploy`
   only), so they can never be the `from` signal of an applied advance.
 
-### Clean exit without a declaration is a FAILURE, not a success (CTL-1790)
+### A clean exit declares nothing — the terminal is decided by EVIDENCE (CTL-1790)
 
 CTL-1789 made the fabricated terminal *visible*; CTL-1790 stops producing it. `mapResult` returns
 `backstop:null` **only** for `subtype === "success"`, so `flipSignalDoneOnSuccess`
@@ -863,31 +863,72 @@ completion". It used to write `status: "done"` there. That is the CTL-1778 root 
 `done`, the pipeline advanced, and PR #3238 was never merged — with `fatals:0`, `gate:0`, and every
 health signal green.
 
-- **Inverted, not deleted.** The handler now writes a terminal **`failed`** with reason
-  `ended-without-declaration` (via `defaultWriteSignalTerminal`) and appends the matching canonical
-  `phase.<phase>.failed.<ticket>` event (via `defaultAppendEventLog`). Deleting it instead — the
-  intuitive fix — wedges the node: the signal stays `running`, so `isTicketInFlight` stays true,
-  `classifyWorker` returns `unknown` (never `dead`) for an SDK signal that carries no `bg_job_id`,
-  the CTL-574 reclaim never fires, and `countSdkInflight` counts the signal with **no clock and no
-  age gate** — at `maxParallel: 6`, six such exits occupy every slot permanently and silently,
-  unrecoverable without a human `rm`. Writing a TERMINAL status is what releases the slot; making
-  that terminal a FAILURE is what stops the lie. Both are required.
+**An unconditional inversion to `failed` is the opposite lie, and it was measured.** Replaying
+mini's `2026-08` event log (Aug 1 → Aug 11) over the 543 `execution-core.sdk.phase-turns`
+`subtype:"success"` exits — one per invocation of this handler — finds **95** where no phase
+terminal event was ever declared, i.e. 95 real firings. They are not one population: 33
+`monitor-merge` firings had their PR merged only LATER (the CTL-1778 shape), but CTL-1777's and
+CTL-1755's `research` each left a complete research doc on disk **41 s and 37 s before** the exit,
+and CTL-1777 went on to ship PR #3238 that evening. A blanket `failed` halts those pipelines at
+`research` and needs-humans a ticket whose work is sitting right there.
+
+- **Gated, not unconditional.** The handler consults the phase's own registered work-done probe
+  (`WORK_DONE_PROBES` — the same evidence the CTL-574 reclaim already trusts) via the three-valued
+  `probeWorkDone`, and only positive evidence authorizes the positive terminal:
+
+  | probe verdict | terminal | reason | `assertedBy` |
+  | --- | --- | --- | --- |
+  | `TRUE` | `done` | *(none — a reason key on a success is what the sweeps read as trouble)* | `recovery-reclaim` |
+  | `FALSE` | `failed` | `ended-without-declaration:work-absent` | `sdk-backstop` |
+  | `UNKNOWN` | `failed` | `ended-without-declaration:evidence-unavailable` | `sdk-backstop` |
+
+  This is the standing rule, not a new exception: residue may never be the AUTHORITY for a positive
+  state change, but it IS admissible for WITHHOLDING one and for IDEMPOTENCY. The exit code is
+  residue and authorizes nothing; the probe is a direct read of the artifact the phase exists to
+  produce. `UNKNOWN` fails **closed** — an un-evidenced positive is the failure mode this ticket
+  exists to remove — and the two absences stay **distinguishable** (distinct reason suffixes plus a
+  `workDoneProbe: {verdict, reason, checked}` record on the signal), because "we checked and the
+  work is absent" and "we could not check" demand different follow-ups.
+- **Inverted, not deleted.** Deleting the handler instead — the intuitive fix — wedges the node: the
+  signal stays `running`, so `isTicketInFlight` stays true, `classifyWorker` returns `unknown`
+  (never `dead`) for an SDK signal that carries no `bg_job_id`, the CTL-574 reclaim never fires, and
+  `countSdkInflight` counts the signal with **no clock and no age gate** — at `maxParallel: 6`, six
+  such exits occupy every slot permanently and silently, unrecoverable without a human `rm`. Writing
+  a TERMINAL status is what releases the slot; deciding WHICH terminal from evidence is what stops
+  the lie. Both are required.
 - **Preserved verbatim**: the in-flight-only precondition (a skill that DID declare has already
   written a terminal, so the handler is a no-op for it; a `needs-input` park stays parked), the
   CTL-736 generation fence (a superseded gen-N worker writes no outcome for gen-N+1 — and therefore
-  deliberately does **not** release the slot), and both call sites.
-- **Retry vs escalate is a named, frozen table** (`ENDED_WITHOUT_DECLARATION_POLICY`), not an inline
-  conditional, because it encodes a judgement about side effects. `research`/`plan`/`implement`/
-  `verify`/`review` → the reason lands on **`.attentionReason`** → revive Loop 2 **retries**.
-  `pr`/`monitor-merge`/`teardown` → **`.failureReason`** → revive **escalates, no retry**: re-running
-  `gh pr merge` against an already-merged PR is a non-idempotent external mutation, re-running
-  research is not. An unlisted/unknown/absent phase fails **closed** to escalate — a wrong escalation
-  is a visible human ping, a wrong retry is a silent double-mutation. `defaultWriteSignalTerminal`
-  takes an optional `{ reasonField }` (default `attentionReason`, so every pre-existing caller is
-  byte-identical) and writes exactly one reason key, never both.
+  deliberately does **not** release the slot), both call sites, and the function's own name/arity.
+- **Retry-vs-escalate is NOT expressible at this layer, so no table pretends otherwise.** An earlier
+  cut carried a frozen per-phase `ENDED_WITHOUT_DECLARATION_POLICY` routing "build" phases to
+  `.attentionReason` (claimed: revive retries) and side-effecting phases to `.failureReason`
+  (claimed: revive escalates). That table was **dead code in both dispatch modes** and has been
+  deleted rather than left looking like policy: `orchestrate-revive` Loop 2 gates its per-phase body
+  on `case "$P_STATUS" in stalled|turn-cap-exhausted) ;; *) continue ;; esac`, so a `failed` signal
+  never enters the loop and neither the escalate branch nor the fresh-stall redispatch is reachable;
+  and under execution-core the escalation sweep tests `(anyStalled || anyFailed) && !pipelineDone` —
+  `stalled` and `failed` land in the SAME branch — while `stallReasonOf` reads
+  `signal?.failureReason ?? signal?.attentionReason`, so the key choice changes no routing decision
+  either. What DOES have a mechanical consequence, and is therefore kept, is that the reason rides
+  **`.failureReason`**: that is the field `recovery-reasoning.mjs` actually reads
+  (`checkDeterministicErrors`, the signal-pattern match, and the "Failure reason:" line in the
+  operator brief). WHO retries a phase, and whether, belongs to the recovery/escalation layer that
+  owns attempt budgets. `defaultWriteSignalTerminal` grew `{ reasonField, assertedBy, extraFields }`,
+  all defaulting to the pre-CTL-1790 behavior so every existing 3-arg caller is byte-identical, and
+  writes exactly one reason key — or none, for a success.
 - **Downstream**: under execution-core a `failed` phase signal drops out of `isTicketInFlight`
   (slot released) and is swept by the recovery/escalation path — the ticket surfaces instead of the
-  pipeline silently advancing past work that never happened.
+  pipeline silently advancing past work that never happened. An evidenced `done` advances exactly as
+  the fabricated one did, so the CTL-1777/CTL-1755 class is unaffected.
+- **Known gap — phases with no registered probe.** `teardown` and `recovery-pass` have no
+  `WORK_DONE_PROBES` entry, so their clean-exit-without-declaration always reads `UNKNOWN` and fails
+  closed (measured: 15 of the 95 firings, ~1.5/day). These do **not** escalate: the CTL-1242
+  `isTicketTerminalOrMerged` guard in the scheduler's escalation sweep clears the marker for a
+  merged/terminal ticket instead of applying `needs-human`. The residual cost is one cheap-first
+  terminal probe per tick per such ticket until `stampEscalationProbeCooldown` arms. Registering a
+  `teardown` probe is deliberately deferred — `WORK_DONE_PROBES` is also the CTL-574 reclaim's
+  registry, so adding an entry changes reclaim behavior beyond this ticket's blast radius.
 
 **Enforcement surfaces:**
 
