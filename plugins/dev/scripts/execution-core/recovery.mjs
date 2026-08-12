@@ -622,8 +622,27 @@ export function defaultAppendFenceSuppressedEvent({
   });
 }
 
+export const DEFAULT_FENCE_SUPPRESSED_EMIT_WINDOW_MS = 15 * 60_000;
+
+function fenceSuppressedEmitWindowMs() {
+  const configured = Number(process.env.CATALYST_FENCE_SUPPRESSED_EMIT_WINDOW_MS);
+  return Number.isFinite(configured) && configured >= 0
+    ? configured
+    : DEFAULT_FENCE_SUPPRESSED_EMIT_WINDOW_MS;
+}
+
+function inFenceSuppressedEmitWindow(markerPath, now, windowMs = fenceSuppressedEmitWindowMs()) {
+  try {
+    const emittedAt = Number(JSON.parse(readFileSync(markerPath, "utf8"))?.emittedAt);
+    return Number.isFinite(emittedAt) && now - emittedAt < windowMs;
+  } catch {
+    return false;
+  }
+}
+
 // Keep observability-only markers outside workers/: an empty workers/<ticket>
 // directory is interpreted as started work until the orphan grace expires.
+// Markers are windowed so a resolved suppression can be observed if it recurs.
 export function emitFenceSuppressedEventOnce(
   orchDir,
   ticket,
@@ -632,7 +651,9 @@ export function emitFenceSuppressedEventOnce(
   appendFenceSuppressedEvent = defaultAppendFenceSuppressedEvent
 ) {
   const marker = join(orchDir, ".fence-suppressed-emits", `${ticket}-${site}.applied`);
-  if (existsSync(marker) || typeof appendFenceSuppressedEvent !== "function") return;
+  if (typeof appendFenceSuppressedEvent !== "function") return;
+  const now = Date.now();
+  if (inFenceSuppressedEmitWindow(marker, now)) return;
   const ok = appendFenceSuppressedEvent({
     ticket,
     site,
@@ -641,8 +662,29 @@ export function emitFenceSuppressedEventOnce(
   });
   if (ok !== false) {
     mkdirSync(dirname(marker), { recursive: true });
-    writeFileSync(marker, "");
+    writeFileSync(marker, JSON.stringify({ ticket, site, emittedAt: now }));
   }
+}
+
+export function gcFenceSuppressedEmits(
+  orchDir,
+  now,
+  windowMs = fenceSuppressedEmitWindowMs()
+) {
+  const dir = join(orchDir, ".fence-suppressed-emits");
+  let reaped = 0;
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".applied")) continue;
+      const marker = join(dir, entry.name);
+      if (inFenceSuppressedEmitWindow(marker, now, windowMs)) continue;
+      rmSync(marker, { force: true });
+      reaped += 1;
+    }
+  } catch {
+    return reaped;
+  }
+  return reaped;
 }
 
 // ─── CTL-932: turn-zero gate primitives ─────────────────────────────────────

@@ -521,8 +521,11 @@ export function startStalePrRescueTimer({
   // (which already owns concurrency); importing readMaxParallel here would pull
   // scheduler.mjs's bun:sqlite graph into this timer. undefined → prior behavior.
   maxParallel = undefined,
+  // CAT-219: gateway is deliberately latent in production. `self` is load-bearing:
+  // it identifies self-owned projection rows and is the host dimension of emitted events.
   gateway = undefined,
   self = getHostName(),
+  appendFenceSuppressedEvent = defaultAppendFenceSuppressedEvent,
   // injectable seams
   jobLifecycle: jobLifecycleFn = jobLifecycle,
   prView = defaultPrView,
@@ -559,6 +562,7 @@ export function startStalePrRescueTimer({
         maxParallel,
         gateway,
         self,
+        appendFenceSuppressedEvent,
         jobLifecycleFn,
         prView,
         compareBehind,
@@ -587,6 +591,7 @@ async function runTick({
   maxParallel,
   gateway,
   self,
+  appendFenceSuppressedEvent,
   jobLifecycleFn,
   prView,
   compareBehind,
@@ -618,6 +623,7 @@ async function runTick({
         maxParallel,
         gateway,
         self,
+        appendFenceSuppressedEvent,
         nowMs,
         jobLifecycleFn,
         prView,
@@ -644,6 +650,7 @@ async function processTicket({
   maxParallel,
   gateway,
   self,
+  appendFenceSuppressedEvent,
   nowMs,
   jobLifecycleFn,
   prView,
@@ -716,6 +723,7 @@ async function processTicket({
         gateway,
         self,
         now: () => nowMs,
+        appendFenceSuppressedEvent,
       }
     );
     // CTL-1609 (Codex P1): latch escalatedAt ONLY on a confirmed label write.
@@ -863,6 +871,7 @@ async function processTicket({
         now: () => nowMs,
         gateway,
         self,
+        appendFenceSuppressedEvent,
       });
       // CTL-1609 (Codex P1): see recordEscalationOutcome — escalatedAt is a
       // permanent skip in decideRescue, so it is written only when the needs-human

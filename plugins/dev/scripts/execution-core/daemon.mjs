@@ -2032,6 +2032,9 @@ function startReaperAndTimer({
       intervalSeconds: rescueCfg.intervalSeconds ?? RESCUE_DEFAULTS.intervalSeconds,
       orchDir,
       config: rescueCfg,
+      // CAT-219-GATEWAY-LATENT: do not thread a gateway here. Its authoritative
+      // read is fail-closed, so an indeterminate Linear read could silently
+      // suppress the human escalation this timer exists to surface.
       // CTL-1609 (Codex P1): the delegate ceiling for this timer's escalation
       // enqueues. Resolved lazily per escalation (not captured at boot) so an
       // autotuned maxParallel is honored without a daemon restart. Injected here
