@@ -22,7 +22,10 @@ import { log } from "./config.mjs";
 // any non-zero exit / spawn error.
 function run(cmd, args, opts = {}) {
   try {
-    const res = spawnSync(cmd, args, { encoding: "utf8", ...opts });
+    const raw = process.env.CATALYST_SCAN_ADAPTER_TIMEOUT_MS;
+    const parsed = raw == null || raw.trim() === "" ? NaN : Number(raw);
+    const timeout = Number.isFinite(parsed) && parsed > 0 ? parsed : 15_000;
+    const res = spawnSync(cmd, args, { encoding: "utf8", timeout, ...opts });
     if (res.status !== 0 || res.error) return "";
     return (res.stdout ?? "").trim();
   } catch {

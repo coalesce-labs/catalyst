@@ -341,9 +341,15 @@ if [[ -x "$LINEAR_TRANSITION" ]]; then
   # NOT. Non-fatal — terminalDoneOnce backstop (fires on teardown===done) retries — but
   # the failure must be LOUD so it is diagnosable.
   LINEAR_DONE_OUT="$("$LINEAR_TRANSITION" --ticket "$TICKET" --transition done \
-    --config .catalyst/config.json --json 2>&1)"
+    --config .catalyst/config.json --merged-work-verified "$VERIFY_PR" --json 2>&1)"
   LINEAR_DONE_RC=$?
   LINEAR_DONE_ACTION="$(printf '%s' "$LINEAR_DONE_OUT" | jq -r '.action // ""' 2>/dev/null || echo "")"
+  if [[ $LINEAR_DONE_RC -eq 3 || "$LINEAR_DONE_ACTION" == "refused-unmerged" ]]; then
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" --phase "$PHASE" --ticket "$TICKET" \
+      --status failed --reason "done_refused_unmerged"
+    echo "phase-teardown: Done refused; aborting before archive/worktree destruction" >&2
+    exit 1
+  fi
   if [[ $LINEAR_DONE_RC -ne 0 ]]; then
     echo "phase-teardown: Linear Done transition FAILED (rc=${LINEAR_DONE_RC}) — terminalDoneOnce backstop will retry: ${LINEAR_DONE_OUT}" >&2
   else
