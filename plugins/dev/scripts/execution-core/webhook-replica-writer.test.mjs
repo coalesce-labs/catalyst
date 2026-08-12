@@ -2,7 +2,7 @@
 // (applyMigrations/applyDelta need a real engine), never the fleet's actual
 // ~/catalyst/catalyst-replica.db, never a live Linear API call.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -53,6 +53,24 @@ describe("createWebhookReplicaWriter", () => {
     const w1 = createWebhookReplicaWriter({ dbPath, ownerKey: "host-a" });
     expect(() => createWebhookReplicaWriter({ dbPath, ownerKey: "host-b" })).toThrow();
     w1.close();
+  });
+
+  test("reclaiming a crashed predecessor's lock (SAME ownerKey, stale pid) does not throw with the default log", () => {
+    // Regression for a fleet incident: a stale lock file left behind by a
+    // dead process with the SAME ownerKey (as happens on every restart of
+    // this writer) hits claimWriterLock's FAST-RECLAIM path, which calls
+    // `log?.("info", ...)`. The old default (`log = console`) isn't callable
+    // that way and threw a TypeError instead of reclaiming — wedging the
+    // replica: every write after a restart silently failed forever.
+    const lockPath = `${dbPath}.writer.lock`;
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 999999, owner: "999999-deadbeef", heartbeat: Date.now(), ownerKey: "same-host-account",
+    }));
+    let writer;
+    expect(() => {
+      writer = createWebhookReplicaWriter({ dbPath, ownerKey: "same-host-account" });
+    }).not.toThrow();
+    writer.close();
   });
 
   test("applyEvent(issue) writes a queryable row via applyDelta", () => {
