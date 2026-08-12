@@ -89,6 +89,28 @@ export const RECOVERY_FIX_FAILURE_TTL_MS = Math.max(
   2 * RECOVERY_FIX_BACKOFF_MAX_MS,
 );
 
+/**
+ * Read a fix-failure file's newest age anchor. Three outcomes are kept distinct
+ * because the scan and the pre-delete revalidation react to them differently:
+ *   { readable: false }            — absent or malformed
+ *   { readable: true, last: null } — parsed, but no finite lastTs/lastCommentTs
+ *   { readable: true, last: <n> }  — newest anchor
+ * Shared by both so they judge freshness by the identical rule.
+ *
+ * @param {string} path
+ * @returns {{ readable: boolean, last: number|null }}
+ */
+function readFixFailureAnchor(path) {
+  let data;
+  try {
+    data = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return { readable: false, last: null };
+  }
+  const anchors = [data?.lastTs, data?.lastCommentTs].filter(Number.isFinite);
+  return { readable: true, last: anchors.length === 0 ? null : Math.max(...anchors) };
+}
+
 export function selectStaleFixFailures({
   orchDir,
   now = () => Date.now(),
@@ -112,18 +134,12 @@ export function selectStaleFixFailures({
   for (const file of files) {
     if (!file.endsWith(".json")) continue;
     const path = join(dir, file);
-    let data;
-    try {
-      data = JSON.parse(readFileSync(path, "utf8"));
-    } catch {
-      continue;
-    }
-    const anchors = [data?.lastTs, data?.lastCommentTs].filter(Number.isFinite);
-    if (anchors.length === 0) {
+    const { readable, last } = readFixFailureAnchor(path);
+    if (!readable) continue; // malformed → skip (unchanged)
+    if (last === null) {
       unagable.push({ file });
       continue;
     }
-    const last = Math.max(...anchors);
     const ageMs = t - last;
     if (ageMs < ttlMs) continue;
     stale.push({ file, path, ageMs, last });
@@ -184,11 +200,30 @@ export function sweepStaleFixFailures({
   for (const { file } of unagable) {
     if (!quiet) console.log(`${file}: no lastTs/lastCommentTs — left in place`);
   }
-  for (const { file, path, ageMs } of stale) {
+  for (const { file, path, ageMs, last } of stale) {
     const ageDays = (ageMs / 864e5).toFixed(1);
     if (!execute) {
       if (!quiet) console.log(`[dry-run] would sweep ${file} (${ageDays}d old)`);
       swept.push(file);
+      continue;
+    }
+    // CAT-124 (Codex #3223 P2): revalidate immediately before deleting. This CLI
+    // can run concurrently with the recovery daemon, and both recordFixFailure and
+    // commitFixCommentHash publish via atomic rename onto this same path. Between
+    // the scan above and the unlink below, a freshly-timestamped file can land
+    // here; an unconditional unlink would then destroy live backoff state (letting
+    // a hot-looping ticket retry immediately) or live comment-dedup state (letting
+    // a duplicate audit comment post). Deleting only when the newest anchor is
+    // still the exact one the scan aged out makes the removal conditional on the
+    // version that was actually judged stale. Any other outcome — replaced,
+    // concurrently deleted, or now unreadable — is left in place; the next sweep
+    // re-scans it, so skipping is always safe and this fails closed.
+    const current = readFixFailureAnchor(path);
+    if (!current.readable || current.last !== last) {
+      if (!quiet) {
+        console.log(`${file}: changed since scan — left in place (re-run to sweep)`);
+      }
+      skipped.push(file);
       continue;
     }
     try {

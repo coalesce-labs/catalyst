@@ -9786,6 +9786,21 @@ export function startScheduler({
   // schedulerTick's inline existsSync default applies. Tests that are not
   // exercising the triage gate inject () => true to unblock Pass 2 dispatch.
   hasTriageArtifact = undefined,
+  // CAT-124 (Codex #3223 P1): the unstuck-sweep operator/test override seams.
+  // runTick reads all five off runningOpts (`runningOpts.unstuckSweep`,
+  // `.unstuckActByCategory`, `.unstuckEscalate`, `.unstuckPostComment`) and
+  // buildRecoverySeamDeps reads `opts.unstuckSweep`/`opts.unstuckActByCategory`
+  // to derive `seamFallbackSuppressed` — but startScheduler never destructured
+  // any of them, so every override silently evaporated at the production entry
+  // point: `startScheduler({ unstuckActByCategory: {} })` left the flag false and
+  // Pass 0r kept rebuilding live seams behind an operator's inert-posture
+  // registry, contrary to the documented both-passes contract. Defaulting each to
+  // undefined keeps the `??` fallbacks (and `!= null`) byte-identical for every
+  // caller that supplies none.
+  unstuckSweep = undefined,
+  unstuckActByCategory = undefined,
+  unstuckEscalate = undefined,
+  unstuckPostComment = undefined,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
@@ -9820,6 +9835,13 @@ export function startScheduler({
     botWriteId, // CTL-781: orchestrator bot UUID to write as assignee on claim
     appendIntentEvent, // CTL-936: operator-event seam for intent.ineffective
     hasTriageArtifact, // CTL-1150: triage-artifact predicate for Pass 2
+    // CAT-124 (Codex #3223 P1): retain the unstuck override seams so runTick's
+    // `runningOpts.unstuck*` reads and buildRecoverySeamDeps(runningOpts)'s
+    // seamFallbackSuppressed derivation actually observe an operator's posture.
+    unstuckSweep,
+    unstuckActByCategory,
+    unstuckEscalate,
+    unstuckPostComment,
   };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels

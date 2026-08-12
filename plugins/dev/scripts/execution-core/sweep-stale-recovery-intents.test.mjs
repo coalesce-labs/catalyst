@@ -220,4 +220,87 @@ describe("fix-failure marker hygiene (CAT-124)", () => {
     expect(existsSync(fixPath("NEW-1"))).toBe(true);
     expect(existsSync(intent)).toBe(true);
   });
+
+  // CAT-124 (Codex #3223 P2): --execute races the recovery daemon, which publishes
+  // both backoff state (recordFixFailure) and comment-dedup state
+  // (commitFixCommentHash) by atomic rename onto the very path being swept. The
+  // scan/unlink window is real, so the delete must be conditional on the version
+  // that was scanned — otherwise live state is destroyed and the ticket retries
+  // immediately / re-posts a duplicate audit comment.
+  describe("pre-delete revalidation (scan→unlink race)", () => {
+    const tNow = () => t0 + RECOVERY_FIX_FAILURE_TTL_MS + 1;
+    const TICKETS = ["RACEA-1", "RACEZ-1"];
+
+    // The scan→unlink window only exists INSIDE sweepStaleFixFailures, so the race
+    // has to be driven from a seam that fires there. Two equally-stale markers are
+    // seeded; when the sweep unlinks whichever it reaches first, `duringSweep` runs
+    // against the OTHER one — i.e. the daemon lands state mid-loop, exactly the
+    // interleaving the finding describes. Written order-independently because
+    // readdirSync order is not guaranteed.
+    const sweepRacing = (duringSweep) => {
+      for (const ticket of TICKETS) recordFixFailure(orchDir, ticket, "orphan_stale", "same", t0);
+      expect(selectStaleFixFailures({ orchDir, now: tNow }).stale).toHaveLength(2);
+
+      const unlinked = [];
+      const result = sweepStaleFixFailures({
+        orchDir,
+        now: tNow,
+        execute: true,
+        quiet: true,
+        unlink: (path) => {
+          unlinked.push(path);
+          rmSync(path);
+          if (unlinked.length === 1) {
+            duringSweep(TICKETS.find((t) => !path.includes(t.split("-")[0])));
+          }
+        },
+      });
+      const victim = TICKETS.find((t) => unlinked[0]?.includes(t.split("-")[0]));
+      const raced = TICKETS.find((t) => t !== victim);
+      return { unlinked, result, victim, raced };
+    };
+
+    test("keeps a marker whose backoff state was refreshed after the scan", () => {
+      const { unlinked, result, victim, raced } = sweepRacing((ticket) =>
+        recordFixFailure(orchDir, ticket, "orphan_stale", "same", tNow())
+      );
+
+      // The untouched marker is still swept; the refreshed one survives.
+      expect(unlinked).toHaveLength(1);
+      expect(result.swept).toEqual([`${victim}-orphan_stale.json`]);
+      expect(result.skipped).toEqual([`${raced}-orphan_stale.json`]);
+      expect(existsSync(fixPath(victim))).toBe(false);
+      expect(existsSync(fixPath(raced))).toBe(true);
+    });
+
+    test("keeps a marker whose comment-dedup state was committed after the scan", () => {
+      const { result, victim, raced } = sweepRacing((ticket) =>
+        commitFixCommentHash(orchDir, ticket, "orphan_stale", fixCommentHash("body"), tNow())
+      );
+
+      expect(result.swept).toEqual([`${victim}-orphan_stale.json`]);
+      expect(result.skipped).toEqual([`${raced}-orphan_stale.json`]);
+      expect(existsSync(fixPath(raced))).toBe(true);
+    });
+
+    test("tolerates a marker deleted by someone else between scan and unlink", () => {
+      const { unlinked, result, victim, raced } = sweepRacing((ticket) =>
+        rmSync(fixPath(ticket))
+      );
+
+      // Only the first unlink runs — the vanished one is reported skipped, not thrown.
+      expect(unlinked).toHaveLength(1);
+      expect(result.swept).toEqual([`${victim}-orphan_stale.json`]);
+      expect(result.skipped).toEqual([`${raced}-orphan_stale.json`]);
+    });
+
+    test("sweeps both when nothing races (revalidation is not a blanket refusal)", () => {
+      const { unlinked, result } = sweepRacing(() => {});
+
+      expect(unlinked).toHaveLength(2);
+      expect(result.swept).toHaveLength(2);
+      expect(result.skipped).toEqual([]);
+      for (const ticket of TICKETS) expect(existsSync(fixPath(ticket))).toBe(false);
+    });
+  });
 });

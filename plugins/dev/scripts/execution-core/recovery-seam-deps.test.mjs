@@ -1,5 +1,13 @@
-import { expect, test } from "bun:test";
-import { buildRecoverySeamDeps } from "./scheduler.mjs";
+import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  buildRecoverySeamDeps,
+  startScheduler,
+  __getRunningOpts,
+  __resetForTests,
+} from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs";
 
 // Every jobLifecycle test injects getAgents. The real getAgentsCached refreshes
@@ -162,4 +170,86 @@ test("seam fallback suppression follows the effective operator registry override
   ]) {
     expect(build(opts).seamFallbackSuppressed).toBe(expected);
   }
+});
+
+// ── CAT-124 (Codex #3223 P1): the override must survive the PRODUCTION entry point ──
+//
+// The suppression contract above is derived inside buildRecoverySeamDeps, which the
+// daemon calls as `buildRecoverySeamDeps(runningOpts)`. startScheduler originally
+// destructured none of the unstuck-* keys, so an operator's
+// `startScheduler({ unstuckActByCategory: {} })` never reached runningOpts: the
+// derivation saw `undefined`, seamFallbackSuppressed stayed false, and Pass 0r went
+// on rebuilding live seams behind a registry that was supposed to bind both passes.
+// Asserting only on a hand-built opts object cannot catch that — these tests go
+// through startScheduler so the wiring itself is pinned.
+// Temp orchDirs created per test, removed in afterEach. CATALYST_DIR itself is
+// already pinned to a hermetic temp dir by the bun [test].preload (test-setup.mjs),
+// so booting a real scheduler here cannot touch ~/catalyst or reach live Linear —
+// run this file from plugins/dev/scripts/execution-core so that preload applies.
+const bootDirs = [];
+function bootOrchDir() {
+  const dir = mkdtempSync(join(tmpdir(), "cat124-seam-wiring-"));
+  writeFileSync(join(dir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+  bootDirs.push(dir);
+  return dir;
+}
+
+const bootOpts = (orchDir, extra) => ({
+  orchDir,
+  dispatch: () => ({ code: 0 }),
+  readEligible: () => [],
+  liveBackgroundCount: () => 0,
+  tickIntervalMs: 60_000,
+  debounceMs: 5,
+  ...extra,
+});
+
+afterEach(() => {
+  // __resetForTests stops the scheduler timer/watcher and clears runningOpts.
+  __resetForTests();
+  while (bootDirs.length) rmSync(bootDirs.pop(), { recursive: true, force: true });
+});
+
+test("startScheduler retains the unstuck override seams in runningOpts", () => {
+  const orchDir = bootOrchDir();
+  const unstuckActByCategory = {};
+  const unstuckSweep = { actByCategory: { "dirty-tree": () => {} } };
+  const unstuckEscalate = () => {};
+  const unstuckPostComment = () => {};
+
+  startScheduler(
+    bootOpts(orchDir, {
+      unstuckSweep,
+      unstuckActByCategory,
+      unstuckEscalate,
+      unstuckPostComment,
+    })
+  );
+
+  const opts = __getRunningOpts();
+  // Identity, not merely presence — runTick reads these off runningOpts directly.
+  expect(opts.unstuckActByCategory).toBe(unstuckActByCategory);
+  expect(opts.unstuckSweep).toBe(unstuckSweep);
+  expect(opts.unstuckEscalate).toBe(unstuckEscalate);
+  expect(opts.unstuckPostComment).toBe(unstuckPostComment);
+});
+
+test("an inert operator registry passed to startScheduler suppresses Pass 0r seam fallback", () => {
+  const orchDir = bootOrchDir();
+  // `{}` is the operator's "keep enforcement inert" posture — the exact shape the
+  // finding named. It must bind BOTH passes, not just Pass 0u.
+  startScheduler(bootOpts(orchDir, { unstuckActByCategory: {} }));
+
+  expect(build(__getRunningOpts()).seamFallbackSuppressed).toBe(true);
+});
+
+test("startScheduler without an override leaves capability fallback active", () => {
+  const orchDir = bootOrchDir();
+  startScheduler(bootOpts(orchDir));
+
+  const opts = __getRunningOpts();
+  expect(opts.unstuckActByCategory).toBeUndefined();
+  expect(opts.unstuckSweep).toBeUndefined();
+  // No injected registry → Pass 0r keeps its capability-checked fallback (unchanged).
+  expect(build(opts).seamFallbackSuppressed).toBe(false);
 });
