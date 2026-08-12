@@ -687,20 +687,22 @@ jobs:
             __tests__/registry-team-identity.test.mjs \
             cli/drain.test.mjs \
             drain-event.test.mjs \
-            config-node-class.test.mjs \
-            config-cloud-token-env.test.mjs \
+            __tests__/config-node-class.test.mjs \
+            __tests__/config-cloud-token-env.test.mjs \
             config.test.mjs \
             delegate-config-event.test.mjs \
             delegate-queue.test.mjs \
             delegate-runner.test.mjs \
             delegate-slot-reservation.test.mjs \
             diagnostician.test.mjs \
-            cloud-sync-telemetry.test.mjs \
+            __tests__/cloud-sync-telemetry.test.mjs \
             cloud-sync-log.test.mjs \
             dispatch.test.mjs \
             doctor.test.mjs \
             doctor-host-state-registry.test.mjs \
-            doctor-replica.test.mjs \
+            __tests__/doctor-replica.test.mjs \
+            __tests__/doctor-worker-labels.test.mjs \
+            __tests__/execution-core-test-list.test.mjs \
             __tests__/replica-health.test.mjs \
             __tests__/replica-health-event.test.mjs \
             __tests__/linear-query-triage-source.test.mjs \
