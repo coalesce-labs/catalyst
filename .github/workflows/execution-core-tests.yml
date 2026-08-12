@@ -535,6 +535,16 @@ jobs:
         run: bash __tests__/phase-artifact-gate.test.sh
 
       - name: Run stable unit tests
+        # CTL-1789 round-1 P2 (Codex): assertion-evidence.test.mjs and
+        # assertion-evidence-parity.test.mjs are added below. The parity
+        # suite is the ONLY mechanism keeping the two hand-written bash
+        # mirrors of ASSERTED_BY (phase-agent-emit-complete's --asserted-by
+        # default, orchestrate-revive's flag) byte-identical to the JS
+        # registry — and a parity check that never runs enforces nothing, so
+        # omitting it here would reproduce the exact gap it was written to
+        # close. Both are pure, hermetic, sub-millisecond file reads: no
+        # timers, no fs.watch, no sandbox dependency, so neither can flake.
+        #
         # CTL-1678 round-7 (Codex): the four drain suites added below
         # (__tests__/config-drain-disabled, __tests__/doctor-drain-disabled,
         # cli/drain, drain-event) had NO required-CI coverage, so every regression
@@ -596,6 +606,8 @@ jobs:
             beliefs/shadow-store.test.mjs \
             beliefs/why.test.mjs \
             abort-worker.test.mjs \
+            assertion-evidence.test.mjs \
+            assertion-evidence-parity.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
