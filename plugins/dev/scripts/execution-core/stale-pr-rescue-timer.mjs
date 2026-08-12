@@ -23,6 +23,12 @@ import { jobLifecycle } from "./recovery.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { fenceGuard } from "./fence-guard.mjs";
+import {
+  appendFenceStandoffEvent,
+  clearFenceStandoff,
+  maybeBreakGlass,
+} from "./fence-standoff.mjs";
+import { recordDurableEscalation } from "./durable-escalation.mjs";
 import { appendFileSync } from "node:fs";
 import { log, getEventLogPath, getClusterHosts } from "./config.mjs";
 import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs";
@@ -333,6 +339,10 @@ export function defaultEscalate(
     env = process.env,
     maxParallel = undefined,
     appendDelegateEvent = defaultAppendDelegateEvent,
+    now = () => Date.now(),
+    fenceGuardFn = fenceGuard,
+    recordDurableEscalationFn = recordDurableEscalation,
+    appendStandoffEvent = appendFenceStandoffEvent,
   } = {}
 ) {
   let routed = false;
@@ -344,12 +354,15 @@ export function defaultEscalate(
     // generation must LOUDLY proceed with the label rather than silently drop a
     // human escalation. A genuine supersession (readable generation, fresh
     // foreign owner / authoritative read says not-current) still suppresses.
-    if (
-      fenceGuard(
-        { ticket, orchDir, multiHost, gateway, self },
-        { proceedOnMissingGeneration: true }
-      )
-    ) {
+    let fenceVerdict = null;
+    if (fenceGuardFn(
+      { ticket, orchDir, multiHost, gateway, self },
+      {
+        proceedOnMissingGeneration: true,
+        onSuppress: (verdict) => { fenceVerdict = verdict; },
+      },
+    )) {
+      clearFenceStandoff(orchDir, ticket);
       const r = routeStuckTicketToDelegate(orchDir, ticket, {
         site: "stale-pr-rescue",
         reason: detail?.reason ?? "unresolvable-conflict",
@@ -374,9 +387,21 @@ export function defaultEscalate(
     } else {
       outcomeReason = "fence-suppressed";
       log.warn(
-        { ticket },
+        { ticket, reason: fenceVerdict?.reason ?? null },
         "ctl-863: stale fence — suppressing stale-pr-rescue labelOnce write (zombie guard)"
       );
+      maybeBreakGlass({
+        orchDir,
+        ticket,
+        site: "stale-pr-rescue",
+        verdict: fenceVerdict,
+        phase: "pr",
+        now: now(),
+        env,
+        appendEvent: appendStandoffEvent,
+        recordEscalation: recordDurableEscalationFn,
+        detail: `stale PR #${detail?.prNumber ?? "?"}`,
+      });
     }
   } else {
     log.warn(
@@ -648,8 +673,11 @@ async function processTicket({
     }
     const stalledOutcome = escalate(
       ticket,
-      { reason: "rescue_worker_stalled", ...rescueState },
-      { orchDir, orchId: effectiveOrchId, linearWrite, multiHost, maxParallel }
+      // CAT-173: thread the known PR number — rescueState carries attempt/behind/
+      // conflict fields but never prNumber, so the standoff detail rendered
+      // "stale PR #?" and dropped the primary actionable identifier.
+      { reason: "rescue_worker_stalled", prNumber: prInfo.number, ...rescueState },
+      { orchDir, orchId: effectiveOrchId, linearWrite, multiHost, maxParallel, now: () => nowMs }
     );
     // CTL-1609 (Codex P1): latch escalatedAt ONLY on a confirmed label write.
     // decideRescue skips forever once escalatedAt exists, so latching on an
@@ -785,12 +813,15 @@ async function processTicket({
     }
 
     case "escalate": {
-      const outcome = escalate(ticket, decision.detail ?? {}, {
+      // CAT-173: decideRescue's detail supplies attempt/behind/conflict only —
+      // thread prNumber so the standoff/escalation reason names the actual PR.
+      const outcome = escalate(ticket, { prNumber: prInfo.number, ...(decision.detail ?? {}) }, {
         orchDir,
         orchId: effectiveOrchId,
         linearWrite,
         multiHost,
         maxParallel,
+        now: () => nowMs,
       });
       // CTL-1609 (Codex P1): see recordEscalationOutcome — escalatedAt is a
       // permanent skip in decideRescue, so it is written only when the needs-human
