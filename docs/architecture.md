@@ -832,7 +832,14 @@ a revive, a resume, and a new-work pull).
   `from`/`to` are also promoted to attributes (`catalyst.advance.*`) because otel-forward strips
   `body.payload` off-machine. `from` is re-derived with the extracted pure `latestLivePhase(signals)`
   — the SAME function `deriveAdvancement` keys off, so the audit can never name a different
-  predecessor than the FSM used.
+  predecessor than the FSM used. **One exception — the remediate detour**: `remediate` is
+  ANCILLARY (∉ `PHASES`), so `latestLivePhase` can never return it, and
+  `maybeResetForRemediateCycle` has already deleted `phase-remediate.json` before the sweep reads
+  its map. Left on `latestLivePhase` alone, every remediation re-entry named `from=implement` and
+  classified its evidence off the stale implement terminal — laundering a FABRICATED remediation
+  into a DECLARED advance. That one edge is resolved through `resolveReapPredecessor` over the
+  PRE-reset snapshot (with `remediateRaw` for the deleted file), the same snapshot + resolver the
+  predecessor reap uses, so the audit's `from` and the reaped worker are always the same phase.
 - **`assertedBy` on the phase signal** (`execution-core/assertion-evidence.mjs`, a zero-import leaf
   owning `ASSERTED_BY` + `classifyAdvanceEvidence`/`explainAdvanceEvidence`). Three producers can
   write a terminal `done` and were previously byte-indistinguishable: the agent's own

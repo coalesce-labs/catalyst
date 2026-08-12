@@ -2019,10 +2019,16 @@ export function readAllEligibleTickets() {
 // consume this same function: a second, independently-derived `from` would drift
 // from the FSM's actual input the moment either supersession rule changes.
 //
-// NOTE on the remediate detour: `remediate` ∉ PHASES, so it is invisible here. On
-// the remediate→verify re-entry the cycle signals have already been deleted, so
-// this returns `implement` — which is genuinely the signal the FSM keyed off. It
-// is NOT the worker to reap; that is resolveReapPredecessor's separate job.
+// NOTE on the remediate detour: `remediate` ∉ PHASES (it is ANCILLARY), so it is
+// structurally invisible here — this function can never return it, for any input.
+// On the remediate→verify re-entry it returns `implement`, which is the signal
+// the FSM mechanically keyed off after maybeResetForRemediateCycle deleted the
+// cycle signals — but `implement` is NOT the phase whose terminal caused that
+// advance, and its (stale) terminal must NOT be the one the audit classifies.
+// CTL-1789 round-1 P1: both the predecessor reap AND the phase.advance.applied
+// audit resolve that one edge through resolveReapPredecessor over the PRE-reset
+// snapshot instead. Callers wanting the FSM's raw input still use this function;
+// callers naming the phase that just finished must layer the detour on top.
 export function latestLivePhase(signals) {
   const sig = signals ?? {};
   const liveSet = new Set(livePhaseEntries(sig).map(([p]) => p));
@@ -7239,10 +7245,27 @@ export function schedulerTick(
       // so the first pipeline pass after deploy reads `absent` /
       // evidence_reason="no-marker". Do not alarm on `absent` until a full ticket
       // has cycled through.
-      const fromPhase = latestLivePhase(signals);
+      //
+      // REMEDIATE DETOUR (CTL-1789 round-1 P1, Codex): latestLivePhase scans
+      // PHASES, and `remediate` is an ANCILLARY phase (∉ PHASES) — so it can
+      // NEVER return `remediate`, whether or not the signal still exists. On
+      // top of that, maybeResetForRemediateCycle deleted phase-remediate.json
+      // above, before `signals` was even read. Left alone, every remediation
+      // re-entry therefore reported `from=implement` and classified its
+      // evidence off the long-finished implement signal — laundering a
+      // FABRICATED remediation terminal into a DECLARED one, corrupting the
+      // exact metric this event exists to produce. Resolve that one edge from
+      // the SAME pre-reset snapshot and the SAME resolver the predecessor-reap
+      // path uses (resolveReapPredecessor), so the audit's `from` and the
+      // reaped worker can never be two different phases for one advance. Every
+      // other edge stays on latestLivePhase — the FSM's own input.
+      const detour = resolveReapPredecessor(preResetSignals, next);
+      const fromPhase =
+        detour?.phase === REMEDIATE_PHASE ? REMEDIATE_PHASE : latestLivePhase(signals);
       const fromRaw = fromPhase
         ? fromPhase === REMEDIATE_PHASE
-          ? (remediateRaw ?? readPhaseSignalRaw(orchDir, ticket, fromPhase))
+          ? // the reset already deleted the file — remediateRaw is the pre-reset capture
+            (remediateRaw ?? readPhaseSignalRaw(orchDir, ticket, fromPhase))
           : readPhaseSignalRaw(orchDir, ticket, fromPhase)
         : null;
       const ev = explainAdvanceEvidence(fromRaw, { predecessorPhase: fromPhase });
