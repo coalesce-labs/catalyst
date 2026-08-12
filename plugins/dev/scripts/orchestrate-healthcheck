@@ -68,6 +68,7 @@ STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
 # CTL-607: current-phase guard helper (latest_phase_in_dir + PHASES mirror).
 # shellcheck source=lib/phase-sequence.sh
 . "${SCRIPT_DIR}/lib/phase-sequence.sh"
+. "${SCRIPT_DIR}/lib/portable-stat.sh"
 # CTL-511: phase-agent-emit-complete emits the broker-routable phase.<name>.failed
 # event when a phase signal is flipped to stalled. Test-overridable.
 EMIT_COMPLETE="${CATALYST_EMIT_COMPLETE:-${SCRIPT_DIR}/phase-agent-emit-complete}"
@@ -236,9 +237,8 @@ SUPPRESSED_TICKETS=() # CTL-509: workers left running by the git-activity guard
 PHASE_TERMINAL_STATES="done failed errored stopped stalled"
 
 mtime_of() {
-	# macOS `stat -f` vs GNU `stat -c` — fall back if neither accepts.
 	local f="$1"
-	stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo ""
+	portable_stat_mtime "$f" || echo ""
 }
 
 # CTL-509: resolve the worktree base for phase-mode workers. Precedence:

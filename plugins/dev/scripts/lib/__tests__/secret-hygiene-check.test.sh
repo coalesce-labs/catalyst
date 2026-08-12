@@ -63,6 +63,17 @@ RC=$?
 assert_contains "$MSG" "config.json" "error message names the file"
 
 echo ""
+echo "check_secret_file_modes: unreadable mode probe → non-zero, names file"
+portable_stat_mode() { return 1; }
+MSG="$(check_secret_file_modes "$DIR_GOOD" 2>&1)"
+RC=$?
+[[ $RC -ne 0 ]] && pass "unreadable mode → non-zero exit" || fail "unreadable mode → should be non-zero"
+assert_contains "$MSG" "config-proj.json mode unreadable" "error names unreadable file"
+# Restore the helper after the injected failure.
+unset _CATALYST_PORTABLE_STAT_SH_LOADED
+source "${SCRIPT_DIR}/../portable-stat.sh"
+
+echo ""
 echo "check_secret_file_modes: empty dir / no config files → exit 0"
 DIR_EMPTY="${SCRATCH}/empty"
 mkdir -p "$DIR_EMPTY"

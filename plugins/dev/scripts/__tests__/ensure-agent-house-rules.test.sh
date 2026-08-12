@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/portable-stat.sh"
 # Tests for ensure-agent-house-rules.sh — the sentinel-based "Working the Loop" auto-seeder.
 # Run: bash plugins/dev/scripts/__tests__/ensure-agent-house-rules.test.sh
 
@@ -126,8 +127,8 @@ has "symlink: shared target updated" "$BEGIN" "$R/shared/CLAUDE.md"
 # something different on GNU/Linux and would return the wrong value)
 R="$SCRATCH/perm"; mkdir -p "$R"; printf '# CLAUDE.md\n\n## Setup\nx\n' >"$R/CLAUDE.md"; chmod 0640 "$R/CLAUDE.md"
 run "$R" --fix >/dev/null
-mode="$(stat -c '%a' "$R/CLAUDE.md" 2>/dev/null || stat -f '%Lp' "$R/CLAUDE.md" 2>/dev/null)"
-assert_eq "perm: mode preserved (640)" "640" "$mode"
+mode="$(portable_stat_mode "$R/CLAUDE.md")"
+assert_eq "perm: mode preserved (640)" "0640" "$mode"
 
 # 14. write into a read-only DIR → nonzero exit, unchanged. (The atomic path stages
 # a temp in the same dir and renames, so a read-only DIR is the real failure mode.)

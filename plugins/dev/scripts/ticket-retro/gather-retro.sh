@@ -30,6 +30,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/portable-stat.sh"
 COMPOUND_LOG="${SCRIPT_DIR}/../compound-log.sh"
 
 THOUGHTS_DIR="./thoughts"
@@ -177,7 +178,7 @@ LEARN_DIR="${THOUGHTS_DIR}/shared/learnings"
 if [ -d "$LEARN_DIR" ]; then
   find "$LEARN_DIR" -type f -name '*.md' 2>/dev/null | while IFS= read -r lf; do
     [ -n "$lf" ] || continue
-    mt=$(date -u -r "$lf" +%s 2>/dev/null || stat -c %Y "$lf" 2>/dev/null || echo 0)
+    mt=$(portable_stat_mtime "$lf" || echo 0)
     [ "$mt" -gt "$WINDOW_EPOCH" ] || continue
     title=$(grep -m1 '^title:' "$lf" 2>/dev/null | sed -E 's/^title:[[:space:]]*//; s/^"//; s/"$//')
     [ -z "$title" ] && title="$(basename "$lf" .md)"

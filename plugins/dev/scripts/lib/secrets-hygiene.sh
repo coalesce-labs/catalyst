@@ -2,10 +2,11 @@
 # Secret-hygiene primitives (CTL-1203). Source me; do not execute directly.
 # bash-3.2 safe: no mapfile, no associative arrays.
 
-# Portable file-mode reader (BSD stat vs GNU stat).
-_sh_file_mode() {
-	stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
-}
+# Portable self-path: BASH_SOURCE under bash, prompt-expansion %x under zsh.
+# shellcheck disable=SC2296
+__SH_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
+__SH_LIB_DIR="$(cd "$(dirname "$__SH_SELF")" && pwd)"
+source "${__SH_LIB_DIR}/portable-stat.sh"
 
 # harden_secrets_dir <dir>
 # mkdir -p then chmod 700 the dir. Idempotent; no-op if already 700.

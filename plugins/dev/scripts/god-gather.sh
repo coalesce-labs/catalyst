@@ -17,6 +17,9 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/portable-stat.sh"
+
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 CLAUDE_PROJECTS_DIR="${HOME}/.claude/projects"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -34,7 +37,7 @@ minutes_ago_iso() {
 
 # mtime of a path in seconds since epoch (macOS + Linux)
 path_mtime() {
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+  portable_stat_mtime "$1" || echo 0
 }
 
 # Elapsed seconds → human string
