@@ -9,6 +9,7 @@ function deps(overrides = {}) {
     runLaunchctl: () => ({ loaded: true }),
     readHaltMarker: () => null,
     nowMs: () => Date.parse("2026-08-11T22:00:00Z"),
+    platform: "darwin",
     ...overrides,
   };
 }
@@ -107,5 +108,34 @@ describe("checkStackAgent", () => {
     const { platform: _p, ...noPlatform } = deps({ platform: "linux" });
     expect(() => checkStackAgent(noPlatform)).not.toThrow();
     expect(checkStackAgent(noPlatform)[0].status).toBe(STATUS.PASS);
+  });
+
+  test("non-darwin platform is graded before plist I/O", () => {
+    const rows = checkStackAgent(deps({ platform: "freebsd", readPlist: () => { throw new Error("must not run"); } }));
+    expect(rows[0].status).toBe(STATUS.WARN);
+    expect(rows[0].detail).toContain("freebsd");
+  });
+
+  test("darwin absent plist still fails", () => {
+    expect(checkStackAgent(deps({ platform: "darwin", readPlist: () => null }))[0].status).toBe(STATUS.FAIL);
+  });
+
+  test("darwin unloaded agent still fails", () => {
+    expect(checkStackAgent(deps({ platform: "darwin", runLaunchctl: () => ({ loaded: false }) }))[0].status).toBe(STATUS.FAIL);
+  });
+
+  test("omitted platform conservatively defaults to darwin", () => {
+    const rows = checkStackAgent({ readPlist: () => supervised, runLaunchctl: () => ({ loaded: true }), readHaltMarker: () => null });
+    expect(rows[0].status).toBe(STATUS.PASS);
+  });
+
+  test("a numeric epoch-seconds haltedAt is read as seconds, not milliseconds", () => {
+    const now = Date.parse("2026-08-11T22:00:00Z");
+    const oneHourAgoSecs = Math.floor(now / 1000) - 3600;
+    const active = checkStackAgent(deps({ readHaltMarker: () => ({ haltedAt: oneHourAgoSecs, ttlSecs: 7200, reason: "maintenance" }) }));
+    expect(active.find((r) => r.name === "stack-halt")?.status).toBe(STATUS.INFO);
+    expect(active.find((r) => r.name === "stack-halt")?.detail).toContain("maintenance");
+    const expired = checkStackAgent(deps({ readHaltMarker: () => ({ haltedAt: oneHourAgoSecs, ttlSecs: 1800, reason: "old" }) }));
+    expect(expired.some((r) => r.name === "stack-halt")).toBe(false);
   });
 });

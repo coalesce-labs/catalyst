@@ -23,6 +23,8 @@ ok(){ "$@" || { echo "not ok: $*"; fail=$((fail+1)); }; }
 
 ok "$STACK" stop
 ok jq -e '.haltedAt and .host and .reason and .by' "$CATALYST_DIR/stack-halt.json"
+# CAT-268: doctor treats numeric haltedAt as epoch seconds and multiplies by 1000.
+ok jq -e '.haltedAt | type == "number"' "$CATALYST_DIR/stack-halt.json"
 EVENT_FILE="$CATALYST_DIR/events/$(date -u +%Y-%m).jsonl"
 ok jq -e 'select(.attributes["event.name"] == "node.stack.halted")' "$EVENT_FILE"
 rm -f "$CATALYST_DIR/stack-halt.json"; ok "$STACK" stop --no-halt; ok test ! -e "$CATALYST_DIR/stack-halt.json"
