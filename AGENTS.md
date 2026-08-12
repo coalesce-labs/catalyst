@@ -38,6 +38,24 @@ plugin) rather than routing around it. For GitHub state only, a single **bounded
 acceptable last resort while you do; never a poll loop, and never a raw Linear API read (the
 replica-read rule below is absolute).
 
+- **Reporting a negative → run a positive control first, or report inconclusive.** A negative result
+  is only evidence if you can state what a positive one would have looked like **and you ran the same
+  instrument against a case known to be present and saw it come back non-zero.** Before you report
+  "zero", "absent", "unrelated", "clean", or "not owned", ask the question that separates *the thing
+  is not there* from *I could not look* — and if you cannot separate them, say **inconclusive**. The
+  four mechanisms that have actually produced a false clean result here, all of them silent:
+  (1) an unstructured match over structured data — a substring `grep` for an event name counted the
+  name where it appeared inside a commit message, reporting events that did not exist; (2) a
+  malformed call returning a falsy sentinel — an ownership helper invoked with its arguments
+  transposed returned `undefined` for every ticket, which reads as "not owned"; (3) an empty input
+  set feeding a loop, so the body never ran and the trailing all-clear line printed on the strength
+  of zero iterations (`[].every(p)` is `true`); (4) the right question asked of the wrong surface —
+  counting a bot's issue comments returned zero while an unresolved *review thread* was the thing
+  blocking the merge. Prefer the verified helpers in `plugins/dev/scripts/lib/verified-checks.mjs`
+  (count events by exact `event.name`, resolve ticket ownership under named rosters, enumerate every
+  merge blocker) — each returns a verdict that can be explicitly **inconclusive** and throws on
+  malformed input rather than degrading to a falsy answer. This rule governs the bullets below: a
+  check that cannot fail loudly is not evidence for any of them.
 - **Waiting on GitHub / CI / Linear state → subscribe to the event log, don't poll.** To block on a
   state change (a PR merged, CI turning green, a review posted, a push to a branch, a ticket
   transition), wait on the unified Catalyst event log instead of re-querying in a loop. Reach for
