@@ -18,6 +18,68 @@ const KNOWN_UNREGISTERED = Object.freeze([
   "checkLayer2PathDivergence", // ~/.config/catalyst/config.json
 ]);
 
+function matchingBrace(src, bodyStart) {
+  let depth = 0;
+  let quote = null;
+  let regex = false;
+  let regexClass = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = bodyStart; index < src.length; index += 1) {
+    const char = src[index];
+    const next = src[index + 1];
+    if (lineComment) {
+      if (char === "\n") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (char === "\\") {
+        index += 1;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (regex) {
+      if (char === "\\") {
+        index += 1;
+      } else if (char === "[") {
+        regexClass = true;
+      } else if (char === "]") {
+        regexClass = false;
+      } else if (char === "/" && !regexClass) {
+        regex = false;
+      }
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      lineComment = true;
+      index += 1;
+    } else if (char === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+    } else if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+    } else if (char === "/") {
+      const previous = src.slice(bodyStart, index).trimEnd().at(-1);
+      if (previous == null || "(=:[,!&|?;{}".includes(previous)) regex = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return src.length - 1;
+}
+
 export function checksReadingHomedirDirectly(src) {
   const found = new Set();
   const decl = /^(?:export\s+)?(?:function\s+(check[A-Za-z0-9_]*)\s*\(|const\s+(check[A-Za-z0-9_]*)\s*=)/gm;
@@ -48,13 +110,7 @@ export function checksReadingHomedirDirectly(src) {
         continue;
       }
     }
-    let depth = 0;
-    let bodyEnd = bodyStart;
-    for (; bodyEnd < src.length; bodyEnd += 1) {
-      if (src[bodyEnd] === "{") depth += 1;
-      if (src[bodyEnd] === "}") depth -= 1;
-      if (depth === 0) break;
-    }
+    const bodyEnd = matchingBrace(src, bodyStart);
     const declaration = src.slice(match.index, bodyEnd + 1);
     if (/\bhomedir\(\)/.test(declaration)) found.add(checkName);
   }
@@ -98,6 +154,21 @@ describe("HOST_STATE_SEAMS registry completeness (CAT-179)", () => {
     ].join("\n\n");
     const found = checksReadingHomedirDirectly(synthetic);
     expect([...found].sort()).toEqual(["checkAlpha", "checkBeta", "checkGamma"]);
+  });
+
+  it("ignores braces inside strings and comments when locating a check body", () => {
+    const synthetic = [
+      'export function checkStringBrace() { const detail = "}"; return homedir(); }',
+      "export function checkCommentBrace() { /* } */ return homedir(); }",
+      "export function checkLineCommentBrace() { // }\n return homedir(); }",
+      "export function checkRegexBrace() { const pattern = /}/; return homedir(); }",
+    ].join("\n");
+    expect([...checksReadingHomedirDirectly(synthetic)].sort()).toEqual([
+      "checkCommentBrace",
+      "checkLineCommentBrace",
+      "checkRegexBrace",
+      "checkStringBrace",
+    ]);
   });
 
   it("fails closed when no declaration anchor matches", () => {
