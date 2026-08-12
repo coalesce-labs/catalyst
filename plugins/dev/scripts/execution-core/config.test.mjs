@@ -48,6 +48,8 @@ import {
   readDeadDocWorkerConfig,
   readBoardHealthConfig,
   readProductivityBoardHealthConfig,
+  readGithubQuotaBoardHealthConfig,
+  readTriageProductionBoardHealthConfig,
   readCoordinationConfig,
   getCoordinationMirrorPath,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
@@ -1377,7 +1379,7 @@ describe("readDeadDocWorkerConfig (CTL-1245)", () => {
 // suppression now rides on the parked-by-human label (see board-health.test.mjs).
 
 describe("readGovernanceSources — governance-mode layers (CTL-1552)", () => {
-  const MODE_KEYS = ["boardHealth", "recoveryPass", "unstuckSweep", "deadDocWorker"];
+  const MODE_KEYS = ["boardHealth", "recoveryPass", "unstuckSweep", "deadDocWorker", "triageProduction"];
   const LAYERS = new Set(["env-override", "config", "default"]);
 
   test("reports a resolved layer for each governance mode (not just the beliefs flags)", () => {
@@ -1517,6 +1519,63 @@ describe("readProductivityBoardHealthConfig (CAT-57)", () => {
       process.env.CATALYST_BH_PRODUCTIVITY = empty;
       expect(readProductivityBoardHealthConfig().mode).toBe("enforce");
     }
+  });
+});
+
+describe("board-health submode config (CAT-82)", () => {
+  const ENVS = ["CATALYST_BH_GH_QUOTA", "CATALYST_BH_TRIAGE_PRODUCTION", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "cat82-bh-triage-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("triage production defaults to shadow and unset env defers to Layer-2", () => {
+    expect(readTriageProductionBoardHealthConfig().mode).toBe("shadow");
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { triageProduction: "off" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readTriageProductionBoardHealthConfig().mode).toBe("off");
+  });
+
+  test("triage production env wins over Layer-2", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { triageProduction: "off" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_BH_TRIAGE_PRODUCTION = "enforce";
+    expect(readTriageProductionBoardHealthConfig().mode).toBe("enforce");
+  });
+
+  test("set-but-invalid triage env shadows and overrides Layer-2 enforce", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { triageProduction: "enforce" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_BH_TRIAGE_PRODUCTION = "enfore";
+    expect(readTriageProductionBoardHealthConfig().mode).toBe("shadow");
+  });
+
+  test("triage production governance provenance reports default, env, invalid env, and Layer-2", () => {
+    expect(readGovernanceSources({}).triageProduction).toBe("default");
+    expect(readGovernanceSources({ CATALYST_BH_TRIAGE_PRODUCTION: "enforce" }).triageProduction).toBe("env-override");
+    expect(readGovernanceSources({ CATALYST_BH_TRIAGE_PRODUCTION: "enfore" }).triageProduction).toBe("env-override");
+
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { triageProduction: "off" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readGovernanceSources({}).triageProduction).toBe("config");
+  });
+
+  test("GitHub quota uses the shared hardened invalid-env precedence", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { githubQuota: "enforce" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_BH_GH_QUOTA = "enfore";
+    expect(readGithubQuotaBoardHealthConfig().mode).toBe("shadow");
   });
 });
 

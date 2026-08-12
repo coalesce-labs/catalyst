@@ -21,6 +21,7 @@ import {
   handleIssueUpdatedEvent,
   handleCommentCreatedEvent,
   sweepMissingTriage,
+  createHoldTally,
   startMonitor,
   stopMonitor,
   seedTailerFromCursor,
@@ -1570,6 +1571,116 @@ describe("sweepMissingTriage (CTL-711)", () => {
       phase: "triage",
     });
     stopMonitor();
+  });
+});
+
+describe("CAT-82 triage hold tally", () => {
+  function heldSweep(ids, overrides = {}) {
+    enroll("ENG", { status: "Ready" });
+    const orchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: ids.map((id) => node(id)) }) });
+    const health = mock(() => {});
+    sweepMissingTriage({
+      orchDir,
+      dispatch: mock(() => ({ code: 0 })),
+      botUserIds: new Set(["bot"]),
+      fetchAssignee: () => ({ known: false }),
+      readMaxParallelFn: () => 10,
+      liveBackgroundCount: () => 0,
+      recordSweepHealth: health,
+      hosts: ["vega"],
+      hostName: "vega",
+      ...overrides,
+    });
+    return health;
+  }
+
+  test("createHoldTally snapshots reason-keyed counts", () => {
+    const tally = createHoldTally();
+    tally.consider();
+    tally.record("delegate-unreadable");
+    expect(tally.snapshot()).toEqual({ considered: 1, held: { "delegate-unreadable": 1 } });
+  });
+
+  test("a fully-held project emits one WARN summary and records health", () => {
+    const info = spyOn(log, "info");
+    const warn = spyOn(log, "warn");
+    const health = heldSweep(["ENG-1", "ENG-2", "ENG-3"]);
+    const summaries = warn.mock.calls.filter((c) => c[1]?.includes("held EVERY candidate"));
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0][0]).toEqual({ team: "ENG", considered: 3, heldDelegateUnreadable: 3 });
+    expect(info.mock.calls.filter((c) => c[1]?.includes("delegate unreadable"))).toHaveLength(0);
+    expect(health).toHaveBeenCalledWith("ENG", { considered: 3, heldDelegateUnreadable: 3 });
+    info.mockRestore();
+    warn.mockRestore();
+  });
+
+  test("a partially-held project reports an INFO summary", () => {
+    let n = 0;
+    const info = spyOn(log, "info");
+    heldSweep(["ENG-1", "ENG-2", "ENG-3"], {
+      fetchAssignee: () => (++n < 3 ? { known: false } : { known: true, delegate: "bot", assignee: "bot" }),
+    });
+    const summaries = info.mock.calls.filter((c) => c[1]?.includes("triage sweep summary"));
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0][0]).toEqual({ team: "ENG", considered: 3, heldDelegateUnreadable: 2 });
+    info.mockRestore();
+  });
+
+  test("a multi-host delegate outage counts only candidates owned by this host", () => {
+    const warn = spyOn(log, "warn");
+    const health = heldSweep(["ENG-1", "ENG-2", "ENG-3", "ENG-4", "ENG-5"], {
+      hosts: ["vega", "peer"],
+      hostName: "vega",
+      survivingRosterOverride: ["vega", "peer"],
+    });
+    const [, snapshot] = health.mock.calls[0];
+    expect(snapshot.considered).toBeGreaterThan(0);
+    expect(snapshot.considered).toBeLessThan(5);
+    expect(snapshot.heldDelegateUnreadable).toBe(snapshot.considered);
+    expect(warn.mock.calls.filter((c) => c[1]?.includes("held EVERY candidate"))).toHaveLength(1);
+    warn.mockRestore();
+  });
+
+  // Review R1: `considered` counts only candidates that reach the delegate gate.
+  // A candidate parked at TRIAGE_DISPATCH_CAP returns before the gate, so it can
+  // never be recorded as held — counting it broke the strict fullyHeld equality
+  // and reset the latch mid-outage.
+  test("a cap-parked candidate does not dilute the fully-held predicate", () => {
+    enroll("ENG", { status: "Ready" });
+    const orchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-1"), node("ENG-2"), node("ENG-3")] }) });
+    // Park ENG-3 at the dispatch cap: it returns before the delegate gate.
+    const countsDir = join(orchDir, ".triage-dispatch-counts");
+    mkdirSync(countsDir, { recursive: true });
+    writeFileSync(join(countsDir, "ENG-3.json"), JSON.stringify({ count: 99 }));
+    const health = mock(() => {});
+    sweepMissingTriage({
+      orchDir,
+      dispatch: mock(() => ({ code: 0 })),
+      botUserIds: new Set(["bot"]),
+      fetchAssignee: () => ({ known: false }),
+      readMaxParallelFn: () => 10,
+      liveBackgroundCount: () => 0,
+      labelNeedsHuman: () => {},
+      recordSweepHealth: health,
+      hosts: ["vega"],
+      hostName: "vega",
+    });
+    const [, snapshot] = health.mock.calls[0];
+    expect(snapshot.considered).toBe(2);
+    expect(snapshot.heldDelegateUnreadable).toBe(2);
+  });
+
+  test("zero candidates emits no CAT-82 summary and records a healthy sweep", () => {
+    const info = spyOn(log, "info");
+    const warn = spyOn(log, "warn");
+    const health = heldSweep([]);
+    expect(info.mock.calls.filter((c) => c[1]?.includes("CAT-82"))).toHaveLength(0);
+    expect(warn.mock.calls.filter((c) => c[1]?.includes("CAT-82"))).toHaveLength(0);
+    expect(health).toHaveBeenCalledWith("ENG", { considered: 0, heldDelegateUnreadable: 0 });
+    info.mockRestore();
+    warn.mockRestore();
   });
 });
 

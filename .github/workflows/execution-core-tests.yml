@@ -724,6 +724,7 @@ jobs:
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
             board-health.test.mjs \
+            triage-sweep-health.test.mjs \
             board-health-seam.test.mjs \
             dispatch-readiness.test.mjs \
             usage-limit.test.mjs \

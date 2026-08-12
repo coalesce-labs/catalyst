@@ -120,6 +120,7 @@ import {
   getReconcileHealth,
   __resetReconcileHealthForTests,
 } from "./reconcile-health.mjs";
+import { recordTriageSweep } from "./triage-sweep-health.mjs";
 // CTL-1628: direct import (not routed through reconcile-health.mjs) — the
 // eligible-set persist-failure event has no consecutive-failure/alert-latch
 // state to track, so it skips recordReconcileFailure and appends straight
@@ -745,6 +746,18 @@ export function computeTriageBudget({
   return { remaining: computeFreeSlots(maxParallel, live + sdkInflight) };
 }
 
+// CAT-82: per-sweep hold accumulator. Optional so one-off webhook dispatches
+// retain their existing per-ticket INFO visibility.
+export function createHoldTally() {
+  const held = Object.create(null);
+  let considered = 0;
+  return {
+    consider() { considered += 1; },
+    record(reason) { held[reason] = (held[reason] ?? 0) + 1; },
+    snapshot() { return { considered, held: { ...held } }; },
+  };
+}
+
 // dispatchTriage — fire the triage phase agent for a →Triage transition. Guards
 // a missing orchDir (a standalone monitor with no daemon wiring) and logs —
 // never throws — a non-zero dispatch. CTL-704: after a successful dispatch,
@@ -836,6 +849,7 @@ function dispatchTriage(
     // Single-host paths never call these.
     readFenceTriageAttempt = readTriageAttemptCountSync,
     bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
+    holdTally = null,
   }
 ) {
   // CAT-159: the durable cross-host liveness-anchor ticket (config
@@ -947,10 +961,23 @@ function dispatchTriage(
   // retries next reconcile). Empty/absent botUserIds disables the gate
   // (CTL-749 fail-open convention).
   if (botUserIds instanceof Set && botUserIds.size > 0) {
+    // CAT-82: the held-sweep denominator counts ONLY candidates that reach this
+    // gate — the sole gate whose hold reason the tally can classify. It sits after
+    // the drain/HRW gates (peer-owned tickets are not ours to attempt), after the
+    // CTL-1441 cap gate, and after the capacity gate: counting a cap-parked or
+    // budget-deferred ticket inflated `considered` with a candidate that can never
+    // be recorded as held, so the strict fullyHeld equality broke and the latch
+    // reset mid-outage. Worst case at a saturated fleet — where only capped
+    // tickets reach dispatchTriage — every sweep read considered>0/held=0 and
+    // looked healthy while the delegate read was down for every ticket.
+    holdTally?.consider();
     const a = fetchAssignee(identifier, { gateway, replica });
     if (!a.known) {
       // Unreadable delegate → HOLD (sweepMissingTriage retries next reconcile).
-      log.info({ identifier, known: false }, "monitor: triage dispatch held — delegate unreadable (CTL-1174)");
+      holdTally?.record("delegate-unreadable");
+      const fields = { identifier, known: false };
+      if (holdTally) log.debug(fields, "monitor: triage dispatch held — delegate unreadable (CTL-1174)");
+      else log.info(fields, "monitor: triage dispatch held — delegate unreadable (CTL-1174)");
       return false;
     }
     if (a.delegate == null) {
@@ -1461,6 +1488,7 @@ export function sweepMissingTriage({
   // CTL-1589 (Codex R2): live-state read for stale-row revalidation; injectable.
   fetchLiveState = defaultFetchTicketState,
   anchorIssue = undefined,
+  recordSweepHealth = recordTriageSweep,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -1477,6 +1505,7 @@ export function sweepMissingTriage({
     hasInProcessRoute, // CTL-1457 (N1)
   });
   for (const p of listProjects()) {
+    const holdTally = createHoldTally();
     const triageStatusName = resolveEligibleQuery(p)?.triageStatus ?? null;
     // CTL-1589: Triage-state board ∪ eligible set, deduped by ticket id. The
     // STRANDED half walks first (Codex R1): under sustained admission load an
@@ -1547,8 +1576,20 @@ export function sweepMissingTriage({
         ...(labelNeedsHuman ? { labelNeedsHuman } : {}), // CTL-1441
         stampWorkerLabel, // CTL-1481
         anchorIssue,
+        holdTally,
       });
     }
+    const { considered, held } = holdTally.snapshot();
+    const heldDelegateUnreadable = held["delegate-unreadable"] ?? 0;
+    if (considered > 0) {
+      const fields = { team: p.team, considered, heldDelegateUnreadable };
+      if (heldDelegateUnreadable === considered) {
+        log.warn(fields, "monitor: triage sweep held EVERY candidate — delegate unreadable (CAT-82)");
+      } else {
+        log.info(fields, "monitor: triage sweep summary (CAT-82)");
+      }
+    }
+    recordSweepHealth(p.team, { considered, heldDelegateUnreadable });
   }
 }
 
