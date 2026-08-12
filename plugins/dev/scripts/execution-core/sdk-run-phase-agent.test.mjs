@@ -22,6 +22,7 @@ import {
   flipSignalDoneOnSuccess,
   runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
+import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -1157,6 +1158,34 @@ describe("flipSignalDoneOnSuccess — CTL-1410 Phase A truth table", () => {
     expect("failureReason" in after).toBe(false);
   });
 
+  // CTL-1789: this flip is the canonical FABRICATED terminal — a clean SDK exit,
+  // NOT the agent declaring completion. It must stamp its own writer id so the
+  // advancement audit can subtract it from the declared advances. Without the
+  // marker the signal is byte-indistinguishable from a wrapper-written one.
+  test("CTL-1789: a flipped terminal is stamped assertedBy=sdk-success-flip", () => {
+    const after = flipCase("dispatched");
+    expect(after.assertedBy).toBe("sdk-success-flip");
+    expect(after.assertedBy).toBe(ASSERTED_BY.SDK_SUCCESS_FLIP);
+    // …and it is NOT the wrapper's declared id.
+    expect(after.assertedBy).not.toBe(ASSERTED_BY.PHASE_AGENT);
+  });
+
+  test("CTL-1789: a bowed-out stale-generation flip stamps NOTHING", () => {
+    // The fence returns before any mutation — the newer dispatch's in-flight
+    // signal must not gain a terminal-writer marker it never earned.
+    const dir = mkdtempSync(join(tmpdir(), "sdk-fence-mark-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(
+      signalFile,
+      JSON.stringify({ status: "dispatched", ticket: "CTL-1", phase: "implement", generation: 6 })
+    );
+    flipSignalDoneOnSuccess(signalFile, 5);
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    rmSync(dir, { recursive: true, force: true });
+    expect(after.status).toBe("dispatched");
+    expect("assertedBy" in after).toBe(false);
+  });
+
   test("running (in-flight) → done", () => {
     expect(flipCase("running").status).toBe("done");
   });
@@ -1434,6 +1463,26 @@ describe("defaultEmitBackstop → defaultWriteSignalStalled terminal-status guar
     const { dir, signalFile } = seedSignal("dispatched");
     emit(signalFile);
     expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("stalled");
+    rmSync(dir, { recursive: true, force: true });
+  });
+  // CTL-1789: the backstop is infrastructure asserting a terminal, so it stamps
+  // its own writer id too. `stalled` is never advance-eligible, so this never
+  // changes an advance's evidence — it keeps the SDK writer PAIR fully covered
+  // rather than half-marked.
+  test("CTL-1789: the backstop stamps assertedBy=sdk-backstop", () => {
+    const { dir, signalFile } = seedSignal("dispatched");
+    emit(signalFile);
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(after.assertedBy).toBe(ASSERTED_BY.SDK_BACKSTOP);
+    expect(after.assertedBy).toBe("sdk-backstop");
+    rmSync(dir, { recursive: true, force: true });
+  });
+  test("CTL-1789: a preserved terminal 'done' gains NO backstop marker", () => {
+    const { dir, signalFile } = seedSignal("done");
+    emit(signalFile);
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(after.status).toBe("done");
+    expect("assertedBy" in after).toBe(false); // the guard returned before any write
     rmSync(dir, { recursive: true, force: true });
   });
   test("a terminal 'done' success is NOT clobbered to stalled", () => {

@@ -500,7 +500,7 @@ jobs:
         # CAT-167: plugin-refresh.test.mjs guards the only git reset --hard in
         # the codebase and the dirty-tree guard protecting uncommitted work.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs plugin-refresh.test.mjs
+        run: bun test worker-state-projection.test.mjs plugin-refresh.test.mjs event-leak-guard.test.mjs
 
       - name: otel-forward tests (CTL-1529 round 3)
         # otel-forward had NO CI coverage at all before this
@@ -596,6 +596,16 @@ jobs:
         run: bash __tests__/execution-core-cli-routing.test.sh
 
       - name: Run stable unit tests
+        # CTL-1789 round-1 P2 (Codex): assertion-evidence.test.mjs and
+        # assertion-evidence-parity.test.mjs are added below. The parity
+        # suite is the ONLY mechanism keeping the two hand-written bash
+        # mirrors of ASSERTED_BY (phase-agent-emit-complete's --asserted-by
+        # default, orchestrate-revive's flag) byte-identical to the JS
+        # registry — and a parity check that never runs enforces nothing, so
+        # omitting it here would reproduce the exact gap it was written to
+        # close. Both are pure, hermetic, sub-millisecond file reads: no
+        # timers, no fs.watch, no sandbox dependency, so neither can flake.
+        #
         # CTL-1678 round-7 (Codex): the four drain suites added below
         # (__tests__/config-drain-disabled, __tests__/doctor-drain-disabled,
         # cli/drain, drain-event) had NO required-CI coverage, so every regression
@@ -658,6 +668,8 @@ jobs:
             beliefs/why.test.mjs \
             cli/branches.test.mjs \
             abort-worker.test.mjs \
+            assertion-evidence.test.mjs \
+            assertion-evidence-parity.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
@@ -721,6 +733,9 @@ jobs:
             event-tail.test.mjs \
             event-log-window.test.mjs \
             event-log-read-guard.test.mjs \
+            env-restore-guard.test.mjs \
+            gh-state-ignore-guard.test.mjs \
+            install-seam-guard.test.mjs \
             fence-guard.test.mjs \
             fence-standoff.test.mjs \
             fence-guard-integration.test.mjs \

@@ -66,6 +66,7 @@ export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 // budget) live here. deriveAdvancement stays pure — the impure reads happen in
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
+import { explainAdvanceEvidence } from "./assertion-evidence.mjs"; // CTL-1789: from-phase terminal attribution
 import { countRemediateCycles, countTicketEventsInWindow, countResolveConflictAttempts } from "./event-scan.mjs"; // #1461 Fix 2: countResolveConflictAttempts (complete+failed, not completions-only)
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
@@ -234,6 +235,7 @@ import {
   defaultAppendCooldownGcEvent,
   defaultAppendCooldownEscalatedEvent,
   defaultAppendPhaseAdvanceHeldEvent,
+  defaultAppendPhaseAdvanceAppliedEvent, // CTL-1789: the positive half of the advancement gate
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
   defaultAppendFenceSuppressedEvent,
@@ -2129,6 +2131,45 @@ export function readAllEligibleTickets() {
   return all;
 }
 
+// latestLivePhase — the pipeline phase whose status deriveAdvancement keys off:
+// the highest-ordinal PHASES entry that is BOTH present in the signal map and
+// still live (not superseded by a later dispatch). Returns null when the map
+// holds no live known phase.
+//
+// CTL-1660 P1 round 3 (Codex #3081): pick the latest phase from the LIVE set, not a
+// raw ordinal scan. With an older `review: done` behind a newly redispatched
+// `implement: running`, the ordinal scan selected the stale `review`, saw `done`,
+// and returned `pr` — dispatching the PR phase while the replacement implementation
+// was still running, skipping its verify and review entirely. (This became
+// reachable once livePhaseEntries admitted such tickets to the advancement sweep,
+// so the two must consume the same supersession decision.)
+//
+// CTL-1789 extracted this out of deriveAdvancement — with ZERO behaviour change —
+// so the advancement sweep can name the `from` side of the edge it just applied.
+// deriveAdvancement returns only `next`; the phase it advanced FROM was discarded,
+// which made a from→to audit event impossible to emit honestly. Both callers MUST
+// consume this same function: a second, independently-derived `from` would drift
+// from the FSM's actual input the moment either supersession rule changes.
+//
+// NOTE on the remediate detour: `remediate` ∉ PHASES (it is ANCILLARY), so it is
+// structurally invisible here — this function can never return it, for any input.
+// On the remediate→verify re-entry it returns `implement`, which is the signal
+// the FSM mechanically keyed off after maybeResetForRemediateCycle deleted the
+// cycle signals — but `implement` is NOT the phase whose terminal caused that
+// advance, and its (stale) terminal must NOT be the one the audit classifies.
+// CTL-1789 round-1 P1: both the predecessor reap AND the phase.advance.applied
+// audit resolve that one edge through resolveReapPredecessor over the PRE-reset
+// snapshot instead. Callers wanting the FSM's raw input still use this function;
+// callers naming the phase that just finished must layer the detour on top.
+export function latestLivePhase(signals) {
+  const sig = signals ?? {};
+  const liveSet = new Set(livePhaseEntries(sig).map(([p]) => p));
+  let latest = null;
+  // remediate ∉ PHASES → invisible here
+  for (const p of PHASES) if (p in sig && liveSet.has(p)) latest = p;
+  return latest;
+}
+
 // deriveAdvancement — pure. Given a ticket's phase→status signals, return the
 // phase the FSM owes next, or null. The next phase is owed when the latest
 // known phase is `done` and its transition() successor is a non-terminal phase
@@ -2141,22 +2182,12 @@ export function readAllEligibleTickets() {
 // remediateCycleCount: 0 }, which preserves the legacy verify → review edge.
 export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount = 0 } = {}) {
   const sig = signals ?? {};
-  // CTL-1660 P1 round 3 (Codex #3081): pick the latest phase from the LIVE set, not a
-  // raw ordinal scan. With an older `review: done` behind a newly redispatched
-  // `implement: running`, the ordinal scan selected the stale `review`, saw `done`,
-  // and returned `pr` — dispatching the PR phase while the replacement implementation
-  // was still running, skipping its verify and review entirely. (This became
-  // reachable once livePhaseEntries admitted such tickets to the advancement sweep,
-  // so the two must consume the same supersession decision.)
-  //
   // The `in sig` guards below still consult the FULL signal map on purpose: refusing
   // to advance into a successor that has any signal at all — even a stale one — is
   // the conservative direction. It can only withhold an advancement, never invent a
   // wrong one.
   const liveSet = new Set(livePhaseEntries(sig).map(([p]) => p));
-  let latest = null;
-  // remediate ∉ PHASES → invisible here
-  for (const p of PHASES) if (p in sig && liveSet.has(p)) latest = p;
+  const latest = latestLivePhase(sig);
   // CTL-703: `skipped` is advancement-eligible for monitor-deploy ONLY.
   // monitor-deploy `skipped` must advance to teardown (just as `done` does),
   // so the pipeline can reach the dedicated teardown phase even when no deploy
@@ -4565,6 +4596,11 @@ export function schedulerTick(
     // CTL-755: held-indicator audit emitter — phase.advance.held.<ticket>.
     // Best-effort, only-on-state-change. Mirrors appendDispatchRequestedEvent.
     appendPhaseAdvanceHeldEvent = defaultAppendPhaseAdvanceHeldEvent,
+    // CTL-1789: applied-advance audit emitter — phase.advance.applied.<ticket>.
+    // Best-effort, one per VERIFIED advance. Default-on (mirrors the held seam):
+    // the advancement gate must not stay refusal-only on any host that forgets to
+    // wire it. Tests inject a spy.
+    appendPhaseAdvanceAppliedEvent = defaultAppendPhaseAdvanceAppliedEvent,
     // CTL-757: canonical linear.state.write audit emitter, injectable for tests.
     // Caller-emitted at the 4 scheduler write sites (scheduler-advance,
     // preemption-resume, terminal-sweep, reconcile-backstop) via the emitStateWrite
@@ -7691,6 +7727,62 @@ export function schedulerTick(
     });
     if (dv.ok) {
       advanced.push({ ticket, phase: next });
+      // CTL-1789: the ONLY point at which "the FSM advanced this ticket" is both
+      // true and verified — dispatchAndVerify has already confirmed a live
+      // successor worker. Emit the positive half of the advancement gate.
+      //
+      // `from` is re-derived with latestLivePhase from the SAME post-sanitize map
+      // deriveAdvancement consumed above, so the audit names the FSM's actual
+      // input rather than a second, independently-guessed predecessor.
+      //
+      // `evidence` classifies WHO wrote that from-phase's terminal: the agent's
+      // own wrapper (declared) vs an infrastructure flip/reclaim (fabricated) vs
+      // unprovable (absent). Costs one readFileSync per SUCCESSFUL advance — the
+      // same read emitPredecessorReap performs a few lines below, not a per-tick
+      // per-ticket cost.
+      //
+      // ROLLOUT: every signal written before this shipped carries no assertedBy,
+      // so the first pipeline pass after deploy reads `absent` /
+      // evidence_reason="no-marker". Do not alarm on `absent` until a full ticket
+      // has cycled through.
+      //
+      // REMEDIATE DETOUR (CTL-1789 round-1 P1, Codex): latestLivePhase scans
+      // PHASES, and `remediate` is an ANCILLARY phase (∉ PHASES) — so it can
+      // NEVER return `remediate`, whether or not the signal still exists. On
+      // top of that, maybeResetForRemediateCycle deleted phase-remediate.json
+      // above, before `signals` was even read. Left alone, every remediation
+      // re-entry therefore reported `from=implement` and classified its
+      // evidence off the long-finished implement signal — laundering a
+      // FABRICATED remediation terminal into a DECLARED one, corrupting the
+      // exact metric this event exists to produce. Resolve that one edge from
+      // the SAME pre-reset snapshot and the SAME resolver the predecessor-reap
+      // path uses (resolveReapPredecessor), so the audit's `from` and the
+      // reaped worker can never be two different phases for one advance. Every
+      // other edge stays on latestLivePhase — the FSM's own input.
+      const detour = resolveReapPredecessor(preResetSignals, next);
+      const fromPhase =
+        detour?.phase === REMEDIATE_PHASE ? REMEDIATE_PHASE : latestLivePhase(signals);
+      const fromRaw = fromPhase
+        ? fromPhase === REMEDIATE_PHASE
+          ? // the reset already deleted the file — remediateRaw is the pre-reset capture
+            (remediateRaw ?? readPhaseSignalRaw(orchDir, ticket, fromPhase))
+          : readPhaseSignalRaw(orchDir, ticket, fromPhase)
+        : null;
+      const ev = explainAdvanceEvidence(fromRaw, { predecessorPhase: fromPhase });
+      safeEmit(
+        appendPhaseAdvanceAppliedEvent,
+        {
+          orchId: ticket,
+          ticket,
+          from: fromPhase,
+          to: next,
+          evidence: ev.evidence,
+          evidenceReason: ev.evidenceReason,
+          assertedBy: ev.assertedBy,
+          assertionRef: fromPhase ? `workers/${ticket}/phase-${fromPhase}.json` : null,
+        },
+        { ticket, phase: "advance" }
+      );
       // CTL-755: a verified triage→research promotion consumed a slot this tick.
       // liveCount was read at the top of the tick (before this dispatch), so the
       // promotion has not yet incremented it — STEP C subtracts promotedCount
@@ -9631,6 +9723,9 @@ function runTick() {
       appendPhaseAdvanceHeldEvent: runningOpts.appendPhaseAdvanceHeldEvent,
       appendFenceStandoffEvent:
         runningOpts.appendFenceStandoffEvent ?? defaultAppendFenceStandoffEvent,
+      // CTL-1789: same shape — undefined keeps schedulerTick's default-on
+      // defaultAppendPhaseAdvanceAppliedEvent; a test injects a spy.
+      appendPhaseAdvanceAppliedEvent: runningOpts.appendPhaseAdvanceAppliedEvent,
       // CTL-1605: arm the guarded fast-path eviction seam for the STEP A terminal
       // short-circuit. Reuses the SAME warm agents snapshot + freshness + worktree
       // resolver the J4 census uses (never removes a dir whose worktree hosts a live
@@ -10446,6 +10541,7 @@ export function startScheduler({
   checkSequencing, // CTL-537: optional override; runTick defaults to defaultCheckSequencing.
   fetchBatch, // CTL-755/784: optional override; schedulerTick defaults to fetchTicketsBatch.
   appendPhaseAdvanceHeldEvent, // CTL-755: optional override; defaults to defaultAppendPhaseAdvanceHeldEvent.
+  appendPhaseAdvanceAppliedEvent, // CTL-1789: optional override; defaults to defaultAppendPhaseAdvanceAppliedEvent.
   // CTL-764 Phase 5: optional worker.transition emitter override (test seam).
   // Undefined → runTick threads the real defaultAppendWorkerTransitionEvent into
   // the per-tick schedulerTick opts (production). A test injects a spy here to
@@ -10519,6 +10615,7 @@ export function startScheduler({
     checkSequencing, // CTL-537: optional override (default defaultCheckSequencing)
     fetchBatch, // CTL-755/784: optional admission-gate batch hydration seam
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
+    appendPhaseAdvanceAppliedEvent, // CTL-1789: optional applied-advance emit seam
     appendWorkerTransitionEvent, // CTL-764: optional worker.transition emitter override (test seam; runTick defaults to defaultAppendWorkerTransitionEvent)
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
     checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)
