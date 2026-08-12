@@ -121,7 +121,13 @@ fi
    # REST check via gh api "repos/${REPO}/pulls/${PR_NUMBER}"
 
    # When PR is CLEAN — merge directly (no --auto)
-   gh pr merge ${PR_NUMBER} --squash --delete-branch
+   # CTL-56: capture head ref before merge; merge via REST only (worktree-safe).
+   HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref' 2>/dev/null || true)
+   gh pr merge ${PR_NUMBER} --squash
+   # … confirm via REST (.merged == true) …
+   # After confirm, delete remote head ref checkout-free (idempotent, best-effort, CTL-56):
+   [[ -n "${HEAD_REF:-}" ]] && \
+     gh api --method DELETE "repos/${REPO}/git/refs/heads/${HEAD_REF}" >/dev/null 2>&1 || true
 
    # Record done — worker writes status=done (CTL-252 contract)
    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)

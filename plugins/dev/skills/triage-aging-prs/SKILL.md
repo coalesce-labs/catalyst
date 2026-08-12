@@ -198,7 +198,16 @@ test suite. A union that produces a duplicate YAML key breaks CI for everyone.
 ## Step 5 — Merge, and judge CI honestly
 
 ```bash
-gh pr merge <N> --repo "$REPO" --squash --delete-branch
+# CTL-56: capture head ref BEFORE merge for checkout-free remote cleanup after confirm.
+HEAD_REF=$(gh api "repos/${REPO}/pulls/<N>" --jq '.head.ref' 2>/dev/null || true)
+# Merge via REST only — no local branch-cleanup flag; worktree-safe (CTL-56).
+gh pr merge <N> --repo "$REPO" --squash
+# … confirm merge via REST (.merged == true) …
+# After REST-confirm, delete remote head ref checkout-free (idempotent, best-effort):
+if [[ -n "${HEAD_REF:-}" ]]; then
+  gh api --method DELETE "repos/${REPO}/git/refs/heads/${HEAD_REF}" >/dev/null 2>&1 \
+    || echo "CTL-56: remote branch ${HEAD_REF} delete skipped (already gone or protected)" >&2
+fi
 ```
 
 Before merging, check the **actual** failing checks rather than trusting the gate:

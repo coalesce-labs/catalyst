@@ -371,18 +371,37 @@ Proceed? [Y/n]:
 ### 9. Execute squash merge
 
 ```bash
-gh pr merge $pr_number --squash --delete-branch
+# CTL-56: capture head ref BEFORE merge so we can delete it checkout-free after confirm.
+# Resolves from the PR API regardless of local branch state.
+head_ref=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.head.ref' 2>/dev/null || true)
+# Merge via REST only — no local branch-cleanup flag (CTL-56: the local side effect fails
+# inside a linked worktree when the base is already checked out in the primary clone).
+gh pr merge $pr_number --squash
 ```
 
 **Always:**
 
 - Squash merge (combines all commits into one)
-- Delete remote branch automatically
+- Remote branch deleted explicitly in Step 9b (checkout-free, after REST confirm)
 
 **Capture merge commit SHA:**
 
 ```bash
 merge_sha=$(git rev-parse HEAD)
+```
+
+### 9b. Delete remote head ref (checkout-free)
+
+After verifying the merge succeeded (REST confirm), delete the remote head branch via API —
+no local `git checkout` required, safe from any worktree (CTL-56):
+
+```bash
+# Idempotent + best-effort: 404/422 means the ref is already gone or protected.
+# Never fail the skill on branch cleanup — the merge already landed.
+if [[ -n "${head_ref:-}" ]]; then
+  gh api --method DELETE "repos/${REPO}/git/refs/heads/${head_ref}" >/dev/null 2>&1 \
+    || echo "CTL-56: remote branch ${head_ref} delete skipped (already gone or protected)" >&2
+fi
 ```
 
 ### 10. Update Linear ticket
@@ -403,20 +422,31 @@ If ticket found and not using `--no-update`:
 ### 11. Delete local branch and update base
 
 ```bash
-# Switch to base branch
-git checkout $base_branch
+# CTL-56: detect linked-worktree — when absolute-git-dir ≠ git-common-dir we are in a
+# linked worktree. In that case, skip the local `git checkout <base>` (it fails when
+# the base is already checked out in the primary clone) and rely on Step 11a to update
+# the primary. Defer the local feature-branch delete to teardown/reaper.
+_abs_git="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
+_com_git="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [[ -n "$_abs_git" && -n "$_com_git" && "$_abs_git" != "$_com_git" ]]; then
+  echo "merge-pr: linked worktree — skipping local base checkout; teardown handles branch cleanup (CTL-56)" >&2
+else
+  # Primary (non-worktree) checkout: switch to base, pull, delete local feature branch.
+  # Switch to base branch
+  git checkout $base_branch
 
-# Pull latest (includes merge commit)
-git pull origin $base_branch
+  # Pull latest (includes merge commit)
+  git pull origin $base_branch
 
-# Delete local feature branch
-git branch -d $head_branch
+  # Delete local feature branch
+  git branch -d $head_branch
 
-# Confirm deletion
-echo "✅ Deleted local branch: $head_branch"
+  # Confirm deletion
+  echo "✅ Deleted local branch: $head_branch"
+fi
 ```
 
-**Always delete local branch** - no prompt (remote already deleted).
+**Always delete local branch** when not in a linked worktree — no prompt (remote deleted in Step 9b).
 
 ### 11a. Update primary worktree
 
