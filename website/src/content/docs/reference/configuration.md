@@ -702,15 +702,25 @@ plist; the launcher sources it from a `0600` file at run time.
 **Seed-before-flip runbook** (run on each host):
 
 1. **Operator credential step:** obtain the cloud credential from the operator who manages the
-   service. This repository does not contain it. Provision it in the launcher's `0600` environment
-   file:
+   service. This repository does not contain it.
+
+   Provision it under the **resolved** token variable name for this host. The name is
+   `CATALYST_CLOUD_TOKEN` unless this host sets the `CATALYST_CLOUD_TOKEN_ENV` env override or the
+   Layer-2 `catalyst.cloud.tokenEnv` key (see the escape-hatch row above) — on such a host,
+   exporting `CATALYST_CLOUD_TOKEN` does **not** authenticate the writer.
 
    ```bash
    mkdir -p ~/.config/catalyst
-   printf 'export CATALYST_CLOUD_TOKEN=%s\n' '<credential>' \
+   # The resolved name for this host: the escape hatch if set, else the default.
+   TOKEN_VAR="${CATALYST_CLOUD_TOKEN_ENV:-CATALYST_CLOUD_TOKEN}"
+   printf 'export %s=%s\n' "$TOKEN_VAR" '<credential>' \
      > ~/.config/catalyst/cloud-sync.env
    chmod 600 ~/.config/catalyst/cloud-sync.env
    ```
+
+   If the name is set via Layer-2 `catalyst.cloud.tokenEnv` rather than the env override, set
+   `TOKEN_VAR` to that value by hand. After step 2, `catalyst doctor`'s `replica-token` line
+   reports the name this host actually resolved — use it to confirm you provisioned the right one.
 
 2. Install and start the supervised writer:
 

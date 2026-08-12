@@ -17,8 +17,15 @@ the token FIRST, activate the writer, wait for a verified seed, and only then fl
    `~/.config/catalyst/cloud-sync.env` (`chmod 600`).
 2. **Activate the writer**: `catalyst-stack adopt-cloud-sync`. Provisioning the token does not
    itself install or start the supervised writer.
-3. **Wait for a verified seed** — `catalyst doctor`'s `replica-fresh` PASS, or
-   `sqlite3 ~/catalyst/catalyst-replica.db 'SELECT COUNT(*) FROM issues'` > 0.
+3. **Wait for a verified seed** — `catalyst-stack verify-cloud-sync` (this is the authority: it
+   checks the schema, issue rows, a fresh writer lock, **and** a non-empty seed cursor). Equivalent
+   manual check — the row count alone is **not** sufficient, because a database with `issues` rows
+   but no `sync_meta` cursor is mid-reseed and every read still falls back to `linearis`:
+
+   ```bash
+   sqlite3 ~/catalyst/catalyst-replica.db \
+     "SELECT 1 FROM sync_meta WHERE key='cursor' AND value<>'' LIMIT 1;"
+   ```
 4. **Then set `CATALYST_LINEAR_REPLICA=on`** and restart execution-core on a worker — an
    already-running process does not construct a reader just because the flag changed.
 
@@ -37,8 +44,9 @@ The canonical seed-before-flip runbook, including every key's precedence, lives 
 
 ## Loki queries
 
-`service_name` is the only stream label here; every other field — including the event name — arrives
-as **structured metadata**, because `otel-forward` sends the body as a plain string and the event
+`service_name` and `service_namespace` are the stream labels here (`service_namespace` is
+`catalyst` for every emitter, and is the cross-signal join key); every other field — including the
+event name — arrives as **structured metadata**, because `otel-forward` sends the body as a plain string and the event
 attributes as OTLP log attributes (dots normalized to underscores). Do not `| json` these lines:
 there is no JSON body to parse, and `attributes["event.name"]` never matches.
 
