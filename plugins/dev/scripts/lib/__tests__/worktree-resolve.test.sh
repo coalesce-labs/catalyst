@@ -100,4 +100,19 @@ eq explicit-missing "$source_value" "non-worktree explicit keeps strict-mode sou
 capture "$ROOT/unrelated" CAT-1000 "$WT1000"
 eq "$(cd "$WT1000" && pwd -P)" "$out" "correct explicit worktree still accepted"
 eq explicit "$source_value" "correct explicit worktree keeps source=explicit"
+# ─── CTL-1777: zsh source-safety for _wtr_path_serves_ticket ───────────────
+# Under zsh, `local path` clobbers $PATH → git becomes unresolvable → the
+# function returns 1 (false negative) even when the worktree is correct.
+# Create a ticket-named worktree and assert _wtr_path_serves_ticket returns
+# the same verdict (SERVES) under both bash and zsh. Skip when zsh absent.
+if command -v zsh >/dev/null 2>&1; then
+  ZSH_WT_REAL="$(cd "$WT" && pwd -P)"
+  ZSH_BASH_VERDICT="$(bash -c "source '$LIB'; _wtr_path_serves_ticket '$ZSH_WT_REAL' CAT-100 && echo SERVES || echo NOTSERVES")"
+  ZSH_ZSH_VERDICT="$(zsh -c "source '$LIB'; _wtr_path_serves_ticket '$ZSH_WT_REAL' CAT-100 && echo SERVES || echo NOTSERVES" 2>/dev/null)"
+  [[ "$ZSH_BASH_VERDICT" == "SERVES" ]] && ok "bash: _wtr_path_serves_ticket returns SERVES for correct worktree" || bad "bash: _wtr_path_serves_ticket unexpectedly returned $ZSH_BASH_VERDICT"
+  [[ "$ZSH_ZSH_VERDICT" == "$ZSH_BASH_VERDICT" ]] && ok "zsh: _wtr_path_serves_ticket matches bash ($ZSH_ZSH_VERDICT)" || bad "zsh: _wtr_path_serves_ticket mismatch (bash=$ZSH_BASH_VERDICT zsh=$ZSH_ZSH_VERDICT)"
+else
+  echo "SKIP: zsh source-safety test for _wtr_path_serves_ticket (zsh not installed)"
+fi
+
 echo "$P passed, $F failed"; [[ $F -eq 0 ]]

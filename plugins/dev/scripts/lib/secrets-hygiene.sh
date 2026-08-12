@@ -32,9 +32,13 @@ ensure_secrets_gitignore() {
 # write_secret_file <content> <path>
 # Atomic writer: write under umask 077, chmod 600, mv into place.
 write_secret_file() {
-	local content="$1" path="$2" tmp
+	# NB: the second local is named dest_path, NOT path. Under zsh, `path` is a
+	# special array tied to $PATH; `local path` scopes it locally and resets it
+	# to empty, making `mktemp` unresolvable (command not found). Bash treats
+	# `path` as ordinary. CTL-1777; see also linear-team-keys.sh:22-27.
+	local content="$1" dest_path="$2" tmp
 	tmp="$(mktemp)" || return 1
 	( umask 077; printf '%s' "$content" > "$tmp" ) || { rm -f "$tmp"; return 1; }
 	chmod 600 "$tmp"
-	mv "$tmp" "$path"
+	mv "$tmp" "$dest_path"
 }

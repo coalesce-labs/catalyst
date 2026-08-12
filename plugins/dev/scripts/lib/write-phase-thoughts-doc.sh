@@ -29,13 +29,24 @@ _WRITE_PHASE_THOUGHTS_DOC_LOADED=1
 write_phase_thoughts_doc() {
   local phase="$1" ticket="$2" body="$3"
   local dir="thoughts/shared/phase-${phase}"
-  local ticket_lc date_prefix path
+  # NB: the local is named doc_path, NOT path. Under zsh, `path` is a special
+  # array tied to $PATH; `local path` scopes it locally and resets it to empty,
+  # making `tr`, `date`, and `mkdir` unresolvable for the rest of the function
+  # (silently swallowed by the pre-existing 2>/dev/null guards). Bash treats
+  # `path` as ordinary, so the bug is zsh-only. See linear-team-keys.sh:22-27
+  # for the prior fix in the same class. CTL-1777.
+  local ticket_lc date_prefix doc_path
   ticket_lc="$(printf '%s' "$ticket" | tr '[:upper:]' '[:lower:]')"
   date_prefix="$(date +%Y-%m-%d)"
   export CATALYST_PHASE_THOUGHTS_DOC=""
-  mkdir -p "$dir" 2>/dev/null || return 0
-  path="${dir}/${date_prefix}-${ticket_lc}.md"
-  if printf '%s\n' "$body" > "$path" 2>/dev/null; then
-    export CATALYST_PHASE_THOUGHTS_DOC="$path"
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "write_phase_thoughts_doc: mkdir failed for ${dir}" >&2
+    return 0
+  fi
+  doc_path="${dir}/${date_prefix}-${ticket_lc}.md"
+  if printf '%s\n' "$body" > "$doc_path" 2>/dev/null; then
+    export CATALYST_PHASE_THOUGHTS_DOC="$doc_path"
+  else
+    echo "write_phase_thoughts_doc: write failed for ${doc_path}" >&2
   fi
 }
