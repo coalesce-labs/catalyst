@@ -315,10 +315,16 @@ export function parseBranchArgs(argv) {
   return out;
 }
 
+export function writeOut(text, stdout = process.stdout) {
+  return new Promise((resolve, reject) => {
+    stdout.write(text, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
 async function cmdList({ json, staleDays, repoRoot }) {
   const rows = await buildRows({ repoRoot, staleDays: staleDays ?? DEFAULT_STALE_DAYS });
   if (json) {
-    process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+    await writeOut(`${JSON.stringify(rows, null, 2)}\n`);
     return 0;
   }
   for (const r of rows) {

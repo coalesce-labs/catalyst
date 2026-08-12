@@ -578,6 +578,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/merge-delete-branch-worktree-guard.test.sh
 
+      - name: catalyst-stack integration tests (CAT-264)
+        # CAT-264: this suite was red and absent from the explicit CI allowlist.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack.test.sh
+
+      - name: execution-core CLI routing tests (CAT-264)
+        # CAT-264: guards complete JSON output as well as noun dispatch.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/execution-core-cli-routing.test.sh
+
       - name: Run stable unit tests
         # CTL-1789 round-1 P2 (Codex): assertion-evidence.test.mjs and
         # assertion-evidence-parity.test.mjs are added below. The parity
@@ -649,6 +659,7 @@ jobs:
             cli/beliefs-shadow-status.test.mjs \
             beliefs/shadow-store.test.mjs \
             beliefs/why.test.mjs \
+            cli/branches.test.mjs \
             abort-worker.test.mjs \
             assertion-evidence.test.mjs \
             assertion-evidence-parity.test.mjs \

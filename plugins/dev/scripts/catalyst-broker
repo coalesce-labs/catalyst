@@ -67,6 +67,9 @@ while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 DAEMON_SCRIPT="${BROKER_DAEMON_SCRIPT:-$SCRIPT_DIR/broker/index.mjs}"
+BROKER_PROC_PATTERN="${BROKER_PROC_PATTERN:-broker/index.mjs}"
+# shellcheck source=lib/process-identity.sh
+source "${CATALYST_PROCESS_IDENTITY_LIB:-$SCRIPT_DIR/lib/process-identity.sh}"
 
 is_alive() { kill -0 "$1" 2>/dev/null; }
 
@@ -75,11 +78,27 @@ read_pid() {
     local pid
     pid="$(cat "$PID_FILE" 2>/dev/null)"
     if [[ "$pid" =~ ^[0-9]+$ ]] && is_alive "$pid"; then
-      echo "$pid"; return 0
+      if cpi_pid_is_ours "$pid" "$BROKER_PROC_PATTERN"; then
+        echo "$pid"; return 0
+      fi
+      echo "warning: pid file $PID_FILE names live pid $pid, but its identity does not match '$BROKER_PROC_PATTERN'; preserving pid file" >&2
+      return 1
     fi
     rm -f "$PID_FILE" 2>/dev/null
   fi
   return 1
+}
+
+find_orphan_pid() {
+  local matches count
+  matches="$(cpi_find_orphans "$BROKER_PROC_PATTERN")" || return 1
+  [[ -n "$matches" ]] || return 1
+  count="$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n+0 }')"
+  if [[ "$count" -gt 1 ]]; then
+    echo "error: ambiguous broker processes match '$BROKER_PROC_PATTERN'; refusing to signal any" >&2
+    return 2
+  fi
+  printf '%s\n' "$matches"
 }
 
 resolve_runtime() {
@@ -133,24 +152,30 @@ cmd_start() {
 }
 
 cmd_stop() {
-  local pid
+  local pid orphan=0 rc
   if ! pid=$(read_pid); then
-    echo "catalyst-broker not running"
-    return 0
+    pid="$(find_orphan_pid)"; rc=$?
+    if [[ $rc -eq 2 ]]; then return 1; fi
+    if [[ $rc -ne 0 ]]; then
+      echo "catalyst-broker not running"
+      return 0
+    fi
+    orphan=1
   fi
-  kill "$pid" 2>/dev/null || true
-  local waited=0
-  while [[ $waited -lt 30 ]] && is_alive "$pid"; do
-    sleep 0.1
-    waited=$((waited + 1))
-  done
-  is_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+  if [[ $orphan -eq 1 ]] && ! cpi_pid_is_ours "$pid" "$BROKER_PROC_PATTERN"; then
+    echo "error: pid $pid no longer matches '$BROKER_PROC_PATTERN'; refusing to signal" >&2
+    return 1
+  fi
+  if ! cpi_stop_pid "$pid"; then
+    echo "error: catalyst-broker stop not confirmed; pid $pid may still be running" >&2
+    return 1
+  fi
   rm -f "$PID_FILE" 2>/dev/null
-  echo "catalyst-broker stopped"
+  if [[ $orphan -eq 1 ]]; then echo "catalyst-broker orphan stopped (pid $pid)"; else echo "catalyst-broker stopped"; fi
 }
 
 cmd_restart() {
-  cmd_stop
+  cmd_stop || return 1
   cmd_start
 }
 
@@ -167,8 +192,11 @@ cmd_status() {
     esac
   done
 
-  local pid
-  if pid=$(read_pid); then
+  local pid orphan=0
+  if ! pid=$(read_pid); then
+    pid="$(find_orphan_pid 2>/dev/null)" && orphan=1 || pid=""
+  fi
+  if [[ -n "$pid" ]]; then
     if [[ $json -eq 1 ]]; then
       if [[ -f "$STATE_FILE" ]] && jq -e . "$STATE_FILE" >/dev/null 2>&1; then
         jq --argjson pid "$pid" '. + {running: true, pid: $pid}' "$STATE_FILE"
@@ -176,7 +204,7 @@ cmd_status() {
         jq -n --argjson pid "$pid" '{running: true, pid: $pid, keyHealth: null, gateway: null}'
       fi
     else
-      echo "running (pid $pid)"
+      if [[ $orphan -eq 1 ]]; then echo "running (orphan pid $pid)"; else echo "running (pid $pid)"; fi
     fi
     return 0
   fi
