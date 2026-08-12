@@ -227,6 +227,8 @@ import {
   defaultAppendPhaseAdvanceHeldEvent,
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
+  defaultAppendFenceSuppressedEvent,
+  emitFenceSuppressedEventOnce,
 } from "./recovery.mjs";
 import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolve.mjs";
 // CTL-729: progress-watchdog imports.
@@ -3966,6 +3968,17 @@ function emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEv
   }
 }
 
+export function emitFenceSuppressedOnce(orchDir, ticket, site, self, appendFenceSuppressedEvent) {
+  try {
+    emitFenceSuppressedEventOnce(orchDir, ticket, site, self, appendFenceSuppressedEvent);
+  } catch (err) {
+    log.warn(
+      { ticket, site, err: err.message },
+      "cat-3: fence-suppressed emit threw — continuing tick"
+    );
+  }
+}
+
 // defaultJanitorKillIntentRecorder — CTL-1004 J2's kill seam, backed by the
 // CTL-936 intentDb (beliefs.db) already threaded into the tick. Mirrors
 // recovery.mjs's intentAwareKill EXACTLY: it BOTH issues the real stop
@@ -4434,6 +4447,7 @@ export function schedulerTick(
     appendFenceStandoffEvent = defaultAppendFenceStandoffEvent,
     // CAT-173: injectable terminal-sweep fence seam for scheduler integration tests.
     terminalFenceGuard = fenceGuard,
+    appendFenceSuppressedEvent = defaultAppendFenceSuppressedEvent,
     // CTL-537: sequencing seam. Default undefined → the new-work gate is skipped
     // entirely (byte-for-byte legacy dispatch for every test that doesn't inject
     // it). Production wires defaultCheckSequencing via runTick/startScheduler.
@@ -6939,6 +6953,13 @@ export function schedulerTick(
                 logger: log,
                 detail: `dependency-cycle members: ${anomaly.members.join(" → ")}`,
               });
+              emitFenceSuppressedOnce(
+                orchDir,
+                member,
+                "dependency-cycle",
+                self,
+                appendFenceSuppressedEvent
+              );
             }
           }
         }
@@ -7860,7 +7881,7 @@ export function schedulerTick(
           } else {
             log.warn(
               { ticket: member, reason: c925FenceVerdict?.reason ?? null },
-              "cat-173: fence suppressed eligible dependency-cycle escalation",
+              "ctl-863: stale fence — suppressing labelOnce(needs-human/ctl-925-cycle) write (zombie guard)"
             );
             maybeBreakGlass({
               orchDir,
@@ -7874,6 +7895,13 @@ export function schedulerTick(
               logger: log,
               detail: `dependency-cycle members: ${anomaly.members.join(" → ")}`,
             });
+            emitFenceSuppressedOnce(
+              orchDir,
+              member,
+              "ctl-925-cycle",
+              self,
+              appendFenceSuppressedEvent
+            );
           }
         }
       }
@@ -8644,6 +8672,16 @@ export function schedulerTick(
                   /* best-effort — a missing marker already permits retry */
                 }
               }
+              // CAT-3: the log.warn + stampFenceSuppress above already cover this
+              // else-branch's original scope — this is the one genuinely new piece
+              // CAT-3 adds on top of CAT-173's standoff handling: per-site telemetry.
+              emitFenceSuppressedOnce(
+                orchDir,
+                ticket,
+                "terminal-sweep",
+                self,
+                appendFenceSuppressedEvent
+              );
             }
           }
           // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
