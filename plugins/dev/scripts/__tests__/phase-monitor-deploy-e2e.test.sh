@@ -23,6 +23,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+# write-phase-thoughts-doc.sh writes a CWD-relative path; cases that don't
+# explicitly `cd` (Case 1) write under whatever directory this script itself
+# was invoked from. Capture it once so assertions can find that file.
+INITIAL_PWD="$PWD"
 SKILL_FILE="${REPO_ROOT}/plugins/dev/skills/phase-monitor-deploy/SKILL.md"
 # CTL-1410 Phase A: every terminal emit rides the production wrapper now.
 EMIT_WRAPPER="${REPO_ROOT}/plugins/dev/scripts/phase-agent-emit-complete"
@@ -286,6 +290,13 @@ SUCCESS_SIG_STATUS="$(jq -r '.status' \
   "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json" 2>/dev/null)"
 assert_eq "success: signal status flipped to done (CTL-1410)" "done" "$SUCCESS_SIG_STATUS"
 
+# CTL-1490 (Codex round-2 P1 — PR #2697): the positive counterpart of the
+# canary-fail case below — a genuinely successful canary DOES get a durable
+# thoughts doc, proving the gate isn't just "never write it."
+SUCCESS_THOUGHTS_DOC="${INITIAL_PWD}/thoughts/shared/phase-monitor-deploy/$(date +%Y-%m-%d)-ctl-9999.md"
+assert_file_exists "success: durable thoughts doc written on canary success" \
+  "$SUCCESS_THOUGHTS_DOC"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Case 2: deploy failure → phase.monitor-deploy.failed, canary NOT invoked
 
@@ -315,6 +326,53 @@ assert_eq "failure: emitted failed event" \
 FAIL_SIG_STATUS="$(jq -r '.status' \
   "$CASE_DIR2/orch/workers/CTL-9999/phase-monitor-deploy.json" 2>/dev/null)"
 assert_eq "failure: signal status flipped to failed (CTL-1410)" "failed" "$FAIL_SIG_STATUS"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case 2b (CTL-1490, Codex round-2 P1 — PR #2697): deploy SUCCESS but CANARY
+# FAILURE → phase.monitor-deploy.failed, and the durable local thoughts doc
+# must NOT be written. reconstruct-ticket-state.mjs's thoughts-artifact walk
+# treats the doc's mere presence as proof monitor-deploy completed
+# successfully; writing it here would let a cross-host reconstruction with no
+# local signals read a failed canary as terminal-success and dispatch
+# teardown on a deployment that actually failed.
+#
+# Run in a dedicated CWD (write_phase_thoughts_doc.sh writes a CWD-relative
+# path) so this case's absence-of-file assertion can't collide with the
+# success case's doc above/below it in this same script run.
+CANARY_FAIL_CWD="$TMPROOT/canary-fail-cwd"
+mkdir -p "$CANARY_FAIL_CWD"
+_PREV_PWD="$PWD"
+cd "$CANARY_FAIL_CWD" || exit 1
+CASE_DIR2B="$(run_case canary-fail canaryfail success failed 5 yes)"
+cd "$_PREV_PWD" || exit 1
+
+EXIT2B="$(cat "$CASE_DIR2B/exit-code")"
+if [ "$EXIT2B" -ne 0 ]; then
+  ok "canary-fail: exits non-zero"
+else
+  fail "canary-fail: exit code" "expected non-zero, got $EXIT2B"
+fi
+
+CANARY_FAIL_EVENT="$(read_phase_event_line "$CASE_DIR2B/catalyst" \
+              | jq -r '.attributes."event.name"' 2>/dev/null)"
+assert_eq "canary-fail: emitted failed event" \
+  "phase.monitor-deploy.failed.CTL-9999" "$CANARY_FAIL_EVENT"
+
+TODAY="$(date +%Y-%m-%d)"
+CANARY_FAIL_THOUGHTS_DOC="${CANARY_FAIL_CWD}/thoughts/shared/phase-monitor-deploy/${TODAY}-ctl-9999.md"
+if [ ! -f "$CANARY_FAIL_THOUGHTS_DOC" ]; then
+  ok "canary-fail: no durable thoughts doc written (reconstruction must not read this as terminal-success)"
+else
+  fail "canary-fail: thoughts doc should not exist" "found: $CANARY_FAIL_THOUGHTS_DOC"
+fi
+
+# The Linear mirror comment IS still posted on canary failure (operators
+# should see it) — only the durable local reconstruction signal is gated.
+if grep -q 'CTL-9999' "$CASE_DIR2B/comment-post-calls.log" 2>/dev/null; then
+  ok "canary-fail: deploy mirror still posted to Linear despite gated thoughts doc"
+else
+  fail "canary-fail: deploy mirror posted" "no call in $(cat "$CASE_DIR2B/comment-post-calls.log" 2>/dev/null)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Case 3: no deploy event arrives within timeout → phase.monitor-deploy.skipped

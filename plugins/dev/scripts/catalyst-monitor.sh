@@ -597,6 +597,10 @@ cmd_start() {
   if [[ -z "$_cm_config_file" && -z "${CATALYST_CONFIG_PATH:-}" && -f "$CATALYST_DIR/.catalyst/config.json" ]]; then
     _cm_config_file="$CATALYST_DIR/.catalyst/config.json"
   fi
+  # CTL-1755: bounded rotate-on-boot so the previous run's log survives a restart.
+  # shellcheck source=lib/rotate-log-on-start.sh
+  [ -f "$SCRIPT_DIR/lib/rotate-log-on-start.sh" ] && . "$SCRIPT_DIR/lib/rotate-log-on-start.sh"
+  rotate_log_on_start "$CATALYST_DIR/monitor.log" 2>/dev/null || true
   CATALYST_CONFIG_FILE="$_cm_config_file" \
   CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \
@@ -875,9 +879,56 @@ acquire_forward_lock() {
 # rather than killing something we cannot identify.
 _forward_pid_is_ours() {
   local pid="$1" cmd
-  cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || return 1
+  # -ww: NEVER let ps truncate. Linux procps wraps at 80 columns when stdout is
+  # not a tty, and the pre-exec command line here is
+  # `bash <tmp>/bin/bun run <repo>/plugins/dev/scripts/otel-forward/index.ts` —
+  # ~114 chars in CI, so the "otel-forward" marker this match depends on is cut
+  # off entirely. The identity check then answered "not ours", read_forward_pid
+  # deleted the pid file as stale, and forward-restart skipped the stop and
+  # started a SECOND forwarder (CI: "Forwarder not running" with pid 2413 still
+  # in state S). macOS ps does not truncate, so this reproduced only on Linux.
+  cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null)" || return 1
   [[ -n "$cmd" ]] || return 1
   [[ "$cmd" == *"otel-forward"* ]]
+}
+
+# _forward_pid_gone PID — 0 when PID is no longer a RUNNING process.
+#
+# `kill -0` CANNOT answer this, and that is the whole bug: it succeeds for a
+# ZOMBIE — a process that has already exited but whose parent has not reaped it.
+# The forwarder is started with nohup+disown, so it is reparented to PID 1; on a
+# host whose PID 1 does not reap promptly (the shell-test/CI container is exactly
+# that) a SIGKILL'd forwarder stays defunct and `kill -0` keeps reporting it alive
+# indefinitely. A wait loop built on `kill -0` therefore cannot terminate early —
+# it burns its full bound and returns with the pid still present, which is what
+# made forward-restart.test.sh fail with "old forwarder pid ... still alive".
+#
+# SIGKILL is uncatchable, so once it is delivered "still visible" can only mean
+# "not yet reaped": a zombie holds a pid slot and nothing else. Ask ps for the
+# process STATE and treat defunct (Z on both Linux and macOS) as gone.
+#
+# FAILS CLOSED, matching _forward_pid_is_ours above: if ps is unavailable we
+# cannot prove death, so we report "not gone" rather than claim a kill worked.
+# Note ps exits non-zero (and prints nothing) for a pid that is not in the table,
+# which is itself proof the pid is gone.
+_forward_pid_gone() {
+  local pid="$1" state
+  kill -0 "$pid" 2>/dev/null || return 0   # fully gone / already reaped
+
+  command -v ps >/dev/null 2>&1 || return 1   # cannot prove it — fail closed
+
+  # `|| return 0` rather than capturing $? separately: ps exits non-zero for a pid
+  # that is not in the process table, which is itself proof the pid is gone. Written
+  # in the same explicit form as _forward_pid_is_ours so it is safe under this
+  # script's `set -e` no matter what context the function is called from.
+  state="$(ps -o state= -p "$pid" 2>/dev/null)" || return 0
+  state="${state//[[:space:]]/}"
+  [[ -z "$state" ]] && return 0   # listed but stateless — treat as gone
+
+  case "$state" in
+    [Zz]*) return 0 ;;   # defunct — exited, awaiting a reap that may never come
+    *) return 1 ;;       # a genuinely live process (R/S/D/T/...)
+  esac
 }
 
 read_forward_pid() {
@@ -904,6 +955,10 @@ _forward_start_impl() {
     echo "Forwarder already running (pid $(cat "$FORWARD_PID_FILE"))"
     return 0
   fi
+  # CTL-1755: bounded rotate-on-boot so the previous run's log survives a restart.
+  # shellcheck source=lib/rotate-log-on-start.sh
+  [ -f "$SCRIPT_DIR/lib/rotate-log-on-start.sh" ] && . "$SCRIPT_DIR/lib/rotate-log-on-start.sh"
+  rotate_log_on_start "$FORWARD_LOG" 2>/dev/null || true
   nohup bun run "$FORWARD_SCRIPT" > "$FORWARD_LOG" 2>&1 &
   local fwd_pid=$!
   disown "$fwd_pid" 2>/dev/null || true
@@ -918,15 +973,30 @@ _forward_stop_impl() {
   fi
   kill "$pid" 2>/dev/null || true
   local waited=0
-  # CTL-1502: match acquire_forward_lock/acquire_watchdog_lock's 10s bound above,
-  # not an independent 3s guess — a loaded CI runner can be slower to reap a
-  # SIGTERM'd process, and the old 30-iteration bound intermittently escalated to
-  # SIGKILL under load, occasionally racing a PID-reuse observation in
-  # forward-restart.test.sh.
-  while [[ $waited -lt 100 ]] && kill -0 "$pid" 2>/dev/null; do
+  while [[ $waited -lt 30 ]] && ! _forward_pid_gone "$pid"; do
     sleep 0.1; waited=$((waited + 1))
   done
-  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+  # CTL-1502: escalating to SIGKILL used to return immediately with no
+  # confirmation the kill took effect, so callers observed "stopped" moments
+  # before the pid was actually gone (root cause of the CI-flaky
+  # forward-restart.test.sh hot-swap assertion). Poll after SIGKILL too, same
+  # bound as the SIGTERM wait above, instead of trusting a single check.
+  #
+  # Both waits poll _forward_pid_gone, NOT `kill -0` (Codex #3172 P1). The
+  # forwarder is nohup+disown'd and therefore reparented to PID 1; where PID 1
+  # does not reap promptly, a SIGKILL'd child stays DEFUNCT and `kill -0` keeps
+  # succeeding forever. A `kill -0` wait can then never observe the kill land —
+  # it just burns all 30 ticks and returns with the pid still present, which is
+  # the failure this PR set out to fix. _forward_pid_gone consults the process
+  # STATE so a zombie reads as gone (it is: SIGKILL is uncatchable, so a still-
+  # visible pid can only be awaiting a reap).
+  if ! _forward_pid_gone "$pid"; then
+    kill -9 "$pid" 2>/dev/null || true
+    waited=0
+    while [[ $waited -lt 30 ]] && ! _forward_pid_gone "$pid"; do
+      sleep 0.1; waited=$((waited + 1))
+    done
+  fi
   rm -f "$FORWARD_PID_FILE" 2>/dev/null || true
   echo "Forwarder stopped"
 }
@@ -1008,7 +1078,15 @@ WATCHDOG_SCRIPT="${SCRIPT_DIR}/execution-core/daemon-watchdog-run.mjs"
 
 _watchdog_pid_is_ours() {
   local pid="$1" cmd
-  cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || return 1
+  # -ww: NEVER let ps truncate. Linux procps wraps at 80 columns when stdout is
+  # not a tty, and the pre-exec command line here is
+  # `bash <tmp>/bin/bun run <repo>/plugins/dev/scripts/otel-forward/index.ts` —
+  # ~114 chars in CI, so the "otel-forward" marker this match depends on is cut
+  # off entirely. The identity check then answered "not ours", read_forward_pid
+  # deleted the pid file as stale, and forward-restart skipped the stop and
+  # started a SECOND forwarder (CI: "Forwarder not running" with pid 2413 still
+  # in state S). macOS ps does not truncate, so this reproduced only on Linux.
+  cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null)" || return 1
   [[ -n "$cmd" ]] || return 1
   [[ "$cmd" == *"daemon-watchdog-run"* ]]
 }

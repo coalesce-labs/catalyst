@@ -15,7 +15,25 @@ cloud_sync_probe_token() {
   done
   (
     set +u
-    unset CATALYST_CLOUD_TOKEN CATALYST_CLOUD_TOKEN_ENV CATALYST_LAYER2_CONFIG_FILE 2>/dev/null || true
+    # Present launchd's environment, not the caller's (CAT-21 Codex P1).
+    #
+    # render_cloud_sync_plist's EnvironmentVariables block sets exactly PATH, HOME,
+    # CATALYST_DIR and (optionally) CATALYST_HOST_NAME. Anything else the invoking
+    # shell exports is invisible to the daemon, so a probe that inherits it is not
+    # answering the question it claims to. Enumerating a few names to unset is what
+    # this did before, and it missed CATALYST_MACHINE_CONFIG and XDG_CONFIG_HOME —
+    # both of which redirect Layer-2 config resolution and therefore change which
+    # token variable the probe reports. A WHITELIST cannot rot the same way: a new
+    # CATALYST_* override added tomorrow is cleared here for free.
+    while IFS='=' read -r _cstp_var _; do
+      case "$_cstp_var" in
+        CATALYST_DIR | CATALYST_HOST_NAME) continue ;;
+        CATALYST_*) unset "$_cstp_var" 2>/dev/null || true ;;
+      esac
+    done < <(env)
+    # Not CATALYST_-prefixed, but it relocates ~/.config and so selects a different
+    # Layer-2 config and cluster.env/cloud-sync.env pair. The plist does not set it.
+    unset XDG_CONFIG_HOME 2>/dev/null || true
     export CATALYST_HOST_NAME="$host_name"
     local cluster_file="$HOME/.config/catalyst/cluster.env"
     local cloud_file="$HOME/.config/catalyst/cloud-sync.env"

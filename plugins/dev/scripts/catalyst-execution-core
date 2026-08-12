@@ -285,7 +285,14 @@ cmd_start() {
 	# session can't satisfy). Sourcing claude-accounts.env here gets a
 	# provisioned CLAUDE_CODE_OAUTH_TOKEN into `claude --bg`'s environment too
 	# (child processes inherit the daemon's env by default).
-	local _accounts_env="${HOME}/.config/catalyst/claude-accounts.env"
+	# Honor CLAUDE_ACCOUNTS_ENV (CAT-90 Codex P2). `catalyst-stack claude-account
+	# switch|sync` materializes the selected token at _ca_accounts_env_file() =
+	# "${CLAUDE_ACCOUNTS_ENV:-$CA_ACCOUNTS_ENV_DEFAULT}". Reading only the default
+	# path here means a node with the override set inherits no refreshed token — or
+	# worse, a STALE one still sitting at the default path — so restarting after a
+	# switch keeps running under the wrong account. Same override, same precedence,
+	# as the tooling that writes the file.
+	local _accounts_env="${CLAUDE_ACCOUNTS_ENV:-${HOME}/.config/catalyst/claude-accounts.env}"
 	if [[ "${CATALYST_EXECUTOR:-}" == "sdk" ]]; then
 		# CTL-1398: clear any inherited CLAUDE_CODE_OAUTH_TOKEN BEFORE sourcing
 		# so claude-accounts.env is authoritative — otherwise an absent/
@@ -353,6 +360,10 @@ cmd_start() {
 	if [[ -z "${CATALYST_CONFIG_FILE:-}" && -f "$CATALYST_DIR/.catalyst/config.json" ]]; then
 		export CATALYST_CONFIG_FILE="$CATALYST_DIR/.catalyst/config.json"
 	fi
+	# CTL-1755: bounded rotate-on-boot so the previous run's log survives a restart.
+	# shellcheck source=lib/rotate-log-on-start.sh
+	[ -f "$SCRIPT_DIR/lib/rotate-log-on-start.sh" ] && . "$SCRIPT_DIR/lib/rotate-log-on-start.sh"
+	rotate_log_on_start "$LOG_FILE" 2>/dev/null || true
 	nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" >"$LOG_FILE" 2>&1 &
 	local server_pid=$!
 	disown "$server_pid" 2>/dev/null || true

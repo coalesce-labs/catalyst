@@ -449,6 +449,7 @@ import {
 } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
 import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
 import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
+import { readDelegateClaims } from "./delegate-claims.mjs"; // CTL-1744: orchDir/.delegate-claims/*.json → Map for the dispatch-liveness grace (zero-import leaf: monitor.mjs imports scheduler.mjs, so the reader cannot live there)
 import { readGithubQuota } from "./github-quota-timer.mjs";
 import { readReplicaState } from "./replica-sample-timer.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609: delegate-first escalation seam
@@ -6552,6 +6553,12 @@ export function schedulerTick(
           // The daemon binds this to read from the real orchDir; a bare tick passes
           // nothing → assembleBoardState defaults to () => new Map() (observable:false).
           getStalledPrState: _boardHealth.getStalledPrState ?? (() => readStalledPrState(orchDir)),
+          // CTL-1744: delegate-lands claim timestamps, so checkDispatchLiveness can
+          // tell the legitimate CTL-1174 two-pass wait from a genuine wedge. Reads
+          // orchDir/.delegate-claims/*.json (host-local, cheap, no network). A bare
+          // tick that passes neither gets assembleBoardState's empty-Map default →
+          // no ticket is granted grace → pre-CTL-1744 behavior exactly.
+          getDelegateClaims: _boardHealth.getDelegateClaims ?? (() => readDelegateClaims(orchDir)),
           getGithubQuota: _boardHealth.getGithubQuota ?? (() => readGithubQuota(orchDir)),
           githubQuotaMode: _boardHealth.githubQuotaMode ?? readGithubQuotaBoardHealthConfig().mode,
           getReplicaState: _boardHealth.getReplicaState ?? (() => readReplicaState(orchDir)),
