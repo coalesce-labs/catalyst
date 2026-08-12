@@ -155,10 +155,26 @@ the e2e test can source it in isolation.
 # CTL-709: phase-implement may have already opened a (draft) PR for this branch.
 # Detect it here so we can promote it rather than re-entering create-pr's
 # interactive "PR already exists" prompt (create-pr/SKILL.md:96 — would hang --bg).
+# CAT-202 follow-up: a bare `gh pr view` here resolves against the ambient
+# `origin` remote — a read-only upstream when pushes route to a separate
+# `fork` remote (catalyst.pr.pushRemote) — so this detection could find/
+# promote a stale PR on the WRONG repo entirely, bypassing draft-pr.sh's
+# fork-aware PR creation further down. Self-sources draft-pr.sh (safe no-op
+# if PLUGIN_ROOT isn't set — e.g. this fence's own isolated e2e test) and
+# falls back to a bare call only when _draft_pr_gh_pr never got defined.
+[[ -n "${PLUGIN_ROOT:-}" && -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]] \
+  && source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+_pr_view() {
+  if declare -f _draft_pr_gh_pr >/dev/null 2>&1; then
+    _draft_pr_gh_pr view "$@"
+  else
+    gh pr view "$@"
+  fi
+}
 EXISTING_PR_NUMBER=""
 EXISTING_PR_URL=""
 EXISTING_PR_IS_DRAFT=""
-EXISTING_PR_JSON="$(gh pr view --json number,url,state,isDraft 2>/dev/null || true)"
+EXISTING_PR_JSON="$(_pr_view --json number,url,state,isDraft 2>/dev/null || true)"
 if [[ -n "$EXISTING_PR_JSON" ]]; then
   if [[ "$(printf '%s' "$EXISTING_PR_JSON" | jq -r '.state // empty' 2>/dev/null)" == "OPEN" ]]; then
     EXISTING_PR_NUMBER="$(printf '%s' "$EXISTING_PR_JSON" | jq -r '.number // empty' 2>/dev/null || true)"
@@ -341,7 +357,15 @@ itself.
        --reason "stale_ref_push_verify_failed"
      exit 1
    fi
-   PR_INFO=$(gh pr view --json number,url,headRefName,baseRefName 2>/dev/null || echo "{}")
+   # CAT-202 follow-up: repo-scoped — see phase-pr-existing-pr-detect's _pr_view.
+   declare -f _pr_view >/dev/null 2>&1 || _pr_view() {
+     if declare -f _draft_pr_gh_pr >/dev/null 2>&1; then
+       _draft_pr_gh_pr view "$@"
+     else
+       gh pr view "$@"
+     fi
+   }
+   PR_INFO=$(_pr_view --json number,url,headRefName,baseRefName 2>/dev/null || echo "{}")
    PR_NUMBER=$(echo "$PR_INFO" | jq -r '.number // empty')
    PR_URL=$(echo "$PR_INFO" | jq -r '.url // empty')
    if [[ -n "$PR_NUMBER" ]]; then
@@ -379,7 +403,17 @@ if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
   PR_URL="$(jq -r '.pr.url // empty' "${PR_SIGNAL}" 2>/dev/null || true)"
   PR_VIEW="{}"
   if [[ -n "${PR_NUMBER}" ]]; then
-    PR_VIEW="$(gh pr view "${PR_NUMBER}" --json title,files,additions,deletions,commits 2>/dev/null || echo '{}')"
+    # CAT-202 follow-up: PR_NUMBER is read straight from the phase signal file
+    # (whatever repo it actually lives on), not derived from ambient origin —
+    # a bare `gh pr view` here would look up that number against the WRONG
+    # repo if origin differs from where the PR actually landed.
+    [[ -n "${PLUGIN_ROOT:-}" && -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]] \
+      && source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+    if declare -f _draft_pr_gh_pr >/dev/null 2>&1; then
+      PR_VIEW="$(_draft_pr_gh_pr view "${PR_NUMBER}" --json title,files,additions,deletions,commits 2>/dev/null || echo '{}')"
+    else
+      PR_VIEW="$(gh pr view "${PR_NUMBER}" --json title,files,additions,deletions,commits 2>/dev/null || echo '{}')"
+    fi
   fi
   PR_TITLE="$(printf '%s' "${PR_VIEW}" | jq -r '.title // "_untitled_"' 2>/dev/null || echo '_untitled_')"
   FILES_CHANGED="$(printf '%s' "${PR_VIEW}" | jq -r '(.files // []) | length' 2>/dev/null || echo '?')"
