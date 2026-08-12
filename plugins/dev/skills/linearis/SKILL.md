@@ -418,6 +418,55 @@ linearis issues update ENG-123 --labels "bug,P1" --label-mode overwrite
 linearis issues update ENG-123 --clear-labels
 ```
 
+> **`--labels` defaults to OVERWRITE.** Omitting `--label-mode` replaces every
+> label on the ticket, silently dropping the ones you did not name. Pass
+> `--label-mode add` unless you positively intend a full replacement.
+
+### Trap: a label name can exist on more than one team (CTL-1802)
+
+A team-scoped label is identified by `(name, team)`, and a workspace can hold
+**two different labels with the same name on different teams**. A migration or a
+team split leaves exactly that. When it happens, applying the label **by name**
+fails, even though the label plainly exists on the issue's team:
+
+```
+linearis issues update CTL-1802 --labels orchestrator
+  -> "LabelIds for incorrect team — The label 'orchestrator' is not
+      associated with the same team as the issue."
+```
+
+The failure is **name→id resolution**, not a missing vocabulary: the name
+resolved to the other team's twin. `labels list --team <TEAM>` is *correct* and
+lists only applicable labels, which is exactly why this is easy to misread as
+"discovery and write disagree" and misdiagnose as a stranded vocabulary.
+
+**Diagnose it — list every team that owns the name** (a plain `labels list`
+cannot show you this, because it only ever shows one team):
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" \
+  -d '{"query":"{ issueLabels(filter:{name:{eq:\"orchestrator\"}},first:50){ nodes{ id name team{ key } } } }"}' \
+  | jq -r '.data.issueLabels.nodes[] | "\(.name)\tteam=\(.team.key // "WORKSPACE")\t\(.id)"'
+```
+
+**Apply by UUID** — the only unambiguous form when a name is duplicated:
+
+```bash
+linearis issues update CTL-1802 --labels 80a8e8f3-b960-4bb7-9e6a-f8b67b0dc62b --label-mode add
+```
+
+Two things that make this trap hard to see:
+
+- **Workspace-scoped labels are immune.** A label with no team (`team=WORKSPACE`)
+  has no twin to disambiguate against, so type vocabularies like
+  `bug`/`feature`/`chore` keep resolving by name while every component label
+  fails. Half your labels working is not evidence that the rest are broken
+  differently — it is evidence they are team-scoped.
+- **The error names the label, not the team.** It reads as "this label is on the
+  wrong team", when the truth is "the name you gave me resolved to a label on
+  the wrong team, and the right one exists too."
+
 ## Workflow: Cycle Review
 
 ### Get the active cycle
