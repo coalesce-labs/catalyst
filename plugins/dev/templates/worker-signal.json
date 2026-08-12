@@ -118,7 +118,7 @@
         "mergedAt": {
           "type": ["string", "null"],
           "format": "date-time",
-          "description": "ISO 8601 timestamp when the PR was actually merged. Written by the WORKER after gh pr merge --squash --delete-branch and REST confirmation via gh api. Null until merge. Orchestrator Phase 4 writes this only as a fallback for stalled workers."
+          "description": "ISO 8601 timestamp when the PR was actually merged. Written by the WORKER after gh pr merge --squash and REST confirmation via gh api, followed by a checkout-free gh api --method DELETE of the head ref (CTL-56). Null until merge. Orchestrator Phase 4 writes this only as a fallback for stalled workers."
         }
       },
       "description": "Pull request details (null until PR is created). The worker owns all fields — number, url, ciStatus, prOpenedAt, and mergedAt — by actively listening and merging (CTL-252). The orchestrator's poll loop is a safety net for stalled workers only."
