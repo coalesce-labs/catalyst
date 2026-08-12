@@ -2082,9 +2082,6 @@ function readLayer2DelegateFirst() {
   }
 }
 
-// env (CATALYST_DELEGATE_FIRST) overrides Layer-2 (.catalyst.delegateFirst.mode),
-// which overrides the safe default "off". "0" is the kill-switch. Mirrors
-// readRecoveryPassConfig exactly.
 export function readDelegateFirstConfig(envObj = process.env) {
   const l2 = readLayer2DelegateFirst();
   const env = envObj.CATALYST_DELEGATE_FIRST;
