@@ -2077,7 +2077,12 @@ export function tryPhaseLifecycleRoute(event, interestsMap) {
           ? `Phase ${phaseName} turn-cap-exhausted on ${ticket}`
           : status === "skipped"
             ? `Phase ${phaseName} skipped on ${ticket}`
-            : `Phase ${phaseName} failed on ${ticket}`;
+            : // CTL-1790: without this arm an abandoned phase reads as a plain
+              // failure in the wake envelope, the broker log and the HUD — the
+              // trailing branch is a catch-all, not a `failed` test.
+              status === "abandoned"
+              ? `Phase ${phaseName} abandoned (worker exited without declaring) on ${ticket}`
+              : `Phase ${phaseName} failed on ${ticket}`;
     matches.push({
       interestId,
       reason,

@@ -78,8 +78,12 @@ export const INTENTIONAL_PHASE_SLOT_EXCEPTIONS = Object.freeze([
 // CTL-512: skipped is the monitor-deploy terminal-no-deploy status. Routed
 // the same as complete (phase-advance is a no-op for monitor-deploy) so the
 // scheduler frees the wave slot.
+// CTL-1790: `abandoned` is the terminal for a worker that exited cleanly WITHOUT
+// declaring an outcome. It is a terminal like `failed` — it frees the ticket and
+// escalates — and it must NEVER be routed like `complete`/`skipped`, which advance
+// the phase.
 export const PHASE_EVENT_PATTERN =
-  /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted|skipped)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
+  /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted|skipped|abandoned)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
 
 // isBrokerProtectedName — true if `name` falls in any broker-protected space.
 // Callers: shouldSkipEvent (router.mjs), parity tests.

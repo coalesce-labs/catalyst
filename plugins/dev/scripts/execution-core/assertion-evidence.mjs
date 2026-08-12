@@ -52,9 +52,22 @@ export const ASSERTED_BY = Object.freeze({
   RECOVERY_RECLAIM: "recovery-reclaim",
   // C (legacy wave orchestration) — orchestrate-revive's synthetic complete.
   REVIVE_SYNTHESIZED: "revive-synthesized",
-  // B — sdk-run-phase-agent.mjs flipSignalDoneOnSuccess. Shared by the SDK and
-  // codex-exec launch verbs (codex imports the same function).
+  // B — HISTORICAL. sdk-run-phase-agent.mjs's old `flipSignalDoneOnSuccess`, which
+  // wrote status:"done" for any worker that exited zero without declaring anything.
+  // CTL-1790 REMOVED that writer — no code emits this id any more.
+  //
+  // It is deliberately KEPT REGISTERED rather than renamed. Signal files and events
+  // written before CTL-1790 still carry it, and this file's parity suite states the
+  // cost of dropping an id: a value the registry does not contain classifies as
+  // `absent`/`unknown-writer`, "corrupting the advancement audit this ticket exists
+  // to produce". Deleting it would retroactively blind the CTL-1789 instrument to
+  // exactly the 15-of-31 fabricated advances that motivated CTL-1790. Keep forever.
   SDK_SUCCESS_FLIP: "sdk-success-flip",
+  // B — sdk-run-phase-agent.mjs flipSignalAbandonedOnUndeclaredExit (CTL-1790), the
+  // REPLACEMENT for the above. Shared by the SDK and codex-exec launch verbs (codex
+  // imports the same function). Asserts only that the process exited cleanly WITHOUT
+  // a declaration — it never asserts the work happened, and it never advances a phase.
+  SDK_ABANDONED: "sdk-abandoned",
   // B (non-success) — sdk-run-phase-agent.mjs defaultWriteSignalTerminal, the
   // stalled/failed/turn-cap-exhausted backstop. Never advance-eligible, stamped
   // so the marker's coverage of the SDK writer pair is not half-missing.
@@ -88,7 +101,8 @@ const DECLARED_WRITERS = new Set([ASSERTED_BY.PHASE_AGENT]);
 const FABRICATED_WRITERS = new Set([
   ASSERTED_BY.RECOVERY_RECLAIM,
   ASSERTED_BY.REVIVE_SYNTHESIZED,
-  ASSERTED_BY.SDK_SUCCESS_FLIP,
+  ASSERTED_BY.SDK_SUCCESS_FLIP, // historical (CTL-1790 removed the writer); see above
+  ASSERTED_BY.SDK_ABANDONED,
   ASSERTED_BY.SDK_BACKSTOP,
 ]);
 
