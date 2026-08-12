@@ -542,11 +542,17 @@ jobs:
 
       - name: orphan-sweep kill-gate test (CTL-1531)
         # orphan-sweep.sh KILLS PROCESSES and removes worktrees, and had ZERO CI
-        # coverage before CTL-1531. The suite is fully hermetic — ps, lsof, pgrep
-        # and kill are all mocked into a scratch $PATH, $HOME is redirected to a
-        # temp dir, and no real process is ever enumerated or signalled.
+        # coverage before CTL-1531. Candidate discovery/signalling is mocked into
+        # a scratch $PATH, with two deliberate real-process exceptions: the ps
+        # mock injects the harness ancestor chain to exercise self-protection, and
+        # _t_bounded uses deadline-limited background jobs. Synthetic pids stay
+        # above 5,000,000; the adjacent guard enforces that disjointness invariant.
         working-directory: plugins/dev/scripts
         run: bash __tests__/orphan-sweep.test.sh
+
+      - name: synthetic pid floor guard (CTL-1701)
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/synthetic-pid-floor.test.sh
 
       - name: orphan-sweep LaunchAgent plist test (CTL-1531)
         working-directory: plugins/dev/scripts

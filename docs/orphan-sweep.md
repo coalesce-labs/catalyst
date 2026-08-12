@@ -137,6 +137,11 @@ are **independent** — flipping one does not arm the other.
 
 All widened numerics are parsed as **bounded base-10** integers. A value Bash arithmetic cannot evaluate — `08`/`09` (invalid octal) or anything past the signed range — falls back to the documented default **loudly**, rather than erroring at use time and silently leaving the sweep uncapped.
 
+Test fixtures that share the widened process namespace use synthetic pids at or above 5,000,000.
+That floor is above Linux's maximum pid and macOS's pid wrap, so synthetic rows cannot alias the
+real self/ancestor rows deliberately injected by the test harness. The
+`synthetic-pid-floor.test.sh` guard enforces this maintenance invariant without exemptions.
+
 ## Health check & troubleshooting
 
 `catalyst-doctor` asserts the reaper is healthy (CTL-1306). Every reaper check is
