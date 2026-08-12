@@ -146,16 +146,29 @@ function runCli(args, env = {}) {
   });
 }
 
-describe("CLI: dispatch-claim", () => {
-  it("computes gen = currentGeneration + 1, claims it, prints {won, generation}", () => {
+// CTL-1791 guard. `dispatch-claim` used to derive its target generation from the
+// LIVE claim-file high-water mark (currentGeneration + 1) — the exact derivation
+// the CTL-736 fence forbids, because the claim set is mutated by the computation
+// that reads it, so two staggered dispatchers compute DIFFERENT targets and each
+// wins its own O_EXCL file. It had zero production callers (the live dispatcher
+// is pure bash and derives the target from the SIGNAL). It is deleted; this test
+// keeps it deleted.
+describe("CLI: dispatch-claim is REMOVED (CTL-736 invariant guard)", () => {
+  it("rejects dispatch-claim as an unknown subcommand and creates no claim file", () => {
     const r = runCli(["dispatch-claim", ORCH_DIR, "CTL-1", "implement"]);
-    expect(r.status).toBe(0);
-    const out = JSON.parse(r.stdout);
-    expect(out.won).toBe(true);
-    expect(out.generation).toBe(1); // fresh ⇒ gen 1
-    // A second dispatch-claim (e.g. revive) bumps to gen 2.
-    const r2 = runCli(["dispatch-claim", ORCH_DIR, "CTL-1", "implement"]);
-    expect(JSON.parse(r2.stdout).generation).toBe(2);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("unknown subcommand: dispatch-claim");
+    // No high-water-derived claim may be created as a side effect.
+    expect(existsSync(claimPath(ORCH_DIR, "CTL-1", "implement", 1))).toBe(false);
+    expect(currentGeneration(ORCH_DIR, "CTL-1", "implement")).toBe(0);
+  });
+
+  it("does not advertise dispatch-claim in the usage string", () => {
+    const r = runCli(["bogus-subcommand"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("usage: claim.mjs <claim|current-generation|release|fence-check>");
+    expect(r.stderr).not.toContain("dispatch-claim");
   });
 });
 

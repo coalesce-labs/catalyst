@@ -129,7 +129,22 @@ known parent to reference.
    # REST check via gh api "repos/${REPO}/pulls/${PR_NUMBER}"
 
    # When PR is CLEAN — merge directly (no --auto)
-   gh pr merge ${PR_NUMBER} --squash --delete-branch
+   # CTL-56: capture head ref before merge; merge via REST only (worktree-safe).
+   HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref' 2>/dev/null || true)
+   gh pr merge ${PR_NUMBER} --squash
+   # Confirm the merge landed via REST BEFORE any branch cleanup — REST is authoritative (CTL-56).
+   # gh's old atomic delete-on-merge flag removed the branch ONLY on a successful merge; a comment
+   # is not a gate, so an unconfirmed/failed merge must NOT reach the delete (it would orphan the
+   # PR's head ref).
+   MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
+   [[ "$MERGED_OK" == "true" ]] || { echo "merge of #${PR_NUMBER} not REST-confirmed; not deleting branch" >&2; exit 1; }
+   # After confirm, delete remote head ref checkout-free (idempotent, best-effort, CTL-56).
+   # URL-encode the ref (preserve '/') so a metacharacter like '#' (feature#123) can't truncate
+   # the endpoint into deleting the wrong ref.
+   if [[ -n "${HEAD_REF:-}" ]]; then
+     enc_ref=$(printf '%s' "$HEAD_REF" | jq -sRr @uri | sed 's|%2F|/|g')
+     gh api --method DELETE "repos/${REPO}/git/refs/heads/${enc_ref}" >/dev/null 2>&1 || true
+   fi
 
    # Record done — worker writes status=done (CTL-252 contract)
    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
