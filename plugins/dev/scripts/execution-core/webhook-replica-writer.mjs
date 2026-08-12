@@ -38,6 +38,18 @@ export function defaultListIssues(teamKey, { spawn = spawnSync } = {}) {
 
 const SYNC_META_DDL = "CREATE TABLE IF NOT EXISTS sync_meta (key TEXT PRIMARY KEY, value TEXT);";
 
+// claimWriterLock (vendored @catalyst-cloud/sdk) invokes log as a plain
+// (level, message, ...extra) => void function (see writer-lock.js's
+// `log?.("info", ...)` / `log?.("warn", ...)` calls) — not console's
+// per-level methods. Defaulting to `console` itself breaks the moment the
+// writer needs to reclaim its own crashed predecessor's lock (a `TypeError:
+// log is not a function`, since `console` isn't callable), which silently
+// wedges every subsequent applyEvent/backfillTeam call behind a lock that
+// never gets reclaimed.
+function consoleLog(level, message, ...extra) {
+  (console[level] ?? console.log)(message, ...extra);
+}
+
 function toBindable(value) {
   if (value === null || value === undefined) return null;
   if (typeof value === "boolean") return value ? 1 : 0;
@@ -46,7 +58,7 @@ function toBindable(value) {
   return JSON.stringify(value);
 }
 
-export function createWebhookReplicaWriter({ dbPath, ownerKey, log = console } = {}) {
+export function createWebhookReplicaWriter({ dbPath, ownerKey, log = consoleLog } = {}) {
   const writerLock = claimWriterLock(dbPath, { ownerKey }, log);
   const sqlite = new Database(dbPath, { create: true });
   // applyMigrations wants MigrationDb ({exec, query: sql=>rows[]}); applyDelta/
