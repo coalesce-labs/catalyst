@@ -464,7 +464,10 @@ jq --arg ts "$MERGED_AT" --arg sha "${MERGE_COMMIT_SHA:-}" \
 # recorded. Idempotent + best-effort: a 404/422 means the ref is already gone or protected;
 # never fail the phase on branch cleanup — the merge already landed.
 if [[ -n "${HEAD_REF:-}" ]]; then
-  gh api --method DELETE "repos/${REPO}/git/refs/heads/${HEAD_REF}" >/dev/null 2>&1 \
+  # CTL-56: URL-encode the head ref (preserve '/') so a metacharacter like '#' in a branch name
+  # (e.g. feature#123) can't truncate the endpoint into deleting the wrong ref.
+  enc_ref=$(printf '%s' "$HEAD_REF" | jq -sRr @uri | sed 's|%2F|/|g')
+  gh api --method DELETE "repos/${REPO}/git/refs/heads/${enc_ref}" >/dev/null 2>&1 \
     || echo "CTL-56: remote branch ${HEAD_REF} delete skipped (already gone or protected)" >&2
 fi
 

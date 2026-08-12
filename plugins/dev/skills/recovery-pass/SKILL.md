@@ -679,7 +679,8 @@ above), and this worker's allowed tools don't include `Skill`. Do the equivalent
   `gh api --method DELETE repos/<owner/repo>/git/refs/heads/<head_ref>` — but ONLY when the head
   branch lives in that repo (`.head.repo.full_name == <owner/repo>`). A fork PR's `.head.ref` names
   a branch in the FORK, so deleting it from the base repo could hit an unrelated same-named branch
-  (CTL-56). Idempotent + best-effort.
+  (CTL-56). URL-encode `<head_ref>` (preserve `/`) first, so a metacharacter like `#` in the branch
+  name can't truncate the endpoint and delete the wrong ref. Idempotent + best-effort.
 
 **Step 4 — Escalate** only when:
 - A human reviewer (not a bot) left `CHANGES_REQUESTED` → escalate with the reviewer's SPECIFIC
@@ -716,8 +717,9 @@ above), and this worker's allowed tools don't include `Skill`. Do the equivalent
 >   checkout-free: `gh api --method DELETE repos/<owner/repo>/git/refs/heads/<head_ref>` against the
 >   same `<owner/repo>` — but ONLY when the head branch lives in that repo
 >   (`.head.repo.full_name == <owner/repo>`); a fork PR's `.head.ref` lives in the fork, so deleting
->   it from the base repo could hit an unrelated same-named branch (CTL-56). Idempotent + best-effort
->   — a 404/422 means already gone or protected.
+>   it from the base repo could hit an unrelated same-named branch (CTL-56). URL-encode `<head_ref>`
+>   (preserve `/`) first so a metacharacter like `#` can't truncate the endpoint. Idempotent +
+>   best-effort — a 404/422 means already gone or protected.
 > - Red CI with a deterministic cause (type error, lint, a flaky test) → fix it, push, re-check
 >   (bounded by the attempts cap of 2 — after honest attempts that still fail on a *genuine design
 >   incompatibility*, it becomes an escalation, below).
@@ -875,7 +877,8 @@ then declare Done autonomously via `declare --by recovery-pass`, which now just 
   `gh api --method DELETE repos/<owner/repo>/git/refs/heads/<head_ref>` — but ONLY when the head
   branch lives in that repo (`.head.repo.full_name == <owner/repo>`); a fork PR's head ref lives in
   the fork, so deleting it from the base repo could hit an unrelated same-named branch (CTL-56).
-  Idempotent + best-effort.
+  URL-encode `<head_ref>` (preserve `/`) first so a metacharacter like `#` can't truncate the
+  endpoint and delete the wrong ref. Idempotent + best-effort.
 
 > **NEVER `--admin` / force-merge past a failing or pending check.** You may merge
 > a PR ONLY when its required checks are genuinely GREEN (`gh pr checks <n>` all

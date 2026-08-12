@@ -412,7 +412,10 @@ merged_ok=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.merged' 2>/dev/null
 # Idempotent + best-effort: a 404/422 means the ref is already gone or protected; never fail the
 # skill on branch cleanup — the merge already landed.
 if [[ "$merged_ok" == "true" && -n "${head_ref:-}" && "${head_repo:-}" == "${REPO}" ]]; then
-  gh api --method DELETE "repos/${REPO}/git/refs/heads/${head_ref}" >/dev/null 2>&1 \
+  # CTL-56: URL-encode the head ref (preserve '/') so a metacharacter like '#' in a branch name
+  # (e.g. feature#123) can't truncate the endpoint into deleting the wrong ref.
+  enc_ref=$(printf '%s' "$head_ref" | jq -sRr @uri | sed 's|%2F|/|g')
+  gh api --method DELETE "repos/${REPO}/git/refs/heads/${enc_ref}" >/dev/null 2>&1 \
     || echo "CTL-56: remote branch ${head_ref} delete skipped (already gone or protected)" >&2
 elif [[ "$merged_ok" != "true" ]]; then
   echo "merge-pr: merge of #${pr_number} not REST-confirmed; skipping branch cleanup (CTL-56)" >&2

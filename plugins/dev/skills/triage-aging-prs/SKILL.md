@@ -216,7 +216,10 @@ MERGED_OK=$(gh api "repos/${REPO}/pulls/<N>" --jq '.merged' 2>/dev/null || echo 
 #    the raw API call does not — so gate on `.head.repo.full_name == ${REPO}` (CTL-56).
 #    triage-aging-prs processes arbitrary aging PRs, which may be fork PRs.
 if [[ "$MERGED_OK" == "true" && -n "${HEAD_REF:-}" && "${HEAD_REPO:-}" == "${REPO}" ]]; then
-  gh api --method DELETE "repos/${REPO}/git/refs/heads/${HEAD_REF}" >/dev/null 2>&1 \
+  # CTL-56: URL-encode the head ref (preserve '/') so a metacharacter like '#' in a branch name
+  # (e.g. feature#123) can't truncate the endpoint into deleting the wrong ref.
+  enc_ref=$(printf '%s' "$HEAD_REF" | jq -sRr @uri | sed 's|%2F|/|g')
+  gh api --method DELETE "repos/${REPO}/git/refs/heads/${enc_ref}" >/dev/null 2>&1 \
     || echo "CTL-56: remote branch ${HEAD_REF} delete skipped (already gone or protected)" >&2
 elif [[ "$MERGED_OK" != "true" ]]; then
   # NOT REST-confirmed: `gh pr merge` may have failed, or (with a merge queue) only ENQUEUED the PR

@@ -1066,7 +1066,8 @@ export function generateRemediateBrief(category, probe = null) {
         "After the merge is REST-confirmed, delete the remote head ref checkout-free: " +
         "`gh api --method DELETE repos/<repo>/git/refs/heads/<head_ref>` — but ONLY when the head branch lives in <repo> " +
         "(`.head.repo.full_name == <repo>`); a fork PR's head ref lives in the fork, so deleting it from the base repo could " +
-        "hit an unrelated same-named branch (CTL-56). Idempotent + best-effort. " +
+        "hit an unrelated same-named branch (CTL-56). URL-encode <head_ref> (preserve '/') first — a metacharacter like '#' " +
+        "in a branch name would otherwise truncate the endpoint and delete the wrong ref. Idempotent + best-effort. " +
         "After addressing any review finding, post `@codex review` via gh-pr-comment.sh to re-trigger the reviewer.",
       "Never --admin or force-merge past a failing or pending check. " +
         "Escalate ONLY a finding that genuinely requires a human decision, " +

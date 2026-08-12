@@ -130,9 +130,13 @@ fi
    # PR's head ref).
    MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
    [[ "$MERGED_OK" == "true" ]] || { echo "merge of #${PR_NUMBER} not REST-confirmed; not deleting branch" >&2; exit 1; }
-   # After confirm, delete remote head ref checkout-free (idempotent, best-effort, CTL-56):
-   [[ -n "${HEAD_REF:-}" ]] && \
-     gh api --method DELETE "repos/${REPO}/git/refs/heads/${HEAD_REF}" >/dev/null 2>&1 || true
+   # After confirm, delete remote head ref checkout-free (idempotent, best-effort, CTL-56).
+   # URL-encode the ref (preserve '/') so a metacharacter like '#' (feature#123) can't truncate
+   # the endpoint into deleting the wrong ref.
+   if [[ -n "${HEAD_REF:-}" ]]; then
+     enc_ref=$(printf '%s' "$HEAD_REF" | jq -sRr @uri | sed 's|%2F|/|g')
+     gh api --method DELETE "repos/${REPO}/git/refs/heads/${enc_ref}" >/dev/null 2>&1 || true
+   fi
 
    # Record done — worker writes status=done (CTL-252 contract)
    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
