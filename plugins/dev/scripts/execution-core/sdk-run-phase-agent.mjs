@@ -62,7 +62,7 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getEventLogPath } from "./config.mjs";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: stamp stream class on the direct terminal-fallback writer
@@ -70,6 +70,12 @@ import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
 import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
+import {
+  probeWorkDone as defaultProbeWorkDone,
+  PROBE_VERDICT,
+  defaultRunGh,
+  defaultRunGit,
+} from "./work-done-probes.mjs"; // CTL-1790: the evidence gate on the clean-exit terminal
 
 // phase-agent-dispatch + phase-agent-emit-complete sit one directory up.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(
@@ -439,12 +445,24 @@ const SIGNAL_TERMINAL_STATUSES = new Set([
 // "stalled"; the terminal sweep applies needs-human only to stalled/failed). The P3
 // terminal-clobber guard and the atomic tmp+rename are shared by every status.
 //
-// CTL-1790: `reasonField` selects WHICH reason key the reason string lands on, and
-// that choice is the retry-vs-escalate contract (revive Loop 2 branches on
-// `.failureReason` → escalate-no-retry; `.attentionReason` → retryable). It defaults
-// to "attentionReason", so every pre-CTL-1790 3-arg caller is byte-identical. Exactly
-// ONE reason key is written — the writer never sets both.
-function defaultWriteSignalTerminal(signalFile, status, reason, { reasonField = "attentionReason" } = {}) {
+// CTL-1790 options bag — all three default to the pre-CTL-1790 behavior, so every
+// existing 3-arg caller is byte-identical:
+//   reasonField — WHICH key carries the reason ("attentionReason" default,
+//                 "failureReason", or null for "write no reason key at all", which
+//                 a SUCCESS terminal needs — a reason key on a `done` signal is
+//                 what the recovery/escalation sweeps read as trouble).
+//   assertedBy  — CTL-1789 writer id. Defaults to the backstop id; the CTL-1790
+//                 evidence-gated `done` path overrides it (see below).
+//   extraFields — additional signal keys merged in before the atomic write.
+// A `done` status additionally stamps `completedAt` (matching the terminal-success
+// shape phase-agent-emit-complete writes); inert for every other status, and no
+// pre-existing caller passes "done".
+function defaultWriteSignalTerminal(
+  signalFile,
+  status,
+  reason,
+  { reasonField = "attentionReason", assertedBy = ASSERTED_BY.SDK_BACKSTOP, extraFields = null } = {},
+) {
   try {
     let sig;
     try {
@@ -457,12 +475,17 @@ function defaultWriteSignalTerminal(signalFile, status, reason, { reasonField = 
     if (SIGNAL_TERMINAL_STATUSES.has(String(sig.status))) return;
     const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     sig.status = status;
-    sig[reasonField === "failureReason" ? "failureReason" : "attentionReason"] =
-      reason || "sdk-backstop";
+    // Exactly ONE reason key is ever written — the writer never sets both.
+    if (reasonField) {
+      sig[reasonField === "failureReason" ? "failureReason" : "attentionReason"] =
+        reason || "sdk-backstop";
+    }
     // CTL-1789: record WHO asserted this terminal. Infrastructure, not the agent.
-    sig.assertedBy = ASSERTED_BY.SDK_BACKSTOP;
+    sig.assertedBy = assertedBy;
     sig.updatedAt = ts;
+    if (status === "done") sig.completedAt = ts;
     sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), [status]: ts };
+    if (extraFields && typeof extraFields === "object") Object.assign(sig, extraFields);
     const tmp = `${signalFile}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(sig));
     renameSync(tmp, signalFile);
@@ -499,9 +522,41 @@ export function defaultWriteSignalStalled(signalFile, reason) {
 // process ended. CTL-1778: monitor-merge blocked on a permission prompt, the query
 // ended cleanly, this function fabricated `done`, the pipeline advanced, and PR
 // #3238 was never merged — with fatals:0, gate:0, and every health signal green.
-// A clean exit WITHOUT a declaration is the definition of an ABNORMAL outcome, so
-// this function now writes a terminal FAILURE (`ended-without-declaration`)
-// instead of a fabricated success.
+//
+// WHY THE INVERSION IS GATED, NOT UNCONDITIONAL (measured). An unconditional
+// `failed` here is just the opposite lie. Replaying mini's 2026-08 event log
+// (Aug 2 → Aug 11, 582 SDK launches, 421 distinct (ticket,phase) pairs) finds 90
+// launches that never emitted a terminal event and 61 that nevertheless saw a
+// strictly later phase launch — i.e. 61 real instances of this handler firing.
+// They are NOT one population:
+//   • all 33 monitor-merge cases had their PR merged AFTER the flip (CTL-1777 /
+//     PR #3238 flipped 19:50:03, merged 20:12:38) — the CTL-1778 shape, correctly
+//     a FAILURE;
+//   • but CTL-1777's and CTL-1755's `research` both left a complete research doc
+//     on disk, and CTL-1777 shipped PR #3238 the same evening. An unconditional
+//     `failed` halts those pipelines at research and needs-humans a ticket whose
+//     work is sitting right there.
+// So the terminal is decided by EVIDENCE, not by the exit code: the phase's own
+// registered work-done probe (WORK_DONE_PROBES — the same evidence the CTL-574
+// reclaim already trusts) is consulted, and only a probe that positively confirms
+// the artifact authorizes `done`.
+//
+// This is the standing rule, not a new exception: residue may never be the
+// AUTHORITY for a positive state change, but it IS admissible for WITHHOLDING one
+// and for IDEMPOTENCY. The exit code is residue and authorizes nothing; the probe
+// is a direct read of the artifact the phase exists to produce.
+//
+//   probe TRUE    → `done`, stamped ASSERTED_BY.RECOVERY_RECLAIM (CTL-1789's
+//                   fabricated-but-EVIDENCED class — infrastructure asserting on
+//                   the agent's behalf on work-done-probe evidence, exactly what
+//                   the reclaim path does).
+//   probe FALSE   → `failed`, reason ended-without-declaration:work-absent.
+//   probe UNKNOWN → `failed`, reason ended-without-declaration:evidence-unavailable.
+//                   FAIL CLOSED: an un-evidenced positive is the failure mode this
+//                   ticket exists to remove. The two reasons are kept DISTINCT (on
+//                   the reason string AND in a `workDoneProbe` record on the
+//                   signal) because "we checked and the work is absent" and "we
+//                   could not check" demand different follow-ups.
 //
 // WHY NOT JUST DELETE IT (measured — the reason inversion, not deletion, is the
 // fix). mapResult returns backstop:null ONLY for subtype==="success", so this is
@@ -525,69 +580,98 @@ export function defaultWriteSignalStalled(signalFile, reason) {
 //     this function's own name/arity, so the two launch verbs stay on one writer.
 const SIGNAL_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 
-// The one reason string for this outcome. Stable — the recovery-pass classifier,
-// Loki queries, and the operator inbox all key off it.
+// The reason strings. `ENDED_WITHOUT_DECLARATION_REASON` is the stable PREFIX both
+// concrete reasons share, so a Loki matcher / classifier can select the whole
+// class with one `startsWith` while the suffix stays load-bearing.
 export const ENDED_WITHOUT_DECLARATION_REASON = "ended-without-declaration";
+// Probe FALSE — we read the artifact the phase exists to produce and it is not there.
+export const ENDED_WITHOUT_DECLARATION_WORK_ABSENT = `${ENDED_WITHOUT_DECLARATION_REASON}:work-absent`;
+// Probe UNKNOWN — we could not read it (no probe for the phase, inputs missing,
+// the probe threw). NOT collapsed into work-absent: this one says "go look", the
+// other says "the work isn't there".
+export const ENDED_WITHOUT_DECLARATION_EVIDENCE_UNAVAILABLE = `${ENDED_WITHOUT_DECLARATION_REASON}:evidence-unavailable`;
 
-// ── CTL-1790: the per-phase retry-vs-escalate policy table ──────────────────
+// ── CTL-1790: retry-vs-escalate is NOT expressible at this layer. ────────────
 //
-// A named table, NOT an inline conditional, because it encodes a judgement about
-// SIDE EFFECTS that has to be readable and testable in one place.
+// An earlier cut of this change carried a frozen per-phase
+// ENDED_WITHOUT_DECLARATION_POLICY table routing "build" phases to
+// `.attentionReason` (claimed: revive RETRIES) and "side-effecting" phases to
+// `.failureReason` (claimed: revive ESCALATES). That table was DEAD CODE in BOTH
+// dispatch modes and has been deleted rather than left looking like policy:
 //
-//   "retry"    → the reason lands on `.attentionReason`. revive Loop 2's escalate
-//                branch tests for `.failureReason`, so an attentionReason signal
-//                is RETRIED (re-dispatched) rather than parked on a human.
-//   "escalate" → the reason lands on `.failureReason` → revive escalates, NO retry.
+//   • orchestrate-revive Loop 2 gates its per-phase body on
+//       case "$P_STATUS" in stalled|turn-cap-exhausted) ;; *) continue ;; esac
+//     A `failed` signal never enters the loop at all, so neither the escalate
+//     branch (phase_is_truly_failed → .failureReason) nor the fresh-stall
+//     redispatch is reachable from anything this writer produces.
+//   • execution-core: scheduler.mjs's escalation sweep tests
+//       (anyStalled || anyFailed) && !pipelineDone
+//     — `stalled` and `failed` land in the SAME branch — and `stallReasonOf` reads
+//     `signal?.failureReason ?? signal?.attentionReason`, so which key holds the
+//     reason changes no routing decision either.
 //
-// Rationale: re-running `gh pr merge` against an already-merged PR (or re-running
-// teardown against an already-torn-down worktree) is a NON-IDEMPOTENT side effect;
-// re-running research/plan/implement/verify/review is not. So the write-side
-// phases escalate to a human and the build-side phases retry.
-export const ENDED_WITHOUT_DECLARATION_POLICY = Object.freeze({
-  // Build phases — idempotent to re-run; a retry is cheaper than a human.
-  research: "retry",
-  plan: "retry",
-  implement: "retry",
-  verify: "retry",
-  review: "retry",
-  // Side-effecting phases — a blind re-run can double-apply an external mutation.
-  pr: "escalate",
-  "monitor-merge": "escalate",
-  teardown: "escalate",
-});
-
-// FAIL-CLOSED default. An unlisted / unknown / missing phase escalates rather
-// than retries: an over-eager retry of an unknown side-effecting phase is a
-// silent double-mutation, while an over-eager escalation is a visible human
-// ping. Visible-and-wrong beats silent-and-wrong.
-export const ENDED_WITHOUT_DECLARATION_DEFAULT_POLICY = "escalate";
-
-// endedWithoutDeclarationPolicy — pure + total. Any input → "retry" | "escalate".
-export function endedWithoutDeclarationPolicy(phase) {
-  const p = ENDED_WITHOUT_DECLARATION_POLICY[String(phase)];
-  return p === "retry" || p === "escalate" ? p : ENDED_WITHOUT_DECLARATION_DEFAULT_POLICY;
-}
-
-// endedWithoutDeclarationReasonField — the policy's one mechanical consequence:
-// WHICH signal key carries the reason. This is the whole retry/escalate contract.
-export function endedWithoutDeclarationReasonField(phase) {
-  return endedWithoutDeclarationPolicy(phase) === "retry" ? "attentionReason" : "failureReason";
-}
+// Writing `stalled` instead of `failed` WOULD make the retry real under legacy
+// revive, but it is still dead under execution-core (the live dispatch mode) and
+// would introduce a third reason-key convention on top of `stalledReason`. So the
+// honest statement is: this layer can only say "this phase did not finish". WHO
+// retries it, and whether, belongs to the recovery/escalation layer that owns
+// attempt budgets — it is not something this writer can express today.
+//
+// What DOES have a mechanical consequence, and is therefore kept: the reason rides
+// `.failureReason`. That is the field recovery-reasoning.mjs actually reads
+// (checkDeterministicErrors, the signal-pattern match, and the "Failure reason:"
+// line in the operator brief); `.attentionReason` is read by neither, so parking
+// the reason there would hide it from the one consumer that renders it.
+const ENDED_WITHOUT_DECLARATION_REASON_FIELD = "failureReason";
 
 // Plain-integer test shared by the generation fence — mirrors the bash
 // `[[ $x =~ ^[0-9]+$ ]]` in phase-agent-emit-complete and claim.mjs's
 // isCurrentGeneration semantics exactly.
 const isPlainInt = (v) => /^[0-9]+$/.test(String(v));
 
+// PROBE_SPAWN_TIMEOUT_MS — the probe runs inside the launch verb's success branch,
+// and `pr`/`monitor-merge` shell out to `gh api`. Bound the spawns so a hung
+// network call cannot hold an SDK slot open indefinitely; on timeout spawnSync
+// returns a non-zero/errored result and the probe reads FALSE → UNKNOWN handling
+// is not needed because a timed-out gh is genuinely "no evidence of a merge".
+const PROBE_SPAWN_TIMEOUT_MS = 20_000;
+const boundedSpawn = (cmd, args, opts) =>
+  spawnSync(cmd, args, { ...opts, timeout: PROBE_SPAWN_TIMEOUT_MS });
+const DEFAULT_PROBE_DEPS = Object.freeze({
+  runGh: (args) => defaultRunGh(args, { spawn: boundedSpawn }),
+  runGit: (args) => defaultRunGit(args, { spawn: boundedSpawn }),
+});
+
+// orchDirFromSignalFile — the probes for the worker-dir phases need `orchDir`, and
+// the signal path IS `${orchDir}/workers/<ticket>/phase-<phase>.json`. Derived, not
+// threaded, so the two call sites stay verbatim. Returns null unless the path has
+// the exact expected shape — a wrong orchDir would make every probe read FALSE and
+// silently turn evidence-unavailable into work-absent.
+function orchDirFromSignalFile(signalFile) {
+  try {
+    const workersDir = dirname(dirname(signalFile)); // .../workers
+    if (basename(workersDir) !== "workers") return null;
+    return dirname(workersDir);
+  } catch {
+    return null;
+  }
+}
+
 // NAME RETAINED DELIBERATELY (CTL-1790): both launch verbs import this symbol and
 // the two call sites are kept verbatim, so the seam stays a single function. It no
-// longer flips to `done` — see the header above. `phase`/`ticket` are read from the
-// signal itself (phase-agent-dispatch writes both at dispatch time), which is why
-// the 2-arg call sites did not have to change.
+// longer flips UNCONDITIONALLY to `done` — the terminal it writes is decided by the
+// phase's work-done probe (see the header above). `phase`/`ticket`/`worktreePath`
+// are read from the signal itself (phase-agent-dispatch writes all three at
+// dispatch time), which is why the 2-arg call sites did not have to change.
 export function flipSignalDoneOnSuccess(
   signalFile,
   generation,
-  { writeSignalTerminal = defaultWriteSignalTerminal, appendEventLog = defaultAppendEventLog } = {},
+  {
+    writeSignalTerminal = defaultWriteSignalTerminal,
+    appendEventLog = defaultAppendEventLog,
+    probeWorkDone = defaultProbeWorkDone,
+    probeDeps = DEFAULT_PROBE_DEPS,
+  } = {},
 ) {
   if (!signalFile) return;
   try {
@@ -618,19 +702,68 @@ export function flipSignalDoneOnSuccess(
     }
     const phase = typeof sig.phase === "string" && sig.phase.length > 0 ? sig.phase : null;
     const ticket = typeof sig.ticket === "string" && sig.ticket.length > 0 ? sig.ticket : null;
-    // The terminal write. `failed` (not `done`) is what stops the fabricated
-    // advancement; a TERMINAL status (any terminal) is what releases the slot —
-    // countSdkInflight only counts dispatched|running, so this drops occupancy by
-    // one exactly as the old `done` write did.
-    writeSignalTerminal(signalFile, "failed", ENDED_WITHOUT_DECLARATION_REASON, {
-      reasonField: endedWithoutDeclarationReasonField(phase),
-    });
-    // …and the matching canonical terminal event, so the failure is observable on
-    // the unified log instead of being visible only to a signal-file tick-scan.
+    const worktreePath =
+      typeof sig.worktreePath === "string" && sig.worktreePath.length > 0 ? sig.worktreePath : null;
+
+    // ── THE EVIDENCE GATE ────────────────────────────────────────────────────
+    // Ask the phase's own work-done probe whether the artifact it exists to
+    // produce is actually there. This is the ONLY thing that can authorize the
+    // positive terminal; the clean exit itself authorizes nothing.
+    const probe = probeWorkDone(
+      { ticket, phase, orchDir: orchDirFromSignalFile(signalFile), worktreePath },
+      probeDeps,
+    );
+    const evidence = {
+      verdict: probe?.verdict ?? PROBE_VERDICT.UNKNOWN,
+      reason: probe?.reason ?? "probe-unavailable",
+      checked: probe?.checked ?? null,
+    };
+    const workDone = evidence.verdict === PROBE_VERDICT.TRUE;
+
+    // The terminal write. Either way a TERMINAL status is what releases the slot —
+    // countSdkInflight only counts dispatched|running, so occupancy drops by one
+    // exactly as the old unconditional `done` write did. WHICH terminal is the
+    // whole point: `done` only on positive probe evidence, `failed` otherwise.
+    if (workDone) {
+      writeSignalTerminal(signalFile, "done", null, {
+        // No reason key at all on a success — an attentionReason/failureReason on a
+        // `done` signal is what the escalation sweeps read as trouble.
+        reasonField: null,
+        // CTL-1789's fabricated-but-EVIDENCED class: infrastructure asserted this
+        // terminal on the agent's behalf, on work-done-probe evidence — the same
+        // thing the recovery reclaim does, so it carries the same writer id. NOT
+        // SDK_SUCCESS_FLIP: that id means "asserted from a clean exit alone", which
+        // is precisely the assertion this gate removed.
+        assertedBy: ASSERTED_BY.RECOVERY_RECLAIM,
+        extraFields: { workDoneProbe: evidence },
+      });
+    } else {
+      writeSignalTerminal(
+        signalFile,
+        "failed",
+        evidence.verdict === PROBE_VERDICT.FALSE
+          ? ENDED_WITHOUT_DECLARATION_WORK_ABSENT
+          : ENDED_WITHOUT_DECLARATION_EVIDENCE_UNAVAILABLE,
+        { reasonField: ENDED_WITHOUT_DECLARATION_REASON_FIELD, extraFields: { workDoneProbe: evidence } },
+      );
+    }
+    // …and the matching canonical terminal event, so BOTH outcomes are observable
+    // on the unified log instead of only via a signal-file tick-scan. Emitting the
+    // success side too is deliberate: an asymmetry here would hide the riskier
+    // branch (the positive state change) while advertising the safe one.
     // Skipped when the signal carries no phase/ticket — a `phase.undefined.failed
     // .undefined` name is worse than no event (it pollutes the routing namespace).
     if (phase && ticket) {
-      appendEventLog({ phase, ticket, status: "failed", reason: ENDED_WITHOUT_DECLARATION_REASON });
+      appendEventLog({
+        phase,
+        ticket,
+        status: workDone ? "complete" : "failed",
+        reason: workDone
+          ? `ended-without-declaration:work-present (${evidence.reason})`
+          : evidence.verdict === PROBE_VERDICT.FALSE
+            ? ENDED_WITHOUT_DECLARATION_WORK_ABSENT
+            : `${ENDED_WITHOUT_DECLARATION_EVIDENCE_UNAVAILABLE} (${evidence.reason})`,
+      });
     }
   } catch {
     /* best-effort — never throw out of the launch verb's success branch */
@@ -1299,9 +1432,10 @@ export async function sdkRunPhaseAgent(
         // terminal via the wrapper (the primary path), or when this run's
         // generation is stale (superseded by a newer dispatch). When the signal is
         // STILL in-flight the query ended without the agent ever declaring
-        // completion, so this writes a terminal FAILURE
-        // (`ended-without-declaration`) rather than fabricating `done` — the
-        // CTL-1778 root cause. Call site kept verbatim.
+        // completion, so the terminal is decided by the phase's work-done PROBE —
+        // `done` only when the artifact is positively confirmed, `failed`
+        // (`ended-without-declaration:*`) otherwise. Never fabricated from the exit
+        // code alone — the CTL-1778 root cause. Call site kept verbatim.
         flipSignalDoneOnSuccess(signalFile, spec.generation);
       }
       return mapped;

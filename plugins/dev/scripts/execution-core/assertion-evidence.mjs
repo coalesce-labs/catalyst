@@ -10,8 +10,11 @@
 //   B. `flipSignalDoneOnSuccess` flipped an in-flight signal to `done` because
 //      the SDK/codex query exited cleanly — WITHOUT the agent ever declaring
 //      anything (sdk-run-phase-agent.mjs). RETIRED as a producer by CTL-1790:
-//      that clean-exit-without-declaration case now writes a terminal FAILURE
-//      (`ended-without-declaration`), not a fabricated success. The id stays
+//      that clean-exit-without-declaration case now consults the phase's work-done
+//      probe, so it either writes a terminal FAILURE (`ended-without-declaration:
+//      work-absent` / `:evidence-unavailable`) or — when the probe positively
+//      confirms the artifact — a `done` stamped RECOVERY_RECLAIM, i.e. class C.
+//      Nothing is asserted from a clean exit alone any more. The id stays
 //      registered because signals written before CTL-1790 still carry it on disk
 //      and the classifier must keep answering `fabricated` for them.
 //   C. a recovery/revive path inferred completion from a work-done probe and
@@ -40,9 +43,15 @@ export const ASSERTED_BY = Object.freeze({
   // A — the phase skill invoked the wrapper itself. The wrapper's DEFAULT, so a
   // caller that passes no --asserted-by is recorded as the agent's own claim.
   PHASE_AGENT: "phase-agent-emit-complete",
-  // C — execution-core recovery reclaim (recovery.mjs defaultEmitComplete):
-  // the worker died, a work-done probe said the artifact landed, so the reclaim
-  // ran the wrapper on its behalf.
+  // C — infrastructure asserted a terminal success on a work-done PROBE's
+  // evidence. TWO writers stamp this, both probe-gated by construction:
+  //   • execution-core recovery reclaim (recovery.mjs defaultEmitComplete) — the
+  //     worker died, the probe said the artifact landed, the reclaim ran the
+  //     wrapper on its behalf;
+  //   • CTL-1790's clean-exit handler (sdk-run-phase-agent.mjs
+  //     flipSignalDoneOnSuccess) — the query exited without a declaration and the
+  //     probe positively confirmed the artifact.
+  // Both are fabricated-but-EVIDENCED; neither ever asserts from an exit code.
   RECOVERY_RECLAIM: "recovery-reclaim",
   // C (legacy wave orchestration) — orchestrate-revive's synthetic complete.
   REVIVE_SYNTHESIZED: "revive-synthesized",

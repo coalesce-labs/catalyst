@@ -21,9 +21,8 @@ import {
   defaultAppendEventLog,
   flipSignalDoneOnSuccess,
   ENDED_WITHOUT_DECLARATION_REASON,
-  ENDED_WITHOUT_DECLARATION_POLICY,
-  endedWithoutDeclarationPolicy,
-  endedWithoutDeclarationReasonField,
+  ENDED_WITHOUT_DECLARATION_WORK_ABSENT,
+  ENDED_WITHOUT_DECLARATION_EVIDENCE_UNAVAILABLE,
   runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
 import { countSdkInflight } from "./signal-reader.mjs"; // CTL-1790: slot-release proof
@@ -84,7 +83,23 @@ function spawnReturningSpec({ spec = makeSpec(), code = 0, signalFile, onPrelaun
     // emit (phase-agent-emit-complete) is recorded but writes nothing.
     if (bin.endsWith("phase-agent-dispatch")) {
       if (signalFile) {
-        writeFileSync(signalFile, JSON.stringify({ status: "dispatched", generation: spec.generation, bg_job_id: null }));
+        // CTL-1790: mirror the REAL dispatcher's signal shape. phase-agent-dispatch
+        // writes ticket/phase/worktreePath at dispatch time (see its jq -nc block),
+        // and flipSignalDoneOnSuccess reads all three off the signal to run the
+        // work-done probe. A fixture missing them made every end-to-end case
+        // degenerate to "signal-missing-identity" — an artifact of the fake, not a
+        // property of production.
+        writeFileSync(
+          signalFile,
+          JSON.stringify({
+            status: "dispatched",
+            generation: spec.generation,
+            bg_job_id: null,
+            ticket: spec.ticket,
+            phase: spec.phase,
+            worktreePath: spec.worktreePath,
+          }),
+        );
       }
       if (onPrelaunch) onPrelaunch();
       return { status: code, stdout: `${JSON.stringify(spec)}\n`, stderr: "", error: null };
@@ -1149,46 +1164,65 @@ describe("sdkRunPhaseAgent — CTL-1367 item 4 (backstop → stalled signal)", (
 // is the SOLE handler of "the SDK/codex process exited clean and the skill never
 // declared". CTL-1410 wrote a fabricated `done` there; CTL-1778 proved that lie
 // advances a pipeline past work that never happened (monitor-merge blocked on a
-// permission prompt, exited 0, signal flipped done, PR #3238 never merged). It now
-// writes a terminal FAILURE. It must still: no-op on a signal the agent already
-// declared terminal, never resurrect a parked hold, bow out on a stale generation,
-// and — the property that makes inversion safe where deletion is not — RELEASE THE
-// SLOT by leaving a terminal status behind.
+// permission prompt, exited 0, signal flipped done, PR #3238 never merged).
+//
+// The terminal is now decided by the phase's work-done PROBE, not the exit code:
+// probe TRUE → done (stamped recovery-reclaim, the fabricated-but-EVIDENCED
+// class); probe FALSE or UNKNOWN → failed, with the two reasons kept distinct. It
+// must still: no-op on a signal the agent already declared terminal, never
+// resurrect a parked hold, bow out on a stale generation, and — the property that
+// makes inversion safe where deletion is not — RELEASE THE SLOT in every acting
+// branch by leaving a terminal status behind.
+
+// stubProbe — a probeWorkDone seam returning a fixed verdict. Every test states
+// its evidence explicitly; nothing depends on ambient disk state.
+const stubProbe = (verdict, reason = `probe-${verdict}`) => () => ({
+  verdict,
+  reason,
+  checked: "stub",
+});
 
 describe("flipSignalDoneOnSuccess — CTL-1790 truth table (clean exit, no declaration)", () => {
-  const flipCase = (startStatus, phase = "implement") => {
+  const flipCase = (startStatus, phase = "implement", verdict = "false") => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-flip-"));
     const signalFile = join(dir, `phase-${phase}.json`);
     writeFileSync(signalFile, JSON.stringify({ status: startStatus, ticket: "CTL-1", phase }));
-    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: () => {} });
+    flipSignalDoneOnSuccess(signalFile, undefined, {
+      appendEventLog: () => {},
+      probeWorkDone: stubProbe(verdict),
+    });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
     return after;
   };
 
-  // THE CTL-1778 REGRESSION TEST. A clean exit with the signal still in-flight is
-  // an agent that never declared anything — it must NOT read as a success.
-  test("dispatched (in-flight, never declared) → terminal FAILED, not done", () => {
+  // THE CTL-1778 REGRESSION TEST. A clean exit with the signal still in-flight and
+  // NO probe evidence is an agent that never declared anything and left nothing
+  // behind — it must NOT read as a success.
+  test("dispatched, probe FALSE → terminal FAILED, not done", () => {
     const after = flipCase("dispatched");
     expect(after.status).toBe("failed");
     expect(after.status).not.toBe("done");
     expect("completedAt" in after).toBe(false);
   });
 
-  test("the failure carries reason 'ended-without-declaration'", () => {
+  test("the failure reason names WHICH absence — work-absent, on failureReason", () => {
     const after = flipCase("dispatched");
-    // implement is a RETRY phase → the reason rides attentionReason.
-    expect(after.attentionReason).toBe(ENDED_WITHOUT_DECLARATION_REASON);
-    expect(after.attentionReason).toBe("ended-without-declaration");
+    expect(after.failureReason).toBe(ENDED_WITHOUT_DECLARATION_WORK_ABSENT);
+    expect(after.failureReason).toBe("ended-without-declaration:work-absent");
+    // The stable class prefix still selects it (one Loki matcher for both reasons).
+    expect(after.failureReason.startsWith(ENDED_WITHOUT_DECLARATION_REASON)).toBe(true);
+    // Exactly ONE reason key is written.
+    expect("attentionReason" in after).toBe(false);
   });
 
-  test("running (in-flight, never declared) → terminal FAILED", () => {
+  test("running (in-flight, probe FALSE) → terminal FAILED", () => {
     expect(flipCase("running").status).toBe("failed");
   });
 
   // CTL-1789/CTL-1790: the terminal is written by INFRASTRUCTURE, so it carries a
   // fabricated writer id — never the agent's own declared id. (sdk-success-flip is
-  // retired as a live producer; this writer stamps the backstop id.)
+  // retired as a live producer; the failure path stamps the backstop id.)
   test("the written terminal is stamped as a FABRICATED writer, never the agent's", () => {
     const after = flipCase("dispatched");
     expect(after.assertedBy).toBe(ASSERTED_BY.SDK_BACKSTOP);
@@ -1211,12 +1245,22 @@ describe("flipSignalDoneOnSuccess — CTL-1790 truth table (clean exit, no decla
     const before = JSON.stringify(declared);
     writeFileSync(signalFile, before);
     const events = [];
-    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: (e) => events.push(e) });
+    const probes = [];
+    flipSignalDoneOnSuccess(signalFile, undefined, {
+      appendEventLog: (e) => events.push(e),
+      probeWorkDone: (...a) => {
+        probes.push(a);
+        return { verdict: "false", reason: "probe-false", checked: "stub" };
+      },
+    });
     const after = readFileSync(signalFile, "utf8");
     rmSync(dir, { recursive: true, force: true });
     expect(after).toBe(before); // not one byte rewritten
     expect(JSON.parse(after).assertedBy).toBe(ASSERTED_BY.PHASE_AGENT);
     expect(events).toHaveLength(0); // and no spurious failure event
+    // …and the gate never even ran: the precondition returns before the probe, so
+    // a declared phase costs zero `gh api` / git spawns.
+    expect(probes).toHaveLength(0);
   });
 
   test("needs-input (parked) is NEVER converted to a failure", () => {
@@ -1252,18 +1296,29 @@ describe("flipSignalDoneOnSuccess — CTL-1790 truth table (clean exit, no decla
     if (sigGen !== undefined) sig.generation = sigGen;
     writeFileSync(signalFile, JSON.stringify(sig));
     const events = [];
-    flipSignalDoneOnSuccess(signalFile, mine, { appendEventLog: (e) => events.push(e) });
+    const probes = [];
+    flipSignalDoneOnSuccess(signalFile, mine, {
+      appendEventLog: (e) => events.push(e),
+      probeWorkDone: (...a) => {
+        probes.push(a);
+        return { verdict: "false", reason: "probe-false", checked: "stub" };
+      },
+    });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
-    return { status: after.status, after, events };
+    return { status: after.status, after, events, probes };
   };
 
   test("stale generation (mine < signal) bows out — signal stays in-flight", () => {
-    const { status, after, events } = fenceCase(5, 6);
+    const { status, after, events, probes } = fenceCase(5, 6);
     expect(status).toBe("dispatched");
     expect("assertedBy" in after).toBe(false); // no marker it never earned
     expect("attentionReason" in after).toBe(false);
+    expect("failureReason" in after).toBe(false);
     expect(events).toHaveLength(0); // and no event for a write that didn't happen
+    // The fence is evaluated BEFORE the gate — a superseded worker must not even
+    // probe, let alone write an outcome for the generation that replaced it.
+    expect(probes).toHaveLength(0);
   });
 
   test("current generation (mine == signal) acts", () => {
@@ -1287,71 +1342,161 @@ describe("flipSignalDoneOnSuccess — CTL-1790 truth table (clean exit, no decla
   });
 });
 
-// ── CTL-1790: the per-phase retry-vs-escalate policy table ───────────────────
-// The owner's standing decision. Build phases are idempotent to re-run so they
-// RETRY (reason on .attentionReason); side-effecting phases are not, so they
-// ESCALATE (reason on .failureReason → revive Loop 2's no-retry branch).
+// ── CTL-1790: THE EVIDENCE GATE ──────────────────────────────────────────────
+// The terminal is decided by the phase's work-done probe, never by the exit code.
+// Measured justification (mini 2026-08 event log, Aug 2 → Aug 11): of 61 real
+// firings of this handler, all 33 monitor-merge cases had their PR merged AFTER
+// the flip (correctly a FAILURE) but CTL-1777's and CTL-1755's `research` both
+// left a complete doc on disk and CTL-1777 shipped PR #3238 the same evening —
+// an unconditional failure halts those pipelines on work that exists.
 
-describe("CTL-1790 — the ended-without-declaration policy table", () => {
-  test("the table maps every build phase to retry", () => {
-    for (const p of ["research", "plan", "implement", "verify", "review"]) {
-      expect(endedWithoutDeclarationPolicy(p)).toBe("retry");
-      expect(endedWithoutDeclarationReasonField(p)).toBe("attentionReason");
-    }
-  });
-
-  test("the table maps every side-effecting phase to escalate", () => {
-    for (const p of ["pr", "monitor-merge", "teardown"]) {
-      expect(endedWithoutDeclarationPolicy(p)).toBe("escalate");
-      expect(endedWithoutDeclarationReasonField(p)).toBe("failureReason");
-    }
-  });
-
-  test("an unknown / absent phase fails CLOSED to escalate (never a blind retry)", () => {
-    for (const p of ["not-a-phase", "", null, undefined, 42, {}]) {
-      expect(endedWithoutDeclarationPolicy(p)).toBe("escalate");
-      expect(endedWithoutDeclarationReasonField(p)).toBe("failureReason");
-    }
-  });
-
-  test("the table is frozen (no runtime mutation of the policy)", () => {
-    expect(Object.isFrozen(ENDED_WITHOUT_DECLARATION_POLICY)).toBe(true);
-  });
-
-  // The mapping's ONE mechanical consequence, asserted on the real signal file:
-  // exactly one reason key is written, and which one is the retry/escalate lever.
-  const writeCase = (phase) => {
-    const dir = mkdtempSync(join(tmpdir(), "sdk-policy-"));
+describe("CTL-1790 — the work-done probe gates the terminal", () => {
+  const gateCase = (phase, verdict, reason) => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-gate-"));
     const signalFile = join(dir, `phase-${phase}.json`);
     writeFileSync(signalFile, JSON.stringify({ status: "running", ticket: "CTL-1778", phase }));
-    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: () => {} });
+    const events = [];
+    flipSignalDoneOnSuccess(signalFile, undefined, {
+      appendEventLog: (e) => events.push(e),
+      probeWorkDone: stubProbe(verdict, reason),
+    });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
-    return after;
+    return { after, events };
   };
 
-  test("implement (retry side) writes attentionReason ONLY — revive retries it", () => {
-    const after = writeCase("implement");
-    expect(after.status).toBe("failed");
-    expect(after.attentionReason).toBe(ENDED_WITHOUT_DECLARATION_REASON);
-    // A failureReason here would trip revive's escalate branch and cost a retry.
+  // ── probe TRUE → done, stamped as fabricated-but-EVIDENCED ─────────────────
+  // This is the CTL-1777-research case: the agent never declared, but the research
+  // doc it exists to produce is on disk. Failing it would halt a shipped pipeline.
+  test("probe TRUE → status done", () => {
+    expect(gateCase("research", "true").after.status).toBe("done");
+  });
+
+  test("probe TRUE → stamped ASSERTED_BY.RECOVERY_RECLAIM (evidenced, not declared)", () => {
+    const { after } = gateCase("research", "true");
+    expect(after.assertedBy).toBe(ASSERTED_BY.RECOVERY_RECLAIM);
+    expect(after.assertedBy).toBe("recovery-reclaim");
+    // NOT the agent's own id — the agent declared nothing.
+    expect(after.assertedBy).not.toBe(ASSERTED_BY.PHASE_AGENT);
+    // NOT the retired "asserted from a clean exit alone" id.
+    expect(after.assertedBy).not.toBe(ASSERTED_BY.SDK_SUCCESS_FLIP);
+  });
+
+  test("probe TRUE → a success terminal shape: completedAt, and NO reason key", () => {
+    const { after } = gateCase("research", "true");
+    expect(typeof after.completedAt).toBe("string");
+    expect(after.phaseTimestamps.done).toBe(after.completedAt);
+    // A reason key on a `done` signal is what the escalation sweeps read as trouble.
+    expect("attentionReason" in after).toBe(false);
     expect("failureReason" in after).toBe(false);
   });
 
-  test("monitor-merge (escalate side) writes failureReason ONLY — revive escalates", () => {
-    const after = writeCase("monitor-merge");
-    expect(after.status).toBe("failed");
-    expect(after.failureReason).toBe(ENDED_WITHOUT_DECLARATION_REASON);
-    // An attentionReason here would let revive blindly re-run `gh pr merge`.
-    expect("attentionReason" in after).toBe(false);
+  test("probe TRUE → the evidence is recorded on the signal", () => {
+    const { after } = gateCase("research", "true");
+    expect(after.workDoneProbe).toEqual({ verdict: "true", reason: "probe-true", checked: "stub" });
   });
 
-  test("pr and teardown also land on failureReason (non-idempotent side effects)", () => {
-    for (const p of ["pr", "teardown"]) {
-      const after = writeCase(p);
-      expect(after.failureReason).toBe(ENDED_WITHOUT_DECLARATION_REASON);
-      expect("attentionReason" in after).toBe(false);
+  // ── probe FALSE → failed/work-absent ──────────────────────────────────────
+  // This is the CTL-1778 case: monitor-merge exited clean, PR unmerged.
+  test("probe FALSE → status failed with reason work-absent", () => {
+    const { after } = gateCase("monitor-merge", "false");
+    expect(after.status).toBe("failed");
+    expect(after.failureReason).toBe(ENDED_WITHOUT_DECLARATION_WORK_ABSENT);
+    expect("completedAt" in after).toBe(false);
+  });
+
+  // ── probe UNKNOWN → failed/evidence-unavailable (FAIL CLOSED) ─────────────
+  test("probe UNKNOWN → status failed, NOT done (fail closed on the positive)", () => {
+    const { after } = gateCase("teardown", "unknown", "no-probe-for-phase");
+    expect(after.status).toBe("failed");
+    expect(after.status).not.toBe("done");
+  });
+
+  test("probe UNKNOWN carries a DISTINGUISHABLE reason — never collapsed into FALSE", () => {
+    const unknown = gateCase("teardown", "unknown", "no-probe-for-phase").after;
+    const absent = gateCase("monitor-merge", "false").after;
+    expect(unknown.failureReason).toBe(ENDED_WITHOUT_DECLARATION_EVIDENCE_UNAVAILABLE);
+    expect(unknown.failureReason).not.toBe(absent.failureReason);
+    // …and the WHY is preserved verbatim, so "no probe for this phase" stays
+    // separable from "the probe threw" and from "inputs were missing".
+    expect(unknown.workDoneProbe.reason).toBe("no-probe-for-phase");
+    // Both still select on the one stable class prefix.
+    for (const s of [unknown.failureReason, absent.failureReason]) {
+      expect(s.startsWith(ENDED_WITHOUT_DECLARATION_REASON)).toBe(true);
     }
+  });
+
+  test("a malformed probe result (null/garbage) is treated as UNKNOWN, never as done", () => {
+    for (const bad of [null, undefined, {}, { verdict: "yes" }, "true"]) {
+      const dir = mkdtempSync(join(tmpdir(), "sdk-gate-bad-"));
+      const signalFile = join(dir, "phase-research.json");
+      writeFileSync(
+        signalFile,
+        JSON.stringify({ status: "running", ticket: "CTL-1", phase: "research" })
+      );
+      flipSignalDoneOnSuccess(signalFile, undefined, {
+        appendEventLog: () => {},
+        probeWorkDone: () => bad,
+      });
+      const after = JSON.parse(readFileSync(signalFile, "utf8"));
+      rmSync(dir, { recursive: true, force: true });
+      expect(after.status).toBe("failed");
+    }
+  });
+
+  test("a THROWING probe never escapes the launch verb's success branch", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-gate-throw-"));
+    const signalFile = join(dir, "phase-research.json");
+    writeFileSync(
+      signalFile,
+      JSON.stringify({ status: "running", ticket: "CTL-1", phase: "research" })
+    );
+    expect(() =>
+      flipSignalDoneOnSuccess(signalFile, undefined, {
+        appendEventLog: () => {},
+        probeWorkDone: () => {
+          throw new Error("gh exploded");
+        },
+      })
+    ).not.toThrow();
+    // The whole handler is best-effort, so a throwing probe leaves the signal
+    // untouched. The slot is then released by the CTL-574 reclaim, not here.
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("running");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // The probe is fed from the SIGNAL — phase-agent-dispatch writes ticket, phase
+  // and worktreePath at dispatch time — and orchDir is derived from the signal
+  // path. Nothing new is threaded through the two verbatim call sites.
+  test("probe inputs come from the signal + the signal path", () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "sdk-gate-inputs-"));
+    const workerDir = join(orchDir, "workers", "CTL-1778");
+    mkdirSync(workerDir, { recursive: true });
+    const signalFile = join(workerDir, "phase-research.json");
+    writeFileSync(
+      signalFile,
+      JSON.stringify({
+        status: "running",
+        ticket: "CTL-1778",
+        phase: "research",
+        worktreePath: "/wt/CTL-1778",
+      })
+    );
+    let seen = null;
+    flipSignalDoneOnSuccess(signalFile, undefined, {
+      appendEventLog: () => {},
+      probeWorkDone: (inputs) => {
+        seen = inputs;
+        return { verdict: "false", reason: "probe-false", checked: "stub" };
+      },
+    });
+    rmSync(orchDir, { recursive: true, force: true });
+    expect(seen).toEqual({
+      ticket: "CTL-1778",
+      phase: "research",
+      orchDir,
+      worktreePath: "/wt/CTL-1778",
+    });
   });
 });
 
@@ -1362,29 +1507,42 @@ describe("CTL-1790 — the ended-without-declaration policy table", () => {
 // permanently. Any terminal status releases it — the test asserts that directly.
 
 describe("CTL-1790 — the terminal write releases the SDK slot", () => {
-  test("countSdkInflight drops from 1 to 0 across the write", () => {
-    const orchDir = mkdtempSync(join(tmpdir(), "sdk-slot-"));
-    const workerDir = join(orchDir, "workers", "CTL-1778");
-    mkdirSync(workerDir, { recursive: true });
-    const signalFile = join(workerDir, "phase-monitor-merge.json");
-    // The exact shape an SDK worker leaves behind: in-flight, NO bg_job_id.
-    writeFileSync(
-      signalFile,
-      JSON.stringify({
-        status: "running",
-        ticket: "CTL-1778",
-        phase: "monitor-merge",
-        bg_job_id: null,
-      })
-    );
-    expect(countSdkInflight(orchDir)).toBe(1); // the slot is held
+  // EVERY acting branch releases the slot — the gate changes WHICH terminal is
+  // written, never WHETHER one is. A probe-true `done`, a probe-false `failed` and
+  // a probe-unknown `failed` must all drop occupancy, or the gate reintroduces the
+  // permanent wedge deletion would have caused.
+  for (const [verdict, expected] of [
+    ["true", "done"],
+    ["false", "failed"],
+    ["unknown", "failed"],
+  ]) {
+    test(`probe ${verdict} → status ${expected}; countSdkInflight drops from 1 to 0`, () => {
+      const orchDir = mkdtempSync(join(tmpdir(), "sdk-slot-"));
+      const workerDir = join(orchDir, "workers", "CTL-1778");
+      mkdirSync(workerDir, { recursive: true });
+      const signalFile = join(workerDir, "phase-monitor-merge.json");
+      // The exact shape an SDK worker leaves behind: in-flight, NO bg_job_id.
+      writeFileSync(
+        signalFile,
+        JSON.stringify({
+          status: "running",
+          ticket: "CTL-1778",
+          phase: "monitor-merge",
+          bg_job_id: null,
+        })
+      );
+      expect(countSdkInflight(orchDir)).toBe(1); // the slot is held
 
-    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: () => {} });
+      flipSignalDoneOnSuccess(signalFile, undefined, {
+        appendEventLog: () => {},
+        probeWorkDone: stubProbe(verdict),
+      });
 
-    expect(countSdkInflight(orchDir)).toBe(0); // …and released
-    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("failed");
-    rmSync(orchDir, { recursive: true, force: true });
-  });
+      expect(countSdkInflight(orchDir)).toBe(0); // …and released
+      expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe(expected);
+      rmSync(orchDir, { recursive: true, force: true });
+    });
+  }
 
   test("a bowed-out stale generation deliberately does NOT release the slot", () => {
     // The gen-N+1 worker owns the signal and is still live — releasing here would
@@ -1402,33 +1560,61 @@ describe("CTL-1790 — the terminal write releases the SDK slot", () => {
         bg_job_id: null,
       })
     );
-    flipSignalDoneOnSuccess(join(workerDir, "phase-implement.json"), 5, { appendEventLog: () => {} });
+    flipSignalDoneOnSuccess(join(workerDir, "phase-implement.json"), 5, {
+      appendEventLog: () => {},
+      probeWorkDone: stubProbe("false"),
+    });
     expect(countSdkInflight(orchDir)).toBe(1);
     rmSync(orchDir, { recursive: true, force: true });
   });
 });
 
-// ── CTL-1790: the failure is announced on the unified event log ──────────────
+// ── CTL-1790: BOTH outcomes are announced on the unified event log ───────────
+// Emitting only the failure would advertise the safe branch and hide the risky
+// one (the positive state change), so the success side emits too.
 
 describe("CTL-1790 — the terminal event", () => {
-  test("a canonical phase.<phase>.failed.<ticket> is appended with the reason", () => {
+  const eventCase = (phase, verdict, reason) => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-evt-"));
-    const signalFile = join(dir, "phase-monitor-merge.json");
-    writeFileSync(
-      signalFile,
-      JSON.stringify({ status: "running", ticket: "CTL-1778", phase: "monitor-merge" })
-    );
+    const signalFile = join(dir, `phase-${phase}.json`);
+    writeFileSync(signalFile, JSON.stringify({ status: "running", ticket: "CTL-1778", phase }));
     const events = [];
-    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: (e) => events.push(e) });
+    flipSignalDoneOnSuccess(signalFile, undefined, {
+      appendEventLog: (e) => events.push(e),
+      probeWorkDone: stubProbe(verdict, reason),
+    });
     rmSync(dir, { recursive: true, force: true });
-    expect(events).toEqual([
+    return events;
+  };
+
+  test("probe FALSE → canonical phase.<phase>.failed.<ticket> naming work-absent", () => {
+    expect(eventCase("monitor-merge", "false")).toEqual([
       {
         phase: "monitor-merge",
         ticket: "CTL-1778",
         status: "failed",
-        reason: ENDED_WITHOUT_DECLARATION_REASON,
+        reason: ENDED_WITHOUT_DECLARATION_WORK_ABSENT,
       },
     ]);
+  });
+
+  test("probe UNKNOWN → failed event whose reason names the unavailability + why", () => {
+    const [evt] = eventCase("teardown", "unknown", "no-probe-for-phase");
+    expect(evt.status).toBe("failed");
+    expect(evt.reason).toContain(ENDED_WITHOUT_DECLARATION_EVIDENCE_UNAVAILABLE);
+    expect(evt.reason).toContain("no-probe-for-phase");
+    // Distinguishable on the event too, not only on the signal.
+    expect(evt.reason).not.toBe(ENDED_WITHOUT_DECLARATION_WORK_ABSENT);
+  });
+
+  test("probe TRUE → canonical phase.<phase>.complete.<ticket>", () => {
+    const [evt] = eventCase("research", "true");
+    expect(evt.status).toBe("complete");
+    expect(evt.phase).toBe("research");
+    expect(evt.ticket).toBe("CTL-1778");
+    // The reason still says the agent never declared — the terminal is evidenced,
+    // not declared, and the log must not read as an agent claim.
+    expect(evt.reason).toContain(ENDED_WITHOUT_DECLARATION_REASON);
   });
 
   test("no event when the signal carries no phase/ticket (no phase.undefined.* pollution)", () => {
@@ -1440,8 +1626,11 @@ describe("CTL-1790 — the terminal event", () => {
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
     expect(events).toHaveLength(0);
-    // …but the terminal write still happened, so the slot still releases.
+    // …but the terminal write still happened, so the slot still releases. With no
+    // ticket/phase the probe cannot run at all → UNKNOWN → fail closed.
     expect(after.status).toBe("failed");
+    expect(after.failureReason).toBe(ENDED_WITHOUT_DECLARATION_EVIDENCE_UNAVAILABLE);
+    expect(after.workDoneProbe.reason).toBe("signal-missing-identity");
   });
 });
 
@@ -1463,7 +1652,50 @@ describe("sdkRunPhaseAgent — CTL-1790 end-to-end (clean exit, no declaration)"
     expect(after.status).toBe("failed");
     expect(after.status).not.toBe("done");
     expect("completedAt" in after).toBe(false);
+    // End-to-end through the REAL probe (no stub) and the REAL writer: the spec's
+    // phase is `implement`, whose probe resolves the worktree and reads commit
+    // state. `/wt/CTL-100` does not exist, so the probe answers FALSE and the gate
+    // writes the work-absent failure — it does NOT guess a success.
+    expect(after.failureReason).toBe(ENDED_WITHOUT_DECLARATION_WORK_ABSENT);
+    expect(after.workDoneProbe.verdict).toBe("false");
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("clean exit + the artifact IS on disk → terminal DONE (the CTL-1777 rescue, end-to-end)", async () => {
+    // The measured counter-case to the row above, exercised through the REAL
+    // researchProbe against a REAL directory — no probe stub anywhere. This is the
+    // shape that made an unconditional `failed` wrong: on 2026-08-11 CTL-1777's
+    // research doc landed 41s before the query exited without declaring, and the
+    // pipeline that flip-advanced went on to ship PR #3238.
+    const wt = mkdtempSync(join(tmpdir(), "sdk-flip-wt-"));
+    mkdirSync(join(wt, "thoughts", "shared", "research"), { recursive: true });
+    writeFileSync(
+      join(wt, "thoughts", "shared", "research", "2026-08-11-ctl-1777.md"),
+      `# CTL-1777\n${"body ".repeat(120)}\n## Code References\n- a.mjs:1\n`,
+    );
+    const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
+    const signalFile = join(dir, "phase-research.json");
+    const spec = makeSpec({
+      signalFile,
+      ticket: "CTL-1777",
+      phase: "research",
+      worktreePath: wt,
+    });
+    const { spawn } = spawnReturningSpec({ spec, signalFile });
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery: fakeQuery([resultMsg()]),
+    });
+    expect(r.code).toBe(0);
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(after.status).toBe("done");
+    expect(after.workDoneProbe.verdict).toBe("true");
+    // Evidenced, never "declared" — the agent said nothing; infrastructure read
+    // the artifact and asserted on its behalf.
+    expect(after.assertedBy).toBe(ASSERTED_BY.RECOVERY_RECLAIM);
+    expect("failureReason" in after).toBe(false);
+    expect("attentionReason" in after).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(wt, { recursive: true, force: true });
   });
 
   test("clean exit + skill already declared (done) → untouched (primary path wins)", async () => {

@@ -247,7 +247,12 @@ function commitProbe(
   { ticket, repoRoot, worktreePath: knownWorktree } = {},
   { runGit = defaultRunGit } = {},
 ) {
-  if (!ticket || !repoRoot) return false;
+  // CTL-1790: `worktreePath` alone is sufficient — resolveWorktree short-circuits
+  // on it and never touches repoRoot, so demanding repoRoot as well made the
+  // CTL-1642 short-circuit unusable for a caller that knows the worktree but not
+  // the repo root (the SDK launch verb reads worktreePath straight off the phase
+  // signal). Byte-identical for every pre-existing caller: they all pass repoRoot.
+  if (!ticket || (!repoRoot && !knownWorktree)) return false;
 
   const worktreePath = resolveWorktree(
     { ticket, repoRoot, worktreePath: knownWorktree },
@@ -282,7 +287,8 @@ function implementProbe(
     readArtifact = defaultReadArtifact,
   } = {},
 ) {
-  if (!ticket || !repoRoot) return false;
+  // CTL-1790: worktreePath alone suffices — see commitProbe.
+  if (!ticket || (!repoRoot && !knownWorktree)) return false;
 
   const worktreePath = resolveWorktree(
     { ticket, repoRoot, worktreePath: knownWorktree },
@@ -349,7 +355,8 @@ function artifactProbe(subdir, markers) {
     { ticket, repoRoot, worktreePath: knownWorktree } = {},
     { runGit = defaultRunGit, listArtifacts = defaultListArtifacts, readArtifact = defaultReadArtifact } = {},
   ) => {
-    if (!ticket || !repoRoot) return false;
+    // CTL-1790: worktreePath alone suffices — see commitProbe.
+    if (!ticket || (!repoRoot && !knownWorktree)) return false;
     const worktreePath = resolveWorktree(
       { ticket, repoRoot, worktreePath: knownWorktree },
       { runGit },
@@ -446,6 +453,87 @@ export const WORK_DONE_PROBE_DESCRIPTIONS = {
 // a dead worker has no probe and is escalated rather than reclaimed).
 export function describeProbe(phase) {
   return WORK_DONE_PROBE_DESCRIPTIONS[phase] ?? "unknown";
+}
+
+// ── CTL-1790: three-valued probe resolution ─────────────────────────────────
+//
+// The boolean probes above are TWO-valued, and they return `false` for BOTH
+// "I checked and the work is absent" and "I could not check" (missing worktree,
+// missing orchDir, unregistered phase, a throwing seam). For the CTL-574 reclaim
+// that conflation is harmless — both mean "do not reclaim". For a caller that
+// uses the probe to authorize a POSITIVE state change it is not: the two have to
+// stay distinguishable in the record, or a later reader cannot tell a phase whose
+// work genuinely never happened from a phase we simply failed to inspect.
+//
+// PROBE_INPUTS names, per phase, WHICH input a probe actually reads, so
+// "could not check" is decided from the declared requirement rather than guessed
+// from a `false`. Kept beside WORK_DONE_PROBES and WORK_DONE_PROBE_DESCRIPTIONS
+// so adding a probe, describing it, and declaring its inputs stay in one place
+// (a test enforces an entry for every registered probe).
+//   "worktree" — resolves the ticket worktree (needs worktreePath OR repoRoot)
+//   "orchDir"  — reads ${orchDir}/workers/<ticket>/<artifact>.json
+export const PROBE_INPUTS = {
+  implement: "worktree",
+  remediate: "worktree",
+  research: "worktree",
+  plan: "worktree",
+  triage: "orchDir",
+  verify: "orchDir",
+  review: "orchDir",
+  pr: "orchDir",
+  "monitor-merge": "orchDir",
+  "monitor-deploy": "orchDir",
+};
+
+// PROBE_VERDICT — exactly three values, forever. Diagnosability rides `reason`,
+// never a fourth value (the same contract shape as CTL-1789's EVIDENCE).
+export const PROBE_VERDICT = Object.freeze({
+  TRUE: "true",
+  FALSE: "false",
+  UNKNOWN: "unknown",
+});
+
+// probeWorkDone — run the registered work-done probe for `phase` and return
+// { verdict, reason, checked }. NEVER throws. `verdict` is UNKNOWN — not FALSE —
+// whenever the answer is un-evidenced rather than negative:
+//   signal-missing-identity — no phase/ticket to probe with
+//   no-probe-for-phase      — the phase has no registered probe (e.g. teardown)
+//   probe-inputs-missing    — the declared input for this probe was not supplied
+//   probe-threw             — the probe raised
+//   probe-non-boolean       — the probe returned a non-boolean (a thenable from a
+//                             future async probe must NOT read as "work absent";
+//                             same discipline as CAT-47's pr-state-async-unsupported)
+export function probeWorkDone(
+  { ticket, phase, orchDir, repoRoot, worktreePath } = {},
+  deps = {},
+) {
+  const V = PROBE_VERDICT;
+  if (!phase || !ticket) {
+    return { verdict: V.UNKNOWN, reason: "signal-missing-identity", checked: null };
+  }
+  if (!hasProbe(phase)) {
+    return { verdict: V.UNKNOWN, reason: "no-probe-for-phase", checked: null };
+  }
+  const needs = PROBE_INPUTS[phase];
+  const haveInputs =
+    needs === "worktree" ? Boolean(worktreePath || repoRoot) : Boolean(orchDir);
+  if (!haveInputs) {
+    return { verdict: V.UNKNOWN, reason: "probe-inputs-missing", checked: describeProbe(phase) };
+  }
+  let raw;
+  try {
+    raw = WORK_DONE_PROBES[phase]({ ticket, phase, orchDir, repoRoot, worktreePath }, deps);
+  } catch {
+    return { verdict: V.UNKNOWN, reason: "probe-threw", checked: describeProbe(phase) };
+  }
+  if (typeof raw !== "boolean") {
+    return { verdict: V.UNKNOWN, reason: "probe-non-boolean", checked: describeProbe(phase) };
+  }
+  return {
+    verdict: raw ? V.TRUE : V.FALSE,
+    reason: raw ? "probe-true" : "probe-false",
+    checked: describeProbe(phase),
+  };
 }
 
 // CTL-736 Phase 3: per-phase worker-dir JSON artifact whose byte-size measures
