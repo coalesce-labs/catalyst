@@ -272,6 +272,193 @@ describe("catalyst-monitor.sh", () => {
   });
 });
 
+// CAT-53: the stack supervisor should reap an orphan squatting a service
+// port rather than silently failing to start. These tests use their OWN
+// isolated tmpDir/pidFile/port — deliberately never the shared fixtures or
+// the default 7400 (this suite may run on a host with a REAL production
+// monitor already bound to 7400; a naive test here could otherwise probe or,
+// worse, kill a live process). Every port is dynamically allocated per test.
+describe("catalyst-monitor.sh orphan port reap (CAT-53)", () => {
+  let cat53Dir: string;
+  let cat53PidFile: string;
+  const spawnedPids: number[] = [];
+
+  beforeAll(() => {
+    cat53Dir = mkdtempSync(join(tmpdir(), "catalyst-monitor-cat53-"));
+    mkdirSync(join(cat53Dir, "wt"), { recursive: true });
+    cat53PidFile = join(cat53Dir, "monitor.pid");
+  });
+
+  afterEach(() => {
+    // Belt-and-suspenders: kill anything this test spawned that might have
+    // survived an assertion failure, plus whatever cmd_start itself started.
+    for (const pid of spawnedPids.splice(0)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already dead */
+      }
+    }
+    if (existsSync(cat53PidFile)) {
+      try {
+        const pid = parseInt(readFileSync(cat53PidFile, "utf-8").trim(), 10);
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already dead */
+      }
+      rmSync(cat53PidFile, { force: true });
+    }
+  });
+
+  afterAll(() => {
+    if (cat53Dir) {
+      try {
+        rmSync(cat53Dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  // A free ephemeral port, picked fresh per test (bind :0, read back, close).
+  async function freePort(): Promise<number> {
+    const srv = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { data() {}, open() {}, close() {} },
+    });
+    const port = srv.port;
+    srv.stop(true);
+    return port;
+  }
+
+  // Spawns a real listener on `port`, backgrounds it, and lets its OWN
+  // parent shell exit — the kernel reparents the listener to PID 1, the
+  // exact "orphan from an earlier stack generation" shape CAT-53 describes.
+  // Returns the orphan's real PID (read back from a marker file, since the
+  // wrapper shell — not the orphan — is what Bun.spawnSync's own PID names).
+  function spawnRealOrphanListener(port: number): number {
+    const marker = join(cat53Dir, `orphan-pid-${port}`);
+    const listenScript = `Bun.listen({hostname:'127.0.0.1',port:${port},socket:{data(){},open(){},close(){}}});setInterval(()=>{},1000);`;
+    const wrapper = `nohup bun -e "${listenScript}" >/dev/null 2>&1 & echo $! > '${marker}'; disown; exit 0`;
+    Bun.spawnSync(["bash", "-c", wrapper]);
+    const pid = parseInt(readFileSync(marker, "utf-8").trim(), 10);
+    rmSync(marker, { force: true });
+    return pid;
+  }
+
+  // A normal (non-orphan) listener — parent is this test process, so its
+  // PPID is real and live. Used to prove the reap logic fails CLOSED.
+  function spawnNormalListener(port: number): { proc: any; pid: number } {
+    const proc = Bun.spawn([
+      "bun",
+      "-e",
+      `Bun.listen({hostname:'127.0.0.1',port:${port},socket:{data(){},open(){},close(){}}});setInterval(()=>{},1000);`,
+    ]);
+    return { proc, pid: proc.pid };
+  }
+
+  function pidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function ppidOf(pid: number): string {
+    const r = Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(pid)]);
+    return r.stdout.toString().trim();
+  }
+
+  async function waitForPortBound(port: number, timeoutMs = 3000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const r = Bun.spawnSync(["bash", "-c", `lsof -ti :${port} -sTCP:LISTEN`]);
+      if (r.stdout.toString().trim()) return;
+      Bun.sleepSync(50);
+    }
+    throw new Error(`port ${port} never became bound`);
+  }
+
+  it("real orphan fixture: reparents to PPID 1", async () => {
+    const port = await freePort();
+    const pid = spawnRealOrphanListener(port);
+    spawnedPids.push(pid);
+    await waitForPortBound(port);
+    expect(ppidOf(pid)).toBe("1");
+    expect(pidAlive(pid)).toBe(true);
+  });
+
+  it("start reaps a PPID-1 orphan squatting the port, then binds clean", async () => {
+    const port = await freePort();
+    const orphanPid = spawnRealOrphanListener(port);
+    spawnedPids.push(orphanPid);
+    await waitForPortBound(port);
+    expect(ppidOf(orphanPid)).toBe("1");
+
+    const { exitCode } = Bun.spawnSync(["bash", SCRIPT, "start"], {
+      env: {
+        ...process.env,
+        CATALYST_DIR: cat53Dir,
+        MONITOR_PID_FILE: cat53PidFile,
+        MONITOR_PORT: String(port),
+        MONITOR_SERVER_SCRIPT: SERVER_SCRIPT,
+        MONITOR_SKIP_BOOTSTRAP: "1",
+        CATALYST_LAYER2_CONFIG_FILE: join(cat53Dir, "absent-layer2-config.json"),
+        CATALYST_MACHINE_CONFIG: undefined,
+        CATALYST_MONITOR_APP_ACTOR_TOKEN: undefined,
+      },
+      cwd: cat53Dir,
+    });
+
+    // The orphan must be gone — reaped before the real monitor tried to bind.
+    expect(pidAlive(orphanPid)).toBe(false);
+    expect(exitCode).toBe(0);
+
+    Bun.sleepSync(500);
+    expect(existsSync(cat53PidFile)).toBe(true);
+    const newPid = parseInt(readFileSync(cat53PidFile, "utf-8").trim(), 10);
+    expect(newPid).not.toBe(orphanPid);
+    expect(pidAlive(newPid)).toBe(true);
+    spawnedPids.push(newPid);
+  });
+
+  it("start does NOT reap a port holder with a live (non-1) PPID", async () => {
+    const port = await freePort();
+    const { proc, pid: holderPid } = spawnNormalListener(port);
+    spawnedPids.push(holderPid);
+    await waitForPortBound(port);
+    expect(ppidOf(holderPid)).not.toBe("1");
+    expect(pidAlive(holderPid)).toBe(true);
+
+    const { exitCode } = Bun.spawnSync(["bash", SCRIPT, "start"], {
+      env: {
+        ...process.env,
+        CATALYST_DIR: cat53Dir,
+        MONITOR_PID_FILE: cat53PidFile,
+        MONITOR_PORT: String(port),
+        MONITOR_SERVER_SCRIPT: SERVER_SCRIPT,
+        MONITOR_SKIP_BOOTSTRAP: "1",
+        CATALYST_LAYER2_CONFIG_FILE: join(cat53Dir, "absent-layer2-config.json"),
+        CATALYST_MACHINE_CONFIG: undefined,
+        CATALYST_MONITOR_APP_ACTOR_TOKEN: undefined,
+      },
+      cwd: cat53Dir,
+    });
+
+    // Fails closed: the live, non-orphan holder is left alone, and
+    // cmd_start explicitly refuses to start rather than risk a second
+    // monitor silently binding alongside it.
+    expect(pidAlive(holderPid)).toBe(true);
+    expect(exitCode).not.toBe(0);
+    expect(existsSync(cat53PidFile)).toBe(false);
+
+    proc.kill();
+  });
+});
+
 describe("catalyst-monitor.sh version drift detection", () => {
   let cacheRoot: string;
   let versionFile: string;
