@@ -41,6 +41,7 @@ import {
   isLivenessAnchorTicket,
   resolveAnchorIssueCached,
 } from "./dispatch-exclusions.mjs";
+import { classifyStallReason } from "./dispatch-skip.mjs";
 
 // ── thresholds + cadence (env-tunable, bounded defaults) ─────────────────────
 export const DEFAULT_THRESHOLDS = {
@@ -439,6 +440,8 @@ export function deriveNearCliff(payload) {
 export function deriveRing(events, nowMs, self) {
   const ring = {
     recentDispatchTs: null,
+    dispatchTsByTicket: new Map(),
+    dispatchAttributionSeen: false,
     cacheReconcile: null,
     accountRatelimit: null,
     reconcileFailing: new Set(),
@@ -456,7 +459,14 @@ export function deriveRing(events, nowMs, self) {
     if (/\.dispatch\.(requested|launched)(\.|$)|worker[.-]create|new-work/i.test(name)) {
       const evHost = ev?.resource?.["host.name"] ?? ev?.body?.payload?.["host.name"] ?? null;
       const isOurs = !self || !evHost || evHost === self;
-      if (isOurs && Number.isFinite(tsMs)) ring.recentDispatchTs = Math.max(ring.recentDispatchTs ?? 0, tsMs);
+      if (isOurs && Number.isFinite(tsMs)) {
+        ring.recentDispatchTs = Math.max(ring.recentDispatchTs ?? 0, tsMs);
+        const match = /\.dispatch\.(?:requested|launched)\.([A-Z][A-Z0-9]*-\d+)$/.exec(name);
+        if (match) {
+          ring.dispatchAttributionSeen = true;
+          ring.dispatchTsByTicket.set(match[1], Math.max(ring.dispatchTsByTicket.get(match[1]) ?? 0, tsMs));
+        }
+      }
     } else if (/cache\.reconcile/i.test(name)) {
       ring.cacheReconcile = {
         changed: payload.changed ?? payload.corrected ?? 0,
@@ -500,6 +510,9 @@ export function deriveRing(events, nowMs, self) {
   // guard against a stale dispatch ts in the future / absurd past
   if (ring.recentDispatchTs != null && ring.recentDispatchTs > nowMs + 60_000) {
     ring.recentDispatchTs = nowMs;
+  }
+  for (const [ticket, ts] of ring.dispatchTsByTicket) {
+    if (ts > nowMs + 60_000) ring.dispatchTsByTicket.set(ticket, nowMs);
   }
   return ring;
 }
@@ -757,10 +770,22 @@ export function assembleBoardState({
     if (isHumanEscalatedSignal(escalation)) humanEscalatedTickets.add(ticket);
   }
 
+  const latestSkipSignal = new Map();
+  for (const signal of signals) {
+    const reason = signal.failureReason ?? signal.attentionReason ?? signal.raw?.stalledReason ?? signal.stalledReason;
+    if (!reason || !signal.ticket) continue;
+    const ts = Date.parse(signal.updatedAt ?? signal.raw?.updatedAt ?? "") || 0;
+    const previous = latestSkipSignal.get(signal.ticket);
+    if (!previous || ts >= previous.ts) latestSkipSignal.set(signal.ticket, { ts, reason });
+  }
+  const dispatchSkips = [...latestSkipSignal].map(([ticket, value]) => ({
+    ticket, reason: value.reason, class: classifyStallReason(value.reason),
+  }));
   return Object.freeze({
     ticketsById,
     signals,
     eligible,
+    dispatchSkips,
     roster: rosterArr,
     dispatchRoster: resolveRosterSeam(getDispatchRoster, rosterArr),
     // CTL-1524 (C4b): resolve here too, so a direct assembleBoardState caller may
@@ -917,6 +942,19 @@ function checkCacheCoherence(b) {
 
 // #1 — dispatch liveness (the liveness-hold wedge): open slots + a waiting queue
 // + ~no recent dispatch. The single most important silent wedge.
+export function computeDispatchOffenders({ owned, dispatchTsByTicket, now, stallMs }) {
+  const offenders = [];
+  let unknownAge = 0;
+  for (const ticket of owned ?? []) {
+    const queuedAt = Date.parse(ticket.updatedAt ?? ticket.createdAt ?? "");
+    if (!Number.isFinite(queuedAt)) { unknownAge += 1; continue; }
+    const queuedAgeMs = now - queuedAt;
+    const lastTs = dispatchTsByTicket?.get(ticket.id) ?? null;
+    if (queuedAgeMs > stallMs && (lastTs == null || now - lastTs > stallMs)) offenders.push(ticket.id);
+  }
+  return { offenders, unknownAge };
+}
+
 function checkDispatchLiveness(b, t) {
   const free = b.capacity.freeSlots;
   const owns = makeOwnsFilter(b, { scope: "dispatch" });
@@ -946,7 +984,9 @@ function checkDispatchLiveness(b, t) {
     return age <= graceMs;
   };
   const waiting = owned.filter((e) => inDelegateGrace(e.id));
-  const ownedEligible = owned.filter((e) => !inDelegateGrace(e.id));
+  const parked = new Set((b.dispatchSkips ?? []).filter((s) => s.class === "operator-owned").map((s) => s.ticket));
+  const operatorParked = owned.filter((e) => parked.has(e.id));
+  const ownedEligible = owned.filter((e) => !inDelegateGrace(e.id) && !parked.has(e.id));
 
   const queuedTotal = b.eligible.length;
   const queued = ownedEligible.length;
@@ -958,6 +998,7 @@ function checkDispatchLiveness(b, t) {
     // CTL-1744: publish the suppression rather than shrinking a count in
     // silence — a census that quietly excludes work reads as "nothing queued".
     queuedOwnedInDelegateGrace: waiting.length,
+    queuedOwnedOperatorParked: operatorParked.length,
     queuedOwnedEvidence: queued,
     delegateGraceMs: graceMs,
   };
@@ -968,6 +1009,21 @@ function checkDispatchLiveness(b, t) {
     return invariant(true, 0, true, [],
       `no wedge (free=${free}, ${queued} owned of ${queuedTotal} queued)${graceNote}`, extra);
   }
+  if (b.ring?.dispatchAttributionSeen) {
+    const result = computeDispatchOffenders({
+      owned: ownedEligible,
+      dispatchTsByTicket: b.ring.dispatchTsByTicket,
+      now: b.now,
+      stallMs: t.dispatchStallMs,
+    });
+    extra.dispatchEvidence = "per-ticket";
+    extra.queuedOwnedUnknownAge = result.unknownAge;
+    const wedged = result.offenders.length > 0;
+    return invariant(!wedged, wedged ? 1 : 0, true, result.offenders.slice(0, 5),
+      wedged ? `${free} free slot(s) + ${result.offenders.length} stale owned ticket(s) without dispatch → wedge${graceNote}` : `dispatch live${graceNote}`, extra);
+  }
+  extra.dispatchEvidence = "board-wide";
+  extra.queuedOwnedUnknownAge = 0;
   const last = b.ring?.recentDispatchTs ?? null;
   const staleMs = last == null ? null : b.now - last;
   const wedged = last == null ? true : staleMs > t.dispatchStallMs;

@@ -71,7 +71,9 @@ beforeAll(() => {
     startWatcher: false,
     dbPath: join(tmpDir, "catalyst.db"),
     wtDir: tmpDir,
-    annotationsDbPath: join(tmpDir, "annotations.db"), // hermetic — never the host ~/catalyst path
+    // Hermetic annotations and event-log paths — never the host ~/catalyst path.
+    annotationsDbPath: join(tmpDir, "annotations.db"),
+    catalystDir: join(tmpDir, "catalyst"),
   });
   baseUrl = `http://localhost:${server.port}`;
 });
@@ -147,5 +149,6 @@ describe("GET /api/journey/:ticket — recomputation contract (not cached)", () 
     // The nextPhase must have changed (pass → fail diverts to remediate).
     expect(nextAfter).not.toEqual(nextBefore);
     expect(nextAfter).toBe("remediate");
-  });
+  // CAT-216: backstop only; the endpoint is hermetic, so a breach is a real regression.
+  }, 15000);
 });
