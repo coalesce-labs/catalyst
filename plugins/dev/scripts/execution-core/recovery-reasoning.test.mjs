@@ -2,7 +2,7 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test recovery-reasoning.test.mjs
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import {
   reasoningRecoveryPass,
   defaultClassifyTicket,
@@ -43,6 +43,31 @@ import {
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
 import { tmpdir } from "node:os";
+
+// CAT-170: this suite exercises defaultRecordIntent / defaultShouldSkipItem, whose orchDir
+// resolves `opts.orchDir ?? resolveOrchDir()` (recovery-reasoning.mjs:1479-1481, :2307).
+// `??` does not honor an explicit null, so an inherited CATALYST_ORCHESTRATOR_DIR — which every
+// phase agent exports — both flips 17 assertions to red AND writes fixture tickets into the
+// operator's live ~/catalyst/execution-core/.recovery-intents/. Delete it for the suite.
+const SAVED_ORCH_DIR = process.env.CATALYST_ORCHESTRATOR_DIR;
+beforeAll(() => {
+  delete process.env.CATALYST_ORCHESTRATOR_DIR;
+});
+afterAll(() => {
+  if (SAVED_ORCH_DIR === undefined) delete process.env.CATALYST_ORCHESTRATOR_DIR;
+  else process.env.CATALYST_ORCHESTRATOR_DIR = SAVED_ORCH_DIR;
+});
+
+describe("suite hermeticity (CAT-170)", () => {
+  test("the ledger never resolves to an ambient orchestrator dir", () => {
+    // Reproduces the phase-agent environment: a real orch dir exported by the caller.
+    // Before the beforeAll/afterAll isolation below, this test FAILS — defaultRecordIntent
+    // resolves `opts.orchDir ?? resolveOrchDir()`, so an explicit null falls through to the
+    // env and the call writes into the operator's live .recovery-intents/.
+    expect(process.env.CATALYST_ORCHESTRATOR_DIR).toBeUndefined();
+    expect(defaultRecordIntent("CTL-998", { decision: "fix" }, { orchDir: null })).toBeNull();
+  });
+});
 
 describe("checkDeterministicErrors", () => {
   test("detects push_rejected_no_workflow_scope", () => {
@@ -1193,8 +1218,8 @@ describe("recovery-intent ledger (cooldown + max-attempts + escalated)", () => {
   });
 
   test("no orchDir → record no-ops, shouldSkip fail-open false", () => {
-    // resolveOrchDir() returns null when CATALYST_ORCHESTRATOR_DIR is unset and
-    // none is injected. Force that by passing orchDir: null explicitly.
+    // The suite-level environment isolation makes resolveOrchDir() return null when
+    // no directory is injected; explicit null alone would fall through via `??`.
     expect(defaultRecordIntent("CTL-998", { decision: "fix" }, { orchDir: null })).toBeNull();
     expect(defaultShouldSkipItem("CTL-998", { orchDir: null })).toBe(false);
   });
