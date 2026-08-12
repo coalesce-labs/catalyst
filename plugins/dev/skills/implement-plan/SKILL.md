@@ -104,7 +104,49 @@ For each phase, follow **Red → Green → Refactor**:
 1. **Red** — Write the tests specified in the plan's "Tests First" section. Run them to confirm they
    fail.
 2. **Green** — Implement the minimum code from the plan's "Implementation" section to make tests
-   pass.
+   pass. Then **commit the Green result**, and only after that push the draft PR, so a mid-phase
+   kill loses at most one Red→Green cycle:
+
+```bash implement-plan-commit-green
+# CTL-1490 (Codex round-2, PR #2697): commit BEFORE the draft-pr-push block below —
+# draft_pr_push (plugins/dev/scripts/lib/draft-pr.sh) is a pure `git push`; it commits
+# nothing itself. Without a commit here, this push re-pushes whatever HEAD already
+# had (the previous phase's/step's commit) and the just-written Green code sits
+# uncommitted in the worktree only — a mid-phase kill after this point still loses
+# it, defeating the "durable off-disk record" purpose the push exists for. Run
+# after EVERY TDD Green step, same gate as the push below (phase-agent mode only;
+# interactive runs skip so there's no surprise commit). Fail-open: never blocks the
+# phase — an empty/failed commit here is not fatal, it just means the upcoming push
+# has nothing new to carry (same durability gap as before this fix, not a regression).
+if [[ -n "${CATALYST_PHASE:-}" ]]; then
+  # `git status --porcelain`, not `git diff`/`git diff --cached` alone — a
+  # Green step very often ADDS a new file (new test, new implementation
+  # module), which is untracked and invisible to both diff forms until
+  # staged. Checked BEFORE staging so an all-clean tree (nothing changed
+  # this Green step) skips straight through without an empty commit attempt.
+  if [[ -n "$(git status --porcelain -- . 2>/dev/null)" ]]; then
+    git add -A -- . ':!thoughts' 2>/dev/null || true
+    git -c core.hooksPath=/dev/null commit -m "wip(green): ${TICKET_ID:-${CATALYST_TICKET:-implement}} TDD green step" \
+      >/dev/null 2>&1 || true
+  fi
+fi
+```
+
+```bash implement-plan-draft-pr-early
+# CTL-783/CTL-1490: make the PR the durable off-disk work record from the FIRST commit.
+# Run after EVERY TDD Green step: first run opens the draft PR, later runs just
+# push (draft_pr_ensure is idempotent). Interactive runs (no CATALYST_PHASE)
+# skip — no surprise pushes. Fail-open: never blocks the phase.
+if [[ -n "${CATALYST_PHASE:-}" && -r "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+  if [[ "$(draft_pr_enabled)" == "true" ]]; then
+    draft_pr_push || true
+    draft_pr_ensure "main" "${TICKET_ID:-${CATALYST_TICKET:-}}" >/dev/null 2>&1 || true
+  fi
+fi
+```
+
 3. **Refactor** — Clean up while keeping tests green. Apply any refactoring notes from the plan.
 
 This order is non-negotiable. If a phase doesn't have a "Tests First" section, write tests for the
@@ -142,24 +184,9 @@ If you encounter a mismatch:
 - Update your progress in both the plan and your todos
 - Check off completed items in the plan file itself using Edit
 - **Check context usage** - monitor token consumption
-- **Push + ensure the draft PR (phase-agent mode)** — In phase-agent mode the draft PR opens
-  at the first phase commit (see the `implement-plan-draft-pr-early` fence); interactive
-  `/catalyst-dev:implement-plan` runs skip this automatically via the CATALYST_PHASE gate.
-
-```bash implement-plan-draft-pr-early
-# CTL-783: make the PR the durable off-disk work record from the FIRST commit.
-# Run after EVERY plan-phase commit: first run opens the draft PR, later runs
-# just push (draft_pr_ensure is idempotent). Interactive runs (no
-# CATALYST_PHASE) skip — no surprise pushes. Fail-open: never blocks the phase.
-if [[ -n "${CATALYST_PHASE:-}" && -r "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
-  # shellcheck source=/dev/null
-  source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
-  if [[ "$(draft_pr_enabled)" == "true" ]]; then
-    draft_pr_push || true
-    draft_pr_ensure "main" "${TICKET_ID:-${CATALYST_TICKET:-}}" >/dev/null 2>&1 || true
-  fi
-fi
-```
+- **Push + ensure the draft PR (phase-agent mode)** — The `implement-plan-draft-pr-early` block
+  runs automatically after each Green step (see TDD Rhythm above; CTL-1490). Interactive
+  `/catalyst-dev:implement-plan` runs skip it via the CATALYST_PHASE gate.
 
 Don't let verification interrupt your flow - batch full suite runs at natural stopping points. But
 always run the specific tests you wrote during each Red → Green cycle.

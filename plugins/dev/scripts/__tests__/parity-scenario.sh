@@ -21,7 +21,7 @@
 # Usage:  bash parity-scenario.sh <scenario>
 #         bash parity-scenario.sh --list
 # Output: ONE line of JSON on stdout —
-#   {"scenario":"…","exit":0,"signalled":[2001],"signals":2,"reclaimed":[2001],"logB64":"…"}
+#   {"scenario":"…","exit":0,"signalled":[5002001],"signals":2,"reclaimed":[5002001],"logB64":"…"}
 #     signalled — pids that received ANY signal (deduped, ascending)
 #     signals   — total signals DELIVERED (SIGTERM and SIGKILL both count)
 #     reclaimed — pids for which an `orphan_proc` reclamation was emitted
@@ -212,67 +212,67 @@ case "$SCENARIO" in
   baseline)
     # The CONTROL. Without it every "spared" assertion below could pass because
     # the harness cannot kill anything at all.
-    export PS_ROWS="2001 1"; export FIX_PIDS="2001"; export CWD_2001="$GONE"
+    export PS_ROWS="5002001 1"; export FIX_PIDS="5002001"; export CWD_5002001="$GONE"
     ;;
   allowlist)
-    export PS_ROWS="2001 1
-2002 1"
-    export FIX_PIDS="2001 2002"
-    export CWD_2001="$GONE"; export CWD_2002="$GONE"
-    export CMD_2001="/bin/bash /Users/x/plugin-source/plugins/dev/scripts/orphan-sweep.sh"
-    export CMD_2002="/bin/bash /Users/x/plugin-source/plugins/dev/scripts/catalyst-stack start"
+    export PS_ROWS="5002001 1
+5002002 1"
+    export FIX_PIDS="5002001 5002002"
+    export CWD_5002001="$GONE"; export CWD_5002002="$GONE"
+    export CMD_5002001="/bin/bash /Users/x/plugin-source/plugins/dev/scripts/orphan-sweep.sh"
+    export CMD_5002002="/bin/bash /Users/x/plugin-source/plugins/dev/scripts/catalyst-stack start"
     ;;
   denylist)
-    export PS_ROWS="2001 1"; export FIX_PIDS="2001"; export CWD_2001="$GONE"
-    export CMD_2001="tmux: server (/private/tmp/tmux-501/default)"
+    export PS_ROWS="5002001 1"; export FIX_PIDS="5002001"; export CWD_5002001="$GONE"
+    export CMD_5002001="tmux: server (/private/tmp/tmux-501/default)"
     ;;
   age-floor)
-    export PS_ROWS="2001 1"; export FIX_PIDS="2001"; export CWD_2001="$GONE"
-    export ETIME_2001="00:30"
+    export PS_ROWS="5002001 1"; export FIX_PIDS="5002001"; export CWD_5002001="$GONE"
+    export ETIME_5002001="00:30"
     ;;
   root-absent-bail)
     # The cwds point UNDER the vanished root, so gate (j) admits them and the
     # early bail is the ONLY thing standing between the fixture and 5 SIGTERMs.
     export SWEEP_WT_ROOT="$WT_ABSENT"
-    export PS_ROWS="2001 1
-2002 1
-2003 1
-2004 1
-2005 1"
-    export FIX_PIDS="2001 2002 2003 2004 2005"
-    for p in 2001 2002 2003 2004 2005; do
+    export PS_ROWS="5002001 1
+5002002 1
+5002003 1
+5002004 1
+5002005 1"
+    export FIX_PIDS="5002001 5002002 5002003 5002004 5002005"
+    for p in 5002001 5002002 5002003 5002004 5002005; do
       eval "export CWD_${p}=\"\${WT_ABSENT}/deleted-tree\""
     done
     ;;
   per-run-cap)
     export SWEEP_PROC_WIDEN_MAX_KILLS=2
-    export PS_ROWS="2001 1
-2002 1
-2003 1
-2004 1
-2005 1"
-    export FIX_PIDS="2001 2002 2003 2004 2005"
-    for p in 2001 2002 2003 2004 2005; do eval "export CWD_${p}=\"\$GONE\""; done
+    export PS_ROWS="5002001 1
+5002002 1
+5002003 1
+5002004 1
+5002005 1"
+    export FIX_PIDS="5002001 5002002 5002003 5002004 5002005"
+    for p in 5002001 5002002 5002003 5002004 5002005; do eval "export CWD_${p}=\"\$GONE\""; done
     ;;
   signal-bound-odd)
     # ODD PARITY, the CTL-1531 round-3 finding. cap=2 ⇒ ceiling 4 DELIVERED
-    # signals. 2001 exits under SIGTERM (ONE signal); 2002+ ignore both signals
-    # (TWO each). Admitting on `signalled >= cap*2` lets 2003 in at signalled==3
+    # signals. 5002001 exits under SIGTERM (ONE signal); 5002002+ ignore both signals
+    # (TWO each). Admitting on `signalled >= cap*2` lets 5002003 in at signalled==3
     # and it then spends two more ⇒ 5 delivered, i.e. cap*2 + 1.
     export SWEEP_PROC_WIDEN_MAX_KILLS=2
-    export PS_ROWS="2001 1
-2002 1
-2003 1
-2004 1"
-    export FIX_PIDS="2001 2002 2003 2004"
-    for p in 2001 2002 2003 2004; do eval "export CWD_${p}=\"\$GONE\""; done
-    export ALIVE_2002=1; export ALIVE_2003=1; export ALIVE_2004=1
+    export PS_ROWS="5002001 1
+5002002 1
+5002003 1
+5002004 1"
+    export FIX_PIDS="5002001 5002002 5002003 5002004"
+    for p in 5002001 5002002 5002003 5002004; do eval "export CWD_${p}=\"\$GONE\""; done
+    export ALIVE_5002002=1; export ALIVE_5002003=1; export ALIVE_5002004=1
     ;;
   tri-state-cwd-probe)
     # The cwd probe cannot ANSWER (EIO), which `[[ -d ]]` alone reports
     # identically to "deleted". Only a definite ENOENT is kill evidence.
-    export PS_ROWS="2001 1"; export FIX_PIDS="2001"
-    export CWD_2001="${WT}/unreadable-tree"
+    export PS_ROWS="5002001 1"; export FIX_PIDS="5002001"
+    export CWD_5002001="${WT}/unreadable-tree"
     export PARITY_EIO_PATH="${WT}/unreadable-tree"
     cat > "$MOCKBIN/stat" <<'STATEOF'
 #!/usr/bin/env bash
@@ -289,30 +289,30 @@ STATEOF
   pre-signal-revalidation)
     # The argv CHANGES between the gate read and the pre-signal re-read: the pid
     # was recycled. No signal may be delivered at all.
-    export PS_ROWS="2001 1"; export FIX_PIDS="2001"; export CWD_2001="$GONE"
-    export CMD2_2001="sh -c a-completely-different-process"
+    export PS_ROWS="5002001 1"; export FIX_PIDS="5002001"; export CWD_5002001="$GONE"
+    export CMD2_5002001="sh -c a-completely-different-process"
     ;;
   confirmed-exit)
     # Signals are DELIVERED but the process never dies. Two signals, ZERO
     # reclamations — `kill` returning success is not an exit.
-    export PS_ROWS="2001 1"; export FIX_PIDS="2001"; export CWD_2001="$GONE"
-    export ALIVE_2001=1
+    export PS_ROWS="5002001 1"; export FIX_PIDS="5002001"; export CWD_5002001="$GONE"
+    export ALIVE_5002001=1
     ;;
   probe-deadline)
     # lsof blocks in the kernel for 3s; the deadline is 1s. A timed-out probe
     # yields an UNKNOWN cwd, which spares — never a truncated path.
-    export PS_ROWS="2001 1"; export FIX_PIDS="2001"; export CWD_2001="$GONE"
-    export HANG_2001=3
+    export PS_ROWS="5002001 1"; export FIX_PIDS="5002001"; export CWD_5002001="$GONE"
+    export HANG_5002001=3
     export SWEEP_PROC_CWD_TIMEOUT_SECS=1
     ;;
   argv-redaction)
-    export PS_ROWS="2001 1"; export FIX_PIDS="2001"; export CWD_2001="$GONE"
-    export CMD_2001="sh -c curl -H Authorization: Bearer ${PARITY_SECRET} https://x/y"
+    export PS_ROWS="5002001 1"; export FIX_PIDS="5002001"; export CWD_5002001="$GONE"
+    export CMD_5002001="sh -c curl -H Authorization: Bearer ${PARITY_SECRET} https://x/y"
     ;;
   shadow-default)
     # SWEEP_PROC_WIDEN deliberately UNSET: the widened class must ship dark.
     unset SWEEP_PROC_WIDEN
-    export PS_ROWS="2001 1"; export FIX_PIDS="2001"; export CWD_2001="$GONE"
+    export PS_ROWS="5002001 1"; export FIX_PIDS="5002001"; export CWD_5002001="$GONE"
     ;;
   *)
     echo "parity-scenario.sh: unknown scenario '${SCENARIO}' (see --list)" >&2
@@ -335,7 +335,7 @@ _json_array() {   # stdin: one integer per line → [a,b,c]
   printf '%s]' "$out"
 }
 
-# The kill mock records the full argv it was handed: "2001" or "-9 2001". The pid
+# The kill mock records the full argv it was handed: "5002001" or "-9 5002001". The pid
 # is always the LAST field.
 SIGNALLED="$(awk 'NF { print $NF }' "$KILL_LOG" | grep -E '^[0-9]+$' | sort -n -u | _json_array)"
 SIGNALS="$(awk 'NF { n++ } END { print n+0 }' "$KILL_LOG")"

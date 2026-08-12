@@ -153,6 +153,22 @@ export function startDelegateRunnerTimer({
           // correct queue even when the daemon's own env doesn't carry it.
           env: { ...process.env, CATALYST_EXECUTION_CORE_DIR: orchDir },
         });
+        // CTL-1764: a spawn FAILURE (EAGAIN/EMFILE/ENOMEM) is reported by an
+        // asynchronous 'error' event on the child, NOT by a synchronous throw —
+        // so neither the `finally` below nor the outer try/catch can see it. An
+        // unhandled 'error' on an EventEmitter is re-raised as a top-level
+        // uncaughtException, which is precisely how a transient EAGAIN killed the
+        // whole daemon twice in 18 minutes on 2026-08-11 while this call site
+        // *looked* guarded. Attaching a listener is what makes the failure
+        // catchable at all; the kick is best-effort and the next interval retries.
+        if (child && typeof child.on === "function") {
+          child.on("error", (err) => {
+            log.warn(
+              { err: err?.message, code: err?.code, entryPath },
+              "delegate-runner: spawn failed; skipping this kick"
+            );
+          });
+        }
         if (child && typeof child.unref === "function") child.unref();
       } finally {
         // (4) CTL-1519: close the PARENT's copy of the log fd. The detached

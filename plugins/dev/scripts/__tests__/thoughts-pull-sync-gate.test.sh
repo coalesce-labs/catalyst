@@ -25,9 +25,28 @@ setup_workdir() {
   echo "$dir"
 }
 
+# Drive the roster through the CANONICAL source (CTL-1490 Codex P1). The gate used
+# to read the retired per-repository `.catalyst/hosts.json`; the roster now comes
+# from execution-core/config.mjs `resolveClusterHosts()` (cluster-repo → static →
+# single-host). Declare it with the real CATALYST_STATIC_ROSTER escape hatch, and
+# pin CATALYST_CLUSTER_DIR at a nonexistent path so the higher-precedence
+# cluster-repo source cannot leak the developer's own roster into the fixture.
+# Same name and signature, so the cases below read unchanged.
 write_hosts() {
-  local workdir="$1" json="$2"
-  printf '%s\n' "$json" > "${workdir}/.catalyst/hosts.json"
+  local workdir="$1" json="$2" n
+  n="$(printf '%s' "$json" | jq -r '[.[] | select(type=="string" and length>0)] | join(",")' 2>/dev/null || echo "")"
+  export CATALYST_CLUSTER_DIR="${workdir}/.no-cluster-repo"
+  if [[ -n "$n" ]]; then
+    export CATALYST_STATIC_ROSTER="$n"
+  else
+    unset CATALYST_STATIC_ROSTER
+  fi
+}
+
+clear_hosts() {
+  local workdir="$1"
+  export CATALYST_CLUSTER_DIR="${workdir}/.no-cluster-repo"
+  unset CATALYST_STATIC_ROSTER
 }
 
 # Create a fake pull-sync script that touches a sentinel file when invoked.
@@ -160,6 +179,91 @@ echo "Test: multi-host + pull failure → gate STILL exits 0 (non-fatal)"
     fail "non-fatal: gate exited $rc when pull failed — must always exit 0"
   else
     pass "multi-host + pull failure → gate STILL exits 0 (non-fatal)"
+  fi
+  rm -rf "$WD"
+}
+
+# --------------------------------------------------------------------------
+# CTL-1490: Mode-aware pull gate tests.
+# Pull failures are ALWAYS non-fatal (exit 0) in all modes — this is the
+# deliberate divergence from the write-side gate (research F2/F6).
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# T6: mode=off explicit, roster=1 → pull NOT invoked (today's roster no-op)
+# --------------------------------------------------------------------------
+echo "T6: mode=off, roster=1 → pull not invoked"
+{
+  WD="$(setup_workdir)"
+  BINDIR="${WD}/bin"
+  mkdir -p "$BINDIR"
+  SENTINEL="${WD}/pull_called"
+  write_hosts "$WD" '["mini"]'
+  make_fake_pull_sync "$BINDIR" 0 "$SENTINEL"
+  rc=0
+  CATALYST_CONFIG_FILE="${WD}/.catalyst/config.json" \
+  CATALYST_PULL_SYNC_CMD="${BINDIR}/thoughts-pull-sync" \
+  CATALYST_PHASE_ARTIFACT_SYNC_MODE=off \
+    bash "$GATE" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    fail "T6: mode=off roster=1: gate exited $rc, want 0"
+  elif [[ -f "$SENTINEL" ]]; then
+    fail "T6: mode=off roster=1: pull was invoked (should be roster no-op)"
+  else
+    pass "T6: mode=off roster=1 → pull NOT invoked"
+  fi
+  rm -rf "$WD"
+}
+
+# --------------------------------------------------------------------------
+# T7: mode=shadow, roster=1 → pull invoked (roster guard removed), fail exit 0
+# --------------------------------------------------------------------------
+echo "T7: mode=shadow, roster=1 → pull invoked, failure still exit 0"
+{
+  WD="$(setup_workdir)"
+  BINDIR="${WD}/bin"
+  mkdir -p "$BINDIR"
+  SENTINEL="${WD}/pull_called"
+  write_hosts "$WD" '["mini"]'
+  make_fake_pull_sync "$BINDIR" 1 "$SENTINEL"   # pull fails
+  rc=0
+  CATALYST_CONFIG_FILE="${WD}/.catalyst/config.json" \
+  CATALYST_PULL_SYNC_CMD="${BINDIR}/thoughts-pull-sync" \
+  CATALYST_PHASE_ARTIFACT_SYNC_MODE=shadow \
+    bash "$GATE" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    fail "T7: mode=shadow pull fail: gate exited $rc, want 0 (read side always non-fatal)"
+  elif [[ ! -f "$SENTINEL" ]]; then
+    fail "T7: mode=shadow roster=1: pull was NOT invoked (roster guard should be bypassed)"
+  else
+    pass "T7: mode=shadow roster=1 → pull invoked, failure exit 0"
+  fi
+  rm -rf "$WD"
+}
+
+# --------------------------------------------------------------------------
+# T8: mode=enforce, roster=1 → pull invoked, failure STILL exit 0
+#     (read side never blocks in any mode — diverges from write side by design)
+# --------------------------------------------------------------------------
+echo "T8: mode=enforce, roster=1 → pull invoked, failure still exit 0"
+{
+  WD="$(setup_workdir)"
+  BINDIR="${WD}/bin"
+  mkdir -p "$BINDIR"
+  SENTINEL="${WD}/pull_called"
+  write_hosts "$WD" '["mini"]'
+  make_fake_pull_sync "$BINDIR" 1 "$SENTINEL"   # pull fails
+  rc=0
+  CATALYST_CONFIG_FILE="${WD}/.catalyst/config.json" \
+  CATALYST_PULL_SYNC_CMD="${BINDIR}/thoughts-pull-sync" \
+  CATALYST_PHASE_ARTIFACT_SYNC_MODE=enforce \
+    bash "$GATE" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    fail "T8: mode=enforce pull fail: gate exited $rc, want 0 (read side never blocks)"
+  elif [[ ! -f "$SENTINEL" ]]; then
+    fail "T8: mode=enforce roster=1: pull was NOT invoked (roster guard should be bypassed)"
+  else
+    pass "T8: mode=enforce roster=1 → pull invoked, failure exit 0"
   fi
   rm -rf "$WD"
 }

@@ -120,6 +120,31 @@ DIR_MODE_BEFORE="$(file_mode "$WF_DIR")"
 write_secret_file '{"x":1}' "$WF_PATH"
 assert_eq "$DIR_MODE_BEFORE" "$(file_mode "$WF_DIR")" "parent dir mode unchanged"
 
+# ─── zsh source-safety: write_secret_file works under zsh (CTL-1777) ────────
+# Under zsh, `local path` in write_secret_file clobbers $PATH → mktemp
+# becomes unresolvable → function returns 1 and file is never written.
+# Skip if zsh is absent.
+
+echo ""
+echo "write_secret_file: behaves identically under zsh (CTL-1777)"
+if command -v zsh >/dev/null 2>&1; then
+	WF_ZSH_DIR="${SCRATCH}/zsh-write-dir"
+	mkdir -p "$WF_ZSH_DIR"
+	WF_ZSH_PATH="${WF_ZSH_DIR}/secret.json"
+	_zsh_rc=0
+	zsh -c "source '$LIB'; write_secret_file 'zsh-content' '$WF_ZSH_PATH'" 2>/dev/null || _zsh_rc=$?
+	assert_eq "0" "$_zsh_rc" "zsh: write_secret_file exits 0"
+	if [[ -f "$WF_ZSH_PATH" ]]; then
+		assert_eq "zsh-content" "$(cat "$WF_ZSH_PATH")" "zsh: file content matches"
+		assert_eq "600" "$(file_mode "$WF_ZSH_PATH")" "zsh: file mode = 600"
+	else
+		fail "zsh: file not created at $WF_ZSH_PATH"
+		fail "zsh: (skipping mode/content checks)"
+	fi
+else
+	echo "  SKIP: zsh not installed on this host"
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 echo ""

@@ -96,6 +96,7 @@ import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 // supersede-guard below.
 import { RECOVERY_PASS_PHASE } from "./recovery-reasoning.mjs";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
+import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
@@ -408,7 +409,9 @@ export function reconstructWorkerState(orchDir, { statJob = defaultStatJob } = {
 // PURE given the injected statJob / probes / emitComplete / appendEvent — no
 // fs / spawn of its own.
 
-function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
+// CTL-1789: exported so the argv contract (notably --asserted-by) is pinnable
+// without shelling out to the real wrapper. The `{ spawn }` seam already existed.
+export function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
   const args = [
     "--phase",
     signal.phase,
@@ -420,6 +423,11 @@ function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
     orchDir,
     "--orch-id",
     signal.raw?.orchestrator ?? signal.ticket,
+    // CTL-1789: this complete is INFERRED from a work-done probe — the worker
+    // died without declaring anything. Mark the terminal fabricated so the
+    // advancement audit does not read it as the agent's own claim.
+    "--asserted-by",
+    ASSERTED_BY.RECOVERY_RECLAIM,
   ];
   const sessionId = signal.raw?.catalystSessionId;
   if (sessionId) {
@@ -1248,6 +1256,69 @@ export function defaultAppendPhaseAdvanceHeldEvent({ orchId, ticket, reason, blo
       payloadExtras: { blockers: blockers ?? [] },
     }),
     "advance-held"
+  );
+}
+
+// CTL-1789: the POSITIVE half of the advancement gate —
+// phase.advance.applied.<ticket>.
+//
+// Until this event existed the gate emitted ONLY on refusal (phase.advance.held),
+// so a month of logs could say why the FSM declined 307 times and nothing at all
+// about the advances it actually performed. "The pipeline advanced" was
+// unobservable; every consumer had to infer it from the SUCCESSOR phase's
+// dispatch, which conflates a fresh advance with a revive, a resume, and a
+// new-work pull.
+//
+// Emitted from exactly one place — the scheduler's advancement sweep, inside the
+// `dv.ok` branch, i.e. AFTER dispatchAndVerify has confirmed a live successor
+// worker. One event per successful advance (~9 per ticket), never per tick.
+//
+// `evidence` is the CTL-1789 second half: three-valued
+// (declared|fabricated|absent) attribution of the `from` phase's terminal — see
+// assertion-evidence.mjs. Promoted to an ATTRIBUTE (not just body.payload)
+// because otel-forward strips body.payload off-machine; `from`/`to` ride along
+// as attributes for the same reason (both bounded ≤10-value enums, so no Loki
+// cardinality risk). `evidence_reason` and `asserted_by` stay in the payload —
+// diagnostics, not dashboard dimensions.
+//
+// INFO severity, deliberately: `held` is a WARN because a refusal may need an
+// operator; a performed advance is the system working.
+//
+// Best-effort, never throws (appendEnvelopeBestEffort). The scheduler additionally
+// wraps the call in safeEmit — an audit emit must never abort a tick.
+export function defaultAppendPhaseAdvanceAppliedEvent({
+  orchId,
+  ticket,
+  from,
+  to,
+  evidence,
+  evidenceReason = null,
+  assertedBy = null,
+  assertionRef = null,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "advance",
+      ticket,
+      orchId,
+      action: "applied",
+      severityText: "INFO",
+      severityNumber: 9,
+      payloadExtras: {
+        from: from ?? null,
+        to: to ?? null,
+        evidence,
+        evidence_reason: evidenceReason,
+        asserted_by: assertedBy,
+        assertion_ref: assertionRef,
+      },
+      attrExtras: {
+        "catalyst.advance.evidence": evidence,
+        "catalyst.advance.from": from ?? undefined,
+        "catalyst.advance.to": to ?? undefined,
+      },
+    }),
+    "advance-applied"
   );
 }
 
@@ -4371,7 +4442,9 @@ export function phaseAlreadyComplete(ticket, phase, { readLog = null, logPath = 
 
 // RESUME_PHASE_ORDER — the linear pipeline phases in forward order, derived from
 // STAGE_RANK (ancillary `remediate` excluded). Reverse-walked by inferResumePhase.
-const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
+// Exported for reconstruct-ticket-state.mjs (CTL-1490) — no import cycle since
+// reconstruct-ticket-state.mjs never imports back into recovery.mjs.
+export const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
   .filter(([id]) => id !== "remediate")
   .sort((a, b) => a[1] - b[1])
   .map(([id]) => id);
@@ -4641,7 +4714,9 @@ function defaultThoughtsPull(cwd) {
 function defaultRebuildWorktree(ticket, { orchDir }) {
   try {
     const repoRoot = join(orchDir, "..", "..");
-    const res = createWorktree({ ticket, repoRoot });
+    // CTL-1490 (Feature E): pass expectedBranch so the CTL-615 collision guard
+    // fires on cross-host takeover and the reconstruction lands on the correct branch.
+    const res = createWorktree({ ticket, repoRoot, expectedBranch: ticket });
     if (res?.code === 0 && res.worktreePath) return { ok: true, cwd: res.worktreePath };
     return { ok: false, cwd: null };
   } catch {

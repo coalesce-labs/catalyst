@@ -32,7 +32,18 @@
 #     [--orch-dir <path>] \
 #     [--orch-id <id>] \
 #     [--session-id <id>] \
+#     [--asserted-by <writer-id>] \
 #     [--no-signal-update]
+#
+# --asserted-by (CTL-1789): the writer id stamped onto the signal file's
+#   `assertedBy` field, recording WHO asserted this phase finished. Defaults to
+#   "phase-agent-emit-complete" — i.e. the phase agent ran this wrapper itself
+#   and DECLARED completion. Infrastructure that invokes this wrapper on a dead
+#   worker's behalf (execution-core recovery reclaim, orchestrate-revive's
+#   synthetic complete) passes its own id so the terminal is classified as
+#   FABRICATED, not declared. Vocabulary + classifier:
+#   execution-core/assertion-evidence.mjs. Signal-file only — deliberately NOT
+#   added to the event payload (test 47 snapshots the default payload keys).
 #
 # --payload-json (CTL-1410): merge a caller-supplied JSON object into the event's
 #   body.payload (caller fields as base; the canonical phase/ticket/status fields
@@ -93,6 +104,16 @@ ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR-}"
 ORCH_ID="${CATALYST_ORCHESTRATOR_ID-}"
 SESSION_ID="${CATALYST_SESSION_ID-}"
 NO_SIGNAL_UPDATE=0
+# CTL-1789: default = the phase agent ran this wrapper itself (a DECLARED
+# terminal). Must stay byte-identical to ASSERTED_BY.PHASE_AGENT in
+# execution-core/assertion-evidence.mjs — bash cannot import that constant, so
+# the mirror is held honest MECHANICALLY by
+# execution-core/assertion-evidence-parity.test.mjs, which extracts this literal
+# and compares it to the registry. Renaming one side alone FAILS that test; an
+# unnoticed drift would reclassify every declared terminal as
+# absent/unknown-writer. Keep the assignment a plain literal on its own line —
+# the parity extractor is anchored on that shape and fails closed if it changes.
+ASSERTED_BY="phase-agent-emit-complete"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -130,6 +151,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--session-id)
 		SESSION_ID="$2"
+		shift 2
+		;;
+	--asserted-by)
+		ASSERTED_BY="$2"
 		shift 2
 		;;
 	--no-signal-update)
@@ -272,7 +297,11 @@ if [[ $STATUS == complete ]]; then
 				fi
 			fi
 		fi
-		if ! match_thoughts_artifact "$_GATE_DIR" "$TICKET" >/dev/null 2>&1; then
+		# CTL-1490: on a miss, pull the thoughts repo once and re-check before
+		# downgrading — a cross-host takeover may have written the artifact on
+		# another host. Happy path (artifact present locally) short-circuits
+		# without pulling; the pull is best-effort.
+		if ! match_thoughts_artifact_with_pull_retry "$_GATE_DIR" "$TICKET" >/dev/null 2>&1; then
 			echo "phase-agent-emit-complete: refusing 'complete' for ${TICKET}/${PHASE}: own artifact not gate-visible" >&2
 			echo "  expected: ${_GATE_DIR}/*-${TICKET}*.md   cwd: $(pwd)" >&2
 			STATUS="failed"
@@ -439,9 +468,11 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 			--arg phase "$PHASE" \
 			--arg host_name "$_EMIT_HOST_NAME" \
 			--arg host_id "$_EMIT_HOST_ID" \
+			--arg asserted_by "$ASSERTED_BY" \
 			".status = \$status
            | ${SET_COMPLETED}
            | .updatedAt = \$ts
+           | (if \$asserted_by == \"\" then . else .assertedBy = \$asserted_by end)
            | (if \$rawstatus == \"complete\" then .failureReason = null
               elif \$reason == \"\" then .
               else .failureReason = \$reason end)

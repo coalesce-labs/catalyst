@@ -2743,6 +2743,60 @@ describe("dispatchTriage — CTL-781 respect-assignment + self-assign", () => {
     expect(applyAssignee.mock.calls[0][0]).toMatchObject({ ticket: "ENG-N1", userId: BOT });
   });
 
+  // ── CTL-1744: the claim marker is stamped ONLY on a CONFIRMED delegate apply ──
+  //
+  // The marker is what buys a ticket dispatch-liveness grace, i.e. it SUPPRESSES a
+  // recovery signal. Stamping it for a delegate write that did not actually land
+  // would excuse a wait that never legitimately started, masking a real stall —
+  // so an unapplied (or ambiguously-applied) write must leave no marker at all.
+  //
+  // These use a REAL temp orchDir: recordDelegateClaim deliberately refuses to
+  // manufacture a missing orch dir, which is exactly why the literal "/orch-781"
+  // used by the tests above writes nothing and they stayed byte-identical.
+  describe("CTL-1744 delegate-claim marker", () => {
+    let realOrchDir;
+    const markerPath = (t) => join(realOrchDir, ".delegate-claims", `${t}.json`);
+    beforeEach(() => { realOrchDir = mkdtempSync(join(tmpdir(), "ctl1744-mon-")); });
+    afterEach(() => { rmSync(realOrchDir, { recursive: true, force: true }); });
+
+    const drive = (ticket, applyResult) => {
+      enroll("ENG", { status: "Ready" });
+      handleStateChangedEvent(toTriageEvent(ticket), {
+        dispatch: mock(() => ({ code: 0 })),
+        orchDir: realOrchDir,
+        botUserIds: new Set([BOT]),
+        botWriteId: BOT,
+        fetchAssignee: () => ({ known: true, assignee: null, delegate: null }),
+        applyAssignee: mock(() => applyResult),
+        triageBudget: { remaining: 5 },
+      });
+    };
+
+    test("applied:true → marker written with a usable numeric claimedAt", () => {
+      drive("ENG-OK", { applied: true, reason: null });
+      expect(existsSync(markerPath("ENG-OK"))).toBe(true);
+      const rec = JSON.parse(readFileSync(markerPath("ENG-OK"), "utf8"));
+      expect(rec.ticket).toBe("ENG-OK");
+      expect(typeof rec.claimedAt).toBe("number");
+      expect(Number.isFinite(rec.claimedAt)).toBe(true);
+      expect(rec.claimedAt).toBeGreaterThan(0);
+    });
+
+    test("UNAPPLIED delegate write → NO marker (an un-landed claim earns no grace)", () => {
+      for (const [label, result] of [
+        ["applied:false", { applied: false, reason: "linear write failed" }],
+        ["applied missing", { reason: "no transport" }],
+        ["applied:undefined", { applied: undefined }],
+        ["applied truthy-but-not-true", { applied: 1 }],
+        ["applied:'true' (string)", { applied: "true" }],
+      ]) {
+        const ticket = `ENG-NO-${label.replace(/[^A-Za-z0-9]/g, "")}`;
+        drive(ticket, result);
+        expect(`${label}: ${existsSync(markerPath(ticket))}`).toBe(`${label}: false`);
+      }
+    });
+  });
+
   test("→Triage DELEGATED to our orchestrator → dispatch fires (even if assignee is a human, CTL-1174)", () => {
     enroll("ENG", { status: "Ready" });
     const dispatch = mock(() => ({ code: 0 }));
