@@ -500,7 +500,7 @@ jobs:
         # CAT-167: plugin-refresh.test.mjs guards the only git reset --hard in
         # the codebase and the dirty-tree guard protecting uncommitted work.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs plugin-refresh.test.mjs
+        run: bun test worker-state-projection.test.mjs plugin-refresh.test.mjs event-leak-guard.test.mjs
 
       - name: otel-forward tests (CTL-1529 round 3)
         # otel-forward had NO CI coverage at all before this
@@ -733,6 +733,7 @@ jobs:
             event-tail.test.mjs \
             event-log-window.test.mjs \
             event-log-read-guard.test.mjs \
+            env-restore-guard.test.mjs \
             fence-guard.test.mjs \
             fence-standoff.test.mjs \
             fence-guard-integration.test.mjs \

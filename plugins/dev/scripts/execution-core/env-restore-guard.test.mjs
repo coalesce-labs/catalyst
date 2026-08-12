@@ -1,13 +1,16 @@
 // env-restore-guard.test.mjs — CAT-251 HOME restoration regression guard.
 //
 // INVARIANT: deleting process.env.HOME is permitted only as the undefined arm
-// of a conditional restoration on the same line. A test that leaves HOME unset
-// can make a later `gh` invocation write `.local/state/gh/device-id` below cwd.
+// of a conditional restoration. A test that leaves HOME unset can make a later
+// `gh` invocation write `.local/state/gh/device-id` below cwd.
 //
 // This deliberately does not flag bare HOME assignments: a line-oriented rule
 // would match both the canonical `else process.env.HOME = savedHome` arm and
 // ordinary setters. Those shapes need targeted behavioral assertions instead.
 // Snapshot-set equality fails for both new offenders and stale exemptions.
+// This guard covers only the shapes its line-oriented detector can see. Named
+// blind spots are bracket notation, Reflect.deleteProperty, assignment of
+// undefined, a delete split across lines, and deletion through an env alias.
 
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -19,6 +22,7 @@ const SKIP_DIRS = new Set(["node_modules", ".git"]);
 const SOURCE_EXT = /\.(?:mjs|js|ts|tsx)$/;
 const OFFENDER = /delete\s+process\.env\.HOME/;
 const GUARDED = /if\s*\(\s*([A-Za-z_$][\w$]*)\s*===\s*undefined\s*\)\s*delete\s+process\.env\.HOME\s*;/;
+const BRACED_GUARD = /^\s*if\s*\(\s*([A-Za-z_$][\w$]*)\s*===\s*undefined\s*\)\s*\{\s*$/;
 const ALLOWLIST = [];
 
 function sourceFiles(dir) {
@@ -33,17 +37,35 @@ function sourceFiles(dir) {
   return files;
 }
 
+function classifyPair(lines, index) {
+  const inlineGuard = lines[index].match(GUARDED);
+  if (inlineGuard) {
+    return new RegExp(
+      `^\\s*else\\s+process\\.env\\.HOME\\s*=\\s*${inlineGuard[1]}\\s*;`,
+    ).test(lines[index + 1] ?? "");
+  }
+
+  const bracedGuard = (lines[index - 1] ?? "").match(BRACED_GUARD);
+  return Boolean(bracedGuard
+    && /^\s*delete\s+process\.env\.HOME\s*;\s*$/.test(lines[index])
+    && /^\s*}\s*else\s*{\s*$/.test(lines[index + 1] ?? "")
+    && new RegExp(
+      `^\\s*process\\.env\\.HOME\\s*=\\s*${bracedGuard[1]}\\s*;`,
+    ).test(lines[index + 2] ?? ""));
+}
+
 test("every process.env.HOME deletion is a conditional restoration", () => {
+  const files = sourceFiles(SCRIPTS_DIR);
   const offenders = [];
-  for (const file of sourceFiles(SCRIPTS_DIR)) {
+  expect(files.length).toBeGreaterThan(0);
+  expect(files).toContain(join(SCRIPTS_DIR, "broker", "watchdog-map-bounding.test.mjs"));
+  for (const file of files) {
     const lines = readFileSync(file, "utf8").split("\n");
     lines.forEach((line, index) => {
       if (!OFFENDER.test(line)) return;
-      const guarded = line.match(GUARDED);
-      const restore = guarded && new RegExp(
-        `^\\s*else\\s+process\\.env\\.HOME\\s*=\\s*${guarded[1]}\\s*;`,
-      ).test(lines[index + 1] ?? "");
-      if (!restore) offenders.push(`${relative(SCRIPTS_DIR, file)}:${index + 1}`);
+      if (!classifyPair(lines, index)) {
+        offenders.push(`${relative(SCRIPTS_DIR, file)}:${index + 1}`);
+      }
     });
   }
   expect(offenders.sort()).toEqual(ALLOWLIST.slice().sort());
@@ -51,20 +73,21 @@ test("every process.env.HOME deletion is a conditional restoration", () => {
 
 test("the canonical-pair classifier rejects unrelated or incomplete guards", () => {
   const deletion = ["delete", "process.env.HOME;"].join(" ");
-  const classified = (lines) => {
-    const guarded = lines[0].match(GUARDED);
-    return Boolean(guarded && new RegExp(
-      `^\\s*else\\s+process\\.env\\.HOME\\s*=\\s*${guarded[1]}\\s*;`,
-    ).test(lines[1] ?? ""));
-  };
 
-  expect(classified([
+  expect(classifyPair([
     `if (savedHome === undefined) ${deletion}`,
     "else process.env.HOME = savedHome;",
-  ])).toBe(true);
-  expect(classified([
+  ], 0)).toBe(true);
+  expect(classifyPair([
+    "if (savedHome === undefined) {",
+    deletion,
+    "} else {",
+    "  process.env.HOME = savedHome;",
+    "}",
+  ], 1)).toBe(true);
+  expect(classifyPair([
     `if (unrelated === undefined) ${deletion}`,
     "else process.env.HOME = savedHome;",
-  ])).toBe(false);
-  expect(classified([`if (savedHome === undefined) ${deletion}`])).toBe(false);
+  ], 0)).toBe(false);
+  expect(classifyPair([`if (savedHome === undefined) ${deletion}`], 0)).toBe(false);
 });
