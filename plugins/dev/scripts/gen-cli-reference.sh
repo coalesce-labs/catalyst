@@ -46,6 +46,7 @@ catalyst-comms|Event & comms|1|File-based JSONL agent communication channels (no
 catalyst-filter|Event & comms|1|DEPRECATED alias for catalyst-broker (delegates so legacy callers keep working).
 catalyst-why|Event & comms|1|Explain why the daemon believes a worker is alive, stuck, or dead (belief→rule→facts trace).
 catalyst-transitions|Event & comms|0|Live, human-readable Linear-state + phase transition log (tails the event stream — bare runs forever).
+catalyst-verify|Event & comms|1|Verified checks that cannot report a clean result from a check that never ran — count events by exact event.name, resolve HRW ticket ownership under named rosters, enumerate every PR merge blocker (exit 2 = INCONCLUSIVE).
 catalyst-session|Session & state|1|Lifecycle CLI for Catalyst agent sessions (start/phase/metric/tool/pr → SQLite + event log).
 catalyst-state|Session & state|1|Manage global orchestrator state at ~/catalyst/state.json (flock-protected RMW + event log).
 boot-resume-approve|Session & state|0|List boot-resume-gated tickets and approve one — writes the .boot-resume-approved sentinel so the daemon dispatches the gated phase without a restart (CTL-1443).
