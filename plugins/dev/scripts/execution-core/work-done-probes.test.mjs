@@ -499,6 +499,109 @@ describe("WORK_DONE_PROBES.research — happy path", () => {
   });
 });
 
+// CTL-1790 PR-1 — the false-done vector closed by boundary-matching.
+//
+// `<worktree>/thoughts/shared` is a SYMLINK into one shared repo, so every
+// worktree lists the same ~1.3k documents. Under the old bare `includes()` rule,
+// 144 distinct ticket ids matched a DIFFERENT ticket's document (2721 foreign
+// pairs) and 100 of those owned no document at all. The live case: CTL-56 owns
+// nothing, yet the production researchProbe/planProbe returned TRUE off
+// CTL-564/565/567's completed 2026-05-21 docs.
+describe("CTL-1790: matchesTicket must not match a LOOKALIKE ticket's artifact", () => {
+  const wt = "/wt/CTL-56";
+  const runGit = makeRunGit({
+    "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-56", wt), stderr: "" },
+  });
+
+  // The exact filenames on disk that made CTL-56 probe "done".
+  const FOREIGN = ["2026-05-21-CTL-564.md", "2026-05-21-CTL-565.md", "2026-05-21-CTL-567.md"];
+
+  test("research: a longer ticket's doc does NOT satisfy the shorter ticket", () => {
+    expect(
+      WORK_DONE_PROBES.research(
+        { ticket: "CTL-56", repoRoot: "/repo" },
+        {
+          runGit,
+          listArtifacts: makeListArtifacts({ "thoughts/shared/research": FOREIGN }),
+          readArtifact: () => RESEARCH_BODY_COMPLETE,
+        },
+      ),
+    ).toBe(false);
+  });
+
+  test("plan: same, via the plans corpus", () => {
+    expect(
+      WORK_DONE_PROBES.plan(
+        { ticket: "CTL-56", repoRoot: "/repo" },
+        {
+          runGit,
+          listArtifacts: makeListArtifacts({
+            "thoughts/shared/plans": ["2026-05-21-CTL-565-daemon-two-state-trigger-rewiring.md"],
+          }),
+          readArtifact: () => PLAN_BODY_COMPLETE,
+        },
+      ),
+    ).toBe(false);
+  });
+
+  // POSITIVE CONTROL. Without this the test above passes for the wrong reason —
+  // e.g. a matcher that matches NOTHING would satisfy it while breaking every
+  // real probe. The owner's own document must still resolve through the same seams.
+  test("POSITIVE CONTROL: the OWNING ticket still matches its own doc", () => {
+    const ownWt = "/wt/CTL-564";
+    expect(
+      WORK_DONE_PROBES.research(
+        { ticket: "CTL-564", repoRoot: "/repo" },
+        {
+          runGit: makeRunGit({
+            "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-564", ownWt), stderr: "" },
+          }),
+          listArtifacts: makeListArtifacts({ "thoughts/shared/research": FOREIGN }),
+          readArtifact: () => RESEARCH_BODY_COMPLETE,
+        },
+      ),
+    ).toBe(true);
+  });
+
+  // The separator families that actually occur on disk must keep matching: `-`
+  // (the common form) and `_` (six real YYYY-MM-DD_ctl-NNNN_slug.md docs, which
+  // the bash gate's `-`-only grammar would have lost).
+  test.each([
+    ["2026-05-26-ctl-604.md", "CTL-604", true, "bare -<ticket>.md tail"],
+    ["2026-05-26-CTL-604-some-suffix.md", "CTL-604", true, "uppercase + descriptive suffix"],
+    ["2026-06-19_ctl-1231_settings-json-never-provisioned.md", "CTL-1231", true, "underscore separators"],
+    ["2026-06-15-resilience-keystones-ctl-1135-ctl-1122.md", "CTL-1122", true, "second id in a two-ticket doc"],
+    ["2026-05-21-CTL-564.md", "CTL-56", false, "prefix lookalike (the live bug)"],
+    ["2026-05-21-CTL-564.md", "CTL-5", false, "shorter prefix lookalike"],
+    ["2026-06-16-ctl-10812.md", "CTL-1081", false, "the bash gate's own stated example"],
+    ["2026-05-26-ctl-604.json", "CTL-604", false, "non-markdown is rejected"],
+    // The canonical ticket-key grammar (ticket-key.mjs TICKET_KEY_RE, CTL-1504)
+    // admits a digit/underscore in the team prefix and puts no length cap on
+    // either half. A narrower private guard here would reject these outright,
+    // and a rejected id reads as "no artifact exists" at every call site.
+    ["2026-08-01-ops_2-17-slug.md", "OPS_2-17", true, "team key with digit+underscore"],
+    ["2026-08-01_ops_2-17_slug.md", "OPS_2-17", true, "same, underscore separators"],
+    ["2026-08-01-ops_2-170-slug.md", "OPS_2-17", false, "…and it still rejects a lookalike"],
+    ["2026-08-01-verylongprefix-42.md", "VERYLONGPREFIX-42", true, "prefix longer than six chars"],
+    ["2026-08-01-ctl-1234567.md", "CTL-1234567", true, "number longer than six digits"],
+    ["2026-08-01-ctl-604.md", "not-a-ticket-key", false, "malformed id is rejected, not regex-injected"],
+  ])("%s vs %s -> %s (%s)", (filename, ticket, expected) => {
+    const probeWt = `/wt/${ticket}`;
+    expect(
+      WORK_DONE_PROBES.research(
+        { ticket, repoRoot: "/repo" },
+        {
+          runGit: makeRunGit({
+            "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor(ticket, probeWt), stderr: "" },
+          }),
+          listArtifacts: makeListArtifacts({ "thoughts/shared/research": [filename] }),
+          readArtifact: () => RESEARCH_BODY_COMPLETE,
+        },
+      ),
+    ).toBe(expected);
+  });
+});
+
 describe("WORK_DONE_PROBES.research — false cases", () => {
   const wt = "/wt/CTL-604";
   const runGitOk = makeRunGit({
