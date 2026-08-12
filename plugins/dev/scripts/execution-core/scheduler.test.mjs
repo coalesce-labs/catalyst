@@ -94,7 +94,10 @@ import {
   computeDeadHosts,
   // CTL-1667: current-run PR reader (for terminalDoneOnce gate tests)
   readCurrentRunPrNumber,
+  // CTL-1789: the extracted from-phase resolver the advancement audit names
+  latestLivePhase,
 } from "./scheduler.mjs";
+import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
@@ -13985,5 +13988,178 @@ describe("CTL-1667 (review fix, round 3): sanitize stale post-PR signals before 
     // is monitor-merge — proof the ticket was reachable, not excluded.
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-84", phase: "monitor-merge" }]);
     expect(r.advanced).toEqual([{ ticket: "CTL-84", phase: "monitor-merge" }]);
+  });
+});
+
+// ─── CTL-1789: phase.advance.applied — the positive half of the gate ─────────
+//
+// Before this, the advancement gate emitted ONLY on refusal (phase.advance.held):
+// a month of production logs held 307 `held` events and zero `phase.advance.*` of
+// any other name, so the FSM's actual advances were unobservable. Every consumer
+// had to infer "the pipeline advanced" from the SUCCESSOR phase's dispatch, which
+// conflates a fresh advance with a revive, a resume, and a new-work pull.
+//
+// These tests pin (a) exactly one applied event per VERIFIED advance, (b) the
+// from→to edge it names, and (c) the three-valued `evidence` attribution of the
+// from-phase's terminal writer.
+describe("CTL-1789 phase.advance.applied", () => {
+  // appliedEvents — narrow the fixture event log to this ticket's applied events.
+  function appliedEvents(ticket) {
+    return readEventLog().filter(
+      (e) => e?.attributes?.["event.name"] === `phase.advance.applied.${ticket}`
+    );
+  }
+
+  // advanceTick — the standard admission-gated advancement tick used below.
+  function advanceTick(extra = {}) {
+    return schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      fetchBatch: mkBatch(() => relUnblocked()),
+      liveBackgroundCount: () => 0,
+      ...extra,
+    });
+  }
+
+  test("latestLivePhase names exactly the phase deriveAdvancement keys off", () => {
+    // Pure-function parity: the extracted resolver must not drift from the FSM's
+    // own input. triage:done → the FSM owes research, keyed off `triage`.
+    expect(latestLivePhase({ triage: "done" })).toBe("triage");
+    expect(deriveAdvancement({ triage: "done" })).toBe("research");
+    // Backward re-dispatch (CTL-1660): a stale higher-ordinal `review` is
+    // superseded by the fresher `implement`, so BOTH agree on `implement`.
+    const backward = { review: "done", implement: "done" };
+    expect(latestLivePhase(backward)).toBe("implement");
+    expect(deriveAdvancement(backward)).toBe("verify");
+    // Nothing live → null, and no advancement.
+    expect(latestLivePhase({})).toBeNull();
+    expect(deriveAdvancement({})).toBeNull();
+    expect(latestLivePhase(null)).toBeNull();
+  });
+
+  test("a verified advance emits exactly ONE applied event naming from→to", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignalRaw("CTL-7", "triage", {
+      ticket: "CTL-7",
+      phase: "triage",
+      status: "done",
+      assertedBy: ASSERTED_BY.PHASE_AGENT,
+    });
+    const r = advanceTick();
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+
+    const evs = appliedEvents("CTL-7");
+    expect(evs).toHaveLength(1);
+    expect(evs[0].body.payload).toMatchObject({
+      phase: "advance",
+      ticket: "CTL-7",
+      status: "applied",
+      from: "triage",
+      to: "research",
+      evidence: "declared",
+      evidence_reason: null,
+      asserted_by: "phase-agent-emit-complete",
+      assertion_ref: "workers/CTL-7/phase-triage.json",
+    });
+    // INFO, not WARN — a performed advance is the system working (held is WARN).
+    expect(evs[0].severityText).toBe("INFO");
+    expect(evs[0].severityNumber).toBe(9);
+    // Promoted to ATTRIBUTES so the dimension survives otel-forward stripping
+    // body.payload off-machine.
+    expect(evs[0].attributes["catalyst.advance.evidence"]).toBe("declared");
+    expect(evs[0].attributes["catalyst.advance.from"]).toBe("triage");
+    expect(evs[0].attributes["catalyst.advance.to"]).toBe("research");
+    // Coordination stream class (phase.advance.* — same as held).
+    expect(evs[0].attributes["event.stream_class"]).toBe("coordination");
+  });
+
+  test("an SDK-flipped terminal is classified FABRICATED, not declared", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignalRaw("CTL-7", "triage", {
+      ticket: "CTL-7",
+      phase: "triage",
+      status: "done",
+      assertedBy: ASSERTED_BY.SDK_SUCCESS_FLIP,
+    });
+    const r = advanceTick();
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+
+    const evs = appliedEvents("CTL-7");
+    expect(evs).toHaveLength(1);
+    expect(evs[0].body.payload.evidence).toBe("fabricated");
+    expect(evs[0].body.payload.asserted_by).toBe("sdk-success-flip");
+    expect(evs[0].attributes["catalyst.advance.evidence"]).toBe("fabricated");
+  });
+
+  test("a legacy signal (written before the marker shipped) → absent/no-marker", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done"); // no assertedBy — the pre-CTL-1789 shape
+    const r = advanceTick();
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+
+    const evs = appliedEvents("CTL-7");
+    expect(evs).toHaveLength(1);
+    expect(evs[0].body.payload.evidence).toBe("absent");
+    expect(evs[0].body.payload.evidence_reason).toBe("no-marker");
+    expect(evs[0].body.payload.asserted_by).toBeNull();
+  });
+
+  test("a HELD advance emits no applied event (the two are mutually exclusive)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done");
+    // No free slot → the admission gate refuses the triage→research promotion.
+    const r = advanceTick({ liveBackgroundCount: () => 5 });
+    expect(r.advanced).toEqual([]);
+    expect(appliedEvents("CTL-7")).toHaveLength(0);
+  });
+
+  test("a FAILED dispatch emits no applied event", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done");
+    const r = advanceTick({ dispatch: fakeDispatch({ code: 1, stderr: "boom" }) });
+    expect(r.advanced).toEqual([]);
+    expect(appliedEvents("CTL-7")).toHaveLength(0);
+  });
+
+  test("a THROWING emitter is swallowed — the advance still lands (safeEmit)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    let called = 0;
+    const r = advanceTick({
+      dispatch,
+      appendPhaseAdvanceAppliedEvent: () => {
+        called++;
+        throw new Error("audit emitter exploded");
+      },
+    });
+    expect(called).toBe(1); // the emitter really ran (and really threw)
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+  });
+
+  test("the emitter receives the resolved from/to/evidence triple (injection seam)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignalRaw("CTL-7", "implement", {
+      ticket: "CTL-7",
+      phase: "implement",
+      status: "done",
+      assertedBy: ASSERTED_BY.RECOVERY_RECLAIM,
+    });
+    const seen = [];
+    advanceTick({ appendPhaseAdvanceAppliedEvent: (a) => seen.push(a) });
+    expect(seen).toEqual([
+      {
+        orchId: "CTL-7",
+        ticket: "CTL-7",
+        from: "implement",
+        to: "verify",
+        evidence: "fabricated",
+        evidenceReason: null,
+        assertedBy: "recovery-reclaim",
+        assertionRef: "workers/CTL-7/phase-implement.json",
+      },
+    ]);
   });
 });

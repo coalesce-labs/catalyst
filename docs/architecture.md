@@ -814,8 +814,41 @@ a fully-dead daemon is a _missing series_, which `count_over_time == 0` cannot a
 **`<name>` slot exceptions** (in `recovery.mjs`, NOT pipeline phases): `dispatch`
 (`phase.dispatch.failed.<ticket>` — the only exception with a terminal-status suffix that matches
 the pattern; real phase rides `payload.target_phase`); `scheduler` (internal observability:
-`yield-file-skip`, `cooldown-gc`, …); `advance` (phase-advance gate `held`). The latter two never
-match the terminal-status set.
+`yield-file-skip`, `cooldown-gc`, …); `advance` (phase-advance gate — `held` on a refusal,
+`applied` on a performed advance, CTL-1789). The latter two never match the terminal-status set, so
+`tryPhaseLifecycleRoute` returns `[]` for every event in them — pure audit, zero wake side effect.
+
+### Advancement-gate observability + terminal attribution (CTL-1789)
+
+The advancement gate used to emit **only on refusal**: 2026-08 held 307 `phase.advance.held` events
+and zero `phase.advance.*` of any other name, so the FSM's actual advances were invisible and every
+consumer had to infer them from the successor phase's dispatch (which conflates a fresh advance with
+a revive, a resume, and a new-work pull).
+
+- **`phase.advance.applied.<TICKET>`** (`recovery.mjs` `defaultAppendPhaseAdvanceAppliedEvent`,
+  emitted from the scheduler's advancement sweep inside the `dv.ok` branch, i.e. only after
+  `dispatchAndVerify` confirmed a live successor worker). Severity **INFO** (`held` stays WARN).
+  Payload: `{from, to, evidence, evidence_reason, asserted_by, assertion_ref}`; `evidence` plus
+  `from`/`to` are also promoted to attributes (`catalyst.advance.*`) because otel-forward strips
+  `body.payload` off-machine. `from` is re-derived with the extracted pure `latestLivePhase(signals)`
+  — the SAME function `deriveAdvancement` keys off, so the audit can never name a different
+  predecessor than the FSM used.
+- **`assertedBy` on the phase signal** (`execution-core/assertion-evidence.mjs`, a zero-import leaf
+  owning `ASSERTED_BY` + `classifyAdvanceEvidence`/`explainAdvanceEvidence`). Three producers can
+  write a terminal `done` and were previously byte-indistinguishable: the agent's own
+  `phase-agent-emit-complete` (**declared**), `flipSignalDoneOnSuccess`'s clean-SDK-exit flip
+  (**fabricated** — the agent never declared anything), and the recovery-reclaim / legacy-revive
+  synthetic completes (**fabricated** — inferred from a work-done probe). Writers stamp their id:
+  the wrapper defaults to `phase-agent-emit-complete` and accepts `--asserted-by` so infrastructure
+  callers self-identify. Unknown/missing markers classify **absent**, never `declared` — the
+  fail direction is deliberate. `evidence_reason` (`no-predecessor` / `unreadable-signal` /
+  `no-marker` / `unknown-writer`) keeps `absent` diagnosable while the contract stays three-valued.
+- **Rollout caveat**: signals written before this shipped carry no marker, so the first pipeline pass
+  after deploy reads `absent` / `no-marker`. Do not alarm on `absent` until a full ticket has cycled.
+- **Scope**: only the terminal-**success** writers are stamped (plus the SDK backstop). The ~20
+  `stalled`/`failed`/`aborted`/`needs-human` writers are deliberately unstamped — those statuses are
+  never advance-eligible (`deriveAdvancement` gates on `done`, or `skipped` for `monitor-deploy`
+  only), so they can never be the `from` signal of an applied advance.
 
 **Enforcement surfaces:**
 
