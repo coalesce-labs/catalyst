@@ -5586,14 +5586,15 @@ describe("HOST_STATE_SEAMS — the host-state seam contract (CAT-135)", () => {
     }
   });
 
-  it("registers each underlying live check in every declared rubric", () => {
+  it("registers each underlying live check exactly once in every declared rubric", () => {
     for (const entry of HOST_STATE_SEAMS) {
       const needle = entry.checkName.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join("");
+      const call = `check${needle}(`;
       for (const rubric of entry.rubrics) {
         for (const cls of classes) {
-          const source = buildRubric(rubric, nodeClassOf({ class: cls, raw: cls }), {})
-            .map((fn) => fn.toString()).join("\n");
-          expect(source).toContain(`check${needle}`);
+          const fns = buildRubric(rubric, nodeClassOf({ class: cls, raw: cls }), {});
+          const matching = fns.filter((fn) => fn.toString().includes(call));
+          expect(matching, `${entry.checkName} in ${rubric}/${cls}`).toHaveLength(1);
         }
       }
     }
