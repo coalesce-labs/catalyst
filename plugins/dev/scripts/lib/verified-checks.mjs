@@ -300,13 +300,42 @@ export function verifyAll(items, predicate, { label = "candidates" } = {}) {
 //
 // `runJson` is an injectable seam: (args: string[]) => parsed JSON. Production
 // passes a `gh` wrapper; tests pass a fake.
-export async function prMergeBlockers({ prNumber, repo, runJson } = {}) {
+// A merge state that GitHub itself calls not-ready. If we return an EMPTY blocker
+// list while GitHub says one of these, our enumeration missed something (a merge
+// conflict, REVIEW_REQUIRED, an ACTION_REQUIRED check, …) and the honest answer
+// is "inconclusive", not "clean".
+const NOT_READY_MERGE_STATES = new Set(["DIRTY", "BLOCKED", "UNSTABLE", "UNKNOWN", "DRAFT"]);
+
+// Check conclusions that are neither success nor neutral. ACTION_REQUIRED and
+// STARTUP_FAILURE are blockers that an enumerate-the-bad-ones list forgets.
+const FAILING_CHECK_STATES = new Set([
+  "FAILURE",
+  "TIMED_OUT",
+  "CANCELLED",
+  "ERROR",
+  "ACTION_REQUIRED",
+  "STARTUP_FAILURE",
+  "STALE",
+]);
+const PENDING_CHECK_STATES = new Set(["", "PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED"]);
+const PASSING_CHECK_STATES = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+
+// isAutomatedReviewer — the bot whose review gates a merge here.
+function isAutomatedReviewer(login) {
+  return typeof login === "string" && /codex/i.test(login);
+}
+
+export async function prMergeBlockers({ prNumber, repo, runJson, reviewerPattern } = {}) {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     throw new VerificationError(`prNumber must be a positive integer, got ${prNumber}`);
   }
   if (typeof runJson !== "function") {
     throw new VerificationError("prMergeBlockers requires a `runJson` seam");
   }
+  const isReviewer =
+    reviewerPattern instanceof RegExp
+      ? (login) => typeof login === "string" && reviewerPattern.test(login)
+      : isAutomatedReviewer;
 
   const surfaces = {};
   const failures = [];
@@ -327,14 +356,21 @@ export async function prMergeBlockers({ prNumber, repo, runJson } = {}) {
     String(prNumber),
     ...repoArgs,
     "--json",
-    "mergeStateStatus,statusCheckRollup,reviews,isDraft",
+    // reviewDecision is the AGGREGATE verdict. Raw `reviews` history keeps a
+    // superseded CHANGES_REQUESTED forever, so a reviewer who later approved
+    // would block this PR indefinitely.
+    "mergeStateStatus,statusCheckRollup,reviews,reviewDecision,isDraft",
   ]);
   await ask("threads", ["__reviewThreads__", String(prNumber), ...repoArgs]);
   await ask("comments", ["__issueComments__", String(prNumber), ...repoArgs]);
+  // The automated reviewer signals a clean pass with a REACTION as often as with
+  // a comment. Counting comments alone cannot see a reaction-only clean pass —
+  // which is defect (4) of this module's own preamble, one level up.
+  await ask("reactions", ["__reactions__", String(prNumber), ...repoArgs]);
 
   if (failures.length > 0) {
     return inconclusive(
-      `could not read ${failures.length} of 3 merge-blocking surfaces: ${failures.join("; ")} — ` +
+      `could not read ${failures.length} of 4 merge-blocking surfaces: ${failures.join("; ")} — ` +
         "a partial read cannot report 'nothing is blocking'",
       { surfaces, failures },
     );
@@ -345,24 +381,24 @@ export async function prMergeBlockers({ prNumber, repo, runJson } = {}) {
 
   if (pr.isDraft === true) blockers.push({ surface: "pr", kind: "draft" });
 
+  const unclassifiedChecks = [];
   for (const check of Array.isArray(pr.statusCheckRollup) ? pr.statusCheckRollup : []) {
     const name = check?.name ?? check?.context ?? "unnamed-check";
-    const state = check?.conclusion ?? check?.state ?? null;
-    if (state === "FAILURE" || state === "TIMED_OUT" || state === "CANCELLED" || state === "ERROR") {
+    const raw = check?.conclusion ?? check?.state ?? null;
+    const state = raw === null ? "" : String(raw).toUpperCase();
+    if (FAILING_CHECK_STATES.has(state)) {
       blockers.push({ surface: "checks", kind: "failing", name, state });
-    } else if (state === null || state === "" || state === "PENDING" || state === "IN_PROGRESS") {
+    } else if (PENDING_CHECK_STATES.has(state)) {
       blockers.push({ surface: "checks", kind: "pending", name, state });
+    } else if (!PASSING_CHECK_STATES.has(state)) {
+      // A conclusion we have never seen. Do NOT silently treat it as passing.
+      unclassifiedChecks.push({ name, state });
     }
   }
 
-  for (const review of Array.isArray(pr.reviews) ? pr.reviews : []) {
-    if (review?.state === "CHANGES_REQUESTED") {
-      blockers.push({
-        surface: "reviews",
-        kind: "changes-requested",
-        author: review?.author?.login ?? "unknown",
-      });
-    }
+  // Aggregate decision, not raw history.
+  if (pr.reviewDecision === "CHANGES_REQUESTED") {
+    blockers.push({ surface: "reviews", kind: "changes-requested", decision: pr.reviewDecision });
   }
 
   const threads = Array.isArray(surfaces.threads) ? surfaces.threads : [];
@@ -377,11 +413,54 @@ export async function prMergeBlockers({ prNumber, repo, runJson } = {}) {
     }
   }
 
-  return conclusive(blockers, {
+  // Has the automated reviewer responded AT ALL? Green checks with no review yet
+  // is not a clean PR — it is an unreviewed one, and reporting "no blockers"
+  // there is exactly the "absence read as approval" this module exists to refuse.
+  const comments = Array.isArray(surfaces.comments) ? surfaces.comments : [];
+  const reactions = Array.isArray(surfaces.reactions) ? surfaces.reactions : [];
+  const reviewerComments = comments.filter((c) => isReviewer(c?.user?.login ?? c?.author?.login));
+  const reviewerReactions = reactions.filter((r) => isReviewer(r?.user?.login ?? r?.author?.login));
+  const reviewerThreads = threads.length > 0;
+  const reviewerResponded =
+    reviewerComments.length > 0 ||
+    reviewerReactions.length > 0 ||
+    reviewerThreads ||
+    typeof pr.reviewDecision === "string";
+  if (!reviewerResponded) {
+    blockers.push({ surface: "review", kind: "awaiting-automated-review" });
+  }
+
+  const evidence = {
     blockerCount: blockers.length,
     mergeStateStatus: pr.mergeStateStatus ?? null,
+    reviewDecision: pr.reviewDecision ?? null,
     surfacesRead: Object.keys(surfaces),
     threadsSeen: threads.length,
-    commentsSeen: Array.isArray(surfaces.comments) ? surfaces.comments.length : 0,
-  });
+    commentsSeen: comments.length,
+    reactionsSeen: reactions.length,
+    reviewerSignals: reviewerComments.length + reviewerReactions.length,
+    unclassifiedChecks,
+  };
+
+  // Reconcile against GitHub's own aggregate before licensing a clean answer.
+  const mergeState = typeof pr.mergeStateStatus === "string" ? pr.mergeStateStatus.toUpperCase() : null;
+  if (blockers.length === 0 && unclassifiedChecks.length > 0) {
+    return inconclusive(
+      `every enumerated surface is clean but ${unclassifiedChecks.length} check(s) reported a ` +
+        `conclusion this tool does not classify (${unclassifiedChecks
+          .map((c) => `${c.name}=${c.state}`)
+          .join(", ")}) — cannot license a clean verdict`,
+      evidence,
+    );
+  }
+  if (blockers.length === 0 && mergeState !== null && NOT_READY_MERGE_STATES.has(mergeState)) {
+    return inconclusive(
+      `every enumerated surface is clean, but GitHub reports mergeStateStatus=${mergeState} — ` +
+        "something is blocking this merge that this tool did not enumerate (a merge conflict, " +
+        "REVIEW_REQUIRED, a branch-protection rule); refusing to contradict GitHub's own status",
+      evidence,
+    );
+  }
+
+  return conclusive(blockers, evidence);
 }

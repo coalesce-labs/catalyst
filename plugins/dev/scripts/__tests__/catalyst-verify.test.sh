@@ -91,6 +91,48 @@ assert_exit 3 "an unknown subcommand is a usage error" -- node "$VERIFY" bogus-s
 assert_exit 0 "--help exits 0" -- node "$VERIFY" --help
 
 echo ""
+echo "catalyst-verify: canonical event-log location contract"
+
+# Scanning the built-in default while the installation has pointed the log
+# elsewhere would return a conclusive zero against the WRONG corpus.
+MONTH="$(date -u +%Y-%m)"
+mkdir -p "${TMP}/evdir" "${TMP}/cdir/events"
+cp "${TMP}/events.jsonl" "${TMP}/evdir/${MONTH}.jsonl"
+cp "${TMP}/events.jsonl" "${TMP}/cdir/events/${MONTH}.jsonl"
+
+assert_exit 0 "CATALYST_EVENTS_FILE is honored" -- \
+	env CATALYST_EVENTS_FILE="${TMP}/events.jsonl" node "$VERIFY" events phase.advance.applied
+assert_exit 0 "CATALYST_EVENTS_DIR is honored" -- \
+	env -u CATALYST_EVENTS_FILE CATALYST_EVENTS_DIR="${TMP}/evdir" node "$VERIFY" events phase.advance.applied
+assert_exit 0 "CATALYST_DIR/events is honored" -- \
+	env -u CATALYST_EVENTS_FILE -u CATALYST_EVENTS_DIR CATALYST_DIR="${TMP}/cdir" node "$VERIFY" events phase.advance.applied
+# ...and an override pointing at an ABSENT log must be inconclusive, not a clean 0
+# against the default corpus.
+assert_exit 2 "an override pointing at an absent log is INCONCLUSIVE, not a fallback scan" -- \
+	env CATALYST_EVENTS_FILE="${TMP}/no-such.jsonl" node "$VERIFY" events phase.advance.applied
+
+echo ""
+echo "catalyst-verify: installed as a CLI"
+
+# A command that no install ever places on PATH has no consumers — which is the
+# very thing the Assert-and-Subtract acceptance test forbids.
+if grep -q 'catalyst-verify:catalyst-verify' "${SCRIPT_DIR}/../install-cli.sh"; then
+	pass "install-cli.sh CLI_ENTRIES contains catalyst-verify"
+else
+	fail "install-cli.sh does not install catalyst-verify — it would never reach PATH"
+fi
+if grep -q 'catalyst-verify' "${SCRIPT_DIR}/../check-setup.sh"; then
+	pass "check-setup.sh verifies catalyst-verify"
+else
+	fail "check-setup.sh does not verify catalyst-verify"
+fi
+if [[ -x "$VERIFY" ]]; then
+	pass "catalyst-verify is executable (install symlinks it)"
+else
+	fail "catalyst-verify is not executable — the symlink would not run"
+fi
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "catalyst-verify: ${PASSES} passed, ${FAILURES} failed"
 echo "─────────────────────────────────────────────"

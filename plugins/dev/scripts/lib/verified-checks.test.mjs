@@ -263,6 +263,7 @@ describe("(4) prMergeBlockers — consult every surface that can block a merge",
           mergeStateStatus: "BLOCKED",
           statusCheckRollup: [{ name: "validate", conclusion: "SUCCESS" }],
           reviews: [],
+          reviewDecision: null,
           ...(overrides.pr ?? {}),
         };
       }
@@ -270,9 +271,19 @@ describe("(4) prMergeBlockers — consult every surface that can block a merge",
         return overrides.threads ?? [{ id: "T_1", isResolved: false, path: "src/a.ts" }];
       }
       if (args[0] === "__issueComments__") return overrides.comments ?? [];
+      if (args[0] === "__reactions__") return overrides.reactions ?? [];
       throw new Error(`unexpected args ${args.join(" ")}`);
     };
   };
+  // A PR that is genuinely clean AND has been reviewed: green checks, resolved
+  // threads, a CLEAN merge state, and a reviewer signal.
+  const cleanGh = (over = {}) =>
+    fakeGh({
+      pr: { mergeStateStatus: "CLEAN", statusCheckRollup: [{ name: "ok", conclusion: "SUCCESS" }], ...(over.pr ?? {}) },
+      threads: over.threads ?? [{ id: "T_1", isResolved: true }],
+      comments: over.comments ?? [{ user: { login: "chatgpt-codex-connector" }, body: "no major issues" }],
+      reactions: over.reactions ?? [],
+    });
 
   test("Scenario: zero bot issue-comments but one unresolved thread reports the thread", async () => {
     const verdict = await prMergeBlockers({ prNumber: 3276, runJson: fakeGh() });
@@ -283,12 +294,106 @@ describe("(4) prMergeBlockers — consult every surface that can block a merge",
     expect(threadBlockers[0].path).toBe("src/a.ts");
   });
 
-  test("a genuinely clean PR reports no blockers", async () => {
+  test("a genuinely clean, reviewed PR reports no blockers", async () => {
+    const verdict = await prMergeBlockers({ prNumber: 1, runJson: cleanGh() });
+    expect(mustBeConclusive(verdict)).toEqual([]);
+  });
+
+  // Codex P1 #1 — green checks with NO reviewer response is not "clean", it is
+  // "unreviewed". Reporting no blockers there reads an absence as approval.
+  test("green checks but no automated review yet is a BLOCKER, not clean", async () => {
     const verdict = await prMergeBlockers({
       prNumber: 1,
-      runJson: fakeGh({ threads: [{ id: "T_1", isResolved: true }] }),
+      runJson: cleanGh({ comments: [], reactions: [], threads: [] }),
+    });
+    const blockers = mustBeConclusive(verdict);
+    expect(blockers.map((b) => b.kind)).toContain("awaiting-automated-review");
+  });
+
+  test("a REACTION-only clean pass counts as a response (it lives on no other surface)", async () => {
+    const verdict = await prMergeBlockers({
+      prNumber: 1,
+      runJson: cleanGh({
+        comments: [],
+        threads: [],
+        reactions: [{ content: "+1", user: { login: "chatgpt-codex-connector" } }],
+      }),
     });
     expect(mustBeConclusive(verdict)).toEqual([]);
+  });
+
+  // Codex P1 #3 — never contradict GitHub's own aggregate.
+  test("clean enumeration but a NOT-READY mergeStateStatus is INCONCLUSIVE", async () => {
+    for (const state of ["DIRTY", "BLOCKED", "UNKNOWN"]) {
+      const verdict = await prMergeBlockers({
+        prNumber: 1,
+        runJson: cleanGh({ pr: { mergeStateStatus: state } }),
+      });
+      expect(verdict.conclusive).toBe(false);
+      expect(verdict.reason).toContain(state);
+      expect(() => mustBeConclusive(verdict)).toThrow(VerificationError);
+    }
+  });
+
+  test("an UNCLASSIFIED check conclusion is INCONCLUSIVE, never assumed passing", async () => {
+    const verdict = await prMergeBlockers({
+      prNumber: 1,
+      runJson: cleanGh({ pr: { statusCheckRollup: [{ name: "weird", conclusion: "SOMETHING_NEW" }] } }),
+    });
+    expect(verdict.conclusive).toBe(false);
+    expect(verdict.reason).toContain("does not classify");
+  });
+
+  test("ACTION_REQUIRED and STARTUP_FAILURE are failing checks", async () => {
+    const verdict = await prMergeBlockers({
+      prNumber: 1,
+      runJson: cleanGh({
+        pr: {
+          statusCheckRollup: [
+            { name: "a", conclusion: "ACTION_REQUIRED" },
+            { name: "b", conclusion: "STARTUP_FAILURE" },
+          ],
+        },
+      }),
+    });
+    expect(mustBeConclusive(verdict).filter((b) => b.kind === "failing").map((b) => b.name)).toEqual(["a", "b"]);
+  });
+
+  // Codex P2 — the aggregate decision, not stale history.
+  test("a SUPERSEDED CHANGES_REQUESTED does not block forever", async () => {
+    const verdict = await prMergeBlockers({
+      prNumber: 1,
+      runJson: cleanGh({
+        pr: {
+          // history still carries the old rejection...
+          reviews: [{ state: "CHANGES_REQUESTED", author: { login: "ryan" } }],
+          // ...but the effective decision is APPROVED.
+          reviewDecision: "APPROVED",
+        },
+      }),
+    });
+    expect(mustBeConclusive(verdict)).toEqual([]);
+  });
+
+  test("an EFFECTIVE CHANGES_REQUESTED still blocks", async () => {
+    const verdict = await prMergeBlockers({
+      prNumber: 1,
+      runJson: cleanGh({ pr: { reviewDecision: "CHANGES_REQUESTED" } }),
+    });
+    expect(mustBeConclusive(verdict).some((b) => b.kind === "changes-requested")).toBe(true);
+  });
+
+  test("a failing REACTIONS surface makes the verdict inconclusive", async () => {
+    const base = cleanGh();
+    const verdict = await prMergeBlockers({
+      prNumber: 1,
+      runJson: async (args) => {
+        if (args[0] === "__reactions__") throw new Error("403 rate limited");
+        return base(args);
+      },
+    });
+    expect(verdict.conclusive).toBe(false);
+    expect(verdict.reason).toContain("403 rate limited");
   });
 
   test("failing and pending checks are both blockers", async () => {
@@ -310,16 +415,10 @@ describe("(4) prMergeBlockers — consult every surface that can block a merge",
     expect(blockers.filter((b) => b.kind === "pending").map((b) => b.name)).toEqual(["pages"]);
   });
 
-  test("a human CHANGES_REQUESTED review is a blocker", async () => {
-    const verdict = await prMergeBlockers({
-      prNumber: 1,
-      runJson: fakeGh({
-        pr: { reviews: [{ state: "CHANGES_REQUESTED", author: { login: "ryan" } }] },
-        threads: [],
-      }),
-    });
-    expect(mustBeConclusive(verdict).some((b) => b.kind === "changes-requested")).toBe(true);
-  });
+  // NOTE: the raw-`reviews`-history version of this test was removed deliberately.
+  // Reading history kept a superseded CHANGES_REQUESTED as a blocker forever;
+  // the aggregate `reviewDecision` is now the source, covered by the
+  // superseded/effective pair below.
 
   // POSITIVE CONTROL: this is the test that fails if the partial-read guard is
   // removed — without it, a broken thread query yields "no blockers found".
