@@ -321,7 +321,7 @@ describe("catalyst-monitor.sh orphan port reap (CAT-53)", () => {
   });
 
   // A free ephemeral port, picked fresh per test (bind :0, read back, close).
-  async function freePort(): Promise<number> {
+  function freePort(): number {
     const srv = Bun.listen({
       hostname: "127.0.0.1",
       port: 0,
@@ -349,7 +349,7 @@ describe("catalyst-monitor.sh orphan port reap (CAT-53)", () => {
 
   // A normal (non-orphan) listener — parent is this test process, so its
   // PPID is real and live. Used to prove the reap logic fails CLOSED.
-  function spawnNormalListener(port: number): { proc: any; pid: number } {
+  function spawnNormalListener(port: number): { proc: ReturnType<typeof Bun.spawn>; pid: number } {
     const proc = Bun.spawn([
       "bun",
       "-e",
@@ -372,7 +372,7 @@ describe("catalyst-monitor.sh orphan port reap (CAT-53)", () => {
     return r.stdout.toString().trim();
   }
 
-  async function waitForPortBound(port: number, timeoutMs = 3000): Promise<void> {
+  function waitForPortBound(port: number, timeoutMs = 3000): void {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const r = Bun.spawnSync(["bash", "-c", `lsof -ti :${port} -sTCP:LISTEN`]);
@@ -382,20 +382,20 @@ describe("catalyst-monitor.sh orphan port reap (CAT-53)", () => {
     throw new Error(`port ${port} never became bound`);
   }
 
-  it("real orphan fixture: reparents to PPID 1", async () => {
-    const port = await freePort();
+  it("real orphan fixture: reparents to PPID 1", () => {
+    const port = freePort();
     const pid = spawnRealOrphanListener(port);
     spawnedPids.push(pid);
-    await waitForPortBound(port);
+    waitForPortBound(port);
     expect(ppidOf(pid)).toBe("1");
     expect(pidAlive(pid)).toBe(true);
   });
 
-  it("start reaps a PPID-1 orphan squatting the port, then binds clean", async () => {
-    const port = await freePort();
+  it("start reaps a PPID-1 orphan squatting the port, then binds clean", () => {
+    const port = freePort();
     const orphanPid = spawnRealOrphanListener(port);
     spawnedPids.push(orphanPid);
-    await waitForPortBound(port);
+    waitForPortBound(port);
     expect(ppidOf(orphanPid)).toBe("1");
 
     const { exitCode } = Bun.spawnSync(["bash", SCRIPT, "start"], {
@@ -425,11 +425,11 @@ describe("catalyst-monitor.sh orphan port reap (CAT-53)", () => {
     spawnedPids.push(newPid);
   });
 
-  it("start does NOT reap a port holder with a live (non-1) PPID", async () => {
-    const port = await freePort();
+  it("start does NOT reap a port holder with a live (non-1) PPID", () => {
+    const port = freePort();
     const { proc, pid: holderPid } = spawnNormalListener(port);
     spawnedPids.push(holderPid);
-    await waitForPortBound(port);
+    waitForPortBound(port);
     expect(ppidOf(holderPid)).not.toBe("1");
     expect(pidAlive(holderPid)).toBe(true);
 
