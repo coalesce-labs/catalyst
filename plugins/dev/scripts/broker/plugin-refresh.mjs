@@ -14,8 +14,8 @@
 //   1. resolves the pluginDirs checkout root(s)  (parity with lib/plugin-dirs.sh)
 //   2. throttles to at most one fetch+reset per N seconds per root
 //   3. runs `git fetch --no-tags origin main && git reset --hard origin/main`
-//      in each root (self-healing: the clone is disposable per CTL-992, so
-//      reset --hard is always safe regardless of working-tree dirt — CTL-1106)
+//      in each clean root. CAT-167 refuses to reset over tracked working-tree
+//      changes; CTL-1106's unconditional behavior remains available via mode=off.
 //   4. emits plugin.checkout.updated (new HEAD sha + daemon-skew restart_needed)
 //      on success, or plugin.checkout.refresh_failed (WARN) on a genuine
 //      network/auth failure — never failing silently.
@@ -76,16 +76,63 @@ const _driftSinceByRoot = new Map(); // root → epoch ms first seen behind (det
 export const PLUGIN_DRIFT_GRACE_MS =
   Number(process.env.CATALYST_PLUGIN_DRIFT_GRACE_MS) || 180_000;
 
+const VALID_DIRTY_GUARD_MODES = new Set(["off", "shadow", "enforce"]);
+
+export function resolveDirtyGuardMode(env = process.env) {
+  const raw = env.CATALYST_PLUGIN_DIRTY_GUARD;
+  return VALID_DIRTY_GUARD_MODES.has(raw) ? raw : "enforce";
+}
+
+const _dirtySkipSinceByRoot = new Map();
+const _dirtyStaleEmittedByRoot = new Set();
+export const PLUGIN_DIRTY_SKIP_GRACE_MS =
+  Number(process.env.CATALYST_PLUGIN_DIRTY_SKIP_GRACE_MS) || 1_800_000;
+const DIRTY_ENTRY_SAMPLE = 10;
+
+export function checkoutWorkingTreeDirty({ root, gitFn = defaultGitFn }) {
+  let out;
+  try {
+    out = gitFn(root, ["status", "--porcelain", "--untracked-files=no"]);
+  } catch (err) {
+    return {
+      dirty: true,
+      reason: "status_failed",
+      entries: [],
+      entryCount: 0,
+      error: err?.message ?? String(err),
+    };
+  }
+  const lines = String(out ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    return { dirty: false, reason: null, entries: [], entryCount: 0 };
+  }
+  const paths = lines.map((line) => {
+    const path = line.slice(2).trim();
+    const arrow = path.indexOf(" -> ");
+    return arrow === -1 ? path : path.slice(arrow + 4);
+  });
+  return {
+    dirty: true,
+    reason: "tracked_changes",
+    entries: paths.slice(0, DIRTY_ENTRY_SAMPLE),
+    entryCount: paths.length,
+  };
+}
+
 export function __clearLagStateForTest() {
   _failuresByRoot.clear();
   _lagEmittedByRoot.clear();
   _driftSinceByRoot.clear();
+  _dirtySkipSinceByRoot.clear();
+  _dirtyStaleEmittedByRoot.clear();
 }
 
 function _clearLagState(root) {
   _failuresByRoot.delete(root);
   _lagEmittedByRoot.delete(root);
   _driftSinceByRoot.delete(root);
+  _dirtySkipSinceByRoot.delete(root);
+  _dirtyStaleEmittedByRoot.delete(root);
 }
 
 // --- default seams (production wiring) ---------------------------------------
@@ -505,13 +552,13 @@ export function resolvePluginPullOwner({
  * refreshPluginCheckout — throttle-gated fetch+reset of a single checkout root.
  *
  * Runs `git fetch --no-tags origin main` then `git reset --hard origin/main`
- * (self-healing: clone is disposable per CTL-992; reset --hard is always safe
- * regardless of working-tree dirt — CTL-1106). On success, emits
+ * (self-healing: clone is disposable per CTL-992) after CAT-167's tracked-dirt
+ * guard permits the destructive operation. On success, emits
  * plugin.checkout.updated with old/new sha and a restart_needed flag (daemon
  * skew is VISIBLE, not auto-restarted). On a genuine fetch/reset failure
  * (network/auth), emits plugin.checkout.refresh_failed at WARN.
  *
- * Returns a result descriptor: { pulled, throttled, changed, failed }.
+ * Returns a result descriptor: { pulled, throttled, changed, failed, skipped }.
  */
 export function refreshPluginCheckout({
   root,
@@ -533,16 +580,17 @@ export function refreshPluginCheckout({
   // ALWAYS returns changed:false so decideStackReload (stack-reload.mjs) stays a no-op
   // (a behind checkout the broker never pulled must not trigger a stack restart loop).
   pull = true,
+  env = process.env,
   // CTL-1415: seams for the pre-pull stale-index.lock age-gate. Undefined statFn
   // falls through to staleLockStatus's real statSync default in production.
   statFn = undefined,
   rmFn = defaultRmFn,
 }) {
-  if (!root) return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
+  if (!root) return { pulled: false, throttled: false, changed: false, failed: false, skipped: null, root, oldSha: null, newSha: null, restartNeeded: false };
 
   const last = _lastPullByRoot.get(root);
   if (last !== undefined && now - last < PLUGIN_REFRESH_THROTTLE_MS) {
-    return { pulled: false, throttled: true, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
+    return { pulled: false, throttled: true, changed: false, failed: false, skipped: null, root, oldSha: null, newSha: null, restartNeeded: false };
   }
 
   // CTL-1348 detect-only: placed BEFORE the throttle reservation so it neither
@@ -558,7 +606,7 @@ export function refreshPluginCheckout({
     } catch (err) {
       // Observability-only: a detect-only fetch failure does NOT advance the lag
       // state machine (the broker no longer owns pulling this checkout; the updater does).
-      return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha: headSha, newSha: null, restartNeeded: false };
+      return { pulled: false, throttled: false, changed: false, failed: true, skipped: null, root, oldSha: headSha, newSha: null, restartNeeded: false };
     }
     if (headSha && originSha && headSha !== originSha) {
       // The checkout is behind and the broker is NOT pulling it. Only WARN once it has been
@@ -576,11 +624,49 @@ export function refreshPluginCheckout({
           detail: { checkout: root, head_sha: headSha, origin_sha: originSha, behind: true, behind_since: since },
         });
       }
-      return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: headSha, newSha: originSha, restartNeeded: false };
+      return { pulled: false, throttled: false, changed: false, failed: false, skipped: null, root, oldSha: headSha, newSha: originSha, restartNeeded: false };
     }
     // Up to date — clear any prior real-pull stall episode AND the drift-grace tracker.
     _clearLagState(root);
-    return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: headSha, newSha: originSha, restartNeeded: false };
+    return { pulled: false, throttled: false, changed: false, failed: false, skipped: null, root, oldSha: headSha, newSha: originSha, restartNeeded: false };
+  }
+
+  const dirtyMode = resolveDirtyGuardMode(env);
+  if (dirtyMode !== "off") {
+    const dirt = checkoutWorkingTreeDirty({ root, gitFn });
+    if (dirt.dirty) {
+      const since = _dirtySkipSinceByRoot.get(root) ?? now;
+      if (!_dirtySkipSinceByRoot.has(root)) _dirtySkipSinceByRoot.set(root, now);
+      const detail = {
+        checkout: root,
+        reason: dirt.reason,
+        entries: dirt.entries,
+        entry_count: dirt.entryCount,
+        error: dirt.error ?? null,
+      };
+      if (dirtyMode === "shadow") {
+        emitFn({ event: "plugin.checkout.would_skip_dirty", orchestrator: null, worker: null, severity: "WARN", detail });
+      } else {
+        emitFn({
+          event: "plugin.checkout.dirty_skipped",
+          orchestrator: null,
+          worker: null,
+          severity: "WARN",
+          detail: { ...detail, blocked_since: since },
+        });
+        if (now - since >= PLUGIN_DIRTY_SKIP_GRACE_MS && !_dirtyStaleEmittedByRoot.has(root)) {
+          _dirtyStaleEmittedByRoot.add(root);
+          emitFn({
+            event: "plugin.checkout.dirty_stale",
+            orchestrator: null,
+            worker: null,
+            severity: "ERROR",
+            detail: { ...detail, blocked_since: since, blocked_ms: now - since, grace_ms: PLUGIN_DIRTY_SKIP_GRACE_MS },
+          });
+        }
+        return { pulled: false, throttled: false, changed: false, failed: false, skipped: "dirty", root, oldSha: null, newSha: null, restartNeeded: false };
+      }
+    }
   }
 
   // Reserve the slot BEFORE the (possibly slow) pull so a duplicate event that
@@ -634,7 +720,7 @@ export function refreshPluginCheckout({
         },
       });
     }
-    return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha, newSha: null, restartNeeded: false };
+    return { pulled: false, throttled: false, changed: false, failed: true, skipped: null, root, oldSha, newSha: null, restartNeeded: false };
   }
 
   let newSha = null;
@@ -647,7 +733,7 @@ export function refreshPluginCheckout({
   // HEAD did not advance — nothing changed, stay quiet (no event noise).
   if (oldSha && newSha && oldSha === newSha) {
     _clearLagState(root);
-    return { pulled: true, throttled: false, changed: false, failed: false, root, oldSha, newSha, restartNeeded: false };
+    return { pulled: true, throttled: false, changed: false, failed: false, skipped: null, root, oldSha, newSha, restartNeeded: false };
   }
 
   // Daemon skew: the checkout advanced, but the long-lived daemon still runs the
@@ -727,7 +813,7 @@ export function refreshPluginCheckout({
       stale_node_modules_pruned: staleNodeModulesPruned,
     },
   });
-  return { pulled: true, throttled: false, changed: true, failed: false, root, oldSha, newSha, restartNeeded };
+  return { pulled: true, throttled: false, changed: true, failed: false, skipped: null, root, oldSha, newSha, restartNeeded };
 }
 
 /**
@@ -765,7 +851,7 @@ export function handlePluginRefreshEvent({
     });
     const results = [];
     for (const root of roots) {
-      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot, pull }));
+      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot, pull, env }));
     }
     return results;
   } catch {
@@ -807,7 +893,7 @@ export function refreshAllPluginCheckouts({
     });
     const results = [];
     for (const root of roots) {
-      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot, pull }));
+      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot, pull, env }));
     }
     return results;
   } catch {

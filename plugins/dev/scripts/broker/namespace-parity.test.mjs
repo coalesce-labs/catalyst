@@ -202,3 +202,22 @@ describe("CTL-1639 worktree.salvage.* namespace (unprotected)", () => {
     }
   });
 });
+
+describe("CAT-167 plugin.checkout.dirty_* namespace (unprotected)", () => {
+  const names = [
+    "plugin.checkout.dirty_skipped",
+    "plugin.checkout.dirty_stale",
+    "plugin.checkout.would_skip_dirty",
+  ];
+
+  test("no dirty-guard event name is broker-protected", () => {
+    for (const name of names) expect(isBrokerProtectedName(name)).toBe(false);
+  });
+
+  test("no dirty-guard event name is a phase slot", () => {
+    for (const name of names) {
+      expect(phaseSlotOf(name)).toBeNull();
+      expect(PHASE_EVENT_PATTERN.test(name)).toBe(false);
+    }
+  });
+});

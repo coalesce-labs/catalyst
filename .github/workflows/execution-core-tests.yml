@@ -476,7 +476,7 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/deployment-mode-parity.test.sh
 
-      - name: Broker worker-state projection test (CTL-1529)
+      - name: Broker package tests (CTL-1529, CAT-167)
         # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the
         # bounded event-log scan in broker/projection.mjs (replayWorkerStateProjection),
         # and `grep worker-state-projection .github/workflows/` used to return NOTHING —
@@ -487,8 +487,10 @@ jobs:
         # CTL-1628: the root workspace install above already covers broker's deps
         # (bun resolves the workspace root's node_modules from this cwd), so no
         # per-package install here anymore.
+        # CAT-167: plugin-refresh.test.mjs guards the only git reset --hard in
+        # the codebase and the dirty-tree guard protecting uncommitted work.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs
+        run: bun test worker-state-projection.test.mjs plugin-refresh.test.mjs
 
       - name: otel-forward tests (CTL-1529 round 3)
         # otel-forward had NO CI coverage at all before this

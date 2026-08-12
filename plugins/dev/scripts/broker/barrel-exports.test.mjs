@@ -109,6 +109,10 @@ const REQUIRED_EXPORTS = [
   // CTL-1106: checkout-lag alarm (plugin-refresh.mjs)
   "CHECKOUT_LAG_FAILURE_THRESHOLD",
   "__clearLagStateForTest",
+  // CAT-167: dirty-working-tree guard (plugin-refresh.mjs)
+  "resolveDirtyGuardMode",
+  "checkoutWorkingTreeDirty",
+  "PLUGIN_DIRTY_SKIP_GRACE_MS",
   // CTL-1161: daemon-local merge trigger + drift-check backstop
   "isDaemonLocalMergeSignal",
   "refreshAllPluginCheckouts",
@@ -150,7 +154,7 @@ describe("CTL-529 barrel contract", () => {
     for (const name of REQUIRED_EXPORTS) {
       expect(typeof barrel[name], `missing export: ${name}`).not.toBe("undefined");
     }
-    expect(REQUIRED_EXPORTS.length).toBe(101);
+    expect(REQUIRED_EXPORTS.length).toBe(104);
   });
 
   test("singleton getters return identity-stable live references", () => {

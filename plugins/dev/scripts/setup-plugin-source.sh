@@ -483,3 +483,6 @@ if [[ $FULL_CUTOVER -eq 1 ]]; then
 	retire_catalyst_marketplace "$CHECKOUT_PATH" \
 		|| echo "WARN: catalyst marketplace not fully retired (non-fatal) — doctor will flag residue." >&2
 fi
+
+echo "This checkout is deploy-only — the broker keeps it pinned to origin/main."
+echo "Do hands-on development in a worktree, not here (see reboot-and-updates.md)."

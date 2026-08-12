@@ -81,10 +81,22 @@ The script **refuses** to register a linked git worktree or a checkout on any
 branch other than `main` — the plugin source must be pristine so the unattended
 ff-only auto-pull always succeeds.
 
-Keep it fresh with `catalyst-stack hotpatch` (below) — and the broker
-auto-refreshes it on every merge to `main` (ff-only pull). `catalyst-stack parity`
-flags it as drift if the checkout ever ends up off `main` or becomes a linked
-worktree.
+Keep it fresh with `catalyst-stack hotpatch` (below) — and the broker auto-refreshes it on every
+merge to `main`, plus a 5-minute drift-check backstop. That refresh is a
+`git fetch` + `git reset --hard origin/main` (**not** an ff-only pull — that is what `hotpatch`
+does). `catalyst-stack parity` flags it as drift if the checkout ever ends up off `main` or becomes
+a linked worktree.
+
+:::caution[This checkout is deploy-only — do your editing in a worktree]
+`~/catalyst/plugin-source` is a deployment target the broker keeps pinned to `origin/main`. Do
+hands-on development in a git worktree (`/catalyst-dev:create-worktree`), not here.
+
+Since CAT-167 the broker **refuses** to reset a checkout with uncommitted **tracked** changes: it
+emits `plugin.checkout.dirty_skipped` (WARN) each tick and escalates to `plugin.checkout.dirty_stale`
+(ERROR) after 30 minutes. Commit or stash to unblock it; the next eligible tick pulls. Untracked
+files never block a refresh (`reset --hard` does not delete them). Set
+`CATALYST_PLUGIN_DIRTY_GUARD=off` to restore the old unconditional-reset behavior.
+:::
 
 ## After merging or pulling new code
 

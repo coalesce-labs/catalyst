@@ -36,7 +36,54 @@ import {
   __clearThrottleForTest,
   CHECKOUT_LAG_FAILURE_THRESHOLD,
   __clearLagStateForTest,
+  resolveDirtyGuardMode,
+  checkoutWorkingTreeDirty,
+  PLUGIN_DIRTY_SKIP_GRACE_MS,
 } from "./plugin-refresh.mjs";
+
+describe("CAT-167 resolveDirtyGuardMode", () => {
+  test("defaults to enforce when unset", () => expect(resolveDirtyGuardMode({})).toBe("enforce"));
+  test("accepts the three valid modes", () => {
+    for (const mode of ["off", "shadow", "enforce"]) {
+      expect(resolveDirtyGuardMode({ CATALYST_PLUGIN_DIRTY_GUARD: mode })).toBe(mode);
+    }
+  });
+  test("an unrecognized value fails safe to enforce", () => {
+    expect(resolveDirtyGuardMode({ CATALYST_PLUGIN_DIRTY_GUARD: "yes" })).toBe("enforce");
+    expect(resolveDirtyGuardMode({ CATALYST_PLUGIN_DIRTY_GUARD: "" })).toBe("enforce");
+  });
+});
+
+describe("CAT-167 checkoutWorkingTreeDirty", () => {
+  test("clean tree is not dirty and excludes untracked files", () => {
+    const calls = [];
+    const res = checkoutWorkingTreeDirty({ root: "/co", gitFn: (root, args) => { calls.push({ root, args }); return ""; } });
+    expect(res).toEqual({ dirty: false, reason: null, entries: [], entryCount: 0 });
+    expect(calls[0].args).toEqual(["status", "--porcelain", "--untracked-files=no"]);
+  });
+  test("tracked modifications are dirty with paths", () => {
+    const res = checkoutWorkingTreeDirty({ root: "/co", gitFn: () => " M monitor.mjs\nM  a.mjs" });
+    expect(res.dirty).toBe(true);
+    expect(res.reason).toBe("tracked_changes");
+    expect(res.entryCount).toBe(2);
+    expect(res.entries).toContain("monitor.mjs");
+  });
+  test("an untracked-only tree is not dirty", () => {
+    expect(checkoutWorkingTreeDirty({ root: "/co", gitFn: () => "" }).dirty).toBe(false);
+  });
+  test("an unreadable status fails closed", () => {
+    const res = checkoutWorkingTreeDirty({ root: "/co", gitFn: () => { throw new Error("not a git repository"); } });
+    expect(res.dirty).toBe(true);
+    expect(res.reason).toBe("status_failed");
+    expect(res.error).toMatch(/not a git repository/);
+  });
+  test("caps the event entry sample", () => {
+    const many = Array.from({ length: 50 }, (_, i) => ` M f${i}.mjs`).join("\n");
+    const res = checkoutWorkingTreeDirty({ root: "/co", gitFn: () => many });
+    expect(res.entryCount).toBe(50);
+    expect(res.entries.length).toBeLessThanOrEqual(10);
+  });
+});
 
 // ─── resolvePluginCheckoutRoots ──────────────────────────────────────────────
 //
@@ -345,11 +392,15 @@ describe("isThisRepoMergeEvent", () => {
 // ─── refreshPluginCheckout ───────────────────────────────────────────────────
 
 // makeGitFn — module-level so it can be shared across describe blocks.
-function makeGitFn({ before = "aaaa", after = "bbbb", fetchThrows = false } = {}) {
+function makeGitFn({ before = "aaaa", after = "bbbb", fetchThrows = false, dirtyStatus = "", statusThrows = false } = {}) {
     const calls = [];
     const gitFn = (root, args) => {
       calls.push({ root, args });
       const sub = args[0];
+      if (sub === "status") {
+        if (statusThrows) throw new Error("status failed");
+        return dirtyStatus;
+      }
       if (sub === "rev-parse") {
         // first rev-parse → before, subsequent → after (reset advanced HEAD)
         const seen = calls.filter((c) => c.args[0] === "rev-parse").length;
@@ -370,6 +421,78 @@ function makeGitFn({ before = "aaaa", after = "bbbb", fetchThrows = false } = {}
     gitFn.calls = calls;
     return gitFn;
 }
+
+describe("CAT-167 dirty-tree guard in refreshPluginCheckout", () => {
+  beforeEach(() => { __clearThrottleForTest(); __clearLagStateForTest(); });
+
+  test("enforce skips dirty checkout before fetch/reset", () => {
+    const emitted = [];
+    const gitFn = makeGitFn({ dirtyStatus: " M monitor.mjs" });
+    const res = refreshPluginCheckout({ root: "/co", now: 1_000, gitFn, emitFn: (e) => emitted.push(e), env: { CATALYST_PLUGIN_DIRTY_GUARD: "enforce" } });
+    expect(gitFn.calls.some((c) => c.args[0] === "fetch" || c.args[0] === "reset")).toBe(false);
+    expect(res).toMatchObject({ pulled: false, changed: false, failed: false, skipped: "dirty" });
+    expect(emitted[0]).toMatchObject({ event: "plugin.checkout.dirty_skipped", severity: "WARN" });
+    expect(emitted[0].detail.entries).toContain("monitor.mjs");
+  });
+
+  test("clean checkout preserves fetch/reset behavior", () => {
+    const emitted = [];
+    const gitFn = makeGitFn({ before: "old", after: "new" });
+    const res = refreshPluginCheckout({ root: "/co", now: 1_000, gitFn, emitFn: (e) => emitted.push(e), env: { CATALYST_PLUGIN_DIRTY_GUARD: "enforce" } });
+    expect(gitFn.calls.some((c) => c.args[0] === "reset")).toBe(true);
+    expect(res).toMatchObject({ pulled: true, changed: true, skipped: null });
+    expect(emitted.map((e) => e.event)).toEqual(["plugin.checkout.updated"]);
+  });
+
+  test("dirty skip does not consume throttle or lag state", () => {
+    const emitted = [];
+    const dirty = makeGitFn({ dirtyStatus: " M a.mjs" });
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD + 2; i++) {
+      refreshPluginCheckout({ root: "/co", now: i * 300_000, gitFn: dirty, emitFn: (e) => emitted.push(e), env: { CATALYST_PLUGIN_DIRTY_GUARD: "enforce" } });
+    }
+    const clean = makeGitFn({ before: "a", after: "b" });
+    const res = refreshPluginCheckout({ root: "/co", now: 900_001, gitFn: clean, emitFn: (e) => emitted.push(e), env: { CATALYST_PLUGIN_DIRTY_GUARD: "enforce" } });
+    expect(res.throttled).toBe(false);
+    expect(res.pulled).toBe(true);
+    expect(emitted.some((e) => e.event === "plugin.checkout.lag")).toBe(false);
+  });
+
+  test("escalates exactly once per dirty episode and resets after recovery", () => {
+    const emitted = [];
+    const call = (gitFn, now) => refreshPluginCheckout({ root: "/co", now, gitFn, emitFn: (e) => emitted.push(e), env: { CATALYST_PLUGIN_DIRTY_GUARD: "enforce" } });
+    const dirty = makeGitFn({ dirtyStatus: " M a.mjs" });
+    call(dirty, 0);
+    call(dirty, PLUGIN_DIRTY_SKIP_GRACE_MS);
+    call(dirty, PLUGIN_DIRTY_SKIP_GRACE_MS * 2);
+    expect(emitted.filter((e) => e.event === "plugin.checkout.dirty_stale")).toHaveLength(1);
+    expect(emitted.find((e) => e.event === "plugin.checkout.dirty_stale").detail.blocked_since).toBe(0);
+    call(makeGitFn({ before: "a", after: "b" }), PLUGIN_DIRTY_SKIP_GRACE_MS * 2 + 60_001);
+    call(dirty, PLUGIN_DIRTY_SKIP_GRACE_MS * 2 + 60_002);
+    call(dirty, PLUGIN_DIRTY_SKIP_GRACE_MS * 3 + 120_003);
+    call(dirty, PLUGIN_DIRTY_SKIP_GRACE_MS * 4 + 120_004);
+    expect(emitted.filter((e) => e.event === "plugin.checkout.dirty_stale")).toHaveLength(2);
+  });
+
+  test("shadow observes but resets; off omits status entirely", () => {
+    const shadowEvents = [];
+    const shadowGit = makeGitFn({ before: "a", after: "b", dirtyStatus: " M a.mjs" });
+    const shadow = refreshPluginCheckout({ root: "/shadow", now: 0, gitFn: shadowGit, emitFn: (e) => shadowEvents.push(e), env: { CATALYST_PLUGIN_DIRTY_GUARD: "shadow" } });
+    expect(shadow.changed).toBe(true);
+    expect(shadowEvents.map((e) => e.event)).toEqual(["plugin.checkout.would_skip_dirty", "plugin.checkout.updated"]);
+    const offGit = makeGitFn({ before: "a", after: "b", dirtyStatus: " M a.mjs" });
+    refreshPluginCheckout({ root: "/off", now: 0, gitFn: offGit, emitFn: () => {}, env: { CATALYST_PLUGIN_DIRTY_GUARD: "off" } });
+    expect(offGit.calls.some((c) => c.args[0] === "status")).toBe(false);
+  });
+
+  test("status failure is fail-closed and detect-only skips guard", () => {
+    const failed = makeGitFn({ statusThrows: true });
+    expect(refreshPluginCheckout({ root: "/failed", gitFn: failed, emitFn: () => {}, env: { CATALYST_PLUGIN_DIRTY_GUARD: "enforce" } }).skipped).toBe("dirty");
+    expect(failed.calls.some((c) => c.args[0] === "reset")).toBe(false);
+    const detect = makeGitFn({ before: "a", dirtyStatus: " M a.mjs" });
+    refreshPluginCheckout({ root: "/detect", gitFn: detect, emitFn: () => {}, pull: false, env: { CATALYST_PLUGIN_DIRTY_GUARD: "enforce" } });
+    expect(detect.calls.some((c) => c.args[0] === "status")).toBe(false);
+  });
+});
 
 describe("refreshPluginCheckout", () => {
   beforeEach(() => __clearThrottleForTest());
@@ -400,12 +523,9 @@ describe("refreshPluginCheckout", () => {
     expect(emitted[0].detail.new_sha).toBe("new222");
   });
 
-  test("dirty working tree no longer fails — reset --hard advances HEAD and emits updated", () => {
-    // CTL-1106 regression: git pull --ff-only threw on a dirty tree, causing a
-    // refresh_failed event and silent no-reload. fetch + reset --hard is immune
-    // to working-tree dirt; the fake simply returns success.
+  test("CTL-1106 invariant: dirty enforce is loud and not refresh_failed", () => {
     const emitted = [];
-    const gitFn = makeGitFn({ before: "dirty-old", after: "clean-new" });
+    const gitFn = makeGitFn({ dirtyStatus: " M dirty.mjs" });
     const res = refreshPluginCheckout({
       root: "/co",
       now: 0,
@@ -413,9 +533,19 @@ describe("refreshPluginCheckout", () => {
       emitFn: (e) => emitted.push(e),
     });
     expect(res.failed).toBe(false);
-    expect(res.changed).toBe(true);
+    expect(res.changed).toBe(false);
+    expect(res.skipped).toBe("dirty");
     expect(emitted).toHaveLength(1);
-    expect(emitted[0].event).toBe("plugin.checkout.updated");
+    expect(emitted[0].event).toBe("plugin.checkout.dirty_skipped");
+  });
+
+  test("CTL-1106 original behavior remains available with guard off", () => {
+    const emitted = [];
+    const gitFn = makeGitFn({ before: "dirty-old", after: "clean-new", dirtyStatus: " M x.mjs" });
+    const res = refreshPluginCheckout({ root: "/co", now: 0, gitFn, emitFn: (e) => emitted.push(e), env: { CATALYST_PLUGIN_DIRTY_GUARD: "off" } });
+    expect(res.failed).toBe(false);
+    expect(res.changed).toBe(true);
+    expect(emitted.map((e) => e.event)).toEqual(["plugin.checkout.updated"]);
   });
 
   test("throttles to at most one pull per N seconds for the same root", () => {
@@ -672,8 +802,9 @@ describe("refreshPluginCheckout — enriched result shape (CTL-1077)", () => {
 
   test("throttled pull returns root with null shas", () => {
     // prime the throttle
-    refreshPluginCheckout({ root: "/co", now: 0, gitFn: () => "sha", emitFn: () => {} });
-    const res = refreshPluginCheckout({ root: "/co", now: 1, gitFn: () => "sha", emitFn: () => {} });
+    const gitFn = (_root, args) => args[0] === "status" ? "" : "sha";
+    refreshPluginCheckout({ root: "/co", now: 0, gitFn, emitFn: () => {} });
+    const res = refreshPluginCheckout({ root: "/co", now: 1, gitFn, emitFn: () => {} });
     expect(res.throttled).toBe(true);
     expect(res.root).toBe("/co");
     expect(res.oldSha).toBeNull();
@@ -685,6 +816,7 @@ describe("refreshPluginCheckout — enriched result shape (CTL-1077)", () => {
       root: "/co",
       now: 1,
       gitFn: (root, args) => {
+        if (args[0] === "status") return "";
         if (args[0] === "rev-parse") return "oldsha";
         throw new Error("not fast-forwardable");
       },
@@ -700,7 +832,7 @@ describe("refreshPluginCheckout — enriched result shape (CTL-1077)", () => {
     const res = refreshPluginCheckout({
       root: "/co",
       now: 1,
-      gitFn: () => "sameSha",
+      gitFn: (_root, args) => args[0] === "status" ? "" : "sameSha",
       emitFn: () => {},
     });
     expect(res.changed).toBe(false);

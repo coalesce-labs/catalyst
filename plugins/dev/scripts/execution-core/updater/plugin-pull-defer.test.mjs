@@ -25,12 +25,13 @@ beforeEach(() => __clearLagStateForTest());
 
 // Scriptable gitFn: records every `<args>` call and answers rev-parse from a
 // sequence (HEAD) + a fixed origin/main; fetch/reset/diff return "".
-function makeGit({ headSeq = [], origin = "" } = {}) {
+function makeGit({ headSeq = [], origin = "", dirtyStatus = "" } = {}) {
   const calls = [];
   let i = 0;
   const git = (_root, args) => {
     const a = args.join(" ");
     calls.push(a);
+    if (a === "status --porcelain --untracked-files=no") return dirtyStatus;
     if (a === "rev-parse HEAD") return headSeq[i++] ?? headSeq[headSeq.length - 1] ?? "";
     if (a === "rev-parse origin/main") return origin;
     return ""; // fetch / reset --hard / diff
@@ -138,6 +139,20 @@ describe("refreshPluginCheckout pull option (CTL-1348 cutover)", () => {
     refreshAllPluginCheckouts({ ...opts, now: PLUGIN_DRIFT_GRACE_MS + 1 }); // past grace → drift
     expect(git.calls).not.toContain("reset --hard origin/main");
     expect(events.some((e) => e.event === "plugin.checkout.drift")).toBe(true);
+  });
+
+  test("CAT-167: dirty checkout is skipped through refreshAllPluginCheckouts", () => {
+    const git = makeGit({ dirtyStatus: " M a.mjs" });
+    const events = [];
+    refreshAllPluginCheckouts({
+      now: 0,
+      env: { CATALYST_PLUGIN_DIRS: "/wt/a/plugins/dev", CATALYST_PLUGIN_DIRTY_GUARD: "enforce" },
+      gitToplevelFn: () => "/wt/a",
+      gitFn: git,
+      emitFn: (e) => events.push(e),
+    });
+    expect(git.calls).not.toContain("reset --hard origin/main");
+    expect(events.some((e) => e.event === "plugin.checkout.dirty_skipped")).toBe(true);
   });
 });
 
