@@ -38,6 +38,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { log } from "./config.mjs";
+import { PRIOR_ARTIFACT_MISSING_EXIT_CODE } from "./prior-artifact-block.mjs";
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on J4 terminal GC
 import { clearStalledLabel } from "./label-guard.mjs"; // CTL-1552: reconcile needs-human label before J4 dir removal
 import { parseWorktreeForBranch } from "./worktree.mjs";
@@ -161,8 +162,6 @@ export function classifyGhostSession(ctx = {}) {
 // artifact (PERMANENT_FAILURE_CODES in scheduler.mjs). It is the ONLY benign cause
 // that J3 is safe to auto-clear; any other code means re-dispatch would repeat the
 // same failure class.
-const PRIOR_ARTIFACT_MISSING_EXIT_CODE = 2;
-
 export function classifyStallClear(ctx = {}) {
   // Only the transient prior-artifact-retry-exhausted stall is auto-clearable.
   // A dispatch-circuit-breaker / phantom-ticket / any other stall is operator-owned.
@@ -740,13 +739,13 @@ const PRIOR_PHASE = Object.freeze(
 // it means everywhere else: MIN_ARTIFACT_BYTES + the schema's closing markers for a
 // thoughts/ doc, a content-validated JSON for a worker-dir signal. Returns false on
 // any unknown phase / missing probe / throwing seam (the safe default — stay frozen).
-export function defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot } = {}) {
+export function defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot, worktreePath } = {}) {
   const prior = PRIOR_PHASE[phase];
   if (!prior) return false; // entry phase (no prior) or unknown — never auto-clear
   const probe = WORK_DONE_PROBES[prior];
   if (typeof probe !== "function") return false;
   try {
-    return probe({ ticket, orchDir, repoRoot }) === true;
+    return probe({ ticket, orchDir, repoRoot, worktreePath }) === true;
   } catch (err) {
     log.warn({ ticket, phase, prior, err: err?.message }, "stall-janitor: prior-artifact probe threw (CTL-1005)");
     return false;
@@ -849,7 +848,7 @@ export function defaultCollectStallClearCandidates({
 
       // Artifact completeness: a complete artifact is necessarily present, so
       // presence defaults to completeness unless a dedicated presence probe is given.
-      const probeCtx = { ticket, phase: stalledPhase, orchDir, repoRoot: repoRootFor(ticket) };
+      const probeCtx = { ticket, phase: stalledPhase, orchDir, repoRoot: repoRootFor(ticket), worktreePath };
       const complete =
         (artifactComplete ?? defaultPriorArtifactComplete)(probeCtx) === true;
       const present = artifactPresent ? artifactPresent(probeCtx) === true : complete;

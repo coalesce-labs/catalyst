@@ -37,6 +37,7 @@ import {
   writeBootFacts,
 } from "./daemon.mjs";
 import { getEventLogPath, log } from "./config.mjs";
+import { PRIOR_ARTIFACT_HOLD_SIGNATURE } from "./prior-artifact-block.mjs";
 import { BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { defaultDispatch, makeCommentWakeDispatch } from "./dispatch.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
@@ -1604,6 +1605,79 @@ describe("handleCommentWake (CTL-549)", () => {
     );
   };
 
+  test("CAT-55: holds an artifact stall while the document is absent and replies once", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CAT-55", "plan", {
+      status: "stalled",
+      stalledReason: "prior-artifact-retry-exhausted",
+      dispatchFailureCode: 2,
+      dispatchFailureArtifactDir: "thoughts/shared/research",
+      dispatchFailureSearchedPath: "/wt/CAT-55/thoughts/shared/research",
+    });
+    let cleared = 0;
+    let removed = 0;
+    let forgotten = 0;
+    const posts = [];
+    const opts = {
+      orchDir: orch,
+      dispatch: () => {},
+      removeLabel: async () => { removed++; },
+      botUserId: new Set(["bot"]),
+      isManagedTicket: () => true,
+      forgetIntent: () => { forgotten++; },
+      clearStall: () => cleared++,
+      artifactPresent: () => false,
+      postComment: (_ticket, body) => { posts.push(body); return true; },
+    };
+    await handleCommentWake({ ticket: "CAT-55", authorId: "human", body: "retry" }, opts);
+    await handleCommentWake({ ticket: "CAT-55", authorId: "human", body: "retry again" }, opts);
+    expect(cleared).toBe(0);
+    expect(removed).toBe(0);
+    expect(forgotten).toBe(0);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toContain("thoughts/shared/research");
+    expect(posts[0]).toContain("force prior artifact retry");
+  });
+
+  test("CAT-55: explicit force phrase overrides an absent artifact hold", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CAT-55", "plan", {
+      status: "stalled",
+      stalledReason: "prior-artifact-retry-exhausted",
+      dispatchFailureCode: 2,
+      dispatchFailureArtifactDir: "thoughts/shared/research",
+      dispatchFailureSearchedPath: "/wt/CAT-55/thoughts/shared/research",
+    });
+    let cleared = 0;
+    await handleCommentWake(
+      { ticket: "CAT-55", authorId: "human", body: "force prior artifact retry" },
+      {
+        orchDir: orch,
+        dispatch: () => {},
+        removeLabel: async () => {},
+        botUserId: new Set(["bot"]),
+        isManagedTicket: () => true,
+        clearStall: () => { cleared++; return true; },
+        artifactPresent: () => false,
+      },
+    );
+    expect(cleared).toBe(1);
+  });
+
+  test("CAT-55: clears when present or indeterminate, and ignores non-artifact stalls", async () => {
+    const orch = tmpOrcDir();
+    for (const [ticket, signal, probe] of [
+      ["CAT-551", { status: "stalled", stalledReason: "prior-artifact-retry-exhausted", dispatchFailureCode: 2 }, () => true],
+      ["CAT-552", { status: "stalled", stalledReason: "prior-artifact-retry-exhausted", dispatchFailureCode: 2 }, () => null],
+      ["CAT-553", { status: "stalled", stalledReason: "dispatch-circuit-breaker", dispatchFailureCode: 2 }, () => false],
+    ]) {
+      writeSignal(orch, ticket, "plan", signal);
+      let cleared = 0;
+      await handleCommentWake({ ticket, body: "retry" }, { orchDir: orch, dispatch: () => {}, removeLabel: async () => {}, clearStall: () => cleared++, artifactPresent: probe });
+      expect(cleared).toBe(1);
+    }
+  });
+
   test("re-dispatches ticket whose signal has status=needs-input", async () => {
     const orch = tmpOrcDir();
     writeSignal(orch, "CTL-1", "implement", {
@@ -2607,6 +2681,38 @@ describe("inbox writer — createCommentInboxWriter (CTL-749)", () => {
       ticket,
       commentId: "c2",
       body: "human reply",
+      authorId: "human-user",
+      authorName: "Alice",
+    });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(true);
+  });
+
+  // CAT-55 (Codex #3243 P2): the daemon's own artifact-hold explanation can return
+  // through the webhook under an actor that is NOT in the configured bot set. Without
+  // this filter it lands in the inbox and the re-dispatched phase reads Catalyst's own
+  // force-retry instruction as operator context.
+  test("CAT-55: skips the artifact-hold self-echo even from a non-bot author", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "bot-user-id");
+    writer({
+      ticket,
+      commentId: "c1",
+      body: `CTL-99/plan is still blocked.\n\n${PRIOR_ARTIFACT_HOLD_SIGNATURE}`,
+      authorId: "unregistered-worker-actor",
+      authorName: "Catalyst",
+    });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("CAT-55: an ordinary human reply mentioning the hold is still written", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "bot-user-id");
+    writer({
+      ticket,
+      commentId: "c1",
+      body: "I put the research doc back — force prior artifact retry",
       authorId: "human-user",
       authorName: "Alice",
     });

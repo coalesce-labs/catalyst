@@ -253,6 +253,9 @@ SIGNAL_EXISTS="no"
 assert_eq "2" "$RC" "exit code 2 when prior artifact missing"
 assert_eq "refused" "$REFUSED_STATUS" "stdout JSON status = refused"
 assert_eq "no" "$SIGNAL_EXISTS" "no signal file written when refused"
+RESEARCH_SEARCHED_PATH=$(echo "$STDOUT_JSON" | jq -r '.searchedPath // empty')
+assert_eq "${WORKER_DIR}/triage.json" "$RESEARCH_SEARCHED_PATH" \
+	"signal refusal names the absolute signal file searched (CAT-55)"
 
 # CTL-494 Phase 1: refusal must also emit phase.<name>.failed.<TICKET> to the
 # event log so the orchestrator wakes in seconds instead of waiting on the
@@ -322,6 +325,9 @@ mkdir -p "${TEST_DIR}/empty-proj"
 		>"${TEST_DIR}/plan.out" 2>/dev/null)
 RC_PLAN=$?
 assert_eq "2" "$RC_PLAN" "plan-phase refusal also exits 2"
+PLAN_SEARCHED_PATH=$(jq -r '.searchedPath // empty' "${TEST_DIR}/plan.out")
+assert_eq "${TEST_DIR}/empty-proj/thoughts/shared/research" "$PLAN_SEARCHED_PATH" \
+	"plan refusal names the absolute research directory searched (CAT-55)"
 PLAN_EVT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
 if [[ -z $PLAN_EVT_FILE ]]; then
 	fail "plan-phase refusal: event log not created"

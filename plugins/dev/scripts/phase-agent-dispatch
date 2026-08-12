@@ -560,6 +560,7 @@ if [[ -n $ARTIFACT_SPEC ]]; then
 	case "$ARTIFACT_SPEC" in
 	signal:*)
 		ARTIFACT_FILE="${ORCH_DIR}/workers/${TICKET}/${ARTIFACT_SPEC#signal:}"
+		GATE_SEARCHED_PATH="$ARTIFACT_FILE"
 		[[ -f $ARTIFACT_FILE ]] || ARTIFACT_OK=0
 		;;
 	glob:*)
@@ -568,6 +569,7 @@ if [[ -n $ARTIFACT_SPEC ]]; then
 		# fragile glob pattern; match_thoughts_artifact handles tail form, slug form, and
 		# cross-ticket lookalike rejection in one boundary-safe, case-insensitive pass.
 		GATE_DIR="${ARTIFACT_SPEC#glob:}"
+		GATE_SEARCHED_PATH="${PWD}/${GATE_DIR}"
 		match_thoughts_artifact "$GATE_DIR" "$TICKET" >/dev/null || ARTIFACT_OK=0
 		;;
 	esac
@@ -575,18 +577,21 @@ fi
 
 if [[ $ARTIFACT_OK -eq 0 ]]; then
 	REFUSAL_REASON="prior_artifact_missing"
-	echo "phase-agent-dispatch: refusing to launch ${PHASE} on ${TICKET}: prior artifact missing (${ARTIFACT_SPEC})" >&2
+	echo "phase-agent-dispatch: refusing to launch ${PHASE} on ${TICKET}: prior artifact missing (${ARTIFACT_SPEC}${GATE_SEARCHED_PATH:+ — searched ${GATE_SEARCHED_PATH}})" >&2
 	jq -nc \
 		--arg ticket "$TICKET" \
 		--arg phase "$PHASE" \
 		--arg model "$MODEL" \
 		--arg artifact "$ARTIFACT_SPEC" \
+		--arg searchedPath "${GATE_SEARCHED_PATH:-}" \
 		--arg reason "$REFUSAL_REASON" \
 		--argjson turnCap "$TURN_CAP" \
 		--argjson dryRun "$DRY_RUN" \
 		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, signalFile: null, status: "refused",
-      reason: $reason, artifact: $artifact, dryRun: ($dryRun == 1)}'
+      reason: $reason, artifact: $artifact,
+      searchedPath: (if $searchedPath == "" then null else $searchedPath end),
+      dryRun: ($dryRun == 1)}'
 
 	# CTL-494: emit phase.<name>.failed.<TICKET> so the broker wakes the
 	# orchestrator in seconds instead of waiting on the 16-minute
