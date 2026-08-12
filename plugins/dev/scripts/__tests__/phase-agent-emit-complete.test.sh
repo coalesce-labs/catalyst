@@ -791,6 +791,59 @@ else
 	assert_eq "boom" "$P_REASON" "malformed payload: base failure_reason preserved"
 fi
 
+# CTL-1789: `assertedBy` records WHO asserted the phase finished. The wrapper's
+# DEFAULT is "the agent ran me itself" (declared); infrastructure invoking the
+# wrapper on a dead worker's behalf passes --asserted-by so the advancement audit
+# classifies the terminal as fabricated instead.
+echo ""
+echo "Test 49 (CTL-1789): signal gains assertedBy=phase-agent-emit-complete by default"
+fresh_env t49
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"in-progress","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+PROJ_DIR="$(seed_thoughts_project "${TEST_DIR}/proj" research CTL-100)"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1)
+ASSERTED=$(jq -r '.assertedBy' "$SIGNAL")
+assert_eq "phase-agent-emit-complete" "$ASSERTED" "default assertedBy = the wrapper (declared)"
+# The default event payload must NOT gain the field — test 47 snapshots its keys.
+LINE=$(read_event_line)
+PAYLOAD_KEYS=$(echo "$LINE" | jq -cS '.body.payload | keys')
+assert_eq '["phase","status","ticket"]' "$PAYLOAD_KEYS" "assertedBy stays out of the event payload"
+
+echo ""
+echo "Test 50 (CTL-1789): --asserted-by overrides the marker (fabricated terminals)"
+fresh_env t50
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"in-progress","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+PROJ_DIR="$(seed_thoughts_project "${TEST_DIR}/proj" research CTL-100)"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete \
+	--asserted-by recovery-reclaim >/dev/null 2>&1)
+ASSERTED=$(jq -r '.assertedBy' "$SIGNAL")
+NEW_STATUS=$(jq -r '.status' "$SIGNAL")
+assert_eq "recovery-reclaim" "$ASSERTED" "--asserted-by is written verbatim"
+assert_eq "done" "$NEW_STATUS" "--asserted-by does not disturb the status flip"
+
+echo ""
+echo "Test 51 (CTL-1789): a non-success terminal is stamped too"
+fresh_env t51
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status failed --reason "tests red" \
+	>/dev/null 2>&1
+ASSERTED=$(jq -r '.assertedBy' "$SIGNAL")
+FAILREASON=$(jq -r '.failureReason' "$SIGNAL")
+assert_eq "phase-agent-emit-complete" "$ASSERTED" "failed terminal also carries assertedBy"
+assert_eq "tests red" "$FAILREASON" "failureReason still written alongside assertedBy"
+
+echo ""
+echo "Test 52 (CTL-1789): --no-signal-update callers write NO marker"
+fresh_env t52
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"stalled","ticket":"CTL-100","phase":"implement"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status failed --no-signal-update \
+	>/dev/null 2>&1
+HAS_ASSERTED=$(jq -r 'has("assertedBy")' "$SIGNAL")
+assert_eq "false" "$HAS_ASSERTED" "--no-signal-update leaves the signal untouched"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"
