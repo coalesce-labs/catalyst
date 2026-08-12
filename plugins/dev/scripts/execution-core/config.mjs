@@ -1975,6 +1975,33 @@ export function readRecoveryPassConfig(envObj = process.env) {
   return { mode };
 }
 
+// CTL-1774: delegate-first mode reader. Mirrors readRecoveryPassConfig exactly:
+// env (CATALYST_DELEGATE_FIRST) overrides Layer-2 config
+// (.catalyst.delegateFirst.mode), which overrides the safe default of 'off'.
+// Ships off; operators opt in to shadow (dry-run evidence) then enforce.
+const DELEGATE_FIRST_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2DelegateFirst() {
+  try {
+    const df = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.delegateFirst;
+    return df && typeof df === "object" ? df : {};
+  } catch { return {}; }
+}
+
+// env (CATALYST_DELEGATE_FIRST) overrides Layer-2 (.catalyst.delegateFirst.mode),
+// which overrides the safe default "off". "0" is the kill-switch. Mirrors
+// readRecoveryPassConfig exactly.
+export function readDelegateFirstConfig(envObj = process.env) {
+  const l2 = readLayer2DelegateFirst();
+  const env = envObj.CATALYST_DELEGATE_FIRST;
+  let mode;
+  if (env === "0") mode = "off";
+  else if (typeof env === "string" && DELEGATE_FIRST_MODES.has(env)) mode = env;
+  else if (typeof l2.mode === "string" && DELEGATE_FIRST_MODES.has(l2.mode)) mode = l2.mode;
+  else mode = "off";
+  return { mode };
+}
+
 // CTL-1245: dead-but-running doc-worker reclaim mode reader. Mirrors
 // readRecoveryPassConfig / readUnstuckSweepConfig exactly: env
 // (CATALYST_DEAD_DOC_WORKER_RECLAIM) overrides Layer-2 config

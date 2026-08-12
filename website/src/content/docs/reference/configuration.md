@@ -1176,6 +1176,39 @@ The productivity signal requires peers to publish `last_advance_at` in their hea
 During a mixed-version fleet rollout, a peer without that field is treated as unknown and is not
 flagged; the invariant begins observing that peer only after the upgraded publisher supplies it.
 
+### Delegate-first escalation routing (CTL-1609 / CTL-1774)
+
+When a ticket is about to be labelled `needs-human`, the delegate-first seam can route it to the
+delegate runner instead. `CATALYST_DELEGATE_FIRST=shadow` is the safe dry-run: it emits a
+`delegate.would-route` event on the unified event log (with the ticket, site, and reason) and still
+labels `needs-human` — so an operator can prove the seam works before committing to `enforce`. In
+`enforce`, the label is suppressed and the ticket is enqueued to the delegate runner (with a
+fail-safe fallback to labelling if the runner is not enabled).
+
+Mode resolves from the env var over Layer-2 over the safe default of `off`. The `0` kill-switch and
+any unset/garbage value resolve to `off`.
+
+| Key | Default | Notes |
+| --- | ------- | ----- |
+| `CATALYST_DELEGATE_FIRST` _(env var)_ | `off` | `off` / `0` (kill-switch — strict no-op, byte-identical to not setting the flag), `shadow` (emit `delegate.would-route` on the event log; still labels `needs-human`), `enforce` (enqueue to the delegate runner instead of labelling; fail-safe: falls back to labelling if the runner is not enabled). Garbage values fall back to `off`. Overrides Layer-2. |
+| `catalyst.delegateFirst.mode` _(Layer-2)_ | `off` | Same three values; honored when the env var is absent or unrecognised. |
+
+**Fail-safe gate.** `enforce` silences `needs-human` only when the delegate runner is confirmed
+enabled (via `CATALYST_BOARD_HEALTH`/`CATALYST_RECOVERY_PASS`). Lighting only `CATALYST_DELEGATE_FIRST=enforce`
+without a live runner would enqueue intents that drain never, with the label suppressed — a silent
+black hole. The gate catches this: if no runner is on, it emits `delegate.route-fallback` with
+`reason:"runner-disabled"` and falls back to labelling immediately.
+
+**Observable shadow events.** With shadow mode active, every `routeStuckTicketToDelegate` call
+emits one of three `delegate.*` events:
+
+- `delegate.would-route` — shadow hit (ticket + site + reason)
+- `delegate.routed` — enforce hit, successfully enqueued
+- `delegate.route-fallback` — enforce hit, fell back to label (reason attached)
+
+All three are safe for LogQL/Loki filters:
+`{job="catalyst-events"} | json | attributes["event.name"] =~ "delegate\\..*"`
+
 ### Monitor reply-route trusted origins (CTL-1573)
 
 `POST /api/ticket/<ticket>/reply` posts operator-authored text to Linear, and the monitor binds

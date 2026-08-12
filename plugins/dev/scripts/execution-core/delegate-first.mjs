@@ -9,15 +9,13 @@
 // Ordered fallback: (auto-fix [deferred]) → delegate → human.
 import { enqueueDelegateIntent } from "./delegate-queue.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
-import { readDelegateRunnerConfig } from "./config.mjs";
+import { readDelegateRunnerConfig, readDelegateFirstConfig } from "./config.mjs";
 
-const VALID_MODES = new Set(["off", "shadow", "enforce"]);
-
-// readDelegateFirstMode — read CATALYST_DELEGATE_FIRST; default "off".
-// Mirrors readBoardHealthConfig/CATALYST_RECOVERY_PASS parsing style.
+// readDelegateFirstMode — env → Layer-2 → "off". Delegates to the config-ladder
+// reader in config.mjs (CTL-1774 Gap B fix). The (env = process.env) injection
+// contract is preserved: all existing callers that pass an explicit env bag still work.
 export function readDelegateFirstMode(env = process.env) {
-  const raw = env.CATALYST_DELEGATE_FIRST ?? "off";
-  return VALID_MODES.has(raw) ? raw : "off";
+  return readDelegateFirstConfig(env).mode;
 }
 
 // ── routeStuckTicketToDelegate ────────────────────────────────────────────────
