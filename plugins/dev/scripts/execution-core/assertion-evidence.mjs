@@ -9,7 +9,11 @@
 //      → the agent DECLARED it finished.
 //   B. `flipSignalDoneOnSuccess` flipped an in-flight signal to `done` because
 //      the SDK/codex query exited cleanly — WITHOUT the agent ever declaring
-//      anything (sdk-run-phase-agent.mjs).
+//      anything (sdk-run-phase-agent.mjs). RETIRED as a producer by CTL-1790:
+//      that clean-exit-without-declaration case now writes a terminal FAILURE
+//      (`ended-without-declaration`), not a fabricated success. The id stays
+//      registered because signals written before CTL-1790 still carry it on disk
+//      and the classifier must keep answering `fabricated` for them.
 //   C. a recovery/revive path inferred completion from a work-done probe and
 //      invoked the same wrapper on the dead worker's behalf.
 //
@@ -42,8 +46,11 @@ export const ASSERTED_BY = Object.freeze({
   RECOVERY_RECLAIM: "recovery-reclaim",
   // C (legacy wave orchestration) — orchestrate-revive's synthetic complete.
   REVIVE_SYNTHESIZED: "revive-synthesized",
-  // B — sdk-run-phase-agent.mjs flipSignalDoneOnSuccess. Shared by the SDK and
-  // codex-exec launch verbs (codex imports the same function).
+  // B — sdk-run-phase-agent.mjs flipSignalDoneOnSuccess. HISTORICAL as of
+  // CTL-1790: no live writer stamps this any more (that function now writes a
+  // terminal failure, stamped SDK_BACKSTOP). Retained so the classifier still
+  // resolves `fabricated` — not `absent`/`unknown-writer` — for the pre-CTL-1790
+  // signals that carry it, and so the audit's historical series stays readable.
   SDK_SUCCESS_FLIP: "sdk-success-flip",
   // B (non-success) — sdk-run-phase-agent.mjs defaultWriteSignalTerminal, the
   // stalled/failed/turn-cap-exhausted backstop. Never advance-eligible, stamped

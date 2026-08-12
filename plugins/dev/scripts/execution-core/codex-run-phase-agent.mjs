@@ -23,7 +23,7 @@
 // EXPORTED sdk primitives: runPrelaunch (the Stage-A shared pre-launch: claim +
 // fenced "dispatched" signal + generation + rebase + prompt/env composition),
 // Semaphore + resolveMaxParallel (the process-wide concurrency cap),
-// scrubSecrets (token redaction), flipSignalDoneOnSuccess (the success-branch
+// scrubSecrets (token redaction), flipSignalDoneOnSuccess (the clean-exit
 // signal backstop), defaultWriteSignalStalled (the stalled-signal flip) and
 // defaultEmitBackstop (the terminal-event backstop). Only the launch verb —
 // spawn `codex exec --json`, parse its JSONL, classify its errors — is new.
@@ -1766,8 +1766,12 @@ export async function codexRunPhaseAgent(
         };
       }
 
-      // success (exitCode === 0) — in-process backstop flip (no-op when the skill's
-      // own phase-agent-emit-complete already flipped it, or the generation is stale).
+      // clean exit (exitCode === 0) — the shared clean-exit handler. A no-op when
+      // the skill's own phase-agent-emit-complete already wrote a terminal (the
+      // normal path) or the generation is stale. CTL-1790: when the signal is STILL
+      // in-flight the process exited without the agent ever declaring completion,
+      // so this writes a terminal FAILURE (ended-without-declaration) — releasing
+      // the slot without fabricating a success. Call site kept verbatim.
       flipSignalDoneOnSuccess(signalFile, spec.generation);
       const usage = normalizeUsage(res.usage);
       emitEvent("execution-core.codex.phase-turns", { ticket, phase, usage });

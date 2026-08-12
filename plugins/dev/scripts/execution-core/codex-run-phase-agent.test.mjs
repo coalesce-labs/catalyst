@@ -35,6 +35,14 @@ import {
 } from "./codex-run-phase-agent.mjs";
 import { Semaphore } from "./sdk-run-phase-agent.mjs";
 
+// Per-file scratch CATALYST_DIR (CTL-1790). test-setup.mjs's CTL-810 preload already
+// pins CATALYST_DIR hermetically for the whole package; asserted locally too, because
+// the shared clean-exit handler appends a REAL terminal event via
+// defaultAppendEventLog → getEventLogPath() (~/catalyst/events/YYYY-MM.jsonl on a
+// fleet host). Running this file without the package preload must still be unable to
+// write the live event log. getEventLogPath() re-resolves CATALYST_DIR per call.
+process.env.CATALYST_DIR = mkdtempSync(join(tmpdir(), "codex-test-catalyst-dir-"));
+
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 
 const tick = () => new Promise((r) => setImmediate(r));
@@ -1564,8 +1572,11 @@ describe("codexRunPhaseAgent — spawn contract (verbatim 0.144.1 success)", () 
     expect(events.find(([n]) => n === "execution-core.codex.phase-turns")[1].usage).toEqual(E1_USAGE);
     expect(reg.state.handles[0].deregistered).toBe(1);
     expect(reg.state.registered[0]).toMatchObject({ executor: "codex-exec", ticket: "CTL-100" });
-    // Success backstop flipped the still-dispatched signal to done.
-    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("done");
+    // CTL-1790: the codex launch verb shares sdk-run-phase-agent's clean-exit
+    // handler. `codex exec` exited 0 but the skill never declared (the signal is
+    // still "dispatched"), so the handler writes a terminal FAILURE — releasing
+    // the slot WITHOUT fabricating a success.
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("failed");
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -1697,8 +1708,10 @@ describe("codexRunPhaseAgent — failure classification", () => {
     expect(r.classification).toBe("success");
     expect(spawned).toBe(1); // NOT re-spawned/retried as a rate-park
     expect(stalled).toHaveLength(0); // never written a stalled signal
-    // flipSignalDoneOnSuccess flipped the still-dispatched signal to done.
-    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("done");
+    // CTL-1790: clean exit 0 with the signal still "dispatched" = the skill never
+    // declared → terminal FAILED (not a fabricated done). The rate-notice path is
+    // unaffected: this is still the success branch, not a rate-park.
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("failed");
     // success telemetry, not a rate-park event.
     expect(events.map(([n]) => n)).toContain("execution-core.codex.phase-turns");
     expect(events.map(([n]) => n)).not.toContain("execution-core.codex.rate-park");

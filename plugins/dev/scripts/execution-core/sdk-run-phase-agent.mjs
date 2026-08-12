@@ -438,7 +438,13 @@ const SIGNAL_TERMINAL_STATUSES = new Set([
 // terminal event (a turn-cap-exhausted backstop must leave "turn-cap-exhausted", not
 // "stalled"; the terminal sweep applies needs-human only to stalled/failed). The P3
 // terminal-clobber guard and the atomic tmp+rename are shared by every status.
-function defaultWriteSignalTerminal(signalFile, status, reason) {
+//
+// CTL-1790: `reasonField` selects WHICH reason key the reason string lands on, and
+// that choice is the retry-vs-escalate contract (revive Loop 2 branches on
+// `.failureReason` → escalate-no-retry; `.attentionReason` → retryable). It defaults
+// to "attentionReason", so every pre-CTL-1790 3-arg caller is byte-identical. Exactly
+// ONE reason key is written — the writer never sets both.
+function defaultWriteSignalTerminal(signalFile, status, reason, { reasonField = "attentionReason" } = {}) {
   try {
     let sig;
     try {
@@ -451,7 +457,8 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
     if (SIGNAL_TERMINAL_STATUSES.has(String(sig.status))) return;
     const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     sig.status = status;
-    sig.attentionReason = reason || "sdk-backstop";
+    sig[reasonField === "failureReason" ? "failureReason" : "attentionReason"] =
+      reason || "sdk-backstop";
     // CTL-1789: record WHO asserted this terminal. Infrastructure, not the agent.
     sig.assertedBy = ASSERTED_BY.SDK_BACKSTOP;
     sig.updatedAt = ts;
@@ -479,74 +486,154 @@ export function defaultWriteSignalStalled(signalFile, reason) {
   return defaultWriteSignalTerminal(signalFile, "stalled", reason);
 }
 
-// CTL-1410 Phase A: the SDK success-branch signal flip. When query() resolves
-// subtype==="success", mapResult returns backstop:null — historically the phase
-// SKILL was solely responsible for flipping its own signal to done (via the
-// phase-agent-emit-complete wrapper). That holds now that the two event-only
-// phases (triage, monitor-deploy) route their terminal emit through the wrapper,
-// but this is the in-process belt-and-suspenders net: on a clean success, if the
-// signal is STILL in-flight (dispatched|running) — the skill exited 0 without its
-// own flip — flip it to done here so occupancy (countSdkInflight) releases the
-// slot and deriveAdvancement sees a terminal status. Under executor=sdk there is
-// no bg reclaim path to synthesize the flip, so without this a success that
-// skipped its wrapper call would strand the slot.
+// ── CTL-1410 Phase A → CTL-1790: the clean-exit, never-declared handler ──────
 //
-// Distinct from defaultWriteSignalTerminal on purpose:
-//   - acts ONLY on an in-flight (dispatched|running) signal — it NEVER resurrects
-//     a parked (needs-input) hold into done, and never clobbers an already-terminal
-//     status (done/failed/skipped/turn-cap-exhausted);
-//   - honors the CTL-736 generation fence — a stale superseded worker must NOT
-//     write an outcome (see below);
-//   - writes status:"done" + completedAt (a SUCCESS terminal), no attentionReason
-//     (an attentionReason/failureReason would trip revive's escalate branch).
+// HISTORY (CTL-1410 Phase A). When query() resolves subtype==="success",
+// mapResult returns backstop:null — the phase SKILL is supposed to have flipped
+// its own signal to done via the phase-agent-emit-complete wrapper. This function
+// was the belt-and-suspenders net for the case where it DIDN'T: on a clean exit
+// with the signal still in-flight (dispatched|running), it wrote status:"done".
+//
+// WHY THAT WAS INVERTED (CTL-1790, the CTL-1778 fix). "The SDK process exited 0"
+// is not evidence that the phase's WORK happened — it is evidence only that the
+// process ended. CTL-1778: monitor-merge blocked on a permission prompt, the query
+// ended cleanly, this function fabricated `done`, the pipeline advanced, and PR
+// #3238 was never merged — with fatals:0, gate:0, and every health signal green.
+// A clean exit WITHOUT a declaration is the definition of an ABNORMAL outcome, so
+// this function now writes a terminal FAILURE (`ended-without-declaration`)
+// instead of a fabricated success.
+//
+// WHY NOT JUST DELETE IT (measured — the reason inversion, not deletion, is the
+// fix). mapResult returns backstop:null ONLY for subtype==="success", so this is
+// the SOLE handler of "SDK exited clean, skill never declared". With it deleted
+// the signal stays "running" forever:
+//   isTicketInFlight stays true → classifyWorker (recovery.mjs) returns "unknown"
+//   for any sdk signal (no bg_job_id) and never "dead" → the CTL-574 reclaim never
+//   fires → countSdkInflight (signal-reader.mjs) counts it with NO clock and NO
+//   age gate → at maxParallel:6, six such exits wedge the node permanently and
+//   silently, unrecoverable without a human `rm`.
+// Writing a TERMINAL status is what releases the slot; making that terminal a
+// FAILURE is what stops the lie. Both properties are required, hence: invert.
+//
+// Preserved verbatim from CTL-1410 Phase A:
+//   - the in-flight-only precondition — it NEVER touches a parked (needs-input)
+//     hold and never clobbers an already-terminal status (a skill that DID
+//     declare has already written done/complete, so this is a no-op for it);
+//   - the CTL-736 generation fence — a stale superseded worker must NOT write an
+//     outcome for the generation that replaced it;
+//   - both call sites (sdk-run-phase-agent.mjs + codex-run-phase-agent.mjs) and
+//     this function's own name/arity, so the two launch verbs stay on one writer.
 const SIGNAL_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
+
+// The one reason string for this outcome. Stable — the recovery-pass classifier,
+// Loki queries, and the operator inbox all key off it.
+export const ENDED_WITHOUT_DECLARATION_REASON = "ended-without-declaration";
+
+// ── CTL-1790: the per-phase retry-vs-escalate policy table ──────────────────
+//
+// A named table, NOT an inline conditional, because it encodes a judgement about
+// SIDE EFFECTS that has to be readable and testable in one place.
+//
+//   "retry"    → the reason lands on `.attentionReason`. revive Loop 2's escalate
+//                branch tests for `.failureReason`, so an attentionReason signal
+//                is RETRIED (re-dispatched) rather than parked on a human.
+//   "escalate" → the reason lands on `.failureReason` → revive escalates, NO retry.
+//
+// Rationale: re-running `gh pr merge` against an already-merged PR (or re-running
+// teardown against an already-torn-down worktree) is a NON-IDEMPOTENT side effect;
+// re-running research/plan/implement/verify/review is not. So the write-side
+// phases escalate to a human and the build-side phases retry.
+export const ENDED_WITHOUT_DECLARATION_POLICY = Object.freeze({
+  // Build phases — idempotent to re-run; a retry is cheaper than a human.
+  research: "retry",
+  plan: "retry",
+  implement: "retry",
+  verify: "retry",
+  review: "retry",
+  // Side-effecting phases — a blind re-run can double-apply an external mutation.
+  pr: "escalate",
+  "monitor-merge": "escalate",
+  teardown: "escalate",
+});
+
+// FAIL-CLOSED default. An unlisted / unknown / missing phase escalates rather
+// than retries: an over-eager retry of an unknown side-effecting phase is a
+// silent double-mutation, while an over-eager escalation is a visible human
+// ping. Visible-and-wrong beats silent-and-wrong.
+export const ENDED_WITHOUT_DECLARATION_DEFAULT_POLICY = "escalate";
+
+// endedWithoutDeclarationPolicy — pure + total. Any input → "retry" | "escalate".
+export function endedWithoutDeclarationPolicy(phase) {
+  const p = ENDED_WITHOUT_DECLARATION_POLICY[String(phase)];
+  return p === "retry" || p === "escalate" ? p : ENDED_WITHOUT_DECLARATION_DEFAULT_POLICY;
+}
+
+// endedWithoutDeclarationReasonField — the policy's one mechanical consequence:
+// WHICH signal key carries the reason. This is the whole retry/escalate contract.
+export function endedWithoutDeclarationReasonField(phase) {
+  return endedWithoutDeclarationPolicy(phase) === "retry" ? "attentionReason" : "failureReason";
+}
 
 // Plain-integer test shared by the generation fence — mirrors the bash
 // `[[ $x =~ ^[0-9]+$ ]]` in phase-agent-emit-complete and claim.mjs's
 // isCurrentGeneration semantics exactly.
 const isPlainInt = (v) => /^[0-9]+$/.test(String(v));
 
-export function flipSignalDoneOnSuccess(signalFile, generation) {
+// NAME RETAINED DELIBERATELY (CTL-1790): both launch verbs import this symbol and
+// the two call sites are kept verbatim, so the seam stays a single function. It no
+// longer flips to `done` — see the header above. `phase`/`ticket` are read from the
+// signal itself (phase-agent-dispatch writes both at dispatch time), which is why
+// the 2-arg call sites did not have to change.
+export function flipSignalDoneOnSuccess(
+  signalFile,
+  generation,
+  { writeSignalTerminal = defaultWriteSignalTerminal, appendEventLog = defaultAppendEventLog } = {},
+) {
   if (!signalFile) return;
   try {
     let sig;
     try {
       sig = JSON.parse(readFileSync(signalFile, "utf8"));
     } catch {
-      return; // no signal on disk (prelaunch never wrote one) — nothing to flip
+      return; // no signal on disk (prelaunch never wrote one) — nothing to write
     }
     if (!sig || typeof sig !== "object") return;
-    // In-flight-only precondition. A terminal signal is already correct; a
+    // In-flight-only precondition (VERBATIM, CTL-1410 Phase A). A terminal signal
+    // is already correct — in particular a skill that DID declare completion has
+    // already written done/complete, so this whole handler is a no-op for it. A
     // needs-input (parked) signal must stay parked.
     if (!SIGNAL_INFLIGHT_STATUSES.has(String(sig.status))) return;
-    // CTL-736 generation fence (adversarial-review catch, CTL-1410 Phase A): an
-    // in-process query cannot be killed (preemption's killBgJob(null) is a no-op,
-    // the per-attempt AbortController is not externally wired), so a preempt→
-    // re-dispatch or revive leaves a stale gen-N query floating while gen-N+1 owns
-    // the SAME signal path. That stale worker's skill correctly bows out at the
-    // wrapper's fence — this flip must not override that refusal by flipping the
-    // newer dispatch's in-flight signal to done (slot over-admission + premature
-    // advancement). Bow out ONLY when both generations are plain integers AND
-    // mine < signal's; anything missing/non-numeric fails open so legacy and
-    // unfenced dispatches are unaffected (isCurrentGeneration parity).
+    // CTL-736 generation fence (VERBATIM, adversarial-review catch, CTL-1410
+    // Phase A): an in-process query cannot be killed (preemption's killBgJob(null)
+    // is a no-op, the per-attempt AbortController is not externally wired), so a
+    // preempt→re-dispatch or revive leaves a stale gen-N query floating while
+    // gen-N+1 owns the SAME signal path. That stale worker's skill correctly bows
+    // out at the wrapper's fence — this handler must not override that refusal by
+    // writing an outcome onto the newer dispatch's in-flight signal. Bow out ONLY
+    // when both generations are plain integers AND mine < signal's; anything
+    // missing/non-numeric fails open so legacy and unfenced dispatches are
+    // unaffected (isCurrentGeneration parity).
     if (isPlainInt(generation) && isPlainInt(sig.generation) && Number(generation) < Number(sig.generation)) {
       return;
     }
-    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-    sig.status = "done";
-    // CTL-1789: this flip fires on a CLEAN SDK EXIT, not on an agent declaring
-    // completion — the agent never ran its wrapper (if it had, `status` would
-    // already be terminal and the in-flight precondition above would have
-    // returned). Stamp it FABRICATED so the advancement audit can subtract it.
-    sig.assertedBy = ASSERTED_BY.SDK_SUCCESS_FLIP;
-    sig.completedAt = ts;
-    sig.updatedAt = ts;
-    sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), done: ts };
-    const tmp = `${signalFile}.tmp.${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(sig));
-    renameSync(tmp, signalFile);
+    const phase = typeof sig.phase === "string" && sig.phase.length > 0 ? sig.phase : null;
+    const ticket = typeof sig.ticket === "string" && sig.ticket.length > 0 ? sig.ticket : null;
+    // The terminal write. `failed` (not `done`) is what stops the fabricated
+    // advancement; a TERMINAL status (any terminal) is what releases the slot —
+    // countSdkInflight only counts dispatched|running, so this drops occupancy by
+    // one exactly as the old `done` write did.
+    writeSignalTerminal(signalFile, "failed", ENDED_WITHOUT_DECLARATION_REASON, {
+      reasonField: endedWithoutDeclarationReasonField(phase),
+    });
+    // …and the matching canonical terminal event, so the failure is observable on
+    // the unified log instead of being visible only to a signal-file tick-scan.
+    // Skipped when the signal carries no phase/ticket — a `phase.undefined.failed
+    // .undefined` name is worse than no event (it pollutes the routing namespace).
+    if (phase && ticket) {
+      appendEventLog({ phase, ticket, status: "failed", reason: ENDED_WITHOUT_DECLARATION_REASON });
+    }
   } catch {
-    /* best-effort — the skill's own wrapper flip is the primary path */
+    /* best-effort — never throw out of the launch verb's success branch */
   }
 }
 
@@ -1207,10 +1294,14 @@ export async function sdkRunPhaseAgent(
       if (backstop) {
         emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir, signalFile }, { spawn });
       } else if (signalFile) {
-        // CTL-1410 Phase A: clean SDK success (no backstop) — in-process safety
-        // net that flips a still-in-flight signal to done. No-op when the phase
-        // SKILL already flipped it via the wrapper (the primary path), or when
-        // this run's generation is stale (superseded by a newer dispatch).
+        // CTL-1410 Phase A / CTL-1790: clean SDK exit (no backstop) — the shared
+        // clean-exit handler. No-op when the phase SKILL already wrote its own
+        // terminal via the wrapper (the primary path), or when this run's
+        // generation is stale (superseded by a newer dispatch). When the signal is
+        // STILL in-flight the query ended without the agent ever declaring
+        // completion, so this writes a terminal FAILURE
+        // (`ended-without-declaration`) rather than fabricating `done` — the
+        // CTL-1778 root cause. Call site kept verbatim.
         flipSignalDoneOnSuccess(signalFile, spec.generation);
       }
       return mapped;

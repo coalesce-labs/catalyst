@@ -20,9 +20,23 @@ import {
   defaultEmitBackstop,
   defaultAppendEventLog,
   flipSignalDoneOnSuccess,
+  ENDED_WITHOUT_DECLARATION_REASON,
+  ENDED_WITHOUT_DECLARATION_POLICY,
+  endedWithoutDeclarationPolicy,
+  endedWithoutDeclarationReasonField,
   runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
+import { countSdkInflight } from "./signal-reader.mjs"; // CTL-1790: slot-release proof
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
+
+// Per-file scratch CATALYST_DIR (CTL-1790). test-setup.mjs's CTL-810 preload already
+// pins CATALYST_DIR hermetically for the whole package; this is the same guarantee
+// asserted locally, because flipSignalDoneOnSuccess now appends a REAL terminal event
+// via defaultAppendEventLog → getEventLogPath(), which on a fleet host is
+// ~/catalyst/events/YYYY-MM.jsonl. Running this one file without the package preload
+// (a different cwd, so no bunfig) must still be unable to write the live event log.
+// getEventLogPath() re-resolves CATALYST_DIR per call, so this assignment suffices.
+process.env.CATALYST_DIR = mkdtempSync(join(tmpdir(), "sdk-test-catalyst-dir-"));
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -1130,77 +1144,92 @@ describe("sdkRunPhaseAgent — CTL-1367 item 4 (backstop → stalled signal)", (
   });
 });
 
-// ── CTL-1410 Phase A: SDK success-branch signal flip ──────────────────────────
-// mapResult subtype==="success" returns backstop:null — historically the ONE
-// abstaining branch (the skill was solely responsible for its own flip). With the
-// event-only phases migrated onto the wrapper, this in-process net flips a
-// still-in-flight (dispatched|running) signal to done so occupancy releases and
-// deriveAdvancement sees a terminal status even if a skill skipped its wrapper
-// call. It must NEVER clobber a terminal status, resurrect a parked hold, nor
-// act on a stale generation (superseded worker).
+// ── CTL-1410 Phase A → CTL-1790: the clean-exit, never-declared handler ───────
+// mapResult subtype==="success" returns backstop:null, so flipSignalDoneOnSuccess
+// is the SOLE handler of "the SDK/codex process exited clean and the skill never
+// declared". CTL-1410 wrote a fabricated `done` there; CTL-1778 proved that lie
+// advances a pipeline past work that never happened (monitor-merge blocked on a
+// permission prompt, exited 0, signal flipped done, PR #3238 never merged). It now
+// writes a terminal FAILURE. It must still: no-op on a signal the agent already
+// declared terminal, never resurrect a parked hold, bow out on a stale generation,
+// and — the property that makes inversion safe where deletion is not — RELEASE THE
+// SLOT by leaving a terminal status behind.
 
-describe("flipSignalDoneOnSuccess — CTL-1410 Phase A truth table", () => {
-  const flipCase = (startStatus) => {
+describe("flipSignalDoneOnSuccess — CTL-1790 truth table (clean exit, no declaration)", () => {
+  const flipCase = (startStatus, phase = "implement") => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-flip-"));
-    const signalFile = join(dir, "phase-triage.json");
-    writeFileSync(signalFile, JSON.stringify({ status: startStatus, ticket: "CTL-1", phase: "triage" }));
-    flipSignalDoneOnSuccess(signalFile);
+    const signalFile = join(dir, `phase-${phase}.json`);
+    writeFileSync(signalFile, JSON.stringify({ status: startStatus, ticket: "CTL-1", phase }));
+    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: () => {} });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
     return after;
   };
 
-  test("dispatched (in-flight) → done + completedAt, no attentionReason", () => {
+  // THE CTL-1778 REGRESSION TEST. A clean exit with the signal still in-flight is
+  // an agent that never declared anything — it must NOT read as a success.
+  test("dispatched (in-flight, never declared) → terminal FAILED, not done", () => {
     const after = flipCase("dispatched");
-    expect(after.status).toBe("done");
-    expect(typeof after.completedAt).toBe("string");
-    expect("attentionReason" in after).toBe(false);
-    expect("failureReason" in after).toBe(false);
+    expect(after.status).toBe("failed");
+    expect(after.status).not.toBe("done");
+    expect("completedAt" in after).toBe(false);
   });
 
-  // CTL-1789: this flip is the canonical FABRICATED terminal — a clean SDK exit,
-  // NOT the agent declaring completion. It must stamp its own writer id so the
-  // advancement audit can subtract it from the declared advances. Without the
-  // marker the signal is byte-indistinguishable from a wrapper-written one.
-  test("CTL-1789: a flipped terminal is stamped assertedBy=sdk-success-flip", () => {
+  test("the failure carries reason 'ended-without-declaration'", () => {
     const after = flipCase("dispatched");
-    expect(after.assertedBy).toBe("sdk-success-flip");
-    expect(after.assertedBy).toBe(ASSERTED_BY.SDK_SUCCESS_FLIP);
-    // …and it is NOT the wrapper's declared id.
+    // implement is a RETRY phase → the reason rides attentionReason.
+    expect(after.attentionReason).toBe(ENDED_WITHOUT_DECLARATION_REASON);
+    expect(after.attentionReason).toBe("ended-without-declaration");
+  });
+
+  test("running (in-flight, never declared) → terminal FAILED", () => {
+    expect(flipCase("running").status).toBe("failed");
+  });
+
+  // CTL-1789/CTL-1790: the terminal is written by INFRASTRUCTURE, so it carries a
+  // fabricated writer id — never the agent's own declared id. (sdk-success-flip is
+  // retired as a live producer; this writer stamps the backstop id.)
+  test("the written terminal is stamped as a FABRICATED writer, never the agent's", () => {
+    const after = flipCase("dispatched");
+    expect(after.assertedBy).toBe(ASSERTED_BY.SDK_BACKSTOP);
     expect(after.assertedBy).not.toBe(ASSERTED_BY.PHASE_AGENT);
+    expect(after.assertedBy).not.toBe(ASSERTED_BY.SDK_SUCCESS_FLIP);
   });
 
-  test("CTL-1789: a bowed-out stale-generation flip stamps NOTHING", () => {
-    // The fence returns before any mutation — the newer dispatch's in-flight
-    // signal must not gain a terminal-writer marker it never earned.
-    const dir = mkdtempSync(join(tmpdir(), "sdk-fence-mark-"));
+  // "A clean exit WITH a declaration is unchanged." The wrapper already wrote a
+  // terminal, so the in-flight precondition returns before any write.
+  test("a DECLARED terminal (skill ran its wrapper) is left byte-identical", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-declared-"));
     const signalFile = join(dir, "phase-implement.json");
-    writeFileSync(
-      signalFile,
-      JSON.stringify({ status: "dispatched", ticket: "CTL-1", phase: "implement", generation: 6 })
-    );
-    flipSignalDoneOnSuccess(signalFile, 5);
-    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    const declared = {
+      status: "done",
+      ticket: "CTL-1",
+      phase: "implement",
+      completedAt: "2026-07-01T00:00:00Z",
+      assertedBy: ASSERTED_BY.PHASE_AGENT,
+    };
+    const before = JSON.stringify(declared);
+    writeFileSync(signalFile, before);
+    const events = [];
+    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: (e) => events.push(e) });
+    const after = readFileSync(signalFile, "utf8");
     rmSync(dir, { recursive: true, force: true });
-    expect(after.status).toBe("dispatched");
-    expect("assertedBy" in after).toBe(false);
+    expect(after).toBe(before); // not one byte rewritten
+    expect(JSON.parse(after).assertedBy).toBe(ASSERTED_BY.PHASE_AGENT);
+    expect(events).toHaveLength(0); // and no spurious failure event
   });
 
-  test("running (in-flight) → done", () => {
-    expect(flipCase("running").status).toBe("done");
-  });
-
-  test("needs-input (parked) is NEVER resurrected to done", () => {
+  test("needs-input (parked) is NEVER converted to a failure", () => {
     const after = flipCase("needs-input");
     expect(after.status).toBe("needs-input");
-    expect("completedAt" in after).toBe(false);
+    expect("attentionReason" in after).toBe(false);
+    expect("failureReason" in after).toBe(false);
   });
 
   for (const terminal of ["done", "failed", "stalled", "skipped", "turn-cap-exhausted"]) {
     test(`already-terminal '${terminal}' is not clobbered`, () => {
       const after = flipCase(terminal);
       expect(after.status).toBe(terminal);
-      expect("completedAt" in after).toBe(false);
     });
   }
 
@@ -1212,47 +1241,212 @@ describe("flipSignalDoneOnSuccess — CTL-1410 Phase A truth table", () => {
     }).not.toThrow();
   });
 
-  // CTL-736 generation fence (adversarial-review catch): a stale superseded
-  // worker's late success must NOT flip the newer dispatch's in-flight signal.
+  // CTL-736 generation fence (KEPT VERBATIM): a stale superseded worker's late
+  // clean exit must NOT write an outcome onto the newer dispatch's in-flight
+  // signal — not a `done` (the old bug) and not a `failed` (the new one would be
+  // just as wrong: it would fail a live worker's phase out from under it).
   const fenceCase = (mine, sigGen) => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-fence-"));
     const signalFile = join(dir, "phase-implement.json");
     const sig = { status: "dispatched", ticket: "CTL-1", phase: "implement" };
     if (sigGen !== undefined) sig.generation = sigGen;
     writeFileSync(signalFile, JSON.stringify(sig));
-    flipSignalDoneOnSuccess(signalFile, mine);
+    const events = [];
+    flipSignalDoneOnSuccess(signalFile, mine, { appendEventLog: (e) => events.push(e) });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
-    return after.status;
+    return { status: after.status, after, events };
   };
 
   test("stale generation (mine < signal) bows out — signal stays in-flight", () => {
-    expect(fenceCase(5, 6)).toBe("dispatched");
+    const { status, after, events } = fenceCase(5, 6);
+    expect(status).toBe("dispatched");
+    expect("assertedBy" in after).toBe(false); // no marker it never earned
+    expect("attentionReason" in after).toBe(false);
+    expect(events).toHaveLength(0); // and no event for a write that didn't happen
   });
 
-  test("current generation (mine == signal) flips", () => {
-    expect(fenceCase(6, 6)).toBe("done");
+  test("current generation (mine == signal) acts", () => {
+    expect(fenceCase(6, 6).status).toBe("failed");
   });
 
-  test("newer generation (mine > signal) flips (fail-open, matches isCurrentGeneration)", () => {
-    expect(fenceCase(7, 6)).toBe("done");
+  test("newer generation (mine > signal) acts (fail-open, matches isCurrentGeneration)", () => {
+    expect(fenceCase(7, 6).status).toBe("failed");
   });
 
-  test("missing own generation fails open (legacy/unfenced dispatch) — flips", () => {
-    expect(fenceCase(undefined, 6)).toBe("done");
+  test("missing own generation fails open (legacy/unfenced dispatch) — acts", () => {
+    expect(fenceCase(undefined, 6).status).toBe("failed");
   });
 
-  test("missing signal generation fails open — flips", () => {
-    expect(fenceCase(5, undefined)).toBe("done");
+  test("missing signal generation fails open — acts", () => {
+    expect(fenceCase(5, undefined).status).toBe("failed");
   });
 
-  test("non-numeric generations fail open — flips", () => {
-    expect(fenceCase("garbage", "alsogarbage")).toBe("done");
+  test("non-numeric generations fail open — acts", () => {
+    expect(fenceCase("garbage", "alsogarbage").status).toBe("failed");
   });
 });
 
-describe("sdkRunPhaseAgent — CTL-1410 Phase A (success flips in-flight signal to done)", () => {
-  test("success + signal still 'dispatched' → flipped to done (the safety net)", async () => {
+// ── CTL-1790: the per-phase retry-vs-escalate policy table ───────────────────
+// The owner's standing decision. Build phases are idempotent to re-run so they
+// RETRY (reason on .attentionReason); side-effecting phases are not, so they
+// ESCALATE (reason on .failureReason → revive Loop 2's no-retry branch).
+
+describe("CTL-1790 — the ended-without-declaration policy table", () => {
+  test("the table maps every build phase to retry", () => {
+    for (const p of ["research", "plan", "implement", "verify", "review"]) {
+      expect(endedWithoutDeclarationPolicy(p)).toBe("retry");
+      expect(endedWithoutDeclarationReasonField(p)).toBe("attentionReason");
+    }
+  });
+
+  test("the table maps every side-effecting phase to escalate", () => {
+    for (const p of ["pr", "monitor-merge", "teardown"]) {
+      expect(endedWithoutDeclarationPolicy(p)).toBe("escalate");
+      expect(endedWithoutDeclarationReasonField(p)).toBe("failureReason");
+    }
+  });
+
+  test("an unknown / absent phase fails CLOSED to escalate (never a blind retry)", () => {
+    for (const p of ["not-a-phase", "", null, undefined, 42, {}]) {
+      expect(endedWithoutDeclarationPolicy(p)).toBe("escalate");
+      expect(endedWithoutDeclarationReasonField(p)).toBe("failureReason");
+    }
+  });
+
+  test("the table is frozen (no runtime mutation of the policy)", () => {
+    expect(Object.isFrozen(ENDED_WITHOUT_DECLARATION_POLICY)).toBe(true);
+  });
+
+  // The mapping's ONE mechanical consequence, asserted on the real signal file:
+  // exactly one reason key is written, and which one is the retry/escalate lever.
+  const writeCase = (phase) => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-policy-"));
+    const signalFile = join(dir, `phase-${phase}.json`);
+    writeFileSync(signalFile, JSON.stringify({ status: "running", ticket: "CTL-1778", phase }));
+    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: () => {} });
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    rmSync(dir, { recursive: true, force: true });
+    return after;
+  };
+
+  test("implement (retry side) writes attentionReason ONLY — revive retries it", () => {
+    const after = writeCase("implement");
+    expect(after.status).toBe("failed");
+    expect(after.attentionReason).toBe(ENDED_WITHOUT_DECLARATION_REASON);
+    // A failureReason here would trip revive's escalate branch and cost a retry.
+    expect("failureReason" in after).toBe(false);
+  });
+
+  test("monitor-merge (escalate side) writes failureReason ONLY — revive escalates", () => {
+    const after = writeCase("monitor-merge");
+    expect(after.status).toBe("failed");
+    expect(after.failureReason).toBe(ENDED_WITHOUT_DECLARATION_REASON);
+    // An attentionReason here would let revive blindly re-run `gh pr merge`.
+    expect("attentionReason" in after).toBe(false);
+  });
+
+  test("pr and teardown also land on failureReason (non-idempotent side effects)", () => {
+    for (const p of ["pr", "teardown"]) {
+      const after = writeCase(p);
+      expect(after.failureReason).toBe(ENDED_WITHOUT_DECLARATION_REASON);
+      expect("attentionReason" in after).toBe(false);
+    }
+  });
+});
+
+// ── CTL-1790: the slot MUST release ──────────────────────────────────────────
+// This is the property that makes INVERSION safe where DELETION is not. Deleting
+// the handler leaves the signal at dispatched|running forever: countSdkInflight
+// has no clock and no age gate, so at maxParallel:6 six such exits wedge the node
+// permanently. Any terminal status releases it — the test asserts that directly.
+
+describe("CTL-1790 — the terminal write releases the SDK slot", () => {
+  test("countSdkInflight drops from 1 to 0 across the write", () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "sdk-slot-"));
+    const workerDir = join(orchDir, "workers", "CTL-1778");
+    mkdirSync(workerDir, { recursive: true });
+    const signalFile = join(workerDir, "phase-monitor-merge.json");
+    // The exact shape an SDK worker leaves behind: in-flight, NO bg_job_id.
+    writeFileSync(
+      signalFile,
+      JSON.stringify({
+        status: "running",
+        ticket: "CTL-1778",
+        phase: "monitor-merge",
+        bg_job_id: null,
+      })
+    );
+    expect(countSdkInflight(orchDir)).toBe(1); // the slot is held
+
+    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: () => {} });
+
+    expect(countSdkInflight(orchDir)).toBe(0); // …and released
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("failed");
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("a bowed-out stale generation deliberately does NOT release the slot", () => {
+    // The gen-N+1 worker owns the signal and is still live — releasing here would
+    // over-admit. Occupancy stays 1.
+    const orchDir = mkdtempSync(join(tmpdir(), "sdk-slot-fence-"));
+    const workerDir = join(orchDir, "workers", "CTL-1778");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({
+        status: "running",
+        ticket: "CTL-1778",
+        phase: "implement",
+        generation: 6,
+        bg_job_id: null,
+      })
+    );
+    flipSignalDoneOnSuccess(join(workerDir, "phase-implement.json"), 5, { appendEventLog: () => {} });
+    expect(countSdkInflight(orchDir)).toBe(1);
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+});
+
+// ── CTL-1790: the failure is announced on the unified event log ──────────────
+
+describe("CTL-1790 — the terminal event", () => {
+  test("a canonical phase.<phase>.failed.<ticket> is appended with the reason", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-evt-"));
+    const signalFile = join(dir, "phase-monitor-merge.json");
+    writeFileSync(
+      signalFile,
+      JSON.stringify({ status: "running", ticket: "CTL-1778", phase: "monitor-merge" })
+    );
+    const events = [];
+    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: (e) => events.push(e) });
+    rmSync(dir, { recursive: true, force: true });
+    expect(events).toEqual([
+      {
+        phase: "monitor-merge",
+        ticket: "CTL-1778",
+        status: "failed",
+        reason: ENDED_WITHOUT_DECLARATION_REASON,
+      },
+    ]);
+  });
+
+  test("no event when the signal carries no phase/ticket (no phase.undefined.* pollution)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-evt-none-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(signalFile, JSON.stringify({ status: "running" }));
+    const events = [];
+    flipSignalDoneOnSuccess(signalFile, undefined, { appendEventLog: (e) => events.push(e) });
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    rmSync(dir, { recursive: true, force: true });
+    expect(events).toHaveLength(0);
+    // …but the terminal write still happened, so the slot still releases.
+    expect(after.status).toBe("failed");
+  });
+});
+
+describe("sdkRunPhaseAgent — CTL-1790 end-to-end (clean exit, no declaration)", () => {
+  test("clean exit + signal still 'dispatched' → terminal FAILED, no fabricated done", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
     const signalFile = join(dir, "phase-triage.json");
     const spec = makeSpec({ signalFile });
@@ -1266,13 +1460,13 @@ describe("sdkRunPhaseAgent — CTL-1410 Phase A (success flips in-flight signal 
     expect(r.code).toBe(0);
     expect(backstops).toHaveLength(0);
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
-    expect(after.status).toBe("done");
-    expect(typeof after.completedAt).toBe("string");
-    expect("attentionReason" in after).toBe(false);
+    expect(after.status).toBe("failed");
+    expect(after.status).not.toBe("done");
+    expect("completedAt" in after).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test("success + skill already flipped (done) → untouched (primary path wins)", async () => {
+  test("clean exit + skill already declared (done) → untouched (primary path wins)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
     const signalFile = join(dir, "phase-triage.json");
     const spec = makeSpec({ signalFile });
@@ -1288,10 +1482,12 @@ describe("sdkRunPhaseAgent — CTL-1410 Phase A (success flips in-flight signal 
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     expect(after.status).toBe("done");
     expect(after.completedAt).toBe("2026-07-01T00:00:00Z"); // NOT overwritten
+    expect("attentionReason" in after).toBe(false);
+    expect("failureReason" in after).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test("success + parked (needs-input) → NOT flipped (in-flight-only precondition)", async () => {
+  test("clean exit + parked (needs-input) → untouched (in-flight-only precondition)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
     const signalFile = join(dir, "phase-triage.json");
     const spec = makeSpec({ signalFile });
@@ -1307,12 +1503,12 @@ describe("sdkRunPhaseAgent — CTL-1410 Phase A (success flips in-flight signal 
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test("stale-generation success (superseded worker) does NOT flip the newer dispatch's signal", async () => {
+  test("stale-generation clean exit (superseded worker) does NOT touch the newer dispatch's signal", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
     const signalFile = join(dir, "phase-triage.json");
     // This run carries generation 1; a newer dispatch has since claimed the
     // signal at generation 2 (preempt→re-dispatch / revive supersede). The stale
-    // run's clean success must bow out exactly like the wrapper's fence does.
+    // run's clean exit must bow out exactly like the wrapper's fence does.
     const spec = makeSpec({ signalFile, generation: 1 });
     const { spawn } = spawnReturningSpec({ spec, signalFile });
     const supersede = () => (async function* () {
@@ -1324,7 +1520,7 @@ describe("sdkRunPhaseAgent — CTL-1410 Phase A (success flips in-flight signal 
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     expect(after.status).toBe("dispatched"); // the gen-2 worker still owns it
     expect(after.generation).toBe(2);
-    expect("completedAt" in after).toBe(false);
+    expect("attentionReason" in after).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
 });
