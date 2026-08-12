@@ -11,6 +11,7 @@
 
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
+import { isTicketKey } from "./ticket-key.mjs";
 import { parseWorktreeForBranch } from "./worktree.mjs";
 
 // MIN_ARTIFACT_BYTES — a small size floor below which an artifact is treated as a
@@ -351,18 +352,36 @@ function implementProbe(
 // bash gate's `-`-only rule loses them — a pre-existing gap, verified live).
 //
 // Measured against the real corpus: foreign matches 2721 pairs / 144 ids -> 0;
-// legitimate files newly unmatched -> 0. The new rule is a STRICT SUBSET of the
-// old one (same substring, plus boundaries), so it can only ever make a probe
-// MORE conservative — it can never newly declare work done, which is the correct
-// direction of failure for a work-done probe.
+// legitimate files newly unmatched -> 0. The new rule matches a STRICT SUBSET of
+// what the old one matched (same substring, plus boundaries).
+//
+// What that subset means per call site — it is NOT uniformly "more conservative":
+//   :368 artifactProbe    — fewer matches => fewer "work is done" returns. Strictly safer.
+//   :501 progress mark    — fewer matches => no progress invented for a foreign doc. Safer.
+//   :311 implement's gate — a non-match SKIPS the gate (the probe then returns true
+//        on >=1 commit + clean tree), so dropping a match here removes a gate rather
+//        than tightening one. That is still the right call: the gate being removed was
+//        computing a commit threshold from ANOTHER ticket's plan, whose error direction
+//        is arbitrary (too few phases => premature done; too many => a false "not done"
+//        revive loop). Removing a wrong gate is correct; it is just not "more conservative".
+//
+// The ticket-id shape is validated with the CANONICAL predicate
+// (`ticket-key.mjs` TICKET_KEY_RE, CTL-1504) rather than a local pattern. A
+// narrower private copy here would reject a legitimate team key that carries a
+// digit or underscore (`OPS_2-17`) or a long prefix/number, and a rejected id
+// returns false from every call site above — silently reporting real artifacts as
+// absent. That is the exact defect ticket-key.mjs was created to fix, and
+// re-deriving the grammar here would have reintroduced it as a second un-fixed
+// twin, which is the very failure this function's own history demonstrates.
+// Uppercased before the test because the canonical predicate is uppercase-only
+// while this matcher has always been case-insensitive about its input.
 function matchesTicket(filename, ticket) {
   if (typeof filename !== "string" || typeof ticket !== "string") return false;
   const lf = filename.toLowerCase();
   if (!lf.endsWith(".md")) return false;
-  const tl = ticket.toLowerCase();
   // Reject a malformed ticket id rather than building a garbage regex from it.
-  if (!/^[a-z]{2,6}-[0-9]{1,6}$/.test(tl)) return false;
-  const esc = tl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!isTicketKey(ticket.toUpperCase())) return false;
+  const esc = ticket.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(?:^|[^0-9a-z])${esc}(?![0-9a-z])`).test(lf);
 }
 

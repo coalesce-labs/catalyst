@@ -575,6 +575,16 @@ describe("CTL-1790: matchesTicket must not match a LOOKALIKE ticket's artifact",
     ["2026-05-21-CTL-564.md", "CTL-5", false, "shorter prefix lookalike"],
     ["2026-06-16-ctl-10812.md", "CTL-1081", false, "the bash gate's own stated example"],
     ["2026-05-26-ctl-604.json", "CTL-604", false, "non-markdown is rejected"],
+    // The canonical ticket-key grammar (ticket-key.mjs TICKET_KEY_RE, CTL-1504)
+    // admits a digit/underscore in the team prefix and puts no length cap on
+    // either half. A narrower private guard here would reject these outright,
+    // and a rejected id reads as "no artifact exists" at every call site.
+    ["2026-08-01-ops_2-17-slug.md", "OPS_2-17", true, "team key with digit+underscore"],
+    ["2026-08-01_ops_2-17_slug.md", "OPS_2-17", true, "same, underscore separators"],
+    ["2026-08-01-ops_2-170-slug.md", "OPS_2-17", false, "…and it still rejects a lookalike"],
+    ["2026-08-01-verylongprefix-42.md", "VERYLONGPREFIX-42", true, "prefix longer than six chars"],
+    ["2026-08-01-ctl-1234567.md", "CTL-1234567", true, "number longer than six digits"],
+    ["2026-08-01-ctl-604.md", "not-a-ticket-key", false, "malformed id is rejected, not regex-injected"],
   ])("%s vs %s -> %s (%s)", (filename, ticket, expected) => {
     const probeWt = `/wt/${ticket}`;
     expect(
