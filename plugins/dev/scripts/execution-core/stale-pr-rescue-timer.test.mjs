@@ -635,7 +635,7 @@ describe("escalation default seam", () => {
     const events = [];
     let now = 1_000;
     const fenceGuardFn = (_ctx, opts) => {
-      opts.onSuppress?.({ ticket: "CAT-173", reason: "superseded", generation: 7 });
+      opts.onSuppress?.({ ticket: "PROJ-173", reason: "unverifiable", generation: 7 });
       return false;
     };
     const deps = {
@@ -654,22 +654,22 @@ describe("escalation default seam", () => {
       },
     };
 
-    const first = defaultEscalate("CAT-173", { prNumber: 173, reason: "conflicting" }, deps);
+    const first = defaultEscalate("PROJ-173", { prNumber: 173, reason: "conflicting" }, deps);
     expect(first.reason).toBe("fence-suppressed");
-    expect(readFenceStandoff(orchDir, "CAT-173")?.count).toBe(1);
-    expect(existsSync(join(orchDir, ".escalations", "CAT-173.json"))).toBe(false);
+    expect(readFenceStandoff(orchDir, "PROJ-173")?.count).toBe(1);
+    expect(existsSync(join(orchDir, ".escalations", "PROJ-173.json"))).toBe(false);
 
     now += 2;
-    const second = defaultEscalate("CAT-173", { prNumber: 173, reason: "conflicting" }, deps);
+    const second = defaultEscalate("PROJ-173", { prNumber: 173, reason: "conflicting" }, deps);
     expect(second.reason).toBe("fence-suppressed");
-    const durable = JSON.parse(readFileSync(join(orchDir, ".escalations", "CAT-173.json"), "utf8"));
+    const durable = JSON.parse(readFileSync(join(orchDir, ".escalations", "PROJ-173.json"), "utf8"));
     expect(durable.source).toBe("fence-standoff");
     expect(durable.reason).toMatch(/fence-standoff.*PR #173/);
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ ticket: "CAT-173", site: "stale-pr-rescue", count: 2 });
+    expect(events[0]).toMatchObject({ ticket: "PROJ-173", site: "stale-pr-rescue", count: 2 });
 
     now += 2;
-    defaultEscalate("CAT-173", { prNumber: 173, reason: "conflicting" }, deps);
+    defaultEscalate("PROJ-173", { prNumber: 173, reason: "conflicting" }, deps);
     expect(events).toHaveLength(1);
   });
 
@@ -688,7 +688,7 @@ describe("escalation default seam", () => {
       },
       now: () => now,
       fenceGuardFn: (_ctx, opts) => {
-        opts.onSuppress?.({ ticket: "CAT-174", reason: "superseded", generation: 8 });
+        opts.onSuppress?.({ ticket: "PROJ-174", reason: "unverifiable", generation: 8 });
         return false;
       },
       recordDurableEscalationFn: (record) => {
@@ -702,27 +702,27 @@ describe("escalation default seam", () => {
     };
 
     now += 2;
-    defaultEscalate("CAT-174", { prNumber: 174 }, deps);
-    expect(readFenceStandoff(orchDir, "CAT-174")?.breakGlassAt).toBeNull();
+    defaultEscalate("PROJ-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "PROJ-174")?.breakGlassAt).toBeNull();
     expect(eventAttempts).toBe(0);
 
     now += 2;
-    defaultEscalate("CAT-174", { prNumber: 174 }, deps);
-    expect(readFenceStandoff(orchDir, "CAT-174")?.breakGlassAt).toBeNull();
+    defaultEscalate("PROJ-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "PROJ-174")?.breakGlassAt).toBeNull();
     expect(eventAttempts).toBe(0);
 
     now += 2;
-    defaultEscalate("CAT-174", { prNumber: 174 }, deps);
-    expect(readFenceStandoff(orchDir, "CAT-174")?.breakGlassAt).toBeNull();
+    defaultEscalate("PROJ-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "PROJ-174")?.breakGlassAt).toBeNull();
     expect(eventAttempts).toBe(1);
 
     now += 2;
-    defaultEscalate("CAT-174", { prNumber: 174 }, deps);
-    expect(readFenceStandoff(orchDir, "CAT-174")?.breakGlassAt).toBe(now);
+    defaultEscalate("PROJ-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "PROJ-174")?.breakGlassAt).toBe(now);
     expect(eventAttempts).toBe(2);
 
     now += 2;
-    defaultEscalate("CAT-174", { prNumber: 174 }, deps);
+    defaultEscalate("PROJ-174", { prNumber: 174 }, deps);
     expect(eventAttempts).toBe(2);
   });
 });

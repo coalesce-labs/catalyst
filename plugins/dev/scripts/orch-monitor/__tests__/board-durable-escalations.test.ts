@@ -36,7 +36,7 @@ const synthesizeDurableEscalations = (boardMod as Record<string, unknown>)
 
 // Minimal durable record as recordDurableEscalation writes it.
 const durableRec = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-  ticket: "CTL-9",
+  ticket: "PROJ-9",
   phase: "implement",
   reason: "Worker stuck > 24h, no progress",
   escalatedAt: new Date(100_000).toISOString(),
@@ -63,7 +63,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
   it("a fence-standoff durable record round-trips as needs-human attention (CAT-173)", () => {
     const cards = synthesizeDurableEscalations(
       [durableRec({
-        ticket: "CAT-53",
+        ticket: "PROJ-53",
         reason: "fence-standoff: superseded on 2 hosts",
         escalatedAt: "2026-08-11T00:00:00Z",
         source: "fence-standoff",
@@ -79,7 +79,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
   it("(a) a durable record with labelConfirmed:false and no existing card → attention card (Hole 1)", () => {
     const cards = synthesizeDurableEscalations([durableRec()], new Set<string>(), 600_000);
     expect(cards).toHaveLength(1);
-    expect(cards[0].id).toBe("CTL-9");
+    expect(cards[0].id).toBe("PROJ-9");
     expect(cards[0].attention).toBe("needs-human");
     // attentionSince anchored to the original escalatedAt (not lastTs / now).
     expect(cards[0].attentionSince).toBe(new Date(100_000).toISOString());
@@ -90,7 +90,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
     const model = deriveInbox(mkPayload(cards));
     expect(model.counts.attention).toBe(1);
     expect(model.counts.needsYou).toBe(1);
-    expect(model.sections.find((s) => s.kind === "attention")?.rows[0].id).toBe("CTL-9");
+    expect(model.sections.find((s) => s.kind === "attention")?.rows[0].id).toBe("PROJ-9");
   });
 
   it("(b) a durable record with labelConfirmed:true surfaces identically to labelConfirmed:false", () => {
@@ -108,7 +108,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
   it("(c) a ticket already carded (worker-dir / parked / queued) is NOT duplicated", () => {
     const cards = synthesizeDurableEscalations(
       [durableRec()],
-      new Set(["CTL-9"]),
+      new Set(["PROJ-9"]),
       600_000,
     );
     expect(cards).toHaveLength(0);
@@ -125,7 +125,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
 
   it("(d) terminal-aware: linfo carries Done linearState → NO card", () => {
     const linfo: Record<string, { linearState?: string }> = {
-      "CTL-9": { linearState: "Done" },
+      "PROJ-9": { linearState: "Done" },
     };
     const cards = synthesizeDurableEscalations(
       [durableRec()],
@@ -144,7 +144,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
       600_000,
       {},
       {},
-      new Set(["CTL-9"]),
+      new Set(["PROJ-9"]),
     );
     expect(cards).toHaveLength(0);
   });
@@ -155,7 +155,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
       new Set<string>(),
       600_000,
       {},
-      { "CTL-9": { linearState: "Canceled" } },
+      { "PROJ-9": { linearState: "Canceled" } },
     );
     expect(cards).toHaveLength(0);
   });
@@ -166,7 +166,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
       new Set<string>(),
       600_000,
       {},
-      { "CTL-9": { linearState: "Implement" } },
+      { "PROJ-9": { linearState: "Implement" } },
     );
     expect(cards).toHaveLength(1);
   });
@@ -176,8 +176,8 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
       [durableRec()],
       new Set<string>(),
       600_000,
-      { "CTL-9": "Replica title" },
-      { "CTL-9": { title: "Linfo title" } },
+      { "PROJ-9": "Replica title" },
+      { "PROJ-9": { title: "Linfo title" } },
     );
     expect(replica[0].title).toBe("Replica title");
 
@@ -186,23 +186,23 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
       new Set<string>(),
       600_000,
       {},
-      { "CTL-9": { title: "Linfo title" } },
+      { "PROJ-9": { title: "Linfo title" } },
     );
     expect(linfoOnly[0].title).toBe("Linfo title");
 
     const bareId = synthesizeDurableEscalations([durableRec()], new Set<string>(), 600_000);
-    expect(bareId[0].title).toBe("CTL-9");
+    expect(bareId[0].title).toBe("PROJ-9");
   });
 
   it("card has the correct type, team, and repo fields", () => {
     const cards = synthesizeDurableEscalations([durableRec()], new Set<string>(), 600_000);
     expect(cards[0].type).toBe("durable-escalation");
-    expect(cards[0].team).toBe("CTL");
+    expect(cards[0].team).toBe("PROJ");
     expect(classifyTicket(cards[0])).not.toBe("done");
   });
 
   it("existingIds may arrive as a plain array (also deduped)", () => {
-    const cards = synthesizeDurableEscalations([durableRec()], ["CTL-9"], 600_000);
+    const cards = synthesizeDurableEscalations([durableRec()], ["PROJ-9"], 600_000);
     expect(cards).toHaveLength(0);
   });
 
@@ -261,7 +261,7 @@ const mergeDurableEscalationsIntoCards = (boardMod as Record<string, unknown>)
 describe("mergeDurableEscalationsIntoCards — CAT-173 standoff visibility", () => {
   const card = (over: Record<string, unknown> = {}): BoardTicket =>
     ({
-      id: "CTL-9",
+      id: "PROJ-9",
       title: "a behind PR",
       attention: null,
       attentionSince: null,
@@ -290,16 +290,16 @@ describe("mergeDurableEscalationsIntoCards — CAT-173 standoff visibility", () 
 
   it("never pages on a terminal ticket", () => {
     const bySet = [card()];
-    mergeDurableEscalationsIntoCards(bySet, [durableRec()], {}, new Set(["CTL-9"]));
+    mergeDurableEscalationsIntoCards(bySet, [durableRec()], {}, new Set(["PROJ-9"]));
     expect(bySet[0].attention).toBeNull();
 
     const byLinfo = [card()];
-    mergeDurableEscalationsIntoCards(byLinfo, [durableRec()], { "CTL-9": { linearState: "Done" } });
+    mergeDurableEscalationsIntoCards(byLinfo, [durableRec()], { "PROJ-9": { linearState: "Done" } });
     expect(byLinfo[0].attention).toBeNull();
   });
 
   it("ignores records with no matching card — synthesis owns those", () => {
-    const tickets = [card({ id: "CTL-OTHER" })];
+    const tickets = [card({ id: "PROJ-OTHER" })];
     mergeDurableEscalationsIntoCards(tickets, [durableRec()]);
     expect(tickets[0].attention).toBeNull();
     expect(tickets).toHaveLength(1);
