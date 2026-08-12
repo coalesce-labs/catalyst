@@ -8,8 +8,11 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789
 import {
   buildEventEnvelope,
+  defaultEmitComplete, // CTL-1789: argv contract (--asserted-by)
+  defaultAppendPhaseAdvanceAppliedEvent, // CTL-1789
   classifyWorker,
   jobLifecycle,
   reconstructWorkerState,
@@ -6655,5 +6658,127 @@ describe("CTL-1643: escalateOnce verified-or-loud label application", () => {
     }));
     expect(appendEscalated.calls.length).toBe(1);
     expect(recordEscalation.calls.length).toBe(1);
+  });
+});
+
+// ─── CTL-1789: reclaim marks its synthetic complete as FABRICATED ────────────
+//
+// The reclaim path invokes the SAME wrapper a healthy agent would, so before this
+// its terminal was byte-indistinguishable from a real agent declaration. The
+// --asserted-by flag is the whole discriminator.
+describe("defaultEmitComplete — CTL-1789 --asserted-by argv contract", () => {
+  test("passes --asserted-by recovery-reclaim", () => {
+    let seen = null;
+    defaultEmitComplete(
+      { orchDir: "/orch", signal: { ticket: "CTL-1", phase: "implement", raw: {} } },
+      {
+        spawn: (bin, args) => {
+          seen = { bin, args };
+          return { status: 0, stdout: "", stderr: "" };
+        },
+      }
+    );
+    expect(seen.bin).toMatch(/phase-agent-emit-complete$/);
+    const i = seen.args.indexOf("--asserted-by");
+    expect(i).toBeGreaterThan(-1);
+    expect(seen.args[i + 1]).toBe(ASSERTED_BY.RECOVERY_RECLAIM);
+    expect(seen.args[i + 1]).toBe("recovery-reclaim");
+    // …and it does NOT pass --no-signal-update: the reclaim OWNS the signal flip,
+    // which is exactly why the marker has to be right.
+    expect(seen.args).not.toContain("--no-signal-update");
+  });
+
+  test("the session-id branch keeps the flag (order-independent lookup)", () => {
+    let seen = null;
+    defaultEmitComplete(
+      {
+        orchDir: "/orch",
+        signal: { ticket: "CTL-1", phase: "pr", raw: { catalystSessionId: "sess-9" } },
+      },
+      {
+        spawn: (_bin, args) => {
+          seen = args;
+          return { status: 0 };
+        },
+      }
+    );
+    expect(seen[seen.indexOf("--asserted-by") + 1]).toBe("recovery-reclaim");
+    expect(seen[seen.indexOf("--session-id") + 1]).toBe("sess-9");
+  });
+});
+
+describe("defaultAppendPhaseAdvanceAppliedEvent — CTL-1789 envelope shape", () => {
+  let prevDir;
+  let dir;
+  beforeEach(() => {
+    prevDir = process.env.CATALYST_DIR;
+    dir = mkdtempSync(join(tmpdir(), "advapplied-"));
+    process.env.CATALYST_DIR = dir;
+  });
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function readOnly() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(dir, "events", `${ym}.jsonl`), "utf8")
+      .trim()
+      .split("\n");
+    expect(lines).toHaveLength(1);
+    return JSON.parse(lines[0]);
+  }
+
+  test("name / severity / payload / promoted attributes", () => {
+    expect(
+      defaultAppendPhaseAdvanceAppliedEvent({
+        orchId: "CTL-1",
+        ticket: "CTL-1",
+        from: "plan",
+        to: "implement",
+        evidence: "declared",
+        evidenceReason: null,
+        assertedBy: ASSERTED_BY.PHASE_AGENT,
+        assertionRef: "workers/CTL-1/phase-plan.json",
+      })
+    ).toBe(true);
+    const e = readOnly();
+    expect(e.attributes["event.name"]).toBe("phase.advance.applied.CTL-1");
+    expect(e.attributes["event.action"]).toBe("applied");
+    expect(e.attributes["catalyst.advance.evidence"]).toBe("declared");
+    expect(e.attributes["catalyst.advance.from"]).toBe("plan");
+    expect(e.attributes["catalyst.advance.to"]).toBe("implement");
+    expect(e.severityText).toBe("INFO");
+    expect(e.severityNumber).toBe(9);
+    expect(e.body.payload).toMatchObject({
+      phase: "advance",
+      ticket: "CTL-1",
+      status: "applied",
+      from: "plan",
+      to: "implement",
+      evidence: "declared",
+      asserted_by: "phase-agent-emit-complete",
+      assertion_ref: "workers/CTL-1/phase-plan.json",
+    });
+  });
+
+  test("a null `from` drops the attribute but keeps the payload field", () => {
+    defaultAppendPhaseAdvanceAppliedEvent({
+      orchId: "CTL-2",
+      ticket: "CTL-2",
+      from: null,
+      to: "research",
+      evidence: "absent",
+      evidenceReason: "no-predecessor",
+    });
+    const e = readOnly();
+    // vetAttrs drops non-strings → absence, not a literal "null" dimension.
+    expect("catalyst.advance.from" in e.attributes).toBe(false);
+    expect(e.body.payload.from).toBeNull();
+    expect(e.body.payload.evidence_reason).toBe("no-predecessor");
+    expect(e.body.payload.asserted_by).toBeNull();
+    expect(e.body.payload.assertion_ref).toBeNull();
   });
 });
