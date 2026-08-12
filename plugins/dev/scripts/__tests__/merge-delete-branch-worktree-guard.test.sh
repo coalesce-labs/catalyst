@@ -107,20 +107,77 @@ echo "CTL-56: repo-wide invariant — no live gh pr merge call carries --delete-
 
 # Scan plugins/ for any 'gh pr merge' line that includes '--delete-branch'.
 # Exclude: JSON schema description strings, HTML mockups, bash comments (#),
-# and test files (themselves may reference the flag for assertion labels).
+# test files (themselves may reference the flag for assertion labels), and
+# generated CHANGELOGs.
+#
+# Why CHANGELOGs are excluded, and why the exclusion is this narrow: a release
+# note DESCRIBING the removal ("The fix drops `--delete-branch` from all `gh pr
+# merge` calls") carries both tokens in prose and was scanned as if it were a
+# call site — a guard that cannot tell the thing from a description of the thing.
+# Release-please generates these files and nothing ever executes them.
+#
+# The exclusion is by CHANGELOG filename, NOT by `.md`, deliberately: 32 live
+# `gh pr merge` call sites in this repo live in `.md` files (SKILL.md bodies and
+# prompt templates that agents execute verbatim). Excluding `*.md` would trade
+# this false positive for a silent false negative across every one of them.
+_scan_live_violators() {
+  # $1 — root to scan. Kept a function so the positive control below runs the
+  # SAME filter chain against a known-violating fixture.
+  grep -rn -- '--delete-branch' "$1" 2>/dev/null \
+    | grep 'gh pr merge' \
+    | grep -v '\.json:' \
+    | grep -v '\.html:' \
+    | grep -v '\.test\.sh:' \
+    | grep -v 'CHANGELOG\.md:' \
+    | grep -v '^[^:]*:[[:space:]]*#' \
+    || true
+}
+
 REPO_ROOT_GUARD="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-LIVE_VIOLATORS="$(grep -rn -- '--delete-branch' "${REPO_ROOT_GUARD}/plugins/" \
-  | grep 'gh pr merge' \
-  | grep -v '\.json:' \
-  | grep -v '\.html:' \
-  | grep -v '\.test\.sh:' \
-  | grep -v '^[^:]*:[[:space:]]*#' \
-  || true)"
+LIVE_VIOLATORS="$(_scan_live_violators "${REPO_ROOT_GUARD}/plugins/")"
 if [[ -z "$LIVE_VIOLATORS" ]]; then
   pass "no live gh pr merge call carries --delete-branch (repo-wide)"
 else
   fail "live gh pr merge --delete-branch found (CTL-56 violation):
 ${LIVE_VIOLATORS}"
+fi
+
+# POSITIVE CONTROL (CTL-1801). The check above concludes from an EMPTY result,
+# so it passes identically whether the repo is clean or the scan is broken —
+# exactly the failure mode that let a too-broad exclusion disable a guard
+# silently. Prove the instrument can still see a true positive: build a fixture
+# that genuinely violates the invariant and assert the same filter chain flags
+# it. If a future edit over-excludes (e.g. dropping all `*.md`), this fails.
+CONTROL_DIR="$(mktemp -d)"
+trap 'rm -rf "${CONTROL_DIR}"' EXIT
+mkdir -p "${CONTROL_DIR}/skills/fixture"
+cat >"${CONTROL_DIR}/skills/fixture/SKILL.md" <<'CONTROL_EOF'
+Merge the pull request:
+
+```bash
+gh pr merge "$PR_NUMBER" --squash --delete-branch
+```
+CONTROL_EOF
+# ...and a CHANGELOG that only DESCRIBES the flag, which must NOT be flagged.
+cat >"${CONTROL_DIR}/CHANGELOG.md" <<'CONTROL_EOF'
+### Worktree-Safe PR Merge
+
+The fix drops `--delete-branch` from all `gh pr merge` calls.
+CONTROL_EOF
+
+CONTROL_HITS="$(_scan_live_violators "${CONTROL_DIR}")"
+if grep -q 'SKILL\.md' <<<"${CONTROL_HITS}"; then
+  pass "positive control: the scan still detects a real .md call site"
+else
+  fail "positive control FAILED — the scan no longer detects a known violation, so its
+clean result above is not evidence. Filter chain output was:
+${CONTROL_HITS}"
+fi
+if grep -q 'CHANGELOG\.md' <<<"${CONTROL_HITS}"; then
+  fail "negative control FAILED — prose in a CHANGELOG was scanned as a call site:
+${CONTROL_HITS}"
+else
+  pass "negative control: CHANGELOG prose is not scanned as a call site"
 fi
 
 echo ""
