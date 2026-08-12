@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/portable-stat.sh"
 # CTL-843: setup-catalyst.sh must merge per-project secrets, never drop unprompted keys.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -150,11 +151,11 @@ set -e
 if [[ $RC -ne 0 ]]; then
   fail "write_secrets_config exited non-zero"
 else
-  CFG_PERMS=$(stat -f "%OLp" "$CONF8" 2>/dev/null || stat -c "%a" "$CONF8" 2>/dev/null)
-  assert_eq "600" "$CFG_PERMS" "config file is chmod 600"
+  CFG_PERMS=$(portable_stat_mode "$CONF8")
+  assert_eq "0600" "$CFG_PERMS" "config file is chmod 600"
   if [[ -n "$BAK8" ]]; then
-    BAK_PERMS=$(stat -f "%OLp" "$BAK8" 2>/dev/null || stat -c "%a" "$BAK8" 2>/dev/null)
-    assert_eq "600" "$BAK_PERMS" "backup file is chmod 600"
+    BAK_PERMS=$(portable_stat_mode "$BAK8")
+    assert_eq "0600" "$BAK_PERMS" "backup file is chmod 600"
   else
     fail "no backup to check permissions on"
   fi

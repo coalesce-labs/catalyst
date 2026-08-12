@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../portable-stat.sh"
 # Unit tests for lib/secrets-hygiene.sh (CTL-1203).
 #
 # Tests harden_secrets_dir, ensure_secrets_gitignore, and write_secret_file
@@ -33,9 +34,7 @@ assert_contains() {
 	fi
 }
 
-file_mode() {
-	stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
-}
+file_mode() { portable_stat_mode "$1"; }
 
 if [[ ! -f "$LIB" ]]; then
 	echo "FATAL: $LIB not found — implement it first" >&2
@@ -49,7 +48,7 @@ source "$LIB"
 echo "harden_secrets_dir: creates missing dir at mode 700"
 DIR1="${SCRATCH}/new-dir"
 harden_secrets_dir "$DIR1"
-assert_eq "700" "$(file_mode "$DIR1")" "new dir mode = 700"
+assert_eq "0700" "$(file_mode "$DIR1")" "new dir mode = 700"
 
 echo ""
 echo "harden_secrets_dir: tightens existing 755 dir to 700"
@@ -57,14 +56,14 @@ DIR2="${SCRATCH}/loose-dir"
 mkdir -p "$DIR2"
 chmod 755 "$DIR2"
 harden_secrets_dir "$DIR2"
-assert_eq "700" "$(file_mode "$DIR2")" "755→700 tightened"
+assert_eq "0700" "$(file_mode "$DIR2")" "755→700 tightened"
 
 echo ""
 echo "harden_secrets_dir: idempotent — second call still 700, exit 0"
 harden_secrets_dir "$DIR2"
 RC=$?
 assert_eq "0" "$RC" "second call exit 0"
-assert_eq "700" "$(file_mode "$DIR2")" "still 700 after second call"
+assert_eq "0700" "$(file_mode "$DIR2")" "still 700 after second call"
 
 # ─── ensure_secrets_gitignore ────────────────────────────────────────────────
 
@@ -104,14 +103,14 @@ WF_DIR="${SCRATCH}/write-dir"
 mkdir -p "$WF_DIR"
 WF_PATH="${WF_DIR}/config.json"
 write_secret_file '{"key":"value"}' "$WF_PATH"
-assert_eq "600" "$(file_mode "$WF_PATH")" "new file mode = 600"
+assert_eq "0600" "$(file_mode "$WF_PATH")" "new file mode = 600"
 assert_eq '{"key":"value"}' "$(cat "$WF_PATH")" "content matches"
 
 echo ""
 echo "write_secret_file: overwrites existing 644 file, result is 600"
 chmod 644 "$WF_PATH"
 write_secret_file '{"key":"updated"}' "$WF_PATH"
-assert_eq "600" "$(file_mode "$WF_PATH")" "overwrite → mode 600"
+assert_eq "0600" "$(file_mode "$WF_PATH")" "overwrite → mode 600"
 assert_eq '{"key":"updated"}' "$(cat "$WF_PATH")" "overwrite content matches"
 
 echo ""

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/portable-stat.sh"
 # Shell tests for rotate_log_on_start (CTL-1755).
 # Run: bash plugins/dev/scripts/__tests__/rotate-log-on-start.test.sh
 
@@ -33,9 +34,7 @@ teardown() {
 # form — on GNU, `-f` means "filesystem status" (mutable, changes when `.1` is
 # created) and would silently return the wrong value instead of the inode. macOS
 # stat rejects `-c`, so it falls through to the BSD `-f` form there.
-inode_of() {
-	stat -c %i "$1" 2>/dev/null || stat -f %i "$1" 2>/dev/null
-}
+inode_of() { portable_stat_inode "$1"; }
 
 # -----------------------------------------------------------------------
 echo "Test 1: absent log → no-op"

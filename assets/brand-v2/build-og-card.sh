@@ -15,6 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$REPO_ROOT/plugins/dev/scripts/lib/portable-stat.sh"
 SRC="$SCRIPT_DIR/og-card.svg"
 PNG="$SCRIPT_DIR/og-card.png"
 
@@ -49,7 +50,7 @@ magick "$TMP" -background "#07090B" -alpha remove -alpha off -colorspace sRGB -s
 rm -f "$TMP"
 
 # Report size + dimensions.
-BYTES=$(stat -f %z "$PNG" 2>/dev/null || stat -c %s "$PNG")
+BYTES=$(portable_stat_size "$PNG") || { echo "ERROR: cannot read size of $PNG" >&2; exit 1; }
 KB=$((BYTES / 1024))
 log "og-card.png: ${BYTES} bytes (~${KB} KB)"
 if [ "$BYTES" -ge 307200 ]; then

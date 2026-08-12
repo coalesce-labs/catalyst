@@ -3,6 +3,7 @@
 
 _CSTP_SELF="${BASH_SOURCE[0]}"
 _CSTP_DIR="$(cd "$(dirname "$_CSTP_SELF")" && pwd)"
+source "${_CSTP_DIR}/portable-stat.sh"
 
 cloud_sync_probe_token() {
   local host_name="" arg
@@ -49,12 +50,12 @@ cloud_sync_probe_token() {
     if [[ -r "$cluster_file" ]]; then
       . "$cluster_file"
       source_name="cluster.env"
-      [[ "$(stat -f '%Lp' "$cluster_file" 2>/dev/null || stat -c '%a' "$cluster_file" 2>/dev/null || echo 600)" == "600" ]] || perms_warning="yes"
+      [[ "$(portable_stat_mode "$cluster_file" || echo 0600)" == "0600" ]] || perms_warning="yes"
     fi
     if [[ -r "$cloud_file" ]]; then
       . "$cloud_file"
       source_name="cloud-sync.env"
-      [[ "$(stat -f '%Lp' "$cloud_file" 2>/dev/null || stat -c '%a' "$cloud_file" 2>/dev/null || echo 600)" == "600" ]] || perms_warning="yes"
+      [[ "$(portable_stat_mode "$cloud_file" || echo 0600)" == "0600" ]] || perms_warning="yes"
     fi
     name="$(CFG_DIR="$config_dir" bun -e 'const m = await import(process.env.CFG_DIR + "/config.mjs"); process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);' 2>/dev/null || printf 'CATALYST_CLOUD_TOKEN')"
     local present="no"

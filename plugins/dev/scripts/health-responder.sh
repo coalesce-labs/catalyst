@@ -103,6 +103,7 @@ _SRC="${BASH_SOURCE[0]}"
 while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
+source "${SCRIPT_DIR}/lib/portable-stat.sh"
 export PATH="${PATH}:${SCRIPT_DIR}"
 
 # CTL-1616 PR5: the secret-contract bash mirror — sourced here (once, at script load, NOT
@@ -366,16 +367,7 @@ is_dry() { [[ "$DRY_RUN" == "1" ]]; }
 # filesystem info to stdout before returning non-zero (Codex P2) — so the BSD
 # attempt's output must be validated and DISCARDED on failure, never
 # concatenated with the `-c` fallback's output.
-_mtime() {
-  local out
-  if out="$(stat -f %m "$1" 2>/dev/null)" && [[ "$out" =~ ^[0-9]+$ ]]; then
-    echo "$out"
-    return 0
-  fi
-  out="$(stat -c %Y "$1" 2>/dev/null)" || return 1
-  [[ "$out" =~ ^[0-9]+$ ]] || return 1
-  echo "$out"
-}
+_mtime() { portable_stat_mtime "$1"; }
 
 # Fail-open telemetry (orphan-sweep idiom): missing binary = silent no-op, and
 # a telemetry failure can never fail the responder.
