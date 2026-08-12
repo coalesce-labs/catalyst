@@ -27,7 +27,9 @@ import {
   readdirSync,
 } from "node:fs";
 import { resolve, dirname, basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { parseEventTailChunk } from "./event-tail.mjs";
 import {
   getExecutionCoreDir,
@@ -79,6 +81,14 @@ import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-heal
 import { startDaemonWatchdogProbe as realStartDaemonWatchdogProbe } from "./daemon-watchdog-probe.mjs"; // CTL-1502: stuck-but-alive daemon watchdog
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
+import {
+  PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE,
+  PRIOR_ARTIFACT_HOLD_SIGNATURE,
+  isPriorArtifactBlock,
+  isPriorArtifactForceRequest,
+  priorArtifactPresence,
+  resolvePriorArtifactRespondGateMode,
+} from "./prior-artifact-block.mjs";
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
 // CAT-57: same advance computation the Linear-anchor liveness publisher uses, so the
 // Loki and Linear transports agree on what counts as a phase-boundary advance.
@@ -346,6 +356,16 @@ export function createCommentInboxWriter(orchDir, botUserId) {
     const ticket = parsed.ticket ?? parsed.identifier ?? null;
     if (!ticket) return;
     if (_isBotId(botUserId, parsed.authorId)) return;
+    // CAT-55 (Codex #3243 P2): botUserId is the primary self-echo filter, but the
+    // artifact-hold explanation this daemon posts can return through the webhook
+    // under an actor that is NOT in the configured bot set — precisely the
+    // unregistered-worker-actor case handleCommentWake's signature check exists
+    // for. That check runs on the wake path, AFTER this writer has already
+    // appended; the stall-clear path preserves a nonempty inbox, so the
+    // re-dispatched phase would read Catalyst's own text — including the
+    // force-retry instruction — as operator context. Filter the signature here
+    // too, so the boundary that writes the inbox enforces it as well.
+    if (String(parsed.body ?? "").includes(PRIOR_ARTIFACT_HOLD_SIGNATURE)) return;
     const workerDir = join(orchDir, "workers", ticket);
     if (!existsSync(workerDir)) return;
     const entry = JSON.stringify({
@@ -456,6 +476,28 @@ export function clearNeedsHumanMarkers(orchDir, ticket, { rm = unlinkSync } = {}
 // status === "stalled", clears the stall via the J3 seam (CTL-1067).
 // Fail-open throughout — a bad signal file or clearStall failure is logged
 // and skipped, never fatal.
+function defaultArtifactPresent(input) {
+  return priorArtifactPresence({ ...input, exists: existsSync, list: readdirSync });
+}
+
+// CAT-55 review finding 4: this runs synchronously on the daemon's event-loop thread, and the
+// helper makes three curl calls with no --max-time. Without a spawn timeout a hung socket to
+// api.linear.app wedges scheduler ticks, heartbeat, reaper and watchdog for as long as it hangs.
+// maxBuffer + the CATALYST_COMMENT_POST_HELPER override match every sibling call site
+// (recovery-emit.mjs, unstuck-escalate-seam.mjs).
+function defaultPostComment(ticket, body) {
+  const helper =
+    process.env.CATALYST_COMMENT_POST_HELPER ||
+    fileURLToPath(new URL("../lib/linear-comment-post.sh", import.meta.url));
+  const result = spawnSync(helper, [ticket, body], {
+    encoding: "utf8",
+    shell: false,
+    timeout: 30_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  return result.status === 0;
+}
+
 export async function handleCommentWake(
   parsed,
   {
@@ -487,6 +529,9 @@ export async function handleCommentWake(
     // silently returns to the inbox and cannot be retried. A human answering IS
     // the signal that another attempt is warranted.
     forgetIntent = defaultForgetIntent,
+    artifactPresent = defaultArtifactPresent,
+    gateMode = resolvePriorArtifactRespondGateMode(),
+    postComment = defaultPostComment,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -496,6 +541,52 @@ export async function handleCommentWake(
   // Catalyst app actor). Fail-open when botUserId is unset. Mirrors the inbox
   // writers' guard. botUserId accepts a string or Set<string>.
   if (_isBotId(botUserId, parsed.authorId)) return;
+
+  const workerDir = join(orchDir, "workers", ticket);
+  // CAT-55: gate before ANY label, marker, intent, or stall mutation. A reply
+  // cannot clear the condition it is answering while the required document is
+  // still positively absent. Unknown probes remain fail-open.
+  const humanProvenance = Boolean(parsed.authorId) && Boolean(botUserId);
+  if (gateMode !== "off" && humanProvenance && isManagedTicket(ticket, orchDir)) {
+    let files = [];
+    try {
+      files = readdirSync(workerDir).filter((name) => name.startsWith("phase-") && name.endsWith(".json"));
+    } catch {
+      /* no local signal → legacy wake behavior */
+    }
+    for (const fname of files) {
+      let sig;
+      try { sig = JSON.parse(readFileSync(join(workerDir, fname), "utf8")); } catch { continue; }
+      if (!isPriorArtifactBlock(sig)) continue;
+      const phase = fname.slice("phase-".length, -".json".length);
+      let present = null;
+      try { present = artifactPresent({
+        ticket,
+        artifact: sig.dispatchFailureArtifact,
+        artifactDir: sig.dispatchFailureArtifactDir,
+        searchedPath: sig.dispatchFailureSearchedPath,
+      }); } catch { /* fail open */ }
+      if (present !== false) continue;
+      if (gateMode === "shadow") {
+        log.info({ ticket, phase }, "comment-wake: would hold artifact block (CAT-55 shadow)");
+        break;
+      }
+      if (isPriorArtifactForceRequest(parsed.body ?? "")) break;
+      log.info({ ticket, phase }, "comment-wake: held artifact block (CAT-55 enforce)");
+      const marker = join(workerDir, `.artifact-blocked-reply-${phase}.applied`);
+      if (!existsSync(marker)) {
+        const where = sig.dispatchFailureSearchedPath ?? sig.dispatchFailureArtifactDir ?? "the prior-phase artifact directory";
+        const body = `${ticket}/${phase} is still blocked because the required document is missing from ${where}. ${PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE(where)} Reply with “force prior artifact retry” to override this hold.\n\n${PRIOR_ARTIFACT_HOLD_SIGNATURE}`;
+        try {
+          if (postComment(ticket, body)) writeFileSync(marker, "");
+          else log.warn({ ticket, phase }, "comment-wake: artifact-block explanation post failed; stall remains held");
+        } catch (err) {
+          log.warn({ ticket, phase, err: err?.message }, "comment-wake: artifact-block explanation post threw; stall remains held");
+        }
+      }
+      return;
+    }
+  }
 
   // CTL-1567: CLEAR FIRST — a human answered, so the ticket must drop off the
   // "Needs you" list before anything else is attempted, and regardless of whether
@@ -531,7 +622,6 @@ export async function handleCommentWake(
   //      configured bot set before believing a human answered.
   //  (b) MANAGED ticket. The daemon sees every workspace comment; only clear on
   //      tickets this installation actually manages.
-  const humanProvenance = Boolean(parsed.authorId) && Boolean(botUserId);
   let clearedNeedsHuman = false;
   // Codex #2970 round 3: distinct from clearedNeedsHuman (which also covers the
   // idempotent already-absent case and gates the marker reconcile below — that
@@ -660,7 +750,6 @@ export async function handleCommentWake(
     }
   }
 
-  const workerDir = join(orchDir, "workers", ticket);
   let signalFiles;
   try {
     signalFiles = readdirSync(workerDir).filter(

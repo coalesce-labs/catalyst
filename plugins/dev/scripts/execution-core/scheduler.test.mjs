@@ -2342,6 +2342,49 @@ describe("CTL-712: escalateDispatchExhausted — retry ceiling → stalled", () 
     expect(typeof sig.explanation.call_to_action).toBe("string");
     expect(sig.explanation.call_to_action.trim()).not.toBe("");
   });
+
+  test("CAT-55: artifact exhaustion persists facts and writes a manual explanation", () => {
+    escalateDispatchExhausted(orchDir, "CAT-55", "plan", {
+      code: 2,
+      cause: "prior_artifact_missing",
+      refusal: {
+        artifact: "glob:thoughts/shared/research",
+        artifactDir: "thoughts/shared/research",
+        searchedPath: "/wt/CAT-55/thoughts/shared/research",
+      },
+    });
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CAT-55", "phase-plan.json"), "utf8"));
+    expect(sig.dispatchFailureArtifactDir).toBe("thoughts/shared/research");
+    expect(sig.dispatchFailureArtifact).toBe("glob:thoughts/shared/research");
+    expect(sig.dispatchFailureSearchedPath).toBe("/wt/CAT-55/thoughts/shared/research");
+    expect(sig.explanation.escalation_type).toBe("manual");
+    expect(sig.explanation.problem).toContain("/wt/CAT-55/thoughts/shared/research");
+    expect(sig.explanation.why_not_auto).toMatch(/re-dispatching alone will not clear/i);
+    expect(sig.explanation.options).toBeUndefined();
+  });
+
+  test("CAT-55: signal refusal keeps the generic decision wording", () => {
+    escalateDispatchExhausted(orchDir, "CAT-57", "verify", {
+      code: 2,
+      cause: "prior_artifact_missing",
+      refusal: {
+        artifact: "signal:phase-implement.json",
+        artifactDir: "phase-implement.json",
+        searchedPath: "/orch/workers/CAT-57/phase-implement.json",
+      },
+    });
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CAT-57", "phase-verify.json"), "utf8"));
+    expect(sig.dispatchFailureArtifact).toBe("signal:phase-implement.json");
+    expect(sig.explanation.escalation_type).toBe("decision");
+    expect(sig.explanation.options).toHaveLength(2);
+  });
+
+  test("CAT-55: missing refusal detail preserves the generic decision explanation", () => {
+    escalateDispatchExhausted(orchDir, "CAT-56", "plan", { code: 2, cause: "prior_artifact_missing" });
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CAT-56", "phase-plan.json"), "utf8"));
+    expect(sig.explanation.escalation_type).toBe("decision");
+    expect(sig.explanation.options).toHaveLength(2);
+  });
 });
 
 // ─── CTL-1108: writeTerminalStalled explanation coverage ───
@@ -12191,6 +12234,60 @@ describe("dispatchAndVerify shared core (CTL-826)", () => {
       reason: "dispatch_nonzero_exit",
       consecutiveFailures: 1,
     });
+  });
+
+  // CAT-55 (Codex #3243 P2): a prelaunch refusal launched no worker, so any
+  // failureReason already on the target signal is from a PRIOR attempt. Reading
+  // it first masked the current `prior_artifact_missing` cause — and
+  // escalateDispatchExhausted gates its artifact metadata + manual explanation on
+  // that exact cause, so the operator lost both.
+  // The stale reason is seeded by the dispatch fake rather than before the tick:
+  // what matters is that a failureReason is on disk when readDispatchFailureReason
+  // runs (just after rc!=0), and a pre-seeded `failed` plan signal would instead
+  // route the ticket down the failure ladder before it ever re-dispatches.
+  test("rc!=0 branch: the current structured refusal outranks a stale on-disk failureReason", () => {
+    writeSignal("CTL-826R", "research", "done"); // FSM owes plan
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const refusalLine = JSON.stringify({
+      status: "refused",
+      reason: "prior_artifact_missing",
+      artifact: "glob:thoughts/shared/research",
+      searchedPath: "/wt/CTL-826R/thoughts/shared/research",
+    });
+    const dispatch = ({ orchDir: od, ticket, phase }) => {
+      writeFileSync(
+        join(od, "workers", ticket, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status: "failed", failureReason: "stale_reason_from_a_prior_attempt" })
+      );
+      return { code: 2, stdout: `${refusalLine}\n`, stderr: "" };
+    };
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
+
+    const events = dispatchFailedEvents("CTL-826R");
+    expect(events).toHaveLength(1);
+    expect(events[0].body.payload.reason).toBe("prior_artifact_missing");
+    expect(events[0].body.payload.reason).not.toBe("stale_reason_from_a_prior_attempt");
+    expect(events[0].body.payload.artifact_dir).toBe("thoughts/shared/research");
+    expect(events[0].body.payload.searched_path).toBe("/wt/CTL-826R/thoughts/shared/research");
+  });
+
+  test("rc!=0 branch: with NO refusal on stdout the on-disk reason is still used", () => {
+    writeSignal("CTL-826S", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = ({ orchDir: od, ticket, phase }) => {
+      writeFileSync(
+        join(od, "workers", ticket, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status: "failed", failureReason: "worker_wrote_this_reason" })
+      );
+      return { code: 1, stdout: "", stderr: "" };
+    };
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
+
+    const events = dispatchFailedEvents("CTL-826S");
+    expect(events).toHaveLength(1);
+    expect(events[0].body.payload.reason).toBe("worker_wrote_this_reason");
   });
 
   // ─── Reduced ladder: resume-after-preemption keeps the lighter failure path ───

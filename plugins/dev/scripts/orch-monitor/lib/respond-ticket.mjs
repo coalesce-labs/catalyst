@@ -46,13 +46,19 @@
 // without a real worker dir, a real hosts.json, a real `linearis`, or a real
 // event log.
 
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { readClusterHostCount, runFenceCheck } from "./stop-worker.mjs";
 import { PHASE_ORDER } from "./board-data.mjs";
 import { nodeClass } from "./canonical-event-shared.ts";
+import {
+  PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE,
+  isPriorArtifactBlock,
+  priorArtifactPresence,
+  resolvePriorArtifactRespondGateMode,
+} from "../../execution-core/prior-artifact-block.mjs";
 
 // The execution-core worker tree root — ~/catalyst/execution-core/workers/<T>/.
 // Byte-identical to ticket-runs.mjs::DEFAULT_WORKERS_DIR and board-data.mjs's
@@ -246,6 +252,10 @@ export function findHeldRun(
   return null;
 }
 
+export function defaultArtifactPresent(input) {
+  return priorArtifactPresence({ ...input, exists: existsSync, list: readdirSync });
+}
+
 // ── orchestration: the endpoint body ─────────────────────────────────────────
 // respondTicket — drive the full BFF12 contract for
 // `POST /api/ticket/<ticket>/respond`. Outcome is a discriminated result the route
@@ -270,13 +280,16 @@ export function findHeldRun(
 // same gate BFF8 uses; mismatch is a hard 400 BEFORE any mutation. All
 // collaborators are injectable so tests cover every branch deterministically.
 export function respondTicket(
-  { ticket, response, confirm },
+  { ticket, response, confirm, force = false },
   {
     findHeld = findHeldRun,
     fenceCheck = runFenceCheck,
     record = recordResponse,
     clearMarker = clearNeedsHumanMarker,
     emit = emitResumeEvent,
+    artifactPresent = defaultArtifactPresent,
+    mode = resolvePriorArtifactRespondGateMode(),
+    log = console,
   } = {},
 ) {
   // Read first — the held run is BOTH the existence check and the source of the
@@ -304,6 +317,35 @@ export function respondTicket(
     return fence.stale
       ? { status: "fenced", ticket, phase }
       : { status: "fence_indeterminate", ticket, phase };
+  }
+
+  if (mode !== "off" && !force && isPriorArtifactBlock(signal)) {
+    let present = null;
+    try {
+      present = artifactPresent({
+        ticket,
+        artifact: signal.dispatchFailureArtifact,
+        artifactDir: signal.dispatchFailureArtifactDir,
+        searchedPath: signal.dispatchFailureSearchedPath,
+      });
+    } catch {
+      // Indeterminate probes fail open.
+    }
+    if (present === false) {
+      const artifactDir = signal.dispatchFailureArtifactDir ?? null;
+      const searchedPath = signal.dispatchFailureSearchedPath ?? null;
+      const where = searchedPath ?? artifactDir ?? "the prior-phase artifact directory";
+      const result = {
+        status: "artifact_missing",
+        ticket,
+        phase,
+        artifactDir,
+        searchedPath,
+        message: `${ticket}/${phase} is blocked on a document that is still missing from ${where}. ${PRIOR_ARTIFACT_FUTILE_RETRY_SENTENCE(where)}`,
+      };
+      if (mode === "enforce") return result;
+      log.info?.({ ticket, phase, ...result }, "respond: would refuse (CAT-55 shadow)");
+    }
   }
 
   // Fence current (or single-host no-op): mutate. Record the human's response,

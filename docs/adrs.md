@@ -793,3 +793,27 @@ is still dispatched so a typo cannot silently stop fleet work. Nothing yet detec
 with Todo work that is wholly absent from the registry; that requires a workspace-wide Linear team
 sweep and remains outside CAT-52. The `coalesce-labs/catalyst` clone remains the CTL project and
 keeps its `CTL` Layer-1 declaration; it is not a valid CAT `repoRoot`.
+
+## ADR-029: Done safety uses merged-work evidence, not an open-PR predicate (CAT-45)
+
+**Decision.** Every automated Done write passes through `linear-transition.sh` and is checked for
+positive evidence of committed work that has not merged. A caller that already verified a merge
+passes that proof through. A senior engineer may use `--allow-unmerged-done "<reason>"`; the reason
+is part of the auditable decision. Infrastructure that cannot perform the check fails open and is
+reported, while a transient failure after GitHub was consulted fails closed in enforce mode.
+
+| Has open PR | Has merged work | CTL-1157 removed gate | CAT-45 |
+|---|---|---|---|
+| no | no | allow | refuse |
+| yes | yes | refuse | allow |
+| yes | no | refuse | refuse |
+| no | yes | allow | allow |
+
+The first row is the no-open-PR-but-no-merged-work failure shape; the removed open-PR predicate would also have allowed it.
+The second row is the abandoned-spike wedge CTL-1157 correctly removed. CAT-45 therefore does not
+restore that handcuff: it loosens the rejected case and tightens the previously invisible one.
+
+Declarations remain durable even when their write is held. Detection belongs to the recurring
+board-health reconciliation scan because the declaration drain only revisits explicit pending
+records. Rollout is shadow-first, with enforcement enabled only after the observed population is
+reviewed and has zero false positives.
