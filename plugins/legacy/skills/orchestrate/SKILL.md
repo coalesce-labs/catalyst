@@ -830,7 +830,7 @@ MANDATORY: Before completing your contract:
 Your success contract ENDS at (CTL-252):
   ✓ PR open (gh pr create succeeded)
   ✓ Active listen loop resolved all blockers (CI, bot reviews, BEHIND) inline
-  ✓ PR merged with gh pr merge --squash --delete-branch (no --auto)
+  ✓ PR merged with gh pr merge --squash (worktree-safe, CTL-56; no --auto; remote ref deleted via gh api --method DELETE after REST confirm)
   ✓ Optional deployment verified (if catalyst.deploy configured)
   ✓ pr.mergedAt, deployment.url (if applicable), status="done" written to signal file
   ✓ Worker process exits cleanly
@@ -1879,8 +1879,9 @@ fi
   --summary "wave ${CURRENT_WAVE:-1} post-merge verification" 2>/dev/null || true
 ```
 
-**Context (CTL-130, updated by CTL-252):** Workers actively merge their own PRs via
-`gh pr merge --squash --delete-branch` (no `--auto`) after the listen loop confirms CLEAN. The merge
+**Context (CTL-130, updated by CTL-252, CTL-56):** Workers actively merge their own PRs via
+`gh pr merge --squash` (worktree-safe, CTL-56; no `--auto`) after the listen loop confirms CLEAN,
+then delete the remote head ref checkout-free via `gh api --method DELETE`. The merge
 happens the moment the worker's listen loop confirms CI passed and reviews are satisfied.
 Verification therefore runs **post-merge** — it surfaces gaps for remediation rather than gating
 merge.

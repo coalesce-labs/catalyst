@@ -68,6 +68,27 @@ else
 fi
 
 echo ""
+echo "CTL-56: repo-wide invariant — no live gh pr merge call carries --delete-branch"
+
+# Scan plugins/ for any 'gh pr merge' line that includes '--delete-branch'.
+# Exclude: JSON schema description strings, HTML mockups, bash comments (#),
+# and test files (themselves may reference the flag for assertion labels).
+REPO_ROOT_GUARD="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+LIVE_VIOLATORS="$(grep -rn -- '--delete-branch' "${REPO_ROOT_GUARD}/plugins/" \
+  | grep 'gh pr merge' \
+  | grep -v '\.json:' \
+  | grep -v '\.html:' \
+  | grep -v '\.test\.sh:' \
+  | grep -v '^[^:]*:[[:space:]]*#' \
+  || true)"
+if [[ -z "$LIVE_VIOLATORS" ]]; then
+  pass "no live gh pr merge call carries --delete-branch (repo-wide)"
+else
+  fail "live gh pr merge --delete-branch found (CTL-56 violation):
+${LIVE_VIOLATORS}"
+fi
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "merge-delete-branch-worktree-guard: ${PASSES} passed, ${FAILURES} failed"
 echo "─────────────────────────────────────────────"

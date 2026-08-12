@@ -1061,7 +1061,10 @@ export function generateRemediateBrief(category, probe = null) {
           "then post `@codex review` via gh-pr-comment.sh to re-trigger the reviewer."
         : "",
       "When the PR is CLEAN, run `gh pr view <n> --json mergeable,mergeStateStatus` to confirm, " +
-        "then merge with `gh pr merge --squash --delete-branch`. " +
+        "then capture the head ref (`gh api repos/<repo>/pulls/<n> --jq '.head.ref'`) and " +
+        "merge with `gh pr merge --squash` (worktree-safe, CTL-56). " +
+        "After the merge is REST-confirmed, delete the remote head ref checkout-free: " +
+        "`gh api --method DELETE repos/<repo>/git/refs/heads/<head_ref>` (idempotent, best-effort). " +
         "After addressing any review finding, post `@codex review` via gh-pr-comment.sh to re-trigger the reviewer.",
       "Never --admin or force-merge past a failing or pending check. " +
         "Escalate ONLY a finding that genuinely requires a human decision, " +
