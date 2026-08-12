@@ -4906,11 +4906,13 @@ describe("checksForClass wires the PR4 install-correctness checks into every arm
 
 describe("installChecksForClass — the focused post-install verification (CTL-1369 PR4)", () => {
   it("unrecognized class → single node-class check", () => {
+    // INSTALL-SEAM-LIVE-OK(CAT-251): recognized:false short-circuits before the seam thunk is built.
     const fns = installChecksForClass(nodeClassOf({ recognized: false, raw: "developr", class: "monitor" }));
     expect(fns).toHaveLength(1);
   });
 
   it("grades node-class + agents + pull-owner, and OMITS the network/operational checks", () => {
+    // INSTALL-SEAM-LIVE-OK(CAT-251): this site only stringifies thunks and never invokes the seam.
     const s = installChecksForClass(nodeClassOf({ class: "worker", raw: "worker" })).map((f) => f.toString()).join("\n");
     expect(s).toContain("checkNodeClass");
     expect(s).toContain("checkAgentsForClass");

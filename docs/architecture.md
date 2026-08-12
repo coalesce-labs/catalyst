@@ -49,6 +49,18 @@ Cross-orchestrator visibility lives at `~/catalyst/state.json` — a single lock
 all orchestrators/workers write via `catalyst-state.sh`. It is a **denormalized summary**;
 per-orchestrator local state in worktrees stays the source of truth for crash recovery (ADR-006).
 
+**Liveness (audited CTL-1791, 2026-08-11).** `state.json` is written by the **legacy-wave** path
+only; the execution-core daemon writes none of it, so on an execution-core host the file is
+routinely **absent** (measured: no `~/catalyst/state.json`, `catalyst.db.orchestrators` = 0 rows).
+Absence is therefore not evidence the machinery is dead. `catalyst-state.sh` retains live callers on
+both paths and is **not** removable: `plugins/legacy/skills/orchestrate/SKILL.md` (`ensure-run-dir`,
+`register`, `update`, `worker`, `heartbeat`, `attention`, `resolve-attention`, `archive`, `event`)
+and `plugins/legacy/skills/oneshot/SKILL.md` (`event`, `worker`, `attention`) — the documented
+runtime fallback — plus, outside the legacy plugin, `setup-orchestrator.sh` (`init`,
+`ensure-run-dir`), `emit-worker-status-change.sh`, `compound-log.sh`, `orchestrate-roll-usage.sh`,
+`orchestrate-status.sh`, and the `orchestrate-*` helper family, with `install-cli.sh` /
+`check-setup.sh` installing and verifying it as the `catalyst-state` CLI.
+
 ```
 ~/catalyst/
 ├── state.json              # active orchestrators (denormalized summary)
@@ -64,7 +76,14 @@ per-orchestrator local state in worktrees stays the source of truth for crash re
   `session_events`, `session_metrics`, `session_tools`, `session_prs`, `schema_migrations`. WAL mode
   → concurrent readers (incl. `orch-monitor`). Schema: `plugins/dev/scripts/db-migrations/`.
   ADR-008. `catalyst-state.sh` still writes JSON/JSONL during the migration period for backward
-  compatibility, so SQLite and the JSONL log coexist.
+  compatibility, so SQLite and the JSONL log coexist. **Row counts are not a liveness signal**
+  (audited CTL-1791): `session_metrics` / `session_tools` / `session_prs` measure **0 rows** on the
+  execution-core fleet while `sessions` holds 960 — the `catalyst-session.sh metric|tool|pr` writers
+  are simply never reached by the phase-agent dispatch path, not absent. All three tables keep live
+  readers that a `DROP` breaks with `no such table`: `catalyst-session.sh read`/`history`/`stats`/
+  `compare`, orch-monitor's `board-data.mjs` (per-ticket and per-phase cost rollups),
+  `history-store.ts`, `session-store.ts`, `ticket-runs.mjs`, and `ticket-retro/gather-retro.sh` —
+  and `check-setup.sh` grades all three in its 5-table `core_tables` gate.
 - **state.json** — active-orchestrator registry (progress, worker status, attention items). Schema:
   `plugins/dev/templates/global-state.json`.
 - **events/** — every phase transition, PR creation, verification result, attention item. Schema:
@@ -193,15 +212,27 @@ dead — it depended on the now-retired Phase 1 drift-check pipeline. The *probl
 to solve — the seven-script single-writer race — is still open, but it is no longer tracked as this
 ADR's Phase 2: **CTL-1631** now owns it as a standalone ticket, replacing the retired Phase-2 plan
 rather than continuing it. Phase 3 — as originally scoped, a `(orch_id,ticket)` SQLite mirror —
-**did ship**, as **CTL-532**: the broker
-folds every event on the log (not just a dedicated command event) into a pure
-`reduceWorkerStateEvent` reducer via `projectWorkerStateEvent`, and upserts the result into a SQLite
-`worker_state` table (`broker/broker-state.mjs`) — one row per `(orchestrator, ticket)` with phase,
-status, PR number, and revive count. Only `phase`/`status` (and the `last_event_id`/`last_event_ts`
-watermark itself) are gated on that watermark — order-independent for distinct timestamps,
-last-write-wins by processing order on an exact tie; `pr_number` (COALESCE) and `revive_count` (MAX)
-apply unconditionally on every upsert regardless of event order. The table is purely observational —
-it never reads or writes the canonical `workers/<TICKET>.json`. See ADR-018 for the full history.
+**did ship**, as **CTL-532**: the broker folds every event on the log (not just a dedicated command
+event) into a pure `reduceWorkerStateEvent` reducer via `projectWorkerStateEvent`, and upserts the
+result into a SQLite `worker_state` table (`broker/broker-state.mjs`) — one row per
+`(orchestrator, ticket)` with phase, status, PR number, and revive count. Only `phase`/`status` (and
+the `last_event_id`/`last_event_ts` watermark itself) are gated on that watermark —
+order-independent for distinct timestamps, last-write-wins by processing order on an exact tie;
+`pr_number` (COALESCE) and `revive_count` (MAX) apply unconditionally on every upsert regardless of
+event order. The table is purely observational **with respect to worker state** — it never reads or
+writes the canonical `workers/<TICKET>.json`. That is a statement about what it does *not* drive,
+**not** a claim that nothing consumes it: `worker_state` has a live, **default-on** reader (audited
+CTL-1791). `hasActiveWorkers` (`broker/broker-state.mjs`) answers "is the fleet working right now?"
+from a single `EXISTS` over non-terminal rows fresher than `ACTIVE_WORKER_FRESHNESS_MS` (30 min);
+`router.mjs`'s tri-state `fleetActivity` wrapper feeds it to the **CTL-1122 ingestion-recency gate**
+(`checkSourceRecency`, enabled unless `CATALYST_INGESTION_RECENCY=0`) and to the watchdog's
+empty-interests severity discriminator. Dropping the table would not fail loudly — `fleetActivity`
+catches the `no such table` throw and returns `null` (unknown), which the fail-closed gate reads as
+"not demonstrably active" and forces severity `up`, **silently blinding** the ingestion-recency
+detector. (`RECENCY_SOURCES` wires **monitor and GitHub only**; `catalyst.linear` is deliberately
+DEFERRED — the linear-webhook bot-skip guard suppresses bot-authored issue events before they reach
+the log, so the source goes quiet even with a worker in flight.) `getStaleWorkers` is the one genuinely unwired export (its own comment
+says so). See ADR-018 for the full history.
 
 ## Deployment Mode (CTL-1617)
 

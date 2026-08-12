@@ -734,6 +734,8 @@ jobs:
             event-log-window.test.mjs \
             event-log-read-guard.test.mjs \
             env-restore-guard.test.mjs \
+            gh-state-ignore-guard.test.mjs \
+            install-seam-guard.test.mjs \
             fence-guard.test.mjs \
             fence-standoff.test.mjs \
             fence-guard-integration.test.mjs \

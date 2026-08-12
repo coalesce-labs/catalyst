@@ -105,3 +105,8 @@ docs/specs/**/*.png
 # unset, so any test-spawned `gh` (even `gh --version`) writes .local/state/gh/device-id under the
 # process cwd. Root-anchored: this must never shadow a package-local .local/ someone adds later.
 /.local/
+# ...and the same artifact at DEPTH: workflows run tests from several nested working directories,
+# so the root anchor above covers only one of them. Scoped to the gh state dir specifically — a
+# bare `**/.local/` would ignore unrelated package-local content. Pinned by
+# plugins/dev/scripts/execution-core/gh-state-ignore-guard.test.mjs.
+**/.local/state/gh/
