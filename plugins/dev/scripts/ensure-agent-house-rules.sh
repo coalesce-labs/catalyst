@@ -53,6 +53,7 @@ say() { [[ $QUIET -eq 1 ]] || printf '%s\n' "$*"; }
 die() { echo "ensure-agent-house-rules: $1" >&2; exit "${2:-5}"; }
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/portable-stat.sh"
 BEGIN_MARK='<!-- catalyst-house-rules:begin -->'
 END_MARK='<!-- catalyst-house-rules:end -->'
 BRIDGE_LINE='@AGENTS.md'
@@ -155,7 +156,7 @@ write_through() {
 		local real; real="$(readlink_f "$dest")"
 		cat "$src" >"$real" || die "failed to write ${dest#"$REPO"/} via symlink (read-only?)"
 	elif [[ -f "$dest" ]]; then
-		local mode tmp; mode="$(stat -c '%a' "$dest" 2>/dev/null || stat -f '%Lp' "$dest" 2>/dev/null || echo '')"
+		local mode tmp; mode="$(portable_stat_mode "$dest" || echo '')"
 		tmp="$(mktemp "$(dirname "$dest")/.house-rules.XXXXXX" 2>/dev/null)" || die "cannot create temp next to ${dest#"$REPO"/} (read-only dir?)"
 		if ! cat "$src" >"$tmp"; then rm -f "$tmp"; die "failed to stage ${dest#"$REPO"/}"; fi
 		[[ -n "$mode" ]] && chmod "$mode" "$tmp" 2>/dev/null

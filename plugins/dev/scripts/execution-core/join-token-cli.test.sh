@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/portable-stat.sh"
 # join-token-cli.test.sh — catalyst-cluster join-token verb contract (CTL-1184).
 # Run: bash plugins/dev/scripts/execution-core/join-token-cli.test.sh
 
@@ -16,7 +17,7 @@ check "prints CATALYST_JOIN_TOKEN=jt_ line" \
 check "prints a TTL / expiry line" \
   'grep -qiE "ttl|expires" <<<"$OUT"'
 check "writes the 0600 store file" \
-  '[[ -f "$TMP/cluster/join-token.json" ]] && [[ "$(stat -f %Lp "$TMP/cluster/join-token.json")" == "600" ]]'
+  '[[ -f "$TMP/cluster/join-token.json" ]] && [[ "$(portable_stat_mode "$TMP/cluster/join-token.json")" == "0600" ]]'
 check "stored token matches printed token" \
   '[[ "$(grep -oE "jt_[0-9a-f]{64}" <<<"$OUT" | head -1)" == "$(grep -oE "jt_[0-9a-f]{64}" "$TMP/cluster/join-token.json" | head -1)" ]]'
 

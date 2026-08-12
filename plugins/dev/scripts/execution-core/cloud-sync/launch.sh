@@ -17,6 +17,7 @@ _SRC="${BASH_SOURCE[0]}"
 while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
+source "${SCRIPT_DIR}/../../lib/portable-stat.sh"
 
 log()  { printf '[catalyst-cloud-sync] %s\n' "$*"; }
 fail() { printf '[catalyst-cloud-sync] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -42,7 +43,7 @@ _warn_if_readable() {
   # stat perms portably (BSD/macOS -f%Lp, GNU -c%a). Last two octal digits = group + other;
   # if either has the read bit (4) set, the secret is exposed to other local users.
   local mode
-  mode="$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null || echo '')"
+  mode="$(portable_stat_mode "$f" || echo '')"
   [[ "$mode" =~ ^[0-7]+$ ]] || return 0
   local grp=$(( ${mode: -2:1} )) oth=$(( ${mode: -1:1} ))
   if (( (grp & 4) != 0 || (oth & 4) != 0 )); then

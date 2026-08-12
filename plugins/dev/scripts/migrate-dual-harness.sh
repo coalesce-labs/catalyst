@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/portable-stat.sh"
 # migrate-dual-harness.sh — migrate a single-harness repo (Claude-only monolithic
 # CLAUDE.md, or Codex-only AGENTS.md-with-no-bridge) to the dual-harness layout so
 # BOTH Claude Code and Codex load the same instructions and the same skills.
@@ -305,8 +307,8 @@ elif [[ -d "$CS" ]]; then
 				# silently drop group access / setgid semantics. The tree
 				# roots themselves are compared first (-mindepth 1 skips them
 				# in the loop, where the rel-path arithmetic needs a child).
-				cs_mode="$(stat -c %a "$CS" 2>/dev/null || stat -f %Lp "$CS" 2>/dev/null)"
-				as_mode="$(stat -c %a "$AS" 2>/dev/null || stat -f %Lp "$AS" 2>/dev/null)"
+				cs_mode="$(portable_stat_mode "$CS")"
+				as_mode="$(portable_stat_mode "$AS")"
 				if [[ "$cs_mode" != "$as_mode" ]]; then
 					SKILLS_ACTION="ambiguous"
 					SKILLS_MSG="byte-identical but the tree roots' modes differ: .claude/skills is mode ${cs_mode:-unreadable} but .agents/skills is ${as_mode:-unreadable}"
@@ -314,8 +316,8 @@ elif [[ -d "$CS" ]]; then
 				[[ "$SKILLS_ACTION" == "collapse" ]] && while IFS= read -r cs_file; do
 					rel_path="${cs_file#"$CS"/}"
 					as_file="$AS/$rel_path"
-					cs_mode="$(stat -c %a "$cs_file" 2>/dev/null || stat -f %Lp "$cs_file" 2>/dev/null)"
-					as_mode="$(stat -c %a "$as_file" 2>/dev/null || stat -f %Lp "$as_file" 2>/dev/null)"
+					cs_mode="$(portable_stat_mode "$cs_file")"
+					as_mode="$(portable_stat_mode "$as_file")"
 					if [[ "$cs_mode" != "$as_mode" ]]; then
 						SKILLS_ACTION="ambiguous"
 						SKILLS_MSG="byte-identical but modes differ: '${rel_path}' is mode ${cs_mode:-unreadable} under .claude/skills but ${as_mode:-unreadable} under .agents/skills"
