@@ -9,15 +9,13 @@
 // Ordered fallback: (auto-fix [deferred]) → delegate → human.
 import { enqueueDelegateIntent } from "./delegate-queue.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
-import { readDelegateRunnerConfig } from "./config.mjs";
+import { readDelegateRunnerConfig, readDelegateFirstConfig } from "./config.mjs";
 
-const VALID_MODES = new Set(["off", "shadow", "enforce"]);
-
-// readDelegateFirstMode — read CATALYST_DELEGATE_FIRST; default "off".
-// Mirrors readBoardHealthConfig/CATALYST_RECOVERY_PASS parsing style.
+// readDelegateFirstMode — env → Layer-2 → "off". Delegates to the config-ladder
+// reader in config.mjs (CTL-1774 Gap B fix). The (env = process.env) injection
+// contract is preserved: all existing callers that pass an explicit env bag still work.
 export function readDelegateFirstMode(env = process.env) {
-  const raw = env.CATALYST_DELEGATE_FIRST ?? "off";
-  return VALID_MODES.has(raw) ? raw : "off";
+  return readDelegateFirstConfig(env).mode;
 }
 
 // ── routeStuckTicketToDelegate ────────────────────────────────────────────────
@@ -69,12 +67,12 @@ export function routeStuckTicketToDelegate(
 
   // helper: call the Phase-1 label chokepoint and return { labelled: bool }
   const labelDirect = () => {
-    const labelled = labelNeedsHumanUnlessBeliefOwner(
-      orchDir,
-      ticket,
-      applyLabel,
-      { env, site, log: logArg, explanation }
-    );
+    const labelled = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, applyLabel, {
+      env,
+      site,
+      log: logArg,
+      explanation,
+    });
     return labelled;
   };
 
@@ -112,16 +110,11 @@ export function routeStuckTicketToDelegate(
   }
 
   const enqueue = deps.enqueue ?? enqueueDelegateIntent;
-  const q = enqueue(
-    ticket,
-    { kind, phase: "recovery-pass", reason, boardContext, briefObj },
-    deps
-  );
+  const q = enqueue(ticket, { kind, phase: "recovery-pass", reason, boardContext, briefObj }, deps);
 
   // Mirror enqueueRecoveryItemDelegate's `initiated` predicate: a fresh enqueue
   // OR an idempotent no-op both mean the delegate already owns the ticket.
-  const initiated =
-    q.enqueued || q.reason === "already-pending" || q.reason === "worker-live";
+  const initiated = q.enqueued || q.reason === "already-pending" || q.reason === "worker-live";
 
   if (initiated) {
     appendEvent({ name: "delegate.routed", ticket, site, reason: q.reason });

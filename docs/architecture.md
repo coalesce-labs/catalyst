@@ -43,6 +43,18 @@ Cross-orchestrator visibility lives at `~/catalyst/state.json` — a single lock
 all orchestrators/workers write via `catalyst-state.sh`. It is a **denormalized summary**;
 per-orchestrator local state in worktrees stays the source of truth for crash recovery (ADR-006).
 
+**Liveness (audited CTL-1791, 2026-08-11).** `state.json` is written by the **legacy-wave** path
+only; the execution-core daemon writes none of it, so on an execution-core host the file is
+routinely **absent** (measured: no `~/catalyst/state.json`, `catalyst.db.orchestrators` = 0 rows).
+Absence is therefore not evidence the machinery is dead. `catalyst-state.sh` retains live callers on
+both paths and is **not** removable: `plugins/legacy/skills/orchestrate/SKILL.md` (`ensure-run-dir`,
+`register`, `update`, `worker`, `heartbeat`, `attention`, `resolve-attention`, `archive`, `event`)
+and `plugins/legacy/skills/oneshot/SKILL.md` (`event`, `worker`, `attention`) — the documented
+runtime fallback — plus, outside the legacy plugin, `setup-orchestrator.sh` (`init`,
+`ensure-run-dir`), `emit-worker-status-change.sh`, `compound-log.sh`, `orchestrate-roll-usage.sh`,
+`orchestrate-status.sh`, and the `orchestrate-*` helper family, with `install-cli.sh` /
+`check-setup.sh` installing and verifying it as the `catalyst-state` CLI.
+
 ```
 ~/catalyst/
 ├── state.json              # active orchestrators (denormalized summary)
@@ -58,7 +70,14 @@ per-orchestrator local state in worktrees stays the source of truth for crash re
   `session_events`, `session_metrics`, `session_tools`, `session_prs`, `schema_migrations`. WAL mode
   → concurrent readers (incl. `orch-monitor`). Schema: `plugins/dev/scripts/db-migrations/`.
   ADR-008. `catalyst-state.sh` still writes JSON/JSONL during the migration period for backward
-  compatibility, so SQLite and the JSONL log coexist.
+  compatibility, so SQLite and the JSONL log coexist. **Row counts are not a liveness signal**
+  (audited CTL-1791): `session_metrics` / `session_tools` / `session_prs` measure **0 rows** on the
+  execution-core fleet while `sessions` holds 960 — the `catalyst-session.sh metric|tool|pr` writers
+  are simply never reached by the phase-agent dispatch path, not absent. All three tables keep live
+  readers that a `DROP` breaks with `no such table`: `catalyst-session.sh read`/`history`/`stats`/
+  `compare`, orch-monitor's `board-data.mjs` (per-ticket and per-phase cost rollups),
+  `history-store.ts`, `session-store.ts`, `ticket-runs.mjs`, and `ticket-retro/gather-retro.sh` —
+  and `check-setup.sh` grades all three in its 5-table `core_tables` gate.
 - **state.json** — active-orchestrator registry (progress, worker status, attention items). Schema:
   `plugins/dev/templates/global-state.json`.
 - **events/** — every phase transition, PR creation, verification result, attention item. Schema:
@@ -132,8 +151,20 @@ result into a SQLite `worker_state` table (`broker/broker-state.mjs`) — one ro
 the `last_event_id`/`last_event_ts` watermark itself) are gated on that watermark —
 order-independent for distinct timestamps, last-write-wins by processing order on an exact tie;
 `pr_number` (COALESCE) and `revive_count` (MAX) apply unconditionally on every upsert regardless of
-event order. The table is purely observational — it never reads or writes the canonical
-`workers/<TICKET>.json`. See ADR-018 for the full history.
+event order. The table is purely observational **with respect to worker state** — it never reads or
+writes the canonical `workers/<TICKET>.json`. That is a statement about what it does *not* drive,
+**not** a claim that nothing consumes it: `worker_state` has a live, **default-on** reader (audited
+CTL-1791). `hasActiveWorkers` (`broker/broker-state.mjs`) answers "is the fleet working right now?"
+from a single `EXISTS` over non-terminal rows fresher than `ACTIVE_WORKER_FRESHNESS_MS` (30 min);
+`router.mjs`'s tri-state `fleetActivity` wrapper feeds it to the **CTL-1122 ingestion-recency gate**
+(`checkSourceRecency`, enabled unless `CATALYST_INGESTION_RECENCY=0`) and to the watchdog's
+empty-interests severity discriminator. Dropping the table would not fail loudly — `fleetActivity`
+catches the `no such table` throw and returns `null` (unknown), which the fail-closed gate reads as
+"not demonstrably active" and forces severity `up`, **silently blinding** the ingestion-recency
+detector. (`RECENCY_SOURCES` wires **monitor and GitHub only**; `catalyst.linear` is deliberately
+DEFERRED — the linear-webhook bot-skip guard suppresses bot-authored issue events before they reach
+the log, so the source goes quiet even with a worker in flight.) `getStaleWorkers` is the one genuinely unwired export (its own comment
+says so). See ADR-018 for the full history.
 
 ## Deployment Mode (CTL-1617)
 
@@ -324,9 +355,9 @@ CTL-707 replaced the binary CTL-667 rebase with a 4-layer strategy:
 
 Before config resolution, signal creation, rebase, and worker launch, the dispatcher resolves the
 ticket worktree through an explicit flag, the project registry, the current repository, then a
-backwards-compatible cwd fallback. It changes into that resolved tree, making dispatch safe from
-any caller cwd; the JS caller's `cwd` remains a belt-and-braces reinforcement. This also prevents
-L3 destroy-and-recreate from selecting a bystander worktree.
+backwards-compatible cwd fallback. It changes into that resolved tree, making dispatch safe from any
+caller cwd; the JS caller's `cwd` remains a belt-and-braces reinforcement. This also prevents L3
+destroy-and-recreate from selecting a bystander worktree.
 
 - **L1 — Periodic background refresh** (`execution-core/worktree-refresh-timer.mjs`): keeps idle
   running worktrees current. Config
@@ -345,18 +376,17 @@ L3 destroy-and-recreate from selecting a bystander worktree.
 | `phase.<phase>.auto-rebased.<ticket>`                | INFO     | L1 + L2 (clean/additive) |
 | `phase.<phase>.rebase-conflict-categorized.<ticket>` | WARN     | L2 (pre-stall)           |
 | `phase.<phase>.rebase-conflict-stalled.<ticket>`     | ERROR    | L2 (terminal)            |
-| `phase.<phase>.dispatch-cwd-corrected.<ticket>`      | WARN     | CAT-31 resolver           |
+| `phase.<phase>.dispatch-cwd-corrected.<ticket>`      | WARN     | CAT-31 resolver          |
 
 Loki:
 `{job="catalyst-events"} | json | attributes["event.name"] =~ "phase\\..*\\.auto-rebased\\..*"`
 (swap suffix per event).
 
 Invariants (unchanged from CTL-667): **cwd-independent** (the target is resolved, not inherited);
-**fresh-only** (resume `--resume-session` skips, CTL-658);
-**build-phase-only** (`is_rebase_phase` in `lib/phase-sequence.sh`;
-`triage`/`pr`/`remediate`/`monitor-*`/`teardown` exempt); **local-only** (never pushes/touches the
-PR; `.catalyst/config.json`,`.trunk/*` stashed across rebase); transient `git fetch` failure (rc=1)
-→ proceed un-rebased.
+**fresh-only** (resume `--resume-session` skips, CTL-658); **build-phase-only** (`is_rebase_phase`
+in `lib/phase-sequence.sh`; `triage`/`pr`/`remediate`/`monitor-*`/`teardown` exempt); **local-only**
+(never pushes/touches the PR; `.catalyst/config.json`,`.trunk/*` stashed across rebase); transient
+`git fetch` failure (rc=1) → proceed un-rebased.
 
 ### PR as the durable work record (CTL-783)
 
@@ -418,8 +448,8 @@ The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode 
 Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
 PR-state resolver, background-job liveness probe, stall clearer, and status writer once; Pass 0u
 uses them to build its act registry, while Pass 0r receives both that registry and the raw bundle
-for capability-checked fallback construction. An injected partial registry therefore falls back
-to real dependencies instead of either using inert defaults or failing as unavailable.
+for capability-checked fallback construction. An injected partial registry therefore falls back to
+real dependencies instead of either using inert defaults or failing as unavailable.
 
 The recovery candidate contract is `{ ticket, phase, signal }`. `phase` names the exact
 `.unstuck-orphan-merge-<phase>.applied` idempotency marker, and `signal.bg_job_id` feeds the
@@ -732,21 +762,22 @@ file's edit isn't invisible to the salvage the same way it's invisible to plain 
 dirty/uninitialized submodule (any depth, via `git submodule status --recursive`) is salvaged
 recursively — its own uncommitted diff + untracked files, not just the superproject's opaque
 `Subproject commit <sha>-dirty` marker. The orphan-sweep's `ORPHAN_GITFILE` case (a stale/missing
-`.git` file pointer — not a usable git worktree, so the git-based primitive above can't inspect it at
-all) instead calls the primitive's sibling `salvage_raw_directory` (plain `tar`, no git involved)
+`.git` file pointer — not a usable git worktree, so the git-based primitive above can't inspect it
+at all) instead calls the primitive's sibling `salvage_raw_directory` (plain `tar`, no git involved)
 before its `rm -rf`. Because the sweep runs every 1–3h and revisits a retained
 `SALVAGE_UNPUSHED`/`SALVAGE_DIRTY` worktree every pass, orphan-sweep wraps its own calls in a
 `salvage_worktree_dedup` fingerprint check (HEAD sha + a git-blob-hash of the working diff/staged
-diff/untracked-file set, stored per-worktree under `~/catalyst/salvage/.state/`) so an unchanged tree
-is NOT re-archived under a new unique name every single sweep — this dedup lives in orphan-sweep.sh
-itself, not inside `salvage_worktree`, so the primitive's other callers (each acting on a worktree
-exactly once) and its own multi-call test contract are unaffected. The `worktree.salvage.*` prefix is
-**unprotected** under the CTL-1142 namespace contract (no `isBrokerProtectedName` collision — it
-routes through `shouldSkipEvent` normally). Salvage is best-effort/fail-open — it never blocks a
-removal — layered on top of the existing fail-closed `_removal_guard_ok` live-handle gate, which is
-re-asserted immediately after salvage completes (not just before it starts) at every synchronous call
-site, since salvage's own duration widens the window a live handle could appear in. (Retention/GC of
-`~/catalyst/salvage/` beyond the dedup above is deferred follow-up.)
+diff/untracked-file set, stored per-worktree under `~/catalyst/salvage/.state/`) so an unchanged
+tree is NOT re-archived under a new unique name every single sweep — this dedup lives in
+orphan-sweep.sh itself, not inside `salvage_worktree`, so the primitive's other callers (each acting
+on a worktree exactly once) and its own multi-call test contract are unaffected. The
+`worktree.salvage.*` prefix is **unprotected** under the CTL-1142 namespace contract (no
+`isBrokerProtectedName` collision — it routes through `shouldSkipEvent` normally). Salvage is
+best-effort/fail-open — it never blocks a removal — layered on top of the existing fail-closed
+`_removal_guard_ok` live-handle gate, which is re-asserted immediately after salvage completes (not
+just before it starts) at every synchronous call site, since salvage's own duration widens the
+window a live handle could appear in. (Retention/GC of `~/catalyst/salvage/` beyond the dedup above
+is deferred follow-up.)
 
 ### Linear app-actor self-echo guard (`botUserId`)
 
@@ -816,8 +847,57 @@ a fully-dead daemon is a _missing series_, which `count_over_time == 0` cannot a
 **`<name>` slot exceptions** (in `recovery.mjs`, NOT pipeline phases): `dispatch`
 (`phase.dispatch.failed.<ticket>` — the only exception with a terminal-status suffix that matches
 the pattern; real phase rides `payload.target_phase`); `scheduler` (internal observability:
-`yield-file-skip`, `cooldown-gc`, …); `advance` (phase-advance gate `held`). The latter two never
-match the terminal-status set.
+`yield-file-skip`, `cooldown-gc`, …); `advance` (phase-advance gate — `held` on a refusal, `applied`
+on a performed advance, CTL-1789). The latter two never match the terminal-status set, so
+`tryPhaseLifecycleRoute` returns `[]` for every event in them — pure audit, zero wake side effect.
+
+### Advancement-gate observability + terminal attribution (CTL-1789)
+
+The advancement gate used to emit **only on refusal**: 2026-08 held 307 `phase.advance.held` events
+and zero `phase.advance.*` of any other name, so the FSM's actual advances were invisible and every
+consumer had to infer them from the successor phase's dispatch (which conflates a fresh advance with
+a revive, a resume, and a new-work pull).
+
+- **`phase.advance.applied.<TICKET>`** (`recovery.mjs` `defaultAppendPhaseAdvanceAppliedEvent`,
+  emitted from the scheduler's advancement sweep inside the `dv.ok` branch, i.e. only after
+  `dispatchAndVerify` confirmed a live successor worker). Severity **INFO** (`held` stays WARN).
+  Payload: `{from, to, evidence, evidence_reason, asserted_by, assertion_ref}`; `evidence` plus
+  `from`/`to` are also promoted to attributes (`catalyst.advance.*`) because otel-forward strips
+  `body.payload` off-machine. `from` is re-derived with the extracted pure
+  `latestLivePhase(signals)` — the SAME function `deriveAdvancement` keys off, so the audit can
+  never name a different predecessor than the FSM used. **One exception — the remediate detour**:
+  `remediate` is ANCILLARY (∉ `PHASES`), so `latestLivePhase` can never return it, and
+  `maybeResetForRemediateCycle` has already deleted `phase-remediate.json` before the sweep reads
+  its map. Left on `latestLivePhase` alone, every remediation re-entry named `from=implement` and
+  classified its evidence off the stale implement terminal — laundering a FABRICATED remediation
+  into a DECLARED advance. That one edge is resolved through `resolveReapPredecessor` over the
+  PRE-reset snapshot (with `remediateRaw` for the deleted file), the same snapshot + resolver the
+  predecessor reap uses, so the audit's `from` and the reaped worker are always the same phase.
+- **`assertedBy` on the phase signal** (`execution-core/assertion-evidence.mjs`, a zero-import leaf
+  owning `ASSERTED_BY` + `classifyAdvanceEvidence`/`explainAdvanceEvidence`). Three producers can
+  write a terminal `done` and were previously byte-indistinguishable: the agent's own
+  `phase-agent-emit-complete` (**declared**), `flipSignalDoneOnSuccess`'s clean-SDK-exit flip
+  (**fabricated** — the agent never declared anything), and the recovery-reclaim / legacy-revive
+  synthetic completes (**fabricated** — inferred from a work-done probe). Writers stamp their id:
+  the wrapper defaults to `phase-agent-emit-complete` and accepts `--asserted-by` so infrastructure
+  callers self-identify. Unknown/missing markers classify **absent**, never `declared` — the fail
+  direction is deliberate. `evidence_reason` (`no-predecessor` / `unreadable-signal` / `no-marker` /
+  `unknown-writer`) keeps `absent` diagnosable while the contract stays three-valued. **One
+  registry, two unavoidable bash mirrors**: the JS writers (`recovery.mjs`,
+  `sdk-run-phase-agent.mjs`) import `ASSERTED_BY`, but `phase-agent-emit-complete` (its
+  `--asserted-by` default) and `orchestrate-revive` (its flag value) are bash and cannot. Those two
+  literals are held byte-identical to the registry MECHANICALLY by
+  `execution-core/assertion-evidence-parity.test.mjs` — the same one-registry/hand-written-mirror/
+  cross-stack-parity-suite discipline as `lib/secret-contract.mjs`. Each anchor matches on the
+  variable/flag, never the value, and fails CLOSED when an anchor disappears, so a rename on either
+  side alone fails rather than silently reclassifying valid terminals as `unknown-writer`.
+- **Rollout caveat**: signals written before this shipped carry no marker, so the first pipeline
+  pass after deploy reads `absent` / `no-marker`. Do not alarm on `absent` until a full ticket has
+  cycled.
+- **Scope**: only the terminal-**success** writers are stamped (plus the SDK backstop). The ~20
+  `stalled`/`failed`/`aborted`/`needs-human` writers are deliberately unstamped — those statuses are
+  never advance-eligible (`deriveAdvancement` gates on `done`, or `skipped` for `monitor-deploy`
+  only), so they can never be the `from` signal of an applied advance.
 
 **Enforcement surfaces:**
 
@@ -829,6 +909,9 @@ match the terminal-status set.
   `recovery.mjs` source-scan).
 - `plugins/dev/scripts/orch-monitor/__tests__/namespace-parity.test.ts` — orch-monitor producer
   parity (GitHub/Linear/service-health names + prefix-family invariant).
+- `plugins/dev/scripts/execution-core/assertion-evidence-parity.test.mjs` — CTL-1789 writer-id
+  parity: the `ASSERTED_BY` registry vs its two bash mirrors, plus a no-re-typed-literal check on
+  the JS writers. Wired into the required `execution-core-tests` stable list.
 
 See `thoughts/shared/plans/2026-06-16-ctl-1142.md` §3.8.
 

@@ -283,6 +283,43 @@ if [ -z "${CATALYST_DRAIN_DISABLED:-}" ]; then pass "absent env file leaves over
 unset CATALYST_EXECUTION_CORE_ENV CATALYST_DRAIN_DISABLED
 rm -rf "$T11"
 
+echo "test 12 (CTL-1755): restart preserves the previous run's log as daemon.log.1"
+setup
+EC_LOG="${SCRATCH}/execution-core/daemon.log"
+mkdir -p "$(dirname "$EC_LOG")"
+printf 'sentinel-from-previous-run\n' > "$EC_LOG"
+# Cross-platform inode probe
+if stat -f %i "$EC_LOG" >/dev/null 2>&1; then
+	INODE_BEFORE="$(stat -f %i "$EC_LOG")"
+else
+	INODE_BEFORE="$(stat -c %i "$EC_LOG")"
+fi
+"$SCRIPT" start >/dev/null 2>&1 || true
+INODE_AFTER=""
+if [ -f "$EC_LOG" ]; then
+	if stat -f %i "$EC_LOG" >/dev/null 2>&1; then
+		INODE_AFTER="$(stat -f %i "$EC_LOG")"
+	else
+		INODE_AFTER="$(stat -c %i "$EC_LOG")"
+	fi
+fi
+if [ -f "${EC_LOG}.1" ] && grep -q 'sentinel-from-previous-run' "${EC_LOG}.1" 2>/dev/null; then
+	pass "restart: previous log preserved in daemon.log.1"
+else
+	fail "restart: previous log preserved in daemon.log.1" "daemon.log.1 missing or lacks sentinel"
+fi
+if [ -f "$EC_LOG" ] && ! grep -q 'sentinel-from-previous-run' "$EC_LOG" 2>/dev/null; then
+	pass "restart: daemon.log truncated (sentinel gone from primary)"
+else
+	fail "restart: daemon.log truncated" "sentinel still present in primary log (not truncated)"
+fi
+if [ -n "$INODE_AFTER" ] && [ "$INODE_BEFORE" = "$INODE_AFTER" ]; then
+	pass "restart: daemon.log inode preserved (Alloy continuity)"
+else
+	fail "restart: daemon.log inode preserved" "before=${INODE_BEFORE} after=${INODE_AFTER}"
+fi
+teardown
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"

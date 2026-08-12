@@ -537,6 +537,10 @@ cmd_start() {
   if [[ -z "$_cm_config_file" && -z "${CATALYST_CONFIG_PATH:-}" && -f "$CATALYST_DIR/.catalyst/config.json" ]]; then
     _cm_config_file="$CATALYST_DIR/.catalyst/config.json"
   fi
+  # CTL-1755: bounded rotate-on-boot so the previous run's log survives a restart.
+  # shellcheck source=lib/rotate-log-on-start.sh
+  [ -f "$SCRIPT_DIR/lib/rotate-log-on-start.sh" ] && . "$SCRIPT_DIR/lib/rotate-log-on-start.sh"
+  rotate_log_on_start "$CATALYST_DIR/monitor.log" 2>/dev/null || true
   CATALYST_CONFIG_FILE="$_cm_config_file" \
   CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \
@@ -891,6 +895,10 @@ _forward_start_impl() {
     echo "Forwarder already running (pid $(cat "$FORWARD_PID_FILE"))"
     return 0
   fi
+  # CTL-1755: bounded rotate-on-boot so the previous run's log survives a restart.
+  # shellcheck source=lib/rotate-log-on-start.sh
+  [ -f "$SCRIPT_DIR/lib/rotate-log-on-start.sh" ] && . "$SCRIPT_DIR/lib/rotate-log-on-start.sh"
+  rotate_log_on_start "$FORWARD_LOG" 2>/dev/null || true
   nohup bun run "$FORWARD_SCRIPT" > "$FORWARD_LOG" 2>&1 &
   local fwd_pid=$!
   disown "$fwd_pid" 2>/dev/null || true
