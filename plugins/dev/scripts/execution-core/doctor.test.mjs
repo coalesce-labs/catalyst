@@ -29,6 +29,7 @@ import {
   checkSdkExecutorAuth,
   checkSdkDaemonEnv,
   checkConfigScopeLeak,
+  checkConfigProvenance,
   checkRepoIconTokenScope,
   defaultConfiguredRepos,
   checkNodeClass,
@@ -5512,6 +5513,211 @@ describe("checksForClass — checkSkillsDirPlugins registration", () => {
   for (const cls of ["worker", "developer", "monitor"]) {
     it(`wires checkSkillsDirPlugins into the ${cls} suite`, () => {
       expect(src({ recognized: true, class: cls })).toContain("checkSkillsDirPlugins");
+    });
+  }
+});
+
+// ─── checkConfigProvenance (CTL-1793) ────────────────────────────────────────
+//
+// The contract this check must never break: it is ADVISORY. runDoctor returns the
+// FAIL count as the process exit code and catalyst-join.sh gates member activation
+// on exit 0, so a FAIL here would take an otherwise-healthy fleet red overnight
+// for a purely observational finding. Three independent guards below: a fixture
+// matrix, a source-level STATUS.FAIL guard, and an end-to-end runDoctor exit code.
+
+describe("checkConfigProvenance (CTL-1793)", () => {
+  // A dump-shaped fixture — the check reads only these fields.
+  const mkDump = (over = {}) => ({
+    fingerprint: "abcdef0123456789",
+    layer1: { path: "/repo/.catalyst/config.json", present: true, parsed: true, hasOrchestration: true },
+    daemonLayer1: { path: "/repo/.catalyst/config.json", source: "exec-core-env-file", pinned: true },
+    rows: [],
+    ...over,
+  });
+  const byName = (checks, name) => checks.find((c) => c.name === name);
+  // Default the fixtures to a WORKER: only a worker runs the execution-core
+  // daemon, so that is the class where the divergence finding is actionable.
+  const provenance = (deps) => byName(checkConfigProvenance({ nodeClass: "worker", ...deps }), "config-provenance");
+
+  it("PASSes when daemon and doctor read the same Layer-1", () => {
+    const c = provenance({ dump: mkDump(), doctorLayer1: "/repo/.catalyst/config.json", repoLayer1: "/repo/.catalyst/config.json" });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("fingerprint=abcdef012345");
+  });
+
+  // THE measured live-fleet bug: nothing pins CATALYST_CONFIG_FILE, so the daemon
+  // reads whatever cwd it was launched from — a different file than doctor grades.
+  it("WARNs when the daemon's Layer-1 is UNPINNED", () => {
+    const c = provenance({
+      dump: mkDump({ daemonLayer1: { path: null, source: "daemon-cwd", pinned: false } }),
+      doctorLayer1: "/repo/.catalyst/config.json",
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain("UNPINNED");
+    expect(c.detail).toContain("CATALYST_CONFIG_FILE");
+  });
+
+  it("WARNs, naming both paths, when the daemon reads a different file than doctor", () => {
+    const c = provenance({
+      dump: mkDump({ daemonLayer1: { path: "/plugin-source/.catalyst/config.json", source: "exec-core-env-file", pinned: true } }),
+      doctorLayer1: "/repo/.catalyst/config.json",
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain("/plugin-source/.catalyst/config.json");
+    expect(c.detail).toContain("/repo/.catalyst/config.json");
+  });
+
+  it("WARNs when the daemon's (agreed) Layer-1 carries no catalyst.orchestration stanza", () => {
+    const c = provenance({
+      dump: mkDump({
+        daemonLayer1: { path: "/x/.catalyst/config.json", source: "catalyst-dir", pinned: true },
+        layer1: { path: "/x/.catalyst/config.json", present: true, parsed: true, hasOrchestration: false },
+      }),
+      doctorLayer1: "/x/.catalyst/config.json",
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain("catalyst.orchestration");
+  });
+
+  it("WARNs when the daemon's Layer-1 is absent or malformed", () => {
+    for (const layer1 of [
+      { path: "/x/.catalyst/config.json", present: false, parsed: false, hasOrchestration: false },
+      { path: "/x/.catalyst/config.json", present: true, parsed: false, hasOrchestration: false },
+    ]) {
+      const c = provenance({
+        dump: mkDump({ daemonLayer1: { path: "/x/.catalyst/config.json", source: "env", pinned: true }, layer1 }),
+        doctorLayer1: "/x/.catalyst/config.json",
+      });
+      expect(c.status).toBe(STATUS.WARN);
+    }
+  });
+
+  it("lists per-host env overrides as INFO, never as a grade change", () => {
+    const checks = checkConfigProvenance({
+      dump: mkDump({
+        rows: [
+          { key: "catalyst.stallJanitor.mode", value: "enforce", provenance: "env-override", envVar: "CATALYST_STALL_JANITOR", secret: false },
+          { key: "catalyst.boardHealth.mode", value: "shadow", provenance: "config", envVar: null, secret: false },
+        ],
+      }),
+      doctorLayer1: "/repo/.catalyst/config.json",
+    });
+    const c = byName(checks, "config-env-overrides");
+    expect(c.status).toBe(STATUS.INFO);
+    expect(c.detail).toContain("catalyst.stallJanitor.mode=enforce");
+    expect(c.detail).toContain("CATALYST_STALL_JANITOR");
+    expect(c.detail).not.toContain("boardHealth");
+  });
+
+  it("never reports a SECRET row among the env overrides", () => {
+    const checks = checkConfigProvenance({
+      dump: mkDump({ rows: [{ key: "secrets.LINEAR_API_TOKEN", value: "set", provenance: "env-override", envVar: "LINEAR_API_TOKEN", secret: true }] }),
+      doctorLayer1: "/repo/.catalyst/config.json",
+    });
+    expect(byName(checks, "config-env-overrides").detail).toContain("no config knob");
+  });
+
+  it("degrades a THROWING dependency to INFO instead of crashing the suite", () => {
+    const checks = checkConfigProvenance({
+      get dump() {
+        throw new Error("boom");
+      },
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.INFO);
+    expect(checks[0].detail).toContain("boom");
+  });
+
+  // Only a worker runs the execution-core daemon; on monitor/developer nodes the
+  // "which Layer-1 does the daemon read" finding has no subject, so it must not
+  // become a permanent WARN that trains operators to ignore the check.
+  it("softens the divergence finding to INFO on a node that runs no daemon", () => {
+    const divergent = {
+      dump: mkDump({ daemonLayer1: { path: null, source: "daemon-cwd", pinned: false } }),
+      doctorLayer1: "/repo/.catalyst/config.json",
+    };
+    expect(provenance({ ...divergent, nodeClass: "worker" }).status).toBe(STATUS.WARN);
+    for (const cls of ["developer", "monitor"]) {
+      const c = provenance({ ...divergent, nodeClass: cls });
+      expect(c.status).toBe(STATUS.INFO);
+      expect(c.detail).toContain(`runs no execution-core daemon`);
+    }
+  });
+
+  it("keeps the env-override report on every node class", () => {
+    for (const cls of ["worker", "developer", "monitor"]) {
+      const checks = checkConfigProvenance({
+        nodeClass: cls,
+        dump: mkDump({ rows: [{ key: "catalyst.boardHealth.mode", value: "enforce", provenance: "env-override", envVar: "CATALYST_BOARD_HEALTH", secret: false }] }),
+        doctorLayer1: "/repo/.catalyst/config.json",
+      });
+      expect(byName(checks, "config-env-overrides").detail).toContain("catalyst.boardHealth.mode=enforce");
+    }
+  });
+
+  // GUARD 1 — fixture matrix: no input shape may ever produce a FAIL.
+  it("ADVISORY: no fixture — healthy, divergent, unpinned, absent, malformed, no-orchestration, garbage, throwing — yields FAIL", () => {
+    // Fixtures are LAZY factories: the throwing one must only throw INSIDE the
+    // check's try/catch. Building it eagerly (and spreading it) would fire the
+    // getter here and mask exactly the totality this test asserts.
+    const fixtures = [
+      (nodeClass) => ({ nodeClass, dump: mkDump(), doctorLayer1: "/repo/.catalyst/config.json" }),
+      (nodeClass) => ({ nodeClass, dump: mkDump({ daemonLayer1: { path: "/other.json", source: "env", pinned: true } }), doctorLayer1: "/repo/.catalyst/config.json" }),
+      (nodeClass) => ({ nodeClass, dump: mkDump({ daemonLayer1: { path: null, source: "daemon-cwd", pinned: false } }), doctorLayer1: "/repo/.catalyst/config.json" }),
+      (nodeClass) => ({ nodeClass, dump: mkDump({ layer1: { present: false, parsed: false, hasOrchestration: false }, daemonLayer1: { path: "/x", source: "env", pinned: true } }), doctorLayer1: "/x" }),
+      (nodeClass) => ({ nodeClass, dump: mkDump({ layer1: { present: true, parsed: false, hasOrchestration: false }, daemonLayer1: { path: "/x", source: "env", pinned: true } }), doctorLayer1: "/x" }),
+      (nodeClass) => ({ nodeClass, dump: mkDump({ layer1: { present: true, parsed: true, hasOrchestration: false }, daemonLayer1: { path: "/x", source: "env", pinned: true } }), doctorLayer1: "/x" }),
+      (nodeClass) => ({ nodeClass, dump: mkDump({ daemonLayer1: null }) }),
+      (nodeClass) => ({ nodeClass, dump: {} }),
+      (nodeClass) => ({ nodeClass, dump: null }),
+      (nodeClass) => ({
+        nodeClass,
+        get dump() {
+          throw new Error("boom");
+        },
+      }),
+    ];
+    for (const makeFixture of fixtures) {
+      for (const nodeClass of ["worker", "developer", "monitor", "bogus"]) {
+        expect(checkConfigProvenance(makeFixture(nodeClass)).every((c) => c.status !== STATUS.FAIL)).toBe(true);
+      }
+    }
+  });
+
+  // GUARD 2 — source-level: a future edit that adds a FAIL breaks CI immediately.
+  // (Same spirit as quota-field-doc-drift.test.sh.)
+  it("ADVISORY: the checkConfigProvenance source body contains no STATUS.FAIL", () => {
+    const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
+    const start = src.indexOf("export function checkConfigProvenance");
+    expect(start).toBeGreaterThan(-1);
+    const rest = src.slice(start + 1);
+    const nextIdx = rest.search(/\n(?:export )?(?:async )?function /);
+    const body = nextIdx === -1 ? rest : rest.slice(0, nextIdx);
+    expect(body).not.toContain("STATUS.FAIL");
+  });
+
+  // GUARD 3 — end-to-end: the worst fixture, through runDoctor, still exits 0.
+  it("ADVISORY: runDoctor exits 0 with only this check registered against a divergent fixture", async () => {
+    const code = await runDoctor({
+      checks: [
+        () =>
+          checkConfigProvenance({
+            dump: mkDump({ daemonLayer1: { path: null, source: "daemon-cwd", pinned: false } }),
+            doctorLayer1: "/repo/.catalyst/config.json",
+          }),
+      ],
+      json: true,
+      log: () => {},
+    });
+    expect(code).toBe(0);
+  });
+});
+
+describe("checksForClass — checkConfigProvenance registration (CTL-1793)", () => {
+  const src = (nc) => checksForClass(nc, {}).map((f) => f.toString()).join("\n");
+  for (const cls of ["worker", "developer"]) {
+    it(`wires checkConfigProvenance into the ${cls} suite`, () => {
+      expect(src({ recognized: true, class: cls })).toContain("checkConfigProvenance");
     });
   }
 });
