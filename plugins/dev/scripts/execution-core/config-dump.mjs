@@ -66,21 +66,30 @@ export const PROVENANCE = Object.freeze({
 
 // ─── env-file parsing ────────────────────────────────────────────────────────
 
-// parseEnvFileAssignments — every `[export ]KEY=value` assignment in an env-file
-// body, as a plain object. The daemon launcher `source`s ~/.config/catalyst/
-// execution-core.env, so these assignments are part of the daemon's EFFECTIVE env
-// even when the operator's interactive shell never exported them. Quotes are
-// stripped; `#` comment lines and blanks are skipped. Never throws.
+// parseEnvFileEntries — every `[export ]KEY=value` assignment in an env-file body,
+// as `{ key, value, exported }` records. Quotes are stripped; `#` comment lines and
+// blanks are skipped. Never throws.
+//
+// `exported` is load-bearing, not decoration. The launcher plain-`source`s
+// ~/.config/catalyst/execution-core.env with NO `set -a`
+// (catalyst-execution-core:214), and a child process inherits only EXPORTED
+// variables. So a bare `CATALYST_STALL_JANITOR=enforce` becomes a variable of the
+// launcher shell that the nohup'd daemon never sees — a fact the launcher itself
+// already documents at :134 ("A bare shell var satisfies ${!key} but is NOT
+// inherited by the nohup'd daemon child"), which is why it explicitly re-`export`s
+// the OTEL keys at :151. Reporting a bare assignment as in-force would be this
+// tool asserting exactly what the reader would NOT produce.
 //
 // This is the whole-file generalization of doctor.mjs's per-key parseEnvFileFlag /
 // overlayDaemonDrainEnv idiom — a line scan, so it needs no dynamic RegExp.
-export function parseEnvFileAssignments(text) {
-  const out = {};
+export function parseEnvFileEntries(text) {
+  const out = [];
   if (typeof text !== "string" || text === "") return out;
   for (const rawLine of text.split("\n")) {
     const line = rawLine.trim();
     if (line === "" || line.startsWith("#")) continue;
-    const body = line.startsWith("export ") ? line.slice(7).trim() : line;
+    const exported = line.startsWith("export ");
+    const body = exported ? line.slice(7).trim() : line;
     const eq = body.indexOf("=");
     if (eq <= 0) continue;
     const key = body.slice(0, eq).trim();
@@ -90,17 +99,37 @@ export function parseEnvFileAssignments(text) {
     if (value.length >= 2 && ((value[0] === '"' && value.endsWith('"')) || (value[0] === "'" && value.endsWith("'")))) {
       value = value.slice(1, -1);
     }
-    out[key] = value;
+    out.push({ key, value, exported });
+  }
+  return out;
+}
+
+// parseEnvFileAssignments — ALL assignments, bare and exported alike, as a plain
+// object. This is the LAUNCHER SHELL's view: `source` sets both kinds as shell
+// variables, so both satisfy the launcher's own `[[ -z "${VAR:-}" ]]` guards.
+// It is NOT the daemon's view — use parseEnvFileExports for that.
+export function parseEnvFileAssignments(text) {
+  const out = {};
+  for (const { key, value } of parseEnvFileEntries(text)) out[key] = value;
+  return out;
+}
+
+// parseEnvFileExports — only the `export`ed assignments: the subset the nohup'd
+// daemon child actually inherits.
+export function parseEnvFileExports(text) {
+  const out = {};
+  for (const { key, value, exported } of parseEnvFileEntries(text)) {
+    if (exported) out[key] = value;
   }
   return out;
 }
 
 // overlayEnvFile — the daemon's effective env: ambient env with the env-file's
-// assignments layered ON TOP. File wins, matching `source` semantics (the launcher
-// sources the file AFTER inheriting the ambient env). Mirrors doctor.mjs's
-// overlayDaemonDrainEnv, generalized to every key.
+// EXPORTED assignments layered ON TOP. File wins, matching `source` semantics (the
+// launcher sources the file AFTER inheriting the ambient env). Bare assignments are
+// deliberately excluded — see parseEnvFileEntries.
 export function overlayEnvFile(env = {}, envFileText = "") {
-  return { ...env, ...parseEnvFileAssignments(envFileText) };
+  return { ...env, ...parseEnvFileExports(envFileText) };
 }
 
 // ─── daemon-visible Layer-1 resolution ───────────────────────────────────────
@@ -128,9 +157,31 @@ export function resolveDaemonLayer1Path({
   const effective = overlayEnvFile(env, execCoreEnvText);
   const pin = effective.CATALYST_CONFIG_FILE;
   if (typeof pin === "string" && pin !== "") {
-    const fromFile = Object.hasOwn(parseEnvFileAssignments(execCoreEnvText), "CATALYST_CONFIG_FILE");
+    const fromFile = Object.hasOwn(parseEnvFileExports(execCoreEnvText), "CATALYST_CONFIG_FILE");
     return { path: pin, source: fromFile ? "exec-core-env-file" : "env", pinned: true };
   }
+
+  // A BARE `CATALYST_CONFIG_FILE=...` in the env file is the worst of both worlds,
+  // and silent. The launcher's auto-pin is guarded by
+  // `[[ -z "${CATALYST_CONFIG_FILE:-}" ]]` (:341), which a bare assignment
+  // SATISFIES AS SET — so the launcher skips pinning — while the nohup'd daemon
+  // child never inherits it. The daemon therefore falls all the way through to its
+  // own cwd-relative resolution, reading a Layer-1 file the operator believes they
+  // pinned away. Report that state distinctly rather than folding it into the
+  // ordinary unpinned case.
+  const bareAssignments = parseEnvFileAssignments(execCoreEnvText);
+  const barePin = Object.hasOwn(bareAssignments, "CATALYST_CONFIG_FILE")
+    ? bareAssignments.CATALYST_CONFIG_FILE
+    : null;
+  if (typeof barePin === "string" && barePin !== "") {
+    return {
+      path: null,
+      source: "daemon-cwd",
+      pinned: false,
+      barePinSuppressed: barePin,
+    };
+  }
+
   if (typeof catalystDir === "string" && catalystDir !== "") {
     const candidate = resolve(catalystDir, ".catalyst", "config.json");
     if (exists(candidate)) return { path: candidate, source: "catalyst-dir", pinned: true };
@@ -576,7 +627,16 @@ export function dumpConfig({
 
   const rows = keys.map((row) => resolveRow(row, { env: effectiveEnv, layer1: l1.parsed, layer2: l2.parsed }));
 
-  const envFileKeys = Object.keys(parseEnvFileAssignments(execCoreEnvText)).sort();
+  const envFileEntries = parseEnvFileEntries(execCoreEnvText);
+  const envFileKeys = [...new Set(envFileEntries.map((e) => e.key))].sort();
+  // Keys assigned WITHOUT `export`: present in the file, set in the launcher shell,
+  // and never inherited by the daemon child. An operator reading the file sees them
+  // as in-force; the daemon does not. Naming them is the whole point of this tool.
+  const bareKeys = [
+    ...new Set(envFileEntries.filter((e) => !e.exported).map((e) => e.key)),
+  ]
+    .filter((k) => !envFileEntries.some((e) => e.key === k && e.exported))
+    .sort();
 
   const hostRow = rows.find((r) => r.key === "catalyst.host.name");
   const resolvedHost =
@@ -600,7 +660,7 @@ export function dumpConfig({
       parsed: l2.ok,
     },
     // The env file's KEY SET is itself a divergence signal — values are never emitted.
-    execCoreEnv: { path: execCoreEnvPath, present: execCoreEnvText !== "", keys: envFileKeys },
+    execCoreEnv: { path: execCoreEnvPath, present: execCoreEnvText !== "", keys: envFileKeys, bareKeys },
     daemonLayer1,
     rows,
     fingerprint: fingerprintRows(rows),
@@ -625,11 +685,31 @@ function readOrNull(path) {
 // ladders getCatalystRepoDir() and getLayer2ConfigPath() use.
 export function collectConfigDump({ env = process.env, cwd = process.cwd(), now = new Date() } = {}) {
   const home = env.HOME || "";
-  const layer1Path = env.CATALYST_CONFIG_FILE || resolve(cwd, ".catalyst", "config.json");
   const layer2Path = env.CATALYST_LAYER2_CONFIG_FILE || resolve(home, ".config", "catalyst", "config.json");
   const execCoreEnvPath = env.CATALYST_EXECUTION_CORE_ENV || resolve(home, ".config", "catalyst", "execution-core.env");
   const execCoreEnvText = readOrNull(execCoreEnvPath) ?? "";
   const catalystDir = env.CATALYST_DIR || resolve(home, "catalyst");
+
+  // Resolve the daemon's Layer-1 FIRST, then read THAT file. Order matters: the
+  // env file is what carries a per-host `export CATALYST_CONFIG_FILE` pin, so a
+  // Layer-1 path taken from the raw ambient env (or this process's cwd) can name a
+  // different file than the daemon reads. Every Layer-1-derived row AND the
+  // fingerprint come from the bytes read here, so resolving them from the caller's
+  // cwd while REPORTING the daemon's path would make the dump disagree with itself
+  // in precisely the per-host-pin scenario it exists to diagnose.
+  const daemonLayer1 = resolveDaemonLayer1Path({
+    env,
+    execCoreEnvText,
+    catalystDir,
+    exists: (p) => readOrNull(p) !== null,
+  });
+  // When the daemon's ladder falls through to its own launch cwd (unknowable from
+  // here), fall back to this process's cwd — the pre-existing behavior, and the
+  // dump already labels that state `pinned: false` so the reader knows the Layer-1
+  // shown is an inference rather than the daemon's own resolution.
+  const layer1Path = daemonLayer1.pinned && daemonLayer1.path
+    ? daemonLayer1.path
+    : env.CATALYST_CONFIG_FILE || resolve(cwd, ".catalyst", "config.json");
 
   return dumpConfig({
     env,
@@ -641,12 +721,7 @@ export function collectConfigDump({ env = process.env, cwd = process.cwd(), now 
     layer2Text: readOrNull(layer2Path),
     execCoreEnvPath,
     execCoreEnvText,
-    daemonLayer1: resolveDaemonLayer1Path({
-      env,
-      execCoreEnvText,
-      catalystDir,
-      exists: (p) => readOrNull(p) !== null,
-    }),
+    daemonLayer1,
   });
 }
 

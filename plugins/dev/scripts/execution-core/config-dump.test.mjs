@@ -9,20 +9,24 @@
 //       source files, so a rename in a reader breaks this test instead of
 //       silently drifting the dump.
 
-import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   CONFIG_KEYS,
   DUMP_SCHEMA,
+  collectConfigDump,
   PROVENANCE,
   dumpConfig,
   fingerprintRows,
   getPath,
   overlayEnvFile,
   parseEnvFileAssignments,
+  parseEnvFileEntries,
+  parseEnvFileExports,
   renderHuman,
   renderJson,
   resolveDaemonLayer1Path,
@@ -58,7 +62,28 @@ describe("env-file parsing (the daemon's effective env)", () => {
   });
 
   test("file wins over ambient env (matches `source` semantics)", () => {
-    expect(overlayEnvFile({ X: "ambient", Y: "keep" }, "X=file")).toEqual({ X: "file", Y: "keep" });
+    expect(overlayEnvFile({ X: "ambient", Y: "keep" }, "export X=file")).toEqual({ X: "file", Y: "keep" });
+  });
+
+  // The launcher plain-`source`s the env file with NO `set -a`
+  // (catalyst-execution-core:214), and a child inherits only EXPORTED vars. Both
+  // live fleet files export every assignment (mini 23/23, mini-2 14/14), so this
+  // distinction is a guard against a future bare line, not a description of today.
+  test("a BARE assignment is not part of the daemon's effective env", () => {
+    expect(overlayEnvFile({ Y: "keep" }, "X=bare")).toEqual({ Y: "keep" });
+    expect(overlayEnvFile({ X: "ambient" }, "X=bare")).toEqual({ X: "ambient" });
+  });
+
+  test("parseEnvFileEntries records the export flag per assignment", () => {
+    expect(parseEnvFileEntries("export A=1\nB=2\n")).toEqual([
+      { key: "A", value: "1", exported: true },
+      { key: "B", value: "2", exported: false },
+    ]);
+  });
+
+  test("parseEnvFileAssignments keeps the launcher-shell view (bare included)", () => {
+    expect(parseEnvFileAssignments("export A=1\nB=2\n")).toEqual({ A: "1", B: "2" });
+    expect(parseEnvFileExports("export A=1\nB=2\n")).toEqual({ A: "1" });
   });
 
   test("never throws on garbage input", () => {
@@ -69,12 +94,12 @@ describe("env-file parsing (the daemon's effective env)", () => {
 
 describe("daemon-visible Layer-1 resolution", () => {
   test("an env-file CATALYST_CONFIG_FILE pin is the daemon's Layer-1", () => {
-    const r = resolveDaemonLayer1Path({ env: {}, execCoreEnvText: "CATALYST_CONFIG_FILE=/plugin-source/.catalyst/config.json" });
+    const r = resolveDaemonLayer1Path({ env: {}, execCoreEnvText: "export CATALYST_CONFIG_FILE=/plugin-source/.catalyst/config.json" });
     expect(r).toEqual({ path: "/plugin-source/.catalyst/config.json", source: "exec-core-env-file", pinned: true });
   });
 
   test("the env-file pin beats an ambient one (the launcher sources the file last)", () => {
-    const r = resolveDaemonLayer1Path({ env: { CATALYST_CONFIG_FILE: "/ambient/c.json" }, execCoreEnvText: "CATALYST_CONFIG_FILE=/file/c.json" });
+    const r = resolveDaemonLayer1Path({ env: { CATALYST_CONFIG_FILE: "/ambient/c.json" }, execCoreEnvText: "export CATALYST_CONFIG_FILE=/file/c.json" });
     expect(r.path).toBe("/file/c.json");
     expect(r.source).toBe("exec-core-env-file");
   });
@@ -89,6 +114,105 @@ describe("daemon-visible Layer-1 resolution", () => {
   test("no pin and no CATALYST_DIR candidate ⇒ UNPINNED (the measured mini state)", () => {
     const r = resolveDaemonLayer1Path({ env: {}, execCoreEnvText: "CATALYST_EXECUTOR=sdk\n", catalystDir: "/home/u/catalyst", exists: () => false });
     expect(r).toEqual({ path: null, source: "daemon-cwd", pinned: false });
+  });
+
+  // Codex P2, sharp edge: a BARE CATALYST_CONFIG_FILE satisfies the launcher's
+  // `[[ -z "${CATALYST_CONFIG_FILE:-}" ]]` guard (:341) so the auto-pin is SKIPPED,
+  // while the nohup'd daemon child never inherits it. The daemon therefore falls
+  // through to its own cwd — the operator believes they pinned it, and did not.
+  test("a BARE CATALYST_CONFIG_FILE suppresses the auto-pin AND does not reach the daemon", () => {
+    const r = resolveDaemonLayer1Path({
+      env: {},
+      execCoreEnvText: "CATALYST_CONFIG_FILE=/plugin-source/.catalyst/config.json\n",
+      catalystDir: "/home/u/catalyst",
+      exists: () => true, // the auto-pin candidate EXISTS and is still not used
+    });
+    expect(r.pinned).toBe(false);
+    expect(r.path).toBeNull();
+    expect(r.barePinSuppressed).toBe("/plugin-source/.catalyst/config.json");
+  });
+
+  test("an EXPORTED pin still wins over the CATALYST_DIR candidate", () => {
+    const r = resolveDaemonLayer1Path({
+      env: {},
+      execCoreEnvText: "export CATALYST_CONFIG_FILE=/pinned/config.json\n",
+      catalystDir: "/home/u/catalyst",
+      exists: () => true,
+    });
+    expect(r).toEqual({ path: "/pinned/config.json", source: "exec-core-env-file", pinned: true });
+  });
+});
+
+// Codex P1: collectConfigDump selected and READ Layer-1 before loading the daemon
+// env file, so `daemonLayer1` named the pinned file while every Layer-1-derived row
+// and the fingerprint were computed from the caller's cwd file — the dump
+// disagreeing with itself in exactly the per-host-pin scenario it exists to
+// diagnose. These tests do real (read-only) I/O over a tmp fixture tree.
+describe("collectConfigDump — Layer-1 is read from the DAEMON's resolution", () => {
+  const dirs = [];
+  afterEach(() => {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+  function tree() {
+    const root = mkdtempSync(resolve(tmpdir(), "config-dump-collect-"));
+    dirs.push(root);
+    const home = resolve(root, "home");
+    const cwd = resolve(root, "cwd");
+    const pinned = resolve(root, "pinned");
+    mkdirSync(resolve(home, ".config", "catalyst"), { recursive: true });
+    mkdirSync(resolve(cwd, ".catalyst"), { recursive: true });
+    mkdirSync(resolve(pinned, ".catalyst"), { recursive: true });
+    // Two DIFFERENT Layer-1 files, disagreeing on a genuinely Layer-1-backed key.
+    // Under the old ordering the dump NAMED the pinned file while reading cwd's, so
+    // this row would read "phase-agents" — the caller's answer, not the daemon's.
+    writeFileSync(
+      resolve(pinned, ".catalyst", "config.json"),
+      JSON.stringify({ catalyst: { orchestration: { dispatchMode: "execution-core" } } }),
+    );
+    writeFileSync(
+      resolve(cwd, ".catalyst", "config.json"),
+      JSON.stringify({ catalyst: { orchestration: { dispatchMode: "phase-agents" } } }),
+    );
+    return { root, home, cwd, pinnedPath: resolve(pinned, ".catalyst", "config.json") };
+  }
+
+  test("an exported env-file pin drives the ROWS and the fingerprint, not just the label", () => {
+    const { home, cwd, pinnedPath } = tree();
+    writeFileSync(
+      resolve(home, ".config", "catalyst", "execution-core.env"),
+      `export CATALYST_CONFIG_FILE=${pinnedPath}\n`,
+    );
+    const d = collectConfigDump({ env: { HOME: home }, cwd, now: new Date(0) });
+
+    expect(d.daemonLayer1.pinned).toBe(true);
+    expect(d.daemonLayer1.path).toBe(pinnedPath);
+    // The label and the bytes now agree...
+    expect(d.layer1.path).toBe(pinnedPath);
+    // ...so the row reflects the file the DAEMON reads, not the caller's cwd.
+    expect(row(d, "catalyst.orchestration.dispatchMode").value).toBe("execution-core");
+  });
+
+  test("with no pin, Layer-1 still falls back to the caller's cwd and says it is unpinned", () => {
+    const { home, cwd } = tree();
+    writeFileSync(resolve(home, ".config", "catalyst", "execution-core.env"), "export CATALYST_EXECUTOR=sdk\n");
+    const d = collectConfigDump({ env: { HOME: home }, cwd, now: new Date(0) });
+    expect(d.daemonLayer1.pinned).toBe(false);
+    expect(d.layer1.path).toBe(resolve(cwd, ".catalyst", "config.json"));
+    expect(row(d, "catalyst.orchestration.dispatchMode").value).toBe("phase-agents");
+  });
+
+  test("bareKeys names env-file keys the daemon never receives", () => {
+    const { home, cwd } = tree();
+    writeFileSync(
+      resolve(home, ".config", "catalyst", "execution-core.env"),
+      "export CATALYST_EXECUTOR=sdk\nCATALYST_STALL_JANITOR=enforce\n",
+    );
+    const d = collectConfigDump({ env: { HOME: home }, cwd, now: new Date(0) });
+    expect(d.execCoreEnv.keys).toContain("CATALYST_STALL_JANITOR");
+    expect(d.execCoreEnv.bareKeys).toEqual(["CATALYST_STALL_JANITOR"]);
+    // ...and the bare override is NOT reported as in force.
+    expect(row(d, "catalyst.stallJanitor.mode").value).toBe("shadow");
   });
 });
 
@@ -271,8 +395,8 @@ describe("fingerprint", () => {
 
   // The headline use case: the two live worker hosts must NOT fingerprint alike.
   test("the measured mini / mini-2 divergence produces different fingerprints", () => {
-    const mini = dump({ execCoreEnvText: "CATALYST_STALL_JANITOR=enforce\nCATALYST_UNSTUCK_SWEEP=enforce\nCATALYST_DEAD_DOC_WORKER_RECLAIM=enforce\n" });
-    const mini2 = dump({ execCoreEnvText: "CATALYST_CONFIG_FILE=/plugin-source/.catalyst/config.json\n" });
+    const mini = dump({ execCoreEnvText: "export CATALYST_STALL_JANITOR=enforce\nexport CATALYST_UNSTUCK_SWEEP=enforce\nexport CATALYST_DEAD_DOC_WORKER_RECLAIM=enforce\n" });
+    const mini2 = dump({ execCoreEnvText: "export CATALYST_CONFIG_FILE=/plugin-source/.catalyst/config.json\n" });
     expect(mini.fingerprint).not.toBe(mini2.fingerprint);
   });
 });
