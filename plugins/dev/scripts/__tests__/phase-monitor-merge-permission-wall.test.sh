@@ -13,11 +13,17 @@ TMPROOT="$(mktemp -d)"; trap 'rm -rf "$TMPROOT"' EXIT
 source "$LIB"
 mk_gh() { local dir="$TMPROOT/bin.$RANDOM"; mkdir -p "$dir"; { echo '#!/usr/bin/env bash'; printf 'printf %%s %q\n' "$1"; echo "exit $2"; } > "$dir/gh"; chmod +x "$dir/gh"; echo "$dir"; }
 probe_with() { local bin; bin="$(mk_gh "$1" "$2")"; PATH="$bin:$PATH" merge_permission_probe owner/repo; }
+describe_with() { local bin; bin="$(mk_gh "$1" "$2")"; PATH="$bin:$PATH" merge_permission_describe owner/repo; }
 assert_eq "$(probe_with '{"push":false,"maintain":false,"admin":false}' 0)" denied "read-only grant"
 assert_eq "$(probe_with '{"push":true,"maintain":false,"admin":false}' 0)" ok "push grant"
 assert_eq "$(probe_with '{"push":false,"maintain":false,"admin":true}' 0)" ok "admin grant"
 assert_eq "$(probe_with '' 1)" unknown "gh failure fails open"
 assert_eq "$(probe_with '{}' 0)" unknown "missing permissions fails open"
+assert_eq "$(describe_with '{"admin":false,"maintain":false,"push":false,"triage":true,"pull":true}' 0)" "denied TRIAGE" "triage grant is reported"
+assert_eq "$(describe_with '{"admin":false,"maintain":false,"push":false,"triage":false,"pull":true}' 0)" "denied READ" "read grant is reported"
+assert_eq "$(describe_with '{"admin":false,"maintain":false,"push":false,"triage":false,"pull":false}' 0)" "denied NONE" "no grant is reported"
+assert_eq "$(describe_with '{"admin":false,"maintain":true,"push":true}' 0)" "ok MAINTAIN" "maintain outranks write"
+assert_eq "$(describe_with '' 1)" "unknown UNKNOWN" "failed grant lookup is unknown"
 assert_denial() { if merge_denial_is_permission "$1"; then assert_eq 0 "$2" "$3"; else assert_eq 1 "$2" "$3"; fi; }
 assert_denial 'GraphQL: user does not have the correct permissions to execute `MergePullRequest`' 0 "GraphQL denial"
 assert_denial 'HTTP 403: Must have admin rights to Repository.' 0 "admin denial"
@@ -65,9 +71,25 @@ else
   pass "CTA never asks the operator to authorize a retry"
 fi
 
+# CAT-257 compound regression: empty explanation + missing emitter must still
+# leave a terminal signal and must report both degraded links on stderr.
+printf 'process.stdout.write("");\n' > "$STUBROOT/scripts/execution-core/escalation-explain.mjs"
+rm -f "$STUBROOT/scripts/phase-agent-emit-complete"
+printf '{"ticket":"CAT-999","phase":"monitor-merge","status":"running"}\n' > "$SIGNAL_FILE"
+PLUGIN_ROOT="$STUBROOT" _escalate_merge_permission "coalesce-labs/catalyst" "3218" "TRIAGE" \
+  >/dev/null 2>"$TMPROOT/compound.err"
+assert_eq "$(jq -r .status "$SIGNAL_FILE")" failed "compound fallback leaves terminal signal"
+assert_contains "$(cat "$TMPROOT/compound.err")" "EMPTY stdout" "empty explanation is diagnosed"
+assert_contains "$(cat "$TMPROOT/compound.err")" "NOT executable" "missing emitter is diagnosed"
+assert_contains "$(cat "$TMPROOT/compound.err")" "no-progress" "missing emitter names recovery consequence"
+assert_eq "$(find "$TMPROOT" -name '*.tmp.*' | wc -l | tr -d ' ')" 0 "compound fallback leaves no temporary file"
+
 BODY="$(cat "$SKILL")"
-assert_contains "$BODY" "merge_permission_probe" "preflight wired"
+assert_contains "$BODY" "merge_permission_describe" "preflight wired"
 assert_contains "$BODY" "merge_denial_is_permission" "call-site classifier wired"
+assert_contains "$BODY" "MERGE_PERM_LIB_OK" "merge classifier is source-gated"
+assert_contains "$BODY" "merge_failed_unclassified" "unclassified merge failure emits terminal reason"
+assert_contains "$BODY" "merge_permission_describe" "preflight surfaces concrete grant"
 PRE_LINE="$(grep -n 'merge_permission_probe' "$SKILL" | head -1 | cut -d: -f1)"
 MERGE_LINE="$(grep -n 'if ! gh pr merge' "$SKILL" | head -1 | cut -d: -f1)"
 [[ "$PRE_LINE" -lt "$MERGE_LINE" ]] && pass "preflight precedes merge" || fail "preflight ordering"
