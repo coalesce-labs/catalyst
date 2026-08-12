@@ -3706,3 +3706,74 @@ describe("escalateExhaustedIntents — correlation remediations (CAT-170 / Codex
     ]);
   });
 });
+
+// ─── CAT-170 phase-review: stale correlation block must not survive ──────────
+describe("defaultWriteEscalationSignal — stale correlation clearing (CAT-170)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-stale-corr-"));
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  const signalPath = (ticket) =>
+    pathJoin(orchDir, "workers", ticket, "phase-recovery-pass.json");
+  const readSignal = (ticket) => JSON.parse(readFileSync(signalPath(ticket), "utf8"));
+
+  test("a later UNCORRELATED escalation erases the prior member correlation block", () => {
+    // 1. escalate as a correlated member — the role is persisted first-class.
+    expect(
+      defaultWriteEscalationSignal(
+        "CTL-2",
+        { reason: "attempts exhausted", correlation: { id: "corr-a", role: "member", anchor: "CTL-1" } },
+        { orchDir },
+      ),
+    ).toBe(true);
+    expect(readSignal("CTL-2").correlation.role).toBe("member");
+
+    // 2. weeks later the same ticket exhausts again, this time on its own. The
+    // writer is a read-modify-write over the prior signal, so without an explicit
+    // delete the stale "member" role rides forward and every notification path
+    // suppresses a genuinely independent operator escalation.
+    expect(
+      defaultWriteEscalationSignal("CTL-2", { reason: "attempts exhausted" }, { orchDir }),
+    ).toBe(true);
+    expect(readSignal("CTL-2")).not.toHaveProperty("correlation");
+  });
+
+  test("an unrelated field on the prior signal is still preserved", () => {
+    defaultWriteEscalationSignal(
+      "CTL-3",
+      { reason: "attempts exhausted", correlation: { id: "corr-b", role: "anchor", anchor: "CTL-3" } },
+      { orchDir },
+    );
+    const first = readSignal("CTL-3");
+    expect(first.needsHumanSince).toBeTruthy();
+
+    defaultWriteEscalationSignal("CTL-3", { reason: "attempts exhausted" }, { orchDir });
+    const second = readSignal("CTL-3");
+    expect(second).not.toHaveProperty("correlation");
+    // the read-modify-write is otherwise intact — needsHumanSince still carries the
+    // FIRST escalation's timestamp rather than being reset.
+    expect(second.needsHumanSince).toBe(first.needsHumanSince);
+  });
+
+  test("a correlated payload still replaces a prior correlation block", () => {
+    defaultWriteEscalationSignal(
+      "CTL-4",
+      { reason: "r", correlation: { id: "corr-old", role: "member", anchor: "CTL-1" } },
+      { orchDir },
+    );
+    defaultWriteEscalationSignal(
+      "CTL-4",
+      { reason: "r", correlation: { id: "corr-new", role: "anchor", anchor: "CTL-4" } },
+      { orchDir },
+    );
+    expect(readSignal("CTL-4").correlation).toEqual({
+      id: "corr-new",
+      role: "anchor",
+      anchor: "CTL-4",
+    });
+  });
+});

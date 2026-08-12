@@ -1397,6 +1397,17 @@ function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
       // uncorrelated escalation, so an existing single-ticket signal is unchanged.
       ...(escalationPayload?.correlation ? { correlation: escalationPayload.correlation } : {}),
     };
+    // CAT-170 (phase-review): this writer is a read-modify-write over `prior`, so an
+    // omitted `correlation` block does NOT clear the one a previous escalation left
+    // behind — it inherits it. A ticket that once escalated as a correlated MEMBER
+    // would keep `correlation.role === "member"` forever, and a later INDEPENDENT
+    // escalation on that ticket (fresh exhaustion after the 7-day latch TTL) would be
+    // suppressed by every notification path that keys on the role — board projector
+    // and desktop bridge alike — so the operator gets no alert at all. Silent
+    // suppression of a genuine escalation is the exact failure this feature exists to
+    // prevent, inverted. The block is per-incident state, not accumulating history:
+    // an uncorrelated payload must ERASE it, not merely decline to replace it.
+    if (!escalationPayload?.correlation) delete signal.correlation;
     mkdirSync(dirname(p), { recursive: true });
     const tmp = `${p}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(signal, null, 2));
