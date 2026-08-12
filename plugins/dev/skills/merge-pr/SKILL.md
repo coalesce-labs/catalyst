@@ -371,18 +371,55 @@ Proceed? [Y/n]:
 ### 9. Execute squash merge
 
 ```bash
-gh pr merge $pr_number --squash --delete-branch
+# CTL-56: capture head ref + head repo BEFORE merge so we can delete the ref checkout-free
+# after a REST-confirmed merge. Resolves from the PR API regardless of local branch state.
+head_ref=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.head.ref' 2>/dev/null || true)
+head_repo=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.head.repo.full_name' 2>/dev/null || true)
+# Merge via REST only — no local branch-cleanup flag (CTL-56: the local side effect fails
+# inside a linked worktree when the base is already checked out in the primary clone).
+gh pr merge $pr_number --squash
 ```
 
 **Always:**
 
 - Squash merge (combines all commits into one)
-- Delete remote branch automatically
+- Remote branch deleted explicitly in Step 9b (checkout-free, after REST confirm)
 
 **Capture merge commit SHA:**
 
 ```bash
 merge_sha=$(git rev-parse HEAD)
+```
+
+### 9b. Delete remote head ref (checkout-free)
+
+After verifying the merge succeeded (REST confirm), delete the remote head branch via API —
+no local `git checkout` required, safe from any worktree (CTL-56):
+
+```bash
+# Confirm the merge landed via REST BEFORE deleting anything. `gh pr merge` returning success is
+# NOT proof it merged: with a merge queue enabled it only ENQUEUES the PR (see `gh pr merge --help`),
+# so the head ref may still belong to a still-open PR. gh's old atomic delete-on-merge flag removed
+# the branch ONLY after a real merge — preserve that conditional with an executable `.merged` check
+# here (a prose "after verifying" step is not a gate). (CTL-56)
+merged_ok=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.merged' 2>/dev/null || echo "false")
+# Delete the remote head ref checkout-free ONLY when BOTH hold:
+#  - the merge is REST-confirmed (merged_ok == true), and
+#  - the head branch actually lives in ${REPO}. A fork PR's `.head.ref` names a branch in the FORK,
+#    so deleting repos/${REPO}/git/refs/heads/${head_ref} could hit a SAME-NAMED branch in the base
+#    repo. gh's built-in flag handled the fork-vs-same-repo split natively; the raw API call does
+#    not — so gate on `.head.repo.full_name == ${REPO}` (CTL-56).
+# Idempotent + best-effort: a 404/422 means the ref is already gone or protected; never fail the
+# skill on branch cleanup — the merge already landed.
+if [[ "$merged_ok" == "true" && -n "${head_ref:-}" && "${head_repo:-}" == "${REPO}" ]]; then
+  # CTL-56: URL-encode the head ref (preserve '/') so a metacharacter like '#' in a branch name
+  # (e.g. feature#123) can't truncate the endpoint into deleting the wrong ref.
+  enc_ref=$(printf '%s' "$head_ref" | jq -sRr @uri | sed 's|%2F|/|g')
+  gh api --method DELETE "repos/${REPO}/git/refs/heads/${enc_ref}" >/dev/null 2>&1 \
+    || echo "CTL-56: remote branch ${head_ref} delete skipped (already gone or protected)" >&2
+elif [[ "$merged_ok" != "true" ]]; then
+  echo "merge-pr: merge of #${pr_number} not REST-confirmed; skipping branch cleanup (CTL-56)" >&2
+fi
 ```
 
 ### 10. Update Linear ticket
@@ -403,20 +440,35 @@ If ticket found and not using `--no-update`:
 ### 11. Delete local branch and update base
 
 ```bash
-# Switch to base branch
-git checkout $base_branch
+# CTL-56: detect linked-worktree — when absolute-git-dir ≠ git-common-dir we are in a
+# linked worktree. In that case, skip the local `git checkout <base>` (it fails when
+# the base is already checked out in the primary clone) and rely on Step 11a to update
+# the primary. Defer the local feature-branch delete to teardown/reaper.
+# NOTE: both sides MUST be absolute for the comparison to be valid. `--git-common-dir`
+# returns a RELATIVE `.git` in the primary clone, which would falsely differ from the
+# always-absolute `--absolute-git-dir` and misfire the guard in the primary. Force
+# absolute with `--path-format=absolute` so the guard is TRUE only in a real worktree.
+_abs_git="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
+_com_git="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [[ -n "$_abs_git" && -n "$_com_git" && "$_abs_git" != "$_com_git" ]]; then
+  echo "merge-pr: linked worktree — skipping local base checkout; teardown handles branch cleanup (CTL-56)" >&2
+else
+  # Primary (non-worktree) checkout: switch to base, pull, delete local feature branch.
+  # Switch to base branch
+  git checkout $base_branch
 
-# Pull latest (includes merge commit)
-git pull origin $base_branch
+  # Pull latest (includes merge commit)
+  git pull origin $base_branch
 
-# Delete local feature branch
-git branch -d $head_branch
+  # Delete local feature branch
+  git branch -d $head_branch
 
-# Confirm deletion
-echo "✅ Deleted local branch: $head_branch"
+  # Confirm deletion
+  echo "✅ Deleted local branch: $head_branch"
+fi
 ```
 
-**Always delete local branch** - no prompt (remote already deleted).
+**Always delete local branch** when not in a linked worktree — no prompt (remote deleted in Step 9b).
 
 ### 11a. Update primary worktree
 

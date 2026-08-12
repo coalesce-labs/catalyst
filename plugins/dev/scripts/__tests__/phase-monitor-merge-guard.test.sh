@@ -116,6 +116,20 @@ else
 fi
 
 echo ""
+echo "CTL-56: worktree-safe merge (drop --delete-branch, checkout-free remote-ref delete)"
+
+if [[ -f "$SKILL" ]]; then
+  assert_not_contains "$BODY" "--delete-branch" \
+    "CTL-56: monitor-merge merge call drops --delete-branch (worktree-safe)"
+  assert_contains "$BODY" "git/refs/heads/" \
+    "CTL-56: monitor-merge deletes remote head ref checkout-free"
+  assert_contains "$BODY" "--method DELETE" \
+    "CTL-56: monitor-merge remote-ref delete uses gh api --method DELETE"
+else
+  fail "SKILL.md missing for CTL-56 checks: $SKILL"
+fi
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-monitor-merge-guard: ${PASSES} passed, ${FAILURES} failed"
 echo "─────────────────────────────────────────────"
