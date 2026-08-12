@@ -100,3 +100,8 @@ docs/specs/**/*.png
 # Worktree-safety machine-local noise marker (see MACHINE_LOCAL_NOISE in
 # plugins/dev/scripts/execution-core/worktree-safety.mjs)
 .orphaned_at
+
+# CAT-251: `gh` resolves ${XDG_STATE_HOME:-$HOME/.local/state} to a RELATIVE path when HOME is
+# unset, so any test-spawned `gh` (even `gh --version`) writes .local/state/gh/device-id under the
+# process cwd. Root-anchored: this must never shadow a package-local .local/ someone adds later.
+/.local/
