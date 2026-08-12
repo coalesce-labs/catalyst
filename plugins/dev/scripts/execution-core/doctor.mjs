@@ -93,6 +93,11 @@ import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CT
 import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 import { listProjects } from "./registry.mjs";
+// CTL-1793: the per-key config-provenance view. Node-safe by construction — its
+// only non-node: import is config.mjs, which doctor already imports above; there
+// is no bun: protocol anywhere in its graph (asserted in config-dump.test.mjs).
+// Read-only and advisory: nothing in this module can change a grade to FAIL.
+import { collectConfigDump } from "./config-dump.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -3454,6 +3459,163 @@ export function checkConfigScopeLeak(deps = {}) {
   return checks;
 }
 
+// ─── CTL-1793: config provenance + host-divergence advisory ─────────────────
+//
+// checkConfigProvenance — surfaces the two per-host config facts that today are
+// invisible to EVERY existing surface:
+//
+//   1. The Layer-1 file the DAEMON reads is not the one doctor grades. doctor's
+//      other config checks read either the plugin checkout's config (layer1Path())
+//      or doctor's own cwd (resolveDoctorLayer1Path()); the daemon reads whatever
+//      the launcher pinned via CATALYST_CONFIG_FILE — and when nothing pins it,
+//      whatever directory the daemon happened to be launched from. On a live
+//      worker host those were measured to be DIFFERENT FILES with different
+//      contents (one carrying no catalyst.orchestration stanza at all), so every
+//      Layer-1-driven feature ran on defaults with nothing surfaced anywhere.
+//   2. Which knobs are in force because of a per-host ENV OVERRIDE rather than a
+//      committed file — including overrides that live only in the daemon's
+//      execution-core.env and are therefore invisible to a naive process.env read.
+//
+// ADVISORY ONLY — this check never returns STATUS.FAIL, and that is enforced
+// structurally, not just by intent:
+//   • STATUS.FAIL is never referenced in this function;
+//   • the whole body is wrapped in one try/catch that degrades to INFO, so a throw
+//     can neither crash the suite (runDoctor's Promise.all has no per-check
+//     isolation) nor push the exit code off zero;
+//   • doctor.test.mjs asserts BOTH a fixture matrix (no fixture ever yields FAIL)
+//     and a source-level guard (this function's body contains no STATUS.FAIL), so
+//     a future edit that adds one fails CI immediately.
+// This matters because runDoctor returns the FAIL count as its exit code and
+// catalyst-join.sh gates member activation on exit 0: a FAIL here would take an
+// otherwise-healthy fleet red overnight for a purely observational finding.
+//
+// It REPORTS the daemon/doctor Layer-1 split; it deliberately does NOT repair it.
+// Changing which file checkConfigScopeLeak (and friends) grade is a behavior
+// change on a live host and belongs in its own ticket.
+export function checkConfigProvenance(deps = {}) {
+  try {
+    const {
+      // The dump is injectable so the fixture matrix needs no filesystem at all.
+      dump = collectConfigDump(),
+      // The Layer-1 doctor's own config checks read (cwd/env chain).
+      doctorLayer1 = resolveDoctorLayer1Path(),
+      // The Layer-1 of the plugin CHECKOUT (what checkConfigScopeLeak grades).
+      repoLayer1 = layer1Path(),
+      // Only a WORKER runs the execution-core daemon (monitor/developer run the
+      // observation substrate only — AGENTS.md "Deployment Mode": node class).
+      // On a non-worker the "daemon's Layer-1" question has no subject, so the
+      // divergence branch reports INFO instead of WARN: a permanent WARN on every
+      // laptop/monitor `catalyst doctor` run is noise that trains operators to
+      // ignore the check. The env-override half stays useful on every class.
+      nodeClass = resolveNodeClass().class,
+    } = deps;
+
+    const checks = [];
+    const runsDaemon = nodeClass === "worker";
+    // Non-worker: the finding is real but not actionable here — soften to INFO.
+    const DIVERGENCE = runsDaemon ? STATUS.WARN : STATUS.INFO;
+    const scopeNote = runsDaemon
+      ? ""
+      : ` (informational on a ${nodeClass} node — it runs no execution-core daemon)`;
+    const daemon = dump?.daemonLayer1 ?? null;
+    const fp = typeof dump?.fingerprint === "string" ? dump.fingerprint.slice(0, 12) : "unknown";
+    const suffix = ` [fingerprint=${fp}; compare hosts with: diff <(ssh a catalyst config dump --json) <(ssh b catalyst config dump --json)]`;
+
+    // ── (1) daemon-visible Layer-1 ───────────────────────────────────────────
+    if (!daemon) {
+      checks.push(
+        mkCheck("config-provenance", STATUS.INFO, "daemon Layer-1 resolution was not computed for this run" + suffix),
+      );
+    } else if (!daemon.pinned) {
+      checks.push(
+        mkCheck(
+          "config-provenance",
+          DIVERGENCE,
+          "the execution-core daemon's Layer-1 config path is UNPINNED — no CATALYST_CONFIG_FILE in the " +
+            "environment or in ~/.config/catalyst/execution-core.env, and no $CATALYST_DIR/.catalyst/config.json " +
+            "to fall back on, so the daemon reads whatever directory it was launched from. That file may differ " +
+            `from the one doctor grades (${doctorLayer1}). Remediation: export CATALYST_CONFIG_FILE=<repo>/.catalyst/config.json ` +
+            "in ~/.config/catalyst/execution-core.env (CTL-1793)" +
+            scopeNote +
+            suffix,
+        ),
+      );
+    } else if (daemon.path !== doctorLayer1) {
+      checks.push(
+        mkCheck(
+          "config-provenance",
+          DIVERGENCE,
+          `the daemon reads a DIFFERENT Layer-1 config than doctor grades: daemon="${daemon.path}" ` +
+            `(pinned via ${daemon.source}) vs doctor="${doctorLayer1}"` +
+            (repoLayer1 !== doctorLayer1 ? ` (plugin checkout: "${repoLayer1}")` : "") +
+            " — every Layer-1-driven setting reported by other checks may not be the one in force (CTL-1793)" +
+            scopeNote +
+            suffix,
+        ),
+      );
+    } else if (dump.layer1?.present && dump.layer1?.parsed && !dump.layer1?.hasOrchestration) {
+      checks.push(
+        mkCheck(
+          "config-provenance",
+          DIVERGENCE,
+          `the daemon's Layer-1 config ("${daemon.path}") carries no catalyst.orchestration stanza — ` +
+            "executor routing, the reaper/worktree-refresh/stale-PR timers, reconcile mode and the " +
+            "eligible query all silently run on built-in defaults (CTL-1793)" +
+            scopeNote +
+            suffix,
+        ),
+      );
+    } else if (!dump.layer1?.present || !dump.layer1?.parsed) {
+      checks.push(
+        mkCheck(
+          "config-provenance",
+          DIVERGENCE,
+          `the daemon's Layer-1 config ("${daemon.path}") is ` +
+            (dump.layer1?.present ? "present but MALFORMED" : "ABSENT") +
+            " — every Layer-1-driven setting runs on built-in defaults (CTL-1793)" +
+            scopeNote +
+            suffix,
+        ),
+      );
+    } else {
+      checks.push(
+        mkCheck(
+          "config-provenance",
+          STATUS.PASS,
+          `daemon and doctor read the same Layer-1 config ("${daemon.path}", pinned via ${daemon.source})` + suffix,
+        ),
+      );
+    }
+
+    // ── (2) per-host env overrides ───────────────────────────────────────────
+    // INFO, never a grade change: an override is a legitimate operator action.
+    // The point is that it should be VISIBLE — these are the knobs that differ
+    // between two hosts running the same committed config.
+    const overrides = (dump?.rows ?? []).filter((r) => r.provenance === "env-override" && !r.secret);
+    checks.push(
+      overrides.length === 0
+        ? mkCheck("config-env-overrides", STATUS.INFO, "no config knob is in force via a per-host env override")
+        : mkCheck(
+            "config-env-overrides",
+            STATUS.INFO,
+            `${overrides.length} config knob(s) in force via a per-host env override (not the committed config): ` +
+              overrides.map((r) => `${r.key}=${String(r.value)} (${r.envVar})`).join("; "),
+          ),
+    );
+
+    return checks;
+  } catch (err) {
+    // Total: any throw degrades to INFO. Never FAIL, never a crashed suite.
+    return [
+      mkCheck(
+        "config-provenance",
+        STATUS.INFO,
+        `config provenance could not be resolved (advisory only): ${err?.message ?? String(err)}`,
+      ),
+    ];
+  }
+}
+
 // ─── CTL-1481: worker:<host> label ownership visibility advisory ────────────
 
 // defaultLinearGraphQLPost — minimal fetch-based Linear GraphQL POST, mirroring
@@ -5362,6 +5524,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
       () => checkConfigScopeLeak(), // advisory
       () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
+      () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
     ];
   }
 
@@ -5435,6 +5598,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
     () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
     () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
+    () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
   ];
 }
 

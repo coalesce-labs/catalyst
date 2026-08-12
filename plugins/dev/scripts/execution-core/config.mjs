@@ -1730,7 +1730,8 @@ export const WATCHDOG_MINUTES_PER_TURN =
   Number(process.env.EXECUTION_CORE_WATCHDOG_MINUTES_PER_TURN) || 2;
 const WATCHDOG_MIN_PHASE_BUDGET_MS = 20 * 60_000; // absolute floor
 const WATCHDOG_FALLBACK_BUDGET_MS = 90 * 60_000; // when turnCap unparseable
-const WATCHDOG_MODES = new Set(["off", "shadow", "enforce"]);
+// CTL-1793: exported (additive) so config-dump.mjs shares one mode-set definition.
+export const WATCHDOG_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2Watchdog() {
   try {
@@ -1932,7 +1933,8 @@ export function phaseBudgetMs(phase, turnCap, cfg = readWatchdogConfig()) {
 // an operator flips it to "enforce". The janitor only collapses already-terminal,
 // unambiguous leftovers (orphan worktrees + idle ghost sessions); it never infers
 // liveness or advancement (that is belief-rule territory).
-const STALL_JANITOR_MODES = new Set(["off", "shadow", "enforce"]);
+// CTL-1793: exported (additive) so config-dump.mjs shares one mode-set definition.
+export const STALL_JANITOR_MODES = new Set(["off", "shadow", "enforce"]);
 // terminalIdleMs — how long a terminal phase signal must have been present before
 // an idle background session for the same subject is treated as a ghost (J2). The
 // Gherkin pins this at >=600s; matches the orphan-reaper's 600s timer cadence.
@@ -1990,7 +1992,8 @@ export function readStallJanitorConfig() {
 // OFF by default — operators opt in via shadow then enforce. Same three-layer
 // precedence as CTL-1004/CTL-1029 (env > Layer-2 catalyst.unstuckSweep.* >
 // code default). Runs as a low-frequency throttled Pass 0u (default 15 min).
-const UNSTUCK_SWEEP_MODES = new Set(["off", "shadow", "enforce"]);
+// CTL-1793: exported (additive) so config-dump.mjs shares one mode-set definition.
+export const UNSTUCK_SWEEP_MODES = new Set(["off", "shadow", "enforce"]);
 export const UNSTUCK_SWEEP_DEFAULT_INTERVAL_MS = 900_000; // 15 minutes
 
 function readLayer2UnstuckSweep() {
@@ -2035,7 +2038,8 @@ export function isThrottled(lastRunMs, intervalMs, nowMs) {
 // Mirrors readUnstuckSweepConfig exactly: env (CATALYST_RECOVERY_PASS) overrides
 // Layer-2 config (.catalyst.recovery.pass.mode), which overrides the safe
 // default of 'off'. Ships off (ADR-023); operators opt in to shadow then enforce.
-const RECOVERY_PASS_MODES = new Set(["off", "shadow", "enforce"]);
+// CTL-1793: exported (additive) so config-dump.mjs shares one mode-set definition.
+export const RECOVERY_PASS_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2RecoveryPass() {
   try {
@@ -2104,7 +2108,8 @@ export function readDelegateFirstConfig(envObj = process.env) {
 //   shadow  → measure + LOG the would-be death verdict, take NO action.
 //   enforce → set ghostAbsent and fall through to the existing revive path
 //             (under the CTL-736 progress gate + O_EXCL claim + CTL-638 cooldown).
-const DEAD_DOC_WORKER_MODES = new Set(["off", "shadow", "enforce"]);
+// CTL-1793: exported (additive) so config-dump.mjs shares one mode-set definition.
+export const DEAD_DOC_WORKER_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2DeadDocWorker() {
   try {
@@ -2526,14 +2531,18 @@ function readLayer2Governance() {
 
 // Three-layer beliefs flag: explicit env ("1"/"0") > Layer-2 boolean > default false.
 // Returns both the effective boolean and its source so the boot self-report can flag overrides.
-function resolveBeliefsFlag(envVal, l2Val) {
+// CTL-1793: `export` added (purely additive — no call site or behavior changes) so
+// config-dump.mjs can label a beliefs flag's provenance with THE SAME ladder the
+// daemon runs, instead of re-implementing it and silently drifting.
+export function resolveBeliefsFlag(envVal, l2Val) {
   if (envVal === "1") return { value: true, source: "env-override" };
   if (envVal === "0") return { value: false, source: "env-override" };
   if (typeof l2Val === "boolean") return { value: l2Val, source: "config" };
   return { value: false, source: "default" };
 }
 
-const BELIEFS_FLAGS = {
+// CTL-1793: exported for config-dump.mjs's registry (see resolveBeliefsFlag above).
+export const BELIEFS_FLAGS = {
   beliefsShadow: "CATALYST_BELIEFS_SHADOW",
   diagnostician: "CATALYST_DIAGNOSTICIAN",
   intentsEnforce: "CATALYST_INTENTS_ENFORCE",
@@ -2571,7 +2580,10 @@ export function readGovernanceConfig(env = process.env) {
 // (a valid Layer-2 mode) | "default". Governance modes were previously invisible
 // to the boot self-report (only BELIEFS_FLAGS were reported), so an operator
 // could not tell whether e.g. board-health enforce came from the env or Layer-2.
-function resolveModeSource(envVal, l2Mode, modes) {
+// CTL-1793: `export` added (purely additive) — config-dump.mjs labels every mode
+// knob's provenance through THIS function, so the dump can never disagree with the
+// daemon about which layer won.
+export function resolveModeSource(envVal, l2Mode, modes) {
   if (envVal === "0") return "env-override"; // kill-switch is an explicit env override
   if (typeof envVal === "string" && modes.has(envVal)) return "env-override";
   if (typeof l2Mode === "string" && modes.has(l2Mode)) return "config";
