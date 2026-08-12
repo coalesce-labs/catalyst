@@ -3659,9 +3659,9 @@ const nodeClassOf = (over = {}) => ({
 
 // passingSkillsDirCheck — the `skillsDirCheck` seam installChecksForClass exposes, stubbed healthy.
 // The real check probes the live ~/.claude tree, and for class=worker a missing symlink is a hard
-// FAIL (developer/monitor only WARN). Any test that asserts on runDoctor's aggregate FAIL COUNT for
-// a worker must inject this, or it grades the host it happens to run on instead of the code under
-// test — which is exactly how it went red in CI. checkSkillsDirPlugins keeps its own direct coverage.
+// FAIL (developer/monitor only WARN). Every call that configures seams must inject this, or it grades
+// the host it happens to run on instead of the code under test — which is exactly how it went red in
+// CI. The CAT-154 seam guard below enforces that rule; checkSkillsDirPlugins keeps direct coverage.
 const passingSkillsDirCheck = () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }];
 
 describe("checkNodeClass (CTL-1355)", () => {
@@ -4929,6 +4929,7 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: false,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker", // a worker w/ broker is fine; the FAIL here is the missing stack agent
+      skillsDirCheck: passingSkillsDirCheck, // CAT-154: was executing the real ~/.claude probe + `git rev-parse`
     });
     const results = (await Promise.all(fns.map((f) => Promise.resolve().then(f)))).flat();
     const agents = results.find((c) => c.name === "agents-for-class");
@@ -4968,6 +4969,7 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: false,
       hasUpdaterAgent: true,
       pluginPullOwner: "updater",
+      skillsDirCheck: passingSkillsDirCheck,
       log: () => {},
     });
     expect(code).toBe(0);
@@ -5061,7 +5063,12 @@ describe("strict node-class — install profile requires an explicitly persisted
   it("installChecksForClass FAILs an inferred/unpersisted class even when agents + owner look correct", async () => {
     // a worker-shaped node (stack agent present, owner broker) but catalyst.node.class never persisted →
     // the post-install verifier must FAIL (the class write did not take), not exit 0.
-    const fns = installChecksForClass(inferred, { hasStackAgent: true, hasUpdaterAgent: false, pluginPullOwner: "broker" });
+    const fns = installChecksForClass(inferred, {
+      hasStackAgent: true,
+      hasUpdaterAgent: false,
+      pluginPullOwner: "broker",
+      skillsDirCheck: passingSkillsDirCheck, // CAT-154: keep this assertion independent of the host tree
+    });
     const results = (await Promise.all(fns.map((f) => Promise.resolve().then(f)))).flat();
     expect(results.find((c) => c.name === "node-class").status).toBe(STATUS.FAIL);
   });
@@ -5515,3 +5522,141 @@ describe("checksForClass — checkSkillsDirPlugins registration", () => {
     });
   }
 });
+
+// ─── CAT-154 seam guard — REGION BEGIN ───
+//
+// The CAT-154 incident: `skillsDirCheck` (doctor.mjs:5425) is a WHOLE-THUNK seam with a LIVE
+// default — omitting it does not disable the check, it runs the real one against ~/.claude and
+// spawns `git rev-parse`. Severity is class-conditional (doctor.mjs:5089: worker→FAIL,
+// developer→WARN) and runDoctor returns the FAIL count only, so an omission is green on a
+// developer Mac and red on every CI runner. That is how main went red for ~11h on 2026-08-09.
+// This guard makes the omission fail HERE, locally, at authoring time.
+//
+// The two markers delimit the guard's OWN body, which is the only region excluded from the scan.
+// Everything else in this file — above AND below — is scanned, so a call site appended after the
+// guard is covered too. The exclusion exists because the body talks about the things it matches on:
+// the runDoctor test's title below contains a literal `runDoctor({ profile: "install" })` that the
+// extractor does pick up. It is a non-offender today only because that same title happens to end
+// in the word skillsDirCheck — reword the title and the guard would report itself. Excluding the
+// body removes that coupling rather than relying on it.
+describe("CAT-154: install-profile call sites must inject the skillsDirCheck seam", () => {
+  const SELF = readFileSync(new URL(import.meta.url), "utf8");
+  const REGION_BEGIN = "CAT-154 seam guard — REGION BEGIN";
+  const REGION_END = "CAT-154 seam guard — REGION END";
+  // A phrase that occurs only in the trailing comment below the guard. Used to prove the scan
+  // really includes the tail; keep it verbatim there.
+  const TAIL_WITNESS = "ARE scanned by the guard above";
+  // Each marker must appear EXACTLY twice — once in its delimiting comment, once in the constant
+  // above. Counting (rather than a bare indexOf) is what makes every way of breaking a marker
+  // LOUD: delete the comment, or rename only the constant, and the count drops to 1 and throws.
+  // A bare indexOf would instead silently retarget the region at the surviving copy and shrink the
+  // scan with zero signal — the degrade-quietly shape this whole guard exists to catch, which
+  // would be the bug moved up one level rather than fixed.
+  const occurrencesOf = (needle) => {
+    let n = 0;
+    for (let i = SELF.indexOf(needle); i !== -1; i = SELF.indexOf(needle, i + needle.length)) n++;
+    return n;
+  };
+  for (const [label, marker] of [["BEGIN", REGION_BEGIN], ["END", REGION_END]]) {
+    const n = occurrencesOf(marker);
+    if (n !== 2) {
+      throw new Error(
+        `CAT-154 seam guard: expected the REGION ${label} marker exactly twice (its delimiting ` +
+          `comment + its constant), found ${n}. The guard cannot define its scan region — restore ` +
+          `the marker verbatim in both places rather than deleting or renaming just one.`,
+      );
+    }
+  }
+  const beginAt = SELF.indexOf(REGION_BEGIN); // the delimiting comment (the constant is below it)
+  const endAt = SELF.lastIndexOf(REGION_END); // the delimiting comment (the constant is above it)
+  if (beginAt <= 0 || endAt <= beginAt) {
+    throw new Error(
+      `CAT-154 seam guard: region markers out of order (begin=${beginAt}, end=${endAt}).`,
+    );
+  }
+  const SRC = SELF.slice(0, beginAt) + SELF.slice(endAt);
+
+  // Extract the full parenthesised call expression starting at the `(` that follows `fnName`.
+  // Naive w.r.t. parens inside string literals — acceptable here (no call site has one) and it
+  // throws rather than silently truncating if that ever stops holding.
+  const callsTo = (src, fnName) => {
+    const out = [];
+    let from = 0;
+    for (;;) {
+      const hit = src.indexOf(`${fnName}(`, from);
+      if (hit === -1) return out;
+      const open = hit + fnName.length;
+      let depth = 0;
+      let end = -1;
+      for (let i = open; i < src.length; i++) {
+        if (src[i] === "(") depth++;
+        else if (src[i] === ")" && --depth === 0) { end = i; break; }
+      }
+      if (end === -1) throw new Error(`unbalanced ${fnName}( at offset ${hit}`);
+      out.push({ offset: hit, text: src.slice(hit, end + 1) });
+      from = end + 1;
+    }
+  };
+
+  // A call that passes an options object is configuring seams — it must configure ALL of them.
+  // Detect the options object by scanning for a comma at paren depth 1, i.e. an actual argument
+  // separator. A whole-text /,\s*\{/ would also match a comma-brace nested inside argument ONE —
+  // e.g. installChecksForClass(nodeClassOf({ class: "worker", extra: { x: 1 } })) — misclassifying
+  // a single-argument call as seam-configuring and firing two spurious failures at once (a bogus
+  // offender below, plus the single-arg tripwire count dropping 2→1).
+  const withOpts = (c) => {
+    let depth = 0;
+    for (let i = 0; i < c.text.length; i++) {
+      const ch = c.text[i];
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      else if (ch === "," && depth === 1) return /^\s*\{/.test(c.text.slice(i + 1));
+    }
+    return false;
+  };
+
+  it("every seam-configuring installChecksForClass call injects skillsDirCheck", () => {
+    const offenders = callsTo(SRC, "installChecksForClass")
+      .filter(withOpts)
+      .filter((c) => !c.text.includes("skillsDirCheck"))
+      .map((c) => c.text.slice(0, 120));
+    expect(offenders).toEqual([]);
+  });
+
+  it("every runDoctor({ profile: \"install\" }) call injects skillsDirCheck", () => {
+    const offenders = callsTo(SRC, "runDoctor")
+      .filter((c) => c.text.includes(`profile: "install"`))
+      .filter((c) => !c.text.includes("skillsDirCheck"))
+      .map((c) => c.text.slice(0, 120));
+    expect(offenders).toEqual([]);
+  });
+
+  // Tripwire: the two single-arg sites are exempt because NEITHER can reach the live seam today —
+  // one passes an unrecognized class (short-circuits to one thunk, doctor.mjs:5431) and the other
+  // only calls .toString() on the returned thunks, never invoking them. That is a property of
+  // these two sites, NOT a general property of single-argument calls: a single-arg call with a
+  // recognized class that DOES invoke its thunks would run the real check. The count alone cannot
+  // see that — swapping one exempt site for such a call keeps the count at 2. So the count is a
+  // conversation-forcing tripwire, not a proof; re-derive the exemption whenever it fires.
+  it("exactly two single-argument installChecksForClass call sites exist (exemption is site-specific)", () => {
+    expect(callsTo(SRC, "installChecksForClass").filter((c) => !withOpts(c)).length).toBe(2);
+  });
+
+  // The scan region must span BOTH sides of the guard. Without this, a call site appended below
+  // the guard is invisible to every assertion above and passes silently — verified by mutation.
+  // Assertions are kept scalar/boolean on purpose: a whole-file `toContain` would dump ~260KB of
+  // source into the failure output and bury the signal.
+  it("scans the file on both sides of the guard, excluding only the guard's own body", () => {
+    // A string that exists ONLY below the guard: its presence proves the tail is really included.
+    // (`SELF.length - endAt > 0` would NOT prove it — lastIndexOf returns a match start, so that
+    // difference is always at least the marker's own length and the assertion can never fail.)
+    // SRC is head[0..beginAt) + tail, so any hit at or past beginAt came from the tail half.
+    expect(SRC.lastIndexOf(TAIL_WITNESS)).toBeGreaterThanOrEqual(beginAt);
+    expect(SRC.length).toBe(beginAt + (SELF.length - endAt)); // exactly both sides, nothing else
+    expect(SRC.includes("const withOpts =")).toBe(false); // guard's own body is the only exclusion
+  });
+});
+
+// ─── CAT-154 seam guard — REGION END ───
+// Call sites added below this line ARE scanned by the guard above. Keep both region markers
+// verbatim; the guard throws on startup if either is missing or reordered.
