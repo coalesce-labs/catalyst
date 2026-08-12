@@ -321,13 +321,49 @@ function implementProbe(
   return true;
 }
 
-// matchesTicket — true when `filename` is a markdown file naming `ticket`. Mirrors
-// the dispatcher's CTL-494 two-step match (strict `*-<ticket-lower>.md` then a
-// wider case-insensitive `*<ticket>*.md`): the strict tail is a subset of the
-// case-insensitive substring, so the substring check is the effective behavior.
+// matchesTicket — true when `filename` is a markdown file naming `ticket` as a
+// WHOLE TOKEN: delimited on the left by start-of-name or a non-alphanumeric
+// separator, and on the right by a non-alphanumeric character (or end).
+//
+// WHY THE BOUNDARIES ARE LOAD-BEARING. The old rule was a bare
+// `lf.includes(ticket)`, and `<worktree>/thoughts/shared` is a SYMLINK into one
+// shared repo — every worktree lists the identical corpus (measured: 695
+// research + 630 plans docs, same realpath from every worktree). Over that live
+// corpus the substring rule let **144 distinct ticket ids match a DIFFERENT
+// ticket's document** (2721 foreign pairs), and 100 of those ids own no document
+// at all. `CTL-56` owns nothing yet matched `2026-05-21-CTL-564.md`,
+// `-CTL-565.md`, `-CTL-567.md` — so `researchProbe`/`planProbe` returned TRUE for
+// CTL-56 off CTL-564's completed work. All three call sites turn that into a
+// wrong conclusion: a false "work is done" (:368), a wrong plan-phase commit
+// gate (:311), and a large forward-progress mark for a ticket with zero progress
+// (:501), which makes the reclaim path revive instead of stop.
+//
+// This is the un-fixed JS twin of an already-solved bash problem: the
+// dispatcher's gate `match_thoughts_artifact` (lib/phase-artifact-gate.sh,
+// CTL-1081) is boundary-safe and states the same goal — "the word-boundary guard
+// rejects cross-ticket lookalikes (e.g. ctl-10812 does NOT satisfy a ctl-1081
+// gate)". The stale comment this replaces claimed to mirror the dispatcher's
+// CTL-494 two-step match; the dispatcher moved to CTL-1081 and this copy never
+// followed.
+//
+// The grammar is the bash gate's, widened only to accept `_` as a left delimiter
+// so the six real `YYYY-MM-DD_ctl-NNNN_slug.md` docs on disk keep matching (the
+// bash gate's `-`-only rule loses them — a pre-existing gap, verified live).
+//
+// Measured against the real corpus: foreign matches 2721 pairs / 144 ids -> 0;
+// legitimate files newly unmatched -> 0. The new rule is a STRICT SUBSET of the
+// old one (same substring, plus boundaries), so it can only ever make a probe
+// MORE conservative — it can never newly declare work done, which is the correct
+// direction of failure for a work-done probe.
 function matchesTicket(filename, ticket) {
+  if (typeof filename !== "string" || typeof ticket !== "string") return false;
   const lf = filename.toLowerCase();
-  return lf.endsWith(".md") && lf.includes(ticket.toLowerCase());
+  if (!lf.endsWith(".md")) return false;
+  const tl = ticket.toLowerCase();
+  // Reject a malformed ticket id rather than building a garbage regex from it.
+  if (!/^[a-z]{2,6}-[0-9]{1,6}$/.test(tl)) return false;
+  const esc = tl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^0-9a-z])${esc}(?![0-9a-z])`).test(lf);
 }
 
 // bodyHasMarkers — completeness gate. `anyOf` requires at least one marker
