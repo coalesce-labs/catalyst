@@ -36,6 +36,7 @@ CLI_ENTRIES=(
   "catalyst-broker:catalyst-broker"
   "catalyst-cluster:catalyst-cluster"
   "catalyst-comms:catalyst-comms"
+  "catalyst-config:catalyst-config"
   "catalyst-events:catalyst-events"
   "catalyst-execution-core:catalyst-execution-core"
   "catalyst-filter:catalyst-filter"
