@@ -967,7 +967,13 @@ deployment, write `status: "done"`, and exit.
 ```bash
 # Execute merge now that PR is ready (no --auto; worker owns the merge in CTL-252 contract)
 if [ "$PR_MERGED" != "true" ]; then
-  gh pr merge "$PR_NUMBER" --squash --delete-branch
+  # CTL-56: capture head ref BEFORE merge so we can delete it checkout-free after confirm.
+  HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref' 2>/dev/null || true)
+  # Merge via REST only (CTL-56: dropping the local branch-cleanup flag avoids the
+  # `git checkout <base>` that fails inside a linked worktree when main is checked
+  # out in the primary clone). The exit code is now meaningful; REST confirm below
+  # is the authoritative success gate.
+  gh pr merge "$PR_NUMBER" --squash
 fi
 
 # Confirm via REST (authoritative — never gh pr view --json)
@@ -982,6 +988,14 @@ if [ "$MERGED_OK" != "true" ]; then
     "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed --reason "merge not confirmed via REST"
   fi
   exit 1
+fi
+
+# CTL-56: delete the remote head ref checkout-free, AFTER merge is REST-confirmed. Idempotent +
+# best-effort: a 404/422 means the ref is already gone or protected; never fail the phase on
+# branch cleanup — the merge already landed.
+if [[ -n "${HEAD_REF:-}" ]]; then
+  gh api --method DELETE "repos/${REPO}/git/refs/heads/${HEAD_REF}" >/dev/null 2>&1 \
+    || echo "CTL-56: remote branch ${HEAD_REF} delete skipped (already gone or protected)" >&2
 fi
 
 MERGE_COMMIT_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
@@ -1386,7 +1400,7 @@ error, context exhaustion):
 - **Phase 3 does NOT commit** — all git operations are deferred to Phase 5
 - **Worker's success contract is `status: "done"` (CTL-252)** — the worker opens the PR, enters an
   event-driven listen loop using `catalyst-events wait-for`, resolves CI/review blockers inline,
-  merges when CLEAN with `gh pr merge --squash --delete-branch` (no `--auto`), and writes
+  merges when CLEAN with `gh pr merge --squash` (worktree-safe, CTL-56; no `--auto`), and writes
   `status: "done"` with `pr.mergedAt` and `deployment.url` (if applicable). Workers do NOT use
   `ScheduleWakeup` (unreliable in `-p` mode) — they use `catalyst-events wait-for` which is a
   blocking subprocess call that works reliably in non-interactive sessions
