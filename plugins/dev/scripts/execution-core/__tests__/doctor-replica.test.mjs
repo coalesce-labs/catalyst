@@ -30,9 +30,27 @@ function deps(over = {}) {
     // fs/spawn. Healthy default = a real SQLite file carrying both required tables.
     isSqliteFile: () => true,
     readDbTables: () => ["issues", "sync_meta", "labels"],
+    // CAT-73: the launchd-faithful token-presence seam. Injected here (rather than
+    // letting defaultProbeTokenPresence fire) so the suite never shells out to
+    // bash/bun. Healthy default = the supervised writer can see the token.
+    probeTokenPresence: () => ({
+      available: true,
+      present: true,
+      name: TOKEN_ENV.envVar,
+      source: "cloud-sync.env",
+      permsWarning: false,
+    }),
     ...over,
   };
 }
+// CAT-73: the writer genuinely cannot see the token (the probe ran and said so).
+const PROBE_ABSENT = () => ({
+  available: true,
+  present: false,
+  name: TOKEN_ENV.envVar,
+  source: "default",
+  permsWarning: false,
+});
 const byName = (recs) => Object.fromEntries(recs.map((r) => [r.name, r]));
 const noFail = (recs) => recs.every((r) => r.status !== "fail");
 
@@ -53,9 +71,11 @@ describe("checkCloudSync", () => {
     expect(m["replica-read-flag"].status).toBe("pass");
   });
 
+  // CAT-73: the authority for these two is the PROBE (the environment the supervised
+  // writer sees), not `env` (this shell's). Both assertions are otherwise unchanged.
   test("token unset → replica-token WARN; the value never leaks", () => {
     const SECRET = "lin_should_never_appear";
-    const recs = checkCloudSync(deps({ env: { SOME_OTHER: SECRET } }));
+    const recs = checkCloudSync(deps({ env: { SOME_OTHER: SECRET }, probeTokenPresence: PROBE_ABSENT }));
     const m = byName(recs);
     expect(m["replica-token"].status).toBe("warn");
     expect(m["replica-token"].detail).toContain(TOKEN_ENV.envVar);
@@ -67,6 +87,70 @@ describe("checkCloudSync", () => {
     const recs = checkCloudSync(deps({ env: { [TOKEN_ENV.envVar]: SECRET } }));
     expect(JSON.stringify(recs)).not.toContain(SECRET);
     expect(byName(recs)["replica-token"].status).toBe("pass");
+  });
+
+  test("CAT-73: token visible to the writer but absent from this shell → PASS, tier PASS", () => {
+    const m = byName(checkCloudSync(deps({ env: {} })));
+    expect(m["replica-token"].status).toBe("pass");
+    expect(m["replica-token"].detail).toMatch(/cloud-sync\.env/);
+    expect(m["replica-tier"].status).toBe("pass");
+    expect(m["replica-tier"].detail).not.toMatch(/INERT|partially/i);
+  });
+
+  test("CAT-73: token in this shell only → WARN naming the writer's env, tier not PASS", () => {
+    const SECRET = "lin_should_never_appear";
+    const recs = checkCloudSync(deps({
+      env: { [TOKEN_ENV.envVar]: SECRET },
+      probeTokenPresence: PROBE_ABSENT,
+    }));
+    const m = byName(recs);
+    expect(m["replica-token"].status).toBe("warn");
+    expect(m["replica-token"].detail).toMatch(/this shell/i);
+    expect(m["replica-token"].detail).toMatch(/cloud-sync\.env/);
+    expect(m["replica-tier"].status).not.toBe("pass");
+    expect(JSON.stringify(recs)).not.toContain(SECRET);
+  });
+
+  test("CAT-73: probe unavailable → degraded wording, answers from this shell", () => {
+    const m = byName(checkCloudSync(deps({
+      env: { [TOKEN_ENV.envVar]: "x" },
+      probeTokenPresence: () => ({ available: false, reason: "probe exit 127" }),
+    })));
+    expect(m["replica-token"].detail).toMatch(/probe unavailable/i);
+    expect(m["replica-token"].detail).toMatch(/may not reflect/i);
+    expect(m["replica-token"].status).toBe("pass"); // shell answer, explicitly caveated
+  });
+
+  test("CAT-73: a throwing probe degrades instead of propagating", () => {
+    const recs = checkCloudSync(deps({
+      env: {},
+      probeTokenPresence: () => { throw new Error("probe threw"); },
+    }));
+    const m = byName(recs);
+    expect(m["replica-token"].status).toBe("warn");
+    expect(m["replica-token"].detail).toMatch(/probe unavailable/i);
+    expect(noFail(recs)).toBe(true);
+  });
+
+  test("CAT-73: probe's resolved name wins in the wording", () => {
+    const m = byName(checkCloudSync(deps({
+      probeTokenPresence: () => ({ available: true, present: true, name: "MY_TOKEN", source: "cloud-sync.env", permsWarning: false }),
+    })));
+    expect(m["replica-token"].detail).toContain("MY_TOKEN");
+    // A NAME divergence is real information, but must not become a second record.
+    expect(m["replica-token"].detail).toContain(TOKEN_ENV.envVar);
+    expect(m["replica-tier"].detail).not.toMatch(/INERT|partially/i);
+  });
+
+  test("CAT-73: perms warning folds into the detail, not a new record", () => {
+    const healthy = checkCloudSync(deps());
+    const recs = checkCloudSync(deps({
+      probeTokenPresence: () => ({ available: true, present: true, name: TOKEN_ENV.envVar, source: "cloud-sync.env", permsWarning: true }),
+    }));
+    const m = byName(recs);
+    expect(m["replica-token"].status).toBe("pass");
+    expect(m["replica-token"].detail).toMatch(/600/);
+    expect(recs).toHaveLength(healthy.length);
   });
 
   test("db absent → replica-fresh WARN (not connected)", () => {
@@ -128,7 +212,12 @@ describe("checkCloudSync", () => {
   });
 
   test("tier-inert summary names token and read flag gaps", () => {
-    const m = byName(checkCloudSync(deps({ mode: "off", env: {}, statFile: () => ({ size: 0, mtimeMs: NOW }) })));
+    const m = byName(checkCloudSync(deps({
+      mode: "off",
+      env: {},
+      probeTokenPresence: PROBE_ABSENT, // CAT-73: the writer's env is the token authority
+      statFile: () => ({ size: 0, mtimeMs: NOW }),
+    })));
     expect(m["replica-tier"].status).toBe("warn");
     expect(m["replica-tier"].detail).toMatch(/token/i);
     expect(m["replica-tier"].detail).toMatch(/CATALYST_LINEAR_REPLICA/);
@@ -194,14 +283,23 @@ describe("checkCloudSync", () => {
       () => ({ size: 10, mtimeMs: 0 }),
       () => { throw new Error("stat fail"); },
     ];
+    const probes = [
+      () => ({ available: true, present: true, name: TOKEN_ENV.envVar, source: "cloud-sync.env", permsWarning: false }),
+      () => ({ available: true, present: false, name: TOKEN_ENV.envVar, source: "default", permsWarning: true }),
+      () => ({ available: false, reason: "boom" }),
+      () => { throw new Error("probe threw"); },
+    ];
     for (const agentInstalled of bools)
       for (const processAlive of bools)
         for (const mode of ["on", "off"])
           for (const fileExists of bools)
             for (const statFile of stats)
-              for (const env of [{ [TOKEN_ENV.envVar]: "x" }, {}]) {
-                const recs = checkCloudSync(deps({ agentInstalled, processAlive, mode, fileExists, statFile, env }));
-                expect(recs.every((r) => r.status !== "fail")).toBe(true);
-              }
+              for (const env of [{ [TOKEN_ENV.envVar]: "x" }, {}])
+                // CAT-73: the probe axis — including a probe that THROWS, which
+                // checkCloudSync must contain rather than propagate into doctor's run.
+                for (const probeTokenPresence of probes) {
+                  const recs = checkCloudSync(deps({ agentInstalled, processAlive, mode, fileExists, statFile, env, probeTokenPresence }));
+                  expect(recs.every((r) => r.status !== "fail")).toBe(true);
+                }
   });
 });
