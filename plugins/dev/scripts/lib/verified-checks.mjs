@@ -82,7 +82,7 @@ function requireNonEmptyString(value, name) {
 //
 // Matches an event when its `attributes["event.name"]` equals `eventName` or is a
 // dotted extension of it (`phase.advance.applied` matches
-// `phase.advance.applied.CTL-56`) — the repo's per-ticket event-name convention.
+// `phase.advance.applied.PROJ-56`) — the repo's per-ticket event-name convention.
 // Prose that merely MENTIONS the name (a commit message inside a GitHub event
 // body) is structurally unreachable, because only the name FIELD is consulted.
 //
@@ -304,7 +304,20 @@ export function verifyAll(items, predicate, { label = "candidates" } = {}) {
 // list while GitHub says one of these, our enumeration missed something (a merge
 // conflict, REVIEW_REQUIRED, an ACTION_REQUIRED check, …) and the honest answer
 // is "inconclusive", not "clean".
-const NOT_READY_MERGE_STATES = new Set(["DIRTY", "BLOCKED", "UNSTABLE", "UNKNOWN", "DRAFT"]);
+// Enumerated from GitHub's MergeStateStatus: the READY set is exactly
+// { CLEAN, HAS_HOOKS }? — no: HAS_HOOKS still requires the hooks to pass, and
+// BEHIND requires an update before merge. Both were missing from an earlier
+// revision of this set and would have produced "no blockers" on a PR GitHub
+// itself refuses to merge. Only CLEAN is unambiguously ready.
+const NOT_READY_MERGE_STATES = new Set([
+  "DIRTY",
+  "BLOCKED",
+  "UNSTABLE",
+  "UNKNOWN",
+  "DRAFT",
+  "BEHIND",
+  "HAS_HOOKS",
+]);
 
 // Check conclusions that are neither success nor neutral. ACTION_REQUIRED and
 // STARTUP_FAILURE are blockers that an enumerate-the-bad-ones list forgets.

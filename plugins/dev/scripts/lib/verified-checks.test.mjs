@@ -39,14 +39,14 @@ const GITHUB_EVENT_MENTIONING_THE_NAME = JSON.stringify({
 
 const REAL_ADVANCE_EVENT = JSON.stringify({
   ts: "2026-08-12T05:51:30.000Z",
-  attributes: { "event.name": "phase.advance.applied.CTL-56" },
+  attributes: { "event.name": "phase.advance.applied.PROJ-56" },
   body: { payload: { evidence: "fabricated", asserted_by: "sdk-success-flip" } },
 });
 
 const UNRELATED_EVENT = JSON.stringify({
   ts: "2026-08-12T05:00:00.000Z",
   attributes: { "event.name": "linear.issue.updated" },
-  body: { message: "linear.issue.updated CTL-1801" },
+  body: { message: "linear.issue.updated PROJ-1801" },
 });
 
 describe("(1) countEventsByName — prose that mentions a name is not an occurrence", () => {
@@ -135,17 +135,17 @@ describe("(2) resolveOwnership — an ownership check refuses rather than answer
     // The exact transposition that reported 11 tickets as unowned: the roster and
     // the host name swapped. Positionally this was silent; by name it is impossible,
     // and the shape check throws.
-    expect(() => resolveOwnership({ ticketId: "CTL-56", roster: "mini", hostName: ROSTER })).toThrow(
+    expect(() => resolveOwnership({ ticketId: "PROJ-56", roster: "mini", hostName: ROSTER })).toThrow(
       VerificationError,
     );
-    expect(() => resolveOwnership({ ticketId: "CTL-56", roster: "mini", hostName: ROSTER })).toThrow(
+    expect(() => resolveOwnership({ ticketId: "PROJ-56", roster: "mini", hostName: ROSTER })).toThrow(
       /must be an array of host names/,
     );
   });
 
   test("no ticket is reported unowned on the strength of a malformed call", () => {
     // The old failure mode returned `false` for all 11. Now every one throws.
-    const tickets = ["CTL-56", "CTL-1790", "CTL-1801"];
+    const tickets = ["PROJ-56", "PROJ-1790", "PROJ-1801"];
     for (const ticketId of tickets) {
       expect(() => resolveOwnership({ ticketId, roster: undefined, hostName: "mini" })).toThrow(
         VerificationError,
@@ -154,19 +154,19 @@ describe("(2) resolveOwnership — an ownership check refuses rather than answer
   });
 
   test("a well-formed call answers, and names the owner as evidence", () => {
-    const owner = hrwOwner("CTL-1790", ROSTER);
-    const verdict = resolveOwnership({ ticketId: "CTL-1790", roster: ROSTER, hostName: owner });
+    const owner = hrwOwner("PROJ-1790", ROSTER);
+    const verdict = resolveOwnership({ ticketId: "PROJ-1790", roster: ROSTER, hostName: owner });
     expect(mustBeConclusive(verdict)).toBe(true);
     expect(verdict.evidence.owner).toBe(owner);
 
     const other = ROSTER.find((h) => h !== owner);
-    expect(mustBeConclusive(resolveOwnership({ ticketId: "CTL-1790", roster: ROSTER, hostName: other }))).toBe(
+    expect(mustBeConclusive(resolveOwnership({ ticketId: "PROJ-1790", roster: ROSTER, hostName: other }))).toBe(
       false,
     );
   });
 
   test("an empty roster throws instead of silently owning nothing", () => {
-    expect(() => resolveOwnership({ ticketId: "CTL-1", roster: [], hostName: "mini" })).toThrow(
+    expect(() => resolveOwnership({ ticketId: "PROJ-1", roster: [], hostName: "mini" })).toThrow(
       VerificationError,
     );
   });
