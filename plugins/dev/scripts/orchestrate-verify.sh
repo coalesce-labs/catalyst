@@ -157,14 +157,14 @@ cd "$WORKTREE"
 # Determine the diff range. Default: vs base-branch tip. If the worker's
 # PR is already merged (post-merge verification — the common case since
 # CTL-130), use the merge SHA so we can still see the changeset even
-# after the branch has been deleted by `gh pr merge --delete-branch`.
+# after the branch has been deleted (CTL-56: via checkout-free gh api DELETE, not --delete-branch).
 BRANCH=$(git branch --show-current 2>/dev/null || echo "")
 DIFF_RANGE="${BASE_BRANCH}..."
 PR_NUMBER=""
 PR_STATE=""
 PR_MERGE_SHA=""
 
-# Prefer signal file PR metadata over branch-based lookup. After --delete-branch,
+# Prefer signal file PR metadata over branch-based lookup. After remote branch deletion,
 # gh pr list --head returns nothing even with --state all, and git diff base... is
 # empty. The worker writes pr.number + pr.mergeCommitSha to the signal file before
 # deleting the branch, so use those when available.

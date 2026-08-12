@@ -1,12 +1,10 @@
 // delegate-first.test.mjs — CTL-1609 Phase 2: routeStuckTicketToDelegate seam
-import { mkdtempSync, rmSync } from "node:fs";
+//                            CTL-1774 Phase 1: Layer-2 config ladder for readDelegateFirstMode
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import {
-  readDelegateFirstMode,
-  routeStuckTicketToDelegate,
-} from "./delegate-first.mjs";
+import { readDelegateFirstMode, routeStuckTicketToDelegate } from "./delegate-first.mjs";
 
 // ─── test helpers ────────────────────────────────────────────────────────────
 
@@ -61,6 +59,77 @@ describe("readDelegateFirstMode", () => {
 
   test("returns off for unrecognised values (fail-safe)", () => {
     expect(readDelegateFirstMode({ CATALYST_DELEGATE_FIRST: "bogus" })).toBe("off");
+  });
+});
+
+// ─── CTL-1774 Phase 1: Layer-2 config ladder for readDelegateFirstMode ───────
+//
+// These tests verify the env → Layer-2 → safe-default ladder, mirroring the
+// readRecoveryPassConfig / readDeadDocWorkerConfig pattern.  Uses
+// CATALYST_LAYER2_CONFIG_FILE to override the Layer-2 path in tests.
+
+describe("readDelegateFirstMode — Layer-2 config ladder (CTL-1774)", () => {
+  const DF_ENVS = ["CATALYST_DELEGATE_FIRST", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {},
+    tmp;
+  beforeEach(() => {
+    for (const k of DF_ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1774-df-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of DF_ENVS) {
+      saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]);
+    }
+    saved = {};
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("safe default: mode=off when env unset and no Layer-2 key", () => {
+    expect(readDelegateFirstMode(process.env)).toBe("off");
+  });
+
+  test("Layer-2 used when env unset — THIS IS THE TEST THAT FAILS RED TODAY", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { delegateFirst: { mode: "shadow" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readDelegateFirstMode(process.env)).toBe("shadow");
+  });
+
+  test("env wins over Layer-2", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { delegateFirst: { mode: "shadow" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_DELEGATE_FIRST = "enforce";
+    expect(readDelegateFirstMode(process.env)).toBe("enforce");
+  });
+
+  test("kill-switch: CATALYST_DELEGATE_FIRST=0 maps to off even if Layer-2 says enforce", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { delegateFirst: { mode: "enforce" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_DELEGATE_FIRST = "0";
+    expect(readDelegateFirstMode(process.env)).toBe("off");
+  });
+
+  test("invalid env falls through to Layer-2 (env not a hard override when unrecognised)", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { delegateFirst: { mode: "shadow" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_DELEGATE_FIRST = "garbage";
+    expect(readDelegateFirstMode(process.env)).toBe("shadow");
+  });
+
+  test("safe default when env unset and Layer-2 file absent", () => {
+    // CATALYST_LAYER2_CONFIG_FILE points at absent.json (set in beforeEach)
+    expect(readDelegateFirstMode(process.env)).toBe("off");
+  });
+
+  test("injection contract preserved: explicit env bag still works", () => {
+    expect(readDelegateFirstMode({ CATALYST_DELEGATE_FIRST: "shadow" })).toBe("shadow");
   });
 });
 
@@ -156,7 +225,10 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
     const opts = makeOpts({
       labelCalls,
       events,
-      enqueueFn: () => { enqueueCalled = true; return { enqueued: true, reason: "enqueued" }; },
+      enqueueFn: () => {
+        enqueueCalled = true;
+        return { enqueued: true, reason: "enqueued" };
+      },
       env: { CATALYST_DELEGATE_FIRST: "shadow" },
     });
 
@@ -177,7 +249,10 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
     let enqueueCalled = false;
     const opts = makeOpts({
       labelCalls,
-      enqueueFn: () => { enqueueCalled = true; return { enqueued: true }; },
+      enqueueFn: () => {
+        enqueueCalled = true;
+        return { enqueued: true };
+      },
       env: { CATALYST_DELEGATE_FIRST: "off" },
     });
 
@@ -193,7 +268,10 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
     let enqueueCalled = false;
     const opts = makeOpts({
       labelCalls,
-      enqueueFn: () => { enqueueCalled = true; return { enqueued: true }; },
+      enqueueFn: () => {
+        enqueueCalled = true;
+        return { enqueued: true };
+      },
       env: {},
     });
 
