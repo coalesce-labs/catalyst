@@ -79,6 +79,8 @@ function runTransition({
   // reads from_state before this call) passes it here so the guard reuses it
   // instead of issuing a second read. undefined → the guard reads for itself.
   knownCurrentState,
+  allowUnmergedDone,
+  mergedWorkVerified,
 }) {
   try {
     const repoRoot = resolveRepoRoot(ticket);
@@ -119,7 +121,7 @@ function runTransition({
     }
 
     const config = `${repoRoot}/.catalyst/config.json`;
-    const { code, stdout } = exec(LINEAR_TRANSITION_BIN, [
+    const args = [
       "--ticket",
       ticket,
       "--transition",
@@ -127,7 +129,10 @@ function runTransition({
       "--config",
       config,
       "--json",
-    ]);
+    ];
+    if (allowUnmergedDone) args.push("--allow-unmerged-done", allowUnmergedDone);
+    if (mergedWorkVerified) args.push("--merged-work-verified", String(mergedWorkVerified));
+    const { code, stdout } = exec(LINEAR_TRANSITION_BIN, args);
     let action = null;
     let from_state = null;
     let to_state = null;
@@ -140,6 +145,9 @@ function runTransition({
       to_state = parsed.targetState || null;
     } catch {
       /* non-JSON stdout — leave action/from_state/to_state null */
+    }
+    if (action === "refused-unmerged" || code === 3) {
+      return { applied: false, skipped: "unmerged-work", reason: "refused-unmerged-work", from_state, to_state: null };
     }
     const applied = code === 0 && action !== "update-failed";
     if (!applied) {
@@ -170,8 +178,8 @@ export function applyPhaseStatus({ ticket, phase, resolveRepoRoot, exec, cache }
 // CTL-758: this is the FORWARD terminal write (key === TERMINAL_LINEAR_KEY) — it
 // is EXEMPT from the backward-write guard, so runTransition does not read state
 // here. `cache` is forwarded for symmetry (unused by the exempt path).
-export function applyTerminalDone({ ticket, resolveRepoRoot, exec, cache }) {
-  return runTransition({ ticket, key: TERMINAL_LINEAR_KEY, resolveRepoRoot, exec, cache });
+export function applyTerminalDone({ ticket, resolveRepoRoot, exec, cache, allowUnmergedDone, mergedWorkVerified }) {
+  return runTransition({ ticket, key: TERMINAL_LINEAR_KEY, resolveRepoRoot, exec, cache, allowUnmergedDone, mergedWorkVerified });
 }
 
 // applyLabel — additively apply a Linear label (needs-human), classify

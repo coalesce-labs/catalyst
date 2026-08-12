@@ -460,12 +460,15 @@ when available, otherwise read a ticket to discover valid status names.
 # Common flow
 linearis issues update ENG-123 --status "In Progress"
 linearis issues update ENG-123 --status "In Review"
-linearis issues update ENG-123 --status "Done"
+plugins/dev/scripts/linear-transition.sh --ticket ENG-123 --transition done
 
 # With comment
-linearis issues update ENG-123 --status "Done"
+plugins/dev/scripts/linear-transition.sh --ticket ENG-123 --transition done
 linearis issues discuss ENG-123 --body "Merged: PR #456"
 ```
+
+Never write a terminal state with bare `linearis issues update --status`. Route terminal writes
+through `linear-transition.sh` so merged-work evidence, idempotency, and the audit event are applied.
 
 ### UUID-based calls (CTL-207)
 

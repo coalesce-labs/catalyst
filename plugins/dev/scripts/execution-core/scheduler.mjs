@@ -3813,7 +3813,7 @@ function reconcileTerminalBackstop(
   }
   // Drift detected: force the forward Done write (the CTL-758 guard permits it).
   try {
-    const res = writeStatus.applyTerminalDone({ ticket, cache });
+    const res = writeStatus.applyTerminalDone({ ticket, cache, mergedWorkVerified: pr.number });
     if (typeof emitStateWrite === "function") {
       emitStateWrite({
         writerResult: res,

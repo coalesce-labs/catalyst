@@ -20,11 +20,14 @@
 #                        ticket is already in target state)
 #   --dry-run            Print what would happen without calling linearis
 #   --json               Emit a JSON result to stdout (default: human-readable)
+#   --merged-work-verified <ref>  Caller-supplied merge proof
+#   --allow-unmerged-done <reason> Audited override
 #
 # Exit codes:
 #   0  success (transitioned, idempotent skip, dry-run, or linearis missing)
 #   1  usage error (missing required args)
 #   2  linearis update call failed
+#   3  Done refused because committed work is not merged
 
 set -uo pipefail
 
@@ -32,6 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # CTL-1397: direct-SQLite Linear reads (replica-first, loud linearis fallback).
 source "${SCRIPT_DIR}/lib/linear-read-replica.sh"
+source "${SCRIPT_DIR}/lib/done-gate.sh"
 
 # ─── Default state fallbacks (when config doesn't specify them) ────────────
 # These match the defaults documented in oneshot/orchestrate skills.
@@ -61,6 +65,8 @@ CONFIG=""
 FORCE=0
 DRY_RUN=0
 JSON_OUT=0
+MERGED_WORK_VERIFIED=""
+ALLOW_UNMERGED_DONE=""
 
 usage() {
   sed -n '2,24p' "$0" >&2
@@ -69,10 +75,17 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --ticket)      TICKET="$2"; shift 2 ;;
-    --transition)  TRANSITION="$2"; shift 2 ;;
-    --state)       STATE="$2"; shift 2 ;;
-    --config)      CONFIG="$2"; shift 2 ;;
+    --ticket|--transition|--state|--config|--merged-work-verified|--allow-unmerged-done)
+      [[ $# -ge 2 && -n "${2:-}" ]] || { echo "ERROR: $1 requires a value" >&2; exit 1; }
+      case "$1" in
+        --ticket) TICKET="$2" ;;
+        --transition) TRANSITION="$2" ;;
+        --state) STATE="$2" ;;
+        --config) CONFIG="$2" ;;
+        --merged-work-verified) MERGED_WORK_VERIFIED="$2" ;;
+        --allow-unmerged-done) ALLOW_UNMERGED_DONE="$2" ;;
+      esac
+      shift 2 ;;
     --force)       FORCE=1; shift ;;
     --dry-run)     DRY_RUN=1; shift ;;
     --json)        JSON_OUT=1; shift ;;
@@ -221,6 +234,15 @@ if [ "$FORCE" -ne 1 ] && command -v jq >/dev/null 2>&1; then
 fi
 
 # ─── Dry-run short-circuit ─────────────────────────────────────────────────
+# CAT-45: idempotency intentionally precedes the gate. Every actual Done write,
+# including --state Done and --force, reaches this universal chokepoint.
+done_gate_check "$TICKET" "$TARGET_STATE" "$CONFIG_PATH" "$MERGED_WORK_VERIFIED" "$ALLOW_UNMERGED_DONE"
+GATE_RC=$?
+if [ "$GATE_RC" -eq 3 ]; then
+  emit "refused-unmerged" "$CURRENT_STATE" "${_CATALYST_DONE_GATE_REASON}"
+  exit 3
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
   emit "dry-run" "$CURRENT_STATE" "would transition to ${TARGET_STATE}"
   exit 0
