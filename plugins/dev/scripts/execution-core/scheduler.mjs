@@ -238,6 +238,7 @@ import {
   defaultAppendOrphanDetectedEvent,
   defaultAppendFenceSuppressedEvent,
   emitFenceSuppressedEventOnce,
+  gcFenceSuppressedEmits,
 } from "./recovery.mjs";
 import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolve.mjs";
 // CTL-729: progress-watchdog imports.
@@ -8948,6 +8949,7 @@ export function schedulerTick(
   for (const { ticket, phase } of gcDispatchCooldowns(orchDir, eligibleIds, now())) {
     appendCooldownGcEvent({ ticket, orchId: ticket, target_phase: phase });
   }
+  gcFenceSuppressedEmits(orchDir, now());
 
   const didWork =
     dispatched.length > 0 || advanced.length > 0 || promotedCount > 0 || resumedCount > 0;

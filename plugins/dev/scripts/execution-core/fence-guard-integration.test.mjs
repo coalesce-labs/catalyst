@@ -162,6 +162,28 @@ describe("schedulerTick terminalDoneOnce fence guard (site 1, CTL-863)", () => {
     });
     expect(doneCalls).not.toContain("CTL-S1");
   });
+
+  test("completed tick reaps expired fence-event markers and preserves fresh ones", () => {
+    const dir = join(orchDir, ".fence-suppressed-emits");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "old.applied"), JSON.stringify({ emittedAt: 1 }));
+    writeFileSync(join(dir, "fresh.applied"), JSON.stringify({ emittedAt: 999_999 }));
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0, stdout: "" }),
+      writeStatus: {
+        applyTerminalDone: () => ({ applied: true }),
+        applyPhaseStatus: () => ({ applied: true }),
+        applyLabel: () => ({ applied: true }),
+      },
+      liveBackgroundCount: () => 0,
+      teardownWorktree: () => true,
+      hosts: ["single-host"],
+      now: () => 1_000_000,
+    });
+    expect(existsSync(join(dir, "old.applied"))).toBe(false);
+    expect(existsSync(join(dir, "fresh.applied"))).toBe(true);
+  });
 });
 
 // ── Site 10: defaultEscalate (stale-pr-rescue-timer) suppressed by stale fence ─
@@ -439,5 +461,37 @@ describe("schedulerTick ctl-925 cycle escalation — HRW ownership gate", () => 
     // pick the escalation up rather than letting it strand.
     expect(ownerForTicket(member, [survivor])).toBe(survivor);
     expect(runAs(survivor, { survivors: [survivor] })).toContain(member);
+  });
+
+  test("foreign-owner suppression emits each cycle member with the injected host", () => {
+    const hostName = ownerForTicket(RING[0], ROSTER);
+    // Both fixture identifiers intentionally share the same owner under this roster.
+    expect(ownerForTicket(RING[1], ROSTER)).toBe(hostName);
+    const events = [];
+    schedulerTick(orchDir, {
+      readEligible: ring,
+      dispatch: () => ({ code: 0, stdout: "" }),
+      writeStatus: {
+        applyTerminalDone: () => ({ applied: true }),
+        applyPhaseStatus: () => ({ applied: true }),
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+        applyBlockedByRelation: () => ({ applied: true }),
+      },
+      liveBackgroundCount: () => 0,
+      teardownWorktree: () => true,
+      hosts: ROSTER,
+      hostName,
+      dispatchSurvivingRoster: ROSTER,
+      gateway: { getDescriptor: () => ({ ownerHost: "foreign-host", generation: 2 }) },
+      appendFenceSuppressedEvent: (event) => events.push(event),
+      now: () => 1_000,
+    });
+    expect(events.map((event) => event.ticket).sort()).toEqual([...RING].sort());
+    expect(events.every((event) => event.site === "ctl-925-cycle")).toBe(true);
+    expect(events.every((event) => event.host === hostName)).toBe(true);
+    for (const ticket of RING) {
+      expect(existsSync(join(orchDir, "workers", ticket))).toBe(false);
+    }
   });
 });

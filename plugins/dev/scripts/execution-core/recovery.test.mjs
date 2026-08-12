@@ -46,6 +46,9 @@ import {
   defaultAppendOperatorEvent,
   // CAT-3
   defaultAppendFenceSuppressedEvent,
+  emitFenceSuppressedEventOnce,
+  gcFenceSuppressedEmits,
+  DEFAULT_FENCE_SUPPRESSED_EMIT_WINDOW_MS,
   // 2026-08-03
   detectSessionRateLimitHit,
 } from "./recovery.mjs";
@@ -65,6 +68,92 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(orchDir, { recursive: true, force: true });
+});
+
+describe("emitFenceSuppressedEventOnce windowing (CAT-219)", () => {
+  const ticket = "CAT-219";
+  const site = "terminal-sweep";
+  const marker = () =>
+    join(orchDir, ".fence-suppressed-emits", `${ticket}-${site}.applied`);
+
+  function seed(value) {
+    mkdirSync(join(orchDir, ".fence-suppressed-emits"), { recursive: true });
+    writeFileSync(marker(), value);
+  }
+
+  test("re-emits after the window elapses", () => {
+    seed(JSON.stringify({ emittedAt: Date.now() - 60 * 60_000 }));
+    const calls = [];
+    emitFenceSuppressedEventOnce(orchDir, ticket, site, "host-a", (event) => calls.push(event));
+    expect(calls).toEqual([
+      { ticket, site, host: "host-a", reason: "fence-suppressed" },
+    ]);
+  });
+
+  test("stays silent inside the window", () => {
+    seed(JSON.stringify({ emittedAt: Date.now() - 60_000 }));
+    const calls = [];
+    emitFenceSuppressedEventOnce(orchDir, ticket, site, "host-a", (event) => calls.push(event));
+    expect(calls).toHaveLength(0);
+  });
+
+  test("writes a timestamped marker and never manufactures a worker directory", () => {
+    emitFenceSuppressedEventOnce(orchDir, ticket, site, "host-a", () => true);
+    expect(typeof JSON.parse(readFileSync(marker(), "utf8")).emittedAt).toBe("number");
+    expect(existsSync(join(orchDir, "workers", ticket))).toBe(false);
+  });
+
+  test.each(["", "{not json"])("legacy or malformed marker fails open: %p", (value) => {
+    seed(value);
+    const calls = [];
+    emitFenceSuppressedEventOnce(orchDir, ticket, site, "host-a", (event) => calls.push(event));
+    expect(calls).toHaveLength(1);
+    expect(typeof JSON.parse(readFileSync(marker(), "utf8")).emittedAt).toBe("number");
+  });
+
+  test("environment override is read lazily", () => {
+    const prior = process.env.CATALYST_FENCE_SUPPRESSED_EMIT_WINDOW_MS;
+    try {
+      process.env.CATALYST_FENCE_SUPPRESSED_EMIT_WINDOW_MS = "100";
+      seed(JSON.stringify({ emittedAt: Date.now() - 101 }));
+      const calls = [];
+      emitFenceSuppressedEventOnce(orchDir, ticket, site, "host-a", (event) => calls.push(event));
+      expect(calls).toHaveLength(1);
+    } finally {
+      if (prior === undefined) delete process.env.CATALYST_FENCE_SUPPRESSED_EMIT_WINDOW_MS;
+      else process.env.CATALYST_FENCE_SUPPRESSED_EMIT_WINDOW_MS = prior;
+    }
+  });
+
+  test("failed emit does not refresh an expired marker", () => {
+    const emittedAt = Date.now() - DEFAULT_FENCE_SUPPRESSED_EMIT_WINDOW_MS - 1;
+    seed(JSON.stringify({ emittedAt }));
+    emitFenceSuppressedEventOnce(orchDir, ticket, site, "host-a", () => false);
+    expect(JSON.parse(readFileSync(marker(), "utf8")).emittedAt).toBe(emittedAt);
+    const calls = [];
+    emitFenceSuppressedEventOnce(orchDir, ticket, site, "host-a", (event) => calls.push(event));
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(readFileSync(marker(), "utf8")).emittedAt).toBeGreaterThan(emittedAt);
+  });
+});
+
+describe("gcFenceSuppressedEmits retention (CAT-219)", () => {
+  test("reaps expired, malformed, and legacy markers while preserving fresh markers", () => {
+    const dir = join(orchDir, ".fence-suppressed-emits");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "old.applied"), JSON.stringify({ emittedAt: 1 }));
+    writeFileSync(join(dir, "fresh.applied"), JSON.stringify({ emittedAt: 9_999 }));
+    writeFileSync(join(dir, "legacy.applied"), "");
+    writeFileSync(join(dir, "malformed.applied"), "{");
+    writeFileSync(join(dir, "keep.txt"), "");
+    expect(gcFenceSuppressedEmits(orchDir, 10_000, 100)).toBe(3);
+    expect(readdirSync(dir).sort()).toEqual(["fresh.applied", "keep.txt"]);
+  });
+
+  test("absent directory is a no-op", () => {
+    expect(() => gcFenceSuppressedEmits(orchDir, Date.now())).not.toThrow();
+    expect(gcFenceSuppressedEmits(orchDir, Date.now())).toBe(0);
+  });
 });
 
 // --- helpers --------------------------------------------------------------
