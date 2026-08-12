@@ -174,6 +174,8 @@ source "$SCRIPT_DIR/lib/stack-halt.sh"
 [[ -f "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh" ]] && . "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
 # shellcheck source=lib/catalyst-agent-path.sh
 source "$SCRIPT_DIR/lib/catalyst-agent-path.sh"
+# shellcheck source=lib/cloud-sync-token-probe.sh
+[[ -f "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh" ]] && . "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
 
 # ─── Proxy env (used only under --proxy) ─────────────────────────────────────
 PROXY_HOST="http://127.0.0.1:8080"
@@ -2538,6 +2540,38 @@ _stat_field() {
   printf '%s' "$out"
 }
 
+# cmd_adopt_thoughts_sync — CTL-1473: install the thoughts-sync LaunchAgent for developer/monitor
+# nodes. Extracted from cmd_install_services so developer nodes (routed through adopt-updater,
+# not install-services) get thoughts-sync too. Pure install — no cutover side effects.
+cmd_adopt_thoughts_sync() {
+  local print_only="no" sync_interval="$SYNC_AGENT_INTERVAL_DEFAULT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --print)         print_only="yes"; shift ;;
+      --sync-interval) sync_interval="${2:?--sync-interval needs a value}"; shift 2 ;;
+      *) fail "unknown adopt-thoughts-sync arg: $1 (try: --print | --sync-interval <sec>)" ;;
+    esac
+  done
+  [[ "$sync_interval" =~ ^[0-9]+$ ]] || fail "--sync-interval must be an integer (seconds), got: $sync_interval"
+  local sync_cmd; sync_cmd="$(_resolve_thoughts_sync_cmd)"
+  if [[ "$print_only" == "yes" ]]; then
+    render_thoughts_sync_plist "$sync_cmd" "$sync_interval"
+    return 0
+  fi
+  [[ "$(uname -s)" == "Darwin" ]] || fail "adopt-thoughts-sync is macOS-only (launchd); this host is $(uname -s). Use --print to preview the plist."
+  command -v launchctl >/dev/null 2>&1 || fail "launchctl not found"
+  mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/catalyst"
+  render_thoughts_sync_plist "$sync_cmd" "$sync_interval" > "$SYNC_AGENT_PLIST"
+  log "wrote $SYNC_AGENT_PLIST (exec: $sync_cmd, interval ${sync_interval}s)"
+  local guid; guid="gui/$(id -u)"
+  launchctl bootout "$guid" "$SYNC_AGENT_PLIST" 2>/dev/null || true
+  if launchctl bootstrap "$guid" "$SYNC_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
+    log "loaded $SYNC_AGENT_LABEL — RunAtLoad fired thoughts-pull-sync"
+  else
+    fail "launchctl bootstrap failed for $SYNC_AGENT_PLIST"
+  fi
+}
+
 # cloud_sync_verify_report [--json] [--strict] — read-only write→read chain report.
 CLOUD_SYNC_REPLICA_TABLES="issues issue_labels labels relations projects sync_meta"
 cloud_sync_verify_report() {
@@ -2600,7 +2634,18 @@ cmd_activate_replica() {
   else
     merged="$(jq -nc '{catalyst:{linearReplica:{mode:"on"}}}')"
   fi
-  if [[ "$dry_run" == yes ]]; then printf '%s\n' "$merged"; return 0; fi
+  if [[ "$dry_run" == yes ]]; then
+    # Preview the CHANGE, never the document (CAT-21 Codex P1). `merged` is the
+    # WHOLE Layer-2 config, which is where this machine's API tokens live — and the
+    # runbook recommends this command, so dumping it discloses every secret to
+    # whatever captured stdout: an agent transcript, a CI log, a terminal recording,
+    # a support paste. The only thing activate-replica changes is
+    # catalyst.linearReplica, so that subtree is the entire useful preview.
+    printf 'activate-replica --dry-run: would set catalyst.linearReplica.mode="on" in %s\n' "$cfg" >&2
+    printf 'activate-replica --dry-run: the rest of the document is unchanged and withheld (it carries secrets)\n' >&2
+    jq -n --argjson lr "$(jq -c '.catalyst.linearReplica // {}' <<<"$merged")" '{catalyst:{linearReplica:$lr}}'
+    return 0
+  fi
   mkdir -p "$(dirname "$cfg")"
   local tmp="${cfg}.tmp.$$"
   if printf '%s\n' "$merged" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$cfg"; then
@@ -2611,38 +2656,6 @@ cmd_activate_replica() {
     return 1
   fi
   log "activated local Linear replica; restart execution-core to construct the reader"
-}
-
-# cmd_adopt_thoughts_sync — CTL-1473: install the thoughts-sync LaunchAgent for developer/monitor
-# nodes. Extracted from cmd_install_services so developer nodes (routed through adopt-updater,
-# not install-services) get thoughts-sync too. Pure install — no cutover side effects.
-cmd_adopt_thoughts_sync() {
-  local print_only="no" sync_interval="$SYNC_AGENT_INTERVAL_DEFAULT"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --print)         print_only="yes"; shift ;;
-      --sync-interval) sync_interval="${2:?--sync-interval needs a value}"; shift 2 ;;
-      *) fail "unknown adopt-thoughts-sync arg: $1 (try: --print | --sync-interval <sec>)" ;;
-    esac
-  done
-  [[ "$sync_interval" =~ ^[0-9]+$ ]] || fail "--sync-interval must be an integer (seconds), got: $sync_interval"
-  local sync_cmd; sync_cmd="$(_resolve_thoughts_sync_cmd)"
-  if [[ "$print_only" == "yes" ]]; then
-    render_thoughts_sync_plist "$sync_cmd" "$sync_interval"
-    return 0
-  fi
-  [[ "$(uname -s)" == "Darwin" ]] || fail "adopt-thoughts-sync is macOS-only (launchd); this host is $(uname -s). Use --print to preview the plist."
-  command -v launchctl >/dev/null 2>&1 || fail "launchctl not found"
-  mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/catalyst"
-  render_thoughts_sync_plist "$sync_cmd" "$sync_interval" > "$SYNC_AGENT_PLIST"
-  log "wrote $SYNC_AGENT_PLIST (exec: $sync_cmd, interval ${sync_interval}s)"
-  local guid; guid="gui/$(id -u)"
-  launchctl bootout "$guid" "$SYNC_AGENT_PLIST" 2>/dev/null || true
-  if launchctl bootstrap "$guid" "$SYNC_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
-    log "loaded $SYNC_AGENT_LABEL — RunAtLoad fired thoughts-pull-sync"
-  else
-    fail "launchctl bootstrap failed for $SYNC_AGENT_PLIST"
-  fi
 }
 
 # cmd_adopt_cloud_sync — install the supervised catalyst-cloud-sync LaunchAgent

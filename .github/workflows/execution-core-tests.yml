@@ -798,4 +798,6 @@ jobs:
             github-token-candidates-legacy-parity.test.mjs \
             github-quota.test.mjs \
             github-quota-timer.test.mjs \
-            cluster-sync.test.mjs
+            cluster-sync.test.mjs \
+            reconstruct-ticket-state.test.mjs \
+            hosts-json-retired.test.mjs

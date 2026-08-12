@@ -245,6 +245,15 @@ if [ -d "$FAKE_HOME/catalyst/archives/CTL-9999" ]; then
     fail "case1: archive contains phase-monitor-merge.json" \
       "ls: $(ls "$FAKE_HOME/catalyst/archives/CTL-9999/" 2>/dev/null || echo empty)"
   fi
+
+  # CTL-1490 (Codex round-2 P1 — PR #2697): the .teardown-complete marker is
+  # written LAST, strictly after archiving/worktree-removal/the terminal
+  # emit above — reconstruct-ticket-state.mjs's defaultCheckArchive treats
+  # ONLY this marker's presence as terminal evidence, not the archive dir's
+  # mere non-emptiness (a worker that crashes right after the archive-first
+  # cp -R, before this marker, must NOT be read as terminal).
+  assert_file_exists "case1: .teardown-complete marker written on full completion" \
+    "$FAKE_HOME/catalyst/archives/CTL-9999/.teardown-complete"
 fi
 
 # 1b. Worktree removed (the wt directory should no longer exist)

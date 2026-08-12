@@ -7,6 +7,29 @@ sidebar:
 
 `catalyst-stack` is the canonical command for bringing the Catalyst service stack up and down. It starts the services in dependency order and is idempotent — already-running services are left alone.
 
+## Logs & retention
+
+Each of the four nohup-launched daemons — execution-core, broker, otel-forward, and orch-monitor — **rotates its log on start**: immediately before truncating the log with `>`, the previous run's content is copied to `<log>.1`, older copies shift down to `<log>.2` … `<log>.N`, and the oldest is dropped. The primary log's **inode is preserved** across a restart (copy-then-truncate, not rename), so Grafana Alloy's `loki.source.file` static-path tailer keeps shipping without a gap.
+
+Retention is controlled by `CATALYST_LOG_RETAIN` (default `5`; `0` disables rotation entirely and restores the old truncate-only behaviour). Log paths:
+
+| Daemon | Log file |
+|--------|----------|
+| execution-core | `~/catalyst/execution-core/daemon.log` |
+| broker | `~/catalyst/broker.log` |
+| otel-forward | `~/catalyst/otel-forward.log` |
+| orch-monitor | `~/catalyst/monitor.log` |
+
+**Known gaps**: the launchd-managed daemons (updater, cloud-sync, event-mirror) truncate via `StandardOutPath`/`StandardErrorPath` and are **not** rotated by this mechanism. The daemon watchdog intentionally appends to the shared `daemon.log` with `>>` and is never rotated.
+
+### A log file is not proof its writer is alive
+
+A daemon started by hand with its output redirected elsewhere leaves `daemon.log` frozen on a previous run's shutdown line — the file looks dead while a separate daemon instance is actively dispatching.
+
+The **structured (pino) daemon logs** — execution-core, broker, and otel-forward — carry a `pid` field on every line. When reading one of those to judge daemon liveness, **confirm the newest line's `pid` matches the running process**: compare `cat <pidfile>` against the `pid` in the newest log line rather than trusting the file's last line or mtime alone.
+
+orch-monitor's `monitor.log` is a raw `console.*` stream, so its routine lines (the ~30s heartbeat, startup/shutdown) carry **no** `pid` field — the check above does not apply to it. Judge the monitor's liveness from its pidfile / running process directly (e.g. `catalyst-monitor status`) instead.
+
 ## Dependency order
 
 | Start order | Stop order |
@@ -153,6 +176,7 @@ Non-interactive mode under `--proxy`: auto-approves `brew install mitmproxy` ins
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `CATALYST_LOG_RETAIN` | `5` | Number of previous log files to keep for each nohup daemon (execution-core, broker, otel-forward, orch-monitor). `0` disables rotation. |
 | `CATALYST_REPO_DIR` | `~/code-repos/github/coalesce-labs/catalyst` | Repo root used by the deprecated `hotpatch --legacy-rsync` path. |
 | `CATALYST_PLUGIN_SOURCE` | `~/catalyst/plugin-source` | Default checkout location used by `setup-plugin-source.sh`. |
 | `CATALYST_STACK_HALT_TTL_SECS` | `86400` | Lifetime of the deliberate-stop marker before supervised starts resume. |
