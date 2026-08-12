@@ -44,6 +44,7 @@ CLI_ENTRIES=(
   "catalyst-linear-reconcile:catalyst-linear-reconcile"
   "catalyst-otel-forward:catalyst-otel-forward"
   "catalyst-transitions:catalyst-transitions"
+  "catalyst-verify:catalyst-verify"
   "catalyst-why:catalyst-why"
   "catalyst-session.sh:catalyst-session"
   "catalyst-state.sh:catalyst-state"
