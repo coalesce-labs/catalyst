@@ -1,10 +1,7 @@
 // delegate-event.test.mjs — CTL-1774 Phase 2: delegate-event.mjs leaf emitter
 // Run: cd plugins/dev/scripts/execution-core && bun test delegate-event.test.mjs
 import { describe, test, expect } from "bun:test";
-import {
-  buildDelegateEvent,
-  appendDelegateEvent,
-} from "./delegate-event.mjs";
+import { buildDelegateEvent, appendDelegateEvent } from "./delegate-event.mjs";
 
 // ─── broker namespace-contract import ────────────────────────────────────────
 // Import isBrokerProtectedName from the broker package directly.
@@ -18,9 +15,7 @@ try {
   // Minimal mirror: delegate.* is not in FORBIDDEN_PREFIXES ("filter." / "broker.daemon")
   // and not in PROTECTED_EXACT_NAMES ("session.heartbeat").
   isBrokerProtectedName = (name) =>
-    name.startsWith("filter.") ||
-    name.startsWith("broker.daemon") ||
-    name === "session.heartbeat";
+    name.startsWith("filter.") || name.startsWith("broker.daemon") || name === "session.heartbeat";
 }
 
 // ─── buildDelegateEvent ───────────────────────────────────────────────────────
@@ -75,11 +70,13 @@ describe("buildDelegateEvent", () => {
   });
 
   test("orchId is used when provided", () => {
-    const ev = JSON.parse(buildDelegateEvent({
-      name: "delegate.would-route",
-      ticket: "CTL-42",
-      orchId: "CTL-99",
-    }));
+    const ev = JSON.parse(
+      buildDelegateEvent({
+        name: "delegate.would-route",
+        ticket: "CTL-42",
+        orchId: "CTL-99",
+      })
+    );
     expect(ev.attributes["catalyst.orchestration"]).toBe("CTL-99");
   });
 
@@ -97,7 +94,7 @@ describe("appendDelegateEvent", () => {
     const lines = [];
     const result = appendDelegateEvent(
       { name: "delegate.would-route", ticket: "CTL-9", site: "manual", reason: "smoke" },
-      (line) => lines.push(line),
+      (line) => lines.push(line)
     );
     expect(result).toBe(true);
     expect(lines).toHaveLength(1);
@@ -106,10 +103,9 @@ describe("appendDelegateEvent", () => {
   });
 
   test("returns false (never throws) when append throws", () => {
-    const result = appendDelegateEvent(
-      { name: "delegate.would-route", ticket: "CTL-9" },
-      () => { throw new Error("no write"); },
-    );
+    const result = appendDelegateEvent({ name: "delegate.would-route", ticket: "CTL-9" }, () => {
+      throw new Error("no write");
+    });
     expect(result).toBe(false);
   });
 });

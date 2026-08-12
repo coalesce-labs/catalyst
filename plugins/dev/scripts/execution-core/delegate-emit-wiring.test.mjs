@@ -30,7 +30,7 @@ const registryEntries = [];
 function writeRegistry() {
   writeFileSync(
     join(catalystDir, "execution-core", "registry.json"),
-    JSON.stringify({ projects: registryEntries }, null, 2),
+    JSON.stringify({ projects: registryEntries }, null, 2)
   );
 }
 
@@ -57,7 +57,10 @@ const node = (identifier, priority = 2) => ({ identifier, state: { name: "Todo" 
 // fakeWriteStatus — mirrors the scheduler.test.mjs helper so maybeEscalateDispatchFailures
 // has a working applyLabel without shelling out to linearis.
 const fakeWriteStatus = (applied = []) => ({
-  applyLabel: ({ ticket, label }) => { applied.push({ ticket, label }); return { applied: true }; },
+  applyLabel: ({ ticket, label }) => {
+    applied.push({ ticket, label });
+    return { applied: true };
+  },
   transition: () => {},
   applyPhaseStatus: () => {},
 });
@@ -95,7 +98,12 @@ describe("CTL-1774 Phase 3 — Site 1: maybeEscalateDispatchFailures", () => {
     const delegateSpy = mock(() => {});
     const applied = [];
     const ws = fakeWriteStatus(applied);
-    const marker = { ticket: "CTL-5", phase: "research", code: 2, consecutiveFailures: overThreshold };
+    const marker = {
+      ticket: "CTL-5",
+      phase: "research",
+      code: 2,
+      consecutiveFailures: overThreshold,
+    };
 
     maybeEscalateDispatchFailures(orchDir, marker, {
       writeStatus: ws,
@@ -118,7 +126,12 @@ describe("CTL-1774 Phase 3 — Site 1: maybeEscalateDispatchFailures", () => {
     const delegateSpy = mock(() => {});
     const applied = [];
     const ws = fakeWriteStatus(applied);
-    const marker = { ticket: "CTL-5", phase: "research", code: 2, consecutiveFailures: overThreshold };
+    const marker = {
+      ticket: "CTL-5",
+      phase: "research",
+      code: 2,
+      consecutiveFailures: overThreshold,
+    };
 
     maybeEscalateDispatchFailures(orchDir, marker, {
       writeStatus: ws,
@@ -134,7 +147,12 @@ describe("CTL-1774 Phase 3 — Site 1: maybeEscalateDispatchFailures", () => {
     const delegateSpy = mock(() => {});
     const applied = [];
     const ws = fakeWriteStatus(applied);
-    const marker = { ticket: "CTL-5", phase: "research", code: 2, consecutiveFailures: overThreshold };
+    const marker = {
+      ticket: "CTL-5",
+      phase: "research",
+      code: 2,
+      consecutiveFailures: overThreshold,
+    };
 
     // enforce mode with no runner → fail-safe gate fires → route-fallback
     maybeEscalateDispatchFailures(orchDir, marker, {
@@ -158,15 +176,23 @@ describe("CTL-1774 Phase 3 — Site 6: defaultEscalate", () => {
   test("shadow mode: appendDelegateEvent called with delegate.would-route (site: stale-pr-rescue)", () => {
     const delegateSpy = mock(() => {});
     const applyLabelMock = mock(() => ({ applied: true }));
-    const linearWrite = { applyLabel: applyLabelMock, transition: () => {}, applyPhaseStatus: () => {} };
+    const linearWrite = {
+      applyLabel: applyLabelMock,
+      transition: () => {},
+      applyPhaseStatus: () => {},
+    };
 
-    defaultEscalate("CTL-6", { reason: "unresolvable-conflict" }, {
-      orchDir,
-      linearWrite,
-      env: { CATALYST_DELEGATE_FIRST: "shadow" },
-      // ↓ CTL-1774 Phase 3: new param — does not exist yet → spy never called → Red
-      appendDelegateEvent: delegateSpy,
-    });
+    defaultEscalate(
+      "CTL-6",
+      { reason: "unresolvable-conflict" },
+      {
+        orchDir,
+        linearWrite,
+        env: { CATALYST_DELEGATE_FIRST: "shadow" },
+        // ↓ CTL-1774 Phase 3: new param — does not exist yet → spy never called → Red
+        appendDelegateEvent: delegateSpy,
+      }
+    );
 
     expect(delegateSpy).toHaveBeenCalledTimes(1);
     const evt = delegateSpy.mock.calls[0][0];
@@ -179,12 +205,16 @@ describe("CTL-1774 Phase 3 — Site 6: defaultEscalate", () => {
     const delegateSpy = mock(() => {});
     const linearWrite = fakeWriteStatus();
 
-    defaultEscalate("CTL-6", { reason: "unresolvable-conflict" }, {
-      orchDir,
-      linearWrite,
-      env: { CATALYST_DELEGATE_FIRST: "off" },
-      appendDelegateEvent: delegateSpy,
-    });
+    defaultEscalate(
+      "CTL-6",
+      { reason: "unresolvable-conflict" },
+      {
+        orchDir,
+        linearWrite,
+        env: { CATALYST_DELEGATE_FIRST: "off" },
+        appendDelegateEvent: delegateSpy,
+      }
+    );
 
     expect(delegateSpy).not.toHaveBeenCalled();
   });
@@ -216,7 +246,13 @@ describe("CTL-1774 Phase 3 — Site 5: sweepMissingTriage / dispatchTriage defau
     sweepMissingTriage({
       orchDir: realOrchDir,
       dispatch: mock(() => ({ code: 0 })),
-      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      applyTriageStatus: () => ({
+        applied: false,
+        verified: false,
+        from_state: null,
+        to_state: null,
+        reason: null,
+      }),
       appendEvent: () => {},
       readMaxParallelFn: () => 6,
       liveBackgroundCount: () => 0,
@@ -249,7 +285,13 @@ describe("CTL-1774 Phase 3 — Site 5: sweepMissingTriage / dispatchTriage defau
     sweepMissingTriage({
       orchDir: realOrchDir,
       dispatch: mock(() => ({ code: 0 })),
-      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      applyTriageStatus: () => ({
+        applied: false,
+        verified: false,
+        from_state: null,
+        to_state: null,
+        reason: null,
+      }),
       appendEvent: () => {},
       readMaxParallelFn: () => 6,
       liveBackgroundCount: () => 0,

@@ -2808,7 +2808,12 @@ export function gcDispatchCooldowns(orchDir, eligibleIdentifiers, now) {
 export function maybeEscalateDispatchFailures(
   orchDir,
   marker,
-  { writeStatus, appendEvent, env = process.env, appendDelegateEvent = defaultAppendDelegateEvent } = {}
+  {
+    writeStatus,
+    appendEvent,
+    env = process.env,
+    appendDelegateEvent = defaultAppendDelegateEvent,
+  } = {}
 ) {
   if (!marker || marker.consecutiveFailures < DISPATCH_FAILURE_ESCALATION_THRESHOLD) return false;
   const result = routeStuckTicketToDelegate(orchDir, marker.ticket, {
@@ -8909,10 +8914,7 @@ function runTick() {
     // and Pass 0r's fallback registry construction.
     const unstuckSeamDeps = {
       orchDir: runningOpts.orchDir,
-      clearStall: defaultClearStall(
-        runningOpts.orchDir,
-        runningOpts.writeStatus ?? linearWrite
-      ),
+      clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
       writeStatus: runningOpts.writeStatus ?? linearWrite,
       resolvePrState: (ticket) => {
         const adapter = runningOpts.prAdapter;
@@ -9036,8 +9038,7 @@ function runTick() {
       // defaultAppendDelegateEvent, so bare unit ticks that don't inject it are
       // already wired to the real log. runTick threads it explicitly so tests
       // injected via startScheduler({ appendDelegateEvent }) reach all tick sites.
-      appendDelegateEvent:
-        runningOpts.appendDelegateEvent ?? defaultAppendDelegateEvent,
+      appendDelegateEvent: runningOpts.appendDelegateEvent ?? defaultAppendDelegateEvent,
       // CTL-642/758: the LIVE PR-merged adapter. Without this the recovery
       // short-circuit's pr-merged branch (terminal-state.mjs) AND the reconcile
       // backstop (reconcileTerminalBackstop gate 2) are BOTH inert in production —

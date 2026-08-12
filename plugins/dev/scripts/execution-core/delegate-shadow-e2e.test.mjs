@@ -54,7 +54,11 @@ describe("CTL-1774 Phase 4 — end-to-end integration", () => {
 
     // Real emitter wrote to the event log
     const now = new Date();
-    const logPath = join(catalystDir, "events", `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`);
+    const logPath = join(
+      catalystDir,
+      "events",
+      `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`
+    );
     const raw = readFileSync(logPath, "utf8").trim().split("\n");
     expect(raw).toHaveLength(1);
     const ev = JSON.parse(raw[0]);
@@ -69,7 +73,9 @@ describe("CTL-1774 Phase 4 — end-to-end integration", () => {
     try {
       readFileSync(join(orchDir, ".delegate-queue"), "utf8");
       queueExists = true;
-    } catch { /* expected */ }
+    } catch {
+      /* expected */
+    }
     expect(queueExists).toBe(false);
   });
 
@@ -89,9 +95,18 @@ describe("CTL-1774 Phase 4 — end-to-end integration", () => {
 
     // No file written
     const now = new Date();
-    const logPath = join(catalystDir, "events", `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`);
+    const logPath = join(
+      catalystDir,
+      "events",
+      `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`
+    );
     let fileExists = false;
-    try { readFileSync(logPath, "utf8"); fileExists = true; } catch { /* expected */ }
+    try {
+      readFileSync(logPath, "utf8");
+      fileExists = true;
+    } catch {
+      /* expected */
+    }
     expect(fileExists).toBe(false);
   });
 });

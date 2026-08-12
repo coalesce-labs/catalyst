@@ -324,7 +324,16 @@ function defaultDispatchRescue(ticket, opts) {
 export function defaultEscalate(
   ticket,
   detail,
-  { orchDir, linearWrite, multiHost = false, gateway = undefined, self = undefined, env = process.env, maxParallel = undefined, appendDelegateEvent = defaultAppendDelegateEvent } = {}
+  {
+    orchDir,
+    linearWrite,
+    multiHost = false,
+    gateway = undefined,
+    self = undefined,
+    env = process.env,
+    maxParallel = undefined,
+    appendDelegateEvent = defaultAppendDelegateEvent,
+  } = {}
 ) {
   let routed = false;
   let labelled = false;
@@ -335,7 +344,12 @@ export function defaultEscalate(
     // generation must LOUDLY proceed with the label rather than silently drop a
     // human escalation. A genuine supersession (readable generation, fresh
     // foreign owner / authoritative read says not-current) still suppresses.
-    if (fenceGuard({ ticket, orchDir, multiHost, gateway, self }, { proceedOnMissingGeneration: true })) {
+    if (
+      fenceGuard(
+        { ticket, orchDir, multiHost, gateway, self },
+        { proceedOnMissingGeneration: true }
+      )
+    ) {
       const r = routeStuckTicketToDelegate(orchDir, ticket, {
         site: "stale-pr-rescue",
         reason: detail?.reason ?? "unresolvable-conflict",
@@ -397,8 +411,7 @@ function recordEscalationOutcome(orchDir, ticket, rescueState, outcome, nowMs, e
   // latch-always behavior rather than silently retrying forever. In production
   // `escalate` defaults to defaultEscalate, which always returns the contract, so
   // the strict path is the one that actually runs.
-  const hasContract =
-    outcome != null && typeof outcome === "object" && "confirmed" in outcome;
+  const hasContract = outcome != null && typeof outcome === "object" && "confirmed" in outcome;
   const confirmed = !hasContract || outcome.confirmed === true;
   if (confirmed) {
     writeRescueState(orchDir, ticket, {
@@ -490,8 +503,7 @@ export function startStalePrRescueTimer({
       // CTL-863: live per-tick cluster-size gate. Re-read the roster each tick so
       // a 1→2 roster growth arms the fence zombie-guard on the very next tick with
       // no daemon restart. An explicitly-injected `multiHost` (tests) is honored.
-      const tickMultiHost =
-        multiHost === undefined ? getClusterHosts().length > 1 : multiHost;
+      const tickMultiHost = multiHost === undefined ? getClusterHosts().length > 1 : multiHost;
       await runTick({
         orchDir,
         orchId,
@@ -644,7 +656,17 @@ async function processTicket({
     // unconfirmed escalation (delegate route that may still fail, fence
     // suppression, missing transport) would leave the PR neither retried nor
     // surfaced. Unconfirmed → stay retryable AND say so loudly.
-    if (recordEscalationOutcome(orchDir, ticket, rescueState, stalledOutcome, nowMs, emit, "rescue_worker_stalled")) {
+    if (
+      recordEscalationOutcome(
+        orchDir,
+        ticket,
+        rescueState,
+        stalledOutcome,
+        nowMs,
+        emit,
+        "rescue_worker_stalled"
+      )
+    ) {
       emit(`phase.rescue.escalated.${ticket}`, { ticket, reason: "rescue_worker_stalled" });
     }
     return;
@@ -773,7 +795,9 @@ async function processTicket({
       // CTL-1609 (Codex P1): see recordEscalationOutcome — escalatedAt is a
       // permanent skip in decideRescue, so it is written only when the needs-human
       // label is confirmed applied.
-      if (recordEscalationOutcome(orchDir, ticket, rescueState, outcome, nowMs, emit, decision.reason)) {
+      if (
+        recordEscalationOutcome(orchDir, ticket, rescueState, outcome, nowMs, emit, decision.reason)
+      ) {
         emit(`phase.rescue.escalated.${ticket}`, { ticket, reason: decision.reason });
       }
       return;

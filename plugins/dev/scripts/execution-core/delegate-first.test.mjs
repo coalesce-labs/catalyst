@@ -4,10 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import {
-  readDelegateFirstMode,
-  routeStuckTicketToDelegate,
-} from "./delegate-first.mjs";
+import { readDelegateFirstMode, routeStuckTicketToDelegate } from "./delegate-first.mjs";
 
 // ─── test helpers ────────────────────────────────────────────────────────────
 
@@ -73,15 +70,22 @@ describe("readDelegateFirstMode", () => {
 
 describe("readDelegateFirstMode — Layer-2 config ladder (CTL-1774)", () => {
   const DF_ENVS = ["CATALYST_DELEGATE_FIRST", "CATALYST_LAYER2_CONFIG_FILE"];
-  let saved = {}, tmp;
+  let saved = {},
+    tmp;
   beforeEach(() => {
-    for (const k of DF_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    for (const k of DF_ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
     tmp = mkdtempSync(join(tmpdir(), "ctl1774-df-"));
     process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
   });
   afterEach(() => {
-    for (const k of DF_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
-    saved = {}; rmSync(tmp, { recursive: true, force: true });
+    for (const k of DF_ENVS) {
+      saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]);
+    }
+    saved = {};
+    rmSync(tmp, { recursive: true, force: true });
   });
 
   test("safe default: mode=off when env unset and no Layer-2 key", () => {
@@ -221,7 +225,10 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
     const opts = makeOpts({
       labelCalls,
       events,
-      enqueueFn: () => { enqueueCalled = true; return { enqueued: true, reason: "enqueued" }; },
+      enqueueFn: () => {
+        enqueueCalled = true;
+        return { enqueued: true, reason: "enqueued" };
+      },
       env: { CATALYST_DELEGATE_FIRST: "shadow" },
     });
 
@@ -242,7 +249,10 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
     let enqueueCalled = false;
     const opts = makeOpts({
       labelCalls,
-      enqueueFn: () => { enqueueCalled = true; return { enqueued: true }; },
+      enqueueFn: () => {
+        enqueueCalled = true;
+        return { enqueued: true };
+      },
       env: { CATALYST_DELEGATE_FIRST: "off" },
     });
 
@@ -258,7 +268,10 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
     let enqueueCalled = false;
     const opts = makeOpts({
       labelCalls,
-      enqueueFn: () => { enqueueCalled = true; return { enqueued: true }; },
+      enqueueFn: () => {
+        enqueueCalled = true;
+        return { enqueued: true };
+      },
       env: {},
     });
 

@@ -67,12 +67,12 @@ export function routeStuckTicketToDelegate(
 
   // helper: call the Phase-1 label chokepoint and return { labelled: bool }
   const labelDirect = () => {
-    const labelled = labelNeedsHumanUnlessBeliefOwner(
-      orchDir,
-      ticket,
-      applyLabel,
-      { env, site, log: logArg, explanation }
-    );
+    const labelled = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, applyLabel, {
+      env,
+      site,
+      log: logArg,
+      explanation,
+    });
     return labelled;
   };
 
@@ -110,16 +110,11 @@ export function routeStuckTicketToDelegate(
   }
 
   const enqueue = deps.enqueue ?? enqueueDelegateIntent;
-  const q = enqueue(
-    ticket,
-    { kind, phase: "recovery-pass", reason, boardContext, briefObj },
-    deps
-  );
+  const q = enqueue(ticket, { kind, phase: "recovery-pass", reason, boardContext, briefObj }, deps);
 
   // Mirror enqueueRecoveryItemDelegate's `initiated` predicate: a fresh enqueue
   // OR an idempotent no-op both mean the delegate already owns the ticket.
-  const initiated =
-    q.enqueued || q.reason === "already-pending" || q.reason === "worker-live";
+  const initiated = q.enqueued || q.reason === "already-pending" || q.reason === "worker-live";
 
   if (initiated) {
     appendEvent({ name: "delegate.routed", ticket, site, reason: q.reason });
