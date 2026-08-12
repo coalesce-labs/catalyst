@@ -2660,6 +2660,20 @@ describe("escalateExhaustedIntents correlation (CAT-170)", () => {
     }
   });
 
+  test("a durable provisional-anchor signal blocks failover when its ledger latch does not land", () => {
+    seed("CAT-222", "account-rate-limited", t0);
+    seed("CAT-223", "account-rate-limited", t0 + 1);
+
+    const out = run({ recordIntent: () => null });
+
+    expect(out.result).toEqual([]);
+    expect(out.events).toEqual([]);
+    expect(out.signals).toHaveLength(1);
+    expect(out.signals[0].ticket).toBe("CAT-222");
+    expect(out.signals[0].payload.correlation.role).toBe("anchor");
+    expect(out.labels).toEqual(["CAT-222"]);
+  });
+
   test("different or absent signatures retain independent escalation behavior", () => {
     seed("CAT-180", "account-rate-limited");
     seed("CAT-181", "source-conflict");

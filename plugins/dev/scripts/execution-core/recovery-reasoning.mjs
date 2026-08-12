@@ -2851,6 +2851,10 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
           correlated: false,
         }));
   const escalatedTickets = [];
+  // A provisional anchor whose signal persisted is already operator-visible even
+  // when its ledger latch later fails. Do not fail over to a second anchor in the
+  // same tick: that would leave two durable `role: "anchor"` signals until retry.
+  const durableAnchorSignals = new Set();
 
   const actOnTicket = (candidate, { role = "singleton", group = null, anchor = null } = {}) => {
     const { ticket, data, file: f } = candidate;
@@ -3038,6 +3042,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       );
       return false; // unlatched → still a candidate, pointer intact → retried as a member
     }
+    if (role === "anchor") durableAnchorSignals.add(ticket);
 
     try {
       recordIntent(ticket, {
@@ -3126,6 +3131,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
         anchorCandidate = candidate;
         break;
       }
+      if (durableAnchorSignals.has(candidate.ticket)) break;
     }
     if (!anchorCandidate) {
       // Every candidate was already attempted above (the loop only breaks on a
