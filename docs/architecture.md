@@ -160,8 +160,10 @@ from a single `EXISTS` over non-terminal rows fresher than `ACTIVE_WORKER_FRESHN
 (`checkSourceRecency`, enabled unless `CATALYST_INGESTION_RECENCY=0`) and to the watchdog's
 empty-interests severity discriminator. Dropping the table would not fail loudly — `fleetActivity`
 catches the `no such table` throw and returns `null` (unknown), which the fail-closed gate reads as
-"not demonstrably active" and forces severity `up`, **silently blinding** the github/linear
-webhook-silence detector. `getStaleWorkers` is the one genuinely unwired export (its own comment
+"not demonstrably active" and forces severity `up`, **silently blinding** the ingestion-recency
+detector. (`RECENCY_SOURCES` wires **monitor and GitHub only**; `catalyst.linear` is deliberately
+DEFERRED — the linear-webhook bot-skip guard suppresses bot-authored issue events before they reach
+the log, so the source goes quiet even with a worker in flight.) `getStaleWorkers` is the one genuinely unwired export (its own comment
 says so). See ADR-018 for the full history.
 
 ## Deployment Mode (CTL-1617)
