@@ -12,7 +12,7 @@ sidebar:
 
 Every `catalyst-*` CLI is installed onto your `PATH` by
 [`install-cli.sh`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/install-cli.sh) (into
-`~/.catalyst/bin` by default). This page lists all 30 of them — one line of
+`~/.catalyst/bin` by default). This page lists all 31 of them — one line of
 purpose plus the key subcommands — grouped by area. Run any tool with `--help`
 for full syntax. The richer tools have their own reference pages (e.g.
 [catalyst-stack](/reference/catalyst-stack/)).
@@ -39,7 +39,7 @@ Manage the execution-core composing daemon (Todo-state monitor + pull-loop sched
 
 On-demand orch-monitor web-dashboard server management.
 
-**Key subcommands:** `start`, `stop`, `restart`, `status`, `open`, `url`, `forward-start`, `forward-stop`, `forward-status`
+**Key subcommands:** `start`, `stop`, `restart`, `status`, `open`, `url`, `forward-start`, `forward-stop`, `forward-status`, `forward-restart`
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-monitor.sh)
 
@@ -232,6 +232,14 @@ Fail-closed activation gate — class-aware health/activation grade (exit 0 ⇒ 
 **Key subcommands:** _(run `catalyst-doctor --help`)_
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-doctor)
+
+### catalyst-config
+
+Read-only per-key config provenance dump (value + env-override/config/default source, resolved layer paths, fingerprint) for cross-host diffing.
+
+**Key subcommands:** `dump`
+
+[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-config)
 
 ### catalyst-backup
 
