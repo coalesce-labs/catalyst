@@ -1366,12 +1366,15 @@ function checkTriageProduction(b, t) {
   let note = "triage production healthy";
   if ((b?.capacity?.freeSlots ?? 0) <= 0) note = "no free slots for triage production";
   else if (untriaged.length === 0) note = "no owned untriaged eligible tickets";
-  else if (last != null) {
+  // A team-scoped held latch is stronger evidence than the host-wide completion
+  // timestamp: on a multi-team host, CAT completing must not mask DOG's held
+  // producer while DOG owns untriaged work.
+  else if (sweepHeldTeams.length > 0) {
+    starved = true;
+    note = `triage sweep held for ${sweepHeldTeams.join(", ")}${last == null ? " with no completion in event tail" : " despite recent host triage completion"}`;
+  } else if (last != null) {
     starved = lastCompleteAgeMs > t.triageProductionStallMs;
     note = starved ? `triage production silent for ${lastCompleteAgeMs}ms` : "triage producing within window";
-  } else if (sweepHeldTeams.length > 0) {
-    starved = true;
-    note = `triage sweep held for ${sweepHeldTeams.join(", ")} with no completion in event tail`;
   } else {
     observable = false;
     note = "no triage completion in the bounded event tail and no held-sweep evidence";

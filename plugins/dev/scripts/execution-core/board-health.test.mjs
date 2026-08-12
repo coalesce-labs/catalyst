@@ -9,7 +9,7 @@
 // action) is asserted by passing `act: () => { throw }` and proving no throw.
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -45,6 +45,7 @@ import {
 // exercises the production body.payload.details nesting + attribute promotion.
 import { buildRecoveryEnvelope } from "./recovery-reasoning.mjs";
 import { tailParsedEvents } from "./event-tail.mjs";
+import { readBoardHealthEventTail } from "./scheduler.mjs";
 
 const NOW = Date.parse("2026-06-20T12:00:00Z");
 const MIN = 60_000;
@@ -3847,7 +3848,7 @@ describe("CAT-82 triage evidence and production", () => {
     const path = join(dir, "events.jsonl");
     const completion = { ts: new Date(NOW - MIN).toISOString(), attributes: { "event.name": "phase.triage.complete.CAT-1" }, resource: { "host.name": "mini" } };
     const noise = Array.from({ length: 4 }, (_, i) => ({ ts: new Date(NOW - 4 + i).toISOString(), attributes: { "event.name": `noise.${i}` } }));
-    writeFileSync(path, [...[completion], ...noise].map((event) => JSON.stringify(event)).join("\n") + "\n");
+    writeFileSync(path, [completion, ...noise].map((event) => JSON.stringify(event)).join("\n") + "\n");
     try {
       const truncated = assembleBoardState({ mode: "shadow", self: "mini", now: () => NOW, readEventRing: () => tailParsedEvents({ path, maxLines: 4 }) });
       expect(truncated.ring.recentTriageCompleteTs).toBeNull();
@@ -3874,5 +3875,35 @@ describe("CAT-82 triage evidence and production", () => {
       sweepHeldTeams: ["CAT"],
       note: "triage sweep held for CAT with no completion in event tail",
     });
+  });
+
+  test("a recent completion for one team cannot mask another owned team's held latch", () => {
+    const verdict = evaluateInvariants(triageBoard({
+      eligible: [{ id: "DOG-1" }],
+      untriagedEligible: new Set(["DOG-1"]),
+      ring: { recentTriageCompleteTs: NOW - MIN, triageSweepHeld: new Set(["DOG"]) },
+    })).triageProduction;
+    expect(verdict).toMatchObject({ ok: false, observable: true, failed: 1, sweepHeldTeams: ["DOG"] });
+  });
+
+  test("the production board-health reader defaults to an 800-event tail", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cat82-production-tail-"));
+    const previous = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const eventDir = join(dir, "events");
+    const path = join(eventDir, `${ym}.jsonl`);
+    mkdirSync(eventDir, { recursive: true });
+    writeFileSync(path, Array.from({ length: 801 }, (_, i) => JSON.stringify({ n: i })).join("\n") + "\n");
+    try {
+      const events = readBoardHealthEventTail();
+      expect(events).toHaveLength(800);
+      expect(events[0]).toEqual({ n: 1 });
+      expect(readBoardHealthEventTail(801)[0]).toEqual({ n: 0 });
+    } finally {
+      previous === undefined ? delete process.env.CATALYST_DIR : (process.env.CATALYST_DIR = previous);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
