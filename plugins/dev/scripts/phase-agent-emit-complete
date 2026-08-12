@@ -106,7 +106,13 @@ SESSION_ID="${CATALYST_SESSION_ID-}"
 NO_SIGNAL_UPDATE=0
 # CTL-1789: default = the phase agent ran this wrapper itself (a DECLARED
 # terminal). Must stay byte-identical to ASSERTED_BY.PHASE_AGENT in
-# execution-core/assertion-evidence.mjs.
+# execution-core/assertion-evidence.mjs — bash cannot import that constant, so
+# the mirror is held honest MECHANICALLY by
+# execution-core/assertion-evidence-parity.test.mjs, which extracts this literal
+# and compares it to the registry. Renaming one side alone FAILS that test; an
+# unnoticed drift would reclassify every declared terminal as
+# absent/unknown-writer. Keep the assignment a plain literal on its own line —
+# the parity extractor is anchored on that shape and fails closed if it changes.
 ASSERTED_BY="phase-agent-emit-complete"
 
 while [[ $# -gt 0 ]]; do

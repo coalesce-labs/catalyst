@@ -850,6 +850,14 @@ a revive, a resume, and a new-work pull).
   callers self-identify. Unknown/missing markers classify **absent**, never `declared` — the
   fail direction is deliberate. `evidence_reason` (`no-predecessor` / `unreadable-signal` /
   `no-marker` / `unknown-writer`) keeps `absent` diagnosable while the contract stays three-valued.
+  **One registry, two unavoidable bash mirrors**: the JS writers (`recovery.mjs`,
+  `sdk-run-phase-agent.mjs`) import `ASSERTED_BY`, but `phase-agent-emit-complete` (its
+  `--asserted-by` default) and `orchestrate-revive` (its flag value) are bash and cannot. Those two
+  literals are held byte-identical to the registry MECHANICALLY by
+  `execution-core/assertion-evidence-parity.test.mjs` — the same one-registry/hand-written-mirror/
+  cross-stack-parity-suite discipline as `lib/secret-contract.mjs`. Each anchor matches on the
+  variable/flag, never the value, and fails CLOSED when an anchor disappears, so a rename on either
+  side alone fails rather than silently reclassifying valid terminals as `unknown-writer`.
 - **Rollout caveat**: signals written before this shipped carry no marker, so the first pipeline pass
   after deploy reads `absent` / `no-marker`. Do not alarm on `absent` until a full ticket has cycled.
 - **Scope**: only the terminal-**success** writers are stamped (plus the SDK backstop). The ~20
@@ -867,6 +875,9 @@ a revive, a resume, and a new-work pull).
   `recovery.mjs` source-scan).
 - `plugins/dev/scripts/orch-monitor/__tests__/namespace-parity.test.ts` — orch-monitor producer
   parity (GitHub/Linear/service-health names + prefix-family invariant).
+- `plugins/dev/scripts/execution-core/assertion-evidence-parity.test.mjs` — CTL-1789 writer-id
+  parity: the `ASSERTED_BY` registry vs its two bash mirrors, plus a no-re-typed-literal check on
+  the JS writers. Wired into the required `execution-core-tests` stable list.
 
 See `thoughts/shared/plans/2026-06-16-ctl-1142.md` §3.8.
 

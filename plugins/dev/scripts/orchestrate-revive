@@ -675,6 +675,12 @@ phase_revive_emit_complete() {
     # CTL-1789: --asserted-by marks this terminal FABRICATED — revive synthesized
     # the completion from a progress probe; the agent never declared anything.
     # Vocabulary: execution-core/assertion-evidence.mjs (REVIVE_SYNTHESIZED).
+    # bash cannot import that constant, so the literal below is held honest
+    # MECHANICALLY by execution-core/assertion-evidence-parity.test.mjs — it
+    # extracts this flag's value and compares it to the registry, so renaming
+    # one side alone FAILS rather than silently classifying the terminal as
+    # absent/unknown-writer. Keep it a bare literal after the flag; the parity
+    # extractor is anchored on that shape and fails closed if it changes.
     if ! "$bin" --phase "$phase" --ticket "$ticket" --status complete \
          --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
          --asserted-by revive-synthesized \

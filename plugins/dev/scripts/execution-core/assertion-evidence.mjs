@@ -32,6 +32,16 @@
 // is declared-by-agent vs fabricated-by-infrastructure — nothing more.
 
 // ASSERTED_BY — the registered writer ids. One per terminal-success writer.
+//
+// THIS IS THE ONLY SOURCE. JS writers (recovery.mjs, sdk-run-phase-agent.mjs)
+// import these symbols. The two BASH writers cannot — `phase-agent-emit-complete`
+// hard-codes PHASE_AGENT as its --asserted-by default and `orchestrate-revive`
+// hard-codes REVIVE_SYNTHESIZED — so those mirrors are held honest MECHANICALLY
+// by assertion-evidence-parity.test.mjs, which extracts each bash literal and
+// compares it to the row here. Renaming EITHER side alone fails that suite; an
+// undetected drift would silently reclassify a valid declared/fabricated
+// terminal as absent/unknown-writer and corrupt the advancement audit. Same
+// discipline as lib/secret-contract.mjs and its bash mirror. CTL-1789 P2.
 export const ASSERTED_BY = Object.freeze({
   // A — the phase skill invoked the wrapper itself. The wrapper's DEFAULT, so a
   // caller that passes no --asserted-by is recorded as the agent's own claim.
