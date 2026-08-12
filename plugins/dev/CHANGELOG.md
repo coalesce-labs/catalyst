@@ -1,5 +1,23 @@
 # Changelog
 
+## [12.53.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.52.0...catalyst-dev-v12.53.0) (2026-08-12)
+
+
+### Features
+
+* **dev:** CTL-1755 preserve daemon logs across restarts ([#3231](https://github.com/coalesce-labs/catalyst/issues/3231)) ([9acf3c5](https://github.com/coalesce-labs/catalyst/commit/9acf3c5e5a0c3902fe713076cffdea6cec492650))
+* **dev:** CTL-1774 — thread appendDelegateEvent through delegate-first routing seam ([#3280](https://github.com/coalesce-labs/catalyst/issues/3280)) ([4cb5ca0](https://github.com/coalesce-labs/catalyst/commit/4cb5ca0bd26de76cfd1c5b766f7343f4a33977cd))
+* **dev:** CTL-1789 — emit phase.advance.applied and attribute who asserted each terminal ([#3268](https://github.com/coalesce-labs/catalyst/issues/3268)) ([52984b6](https://github.com/coalesce-labs/catalyst/commit/52984b650fadde0b3bf97a2bd18c3b24d388ebd9))
+
+
+### Bug Fixes
+
+* **dev:** bound board-health delegate-lands grace ([#3206](https://github.com/coalesce-labs/catalyst/issues/3206)) ([6ec4226](https://github.com/coalesce-labs/catalyst/commit/6ec4226499625e5dd8440ef2e4aadee76ac591b4))
+* **dev:** CTL-1764 handle async spawn 'error' so EAGAIN cannot kill the daemon ([#3230](https://github.com/coalesce-labs/catalyst/issues/3230)) ([3a03870](https://github.com/coalesce-labs/catalyst/commit/3a038701683ae5d832f64a28089b16851fef7f31))
+* **dev:** CTL-1777 — fix write_phase_thoughts_doc under zsh (rename local path vars + static lint) ([#3238](https://github.com/coalesce-labs/catalyst/issues/3238)) ([05a10a5](https://github.com/coalesce-labs/catalyst/commit/05a10a5a844338141d9fa803f2ef8a660a656193))
+* **dev:** CTL-1791 — delete claim.mjs dispatch-claim, the high-water+1 generation the CTL-736 fence forbids ([#3269](https://github.com/coalesce-labs/catalyst/issues/3269)) ([3a9025f](https://github.com/coalesce-labs/catalyst/commit/3a9025ff32cc32dbbffe21cd5861ea82adeec7c5))
+* **dev:** CTL-56 — worktree-safe merge (drop --delete-branch, checkout-free ref cleanup) ([#3277](https://github.com/coalesce-labs/catalyst/issues/3277)) ([f9690b5](https://github.com/coalesce-labs/catalyst/commit/f9690b58dc48a2684810a96aa1b7abb5dcc7dffb))
+
 ## [12.52.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.51.0...catalyst-dev-v12.52.0)
 
 Aug 10, 2026

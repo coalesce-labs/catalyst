@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-legacy-v2.2.0...catalyst-legacy-v2.2.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* **dev:** CTL-56 — worktree-safe merge (drop --delete-branch, checkout-free ref cleanup) ([#3277](https://github.com/coalesce-labs/catalyst/issues/3277)) ([f9690b5](https://github.com/coalesce-labs/catalyst/commit/f9690b58dc48a2684810a96aa1b7abb5dcc7dffb))
+
 ## [2.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-legacy-v2.1.0...catalyst-legacy-v2.2.0) (2026-08-04)
 
 
