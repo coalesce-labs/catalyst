@@ -59,10 +59,48 @@ prior_artifact_for_phase() {
 # Returns "" for phases that do not produce thoughts artifacts.
 own_thoughts_artifact_dir_for_phase() {
 	case "$1" in
-	research) echo "thoughts/shared/research" ;;
-	plan) echo "thoughts/shared/plans" ;;
-	*) echo "" ;;
+	research)       echo "thoughts/shared/research" ;;
+	plan)           echo "thoughts/shared/plans" ;;
+	triage)         echo "thoughts/shared/phase-triage" ;;
+	verify)         echo "thoughts/shared/phase-verify" ;;
+	review)         echo "thoughts/shared/phase-review" ;;
+	pr)             echo "thoughts/shared/phase-pr" ;;
+	monitor-merge)  echo "thoughts/shared/phase-monitor-merge" ;;
+	monitor-deploy) echo "thoughts/shared/phase-monitor-deploy" ;;
+	*)              echo "" ;;
 	esac
+}
+
+# match_thoughts_artifact_with_pull_retry <dir> <ticket>
+#
+# Calls match_thoughts_artifact first. Only on a miss, shells out to
+# thoughts-pull-sync-gate.sh once, then re-checks. Never pulls before the
+# first check. Returns 0 if match found (any attempt), 1 if still missing
+# after a pull attempt.
+match_thoughts_artifact_with_pull_retry() {
+	local dir="$1" ticket="$2"
+
+	# First try — no pull yet.
+	if match_thoughts_artifact "$dir" "$ticket" >/dev/null 2>&1; then
+		match_thoughts_artifact "$dir" "$ticket"
+		return 0
+	fi
+
+	# Miss — pull once then re-check.
+	local self_dir
+	self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	if [[ -n "${CATALYST_PULL_SYNC_CMD:-}" ]]; then
+		"$CATALYST_PULL_SYNC_CMD" >/dev/null 2>&1 || true
+	elif [[ -x "${self_dir}/thoughts-pull-sync-gate.sh" ]]; then
+		"${self_dir}/thoughts-pull-sync-gate.sh" >/dev/null 2>&1 || true
+	fi
+
+	# Re-check after pull.
+	if match_thoughts_artifact "$dir" "$ticket" >/dev/null 2>&1; then
+		match_thoughts_artifact "$dir" "$ticket"
+		return 0
+	fi
+	return 1
 }
 
 # ─── Slug-tolerant, boundary-safe, case-insensitive matcher ────────────────────

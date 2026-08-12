@@ -482,6 +482,30 @@ t_rejected_missing_representative_claim_falls_back_to_overall() {
 }
 check "_ca_entry_rejected_reason: missing representativeClaim falls back to overallStatus" t_rejected_missing_representative_claim_falls_back_to_overall
 
+# CAT-90 Codex P2: the execution-core daemon sources claude-accounts.env, and it
+# must resolve the SAME path this tooling writes. `claude-account switch|sync`
+# materializes the token at _ca_accounts_env_file() =
+# "${CLAUDE_ACCOUNTS_ENV:-$CA_ACCOUNTS_ENV_DEFAULT}"; a daemon that reads only the
+# default path inherits no refreshed token on an override node — or a STALE token
+# still sitting at the default — so a restart after a switch keeps running under
+# the wrong account. Static parity check: cheap, and it fails loudly if the daemon
+# is ever reverted to a hardcoded path.
+t_daemon_honors_accounts_env_override() {
+  local daemon
+  daemon="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/catalyst-execution-core"
+  [[ -r "$daemon" ]] || return 1
+  grep -q '_accounts_env="\${CLAUDE_ACCOUNTS_ENV:-' "$daemon"
+}
+check "execution-core daemon honors CLAUDE_ACCOUNTS_ENV (same override as the writer)" t_daemon_honors_accounts_env_override
+
+t_daemon_default_matches_writer_default() {
+  local daemon
+  daemon="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/catalyst-execution-core"
+  # Both must fall back to ~/.config/catalyst/claude-accounts.env.
+  grep -q '_accounts_env="\${CLAUDE_ACCOUNTS_ENV:-\${HOME}/.config/catalyst/claude-accounts.env}"' "$daemon"
+}
+check "execution-core daemon default matches CA_ACCOUNTS_ENV_DEFAULT" t_daemon_default_matches_writer_default
+
 echo ""
 TOTAL=$((PASSES + FAILURES))
 echo "catalyst-stack-claude-account: $PASSES/$TOTAL passed, $FAILURES failed"
