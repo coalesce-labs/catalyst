@@ -422,7 +422,7 @@ linearis issues update ENG-123 --clear-labels
 > label on the ticket, silently dropping the ones you did not name. Pass
 > `--label-mode add` unless you positively intend a full replacement.
 
-### Trap: a label name can exist on more than one team (CTL-1802)
+### Trap: a label name can exist on more than one team
 
 A team-scoped label is identified by `(name, team)`, and a workspace can hold
 **two different labels with the same name on different teams**. A migration or a
@@ -430,7 +430,7 @@ team split leaves exactly that. When it happens, applying the label **by name**
 fails, even though the label plainly exists on the issue's team:
 
 ```
-linearis issues update CTL-1802 --labels orchestrator
+linearis issues update PROJ-123 --labels orchestrator
   -> "LabelIds for incorrect team — The label 'orchestrator' is not
       associated with the same team as the issue."
 ```
@@ -440,10 +440,31 @@ resolved to the other team's twin. `labels list --team <TEAM>` is *correct* and
 lists only applicable labels, which is exactly why this is easy to misread as
 "discovery and write disagree" and misdiagnose as a stranded vocabulary.
 
-**Diagnose it — list every team that owns the name** (a plain `labels list`
-cannot show you this, because it only ever shows one team):
+**Step 1 — replica first (free, no API quota).** Confirm which team's issues
+actually carry the name, and get the label id, without touching Linear:
 
 ```bash
+sqlite3 -separator '  ' ~/catalyst/catalyst-replica.db "
+  SELECT l.name, l.id, i.team_key, COUNT(*) AS issues
+    FROM issue_labels il
+    JOIN labels l  ON l.id = il.label_id
+    JOIN issues i  ON i.id = il.issue_id
+   WHERE l.name = 'orchestrator'
+   GROUP BY l.name, l.id, i.team_key;"
+```
+
+This answers "which id is in use on MY team's issues", which is usually all you
+need — apply that id and move on.
+
+**Step 2 — only if step 1 is inconclusive.** The replica **cannot** prove a
+duplicate exists: its `labels` table carries no team column, and it mirrors only
+this team's issues, so a twin on another team is structurally invisible to it.
+That is a genuine gap, not a shortcut — so this is the documented
+single-bounded-check last resort, run **once** during a diagnosis, never in a
+loop or a script:
+
+```bash
+# LAST RESORT — one call, one label name, during an active diagnosis only.
 curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" \
   -d '{"query":"{ issueLabels(filter:{name:{eq:\"orchestrator\"}},first:50){ nodes{ id name team{ key } } } }"}' \
@@ -453,7 +474,7 @@ curl -s -X POST https://api.linear.app/graphql \
 **Apply by UUID** — the only unambiguous form when a name is duplicated:
 
 ```bash
-linearis issues update CTL-1802 --labels 80a8e8f3-b960-4bb7-9e6a-f8b67b0dc62b --label-mode add
+linearis issues update PROJ-123 --labels <label-uuid> --label-mode add
 ```
 
 Two things that make this trap hard to see:
