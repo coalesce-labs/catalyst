@@ -34,7 +34,10 @@ import { fileURLToPath } from "node:url";
 import { log as defaultLog } from "./config.mjs";
 import { filterMachineLocalDirt, isNodeModulesDeletion } from "./dirty-tree-classifier.mjs";
 import { classifyCleanRebaseForcePush } from "./catB-force-with-lease.mjs";
-import { classifyOrphanMergedReconcile } from "./unstuck-orphan-merge.mjs";
+import {
+  classifyOrphanMergedReconcile,
+  isOrphanMergePhaseAllowed,
+} from "./unstuck-orphan-merge.mjs";
 import { clearStalledLabel, inRemovalBackoff } from "./label-guard.mjs";
 
 // phase-agent-emit-complete sits two directories up from execution-core/
@@ -290,8 +293,24 @@ export function buildOrphanStaleActSeam(deps = {}) {
   return function orphanStaleActSeam(candidate, _decision) {
     const { ticket, phase, signal } = candidate;
 
+    // markerPath validates the phase's SHAPE and throws `missing-phase` on a
+    // malformed one (CAT-47) — a stricter, more specific verdict than the
+    // allowlist below, so it deliberately stays first.
     const marker = markerPath(orchDir, ticket, phase, "orphan-merge");
     if (markerExists(marker)) return; // idempotent — already emitted this lifetime.
+
+    // CAT-124 (Codex #3223 P2): refuse a non-allowlisted phase HERE, before any
+    // evidence resolution. Everything below — the terminal-done probe and above all
+    // resolvePrState — is wasted or actively misleading work for a phase that can
+    // never be advanced: a synchronous production resolver burned a real GitHub
+    // query before the refusal, and a thenable resolver threw
+    // `pr-state-async-unsupported` first, recording a seam failure + backoff in
+    // place of the intended `phase-not-allowlisted` refusal. The classifier keeps
+    // its own FIRST-gate check (both drivers reach it by other paths); this raises
+    // the same verdict earlier rather than relocating it.
+    if (!isOrphanMergePhaseAllowed(phase)) {
+      throw new Error(`orphan-stale: phase-not-allowlisted (${ticket})`);
+    }
 
     const terminalDoneApplied = markerExists(
       join(orchDir ?? ".", "workers", ticket, ".terminal-done.applied")

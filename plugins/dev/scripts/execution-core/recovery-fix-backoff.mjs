@@ -17,19 +17,46 @@ function envNum(names, fallback) {
 
 // The attempts ledger owns the in-lifetime bound: threshold 3 deliberately exceeds its two
 // attempts, so this history engages only after forgetIntent resets that ledger. BASE_MS must
-// exceed the ledger's 30-minute cooldown or this layered guard never blocks. Values are captured
+// exceed the ledger's cooldown or this layered guard never blocks. Values are captured
 // once at boot; CATALYST_-prefixed names are canonical and the CAT-47 names remain deprecated aliases.
 export const RECOVERY_FIX_BACKOFF_THRESHOLD = envNum(
   ["CATALYST_RECOVERY_FIX_BACKOFF_THRESHOLD", "RECOVERY_FIX_BACKOFF_THRESHOLD"],
   3
 );
-export const RECOVERY_FIX_BACKOFF_BASE_MS = envNum(
-  ["CATALYST_RECOVERY_FIX_BACKOFF_BASE_MS", "RECOVERY_FIX_BACKOFF_BASE_MS"],
-  2 * 60 * 60 * 1000
+
+// CAT-124 (Codex #3223 P2): the "BASE_MS exceeds the ledger cooldown" invariant above was
+// asserted against the cooldown's 30-MINUTE DEFAULT, not against its configured value. Raising
+// CATALYST_RECOVERY_COOLDOWN_MIN past 120 silently inverted it: defaultShouldSkipItem suppresses
+// the ticket for the whole cooldown and inFixBackoff is only consulted AFTER that skip check, so a
+// 2-hour base window had already expired by the time this guard was ever reached — the post-reset
+// guard became unreachable in a fully supported configuration. Derive the floor from the cooldown
+// that is actually configured instead of assuming its default.
+//
+// The cooldown formula is duplicated (not imported) on purpose: recovery-reasoning.mjs, which owns
+// RECOVERY_COOLDOWN_MS, already imports THIS module, so importing back would close a cycle. This
+// file is a zero-internal-import leaf and stays that way; the expression below is kept
+// character-for-character identical to recovery-reasoning.mjs's, including the `|| default` that
+// makes NaN and 0 fall through.
+const RECOVERY_COOLDOWN_MS_FOR_FLOOR =
+  Number(process.env.CATALYST_RECOVERY_COOLDOWN_MIN) * 60 * 1000 || 30 * 60 * 1000;
+
+// 2x mirrors the safety factor RECOVERY_FIX_FAILURE_TTL_MS already uses for its own
+// must-outlive relationship, rather than inventing a new margin. With the default cooldown
+// (30m → 1h floor) this is inert: the 2h default base already clears it, so default deployments
+// are byte-identical. A clamp only engages when the configured cooldown would otherwise render
+// the guard dead, and it always moves in the conservative direction (suppress a repeatedly
+// failing ticket for longer, never shorter).
+export const RECOVERY_FIX_BACKOFF_BASE_MS = Math.max(
+  envNum(["CATALYST_RECOVERY_FIX_BACKOFF_BASE_MS", "RECOVERY_FIX_BACKOFF_BASE_MS"], 2 * 60 * 60 * 1000),
+  2 * RECOVERY_COOLDOWN_MS_FOR_FLOOR
 );
-export const RECOVERY_FIX_BACKOFF_MAX_MS = envNum(
-  ["CATALYST_RECOVERY_FIX_BACKOFF_MAX_MS", "RECOVERY_FIX_BACKOFF_MAX_MS"],
-  24 * 60 * 60 * 1000
+
+// MAX is the ceiling the exponential windows saturate at, so it must not sit below the base it
+// bounds — otherwise a clamped base would be capped straight back under the cooldown, undoing the
+// floor above. RECOVERY_FIX_FAILURE_TTL_MS derives from this and so widens with it automatically.
+export const RECOVERY_FIX_BACKOFF_MAX_MS = Math.max(
+  envNum(["CATALYST_RECOVERY_FIX_BACKOFF_MAX_MS", "RECOVERY_FIX_BACKOFF_MAX_MS"], 24 * 60 * 60 * 1000),
+  RECOVERY_FIX_BACKOFF_BASE_MS
 );
 
 export const RECOVERY_FIX_FAILURES_DIR = ".recovery-fix-failures";
