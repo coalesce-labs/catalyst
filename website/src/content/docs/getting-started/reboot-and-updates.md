@@ -33,7 +33,8 @@ This writes `~/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist` and loads
 it. The agent runs `catalyst-stack start` at login (`RunAtLoad`) and again every
 10 minutes as an idempotent keep-alive — because `start` is ordered
 (monitor → broker → execution-core) and no-ops a running daemon, it never
-double-starts and it self-heals a daemon that crashed between intervals. Output
+double-starts, self-heals a daemon that crashed between intervals, and honors a deliberate
+`catalyst-stack stop`. A direct `catalyst-stack start` resumes a deliberately halted stack. Output
 goes to `~/catalyst/stack-launchd.log`. (`install-services` also installs two
 companion agents — `catalyst-thoughts-sync`, which keeps your thoughts checkouts
 fresh, and `catalyst-log-shipper` — so `services-status` lists three agents; see

@@ -39,7 +39,6 @@ import {
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
-  getLivenessAnchorIssue, // CAT-159: exclude the durable liveness-anchor ticket from dispatch
 } from "./config.mjs";
 // CTL-1397 (Node-loadability): monitor.mjs MUST NOT import replica-read.mjs — that
 // module statically imports `bun:sqlite`, which the Node ESM loader rejects at
@@ -50,6 +49,7 @@ import {
 // (linear-query.mjs never imports replica-read.mjs either; daemon.mjs:681 builds
 // the reader and passes it in). monitor.mjs stays Node-loadable.
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
+import { isLivenessAnchorTicket, resolveAnchorIssueCached } from "./dispatch-exclusions.mjs";
 import { claimDispatchSync, readTriageAttemptCountSync, bumpTriageAttemptCountSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS; CTL-1649: fleet-wide triage attempt count
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import {
@@ -537,16 +537,15 @@ export function handleStateChangedEvent(
     claimDispatch = claimDispatchSync,
     // CTL-1095: drain gate seam — thread through to dispatchTriage.
     isDraining = (dir) => isDrainingDefault(dir),
+    anchorIssue = undefined,
     // CTL-1367 P1: failed-terminal backstop for a rejected async (sdk) triage
     // dispatch — threaded through to dispatchTriage (undefined → real default).
     emitBackstop,
     // CTL-1481: worker:<host> label-stamp seam — threaded through to
     // dispatchTriage (undefined → real default; tests inject a fake).
     stampWorkerLabel,
-    // CAT-159: liveness-anchor exclusion seam — threaded through to
-    // dispatchTriage (undefined → real config accessor; tests inject a fixed
-    // value so the guard is deterministic without touching Layer-2 config).
-    livenessAnchorIssue,
+    readFenceTriageAttempt = readTriageAttemptCountSync,
+    bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -589,12 +588,14 @@ export function handleStateChangedEvent(
           applyAssignee,
           hosts,
           hostName,
+          anchorIssue,
+          readFenceTriageAttempt,
+          bumpFenceTriageAttempt,
           survivingRosterOverride, // CTL-1091
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
           stampWorkerLabel, // CTL-1481
-          livenessAnchorIssue, // CAT-159
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -648,12 +649,14 @@ export function handleStateChangedEvent(
           applyAssignee,
           hosts,
           hostName,
+          anchorIssue,
+          readFenceTriageAttempt,
+          bumpFenceTriageAttempt,
           survivingRosterOverride, // CTL-1091
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
           stampWorkerLabel, // CTL-1481
-          livenessAnchorIssue, // CAT-159
         });
       } else {
         log.debug(
@@ -783,6 +786,13 @@ function dispatchTriage(
     // multi-host triage claim (same gate as emitFenceClaimed). Injectable so
     // tests drive/assert the stamp without touching Linear.
     stampWorkerLabel = defaultStampWorkerLabel,
+    // CAT-159: normally threaded down from startMonitor (resolved once per
+    // scan). Defaulted to the real cached accessor rather than `undefined` so a
+    // caller that forgets to thread it still gets the exclusion — losing the
+    // guard is the failure mode this ticket exists to prevent. Tests pass an
+    // explicit value (including null) and the suite clears the env anchor, so
+    // the default never makes a verdict host-dependent.
+    anchorIssue = resolveAnchorIssueCached(),
     // CTL-1095: drain gate — node-level refusal of new-triage admission.
     isDraining = (dir) => isDrainingDefault(dir),
     // CTL-1367 P1: failed-terminal backstop for a REJECTED async (sdk) triage
@@ -822,22 +832,23 @@ function dispatchTriage(
     // Single-host paths never call these.
     readFenceTriageAttempt = readTriageAttemptCountSync,
     bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
-    // CAT-159: the durable cross-host liveness-anchor ticket (config
-    // catalyst.cluster.livenessAnchorIssue) has no completion criteria — it
-    // exists permanently as an attachment point for heartbeat records. It has
-    // nothing to research/implement, so dispatching it here always fails,
-    // escalates to recovery-pass, self-heal-exhausts, and needs a human to
-    // manually clear it back into the identical loop. Checked FIRST — before
-    // orchDir/drain/HRW — so this never costs a Linear call, not even a read.
-    // undefined → the real config accessor (null when unconfigured, matching
-    // every other caller's default).
-    livenessAnchorIssue = getLivenessAnchorIssue(),
   }
 ) {
-  if (livenessAnchorIssue && identifier === livenessAnchorIssue) {
+  // CAT-159: the durable cross-host liveness-anchor ticket (config
+  // catalyst.cluster.livenessAnchorIssue) has no completion criteria — it
+  // exists permanently as an attachment point for heartbeat records. It has
+  // nothing to research/implement, so dispatching it here always fails,
+  // escalates to recovery-pass, self-heal-exhausts, and needs a human to
+  // manually clear it back into the identical loop. Checked FIRST — before
+  // orchDir/drain/HRW — so this never costs a Linear call, not even a read,
+  // and before every budget/counter side effect. Sibling correctness gate to
+  // dispatch-readiness.mjs's new-work admission check and board-health.mjs's
+  // recovery suppression: all three route through the one shared predicate so
+  // they can never disagree.
+  if (isLivenessAnchorTicket(identifier, { anchorIssue })) {
     log.debug(
       { identifier },
-      "cat-159: skipping triage dispatch — ticket is the configured liveness anchor (no completion criteria)"
+      "cat-159: skipping triage dispatch for catalyst.cluster.livenessAnchorIssue"
     );
     return false;
   }
@@ -1435,6 +1446,7 @@ export function sweepMissingTriage({
   runTriageState = defaultRunTriageStateQuery,
   // CTL-1589 (Codex R2): live-state read for stale-row revalidation; injectable.
   fetchLiveState = defaultFetchTicketState,
+  anchorIssue = undefined,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -1478,6 +1490,9 @@ export function sweepMissingTriage({
     for (const t of candidates) {
       if (seen.has(t.identifier)) continue;
       seen.add(t.identifier);
+      // Redundant with dispatchTriage by design: the gate is correctness; this
+      // filter avoids reconsidering the permanent anchor on every sweep.
+      if (isLivenessAnchorTicket(t.identifier, { anchorIssue })) continue;
       // Codex R4: at a saturated fleet, still ROUTE capped tickets (their park is
       // capacity-independent and dispatchTriage's cap gate runs before its
       // budget gate); everything else waits for the next sweep.
@@ -1517,6 +1532,7 @@ export function sweepMissingTriage({
         emitBackstop, // CTL-1367 P1
         ...(labelNeedsHuman ? { labelNeedsHuman } : {}), // CTL-1441
         stampWorkerLabel, // CTL-1481
+        anchorIssue,
       });
     }
   }
@@ -1875,6 +1891,7 @@ export function startMonitor({
   // no bun:sqlite import). Stored module-level so reconcileAll/reconcileProject
   // (which the reconcile timer drives) read it without re-threading.
   eligibleReplica,
+  anchorIssue = resolveAnchorIssueCached(),
 } = {}) {
   _injectedEligibleReplica = eligibleReplica ?? null;
   // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
@@ -1901,6 +1918,7 @@ export function startMonitor({
     botUserIds,
     botWriteId,
     gateway,
+    anchorIssue,
   };
   reconcileAll({ exec });
   sweepMissingTriage({
@@ -1915,6 +1933,7 @@ export function startMonitor({
     botUserIds,
     botWriteId,
     gateway,
+    anchorIssue,
   }); // CTL-711: triage pre-existing eligible tickets
   if (resumeFromCursor) {
     seedTailerFromCursor();
@@ -1976,6 +1995,7 @@ export function startMonitor({
       botUserIds,
       botWriteId,
       gateway,
+      anchorIssue,
     }); // CTL-711 + CTL-716: catch tickets that appeared between webhooks
   }, reconcileIntervalMs);
 }

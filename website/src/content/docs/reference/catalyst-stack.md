@@ -24,8 +24,8 @@ The core daemons start **monitor → broker → execution-core** (CTL-1084 known
 
 | Subcommand | Description |
 |------------|-------------|
-| `start` | Start all services (idempotent). |
-| `stop` | Stop all services in reverse order. |
+| `start` | Start all services (idempotent) and clear a deliberate-stop marker. `--supervised` honors an active marker instead. |
+| `stop` | Stop all services in reverse order and record a deliberate halt. `--no-halt` suppresses the marker for scripted/internal stops. |
 | `restart` | Stop then start. Accepts the same flags as `start`. |
 | `status` | Print running/stopped state for each service. |
 | `install-services` | Install the launchd LaunchAgents (stack keep-alive, thoughts-sync, log-shipper) that auto-start on boot. macOS only. |
@@ -133,6 +133,18 @@ Logs go to `~/catalyst/stack-launchd.log`. macOS only; `--print` works anywhere 
 review. Re-running `install-services` is idempotent (it boots out the old instance
 first). See [Post-reboot and updates](/getting-started/reboot-and-updates/).
 
+### Deliberate-stop marker
+
+`catalyst-stack stop` atomically writes `$CATALYST_DIR/stack-halt.json` (normally
+`~/catalyst/stack-halt.json`). The launchd agent invokes `start --supervised`, which exits
+successfully without starting services while that marker is active. A direct `start` clears the
+marker; `restart` and `stop --no-halt` do not create one. Markers expire after 24 hours by default,
+or after `CATALYST_STACK_HALT_TTL_SECS`, so an abandoned marker cannot strand a host indefinitely.
+
+After upgrading, rerun `catalyst-stack install-services`: an older plist lacks `--supervised` and
+will undo an operator stop at its next interval. `catalyst doctor` reports a stale, unloaded, or
+missing stack agent and also surfaces an active halt marker.
+
 ### `--yes`
 
 Non-interactive mode under `--proxy`: auto-approves `brew install mitmproxy` instead of prompting.
@@ -143,6 +155,7 @@ Non-interactive mode under `--proxy`: auto-approves `brew install mitmproxy` ins
 |----------|---------|---------|
 | `CATALYST_REPO_DIR` | `~/code-repos/github/coalesce-labs/catalyst` | Repo root used by the deprecated `hotpatch --legacy-rsync` path. |
 | `CATALYST_PLUGIN_SOURCE` | `~/catalyst/plugin-source` | Default checkout location used by `setup-plugin-source.sh`. |
+| `CATALYST_STACK_HALT_TTL_SECS` | `86400` | Lifetime of the deliberate-stop marker before supervised starts resume. |
 | `MITM_LOG` | `~/catalyst/linear-proxy.jsonl` | JSONL capture path read by the mitmproxy addon (`mitm_linear_addon.py`) — not the process log. The mitmdump process log is fixed at `~/catalyst/mitm.log` and cannot be overridden. |
 
 ## Exit codes

@@ -95,7 +95,12 @@ If behind:
 ### 5. Check for existing PR
 
 ```bash
-gh pr view --json number,url,title,state 2>/dev/null
+# CAT-202: scope to the configured push remote's repo (draft-pr.sh's
+# _draft_pr_gh_pr), not the ambient `origin` remote — when origin is a
+# read-only upstream and pushes route to a separate `fork` remote, a bare
+# `gh pr view` silently checks the wrong repo for an existing PR.
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+_draft_pr_gh_pr view --json number,url,title,state 2>/dev/null
 ```
 
 If PR exists:
@@ -218,7 +223,9 @@ skip_block="$(linear_sibling_skip_block_from_branch "$ticket" "$branch")"
 $skip_block"
 
 # Create PR (author will be the git user)
-gh pr create --title "$title" --body "$body" --base "$base"
+# CAT-202: same repo-scoping as the existing-PR check above — see draft-pr.sh
+# already sourced in step 8.
+_draft_pr_gh_pr create --title "$title" --body "$body" --base "$base"
 ```
 
 The initial body uses commit messages so the PR is immediately readable even before `/describe-pr`

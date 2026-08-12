@@ -54,6 +54,11 @@ import { ALERT_BOOT_DEPENDENCY_UNUSABLE } from "../execution-core/dispatch-alert
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
 const INLINE_EVENT_NAMES = [
+  "node.stack.halted",
+  "node.stack.resumed",
+  "node.stack.start-suppressed",
+  "node.stack.halt-expired",
+  "node.stack.self-heal",
   "node.boot",                        // boot-event.mjs:32
   "monitor.reconcile.failing.team",   // reconcile-health-event.mjs:66 (team is param; prefix is safe)
   "monitor.reconcile.recovered.team", // reconcile-health-event.mjs:66
@@ -71,6 +76,7 @@ const INLINE_EVENT_NAMES = [
   "delegate.routed",                  // CTL-1609 delegate-first.mjs (enforce mode — enqueued ok)
   "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
   "catalyst.replica.writer_idle",     // CAT-21 cloud-sync.mjs (tokenless writer provisioning gap)
+  "catalyst.replica.reseed_requested", // CAT-49 boot-time empty-replica reseed
 ];
 
 // Build the flat list of all static exec-core event names.

@@ -1,5 +1,11 @@
 # Architecture
 
+## Replica completeness chain
+
+Linear replica completeness follows a sampler → atomic `replica-state.json` snapshot → board-health
+invariant chain. The daemon primes the snapshot before the first scan. Empty or absent replicas feed
+a shadow-first, cooldown-bounded boot reseed decision; populated replicas are never actuated.
+
 For the local Linear writer, freshness gate, read tiers, configuration order, and health signals,
 see [Linear read replica](linear-replica.md).
 
@@ -359,6 +365,15 @@ that lane marker is active, phase-aware dispatch routes `bg` work to `codex-exec
 is healthy and emits an audit-only fallback event. Account rate-limit samples also derive the board
 health `nearCliff` invariant from five-hour and seven-day utilization (90% by default).
 
+### Operational liveness-anchor exclusion
+
+The Linear issue configured by `catalyst.cluster.livenessAnchorIssue` is a durable heartbeat
+bulletin board, not pipeline work. `dispatch-exclusions.mjs` identifies it, and execution-core
+excludes it at all three action boundaries: `dispatch-readiness.mjs:canOccupySlotNow` for new-work
+admission, `monitor.mjs:dispatchTriage` (plus the `sweepMissingTriage` candidate filter) for triage,
+and `board-health.mjs:makeSuppressed` for recovery moves. The exclusion fails open when the
+machine-local key is unset or unreadable, so no unidentified work ticket is suppressed.
+
 ### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707 + CAT-31)
 
 On a **fresh** dispatch of a **build** phase (`research`,`plan`,`implement`,`verify`,`review`),
@@ -565,6 +580,12 @@ Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlig
 the terminal sweep applies `needs-human` via `labelOnce`.
 
 ### Stuck-but-alive daemon watchdog (CTL-1502)
+
+The periodic whole-stack launchd supervisor is gated by durable operator intent. An operator
+`catalyst-stack stop` records a bounded halt marker; launchd calls `start --supervised` and leaves
+the stack down while it is active, whereas a direct `start` clears it. The timer remains the crash
+self-heal layer. See the [catalyst-stack reference](../website/src/content/docs/reference/catalyst-stack.md)
+for the marker schema, TTL, and migration check.
 
 Both existing daemon-supervision paths — the launchd `KeepAlive`/`StartInterval` agents and
 `catalyst-monitor forward-start` — are **pid-liveness only** (`kill -0`), so a wedged process that

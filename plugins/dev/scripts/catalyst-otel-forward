@@ -9,7 +9,8 @@ Cloudflare destinations (long-lived forwarder daemon).
 
 Usage: catalyst-otel-forward [options]
 
-Runs as a daemon with no subcommand. Destinations + behavior come from
+Runs as a foreground daemon with no subcommand. Lifecycle subcommands are
+refused; use catalyst-monitor.sh forward-<verb>. Destinations + behavior come from
 ~/.config/catalyst/config-<project>.json (CATALYST_CONFIG_PATH overrides).
 
 Options:
@@ -22,6 +23,13 @@ EOF
 
 case "${1:-}" in
   -h|--help|help) print_help; exit 0 ;;
+  start|stop|restart|status)
+    echo "error: use: catalyst-monitor.sh forward-${1}" >&2
+    exit 2
+    ;;
+  "") ;;
+  -*) echo "error: unknown argument: $1" >&2; exit 2 ;;
+  *) echo "error: unknown argument: $1" >&2; exit 2 ;;
 esac
 
 # Resolve symlinks before deriving SCRIPT_DIR — install-cli.sh installs this as a symlink in the bin

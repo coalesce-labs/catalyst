@@ -445,6 +445,17 @@ export function reasoningRecoveryPass(items, opts = {}) {
             fix_class,
             outcome: fixOutcome.success,
             details: fixOutcome.details,
+            // CAT-203 (extends CTL-1439): a successful seam-dispatched fix IS a
+            // verdict — without one, escalateExhaustedIntents' "N attempts, no
+            // recorded verdict" sweep can't tell a fixed ticket from one still
+            // being worked, so a ticket fixed on attempt 1 can spuriously
+            // escalate on a later re-evaluation. Mirrors the escalate branch
+            // below, which already self-stamps verdict:"escalate" for the
+            // identical reason. A FAILED attempt intentionally gets no verdict —
+            // it must still count toward the attempts-exhausted budget.
+            ...(fixOutcome.success
+              ? { verdict: "fixed", verdictReason: fixOutcome.reason ?? null }
+              : {}),
           });
           actionLog.push("recorded recovery-pass intent");
         } catch (err) {
@@ -650,6 +661,8 @@ export function isPrMergeUnconfirmedReason(reason) {
 // CTL-1496: classify a pr_not_merged recovery item by probing live PR state.
 // All GitHub calls are behind the injectable probePrBlock seam so this function
 // stays pure and unit-testable with a fake probe.
+const MERGE_CAPABLE_PERMISSIONS = new Set(["WRITE", "MAINTAIN", "ADMIN"]);
+
 export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlock, log } = {}) {
   const ticket = evidence.ticket ?? evidence.signal?.ticket;
   // CTL-1496: thread the ticket's head branch to the probe when the evidence
@@ -739,6 +752,20 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
           (t
             ? ` — "${(t.body || "").slice(0, 120)}" (${t.path}:${t.line})`
             : " (CHANGES_REQUESTED)"),
+      },
+    };
+  }
+
+  // CAT-222: an affirmative non-merge-capable repository grant is terminal.
+  // Unknown/absent permission remains fail-open for older or partial probes.
+  if (probe.viewerPermission && !MERGE_CAPABLE_PERMISSIONS.has(probe.viewerPermission)) {
+    return {
+      decision: "escalate",
+      fix_class: "human",
+      details: {
+        reason:
+          `pr_not_merged: this account has ${probe.viewerPermission} permission on the ` +
+          `repository and cannot merge pr#${probe.prNumber} — grant write access or merge manually`,
       },
     };
   }
@@ -1577,6 +1604,8 @@ function promoteNumericAttrs(type, details) {
     // rather than charting a fake zero.
     num("recovery.github.core_remaining", details.githubCoreRemaining);
     num("recovery.github.core_remaining_pct", details.githubCoreRemainingPct);
+    num("recovery.replica.issue_rows", details.replicaIssueRows);
+    num("recovery.replica.team_coverage_pct", details.replicaTeamCoveragePct);
   }
   return a;
 }
@@ -2314,10 +2343,19 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
     Boolean(prior.escalated) &&
     typeof priorLast === "number" &&
     ts - priorLast >= RECOVERY_TERMINAL_INTENT_TTL_MS;
+  // CAT-196: a verified "fixed" verdict always clears any prior escalation —
+  // without this, recordVerdict's "fixed" branch (which never itself passes
+  // escalated:false) fell through to the first clause below and kept a stale
+  // escalated:true from an earlier attempt, so the ledger read "decision:fixed"
+  // with a real verdictReason but stayed latched — and defaultShouldSkipItem
+  // checks escalated BEFORE ever looking at decision, silently stranding a
+  // verified-fixed ticket out of recovery-pass/board-health rotation for up to
+  // the full 7-day RECOVERY_TERMINAL_INTENT_TTL_MS.
   const escalated =
-    (Boolean(prior.escalated) && !priorEscalationExpired) ||
-    Boolean(intent.escalated) ||
-    intent.decision === "escalate"; // an escalate-pass latches escalated
+    intent.decision !== "fixed" &&
+    ((Boolean(prior.escalated) && !priorEscalationExpired) ||
+      Boolean(intent.escalated) ||
+      intent.decision === "escalate"); // an escalate-pass latches escalated
 
   // CTL-1440 (P0b, replaces the CTL-1432 lastTs FREEZE): the freeze shared one
   // field between two consumers wanting OPPOSITE semantics — the board-health

@@ -4,6 +4,20 @@ The local Linear tier has three layers: the cloud-sync writer seeds and updates 
 database, its writer-lock heartbeat proves the writer is alive independently of feed activity,
 and the agent/daemon read paths serve single-ticket and board reads from that database.
 
+## Verifying that the tier serves reads
+
+Run `catalyst doctor` and inspect `replica-rows` and `replica-tier`. Board-health samples the
+database into `replica-state.json`; `CATALYST_BH_REPLICA=shadow` reports its state without failing
+a board, while `enforce` makes absent, schema-less, empty, and stale states observable.
+
+`CATALYST_REPLICA_RESEED=shadow` records whether an empty replica would be reseeded. In `enforce`,
+the supervised writer restarts once subject to a cooldown; missing writer agents and tokens are
+logged as explicit non-actions. Measure the resulting read-source distribution with:
+
+```logql
+{service_name="catalyst.linear-read"} | field="linear.read.source"
+```
+
 ## Configuration order
 
 Two independent settings are required, and neither takes effect on its own: the token alone leaves
