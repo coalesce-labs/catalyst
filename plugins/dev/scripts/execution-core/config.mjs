@@ -2182,6 +2182,23 @@ export function readBoardHealthConfig(env = process.env) {
   return { mode };
 }
 
+export function readStalledRepullConfig(env = process.env) {
+  let l2 = {};
+  try {
+    l2 = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.orchestration?.stalledRepull ?? {};
+  } catch { /* defaults */ }
+  const allowed = new Set(["off", "shadow", "enforce"]);
+  const envMode = env.CATALYST_STALLED_REPULL;
+  const mode = allowed.has(envMode) ? envMode : allowed.has(l2.mode) ? l2.mode : "shadow";
+  const positive = (value, fallback) => Number.isFinite(value) && value > 0 ? value : fallback;
+  return {
+    mode,
+    graceMs: positive(l2.graceMs, 30 * 60_000),
+    maxRepullAttempts: positive(l2.maxRepullAttempts, 2),
+    repullBackoffMs: positive(l2.repullBackoffMs, 2 * 60 * 60_000),
+  };
+}
+
 // CAT-40: GitHub quota actuation is independently shadow-first even when the
 // broader board-health delegate runs in enforce mode.
 export function readGithubQuotaBoardHealthConfig(env = process.env) {
