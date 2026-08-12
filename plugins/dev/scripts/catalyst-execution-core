@@ -406,6 +406,10 @@ cmd_stop() {
 		fi
 		orphan=1
 	fi
+	if [[ $orphan -eq 1 ]] && ! cpi_pid_is_ours "$pid" "$EXECUTION_CORE_PROC_PATTERN"; then
+		echo "error: pid $pid no longer matches '$EXECUTION_CORE_PROC_PATTERN'; refusing to signal" >&2
+		return 1
+	fi
 	if ! cpi_stop_pid "$pid"; then
 		echo "error: catalyst-execution-core stop not confirmed; pid $pid may still be running" >&2
 		return 1

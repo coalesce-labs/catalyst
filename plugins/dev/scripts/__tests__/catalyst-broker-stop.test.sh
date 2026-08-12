@@ -42,4 +42,13 @@ echo "$orphan" > "$tmp/broker.pid"
 out="$(CATALYST_PROCESS_IDENTITY_LIB="$stub" $CLI stop 2>&1)"; rc=$?
 [[ $rc -eq 1 && "$out" == *"not confirmed"* ]] && ok "unconfirmable stop fails distinctly" || bad "unconfirmable stop fails distinctly" "$out rc=$rc"
 
+stale_stub="$tmp/process-identity-stale-stub.sh"
+cp "$ROOT/plugins/dev/scripts/lib/process-identity.sh" "$stale_stub"
+printf '\ncpi_find_orphans() { echo 5999998; }\n' >> "$stale_stub"
+rm -f "$tmp/broker.pid"
+out="$(CATALYST_PROCESS_IDENTITY_LIB="$stale_stub" $CLI stop 2>&1)"; rc=$?
+[[ $rc -ne 0 && "$out" == *"refusing to signal"* ]] \
+  && ok "orphan stop refuses a pid that no longer matches the pattern" \
+  || bad "orphan stop refuses a pid that no longer matches the pattern" "$out rc=$rc"
+
 exit "$failures"

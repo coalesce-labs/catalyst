@@ -44,6 +44,12 @@ chmod +x "$FAKE_GH"
 export CATALYST_GH_BIN="$FAKE_GH"
 # Point runs root at empty scratch so indexSignalsByBgJobId finds nothing.
 export CATALYST_DIR="$SCRATCH/catalyst"
+# Keep branch inventory independent of the checkout's ref count and clone depth.
+# The route test owns dispatch + complete JSON, not the repository inventory.
+FAKE_REPO="$SCRATCH/repo"
+git init -q -b main "$FAKE_REPO"
+git -C "$FAKE_REPO" -c user.name=test -c user.email=test@example.invalid \
+	commit --allow-empty -q -m init
 
 echo "test 1 (CTL-649): backcompat 'probe' routes to daemon probe (no daemon → nonzero)"
 if "$SCRIPT" probe; then
@@ -76,7 +82,7 @@ fi
 echo "test 5 (CTL-649): 'sessions list --json' routes to the sessions module"
 OUT="$("$SCRIPT" sessions list --json 2>/dev/null)"
 RC=$?
-if [ "$RC" = "0" ] && echo "$OUT" | grep -q '\[\]'; then
+if [ "$RC" = "0" ] && [[ "$OUT" == \[* ]]; then
 	pass "sessions list --json emits a JSON array"
 else
 	fail "sessions list --json emits a JSON array" "rc=$RC out=$OUT"
@@ -85,16 +91,17 @@ fi
 echo "test 5b (CTL-649): 'worktrees list --json' routes to the worktrees module"
 OUT="$("$SCRIPT" worktrees list --json 2>/dev/null)"
 RC=$?
-if [ "$RC" = "0" ] && echo "$OUT" | grep -q '\['; then
+if [ "$RC" = "0" ] && [[ "$OUT" == \[* ]]; then
 	pass "worktrees list --json routes to worktrees module"
 else
 	fail "worktrees list --json routes to worktrees module" "rc=$RC out=$OUT"
 fi
 
 echo "test 5c (CTL-649): 'branches list --json' routes to the branches module"
-OUT="$("$SCRIPT" branches list --json 2>/dev/null)"
+OUT="$("$SCRIPT" branches list --json --repo-root "$FAKE_REPO" 2>/dev/null)"
 RC=$?
-if [ "$RC" = "0" ] && echo "$OUT" | grep -q '\['; then
+if [ "$RC" = "0" ] && [[ "$OUT" == \[* ]] &&
+	{ ! command -v jq >/dev/null 2>&1 || printf '%s' "$OUT" | jq -e 'type == "array"' >/dev/null; }; then
 	pass "branches list --json routes to branches module"
 else
 	fail "branches list --json routes to branches module" "rc=$RC out=$OUT"

@@ -585,6 +585,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/draft-pr-lib.test.sh
 
+      - name: catalyst-stack integration tests (CAT-264)
+        # CAT-264: this suite was red and absent from the explicit CI allowlist.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack.test.sh
+
+      - name: execution-core CLI routing tests (CAT-264)
+        # CAT-264: guards complete JSON output as well as noun dispatch.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/execution-core-cli-routing.test.sh
+
       - name: Run stable unit tests
         # CTL-1678 round-7 (Codex): the four drain suites added below
         # (__tests__/config-drain-disabled, __tests__/doctor-drain-disabled,
@@ -646,6 +656,7 @@ jobs:
             cli/beliefs-shadow-status.test.mjs \
             beliefs/shadow-store.test.mjs \
             beliefs/why.test.mjs \
+            cli/branches.test.mjs \
             abort-worker.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \

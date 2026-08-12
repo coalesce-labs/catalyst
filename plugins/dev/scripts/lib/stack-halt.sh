@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 # Durable operator-intent marker for catalyst-stack supervision (CAT-163).
+#
+# CROSS-FILE GLOBAL (CAT-264): STACK_HALT_STATE is assigned here and in
+# stack_halt_active() but read by catalyst-stack after it sources this library.
+# It carries why a falsy stack_halt_active returned: absent, expired, and
+# malformed all return 1. Do not delete or export it.
+# shellcheck disable=SC2034
 
 STACK_HALT_FILE="${CATALYST_DIR:-$HOME/catalyst}/stack-halt.json"
 STACK_HALT_TTL_SECS="${CATALYST_STACK_HALT_TTL_SECS:-86400}"

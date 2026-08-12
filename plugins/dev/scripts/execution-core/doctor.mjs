@@ -2253,16 +2253,35 @@ export function checkReaper(deps = {}) {
 // The stack keep-alive must be both installed and migrated to the supervised
 // invocation. Keep all host I/O outside checkStackAgent: its three required
 // seams make an incomplete unit fixture fail loudly instead of probing launchd.
+//
+// CAT-264: doctor FAILs gate catalyst-join before install-services can repair
+// the host. Scope the absent-plist FAIL to strict Darwin checks; non-Darwin
+// hosts cannot run launchd, and preinstall runs are followed by a strict verify.
+// An installed-but-unloaded agent remains FAIL even during preinstall because
+// that is the CAT-239 silent-unload state this probe exists to catch.
 export function checkStackAgent(deps = {}) {
   for (const seam of ["readPlist", "runLaunchctl", "readHaltMarker"]) {
     if (typeof deps[seam] !== "function") throw new TypeError(`checkStackAgent requires ${seam}`);
   }
-  const { readPlist, runLaunchctl, readHaltMarker, nowMs = () => Date.now() } = deps;
+  const {
+    readPlist,
+    runLaunchctl,
+    readHaltMarker,
+    nowMs = () => Date.now(),
+    platform = "darwin",
+    preinstall = false,
+  } = deps;
+  const sev = (s) => (preinstall && s === STATUS.FAIL ? STATUS.WARN : s);
   const checks = [];
+  if (platform !== "darwin") {
+    return [mkCheck("stack-agent", STATUS.WARN,
+      `launchd is macOS-only and this host is ${platform} — the catalyst-stack keep-alive ` +
+      "cannot supervise it; 'catalyst-stack install-services' is macOS-only, so this is not remediable here")];
+  }
   let xml;
   try { xml = readPlist(); } catch { xml = null; }
   if (!xml) {
-    return [mkCheck("stack-agent", STATUS.FAIL,
+    return [mkCheck("stack-agent", sev(STATUS.FAIL),
       "catalyst-stack LaunchAgent is not installed — run 'catalyst-stack install-services'")];
   }
   let state;
@@ -2300,6 +2319,7 @@ function productionStackAgentDeps() {
   // doctor intentionally does not duplicate the marker filename literal.
   const haltLib = resolve(dirname(fileURLToPath(import.meta.url)), "../lib/stack-halt.sh");
   return {
+    platform: process.platform,
     readPlist: () => readFileSync(plistPath, "utf8"),
     runLaunchctl: () => {
       const r = spawnSync("launchctl", ["list", "ai.coalesce.catalyst-stack"], { encoding: "utf8", timeout: 5_000 });
@@ -5475,7 +5495,7 @@ export function checksForClass(nc, opts = {}) {
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
-      () => checkStackAgent(productionStackAgentDeps()), // CAT-163: stale keep-alive plists undo deliberate stops
+      () => checkStackAgent({ ...productionStackAgentDeps(), preinstall }), // CAT-163: stale keep-alive plists undo deliberate stops
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
@@ -5504,7 +5524,7 @@ export function checksForClass(nc, opts = {}) {
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
-    () => checkStackAgent(productionStackAgentDeps()), // CAT-163: grade installation + --supervised migration
+    () => checkStackAgent({ ...productionStackAgentDeps(), preinstall }), // CAT-163: grade installation + --supervised migration
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),

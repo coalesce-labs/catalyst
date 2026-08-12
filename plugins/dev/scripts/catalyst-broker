@@ -162,6 +162,10 @@ cmd_stop() {
     fi
     orphan=1
   fi
+  if [[ $orphan -eq 1 ]] && ! cpi_pid_is_ours "$pid" "$BROKER_PROC_PATTERN"; then
+    echo "error: pid $pid no longer matches '$BROKER_PROC_PATTERN'; refusing to signal" >&2
+    return 1
+  fi
   if ! cpi_stop_pid "$pid"; then
     echo "error: catalyst-broker stop not confirmed; pid $pid may still be running" >&2
     return 1

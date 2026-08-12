@@ -21,8 +21,14 @@ cpi_pid_gone() {
 }
 
 cpi_find_orphans() {
-  local pattern="$1" uid pid ppid command ancestors=" $$ " current="${PPID:-}"
+  local pattern="$1" uid pid command self_cmd ancestors=" $$ " current="${PPID:-}"
   uid="$(id -u)" || return 1
+  # Exclude scanner forks by their runtime command identity. The callers run
+  # this function inside command substitution and the ps pipeline forks again;
+  # those descendants inherit our argv but are not covered by the ancestor walk.
+  # Exact equality avoids the old broad `awk ` substring false negative. If ps
+  # cannot read our identity, fail open so a real orphan is not hidden.
+  self_cmd="$(ps -ww -o command= -p "$$" 2>/dev/null | awk '{ $1=$1; print }')"
   while [[ "$current" =~ ^[0-9]+$ && "$current" -gt 1 ]]; do
     ancestors="$ancestors$current "
     current="$(ps -o ppid= -p "$current" 2>/dev/null)" || break
@@ -32,7 +38,7 @@ cpi_find_orphans() {
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
     [[ " $ancestors " == *" $pid "* ]] && continue
     [[ "$command" == *"$pattern"* ]] || continue
-    case "$command" in *"ps -ww -axo uid=,pid=,ppid=,command="*|*"awk "*) continue ;; esac
+    [[ -n "$self_cmd" && "$command" == "$self_cmd" ]] && continue
     printf '%s\n' "$pid"
   done < <(ps -ww -axo uid=,pid=,command= 2>/dev/null | awk -v uid="$uid" '$1 == uid { p=$2; $1=$2=""; sub(/^ +/, ""); print p, $0 }')
 }

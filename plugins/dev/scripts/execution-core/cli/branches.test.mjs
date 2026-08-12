@@ -3,8 +3,37 @@
 // directly (git branch -D / git push origin --delete), NOT through the reaper.
 
 import { describe, it, expect } from "bun:test";
-import { classify, buildRows, runBranchesPrune, parseBranchArgs, gitLines } from "./branches.mjs";
+import {
+  classify,
+  buildRows,
+  runBranchesPrune,
+  parseBranchArgs,
+  gitLines,
+  writeOut,
+} from "./branches.mjs";
 import { ArgError } from "./args.mjs";
+
+describe("writeOut", () => {
+  it("waits for the write callback even when stdout.write returns true", async () => {
+    let completeWrite;
+    const stdout = {
+      write(_text, callback) {
+        completeWrite = callback;
+        return true;
+      },
+    };
+    let resolved = false;
+    const pending = writeOut("complete JSON", stdout).then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    completeWrite();
+    await pending;
+    expect(resolved).toBe(true);
+  });
+});
 
 describe("branches classify", () => {
   it("WORKTREE_BACKED when checked out in some worktree", () => {
