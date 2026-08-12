@@ -219,7 +219,14 @@ if [[ "$MERGED_OK" == "true" && -n "${HEAD_REF:-}" && "${HEAD_REPO:-}" == "${REP
   gh api --method DELETE "repos/${REPO}/git/refs/heads/${HEAD_REF}" >/dev/null 2>&1 \
     || echo "CTL-56: remote branch ${HEAD_REF} delete skipped (already gone or protected)" >&2
 elif [[ "$MERGED_OK" != "true" ]]; then
-  echo "triage-aging-prs: merge of #<N> not REST-confirmed; skipping branch cleanup (CTL-56)" >&2
+  # NOT REST-confirmed: `gh pr merge` may have failed, or (with a merge queue) only ENQUEUED the PR
+  # without landing it (`gh pr merge --help`). This PR is NOT merged — its head ref must survive AND
+  # it must NOT flow into Step 6 as a merged PR. Treat it as a failed merge for this PR: record the
+  # not-merged status in your report and move to the NEXT aging PR (`continue`) — do NOT reconcile
+  # its ticket to Done and do NOT report it as merged. Never `exit` here: that would abort the whole
+  # burndown over a single unmergeable PR (CTL-56).
+  echo "triage-aging-prs: merge of #<N> NOT REST-confirmed — PR still open; skipping branch cleanup AND ticket reconciliation for it (CTL-56)" >&2
+  continue
 fi
 ```
 

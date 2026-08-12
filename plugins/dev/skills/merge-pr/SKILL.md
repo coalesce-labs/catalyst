@@ -371,9 +371,10 @@ Proceed? [Y/n]:
 ### 9. Execute squash merge
 
 ```bash
-# CTL-56: capture head ref BEFORE merge so we can delete it checkout-free after confirm.
-# Resolves from the PR API regardless of local branch state.
+# CTL-56: capture head ref + head repo BEFORE merge so we can delete the ref checkout-free
+# after a REST-confirmed merge. Resolves from the PR API regardless of local branch state.
 head_ref=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.head.ref' 2>/dev/null || true)
+head_repo=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.head.repo.full_name' 2>/dev/null || true)
 # Merge via REST only — no local branch-cleanup flag (CTL-56: the local side effect fails
 # inside a linked worktree when the base is already checked out in the primary clone).
 gh pr merge $pr_number --squash
@@ -396,11 +397,25 @@ After verifying the merge succeeded (REST confirm), delete the remote head branc
 no local `git checkout` required, safe from any worktree (CTL-56):
 
 ```bash
-# Idempotent + best-effort: 404/422 means the ref is already gone or protected.
-# Never fail the skill on branch cleanup — the merge already landed.
-if [[ -n "${head_ref:-}" ]]; then
+# Confirm the merge landed via REST BEFORE deleting anything. `gh pr merge` returning success is
+# NOT proof it merged: with a merge queue enabled it only ENQUEUES the PR (see `gh pr merge --help`),
+# so the head ref may still belong to a still-open PR. gh's old atomic delete-on-merge flag removed
+# the branch ONLY after a real merge — preserve that conditional with an executable `.merged` check
+# here (a prose "after verifying" step is not a gate). (CTL-56)
+merged_ok=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.merged' 2>/dev/null || echo "false")
+# Delete the remote head ref checkout-free ONLY when BOTH hold:
+#  - the merge is REST-confirmed (merged_ok == true), and
+#  - the head branch actually lives in ${REPO}. A fork PR's `.head.ref` names a branch in the FORK,
+#    so deleting repos/${REPO}/git/refs/heads/${head_ref} could hit a SAME-NAMED branch in the base
+#    repo. gh's built-in flag handled the fork-vs-same-repo split natively; the raw API call does
+#    not — so gate on `.head.repo.full_name == ${REPO}` (CTL-56).
+# Idempotent + best-effort: a 404/422 means the ref is already gone or protected; never fail the
+# skill on branch cleanup — the merge already landed.
+if [[ "$merged_ok" == "true" && -n "${head_ref:-}" && "${head_repo:-}" == "${REPO}" ]]; then
   gh api --method DELETE "repos/${REPO}/git/refs/heads/${head_ref}" >/dev/null 2>&1 \
     || echo "CTL-56: remote branch ${head_ref} delete skipped (already gone or protected)" >&2
+elif [[ "$merged_ok" != "true" ]]; then
+  echo "merge-pr: merge of #${pr_number} not REST-confirmed; skipping branch cleanup (CTL-56)" >&2
 fi
 ```
 

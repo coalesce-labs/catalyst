@@ -79,9 +79,13 @@ echo "CTL-56: automated merge sites gate branch delete on an executable REST .me
 # atomic `--delete-branch` deleted ONLY on a successful merge; the split rewrite must preserve
 # that with an EXECUTABLE `.merged` confirm (not a prose comment) before the delete, or a
 # failed/unconfirmed merge orphans the PR's head ref. Assert the confirm token exists at each
-# automated (non-interactive) merge+delete site. (merge-pr is interactive and human-gated, so it
-# is excluded here; recovery-pass carries its own cross-repo REST-confirm prose.)
+# merge+delete site. (CTL-56 Codex round-1 P1: merge-pr was previously excluded as "interactive and
+# human-gated", but human-gating gates the merge DECISION, not the merge-queue race — with a queue,
+# `gh pr merge` enqueues and returns success and the next line would delete a still-open PR's head
+# ref. So merge-pr now carries the executable `.merged` gate too; recovery-pass carries its own
+# cross-repo REST-confirm prose.)
 CONFIRM_GATED_FILES=(
+  "plugins/dev/skills/merge-pr/SKILL.md"
   "plugins/dev/skills/triage-aging-prs/SKILL.md"
   "plugins/dev/templates/fixup-prompt.md"
   "plugins/dev/templates/followup-prompt.md"

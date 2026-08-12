@@ -110,6 +110,10 @@ on:
       - "plugins/dev/skills/triage-aging-prs/**"
       - "plugins/dev/templates/**"
       - "plugins/legacy/skills/oneshot/**"
+      # CTL-56: the repo-wide --delete-branch guard also scans the legacy orchestrate skill (this
+      # PR removes its live --delete-branch instructions); without this path a change confined to
+      # it would neither trigger the workflow on push nor mark a PR relevant, bypassing the guard.
+      - "plugins/legacy/skills/orchestrate/**"
       # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
       # every member package's install (incl. execution-core, broker, otel-forward).
       - "package.json"
@@ -160,6 +164,9 @@ jobs:
               - "plugins/dev/skills/triage-aging-prs/**"
               - "plugins/dev/templates/**"
               - "plugins/legacy/skills/oneshot/**"
+              # CTL-56: mirror the push-path entry above — the repo-wide guard scans the legacy
+              # orchestrate skill, so a change confined to it must mark the PR relevant.
+              - "plugins/legacy/skills/orchestrate/**"
 
   execution-core-unit-tests:
     needs: detect-changes
