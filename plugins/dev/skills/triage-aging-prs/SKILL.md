@@ -198,15 +198,28 @@ test suite. A union that produces a duplicate YAML key breaks CI for everyone.
 ## Step 5 — Merge, and judge CI honestly
 
 ```bash
-# CTL-56: capture head ref BEFORE merge for checkout-free remote cleanup after confirm.
+# CTL-56: capture head ref + head repo BEFORE merge for checkout-free remote cleanup after confirm.
 HEAD_REF=$(gh api "repos/${REPO}/pulls/<N>" --jq '.head.ref' 2>/dev/null || true)
+HEAD_REPO=$(gh api "repos/${REPO}/pulls/<N>" --jq '.head.repo.full_name' 2>/dev/null || true)
 # Merge via REST only — no local branch-cleanup flag; worktree-safe (CTL-56).
 gh pr merge <N> --repo "$REPO" --squash
-# … confirm merge via REST (.merged == true) …
-# After REST-confirm, delete remote head ref checkout-free (idempotent, best-effort):
-if [[ -n "${HEAD_REF:-}" ]]; then
+# Confirm the merge landed via REST BEFORE any branch cleanup — REST is authoritative, and gh's
+# old atomic delete-on-merge flag removed the branch ONLY on a successful merge. A comment is not
+# a gate: an unconfirmed/failed merge here must NOT reach the delete, or it orphans the PR's head
+# ref (CTL-56).
+MERGED_OK=$(gh api "repos/${REPO}/pulls/<N>" --jq '.merged' 2>/dev/null || echo "false")
+# Delete the remote head ref checkout-free (idempotent, best-effort) ONLY when BOTH hold:
+#  - the merge is REST-confirmed, and
+#  - the head branch actually lives in ${REPO}. A fork PR's `.head.ref` names a branch in the
+#    FORK, so deleting repos/${REPO}/git/refs/heads/${HEAD_REF} could hit a SAME-NAMED branch in
+#    the base repo. gh's built-in branch-delete flag handled the fork-vs-same-repo split natively;
+#    the raw API call does not — so gate on `.head.repo.full_name == ${REPO}` (CTL-56).
+#    triage-aging-prs processes arbitrary aging PRs, which may be fork PRs.
+if [[ "$MERGED_OK" == "true" && -n "${HEAD_REF:-}" && "${HEAD_REPO:-}" == "${REPO}" ]]; then
   gh api --method DELETE "repos/${REPO}/git/refs/heads/${HEAD_REF}" >/dev/null 2>&1 \
     || echo "CTL-56: remote branch ${HEAD_REF} delete skipped (already gone or protected)" >&2
+elif [[ "$MERGED_OK" != "true" ]]; then
+  echo "triage-aging-prs: merge of #<N> not REST-confirmed; skipping branch cleanup (CTL-56)" >&2
 fi
 ```
 

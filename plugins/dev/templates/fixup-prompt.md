@@ -124,7 +124,12 @@ fi
    # CTL-56: capture head ref before merge; merge via REST only (worktree-safe).
    HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref' 2>/dev/null || true)
    gh pr merge ${PR_NUMBER} --squash
-   # … confirm via REST (.merged == true) …
+   # Confirm the merge landed via REST BEFORE any branch cleanup — REST is authoritative (CTL-56).
+   # gh's old atomic delete-on-merge flag removed the branch ONLY on a successful merge; a comment
+   # is not a gate, so an unconfirmed/failed merge must NOT reach the delete (it would orphan the
+   # PR's head ref).
+   MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
+   [[ "$MERGED_OK" == "true" ]] || { echo "merge of #${PR_NUMBER} not REST-confirmed; not deleting branch" >&2; exit 1; }
    # After confirm, delete remote head ref checkout-free (idempotent, best-effort, CTL-56):
    [[ -n "${HEAD_REF:-}" ]] && \
      gh api --method DELETE "repos/${REPO}/git/refs/heads/${HEAD_REF}" >/dev/null 2>&1 || true

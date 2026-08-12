@@ -426,8 +426,12 @@ If ticket found and not using `--no-update`:
 # linked worktree. In that case, skip the local `git checkout <base>` (it fails when
 # the base is already checked out in the primary clone) and rely on Step 11a to update
 # the primary. Defer the local feature-branch delete to teardown/reaper.
+# NOTE: both sides MUST be absolute for the comparison to be valid. `--git-common-dir`
+# returns a RELATIVE `.git` in the primary clone, which would falsely differ from the
+# always-absolute `--absolute-git-dir` and misfire the guard in the primary. Force
+# absolute with `--path-format=absolute` so the guard is TRUE only in a real worktree.
 _abs_git="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
-_com_git="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+_com_git="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
 if [[ -n "$_abs_git" && -n "$_com_git" && "$_abs_git" != "$_com_git" ]]; then
   echo "merge-pr: linked worktree — skipping local base checkout; teardown handles branch cleanup (CTL-56)" >&2
 else

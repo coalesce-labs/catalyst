@@ -63,9 +63,40 @@ if [[ -f "$MERGE_PR" ]]; then
   BODY="$(cat "$MERGE_PR")"
   assert_contains "$BODY" "git-common-dir" \
     "merge-pr Step 11 has linked-worktree guard (git-common-dir divergence check)"
+  # CTL-56 remediation: both sides of the divergence check MUST be absolute, else the
+  # guard misfires in the primary clone (--git-common-dir returns a RELATIVE .git there).
+  # Pin the normalization so the fix cannot silently regress.
+  assert_contains "$BODY" "path-format=absolute" \
+    "merge-pr Step 11 normalizes git-common-dir to absolute (--path-format=absolute) before comparing"
 else
   fail "merge-pr/SKILL.md missing: $MERGE_PR"
 fi
+
+echo ""
+echo "CTL-56: automated merge sites gate branch delete on an executable REST .merged confirm"
+# The presence checks above are false-green for a delete-BEFORE-confirm regression: a site that
+# merges then unconditionally deletes still contains git/refs/heads/ + --method DELETE. The old
+# atomic `--delete-branch` deleted ONLY on a successful merge; the split rewrite must preserve
+# that with an EXECUTABLE `.merged` confirm (not a prose comment) before the delete, or a
+# failed/unconfirmed merge orphans the PR's head ref. Assert the confirm token exists at each
+# automated (non-interactive) merge+delete site. (merge-pr is interactive and human-gated, so it
+# is excluded here; recovery-pass carries its own cross-repo REST-confirm prose.)
+CONFIRM_GATED_FILES=(
+  "plugins/dev/skills/triage-aging-prs/SKILL.md"
+  "plugins/dev/templates/fixup-prompt.md"
+  "plugins/dev/templates/followup-prompt.md"
+)
+for REL_FILE in "${CONFIRM_GATED_FILES[@]}"; do
+  FILE="${REPO_ROOT}/${REL_FILE}"
+  LABEL="$(basename "$(dirname "$FILE")")/$(basename "$FILE")"
+  if [[ -f "$FILE" ]]; then
+    BODY="$(cat "$FILE")"
+    assert_contains "$BODY" ".merged" \
+      "CTL-56: ${LABEL} gates branch delete on an executable REST .merged confirm (not a comment)"
+  else
+    fail "file missing: ${FILE}"
+  fi
+done
 
 echo ""
 echo "CTL-56: repo-wide invariant — no live gh pr merge call carries --delete-branch"
