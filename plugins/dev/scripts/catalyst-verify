@@ -1,0 +1,257 @@
+#!/usr/bin/env node
+// catalyst-verify — run one of the verified checks from the command line (CTL-1801).
+//
+// These are the questions this repo re-asks every session and keeps hand-rolling
+// wrong. Each subcommand prints a VERDICT: either a measured answer, or an
+// explicit `INCONCLUSIVE` with the reason it could not look. It never prints a
+// bare zero that a reader could mistake for a measurement.
+//
+// Exit codes:
+//   0  conclusive, and the answer is the "clean"/affirmative one
+//   1  conclusive, and the answer is the "dirty"/negative one
+//   2  INCONCLUSIVE — the instrument could not look (NOT the same as a clean 0)
+//   3  usage error / malformed input
+//
+// Exit 2 is the whole point: a caller that treats "could not look" as "nothing
+// found" is the defect this tool exists to remove, so it gets its own code.
+
+import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+import {
+  VerificationError,
+  countEventsByName,
+  ownershipPreflight,
+  prMergeBlockers,
+  resolveOwnership,
+} from "./lib/verified-checks.mjs";
+
+const USAGE = `catalyst-verify — checks that cannot report a clean result from a check that never ran.
+
+  catalyst-verify events <event.name> [--log <path>]
+      Count events by EXACT event.name (matches "<name>" and "<name>.<TICKET>").
+      Never counts the name where it merely appears in prose (a commit message
+      inside an event body). Defaults to this month's unified event log.
+
+  catalyst-verify owns <TICKET> --host <name> --roster <a,b> [--roster <a>]...
+      Does <host> own <TICKET> under HRW? Pass --roster more than once to
+      preflight across several rosters (e.g. the live one AND the full one);
+      ownership is claimed only when every roster agrees.
+
+  catalyst-verify pr-blockers <number> [--repo <owner/name>]
+      Enumerate EVERY surface that can block a merge: checks, review threads,
+      CHANGES_REQUESTED reviews, draft state. If any surface cannot be read the
+      verdict is INCONCLUSIVE rather than "nothing is blocking".
+
+Exit: 0 clean/yes · 1 dirty/no · 2 INCONCLUSIVE · 3 usage error`;
+
+function fail(msg, code = 3) {
+  process.stderr.write(`${msg}\n`);
+  process.exit(code);
+}
+
+// report — the single place a verdict becomes output, so every subcommand
+// renders an inconclusive result identically.
+function report(verdict, { onValue }) {
+  if (!verdict.conclusive) {
+    process.stdout.write(`INCONCLUSIVE: ${verdict.reason}\n`);
+    process.stdout.write(`  evidence: ${JSON.stringify(verdict.evidence)}\n`);
+    process.exit(2);
+  }
+  onValue(verdict);
+}
+
+function takeFlag(args, name) {
+  const i = args.indexOf(name);
+  if (i === -1) return null;
+  const v = args[i + 1];
+  args.splice(i, 2);
+  return v ?? null;
+}
+function takeAll(args, name) {
+  const out = [];
+  for (;;) {
+    const v = takeFlag(args, name);
+    if (v === null) break;
+    out.push(v);
+  }
+  return out;
+}
+
+function ghJson(args) {
+  const r = spawnSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (r.error) throw new Error(`gh failed to spawn: ${r.error.message}`);
+  if (r.status !== 0) throw new Error(`gh exited ${r.status}: ${(r.stderr || "").trim().slice(0, 300)}`);
+  try {
+    return JSON.parse(r.stdout);
+  } catch (err) {
+    throw new Error(`gh output was not JSON: ${err.message}`);
+  }
+}
+
+// ghGraphQL — a GraphQL read that THROWS on a partial response.
+//
+// GitHub returns HTTP 200 with a top-level `errors` array (and/or a null
+// `pullRequest`) for a partially-failed query. `ghJson` parses that happily, and
+// a caller that then reads `…pullRequest.reviewThreads.nodes` with optional
+// chaining gets `undefined` -> `[]` -> "no unresolved threads". That is a clean
+// verdict produced by a failed read. `execution-core/pr-block-probe.mjs:211-214`
+// rejects this exact shape for the same reason; this mirrors it.
+function ghGraphQL(query) {
+  const json = ghJson(["api", "graphql", "-f", `query=${query}`]);
+  if (json === null || json.errors || !json?.data?.repository?.pullRequest) {
+    const detail = json?.errors ? JSON.stringify(json.errors).slice(0, 200) : "null pullRequest";
+    throw new Error(`partial GraphQL response: ${detail}`);
+  }
+  return json.data.repository.pullRequest;
+}
+
+// The gh adapter. `prMergeBlockers` asks for three surfaces by sentinel name;
+// this maps each to the real API surface that answers it. The review-thread and
+// issue-comment surfaces are DISTINCT from `gh pr view` on purpose — the
+// automated reviewer signals findings on one and a clean pass on the other, so
+// consulting only `pr view` answers a different question than the one asked.
+function ghSurfaceAdapter(repoFlag) {
+  const repoArgs = repoFlag ? ["--repo", repoFlag] : [];
+  const nwo = () => {
+    if (repoFlag) return repoFlag;
+    const r = spawnSync("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], {
+      encoding: "utf8",
+    });
+    if (r.status !== 0) throw new Error("could not resolve the current repo");
+    return r.stdout.trim();
+  };
+  return async (args) => {
+    if (args[0] === "pr") return ghJson(args);
+    const num = Number(args[1]);
+    const [owner, name] = nwo().split("/");
+    if (args[0] === "__reviewThreads__") {
+      // PAGINATE. `first:100` silently omits later pages, so an unresolved thread
+      // on page two would be absent and the verdict would read "clean". Every
+      // page is aggregated before any verdict is issued; a failure mid-walk
+      // throws, which makes the whole verdict inconclusive rather than short.
+      const nodes = [];
+      let after = null;
+      for (let page = 0; page < 50; page += 1) {
+        const cursor = after ? `, after:"${after}"` : "";
+        const q = `{repository(owner:"${owner}",name:"${name}"){pullRequest(number:${num}){reviewThreads(first:100${cursor}){pageInfo{hasNextPage endCursor} nodes{id isResolved path}}}}}`;
+        const prNode = ghGraphQL(q);
+        const conn = prNode?.reviewThreads;
+        if (!conn || !Array.isArray(conn.nodes)) {
+          throw new Error("reviewThreads connection missing from a 200 response");
+        }
+        nodes.push(...conn.nodes);
+        if (!conn.pageInfo?.hasNextPage || !conn.pageInfo?.endCursor) return nodes;
+        after = conn.pageInfo.endCursor;
+      }
+      throw new Error("reviewThreads pagination exceeded 50 pages — refusing to guess the remainder");
+    }
+    if (args[0] === "__issueComments__") {
+      return ghJson(["api", `repos/${owner}/${name}/issues/${num}/comments`, "--paginate"]);
+    }
+    if (args[0] === "__reactions__") {
+      // A reaction-only clean pass lives here and NOWHERE else.
+      return ghJson(["api", `repos/${owner}/${name}/issues/${num}/reactions`, "--paginate"]);
+    }
+    throw new Error(`unknown surface ${args[0]}`);
+  };
+}
+
+// resolveEventLogPath — the canonical log-location contract, same ladder
+// `catalyst-events` uses: CATALYST_EVENTS_FILE (exact file) > CATALYST_EVENTS_DIR
+// > CATALYST_DIR/events > ~/catalyst/events. Scanning the built-in default while
+// an installation has pointed the log elsewhere would return a conclusive zero
+// against the WRONG corpus — a licensed answer to a question nobody asked.
+function resolveEventLogPath(env, month) {
+  if (env.CATALYST_EVENTS_FILE) return env.CATALYST_EVENTS_FILE;
+  if (env.CATALYST_EVENTS_DIR) return resolve(env.CATALYST_EVENTS_DIR, `${month}.jsonl`);
+  if (env.CATALYST_DIR) return resolve(env.CATALYST_DIR, "events", `${month}.jsonl`);
+  return resolve(homedir(), "catalyst", "events", `${month}.jsonl`);
+}
+
+async function main(argv) {
+  const args = argv.slice(2);
+  const cmd = args.shift();
+  if (!cmd || cmd === "--help" || cmd === "-h" || cmd === "help") {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
+
+  if (cmd === "events") {
+    const logFlag = takeFlag(args, "--log");
+    const name = args.shift();
+    if (!name) fail("usage: catalyst-verify events <event.name> [--log <path>]");
+    const month = new Date().toISOString().slice(0, 7);
+    const logPath = logFlag || resolveEventLogPath(process.env, month);
+    const verdict = await countEventsByName(name, { logPath });
+    return report(verdict, {
+      onValue: (v) => {
+        process.stdout.write(`${v.value}\n`);
+        process.stderr.write(
+          `  (positive control: ${v.evidence.parsedEvents} events read from ${logPath}` +
+            `${v.evidence.parseFailures ? `, ${v.evidence.parseFailures} unparseable lines` : ""})\n`,
+        );
+        process.exit(v.value > 0 ? 0 : 1);
+      },
+    });
+  }
+
+  if (cmd === "owns") {
+    const host = takeFlag(args, "--host");
+    const rosters = takeAll(args, "--roster").map((r) =>
+      r.split(",").map((s) => s.trim()).filter(Boolean),
+    );
+    const ticket = args.shift();
+    if (!ticket || !host || rosters.length === 0) {
+      fail("usage: catalyst-verify owns <TICKET> --host <name> --roster <a,b> [--roster <a>]...");
+    }
+    const verdict =
+      rosters.length === 1
+        ? resolveOwnership({ ticketId: ticket, roster: rosters[0], hostName: host })
+        : ownershipPreflight({ ticketId: ticket, rosters, hostName: host });
+    return report(verdict, {
+      onValue: (v) => {
+        const owners = v.evidence.owners
+          ? v.evidence.owners.map((o) => `[${o.roster.join(",")}] -> ${o.owner}`).join("  ")
+          : `[${v.evidence.roster.join(",")}] -> ${v.evidence.owner}`;
+        process.stdout.write(`${v.value ? "YES" : "NO"}  ${ticket} host=${host}\n`);
+        process.stdout.write(`  ${owners}\n`);
+        process.exit(v.value ? 0 : 1);
+      },
+    });
+  }
+
+  if (cmd === "pr-blockers") {
+    const repoFlag = takeFlag(args, "--repo");
+    const num = Number(args.shift());
+    if (!Number.isInteger(num) || num <= 0) fail("usage: catalyst-verify pr-blockers <number> [--repo o/n]");
+    const verdict = await prMergeBlockers({
+      prNumber: num,
+      repo: repoFlag,
+      runJson: ghSurfaceAdapter(repoFlag),
+    });
+    return report(verdict, {
+      onValue: (v) => {
+        if (v.value.length === 0) {
+          process.stdout.write(`no blockers (mergeStateStatus=${v.evidence.mergeStateStatus})\n`);
+          process.stderr.write(
+            `  (surfaces read: ${v.evidence.surfacesRead.join(", ")}; ` +
+              `${v.evidence.threadsSeen} threads, ${v.evidence.commentsSeen} issue comments)\n`,
+          );
+          process.exit(0);
+        }
+        for (const b of v.value) {
+          process.stdout.write(`${b.surface}\t${b.kind}\t${b.name ?? b.path ?? b.author ?? b.id ?? ""}\n`);
+        }
+        process.exit(1);
+      },
+    });
+  }
+
+  fail(`unknown subcommand: ${cmd}\n\n${USAGE}`);
+}
+
+main(process.argv).catch((err) => {
+  if (err instanceof VerificationError) fail(`VerificationError: ${err.message}`, 3);
+  fail(`error: ${err.message}`, 3);
+});
