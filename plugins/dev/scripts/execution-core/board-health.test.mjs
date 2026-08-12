@@ -3028,6 +3028,7 @@ describe("CAT-57 host-scoped board health", () => {
     expect(resolveRosterSeam(() => [], fallback)).toBe(fallback);
     expect(resolveRosterSeam(null, fallback)).toBe(fallback);
     expect(resolveRosterSeam(() => { throw new Error("down"); }, fallback)).toBe(fallback);
+    expect(resolveRosterSeam([], [])).toEqual([]);
   });
 
   test("dispatch liveness is unobservable only for multi-host empty rosters", () => {
@@ -3217,6 +3218,44 @@ describe("CAT-57 nodeProductivity invariant", () => {
       ticketsById: doneBlocker,
       owner: (id) => id === "CAT-BLOCKER" ? "mini" : "peer",
     })).nodeProductivity.flagged).toEqual(["peer"]);
+  });
+
+  describe("CAT-126: only advanceable tickets count as owned work", () => {
+    const blockedTicket = (blockerState) => new Map([
+      ["CAT-PEER", {
+        identifier: "CAT-PEER",
+        state: "Todo",
+        relations: [{ type: "blocked_by", relatedIssue: { identifier: "CAT-BLOCKER" } }],
+      }],
+      ["CAT-BLOCKER", { identifier: "CAT-BLOCKER", state: blockerState }],
+    ]);
+
+    test("a live blocker removes the ticket from the peer share", () => {
+      const r = evaluateInvariants(productivityBoard({
+        ticketsById: blockedTicket("In Progress"),
+        owner: (id) => id === "CAT-PEER" ? "peer" : "mini",
+      })).nodeProductivity;
+      expect(r.flagged).toEqual([]);
+    });
+
+    test("a done blocker has cleared and the ticket still counts", () => {
+      const r = evaluateInvariants(productivityBoard({
+        ticketsById: blockedTicket("Done"),
+        owner: (id) => id === "CAT-PEER" ? "peer" : "mini",
+      })).nodeProductivity;
+      expect(r.flagged).toEqual(["peer"]);
+      expect(r.unproductive.peer.ownedTickets).toEqual(["CAT-PEER"]);
+    });
+
+    test("needs-human and parked-by-human tickets do not count", () => {
+      for (const label of ["needs-human", "parked-by-human"]) {
+        const r = evaluateInvariants(productivityBoard({
+          ticketsById: new Map([["CAT-PEER", { labels: [{ name: label }] }]]),
+        })).nodeProductivity;
+        expect(r.flagged).toEqual([]);
+      }
+    });
+
   });
 
   test("off omits key and never reads productivity seam", () => {

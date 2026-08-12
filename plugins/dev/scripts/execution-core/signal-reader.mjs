@@ -183,6 +183,20 @@ export function readWorkerSignals(orchDir) {
 // freshest active one byActivePhase picks. readWorkerSignals stays the
 // canonical active-phase projection for the scheduler; this is the strictly
 // wider observation set the fact collector records.
+//
+// PERFORMANCE, measured — CAT-126 (CAT-57 deferred finding 5), 2026-08-12.
+// This is an un-memoized two-level scan called by two independent timers in the
+// daemon process: the 30 s node heartbeat (daemon.mjs lastAdvanceAtFn, ~120/hr,
+// unconditional) and the 120 s liveness publisher (cluster-heartbeat-publisher.mjs
+// lastAdvanceAt, ≤30/hr, linear mode only). CAT-57's review flagged the missing memo.
+// MEASURED on a live orchDir (28 worker dirs / 133 signals): 2.18 ms per invocation,
+// ~0.33 s/hr of blocked event loop across both callers — 0.009% of wall-clock, and
+// ~1.6 s/hr even at the 137-dir size of the 2026-06-16 incident that motivated
+// worker-dir-gc. A memo would recover ~0.07 s/hr and would have to be either a
+// module-level TTL cache (shared mutable state + a staleness window on a LIVENESS
+// path — what recovery.mjs:4080-4084 argues against) or a per-tick closure (no tick
+// exists here; both callers are setInterval). Deliberately NOT memoized. Re-measure
+// before reopening.
 export function readAllPhaseSignals(orchDir) {
   const workersDir = join(orchDir, "workers");
   const out = [];
