@@ -27,6 +27,8 @@ import {
   isParkedByHuman,
   eligibleDeferredAnchors,
   makeOwnsFilter,
+  // CTL-1744: delegate-claim evidence normalizer (fail-closed sanitization).
+  normalizeDelegateClaims,
   resolveRosterSeam,
 } from "./board-health.mjs";
 // CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
@@ -111,6 +113,10 @@ function mkBoard(o = {}) {
     // CTL-1644: per-ticket evidence map for the stranded-mid-pipeline check.
     // Empty Map default ⇒ checkStrandedMidPipeline stays observable:false (shadow-first).
     strandedEvidence: o.strandedEvidence ?? new Map(),
+    // CTL-1744: per-ticket delegate-claim timestamps. Empty Map default ⇒ no
+    // ticket is ever granted delegate-lands grace, so every pre-existing test
+    // exercises exactly the pre-CTL-1744 behavior.
+    delegateClaims: o.delegateClaims ?? new Map(),
     now: o.now ?? NOW,
   };
 }
@@ -202,6 +208,183 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
       mkBoard({ capacity: { freeSlots: 4 }, eligible: [], ring: { recentDispatchTs: null } }),
     );
     expect(noQueue.dispatchLiveness.ok).toBe(true);
+  });
+
+  // ── CTL-1744: delegate-lands grace ────────────────────────────────────────
+  //
+  // The CTL-1174 triage gate is TWO-PASS: pass 1 claims a ticket by delegating it
+  // to the orchestrator app-actor and HOLDS; pass 2 dispatches, but only on the
+  // next reconcile sweep (RECONCILE_INTERVAL_MS, 10 min). Without grace, that
+  // by-design wait reads as a wedge and actuates a recovery delegate — observed
+  // live 2026-08-10, where a 2-minute-old claim burned an opus session, a
+  // worktree and a slot on a perfectly healthy board.
+  //
+  // GRACE_MS mirrors the production default (RECONCILE_INTERVAL_MS + 60s slack).
+  const GRACE_MS = 10 * 60_000 + 60_000;
+  const wedgeBoard = (o = {}) =>
+    mkBoard({
+      capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
+      ring: { recentDispatchTs: NOW - 30 * MIN }, // far past the 10-min stall
+      ...o,
+    });
+
+  test("CTL-1744 (a) INSIDE grace: a freshly-claimed ticket is not wedge evidence → no recovery", () => {
+    const r = evaluateInvariants(
+      wedgeBoard({
+        eligible: [{ id: "CTL-1743" }],
+        delegateClaims: new Map([["CTL-1743", NOW - 2 * MIN]]), // claimed 2 min ago
+      }),
+    );
+    expect(r.dispatchLiveness.ok).toBe(true);
+    expect(r.dispatchLiveness.failed).toBe(0);
+    expect(r.dispatchLiveness.flagged).toEqual([]);
+    // census stays honest: the candidate is reported, not silently dropped
+    expect(r.dispatchLiveness.queuedOwned).toBe(1);
+    expect(r.dispatchLiveness.queuedOwnedInDelegateGrace).toBe(1);
+    expect(r.dispatchLiveness.queuedOwnedEvidence).toBe(0);
+    expect(r.dispatchLiveness.note).toContain("delegate-lands grace");
+  });
+
+  test("CTL-1744 (b) AFTER grace: recovery still fires — a genuinely wedged board is not masked", () => {
+    const r = evaluateInvariants(
+      wedgeBoard({
+        eligible: [{ id: "CTL-1743" }],
+        delegateClaims: new Map([["CTL-1743", NOW - (GRACE_MS + 1)]]), // 1ms past grace
+      }),
+    );
+    expect(r.dispatchLiveness.ok).toBe(false);
+    expect(r.dispatchLiveness.failed).toBe(1);
+    expect(r.dispatchLiveness.flagged).toContain("CTL-1743");
+    expect(r.dispatchLiveness.queuedOwnedInDelegateGrace).toBe(0);
+  });
+
+  test("CTL-1744 (b') boundary: exactly at grace is still granted; one ms past is not", () => {
+    const atEdge = evaluateInvariants(
+      wedgeBoard({
+        eligible: [{ id: "CTL-1" }],
+        delegateClaims: new Map([["CTL-1", NOW - GRACE_MS]]),
+      }),
+    );
+    expect(atEdge.dispatchLiveness.ok).toBe(true);
+    const pastEdge = evaluateInvariants(
+      wedgeBoard({
+        eligible: [{ id: "CTL-1" }],
+        delegateClaims: new Map([["CTL-1", NOW - GRACE_MS - 1]]),
+      }),
+    );
+    expect(pastEdge.dispatchLiveness.ok).toBe(false);
+  });
+
+  test("CTL-1744 (c) FAIL-CLOSED: every unusable claim timestamp grants NO grace", () => {
+    // Each case must behave exactly like today (wedge), because grace SUPPRESSES
+    // a recovery signal and may only be granted on positive, well-formed evidence.
+    const cases = [
+      ["no entry for the ticket", new Map([["CTL-OTHER", NOW]])],
+      ["empty map", new Map()],
+      ["non-numeric (string)", new Map([["CTL-1", String(NOW)]])],
+      ["NaN", new Map([["CTL-1", NaN]])],
+      ["Infinity", new Map([["CTL-1", Infinity]])],
+      ["null", new Map([["CTL-1", null]])],
+      ["undefined", new Map([["CTL-1", undefined]])],
+      ["zero", new Map([["CTL-1", 0]])],
+      ["negative", new Map([["CTL-1", -1]])],
+      ["FUTURE-dated (clock skew)", new Map([["CTL-1", NOW + 5 * MIN]])],
+      ["not a Map at all", { "CTL-1": NOW }],
+      ["null claims", null],
+    ];
+    for (const [label, delegateClaims] of cases) {
+      const r = evaluateInvariants(
+        wedgeBoard({ eligible: [{ id: "CTL-1" }], delegateClaims }),
+      );
+      expect(`${label}: ${r.dispatchLiveness.ok}`).toBe(`${label}: false`);
+      expect(`${label}: ${r.dispatchLiveness.flagged.includes("CTL-1")}`).toBe(`${label}: true`);
+    }
+  });
+
+  test("CTL-1744 (d) HRW UNCHANGED: grace narrows evidence only, never ownership", () => {
+    // A peer-owned ticket is not this host's business with or without a claim.
+    // Granting it grace must not change that, and must not make a peer-owned
+    // ticket become owned.
+    const peerOwned = evaluateInvariants(
+      mkOwnedBoard({
+        owner: () => "peer",
+        capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
+        ring: { recentDispatchTs: NOW - 30 * MIN },
+        eligible: [{ id: "CTL-PEER" }],
+        delegateClaims: new Map([["CTL-PEER", NOW - 2 * MIN]]),
+      }),
+    );
+    expect(peerOwned.dispatchLiveness.ok).toBe(true);      // not ours → never a wedge
+    expect(peerOwned.dispatchLiveness.queuedOwned).toBe(0); // ownership unaffected by grace
+    expect(peerOwned.dispatchLiveness.queuedOwnedInDelegateGrace).toBe(0);
+
+    // Mixed board: one owned+fresh (suppressed), one owned+stale (still evidence).
+    const mixed = evaluateInvariants(
+      mkOwnedBoard({
+        owner: () => "mini",
+        capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
+        ring: { recentDispatchTs: NOW - 30 * MIN },
+        eligible: [{ id: "CTL-FRESH" }, { id: "CTL-STALE" }],
+        delegateClaims: new Map([
+          ["CTL-FRESH", NOW - 1 * MIN],
+          ["CTL-STALE", NOW - 3 * HOUR],
+        ]),
+      }),
+    );
+    expect(mixed.dispatchLiveness.ok).toBe(false);
+    expect(mixed.dispatchLiveness.flagged).toContain("CTL-STALE");
+    expect(mixed.dispatchLiveness.flagged).not.toContain("CTL-FRESH");
+    expect(mixed.dispatchLiveness.queuedOwned).toBe(2);
+    expect(mixed.dispatchLiveness.queuedOwnedInDelegateGrace).toBe(1);
+    expect(mixed.dispatchLiveness.queuedOwnedEvidence).toBe(1);
+  });
+
+  test("CTL-1744: grace never RESURRECTS a wedge — recent dispatch still reads live", () => {
+    const r = evaluateInvariants(
+      mkBoard({
+        capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
+        eligible: [{ id: "CTL-1" }],
+        ring: { recentDispatchTs: NOW - 1 * MIN },
+        delegateClaims: new Map([["CTL-1", NOW - 3 * HOUR]]),
+      }),
+    );
+    expect(r.dispatchLiveness.ok).toBe(true);
+  });
+
+  test("CTL-1744: normalizeDelegateClaims keeps only usable evidence, never throws", () => {
+    expect(normalizeDelegateClaims(new Map([["CTL-1", 123]])).get("CTL-1")).toBe(123);
+    // future-dated is KEPT here so the age check can reject it explicitly
+    expect(normalizeDelegateClaims(new Map([["CTL-1", 9e15]])).get("CTL-1")).toBe(9e15);
+    // accepts any [k,v] iterable, not just a Map
+    expect(normalizeDelegateClaims([["CTL-2", 5]]).get("CTL-2")).toBe(5);
+    for (const bad of [null, undefined, 42, "nope", { "CTL-1": 1 }, new Set([1, 2])]) {
+      expect(normalizeDelegateClaims(bad).size).toBe(0);
+    }
+    const mixed = normalizeDelegateClaims(
+      new Map([["CTL-OK", 1], ["CTL-NAN", NaN], ["CTL-STR", "1"], ["", 1], ["CTL-NEG", -1]]),
+    );
+    expect([...mixed.keys()]).toEqual(["CTL-OK"]);
+    // a throwing iterable degrades to empty rather than propagating
+    const hostile = { [Symbol.iterator]() { throw new Error("boom"); } };
+    expect(normalizeDelegateClaims(hostile).size).toBe(0);
+  });
+
+  test("CTL-1744: assembleBoardState seam is inert by default and fail-closed on throw", () => {
+    const unwired = assembleBoardState({ orchDir: "/tmp/x" });
+    expect(unwired.delegateClaims).toBeInstanceOf(Map);
+    expect(unwired.delegateClaims.size).toBe(0);
+
+    const throwing = assembleBoardState({
+      orchDir: "/tmp/x",
+      getDelegateClaims: () => { throw new Error("unreadable"); },
+    });
+    expect(throwing.delegateClaims.size).toBe(0);
+
+    const wired = assembleBoardState({
+      orchDir: "/tmp/x",
+      getDelegateClaims: () => new Map([["CTL-1", 1234]]),
+    });
+    expect(wired.delegateClaims.get("CTL-1")).toBe(1234);
   });
 
   test("workerAge: non-terminal worker past phase-normal age flags; within-age + terminal do not", () => {
@@ -1246,6 +1429,45 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     expect(r.ran).toBe(true);
     expect(emits.length).toBe(1);
     expect(emits[0].details.mode).toBe("enforce");
+  });
+
+  // CTL-1744 / Codex #3206 P1 — REGRESSION GUARD for a silent seam drop.
+  //
+  // The scheduler binds getDelegateClaims at the daemon call site, but
+  // boardHealthPass originally neither destructured nor forwarded it. JavaScript
+  // discards an undeclared property silently, so assembleBoardState always fell
+  // back to its empty-Map default: no ticket was ever granted grace and enforce
+  // could still launch the very delegate this fix exists to prevent — i.e. the
+  // whole change was INERT in production.
+  //
+  // It survived review because every other CTL-1744 test calls assembleBoardState
+  // DIRECTLY; none went through boardHealthPass, which is the only path the daemon
+  // actually uses. So assert the PRODUCTION path, and assert both halves: that the
+  // injected reader is really consulted, and that its value reaches the invariant.
+  test("CTL-1744: boardHealthPass FORWARDS getDelegateClaims through to assembleBoardState", () => {
+    const emits = [];
+    let calls = 0;
+    // flaggedDeps is, by construction, a dispatch wedge: free slots + a queue of
+    // CTL-1/CTL-2 + no dispatch events. Claim BOTH queued tickets well inside the
+    // grace window (grace = RECONCILE_INTERVAL_MS + 60s = 11 min; these are 1 min old)
+    // so a correctly-forwarded reader must clear the wedge entirely.
+    const r = boardHealthPass(
+      flaggedDeps({
+        mode: "shadow",
+        emit: (e) => emits.push(e),
+        getDelegateClaims: () => {
+          calls += 1;
+          return new Map([["CTL-1", NOW - 60_000], ["CTL-2", NOW - 60_000]]);
+        },
+      }),
+    );
+    expect(r.ran).toBe(true);
+    // (1) the forwarding contract itself: the reader was actually invoked.
+    //     Pre-fix this was 0 — the property never survived the destructure.
+    expect(calls).toBeGreaterThan(0);
+    // (2) the behavior that contract buys: every queued ticket is inside the
+    //     delegate-lands grace, so the board is NOT a wedge. Pre-fix: ok === false.
+    expect(emits[0].details.invariants.dispatchLiveness.ok).toBe(true);
   });
 
   test("mode:enforce WITH act → ONE holistic dispatch carrying anchor + boardContext (CTL-1300)", () => {
