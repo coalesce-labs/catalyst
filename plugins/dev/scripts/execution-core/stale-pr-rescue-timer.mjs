@@ -19,7 +19,11 @@ import {
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { jobLifecycle } from "./recovery.mjs";
+import {
+  jobLifecycle,
+  defaultAppendFenceSuppressedEvent,
+  emitFenceSuppressedEventOnce,
+} from "./recovery.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { fenceGuard } from "./fence-guard.mjs";
@@ -30,7 +34,7 @@ import {
 } from "./fence-standoff.mjs";
 import { recordDurableEscalation } from "./durable-escalation.mjs";
 import { appendFileSync } from "node:fs";
-import { log, getEventLogPath, getClusterHosts } from "./config.mjs";
+import { log, getEventLogPath, getClusterHosts, getHostName } from "./config.mjs";
 import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs";
 // Default Linear transport for the escalation path. The daemon does not thread
 // a writer (scheduler.mjs threads its own), so without this default every
@@ -343,6 +347,7 @@ export function defaultEscalate(
     fenceGuardFn = fenceGuard,
     recordDurableEscalationFn = recordDurableEscalation,
     appendStandoffEvent = appendFenceStandoffEvent,
+    appendFenceSuppressedEvent = defaultAppendFenceSuppressedEvent,
   } = {}
 ) {
   let routed = false;
@@ -402,6 +407,20 @@ export function defaultEscalate(
         recordEscalation: recordDurableEscalationFn,
         detail: `stale PR #${detail?.prNumber ?? "?"}`,
       });
+      try {
+        emitFenceSuppressedEventOnce(
+          orchDir,
+          ticket,
+          "stale-pr-rescue",
+          self,
+          appendFenceSuppressedEvent
+        );
+      } catch (err) {
+        log.warn(
+          { ticket, err: err.message },
+          "cat-3: stale-pr-rescue fence-suppressed emit threw"
+        );
+      }
     }
   } else {
     log.warn(
@@ -502,6 +521,8 @@ export function startStalePrRescueTimer({
   // (which already owns concurrency); importing readMaxParallel here would pull
   // scheduler.mjs's bun:sqlite graph into this timer. undefined → prior behavior.
   maxParallel = undefined,
+  gateway = undefined,
+  self = getHostName(),
   // injectable seams
   jobLifecycle: jobLifecycleFn = jobLifecycle,
   prView = defaultPrView,
@@ -535,6 +556,9 @@ export function startStalePrRescueTimer({
         cfg,
         linearWrite,
         multiHost: tickMultiHost,
+        maxParallel,
+        gateway,
+        self,
         jobLifecycleFn,
         prView,
         compareBehind,
@@ -561,6 +585,8 @@ async function runTick({
   linearWrite,
   multiHost,
   maxParallel,
+  gateway,
+  self,
   jobLifecycleFn,
   prView,
   compareBehind,
@@ -590,6 +616,8 @@ async function runTick({
         linearWrite,
         multiHost,
         maxParallel,
+        gateway,
+        self,
         nowMs,
         jobLifecycleFn,
         prView,
@@ -614,6 +642,8 @@ async function processTicket({
   linearWrite,
   multiHost,
   maxParallel,
+  gateway,
+  self,
   nowMs,
   jobLifecycleFn,
   prView,
@@ -677,7 +707,16 @@ async function processTicket({
       // conflict fields but never prNumber, so the standoff detail rendered
       // "stale PR #?" and dropped the primary actionable identifier.
       { reason: "rescue_worker_stalled", prNumber: prInfo.number, ...rescueState },
-      { orchDir, orchId: effectiveOrchId, linearWrite, multiHost, maxParallel, now: () => nowMs }
+      {
+        orchDir,
+        orchId: effectiveOrchId,
+        linearWrite,
+        multiHost,
+        maxParallel,
+        gateway,
+        self,
+        now: () => nowMs,
+      }
     );
     // CTL-1609 (Codex P1): latch escalatedAt ONLY on a confirmed label write.
     // decideRescue skips forever once escalatedAt exists, so latching on an
@@ -822,6 +861,8 @@ async function processTicket({
         multiHost,
         maxParallel,
         now: () => nowMs,
+        gateway,
+        self,
       });
       // CTL-1609 (Codex P1): see recordEscalationOutcome — escalatedAt is a
       // permanent skip in decideRescue, so it is written only when the needs-human

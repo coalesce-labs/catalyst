@@ -47,6 +47,8 @@ import {
   defaultAppendBootResumePhaseRegressionEvent,
   // CTL-1044
   defaultAppendOperatorEvent,
+  // CAT-3
+  defaultAppendFenceSuppressedEvent,
   // 2026-08-03
   detectSessionRateLimitHit,
 } from "./recovery.mjs";
@@ -3750,6 +3752,86 @@ describe("defaultAppendOperatorEvent (CTL-1044)", () => {
         payload: { ticket: "CTL-FAIL" },
       }),
     ).toBe(false);
+  });
+});
+
+// CAT-3: escalation.fence-suppressed envelope. A fence suppression is a
+// deliberate no-write; the event is the ONLY operator-visible record of it, and
+// its whole value is the DIMENSIONS (ticket/site/host/reason). otel-forward
+// strips body.payload off-machine, so those dimensions have to survive as OTLP
+// ATTRIBUTES — if defaultAppendOperatorEvent stops merging evt.attributes the
+// event still lands, still passes namespace parity, and is silently useless.
+// These tests pin that merge so the regression cannot ship green.
+describe("escalation.fence-suppressed envelope (CAT-3)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "cat3-fence-suppressed-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("carries ticket/site/host/reason as ATTRIBUTES (survives the payload strip)", () => {
+    const ok = defaultAppendFenceSuppressedEvent({
+      ticket: "CAT-3",
+      site: "terminal-sweep",
+      host: "host-a",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("escalation.fence-suppressed");
+    expect(env.attributes.ticket).toBe("CAT-3");
+    expect(env.attributes.site).toBe("terminal-sweep");
+    expect(env.attributes.host).toBe("host-a");
+    expect(env.attributes.reason).toBe("fence-suppressed");
+    // payload keeps the same dimensions for the on-machine log reader.
+    expect(env.body.payload).toEqual({
+      ticket: "CAT-3",
+      site: "terminal-sweep",
+      host: "host-a",
+      reason: "fence-suppressed",
+    });
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+  });
+
+  test("an explicit reason overrides the default", () => {
+    expect(
+      defaultAppendFenceSuppressedEvent({
+        ticket: "CAT-3",
+        site: "stale-pr-rescue",
+        host: "host-b",
+        reason: "foreign-owner",
+      }),
+    ).toBe(true);
+    expect(readBackEnvelope().attributes.reason).toBe("foreign-owner");
+  });
+
+  test("a caller-supplied attribute can never shadow event.name", () => {
+    expect(
+      defaultAppendOperatorEvent({
+        "event.name": "escalation.fence-suppressed",
+        attributes: { "event.name": "spoofed", ticket: "CAT-3" },
+        payload: { ticket: "CAT-3" },
+      }),
+    ).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("escalation.fence-suppressed");
+    expect(env.attributes.ticket).toBe("CAT-3");
   });
 });
 

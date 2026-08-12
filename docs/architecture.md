@@ -548,7 +548,9 @@ label application:
   ensures the chokepoint's coercion cannot overwrite it.
 
 New event names (registered in `broker/namespace-parity.test.mjs`): `escalation.explanation-absent`,
-`delegate.would-route`, `delegate.routed`, `delegate.route-fallback`.
+`escalation.fence-suppressed`, `delegate.would-route`, `delegate.routed`,
+`delegate.route-fallback`. A fence suppression is a deliberate no-write;
+`escalation.fence-suppressed` makes that decision operator-visible instead of silent.
 
 ### Runaway-loop guards (CTL-671)
 

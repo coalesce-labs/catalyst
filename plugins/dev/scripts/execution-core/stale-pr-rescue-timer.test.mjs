@@ -1158,3 +1158,47 @@ describe("escalation durability — escalatedAt only on a confirmed escalation (
     expect(readRescueState(orchDir, "CTL-E4")?.escalatedAt).toBeTruthy();
   });
 });
+
+describe("defaultEscalate fence-suppressed event", () => {
+  let dir;
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+  it("emits once without creating a worker directory", () => {
+    dir = mkdtempSync(join(tmpdir(), "stale-pr-fence-"));
+    const events = [];
+    const deps = {
+      orchDir: dir,
+      linearWrite: { applyLabel: () => ({ applied: true }) },
+      multiHost: true,
+      self: "host-a",
+      gateway: {
+        getDescriptor: () => ({ ownerHost: "host-b", generation: 2 }),
+      },
+      appendFenceSuppressedEvent: (event) => events.push(event),
+    };
+    const outcome = defaultEscalate("CAT-3", {}, deps);
+    defaultEscalate("CAT-3", {}, deps);
+    defaultEscalate("CAT-3", {}, deps);
+    expect(outcome).toEqual({ confirmed: false, routed: false, reason: "fence-suppressed" });
+    expect(events).toEqual([
+      {
+        ticket: "CAT-3",
+        site: "stale-pr-rescue",
+        host: "host-a",
+        reason: "fence-suppressed",
+      },
+    ]);
+    expect(existsSync(join(dir, "workers", "CAT-3"))).toBe(false);
+  });
+
+  it("does not emit for a missing Linear transport", () => {
+    dir = mkdtempSync(join(tmpdir(), "stale-pr-no-transport-"));
+    const events = [];
+    defaultEscalate("CAT-3", {}, {
+      orchDir: dir,
+      linearWrite: null,
+      appendFenceSuppressedEvent: (event) => events.push(event),
+    });
+    expect(events).toHaveLength(0);
+  });
+});
