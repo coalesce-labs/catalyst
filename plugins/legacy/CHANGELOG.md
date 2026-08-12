@@ -1,9 +1,18 @@
 # Changelog
 
-## [2.2.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-legacy-v2.2.0...catalyst-legacy-v2.2.1) (2026-08-12)
+## [2.2.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-legacy-v2.2.0...catalyst-legacy-v2.2.1)
+
+Aug 12, 2026
+
+<!-- ai-enhanced -->
+
+### Worktree-Safe PR Merge
+
+Automated merges no longer fail with `fatal: 'main' is already used by worktree` when running from git linked worktrees. The fix drops `--delete-branch` from all `gh pr merge` calls and replaces it with a checkout-free remote ref delete via the GitHub REST API, applied consistently across the phase-agent pipeline, oneshot workers, and interactive merge skill. No migration steps required.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** CTL-56 — worktree-safe merge (drop --delete-branch, checkout-free ref cleanup) ([#3277](https://github.com/coalesce-labs/catalyst/issues/3277)) ([f9690b5](https://github.com/coalesce-labs/catalyst/commit/f9690b58dc48a2684810a96aa1b7abb5dcc7dffb))
 
