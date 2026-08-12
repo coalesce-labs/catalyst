@@ -128,10 +128,17 @@ _scan_live_violators() {
     | grep -v '\.json:' \
     | grep -v '\.html:' \
     | grep -v '\.test\.sh:' \
-    | grep -v 'CHANGELOG\.md:' \
+    | grep -v '/CHANGELOG\.md:' \
     | grep -v '^[^:]*:[[:space:]]*#' \
     || true
 }
+# NOTE the leading `/` on the CHANGELOG filter: it anchors the match to a path
+# boundary so the exclusion covers ONLY a file whose basename is exactly
+# `CHANGELOG.md`. Unanchored, the same filter would also drop a live instruction
+# file named e.g. `NOT_CHANGELOG.md` or `PLUGIN_CHANGELOG.md`, and a real
+# violation inside one would make this guard pass silently — reintroducing the
+# false negative the narrow exclusion exists to avoid. The positive control below
+# covers the prefixed-basename case explicitly.
 
 REPO_ROOT_GUARD="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 LIVE_VIOLATORS="$(_scan_live_violators "${REPO_ROOT_GUARD}/plugins/")"
@@ -158,11 +165,21 @@ Merge the pull request:
 gh pr merge "$PR_NUMBER" --squash --delete-branch
 ```
 CONTROL_EOF
-# ...and a CHANGELOG that only DESCRIBES the flag, which must NOT be flagged.
+# ...a CHANGELOG that only DESCRIBES the flag, which must NOT be flagged...
 cat >"${CONTROL_DIR}/CHANGELOG.md" <<'CONTROL_EOF'
 ### Worktree-Safe PR Merge
 
 The fix drops `--delete-branch` from all `gh pr merge` calls.
+CONTROL_EOF
+# ...and a live instruction file whose basename merely ENDS WITH the excluded
+# one. An unanchored `CHANGELOG.md:` filter would drop this too, letting a real
+# violation through silently.
+cat >"${CONTROL_DIR}/skills/fixture/NOT_CHANGELOG.md" <<'CONTROL_EOF'
+Merge it:
+
+```bash
+gh pr merge "$PR_NUMBER" --squash --delete-branch
+```
 CONTROL_EOF
 
 CONTROL_HITS="$(_scan_live_violators "${CONTROL_DIR}")"
@@ -173,7 +190,14 @@ else
 clean result above is not evidence. Filter chain output was:
 ${CONTROL_HITS}"
 fi
-if grep -q 'CHANGELOG\.md' <<<"${CONTROL_HITS}"; then
+if grep -q 'NOT_CHANGELOG\.md' <<<"${CONTROL_HITS}"; then
+  pass "positive control: the CHANGELOG exclusion is anchored to the exact basename"
+else
+  fail "positive control FAILED — a violation in NOT_CHANGELOG.md was swallowed by an
+unanchored CHANGELOG filter. Filter chain output was:
+${CONTROL_HITS}"
+fi
+if grep -qE '(^|/)CHANGELOG\.md' <<<"${CONTROL_HITS}"; then
   fail "negative control FAILED — prose in a CHANGELOG was scanned as a call site:
 ${CONTROL_HITS}"
 else
