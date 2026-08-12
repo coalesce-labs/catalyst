@@ -207,6 +207,9 @@ triage producer is silent. Successful `phase.triage.complete.*` events provide p
 evidence; the latched `monitor.triage.held.*` / `monitor.triage.recovered.*` pair corroborates an
 outage when the bounded event tail contains no completion. The invariant defaults to `shadow`; in
 `enforce` its move remains escalate-only tier 3 and never anchors or dispatches a recovery delegate.
+Positive production evidence is limited to the scheduler's 800-line event tail, so on a
+high-volume log the held latch is the load-bearing corroborator; a null completion age alone is
+unobservable, not evidence of an outage.
 
 **Worker signal projection (CTL-532 = ADR-018 Phase 3, shipped; Phase 1 retired, CTL-1628).**
 Per-worker `workers/<TICKET>.json` files are still written by ~7 scripts with no inter-process

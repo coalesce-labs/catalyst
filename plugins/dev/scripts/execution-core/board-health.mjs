@@ -112,7 +112,11 @@ export const DEFAULT_THRESHOLDS = {
   // holistic recovery-pass delegate (opus, worktree, slot) on a healthy board.
   delegateGraceMs:
     Number(process.env.CATALYST_BH_DELEGATE_GRACE_MS) || RECONCILE_INTERVAL_MS + 60_000,
-  // CAT-82: three missed 10-minute triage reconciliation sweeps.
+  // CAT-82: three missed 10-minute triage reconciliation sweeps. Positive
+  // completion evidence is also bounded by scheduler's 800-line event tail, so
+  // the effective evidence window is min(this stall window, the duration those
+  // lines span). A null lastCompleteAgeMs means "no completion in the tail",
+  // not "no completion occurred"; without a held latch the verdict is unknown.
   triageProductionStallMs: Number(process.env.CATALYST_BH_TRIAGE_STALL_MS) || 30 * 60_000,
 };
 

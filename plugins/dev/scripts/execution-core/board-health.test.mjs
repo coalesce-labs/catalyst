@@ -9,6 +9,9 @@
 // action) is asserted by passing `act: () => { throw }` and proving no throw.
 
 import { describe, test, expect } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   assembleBoardState,
   DEFAULT_THRESHOLDS,
@@ -41,6 +44,7 @@ import {
 // CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
 // exercises the production body.payload.details nesting + attribute promotion.
 import { buildRecoveryEnvelope } from "./recovery-reasoning.mjs";
+import { tailParsedEvents } from "./event-tail.mjs";
 
 const NOW = Date.parse("2026-06-20T12:00:00Z");
 const MIN = 60_000;
@@ -3836,5 +3840,39 @@ describe("CAT-82 triage evidence and production", () => {
     expect(buildBoardContext(b, invs).triageProduction.untriaged).toHaveLength(5);
     const ev = buildBoardScanEvent({ mode: "enforce", invariants: invs, decision: decideBoardHealth(invs, b), board: b });
     expect(ev.details).toMatchObject({ triageUntriagedEligible: 12, triageLastCompleteAgeMs: HOUR });
+  });
+
+  test("a completion outside the bounded tail yields unobservable without a held latch", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cat82-tail-"));
+    const path = join(dir, "events.jsonl");
+    const completion = { ts: new Date(NOW - MIN).toISOString(), attributes: { "event.name": "phase.triage.complete.CAT-1" }, resource: { "host.name": "mini" } };
+    const noise = Array.from({ length: 4 }, (_, i) => ({ ts: new Date(NOW - 4 + i).toISOString(), attributes: { "event.name": `noise.${i}` } }));
+    writeFileSync(path, [...[completion], ...noise].map((event) => JSON.stringify(event)).join("\n") + "\n");
+    try {
+      const truncated = assembleBoardState({ mode: "shadow", self: "mini", now: () => NOW, readEventRing: () => tailParsedEvents({ path, maxLines: 4 }) });
+      expect(truncated.ring.recentTriageCompleteTs).toBeNull();
+      expect(evaluateInvariants(triageBoard({ ring: truncated.ring })).triageProduction).toMatchObject({ ok: true, observable: false });
+
+      // Positive control: the same fixture and parser surface the completion
+      // when the bound includes one more line.
+      const completeTail = assembleBoardState({ mode: "shadow", self: "mini", now: () => NOW, readEventRing: () => tailParsedEvents({ path, maxLines: 5 }) });
+      expect(completeTail.ring.recentTriageCompleteTs).toBe(NOW - MIN);
+      expect(evaluateInvariants(triageBoard({ ring: completeTail.ring })).triageProduction.note).toBe("triage producing within window");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a held latch corroborates starvation when the bounded tail has no completion", () => {
+    const verdict = evaluateInvariants(triageBoard({
+      ring: { recentTriageCompleteTs: null, triageSweepHeld: new Set(["CAT"]) },
+    })).triageProduction;
+    expect(verdict).toMatchObject({
+      ok: false,
+      observable: true,
+      failed: 1,
+      sweepHeldTeams: ["CAT"],
+      note: "triage sweep held for CAT with no completion in event tail",
+    });
   });
 });
