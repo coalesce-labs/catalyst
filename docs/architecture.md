@@ -843,8 +843,56 @@ a fully-dead daemon is a _missing series_, which `count_over_time == 0` cannot a
 **`<name>` slot exceptions** (in `recovery.mjs`, NOT pipeline phases): `dispatch`
 (`phase.dispatch.failed.<ticket>` — the only exception with a terminal-status suffix that matches
 the pattern; real phase rides `payload.target_phase`); `scheduler` (internal observability:
-`yield-file-skip`, `cooldown-gc`, …); `advance` (phase-advance gate `held`). The latter two never
-match the terminal-status set.
+`yield-file-skip`, `cooldown-gc`, …); `advance` (phase-advance gate — `held` on a refusal,
+`applied` on a performed advance, CTL-1789). The latter two never match the terminal-status set, so
+`tryPhaseLifecycleRoute` returns `[]` for every event in them — pure audit, zero wake side effect.
+
+### Advancement-gate observability + terminal attribution (CTL-1789)
+
+The advancement gate used to emit **only on refusal**: 2026-08 held 307 `phase.advance.held` events
+and zero `phase.advance.*` of any other name, so the FSM's actual advances were invisible and every
+consumer had to infer them from the successor phase's dispatch (which conflates a fresh advance with
+a revive, a resume, and a new-work pull).
+
+- **`phase.advance.applied.<TICKET>`** (`recovery.mjs` `defaultAppendPhaseAdvanceAppliedEvent`,
+  emitted from the scheduler's advancement sweep inside the `dv.ok` branch, i.e. only after
+  `dispatchAndVerify` confirmed a live successor worker). Severity **INFO** (`held` stays WARN).
+  Payload: `{from, to, evidence, evidence_reason, asserted_by, assertion_ref}`; `evidence` plus
+  `from`/`to` are also promoted to attributes (`catalyst.advance.*`) because otel-forward strips
+  `body.payload` off-machine. `from` is re-derived with the extracted pure `latestLivePhase(signals)`
+  — the SAME function `deriveAdvancement` keys off, so the audit can never name a different
+  predecessor than the FSM used. **One exception — the remediate detour**: `remediate` is
+  ANCILLARY (∉ `PHASES`), so `latestLivePhase` can never return it, and
+  `maybeResetForRemediateCycle` has already deleted `phase-remediate.json` before the sweep reads
+  its map. Left on `latestLivePhase` alone, every remediation re-entry named `from=implement` and
+  classified its evidence off the stale implement terminal — laundering a FABRICATED remediation
+  into a DECLARED advance. That one edge is resolved through `resolveReapPredecessor` over the
+  PRE-reset snapshot (with `remediateRaw` for the deleted file), the same snapshot + resolver the
+  predecessor reap uses, so the audit's `from` and the reaped worker are always the same phase.
+- **`assertedBy` on the phase signal** (`execution-core/assertion-evidence.mjs`, a zero-import leaf
+  owning `ASSERTED_BY` + `classifyAdvanceEvidence`/`explainAdvanceEvidence`). Three producers can
+  write a terminal `done` and were previously byte-indistinguishable: the agent's own
+  `phase-agent-emit-complete` (**declared**), `flipSignalDoneOnSuccess`'s clean-SDK-exit flip
+  (**fabricated** — the agent never declared anything), and the recovery-reclaim / legacy-revive
+  synthetic completes (**fabricated** — inferred from a work-done probe). Writers stamp their id:
+  the wrapper defaults to `phase-agent-emit-complete` and accepts `--asserted-by` so infrastructure
+  callers self-identify. Unknown/missing markers classify **absent**, never `declared` — the
+  fail direction is deliberate. `evidence_reason` (`no-predecessor` / `unreadable-signal` /
+  `no-marker` / `unknown-writer`) keeps `absent` diagnosable while the contract stays three-valued.
+  **One registry, two unavoidable bash mirrors**: the JS writers (`recovery.mjs`,
+  `sdk-run-phase-agent.mjs`) import `ASSERTED_BY`, but `phase-agent-emit-complete` (its
+  `--asserted-by` default) and `orchestrate-revive` (its flag value) are bash and cannot. Those two
+  literals are held byte-identical to the registry MECHANICALLY by
+  `execution-core/assertion-evidence-parity.test.mjs` — the same one-registry/hand-written-mirror/
+  cross-stack-parity-suite discipline as `lib/secret-contract.mjs`. Each anchor matches on the
+  variable/flag, never the value, and fails CLOSED when an anchor disappears, so a rename on either
+  side alone fails rather than silently reclassifying valid terminals as `unknown-writer`.
+- **Rollout caveat**: signals written before this shipped carry no marker, so the first pipeline pass
+  after deploy reads `absent` / `no-marker`. Do not alarm on `absent` until a full ticket has cycled.
+- **Scope**: only the terminal-**success** writers are stamped (plus the SDK backstop). The ~20
+  `stalled`/`failed`/`aborted`/`needs-human` writers are deliberately unstamped — those statuses are
+  never advance-eligible (`deriveAdvancement` gates on `done`, or `skipped` for `monitor-deploy`
+  only), so they can never be the `from` signal of an applied advance.
 
 **Enforcement surfaces:**
 
@@ -856,6 +904,9 @@ match the terminal-status set.
   `recovery.mjs` source-scan).
 - `plugins/dev/scripts/orch-monitor/__tests__/namespace-parity.test.ts` — orch-monitor producer
   parity (GitHub/Linear/service-health names + prefix-family invariant).
+- `plugins/dev/scripts/execution-core/assertion-evidence-parity.test.mjs` — CTL-1789 writer-id
+  parity: the `ASSERTED_BY` registry vs its two bash mirrors, plus a no-re-typed-literal check on
+  the JS writers. Wired into the required `execution-core-tests` stable list.
 
 See `thoughts/shared/plans/2026-06-16-ctl-1142.md` §3.8.
 
