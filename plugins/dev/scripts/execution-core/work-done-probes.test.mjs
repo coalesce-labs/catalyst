@@ -2,10 +2,12 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test work-done-probes.test.mjs
 
 import { describe, test, expect } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   WORK_DONE_PROBES,
   hasProbe,
   defaultRunGit,
+  defaultRunGh,
   resolveWorktree,
   defaultReadFile,
   readVerifyVerdict,
@@ -424,6 +426,99 @@ describe("defaultRunGit — spawn error is non-fatal", () => {
     expect(r.code).toBe(127);
     expect(r.stdout).toBe("");
     expect(r.stderr).toContain("ENOENT");
+  });
+});
+
+// CTL-1810 — the probe spawns are BOUNDED. These two seams run synchronously on the
+// scheduler tick, so an unbounded child wedges the daemon's event loop.
+describe("CTL-1810 — defaultRunGit/defaultRunGh bound every spawn", () => {
+  // T1/T2 — the bound is actually handed to spawnSync. Deleting `timeout:` from either
+  // seam fails these directly.
+  test("defaultRunGit passes a positive timeout to spawn", () => {
+    let seen = null;
+    defaultRunGit(["status", "--porcelain"], {
+      spawn: (_bin, _args, opts) => {
+        seen = opts;
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    expect(typeof seen.timeout).toBe("number");
+    expect(seen.timeout).toBeGreaterThan(0);
+  });
+
+  test("defaultRunGh passes a positive timeout to spawn", () => {
+    let seen = null;
+    defaultRunGh(["api", "repos/o/r/pulls/1"], {
+      spawn: (_bin, _args, opts) => {
+        seen = opts;
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    expect(typeof seen.timeout).toBe("number");
+    expect(seen.timeout).toBeGreaterThan(0);
+  });
+
+  test("an explicit timeoutMs overrides the default and reaches spawn", () => {
+    let seen = null;
+    defaultRunGh(["api", "x"], {
+      timeoutMs: 1234,
+      spawn: (_bin, _args, opts) => {
+        seen = opts;
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    expect(seen.timeout).toBe(1234);
+  });
+
+  // T3/T4 — a timeout degrades to the seams' existing never-throw failure contract,
+  // NOT to an exception thrown into schedulerTick, and says so in stderr.
+  test("an ETIMEDOUT child returns code 127 and names the timeout — it does not throw", () => {
+    const err = Object.assign(new Error("spawnSync git ETIMEDOUT"), { code: "ETIMEDOUT" });
+    const r = defaultRunGit(["rev-list", "--count", "origin/main..HEAD"], {
+      timeoutMs: 5000,
+      spawn: () => ({ error: err, status: null }),
+    });
+    expect(r.code).toBe(127);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("timed out after 5000ms");
+  });
+
+  test("a child killed by the timeout's SIGTERM also reads as timed out", () => {
+    const r = defaultRunGh(["api", "repos/o/r/pulls/1"], {
+      timeoutMs: 7000,
+      spawn: () => ({ error: new Error("killed"), signal: "SIGTERM", status: null }),
+    });
+    expect(r.code).toBe(127);
+    expect(r.stderr).toContain("timed out after 7000ms");
+  });
+
+  // T5 — regression guard: a NON-timeout spawn error must still surface its own message,
+  // not be relabelled as a timeout.
+  test("a non-timeout spawn error keeps its original message", () => {
+    const r = defaultRunGit(["worktree", "list"], {
+      spawn: () => ({ error: new Error("ENOENT") }),
+    });
+    expect(r.stderr).toContain("ENOENT");
+    expect(r.stderr).not.toContain("timed out");
+  });
+
+  // T6 — THE LOAD-BEARING TEST. Everything above asserts against a stub, so all of it
+  // would still pass if spawnSync ignored the option. This one spawns a REAL child that
+  // hangs far longer than the bound and asserts the call returns anyway. Delete the
+  // `timeout:` from defaultRunGit and this test hangs for 30s instead of returning in
+  // ~0.3s — i.e. it is the test that goes red when the production line is removed.
+  test("a real hanging child returns within the bound (red if `timeout:` is removed)", () => {
+    const started = Date.now();
+    const r = defaultRunGit(["--exec-path"], {
+      timeoutMs: 300,
+      // Ignore the git args entirely — spawn a child that is guaranteed to outlive the
+      // bound. spawnSync's own timeout is what must terminate it.
+      spawn: (_bin, _args, opts) => spawnSync("sleep", ["30"], opts),
+    });
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeLessThan(5000);
+    expect(r.code).toBe(127);
+    expect(r.stderr).toContain("timed out after 300ms");
   });
 });
 
