@@ -2603,9 +2603,9 @@ describe("CAT-11 branch-salvage board context", () => {
     ok: false, failed: 1, observable: true, flagged: ["CAT-11"], prDiscovery,
   } });
 
-  test("v4 emits an empty additive detail cohort without changing existing fields", () => {
+  test("emits an empty additive detail cohort without changing existing fields", () => {
     const ctx = buildBoardContext(mkBoard(), allGreen());
-    expect(ctx.schema).toBe("recovery-board-context/v4");
+    expect(ctx.schema).toBe("recovery-board-context/v5");
     expect(ctx.unownedInFlightDetail).toEqual([]);
     expect(ctx.unownedInFlight).toEqual([]);
     expect(ctx.stalledPrs).toEqual([]);
