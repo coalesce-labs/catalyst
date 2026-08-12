@@ -619,6 +619,44 @@ export function defaultAppendOrphanDetectedEvent({
   );
 }
 
+// CAT-3 — operator-visible record of a deliberately suppressed escalation write.
+// This uses the generic operator envelope because escalation.* is not phase-keyed.
+export function defaultAppendFenceSuppressedEvent({
+  ticket,
+  site,
+  host,
+  reason = "fence-suppressed",
+}) {
+  return defaultAppendOperatorEvent({
+    "event.name": "escalation.fence-suppressed",
+    payload: { ticket, site, host, reason },
+    attributes: { ticket, site, host, reason },
+  });
+}
+
+// Keep observability-only markers outside workers/: an empty workers/<ticket>
+// directory is interpreted as started work until the orphan grace expires.
+export function emitFenceSuppressedEventOnce(
+  orchDir,
+  ticket,
+  site,
+  host,
+  appendFenceSuppressedEvent = defaultAppendFenceSuppressedEvent
+) {
+  const marker = join(orchDir, ".fence-suppressed-emits", `${ticket}-${site}.applied`);
+  if (existsSync(marker) || typeof appendFenceSuppressedEvent !== "function") return;
+  const ok = appendFenceSuppressedEvent({
+    ticket,
+    site,
+    host,
+    reason: "fence-suppressed",
+  });
+  if (ok !== false) {
+    mkdirSync(dirname(marker), { recursive: true });
+    writeFileSync(marker, "");
+  }
+}
+
 // ─── CTL-932: turn-zero gate primitives ─────────────────────────────────────
 //
 // A wedged-never-started worker registered with CC but never resolved its
@@ -968,6 +1006,21 @@ export function defaultAppendYieldFileSkipEvent({ ticket, orchId, filename }) {
     }),
     "yield-file-skip"
   );
+}
+
+export function defaultAppendDispatchSkippedEvent({ ticket, orchId, descriptor }) {
+  return appendEnvelopeBestEffort(buildEventEnvelope({
+    phase: "scheduler", ticket, orchId, action: "dispatch-skipped",
+    reason: descriptor?.reason ?? "unknown",
+    payloadExtras: descriptor ?? {},
+  }), "dispatch-skipped");
+}
+
+export function defaultAppendStalledRepullEvent({ ticket, orchId, mode, outcome, reason }) {
+  return appendEnvelopeBestEffort(buildEventEnvelope({
+    phase: "scheduler", ticket, orchId, action: "stalled-repull", reason,
+    payloadExtras: { mode, outcome },
+  }), "stalled-repull");
 }
 
 // CTL-932: `extras` rides into the payload so an escalation can carry evidence
@@ -1467,6 +1520,7 @@ export function defaultAppendOperatorEvent(evt) {
         spanId: randomBytes(8).toString("hex"),
         resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
         attributes: {
+          ...(evt?.attributes ?? {}),
           "event.name": name,
         },
         body: { payload: evt?.payload ?? null },

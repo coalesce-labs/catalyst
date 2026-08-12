@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/portable-stat.sh"
 # Tests for plugins/dev/scripts/research-curate/{cluster,contradict,append-contradictions}.sh
 # plus the run.sh extensions added in CTL-468.
 #
@@ -299,7 +300,7 @@ echo '{"cluster_id":"c1","topic":"alpha+beta","contradictions":[{"between":["A",
   | bash "$APPEND" --date 2026-05-17 "$DEST7" >/dev/null 2>&1
 
 # Original content still present byte-for-byte
-HEAD_BYTES=$(head -c "$(stat -f%z "$DEST7" 2>/dev/null || stat -c%s "$DEST7")" "$DEST7" | head -8)
+HEAD_BYTES=$(head -c "$(portable_stat_size "$DEST7")" "$DEST7" | head -8)
 if grep -q "existing entry kept intact" "$DEST7"; then
   ok "append-contradictions.sh: original entries preserved"
 else

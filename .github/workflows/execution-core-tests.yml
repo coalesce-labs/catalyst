@@ -376,6 +376,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/linear-app-actor.test.sh
 
+      - name: portable stat helper tests (CAT-85)
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/portable-stat.test.sh
+
+      - name: portable stat regression guard (CAT-85)
+        working-directory: plugins/dev/scripts
+        run: |
+          command -v rg >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ripgrep)
+          bash lib/__tests__/stat-portability-guard.test.sh
+
       - name: worktree-salvage primitive + telemetry unit tests (CTL-1639)
         # lib/worktree-salvage.sh snapshots a worktree's unpushed commits +
         # uncommitted changes to ~/catalyst/salvage/ BEFORE any destructive

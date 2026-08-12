@@ -79,6 +79,7 @@ _SRC="${BASH_SOURCE[0]}"
 while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
+source "${SCRIPT_DIR}/lib/portable-stat.sh"
 export PATH="${PATH}:${SCRIPT_DIR}"
 
 # CTL-1417: self-protection guard — a final belt (fail-closed lsof + cwd check)
@@ -562,11 +563,7 @@ _wt_unpushed_count() {
 # mtime stream is polluted with filesystem-block numbers and `sort -nr | head -1`
 # returns garbage — the wf_* classify path produced no SAFE/KEEP verdict on Linux
 # (CI RED T67/T68). Detect the working flavour once at load time instead.
-if stat -c '%Y' /dev/null >/dev/null 2>&1; then
-  _stat_mtime() { stat -c '%Y' "$1" 2>/dev/null || echo 0; }
-else
-  _stat_mtime() { stat -f '%m' "$1" 2>/dev/null || echo 0; }
-fi
+_stat_mtime() { portable_stat_mtime "$1" || echo 0; }
 
 _wt_newest_mtime() {
   find "$1" -type f \

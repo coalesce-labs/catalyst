@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/portable-stat.sh"
 # Shell tests for `catalyst-backup` (CTL-1369 PR2).
 #
 # Runs the CLI as a SUBPROCESS against a sandbox HOME (every path is env-overridable), so the
@@ -23,7 +24,7 @@ expect_file()     { if [[ -f "$2" ]]; then ok "$1"; else fail "$1" "missing file
 expect_absent()   { if [[ ! -e "$2" ]]; then ok "$1"; else fail "$1" "should not exist: $2"; fi; }
 # GNU stat uses `-c %a`; BSD/macOS stat uses `-f %Lp`. Try GNU first (on BSD `-c` errors out;
 # on GNU `-f` means file-system status and would wrongly succeed) so we get mode bits on both.
-perms() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+perms() { portable_stat_mode "$1"; }
 
 command -v jq >/dev/null 2>&1 || { echo "jq required for these tests — skipping"; exit 0; }
 
@@ -92,9 +93,9 @@ expect_eq "manifest captured >= 8 required artifacts" "yes" "$([[ "${CCOUNT:-0}"
 expect_eq "backed-up db is a valid sqlite snapshot" "2" "$(sqlite3 "$BUNDLE/runtime/catalyst.db" 'SELECT count(*) FROM sessions' 2>/dev/null)"
 
 echo "catalyst-backup — secret perms (bundle 0700, secret files 0600)"
-expect_eq "bundle dir is 0700"        "700" "$(perms "$BUNDLE")"
-expect_eq "config.json is 0600"       "600" "$(perms "$BUNDLE/config/config.json")"
-expect_eq "humanlayer.json is 0600"   "600" "$(perms "$BUNDLE/humanlayer/humanlayer.json")"
+expect_eq "bundle dir is 0700"        "0700" "$(perms "$BUNDLE")"
+expect_eq "config.json is 0600"       "0600" "$(perms "$BUNDLE/config/config.json")"
+expect_eq "humanlayer.json is 0600"   "0600" "$(perms "$BUNDLE/humanlayer/humanlayer.json")"
 
 echo "catalyst-backup — list"
 expect_contains "list shows the bundle"        "$(src_env "$BACKUP" list 2>/dev/null)" "$BUNDLE"

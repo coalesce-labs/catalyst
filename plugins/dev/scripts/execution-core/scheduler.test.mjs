@@ -44,6 +44,7 @@ import {
   listStartedTickets,
   schedulerTick,
   readAllEligibleTickets,
+  emitFenceSuppressedOnce,
   hydrateOutOfSetBlockers,
   startScheduler,
   stopScheduler,
@@ -101,6 +102,7 @@ import {
   pruneExpiredReservations,
   SLOT_RESERVATION_LAPSE_MS,
 } from "./scheduler.mjs";
+
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
@@ -114,6 +116,60 @@ import { recordRemovalFailure } from "./label-guard.mjs"; // CTL-1605 Codex thre
 import { getDrainFlagPath, getEventLogPath } from "./config.mjs"; // CTL-1678: drain-disabled override integration test
 import { makePhaseAwareDispatchFn } from "./dispatch.mjs";
 import { laneCooldownPath, parkLane } from "./lane-cooldown.mjs";
+
+describe("emitFenceSuppressedOnce", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "fence-suppressed-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("emits once per ticket and site with the operator payload", () => {
+    const calls = [];
+    const emit = (payload) => {
+      calls.push(payload);
+      return true;
+    };
+    emitFenceSuppressedOnce(dir, "CAT-3", "terminal-sweep", "host-a", emit);
+    emitFenceSuppressedOnce(dir, "CAT-3", "terminal-sweep", "host-a", emit);
+    emitFenceSuppressedOnce(dir, "CAT-3", "dependency-cycle", "host-a", emit);
+    expect(calls).toEqual([
+      {
+        ticket: "CAT-3",
+        site: "terminal-sweep",
+        host: "host-a",
+        reason: "fence-suppressed",
+      },
+      {
+        ticket: "CAT-3",
+        site: "dependency-cycle",
+        host: "host-a",
+        reason: "fence-suppressed",
+      },
+    ]);
+  });
+
+  test("does not create a worker directory for an unstarted ticket", () => {
+    const calls = [];
+    const emit = (payload) => {
+      calls.push(payload);
+      return true;
+    };
+    for (let i = 0; i < 3; i += 1) {
+      emitFenceSuppressedOnce(dir, "CAT-3", "ctl-925-cycle", "host-a", emit);
+    }
+    expect(calls).toHaveLength(1);
+    expect(existsSync(join(dir, "workers", "CAT-3"))).toBe(false);
+  });
+
+  test("does not write a marker when the emitter returns false or throws", () => {
+    emitFenceSuppressedOnce(dir, "CAT-3", "terminal-sweep", "host-a", () => false);
+    emitFenceSuppressedOnce(dir, "CAT-3", "dependency-cycle", "host-a", () => {
+      throw new Error("boom");
+    });
+    expect(existsSync(join(dir, ".fence-suppressed-emits"))).toBe(false);
+  });
+});
 
 let orchDir;
 let catalystDir;

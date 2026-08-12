@@ -45,6 +45,7 @@ _CATALYST_LINEAR_READ_REPLICA_SH=1
 # shellcheck disable=SC2296
 __LRR_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
 __LRR_LIB_DIR="$(cd "$(dirname "$__LRR_SELF")" && pwd)"
+source "${__LRR_LIB_DIR}/portable-stat.sh"
 
 # _lrr_emit_fallback_event <ID> <reason> <source> — best-effort: append a WARN
 # `catalyst.replica.read_fallback` event to the unified log so every replica
@@ -135,7 +136,7 @@ _lrr_live_read() {
 # `--file-system` (it would NOT error, it prints filesystem text), so probing BSD
 # first would yield garbage on the Linux fleet. macOS lacks `-c`, so it errors
 # cleanly and falls through to `-f`.
-_lrr_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+_lrr_mtime() { portable_stat_mtime "$1" || echo ""; }
 
 # replica_fresh [db] → rc 0 when the replica is safe to read:
 #   • sqlite3 available, and
