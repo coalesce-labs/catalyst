@@ -60,6 +60,19 @@ export function parseWorktreeForBranch(porcelain, ticket) {
   return null;
 }
 
+// parseBranchForWorktree — pure inverse lookup for porcelain output. Returns
+// null for detached worktrees and exact-path misses.
+export function parseBranchForWorktree(porcelain, worktreePath) {
+  let currentPath = null;
+  for (const line of (porcelain ?? "").split("\n")) {
+    if (line.startsWith("worktree ")) currentPath = line.slice("worktree ".length).trim();
+    else if (currentPath === worktreePath && line.startsWith("branch refs/heads/")) {
+      return line.slice("branch refs/heads/".length).trim() || null;
+    }
+  }
+  return null;
+}
+
 // teardownWorktree — the RAW worktree remover (resolve path by branch, then
 // `git worktree remove`). CTL-791: it is **no longer `--force`** — a plain remove
 // refuses on a dirty/locked tree rather than yanking uncommitted/untracked work.

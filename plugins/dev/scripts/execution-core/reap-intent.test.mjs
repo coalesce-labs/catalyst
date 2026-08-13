@@ -46,9 +46,10 @@ describe("emitReapIntent", () => {
     await expect(emitReapIntent("bogus.event", {})).rejects.toThrow(/unknown/);
   });
 
-  it("exposes REAP_INTENT_TYPES with 25 entries", async () => {
+  it("exposes REAP_INTENT_TYPES with 26 entries", async () => {
     const { REAP_INTENT_TYPES } = await freshModule();
-    expect(REAP_INTENT_TYPES.length).toBe(25); // +2 for CTL-1242 J4 (janitor.signals.gc, janitor.would.gc)
+    expect(REAP_INTENT_TYPES.length).toBe(26);
+    expect(REAP_INTENT_TYPES).toContain("terminalSweep.would.reap-request");
     expect(REAP_INTENT_TYPES).toContain("phase.yield.reap-requested");
     expect(REAP_INTENT_TYPES).toContain("pr.merged.cleanup-requested");
     expect(REAP_INTENT_TYPES).toContain("orphans.reap-requested");

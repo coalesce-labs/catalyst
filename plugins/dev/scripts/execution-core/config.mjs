@@ -1988,6 +1988,28 @@ export function readStallJanitorConfig() {
   return { mode, terminalIdleMs, censusIntervalMs };
 }
 
+const TERMINAL_SWEEP_REAP_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2TerminalSweepReap() {
+  try {
+    const value = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.terminalSweepReap;
+    return value && typeof value === "object" ? value : {};
+  } catch { return {}; }
+}
+
+export function readTerminalSweepReapConfig() {
+  const layer2 = readLayer2TerminalSweepReap();
+  const env = process.env.CATALYST_TERMINAL_SWEEP_REAP;
+  if (env === "0") return { mode: "off" };
+  if (typeof env === "string") {
+    return { mode: TERMINAL_SWEEP_REAP_MODES.has(env) ? env : "shadow" };
+  }
+  return {
+    mode: typeof layer2.mode === "string" && TERMINAL_SWEEP_REAP_MODES.has(layer2.mode)
+      ? layer2.mode : "shadow",
+  };
+}
+
 // --- Unstuck sweep (CTL-1064) ---
 // OFF by default — operators opt in via shadow then enforce. Same three-layer
 // precedence as CTL-1004/CTL-1029 (env > Layer-2 catalyst.unstuckSweep.* >
@@ -2559,6 +2581,7 @@ export function readGovernanceConfig(env = process.env) {
     ...beliefs,
     // mode subsystems — reuse existing three-layer readers so Layer-2 flows through
     stallJanitor: { mode: readStallJanitorConfig().mode },
+    terminalSweepReap: { mode: readTerminalSweepReapConfig().mode },
     watchdog: { mode: readWatchdogConfig().mode },
     unstuckSweep: { mode: readUnstuckSweepConfig().mode },
     // CTL-1331: surface the async board-health delegate runner so operators can

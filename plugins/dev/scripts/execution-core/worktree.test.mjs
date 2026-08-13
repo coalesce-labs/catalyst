@@ -5,7 +5,7 @@
 // create-worktree.sh or git.
 
 import { describe, test, expect } from "bun:test";
-import { createWorktree, parseWorktreeForBranch, teardownWorktree } from "./worktree.mjs";
+import { createWorktree, parseBranchForWorktree, parseWorktreeForBranch, teardownWorktree } from "./worktree.mjs";
 
 describe("createWorktree", () => {
   test("invokes create-worktree.sh with [ticket, main, --reuse-existing] and cwd=repoRoot", () => {
@@ -74,6 +74,12 @@ describe("createWorktree", () => {
     createWorktree({ ticket: "CTL-6", repoRoot: "/repo" }, { spawn });
     expect(calls[0]).toEqual(["CTL-6", "main", "--reuse-existing"]);
   });
+});
+
+describe("parseBranchForWorktree", () => {
+  const porcelain = "worktree /wt/CAT-9\nbranch refs/heads/CAT-9\n\nworktree /wt/detached\ndetached\n";
+  test("returns the exact path's branch", () => expect(parseBranchForWorktree(porcelain, "/wt/CAT-9")).toBe("CAT-9"));
+  test("returns null for detached or unknown paths", () => { expect(parseBranchForWorktree(porcelain, "/wt/detached")).toBeNull(); expect(parseBranchForWorktree(porcelain, "/wt/missing")).toBeNull(); });
 });
 
 describe("parseWorktreeForBranch", () => {
