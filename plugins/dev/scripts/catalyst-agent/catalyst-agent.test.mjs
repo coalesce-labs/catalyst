@@ -12,6 +12,10 @@ import { join } from "node:path";
 import { runDomain, runOnce, main, defaultImporters, writeHeartbeat } from "./catalyst-agent.mjs";
 import { readAgentConfig, getHeartbeatPath } from "./config.mjs";
 
+// The three domains whose importers the tests below inject. `versionEnabled` is
+// deliberately absent (falsy → skipped): these fixtures supply no `version`
+// importer, and the real one would `git fetch` every executing root. The version
+// gate has its own coverage — see the toggle pair in the defaultImporters block.
 const ALL_ON = {
   usageEnabled: true,
   hostEnabled: true,
@@ -310,7 +314,14 @@ describe("main — --loop lifecycle", () => {
 // ─── defaultImporters / makeBuilderEmit — the REAL --once wiring (finding 9) ───
 
 describe("defaultImporters — real sampler composition (event-log emit)", () => {
-  const ENVS = ["CATALYST_DIR", "CATALYST_AGENT_EMIT", "CATALYST_AGENT_USAGE", "CATALYST_AGENT_HOST", "CATALYST_AGENT_PROCESS"];
+  const ENVS = [
+    "CATALYST_DIR",
+    "CATALYST_AGENT_EMIT",
+    "CATALYST_AGENT_USAGE",
+    "CATALYST_AGENT_HOST",
+    "CATALYST_AGENT_PROCESS",
+    "CATALYST_AGENT_VERSION",
+  ];
   let saved = {};
   function setEnv(env) {
     for (const k of ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
@@ -390,6 +401,13 @@ describe("defaultImporters — real sampler composition (event-log emit)", () =>
       CATALYST_AGENT_EMIT: "otlp",
       CATALYST_AGENT_USAGE: "0", // no keychain/usage network
       CATALYST_AGENT_PROCESS: "0", // host only
+      // The version domain does not go through the monkeypatched fetch: its tick
+      // runs a REAL `git fetch --quiet origin main` per executing Catalyst root
+      // (build-info's commitsBehindByRoot, one 15s-bounded git call each since
+      // CTL-1825). That is real network inside a 5s bun timeout — the very thing
+      // "only the host domain enabled (no other network)" above rules out — so the
+      // domain is switched off here rather than raced against.
+      CATALYST_AGENT_VERSION: "0",
     });
     process.env.CATALYST_AGENT_OTLP_ENDPOINT = "http://127.0.0.1:4318";
     const realFetch = globalThis.fetch;
@@ -409,6 +427,11 @@ describe("defaultImporters — real sampler composition (event-log emit)", () =>
       // The decisive assertion: the POST completed before runOnce returned, so a
       // subsequent process.exit(0) (the --once entrypoint) would NOT drop it.
       expect(finished).toBe(true);
+      // Hermeticity, asserted rather than assumed. runOnce writes results.version
+      // ONLY inside `if (config.versionEnabled)`, so an absent key is proof the
+      // git-fetching domain was never entered — not merely that it happened to
+      // finish inside the timeout. The mirror of the positive control below.
+      expect(results.version).toBeUndefined();
     } finally {
       globalThis.fetch = realFetch;
       delete process.env.CATALYST_AGENT_OTLP_ENDPOINT;
@@ -416,16 +439,43 @@ describe("defaultImporters — real sampler composition (event-log emit)", () =>
     }
   });
 
+  test("positive control: with CATALYST_AGENT_VERSION unset the version domain DOES run", async () => {
+    // The mirror of the assertion above, and what makes it evidence: the same
+    // observable (results.version) under the same runOnce, with the toggle left
+    // unset. If it were absent here too, the test above would be passing because
+    // the domain is dead rather than because the toggle switched it off. Importers
+    // are injected, so the domain "running" costs no git and no network — what is
+    // under test is the env → readAgentConfig → runOnce gate, not the sampler.
+    const dir = mkdtempSync(join(tmpdir(), "ctl1825-version-on-"));
+    setEnv({ CATALYST_DIR: dir, CATALYST_AGENT_EMIT: "eventlog" }); // VERSION deliberately unset
+    const ran = [];
+    const stub = (name) => async () => ({ runOnce: async () => { ran.push(name); } });
+    try {
+      const config = readAgentConfig();
+      expect(config.versionEnabled).toBe(true);
+      const results = await runOnce({
+        config,
+        importers: { usage: stub("usage"), host: stub("host"), process: stub("process"), version: stub("version") },
+      });
+      expect(ran).toContain("version");
+      expect(results.version).toBe(true);
+    } finally {
+      restoreEnv();
+    }
+  });
+
   test("every importer resolves to a module with an async runOnce (lazy import + adapter shape)", async () => {
-    // Structural wiring check for ALL three domains, with NO network: the usage
-    // importer's runOnce would hit the live keychain + usage API if executed on a
-    // dev host, so we deliberately do NOT call it here — we assert the lazy import
-    // resolves and yields the uniform { runOnce } adapter (the import.meta.url path
-    // + two-level .then chain for usage). The deep enumerate→tick→emit and
+    // Structural wiring check for ALL four domains, with NO network: the usage
+    // importer's runOnce would hit the live keychain + usage API, and version's
+    // would `git fetch` every executing root, if executed on a dev host — so we
+    // deliberately do NOT call either here. We assert the lazy import resolves and
+    // yields the uniform { runOnce } adapter (the import.meta.url path + two-level
+    // .then chain for usage). The deep enumerate→tick→emit and
     // sampleHost/sampleProcesses signatures are validated by the host & process
-    // event-log tests above and by the per-module unit suites.
+    // event-log tests above and by the per-module unit suites (sampleVersion's own
+    // composition is covered with injected seams in version.test.mjs).
     const importers = defaultImporters();
-    for (const key of ["usage", "host", "process"]) {
+    for (const key of ["usage", "host", "process", "version"]) {
       const mod = await importers[key]();
       expect(typeof mod.runOnce).toBe("function");
       // Each adapter's runOnce is async (returns a promise) so runOnce/runDomain

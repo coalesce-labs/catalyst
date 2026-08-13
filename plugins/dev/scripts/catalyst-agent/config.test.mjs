@@ -19,6 +19,7 @@ const ENVS = [
   "CATALYST_AGENT_USAGE",
   "CATALYST_AGENT_HOST",
   "CATALYST_AGENT_PROCESS",
+  "CATALYST_AGENT_VERSION",
   "CATALYST_DIR",
 ];
 let saved = {};
@@ -49,6 +50,7 @@ describe("readAgentConfig — defaults", () => {
     expect(cfg.usageEnabled).toBe(true);
     expect(cfg.hostEnabled).toBe(true);
     expect(cfg.processEnabled).toBe(true);
+    expect(cfg.versionEnabled).toBe(true);
   });
 });
 
@@ -137,6 +139,7 @@ describe("readAgentConfig — domain toggles", () => {
     expect(cfg.usageEnabled).toBe(false);
     expect(cfg.hostEnabled).toBe(true);
     expect(cfg.processEnabled).toBe(true);
+    expect(cfg.versionEnabled).toBe(true);
   });
 
   test("CATALYST_AGENT_HOST=0 disables host only", () => {
@@ -145,6 +148,7 @@ describe("readAgentConfig — domain toggles", () => {
     expect(cfg.hostEnabled).toBe(false);
     expect(cfg.usageEnabled).toBe(true);
     expect(cfg.processEnabled).toBe(true);
+    expect(cfg.versionEnabled).toBe(true);
   });
 
   test("CATALYST_AGENT_PROCESS=0 disables process only", () => {
@@ -153,13 +157,30 @@ describe("readAgentConfig — domain toggles", () => {
     expect(cfg.processEnabled).toBe(false);
     expect(cfg.usageEnabled).toBe(true);
     expect(cfg.hostEnabled).toBe(true);
+    expect(cfg.versionEnabled).toBe(true);
+  });
+
+  // The version domain is the ONE whose tick reaches the network unconditionally
+  // (build-info's per-root `git fetch --quiet origin main`, CTL-1825), so its
+  // toggle is what a test that must not touch the network sets — see the CTL-812
+  // OTLP-drain test in catalyst-agent.test.mjs. Left uncovered, a regression that
+  // stopped honoring it would surface only as an intermittent 5s timeout there.
+  test("CATALYST_AGENT_VERSION=0 disables version only", () => {
+    process.env.CATALYST_AGENT_VERSION = "0";
+    const cfg = readAgentConfig();
+    expect(cfg.versionEnabled).toBe(false);
+    expect(cfg.usageEnabled).toBe(true);
+    expect(cfg.hostEnabled).toBe(true);
+    expect(cfg.processEnabled).toBe(true);
   });
 
   test("any non-zero value keeps a domain enabled", () => {
     process.env.CATALYST_AGENT_USAGE = "1";
     process.env.CATALYST_AGENT_HOST = "true";
+    process.env.CATALYST_AGENT_VERSION = "1";
     expect(readAgentConfig().usageEnabled).toBe(true);
     expect(readAgentConfig().hostEnabled).toBe(true);
+    expect(readAgentConfig().versionEnabled).toBe(true);
   });
 });
 
