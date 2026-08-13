@@ -1,0 +1,201 @@
+// cloud-sync-dep-skew-wiring.test.mjs — CTL-1659. A SOURCE-SCAN parity test over
+// cloud-sync.mjs, in the shape broker/namespace-parity.test.mjs uses for recovery.mjs.
+//
+// Why a source scan rather than a behavioural test. cloud-sync.mjs is script-shaped: it
+// imports the real @catalyst-cloud SDK at module scope, opens a socket, and ends in
+// `await new Promise(() => {})`. It cannot be imported by a test, which is exactly why its
+// pure helpers were factored into cloud-sync-telemetry.mjs / cloud-sync-deps.mjs in the
+// first place. But a fully-tested helper that no caller invokes is THE failure mode this
+// ticket exists to remove — `restart_needed` was a correct signal with no consumer, and
+// ADR-018's Phase 1 shipped a whole shadow-write mechanism whose only reader was a manual
+// CLI. So the wiring itself gets an assertion, and the assertion's own instrument is
+// positive-controlled below: a grep that cannot find a known-present anchor is not
+// evidence about the anchors it cannot find.
+import { describe, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "cloud-sync.mjs"), "utf8");
+
+describe("cloud-sync.mjs dep-skew wiring", () => {
+  test("POSITIVE CONTROL — the instrument finds anchors known to be present", () => {
+    // If these ever return 0 the scan is broken and every assertion below is vacuous.
+    expect(SRC).toContain("classifyStall"); // the CTL-1508 sibling predicate
+    expect(SRC).toContain("exitAfterClose"); // the CTL-1508 bounded exit
+    expect(SRC.length).toBeGreaterThan(1000);
+  });
+
+  test("the boot record is CAPTURED and WRITTEN — otherwise doctor has nothing to grade", () => {
+    expect(SRC).toContain("captureLoadedDeps");
+    expect(SRC).toContain("writeDepsBreadcrumb");
+    // Resolution goes through the real module resolver, so the record describes what was
+    // ACTUALLY loaded rather than what the lockfile claims (the CTL-1646 trap).
+    expect(SRC).toMatch(/resolveModule:\s*\(specifier\)\s*=>\s*depsRequire\.resolve\(specifier\)/);
+  });
+
+  test("the predicate is EVALUATED on the heartbeat tick, against a re-read lockfile digest", () => {
+    expect(SRC).toContain("classifyDepSkew");
+    expect(SRC).toMatch(/sha256File\(DEP_SKEW_LOCK_PATH\)/);
+  });
+
+  test("the skew fields ride the EXISTING freshness heartbeat line (the alertable surface)", () => {
+    // Not a separate opt-in line: shadow-mode detection that nobody can alert on is the
+    // status quo with better logging.
+    expect(SRC).toMatch(/freshnessFields\([\s\S]{0,400}?depSkewFields\(/);
+  });
+
+  test("the restart uses the EXISTING self-heal exit — breadcrumb + exit code 1, never 0", () => {
+    // exit 0 is the plist's "clean no-op, launchd leaves it DOWN" contract
+    // (KeepAlive={SuccessfulExit:false}); a literal clean exit would permanently stop the
+    // replica writer. The ticket's own Option-1 wording is wrong on exactly this point.
+    expect(SRC).toContain("reason: DEP_SKEW_REASON");
+    const restartBlock = SRC.slice(SRC.indexOf("if (depSkew.restart)"));
+    expect(restartBlock).toMatch(/exitAfterClose\(\{\s*closePromise: replica\.close\(\),\s*exitCode: 1/);
+    expect(restartBlock).not.toMatch(/exitCode:\s*0/);
+  });
+
+  test("no FOURTH restart mechanism is introduced — the daemon never shells out to restart itself", () => {
+    // The subtraction win of this design is that every actuator already exists: launchd
+    // KeepAlive restarts, health-responder.sh escalates, the heartbeat tick is the safe
+    // exit point. A self-restarting daemon that shells out would be a new mechanism.
+    //
+    // Matched STRUCTURALLY (an import, a call, a command line) rather than by the bare
+    // words "kickstart"/"launchctl", which appear legitimately in this file's prose — the
+    // unstructured-match-over-structured-data trap that has produced false results here.
+    expect(SRC).not.toMatch(/from\s+["']node:child_process["']/);
+    expect(SRC).not.toMatch(/\b(?:spawnSync|spawn|execSync|execFileSync|execFile)\s*\(/);
+    expect(SRC).not.toMatch(/launchctl\s+(?:kickstart|bootout|bootstrap)/);
+    // Positive control on those negatives: the same instruments DO match this file's real
+    // import and call shapes, so a zero above is a measurement rather than a broken regex.
+    expect(SRC).toMatch(/from\s+["']node:fs["']/);
+    expect(SRC).toMatch(/\bexitAfterClose\s*\(/);
+  });
+
+  // AC1's second clause — "And the restart is visible in the event log" — was REFUTED on the
+  // first cut of this PR: the restart block wrote a pino line to stderr and appended NOTHING
+  // to ~/catalyst/events/YYYY-MM.jsonl, so the surface `catalyst-events wait-for`, the broker,
+  // the HUD and orch-monitor all read had no record of it. These assertions are the standing
+  // guard against that regression, and they are checked against the block itself rather than
+  // the whole file — an emitter that exists somewhere in cloud-sync.mjs but is never called
+  // from the restart path is exactly the `restart_needed` failure with a new name.
+  test("the RESTART is appended to the unified event log, before the exit that would lose it", () => {
+    const restartBlock = SRC.slice(SRC.indexOf("if (depSkew.restart)"));
+    expect(restartBlock).toContain("DEP_SKEW_RESTART_EVENT");
+    const emit = restartBlock.indexOf("emitDepSkewEvent({ name: DEP_SKEW_RESTART_EVENT");
+    expect(emit).toBeGreaterThan(-1);
+    // Ordering is asserted against the CALLS (`name(` / `name({`), never the bare identifier:
+    // this file's prose names `exitAfterClose` and `recordRestartAttempt` in comments, and an
+    // offset taken from a comment is the unstructured-match-over-structured-data trap.
+    const exitCall = restartBlock.indexOf("exitAfterClose({");
+    const spendCall = restartBlock.indexOf("recordRestartAttempt(");
+    expect(exitCall).toBeGreaterThan(-1);
+    expect(spendCall).toBeGreaterThan(-1);
+    // exitAfterClose can terminate the process at any point after it is called, so an append
+    // sequenced after it is lost on exactly the runs that matter.
+    expect(emit).toBeLessThan(exitCall);
+    // …and after the budget is spent: announcing a restart the ledger then declines is the
+    // same lie `restart_needed` told.
+    expect(emit).toBeGreaterThan(spendCall);
+  });
+
+  test("the emitter appends to the UNIFIED LOG — the same file+call emitWriterIdleEvent uses", () => {
+    // A "telemetry" function that only writes a pino line would satisfy the test above while
+    // leaving the acceptance clause refuted, so the append itself is asserted structurally.
+    const emitter = SRC.slice(SRC.indexOf("function emitDepSkewEvent"), SRC.indexOf("function scrub"));
+    expect(emitter).toContain("getEventLogPath()");
+    expect(emitter).toMatch(/appendFileSync\(logPath, `\$\{JSON\.stringify\(envelope\)\}\\n`\)/);
+    expect(emitter).toContain("depSkewEventEnvelope"); // the unit-tested v2 envelope, not a hand-rolled one
+    // POSITIVE CONTROL for those anchors: the same instrument finds the KNOWN-WORKING
+    // emitter this one is modelled on. If `emitWriterIdleEvent` ever stops matching, the
+    // assertions above are measuring a moved target rather than a present one.
+    const known = SRC.slice(SRC.indexOf("function emitWriterIdleEvent"), SRC.indexOf("function emitDepSkewEvent"));
+    expect(known).toContain("getEventLogPath()");
+    expect(known).toMatch(/appendFileSync\(logPath, `\$\{JSON\.stringify\(envelope\)\}\\n`\)/);
+  });
+
+  test("the HELD posture is emitted too, and never claims a restart it did not perform", () => {
+    // Shadow is the shipping default, so the would-restart event is the one an operator sees
+    // in practice; without it the default configuration is silent on the unified log.
+    expect(SRC).toContain("DEP_SKEW_WOULD_RESTART_EVENT");
+    expect(SRC).toMatch(/if \(depSkew\.wouldRestart && !depSkew\.restart\)/);
+    // The undurable-ledger decline also emits — the posture block deferred to the restart
+    // block on `restart: true`, so without this an enforce-mode host with an unwritable
+    // ledger would emit nothing at all on the configuration that is trying to act.
+    const declineBlock = SRC.slice(SRC.indexOf("if (spent === null)"), SRC.indexOf("} else {", SRC.indexOf("if (spent === null)")));
+    expect(declineBlock).toContain("DEP_SKEW_WOULD_RESTART_EVENT");
+    expect(declineBlock).not.toContain("DEP_SKEW_RESTART_EVENT");
+  });
+
+  // Round-2 finding 5. The decline branch sits INSIDE `if (depSkew.restart)` and therefore
+  // OUTSIDE the posture latch that guards the alert above it. With sustained skew in enforce
+  // mode and a ledger that stays unwritable (a full or read-only ~/catalyst), it ran on every
+  // heartbeat: one ERROR line plus one `dep_skew_would_restart` event every 30s for the whole
+  // incident — an alarm flooding the very two surfaces it exists to make legible. Same
+  // count-exactly / warn-sparsely shape as CTL-1817/CTL-1823's sparse-warn: the CONDITION is
+  // re-evaluated every tick, the ANNOUNCEMENT is edge-triggered.
+  test("the undurable-ledger DECLINE is latched, so a sustained incident announces once and not every 30s", () => {
+    const start = SRC.indexOf("if (spent === null)");
+    expect(start).toBeGreaterThan(-1);
+    const declineBlock = SRC.slice(start, SRC.indexOf("} else {", start));
+    // The guard, the assignment, and BOTH emissions must be inside it — a latch that covered
+    // only the pino line would still spam the unified event log, and vice versa.
+    const guard = declineBlock.indexOf("if (depSkewPosture !== _depSkewDeclinedPosture)");
+    expect(guard, "the decline must be gated on a posture latch, not run every tick").toBeGreaterThan(-1);
+    expect(declineBlock).toContain("_depSkewDeclinedPosture = depSkewPosture");
+    expect(declineBlock.indexOf("hlog.error("), "the ERROR line must sit inside the latch").toBeGreaterThan(guard);
+    expect(declineBlock.indexOf("emitDepSkewEvent({"), "the event emission must sit inside the latch").toBeGreaterThan(guard);
+    // The WRITE ATTEMPT must stay OUTSIDE the latch: retrying it each tick is what lets a
+    // repaired filesystem resume the self-heal. A latch over the retry would turn one
+    // transient EROFS into a permanent refusal.
+    expect(declineBlock).not.toContain("recordRestartAttempt(");
+    expect(SRC.slice(SRC.indexOf("if (depSkew.restart)"), start)).toContain("recordRestartAttempt(");
+  });
+
+  test("the decline latch is DECLARED and RE-ARMS when the skew clears (a latch that never resets is a permanent silence)", () => {
+    expect(SRC).toMatch(/let _depSkewDeclinedPosture = null;/);
+    // The re-arm rides the same `!depSkew.skewed` line as the alert latch, so the two can
+    // never drift into one resetting while the other stays stuck.
+    const rearm = SRC.match(/if \(!depSkew\.skewed\)[^\n]*\n?/)?.[0] ?? "";
+    expect(rearm).toContain("_depSkewAlertedPosture = null");
+    expect(rearm, "the decline latch must re-arm alongside the alert latch").toContain("_depSkewDeclinedPosture = null");
+    // POSITIVE CONTROL for this instrument: the pre-existing alert latch it is modelled on
+    // matches the same declaration shape, so a zero above is a measurement, not a bad regex.
+    expect(SRC).toMatch(/let _depSkewAlertedPosture = null;/);
+  });
+
+  test("the durable restart budget is spent BEFORE the exit (the loop terminator is wired)", () => {
+    const restartBlock = SRC.slice(SRC.indexOf("if (depSkew.restart)"));
+    // Anchored on the CALL shapes, not the bare identifiers — both names also appear in this
+    // block's prose, and an offset read out of a comment would still "pass" if the calls were
+    // reordered or removed.
+    expect(restartBlock.indexOf("recordRestartAttempt(")).toBeGreaterThan(-1);
+    expect(restartBlock.indexOf("exitAfterClose({")).toBeGreaterThan(-1);
+    expect(restartBlock.indexOf("recordRestartAttempt(")).toBeLessThan(restartBlock.indexOf("exitAfterClose({"));
+  });
+
+  test("mode defaults to SHADOW and is operator-selectable", () => {
+    expect(SRC).toContain("resolveDepSkewMode(process.env.CATALYST_CLOUD_SYNC_DEP_SKEW)");
+    // off is fully dormant: no capture, no breadcrumb, nothing written.
+    expect(SRC).toMatch(/if \(DEP_SKEW_MODE !== "off"\)/);
+  });
+});
+
+describe("stack-reload is deliberately NOT the trigger", () => {
+  test("cloud-sync stays out of decideStackReload's component list, by design", () => {
+    // Adding it there is the symmetric CTL-1506 move and was considered and rejected: it
+    // fires only on hosts where the BROKER advances the checkout (a host whose
+    // catalyst-updater pulls without a broker never gets the push), and it would need new
+    // kickstart plumbing plus a real per-component confirmation probe — cloud-sync has no
+    // pid file readPidFor knows, and CTL-1506's own P1 lesson is that a best-effort
+    // `return true` confirmation is how a stale daemon hides. The in-daemon predicate
+    // covers every host cloud-sync runs on, by construction, and its confirmation is free:
+    // the next boot overwrites the record. One trigger, not two.
+    const reload = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "broker", "stack-reload.mjs"), "utf8");
+    expect(reload).not.toContain("cloud-sync");
+    // POSITIVE CONTROL for that negative — the same instrument on the same file finds the
+    // components that ARE listed. Without this, a typo'd path would "prove" the absence.
+    expect(reload).toContain("execution-core");
+    expect(reload).toContain("otel-forward");
+  });
+});

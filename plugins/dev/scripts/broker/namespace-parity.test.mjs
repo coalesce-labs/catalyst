@@ -46,6 +46,10 @@ import { JANITOR_EVENT_TYPES } from "../execution-core/janitor-event-types.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "../execution-core/unstuck-sweep-event-types.mjs";
 import { LINEAR_READ_EVENT } from "../execution-core/linear-read-event.mjs"; // CTL-1403
 import { ALERT_BOOT_DEPENDENCY_UNUSABLE } from "../execution-core/dispatch-alert.mjs";
+// CTL-1659 — the cloud-sync dep-skew pair, imported from its owning module rather than
+// re-typed as a literal below, so a rename cannot leave this contract asserting over a name
+// nothing emits (the hand-copied-literal trap the ASSERTED_BY parity suite exists to prevent).
+import { DEP_SKEW_RESTART_EVENT, DEP_SKEW_WOULD_RESTART_EVENT } from "../execution-core/cloud-sync-deps.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -86,6 +90,8 @@ const EXEC_CORE_EVENT_NAMES = [
   ...UNSTUCK_SWEEP_EVENT_TYPES,
   LINEAR_READ_EVENT, // CTL-1403 reads-by-source (catalyst.linear.read)
   ALERT_BOOT_DEPENDENCY_UNUSABLE,
+  DEP_SKEW_RESTART_EVENT, // CTL-1659 cloud-sync.mjs — the writer restarting to load an installed dep fix
+  DEP_SKEW_WOULD_RESTART_EVENT, // CTL-1659 — sustained skew that did NOT act (shadow / budget / undurable ledger)
   ...INLINE_EVENT_NAMES,
 ];
 

@@ -666,6 +666,109 @@ in this repo, and by nothing in `catalyst-otel` either (the provisioned Grafana 
   `otel-forward/lib/sparse-warn.ts` (semantics unchanged); the tailer's unknown-shape alarm and this
   drop alarm each build their own gate so a flood of one cannot exhaust the other's key budget.
 
+### Installed-but-unloaded: cloud-sync dependency skew (CTL-1659)
+
+The **third** link in the CTL-1506 chain, and the one no existing mechanism covers. `plugin-refresh`
+emits `restart_needed` and deliberately stops ("restart stays a gated OPERATOR action — never
+automated here"); `decideStackReload` restarts exactly `monitor`, `execution-core`, `otel-forward`
+(cloud-sync in neither). Measured 2026-08-04: a dependency fix landed on main, the updater pulled it,
+the install succeeded, and **both minis' cloud-sync writers kept serving the old modules for days**
+— the CTC-328 delete-corruption guard sat correctly installed while the daemons ran unguarded, until
+a human kickstarted them. Nothing was red; `restart_needed` is a field in an event nobody watches.
+
+**It is deliberately NOT a fourth restart mechanism.** Adding cloud-sync to `decideStackReload` (the
+symmetric CTL-1506 move) fires only where the *broker* advances the checkout — a host whose
+`catalyst-updater` pulls without a broker never gets the push — and needs new kickstart plumbing plus
+a real per-component confirmation probe (cloud-sync has no pid file `readPidFor` knows, and
+CTL-1506's own P1 lesson is that a best-effort `return true` confirmation is exactly how a stale
+daemon hides). CTL-1502's watchdog is also the wrong reuse target: its predicates are **stuckness**
+for a daemon that cannot help itself, and its restart action is hardwired to `catalyst-monitor.sh`
+argv. Dep-skew is neither — the writer is healthy and fully capable of self-action — so it becomes a
+**second predicate on the CTL-1508 self-heal exit that already exists** in `cloud-sync.mjs`:
+
+| Piece                  | Already existed                                                                  |
+| ---------------------- | -------------------------------------------------------------------------------- |
+| Actuator               | launchd `KeepAlive={SuccessfulExit:false}`                                       |
+| Safe exit point        | the heartbeat tick, between applied frames                                        |
+| Bounded close          | `exitAfterClose` (CTL-1508)                                                       |
+| Restart-failed net     | `health-responder.sh`'s `no-respawn`, keyed on the breadcrumb this path writes    |
+| Loop terminator (new)  | a durable `{ts,count}` budget, `~/catalyst/cloud-sync.depskew.json`               |
+
+- **Boot record** (`cloud-sync-deps.mjs` `captureLoadedDeps` → `~/catalyst/cloud-sync.deps.json`):
+  what the process **actually resolved** — `createRequire().resolve()`'s path, the version from THAT
+  path's `package.json`, an entry-file digest, the serving root, and a SHA-256 of that root's
+  `bun.lock`. Deliberately not "what the lockfile said": a claim derived from the lockfile
+  re-manufactures the CTL-1646 shadowed-install lie. The **digest**, not the version string, is the
+  verdict — a repointed tarball / workspace link / git dep ships new bytes under the same semver.
+- **Predicate** (`cloud-sync-telemetry.mjs` `classifyDepSkew`, beside `classifyStall`, same
+  never-false-kill discipline): an unknown digest on either side never asserts; `sustainedTicks`
+  consecutive mismatches are required (bun rewrites `bun.lock` in place, so one tick can catch it
+  mid-write); an uptime floor holds a just-relaunched writer; the durable budget bounds the
+  pathological continuous-rewrite case, and its refusal is NAMED rather than folded into "no
+  restart". Modes `off`/`shadow`/`enforce`, **shadow by default**.
+- **Exit**: `writeSelfHealBreadcrumb(..., {reason:"dep-skew"})` + bounded `close()` + **exit 1**. The
+  ticket's own Option-1 wording ("exit cleanly and let KeepAlive relaunch") is mechanically wrong
+  here — exit **0** is the plist's "clean no-op, stay DOWN" contract, so a clean exit would
+  permanently stop the replica writer. The `reason` key is emitted only when supplied, so the stall
+  path's on-disk shape (which `health-responder.sh` parses with `jq`) is byte-identical.
+- **Alarm** rides the writer's existing structured heartbeat line in **every** mode
+  (`depSkewFields` → stderr → `cloud-sync.log` → Alloy → Loki, `service_name=catalyst.cloud-sync`),
+  because shadow-with-nobody-watching is precisely the failure being fixed. `catalyst doctor`'s
+  advisory `cloud-sync-skew` check grades the same record over four fail-closed links —
+  record-identity (pid must still name a live `cloud-sync.mjs`; a recycled pid is stale evidence),
+  boot-record-complete, loaded-vs-locked (the incident), installed-vs-locked (the partial install a
+  restart does **not** fix) — and can never PASS on absent, stale, or zero-comparison input.
+- **What each comparator is anchored on, and why the obvious anchor is not enough.**
+  `loaded-vs-locked` compares TWO digests, not one: the root lockfile's, AND each package's boot
+  `entryHash` re-hashed from its recorded `resolvedPath`. The entry digest is not redundant — a
+  repointed mutable artifact, a `bun link`ed workspace output, or an in-place rebuild changes the
+  bytes the running process holds while the lockfile TEXT and the package version stay
+  byte-identical, so the lockfile digest alone reports ok and the writer never restarts. (Capturing
+  a field as the discriminator and never reading it back is "a check that cannot fail" — the same
+  shape as `restart_needed`, one level in.) `installed-vs-locked` matches each package to **its own**
+  lock entry via the install-location key bun uses (`<id>` hoisted, `<parent>/<id>` nested,
+  chained deeper — `lockKeyForPackageJsonPath`), never to "any occurrence of this id in the file":
+  with the SDK locked at 0.8.2 at the root and 0.7.0 under a nested parent, an any-occurrence match
+  accepts a stale 0.7.0 root install, hiding exactly the shadowed/partial install the link exists to
+  detect. A path that cannot be associated with a lock entry (outside the recorded root, or a
+  workspace link) reports **inconclusive naming the elsewhere-resolutions**, never a permissive match.
+- **The restart-budget ledger read is TRI-STATE.** Absent (`ENOENT`) → full budget; a ledger that
+  exists but cannot be read or parsed → `RESTART_LEDGER_UNREADABLE`, and the classifier declines.
+  Collapsing the two into one `null` meant a corrupt or momentarily-unreadable ledger granted a full
+  budget and then overwrote the evidence — the durable loop terminator disarmed by the corruption it
+  exists to survive. Field types are checked before any coercion, since `Number(null)`/`Number([])`
+  are `0` (an "expired window" → full budget) and `Number(undefined) || 0` is `0` ("nothing spent
+  yet"); the gate runs BEFORE the expired-window shortcut so a bogus count cannot re-arm on an anchor
+  read out of the same untrusted file.
+- **The undurable-ledger decline is edge-triggered.** That branch sits inside `if (depSkew.restart)`,
+  outside the posture latch guarding the alert above it, so a sustained skew with an unwritable
+  ledger emitted an ERROR line plus a `dep_skew_would_restart` event on **every** 30 s heartbeat for
+  the whole incident. `_depSkewDeclinedPosture` latches the announcement (re-arming on any posture
+  change and when skew clears) while the write itself is still retried each tick — same
+  count-exactly / warn-sparsely discipline as CTL-1817/CTL-1823's `otel-forward/lib/sparse-warn.ts`.
+- **Unified event log** (the ticket's AC1 clause "the restart is visible in the event log"). The
+  heartbeat line above is a **log** stream; it never reaches `catalyst-events wait-for`, the broker,
+  the HUD, or orch-monitor, all of which read `~/catalyst/events/YYYY-MM.jsonl`. So the dep-skew
+  path appends a **v2 envelope** to that file through the same `getEventLogPath()` +
+  `appendFileSync` call `emitWriterIdleEvent` (CAT-21) already used in `cloud-sync.mjs` — the
+  capability was present and merely unused here. Two names, not one name plus a payload flag,
+  because `otel-forward` strips `body.payload` off-machine and an alert must be able to select a
+  real restart from `attributes` alone:
+
+  | Event                                    | Emitted when                                                                                    |
+  | ---------------------------------------- | ----------------------------------------------------------------------------------------------- |
+  | `catalyst.replica.dep_skew_restart`      | the writer IS exiting — budget spent, before `exitAfterClose`. At most once per process.        |
+  | `catalyst.replica.dep_skew_would_restart`| sustained skew that did NOT act: shadow mode (the default), exhausted budget, or an undurable ledger. `reason` names which. |
+
+  Both are built by the pure `depSkewEventEnvelope` (`cloud-sync-deps.mjs`) so the shape is
+  unit-testable without running the script-shaped writer, and both reuse `depSkewFields` for their
+  digest attributes so the event and the heartbeat line cannot drift. Emission is **fail-open** —
+  a failed append never blocks the self-heal exit — and the restart event is sequenced **before**
+  `exitAfterClose`, which can terminate the process at any point once called. Ordering rule: the
+  posture block emits only the *held* event (`wouldRestart && !restart`); the restart block owns
+  the acted one, so an event never claims a restart the ledger then declines. Registered in
+  `broker/namespace-parity.test.mjs` by import, not by re-typed literal.
+
 ### Two-axis worker state & the recordTransition chokepoint (CTL-764)
 
 Every worker ticket has **two orthogonal axes** — never blurred:

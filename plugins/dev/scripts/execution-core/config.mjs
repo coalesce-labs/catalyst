@@ -2400,6 +2400,25 @@ export function getCloudSyncSelfHealPath() {
   return resolve(catalystDir(), "cloud-sync.selfheal.json");
 }
 
+// CTL-1659: path to the cloud-sync LOADED-DEPENDENCY boot record — what the writer
+// actually resolved at boot (module paths, versions, entry digests, the serving root and
+// that root's lockfile digest). Written once on reaching 'live', re-read by the writer's
+// own heartbeat (to detect a lockfile that moved underneath it) and by `catalyst doctor`
+// (which grades it from another process). Lives beside the writer's log/DB/self-heal
+// breadcrumb under ~/catalyst. Re-resolved per call (the catalystDir() idiom) so tests
+// redirect via CATALYST_DIR.
+export function getCloudSyncDepsPath() {
+  return resolve(catalystDir(), "cloud-sync.deps.json");
+}
+
+// CTL-1659: the durable dep-skew restart budget. Separate from the boot record because
+// the boot record is REWRITTEN every boot — a counter kept there would reset on exactly
+// the restart it is meant to count, which is how a loop terminator silently stops
+// terminating. Same attempt-cap shape health-responder.sh uses: {ts, count}.
+export function getCloudSyncDepSkewLedgerPath() {
+  return resolve(catalystDir(), "cloud-sync.depskew.json");
+}
+
 // --- Catalyst-Cloud token resolution (CTL-1394) ---
 // The supervised cloud-sync daemon reads its cloud token from a STANDARD env-var NAME —
 // `CATALYST_CLOUD_TOKEN` — on EVERY host (the same name cloud-token-env.mjs / CTL-1307

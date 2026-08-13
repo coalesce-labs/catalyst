@@ -717,6 +717,9 @@ jobs:
             diagnostician.test.mjs \
             cloud-sync-telemetry.test.mjs \
             cloud-sync-log.test.mjs \
+            cloud-sync-deps.test.mjs \
+            cloud-sync-dep-skew-wiring.test.mjs \
+            doctor-cloud-sync-skew.test.mjs \
             dispatch.test.mjs \
             doctor.test.mjs \
             doctor-replica.test.mjs \

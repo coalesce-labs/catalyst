@@ -46,18 +46,54 @@
 //   • start() throws / fatal     → exit 1  (launchd restarts with backoff; a stale
 //                                   self-lock auto-reclaims after ~15s)
 //   • genuine stall (watchdog)   → self-heal breadcrumb + close() + exit 1  (restart)
+//   • dep-skew (CTL-1659)        → self-heal breadcrumb + close() + exit 1  (restart)
 // CTL-1508: BOTH close()-then-exit paths are bounded by CATALYST_CLOUD_SYNC_CLOSE_TIMEOUT_MS
 // (default 3s) via exitAfterClose — a close() wedged on a dead socket can no longer strand
 // the process in a half-dead never-exits state launchd cannot recover from.
+//
+// DEP-SKEW SELF-HEAL (CTL-1659): a dependency fix lands on main, the updater pulls it, the
+// install succeeds — and this process keeps serving the OLD modules until a human notices.
+// It went unnoticed for days on 2026-08-04 because nothing restarts this daemon on a dep
+// change: `plugin-refresh` deliberately stops at `restart_needed` ("restart stays a gated
+// OPERATOR action"), and the broker's `decideStackReload` hard-codes monitor/execution-core/
+// otel-forward — the same omission class CTL-1506 fixed one link up the chain. Rather than
+// add a FOURTH external restart mechanism, this is a SECOND predicate on the self-heal exit
+// that already exists three lines above: at boot we record what we actually resolved
+// (captureLoadedDeps), on each heartbeat we re-hash the root lockfile, and a SUSTAINED
+// mismatch takes the same breadcrumb + bounded exit-1 path the stall watchdog takes — which
+// means launchd KeepAlive is the actuator and health-responder.sh's `no-respawn` condition
+// already nets a failed relaunch, with no change to either. Ships SHADOW by default
+// (CATALYST_CLOUD_SYNC_DEP_SKEW=off|shadow|enforce); the skew fields ride the freshness
+// heartbeat line in every mode, so the signal is alertable in Loki from day one instead of
+// being another `restart_needed` nobody watches. The restart ALSO lands on the unified event
+// log (`catalyst.replica.dep_skew_restart`, with `…_would_restart` for a detected-but-held
+// posture) via the same append emitWriterIdleEvent already uses — the heartbeat line is a LOG
+// stream and reaches neither `catalyst-events wait-for`, the broker, the HUD, nor
+// orch-monitor, which is the ticket's "the restart is visible in the event log" clause.
 import { CatalystReplica } from "@catalyst-cloud/sdk/node";
-import { getCloudSyncSelfHealPath, getEventLogPath, getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
+import { getCloudSyncDepSkewLedgerPath, getCloudSyncDepsPath, getCloudSyncSelfHealPath, getEventLogPath, getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { sdkLogRecord } from "./cloud-sync-log.mjs";
-import { classifyStall, clearSelfHealBreadcrumb, exitAfterClose, freshnessFields, readReplicaCounts, writeSelfHealBreadcrumb } from "./cloud-sync-telemetry.mjs";
+import { classifyDepSkew, classifyStall, clearSelfHealBreadcrumb, exitAfterClose, freshnessFields, readReplicaCounts, resolveDepSkewMode, writeSelfHealBreadcrumb } from "./cloud-sync-telemetry.mjs";
+import {
+  DEP_SKEW_ALERT,
+  DEP_SKEW_REASON,
+  DEP_SKEW_RESTART_EVENT,
+  DEP_SKEW_WOULD_RESTART_EVENT,
+  captureLoadedDeps,
+  classifyRestartBudget,
+  depSkewEventEnvelope,
+  depSkewFields,
+  readRestartLedger,
+  recordRestartAttempt,
+  sha256File,
+  writeDepsBreadcrumb,
+} from "./cloud-sync-deps.mjs";
 import { createRequire } from "node:module";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
@@ -113,6 +149,42 @@ function emitWriterIdleEvent({ host, tokenEnv, tokenSource, dbPath }) {
       },
       body: { message: `cloud-sync writer idle: no token in ${tokenEnv} (source=${tokenSource})` },
     };
+    const logPath = getEventLogPath();
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, `${JSON.stringify(envelope)}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// CTL-1659 — the AC1 clause "And the restart is visible in the event log". Deliberately the
+// SAME append that emitWriterIdleEvent performs (same file, same v2 envelope, same
+// fail-open `try`/`return false`): the unified log at ~/catalyst/events/YYYY-MM.jsonl is the
+// surface `catalyst-events wait-for`, the broker, the HUD and orch-monitor all read, and the
+// heartbeat line alone reaches none of them. The envelope itself is built by the pure
+// `depSkewEventEnvelope` in cloud-sync-deps.mjs so its shape is unit-testable without
+// running this script-shaped module. FAIL-OPEN, without exception: emitting the observation
+// must never be able to block or crash the self-heal exit it is describing — a lost event is
+// a lost event, a wedged writer is the incident.
+function emitDepSkewEvent({ name, currentLockHash, depSkew, restart }) {
+  try {
+    const envelope = depSkewEventEnvelope({
+      name,
+      host: getHostName(),
+      mode: DEP_SKEW_MODE,
+      reason: depSkew.reason,
+      bootLockHash: DEP_SKEW_BOOT_LOCK_HASH,
+      currentLockHash,
+      lockPath: DEP_SKEW_LOCK_PATH,
+      sustained: depSkew.sustained,
+      wouldRestart: depSkew.wouldRestart,
+      restart,
+      id: randomBytes(8).toString("hex"),
+      traceId: randomBytes(16).toString("hex"),
+      spanId: randomBytes(8).toString("hex"),
+      resource: buildCatalystResource({ serviceName: "catalyst.cloud-sync", host: getHostName() }),
+    });
     const logPath = getEventLogPath();
     mkdirSync(dirname(logPath), { recursive: true });
     appendFileSync(logPath, `${JSON.stringify(envelope)}\n`);
@@ -238,6 +310,81 @@ console.log(`${TAG} live — replica seeded + tailing the change feed (cursor=${
 // case and clearSelfHealBreadcrumb never throws.
 clearSelfHealBreadcrumb(getCloudSyncSelfHealPath());
 
+// --- CTL-1659: record what this process ACTUALLY loaded ------------------------------
+// Written ONCE, here, because reaching 'live' is the moment the modules are proven usable.
+// The record carries the RESOLVED module path, the version read from THAT path's
+// package.json, a digest of the entry file, the root that served it, and a SHA-256 of that
+// root's lockfile — deliberately NOT "what the lockfile said", which would re-manufacture
+// the claim under test (the CTL-1646 shadowed-install class). `bootLockHash` is also the
+// baseline the per-tick predicate below compares against.
+const DEP_SKEW_MODE = resolveDepSkewMode(process.env.CATALYST_CLOUD_SYNC_DEP_SKEW);
+// Consecutive-tick threshold: bun rewrites bun.lock IN PLACE during an install, so a
+// single tick can catch it mid-write. Two consecutive observations (~1 min at the default
+// 30s heartbeat) is past any plausible write window.
+const DEP_SKEW_SUSTAINED_TICKS = Number(process.env.CATALYST_CLOUD_SYNC_DEP_SKEW_TICKS) || 2;
+// Uptime floor — a just-relaunched writer never immediately exits again, so even a
+// pathological lockfile churn cannot restart faster than this.
+const DEP_SKEW_UPTIME_FLOOR_MS = Number(process.env.CATALYST_CLOUD_SYNC_DEP_SKEW_UPTIME_MS) || 120_000;
+// Durable budget (the loop terminator). Default: at most ONE dep-skew restart per 6h. The
+// predicate is self-clearing — a relaunch re-captures the CURRENT digest, so boot ===
+// current again — and this covers only what self-clearing cannot: a lockfile being
+// rewritten continuously by a broken install loop.
+const DEP_SKEW_BUDGET_WINDOW_MS = Number(process.env.CATALYST_CLOUD_SYNC_DEP_SKEW_WINDOW_MS) || 21_600_000;
+const DEP_SKEW_MAX_RESTARTS = Number(process.env.CATALYST_CLOUD_SYNC_DEP_SKEW_MAX_RESTARTS) || 1;
+const depsRequire = createRequire(import.meta.url);
+let _bootDeps = null;
+if (DEP_SKEW_MODE !== "off") {
+  try {
+    _bootDeps = captureLoadedDeps({
+      startDir: dirname(fileURLToPath(import.meta.url)),
+      resolveModule: (specifier) => depsRequire.resolve(specifier),
+    });
+    writeDepsBreadcrumb(getCloudSyncDepsPath(), _bootDeps);
+    hlog.info(
+      {
+        event: "catalyst.replica.deps_captured",
+        ...depSkewFields({ mode: DEP_SKEW_MODE, bootLockHash: _bootDeps.lockHash, skewed: false }),
+        "catalyst.cloud_sync.deps.root": _bootDeps.root,
+        "catalyst.cloud_sync.deps.degraded": _bootDeps.degraded,
+        "catalyst.cloud_sync.deps.packages": _bootDeps.packages.map((p) => `${p.id}@${p.version ?? "?"}`).join(","),
+        "host.name": getHostName(),
+      },
+      `cloud-sync: loaded-dependency boot record written (mode=${DEP_SKEW_MODE}${_bootDeps.degraded ? `, DEGRADED: ${_bootDeps.degradedReasons.join("; ")}` : ""})`,
+    );
+  } catch (err) {
+    // Fail-open by construction: recording module identity must never take down the
+    // writer. A missing record is UNKNOWN to doctor, never "clean" — that asymmetry is
+    // what keeps this safe to fail.
+    _bootDeps = null;
+    try { hlog.warn({ event: "catalyst.replica.deps_capture_failed" }, `cloud-sync: dependency boot record failed: ${scrub(err?.message ?? String(err))}`); } catch { /* best-effort */ }
+  }
+}
+const DEP_SKEW_BOOT_LOCK_HASH = _bootDeps?.lockHash ?? null;
+const DEP_SKEW_LOCK_PATH = _bootDeps?.lockPath ?? null;
+const BOOT_MS = Date.now();
+let _depSkewMismatches = 0;
+// The one-shot latch keys on the POSTURE, not on a bare boolean: an episode that escalates
+// (skewed → sustained → would-restart) must re-alert once per step, or the only line in
+// Loki would be the earliest and weakest one, saying "no restart" about a run that went on
+// to restart. It re-arms (null) the moment skew clears.
+let _depSkewAlertedPosture = null;
+// A SECOND latch, for the undurable-ledger decline. That branch lives inside
+// `if (depSkew.restart)`, OUTSIDE the posture latch above, so with sustained skew in
+// enforce mode and a ledger that stays unwritable (a full or read-only ~/catalyst) it fires
+// on EVERY heartbeat: one ERROR line plus one `dep_skew_would_restart` event every 30s for
+// the whole incident — an alarm flooding the very surfaces (cloud-sync.log, the unified
+// event log) it exists to make legible. Same count-exactly / warn-sparsely discipline as
+// CTL-1817/CTL-1823 (otel-forward/lib/sparse-warn.ts): the condition is re-evaluated every
+// tick, the ANNOUNCEMENT is edge-triggered. Keyed on the same posture string as the alert
+// latch, so a genuine change (skew clears, the budget runs out, the run stops being
+// sustained) re-announces once; it re-arms (null) the moment skew clears.
+//
+// Deliberately latches only the EMISSIONS, never the write attempt: retrying
+// `recordRestartAttempt` each tick is what lets a repaired filesystem resume the self-heal,
+// and a latch that suppressed the retry would turn one transient EROFS into a permanent
+// refusal.
+let _depSkewDeclinedPosture = null;
+
 // CTL-1395: liveness + freshness telemetry. Every HEARTBEAT_INTERVAL_MS emit (a) the
 // CTL-1280 `daemon heartbeat` marker — feed-independent proof the writer is alive, → the
 // uptime tile (same Loki heartbeat-freshness query as the other daemons) — and (b) a
@@ -305,12 +452,127 @@ const emitTelemetry = () => {
   // produces identically (Codex P1/P2).
   const { genuine, restart, displayStatus, sdkUnhealthy, frameSilent } = classifyStall({ rows, stalledMs, stallMs: STALL_MS, status: sdkStatus, lastFrameAt, now });
   if (!genuine) _stallAlerted = false; // re-arm the one-shot alert for the next genuine stall
+  // CTL-1659: re-hash the root lockfile the modules were served from. A digest read is
+  // O(file) on a ~200KB text file once per heartbeat — cheap, and it touches nothing the
+  // SDK owns. An unreadable lockfile yields null, which classifyDepSkew treats as UNKNOWN
+  // (never as skew), so a transient read error cannot kill a healthy writer.
+  const currentLockHash = DEP_SKEW_LOCK_PATH ? sha256File(DEP_SKEW_LOCK_PATH) : null;
+  if (DEP_SKEW_BOOT_LOCK_HASH && currentLockHash && currentLockHash !== DEP_SKEW_BOOT_LOCK_HASH) _depSkewMismatches += 1;
+  else _depSkewMismatches = 0; // any matching (or unknown) tick resets the run
+  // The budget is consulted BEFORE deciding, so its refusal is REPORTED in the same
+  // classification (and therefore in the alert line) rather than being discovered as a
+  // silent no-op after the alarm has already claimed a restart was coming. Read only when
+  // a mismatch run is actually open, so the healthy steady state costs no extra syscall.
+  const depSkewLedger = _depSkewMismatches > 0 ? readRestartLedger(getCloudSyncDepSkewLedgerPath()) : null;
+  const budget = classifyRestartBudget({
+    ledger: depSkewLedger,
+    now,
+    windowMs: DEP_SKEW_BUDGET_WINDOW_MS,
+    maxRestarts: DEP_SKEW_MAX_RESTARTS,
+  });
+  const depSkew = classifyDepSkew({
+    bootLockHash: DEP_SKEW_BOOT_LOCK_HASH,
+    currentLockHash,
+    consecutiveMismatches: _depSkewMismatches,
+    sustainedTicks: DEP_SKEW_SUSTAINED_TICKS,
+    uptimeMs: now - BOOT_MS,
+    uptimeFloorMs: DEP_SKEW_UPTIME_FLOOR_MS,
+    mode: DEP_SKEW_MODE,
+    budgetAllowed: budget.allowed,
+    budgetReason: budget.reason,
+  });
+  const depSkewPosture = `${depSkew.skewed}:${depSkew.sustained}:${depSkew.wouldRestart}:${depSkew.restart}`;
+  if (!depSkew.skewed) { _depSkewAlertedPosture = null; _depSkewDeclinedPosture = null; } // re-arm the one-shots for the next episode
   try {
     hlog.info(
-      freshnessFields({ rows, maxUpdatedMs, status: displayStatus, cursor, hostName: getHostName(), lastFrameAt, now }),
+      {
+        ...freshnessFields({ rows, maxUpdatedMs, status: displayStatus, cursor, hostName: getHostName(), lastFrameAt, now }),
+        // The skew observation rides the EXISTING heartbeat line in every mode, so a Loki
+        // rule can alarm on it without waiting for someone to run doctor. Shadow with
+        // nobody watching is precisely the failure this ticket exists to remove.
+        ...depSkewFields({
+          mode: DEP_SKEW_MODE,
+          bootLockHash: DEP_SKEW_BOOT_LOCK_HASH,
+          currentLockHash,
+          skewed: depSkew.known ? depSkew.skewed : null,
+          sustained: depSkew.known ? depSkew.sustained : null,
+          wouldRestart: depSkew.known ? depSkew.wouldRestart : null,
+        }),
+      },
       "cloud-sync: freshness",
     );
   } catch { /* best-effort — telemetry must never crash the writer */ }
+  if (depSkew.skewed && depSkewPosture !== _depSkewAlertedPosture) {
+    _depSkewAlertedPosture = depSkewPosture;
+    try {
+      hlog.warn(
+        {
+          event: "catalyst.replica.dep_skew",
+          "catalyst.alert": DEP_SKEW_ALERT,
+          ...depSkewFields({ mode: DEP_SKEW_MODE, bootLockHash: DEP_SKEW_BOOT_LOCK_HASH, currentLockHash, skewed: true, sustained: depSkew.sustained, wouldRestart: depSkew.wouldRestart }),
+          "catalyst.cloud_sync.deps.lock_path": DEP_SKEW_LOCK_PATH,
+          "catalyst.cloud_sync.deps.reason": depSkew.reason,
+          "host.name": getHostName(),
+        },
+        `cloud-sync: the root lockfile changed since this writer loaded its modules — the daemon is serving PRE-CHANGE code (mode=${DEP_SKEW_MODE}${depSkew.restart ? ", self-healing via restart" : `, no restart: ${depSkew.reason ?? "held"}`})`,
+      );
+    } catch { /* the alarm must never crash the writer */ }
+    // …and the same escalation step onto the UNIFIED EVENT LOG, gated on the same posture
+    // latch so a 30s heartbeat cannot spam it. Only the HELD case is emitted here: when
+    // `depSkew.restart` is true the restart block below owns the emission, because only
+    // AFTER the budget is spent is "restarting" a truthful claim — a ledger that cannot be
+    // persisted declines the exit, and an event announcing a restart that never happened is
+    // the same lie `restart_needed` told.
+    if (depSkew.wouldRestart && !depSkew.restart) {
+      emitDepSkewEvent({ name: DEP_SKEW_WOULD_RESTART_EVENT, currentLockHash, depSkew, restart: false });
+    }
+  }
+  if (depSkew.restart) {
+    // Spend the durable budget FIRST: if the ledger cannot be persisted there is no loop
+    // terminator, so we decline the restart rather than risk an unbounded relaunch cycle.
+    // Declining is never destructive — it leaves exactly today's behavior (a skewed but
+    // running writer), which the doctor check and the alert above both name.
+    const spent = recordRestartAttempt(getCloudSyncDepSkewLedgerPath(), { ledger: depSkewLedger, now, windowMs: DEP_SKEW_BUDGET_WINDOW_MS });
+    if (spent === null) {
+      // EDGE-TRIGGERED, not per-tick. The write above is retried every heartbeat (that is
+      // how a repaired filesystem resumes the self-heal), but the ERROR line and the
+      // unified-log event are announced once per DECLINED POSTURE — otherwise a sustained
+      // skew with a permanently-unwritable ledger emits both every 30s for the duration of
+      // the incident, burying the one line an operator needs under thousands of copies of
+      // itself. The latch re-arms on any posture change and the moment skew clears.
+      if (depSkewPosture !== _depSkewDeclinedPosture) {
+        _depSkewDeclinedPosture = depSkewPosture;
+        try { hlog.error({ event: "catalyst.replica.dep_skew", "catalyst.alert": DEP_SKEW_ALERT }, "cloud-sync: dep-skew restart DECLINED — the restart-budget ledger could not be persisted, so the loop has no terminator"); } catch { /* best-effort */ }
+        // The posture block above skipped its would-restart event (it saw `restart: true`, and
+        // deferred to this block), so without this line an enforce-mode host with an unwritable
+        // ledger would emit NOTHING to the unified log — silence on precisely the configuration
+        // that is trying to act and cannot. `reason` carries the ledger failure.
+        emitDepSkewEvent({
+          name: DEP_SKEW_WOULD_RESTART_EVENT,
+          currentLockHash,
+          depSkew: { ...depSkew, reason: "the dep-skew restart-budget ledger could not be persisted — declining the restart (the loop would have no terminator)" },
+          restart: false,
+        });
+      }
+    } else {
+      // Same exit path as the CTL-1508 genuine-stall self-heal, with a `reason`
+      // discriminator: breadcrumb (so health-responder.sh's no-respawn condition nets a
+      // failed relaunch) + bounded close + exit 1. NEVER exit 0 — the plist pairs
+      // KeepAlive={SuccessfulExit:false} with an exit-0 "clean no-op, stay DOWN" contract,
+      // so a clean exit here would permanently stop the replica writer.
+      //
+      // AC1's second clause, emitted HERE — after the budget is spent and before the exit,
+      // the one window in which "this writer is restarting for dep-skew" is both true and
+      // still recordable. Ordered ahead of clearInterval/exitAfterClose deliberately: the
+      // bounded close can exit the process at any point after it is called, so an append
+      // sequenced after it could be lost on exactly the runs that matter most.
+      emitDepSkewEvent({ name: DEP_SKEW_RESTART_EVENT, currentLockHash, depSkew, restart: true });
+      writeSelfHealBreadcrumb(getCloudSyncSelfHealPath(), { cursor, stalledMs: null, sdkStatus, reason: DEP_SKEW_REASON });
+      try { if (hbTimer) clearInterval(hbTimer); } catch { /* best-effort */ }
+      exitAfterClose({ closePromise: replica.close(), exitCode: 1, timeoutMs: CLOSE_TIMEOUT_MS });
+      return; // the stall block below must not also fire on the way out
+    }
+  }
   if (genuine && !_stallAlerted) {
     _stallAlerted = true;
     // The alarm that was missing for 18.5h — now gated on an independent liveness failure
