@@ -30,3 +30,32 @@ export function buildCanonicalEventLine(
   spec: CanonicalEventSpec,
   seams?: CanonicalEventSeams,
 ): string;
+
+/** The same envelope as an object, before serialization (CTL-1795). */
+export function buildCanonicalEvent(
+  spec: CanonicalEventSpec,
+  seams?: CanonicalEventSeams,
+): Record<string, unknown>;
+
+/**
+ * Which v1 flat fields are promoted to first-class OTel attributes (CTL-1795).
+ * Byte-identical to otel-forward's ATTR_MAP — see the note on the implementation.
+ */
+export const FLAT_ATTRIBUTE_MAP: Readonly<Record<string, string>>;
+
+export interface DualEnvelopeOpts {
+  serviceName?: string;
+  severityText?: string;
+  severityNumber?: number;
+}
+
+/**
+ * Build ONE superset JSONL line carrying both the v1 top-level `event` and a v2
+ * `attributes`/`body`/`resource` block (CTL-1795). Throws on a nameless record or one that
+ * is already canonical — callers fall back to the plain v1 line.
+ */
+export function buildDualEnvelopeLine(
+  flat: Record<string, unknown>,
+  opts?: DualEnvelopeOpts,
+  seams?: CanonicalEventSeams,
+): string;

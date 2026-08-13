@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scanEventsChunked } from "./event-tail.mjs";
 import { shortIdFromSessionId, isSelfSession } from "./claude-ids.mjs";
-import { emitReapIntent, REAP_INTENT_TYPES } from "./reap-intent.mjs";
+import { emitReapIntent, REAP_INTENT_TYPES, dualEnvelopeOrV1 } from "./reap-intent.mjs";
 import { lastSeenMsForSession } from "./session-recency.mjs";
 import { getAgentsCached, listClaudeAgentsResult } from "./claude-agents.mjs";
 import {
@@ -1142,7 +1142,11 @@ export async function defaultAgents() {
   return getAgentsCached().agents;
 }
 
-async function defaultEmit(eventType, fields) {
+// Exported for test observability (CTL-1795), matching the sibling timers
+// (stale-pr-rescue-timer.mjs:459, orphan-pr-sweep-timer.mjs:158). The echo fallback below is
+// the REAL adapter the daemon runs; a test against the injected `emit` seam would exercise the
+// test's own function and could never observe what this one writes to disk.
+export async function defaultEmit(eventType, fields) {
   try {
     return await emitReapIntent(eventType, fields);
   } catch (err) {
@@ -1156,7 +1160,11 @@ async function defaultEmit(eventType, fields) {
       const logPath = getEventLogPath();
       try {
         mkdirSync(dirname(logPath), { recursive: true });
-        appendFileSync(logPath, JSON.stringify(payload) + "\n");
+        // CTL-1795: the echo events are a SECOND hand-rolled v1 envelope, independent of
+        // emitReapIntent's — `pr.merged.cleanup-failed` alone was 1,560 events in 2026-08. They
+        // ride the same superset builder, with the same degrade-to-v1 fallback, so the two
+        // never drift.
+        appendFileSync(logPath, dualEnvelopeOrV1(payload, eventType));
       } catch (appendErr) {
         // A dropped *.cleanup-complete / *.reap-complete echo makes bootReplay
         // re-reap on next boot (it keys replay-skip on the echo's presence), so

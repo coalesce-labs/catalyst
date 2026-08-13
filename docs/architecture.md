@@ -97,6 +97,27 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
   - **v1** (bash, `catalyst-state.sh event`): `{ts, event, orchestrator, worker, detail}`.
   - **v2 OTel** (`plugins/dev/scripts/orch-monitor/lib/webhook-events.ts` for `github.*`/`linear.*`;
     `catalyst-comms send` for `comms.message.posted`): `{ts, attributes, body, resource}`.
+  - **Superset (CTL-1795, phase 1)** — every v1 emit site now writes ONE line carrying BOTH the
+    top-level `event` and a full v2 `attributes`/`body`/`resource` block, built through the shared
+    builders `execution-core/lib/canonical-event.mjs` (`buildDualEnvelopeLine`) and
+    `lib/canonical-event.sh` (`canonical_dual_envelope_line`). Measured motivation: 159,009 v1
+    events across **31 distinct names** in 2026-08 were invisible to any consumer reading
+    `attributes["event.name"]`. It is **one** line, not two, because `getEventName` reads
+    `event.event` FIRST (`broker/event-name.mjs:16`) — a v1 line plus a v2 twin would be routed
+    twice, double-applying `handleAgentCheckin`'s `upsertAgent`/`_autoRegisterPrLifecycle`. Flat
+    fields are promoted to attributes by the same map otel-forward's `normalizeFlatEvent` uses, so
+    the OTLP attribute set is unchanged; unmapped fields land in `body.payload`; every v1 key also
+    survives verbatim. Phase 1 is **additive** — removing v1 emission and narrowing
+    `catalyst-events tail`/`wait-for` to v2 is an explicit follow-up one release later.
+  - **Declared asymmetry (jq-less hosts).** The bash v2 builder is a jq program, so two bash
+    fallbacks — `catalyst-state.sh`'s jq-less branch and `emit-worker-status-change.sh`'s
+    missing-`$STATE_SCRIPT` branch, both of which exist *because* the canonical path is
+    unavailable — emit v1 only; no jq-free JSON assembler is written for them. Same posture as the
+    jq-less deployment-mode resolver above: the divergence is made observable rather than silent,
+    via a `CATALYST_EVENT_ENVELOPE_V1_ONLY` breadcrumb plus one stderr line per process
+    (`canonical_note_v1_only`) — stderr because a separate CLI process cannot hand an exported var
+    back, and because it rides the Alloy-shipped daemon `.log` rather than the event log whose
+    degradation it reports.
   - Consumers: `catalyst-events tail` (stream), `catalyst-events wait-for` (blocking single-event).
     Both shapes handled. See `website/src/content/docs/observability/catalyst-events.md`.
 - **history/** — full snapshots archived on completion/failure/stale.

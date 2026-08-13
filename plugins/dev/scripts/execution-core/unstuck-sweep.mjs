@@ -18,6 +18,8 @@ import { spawnSync } from "node:child_process";
 import { log, getEventLogPath } from "./config.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "./unstuck-sweep-event-types.mjs";
 import { isTicketKey } from "./ticket-key.mjs";
+// CTL-1795: shared v1→superset envelope serializer (with its degrade-to-v1 fallback).
+import { dualEnvelopeOrV1 } from "./reap-intent.mjs";
 
 export { UNSTUCK_SWEEP_EVENT_TYPES };
 
@@ -48,7 +50,10 @@ export async function emitUnstuckEvent(eventType, fields = {}) {
     if (v === undefined || v === null || v === "") continue;
     payload[k] = v;
   }
-  const line = JSON.stringify(payload) + "\n";
+  // CTL-1795: the sweep's own hand-rolled v1 envelope — a THIRD independent copy of the shape.
+  // Same superset line, same degrade-to-v1 fallback as the reap-intent emitter, so an envelope
+  // build can never cost the sweep a verdict.
+  const line = dualEnvelopeOrV1(payload, eventType);
   const logPath = getEventLogPath();
   try {
     mkdirSync(dirname(logPath), { recursive: true });
