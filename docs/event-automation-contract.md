@@ -344,11 +344,45 @@ attribute-carrying _subset_, not the family total.
 
 ⛔ **The 531 are being destroyed off-machine today, before any migration.** They are
 `phase.rescue.escalated.<T>` (523), `.dispatched.<T>` (5), `.dispatch-failed.<T>` (3).
-`otel-forward` builds the OTLP body from `ev.body?.message ?? ev.attributes?.["event.name"] ?? ""`
-and the attribute array from `ev.attributes ?? {}` (`otel-forward/lib/destinations/otlp.ts:74-75`).
-A v3 event has **neither** — so it forwards with an empty body and an empty attribute set.
-Off-machine, those 531 events have no name and no ticket. This is not a migration cost to be
-weighed; it is a standing bug the migration merely surfaced.
+⚠ **Mechanism corrected 2026-08-13 (CTL-1817, PR #3325 round-1 review).** An earlier revision of
+this paragraph said a v3 event "forwards with an empty body and an empty attribute set", reasoning
+from the OTLP mapper (`otel-forward/lib/destinations/otlp.ts`), which builds the body from
+`ev.body?.message ?? ev.attributes?.["event.name"] ?? ""` and the attributes from
+`ev.attributes ?? {}` — neither of which a v3 event satisfies. **That is not what happens: a v3 event
+never reaches the mapper.**
+
+**One gate accounts for all 531:** `otel-forward/lib/tail.ts` `shouldForward` accepts only
+`attributes` | a string `event` | pino (numeric `level` + string `msg`). A v3 line matches none, so
+`readNewLines` never hands it to `processLine` — it is filtered out **at the tailer** and never read
+into the pipeline at all.
+
+(A *second*, independent guard exists downstream — `otel-forward/index.ts` `processLine` drops any
+record with no `attributes` — but it is **unreachable for v3** and discards none of the 531. It
+governs only records that already passed the tailer. It is named here because it is the other place
+a record can vanish without a trace, **not** because it is a second step in this loss.)
+
+So the 531 do not arrive off-machine degraded — **they never leave the host.** The loss is total, and
+it was invisible because an unrecognized line is indistinguishable from no line, which is why a month
+of it looked like silence rather than like corruption. This is a standing bug the migration merely
+surfaced, not a migration cost to be weighed — and it is worse than the original text claimed.
+
+The lesson generalizes past this one shape: **reasoning from the mapper alone skips the filters in
+front of it.** A detector placed at the mapper cannot observe what a filter already threw away —
+which is exactly the mistake the first fix made.
+
+✅ **Status of the fix: both gates now record their drops** (CTL-1817, PR #3325, merged 2026-08-13).
+`noteUnrecognizedLine` reports at the tailer and a `skippedNoAttributes` counter reports at
+`processLine`; both count every occurrence and warn sparsely (once per distinct event name, then on
+exponentially-spaced totals), on the pino `~/catalyst/otel-forward.log` that Alloy ships
+**independently of otel-forward's own OTLP egress** — an alarm riding the pipe it measures reads
+clean during exactly the outage it exists to detect. Both producers of the v3 shape were fixed in the
+same PR, so the counters should sit at zero; any non-zero value is itself the alarm.
+
+⚠ One caveat, tracked as **CTL-1823**: the separate *mapper*-level degenerate counter
+(`degenerateRecordTotal`) is incremented inside `buildOtlpPayload`, which runs once per send
+**attempt** — so under OTLP retries or a DLQ replay it counts the same record more than once. It is
+an attempt count, not a record count, precisely when the backend is in trouble. The two **gate**
+counters above sit on the tail path, run once per line, and do not have this defect.
 
 **Four producers put an identifier in the name and nowhere else.** All four must gain an attribute
 **before** any suffix is stripped, or the migration destroys information:
@@ -445,8 +479,10 @@ label — 1,476 names cost zero index cardinality and zero Prometheus series. If
 name count, the honest answer would be "don't bother." It does not. It rests on three measured
 facts:
 
-1. **Live data loss** — 531 events/month forwarded with an empty body and no attributes
-   (`otlp.ts:74-75`). Fixed by Step 0 alone.
+1. **Live data loss** — 531 events/month **discarded before they leave the host**, all of them at
+   `tail.ts`'s `shouldForward` filter (see §4.1b — NOT forwarded degenerately at `otlp.ts`, the
+   original and corrected reading, and NOT at `index.ts`'s no-attributes drop, which these records
+   never reach). Fixed by Step 0 alone.
 2. **Proven grammar drift** — the phase grammar exists in **four** hand-copies, and one of them has
    _already_ silently diverged in production:
 
