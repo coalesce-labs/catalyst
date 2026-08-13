@@ -578,10 +578,15 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
     // the advancement audit can attribute it.
     sig.assertedBy = ASSERTED_BY.SDK_ABANDONED;
     sig.updatedAt = ts;
-    // DELIBERATELY NO `completedAt`. computeLastPhaseAdvanceTs (signal-reader.mjs:85)
-    // reads `completedAt` on any TERMINAL status as a phase ADVANCE and publishes it
-    // as cross-host liveness — an abandoned phase advanced nothing, and claiming
-    // otherwise would feed the liveness plane a fabrication of a different shape.
+    // DELIBERATELY NO `completedAt`. computeLastPhaseAdvanceTs (signal-reader.mjs)
+    // reads it on any TERMINAL status as a phase ADVANCE and publishes it as
+    // cross-host liveness — an abandoned phase advanced nothing.
+    //
+    // Omitting it here is NECESSARY BUT NOT SUFFICIENT (Codex #3310 P2): that reader's
+    // value chain falls back to `updatedAt`, which the line above necessarily sets. The
+    // load-bearing half of this guard therefore lives in the READER, which now skips
+    // any signal carrying `outcome: "abandoned"`. Both halves are required; neither
+    // alone works.
     sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), failed: ts };
     const tmp = `${signalFile}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(sig));

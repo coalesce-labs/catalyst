@@ -4,7 +4,7 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test sdk-run-phase-agent.test.mjs
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { isTicketInFlight, deriveAdvancement } from "./scheduler.mjs";
 import { PHASE_EVENT_PATTERN } from "../broker/namespace-contract.mjs";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
@@ -1146,7 +1146,12 @@ describe("flipSignalAbandonedOnUndeclaredExit — CTL-1410 Phase A / CTL-1790 tr
     const dir = mkdtempSync(join(tmpdir(), "sdk-flip-"));
     const signalFile = join(dir, "phase-triage.json");
     writeFileSync(signalFile, JSON.stringify({ status: startStatus, ticket: "CTL-1", phase: "triage" }));
-    flipSignalAbandonedOnUndeclaredExit(signalFile);
+    // Codex #3310 P2: NEVER let a unit test reach defaultAppendEventLog — it appends to
+    // the REAL fleet log at getEventLogPath(). VERIFIED by probe: an un-injected call
+    // wrote `phase.triage.abandoned.CTL-1` into this machine's live
+    // ~/catalyst/events/2026-08.jsonl. A test that pollutes the event log can also WAKE
+    // the local dogfooding installation.
+    flipSignalAbandonedOnUndeclaredExit(signalFile, undefined, { appendEventLog: () => {} });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
     return after;
@@ -1190,7 +1195,7 @@ describe("flipSignalAbandonedOnUndeclaredExit — CTL-1410 Phase A / CTL-1790 tr
       signalFile,
       JSON.stringify({ status: "dispatched", ticket: "CTL-1", phase: "implement", generation: 6 })
     );
-    flipSignalAbandonedOnUndeclaredExit(signalFile, 5);
+    flipSignalAbandonedOnUndeclaredExit(signalFile, 5, { appendEventLog: () => {} });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
     expect(after.status).toBe("dispatched");
@@ -1221,9 +1226,10 @@ describe("flipSignalAbandonedOnUndeclaredExit — CTL-1410 Phase A / CTL-1790 tr
 
   test("missing / empty / null signalFile never throws", () => {
     expect(() => {
-      flipSignalAbandonedOnUndeclaredExit("/nonexistent/dir/sig.json");
-      flipSignalAbandonedOnUndeclaredExit("");
-      flipSignalAbandonedOnUndeclaredExit(null);
+      const sink = { appendEventLog: () => {} };
+      flipSignalAbandonedOnUndeclaredExit("/nonexistent/dir/sig.json", undefined, sink);
+      flipSignalAbandonedOnUndeclaredExit("", undefined, sink);
+      flipSignalAbandonedOnUndeclaredExit(null, undefined, sink);
     }).not.toThrow();
   });
 
@@ -1235,7 +1241,7 @@ describe("flipSignalAbandonedOnUndeclaredExit — CTL-1410 Phase A / CTL-1790 tr
     const sig = { status: "dispatched", ticket: "CTL-1", phase: "implement" };
     if (sigGen !== undefined) sig.generation = sigGen;
     writeFileSync(signalFile, JSON.stringify(sig));
-    flipSignalAbandonedOnUndeclaredExit(signalFile, mine);
+    flipSignalAbandonedOnUndeclaredExit(signalFile, mine, { appendEventLog: () => {} });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
     return after.status;
@@ -1267,6 +1273,26 @@ describe("flipSignalAbandonedOnUndeclaredExit — CTL-1410 Phase A / CTL-1790 tr
 });
 
 describe("sdkRunPhaseAgent — CTL-1410 Phase A / CTL-1790 (a clean exit with no declaration is abandonment)", () => {
+  // Codex #3310 P2: these drive the REAL call site, which uses defaultAppendEventLog —
+  // and that appends to getEventLogPath(), i.e. the machine's LIVE fleet event log.
+  // VERIFIED by probe: an un-redirected call wrote `phase.triage.abandoned.CTL-1` into
+  // this machine's real ~/catalyst/events/2026-08.jsonl. Redirect CATALYST_DIR for the
+  // whole block (getEventLogPath re-resolves per call — same technique as the CTL-1488
+  // test below) so a unit test can neither pollute the log nor WAKE the local
+  // dogfooding installation.
+  let prevCatalystDir;
+  let evDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    evDir = mkdtempSync(join(tmpdir(), "sdk-abandon-evdir-"));
+    process.env.CATALYST_DIR = evDir;
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(evDir, { recursive: true, force: true });
+  });
+
   test("success + signal still 'dispatched' → abandoned, NOT done (end to end)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
     const signalFile = join(dir, "phase-triage.json");
@@ -2046,7 +2072,9 @@ describe("CTL-1790 — the written terminal is recognized by the live predicates
       signalFile,
       JSON.stringify({ status: "dispatched", ticket: "CTL-1", phase: "implement" })
     );
-    flipSignalAbandonedOnUndeclaredExit(signalFile, undefined, { ticket: "CTL-1", phase: "implement" });
+    flipSignalAbandonedOnUndeclaredExit(signalFile, undefined, {
+      ticket: "CTL-1", phase: "implement", appendEventLog: () => {},
+    });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
     return after;
