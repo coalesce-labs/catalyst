@@ -10,12 +10,15 @@ up uniformly.
 - **Does not import execution-core's runtime** — it is a separate process with its own
   config, envelope builder, and emit transports. There is exactly **one** exception, and
   it is a pure `node:*`-only leaf carrying data the agent must not have a second copy of:
-  `execution-core/checkout-sync.mjs`'s `resolveExecutingRoots` (CTL-1808), the enumeration
+  `execution-core/checkout-sync.mjs`'s `classifyExecutingRoots` (CTL-1808), the enumeration
   of checkouts this host runs code from. The currency gauge below measures that set, and a
   second enumeration written here would drift from the one the sync pass acts on. Nothing
   in that leaf reaches `execution-core/config.mjs` or its `bun:sqlite` graph, so the agent
-  still loads under bare `node` with no `node_modules` (guarded by the import-graph check
-  in `execution-core-tests.yml`).
+  still loads under bare `node` with no `node_modules` — guarded by
+  `check-import-graph.mjs`, a required step in `execution-core-tests.yml`, which imports
+  every agent module under plain `node` (not a bundler: `bun build --target=node` resolves
+  `bun:*` as an external and exits 0 on a graph `node` cannot load) and separately audits
+  the source for any non-`node:` specifier.
 
 ## Domains
 
@@ -40,15 +43,29 @@ version). The sampler modules (`usage.mjs` + `accounts.mjs`, `host.mjs`,
 | metric                            | shape                                                                       |
 | --------------------------------- | --------------------------------------------------------------------------- |
 | `catalyst.build.info`             | always `1`; label `vcs.ref.head.revision` = the **agent's own** commit       |
-| `catalyst.vcs.commits_behind`     | **one series per executing checkout**, label `catalyst.checkout.root` = path |
-| `catalyst.vcs.commits_behind.max` | one value: the **stalest** checkout on this host                            |
+| `catalyst.vcs.commits_behind`     | **one series per executing Catalyst checkout**, label `catalyst.checkout.root` = path |
+| `catalyst.vcs.commits_behind.max` | one value: the **stalest** Catalyst checkout on this host                    |
 
 `commits_behind` is measured once per checkout this host actually executes code
-from, resolved through CTL-1808's `resolveExecutingRoots`:
+from, resolved through CTL-1808's `classifyExecutingRoots`:
 
 ```
 registry repoRoots  ∪  this checkout  ∪  Layer-2 catalyst.checkouts[]  ∪  <CATALYST_DIR>/plugin-source
 ```
+
+**Which of those roots (CTL-1825 round 2).** That enumeration also carries the
+enrolled **product** repos the CTL-1808 sync pass fast-forwards, and those are a
+different repository's distance from a different `main`. Measured on the laptop,
+nine of eleven roots were product repos and the stalest — `personal-os`, 58 behind
+its own main — became this host's reported maximum, so a metric named for Catalyst
+currency reported 58 for a personal repository and the pre-existing
+`max by (host_name)(catalyst_vcs_commits_behind) > 20` alert fires on it. So each
+root is classified and **only the `catalyst` role is measured**: the agent's own
+tree and `<CATALYST_DIR>/plugin-source` (Catalyst by construction), plus any
+enrolled or Layer-2-declared root carrying `.claude-plugin/marketplace.json` — the
+Catalyst repo is itself enrolled (ADR-028), so the exclusion has to be by what a
+tree IS, not by which source named it. One enumeration, two views: the sync pass
+still fast-forwards every root.
 
 **Why not just this checkout (CTL-1825).** It used to be `git -C <the directory
 build-info.mjs lives in>`, which answers "is the tree the agent lives in

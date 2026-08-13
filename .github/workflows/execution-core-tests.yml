@@ -512,10 +512,10 @@ jobs:
         # them: the code-currency gauge measured the wrong tree and read a healthy
         # 0 for a year, and no test would have failed if it had regressed either.
         #
-        # The whole suite runs: measured 270 pass / 0 fail on this branch and
-        # 251 / 0 at the merge base — the delta is exactly the +19 added here, so
+        # The whole suite runs: measured 273 pass / 0 fail on this branch and
+        # 251 / 0 at the merge base — the delta is exactly the tests added here, so
         # there is no pre-existing red to import. It needs no install: the agent is
-        # `node:*`-only by design, which the build-resolution check above enforces.
+        # `node:*`-only by design, which the import-graph check below enforces.
         working-directory: plugins/dev/scripts/catalyst-agent
         run: bun test
 
@@ -523,10 +523,23 @@ jobs:
         # The agent runs under plain `node` from a launchd plist with NO
         # node_modules. CTL-1825 gave it its one execution-core import
         # (checkout-sync.mjs's root enumeration); this step fails if that leaf ever
-        # grows a dependency the agent's runtime cannot load — the same guard the
-        # cloud-sync / catalyst-linear steps above apply to their entry points.
+        # grows a dependency the agent's runtime cannot load.
+        #
+        # Run with `node`, NOT `bun`, and NOT via a bundler. This step first shipped
+        # as `bun build --target=node catalyst-agent.mjs --outfile=/dev/null`, which
+        # CANNOT FAIL for the class it claims to catch — measured: with a
+        # side-effectful `import { Database } from "bun:sqlite"` added to
+        # build-info.mjs that command exits 0 (a bundler resolves `bun:*` as an
+        # external), while `node` on the same tree dies with
+        # ERR_UNSUPPORTED_ESM_URL_SCHEME. The instrument has to be the runtime the
+        # agent actually runs under. `check-import-graph.mjs` imports every agent
+        # module under bare node — not just the entry, since the four domain
+        # samplers are reached only through lazy `import()` — and separately audits
+        # the source graph so a stray node_modules on the runner cannot let a bare
+        # npm specifier pass here and fail on a launchd tick. Its own non-vacuity
+        # gates fail it closed if the enumeration ever goes empty.
         working-directory: plugins/dev/scripts/catalyst-agent
-        run: bun build --target=node catalyst-agent.mjs --outfile=/dev/null
+        run: node check-import-graph.mjs
 
       - name: otel-forward tests (CTL-1529 round 3)
         # otel-forward had NO CI coverage at all before this

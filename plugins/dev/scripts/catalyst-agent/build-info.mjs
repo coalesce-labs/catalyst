@@ -32,11 +32,24 @@
 // it is affirmative evidence of currency where none exists.
 //
 // So the measurement is now taken once per EXECUTING ROOT, and the roots come
-// from CTL-1808's `resolveExecutingRoots` — the same enumeration the checkout-sync
+// from CTL-1808's `classifyExecutingRoots` — the same enumeration the checkout-sync
 // pass fast-forwards. Deliberately one enumeration and not two: a root the syncer
 // keeps current that the gauge cannot see (or the reverse) is the same silent gap
 // in a new place. The revision/version signals stay MODULE_DIR-scoped, correctly
 // — those describe the running artifact, which IS this tree.
+//
+// ─── …and WHICH of those roots the gauge answers for ──────────────────────────
+//
+// One enumeration, two VIEWS. The syncer fast-forwards every enumerated root,
+// including sibling and product repos — that breadth is the point of CTL-1808. This
+// gauge measures only the roots whose role is `catalyst`, because its name, and the
+// alert that reads it, are about CATALYST code currency. Measured on the laptop
+// 2026-08-13, nine of eleven enumerated roots were enrolled PRODUCT repos, and the
+// stalest — `personal-os`, 58 behind its own main — was the maximum, so
+// `catalyst.vcs.commits_behind.max` reported 58 for a personal repository and the
+// pre-existing `max by (host_name)(catalyst_vcs_commits_behind) > 20` alert fires
+// on it. That is a number that does not mean what its name says, which is the same
+// defect family as the false zero above, just pointing the other way.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -45,7 +58,7 @@ import { execFileSync } from "node:child_process";
 // node:*-only leaf carrying the checkout enumeration. It pulls in no config, no
 // emit transport, and no npm dependency, so the agent still runs unchanged under
 // bare `node` with no node_modules.
-import { resolveExecutingRoots } from "../execution-core/checkout-sync.mjs";
+import { classifyExecutingRoots, resolveExecutingRoots, CHECKOUT_ROLE } from "../execution-core/checkout-sync.mjs";
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -102,7 +115,28 @@ export function executingRoots(opts) {
 }
 
 /**
- * commitsBehindByRoot — how many commits each executing root is behind origin/main,
+ * catalystRoots — the `catalyst`-role subset of the enumeration above: the checkouts of
+ * THIS repository that this host executes (its own tree, `<CATALYST_DIR>/plugin-source`, and
+ * any enrolled or Layer-2-declared root carrying the Catalyst marker). This — not
+ * `executingRoots` — is what the currency gauge measures, and it is the default `roots` for
+ * every function below.
+ *
+ * Excluding the enrolled PRODUCT repos is a scope decision, argued in the header: they are
+ * a different repository's distance from a different `main`, so folding them into a metric
+ * named `catalyst.vcs.commits_behind` makes its max mean something other than its name. It
+ * also stops the agent issuing a `git fetch` against nine unrelated repositories on every
+ * launchd tick, which is a side effect a telemetry sampler has no business having.
+ *
+ * NOT cached, for the same reason `executingRoots` is not.
+ */
+export function catalystRoots(opts) {
+  return classifyExecutingRoots(opts)
+    .filter((c) => c.role === CHECKOUT_ROLE.CATALYST)
+    .map((c) => c.root);
+}
+
+/**
+ * commitsBehindByRoot — how many commits each Catalyst checkout is behind origin/main,
  * ONE measurement per root. Fetches each root first (network) unless {fetch:false}.
  *
  * Returns `[{root, behind}]`, `behind` a non-negative integer or **null** when git /
@@ -110,11 +144,13 @@ export function executingRoots(opts) {
  * rather than collapsed: an unreadable checkout must drop its own series, not
  * contribute a 0 that reads as "current", and not suppress the roots that DID measure.
  *
- * COST — this went from one fetch per tick to one per root. Measured on the laptop
- * (11 roots, real network): **8.6s**, against a 300s StartInterval. The worst case is
- * bounded by `roots × 2 × 15s` (the two git timeouts) with no network at all, and even
- * then nothing piles up: launchd will not start a second `--once` of the same label
- * while one is running, so a slow tick costs a sample, never a process.
+ * COST — this went from one fetch per tick to one per root, and the `catalyst`-role
+ * scoping brings it back down: measured on the laptop, 11 enumerated roots (real
+ * network) took **8.6s**, of which nine were product repos the gauge no longer touches.
+ * Against a 300s StartInterval either is affordable; the worst case is bounded by
+ * `roots × 2 × 15s` (the two git timeouts) with no network at all, and even then nothing
+ * piles up: launchd will not start a second `--once` of the same label while one is
+ * running, so a slow tick costs a sample, never a process.
  *
  * Deliberately NO per-sweep time budget. A budget would have to cut the sweep short
  * somewhere, and the enumeration puts `<CATALYST_DIR>/plugin-source` LAST — so the one
@@ -122,7 +158,7 @@ export function executingRoots(opts) {
  * A blind spot in the same place, reintroduced by the guard against a cost that measures
  * 8.6s, is a bad trade.
  */
-export function commitsBehindByRoot({ fetch = true, roots = executingRoots(), gitIn = gitAt } = {}) {
+export function commitsBehindByRoot({ fetch = true, roots = catalystRoots(), gitIn = gitAt } = {}) {
   return (roots ?? []).map((root) => {
     if (fetch) gitIn(root, ["fetch", "--quiet", "origin", "main"]);
     const n = gitIn(root, ["rev-list", "--count", "HEAD..origin/main"]);
@@ -133,10 +169,10 @@ export function commitsBehindByRoot({ fetch = true, roots = executingRoots(), gi
 
 /**
  * commitsBehindMain — the host's single code-currency number: the MAXIMUM commits-behind
- * across every executing root. Never the agent's own root, and never an average — a fleet
- * is only as current as its stalest tree, and any aggregate that a current root can pull
- * down is the same false-zero this ticket removed. Returns null when NO root resolved
- * (omit the gauge rather than lie).
+ * across every Catalyst checkout it executes. Never the agent's own root alone, and never
+ * an average — a fleet is only as current as its stalest tree, and any aggregate that a
+ * current root can pull down is the same false-zero this ticket removed. Returns null when
+ * NO root resolved (omit the gauge rather than lie).
  */
 export function commitsBehindMain(opts = {}) {
   const measured = commitsBehindByRoot(opts)

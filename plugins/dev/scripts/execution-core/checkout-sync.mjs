@@ -183,9 +183,12 @@ export function resolveAllowlist({ registryRoots = [], selfRoot = null, configur
 // follows. It lives HERE, next to the fold, because the moment a second consumer needs
 // "which checkouts does this host run?" it either imports this or writes its own, and two
 // readers of the same question drift. CTL-1825's currency gauge is that second consumer:
-// it measures exactly this set, so a root that the sync pass would fast-forward is also a
-// root the gauge reports on — one enumeration, two uses, no chance of one covering a tree
-// the other cannot see.
+// it measures this set, so a root the sync pass would fast-forward is a root the gauge can
+// see — one enumeration, two uses, no chance of one covering a tree the other cannot.
+//
+// The two consumers take DIFFERENT VIEWS of the one enumeration, not different enumerations:
+// the sync pass acts on every root, the gauge measures the `catalyst` role only. See
+// `classifyExecutingRoots` below for why, and for the measurement that forced the split.
 
 // defaultReadJson — parse a JSON file, or null for absent/unreadable/malformed. Total:
 // an operator's typo in Layer-2 must not take out the enumeration (and with it every
@@ -217,6 +220,63 @@ function defaultSelfRoot(exists) {
   }
 }
 
+// ── Role: a Catalyst checkout, or an enrolled project repo? ────────────────────
+//
+// CTL-1825 round 2. The enumeration answers "which checkouts does this host run?", and the
+// SYNC pass wants every one of them — the 2026-08-12 ADR incident was `catalyst-cloud`, a
+// sibling, so a catalyst-only subscriber would have caught none of the four incidents. The
+// currency GAUGE asks a narrower question over the same set: "is the CATALYST code this host
+// executes current?"
+//
+// That difference is not academic. Measured on the laptop, 2026-08-13: of eleven enumerated
+// roots, NINE are enrolled product repos, and the stalest of them — `personal-os`, 58 commits
+// behind its own main — was the maximum. So `catalyst.vcs.commits_behind.max` reported 58 for
+// a personal repository, and the pre-existing Grafana alert
+// `max by (host_name)(catalyst_vcs_commits_behind) > 20` fires on it. A gauge named for
+// Catalyst currency that is driven by an unrelated enrolled project is the same defect class
+// as the false zero this ticket removed: the number does not mean what its name says.
+//
+// So each root carries a ROLE, and the gauge measures the `catalyst` partition. The role is
+// decided by what the tree IS, never by which source named it — the registry legitimately
+// enrols this very repository (ADR-028's CAT registration), and Layer-2 `catalyst.checkouts[]`
+// is a config NAMESPACE rather than a claim about the repo (its own documented example is
+// `catalyst-cloud`, a sibling).
+export const CHECKOUT_ROLE = Object.freeze({ CATALYST: "catalyst", PROJECT: "project" });
+
+// The marker that identifies a checkout of THIS repository: the marketplace manifest every
+// Catalyst checkout carries at its root and no other repo on this fleet does. Verified
+// against the live registry 2026-08-13 — of the nine enrolled repoRoots plus
+// `~/catalyst/plugin-source`, exactly two carry it (the Catalyst repo and plugin-source) and
+// eight do not, which is the partition wanted. A file, not a directory: a stray empty
+// `.claude-plugin/` must not promote a product repo into the currency gauge.
+export const CATALYST_CHECKOUT_MARKER = join(".claude-plugin", "marketplace.json");
+
+/**
+ * classifyExecutingRoots — the enumeration below, each root tagged with its CHECKOUT_ROLE.
+ *
+ * Two roots are `catalyst` STRUCTURALLY, marker or no marker, because excluding either is
+ * precisely the CTL-1825 defect: `selfRoot` (this module IS Catalyst code, so the tree it was
+ * loaded from is a Catalyst checkout by construction) and `<CATALYST_DIR>/plugin-source` (the
+ * tree every daemon on a worker node runs FROM — the one root this whole ticket exists to
+ * measure). Every other root is promoted only by the marker.
+ *
+ * The fail direction is deliberate and asymmetric: an unrecognised tree that really is a
+ * Catalyst checkout costs one extra measured series and a slightly pessimistic max, while a
+ * Catalyst checkout wrongly excluded is a currency gauge that cannot see a stale root — which
+ * is the entire ticket. Misclassify toward measuring.
+ */
+export function classifyExecutingRoots(opts = {}) {
+  const { exists = existsSync } = opts;
+  const { roots, structuralCatalyst } = collectExecutingRoots(opts);
+  return roots.map((root) => ({
+    root,
+    role:
+      structuralCatalyst.has(root) || exists(join(root, CATALYST_CHECKOUT_MARKER))
+        ? CHECKOUT_ROLE.CATALYST
+        : CHECKOUT_ROLE.PROJECT,
+  }));
+}
+
 /**
  * resolveExecutingRoots — every checkout this host actually executes code from, from four
  * DECLARED sources, in order:
@@ -237,8 +297,18 @@ function defaultSelfRoot(exists) {
  * `requireExists` (default true) drops a root that is not on this host: a registry copied
  * between hosts routinely names a repoRoot that exists on neither (CTL-854), and measuring
  * it costs a git timeout to learn nothing. Set false to inspect the undiluted enumeration.
+ *
+ * The path-only view of `classifyExecutingRoots` — the sync pass acts on every root
+ * regardless of role, so it takes this one.
  */
-export function resolveExecutingRoots({
+export function resolveExecutingRoots(opts = {}) {
+  return collectExecutingRoots(opts).roots;
+}
+
+// collectExecutingRoots — the shared collection both views above are built from. Returns the
+// folded root list plus the set of roots that are Catalyst checkouts by construction rather
+// than by probe, so the classifier does not have to re-derive which source named what.
+function collectExecutingRoots({
   env = process.env,
   readJson = defaultReadJson,
   // `exists` is destructured BEFORE `selfRoot` so the default below can thread it —
@@ -277,10 +347,19 @@ export function resolveExecutingRoots({
 
   // 4. plugin-source, always last so an explicit declaration of the same path keeps its
   // earlier position (resolveAllowlist is order-stable and first-wins).
-  configuredRoots.push(join(catalystDir, "plugin-source"));
+  const pluginSource = join(catalystDir, "plugin-source");
+  configuredRoots.push(pluginSource);
 
   const roots = resolveAllowlist({ registryRoots, selfRoot, configuredRoots });
-  return requireExists ? roots.filter((r) => exists(r)) : roots;
+  // Normalised the SAME way resolveAllowlist normalises, or `/cat/plugin-source/` in the
+  // config and `/cat/plugin-source` in the fold would compare unequal and the one root this
+  // ticket exists to measure would silently classify as a product repo.
+  const norm = (r) => String(r).replace(/\/+$/, "");
+  const structuralCatalyst = new Set([norm(pluginSource), ...(selfRoot ? [norm(selfRoot)] : [])]);
+  return {
+    roots: requireExists ? roots.filter((r) => exists(r)) : roots,
+    structuralCatalyst,
+  };
 }
 
 // ── The pass ──────────────────────────────────────────────────────────────────

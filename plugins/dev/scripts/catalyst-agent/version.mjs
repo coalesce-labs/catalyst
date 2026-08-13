@@ -10,7 +10,7 @@
 //                              — the classic *_build_info anchor; service.version
 //                                + host.name come from the shared resource.
 //   catalyst.vcs.commits_behind gauge=N — commits HEAD is behind origin/main,
-//                              ONE SERIES PER EXECUTING CHECKOUT, labelled
+//                              ONE SERIES PER EXECUTING CATALYST CHECKOUT, labelled
 //                              catalyst.checkout.root. Omitted when unresolvable.
 //   catalyst.vcs.commits_behind.max gauge=N — the host's single currency number:
 //                              the MAXIMUM across those roots.
@@ -31,6 +31,15 @@
 // a point with and without `catalyst.checkout.root` on one metric is two
 // conflicting series in Prometheus, and the sum of a gauge over roots is
 // meaningless anyway.
+//
+// Scope (CTL-1825 round 2). "Executing root" here means executing CATALYST
+// checkout — `build-info.mjs`'s `catalystRoots`, not the whole CTL-1808
+// enumeration. The enumeration also carries the enrolled PRODUCT repos the sync
+// pass fast-forwards, and on the laptop the stalest of those (`personal-os`, 58
+// behind its own main) became this host's reported maximum, firing an alert named
+// for Catalyst node currency on a personal repository. Both metrics below are
+// therefore Catalyst-checkout-scoped, which is what makes their names true and the
+// pre-existing `max by (host_name)(catalyst_vcs_commits_behind) > 20` alert correct.
 import { otlpMetric, emitMetrics } from "./emit.mjs";
 import { readAgentConfig, log } from "./config.mjs";
 import {
@@ -107,7 +116,7 @@ export async function sampleVersion({
       name: "catalyst.vcs.commits_behind",
       unit: "",
       description:
-        "Commits HEAD is behind origin/main for one executing checkout (0 = up to date with main); labelled by that checkout's path.",
+        "Commits HEAD is behind origin/main for one executing Catalyst checkout (0 = up to date with main); labelled by that checkout's path.",
       kind: "gauge",
       points: checkouts.map((c) => ({
         value: c.behind,
@@ -123,7 +132,7 @@ export async function sampleVersion({
       name: "catalyst.vcs.commits_behind.max",
       unit: "",
       description:
-        "Commits behind origin/main of the STALEST executing checkout on this host (the host's single code-currency number).",
+        "Commits behind origin/main of the STALEST executing Catalyst checkout on this host (the host's single code-currency number).",
       kind: "gauge",
       points: [{ value: behind, timeUnixNano: t }],
     }),
