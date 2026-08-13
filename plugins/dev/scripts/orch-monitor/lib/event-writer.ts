@@ -134,8 +134,21 @@ function isLegacyFirstLine(filePath: string, logger?: EventWriterLogger): boolea
     if (typeof parsed !== "object" || parsed === null) return true;
     return !("attributes" in parsed);
   } catch {
-    // unparseable — treat as legacy/garbage; rotate it out of the way
-    return true;
+    // CTL-1813: an UNPARSEABLE first line is NOT a legacy log, and must never move the live
+    // one. This used to return true — "garbage; rotate it out of the way" — which meant a
+    // single torn line retired the whole month: measured against this writer, one truncated
+    // first line rotated 349 live events aside, and because the destination is a fixed
+    // `.legacy` name, a second torn line one rotation later overwrote the only surviving
+    // copy. A torn line is precisely what CTL-1809's bash-append tearing produces above 1025
+    // bytes, so the two defects compose into unrecoverable loss.
+    //
+    // Rotation exists for the v1 -> canonical migration, which is a line that PARSES and
+    // lacks `attributes`. Damage is a different thing: refuse, keep every event in place,
+    // and say so — the same fail-safe the >1 MiB probe branch above already takes.
+    logger?.warn?.(
+      `[event-writer] first line of ${filePath} does not parse as JSON — NOT rotating (events preserved in place)`,
+    );
+    return false;
   }
 }
 
@@ -161,7 +174,19 @@ export class CanonicalEventWriter {
     if (this.rotated.has(filePath)) return;
     this.rotated.add(filePath);
     if (!isLegacyFirstLine(filePath, this.logger)) return;
-    const legacyPath = `${filePath}.legacy`;
+    // CTL-1813: a destination that CANNOT COLLIDE. A fixed `.legacy` is a rescue slot of
+    // depth one — the next rotation renames over it and the previous month's only surviving
+    // copy is gone. Measured: two consecutive rotations left the first month unrecoverable.
+    //
+    // A timestamp alone is not sufficient, and the test for this caught it: two rotations
+    // inside the same millisecond produce the same name and the collision returns. So probe
+    // for a free name and never rename onto an existing file — the whole point is that no
+    // rotation may destroy a previous one.
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    let legacyPath = `${filePath}.legacy.${stamp}`;
+    for (let n = 1; existsSync(legacyPath); n += 1) {
+      legacyPath = `${filePath}.legacy.${stamp}.${n}`;
+    }
     try {
       renameSync(filePath, legacyPath);
       this.logger.warn?.(

@@ -6,6 +6,15 @@ import { tmpdir } from "node:os";
 import { CanonicalEventWriter } from "../lib/event-writer";
 import type { CanonicalEvent } from "../lib/canonical-event";
 
+// CTL-1813: rotation destinations are now UNIQUE (a fixed `.legacy` is a rescue slot of
+// depth one — the next rotation clobbers the previous month's only copy). Tests therefore
+// look for ANY rotated sibling rather than one exact name.
+function rotatedFiles(dir: string, base: string): string[] {
+  if (!existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter((f) => f.startsWith(`${base}.legacy`));
+}
+
+
 // bytesRequested — total `length` argument across readSync calls. The spy's
 // call tuple resolves to the 3-arg `readSync(fd, buffer, opts)` overload under
 // TS, so index positionally through `unknown[]` rather than fighting the
@@ -124,9 +133,10 @@ describe("CanonicalEventWriter", () => {
     );
     const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
     await writer.append(sampleEvent());
-    const legacyPath = join(workdir, "2026-05.jsonl.legacy");
-    expect(existsSync(legacyPath)).toBe(true);
-    expect(readFileSync(legacyPath, "utf8")).toContain('"event":"session-started"');
+    // CTL-1813: the destination is now unique, so resolve it rather than assuming the name.
+    const rotated = rotatedFiles(workdir, "2026-05.jsonl");
+    expect(rotated.length).toBe(1);
+    expect(readFileSync(join(workdir, rotated[0]), "utf8")).toContain('"event":"session-started"');
 
     const newContents = readFileSync(target, "utf8")
       .split("\n")
@@ -211,14 +221,14 @@ describe("CanonicalEventWriter", () => {
         readFileSyncSpy.mockRestore();
       }
       // …and the semantics are unchanged: a canonical first line is not rotated.
-      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(false);
+      expect(rotatedFiles(workdir, "2026-05.jsonl").length).toBe(0);
     });
 
     it("still rotates a LEGACY first line in a multi-megabyte log (bounding did not blind it)", async () => {
       writeBigMonth(JSON.stringify({ ts: "2026-05-07T00:00:00Z", event: "session-started" }));
       const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
       await writer.append(sampleEvent());
-      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(true);
+      expect(rotatedFiles(workdir, "2026-05.jsonl").length).toBe(1);
     });
 
     it("FAIL-SAFE: an undecidably long first line does NOT rotate, and says so", async () => {
@@ -236,18 +246,63 @@ describe("CanonicalEventWriter", () => {
         logger: { warn: (m) => warnings.push(m) },
       });
       await writer.append(sampleEvent());
-      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(false);
+      expect(rotatedFiles(workdir, "2026-05.jsonl").length).toBe(0);
       expect(warnings.some((w) => w.includes("first-line probe exceeded"))).toBe(true);
       // The append still lands.
       expect(readFileSync(target(), "utf8")).toContain("github.pr.merged");
     });
 
-    it("a SHORT unparseable first line still rotates (the fail-safe is only for the cap)", async () => {
+    // ⛔ CTL-1813 REVERSES this case. It previously asserted that a short unparseable first
+    // line SHOULD rotate — "the fail-safe is only for the cap" — and that was a considered
+    // decision, not an oversight: CTL-1529 reasoned that an unreadably-large probe means "I
+    // could not look", while a short garbage line means the file really is junk.
+    //
+    // MEASUREMENT SINCE THEN FALSIFIES THAT PREMISE. CTL-1809 established that our own bash
+    // appends TEAR above 1025 bytes (macOS BUFSIZ), so a short unparseable first line is now
+    // a predictable product of the writer rather than evidence of a junk file. And the cost
+    // is total: driven against this writer, one torn first line rotated 349 live events
+    // aside, and a second torn line one rotation later overwrote the only surviving copy.
+    //
+    // CTL-1529's own words argue for the reversal — "'I could not read enough' must never be
+    // conflated with 'this is legacy', because only one of them destroys the path every
+    // reader is tailing." Damage is now in the first category too.
+    it("CTL-1813: a SHORT unparseable first line does NOT rotate — damage is not a legacy log", async () => {
       mkdirSync(workdir, { recursive: true });
       writeFileSync(target(), "not json at all\n");
-      const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
+      const warnings: string[] = [];
+      const writer = new CanonicalEventWriter({
+        baseDir: workdir,
+        now: () => fixed,
+        logger: { warn: (m) => warnings.push(m) },
+      });
       await writer.append(sampleEvent());
-      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(true);
+      expect(rotatedFiles(workdir, "2026-05.jsonl").length).toBe(0);
+      // Silence is a defect: refusing must be audible, or a damaged log looks healthy.
+      expect(warnings.some((w) => w.includes("does not parse as JSON"))).toBe(true);
+      // Every pre-existing byte is still there, and the append still lands.
+      const body = readFileSync(target(), "utf8");
+      expect(body).toContain("not json at all");
+      expect(body).toContain("github.pr.merged");
+    });
+
+    // THE LOAD-BEARING ONE: two rotations must not destroy the first month.
+    it("CTL-1813: a second legacy rotation cannot clobber the first", async () => {
+      mkdirSync(workdir, { recursive: true });
+      // Round 1 — a genuine v1 line (parses, no `attributes`) rotates.
+      writeFileSync(target(), JSON.stringify({ ts: "x", event: "MONTH_A" }) + "\n");
+      await new CanonicalEventWriter({ baseDir: workdir, now: () => fixed }).append(sampleEvent());
+      // Round 2 — a NEW writer (fresh in-process `rotated` set, as a restart would have) sees
+      // another legacy line and rotates again.
+      writeFileSync(target(), JSON.stringify({ ts: "y", event: "MONTH_B" }) + "\n");
+      await new CanonicalEventWriter({ baseDir: workdir, now: () => fixed }).append(sampleEvent());
+
+      const rotated = rotatedFiles(workdir, "2026-05.jsonl");
+      expect(rotated.length).toBe(2);
+      // With a fixed `.legacy` destination the second rename overwrote the first, and
+      // MONTH_A was unrecoverable. Both must survive.
+      const all = rotated.map((f) => readFileSync(join(workdir, f), "utf8")).join("");
+      expect(all).toContain("MONTH_A");
+      expect(all).toContain("MONTH_B");
     });
 
     it("preserves the old split().find() semantics: leading blank lines are skipped", async () => {
@@ -257,7 +312,7 @@ describe("CanonicalEventWriter", () => {
       await writer.append(sampleEvent());
       // The first NON-EMPTY line is legacy ⇒ rotate (a naive "bytes before the
       // first \n" probe would have seen "" and skipped rotation).
-      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(true);
+      expect(rotatedFiles(workdir, "2026-05.jsonl").length).toBe(1);
     });
 
     it("preserves the old semantics: a first line with NO trailing newline still classifies", async () => {
@@ -265,7 +320,7 @@ describe("CanonicalEventWriter", () => {
       writeFileSync(target(), JSON.stringify({ ts: "x", event: "legacy" })); // no "\n"
       const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
       await writer.append(sampleEvent());
-      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(true);
+      expect(rotatedFiles(workdir, "2026-05.jsonl").length).toBe(1);
     });
 
     it("an empty file is not legacy (nothing to rotate)", async () => {
@@ -273,7 +328,7 @@ describe("CanonicalEventWriter", () => {
       writeFileSync(target(), "");
       const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => fixed });
       await writer.append(sampleEvent());
-      expect(existsSync(join(workdir, "2026-05.jsonl.legacy"))).toBe(false);
+      expect(rotatedFiles(workdir, "2026-05.jsonl").length).toBe(0);
     });
   });
 
