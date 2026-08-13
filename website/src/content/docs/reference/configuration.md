@@ -780,6 +780,59 @@ authoritative acceptance check—an installed service alone is not proof of a us
 { "catalyst": { "linearReplica": { "mode": "on" } } }
 ```
 
+### Cloud-sync dependency skew (`CATALYST_CLOUD_SYNC_DEP_SKEW`, CTL-1659)
+
+Nothing in the fleet restarts the cloud-sync writer when a dependency changes. `plugin-refresh`
+deliberately stops at `restart_needed` ("restart stays a gated OPERATOR action"), and the broker's
+stack reload hard-codes three components — monitor, execution-core, otel-forward — of which
+cloud-sync is not one. On 2026-08-04 that meant a merged dependency fix installed correctly on both
+minis while the running writers kept serving the old modules for days, with nothing red anywhere: a
+merged fix that never restarts is indistinguishable from no fix.
+
+The writer therefore records what it **actually resolved** at boot (module paths, versions, entry
+digests, the root it was served from, and a SHA-256 of that root's `bun.lock`) to
+`~/catalyst/cloud-sync.deps.json`, re-hashes the lockfile on every heartbeat, and — in `enforce` —
+takes the **existing CTL-1508 self-heal exit** (self-heal breadcrumb with `reason:"dep-skew"` +
+bounded `close()` + **exit 1**) so launchd `KeepAlive` relaunches it on the new modules. It is not a
+new restart mechanism: launchd is the actuator, the heartbeat tick between applied frames is the safe
+exit point, and `health-responder.sh`'s existing `no-respawn` condition already nets a relaunch that
+never came. **Never exit 0** — that is the plist's "clean no-op, stay DOWN" contract, and a clean
+exit here would permanently stop the replica writer.
+
+| Key / env                                        | Purpose                                                                                                                                                                    | Default |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `CATALYST_CLOUD_SYNC_DEP_SKEW`                   | `off` (fully dormant — no boot record, no comparison), `shadow` (detect + emit the skew fields and a `would-restart` warning; mutate nothing), `enforce` (self-heal restart). Unrecognised values settle at `shadow`. | shadow  |
+| `CATALYST_CLOUD_SYNC_DEP_SKEW_TICKS`             | Consecutive mismatching heartbeats required before acting — `bun` rewrites `bun.lock` in place during an install, so one tick can catch it mid-write.                       | 2       |
+| `CATALYST_CLOUD_SYNC_DEP_SKEW_UPTIME_MS`         | Uptime floor: a just-relaunched writer never immediately exits again.                                                                                                       | 120000  |
+| `CATALYST_CLOUD_SYNC_DEP_SKEW_MAX_RESTARTS`      | Durable restart budget — the loop terminator for a lockfile being rewritten continuously by a broken install.                                                               | 1       |
+| `CATALYST_CLOUD_SYNC_DEP_SKEW_WINDOW_MS`         | The window that budget is measured over (`~/catalyst/cloud-sync.depskew.json`).                                                                                             | 21600000 |
+
+**The alarm is not `catalyst doctor`.** An on-demand-only check reproduces "invisible until a human
+looks" — the very property that made the incident last for days. The skew observation rides the
+writer's existing structured heartbeat line in **every** mode, so it is alertable in Loki from day
+one:
+
+```logql
+{service_name="catalyst.cloud-sync"} | json
+  | __error__=""
+  | `catalyst.cloud_sync.deps.skewed` = "true"
+```
+
+and the one-shot episode warning carries `"catalyst.alert": "replica_dep_skew"` with both short
+digests, the lockfile path, and the reason a restart was or was not taken.
+
+`catalyst doctor` grades the same boot record as the advisory `cloud-sync-skew` check, over three
+links that each fail **closed**: the record's pid must still name a live `cloud-sync.mjs` (a dead or
+recycled pid makes the whole comparison stale evidence); the boot lockfile digest is compared against
+the current one at the **recorded root** (the daemons run from `~/catalyst/plugin-source`, not your
+dev checkout); and the installed `node_modules` version is compared against the lockfile's resolution
+— which catches the partial install a restart does **not** fix. An absent boot record, an unreadable
+lockfile, or zero packages compared all report **WARN "skew unknown"**, never PASS.
+
+> **Rollout note.** A writer that has not restarted since this shipped has no boot record, so the
+> first `catalyst doctor` run after deploy legitimately reports `cloud-sync-skew` WARN "skew
+> unknown". It self-clears on the writer's next boot.
+
 ## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
 
 `catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from

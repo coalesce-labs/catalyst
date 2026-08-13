@@ -86,6 +86,78 @@ export function classifyStall({ rows = null, stalledMs = 0, stallMs = 600_000, s
   };
 }
 
+// --- CTL-1659 dep-skew (the second self-heal condition) ------------------------------
+// The writer already owns a self-heal exit (breadcrumb + bounded exit 1 → launchd
+// KeepAlive relaunch). CTL-1659 adds a SECOND predicate to that same path rather than a
+// fourth external restart mechanism: the broker's `decideStackReload` hard-codes three
+// components and cloud-sync is not one of them, and CTL-1502's daemon-watchdog measures
+// STUCKNESS (DLQ bytes, frozen forwarding lag) for a daemon that cannot help itself, with
+// its restart action hardwired to `catalyst-monitor.sh` argv. Dep-skew is neither: the
+// daemon is healthy and fully capable of self-action, so the whole actuator chain it needs
+// — launchd KeepAlive, a safe exit point between applied frames, health-responder.sh's
+// `no-respawn` net keyed on the very breadcrumb it writes — already exists here.
+//
+// NOTE the exit code. The ticket's own wording ("exit cleanly and let KeepAlive relaunch")
+// is mechanically WRONG for this daemon: the plist pairs KeepAlive={SuccessfulExit:false}
+// with an exit-0 contract meaning "clean no-op, stay DOWN". A literal clean exit would
+// permanently stop the replica writer. The self-heal path is exit 1, always.
+
+export const DEP_SKEW_MODES = new Set(["off", "shadow", "enforce"]);
+
+// resolveDepSkewMode — off (fully dormant) | shadow (detect + log would-restart, mutate
+// nothing) | enforce (self-heal exit). Anything unrecognized settles at the SHADOW default:
+// both non-enforce modes are non-acting, so a typo can never turn a knob into a restarter.
+export function resolveDepSkewMode(raw) {
+  const v = String(raw ?? "").trim().toLowerCase();
+  return DEP_SKEW_MODES.has(v) ? v : "shadow";
+}
+
+// classifyDepSkew — decide whether the writer's loaded modules have fallen behind the
+// root lockfile far enough to justify spending its self-heal exit. Same never-false-kill
+// discipline as classifyStall: every guard below removes a way to restart a healthy
+// writer, and an UNKNOWN input never asserts.
+//   • either digest unknown (a failed read, a pre-rollout boot record) → known:false and
+//     nothing asserts — a failed measurement must never look like a positive one;
+//   • a single-tick mismatch does not act: `sustainedTicks` consecutive observations are
+//     required so a lockfile caught MID-WRITE (bun rewrites it in place during an install)
+//     cannot trip the predicate;
+//   • an uptime floor keeps a just-relaunched writer from immediately exiting again;
+//   • the durable restart budget (classifyRestartBudget) is the loop terminator for the
+//     pathological case self-clearing cannot cover, and its refusal is NAMED in `reason`
+//     rather than silently folded into "no restart".
+// `wouldRestart` is the shadow-mode observation (what enforce WOULD have done); `restart`
+// is the only field the daemon acts on.
+export function classifyDepSkew({
+  bootLockHash = null,
+  currentLockHash = null,
+  consecutiveMismatches = 0,
+  sustainedTicks = 2,
+  uptimeMs = 0,
+  uptimeFloorMs = 120_000,
+  mode = "shadow",
+  budgetAllowed = true,
+  budgetReason = null,
+} = {}) {
+  const known =
+    typeof bootLockHash === "string" && bootLockHash.length > 0 &&
+    typeof currentLockHash === "string" && currentLockHash.length > 0;
+  const skewed = known && bootLockHash !== currentLockHash;
+  const sustained = skewed && Number(consecutiveMismatches) >= Number(sustainedTicks);
+  const agedIn = Number(uptimeMs) >= Number(uptimeFloorMs);
+  const acting = mode !== "off";
+  const wouldRestart = acting && sustained && agedIn;
+  const restart = wouldRestart && mode === "enforce" && budgetAllowed === true;
+  let reason = null;
+  if (!known) reason = "lockfile digest unknown on at least one side — not asserting skew";
+  else if (!skewed) reason = null;
+  else if (!sustained) reason = `mismatch observed ${consecutiveMismatches}/${sustainedTicks} consecutive ticks — holding (the lockfile may be mid-write)`;
+  else if (!agedIn) reason = `writer uptime ${Math.round(Number(uptimeMs) / 1000)}s is below the ${Math.round(Number(uptimeFloorMs) / 1000)}s floor — holding`;
+  else if (!acting) reason = "dep-skew mode is off";
+  else if (mode !== "enforce") reason = `dep-skew mode is ${mode} — would restart, mutating nothing`;
+  else if (budgetAllowed !== true) reason = budgetReason ?? "dep-skew restart budget exhausted — holding";
+  return { known, skewed, sustained, wouldRestart, restart, mode, reason };
+}
+
 // readReplicaCounts — run the single freshness query against a read-model SqlExecutor
 // (`replica.sql`). Returns { rows, maxUpdatedMs }, both null on any failure (fail-open:
 // a locked / mid-apply DB must never throw out of the writer's telemetry timer).
@@ -149,10 +221,20 @@ export function exitAfterClose({ closePromise, exitCode, timeoutMs = 3_000, exit
 // writeSelfHealBreadcrumb — atomic tmp+rename (the writeBootMarker idiom, recovery.mjs):
 // CTL-1509's responder reads this file from another process, so it must never observe a
 // torn write. fs deps injectable for tests.
-export function writeSelfHealBreadcrumb(path, { cursor = null, stalledMs = null, sdkStatus = null } = {}, { writeFile = writeFileSync, rename = renameSync, now = Date.now } = {}) {
+//
+// CTL-1659: an OPTIONAL `reason` discriminator. The dep-skew self-heal rides this exact
+// path — same breadcrumb, same bounded exit 1 — deliberately, so health-responder.sh's
+// `no-respawn` condition (keyed on `expectRestart:true`) nets a failed dep-skew relaunch
+// with no change at all. The key is emitted ONLY when a caller supplies one, so the
+// stall path's on-disk shape stays byte-identical (the responder parses this file with
+// jq, and its consumers were written against the CTL-1508 shape); an absent `reason`
+// therefore means "stall", the original and still-default condition.
+export function writeSelfHealBreadcrumb(path, { cursor = null, stalledMs = null, sdkStatus = null, reason = null } = {}, { writeFile = writeFileSync, rename = renameSync, now = Date.now } = {}) {
   try {
     const tmp = `${path}.tmp`;
-    writeFile(tmp, JSON.stringify({ ts: now(), cursor, stalledMs, sdkStatus, expectRestart: true }));
+    const record = { ts: now(), cursor, stalledMs, sdkStatus, expectRestart: true };
+    if (typeof reason === "string" && reason.length > 0) record.reason = reason;
+    writeFile(tmp, JSON.stringify(record));
     rename(tmp, path);
     return true;
   } catch {

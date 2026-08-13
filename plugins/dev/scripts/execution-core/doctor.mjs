@@ -55,6 +55,9 @@ import {
   getReplicaDbPath,
   readLinearReplica,
   resolveNodeCloudTokenEnv,
+  // CTL-1659: the cloud-sync loaded-dependency boot record — doctor grades it from
+  // another process, so it needs the same path the writer writes.
+  getCloudSyncDepsPath,
   // CTL-1393: cluster-secret freshness check — clone dir + the durable
   // change-detection marker the daemon's auto-refresh writes.
   getClusterRepoDir,
@@ -66,6 +69,9 @@ import {
   resolveDeploymentMode,
 } from "./config.mjs";
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
+// CTL-1659: the loaded-dependency skew comparator. A zero-import leaf (node:crypto/fs/path
+// only), like lib/secret-contract.mjs — safe under doctor's bare-Node runtime.
+import { evaluateDepSkew, readDepsBreadcrumb } from "./cloud-sync-deps.mjs";
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
 // CTL-1616 PR2: the shared secret-contract engine, imported DIRECTLY from the
@@ -3245,6 +3251,104 @@ export function checkCloudSync(deps = {}) {
   return checks;
 }
 
+// defaultProcessCommandForPid — the full argv of a live pid, or null. Used ONLY to prove
+// a recorded pid still names the program that wrote the record. `kill -0` would answer
+// "some process holds this pid", which on a recycled pid is a fresh-looking lie — the same
+// fail-closed identity discipline catalyst-monitor.sh applies to its pid files.
+function defaultProcessCommandForPid(pid) {
+  try {
+    const r = spawnSync("ps", ["-ww", "-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 5_000 });
+    if (r.error || r.status !== 0 || typeof r.stdout !== "string") return null;
+    const cmd = r.stdout.trim();
+    return cmd.length > 0 ? cmd : null;
+  } catch {
+    return null;
+  }
+}
+
+// checkCloudSyncSkew — CTL-1659. Is the RUNNING cloud-sync writer serving the modules the
+// current lockfile resolves? The measured incident (2026-08-04): a dependency fix landed
+// on main, the updater pulled it, the install succeeded, and the daemon kept serving the
+// OLD modules for days — because `plugin-refresh` stops at `restart_needed` by design and
+// the broker's `decideStackReload` hard-codes three components, cloud-sync among neither.
+// Nothing was red. This converts "invisible for weeks" into "named on the next doctor run"
+// — the property that was actually missing, and worth having even where a restart cannot
+// fix the drift (a partial install from the 180s SIGKILL ceiling).
+//
+// THREE THINGS IT WILL NOT DO, each one a way the check could otherwise report healthy
+// while the defect is present:
+//   • it never PASSes on absent input (no boot record → WARN "skew unknown"): a daemon
+//     that predates this feature, or whose breadcrumb write failed, is unmeasured, not
+//     clean. The first pipeline pass after deploy legitimately reads WARN.
+//   • it never PASSes on STALE input: the record's pid must still name a live
+//     cloud-sync.mjs, or the whole comparison is graded against the wrong process.
+//   • it never PASSes on ZERO comparisons ([].every(p) === true), and never derives the
+//     "loaded" side from the lockfile — that would re-manufacture the very claim under
+//     test (the CTL-1646 shadowed-install class).
+// Advisory by construction: WARN/INFO/PASS only, NEVER FAIL. It sits in the checkCloudSync
+// family, whose FAIL count gates catalyst-join activation. The ALARM is not this check —
+// doctor is on-demand, and an on-demand-only check reproduces "invisible until a human
+// looks"; the alerting surface is the writer's own heartbeat line (depSkewFields →
+// cloud-sync.log → Alloy → Loki).
+export function checkCloudSyncSkew(deps = {}) {
+  const {
+    label = CLOUD_SYNC_AGENT_LABEL,
+    laDir = defaultLaunchAgentsDir(),
+    agentInstalled = defaultAgentInstalled,
+    processAlive = defaultCloudSyncProcessAlive,
+    depsPath = getCloudSyncDepsPath(),
+    readBreadcrumb = (p) => readDepsBreadcrumb(p),
+    evaluate = evaluateDepSkew,
+    readText = (p) => readFileSync(p, "utf8"),
+    readJson = (p) => JSON.parse(readFileSync(p, "utf8")),
+    processCommandForPid = defaultProcessCommandForPid,
+  } = deps;
+
+  // Wrapped whole: this check reads files and spawns `ps`, and a throw here would abort
+  // the entire doctor run. A failure to measure degrades to a WARN that says so.
+  try {
+    let record = null;
+    try {
+      record = readBreadcrumb(depsPath);
+    } catch (err) {
+      return [mkCheck("cloud-sync-skew", STATUS.WARN, `dependency-skew boot record unreadable (${depsPath}): ${err?.message ?? String(err)} — skew is UNKNOWN`)];
+    }
+
+    // Gate: no writer agent, no live writer, and no boot record → nothing is loaded on
+    // this node, so nothing can be skewed. One INFO, matching checkCloudSync's own gate
+    // so this check is safe to wire into every class.
+    const installed = agentInstalled(label, laDir);
+    if (!installed && !record) {
+      return [mkCheck("cloud-sync-skew", STATUS.INFO, "cloud-sync writer not installed on this node — no loaded modules to compare")];
+    }
+
+    if (!record) {
+      const alive = processAlive();
+      return [
+        mkCheck(
+          "cloud-sync-skew",
+          STATUS.WARN,
+          `no dependency-skew boot record at ${depsPath} — skew is UNKNOWN${alive ? " while a writer is running" : ""}. ` +
+            "Expected before the writer's first boot after CTL-1659 ships; it self-clears on the next restart (launchctl kickstart -k gui/$UID/" +
+            `${label}).`,
+        ),
+      ];
+    }
+
+    const result = evaluate({ breadcrumb: record, readText, readJson, processCommandForPid });
+    const bad = result.verdicts.filter((v) => v.status !== "ok");
+    if (bad.length === 0) {
+      return [mkCheck("cloud-sync-skew", STATUS.PASS, `loaded modules match the lockfile — ${result.verdicts.map((v) => v.link).join(", ")} all verified`)];
+    }
+    // WARN either way, but lead with the skew when there is one: a confirmed drift is
+    // actionable now, whereas an inconclusive link is a request to look again.
+    const lead = result.skew ? "DEPENDENCY SKEW" : "dependency skew UNKNOWN";
+    return [mkCheck("cloud-sync-skew", STATUS.WARN, `${lead}: ${bad.map((v) => `[${v.link}] ${v.detail}`).join(" | ")}`)];
+  } catch (err) {
+    return [mkCheck("cloud-sync-skew", STATUS.WARN, `dependency-skew check could not run: ${err?.message ?? String(err)} — skew is UNKNOWN, not absent`)];
+  }
+}
+
 // defaultClusterGit — a capturing git runner for the freshness check. Returns
 // { status, stdout }; never throws. Injectable so the check stays hermetic.
 function defaultClusterGit(args) {
@@ -5491,6 +5595,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkCloudTokenEnv(), // advisory
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
       () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
+      () => checkCloudSyncSkew(), // CTL-1659: is the RUNNING writer serving the lockfile's modules? (advisory)
       () => checkConfigScopeLeak(), // advisory
       () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
       () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
@@ -5559,6 +5664,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)
+    () => checkCloudSyncSkew(), // CTL-1659: a merged dependency fix that never reached the running writer (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
