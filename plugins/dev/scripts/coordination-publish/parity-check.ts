@@ -117,11 +117,18 @@ export function computeParity(input: {
   // Index ALL coordination rows by ticket in a SINGLE list per ticket, preserving input (wire)
   // order and tagging each with its orchestrator. A worker_state then matches the entries whose
   // orchestrator is its OWN (composite isolation, so multiple orchestrators/runs of a ticket never
-  // cross-contaminate) OR is identity-less. Identity-less rows (no catalyst.orchestrator.id) come
-  // from the SDK terminal emitter's defaultAppendEventLog fallback (sdk-run-phase-agent.mjs, when
-  // phase-agent-emit-complete is missing/fails) — a real terminal carrying the ticket but no
-  // orchestrator; matching them against every worker_state for the ticket keeps a failed
-  // identity-less terminal from silently disappearing. Keeping BOTH kinds in one ordered list (not
+  // cross-contaminate) OR is identity-less. Identity-less rows (no catalyst.orchestrator.id) are a
+  // real terminal carrying the ticket but no orchestrator; matching them against every worker_state
+  // for the ticket keeps a failed identity-less terminal from silently disappearing.
+  //   PROVENANCE (corrected, CTL-1814): this path used to name the SDK terminal emitter's
+  //   defaultAppendEventLog fallback (sdk-run-phase-agent.mjs) as the SOURCE of identity-less rows.
+  //   That emitter now stamps catalyst.orchestrator.id on every terminal it writes — resolved, or
+  //   the explicit "unresolved" sentinel — so it is no longer a producer of this shape. The branch
+  //   is KEPT because pre-CTL-1814 events already on the log are identity-less forever, and because
+  //   any future hand-rolled envelope can reintroduce the shape. Note the sentinel is deliberately
+  //   NOT folded in here: an unattributable terminal matching no worker_state surfaces as a coverage
+  //   gap, which is the loud outcome, not a silently absorbed one.
+  // Keeping BOTH kinds in one ordered list (not
   // two concatenated maps) is essential: selectTerminalOutcome's watermark tie-break is
   // last-processed-wins, so re-ordering an earlier identity-less row after a later keyed row would
   // flip the winner and fabricate a divergence (Codex P1, round 8).
