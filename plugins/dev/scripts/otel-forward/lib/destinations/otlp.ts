@@ -10,6 +10,7 @@ import { appendToDlq, drainDlqBounded, DEFAULT_MAX_DRAIN_BATCHES, type DrainOutc
 import { partitionByAge } from "../age-filter.ts";
 import { log } from "../logger.ts";
 import { buildCanonicalEnvelope } from "../canonical.ts";
+import { recordDrop, type DropReason } from "../drop-surface.ts";
 
 const destLog = log.child({ destination: "otlp" });
 
@@ -179,6 +180,11 @@ export interface OtlpSenderOpts {
   /** CTL-1506 (Codex P1): shutdown signal. When aborted, in-flight retries stop and the
    *  batch is DLQ'd immediately, so a flush can't outlive the launcher's SIGKILL grace. */
   signal?: AbortSignal;
+  /** CTL-1818: accounting seam for a DISCARDED batch. Defaults to the host-local drop
+   *  surface (lib/drop-surface.ts) so the wiring cannot be forgotten at a call site; a test
+   *  passes a no-op to bypass it (the ticket's required positive control) or a spy to assert
+   *  the exact reason/count. Never used to CHANGE what is dropped — only to record it. */
+  dropRecorder?: (reason: DropReason, records: number) => void;
 }
 
 // CTL-1008 Phase 4: guard against re-amplifying our own failure events —
@@ -240,6 +246,15 @@ export class OtlpSender {
   }
 
   private emitDrop(reason: "aged" | "terminal_4xx", records: CanonicalEvent[]): void {
+    // CTL-1818: account for the discard on the host-local surface BEFORE the two guards
+    // below, both of which suppress the event entirely — no `eventLogPath` (nothing to write
+    // to) and `isSelfBatch` (the CTL-1008 loop guard). A discard suppressed there is today
+    // invisible on EVERY surface: aged records never ride the DLQ, so the CTL-1502 watchdog's
+    // DLQ-size predicate stays flat, and the checkpoint keeps advancing past them.
+    //
+    // This is deliberately unconditional and destination-local: the surface must survive the
+    // transport it reports on, so it can never be gated on the event log being writable.
+    (this.opts.dropRecorder ?? recordDrop)(reason, records.length);
     if (!this.opts.eventLogPath || isSelfBatch(records)) return;
     this.emitEvent(
       "catalyst.observability.forward_dropped",

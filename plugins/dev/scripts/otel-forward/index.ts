@@ -21,6 +21,8 @@ import {
 } from "./lib/normalize.ts";
 import { dlqDepth } from "./lib/dlq.ts";
 import { buildCanonicalEnvelope } from "./lib/canonical.ts";
+import { createSparseWarnGate } from "./lib/sparse-warn.ts";
+import { configureDropSurface, evaluateDropSurface } from "./lib/drop-surface.ts";
 
 const CATALYST_DIR = process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
 const EVENTS_DIR = process.env.CATALYST_EVENTS_DIR ?? join(CATALYST_DIR, "events");
@@ -100,6 +102,11 @@ const CONFIG_PATH =
 
 const cfg = loadForwarderConfig(CONFIG_PATH, PROJECT_KEY);
 const ck = readCheckpoint(CHECKPOINT_PATH);
+
+// CTL-1818: apply the configured drop-surface thresholds (env still wins — see
+// lib/drop-surface.ts's ladder). Done at module scope, not inside the `import.meta.main`
+// block, so a sender constructed by any importer measures against the same thresholds.
+configureDropSurface(cfg.otlp.dropSurface);
 
 // CTL-1817: `unrecognized` counts lines the TAILER filtered out for matching no known
 // envelope shape; `skippedNoAttributes` counts records that got past the tailer but were
@@ -226,6 +233,11 @@ function emitLag(): void {
   // CTL-1517: per-process RSS/heap OTel gauge on the same tick (fire-and-forget; never
   // throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
   void emitProcessMemoryMetric({ serviceName: "catalyst.otel-forward", log });
+  // CTL-1818: re-evaluate the host-local drop surface on the same 30 s tick. Two things no
+  // drop-driven call can do: CLEAR a latched sustained-loss alert on a host that recovered
+  // and went quiet (nothing else re-evaluates once the drops stop), and keep the marker's
+  // rolling-window figures honest while nothing is being discarded. Best-effort, never throws.
+  evaluateDropSurface();
   // Skip on cold start before any event has been processed or delivered
   if (!lastLocalTs && !lastForwardedTs) return;
   try {
@@ -260,30 +272,12 @@ export function describeUnknownShape(line: string): string {
   }
 }
 
-// CTL-1817: COUNT EVERY OCCURRENCE, LOG SPARSELY.
-//
-// The counters above must be exact — they are the measurement. The log line is the alarm,
-// and an alarm that fires per-record is a liability: the observed v3 rate was ~17/day, but
-// an unknown future shape could be a `recovery.tick`-class emitter (326,940/month), which
-// would flood otel-forward.log and, through Alloy, Loki itself. Degrading the log surface
-// while reporting a log-surface defect would be its own bug.
-//
-// So: warn once per distinct event name (the diagnostic that actually tells an operator what
-// to fix), then only on exponentially-spaced totals so a sustained flood still shows a live
-// heartbeat with an accurate running count. The distinct-name set is capped — an attacker-ish
-// pathological case (a unique name per record, e.g. a ticket id in the name) must not grow
-// unboundedly in a long-lived daemon.
-const MAX_TRACKED_SHAPES = 50;
-const warnedShapes = new Set<string>();
-
-function shouldWarnForShape(name: string, total: number): boolean {
-  if (!warnedShapes.has(name) && warnedShapes.size < MAX_TRACKED_SHAPES) {
-    warnedShapes.add(name);
-    return true;
-  }
-  // 10, 100, 1000, … — a bounded heartbeat under sustained loss.
-  return total >= 10 && Math.log10(total) % 1 === 0;
-}
+// CTL-1817: COUNT EVERY OCCURRENCE, LOG SPARSELY. The gate itself moved to
+// lib/sparse-warn.ts in CTL-1818 (unchanged semantics: first sighting per distinct key, then
+// 10/100/1000… heartbeats, capped key set) so the drop surface reuses the SAME mechanism
+// rather than growing a second one beside it. This gate keeps its own key budget — a flood of
+// unknown envelope shapes must not exhaust the one the drop alarm depends on.
+const shouldWarnForShape = createSparseWarnGate({ maxTracked: 50 });
 
 // Wired into the tailer as onUnrecognized. This is the ONLY place that can see a line the
 // tailer's shouldForward filter discards, because such a line never reaches processLine.

@@ -630,6 +630,42 @@ mode, restarts the stuck daemon exactly once per breach episode.
   not just `kill -0`, and fail closed — a recycled pid is treated as a stale file, never a kill
   target. Covered by `__tests__/daemon-watchdog-supervision.test.sh`.
 
+### Forward-drop surface (CTL-1818)
+
+The watchdog above catches a **wedged** forwarder. A forwarder that is working perfectly and
+**discarding** events is a different failure, and none of the three existing instruments can see it:
+`emitDrop` (`otel-forward/lib/destinations/otlp.ts`) fires for `aged` or `terminal_4xx`, and an aged
+record **never rides the DLQ in the primary path** — so the watchdog's DLQ-size predicate stays flat,
+the checkpoint keeps advancing (a discard *is* read progress), and the
+`catalyst.observability.forward_dropped` event it writes ships through the very path that just
+discarded something. Measured on the fleet's mirrored `2026-08.jsonl` (coverage 08-08 → 08-13):
+**87,706 drop events carrying 7,623,269 discarded records, 100% `reason: "aged"`** — read by nothing
+in this repo, and by nothing in `catalyst-otel` either (the provisioned Grafana rule reads
+`forward_failed`, a different name).
+
+- **Where it is counted** — `recordDrop` (`otel-forward/lib/drop-surface.ts`) is called from
+  `emitDrop` **before** its `!eventLogPath` / `isSelfBatch` guards, both of which suppress the event
+  entirely. Counters are process-exact, per reason, in events (batches) **and** records.
+- **Three sinks, none of which ride the failing pipe** — (1) the exact in-memory counters;
+  (2) a durable marker `~/catalyst/otel-forward-drops.json` (atomic tmp+rename, `cumulative` totals
+  carried across restarts, ≤1 s write throttle bypassed on any alert transition); (3) the daemon's
+  pino `.log`, Alloy-shipped independently of its own OTLP egress. Deliberately **no** event sink —
+  an alarm sourced from the forwarded stream measures the survivors and reads clean during exactly
+  the outage it exists to detect.
+- **Sustained-rate alert** — pure `classifyDropWindow` over a bounded 60-bucket ring: breach when
+  window records `>= thresholdRecords`, alert when the breach persists `>= sustainMs` (defaults 5 min
+  / 1,000 records / 10 min, resolved env > `forwarders.otlp.dropSurface` > frozen default). Raise and
+  clear are **edge-triggered**, so a storm logs one `ERROR`, not one per batch; the forwarder's
+  existing 30 s lag timer re-evaluates so a host that recovered and went quiet does not latch raised
+  forever.
+- **ALERT-ONLY, by ruling.** This is *not* a third member of `classifyDaemonStuck`'s `tripped` list —
+  that list is wired straight to `restart()` in the CTL-1502 probe, and restarting a forwarder does
+  not fix a Loki-accept-window/backlog condition; it only loses the in-memory buffer. A Grafana rule
+  over the `.log` stream is the follow-up, and belongs in the `catalyst-otel` repo.
+- **One mechanism, two callers** — the CTL-1817 count-every/log-sparsely gate moved to
+  `otel-forward/lib/sparse-warn.ts` (semantics unchanged); the tailer's unknown-shape alarm and this
+  drop alarm each build their own gate so a flood of one cannot exhaust the other's key budget.
+
 ### Two-axis worker state & the recordTransition chokepoint (CTL-764)
 
 Every worker ticket has **two orthogonal axes** — never blurred:

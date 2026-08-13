@@ -3,6 +3,20 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildOtlpPayload } from "./otlp.ts";
+
+// CTL-1818: every discard this file provokes now also lands on the host-local drop surface,
+// whose marker defaults to `$CATALYST_DIR/otel-forward-drops.json`. Pin CATALYST_DIR into a
+// throwaway directory so a local `bun test` cannot overwrite a real ~/catalyst marker
+// belonging to a running forwarder. Re-asserted per test, not only at file scope: bun runs
+// every test file in one process, and the drop-surface suite restores CATALYST_DIR to
+// whatever it found — which is `undefined` (i.e. the real ~/catalyst) if that file's modules
+// happened to execute first. Asserting the surface is otlp-drop-surface.test.ts's job; here
+// it is only isolated.
+const TEST_CATALYST_DIR = mkdtempSync(join(tmpdir(), "otlp-test-catalyst-dir-"));
+process.env.CATALYST_DIR = TEST_CATALYST_DIR;
+beforeEach(() => {
+  process.env.CATALYST_DIR = TEST_CATALYST_DIR;
+});
 import { appendToDlq, dlqDepth, drainDlq } from "../dlq.ts";
 import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
 
