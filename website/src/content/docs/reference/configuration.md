@@ -525,6 +525,24 @@ default.** This section is the authoritative schema; the developer reference
 | `flushIntervalMs`    | `5000`                  | Per-forwarder flush cadence — each enabled destination runs its own timer at its own interval (CTL-1506). A destination's flushes are serialized independently: a tick arriving while its previous flush is still in flight is a no-op, so this is a floor.                                                                                                                                                |
 | `lokiAcceptWindowMs` | `3600000` (1 h)         | Age cutoff for Loki records (CTL-1506). Records older than this are dropped with a `forward_dropped` (`drop_reason: "aged"`) event before any send. Note the _effective_ send cutoff is slightly stricter — `lokiAcceptWindowMs − min(timeoutMs, lokiAcceptWindowMs/4)` — a delivery margin so a near-cutoff record can't age past the window mid-request. Tune to your Loki `reject_old_samples_max_age`. |
 | `maxRetryElapsedMs`  | `60000` (60 s)          | Max elapsed time for HTTP retry backoff on a retryable failure (`429`/`5xx`/network) before the batch is dead-lettered (CTL-1506). Terminal `4xx` (not `429`) is dropped immediately, never retried or DLQ'd.                                                                                                                                                                                              |
+| `dropSurface`        | see below               | Thresholds for the host-local drop surface (CTL-1818) — the counter/marker/alarm that makes a **discarded** event visible. Sub-keys below; each also has an env override, which wins.                                                                                                                                                                                                                       |
+
+#### `otlp.dropSurface` keys (CTL-1818)
+
+Every discard (`drop_reason: "aged"` or `"terminal_4xx"`) increments a host-local counter and is
+written to the marker `~/catalyst/otel-forward-drops.json`; a discard rate that stays above
+`thresholdRecords` for `sustainMs` raises one `ERROR` line on `~/catalyst/otel-forward.log`
+(Alloy-shipped, independent of the OTLP egress this daemon is itself responsible for). The alert is
+**alert-only** — it never restarts the forwarder.
+
+| Key                | Env override                               | Default          | Description                                                                                                                                                          |
+| ------------------ | ------------------------------------------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `windowMs`         | `CATALYST_FORWARD_DROP_WINDOW_MS`          | `300000` (5 min) | Rolling window the discard rate is measured over. Matches the provisioned Grafana window for `forward_failed`, so both are reasoned about in one unit.                |
+| `thresholdRecords` | `CATALYST_FORWARD_DROP_THRESHOLD_RECORDS`  | `1000`           | Records discarded within the window that constitutes a breach (inclusive `>=`). Sits between the two regimes measured on the fleet: a quiet day ≈ 800/window, a loss storm ≈ 6,900/window. |
+| `sustainMs`        | `CATALYST_FORWARD_DROP_SUSTAIN_MS`         | `600000` (10 min)| How long the breach must persist before the alert fires, so a single burst self-heals without paging.                                                                |
+
+A malformed or out-of-range override is **ignored** (the surface keeps measuring at its previous
+value) rather than silently disabling the counter.
 
 PostHog and Cloudflare AE keys mirror the JSON above; see the developer reference for their delivery
 semantics.

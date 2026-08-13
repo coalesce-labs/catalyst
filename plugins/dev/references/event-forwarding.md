@@ -88,6 +88,44 @@ not duplicated here.
 with attribute `catalyst.observability.drop_reason` (`"aged"` or `"terminal_4xx"`) and
 `body.payload.count`. Loop-guarded by `isSelfBatch` (same as `forward_failed`).
 
+### Drop surface — `~/catalyst/otel-forward-drops.json` (CTL-1818)
+
+A discard is the one forwarder failure **no other instrument can see**:
+
+| signal          | how it is normally caught                                      | does it catch an aged drop?                                            |
+| --------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `forward_failed` | DLQ grows → CTL-1502 watchdog P1 (DLQ file size)               | **No** — an aged record never rides the DLQ, so the file stays flat     |
+| `forward_lag`    | checkpoint `lastForwardedTs` freezes → watchdog P2             | **No** — the checkpoint advances; a discard *is* read progress          |
+| `forward_dropped`| an event on the log…                                           | **No** — that event ships through the path that just discarded something |
+
+So the drop is accounted for **on the host**, out of band of the forwarder's own OTLP egress:
+
+- **Counters** — exact, per reason, in both events (batches) and records. Recorded in
+  `emitDrop` **before** its `!eventLogPath` / `isSelfBatch` guards, so a discard that emits no
+  event at all is still counted.
+- **Marker** — `~/catalyst/otel-forward-drops.json` (atomic tmp+rename, beside the checkpoint and
+  the DLQ). Carries host, pid, per-reason `process` and restart-carried `cumulative` totals, the
+  rolling-window verdict, and the alert latch. Read it directly:
+
+  ```bash
+  jq '{host, cumulative, window, alert}' ~/catalyst/otel-forward-drops.json
+  ```
+
+- **Alarm** — the daemon's pino `~/catalyst/otel-forward.log`, which Alloy ships to Loki
+  **independently** of this daemon's OTLP egress. A first-sighting warning per reason plus
+  exponentially-spaced heartbeats (the CTL-1817 count-every/log-sparsely gate,
+  `lib/sparse-warn.ts`), and one `ERROR` line when the discard rate stays above threshold for the
+  sustain window — naming the host and the reason.
+
+**Alert-only.** The sustained-loss alert raises a log line and latches the marker; it never
+restarts anything. An aged drop is a Loki-accept-window / backlog condition, and a restart does not
+fix it — it only loses the in-memory buffer. This is deliberately *not* a third predicate in
+`classifyDaemonStuck`, whose `tripped` list feeds `restart()` in the CTL-1502 probe.
+
+Thresholds (`windowMs`, `thresholdRecords`, `sustainMs`) resolve **env > `forwarders.otlp.dropSurface`
+> frozen default**; the authoritative schema and defaults live in
+`website/src/content/docs/reference/configuration.md`.
+
 The `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable overrides `endpoint` (port 4317 is
 automatically rewritten to 4318 for HTTP).
 
