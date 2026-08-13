@@ -260,13 +260,39 @@ export function describeUnknownShape(line: string): string {
   }
 }
 
-// CTL-1817: wired into the tailer as onUnrecognized. This is the ONLY place that can see a
-// line the tailer's shouldForward filter discards, because such a line never reaches
-// processLine at all.
+// CTL-1817: COUNT EVERY OCCURRENCE, LOG SPARSELY.
+//
+// The counters above must be exact — they are the measurement. The log line is the alarm,
+// and an alarm that fires per-record is a liability: the observed v3 rate was ~17/day, but
+// an unknown future shape could be a `recovery.tick`-class emitter (326,940/month), which
+// would flood otel-forward.log and, through Alloy, Loki itself. Degrading the log surface
+// while reporting a log-surface defect would be its own bug.
+//
+// So: warn once per distinct event name (the diagnostic that actually tells an operator what
+// to fix), then only on exponentially-spaced totals so a sustained flood still shows a live
+// heartbeat with an accurate running count. The distinct-name set is capped — an attacker-ish
+// pathological case (a unique name per record, e.g. a ticket id in the name) must not grow
+// unboundedly in a long-lived daemon.
+const MAX_TRACKED_SHAPES = 50;
+const warnedShapes = new Set<string>();
+
+function shouldWarnForShape(name: string, total: number): boolean {
+  if (!warnedShapes.has(name) && warnedShapes.size < MAX_TRACKED_SHAPES) {
+    warnedShapes.add(name);
+    return true;
+  }
+  // 10, 100, 1000, … — a bounded heartbeat under sustained loss.
+  return total >= 10 && Math.log10(total) % 1 === 0;
+}
+
+// Wired into the tailer as onUnrecognized. This is the ONLY place that can see a line the
+// tailer's shouldForward filter discards, because such a line never reaches processLine.
 export function noteUnrecognizedLine(line: string): void {
   stats.unrecognized++;
+  const event = describeUnknownShape(line);
+  if (!shouldWarnForShape(`u:${event}`, stats.unrecognized)) return;
   log.warn(
-    { event: describeUnknownShape(line), unrecognized_total: stats.unrecognized },
+    { event, unrecognized_total: stats.unrecognized },
     "unrecognized envelope shape — line dropped by the tailer, never forwarded (CTL-1817)",
   );
 }
@@ -286,10 +312,14 @@ export function processLine(line: string): void {
       // record that reaches this branch is by definition not in the shape we expect.
       stats.skipped++;
       stats.skippedNoAttributes++;
-      log.warn(
-        { event: describeUnknownShape(line), skipped_no_attributes: stats.skippedNoAttributes },
-        "dropping record with no attributes — it will not be forwarded (CTL-1817)",
-      );
+      const event = describeUnknownShape(line);
+      // Same count-always / log-sparsely discipline as noteUnrecognizedLine above.
+      if (shouldWarnForShape(`n:${event}`, stats.skippedNoAttributes)) {
+        log.warn(
+          { event, skipped_no_attributes: stats.skippedNoAttributes },
+          "dropping record with no attributes — it will not be forwarded (CTL-1817)",
+        );
+      }
       return;
     }
     stats.processed++;
