@@ -730,7 +730,7 @@ function useLaneCellHeights(
   const [allocs, setAllocs] = useState<Map<string, number | null> | null>(null);
   // ResizeObserver bumps this so the layout effect re-measures on viewport resize.
   const [resizeTick, setResizeTick] = useState(0);
-  const lanesKey = laneKeys.join(" ");
+  const lanesKey = laneKeys.join("\u0000");
 
   useLayoutEffect(() => {
     const scroller = scrollRef.current;
