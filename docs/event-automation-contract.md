@@ -378,11 +378,32 @@ exponentially-spaced totals), on the pino `~/catalyst/otel-forward.log` that All
 clean during exactly the outage it exists to detect. Both producers of the v3 shape were fixed in the
 same PR, so the counters should sit at zero; any non-zero value is itself the alarm.
 
-⚠ One caveat, tracked as **CTL-1823**: the separate *mapper*-level degenerate counter
-(`degenerateRecordTotal`) is incremented inside `buildOtlpPayload`, which runs once per send
-**attempt** — so under OTLP retries or a DLQ replay it counts the same record more than once. It is
-an attempt count, not a record count, precisely when the backend is in trouble. The two **gate**
-counters above sit on the tail path, run once per line, and do not have this defect.
+✅ **The one caveat that remained is now closed** (CTL-1823, merged 2026-08-13). What it said, and
+what changed:
+
+- **The defect, as recorded here on 2026-08-13:** the separate *mapper*-level degenerate counter
+  (`degenerateRecordTotal`) was incremented inside `buildOtlpPayload`, which runs once per send
+  **attempt** — so under OTLP retries or a DLQ replay it counted the same record more than once.
+  It was an attempt count, not a record count, precisely when the backend was in trouble.
+- **The fix:** counting moved out of the serializer entirely — `buildOtlpPayload` is now pure
+  mapping and does no accounting at all. The count is taken once per batch at `OtlpSender.flush`
+  entry, via `noteDegenerateRecords` (`otel-forward/lib/destinations/otlp.ts`). That is the one
+  point on the path at which each record is seen exactly once: `index.ts`'s `flushDest` hands
+  `buffer.splice(0)` to a single `flush()`, and both the retry loop and the DLQ drain sit
+  downstream of it.
+- **Current semantics — RECORDS, not attempts:** `degenerateRecordTotal()` counts degenerate
+  records **this process accepted for forwarding**, one increment per record. It includes records
+  subsequently aged out or terminally dropped (the call is deliberately ahead of the age
+  partition), and it excludes a DLQ entry written by a previous process and drained by this one —
+  that record was counted by the process that accepted it. Undercounting a prior process's backlog
+  is the deliberate fail direction for a detector whose job is to sit at zero; the failure being
+  fixed was inflation.
+- **Unchanged:** the two **gate** counters above sit on the tail path, run once per line, and never
+  had this defect. That asymmetry is intended and was not touched.
+
+The same change routed the degenerate warning through the shared count-every/warn-sparsely gate
+(`otel-forward/lib/sparse-warn.ts`) with its own key budget, so a flood of degenerate shapes cannot
+exhaust the budget the two gate alarms above depend on.
 
 **Four producers put an identifier in the name and nowhere else.** All four must gain an attribute
 **before** any suffix is stripped, or the migration destroys information:

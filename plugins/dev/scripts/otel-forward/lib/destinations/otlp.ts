@@ -11,6 +11,7 @@ import { partitionByAge } from "../age-filter.ts";
 import { log } from "../logger.ts";
 import { buildCanonicalEnvelope } from "../canonical.ts";
 import { recordDrop, type DropReason } from "../drop-surface.ts";
+import { createSparseWarnGate } from "../sparse-warn.ts";
 
 const destLog = log.child({ destination: "otlp" });
 
@@ -83,16 +84,76 @@ function toUnixNano(ts: string | undefined): number {
 // ships to Loki independently of this file's OTLP egress (log-shipper/config.alloy:22). That
 // independence is the point: an alarm that rides the transport it measures reads clean during
 // exactly the outage it exists to detect.
+//
+// ── CTL-1823 CORRECTION (the one CTL-1817 claim that was false as written) ──────────────────
+//
+// (1) EXACTNESS. CTL-1817 counted inside `buildOtlpPayload` and described the result as an exact
+// per-record count — verbatim, the doc comment on `degenerateRecordTotal` read "Running count of
+// degenerate records seen by this process." It did not hold. The mapper is the
+// SERIALIZER: it runs once per `rawSend` ATTEMPT — it sits inside `withHttpRetry` — and again
+// on every DLQ drain. So one record incremented the counter on every OTLP retry and once more
+// on replay, and the number INFLATED precisely during backend trouble, which is exactly when
+// an operator reads it. An inflating counter is worse than a missing one: it invites a wrong
+// conclusion about the SCOPE of the loss (is one record degenerate, or a thousand?).
+//
+// The count therefore moved to BATCH ACCEPT — `OtlpSender.flush` entry, via
+// `noteDegenerateRecords` below. That is the one point on this path at which each record is
+// seen exactly once: index.ts's `flushDest` hands `buffer.splice(0)` to a single `flush()`, so
+// a record enters at most one flush, and the retry loop and the drain both sit downstream of
+// it. `buildOtlpPayload` is now pure mapping and does no accounting at all.
+//
+// Honest scope of the resulting number: it counts degenerate records this PROCESS accepted for
+// forwarding — including any subsequently aged out or terminally dropped, and NOT including a
+// DLQ entry written by a previous process and drained by this one (that record was counted by
+// the process that accepted it). Undercounting a prior process's backlog is the deliberate
+// direction: the previous behavior's failure was inflation, and a detector whose job is "sit
+// at zero" must never manufacture a non-zero reading out of retry traffic.
+//
+// (2) FLOOD SAFETY. The asymmetry with the two GATE counters in index.ts
+// (`unrecognized`, `skippedNoAttributes`) is the useful part and is preserved: those sit on the
+// tail path, run once per line, and were always exact — they are not touched here.
+//
+// ⚠ ATTRIBUTION — WITHDRAWN CLAIM. An earlier revision of this note charged CTL-1817's commit
+// message with a second false claim, that the counters "stay exact". That is not supportable, so
+// it is withdrawn: ONE claim was false, not two. The phrase exists in exactly one commit,
+// `ad1c6f38` ("The counters are the MEASUREMENT and stay exact") — an unmerged commit on the
+// `CTL-1817` branch, squashed away by the merge, so the message that actually landed on main
+// (`d14e477b`, PR #3325) says nothing of the kind. And even there it was about index.ts's
+// tail-path drop counters — that commit touches only `index.ts` and `drop-counters.test.ts` and
+// never this file — i.e. the very counters paragraph (2) says were always exact. A comment whose
+// purpose is to correct a false claim must not carry one. Positive control for that search:
+// `git log --all --grep="stay exact"` returns five commits, so a miss would have been absence
+// rather than a broken instrument.
 let degenerateRecordCount = 0;
 
-/** Running count of degenerate records seen by this process. Expected to stay 0. */
+// CTL-1823: the warning now rides the SAME count-every/log-sparsely gate as those gate alarms
+// (lib/sparse-warn.ts, extracted by CTL-1818) instead of emitting once per record. A recognized
+// high-volume envelope shape arriving degenerate would otherwise write one line per record into
+// otel-forward.log and — because Alloy ships that file — into Loki itself: degrading the log
+// surface while reporting a log-surface defect, which is the very failure the sparsification was
+// built to prevent. It simply had not reached this call site.
+//
+// This gate keeps its OWN key budget rather than sharing the tailer's or the drop surface's: a
+// flood of degenerate shapes must not exhaust the budget another alarm depends on.
+let shouldWarnDegenerate = createSparseWarnGate({ maxTracked: 50 });
+
+/**
+ * Running count of degenerate records ACCEPTED FOR FORWARDING by this process — one increment
+ * per record, taken at `OtlpSender.flush` entry, never per send attempt or DLQ replay (CTL-1823;
+ * see the correction note above for why that distinction is load-bearing). Expected to stay 0.
+ */
 export function degenerateRecordTotal(): number {
   return degenerateRecordCount;
 }
 
-/** Test seam — reset the process-scoped counter between cases. */
+/**
+ * Test seam — reset the process-scoped counter between cases. Re-arms the sparse-warn gate too:
+ * the gate's "first sighting per distinct key" memory is module state, so without this a second
+ * test would silently observe zero warnings for a shape an earlier test had already reported.
+ */
 export function resetDegenerateRecordTotal(): void {
   degenerateRecordCount = 0;
+  shouldWarnDegenerate = createSparseWarnGate({ maxTracked: 50 });
 }
 
 // Best-effort identity for a record that, by definition, failed to present one in the shape
@@ -107,23 +168,55 @@ function describeDegenerate(ev: CanonicalEvent): string {
   return "(unidentifiable)";
 }
 
-export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
+// The predicate, kept beside the mapping it describes: a record is degenerate when the two
+// expressions `buildOtlpPayload` uses below BOTH collapse to nothing — body to "" and
+// attributes to []. Extracted (CTL-1823) so the detector and the mapper cannot drift apart
+// while living in different functions; if the mapping changes, this must change with it.
+export function isDegenerateRecord(ev: CanonicalEvent): boolean {
+  const bodyEmpty = !(ev.body?.message ?? ev.attributes?.["event.name"] ?? "");
+  const attrsEmpty = Object.keys((ev.attributes as unknown as Record<string, unknown>) ?? {}).length === 0;
+  return bodyEmpty && attrsEmpty;
+}
+
+/** Minimal pino-shaped sink, so a test can assert the alarm without writing a real log. */
+interface DegenerateWarnLogger {
+  warn(obj: Record<string, unknown>, msg: string): void;
+}
+
+/**
+ * CTL-1823: the accounting seam. Called ONCE per batch, at `OtlpSender.flush` entry — never
+ * from the mapper, which the retry loop and the DLQ drain both re-enter. Counts every
+ * degenerate record exactly once and warns sparsely (see the gate above).
+ *
+ * Exported so the counting discipline is testable at the seam itself; production has exactly
+ * one caller, `OtlpSender.flush`.
+ */
+export function noteDegenerateRecords(
+  events: CanonicalEvent[],
+  { log: warnLog = destLog as DegenerateWarnLogger }: { log?: DegenerateWarnLogger } = {},
+): void {
   for (const ev of events) {
-    const bodyEmpty = !(ev.body?.message ?? ev.attributes?.["event.name"] ?? "");
-    const attrsEmpty = Object.keys((ev.attributes as unknown as Record<string, unknown>) ?? {}).length === 0;
-    if (bodyEmpty && attrsEmpty) {
-      degenerateRecordCount++;
-      destLog.warn(
-        {
-          event: describeDegenerate(ev),
-          ts: ev.ts,
-          service: ev.resource?.["service.name"] ?? null,
-          degenerate_total: degenerateRecordCount,
-        },
-        "otlp: DEGENERATE record — empty body AND no attributes; forwarded anyway, identity lost off-machine (CTL-1817)",
-      );
-    }
+    if (!isDegenerateRecord(ev)) continue;
+    degenerateRecordCount++;
+    const event = describeDegenerate(ev);
+    // Count always, log sparsely — the counter is the measurement, the line is the alarm.
+    if (!shouldWarnDegenerate(event, degenerateRecordCount)) continue;
+    warnLog.warn(
+      {
+        event,
+        ts: ev.ts,
+        service: ev.resource?.["service.name"] ?? null,
+        degenerate_total: degenerateRecordCount,
+      },
+      "otlp: DEGENERATE record — empty body AND no attributes; forwarded anyway, identity lost off-machine (CTL-1817)",
+    );
   }
+}
+
+// PURE MAPPING — no accounting (CTL-1823). Detection of the degenerate shape this function
+// produces lives in `noteDegenerateRecords`, called at batch accept; this function is re-entered
+// on every retry and every DLQ replay, so anything counted here would count send attempts.
+export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
   return {
     resourceLogs: events.map((ev) => ({
       resource: {
@@ -357,6 +450,17 @@ export class OtlpSender {
   }
 
   async flush(batch: CanonicalEvent[]): Promise<void> {
+    // CTL-1823: BATCH ACCEPT is the counting point — the first statement of flush, before the
+    // age partition, before the retry loop, before the drain. Every record handed to this
+    // destination passes here exactly once (index.ts hands each buffered record to a single
+    // flush via `buffer.splice(0)`), so the counter measures RECORDS. Counting any later —
+    // in `rawSend`, or in the mapper where CTL-1817 put it — measures send ATTEMPTS instead,
+    // and inflates during exactly the backend trouble that makes someone read the number.
+    // Deliberately ahead of the age partition too: a record this host chose to forward and
+    // then aged out was still a degenerate record on this host, and moving the call after the
+    // partition would put it back on a path the retry loop re-enters.
+    noteDegenerateRecords(batch);
+
     const url = `${this.opts.endpoint.replace(/:4317/, ":4318").replace(/\/$/, "")}/v1/logs`;
     const windowMs = this.opts.lokiAcceptWindowMs ?? DEFAULT_LOKI_ACCEPT_WINDOW_MS;
 
