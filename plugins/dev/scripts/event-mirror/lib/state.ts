@@ -49,10 +49,23 @@ export function extractEventId(line: string): string | null {
     if (typeof obj?.id === "string") return obj.id;
     if (typeof obj?.event_id === "string") return obj.event_id;
     if (typeof obj?.attributes?.["event.id"] === "string") return obj.attributes["event.id"];
-    // Fall back to the ts + event.name composite as a pseudo-id for events without an id field.
-    const ts = obj?.ts ?? obj?.time ?? null;
-    const name = obj?.attributes?.["event.name"] ?? obj?.event ?? null;
-    if (ts && name) return `${ts}:${name}`;
+    // CTL-1812: there is NO fallback id, deliberately.
+    //
+    // This used to return the `${ts}:${name}` composite, which is not an identity — two
+    // genuinely distinct events sharing a timestamp and an event name collide, and the
+    // second is silently discarded as a duplicate. MEASURED: replaying that rule over the
+    // authoritative worker logs suppressed 35,931 real events (14,660 mini + 21,271
+    // mini-2), 100% of them via this path and 0 via a real id.
+    //
+    // A CONTENT HASH was the obvious replacement and is also WRONG — measured before
+    // adopting it: mini's own August log contains 14,515 byte-identical duplicate lines
+    // (1.32% of 1,096,795). Those are real, separately-emitted events, so hashing would
+    // trade one silent-loss bug for a smaller one. Fewer lost events is still lost events.
+    //
+    // So we return null and let the caller's conservative path include the line. A
+    // duplicate is visible and harmless; a dropped event is neither. The dedup ring
+    // still does its job for every event that carries a REAL id, which is the population
+    // it was built for.
     return null;
   } catch {
     return null;

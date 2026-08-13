@@ -164,14 +164,26 @@ export async function mirrorTick(opts: MirrorTickOpts): Promise<TickResult> {
       }
       hs.currentFile = currentFile;
 
+      // CTL-1812: capture the offset this read STARTS at, and set the cursor
+      // ABSOLUTELY from it below. The previous `hs.cursor += bytesRead` was a
+      // read-modify-write on shared mutable state, and `tail -c +N` always reads to
+      // EOF — so two overlapping ticks each added (EOF - cursor) to the SAME cursor
+      // and parked it far past EOF. While parked, `tail -c +N` returns nothing and
+      // the mirror goes DARK: events are skipped silently, with no fragment and no
+      // error. MEASURED consequence: 341,356 events (15.6% of mini, 13.6% of mini-2)
+      // absent from this node's copy, and 200 mid-string fragments produced when the
+      // remote later grew past the parked cursor. Setting it absolutely makes the
+      // update idempotent — an overlapping tick now computes the SAME endpoint
+      // instead of doubling it.
+      const startCursor = hs.cursor;
       try {
-        const { lines, bytesRead } = await fetchFn(host, hs.cursor, currentFile);
+        const { lines, bytesRead } = await fetchFn(host, startCursor, currentFile);
         const survivors = filterNewLines(state, lines, currentFile);
         if (survivors.length > 0) {
           appendFileSync(localFile, survivors.map(l => l + "\n").join(""));
           totalAppended += survivors.length;
         }
-        hs.cursor += bytesRead;
+        hs.cursor = startCursor + bytesRead;
         hs.healthy = true;
         hs.lastSeenTs = new Date().toISOString();
         byHostResult[host] = { healthy: true, linesAppended: survivors.length };
@@ -234,9 +246,39 @@ if (import.meta.main) {
     persistState(state);
   };
 
+  // CTL-1812: RE-ENTRANCY GUARD. `setInterval(async ...)` does not await the previous
+  // callback, so a tick slower than intervalMs — which a catch-up read against a 1 GB
+  // remote log reliably is — starts while the last one is still in flight. That was the
+  // trigger for the cursor race above. The absolute-cursor fix makes an overlap
+  // HARMLESS; this makes it not happen, which also stops us re-reading (and buffering)
+  // the same gigabyte twice.
+  //
+  // A skipped tick costs only latency: the next one reads from the same cursor to EOF,
+  // so nothing is missed. That is the "an event means go look" property — the tick is
+  // idempotent by observation, so declining to run one cannot lose data.
+  let tickInFlight = false;
+  let ticksSkipped = 0;
+  const guardedTick = async () => {
+    if (tickInFlight) {
+      ticksSkipped += 1;
+      // Silence is a defect: a mirror permanently skipping ticks is a mirror falling
+      // behind, and it must be visible rather than inferred from missing events later.
+      console.warn(
+        `[catalyst-event-mirror] tick still in flight — skipped (${ticksSkipped} since start)`
+      );
+      return;
+    }
+    tickInFlight = true;
+    try {
+      await tick();
+    } catch (err) {
+      console.error("[catalyst-event-mirror] tick error:", err);
+    } finally {
+      tickInFlight = false;
+    }
+  };
+
   // Run immediately then on interval.
-  await tick().catch(err => console.error("[catalyst-event-mirror] tick error:", err));
-  setInterval(async () => {
-    await tick().catch(err => console.error("[catalyst-event-mirror] tick error:", err));
-  }, intervalMs);
+  await guardedTick();
+  setInterval(guardedTick, intervalMs);
 }
