@@ -318,6 +318,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/canonical-event.test.sh
 
+      - name: SKILL.md ${PLUGIN_ROOT} assignment guard (CTL-1832)
+        # CTL-1832: a SKILL.md that EXPANDS ${PLUGIN_ROOT} must also ASSIGN it, or
+        # the expansion is empty and the command silently addresses a bogus path.
+        # This shipped twice: fatally in phase-monitor-deploy (CTL-1410, under
+        # `set -u`) and SILENTLY in phase-triage, where `2>/dev/null || echo '{}'`
+        # turned a broken escalation shim into an empty explanation with exit 0.
+        # The scan carries its own positive control, so a clean run is evidence.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/skill-plugin-root-assigned.test.sh
+
       - name: catalyst-stack shipper ephemeral-path guard test (CTL-1473)
         # CTL-1473: guards that install-services (--print and real) refuses to bake
         # an ephemeral config path (worktree or /tmp). Uses CATALYST_FORCE_BAKE_DIR +
