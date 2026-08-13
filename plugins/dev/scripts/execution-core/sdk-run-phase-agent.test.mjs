@@ -7,6 +7,9 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { isTicketInFlight, deriveAdvancement } from "./scheduler.mjs";
 import { PHASE_EVENT_PATTERN } from "../broker/namespace-contract.mjs";
+// CTL-1814: the REAL CTL-532 reducer — the consumer this emitter was invisible to.
+// Asserting against a re-implementation of the fold would test nothing.
+import { reduceWorkerStateEvent } from "../broker/projection.mjs";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2144,5 +2147,219 @@ describe("CTL-1790 — the written terminal is recognized by the live predicates
     rmSync(dir, { recursive: true, force: true });
     expect(after.status).toBe("dispatched");
     expect(seen).toHaveLength(0);
+  });
+});
+
+// ── CTL-1814: the fallback terminal must carry its orchestrator ──────────────
+//
+// defaultAppendEventLog is the LAST-RESORT terminal writer — it fires exactly when
+// the phase-agent-emit-complete wrapper is missing or died. Its hand-rolled v2
+// envelope never carried `catalyst.orchestrator.id`, which is HALF of the CTL-532
+// worker-state identity: broker/projection.mjs `reduceWorkerStateEvent` returns
+// null without it, and `upsertWorkerState` (PK `(orchestrator, ticket)`) then
+// writes nothing — so worker_state went stale precisely when the primary path had
+// already broken.
+//
+// These tests drive the REAL reducer over the REAL written line. The status list is
+// DERIVED from the broker's own PHASE_EVENT_PATTERN rather than re-typed, so a
+// future terminal status cannot be added to the contract without landing here.
+const CONTRACT_TERMINAL_STATUSES = (() => {
+  // The second capture group of PHASE_EVENT_PATTERN is the terminal-status
+  // alternation. Anchor on `complete` (its first member) rather than on group
+  // position so the match FAILS CLOSED if the pattern is restructured — a guard
+  // that silently matched the wrong group would derive an empty/wrong list and
+  // then pass by testing nothing.
+  const m = /\((complete\|[^)]+)\)/.exec(PHASE_EVENT_PATTERN.source);
+  if (!m) {
+    throw new Error(
+      "PHASE_EVENT_PATTERN no longer exposes a `(complete|…)` terminal-status alternation — " +
+        "this guard can no longer derive the status list, so fix the guard rather than deleting it",
+    );
+  }
+  return m[1].split("|");
+})();
+
+// The explicit sentinel this emitter must write when no orchestrator can be
+// resolved. Declared here as the CONTRACT the test pins — deliberately NOT imported
+// from the module under test, so a rename on the production side is a failure here
+// rather than a silently-agreeing tautology.
+const UNRESOLVED_ORCHESTRATOR = "unresolved";
+
+describe("CTL-1814 — the fallback terminal event carries its orchestrator", () => {
+  // Drive defaultAppendEventLog against a scratch CATALYST_DIR and return the
+  // parsed line it appended. getEventLogPath() re-resolves CATALYST_DIR per call,
+  // so nothing here can touch the real ~/catalyst event log.
+  const appendAndRead = (args, envOverrides = {}) => {
+    const prevDir = process.env.CATALYST_DIR;
+    const prevOrch = process.env.CATALYST_ORCHESTRATOR_ID;
+    const dir = mkdtempSync(join(tmpdir(), "sdk-ctl1814-"));
+    process.env.CATALYST_DIR = dir;
+    // The daemon that runs this code may itself have CATALYST_ORCHESTRATOR_ID set;
+    // clear it so each case exercises the rung it means to (test-env pollution).
+    delete process.env.CATALYST_ORCHESTRATOR_ID;
+    if (envOverrides.CATALYST_ORCHESTRATOR_ID !== undefined) {
+      process.env.CATALYST_ORCHESTRATOR_ID = envOverrides.CATALYST_ORCHESTRATOR_ID;
+    }
+    try {
+      defaultAppendEventLog(args);
+      const now = new Date();
+      const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+      const line = readFileSync(join(dir, "events", `${ym}.jsonl`), "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .pop();
+      return JSON.parse(line);
+    } finally {
+      if (prevDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prevDir;
+      if (prevOrch === undefined) delete process.env.CATALYST_ORCHESTRATOR_ID;
+      else process.env.CATALYST_ORCHESTRATOR_ID = prevOrch;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test("the derived status list is the full contract set (guard is looking at real data)", () => {
+    // Positive control for the derivation above: if this list ever comes back empty
+    // or truncated, every per-status test below would vacuously "pass" by not running.
+    expect(CONTRACT_TERMINAL_STATUSES).toEqual([
+      "complete",
+      "failed",
+      "turn-cap-exhausted",
+      "skipped",
+      "abandoned",
+    ]);
+  });
+
+  for (const status of CONTRACT_TERMINAL_STATUSES) {
+    test(`status=${status}: the written envelope folds to a non-null worker-state patch`, () => {
+      const ev = appendAndRead({
+        phase: "implement",
+        ticket: "CTL-1814",
+        status,
+        reason: "sdk-threw",
+        orchestrator: "ORCH-9",
+      });
+      expect(ev.attributes["event.name"]).toBe(`phase.implement.${status}.CTL-1814`);
+      expect(ev.attributes["catalyst.orchestrator.id"]).toBe("ORCH-9");
+
+      const folded = reduceWorkerStateEvent(ev);
+      expect(folded).not.toBeNull();
+      expect(folded.orchestrator).toBe("ORCH-9");
+      expect(folded.ticket).toBe("CTL-1814");
+      expect(folded.patch.phase).toBe("implement");
+      // A status the projection does not map yields `undefined` here, which
+      // upsertWorkerState would write as a NULL status — a folded row that says
+      // nothing. Assert a real mapped value, not merely a non-null envelope.
+      expect(folded.patch.status).toBeTruthy();
+    });
+  }
+
+  test("an UNRESOLVABLE orchestrator is written explicitly, never omitted", () => {
+    const ev = appendAndRead({ phase: "implement", ticket: "CTL-1814", status: "failed" });
+    // The distinction this ticket exists for: an emitter that never stamped the
+    // attribute and an emitter that stamped "I could not resolve one" must not both
+    // read as `undefined` on the same key. Asserted over the KEY SET rather than
+    // with toHaveProperty, whose dotted-path semantics would look for a nested
+    // `catalyst → orchestrator → id` object and report "unable to find property"
+    // even when the flat attribute is present.
+    expect(Object.keys(ev.attributes)).toContain("catalyst.orchestrator.id");
+    expect(ev.attributes["catalyst.orchestrator.id"]).toBe(UNRESOLVED_ORCHESTRATOR);
+    // …and the sentinel keeps the terminal PROJECTABLE — a row that names itself
+    // unattributed is strictly louder than no row at all.
+    const folded = reduceWorkerStateEvent(ev);
+    expect(folded).not.toBeNull();
+    expect(folded.orchestrator).toBe(UNRESOLVED_ORCHESTRATOR);
+  });
+
+  test("CATALYST_ORCHESTRATOR_ID is the second rung — the same env the wrapper defaults from", () => {
+    const ev = appendAndRead(
+      { phase: "verify", ticket: "CTL-1814", status: "failed" },
+      { CATALYST_ORCHESTRATOR_ID: "orch-from-env" },
+    );
+    expect(ev.attributes["catalyst.orchestrator.id"]).toBe("orch-from-env");
+  });
+
+  test("an explicit orchestrator outranks the env rung", () => {
+    const ev = appendAndRead(
+      { phase: "verify", ticket: "CTL-1814", status: "failed", orchestrator: "orch-explicit" },
+      { CATALYST_ORCHESTRATOR_ID: "orch-from-env" },
+    );
+    expect(ev.attributes["catalyst.orchestrator.id"]).toBe("orch-explicit");
+  });
+
+  test("a blank/non-string orchestrator falls through instead of being coerced into an id", () => {
+    for (const bogus of ["", "   ", 42, null, {}]) {
+      const ev = appendAndRead({
+        phase: "implement",
+        ticket: "CTL-1814",
+        status: "failed",
+        orchestrator: bogus,
+      });
+      expect(ev.attributes["catalyst.orchestrator.id"]).toBe(UNRESOLVED_ORCHESTRATOR);
+    }
+  });
+
+  test("defaultEmitBackstop's fallback uses the SAME id it handed the wrapper", () => {
+    // The fallback fires when the wrapper did NOT cleanly succeed — including the
+    // case where it wrote its own copy of this terminal and then died. A duplicate
+    // is tolerated by design (phase-advance is idempotent), but only because both
+    // copies converge on ONE worker_state row: two different orchestrator ids would
+    // split one phase across two rows. Pin that they cannot drift.
+    const spawned = [];
+    const appended = [];
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1814", status: "failed", reason: "sdk-threw", orchDir: "/ec" },
+      {
+        spawn: (_bin, args) => {
+          spawned.push(args);
+          return { status: 1, error: null }; // non-zero → the fallback append runs
+        },
+        writeSignalStalled: () => {},
+        appendEventLog: (e) => appended.push(e),
+      },
+    );
+    expect(appended).toHaveLength(1);
+    const wrapperOrchId = spawned[0][spawned[0].indexOf("--orch-id") + 1];
+    expect(wrapperOrchId).toBeTruthy();
+    expect(appended[0].orchestrator).toBe(wrapperOrchId);
+  });
+
+  test("the abandonment terminal is attributed from the signal file itself", () => {
+    // phase-agent-dispatch writes `orchestrator` into the phase signal at prelaunch,
+    // so the signal this function already parses is the authoritative local record of
+    // whose run it was — no new argument at either call site (sdk + codex-exec).
+    const dir = mkdtempSync(join(tmpdir(), "sdk-ctl1814-abandon-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(
+      signalFile,
+      JSON.stringify({
+        status: "running",
+        ticket: "CTL-1814",
+        phase: "implement",
+        orchestrator: "orch-from-signal",
+      }),
+    );
+    const seen = [];
+    flipSignalAbandonedOnUndeclaredExit(signalFile, undefined, {
+      ticket: "CTL-1814",
+      phase: "implement",
+      appendEventLog: (e) => seen.push(e),
+    });
+    rmSync(dir, { recursive: true, force: true });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].orchestrator).toBe("orch-from-signal");
+  });
+
+  test("codex-exec reuses these emitters rather than forking its own copy", () => {
+    // The whole fix reaches the codex-exec launch verb only because that module
+    // IMPORTS both writers from here. If it ever inlines its own copies, the codex
+    // path silently regresses to orchestrator-less terminals with every test above
+    // still green — so assert the import edge, not just the behaviour.
+    const codexSrc = readFileSync(join(import.meta.dir, "codex-run-phase-agent.mjs"), "utf8");
+    const importBlock = /import\s*\{([^}]*)\}\s*from\s*"\.\/sdk-run-phase-agent\.mjs"/.exec(codexSrc);
+    expect(importBlock).not.toBeNull();
+    expect(importBlock[1]).toContain("defaultEmitBackstop");
+    expect(importBlock[1]).toContain("flipSignalAbandonedOnUndeclaredExit");
   });
 });

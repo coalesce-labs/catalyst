@@ -304,7 +304,7 @@ function defaultEmitEvent(name, payload) {
 // --no-signal-update so the skill/pre-launch keeps ownership of the signal file).
 // Best-effort; never throws.
 export function defaultEmitBackstop(
-  { phase, ticket, status, reason, orchDir, signalFile },
+  { phase, ticket, status, reason, orchDir, signalFile, orchestrator },
   {
     spawn = spawnSync,
     writeSignalStalled = defaultWriteSignalStalled,
@@ -336,12 +336,25 @@ export function defaultEmitBackstop(
   // signal), then INSPECT the result instead of swallowing it — a missing/failing
   // emit binary falls back to a direct event-log append so the terminal event is
   // never silently dropped.
+  //
+  // CTL-1814: ONE resolved id, TWO consumers — the wrapper's `--orch-id` and the
+  // fallback append below. They must never drift. The fallback fires precisely
+  // when the wrapper did NOT cleanly succeed, INCLUDING the case where it already
+  // wrote its own copy of this terminal and then died; that duplicate is tolerated
+  // by design (phase-advance is idempotent) but only because both copies converge
+  // on ONE `(orchestrator, ticket)` worker_state row. Two different ids would split
+  // one phase across two rows instead. Defaulting to `ticket` reproduces the value
+  // this call site has always handed the wrapper — execution-core dispatch sets
+  // CATALYST_ORCHESTRATOR_ID to the ticket (phase-agent-dispatch / runPrelaunch),
+  // so orchestrator == ticket there; the parameter lets a caller that knows a
+  // different id supply it to BOTH consumers at once.
+  const orchId = resolveOrchestratorId(orchestrator ?? ticket);
   const args = [
     "--phase", phase,
     "--ticket", ticket,
     "--status", status,
     "--orch-dir", orchDir,
-    "--orch-id", ticket,
+    "--orch-id", orchId,
     "--no-signal-update",
   ];
   if (reason) args.push("--reason", reason);
@@ -373,7 +386,7 @@ export function defaultEmitBackstop(
     typeof res.status !== "number" ||
     res.status !== 0;
   if (emitFailed) {
-    appendEventLog({ phase, ticket, status, reason });
+    appendEventLog({ phase, ticket, status, reason, orchestrator: orchId });
   }
 }
 
@@ -519,7 +532,7 @@ const SIGNAL_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 const isPlainInt = (v) => /^[0-9]+$/.test(String(v));
 
 export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts = {}) {
-  const { appendEventLog = defaultAppendEventLog, ticket, phase } = opts;
+  const { appendEventLog = defaultAppendEventLog, ticket, phase, orchestrator } = opts;
   if (!signalFile) return;
   try {
     let sig;
@@ -597,11 +610,62 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
     const t = ticket ?? sig.ticket;
     const p = phase ?? sig.phase;
     if (t && p) {
-      appendEventLog({ phase: p, ticket: t, status: "abandoned", reason: "ended-without-declaration" });
+      appendEventLog({
+        phase: p,
+        ticket: t,
+        status: "abandoned",
+        reason: "ended-without-declaration",
+        // CTL-1814: the SIGNAL FILE is the authoritative local record of whose run
+        // this was — phase-agent-dispatch writes `orchestrator` into it at prelaunch
+        // — and this function has already parsed it, so attribution costs no extra
+        // I/O. Resolving it HERE rather than at the call sites is what carries the
+        // fix to the codex-exec launch verb too: codex-run-phase-agent.mjs imports
+        // this function and calls it with the same `{ ticket, phase }` the SDK path
+        // does, so neither call site needs to learn a new argument.
+        orchestrator: orchestrator ?? sig.orchestrator,
+      });
     }
   } catch {
     /* best-effort — the skill's own wrapper flip is the primary path */
   }
+}
+
+// ── CTL-1814: the orchestrator id this emitter must carry ───────────────────
+//
+// `catalyst.orchestrator.id` is HALF of the CTL-532 worker-state identity.
+// broker/projection.mjs reads it (`localOrchestrator` →
+// `event.orchestrator ?? attributes["catalyst.orchestrator.id"]`),
+// `reduceWorkerStateEvent` returns NULL the moment it is absent, and
+// `upsertWorkerState` — PRIMARY KEY `(orchestrator, ticket)` — then writes
+// nothing at all. So a terminal without it is not "degraded", it is INVISIBLE to
+// worker_state; and because this is the LAST-RESORT writer, it went invisible
+// precisely when the primary `phase-agent-emit-complete` path had already
+// failed, which is the worst moment to lose the record.
+//
+// UNRESOLVABLE IS A VALUE, NOT AN OMISSION. When no id resolves the attribute is
+// still written, carrying ORCHESTRATOR_UNRESOLVED. Omitting it would leave
+// "this event predates the contract" and "this emitter tried and could not
+// resolve one" reading identically (`undefined`) off the same key for every
+// downstream consumer. The sentinel also keeps the terminal PROJECTABLE: the
+// fold yields a row under a name that says out loud it is unattributed, which
+// is strictly louder than the row never existing.
+export const ORCHESTRATOR_UNRESOLVED = "unresolved";
+
+// resolveOrchestratorId — the id ladder, mirroring the value the PRIMARY path
+// would have used: an explicit caller value first, then CATALYST_ORCHESTRATOR_ID
+// (the same env `phase-agent-emit-complete` defaults its ORCH_ID from), then the
+// sentinel. Only a non-empty STRING resolves — a number/object/blank falls through
+// to the next rung rather than being coerced into an identity nobody can look up
+// (a `[object Object]` orchestrator is worse than an honest sentinel, because it
+// looks like a real key). Pure; never throws.
+export function resolveOrchestratorId(orchestrator, env = process.env) {
+  for (const candidate of [orchestrator, env?.CATALYST_ORCHESTRATOR_ID]) {
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return ORCHESTRATOR_UNRESOLVED;
 }
 
 // defaultAppendEventLog — CTL-1367 item 5. Last-resort terminal-event append when
@@ -609,7 +673,11 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
 // v2 envelope `phase.<phase>.<status>.<ticket>` to the unified event log so the
 // terminal event is NEVER silently dropped (the broker routes on
 // attributes["event.name"]). Best-effort; never throws.
-export function defaultAppendEventLog({ phase, ticket, status, reason }) {
+//
+// CTL-1814: `orchestrator` completes the projection identity (see the block
+// above). It is resolved, never assumed — and always stamped, including the
+// unresolvable case.
+export function defaultAppendEventLog({ phase, ticket, status, reason, orchestrator }) {
   try {
     const path = getEventLogPath();
     mkdirSync(dirname(path), { recursive: true });
@@ -626,6 +694,9 @@ export function defaultAppendEventLog({ phase, ticket, status, reason }) {
         // CTL-1488: DIRECT canonical writer — bypasses buildCanonicalEvent, so stamp the stream class
         // or coordination-publish's fail-closed filter silently drops this terminal event.
         "event.stream_class": classifyEventStream(eventName),
+        // CTL-1814: without this the CTL-532 fold returns null and worker_state
+        // stays stale for exactly the four terminal statuses this emitter writes.
+        "catalyst.orchestrator.id": resolveOrchestratorId(orchestrator),
         "linear.issue.identifier": ticket,
         "catalyst.worker.ticket": ticket,
       },
