@@ -23,7 +23,7 @@
 // EXPORTED sdk primitives: runPrelaunch (the Stage-A shared pre-launch: claim +
 // fenced "dispatched" signal + generation + rebase + prompt/env composition),
 // Semaphore + resolveMaxParallel (the process-wide concurrency cap),
-// scrubSecrets (token redaction), flipSignalDoneOnSuccess (the success-branch
+// scrubSecrets (token redaction), flipSignalAbandonedOnUndeclaredExit (the success-branch
 // signal backstop), defaultWriteSignalStalled (the stalled-signal flip) and
 // defaultEmitBackstop (the terminal-event backstop). Only the launch verb —
 // spawn `codex exec --json`, parse its JSONL, classify its errors — is new.
@@ -66,7 +66,7 @@ import { codexConfig, log } from "./config.mjs";
 import {
   defaultEmitBackstop,
   defaultWriteSignalStalled,
-  flipSignalDoneOnSuccess,
+  flipSignalAbandonedOnUndeclaredExit,
   resolveMaxParallel,
   runPrelaunch,
   scrubSecrets,
@@ -1766,9 +1766,11 @@ export async function codexRunPhaseAgent(
         };
       }
 
-      // success (exitCode === 0) — in-process backstop flip (no-op when the skill's
-      // own phase-agent-emit-complete already flipped it, or the generation is stale).
-      flipSignalDoneOnSuccess(signalFile, spec.generation);
+      // success (exitCode === 0) — CTL-1790: a clean exit is NOT a declared outcome.
+      // If the signal is still in-flight the skill never declared, so record
+      // ABANDONMENT (no-op when the skill's own phase-agent-emit-complete already
+      // declared, or when this generation is stale).
+      flipSignalAbandonedOnUndeclaredExit(signalFile, spec.generation, { ticket, phase });
       const usage = normalizeUsage(res.usage);
       emitEvent("execution-core.codex.phase-turns", { ticket, phase, usage });
       return {

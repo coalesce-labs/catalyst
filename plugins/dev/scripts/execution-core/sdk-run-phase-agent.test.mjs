@@ -4,7 +4,9 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test sdk-run-phase-agent.test.mjs
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { isTicketInFlight, deriveAdvancement } from "./scheduler.mjs";
+import { PHASE_EVENT_PATTERN } from "../broker/namespace-contract.mjs";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,7 +21,7 @@ import {
   scrubSecrets,
   defaultEmitBackstop,
   defaultAppendEventLog,
-  flipSignalDoneOnSuccess,
+  flipSignalAbandonedOnUndeclaredExit,
   runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
@@ -1133,41 +1135,55 @@ describe("sdkRunPhaseAgent — CTL-1367 item 4 (backstop → stalled signal)", (
 // ── CTL-1410 Phase A: SDK success-branch signal flip ──────────────────────────
 // mapResult subtype==="success" returns backstop:null — historically the ONE
 // abstaining branch (the skill was solely responsible for its own flip). With the
-// event-only phases migrated onto the wrapper, this in-process net flips a
-// still-in-flight (dispatched|running) signal to done so occupancy releases and
-// deriveAdvancement sees a terminal status even if a skill skipped its wrapper
-// call. It must NEVER clobber a terminal status, resurrect a parked hold, nor
-// act on a stale generation (superseded worker).
+// event-only phases migrated onto the wrapper, this in-process net acts on a
+// still-in-flight (dispatched|running) signal. CTL-1790 changed WHAT it writes: it
+// used to fabricate `done`; it now records ABANDONMENT (a recognized terminal that
+// frees the ticket and escalates, but never advances). It must NEVER clobber a
+// terminal status, resurrect a parked hold, nor act on a stale generation.
 
-describe("flipSignalDoneOnSuccess — CTL-1410 Phase A truth table", () => {
+describe("flipSignalAbandonedOnUndeclaredExit — CTL-1410 Phase A / CTL-1790 truth table", () => {
   const flipCase = (startStatus) => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-flip-"));
     const signalFile = join(dir, "phase-triage.json");
     writeFileSync(signalFile, JSON.stringify({ status: startStatus, ticket: "CTL-1", phase: "triage" }));
-    flipSignalDoneOnSuccess(signalFile);
+    // Codex #3310 P2: NEVER let a unit test reach defaultAppendEventLog — it appends to
+    // the REAL fleet log at getEventLogPath(). VERIFIED by probe: an un-injected call
+    // wrote `phase.triage.abandoned.CTL-1` into this machine's live
+    // ~/catalyst/events/2026-08.jsonl. A test that pollutes the event log can also WAKE
+    // the local dogfooding installation.
+    flipSignalAbandonedOnUndeclaredExit(signalFile, undefined, { appendEventLog: () => {} });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
     return after;
   };
 
-  test("dispatched (in-flight) → done + completedAt, no attentionReason", () => {
+  // CTL-1790 — THE core behavioural assertion. A clean exit with no declaration is
+  // NOT a success. Any regression to `done` re-opens the 15-of-31 fabricated-advance
+  // defect, so this test is the one that must go red if the fix is reverted.
+  test("dispatched (in-flight) → abandonment, NEVER done", () => {
     const after = flipCase("dispatched");
-    expect(after.status).toBe("done");
-    expect(typeof after.completedAt).toBe("string");
-    expect("attentionReason" in after).toBe(false);
-    expect("failureReason" in after).toBe(false);
+    expect(after.status).not.toBe("done");
+    expect(after.status).toBe("failed");
+    expect(after.outcome).toBe("abandoned");
+    expect(after.failureReason).toBe("ended-without-declaration");
+    // No completedAt: computeLastPhaseAdvanceTs (signal-reader.mjs:85) would read it
+    // on a TERMINAL status as a phase ADVANCE and publish it as cross-host liveness.
+    expect("completedAt" in after).toBe(false);
   });
 
   // CTL-1789: this flip is the canonical FABRICATED terminal — a clean SDK exit,
   // NOT the agent declaring completion. It must stamp its own writer id so the
   // advancement audit can subtract it from the declared advances. Without the
   // marker the signal is byte-indistinguishable from a wrapper-written one.
-  test("CTL-1789: a flipped terminal is stamped assertedBy=sdk-success-flip", () => {
+  test("CTL-1789/CTL-1790: the terminal is stamped assertedBy=sdk-abandoned", () => {
     const after = flipCase("dispatched");
-    expect(after.assertedBy).toBe("sdk-success-flip");
-    expect(after.assertedBy).toBe(ASSERTED_BY.SDK_SUCCESS_FLIP);
+    expect(after.assertedBy).toBe("sdk-abandoned");
+    expect(after.assertedBy).toBe(ASSERTED_BY.SDK_ABANDONED);
     // …and it is NOT the wrapper's declared id.
     expect(after.assertedBy).not.toBe(ASSERTED_BY.PHASE_AGENT);
+    // The retired id must stay REGISTERED so pre-CTL-1790 signals still classify as
+    // fabricated rather than unknown-writer — but nothing may write it any more.
+    expect(after.assertedBy).not.toBe(ASSERTED_BY.SDK_SUCCESS_FLIP);
   });
 
   test("CTL-1789: a bowed-out stale-generation flip stamps NOTHING", () => {
@@ -1179,20 +1195,23 @@ describe("flipSignalDoneOnSuccess — CTL-1410 Phase A truth table", () => {
       signalFile,
       JSON.stringify({ status: "dispatched", ticket: "CTL-1", phase: "implement", generation: 6 })
     );
-    flipSignalDoneOnSuccess(signalFile, 5);
+    flipSignalAbandonedOnUndeclaredExit(signalFile, 5, { appendEventLog: () => {} });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
     expect(after.status).toBe("dispatched");
     expect("assertedBy" in after).toBe(false);
   });
 
-  test("running (in-flight) → done", () => {
-    expect(flipCase("running").status).toBe("done");
+  test("running (in-flight) → the abandonment terminal", () => {
+    const after = flipCase("running");
+    expect(after.status).toBe("failed");
+    expect(after.outcome).toBe("abandoned");
   });
 
-  test("needs-input (parked) is NEVER resurrected to done", () => {
+  test("needs-input (parked) is NEVER resurrected", () => {
     const after = flipCase("needs-input");
     expect(after.status).toBe("needs-input");
+    expect("outcome" in after).toBe(false);
     expect("completedAt" in after).toBe(false);
   });
 
@@ -1200,15 +1219,17 @@ describe("flipSignalDoneOnSuccess — CTL-1410 Phase A truth table", () => {
     test(`already-terminal '${terminal}' is not clobbered`, () => {
       const after = flipCase(terminal);
       expect(after.status).toBe(terminal);
+      expect("outcome" in after).toBe(false);
       expect("completedAt" in after).toBe(false);
     });
   }
 
   test("missing / empty / null signalFile never throws", () => {
     expect(() => {
-      flipSignalDoneOnSuccess("/nonexistent/dir/sig.json");
-      flipSignalDoneOnSuccess("");
-      flipSignalDoneOnSuccess(null);
+      const sink = { appendEventLog: () => {} };
+      flipSignalAbandonedOnUndeclaredExit("/nonexistent/dir/sig.json", undefined, sink);
+      flipSignalAbandonedOnUndeclaredExit("", undefined, sink);
+      flipSignalAbandonedOnUndeclaredExit(null, undefined, sink);
     }).not.toThrow();
   });
 
@@ -1220,7 +1241,7 @@ describe("flipSignalDoneOnSuccess — CTL-1410 Phase A truth table", () => {
     const sig = { status: "dispatched", ticket: "CTL-1", phase: "implement" };
     if (sigGen !== undefined) sig.generation = sigGen;
     writeFileSync(signalFile, JSON.stringify(sig));
-    flipSignalDoneOnSuccess(signalFile, mine);
+    flipSignalAbandonedOnUndeclaredExit(signalFile, mine, { appendEventLog: () => {} });
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
     rmSync(dir, { recursive: true, force: true });
     return after.status;
@@ -1230,29 +1251,49 @@ describe("flipSignalDoneOnSuccess — CTL-1410 Phase A truth table", () => {
     expect(fenceCase(5, 6)).toBe("dispatched");
   });
 
-  test("current generation (mine == signal) flips", () => {
-    expect(fenceCase(6, 6)).toBe("done");
+  test("current generation (mine == signal) writes the terminal", () => {
+    expect(fenceCase(6, 6)).toBe("failed");
   });
 
   test("newer generation (mine > signal) flips (fail-open, matches isCurrentGeneration)", () => {
-    expect(fenceCase(7, 6)).toBe("done");
+    expect(fenceCase(7, 6)).toBe("failed");
   });
 
   test("missing own generation fails open (legacy/unfenced dispatch) — flips", () => {
-    expect(fenceCase(undefined, 6)).toBe("done");
+    expect(fenceCase(undefined, 6)).toBe("failed");
   });
 
   test("missing signal generation fails open — flips", () => {
-    expect(fenceCase(5, undefined)).toBe("done");
+    expect(fenceCase(5, undefined)).toBe("failed");
   });
 
   test("non-numeric generations fail open — flips", () => {
-    expect(fenceCase("garbage", "alsogarbage")).toBe("done");
+    expect(fenceCase("garbage", "alsogarbage")).toBe("failed");
   });
 });
 
-describe("sdkRunPhaseAgent — CTL-1410 Phase A (success flips in-flight signal to done)", () => {
-  test("success + signal still 'dispatched' → flipped to done (the safety net)", async () => {
+describe("sdkRunPhaseAgent — CTL-1410 Phase A / CTL-1790 (a clean exit with no declaration is abandonment)", () => {
+  // Codex #3310 P2: these drive the REAL call site, which uses defaultAppendEventLog —
+  // and that appends to getEventLogPath(), i.e. the machine's LIVE fleet event log.
+  // VERIFIED by probe: an un-redirected call wrote `phase.triage.abandoned.CTL-1` into
+  // this machine's real ~/catalyst/events/2026-08.jsonl. Redirect CATALYST_DIR for the
+  // whole block (getEventLogPath re-resolves per call — same technique as the CTL-1488
+  // test below) so a unit test can neither pollute the log nor WAKE the local
+  // dogfooding installation.
+  let prevCatalystDir;
+  let evDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    evDir = mkdtempSync(join(tmpdir(), "sdk-abandon-evdir-"));
+    process.env.CATALYST_DIR = evDir;
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(evDir, { recursive: true, force: true });
+  });
+
+  test("success + signal still 'dispatched' → abandoned, NOT done (end to end)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
     const signalFile = join(dir, "phase-triage.json");
     const spec = makeSpec({ signalFile });
@@ -1266,8 +1307,12 @@ describe("sdkRunPhaseAgent — CTL-1410 Phase A (success flips in-flight signal 
     expect(r.code).toBe(0);
     expect(backstops).toHaveLength(0);
     const after = JSON.parse(readFileSync(signalFile, "utf8"));
-    expect(after.status).toBe("done");
-    expect(typeof after.completedAt).toBe("string");
+    // The whole point of CTL-1790: a zero exit code is not evidence of work.
+    expect(after.status).not.toBe("done");
+    expect(after.status).toBe("failed");
+    expect(after.outcome).toBe("abandoned");
+    expect(after.failureReason).toBe("ended-without-declaration");
+    expect("completedAt" in after).toBe(false);
     expect("attentionReason" in after).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
@@ -2008,5 +2053,96 @@ describe("defaultAppendEventLog — CTL-1488 stamps the coordination stream clas
       else process.env.CATALYST_DIR = prev;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── CTL-1790: the abandonment terminal must FREE the ticket and NOT advance it ──
+//
+// The truth-table block above pins what gets WRITTEN. These two pin what the rest of
+// the system DOES with it, by driving the real production predicates rather than
+// re-stating a status literal. They are the anti-wedge tests: the measured hazard of
+// this change is a terminal the readers do not recognize, which leaves the ticket
+// in-flight forever — never advanced, never reclaimed, never escalated, and silently
+// re-dispatched on the next daemon restart.
+describe("CTL-1790 — the written terminal is recognized by the live predicates", () => {
+  const writeAbandoned = () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-abandon-live-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(
+      signalFile,
+      JSON.stringify({ status: "dispatched", ticket: "CTL-1", phase: "implement" })
+    );
+    flipSignalAbandonedOnUndeclaredExit(signalFile, undefined, {
+      ticket: "CTL-1", phase: "implement", appendEventLog: () => {},
+    });
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    rmSync(dir, { recursive: true, force: true });
+    return after;
+  };
+
+  // T1 — THE ANTI-WEDGE TEST. isTicketInFlight (scheduler.mjs) is a CLOSED allow-list
+  // of failed|stalled|aborted; a status outside it returns true forever. Driving the
+  // real function means this fails if the writer ever emits an unrecognized terminal
+  // (including a bare `abandoned`), and also fails if someone narrows the allow-list.
+  test("the ticket is no longer in flight — the slot and the claim are freed", () => {
+    const after = writeAbandoned();
+    expect(isTicketInFlight({ implement: after.status })).toBe(false);
+  });
+
+  // T2 — THE ticket's single hard requirement. An undeclared exit must not move the
+  // pipeline forward. Fails the moment the writer regresses to "done".
+  test("the pipeline does NOT advance off an undeclared exit", () => {
+    const after = writeAbandoned();
+    expect(deriveAdvancement({ implement: after.status })).toBeNull();
+    // and the control: a genuinely declared `done` DOES advance, so the assertion
+    // above is testing the status and not a broken call.
+    expect(deriveAdvancement({ implement: "done" })).not.toBeNull();
+  });
+
+  // T3 — silence is a defect: exactly one event, correctly named, is emitted.
+  test("exactly one phase.<phase>.abandoned.<ticket> event is emitted", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-abandon-ev-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(
+      signalFile,
+      JSON.stringify({ status: "running", ticket: "CTL-1", phase: "implement" })
+    );
+    const seen = [];
+    flipSignalAbandonedOnUndeclaredExit(signalFile, undefined, {
+      ticket: "CTL-1",
+      phase: "implement",
+      appendEventLog: (e) => seen.push(e),
+    });
+    rmSync(dir, { recursive: true, force: true });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].status).toBe("abandoned");
+    expect(seen[0].phase).toBe("implement");
+    expect(seen[0].ticket).toBe("CTL-1");
+    expect(`phase.${seen[0].phase}.${seen[0].status}.${seen[0].ticket}`).toBe(
+      "phase.implement.abandoned.CTL-1"
+    );
+    // and it must be routable by the broker's contract, not a silently-dropped orphan
+    expect(PHASE_EVENT_PATTERN.test("phase.implement.abandoned.CTL-1")).toBe(true);
+  });
+
+  // T4 — a bow-out (parked / already-terminal / stale generation) emits NOTHING.
+  // An event without a matching write would be a fabrication of the opposite kind.
+  test("a bowed-out call writes nothing and emits nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-abandon-bow-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(
+      signalFile,
+      JSON.stringify({ status: "dispatched", ticket: "CTL-1", phase: "implement", generation: 9 })
+    );
+    const seen = [];
+    flipSignalAbandonedOnUndeclaredExit(signalFile, 8, {
+      ticket: "CTL-1",
+      phase: "implement",
+      appendEventLog: (e) => seen.push(e),
+    });
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    rmSync(dir, { recursive: true, force: true });
+    expect(after.status).toBe("dispatched");
+    expect(seen).toHaveLength(0);
   });
 });

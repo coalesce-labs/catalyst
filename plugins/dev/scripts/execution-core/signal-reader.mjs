@@ -83,6 +83,16 @@ export function computeLastPhaseAdvanceTs(signals, { self, now = Date.now() } = 
       if (!signal || typeof signal !== "object") continue;
       const status = String(signal.status ?? "").toLowerCase();
       if (!TERMINAL.has(status) && status !== "complete" && status !== "completed") continue;
+      // CTL-1790 (Codex #3310 P2): an ABANDONED phase advanced nothing, so its
+      // timestamp must not publish as a phase advance. Omitting `completedAt` at the
+      // writer is NOT sufficient — the value chain below falls back to `updatedAt`,
+      // which the writer necessarily sets, so the abandonment would still surface as
+      // `lastAdvanceAt` and report productivity for a phase that explicitly did not
+      // advance. That is a fabrication of the same family this ticket removes, just
+      // in the liveness plane instead of the pipeline. Keyed on the additive
+      // `outcome` field so no other terminal's behaviour changes.
+      const outcome = String(signal.outcome ?? signal.raw?.outcome ?? "").toLowerCase();
+      if (outcome === "abandoned") continue;
       const host = signal.raw?.host?.name ?? signal.host?.name ?? null;
       if (host != null && host !== self) continue;
       const value = signal.completedAt ?? signal.raw?.completedAt ?? signal.updatedAt ?? signal.raw?.updatedAt;

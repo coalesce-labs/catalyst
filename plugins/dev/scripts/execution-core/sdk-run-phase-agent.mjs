@@ -484,21 +484,33 @@ export function defaultWriteSignalStalled(signalFile, reason) {
 // SKILL was solely responsible for flipping its own signal to done (via the
 // phase-agent-emit-complete wrapper). That holds now that the two event-only
 // phases (triage, monitor-deploy) route their terminal emit through the wrapper,
-// but this is the in-process belt-and-suspenders net: on a clean success, if the
-// signal is STILL in-flight (dispatched|running) — the skill exited 0 without its
-// own flip — flip it to done here so occupancy (countSdkInflight) releases the
-// slot and deriveAdvancement sees a terminal status. Under executor=sdk there is
-// no bg reclaim path to synthesize the flip, so without this a success that
-// skipped its wrapper call would strand the slot.
+// but a worker can still exit 0 without ever declaring anything.
+//
+// CTL-1790 — WHAT THIS USED TO DO, AND WHY IT CHANGED. This function was
+// `flipSignalDoneOnSuccess`: on a clean exit with an in-flight signal it wrote
+// status:"done" and emitted nothing. That is where 15 of 31 measured August 2026
+// phase advancements came from — success INFERRED from a process exiting zero,
+// declared by nothing that did the work, and silent. Under the goal-loop contract a
+// worker declares its own outcome or nothing is recorded, so the fabricated success
+// is deleted outright.
+//
+// What is NOT deleted is the TERMINAL WRITE, and that distinction is the whole trap.
+// Removing this function altogether leaves the signal in-flight forever:
+// isTicketInFlight stays true, classifyWorker returns "unknown" so the CTL-574
+// reclaim never fires, and the terminal sweep never escalates — a stranded, invisible
+// ticket that silently re-dispatches on the next daemon restart. An event alone
+// cannot fix that: the readers that free the ticket read the SIGNAL FILE, not the
+// event log. So the fabrication becomes a declared non-outcome, written terminal.
 //
 // Distinct from defaultWriteSignalTerminal on purpose:
 //   - acts ONLY on an in-flight (dispatched|running) signal — it NEVER resurrects
-//     a parked (needs-input) hold into done, and never clobbers an already-terminal
-//     status (done/failed/skipped/turn-cap-exhausted);
+//     a parked (needs-input) hold, and never clobbers an already-terminal status
+//     (done/failed/skipped/turn-cap-exhausted);
 //   - honors the CTL-736 generation fence — a stale superseded worker must NOT
 //     write an outcome (see below);
-//   - writes status:"done" + completedAt (a SUCCESS terminal), no attentionReason
-//     (an attentionReason/failureReason would trip revive's escalate branch).
+//   - writes the recognized terminal status:"failed" with outcome:"abandoned" and
+//     failureReason:"ended-without-declaration", and NO completedAt — see the
+//     block at the write site for why each of those three is load-bearing.
 const SIGNAL_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 
 // Plain-integer test shared by the generation fence — mirrors the bash
@@ -506,7 +518,8 @@ const SIGNAL_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 // isCurrentGeneration semantics exactly.
 const isPlainInt = (v) => /^[0-9]+$/.test(String(v));
 
-export function flipSignalDoneOnSuccess(signalFile, generation) {
+export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts = {}) {
+  const { appendEventLog = defaultAppendEventLog, ticket, phase } = opts;
   if (!signalFile) return;
   try {
     let sig;
@@ -533,18 +546,59 @@ export function flipSignalDoneOnSuccess(signalFile, generation) {
       return;
     }
     const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-    sig.status = "done";
-    // CTL-1789: this flip fires on a CLEAN SDK EXIT, not on an agent declaring
-    // completion — the agent never ran its wrapper (if it had, `status` would
-    // already be terminal and the in-flight precondition above would have
-    // returned). Stamp it FABRICATED so the advancement audit can subtract it.
-    sig.assertedBy = ASSERTED_BY.SDK_SUCCESS_FLIP;
-    sig.completedAt = ts;
+    // ── CTL-1790: record ABANDONMENT, never a fabricated success. ──────────────
+    //
+    // `status` is the ALREADY-RECOGNIZED terminal `failed`, NOT a new `abandoned`
+    // token, and that choice is the load-bearing one. A new status value would have
+    // to be added to 29 separate status sets across exec-core, the broker, the
+    // orch-monitor readers and five hand-copied UI literals (three of which have no
+    // drift guard). A single miss fails in the WORST direction: `isTicketInFlight`
+    // (scheduler.mjs:1226) is a closed allow-list of `failed|stalled|aborted`, so an
+    // unrecognized terminal keeps the ticket "in flight" forever — never advanced,
+    // never reclaimed (classifyWorker → "unknown"), never escalated (the terminal
+    // sweep's anyFailed/anyStalled both stay false), excluded from the recovery pass,
+    // and silently re-dispatched on the next daemon restart (boot-resume.mjs:298).
+    // That is a permanently stranded, permanently INVISIBLE ticket — the exact defect
+    // class this ticket exists to remove, reproduced by its own fix.
+    //
+    // With `failed`, every one of those 29 sets already handles it, so a surface we
+    // have not upgraded yet degrades to "this phase failed" — which is TRUE, and loud.
+    // The abandonment itself rides additive fields plus its own event, and each
+    // display surface can be upgraded independently. Safety by construction; fidelity
+    // opt-in. (Two further traps, both verified: the UI's `isAbandoned()` in
+    // orch-monitor/ui/src/lib/computations.ts:28 returns FALSE for "abandoned" — its
+    // set is {superseded,canceled} — and catalyst-state.sh:469 already uses
+    // `abandoned` for orchestrator heartbeat-expiry GC.)
+    sig.status = "failed";
+    sig.outcome = "abandoned";
+    sig.failureReason = "ended-without-declaration";
+    // CTL-1789: this fires on a CLEAN SDK EXIT, not on an agent declaring anything —
+    // the agent never ran its wrapper (if it had, `status` would already be terminal
+    // and the in-flight precondition above would have returned). Stamp the writer so
+    // the advancement audit can attribute it.
+    sig.assertedBy = ASSERTED_BY.SDK_ABANDONED;
     sig.updatedAt = ts;
-    sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), done: ts };
+    // DELIBERATELY NO `completedAt`. computeLastPhaseAdvanceTs (signal-reader.mjs)
+    // reads it on any TERMINAL status as a phase ADVANCE and publishes it as
+    // cross-host liveness — an abandoned phase advanced nothing.
+    //
+    // Omitting it here is NECESSARY BUT NOT SUFFICIENT (Codex #3310 P2): that reader's
+    // value chain falls back to `updatedAt`, which the line above necessarily sets. The
+    // load-bearing half of this guard therefore lives in the READER, which now skips
+    // any signal carrying `outcome: "abandoned"`. Both halves are required; neither
+    // alone works.
+    sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), failed: ts };
     const tmp = `${signalFile}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(sig));
     renameSync(tmp, signalFile);
+    // SILENCE IS A DEFECT. The old flip wrote a terminal and emitted NOTHING, which
+    // is why 15 of 31 August advancements were invisible. Emit outside the
+    // read→fence→write block above so a logging failure can never affect the write.
+    const t = ticket ?? sig.ticket;
+    const p = phase ?? sig.phase;
+    if (t && p) {
+      appendEventLog({ phase: p, ticket: t, status: "abandoned", reason: "ended-without-declaration" });
+    }
   } catch {
     /* best-effort — the skill's own wrapper flip is the primary path */
   }
@@ -1207,11 +1261,12 @@ export async function sdkRunPhaseAgent(
       if (backstop) {
         emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir, signalFile }, { spawn });
       } else if (signalFile) {
-        // CTL-1410 Phase A: clean SDK success (no backstop) — in-process safety
-        // net that flips a still-in-flight signal to done. No-op when the phase
-        // SKILL already flipped it via the wrapper (the primary path), or when
-        // this run's generation is stale (superseded by a newer dispatch).
-        flipSignalDoneOnSuccess(signalFile, spec.generation);
+        // CTL-1410 Phase A / CTL-1790: the process exited 0 with no backstop. If
+        // the signal is STILL in-flight the phase SKILL never declared an outcome,
+        // so record ABANDONMENT — not a fabricated success. No-op when the skill
+        // already declared via the wrapper (the primary path), or when this run's
+        // generation is stale (superseded by a newer dispatch).
+        flipSignalAbandonedOnUndeclaredExit(signalFile, spec.generation, { ticket, phase });
       }
       return mapped;
     }

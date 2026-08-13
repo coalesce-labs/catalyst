@@ -584,3 +584,34 @@ describe("hasFreshClaim (CTL-1367 P2-G)", () => {
     expect(hasFreshClaim(orchDir, "CTL-NOPE", "triage")).toBe(false);
   });
 });
+
+// CTL-1790 (Codex #3310 P2) — an ABANDONED phase advanced nothing, so it must not
+// publish as a phase advance. Omitting `completedAt` at the writer is not enough:
+// the value chain falls back to `updatedAt`, which the writer necessarily sets.
+describe("computeLastPhaseAdvanceTs — abandonment is not an advance", () => {
+  const abandoned = {
+    status: "failed",
+    outcome: "abandoned",
+    updatedAt: "2026-08-12T23:00:00Z",
+  };
+
+  test("a signal with outcome:'abandoned' contributes no advance timestamp", () => {
+    expect(computeLastPhaseAdvanceTs([abandoned], { now: Date.parse("2026-08-12T23:30:00Z") })).toBeNull();
+  });
+
+  // POSITIVE CONTROL — the same shape WITHOUT the outcome field must still count,
+  // proving the test above is exercising the exclusion and not a broken call.
+  test("an ordinary failed terminal still contributes its updatedAt", () => {
+    const { outcome, ...plainFailed } = abandoned;
+    expect(computeLastPhaseAdvanceTs([plainFailed], { now: Date.parse("2026-08-12T23:30:00Z") })).toBe(
+      "2026-08-12T23:00:00.000Z",
+    );
+  });
+
+  test("abandonment does not mask a genuine advance from another phase", () => {
+    const real = { status: "done", completedAt: "2026-08-12T22:00:00Z" };
+    expect(computeLastPhaseAdvanceTs([abandoned, real], { now: Date.parse("2026-08-12T23:30:00Z") })).toBe(
+      "2026-08-12T22:00:00.000Z",
+    );
+  });
+});

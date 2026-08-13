@@ -321,14 +321,18 @@ function localTicket(event, payload) {
 }
 
 // keep in sync with router.mjs PHASE_EVENT_PATTERN
+// CTL-1790 added `abandoned`; `skipped` was missing here since CTL-512 — this copy
+// had drifted from the contract it claims to mirror, so both are added together.
 const WORKER_PHASE_EVENT_PATTERN =
-  /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
+  /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted|skipped|abandoned)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
 
 // phase.<name>.<status> → projected worker `status` value.
 const PHASE_STATUS_MAP = {
   complete: "phase-complete",
   failed: "phase-failed",
   "turn-cap-exhausted": "turn-cap-exhausted",
+  skipped: "phase-complete", // CTL-512: terminal-success for monitor-deploy
+  abandoned: "phase-failed", // CTL-1790: terminal, never advance-eligible
 };
 
 // orchestrator.worker.<action> events that map directly to a status with no
