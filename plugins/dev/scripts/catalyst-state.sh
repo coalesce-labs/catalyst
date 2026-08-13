@@ -185,6 +185,13 @@ event_append() {
   ensure_dirs
 
   if ! command -v jq >/dev/null 2>&1; then
+    # CTL-1795 DECLARED ASYMMETRY. build_canonical_line is a jq program, so on a jq-less host
+    # there is no canonical half to emit and this branch writes the caller's RAW v1 line. That
+    # is deliberate: a hand-rolled jq-free JSON assembler would be a second, untested serializer
+    # for the shape this repo has one builder for. The line is emitted rather than dropped (the
+    # event matters more than its envelope) and the breadcrumb makes the divergence observable
+    # instead of silent — same posture as lib/catalyst-deployment-mode.sh's jq-less resolver.
+    canonical_note_v1_only "jq-missing:event_append"
     local month_file="${EVENTS_DIR}/$(date -u +%Y-%m).jsonl"
     echo "$input_json" >> "$month_file"
     return 0

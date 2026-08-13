@@ -328,6 +328,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/skill-plugin-root-assigned.test.sh
 
+      - name: dual-envelope test (CTL-1795 v1→superset, bash half)
+        # Covers canonical_dual_envelope_line / canonical_note_v1_only, the bash
+        # reap-intent producer, and catalyst-session.sh's agent.checkin/checkout.
+        # ALSO the cross-stack ATTR_MAP parity check: the bash mirror
+        # _CE_FLAT_ATTR_JQ vs the JS registry FLAT_ATTRIBUTE_MAP. Bash cannot
+        # import an ESM constant, so this suite is the only thing preventing the
+        # two hand-written mirrors from drifting.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/dual-envelope.test.sh
+
       - name: catalyst-stack shipper ephemeral-path guard test (CTL-1473)
         # CTL-1473: guards that install-services (--print and real) refuses to bake
         # an ephemeral config path (worktree or /tmp). Uses CATALYST_FORCE_BAKE_DIR +
@@ -720,6 +730,7 @@ jobs:
             event-log-window.test.mjs \
             event-log-read-guard.test.mjs \
             lib/canonical-event.test.mjs \
+            lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \
             fence-guard-integration.test.mjs \
             terminal-done-cooldown.test.mjs \

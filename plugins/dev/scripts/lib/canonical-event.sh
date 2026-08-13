@@ -413,6 +413,147 @@ build_canonical_line() {
     }'
 }
 
+# ─── CTL-1795: the v1→superset dual envelope (bash half) ─────────────────────
+#
+# Mirrors execution-core/lib/canonical-event.mjs's buildDualEnvelopeLine. A superset line
+# carries BOTH the top-level v1 `event` and a full v2 attributes/body/resource block, so a
+# consumer filtering on attributes["event.name"] stops silently seeing a smaller universe —
+# while every existing v1 reader keeps reading the same top-level fields it always did.
+#
+# ONE line, never two: broker/event-name.mjs's getEventName reads `event.event` FIRST, so a v1
+# line and a separate v2 twin would both resolve to the same name and both be routed —
+# `agent.checkin`/`agent.checkout` would run upsertAgent and _autoRegisterPrLifecycle twice.
+
+# canonical_merge_v1 V1_JSON CANONICAL_LINE
+#
+# Echo ONE superset JSONL line on stdout: the v1 object's keys first, then every canonical
+# field merged over them. jq's `+` is right-biased, so a canonical key always wins a collision;
+# `ts` is the only key both shapes carry, and it is then forced back to the v1 value so the two
+# halves of one line can never disagree about when the event happened.
+#
+# Returns 1 (and echoes nothing) when jq is missing or either input fails to parse — the caller
+# falls back to the plain v1 line and calls canonical_note_v1_only. Losing an event is never an
+# acceptable price for enriching its envelope.
+canonical_merge_v1() {
+  local v1="$1" canonical="$2"
+  command -v jq >/dev/null 2>&1 || return 1
+  [[ -n "$v1" && -n "$canonical" ]] || return 1
+  printf '%s' "$canonical" | jq -c --argjson v1 "$v1" '
+    (($v1.ts // .ts)) as $ts
+    | ($v1 + .)
+    | .ts = $ts
+    | .observedTs = $ts
+  ' 2>/dev/null || return 1
+}
+
+# _CE_FLAT_ATTR_JQ — the bash mirror of FLAT_ATTRIBUTE_MAP in
+# execution-core/lib/canonical-event.mjs (which is itself byte-identical to otel-forward's
+# ATTR_MAP in lib/normalize.ts). Bash cannot `import` an ESM constant, so this is a
+# hand-written mirror held honest MECHANICALLY by __tests__/dual-envelope.test.sh, which parses
+# both sides and asserts set equality — the same one-registry/hand-mirror/cross-stack-parity
+# discipline lib/secret-contract.sh and assertion-evidence-parity.test.mjs already use. Drift
+# here would silently give a bash-emitted event a different attribute set than the JS emitter
+# gives the SAME event name.
+_CE_FLAT_ATTR_JQ='{
+  "ticket": "catalyst.worker.ticket",
+  "phase": "catalyst.worker.phase",
+  "bg_job_id": "catalyst.worker.bg_job_id",
+  "branch": "catalyst.worker.branch",
+  "orch_id": "catalyst.orchestrator.id",
+  "dominant_phase": "catalyst.worker.dominant_phase"
+}'
+
+# canonical_dual_envelope_line V1_JSON [SERVICE] [SEVERITY]
+#
+# Echo ONE superset JSONL line built from a flat v1 record `{ts, event, ...fields}` — the bash
+# counterpart of buildDualEnvelopeLine in execution-core/lib/canonical-event.mjs, splitting the
+# flat fields by the SAME map so a bash-emitted and a JS-emitted event of the same name carry
+# the same attributes.
+#
+# Returns 1 and echoes nothing when jq is missing, the record is nameless, or the record is
+# already canonical — every caller falls back to its plain v1 line and calls
+# canonical_note_v1_only.
+canonical_dual_envelope_line() {
+  local v1="$1" service="${2:-catalyst.execution-core}" severity="${3:-INFO}"
+  command -v jq >/dev/null 2>&1 || return 1
+  [[ -n "$v1" ]] || return 1
+  # Fail closed on an already-canonical record: double-wrapping is the one shape this must
+  # never produce.
+  printf '%s' "$v1" | jq -e 'has("attributes") | not' >/dev/null 2>&1 || return 1
+
+  local name ts attrs payload
+  name="$(printf '%s' "$v1" | jq -r 'if (.event | type) == "string" then .event else "" end' 2>/dev/null)" || return 1
+  [[ -n "$name" ]] || return 1
+  ts="$(printf '%s' "$v1" | jq -r '.ts // ""' 2>/dev/null)" || return 1
+  [[ -n "$ts" ]] || ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # `ts` and `event` are envelope fields and never land in either bucket; a mapped key becomes
+  # an attribute; everything else lands in body.payload, so nothing is dropped.
+  attrs="$(printf '%s' "$v1" | jq -c --argjson m "$_CE_FLAT_ATTR_JQ" '
+    reduce (to_entries[]) as $e ({};
+      if $e.key == "ts" or $e.key == "event" then .
+      elif ($m[$e.key] // null) != null then .[$m[$e.key]] = $e.value
+      else . end)' 2>/dev/null)" || return 1
+  payload="$(printf '%s' "$v1" | jq -c --argjson m "$_CE_FLAT_ATTR_JQ" '
+    reduce (to_entries[]) as $e ({};
+      if $e.key == "ts" or $e.key == "event" or ($m[$e.key] // null) != null then .
+      else .[$e.key] = $e.value end)
+    | if length == 0 then null else . end' 2>/dev/null)" || return 1
+
+  # --message is REQUIRED here, not decorative: build_canonical_line omits body.message entirely
+  # when it is empty, and a record with no body.message AND no attributes is the degenerate
+  # OTLP LogRecord CTL-1817 exists to prevent. The mjs builder makes `message: name` an
+  # invariant; this is the bash statement of the same invariant.
+  local line
+  line="$(build_canonical_line \
+    --ts "$ts" \
+    --severity "$severity" \
+    --service "$service" \
+    --event-name "$name" \
+    --message "$name" \
+    --payload-json "${payload:-null}" 2>/dev/null)" || return 1
+  [[ -n "$line" ]] || return 1
+
+  # Merge the mapped attributes into the canonical block (event.name stays first and is
+  # reasserted so a flat field can never displace it), then merge the whole canonical envelope
+  # over the v1 keys.
+  printf '%s' "$line" | jq -c --argjson v1 "$v1" --argjson extra "$attrs" --arg name "$name" '
+    .attributes = ((.attributes + $extra) | ."event.name" = $name)
+    | ($v1 + .)
+    | .ts = ($v1.ts // .ts)
+    | .observedTs = .ts
+  ' 2>/dev/null || return 1
+}
+
+# canonical_note_v1_only REASON
+#
+# Record that this process just emitted a RAW v1 line because the canonical path was
+# unavailable. This is the DECLARED ASYMMETRY of CTL-1795: build_canonical_line requires jq, so
+# "every v1 emit site dual-emits" is structurally unachievable from bash on a jq-less host, and
+# the two remaining raw-v1 fallbacks (catalyst-state.sh's jq-less branch,
+# emit-worker-status-change.sh's missing-$STATE_SCRIPT branch) exist precisely BECAUSE the
+# canonical path is unavailable there. We do not hand-roll a jq-free JSON assembler for it; we
+# make the divergence observable instead of silent.
+#
+# Two breadcrumbs, because neither alone reaches both audiences:
+#   · an exported env var — same-shell, for an in-process caller and `catalyst doctor`; the same
+#     shape lib/catalyst-deployment-mode.sh uses for CATALYST_DEPLOYMENT_MODE_JQ_MISSING.
+#   · ONE stderr line per process — the durable, cross-process half. catalyst-state.sh runs as a
+#     separate CLI process, so an exported var dies with it and could never be read back. stderr
+#     lands in the caller's launchd-captured `.log`, which Alloy ships to Loki INDEPENDENTLY of
+#     the event log — an event-log-sourced signal could not report a degradation of the event log
+#     itself. Guarded to once per process so a hot emit path cannot flood the log.
+canonical_note_v1_only() {
+  local reason="${1:-unknown}"
+  export CATALYST_EVENT_ENVELOPE_V1_ONLY=1
+  export CATALYST_EVENT_ENVELOPE_V1_ONLY_REASON="$reason"
+  if [[ -z "${__CE_V1_ONLY_WARNED:-}" ]]; then
+    __CE_V1_ONLY_WARNED=1
+    printf '[catalyst] WARNING: emitted a RAW v1 event envelope (%s) — invisible to any consumer reading attributes["event.name"] (CTL-1795)\n' \
+      "$reason" >&2
+  fi
+}
+
 # _canonical_is_sentinel_leak BASE_DIR LINE
 # Returns 0 (true) if LINE is a sentinel-stamped event aimed at the default
 # production events dir (BASE_DIR resolves to $HOME/catalyst/events). Parity

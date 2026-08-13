@@ -106,7 +106,35 @@ emit_reap_intent() {
 	mkdir -p "$dir" 2>/dev/null || return 1
 	local month_file
 	month_file="${dir}/$(date -u +%Y-%m).jsonl"
-	printf '%s\n' "$payload" >>"$month_file" 2>/dev/null || return 1
+
+	# CTL-1795: emit the superset envelope (v1 keys + a full canonical block) so this producer
+	# is visible to a consumer reading attributes["event.name"], exactly like its mjs twin
+	# execution-core/reap-intent.mjs. canonical-event.sh is sourced lazily — this file is a
+	# dependency-free leaf sourced by phase-agent-yield-check.sh / orchestrate-phase-advance /
+	# lib/worktree-presweep.sh, and it must keep working when the helper (or jq) is absent.
+	local line=""
+	if [[ -z ${__REAP_CANONICAL_TRIED:-} ]]; then
+		__REAP_CANONICAL_TRIED=1
+		local _rei_lib_dir
+		_rei_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-${(%):-%x}}")" && pwd)"
+		if [[ -r "${_rei_lib_dir}/canonical-event.sh" ]]; then
+			# shellcheck source=./canonical-event.sh
+			. "${_rei_lib_dir}/canonical-event.sh" 2>/dev/null || true
+		fi
+	fi
+	if command -v canonical_dual_envelope_line >/dev/null 2>&1; then
+		line="$(canonical_dual_envelope_line "$payload" "catalyst.execution-core" "INFO")" || line=""
+	fi
+	if [[ -z "$line" ]]; then
+		# The declared asymmetry — no jq or no canonical helper means no v2 half is constructible.
+		# Emit v1 anyway (a dropped reap-intent is a worker that is never reaped) and leave the
+		# breadcrumb so the divergence is observable rather than silent.
+		command -v canonical_note_v1_only >/dev/null 2>&1 &&
+			canonical_note_v1_only "canonical-build-unavailable:${event_type}"
+		line="$payload"
+	fi
+
+	printf '%s\n' "$line" >>"$month_file" 2>/dev/null || return 1
 	return 0
 }
 

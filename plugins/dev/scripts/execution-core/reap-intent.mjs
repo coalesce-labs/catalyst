@@ -16,6 +16,10 @@ import { getEventLogPath, log } from "./config.mjs";
 // at this emitter and was silently lost. Importing the list (instead of
 // re-typing it) makes that class of bug structurally impossible.
 import { JANITOR_EVENT_TYPES } from "./janitor-event-types.mjs";
+// CTL-1795: the shared v1→superset envelope builder. This module is the single largest v1
+// producer on the log (138,425 `phase.terminal.reap-requested` alone in 2026-08 on mini), so
+// every event it writes was invisible to any consumer reading attributes["event.name"].
+import { buildDualEnvelopeLine } from "./lib/canonical-event.mjs";
 
 export const REAP_INTENT_TYPES = Object.freeze([
   "phase.yield.reap-requested",
@@ -111,7 +115,7 @@ export async function emitReapIntent(eventType, fields = {}) {
     const target = FIELD_MAP[k] ?? k;
     payload[target] = v;
   }
-  const line = JSON.stringify(payload) + "\n";
+  const line = dualEnvelopeOrV1(payload, eventType);
   const logPath = getEventLogPath();
   try {
     mkdirSync(dirname(logPath), { recursive: true });
@@ -120,5 +124,27 @@ export async function emitReapIntent(eventType, fields = {}) {
   } catch (err) {
     log.error({ err: err.message, eventType }, "emitReapIntent: append failed");
     return false;
+  }
+}
+
+/**
+ * dualEnvelopeOrV1 — serialize `payload` as the CTL-1795 superset line, degrading to the plain
+ * v1 line if the builder refuses it.
+ *
+ * The degradation matters: a `*.reap-requested` that never lands is a worker that is never
+ * reaped, so envelope enrichment must never be able to cost us the event. The builder throws
+ * only on a nameless record or one that already carries an `attributes` key — the latter is
+ * reachable from here because `attributes` is a legal (unmapped) reap-intent field name.
+ * Exported for the reaper's echo path, which needs the identical fallback.
+ */
+export function dualEnvelopeOrV1(payload, eventType) {
+  try {
+    return buildDualEnvelopeLine(payload, { serviceName: "catalyst.execution-core" });
+  } catch (err) {
+    log.warn(
+      { err: err?.message, eventType },
+      "dual-envelope build failed — falling back to the v1-only line (CTL-1795)",
+    );
+    return JSON.stringify(payload) + "\n";
   }
 }

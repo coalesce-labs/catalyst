@@ -236,6 +236,63 @@ emit_event() {
   __session_emit_canonical "$sid" "$type" "${payload:-null}" "$ts"
 }
 
+# __session_emit_agent_event NAME ACTION TS DETAIL_JSON SESSION_ID [TICKET] [ORCH]
+#
+# CTL-1795. `agent.checkin` / `agent.checkout` are the two places this script writes a RAW v1
+# line — hand-built here and handed straight to canonical_jsonl_append, which BYPASSES
+# catalyst-state.sh's event_append and therefore its v1→canonical translation. They are live
+# (302 checkins + 394 checkouts measured in 2026-08) and they feed the broker's agent-identity
+# and PR auto-correlation path, so they were invisible to any consumer reading
+# attributes["event.name"]. The ticket's own census missed them.
+#
+# Emits ONE superset line: the v1 `{ts,event,detail}` keys are preserved verbatim (the broker's
+# getEventPayload reads `event.detail` FIRST, so nothing about its behaviour changes) and a full
+# canonical block is merged over them. body.payload is the detail object ITSELF, not a wrapper
+# around it, precisely so that getEventPayload's `detail ?? body.payload` fallback returns the
+# same object once v1 emission is removed in the follow-up.
+#
+# entity/action mirror catalyst-state.sh's __orch_canonical_for, which already carries explicit
+# `agent.checkin`/`agent.checkout` cases — one translation for these names, not two.
+__session_emit_agent_event() {
+  local name="$1" action="$2" ts="$3" detail="$4" sid="$5" ticket="${6:-}" orch="${7:-}"
+  local v1 line superset
+  v1="$(jq -nc --arg ts "$ts" --arg ev "$name" --argjson detail "$detail" \
+    '{ts:$ts,event:$ev,detail:$detail}' 2>/dev/null)" || return 0
+  [[ -n "$v1" ]] || return 0
+
+  local extra_args=()
+  [[ -n "$ticket" && "$ticket" != "null" ]] && extra_args+=(--worker "$ticket")
+  [[ -n "$orch" && "$orch" != "null" ]] && extra_args+=(--orch "$orch")
+
+  line="$(build_canonical_line \
+    --ts "$ts" \
+    --severity INFO \
+    --service catalyst.session \
+    --event-name "$name" \
+    --entity agent \
+    --action "$action" \
+    --label "$sid" \
+    --message "$name" \
+    --session "$sid" \
+    "${extra_args[@]}" \
+    --payload-json "$detail" 2>/dev/null)" || line=""
+
+  if [[ -n "$line" ]]; then
+    superset="$(canonical_merge_v1 "$v1" "$line")" || superset=""
+  else
+    superset=""
+  fi
+
+  if [[ -z "$superset" ]]; then
+    # The declared asymmetry: no jq (or a canonical build that failed) means no v2 half is
+    # constructible from bash. Emit the v1 line anyway — losing a checkin/checkout would strand
+    # the broker's agent registry — and leave a breadcrumb so the degradation is observable.
+    canonical_note_v1_only "canonical-build-unavailable:${name}"
+    superset="$v1"
+  fi
+  canonical_jsonl_append "$EVENTS_DIR" "$superset" 2>/dev/null || true
+}
+
 # ─── Commands ───────────────────────────────────────────────────────────────
 
 cmd_start() {
@@ -325,9 +382,8 @@ cmd_start() {
       orchestrator:(if $orchestrator == "" then null else $orchestrator end),
       claimed_pr:null,
       cwd:$cwd}')
-  canonical_jsonl_append "$EVENTS_DIR" \
-    "$(jq -nc --arg ts "$checkin_ts" --argjson detail "$checkin_payload" \
-      '{ts:$ts,event:"agent.checkin",detail:$detail}' 2>/dev/null)" 2>/dev/null || true
+  __session_emit_agent_event "agent.checkin" "checkin" "$checkin_ts" "$checkin_payload" \
+    "$sid" "$ticket" "${workflow:-${CATALYST_ORCHESTRATOR_ID:-}}"
 
   echo "$sid"
 }
@@ -571,9 +627,12 @@ cmd_end() {
   # CTL-303: emit agent.checkout so the broker can clean up auto-correlated interests.
   # CTL-402: include reason so the broker can log and persist why the session ended.
   local checkout_ts; checkout_ts="$(now_iso)"
-  canonical_jsonl_append "$EVENTS_DIR" \
-    "$(jq -nc --arg ts "$checkout_ts" --arg sid "$sid" --arg st "$status" --arg reason "$reason" \
-      '{ts:$ts,event:"agent.checkout",detail:({session_id:$sid,status:$st}+if $reason!="" then {reason:$reason} else {} end)}' 2>/dev/null)" 2>/dev/null || true
+  local checkout_payload
+  checkout_payload="$(jq -nc --arg sid "$sid" --arg st "$status" --arg reason "$reason" \
+    '{session_id:$sid,status:$st}+if $reason!="" then {reason:$reason} else {} end' 2>/dev/null)" \
+    || checkout_payload=""
+  [[ -n "$checkout_payload" ]] && __session_emit_agent_event \
+    "agent.checkout" "checkout" "$checkout_ts" "$checkout_payload" "$sid"
 
   # CTL-157: emit claude_code.session.outcome to OTLP.
   local emit_bin="${CATALYST_EMIT_OTEL_BIN:-$SCRIPT_DIR/emit-otel-event.sh}"

@@ -137,6 +137,20 @@ append_event() {
     # Fallback: write directly to the events file. Same path catalyst-state.sh
     # uses (CATALYST_EVENTS_DIR / YYYY-MM.jsonl, or CATALYST_EVENTS_FILE if
     # explicitly set, used by tests).
+    #
+    # CTL-1795 DECLARED ASYMMETRY. This branch exists precisely BECAUSE the canonical path is
+    # unavailable — $STATE_SCRIPT is what owns the v1→canonical translation, and it is not
+    # executable here — so the line goes out as RAW v1 with no attributes block. Emitting it
+    # beats dropping it; the breadcrumb (env var + one stderr line per process) is what keeps
+    # the divergence observable. canonical-event.sh is sourced lazily and only for the
+    # breadcrumb, so this path stays dependency-free when the helper is absent too.
+    if [ -r "${SCRIPT_DIR}/lib/canonical-event.sh" ]; then
+      # shellcheck source=lib/canonical-event.sh
+      . "${SCRIPT_DIR}/lib/canonical-event.sh" 2>/dev/null || true
+    fi
+    if command -v canonical_note_v1_only >/dev/null 2>&1; then
+      canonical_note_v1_only "state-script-unavailable:emit-worker-status-change"
+    fi
     local events_file
     if [ -n "${CATALYST_EVENTS_FILE:-}" ]; then
       events_file="$CATALYST_EVENTS_FILE"
