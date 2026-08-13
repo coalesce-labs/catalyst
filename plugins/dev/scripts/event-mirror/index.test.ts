@@ -43,9 +43,31 @@ describe("extractEventId", () => {
   test("reads attributes[event.id]", () => {
     expect(extractEventId(JSON.stringify({ attributes: { "event.id": "eid" } }))).toBe("eid");
   });
-  test("falls back to ts:name composite", () => {
+  // CTL-1812: this USED to return the `${ts}:${name}` composite. That is not an
+  // identity — two distinct events sharing a timestamp and a name collided, and the
+  // second was silently dropped as a duplicate. Measured: 35,931 real events suppressed
+  // across the two worker logs, 100% via this path. There is now no fallback id, and the
+  // caller's conservative path includes the line instead.
+  test("an event with no real id has NO fallback id — it must not be synthesised", () => {
     const line = JSON.stringify({ ts: "2026-08", attributes: { "event.name": "foo" } });
-    expect(extractEventId(line)).toBe("2026-08:foo");
+    expect(extractEventId(line)).toBeNull();
+  });
+
+  test("two DISTINCT events sharing ts and name are not collapsed", () => {
+    const a = JSON.stringify({ ts: "2026-08", attributes: { "event.name": "foo" }, body: { n: 1 } });
+    const b = JSON.stringify({ ts: "2026-08", attributes: { "event.name": "foo" }, body: { n: 2 } });
+    const state = newMirrorState();
+    const out = filterNewLines(state, [a, b], "2026-08.jsonl");
+    expect(out).toHaveLength(2);
+  });
+
+  // POSITIVE CONTROL — a real id still dedups, so the test above is proving the fallback
+  // was removed rather than that dedup stopped working altogether.
+  test("a real event id still dedups", () => {
+    const line = JSON.stringify({ id: "real-1", ts: "2026-08" });
+    const state = newMirrorState();
+    expect(filterNewLines(state, [line], "2026-08.jsonl")).toHaveLength(1);
+    expect(filterNewLines(state, [line], "2026-08.jsonl")).toHaveLength(0);
   });
   test("returns null for unparseable line", () => {
     expect(extractEventId("not json")).toBeNull();
@@ -260,5 +282,82 @@ describe("resolveHosts — roster resolution", () => {
     withEnv({ CATALYST_CLUSTER_JSON: join(tmp, "does-not-exist.json") }, () => {
       expect(resolveHosts()).toEqual([]);
     });
+  });
+});
+
+// ── CTL-1812: the cursor race that lost 341,356 events ────────────────────────
+//
+// `tail -c +N` always reads to EOF, so `bytesRead` is (EOF - cursor). The old code did
+// `hs.cursor += bytesRead`, a read-modify-write on shared state — two overlapping ticks
+// each added (EOF - cursor) to the SAME starting cursor and parked it at roughly
+// 2*EOF - cursor, far past the end of the remote file. While parked, `tail -c +N`
+// returns nothing and the mirror goes DARK: events are skipped with no fragment, no
+// error, and no unhealthy host. Measured consequence on this node: 167,118 of mini's
+// events (15.63%) and 174,238 of mini-2's (13.60%) simply absent.
+describe("CTL-1812 — overlapping ticks must not park the cursor past remote EOF", () => {
+  // A fake remote whose content grows, and which behaves exactly like `tail -c +N`:
+  // reads from `cursor` to EOF, returning nothing once the cursor is past the end.
+  const makeRemote = (content: string) => {
+    const fetchFn: FetchFn = async (_host, cursor) => {
+      const buf = Buffer.from(content, "utf8");
+      if (cursor >= buf.length) return { lines: [], bytesRead: 0 };
+      const slice = buf.subarray(cursor).toString("utf8");
+      return { lines: slice.split("\n").filter((l) => l.trim()), bytesRead: Buffer.byteLength(slice, "utf8") };
+    };
+    return fetchFn;
+  };
+
+  const lines = (n: number, tag: string) =>
+    Array.from({ length: n }, (_, i) => JSON.stringify({ id: `${tag}-${i}`, ts: "2026-08" })).join("\n") + "\n";
+
+  test("two CONCURRENT ticks leave the cursor at EOF, not past it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mirror-race-"));
+    try {
+      const content = lines(50, "a");
+      const fetchFn = makeRemote(content);
+      const state = newMirrorState();
+      const localFile = join(dir, "2026-08.jsonl");
+
+      // Fire both ticks WITHOUT awaiting the first — the exact shape setInterval had.
+      await Promise.all([
+        mirrorTick({ hosts: ["h1"], state, fetchFn, localFile }),
+        mirrorTick({ hosts: ["h1"], state, fetchFn, localFile }),
+      ]);
+
+      const eof = Buffer.byteLength(content, "utf8");
+      // THE ASSERTION. With `cursor += bytesRead` this lands at ~2*eof and the mirror
+      // goes dark for everything written before the remote catches up.
+      expect(state.byHost["h1"].cursor).toBeLessThanOrEqual(eof);
+      expect(state.byHost["h1"].cursor).toBe(eof);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("after concurrent ticks, subsequently-appended events are still mirrored", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mirror-race2-"));
+    try {
+      const first = lines(20, "a");
+      const state = newMirrorState();
+      const localFile = join(dir, "2026-08.jsonl");
+
+      await Promise.all([
+        mirrorTick({ hosts: ["h1"], state, fetchFn: makeRemote(first), localFile }),
+        mirrorTick({ hosts: ["h1"], state, fetchFn: makeRemote(first), localFile }),
+      ]);
+
+      // The remote grows. A parked cursor would skip straight past these.
+      const grown = first + lines(20, "b");
+      await mirrorTick({ hosts: ["h1"], state, fetchFn: makeRemote(grown), localFile });
+
+      const body = readFileSync(localFile, "utf8");
+      // Every one of the later events must be present — this is the 341k-event property.
+      for (let i = 0; i < 20; i++) {
+        expect(body).toContain(`"b-${i}"`);
+      }
+      expect(state.byHost["h1"].cursor).toBe(Buffer.byteLength(grown, "utf8"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
