@@ -208,7 +208,7 @@ export function computeParity(input: {
     const covered =
       orchestrator === "" ? workerStateTickets.has(ticket) : workerStateKeys.has(parityKey(orchestrator, ticket));
     if (covered) continue;
-    const dedupKey = orchestrator === "" ? ` ${ticket}` : parityKey(orchestrator, ticket);
+    const dedupKey = orchestrator === "" ? `\u0000${ticket}` : parityKey(orchestrator, ticket);
     if (reportedOrphans.has(dedupKey)) continue;
     reportedOrphans.add(dedupKey);
     divergences.push({

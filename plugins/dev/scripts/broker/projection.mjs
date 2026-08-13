@@ -479,7 +479,7 @@ export function reduceWorkerStateEvent(event) {
 // for the revive ledger so legacy revive events still dedupe across replays.
 function synthesizeWorkerEventId(name, ts, ticket) {
   return createHash("sha256")
-    .update(`${name} ${ts ?? ""} ${ticket ?? ""}`)
+    .update(`${name}\u0000${ts ?? ""}\u0000${ticket ?? ""}`)
     .digest("hex");
 }
 
