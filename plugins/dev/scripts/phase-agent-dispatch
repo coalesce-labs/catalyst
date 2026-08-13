@@ -1090,6 +1090,38 @@ compose_worker_settings_json() {
         then { statusLine: { type: "command", command: $statusline_cmd } }
         else {} end)'
 }
+
+# CAT-158: the human-facing --dry-run stdout dump can expose values carried in
+# settings.env. Redact only that dump. The prelaunch-only stdout is the
+# in-process executor's launch transport and must retain auth, like spawn.
+redacted_worker_settings_json() {
+	local raw="${1-}"
+	printf '%s' "$raw" | jq -e . >/dev/null 2>&1 || { printf '%s' '{}'; return 0; }
+	printf '%s' "$raw" | jq -c '
+    def is_secret_key: test("TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY"; "i");
+    if (.env | type) == "object"
+    then .env |= with_entries(
+      if (.key | is_secret_key)
+         and (.value | type) == "string"
+         and (.value | length) > 0
+      then .value = "[REDACTED]" else . end)
+    else . end
+  ' 2>/dev/null || printf '%s' '{}'
+}
+
+# CAT-158: DISPATCH_ENV is printed as KEY=VALUE strings beside settings. Apply
+# the same key rule there so the launch-spec envelope cannot become a second
+# secret printer.
+redacted_dispatch_env_json() {
+	jq -nc --args '
+    $ARGS.positional |
+    map(
+      if test("^[A-Za-z_][A-Za-z0-9_]*=")
+         and (split("=")[0] | test("TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY"; "i"))
+      then (split("=")[0] + "=[REDACTED]") else . end
+    )
+  ' "$@" 2>/dev/null || printf '%s' '[]'
+}
 WORKER_SETTINGS_JSON="$(compose_worker_settings_json)"
 # Fail-open: never let a malformed settings string reach the spawn or dry-run.
 if ! printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1; then
@@ -1177,8 +1209,8 @@ if [[ $DRY_RUN -eq 1 ]]; then
 		--argjson attempt "$ATTEMPT" \
 		--arg resumeSession "$RESUME_SESSION" \
 		--arg pluginDirs "$PLUGIN_DIRS_RESOLVED" \
-		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
-		--argjson settings "$(printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && printf '%s' "$WORKER_SETTINGS_JSON" || echo '{}')" \
+		--argjson env "$(redacted_dispatch_env_json "${DISPATCH_ENV[@]}")" \
+		--argjson settings "$(redacted_worker_settings_json "$WORKER_SETTINGS_JSON")" \
 		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, prompt: $prompt, signalFile: $signal,
       sessionName: $sessionName, attempt: $attempt,

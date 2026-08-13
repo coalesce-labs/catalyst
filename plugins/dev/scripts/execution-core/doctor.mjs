@@ -99,6 +99,17 @@ import { listProjects } from "./registry.mjs";
 // Read-only and advisory: nothing in this module can change a grade to FAIL.
 import { collectConfigDump } from "./config-dump.mjs";
 
+// Read the Layer-2 app-actor map without exposing malformed config to callers.
+function readLinearBotConfig(l2Path) {
+  if (!l2Path || !existsSync(l2Path)) return {};
+  try {
+    const bot = JSON.parse(readFileSync(l2Path, "utf8"))?.catalyst?.linear?.bot;
+    return bot && typeof bot === "object" && !Array.isArray(bot) ? bot : {};
+  } catch {
+    return null;
+  }
+}
+
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
 // with node). Logic is identical; deps are already imported above.
@@ -108,6 +119,12 @@ import { collectConfigDump } from "./config-dump.mjs";
 //   2. ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
 //   3. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
 // Returns a Set<string>. Empty set = no filter (fail-open). Never throws.
+//
+// The Layer-2 extraction deliberately reads ONLY worker + orchestrator, mirroring
+// daemon.mjs's self-echo filter. Enumerating every configured actor here would make
+// this check grade green on identities the daemon does not actually filter. (The
+// separate checkAppActorMint DOES enumerate the live map — that check verifies
+// mintability, not self-echo coverage.)
 function readLinearBotUserIds(l1Path, l2Path) {
   const ids = new Set();
   function addFromPath(path, extractor) {
@@ -117,13 +134,11 @@ function readLinearBotUserIds(l1Path, l2Path) {
       extractor(parsed, ids);
     } catch { /* ignore unreadable / malformed files */ }
   }
-  addFromPath(l2Path, (p, s) => {
-    const bot = p?.catalyst?.linear?.bot;
-    if (typeof bot?.worker?.botUserId === "string" && bot.worker.botUserId.length > 0)
-      s.add(bot.worker.botUserId);
-    if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
-      s.add(bot.orchestrator.botUserId);
-  });
+  const bot = readLinearBotConfig(l2Path) ?? {};
+  for (const key of ["worker", "orchestrator"]) {
+    const uid = bot?.[key]?.botUserId;
+    if (typeof uid === "string" && uid.length > 0) ids.add(uid);
+  }
   addFromPath(l1Path, (p, s) => {
     const uid = p?.catalyst?.monitor?.linear?.botUserId;
     if (typeof uid === "string" && uid.length > 0) s.add(uid);
@@ -736,6 +751,114 @@ export async function checkBotCredentials(deps = {}) {
     );
   }
 
+  return checks;
+}
+
+// checkAppActorMint — opt-in verification for every app actor configured in
+// Layer-2. Each actor is graded independently so one rejected rotated secret
+// cannot hide the state of its siblings. Credential values are used only in
+// request bodies/headers and are never interpolated into check records.
+export async function checkAppActorMint(deps = {}) {
+  const {
+    fetch: _fetch = globalThis.fetch,
+    readBotConfig = readLinearBotConfig,
+    layer2Path: configuredLayer2Path = layer2Path(),
+  } = deps;
+  const actors = readBotConfig(configuredLayer2Path);
+  if (actors === null) {
+    return [mkCheck(
+      "app-actors",
+      STATUS.FAIL,
+      `Layer-2 config ${configuredLayer2Path} is unreadable or malformed; app-actor credentials were not verified`,
+    )];
+  }
+  const names = Object.keys(actors).sort();
+  if (names.length === 0) {
+    return [mkCheck("app-actors", STATUS.INFO, "no app-actors configured; nothing to verify")];
+  }
+
+  const checks = [];
+  for (const name of names) {
+    const actor = actors[name] ?? {};
+    const configKey = `catalyst.linear.bot.${name}`;
+    const { clientId, clientSecret, botUserId } = actor;
+    if (![clientId, clientSecret, botUserId].every((v) => typeof v === "string" && v.length > 0)) {
+      checks.push(mkCheck(
+        `app-actor:${name}`,
+        STATUS.FAIL,
+        `${configKey} in ${configuredLayer2Path} must contain non-empty clientId, clientSecret, and botUserId`,
+      ));
+      continue;
+    }
+
+    let accessToken = "";
+    try {
+      const mintBody = new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+        scope: "read,write,comments:create,app:assignable,app:mentionable",
+        actor: "app",
+      });
+      const mint = await _fetch("https://api.linear.app/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: mintBody,
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!mint.ok) {
+        checks.push(mkCheck(
+          `app-actor:${name}`,
+          STATUS.FAIL,
+          `actor "${name}" mint was rejected (HTTP ${mint.status}); re-check ${configKey}.clientSecret in ${configuredLayer2Path}`,
+        ));
+        continue;
+      }
+      accessToken = (await mint.json())?.access_token;
+      if (typeof accessToken !== "string" || accessToken.length === 0) {
+        checks.push(mkCheck(
+          `app-actor:${name}`,
+          STATUS.FAIL,
+          `actor "${name}" mint response contained no access_token; re-check ${configKey}.clientSecret in ${configuredLayer2Path}`,
+        ));
+        continue;
+      }
+
+      const viewerResponse = await _fetch(LINEAR_GQL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ query: "query { viewer { id name } }" }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!viewerResponse.ok) throw new Error(`viewer query returned HTTP ${viewerResponse.status}`);
+      const viewerJson = await viewerResponse.json();
+      if (viewerJson?.errors?.length) throw new Error("viewer query returned GraphQL errors");
+      const viewer = viewerJson?.data?.viewer;
+      if (viewer?.id !== botUserId) {
+        checks.push(mkCheck(
+          `app-actor:${name}`,
+          STATUS.FAIL,
+          `actor "${name}" minted as viewer id "${viewer?.id ?? "missing"}", expected configured botUserId "${botUserId}" at ${configKey}.botUserId`,
+        ));
+        continue;
+      }
+      checks.push(mkCheck(
+        `app-actor:${name}`,
+        STATUS.PASS,
+        `actor "${name}" minted successfully with matching viewer id ${viewer.id}`,
+      ));
+    } catch (err) {
+      let errorDetail = err?.message ?? String(err);
+      for (const secret of [clientSecret, accessToken]) {
+        if (typeof secret === "string" && secret.length > 0) errorDetail = errorDetail.split(secret).join("[REDACTED]");
+      }
+      checks.push(mkCheck(
+        `app-actor:${name}`,
+        STATUS.FAIL,
+        `actor "${name}" verification failed: ${errorDetail}; re-check ${configKey}.clientSecret in ${configuredLayer2Path}`,
+      ));
+    }
+  }
   return checks;
 }
 
@@ -2079,6 +2202,7 @@ Options:
   --install                   Shorthand for --profile install
   --dry-run                   No-op flag (all checks are already read-only)
   --expected-bot-user-id <id> Assert that the configured token belongs to <id>
+  --verify-app-actors         Mint and verify every configured Linear app actor
   --help, -h                  Print this help and exit 0
 `;
 
@@ -2087,6 +2211,7 @@ export function parseArgs(argv) {
   const args = Array.isArray(argv) ? argv : [];
   let json = false;
   let expectedBotUserId = null;
+  let verifyAppActors = false;
   let help = false;
   // CTL-1369 PR4: "activation" (default) | "install" (the post-install verification subset).
   let profile = "activation";
@@ -2094,6 +2219,7 @@ export function parseArgs(argv) {
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--json") json = true;
+    else if (a === "--verify-app-actors") verifyAppActors = true;
     else if (a === "--dry-run") { /* default behavior; no-op */ }
     else if (a === "--help" || a === "-h") help = true;
     else if (a === "--install") profile = "install";
@@ -2106,7 +2232,7 @@ export function parseArgs(argv) {
       expectedBotUserId = args[++i] ?? null;
     }
   }
-  return { json, expectedBotUserId, help, profile };
+  return { json, expectedBotUserId, verifyAppActors, help, profile };
 }
 
 // defaultReaperState — load state + last exit of the orphan-sweep LaunchAgent.
@@ -5363,6 +5489,7 @@ export function checksForClass(nc, opts = {}) {
     seed = null,
     otel = null,
     expectedBotUserId = null,
+    verifyAppActors = false,
     runVerifyNode,
     readReplicaBaseUrl,
     fetch: _fetch,
@@ -5470,6 +5597,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
       developerBotCredentials,
+      ...(verifyAppActors ? [() => checkAppActorMint()] : []),
       () => checkHrwPartition(), // would-own count (visibility)
       () =>
         checkDaemonlessLocal({
@@ -5510,6 +5638,7 @@ export function checksForClass(nc, opts = {}) {
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
+      ...(verifyAppActors ? [() => checkAppActorMint()] : []),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater
@@ -5541,6 +5670,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),
     () => checkBotCredentials({ expectedBotUserId }),
+    ...(verifyAppActors ? [() => checkAppActorMint()] : []),
     () => checkConnectivity({ seed, otel }),
     () => checkSecretsHygiene(),
     () => checkDaemonToolPath(), // CTL-1289: daemon launchd PATH resolves linearis/node/claude

@@ -232,6 +232,8 @@ guard, and the Layer-2 path chain — is documented in full in its canonical ref
 `website/src/content/docs/reference/configuration.md`; this section covers only the architectural
 role.
 
+Operator procedure: [Linear app-actor secret rotation](runbooks/linear-app-actor-secret-rotation.md).
+
 ```mermaid
 flowchart LR
   REG[SECRET_REGISTRY<br/>one frozen row set] --> JS[secret-contract.mjs<br/>zero-import engine]
