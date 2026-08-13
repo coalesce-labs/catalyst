@@ -451,8 +451,59 @@ canonical_jsonl_append() {
   if [[ -f "$month_file" ]]; then
     local first
     first="$(head -n 1 "$month_file" 2>/dev/null || true)"
-    if [[ -n "$first" ]] && ! printf '%s' "$first" | jq -e 'has("attributes")' >/dev/null 2>&1; then
-      mv "$month_file" "${month_file}.legacy" 2>/dev/null || true
+    if [[ -n "$first" ]]; then
+      # CTL-1813: rotate ONLY for a genuine v1 line — a line that PARSES and simply lacks
+      # `attributes`. That migration is the entire purpose of this rotation.
+      #
+      # An UNPARSEABLE first line is a different thing and must NOT move the live log. The
+      # old test conflated them (`jq -e has("attributes")` exits non-zero for both), so one
+      # torn line retired the whole month: MEASURED against this function, a single truncated
+      # first line moved 499 live events aside, and a SECOND torn line one rotation later
+      # overwrote the only surviving copy, because the destination is a fixed name. A torn
+      # line is exactly what CTL-1809's bash-append tearing produces above 1025 bytes, so the
+      # two defects compose into unrecoverable loss.
+      #
+      # Quarantining the LINE is also not this function's job — it appends, it does not repair.
+      # Refusing to rotate keeps every event in place and leaves the damage visible.
+      if printf '%s' "$first" | jq -e . >/dev/null 2>&1; then
+        if ! printf '%s' "$first" | jq -e 'has("attributes")' >/dev/null 2>&1; then
+          # A genuine legacy log. Rotate to a UNIQUE destination: a fixed `.legacy` is a
+          # rescue slot of depth one, and the next rotation clobbers the previous month's
+          # only copy.
+          # A destination that cannot collide AND cannot be clobbered by a concurrent
+          # rotation. `[[ -e ]]` then `mv` is check-then-act: two writers can both see the
+          # name free, and POSIX rename() OVERWRITES, so the second would destroy the first's
+          # rescue copy — this ticket's own defect, one layer down (Codex #3318 P1).
+          #
+          # `ln` is the atomic primitive: hard-linking onto an existing path fails EEXIST
+          # rather than overwriting, so the name is RESERVED by the link itself. Unlink the
+          # source only once the link succeeded; if it fails we simply try the next name and
+          # the original is still in place.
+          local stamp dest n
+          stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+          n=0
+          while :; do
+            if [[ "$n" -eq 0 ]]; then dest="${month_file}.legacy.${stamp}.$$"
+            else dest="${month_file}.legacy.${stamp}.$$.${n}"; fi
+            if ln "$month_file" "$dest" 2>/dev/null; then
+              rm -f "$month_file" 2>/dev/null || true
+              printf '[catalyst] rotated legacy event log %s -> %s\n' "$month_file" "$dest" >&2
+              break
+            fi
+            n=$((n + 1))
+            # Bounded: an unbounded loop here would spin forever if the directory were
+            # unwritable, and a rotation is never worth wedging an append path for.
+            if [[ "$n" -gt 50 ]]; then
+              printf '[catalyst] WARNING: could not reserve a rotation name for %s — leaving it in place\n' "$month_file" >&2
+              break
+            fi
+          done
+        fi
+      else
+        # Silence is a defect: an unparseable first line means the log has been damaged, and
+        # nothing else in this path would ever say so.
+        printf '[catalyst] WARNING: first line of %s does not parse as JSON — NOT rotating (events preserved in place)\n' "$month_file" >&2
+      fi
     fi
   fi
   printf '%s\n' "$line" >> "$month_file" 2>/dev/null || true
