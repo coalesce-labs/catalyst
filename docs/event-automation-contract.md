@@ -344,11 +344,27 @@ attribute-carrying _subset_, not the family total.
 
 ⛔ **The 531 are being destroyed off-machine today, before any migration.** They are
 `phase.rescue.escalated.<T>` (523), `.dispatched.<T>` (5), `.dispatch-failed.<T>` (3).
-`otel-forward` builds the OTLP body from `ev.body?.message ?? ev.attributes?.["event.name"] ?? ""`
-and the attribute array from `ev.attributes ?? {}` (`otel-forward/lib/destinations/otlp.ts:74-75`).
-A v3 event has **neither** — so it forwards with an empty body and an empty attribute set.
-Off-machine, those 531 events have no name and no ticket. This is not a migration cost to be
-weighed; it is a standing bug the migration merely surfaced.
+⚠ **Mechanism corrected 2026-08-13 (CTL-1817, PR #3325 round-1 review).** An earlier revision of
+this paragraph said a v3 event "forwards with an empty body and an empty attribute set", reasoning
+from the OTLP mapper (`otel-forward/lib/destinations/otlp.ts`), which builds the body from
+`ev.body?.message ?? ev.attributes?.["event.name"] ?? ""` and the attributes from
+`ev.attributes ?? {}` — neither of which a v3 event satisfies. **That is not what happens: a v3 event
+never reaches the mapper.** Two gates discard it first, and both were silent:
+
+1. `otel-forward/lib/tail.ts` `shouldForward` accepts only `attributes` | a string `event` | pino
+   (numeric `level` + string `msg`). A v3 line matches none, so it is filtered out **at the tailer**
+   and never read into the pipeline at all.
+2. `otel-forward/index.ts` `processLine` then drops anything that still has no `attributes`.
+
+So the 531 do not arrive off-machine degraded — **they never leave the host.** The loss is total, and
+it was invisible because an unrecognized line is indistinguishable from no line, which is why a month
+of it looked like silence rather than like corruption. This is a standing bug the migration merely
+surfaced, not a migration cost to be weighed — and it is worse than the original text claimed.
+
+The lesson generalizes past this one shape: **reasoning from the mapper alone skips the two filters
+in front of it.** A detector placed there cannot observe what the filters already threw away — which
+is exactly the mistake the first fix made, and why detection now sits at the gates
+(`noteUnrecognizedLine`, `skippedNoAttributes`).
 
 **Four producers put an identifier in the name and nowhere else.** All four must gain an attribute
 **before** any suffix is stripped, or the migration destroys information:
@@ -445,8 +461,9 @@ label — 1,476 names cost zero index cardinality and zero Prometheus series. If
 name count, the honest answer would be "don't bother." It does not. It rests on three measured
 facts:
 
-1. **Live data loss** — 531 events/month forwarded with an empty body and no attributes
-   (`otlp.ts:74-75`). Fixed by Step 0 alone.
+1. **Live data loss** — 531 events/month **discarded before they leave the host**, at
+   `tail.ts`'s `shouldForward` filter and `index.ts`'s no-attributes drop (see §4.1b; NOT forwarded
+   degenerately at `otlp.ts` — that was the original, corrected reading). Fixed by Step 0 alone.
 2. **Proven grammar drift** — the phase grammar exists in **four** hand-copies, and one of them has
    _already_ silently diverged in production:
 
