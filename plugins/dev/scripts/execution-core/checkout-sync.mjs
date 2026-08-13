@@ -104,6 +104,14 @@ export function parseSymrefDefault(stdout) {
 export function classifyGitState(obs) {
   if (!obs || typeof obs !== "object") return REFUSAL.BROKEN_POINTER;
   if (obs.brokenPointer) return REFUSAL.BROKEN_POINTER;
+  // A checkout we could not read a branch from is BROKEN, not "repurposed" (Codex #3316 P2).
+  // Without this, a null/partial observation spread into {} leaves currentBranch undefined,
+  // which compares unequal to the default and reports `primary-on-other-branch` — a
+  // plausible-but-wrong reason that sends a human to look at the wrong thing. Checked before
+  // the branch comparison precisely so it cannot be misread as that.
+  if (!obs.detached && (typeof obs.currentBranch !== "string" || !obs.currentBranch)) {
+    return REFUSAL.BROKEN_POINTER;
+  }
   // G1 — a linked worktree has its own HEAD and belongs to phase-agent-dispatch's rebase
   // layers. A second writer there is the genuinely dangerous version of this ticket.
   if (obs.isLinkedWorktree) return REFUSAL.LINKED_WORKTREE;
@@ -207,11 +215,15 @@ export async function syncRepo(root, deps) {
   }
 
   // 3. Guards, all against the just-fetched ref.
+  // `observe` may legitimately return null for a broken checkout, so nothing below may
+  // dereference it unguarded: a throw here is caught by runPass and recorded as the
+  // TRANSIENT `fetch-failed` class, which by design never escalates — exactly inverting the
+  // meaning of a broken pointer, which never fixes itself (Codex #3316 P2).
   const obs = await observe(root, branch);
   base.unreachable_commits = Number(await unreachableCount(root)) || 0;
-  const refusal = classifyGitState({ ...obs, defaultBranch: branch });
+  const refusal = classifyGitState({ ...(obs ?? {}), defaultBranch: branch });
   base.behind_by = Number(await behindCount(root, branch)) || 0;
-  if (refusal) return { ...base, refused_reason: refusal, detail: obs.detail ?? null };
+  if (refusal) return { ...base, refused_reason: refusal, detail: obs?.detail ?? null };
 
   if (diagnosticOnly) {
     // Guards pass, but the branch came from a cache we do not trust to authorise a write.

@@ -262,3 +262,57 @@ describe("summarize", () => {
     expect(s).toEqual({ total: 6, current: 1, advanced: 1, refused: 1, fetchFailed: 1, skipped: 1, diagnostic: 1, unreachableCommits: 3 });
   });
 });
+
+// Codex #3316 P2 — a broken checkout must stay ACTIONABLE.
+//
+// `observe()` returning null is a real state (a broken `.git` file pointer, a directory that
+// is not a repo). Two bugs conspired to turn it into the wrong answer: `obs.detail` threw,
+// runPass caught it, and the repo was recorded as `fetch-failed` — TRANSIENT infrastructure,
+// which by design never escalates to a human. A broken pointer is precisely the opposite:
+// it never fixes itself. Inverting those two classes defeats the distinction this module is
+// built around.
+describe("Codex #3316 P2 — a null observation is a broken pointer, not transient", () => {
+  const brokenDeps = {
+    lsRemoteDefault: async () => ({ ok: true, branch: "main" }),
+    offlineDefault: () => null,
+    fetchRef: async () => ({ ok: true, stderr: "" }),
+    observe: async () => null,
+    mergeFf: async () => ({ ok: true, stderr: "" }),
+    headSha: async () => "a",
+    remoteSha: async () => "b",
+    behindCount: async () => 1,
+    unreachableCount: async () => 0,
+  };
+
+  test("a null observation refuses as broken-worktree-pointer, and does not throw", async () => {
+    const out = await runPass({ roots: ["/broken"], deps: brokenDeps });
+    const r = out.repos[0];
+    expect(r.action).toBe(ACTION.REFUSED);
+    expect(r.refused_reason).toBe(REFUSAL.BROKEN_POINTER);
+  });
+
+  test("it is NOT recorded as the transient fetch-failed class", async () => {
+    const out = await runPass({ roots: ["/broken"], deps: brokenDeps });
+    // fetch-failed never escalates to a human; a broken pointer must.
+    expect(out.repos[0].action).not.toBe(ACTION.FETCH_FAILED);
+    expect(out.repos[0].error).toBeUndefined();
+  });
+
+  // The second defect, which the throw was masking: spreading null yields {}, so
+  // `currentBranch` was undefined and compared unequal to the default — classifying a broken
+  // checkout as "someone repurposed the primary". A plausible-but-wrong reason sends a human
+  // to look at the wrong thing, which is worse than no reason at all.
+  test("an observation with no branch is broken — never 'primary-on-other-branch'", () => {
+    expect(classifyGitState({ defaultBranch: "main" })).toBe(REFUSAL.BROKEN_POINTER);
+    expect(classifyGitState({ defaultBranch: "main", currentBranch: null })).toBe(REFUSAL.BROKEN_POINTER);
+  });
+
+  // POSITIVE CONTROL — a genuinely repurposed primary must STILL report the branch reason,
+  // so the test above is proving the null case is distinguished rather than that the
+  // wrong-branch refusal was removed.
+  test("a real repurposed primary still reports primary-on-other-branch", () => {
+    expect(classifyGitState({
+      defaultBranch: "main", currentBranch: "my-wip", hasUpstreamRef: true, aheadBy: 0,
+    })).toBe(REFUSAL.WRONG_BRANCH);
+  });
+});
