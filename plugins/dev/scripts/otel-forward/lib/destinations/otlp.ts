@@ -52,7 +52,77 @@ function toUnixNano(ts: string | undefined): number {
   return (Number.isNaN(t) ? Date.now() : t) * 1_000_000;
 }
 
+// CTL-1817: DEGENERATE-RECORD DETECTION.
+//
+// A record whose body maps to "" AND whose attributes map to [] carries nothing but a
+// timestamp and a severity once it is off this machine — its identity is destroyed in
+// transit. That is not a delivery failure, so none of the three existing guardrails can see
+// it: the forward SUCCEEDS, so `forward_failed`/DLQ-size never fire, and `forward_lag`'s
+// checkpoint advances normally.
+//
+// ⚠️ SCOPE — this detector does NOT see a "v3" (bare-`name`) record, and must not be read as
+// if it did. Such a record never reaches this mapper: the tailer's `shouldForward`
+// (lib/tail.ts) drops it for matching no known shape, and `processLine` (index.ts) drops
+// anything that still has no `attributes`. The 531 `phase.rescue.*` + 1 `phase.orphan-pr.*`
+// of 2026-08 were discarded at those two gates, NOT forwarded degenerately — they never left
+// the host. That loss is reported by `noteUnrecognizedLine` / `skippedNoAttributes`, which
+// sit at the gates that can actually observe it (round-1 review, Codex P1).
+//
+// What DOES reach here is a record carrying a present-but-EMPTY `attributes` object (`{}`
+// passes the truthiness guard above) with no resolvable body — degenerate yet forwarded.
+// That is a narrower case than v3, and a real one: it is integrity loss on a delivered
+// record rather than a drop.
+//
+// The counter is deliberately NOT a repair. The mapping output is left byte-identical so a
+// degenerate record still forwards (dropping it here would trade silent corruption for
+// silent loss) and so the regression test can still observe the defect on a raw fixture.
+// It is a DETECTOR: it should sit at zero, so any non-zero value is itself the alarm.
+//
+// It is reported on destLog — the pino `~/catalyst/otel-forward.log`, which Alloy tails and
+// ships to Loki independently of this file's OTLP egress (log-shipper/config.alloy:22). That
+// independence is the point: an alarm that rides the transport it measures reads clean during
+// exactly the outage it exists to detect.
+let degenerateRecordCount = 0;
+
+/** Running count of degenerate records seen by this process. Expected to stay 0. */
+export function degenerateRecordTotal(): number {
+  return degenerateRecordCount;
+}
+
+/** Test seam — reset the process-scoped counter between cases. */
+export function resetDegenerateRecordTotal(): void {
+  degenerateRecordCount = 0;
+}
+
+// Best-effort identity for a record that, by definition, failed to present one in the shape
+// the mapper expects. Reads all three envelope shapes (v2 attributes ?? v1 event ?? v3 name)
+// so the warning can NAME the offending event instead of reporting an anonymous count.
+function describeDegenerate(ev: CanonicalEvent): string {
+  const raw = ev as unknown as Record<string, unknown>;
+  const v2 = ev.attributes?.["event.name"];
+  if (typeof v2 === "string" && v2) return v2;
+  if (typeof raw.event === "string" && raw.event) return raw.event;
+  if (typeof raw.name === "string" && raw.name) return raw.name;
+  return "(unidentifiable)";
+}
+
 export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
+  for (const ev of events) {
+    const bodyEmpty = !(ev.body?.message ?? ev.attributes?.["event.name"] ?? "");
+    const attrsEmpty = Object.keys((ev.attributes as unknown as Record<string, unknown>) ?? {}).length === 0;
+    if (bodyEmpty && attrsEmpty) {
+      degenerateRecordCount++;
+      destLog.warn(
+        {
+          event: describeDegenerate(ev),
+          ts: ev.ts,
+          service: ev.resource?.["service.name"] ?? null,
+          degenerate_total: degenerateRecordCount,
+        },
+        "otlp: DEGENERATE record — empty body AND no attributes; forwarded anyway, identity lost off-machine (CTL-1817)",
+      );
+    }
+  }
   return {
     resourceLogs: events.map((ev) => ({
       resource: {

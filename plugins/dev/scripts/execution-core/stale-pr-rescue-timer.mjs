@@ -25,6 +25,7 @@ import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-ev
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
 import { log, getEventLogPath, getClusterHosts } from "./config.mjs";
+import { buildCanonicalEventLine } from "./lib/canonical-event.mjs"; // CTL-1817
 import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs";
 // Default Linear transport for the escalation path. The daemon does not thread
 // a writer (scheduler.mjs threads its own), so without this default every
@@ -439,12 +440,32 @@ function recordEscalationOutcome(orchDir, ticket, rescueState, outcome, nowMs, e
   return false;
 }
 
-// defaultEmit — append a bare event envelope to the event log.
+// defaultEmit — append a CANONICAL event envelope to the event log.
 // Best-effort: never throws.
-function defaultEmit(name, payload) {
+//
+// CTL-1817: this used to write a bare `{ name, ...payload, ts }` line — the "v3" shape.
+// otel-forward reads `body.message ?? attributes["event.name"]` for the body and
+// `attributes` for the attributes, so a v3 line forwarded off-machine with an EMPTY body
+// and EMPTY attributes: 531 `phase.rescue.*` escalations in 2026-08 reached Loki as records
+// carrying nothing but a timestamp and a severity. The ticket identifier lived only inside
+// the event name, and the name was not on the wire either.
+//
+// The identifier is now promoted to `linear.issue.identifier` (the same attribute
+// fence-event.mjs uses) so the escalation is queryable by ticket, and body.message is
+// non-empty by construction. Every rescue payload carries `ticket`; the conditional is
+// belt-and-braces for a future caller that does not.
+// Exported for unit tests (canonical-event.test.mjs) — the emit seam is injected everywhere
+// else, so this adapter was previously the one untested line on the path.
+export function defaultEmit(name, payload) {
   try {
-    const line = JSON.stringify({ name, ...payload, ts: new Date().toISOString() });
-    appendFileSync(getEventLogPath(), line + "\n");
+    appendFileSync(
+      getEventLogPath(),
+      buildCanonicalEventLine({
+        name,
+        payload,
+        attributes: payload?.ticket ? { "linear.issue.identifier": payload.ticket } : {},
+      }),
+    );
   } catch {
     /* best-effort */
   }
