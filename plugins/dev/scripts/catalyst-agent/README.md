@@ -7,8 +7,15 @@ up uniformly.
 
 - **Zero npm deps** — `node:*` builtins only; runs unchanged under `node>=18`
   and `bun`.
-- **Does not import from execution-core** — it is a separate process with its own
-  config, envelope builder, and emit transports.
+- **Does not import execution-core's runtime** — it is a separate process with its own
+  config, envelope builder, and emit transports. There is exactly **one** exception, and
+  it is a pure `node:*`-only leaf carrying data the agent must not have a second copy of:
+  `execution-core/checkout-sync.mjs`'s `resolveExecutingRoots` (CTL-1808), the enumeration
+  of checkouts this host runs code from. The currency gauge below measures that set, and a
+  second enumeration written here would drift from the one the sync pass acts on. Nothing
+  in that leaf reaches `execution-core/config.mjs` or its `bun:sqlite` graph, so the agent
+  still loads under bare `node` with no `node_modules` (guarded by the import-graph check
+  in `execution-core-tests.yml`).
 
 ## Domains
 
@@ -20,10 +27,49 @@ up uniformly.
 
 Each toggle defaults **on**; set it to `0` to disable that domain.
 
-Each tick runs the enabled domains in order (usage → host → processes). The
-sampler modules (`usage.mjs` + `accounts.mjs`, `host.mjs`, `processes.mjs`) are
-imported lazily and adapted to a uniform `runOnce(config)`; a domain that throws
-is isolated so it never stops the others.
+A fourth domain (`version`, toggle `CATALYST_AGENT_VERSION`) emits **metrics**
+rather than events — see [Code currency](#code-currency) below.
+
+Each tick runs the enabled domains in order (usage → host → processes →
+version). The sampler modules (`usage.mjs` + `accounts.mjs`, `host.mjs`,
+`processes.mjs`, `version.mjs`) are imported lazily and adapted to a uniform
+`runOnce(config)`; a domain that throws is isolated so it never stops the others.
+
+## Code currency
+
+| metric                            | shape                                                                       |
+| --------------------------------- | --------------------------------------------------------------------------- |
+| `catalyst.build.info`             | always `1`; label `vcs.ref.head.revision` = the **agent's own** commit       |
+| `catalyst.vcs.commits_behind`     | **one series per executing checkout**, label `catalyst.checkout.root` = path |
+| `catalyst.vcs.commits_behind.max` | one value: the **stalest** checkout on this host                            |
+
+`commits_behind` is measured once per checkout this host actually executes code
+from, resolved through CTL-1808's `resolveExecutingRoots`:
+
+```
+registry repoRoots  ∪  this checkout  ∪  Layer-2 catalyst.checkouts[]  ∪  <CATALYST_DIR>/plugin-source
+```
+
+**Why not just this checkout (CTL-1825).** It used to be `git -C <the directory
+build-info.mjs lives in>`, which answers "is the tree the agent lives in
+current?" — a different question from "is the code this host runs current?"
+whenever those trees differ, and on this fleet they differ by design: workers
+execute from `~/catalyst/plugin-source`, the laptop's plist runs the agent out of
+the dev checkout. Measured 2026-08-13 on the laptop, the gauge read a healthy
+**0** while `~/catalyst/plugin-source` was **24** commits behind. A gauge that can
+only report 0 is worse than no gauge.
+
+Two rules follow, and both are enforced by tests: a stale root is **its own
+non-zero series** (never averaged away or overwritten), and the single aggregate
+is the **MAXIMUM** across roots, never the agent's own. A root git cannot read
+drops its own point — it never contributes a 0 that reads as "current".
+
+Enrol a sibling checkout this host keeps current but is not enrolled to dispatch
+into by adding it to Layer-2 (`~/.config/catalyst/config.json`):
+
+```json
+{ "catalyst": { "checkouts": ["/Users/me/code/catalyst-cloud"] } }
+```
 
 ## Run
 

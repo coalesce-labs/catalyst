@@ -503,6 +503,31 @@ jobs:
         working-directory: plugins/dev/scripts/broker
         run: bun test worker-state-projection.test.mjs
 
+      - name: catalyst-agent tests (CTL-1825)
+        # catalyst-agent had NO CI coverage at all before CTL-1825
+        # (`grep catalyst-agent .github/workflows/` returned nothing — positive
+        # control: the same grep for `otel-forward` returned the step below), and
+        # it is a launchd-managed telemetry daemon whose gauges an operator is
+        # meant to TRUST. CTL-1825 is the failure that follows from not running
+        # them: the code-currency gauge measured the wrong tree and read a healthy
+        # 0 for a year, and no test would have failed if it had regressed either.
+        #
+        # The whole suite runs: measured 270 pass / 0 fail on this branch and
+        # 251 / 0 at the merge base — the delta is exactly the +19 added here, so
+        # there is no pre-existing red to import. It needs no install: the agent is
+        # `node:*`-only by design, which the build-resolution check above enforces.
+        working-directory: plugins/dev/scripts/catalyst-agent
+        run: bun test
+
+      - name: Verify catalyst-agent import graph (bare-node loadability, CTL-1825)
+        # The agent runs under plain `node` from a launchd plist with NO
+        # node_modules. CTL-1825 gave it its one execution-core import
+        # (checkout-sync.mjs's root enumeration); this step fails if that leaf ever
+        # grows a dependency the agent's runtime cannot load — the same guard the
+        # cloud-sync / catalyst-linear steps above apply to their entry points.
+        working-directory: plugins/dev/scripts/catalyst-agent
+        run: bun build --target=node catalyst-agent.mjs --outfile=/dev/null
+
       - name: otel-forward tests (CTL-1529 round 3)
         # otel-forward had NO CI coverage at all before this
         # (`grep otel-forward .github/workflows/` returned nothing), and it is a
@@ -692,6 +717,7 @@ jobs:
             tick-timing.test.mjs \
             tracing.test.mjs \
             cloud-token-env.test.mjs \
+            checkout-sync.test.mjs \
             cluster-claim-sync.test.mjs \
             cluster-claim.test.mjs \
             comms-drain.test.mjs \

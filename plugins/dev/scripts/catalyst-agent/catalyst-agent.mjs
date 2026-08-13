@@ -164,7 +164,8 @@ export function defaultImporters(pending = []) {
           await processes.sampleProcesses({ topN: config.topN });
         },
       })),
-    // Domain 4 (CTL-1235) — catalyst.build.info + catalyst.vcs.commits_behind.
+    // Domain 4 (CTL-1235) — catalyst.build.info + catalyst.vcs.commits_behind
+    // (one series per executing checkout) + catalyst.vcs.commits_behind.max.
     // Emits the running version/commit + drift-from-main as OTLP gauges. Uses its
     // own config-aware metric emit (like host), so nothing is collected here.
     version: () =>
