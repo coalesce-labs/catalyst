@@ -26,12 +26,76 @@ const MIN_ARTIFACT_BYTES = 200;
 // derive phaseCount from the same schema element.
 const PLAN_PHASE_HEADER_RE = /^## Phase /gm;
 
-// defaultRunGit — `git <args>` with stdout/stderr captured. Returns
-// { code, stdout, stderr }; never throws.
-export function defaultRunGit(args, { spawn = spawnSync } = {}) {
-  const res = spawn("git", args, { encoding: "utf8" });
-  if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
+// CTL-1810 — BOUND EVERY PROBE SPAWN.
+//
+// `defaultRunGit`/`defaultRunGh` were the only un-timed `spawnSync` seams left in
+// execution-core, and both are called SYNCHRONOUSLY from `schedulerTick` (a 30s
+// `setInterval`): resolveWorktree's `git worktree list`, ghPullRest's `gh api`, and the
+// implement/verify/review probes' `git rev-list`/`git status`. An unbounded child — hung
+// TLS, a GitHub incident, a credential-helper prompt, a stalled network mount — blocks the
+// daemon's event loop indefinitely, with no clock and nothing to break the wait. That is
+// the CTL-1524 failure mode (median event-loop delay 77.5s inside a synchronous drain
+// burst; see wt-cleanup-drain.mjs:19-30).
+//
+// Every sibling probe in this directory was already bounded — pr-block-probe.mjs:24 (20s),
+// github-quota-timer.mjs:43 (10s), github-auth-preflight.mjs:52 (10s) — and the first of
+// those states this rationale in its own header. These two were the gap.
+//
+// WHY A TIMEOUT NEEDS NO NEW ERROR PATH HERE. Unlike pr-block-probe's `realGh`, these two
+// seams contract to NEVER THROW; a timeout must degrade to the existing non-zero return, not
+// an exception thrown into the tick. `spawnSync` reports a timeout by setting `res.error`
+// (ETIMEDOUT) and leaving `status` null, which the pre-existing `if (res.error)` branch below
+// already converts to `{ code: 127 }`. Callers then see "probe failed", which every probe
+// already treats as "work NOT proven done" — the safe direction. The only addition is a
+// stderr string that names the timeout, so a bound that fires is diagnosable rather than
+// looking like a generic spawn failure.
+//
+// `CATALYST_GH_PROBE_TIMEOUT_MS` is deliberately the SAME knob (and the same 20s default)
+// pr-block-probe.mjs already uses, so "the gh probe timeout" stays one value fleet-wide.
+// Local `git` gets its own, tighter bound: measured warm-cache cost is 0.02-0.07s, so 10s is
+// already three orders of magnitude of headroom.
+
+// positiveIntMs — an override is only honored if it is a POSITIVE INTEGER; anything
+// else falls back to the bounded default (Codex #3307 P2). Both failure modes are
+// real and both defeat the contract this block exists to create:
+//   • "0" is TRUTHY, so a naive `env || default` yields Number("0") === 0, and
+//     spawnSync treats timeout:0 as NO TIMEOUT — an operator "kill-switch" would
+//     silently restore the exact indefinitely-blocking probe this bounds. VERIFIED.
+//   • negative, fractional and non-numeric values make spawnSync throw
+//     ERR_OUT_OF_RANGE *before* spawnResult can run, breaking the seams' never-throw
+//     contract and putting an exception into schedulerTick. VERIFIED for -5, 1.5, NaN.
+// Falling back to the default is deliberate: there is no legitimate reason to want an
+// unbounded probe, so an unusable override degrades to bounded rather than to off.
+function positiveIntMs(raw, fallback) {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+const GIT_PROBE_TIMEOUT_MS = positiveIntMs(process.env.CATALYST_GIT_PROBE_TIMEOUT_MS, 10000);
+const GH_PROBE_TIMEOUT_MS = positiveIntMs(process.env.CATALYST_GH_PROBE_TIMEOUT_MS, 20000);
+
+// spawnResult — shared { code, stdout, stderr } normalizer for the two bounded seams.
+// Never throws. A timed-out child (ETIMEDOUT, or killed by the timeout's SIGTERM) is
+// reported as the same code:127 failure as any other spawn error, with a stderr that says
+// so explicitly.
+function spawnResult(bin, args, res, timeoutMs) {
+  if (res.error) {
+    const timedOut = res.error.code === "ETIMEDOUT" || res.signal === "SIGTERM";
+    return {
+      code: 127,
+      stdout: "",
+      stderr: timedOut ? `${bin} timed out after ${timeoutMs}ms: ${bin} ${args.join(" ")}` : res.error.message,
+    };
+  }
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
+// defaultRunGit — `git <args>` with stdout/stderr captured, bounded by `timeoutMs`.
+// Returns { code, stdout, stderr }; never throws.
+export function defaultRunGit(args, { spawn = spawnSync, timeoutMs } = {}) {
+  const t = positiveIntMs(timeoutMs, GIT_PROBE_TIMEOUT_MS);
+  const res = spawn("git", args, { encoding: "utf8", timeout: t });
+  return spawnResult("git", args, res, t);
 }
 
 // defaultListArtifacts — `readdirSync(dir)` → filenames; [] on any error (missing
@@ -182,11 +246,12 @@ function monitorDeployProbe({ ticket, orchDir } = {}, { readFile = defaultReadFi
 // per research §4 — NOT `gh pr view --json state`, whose GraphQL state is
 // uppercase and would never compare equal to "open").
 
-// defaultRunGh — `gh <args>` with stdout/stderr captured; never throws.
-export function defaultRunGh(args, { spawn = spawnSync } = {}) {
-  const res = spawn("gh", args, { encoding: "utf8" });
-  if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
-  return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+// defaultRunGh — `gh <args>` with stdout/stderr captured, bounded by `timeoutMs`
+// (CTL-1810 — see the GIT_PROBE_TIMEOUT_MS block above for why). Never throws.
+export function defaultRunGh(args, { spawn = spawnSync, timeoutMs } = {}) {
+  const t = positiveIntMs(timeoutMs, GH_PROBE_TIMEOUT_MS);
+  const res = spawn("gh", args, { encoding: "utf8", timeout: t });
+  return spawnResult("gh", args, res, t);
 }
 
 // prInfoFromSignal — read { number, url } from a worker-dir signal's .pr. null
