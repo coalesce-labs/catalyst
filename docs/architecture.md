@@ -662,9 +662,22 @@ in this repo, and by nothing in `catalyst-otel` either (the provisioned Grafana 
   that list is wired straight to `restart()` in the CTL-1502 probe, and restarting a forwarder does
   not fix a Loki-accept-window/backlog condition; it only loses the in-memory buffer. A Grafana rule
   over the `.log` stream is the follow-up, and belongs in the `catalyst-otel` repo.
-- **One mechanism, two callers** — the CTL-1817 count-every/log-sparsely gate moved to
-  `otel-forward/lib/sparse-warn.ts` (semantics unchanged); the tailer's unknown-shape alarm and this
-  drop alarm each build their own gate so a flood of one cannot exhaust the other's key budget.
+- **One mechanism, three callers** — the CTL-1817 count-every/log-sparsely gate moved to
+  `otel-forward/lib/sparse-warn.ts` (semantics unchanged); the tailer's unknown-shape alarm, this
+  drop alarm, and (CTL-1823) the OTLP degenerate-record alarm each build their own gate so a flood
+  of one cannot exhaust the others' key budget.
+
+**Degenerate-record counting is taken at batch accept, not at serialization (CTL-1823).** The
+CTL-1817 detector incremented inside `buildOtlpPayload`, which is the serializer: it is re-entered
+once per `rawSend` attempt (it sits inside `withHttpRetry`) and again on every DLQ drain, so one
+record was re-counted on every OTLP retry and once more on replay — the counter INFLATED during
+exactly the backend trouble that makes an operator read it. The count now runs once per batch at
+`OtlpSender.flush` entry (`noteDegenerateRecords`), the single point at which each record is seen
+exactly once (`index.ts`'s `flushDest` hands `buffer.splice(0)` to one `flush()`). It counts records
+this PROCESS accepted for forwarding; a DLQ entry written by a previous process and drained by this
+one is not counted here, which is the deliberate fail direction for a detector whose job is to sit
+at zero. The asymmetry with the two GATE counters (`unrecognized`, `skippedNoAttributes`) is
+intended and unchanged: those sit on the tail path, run once per line, and were always exact.
 
 ### Installed-but-unloaded: cloud-sync dependency skew (CTL-1659)
 

@@ -11,9 +11,22 @@
 //   2. the forwarder half — a degenerate record is COUNTED and named rather than silently
 //      forwarded, and the count stays untouched for healthy records.
 //
+// CTL-1823 moved WHERE the count is taken — out of `buildOtlpPayload` (re-entered per send
+// attempt and per DLQ replay, so it counted attempts) and into `noteDegenerateRecords`, called
+// once per batch at `OtlpSender.flush` entry. The classification contract pinned here is
+// unchanged; every counting assertion below therefore drives the relocated seam, so it stays a
+// live assertion instead of quietly becoming a tautology about a counter nothing increments.
+// The exactness of that relocation is pinned end-to-end through the real `flush` in
+// otlp-degenerate-exactness.test.ts.
+//
 // Run: cd plugins/dev/scripts/otel-forward && bun test
 import { describe, test, expect, beforeEach } from "bun:test";
-import { buildOtlpPayload, degenerateRecordTotal, resetDegenerateRecordTotal } from "./otlp.ts";
+import {
+  buildOtlpPayload,
+  degenerateRecordTotal,
+  noteDegenerateRecords,
+  resetDegenerateRecordTotal,
+} from "./otlp.ts";
 import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
 // The PRODUCER's builder, imported across package boundaries on purpose: this is the only
 // test that proves the two sides agree. A fixture hand-copied from the builder's output
@@ -57,6 +70,8 @@ describe("CTL-1817 producer half — a canonical line survives the mapper", () =
     expect(rec.body.stringValue).not.toBe("");
     expect(attrValue(rec, "linear.issue.identifier")).toBe("CTL-1832");
     expect(attrValue(rec, "event.name")).toBe("phase.rescue.escalated.CTL-1832");
+    // Run it past the detector too — a healthy record must not be classified degenerate.
+    noteDegenerateRecords([ev]);
     expect(degenerateRecordTotal()).toBe(0);
   });
 
@@ -73,6 +88,7 @@ describe("CTL-1817 producer half — a canonical line survives the mapper", () =
 
     expect(rec.body.stringValue).toBe("phase.orphan-pr.detected.3324");
     expect(attrValue(rec, "vcs.pr.number")).toBe(3324);
+    noteDegenerateRecords([ev]);
     expect(degenerateRecordTotal()).toBe(0);
   });
 });
@@ -93,7 +109,7 @@ describe("CTL-1817 forwarder half — a degenerate record is counted, not silent
     const ev = JSON.parse(v3Line("phase.rescue.escalated.CTL-1832", { ticket: "CTL-1832" })) as CanonicalEvent;
 
     expect(degenerateRecordTotal()).toBe(0);
-    buildOtlpPayload([ev]);
+    noteDegenerateRecords([ev]);
     expect(degenerateRecordTotal()).toBe(1);
   });
 
@@ -101,9 +117,12 @@ describe("CTL-1817 forwarder half — a degenerate record is counted, not silent
     const a = JSON.parse(v3Line("phase.rescue.escalated.CTL-1", { ticket: "CTL-1" })) as CanonicalEvent;
     const b = JSON.parse(v3Line("phase.rescue.dispatched.CTL-2", { ticket: "CTL-2" })) as CanonicalEvent;
 
-    buildOtlpPayload([a, b]);
+    noteDegenerateRecords([a, b]);
     expect(degenerateRecordTotal()).toBe(2);
-    buildOtlpPayload([a]);
+    // A SECOND ACCEPTED BATCH still accumulates — the CTL-1823 relocation moved where the count
+    // is taken, it did not dedupe by record identity. (Re-SENDING that same batch is what must
+    // not re-count; otlp-degenerate-exactness.test.ts pins that through the real retry/drain.)
+    noteDegenerateRecords([a]);
     expect(degenerateRecordTotal()).toBe(3);
   });
 
@@ -121,7 +140,7 @@ describe("CTL-1817 forwarder half — a degenerate record is counted, not silent
       body: { message: "recovery.tick" },
     } as unknown as CanonicalEvent;
 
-    buildOtlpPayload([ev]);
+    noteDegenerateRecords([ev]);
     expect(degenerateRecordTotal()).toBe(0);
   });
 
@@ -136,7 +155,7 @@ describe("CTL-1817 forwarder half — a degenerate record is counted, not silent
       body: {},
     } as unknown as CanonicalEvent;
 
-    buildOtlpPayload([ev]);
+    noteDegenerateRecords([ev]);
     expect(degenerateRecordTotal()).toBe(0);
   });
 
@@ -144,6 +163,7 @@ describe("CTL-1817 forwarder half — a degenerate record is counted, not silent
     const ev = { ts: "2026-08-13T10:00:00Z", severityText: "INFO", severityNumber: 9 } as unknown as CanonicalEvent;
 
     expect(() => buildOtlpPayload([ev])).not.toThrow();
+    expect(() => noteDegenerateRecords([ev])).not.toThrow();
     expect(degenerateRecordTotal()).toBe(1);
   });
 });
