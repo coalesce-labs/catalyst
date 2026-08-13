@@ -725,3 +725,84 @@ is still dispatched so a typo cannot silently stop fleet work. Nothing yet detec
 with Todo work that is wholly absent from the registry; that requires a workspace-wide Linear team
 sweep and remains outside CAT-52. The `coalesce-labs/catalyst` clone remains the CTL project and
 keeps its `CTL` Layer-1 declaration; it is not a valid CAT `repoRoot`.
+
+## ADR-029: The event–automation contract — Linear is the trigger, the lease is the lock (2026-08-13)
+
+**Decision.** Every side effect in the fleet belongs to a subscriber, not to the actor that caused
+it. A phase is a goal-loop: it works until its goal is met, posts one outcome, and stops — it does
+not advance the ticket, write Linear, or dispatch the next phase. The complete list of triggers,
+their bounded actions, and — for each — **which component refuses the second delivery** is ratified
+as `docs/event-automation-contract.md`. An 18-row automation table and a 33-row stage-transition
+lookup table (20 machine edges keyed on the holder's declaration, 13 human/foreign-agent intents
+keyed on `(class, to_state)`) are the contract; this entry is the decision, not the data.
+
+**Linear is the trigger, never the lock.** A Linear stage change says "go look" and starts an
+automation. It is never asked to refuse anything, and no design may propose it as the exclusion
+point. The direct consequence is worked through rather than avoided: two hosts receiving the same
+stage-change webhook both pass the trigger, so the claim is acquired **after** the trigger and
+**before** any side effect, and exactly one wins. Linear is written **last**, as a mirror — which is
+what the code already does (`scheduler.mjs` advancement sweep: `dispatchAndVerify` → emit
+`phase.advance.applied` → reap predecessor → `applyPhaseStatus`, whose own comment reads "idempotent
+… never aborts the tick"). The ADR names the fact rather than contradicting it.
+
+**Machine edges are keyed on the declaration, not on `(from_state, to_state)`.** The phase→state map
+is many-to-one: `verify` and `review` both map to `Validate`, and `pr` / `monitor-merge` /
+`monitor-deploy` / `teardown` all map to `PR`, so four of the ten pipeline advances produce no
+observable Linear transition at all (measured on mini, 2026-08: 185 no-op same-state writes;
+`review` 48 of 49). A tuple lookup structurally cannot address those edges. Keying on
+`(declaration, phase)` dissolves the problem — and the transport is the one that works:
+intermediate-stage webhooks deliver at ~2–5% (replica 323 CTL transitions vs. 116 events,
+2026-08-01→13), while the local declaration append does not lose. The collapse itself is **kept**:
+it is a deliberate lossy projection of a value authoritative elsewhere, and widening it would
+re-couple board granularity to the pipeline across every saved view in the workspace.
+
+**Terminology.** The contract asks **"Who says no?"** — when the same trigger is delivered twice,
+which component refuses the second attempt. The phrase "exclusion store" is retired as unclear
+jargon. A cursored log redelivers after a crash (the reaper's boot replay does exactly this), so
+redelivery is normal operation and every row owes an answer. `git --ff-only`, `set -o noclobber`,
+GitHub's `--match-head-commit`, and a conditional write can refuse; a plain file write, an
+append-only log, and a Linear state field cannot. **The log declares; it cannot exclude.**
+
+**Consequences.** Seven automation rows (2, 3, 5, 9, 11, 14, 15) have no cross-host refusal today
+and are blocked on lease work, not on event-substrate work; until then their refusal is host-local
+and graded as such. `phase.advance.applied` gets its first consumer (the Linear mirror write, row
+18), and the consumer-free `linear.state.write` emitter becomes deletable. Two reconcilers that do
+**not** exist must ship with the human-intent table: a replica-side sweep for lost INTENT commands
+(a lost kill leaves a worker burning), and anything that can re-derive "in a build stage with no
+live holder". The self-echo guard is demoted to defence-in-depth: it already discriminates on our
+own app-actor ids rather than on "is a bot" (`daemon.mjs:264-288`), which keeps other agents' Linear
+comments deliverable, but it fails open on an unknown id, so an echo record carries the weight.
+
+**Citation hygiene.** The governing invariants are catalyst-cloud's **ADR-0027**
+(`catalyst-cloud/docs/adr/0027-reliability-initiative-invariants-and-acceptance.md`, accepted
+2026-08-12). That is a **different repository's numbering** from this repo's **ADR-027** ("Browser
+automation stays local"), which is unrelated. Always cite the cloud ADR by repo + path, never by
+bare number.
+
+**Amendment, 2026-08-13 — the pipeline tail becomes subscribers, and human intent preempts.** The
+contract's §7a records seven rulings that extend this decision without changing it. **The tail
+collapses:** `monitor-merge`, `monitor-deploy` and `teardown` stop being phase agents — the pipeline
+goes **10 phases → 7**, with `pr` as the terminal — and their work moves to subscribers on
+`github.pr.merged` (447 delivered on mini in 2026-08, carrying `vcs.pr.number` and
+`body.payload.mergeCommitSha`), plus a per-repo deploy-watcher and a level-triggered reconciler. Two
+things must move _with_ the deletion, not after it: **Done** (teardown is today the sole originating
+authority — `scheduler.mjs:3675` fires only when `signals[TERMINAL_PHASE] === "done"` at `:8092`, so
+it is re-homed onto a done-writer whose evidence is the CTL-1667 PR-identity gate plus a live
+`gh pr view … MERGED` read, I6) and **BEHIND-rebase on an open PR** (today's only owner is the live
+monitor-merge agent; it becomes a demand-driven `fix_class:"rebase"`, never an eager sweep — an
+eager one reproduces the CTL-1704 Pages/re-review serialization incident by construction). **Human
+intent preempts:** any human or foreign state change on a ticket with a live worker alerts that
+worker, which wraps up, pushes WIP, posts a closure comment saying what it did and where it left it,
+and exits on `phase.<P>.abandoned.<T>` — a terminal `PHASE_EVENT_PATTERN` already routes
+(`namespace-contract.mjs:81-86`, CTL-1790), so the protocol needs **no** namespace change. **The
+departing worker does not decide what happens next; the new state does** — which retires this ADR's
+§9.1 open question ("a human sets Done on a live worker") by generalizing past it. **And the
+many-to-one collapse this ADR kept is precisely what makes the deletion free:** `pr`,
+`monitor-merge`, `monitor-deploy` and `teardown` all carry `linearKey: "inReview"` → `PR`
+(`workflow.default.json:65-68`, verified), so the ticket sits in `PR` until `Done` either way and
+the board loses nothing. Ryan explicitly **considered and rejected** adding `Review` and `Merge`
+Linear states — he proposed them, was shown this ADR's rationale (widening re-couples board
+granularity to the pipeline across nine teams' saved views), and reversed. **No new Linear states.**
+`Ready` is archived (21 `issue_history` transitions workspace-wide, zero live occupants). Full
+design, re-homing table, preempt failure modes and quantified deletion:
+`docs/event-automation-contract.md` §7a.
