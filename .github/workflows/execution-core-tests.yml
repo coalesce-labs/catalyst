@@ -318,6 +318,20 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/canonical-event.test.sh
 
+      - name: event-append atomicity test (CTL-1809)
+        # The bash append seam must be exactly ONE write(2) per event: `printf >>` is
+        # ⌈n/BUFSIZ⌉ write() calls (BUFSIZ = 1024 on macOS, 8192 on glibc), so a line over
+        # that tears when a concurrent producer appends between them. Runs 8 concurrent
+        # producers x 150 lines at 1,025 B and at the real 19,086 B fleet maximum, and
+        # asserts BOTH halves of the contract — every line parses, AND every line's contents
+        # belong to exactly one event (a splice can parse perfectly; the RCA reproduced one).
+        # Carries its own positive control: the same harness on a naive `printf >>` must go
+        # RED, so a green run is evidence rather than a machine that happens not to tear.
+        # Also covers the hard 256 KiB cap + tombstone, the all-producers convergence scan,
+        # and catalyst-events' torn-line batch-abort fix.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/event-append-atomicity.test.sh
+
       - name: SKILL.md ${PLUGIN_ROOT} assignment guard (CTL-1832)
         # CTL-1832: a SKILL.md that EXPANDS ${PLUGIN_ROOT} must also ASSIGN it, or
         # the expansion is empty and the command silently addresses a bogus path.

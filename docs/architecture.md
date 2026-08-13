@@ -118,6 +118,46 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
     (`canonical_note_v1_only`) — stderr because a separate CLI process cannot hand an exported var
     back, and because it rides the Alloy-shipped daemon `.log` rather than the event log whose
     degradation it reports.
+  - **One write(2) per bash append (CTL-1809).** Every bash producer appends through the single
+    seam `canonical_atomic_append_line` (`lib/canonical-event.sh`), which pipes the line through
+    `/bin/dd obs=1048576` — dd accumulates the whole line into one output block and issues exactly
+    one `write(2)` up to 1 MiB (`0+1 records out` for a 256 KiB input at `obs=1m`, vs `4+1` at
+    `obs=64k`). The replaced `printf '%s\n' … >>` is NOT atomic: `O_APPEND` makes the file *offset*
+    atomic, not a multi-`write(2)` sequence, and bash's builtin printf flushes through stdio in
+    BUFSIZ chunks (1024 on macOS, 8192 on glibc), so a line past BUFSIZ is ⌈n/BUFSIZ⌉ writes and a
+    concurrent producer's append lands between them. Measured at 8 producers × 150 lines:
+    658/1200 damaged at 1,025 B and 1,196/1200 at 19,086 B. Under the CTL-1795 superset envelope
+    two producers' *median* line already sits past the macOS threshold (`catalyst.phase-agent`
+    averages 1,075 B; `catalyst.worktree-salvage` 919 B), so this was latent, not theoretical.
+    `/bin/dd` is absolute because a restricted-`PATH` phase-agent worker is exactly where a
+    PATH-resolved helper becomes a silent no-op; there is deliberately no size branch and no
+    printf fallback in the primitive. **Hard cap 262,144 bytes** (byte length, 4.2× the observed
+    all-time fleet max of 62,597 B, inside dd's proven-atomic range): over it, the write is
+    REFUSED — never truncated or split — with a stderr WARNING carrying the size and event name,
+    plus a `catalyst.event.oversized` tombstone appended in-band. The tombstone carries its **own**
+    name, never the dropped event's: re-emitting the original name with a gutted payload would fire
+    that event's `wait-for` subscribers and the broker's phase-lifecycle router on fabricated
+    content. The **JS** writers are untouched — `appendFileSync` is already atomic far past this cap.
+    Seven bash sites converge on the seam (`canonical_jsonl_append`, `catalyst-state.sh`'s jq-less
+    branch, `emit-worker-status-change.sh`, `lib/emit-reap-intent.sh`, `lib/phase-emit-complete.sh`,
+    `catalyst-events`'s `wait.*` emitter, and `catalyst-stack`'s `_emit_checkout_updated` — the last
+    a whole-function stdout redirect rather than a `printf`, which is why it is the easiest to miss).
+    The three dependency-free leaves keep a raw-append fallback for a missing helper, but a **loud**
+    one; `__tests__/event-append-atomicity.test.sh` scans for any silent raw append and recognizes
+    the exemption only by that warning.
+  - **Read side is a tripwire, not the fix (CTL-1809).** Torn lines are COUNTED and SKIPPED at three
+    readers — `otel-forward/lib/tail.ts` (`onUnparseable` → `stats.torn`),
+    `execution-core/event-tail.mjs` (`tornLineCount()`), and `catalyst-events`' filter
+    (`torn_lines_total` on stderr). Every one **advances past** the line: a torn line is permanently
+    corrupt, so parking a cursor on it would wedge the reader forever
+    (`event-tail.mjs:12-17`). `catalyst-events` was worse than skipping — plain
+    `jq -c "select(...)"` ABORTS at the first unparseable line (exit 5), so every valid event after
+    a torn one in the same wake batch was silently lost and a `wait-for` sharing that batch timed
+    out; it now uses `jq -R 'fromjson?'`. These counters are a **lower bound**, never proof of
+    cleanliness: the RCA reproduced a splice that parses as valid JSON with a matching declared
+    length and three different events' contents, which no parser can detect. A monitor node's count
+    legitimately EXCEEDS a worker's — event-mirror is a transport, not a repair layer, and a torn
+    line has no extractable id for its dedup ring to suppress.
   - Consumers: `catalyst-events tail` (stream), `catalyst-events wait-for` (blocking single-event).
     Both shapes handled. See `website/src/content/docs/observability/catalyst-events.md`.
 - **history/** — full snapshots archived on completion/failure/stale.

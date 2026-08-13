@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# CTL-1809 (Defect B): a bash append to the event log must be exactly ONE write(2).
+#
+# `printf '%s\n' "$line" >> "$file"` looks atomic and is not. O_APPEND makes the file OFFSET
+# atomic; it does NOT make a multi-write(2) sequence atomic. bash's builtin printf flushes
+# through stdio in BUFSIZ-sized chunks (1024 on macOS, 8192 on glibc), so a line longer than
+# BUFSIZ is ⌈n/BUFSIZ⌉ separate write() calls and a concurrent producer's append lands
+# BETWEEN them. The result is a spliced line: one event's head followed by another's tail.
+#
+# The nastiest product of that splice is NOT an unparseable line. The RCA reproduced a line
+# that PARSES as valid JSON, whose declared length matches, and whose contents are three
+# different events — so a parse-only assertion is not sufficient. Every case below therefore
+# asserts BOTH halves of the acceptance criterion: every line parses, AND every line's
+# contents belong to exactly one event. The second half is enforced by giving each producer
+# its own single fill character; a spliced line contains two.
+#
+# Sizes are not arbitrary. 1,025 B is one byte past macOS BUFSIZ; 19,086 B is the real
+# largest `catalyst.worktree-rebase` line measured on mini. Both demonstrably tear today —
+# case 3 is the committed proof of that, and it is what keeps cases 1 and 2 honest.
+#
+# Driven against the REAL shipped function (lib/canonical-event.sh), never a model of it.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$(dirname "$SCRIPT_DIR")"
+LIB="${SCRIPTS_DIR}/lib/canonical-event.sh"
+[[ -f "$LIB" ]] || { echo "FAIL: canonical-event.sh not found at $LIB"; exit 1; }
+# shellcheck disable=SC1090
+source "$LIB"
+
+command -v jq >/dev/null 2>&1 || { echo "SKIP: jq unavailable"; exit 0; }
+
+# The primitive hard-codes /bin/dd — an ABSOLUTE path, deliberately, because a phase-agent
+# worker or launchd job runs with a restricted PATH and a PATH-resolved helper that fails to
+# resolve is the silent no-op this whole guard exists to prevent. Asserted here rather than
+# skipped: if /bin/dd is ever absent on a supported host, every bash append on that host is
+# broken and this suite must say so in one line instead of leaving the reader to infer it
+# from "expected 1200 lines, found 0". (Present on stock macOS and on Ubuntu, where /bin is
+# a usrmerge symlink to /usr/bin.)
+[[ -x /bin/dd ]] || { echo "FAIL: /bin/dd is missing — the atomic append primitive cannot work on this host"; exit 1; }
+
+TMPS=()
+# NOTE the trailing `true`: without it the loop's last conditional decides this script's EXIT
+# STATUS, so a passing test could report failure. Cleanup must never change the verdict.
+cleanup() { local d; for d in "${TMPS[@]:-}"; do [[ -n "$d" ]] && rm -rf "$d"; done; true; }
+trap cleanup EXIT
+newdir() { mktemp -d; }
+fail() { echo "FAIL: $*"; exit 1; }
+pass() { echo "  ok — $*"; }
+
+PRODUCERS=8
+LINES_PER=150
+
+# The naive append this ticket replaces — byte-for-byte the pre-CTL-1809 shape of
+# canonical-event.sh's last line. Case 3 runs the identical harness through it; if it ever
+# stops tearing, cases 1 and 2 have stopped proving anything and this suite says so.
+naive_append() { printf '%s\n' "$2" >> "$1"; }
+
+# run_harness FILE SIZE APPEND_FN
+# PRODUCERS concurrent subshells x LINES_PER lines, each line EXACTLY $SIZE bytes (the
+# trailing newline the appender adds is on top of that). Producer N fills its padding with
+# the single character N, which is what makes a splice detectable even when it parses.
+run_harness() {
+  local file="$1" size="$2" fn="$3"
+  : > "$file"
+  local pids=() p
+  for p in $(seq 1 "$PRODUCERS"); do
+    (
+      local prefix suffix npad padchar pad line i
+      padchar="$p"
+      for i in $(seq 1 "$LINES_PER"); do
+        prefix="{\"producer\":${p},\"seq\":${i},\"fill\":\""
+        suffix="\",\"producer_echo\":${p}}"
+        npad=$(( size - ${#prefix} - ${#suffix} ))
+        pad="$(printf '%*s' "$npad" '' | tr ' ' "$padchar")"
+        line="${prefix}${pad}${suffix}"
+        [[ ${#line} -eq $size ]] || { echo "harness bug: built ${#line} bytes, wanted $size" >&2; exit 1; }
+        "$fn" "$file" "$line"
+      done
+    ) &
+    pids+=($!)
+  done
+  # Bounded by construction: each child runs a fixed LINES_PER-iteration loop and exits. No
+  # `while :` anywhere, so there is nothing here that can outlive the test.
+  for p in "${pids[@]}"; do wait "$p"; done
+}
+
+# count_damage FILE — echoes "<unparseable> <spliced>".
+#   unparseable = lines that fail JSON.parse
+#   spliced     = lines that PARSE but whose contents come from more than one producer
+#                 (fill character not homogeneous, or not matching the declared producer,
+#                 or producer != producer_echo). This is the detector the RCA's
+#                 valid-JSON splice defeats a plain parse check with.
+count_damage() {
+  local file="$1"
+  local unparseable spliced
+  unparseable="$(jq -R 'try (fromjson | empty) catch 1' < "$file" | wc -l | tr -d ' ')"
+  spliced="$(jq -R '
+      (try fromjson catch null) as $o
+      | select($o != null)
+      | select(
+          ($o.producer != $o.producer_echo)
+          or (($o.fill | explode | unique | length) != 1)
+          or (($o.fill | explode | .[0]) != (48 + $o.producer))
+        )
+      | 1' < "$file" | wc -l | tr -d ' ')"
+  printf '%s %s' "$unparseable" "$spliced"
+}
+
+expected_lines=$(( PRODUCERS * LINES_PER ))
+
+# --- 1. 1,025 B x 8 producers through the primitive: clean --------------------
+D="$(newdir)"; TMPS+=("$D"); F1="$D/e.jsonl"
+run_harness "$F1" 1025 canonical_atomic_append_line
+read -r U1 S1 <<<"$(count_damage "$F1")"
+N1="$(wc -l < "$F1" | tr -d ' ')"
+[[ "$N1" == "$expected_lines" ]] || fail "1025B: expected $expected_lines lines, found $N1 (a line was dropped or split)"
+[[ "$U1" == "0" ]] || fail "1025B: $U1 unparseable lines through the atomic primitive"
+[[ "$S1" == "0" ]] || fail "1025B: $S1 lines carry contents from more than one event"
+pass "1025 B x ${PRODUCERS} producers: ${N1} lines, 0 unparseable, 0 spliced"
+
+# --- 2. 19,086 B x 8 producers through the primitive: clean -------------------
+D="$(newdir)"; TMPS+=("$D"); F2="$D/e.jsonl"
+run_harness "$F2" 19086 canonical_atomic_append_line
+read -r U2 S2 <<<"$(count_damage "$F2")"
+N2="$(wc -l < "$F2" | tr -d ' ')"
+[[ "$N2" == "$expected_lines" ]] || fail "19086B: expected $expected_lines lines, found $N2"
+[[ "$U2" == "0" ]] || fail "19086B: $U2 unparseable lines through the atomic primitive"
+[[ "$S2" == "0" ]] || fail "19086B: $S2 lines carry contents from more than one event"
+pass "19086 B x ${PRODUCERS} producers: ${N2} lines, 0 unparseable, 0 spliced"
+
+# --- 3. POSITIVE CONTROL: the same harness on a naive `printf >>` must TEAR ----
+# This is the AC's third clause made permanent ("replace the append primitive with a naive
+# printf >> and the concurrency test goes red"). Without it, cases 1 and 2 would still pass
+# on a machine or a bash build where nothing tears — a green that proves nothing. Asserted
+# at BOTH sizes so a platform whose BUFSIZ is 8192 (glibc) still exercises the control at
+# 19,086 B rather than reporting a false clean.
+D="$(newdir)"; TMPS+=("$D"); FN1="$D/naive1025.jsonl"; FN2="$D/naive19086.jsonl"
+run_harness "$FN1" 1025 naive_append
+run_harness "$FN2" 19086 naive_append
+read -r UN1 SN1 <<<"$(count_damage "$FN1")"
+read -r UN2 SN2 <<<"$(count_damage "$FN2")"
+DAMAGE_1025=$(( UN1 + SN1 ))
+DAMAGE_19086=$(( UN2 + SN2 ))
+[[ "$DAMAGE_19086" -gt 0 ]] \
+  || fail "positive control DID NOT TEAR at 19086 B — cases 1 and 2 are therefore not evidence of anything"
+pass "positive control: naive printf >> damaged ${DAMAGE_1025} lines at 1025 B and ${DAMAGE_19086} at 19086 B"
+
+# --- 4. Over the cap: fails loudly, drops nothing silently, leaves a tombstone -
+D="$(newdir)"; TMPS+=("$D"); F4="$D/e.jsonl"; : > "$F4"
+BIG_PAD="$(printf '%*s' 300000 '' | tr ' ' 'z')"
+BIG_LINE="{\"attributes\":{\"event.name\":\"phase.implement.complete.CTL-9999\"},\"pad\":\"${BIG_PAD}\"}"
+WARN="$D/warn.txt"
+set +e
+canonical_atomic_append_line "$F4" "$BIG_LINE" 2>"$WARN"
+RC=$?
+set -e
+[[ "$RC" -ne 0 ]] || fail "an oversized append returned 0 — a caller cannot tell the event was dropped"
+grep -q "300" "$WARN" || fail "the oversized warning does not report the size; stderr: $(cat "$WARN")"
+grep -q 'phase.implement.complete.CTL-9999' "$WARN" \
+  || fail "the oversized warning does not name the event; stderr: $(cat "$WARN")"
+# Never silently truncated or split: the file must not contain any fragment of the payload.
+grep -q 'zzzz' "$F4" && fail "an oversized event was written (truncated or split) instead of refused"
+pass "oversized append: rc=$RC, size and event name on stderr, nothing written from the payload"
+
+# The tombstone: the drop must be durable and in-band, not only a stderr line that no
+# event-log consumer can see.
+TOMB_NAME="$(jq -r '.attributes["event.name"]' < "$F4")"
+[[ "$TOMB_NAME" == "catalyst.event.oversized" ]] \
+  || fail "expected a catalyst.event.oversized tombstone in the log, found event.name=$TOMB_NAME"
+# The tombstone must carry its OWN name. Re-emitting the dropped event's name with a gutted
+# payload would fire `catalyst-events wait-for` subscribers and the broker's phase-lifecycle
+# router on fabricated content — strictly worse than the absence it is reporting.
+jq -e '.attributes["event.name"] != "phase.implement.complete.CTL-9999"' < "$F4" >/dev/null \
+  || fail "the tombstone re-used the dropped event's name — it would fire that event's subscribers"
+jq -e '.attributes["catalyst.event.oversized.name"] == "phase.implement.complete.CTL-9999"' < "$F4" >/dev/null \
+  || fail "the tombstone does not record which event was dropped"
+jq -e '.attributes["catalyst.event.oversized.bytes"] > 262144' < "$F4" >/dev/null \
+  || fail "the tombstone does not record the dropped size"
+[[ "$(wc -l < "$F4" | tr -d ' ')" == "1" ]] || fail "expected exactly one tombstone line"
+pass "tombstone: catalyst.event.oversized, own name, records the dropped name and size"
+
+# --- 5. Cap boundary: exactly at the cap is ACCEPTED --------------------------
+# Off-by-one guard in the direction that matters. 262,144 B is 4.2x the all-time observed
+# fleet maximum (62,597 B) and is inside the range dd is proven atomic over, so a line at
+# the cap is a line the primitive must still write.
+D="$(newdir)"; TMPS+=("$D"); F5="$D/e.jsonl"; : > "$F5"
+EXACT_PREFIX='{"attributes":{"event.name":"cap.boundary"},"pad":"'
+EXACT_SUFFIX='"}'
+EXACT_PAD="$(printf '%*s' $(( 262144 - ${#EXACT_PREFIX} - ${#EXACT_SUFFIX} )) '' | tr ' ' 'y')"
+EXACT_LINE="${EXACT_PREFIX}${EXACT_PAD}${EXACT_SUFFIX}"
+[[ ${#EXACT_LINE} -eq 262144 ]] || fail "harness bug: boundary line is ${#EXACT_LINE} bytes"
+canonical_atomic_append_line "$F5" "$EXACT_LINE" || fail "a line exactly at the cap was refused"
+jq -e '.attributes["event.name"] == "cap.boundary"' < "$F5" >/dev/null \
+  || fail "the at-cap line did not land intact"
+pass "cap boundary: 262144 B accepted and intact"
+
+# --- 6. Every bash producer converges on the one primitive --------------------
+# The primitive only helps the sites that call it, so a raw `>>` append to the event log
+# added later would silently keep the old torn path. This scan enumerates append redirects
+# to an event-log destination across the shipped bash producers.
+#
+# Three sites legitimately keep a raw append: dependency-free leaves that source
+# canonical-event.sh lazily and must still emit when it is absent. Those are recognized ONLY
+# by the loud warning that must immediately precede them — so the exemption cannot be
+# claimed by a silent append, and adding a genuinely new raw append still fails this test.
+UNGUARDED_SENTINEL='WITHOUT the atomic primitive'
+scan_unguarded_appends() {
+  # FNR, not NR: awk's NR is CUMULATIVE across the whole argument list, so using it would
+  # both misreport line numbers and — far worse — let a loud-fallback warning at the end of
+  # one file exempt a silent append near the start of the NEXT one. `guard` is reset at each
+  # file boundary for the same reason.
+  awk -v sentinel="$UNGUARDED_SENTINEL" '
+    FNR == 1 { guard = 0 }
+    index($0, sentinel) { guard = FNR }
+    />>/ && /(month_file|events_file|CATALYST_EVENTS_FILE|[$]dest|\.jsonl)/ {
+      if (guard == 0 || FNR - guard > 3) printf "%s:%d:%s\n", FILENAME, FNR, $0
+    }
+  ' "$@" 2>/dev/null || true
+}
+RAW="$(scan_unguarded_appends \
+  "${SCRIPTS_DIR}/lib/canonical-event.sh" \
+  "${SCRIPTS_DIR}/lib/emit-reap-intent.sh" \
+  "${SCRIPTS_DIR}/lib/phase-emit-complete.sh" \
+  "${SCRIPTS_DIR}/catalyst-state.sh" \
+  "${SCRIPTS_DIR}/catalyst-events" \
+  "${SCRIPTS_DIR}/catalyst-stack" \
+  "${SCRIPTS_DIR}/emit-worker-status-change.sh")"
+[[ -z "$RAW" ]] || fail "a bash producer appends to the event log without the atomic primitive and without a loud fallback warning:
+$RAW"
+# POSITIVE CONTROL for the scan above. A scan that matches nothing because its pattern is
+# wrong is indistinguishable from a clean tree — the exact shape of check that has shipped
+# as a false clean in this repo. Two decoys, because the scan has two halves that can each
+# fail silently: (a) an UNGUARDED raw append must be reported, or the scan is blind;
+# (b) a GUARDED one must not be, or the exemption is really "match nothing" and half (a)
+# would be reported for the wrong reason.
+D="$(newdir)"; TMPS+=("$D")
+printf 'printf "%%s" "$line" >> "$month_file"\n' > "$D/decoy-bare.sh"
+[[ -n "$(scan_unguarded_appends "$D/decoy-bare.sh")" ]] \
+  || fail "the raw-append scan cannot detect an unguarded raw append — the clean result above is meaningless"
+{ printf 'echo "WARNING: %s here"\n' "$UNGUARDED_SENTINEL"
+  printf 'printf "%%s" "$line" >> "$month_file"\n'; } > "$D/decoy-guarded.sh"
+[[ -z "$(scan_unguarded_appends "$D/decoy-guarded.sh")" ]] \
+  || fail "the scan does not honour the loud-fallback exemption it claims to"
+pass "no bash producer bypasses the primitive silently (scan positive-controlled both ways)"
+
+# --- 6b. The loud fallback actually fires ------------------------------------
+# The exemption above is only defensible if the warning is real. A fallback branch that
+# ships un-exercised is the second code path this ticket's design notes ban everywhere else,
+# so it gets exercised here against the REAL shipped file: copy lib/emit-reap-intent.sh
+# somewhere with no canonical-event.sh sibling — which is exactly how it resolves the helper
+# (`_rei_lib_dir` from BASH_SOURCE) — and require both the warning AND the event.
+D="$(newdir)"; TMPS+=("$D")
+mkdir -p "$D/lonely" "$D/ev"
+cp "${SCRIPTS_DIR}/lib/emit-reap-intent.sh" "$D/lonely/"
+FBERR="$D/fb.err"
+CATALYST_EVENTS_DIR="$D/ev" bash "$D/lonely/emit-reap-intent.sh" \
+  orphans.reap-requested --orch-id test-orch 2>"$FBERR" || true
+grep -q "$UNGUARDED_SENTINEL" "$FBERR" \
+  || fail "the helper-absent fallback did not warn — the scan's exemption covers a silent path. stderr: $(cat "$FBERR")"
+[[ -s "$D/ev/$(date -u +%Y-%m).jsonl" ]] \
+  || fail "the helper-absent fallback warned but dropped the event — it must still emit"
+pass "loud fallback: warns on stderr and still emits when canonical-event.sh is absent"
+
+# --- 7. catalyst-events must not lose a whole batch to one torn line ----------
+# `jq -c "select(...)"` ABORTS at the first line that does not parse (exit 5), so every
+# valid event AFTER a torn line in the same wake batch was silently lost and a `wait-for`
+# whose awaited event shared that batch timed out. The loop cursor is a line COUNT, so the
+# abort is batch-scoped rather than a permanent wedge — which is exactly why it was never
+# noticed.
+D="$(newdir)"; TMPS+=("$D")
+EV="$D/events/$(date -u +%Y-%m).jsonl"
+mkdir -p "$(dirname "$EV")"
+{
+  printf '{"attributes":{"event.name":"before.torn"}}\n'
+  printf 'TORN{"attributes":{"event.na\n'
+  printf '{"attributes":{"event.name":"after.torn"}}\n'
+} > "$EV"
+ERRF="$D/tail.err"; OUTF="$D/tail.out"
+# `tail` is a live tail — it never returns on its own. Start it, let it emit its one
+# --since-line 0 backlog batch, then kill it. The deadline is a fixed sleep in the
+# foreground, so nothing here can outlive this test even if the kill fails.
+CATALYST_EVENTS_DIR="$D/events" "${SCRIPTS_DIR}/catalyst-events" tail \
+  --since-line 0 --filter '.attributes["event.name"] | test("torn")' \
+  >"$OUTF" 2>"$ERRF" &
+TAILPID=$!
+sleep 2
+kill "$TAILPID" 2>/dev/null || true
+wait "$TAILPID" 2>/dev/null || true
+ps -p "$TAILPID" >/dev/null 2>&1 && fail "LEAKED catalyst-events tail pid $TAILPID"
+grep -q 'after.torn' "$OUTF" \
+  || fail "a torn line swallowed the rest of the batch — 'after.torn' never reached the consumer. got: $(cat "$OUTF")"
+grep -q 'before.torn' "$OUTF" \
+  || fail "the batch did not emit at all — the harness, not the fix, is what this case measured. got: $(cat "$OUTF")"
+grep -q 'torn_lines_total' "$ERRF" \
+  || fail "the skipped line was silent — no counted operator-visible warning. stderr: $(cat "$ERRF")"
+pass "catalyst-events: torn line counted and skipped, the rest of the batch survives"
+
+echo "PASS: event-append-atomicity (CTL-1809)"

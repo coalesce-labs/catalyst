@@ -22,6 +22,17 @@ export interface TailerOpts {
    * warning so the drop is loud instead of silent. See shouldForward below.
    */
   onUnrecognized?: (line: string) => void;
+  /**
+   * CTL-1809: called with the raw line when it does not parse as JSON at all — a TORN line,
+   * i.e. the product of a bash producer's multi-write(2) append being interleaved by a
+   * concurrent producer. Distinct from onUnrecognized, which fires for a line that parses
+   * fine but matches no known envelope shape. Both are drops; only this one means the log
+   * itself was damaged on the way in.
+   *
+   * Optional so every existing caller is unchanged; index.ts wires it to a counter +
+   * sparse warning. See shouldForward's catch below.
+   */
+  onUnparseable?: (line: string) => void;
 }
 
 export interface Tailer {
@@ -71,6 +82,22 @@ export function createTailer(opts: TailerOpts): Tailer {
       }
       return recognized;
     } catch {
+      // CTL-1809: THIS IS THE TORN-LINE SEAM. Until now this catch swallowed an unparseable
+      // line with no counter and no log line anywhere in the process — so a damaged event
+      // log and a quiet one were byte-for-byte indistinguishable from here, which is how a
+      // measured 200-fragment corpus on the monitor node went unreported for a week.
+      //
+      // COUNT AND SKIP. A torn line can never be forwarded (it has no readable envelope),
+      // and it is permanently corrupt — parking `offset` on it would wedge this tailer, and
+      // with it the whole forwarder, on damage that will never resolve. The byte cursor has
+      // already advanced past it by the time we get here (readNewLines sets `offset = size`
+      // before splitting), which is the same never-revisit contract every other reader on
+      // this log ships.
+      try {
+        opts.onUnparseable?.(line);
+      } catch {
+        /* best-effort — a reporting hook must never break the tail loop */
+      }
       return false;
     }
   }

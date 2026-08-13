@@ -193,7 +193,11 @@ event_append() {
     # instead of silent — same posture as lib/catalyst-deployment-mode.sh's jq-less resolver.
     canonical_note_v1_only "jq-missing:event_append"
     local month_file="${EVENTS_DIR}/$(date -u +%Y-%m).jsonl"
-    echo "$input_json" >> "$month_file"
+    # CTL-1809: the jq-less branch bypasses canonical_jsonl_append (whose sentinel and
+    # rotation checks are jq programs and would mis-report here), but it must NOT bypass the
+    # atomic append. The primitive is jq-free by construction precisely so this path keeps
+    # the one-write(2) guarantee that the rest of the emit sites get.
+    canonical_atomic_append_line "$month_file" "$input_json" || return 1
     return 0
   fi
 

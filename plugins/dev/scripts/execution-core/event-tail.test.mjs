@@ -14,7 +14,13 @@ import { describe, test, expect } from "bun:test";
 import { writeFileSync, appendFileSync, mkdtempSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseEventTailChunk, scanEventsChunked, tailParsedEvents } from "./event-tail.mjs";
+import {
+  parseEventTailChunk,
+  scanEventsChunked,
+  tailParsedEvents,
+  tornLineCount,
+  resetTornLineCount,
+} from "./event-tail.mjs";
 
 // parseEventTailChunk — preserve the daemon.mjs contract verbatim.
 describe("parseEventTailChunk", () => {
@@ -188,5 +194,57 @@ describe("tailParsedEvents (CTL-1514)", () => {
     const got = tailParsedEvents({ path, maxLines: 1 });
     expect(got).toHaveLength(1);
     expect(got[0].big.length).toBe(2 * 1024 * 1024);
+  });
+});
+
+// ─── CTL-1809: the torn-line drop must be counted, not silent ────────────────
+//
+// parseEventTailChunk's `catch { continue }` drops an unparseable COMPLETE line. That drop
+// is correct — a torn line is permanently corrupt, and parking the byte cursor on it would
+// wedge the daemon tail, the reaper's boot replay and every scan CLI on damage that will
+// never resolve. But it used to be INVISIBLE, so a damaged event log and a quiet one read
+// identically from every reader built on this module.
+describe("torn-line counter (CTL-1809)", () => {
+  test("counts each unparseable complete line and still advances past it", () => {
+    resetTornLineCount();
+    const { events } = parseEventTailChunk(
+      '{"event":"a"}\nTORN{"attributes":{"event.na\n{"event":"b"}\n',
+      ""
+    );
+    // ADVANCES: the valid event AFTER the torn line is still returned. This is the half that
+    // separates count-and-advance from park-the-cursor — a reader that stalled on the torn
+    // line would never reach {"event":"b"}.
+    expect(events).toEqual([{ event: "a" }, { event: "b" }]);
+    expect(tornLineCount()).toBe(1);
+  });
+
+  test("a clean chunk leaves the counter untouched (with a positive control)", () => {
+    resetTornLineCount();
+    parseEventTailChunk('{"event":"a"}\n{"event":"b"}\n', "");
+    expect(tornLineCount()).toBe(0);
+    // POSITIVE CONTROL: same instrument, same call, one torn line added. Without it, a
+    // counter wired to nothing at all would also report 0 above and look correct.
+    parseEventTailChunk("TORN\n", "");
+    expect(tornLineCount()).toBe(1);
+  });
+
+  test("the trailing PARTIAL line is not counted — only complete lines are", () => {
+    resetTornLineCount();
+    // No trailing newline: `{"event":"b` is a write in flight, not corruption. Counting it
+    // would make the detector alarm continuously against any actively-written log.
+    const { events, leftover } = parseEventTailChunk('{"event":"a"}\n{"event":"b', "");
+    expect(events).toEqual([{ event: "a" }]);
+    expect(leftover).toBe('{"event":"b');
+    expect(tornLineCount()).toBe(0);
+  });
+
+  test("counts through scanEventsChunked — the path the daemon and reaper actually use", () => {
+    resetTornLineCount();
+    const path = join(mkdtempSync(join(tmpdir(), "ctl1809-")), "e.jsonl");
+    writeFileSync(path, '{"event":"a"}\nTORN{"att\n{"event":"b"}\n');
+    const seen = [];
+    scanEventsChunked({ path, onEvent: (e) => seen.push(e) });
+    expect(seen).toEqual([{ event: "a" }, { event: "b" }]);
+    expect(tornLineCount()).toBe(1);
   });
 });

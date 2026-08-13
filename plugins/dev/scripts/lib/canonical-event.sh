@@ -573,6 +573,121 @@ _canonical_is_sentinel_leak() {
      "$(cd "$default_dir" 2>/dev/null && pwd -P || echo "$default_dir")" ]]
 }
 
+# ─── CTL-1809: the one atomic append seam ────────────────────────────────────
+#
+# `printf '%s\n' "$line" >> "$file"` LOOKS atomic and is not. O_APPEND makes the file
+# OFFSET atomic; it does not make a multi-`write(2)` sequence atomic. bash's builtin printf
+# flushes through stdio in BUFSIZ-sized chunks — 1024 on macOS, 8192 on glibc, an
+# undocumented implementation detail that differs by platform — so a line longer than
+# BUFSIZ becomes ⌈n/BUFSIZ⌉ separate write() calls and a concurrent producer's append lands
+# BETWEEN them. Measured against this repo's own harness at 8 producers × 150 lines:
+# 658/1200 lines damaged at 1,025 B and 1,196/1200 at 19,086 B.
+#
+# The relevant constant is stdio BUFSIZ, NOT PIPE_BUF — the destination is a regular file,
+# not a pipe, so the familiar "a write below PIPE_BUF is atomic" reasoning does not apply
+# here at all.
+#
+# `/bin/dd obs=1048576` accumulates the entire piped line into ONE output block and issues
+# exactly one write(2) for any input up to 1 MiB. dd's own accounting is the direct proof: a
+# 262,145-byte input reports `0+1 records out` at obs=1m (one partial output block = one
+# write) versus `4+1 records out` at obs=64k. Pipe-side chunking is irrelevant — only dd's
+# OUTPUT write touches the log.
+#
+# THREE deliberate non-choices, each of which was the failure mode of an obvious alternative:
+#
+#   · `/bin/dd`, not `dd`. Phase-agent workers and launchd jobs run with a restricted PATH,
+#     and a PATH-resolved helper that fails to resolve is precisely the silent no-op this
+#     guard exists to prevent. An absolute path present on stock macOS and Linux satisfies
+#     that structurally, with no fallback branch to be loud about.
+#   · No interpreter. A bun/node append helper costs 10–20× dd's per-emit time AND
+#     reintroduces the PATH-resolution failure above. Measured here: 3.8 ms/emit for dd vs
+#     0.2 ms for raw printf. The bash-writer census is ~200k events/month fleet-wide
+#     (~0.077/s), i.e. ~13 CPU-minutes/month. The JS writers — which carry the high-rate
+#     families like `recovery.tick` — already use `appendFileSync` and are atomic far past
+#     this cap, so they are deliberately untouched.
+#   · No size branch. "printf if small, dd if big" is a second code path that ships
+#     un-exercised, and it would be exercised only on the large lines that actually tear.
+#     Every bash append goes through dd unconditionally.
+#
+# Hard cap: 262,144 bytes, measured with `wc -c` (BYTES, not characters — a multi-byte
+# payload must not slip past a character count). That is 4.2× the all-time observed fleet
+# maximum (62,597 B) and inside the range dd is empirically proven atomic over. A cap above
+# the proven-atomic bound would be a lie and a cap near the observed max would drop real
+# events, which is also why it is deliberately NOT env-overridable.
+CATALYST_EVENT_LINE_MAX_BYTES=262144
+
+# _canonical_event_name_of LINE
+# Best-effort name for a line we are about to refuse. Reads all three envelope
+# discriminators in the house order — attributes["event.name"] ?? event ?? name — because a
+# refused line may be in any of them and an anonymous tally is not actionable. Uses sed
+# rather than jq: this must work on the jq-less catalyst-state.sh path too, and it is a COLD
+# path (only a cap breach reaches it), so the fork is free.
+_canonical_event_name_of() {
+  local line="$1" n=""
+  n="$(printf '%s' "$line" | LC_ALL=C sed -n 's/.*"event\.name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$n" ]] || n="$(printf '%s' "$line" | LC_ALL=C sed -n 's/.*"event"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$n" ]] || n="$(printf '%s' "$line" | LC_ALL=C sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  printf '%s' "${n:-(unknown)}"
+}
+
+# _canonical_append_oversized_tombstone FILE NAME BYTES
+# Durable, in-band record that an event was refused. The stderr WARNING alone rides the
+# caller's `.log` (Alloy → Loki), which is the right OUT-of-band channel for "the event log
+# itself is degraded" — but it is invisible to every consumer that reads the event log, i.e.
+# to the surface where the gap actually appears.
+#
+# The tombstone carries its OWN event name. Re-emitting the dropped event's name with a
+# gutted payload would fire `catalyst-events wait-for` subscribers and the broker's
+# phase-lifecycle router on fabricated content — strictly worse than the absence it reports.
+# A name-specific waiter therefore still misses its event; nothing in the fleet is within 4×
+# of the cap, so this is a tripwire for a pathological producer, not a routing policy.
+#
+# Hand-built with printf, not jq: the cap must hold on the jq-less path too. The dropped
+# event's name is the only untrusted text here and is scrubbed to the event-name charset
+# before embedding, since there is no jq available to escape it.
+_canonical_append_oversized_tombstone() {
+  local file="$1" name="$2" bytes="$3"
+  # Recursion guard: the tombstone is appended through the same primitive. It is fixed-size
+  # plus a 120-char name so it cannot itself breach the cap — but a guard that does not
+  # depend on that arithmetic staying true is cheaper than one that does.
+  [[ -z "${__CE_IN_TOMBSTONE:-}" ]] || return 0
+  local ts host safe tomb
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  host="$(catalyst_host_name 2>/dev/null || echo unknown)"
+  safe="$(printf '%s' "$name" | LC_ALL=C tr -c 'A-Za-z0-9._:-' '_' | cut -c1-120)"
+  tomb="$(printf '{"ts":"%s","observedTs":"%s","severityText":"ERROR","severityNumber":17,"body":{"message":"event dropped: %s bytes exceeds the %s-byte append cap"},"attributes":{"event.name":"catalyst.event.oversized","event.entity":"event","event.action":"dropped","catalyst.event.oversized.name":"%s","catalyst.event.oversized.bytes":%s,"catalyst.event.oversized.cap":%s},"resource":{"service.name":"catalyst.event-append","host.name":"%s"}}' \
+    "$ts" "$ts" "$bytes" "$CATALYST_EVENT_LINE_MAX_BYTES" "$safe" "$bytes" "$CATALYST_EVENT_LINE_MAX_BYTES" "$host")"
+  __CE_IN_TOMBSTONE=1 canonical_atomic_append_line "$file" "$tomb" || true
+}
+
+# canonical_atomic_append_line FILE LINE
+# Append LINE + "\n" to FILE in exactly one write(2). Returns 0 on success, non-zero when
+# the line was refused (over the cap) or dd itself failed.
+#
+# Failure is LOUD and does NOT degrade to printf. A silent degrade would put the tear back
+# on exactly the large lines this exists for. Note also that the old call site's
+# `2>/dev/null || true` is why nothing on this path was ever audible — these warnings must
+# reach the caller's stderr, so no caller may re-silence them.
+canonical_atomic_append_line() {
+  local file="$1" line="$2"
+  [[ -n "$file" ]] || return 1
+  local bytes
+  bytes="$(printf '%s' "$line" | LC_ALL=C wc -c | tr -d ' ')"
+  if [[ "$bytes" -gt "$CATALYST_EVENT_LINE_MAX_BYTES" ]]; then
+    local name
+    name="$(_canonical_event_name_of "$line")"
+    printf '[catalyst] WARNING: refusing to append a %s-byte event (cap %s) — event.name=%s; dropped, NOT truncated (CTL-1809)\n' \
+      "$bytes" "$CATALYST_EVENT_LINE_MAX_BYTES" "$name" >&2
+    _canonical_append_oversized_tombstone "$file" "$name" "$bytes"
+    return 1
+  fi
+  if ! printf '%s\n' "$line" | /bin/dd obs=1048576 2>/dev/null >>"$file"; then
+    printf '[catalyst] WARNING: atomic append to %s FAILED — event lost (CTL-1809)\n' "$file" >&2
+    return 1
+  fi
+  return 0
+}
+
 # canonical_jsonl_append BASE_DIR LINE
 # Append a JSONL line to ${BASE_DIR}/YYYY-MM.jsonl. Rotates the existing file
 # to *.legacy on first canonical write if the first existing line lacks an
@@ -647,5 +762,9 @@ canonical_jsonl_append() {
       fi
     fi
   fi
-  printf '%s\n' "$line" >> "$month_file" 2>/dev/null || true
+  # CTL-1809: one write(2), not ⌈n/BUFSIZ⌉ of them. The old `2>/dev/null || true` here is
+  # deliberately gone — silencing the primitive's stderr would re-hide the two conditions it
+  # exists to report (a refused oversized event, a failed write). The `|| true` stays in
+  # spirit: this function's contract is best-effort, so a refusal must not abort the caller.
+  canonical_atomic_append_line "$month_file" "$line" || true
 }

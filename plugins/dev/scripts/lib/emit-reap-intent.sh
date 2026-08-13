@@ -134,7 +134,17 @@ emit_reap_intent() {
 		line="$payload"
 	fi
 
-	printf '%s\n' "$line" >>"$month_file" 2>/dev/null || return 1
+	# CTL-1809: one write(2) per event. This file is a dependency-free leaf that sources
+	# canonical-event.sh LAZILY (above) and must keep working when the helper is absent — so
+	# the fallback is kept, but made LOUD. A silent printf fallback here would be the exact
+	# shape of degradation the atomic seam exists to remove: it would look identical to a
+	# working append right up until two producers overlapped on a large line.
+	if command -v canonical_atomic_append_line >/dev/null 2>&1; then
+		canonical_atomic_append_line "$month_file" "$line" || return 1
+	else
+		printf '[catalyst] WARNING: canonical-event.sh unavailable — appending a reap intent WITHOUT the atomic primitive; this write can tear above BUFSIZ (CTL-1809)\n' >&2
+		printf '%s\n' "$line" >>"$month_file" 2>/dev/null || return 1
+	fi
 	return 0
 }
 
