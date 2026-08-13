@@ -585,6 +585,60 @@ token is decrypted but not yet projected to the machine-level env. The operator 
 adding/rotating the secret in the `catalyst-cluster` repo lives in the `docs/cluster-onboarding.md`
 developer guide ("Provisioning the shared cloud token").
 
+## Executing checkouts (`catalyst.checkouts`, CTL-1825)
+
+`catalyst.checkouts` is a **Layer-2, machine-local** array of absolute paths — extra git
+checkouts this host executes code from or keeps current, beyond the ones already declared
+elsewhere. Default: unset (an empty list).
+
+It is the third of four sources in the **executing-root enumeration**
+(`execution-core/checkout-sync.mjs` → `resolveExecutingRoots`), which is the single answer to
+"which checkouts does this host run?":
+
+```
+registry repoRoots  ∪  this checkout  ∪  Layer-2 catalyst.checkouts[]  ∪  <CATALYST_DIR>/plugin-source
+```
+
+| source                            | where it comes from                                                                    |
+| --------------------------------- | -------------------------------------------------------------------------------------- |
+| registry `repoRoot`s              | `<CATALYST_DIR>/execution-core/registry.json` — the enrolled projects the daemon dispatches into |
+| this checkout                     | the tree the resolving module was loaded from (nearest ancestor with a `.git`)          |
+| `catalyst.checkouts[]`            | **this key** — siblings a given host keeps current but is not enrolled to dispatch into |
+| `<CATALYST_DIR>/plugin-source`    | the tree every daemon on a worker node actually runs FROM                               |
+
+```json
+{ "catalyst": { "checkouts": ["/Users/me/code/catalyst-cloud", "/Users/me/code/catalyst-otel"] } }
+```
+
+Order-stable and de-duplicated (trailing slashes normalised, so one repo cannot enrol twice).
+A path that does not exist on this host is dropped — a registry copied between hosts routinely
+names a `repoRoot` that exists on neither (CTL-854). A non-array value is **ignored**, never
+coerced: spreading a bare string would enrol one root per character.
+
+**Consumers, and the two views of the one enumeration.** The checkout-sync pass acts on
+**every** root — that breadth is the point, since the 2026-08-12 incident that motivated
+CTL-1808 was a sibling repo. The `catalyst-agent` code-currency gauge measures only the
+roots whose **role** is `catalyst` (`classifyExecutingRoots`), emitting
+`catalyst.vcs.commits_behind` one series per such root (label `catalyst.checkout.root`) plus
+`catalyst.vcs.commits_behind.max` — the stalest of them, which is the host's single currency
+number. Deliberately the same enumeration for both: a root one keeps current that the other
+cannot see is the same silent gap in a new place.
+
+Two failures shaped that. Before CTL-1825 the gauge measured only the directory the agent's
+own module lived in, so on a host whose agent and daemons run from different trees (every node
+on this fleet) it reported a healthy `0` for a tree nobody executes. Measuring the *whole*
+enumeration then overshot the other way: on the laptop, nine of eleven roots were enrolled
+**product** repos, and the stalest of those (`personal-os`, 58 commits behind its own `main`)
+became the reported maximum — a metric named for Catalyst currency answering for a personal
+repository, and firing `max by (host_name)(catalyst_vcs_commits_behind) > 20` on it.
+
+A root is `catalyst` when it is the agent's own tree or `<CATALYST_DIR>/plugin-source` (both
+by construction, marker or not — excluding either is the original defect), or when it carries
+`.claude-plugin/marketplace.json`. The role therefore follows what a tree **is**, never which
+source named it: this repository is itself an enrolled `repoRoot` (ADR-028), and
+`catalyst.checkouts[]` is a config namespace rather than a claim about the repo — its own
+example above is `catalyst-cloud`, a sibling.
+
 ## Node class (`catalyst.node.class`, CTL-1344)
 
 `catalyst.node.class` names **what kind of machine this is**. It is the front door to per-class

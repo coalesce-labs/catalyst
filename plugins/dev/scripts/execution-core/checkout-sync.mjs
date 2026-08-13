@@ -42,6 +42,16 @@
 // decision, it is not this automation's to make — it refuses and says exactly what it found.
 
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+// The canonical Layer-2 path chain (CTL-1616 §2). Imported, never re-derived: a second
+// copy of that ladder is how one process reads `$XDG_CONFIG_HOME/catalyst/config.json`
+// while another reads `~/.config/catalyst/config.json` and they disagree about what is
+// configured. `secret-contract.mjs` is a zero-npm-dep node:* leaf, so importing it keeps
+// this module loadable under bare node (the catalyst-agent's runtime — CTL-1825).
+import { resolveLayer2Path } from "../lib/secret-contract.mjs";
 
 // ── Outcomes ──────────────────────────────────────────────────────────────────
 // A closed vocabulary. `refused` always carries a `refused_reason`; `fetch-failed` is
@@ -164,6 +174,192 @@ export function resolveAllowlist({ registryRoots = [], selfRoot = null, configur
     out.push(root);
   }
   return out;
+}
+
+// ── The declared sources, collected ───────────────────────────────────────────
+//
+// resolveAllowlist above takes the three source LISTS. Collecting them — reading the
+// registry, finding this checkout, reading Layer-2, naming plugin-source — is what
+// follows. It lives HERE, next to the fold, because the moment a second consumer needs
+// "which checkouts does this host run?" it either imports this or writes its own, and two
+// readers of the same question drift. CTL-1825's currency gauge is that second consumer:
+// it measures this set, so a root the sync pass would fast-forward is a root the gauge can
+// see — one enumeration, two uses, no chance of one covering a tree the other cannot.
+//
+// The two consumers take DIFFERENT VIEWS of the one enumeration, not different enumerations:
+// the sync pass acts on every root, the gauge measures the `catalyst` role only. See
+// `classifyExecutingRoots` below for why, and for the measurement that forced the split.
+
+// defaultReadJson — parse a JSON file, or null for absent/unreadable/malformed. Total:
+// an operator's typo in Layer-2 must not take out the enumeration (and with it every
+// OTHER root's measurement), which is what a throw here would do.
+function defaultReadJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// defaultSelfRoot — the checkout THIS file is running out of, found by walking up to the
+// nearest `.git`. Deliberately not a hardcoded ancestor count (`../../../..`): the same
+// module is loaded from `~/catalyst/plugin-source`, from a dev clone, and from a linked
+// worktree, and only the walk gets all three right. A linked worktree's `.git` is a FILE,
+// so `exists` (not a directory check) is the right probe — a worktree IS a checkout that
+// executes code, and answering with the primary instead would measure the wrong tree.
+//
+// Uncached on purpose: the walk is a handful of stat calls, and a cache shared across an
+// injected and a real `exists` is a footgun that buys nothing in a one-shot process.
+function defaultSelfRoot(exists) {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    if (exists(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null; // reached the filesystem root
+    dir = parent;
+  }
+}
+
+// ── Role: a Catalyst checkout, or an enrolled project repo? ────────────────────
+//
+// CTL-1825 round 2. The enumeration answers "which checkouts does this host run?", and the
+// SYNC pass wants every one of them — the 2026-08-12 ADR incident was `catalyst-cloud`, a
+// sibling, so a catalyst-only subscriber would have caught none of the four incidents. The
+// currency GAUGE asks a narrower question over the same set: "is the CATALYST code this host
+// executes current?"
+//
+// That difference is not academic. Measured on the laptop, 2026-08-13: of eleven enumerated
+// roots, NINE are enrolled product repos, and the stalest of them — `personal-os`, 58 commits
+// behind its own main — was the maximum. So `catalyst.vcs.commits_behind.max` reported 58 for
+// a personal repository, and the pre-existing Grafana alert
+// `max by (host_name)(catalyst_vcs_commits_behind) > 20` fires on it. A gauge named for
+// Catalyst currency that is driven by an unrelated enrolled project is the same defect class
+// as the false zero this ticket removed: the number does not mean what its name says.
+//
+// So each root carries a ROLE, and the gauge measures the `catalyst` partition. The role is
+// decided by what the tree IS, never by which source named it — the registry legitimately
+// enrols this very repository (ADR-028's CAT registration), and Layer-2 `catalyst.checkouts[]`
+// is a config NAMESPACE rather than a claim about the repo (its own documented example is
+// `catalyst-cloud`, a sibling).
+export const CHECKOUT_ROLE = Object.freeze({ CATALYST: "catalyst", PROJECT: "project" });
+
+// The marker that identifies a checkout of THIS repository: the marketplace manifest every
+// Catalyst checkout carries at its root and no other repo on this fleet does. Verified
+// against the live registry 2026-08-13 — of the nine enrolled repoRoots plus
+// `~/catalyst/plugin-source`, exactly two carry it (the Catalyst repo and plugin-source) and
+// eight do not, which is the partition wanted. A file, not a directory: a stray empty
+// `.claude-plugin/` must not promote a product repo into the currency gauge.
+export const CATALYST_CHECKOUT_MARKER = join(".claude-plugin", "marketplace.json");
+
+/**
+ * classifyExecutingRoots — the enumeration below, each root tagged with its CHECKOUT_ROLE.
+ *
+ * Two roots are `catalyst` STRUCTURALLY, marker or no marker, because excluding either is
+ * precisely the CTL-1825 defect: `selfRoot` (this module IS Catalyst code, so the tree it was
+ * loaded from is a Catalyst checkout by construction) and `<CATALYST_DIR>/plugin-source` (the
+ * tree every daemon on a worker node runs FROM — the one root this whole ticket exists to
+ * measure). Every other root is promoted only by the marker.
+ *
+ * The fail direction is deliberate and asymmetric: an unrecognised tree that really is a
+ * Catalyst checkout costs one extra measured series and a slightly pessimistic max, while a
+ * Catalyst checkout wrongly excluded is a currency gauge that cannot see a stale root — which
+ * is the entire ticket. Misclassify toward measuring.
+ */
+export function classifyExecutingRoots(opts = {}) {
+  const { exists = existsSync } = opts;
+  const { roots, structuralCatalyst } = collectExecutingRoots(opts);
+  return roots.map((root) => ({
+    root,
+    role:
+      structuralCatalyst.has(root) || exists(join(root, CATALYST_CHECKOUT_MARKER))
+        ? CHECKOUT_ROLE.CATALYST
+        : CHECKOUT_ROLE.PROJECT,
+  }));
+}
+
+/**
+ * resolveExecutingRoots — every checkout this host actually executes code from, from four
+ * DECLARED sources, in order:
+ *
+ *   1. registry `repoRoots`  — `<CATALYST_DIR>/execution-core/registry.json`, the enrolled
+ *                              projects the daemon dispatches into
+ *   2. this checkout         — the tree this module was loaded from
+ *   3. Layer-2 `catalyst.checkouts[]` — machine-local declarations (siblings a given host
+ *                              keeps current but is not enrolled to dispatch into)
+ *   4. `<CATALYST_DIR>/plugin-source` — the tree every daemon on a worker node runs FROM,
+ *                              which is frequently NOT any of the above (this is the whole
+ *                              of CTL-1825: on the laptop it was 24 commits behind while
+ *                              the agent's own checkout was current)
+ *
+ * Still an allowlist, never a filesystem walk — see resolveAllowlist. Every input is
+ * injectable so the enumeration is testable without a registry, a config file, or a repo.
+ *
+ * `requireExists` (default true) drops a root that is not on this host: a registry copied
+ * between hosts routinely names a repoRoot that exists on neither (CTL-854), and measuring
+ * it costs a git timeout to learn nothing. Set false to inspect the undiluted enumeration.
+ *
+ * The path-only view of `classifyExecutingRoots` — the sync pass acts on every root
+ * regardless of role, so it takes this one.
+ */
+export function resolveExecutingRoots(opts = {}) {
+  return collectExecutingRoots(opts).roots;
+}
+
+// collectExecutingRoots — the shared collection both views above are built from. Returns the
+// folded root list plus the set of roots that are Catalyst checkouts by construction rather
+// than by probe, so the classifier does not have to re-derive which source named what.
+function collectExecutingRoots({
+  env = process.env,
+  readJson = defaultReadJson,
+  // `exists` is destructured BEFORE `selfRoot` so the default below can thread it —
+  // default parameters evaluate left to right, and the other order is a TDZ error.
+  exists = existsSync,
+  // undefined ⇒ resolve the real one; an explicit null ⇒ this host contributes none.
+  selfRoot = defaultSelfRoot(exists),
+  requireExists = true,
+} = {}) {
+  // Total against every source: a throwing reader (EACCES, a mocked failure) must cost
+  // that ONE source, never the whole set.
+  const read = (path) => {
+    try {
+      return readJson(path);
+    } catch {
+      return null;
+    }
+  };
+
+  const home = typeof env?.HOME === "string" && env.HOME ? env.HOME : homedir();
+  const catalystDir = typeof env?.CATALYST_DIR === "string" && env.CATALYST_DIR ? env.CATALYST_DIR : join(home, "catalyst");
+
+  // 1. The registry, read straight from disk rather than through registry.mjs — that
+  // module imports execution-core/config.mjs (and its bun:sqlite graph), which the bare-node
+  // consumers of this enumeration cannot load. Same file, same shape, same key.
+  const registry = read(join(catalystDir, "execution-core", "registry.json"));
+  const registryRoots = Array.isArray(registry?.projects)
+    ? registry.projects.map((p) => p?.repoRoot).filter((r) => typeof r === "string")
+    : [];
+
+  // 3. Layer-2 `catalyst.checkouts[]`. A non-array value is IGNORED, not coerced: spreading
+  // a bare string would enrol one root per character.
+  const layer2 = read(resolveLayer2Path(env));
+  const declared = (layer2?.catalyst ?? layer2)?.checkouts;
+  const configuredRoots = Array.isArray(declared) ? declared.filter((r) => typeof r === "string") : [];
+
+  // 4. plugin-source, always last so an explicit declaration of the same path keeps its
+  // earlier position (resolveAllowlist is order-stable and first-wins).
+  const pluginSource = join(catalystDir, "plugin-source");
+  configuredRoots.push(pluginSource);
+
+  const roots = resolveAllowlist({ registryRoots, selfRoot, configuredRoots });
+  // Normalised the SAME way resolveAllowlist normalises, or `/cat/plugin-source/` in the
+  // config and `/cat/plugin-source` in the fold would compare unequal and the one root this
+  // ticket exists to measure would silently classify as a product repo.
+  const norm = (r) => String(r).replace(/\/+$/, "");
+  const structuralCatalyst = new Set([norm(pluginSource), ...(selfRoot ? [norm(selfRoot)] : [])]);
+  return {
+    roots: requireExists ? roots.filter((r) => exists(r)) : roots,
+    structuralCatalyst,
+  };
 }
 
 // ── The pass ──────────────────────────────────────────────────────────────────

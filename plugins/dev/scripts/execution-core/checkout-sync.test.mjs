@@ -11,6 +11,10 @@ import {
   parseSymrefDefault,
   classifyGitState,
   resolveAllowlist,
+  resolveExecutingRoots,
+  classifyExecutingRoots,
+  CHECKOUT_ROLE,
+  CATALYST_CHECKOUT_MARKER,
   summarize,
   syncRepo,
   runPass,
@@ -238,6 +242,222 @@ describe("resolveAllowlist — declared sources only, never a filesystem walk", 
   test("a sibling repo enrols through the configured source", () => {
     const roots = resolveAllowlist({ selfRoot: "/x/catalyst", configuredRoots: ["/x/catalyst-cloud"] });
     expect(roots).toContain("/x/catalyst-cloud");
+  });
+});
+
+// CTL-1825 — the SAME enumeration, now reachable by a second consumer.
+//
+// resolveAllowlist takes the three source LISTS already collected; nothing shipped that
+// collected them, so catalyst-agent's currency gauge would have had to invent its own reader
+// for the registry / Layer-2 / plugin-source. That second reader is how two answers to
+// "which checkouts does this host run?" start drifting, so the collection lives HERE, in the
+// module that owns the question, and folds into resolveAllowlist rather than beside it.
+describe("resolveExecutingRoots — collect the four declared sources, then fold through resolveAllowlist", () => {
+  // Every source is injected: no registry file, no Layer-2 config, no filesystem on the box
+  // running the test has any effect on the answer.
+  const seams = (over = {}) => ({
+    env: { CATALYST_DIR: "/cat", HOME: "/home/u" },
+    readJson: () => null,
+    selfRoot: null,
+    exists: () => true,
+    ...over,
+  });
+
+  test("registry repoRoots ∪ this checkout ∪ Layer-2 checkouts[] ∪ plugin-source, in that order", () => {
+    const roots = resolveExecutingRoots(seams({
+      readJson: (path) => {
+        if (path === "/cat/execution-core/registry.json") {
+          return { projects: [{ team: "CTL", repoRoot: "/repos/catalyst" }, { team: "CTC", repoRoot: "/repos/catalyst-cloud" }] };
+        }
+        if (path === "/home/u/.config/catalyst/config.json") {
+          return { catalyst: { checkouts: ["/repos/extra"] } };
+        }
+        return null;
+      },
+      selfRoot: "/dev/checkout",
+    }));
+    expect(roots).toEqual([
+      "/repos/catalyst",
+      "/repos/catalyst-cloud",
+      "/dev/checkout",
+      "/repos/extra",
+      "/cat/plugin-source",
+    ]);
+  });
+
+  test("plugin-source tracks CATALYST_DIR, and falls back to $HOME/catalyst when unset", () => {
+    expect(resolveExecutingRoots(seams({ env: { HOME: "/home/u" } }))).toContain("/home/u/catalyst/plugin-source");
+    expect(resolveExecutingRoots(seams({ env: { CATALYST_DIR: "/vol/cat", HOME: "/home/u" } })))
+      .toContain("/vol/cat/plugin-source");
+  });
+
+  // The whole point of CTL-1825: the tree the agent lives in and the tree the daemons run
+  // from are DIFFERENT trees on this fleet, and both must be in the set.
+  test("the agent's own checkout and ~/catalyst/plugin-source are both present, de-duplicated", () => {
+    const roots = resolveExecutingRoots(seams({ selfRoot: "/dev/checkout" }));
+    expect(roots).toContain("/dev/checkout");
+    expect(roots).toContain("/cat/plugin-source");
+    // …and when they ARE the same tree (a worker node), one entry, not two.
+    const same = resolveExecutingRoots(seams({ selfRoot: "/cat/plugin-source" }));
+    expect(same.filter((r) => r === "/cat/plugin-source")).toHaveLength(1);
+  });
+
+  test("a malformed registry / Layer-2 file contributes nothing rather than throwing", () => {
+    const roots = resolveExecutingRoots(seams({
+      readJson: () => { throw new Error("EACCES"); },
+      selfRoot: "/dev/checkout",
+    }));
+    expect(roots).toEqual(["/dev/checkout", "/cat/plugin-source"]);
+  });
+
+  test("a registry entry whose repoRoot is absent on THIS host is dropped (CTL-854)", () => {
+    const roots = resolveExecutingRoots(seams({
+      readJson: (path) =>
+        path === "/cat/execution-core/registry.json"
+          ? { projects: [{ team: "CTL", repoRoot: "/repos/present" }, { team: "X", repoRoot: "/repos/gone" }] }
+          : null,
+      exists: (p) => p !== "/repos/gone",
+    }));
+    expect(roots).toContain("/repos/present");
+    expect(roots).not.toContain("/repos/gone");
+  });
+
+  test("existence filtering is opt-out, so the pure enumeration is still inspectable", () => {
+    const roots = resolveExecutingRoots(seams({
+      readJson: (path) =>
+        path === "/cat/execution-core/registry.json" ? { projects: [{ team: "X", repoRoot: "/repos/gone" }] } : null,
+      exists: () => false,
+      requireExists: false,
+    }));
+    expect(roots).toContain("/repos/gone");
+  });
+
+  // The self-root is FOUND (walk up to the nearest `.git`), not computed from a fixed
+  // ancestor count — the same file is loaded from plugin-source, a dev clone, and a
+  // linked worktree, and only the walk is right in all three.
+  test("omitting selfRoot walks up to the nearest .git, through the injected `exists`", () => {
+    const probed = [];
+    const roots = resolveExecutingRoots({
+      env: { CATALYST_DIR: "/cat", HOME: "/home/u" },
+      readJson: () => null,
+      // Nothing has a `.git` and nothing exists → the walk runs to the filesystem root
+      // and contributes nothing, rather than throwing or looping.
+      exists: (p) => { probed.push(p); return false; },
+    });
+    expect(roots).toEqual([]);
+    // It probed for `.git`, and — finding none — walked all the way to the filesystem
+    // root and stopped there rather than spinning.
+    expect(probed.filter((p) => p.endsWith("/.git")).length).toBeGreaterThan(1);
+    expect(probed).toContain("/.git");
+  });
+
+  test("Layer-2 checkouts[] that is not an array of paths is ignored, not spread", () => {
+    const roots = resolveExecutingRoots(seams({
+      readJson: (path) =>
+        path === "/home/u/.config/catalyst/config.json" ? { catalyst: { checkouts: "/one/path" } } : null,
+    }));
+    expect(roots).toEqual(["/cat/plugin-source"]);
+  });
+});
+
+// CTL-1825 round 2 — ONE enumeration, TWO views.
+//
+// The sync pass acts on every enumerated root (the 2026-08-12 ADR incident was a sibling
+// repo, so breadth is the point). The currency gauge answers a narrower question over the
+// same set — "is the CATALYST code this host runs current?" — and on the laptop the whole
+// set gave it the wrong answer: nine of eleven roots were enrolled PRODUCT repos, and the
+// stalest of those (`personal-os`, 58 behind its own main) became the host's reported
+// maximum, firing an alert named for Catalyst node currency on a personal repository.
+//
+// The role is decided by what a tree IS, never by which source named it: the registry
+// legitimately enrols this very repository (ADR-028), and Layer-2 `catalyst.checkouts[]` is
+// a config namespace, not a claim (its documented example is `catalyst-cloud`, a sibling).
+describe("classifyExecutingRoots — Catalyst checkout vs enrolled product repo", () => {
+  // `exists` answers two different questions here (is the root present? does it carry the
+  // marker?), so the seam takes an explicit set of present paths rather than a blanket true.
+  const seams = ({ present = [], ...over } = {}) => ({
+    env: { CATALYST_DIR: "/cat", HOME: "/home/u" },
+    readJson: () => null,
+    selfRoot: null,
+    exists: (p) => present.includes(p),
+    ...over,
+  });
+
+  test("an enrolled repoRoot with no Catalyst marker is a product repo", () => {
+    const roots = classifyExecutingRoots(seams({
+      present: ["/repos/personal-os", "/cat/plugin-source"],
+      readJson: (path) =>
+        path === "/cat/execution-core/registry.json" ? { projects: [{ team: "POS", repoRoot: "/repos/personal-os" }] } : null,
+    }));
+    expect(roots).toEqual([
+      { root: "/repos/personal-os", role: CHECKOUT_ROLE.PROJECT },
+      { root: "/cat/plugin-source", role: CHECKOUT_ROLE.CATALYST },
+    ]);
+  });
+
+  // The exclusion above must be by CONTENT. "Registry roots are never Catalyst" would drop
+  // this repository, which is enrolled — and dropping a Catalyst checkout from the currency
+  // gauge is the CTL-1825 defect itself, just reached by a different route.
+  test("an enrolled repoRoot that carries the Catalyst marker IS a Catalyst checkout", () => {
+    const roots = classifyExecutingRoots(seams({
+      present: ["/repos/catalyst", `/repos/catalyst/${CATALYST_CHECKOUT_MARKER}`, "/cat/plugin-source"],
+      readJson: (path) =>
+        path === "/cat/execution-core/registry.json" ? { projects: [{ team: "CTL", repoRoot: "/repos/catalyst" }] } : null,
+    }));
+    expect(roots.find((r) => r.root === "/repos/catalyst")?.role).toBe(CHECKOUT_ROLE.CATALYST);
+  });
+
+  // The two roots that are Catalyst by construction. Both are marker-less in this fixture on
+  // purpose: if the structural rule regresses, the gauge stops measuring the one tree the
+  // ticket exists to measure, and it does so silently.
+  test("selfRoot and <CATALYST_DIR>/plugin-source are Catalyst with no marker present", () => {
+    const roots = classifyExecutingRoots(seams({
+      present: ["/dev/checkout", "/cat/plugin-source"],
+      selfRoot: "/dev/checkout",
+    }));
+    expect(roots).toEqual([
+      { root: "/dev/checkout", role: CHECKOUT_ROLE.CATALYST },
+      { root: "/cat/plugin-source", role: CHECKOUT_ROLE.CATALYST },
+    ]);
+  });
+
+  // Layer-2 `catalyst.checkouts[]` is a config NAMESPACE, not an assertion about the repo —
+  // the key's own documented example is `catalyst-cloud`. Declaring a sibling there must not
+  // fold its drift into a metric named for Catalyst currency.
+  test("a Layer-2 declared sibling is a product repo unless it carries the marker", () => {
+    const declared = (checkouts, present) =>
+      classifyExecutingRoots(seams({
+        present: ["/cat/plugin-source", ...present],
+        readJson: (path) => (path === "/home/u/.config/catalyst/config.json" ? { catalyst: { checkouts } } : null),
+      }));
+    expect(declared(["/repos/catalyst-cloud"], ["/repos/catalyst-cloud"])
+      .find((r) => r.root === "/repos/catalyst-cloud")?.role).toBe(CHECKOUT_ROLE.PROJECT);
+    expect(declared(["/repos/second-clone"], ["/repos/second-clone", `/repos/second-clone/${CATALYST_CHECKOUT_MARKER}`])
+      .find((r) => r.root === "/repos/second-clone")?.role).toBe(CHECKOUT_ROLE.CATALYST);
+  });
+
+  // A trailing slash in the registry or in Layer-2 is normalised by resolveAllowlist, so the
+  // structural set has to be normalised the same way or plugin-source compares unequal to
+  // itself and silently demotes to a product repo.
+  test("a trailing slash on plugin-source does not demote it", () => {
+    const roots = classifyExecutingRoots(seams({
+      present: ["/cat/plugin-source"],
+      readJson: (path) =>
+        path === "/home/u/.config/catalyst/config.json" ? { catalyst: { checkouts: ["/cat/plugin-source/"] } } : null,
+    }));
+    expect(roots).toEqual([{ root: "/cat/plugin-source", role: CHECKOUT_ROLE.CATALYST }]);
+  });
+
+  // The path-only view stays exactly the enumeration, roles or no roles — the sync pass
+  // must keep seeing every root, including the product repos it exists to fast-forward.
+  test("resolveExecutingRoots is the same set, unfiltered by role", () => {
+    const opts = seams({
+      present: ["/repos/personal-os", "/cat/plugin-source"],
+      readJson: (path) =>
+        path === "/cat/execution-core/registry.json" ? { projects: [{ team: "POS", repoRoot: "/repos/personal-os" }] } : null,
+    });
+    expect(resolveExecutingRoots(opts)).toEqual(classifyExecutingRoots(opts).map((r) => r.root));
+    expect(resolveExecutingRoots(opts)).toContain("/repos/personal-os");
   });
 });
 
