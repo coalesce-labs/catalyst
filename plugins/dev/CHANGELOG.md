@@ -1,17 +1,22 @@
 # Changelog
 
-## [12.54.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.53.0...catalyst-dev-v12.54.0) (2026-08-13)
+## [12.54.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.53.0...catalyst-dev-v12.54.0)
+
+Aug 13, 2026
+
+<!-- ai-enhanced -->
+
+### Scheduler Hardening & Diagnostic Truthfulness
+
+Work-done probes now carry timeouts so a hung `gh` or `git` child cannot wedge the scheduler tick indefinitely, and probe matches are tightened to prevent one ticket's document from falsely satisfying another's done check. The config dump tool now reports each setting's actual in-force value and where it came from, rather than echoing what the config file says — every row is bound to the reader that actually decides it. A torn first line in the event log no longer silently retires the rest of the month alongside it, and raw NUL bytes in five source files have been replaced with escape sequences so grep and project-wide searches no longer skip them.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1793 — catalyst config dump that cannot assert what the reader would not produce ([#3276](https://github.com/coalesce-labs/catalyst/issues/3276)) ([77633e7](https://github.com/coalesce-labs/catalyst/commit/77633e76ba82cc38cd76e83df8f28fa87e01adfc))
 * **dev:** CTL-1801 — checks that cannot report a clean result from a check that never ran ([#3285](https://github.com/coalesce-labs/catalyst/issues/3285)) ([eb70d61](https://github.com/coalesce-labs/catalyst/commit/eb70d61c87e24b0ad0e24737743b07d682e2d313))
 * **dev:** CTL-1808 — the fast-forward becomes a subscriber, not a call (part 1: the scanner) ([#3316](https://github.com/coalesce-labs/catalyst/issues/3316)) ([d190e87](https://github.com/coalesce-labs/catalyst/commit/d190e879ac5ba60435f444571c82f4bfadbc7eb3))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1790 PR-1 — a work-done probe must not match another ticket's document ([#3286](https://github.com/coalesce-labs/catalyst/issues/3286)) ([e785a6e](https://github.com/coalesce-labs/catalyst/commit/e785a6e4bb1f4ee71ceb1f903d642e707e7fb119))
 * **dev:** CTL-1804 — make the forwarder identity check say what it saw ([#3317](https://github.com/coalesce-labs/catalyst/issues/3317)) ([6ba92e5](https://github.com/coalesce-labs/catalyst/commit/6ba92e55f54bde9e51aff880057c7def83291176))
 * **dev:** CTL-1810 — bound every work-done probe spawn so a hung gh cannot wedge the scheduler tick ([#3307](https://github.com/coalesce-labs/catalyst/issues/3307)) ([37de564](https://github.com/coalesce-labs/catalyst/commit/37de564f8b8e42a1b33b8bd4cdb1f8a933ff452d))
