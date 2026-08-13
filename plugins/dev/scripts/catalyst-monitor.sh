@@ -881,6 +881,18 @@ read_forward_pid() {
     # Either dead, or alive but NOT the forwarder (recycled pid) — the pid file
     # is stale either way. Drop it so start/restart can proceed cleanly, and so
     # stop never signals a process that isn't ours.
+    #
+    # CTL-1804: SAY WHAT WE SAW, AT THE MOMENT WE DECIDE. This deletion used to be
+    # silent, so a CI failure could only be reconstructed afterwards by the test —
+    # by which time the racy state is gone and `ps` reports a perfectly good command
+    # line, making the failure look impossible. Distinguish the two sub-causes,
+    # because they have opposite meanings: a dead pid is routine cleanup, while
+    # "alive but not ours" is either a genuinely recycled pid or an identity check
+    # that ran too early (the start race this ticket fixes).
+    if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+      printf 'read_forward_pid: pid %s is alive but did not match the forwarder identity; dropping stale pid file\n' "$pid" >&2
+      printf '  observed command: %s\n' "$(ps -ww -o command= -p "$pid" 2>/dev/null || echo '<ps failed>')" >&2
+    fi
     rm -f "$FORWARD_PID_FILE" 2>/dev/null || true
   fi
   return 1
@@ -902,8 +914,59 @@ _forward_start_impl() {
   nohup bun run "$FORWARD_SCRIPT" > "$FORWARD_LOG" 2>&1 &
   local fwd_pid=$!
   disown "$fwd_pid" 2>/dev/null || true
-  echo "$fwd_pid" > "$FORWARD_PID_FILE"
-  echo "Forwarder started (pid $fwd_pid)"
+
+  # CTL-1804: WAIT FOR THE PROCESS TO BECOME IDENTIFIABLE BEFORE DECLARING IT STARTED.
+  #
+  # `$!` is the pid of the forked subshell, captured the instant `&` returns. At that moment
+  # its command line is still the PARENT's — it does not contain "otel-forward" until `nohup`
+  # has exec'd `bun`. So there is a window in which the pid file exists, `kill -0` succeeds,
+  # and `_forward_pid_is_ours` is FALSE.
+  #
+  # That window is not cosmetic. `read_forward_pid` treats "alive but not ours" as a RECYCLED
+  # PID and deletes the pid file as stale — so a `forward-restart` landing in the window skips
+  # its stop half entirely ("Forwarder not running") and starts a SECOND forwarder beside the
+  # first. That is the double-forwarder hazard the CTL-1502 single-lock transaction exists to
+  # prevent, reached from inside the lock, where the lock cannot help.
+  #
+  # ⚠️ THIS IS HARDENING, NOT A PROVEN FIX — and the distinction is deliberate.
+  #
+  # CI failed five times across three unrelated PRs on 2026-08-13, always with the same
+  # signature: "Forwarder not running" while the old pid was still in state S with a correct
+  # command line. The window described above is a real, reachable defect and closing it is
+  # right on its own terms. But it is NOT established as the cause of those failures:
+  #   • an attempt to reproduce it by widening the window (a stub deliberately slow to exec)
+  #     PASSED with and without this wait, so it does not discriminate;
+  #   • on macOS the pre-exec command line already contains "otel-forward" via the script path,
+  #     so the identity check succeeds even inside the window;
+  #   • the failures were Linux-only, and `-ww` (added earlier for exactly the truncation
+  #     theory) is already present and did not stop them.
+  # No regression test accompanies this change because no test written so far actually fails
+  # without it, and a test that passes either way would assert nothing.
+  #
+  # The diagnostic added to read_forward_pid below is the part expected to settle it: it records
+  # what the identity check SAW at the moment it decided, so the next occurrence names its own
+  # cause instead of being reconstructed afterwards from state that has already healed.
+  local waited=0
+  while [ "$waited" -lt 50 ]; do
+    if _forward_pid_is_ours "$fwd_pid"; then
+      echo "$fwd_pid" > "$FORWARD_PID_FILE"
+      echo "Forwarder started (pid $fwd_pid)"
+      return 0
+    fi
+    kill -0 "$fwd_pid" 2>/dev/null || break   # it exited before we could identify it
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  # Never identified. Report WHAT WE SAW rather than a bare failure — a start that fails
+  # silently is indistinguishable from one that was never wired.
+  local observed
+  observed="$(ps -ww -o command= -p "$fwd_pid" 2>/dev/null || echo '<no such process>')"
+  kill "$fwd_pid" 2>/dev/null || true
+  rm -f "$FORWARD_PID_FILE" 2>/dev/null || true
+  echo "Forwarder failed to start: pid $fwd_pid never matched the forwarder identity" >&2
+  echo "  observed command: ${observed:-<empty>}" >&2
+  return 1
 }
 
 _forward_stop_impl() {
