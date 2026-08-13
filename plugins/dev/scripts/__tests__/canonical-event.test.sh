@@ -311,10 +311,13 @@ CANONICAL_LINE="$(build_canonical_line \
   --event-name session.started)"
 canonical_jsonl_append "$SCRATCH" "$CANONICAL_LINE"
 
-if [[ -f "${LEGACY_FILE}.legacy" ]]; then
+# CTL-1813: the rotation destination is now UNIQUE — a fixed `.legacy` is a rescue slot of
+# depth one, and a second rotation clobbered the previous month's only copy. Resolve the
+# rotated sibling rather than assuming its exact name.
+if [[ -n "$(find "$SCRATCH" -name "$(basename "$LEGACY_FILE").legacy*" -print -quit 2>/dev/null)" ]]; then
   ok "canonical_jsonl_append rotates legacy file"
 else
-  fail "canonical_jsonl_append rotation" "no .legacy file at ${LEGACY_FILE}.legacy"
+  fail "canonical_jsonl_append rotation" "no rotated sibling of ${LEGACY_FILE}"
 fi
 
 NEW_LINE_COUNT="$(wc -l < "$LEGACY_FILE" | tr -d ' ')"
