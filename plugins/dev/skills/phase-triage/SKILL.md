@@ -467,12 +467,33 @@ ambiguous to classify, or a required external resource is unavailable), emit
 `failed` with a structured `explanation` block. Use the CLI shim:
 
 ```bash
-EXPL_JSON="$(node "${PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs" \
-  --ticket "$TICKET" --phase triage \
-  --what-failed "{{ specific symptom }}" \
-  --why-gave-up "{{ reason autonomous triage cannot complete }}" \
-  --human-question "{{ one specific answerable question }}" \
-  2>/dev/null || echo '{}')"
+# CTL-1832: this invocation referenced ${PLUGIN_ROOT}, which this skill NEVER
+# assigns — the file's own idiom is CLAUDE_PLUGIN_ROOT (see the secret-contract
+# source earlier in this skill). The empty expansion handed node the bogus path
+# "/scripts/execution-core/escalation-explain.mjs"; `2>/dev/null` swallowed the
+# ENOENT and `|| echo '{}'` substituted an EMPTY explanation, exiting 0. So every
+# structured triage escalation silently degraded to {} — which is exactly the
+# failure CTL-1609's explanation chokepoint exists to prevent: with no
+# explanation it emits `escalation.explanation-absent`, coerces a degraded
+# fallback, and the operator inbox renders a bare `needs-human` label instead of
+# the specific question this section demands below.
+#
+# Same defect CTL-1410 fixed in phase-monitor-deploy (there it was fatal, under
+# that body's `set -u`); it was never back-ported here, where it degrades
+# silently instead — the worse direction.
+#
+# The '{}' fallback is KEPT so a broken shim can never block a triage escalation,
+# but the failure now leaves a breadcrumb on stderr rather than being invisible,
+# and stderr is no longer discarded.
+if ! EXPL_JSON="$(node "${CLAUDE_PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs" \
+      --ticket "$TICKET" --phase triage \
+      --what-failed "{{ specific symptom }}" \
+      --why-gave-up "{{ reason autonomous triage cannot complete }}" \
+      --human-question "{{ one specific answerable question }}")" \
+   || [[ -z "$EXPL_JSON" ]]; then
+  echo "phase-triage: escalation-explain unavailable (CLAUDE_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-<unset>}); escalating WITHOUT a structured explanation" >&2
+  EXPL_JSON='{}'
+fi
 ```
 
 The `human_question` MUST be specific and answerable — never:
