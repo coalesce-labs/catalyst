@@ -15,6 +15,13 @@ export interface TailerOpts {
   onLine: (line: string) => void;
   signal: AbortSignal;
   pollMs?: number;
+  /**
+   * CTL-1817: called with the raw line when it parses as a JSON object but matches NONE of
+   * the three recognized envelope shapes, i.e. exactly the lines this tailer drops on the
+   * floor. Optional so every existing caller is unchanged; index.ts wires it to a counter +
+   * warning so the drop is loud instead of silent. See shouldForward below.
+   */
+  onUnrecognized?: (line: string) => void;
 }
 
 export interface Tailer {
@@ -34,15 +41,35 @@ export function createTailer(opts: TailerOpts): Tailer {
   // records (have `event` but no `attributes`), and pino operational logs
   // (have numeric `level` + string `msg`, no `event` or `attributes`).
   // processLine normalizes flat/pino records into canonical form before forwarding.
+  //
+  // CTL-1817: THIS IS THE DROP POINT. A "v3" line (`{name, ...payload, ts}` — no
+  // `attributes`, no string `event`, not pino) matches none of the three predicates, so it
+  // is filtered out HERE and never reaches processLine, let alone the OTLP mapper. Such
+  // events are therefore not "forwarded degenerately" — they never leave the host at all.
+  // 531 `phase.rescue.*` + 1 `phase.orphan-pr.*` were discarded this way in 2026-08 on mini,
+  // and the discard was invisible: an unrecognized line is indistinguishable from no line.
+  //
+  // The producers no longer emit that shape, but the FILTER is what made the loss silent, so
+  // a future shape drift would repeat it exactly. onUnrecognized makes the drop observable at
+  // the only place that can see it. The forward/no-forward decision is deliberately
+  // unchanged — this reports, it does not start forwarding shapes the pipeline cannot map.
   function shouldForward(line: string): boolean {
     try {
       const obj = JSON.parse(line) as Record<string, unknown>;
       if (typeof obj !== "object" || obj === null) return false;
-      return (
+      const recognized =
         "attributes" in obj ||
         typeof obj.event === "string" ||
-        (typeof obj.level === "number" && typeof obj.msg === "string")
-      );
+        (typeof obj.level === "number" && typeof obj.msg === "string");
+      if (!recognized) {
+        // Never let a reporting hook break the tail loop.
+        try {
+          opts.onUnrecognized?.(line);
+        } catch {
+          /* best-effort */
+        }
+      }
+      return recognized;
     } catch {
       return false;
     }

@@ -58,14 +58,25 @@ function toUnixNano(ts: string | undefined): number {
 // timestamp and a severity once it is off this machine — its identity is destroyed in
 // transit. That is not a delivery failure, so none of the three existing guardrails can see
 // it: the forward SUCCEEDS, so `forward_failed`/DLQ-size never fire, and `forward_lag`'s
-// checkpoint advances normally. It was invisible for the same reason for a whole month
-// (531 `phase.rescue.*` + 1 `phase.orphan-pr.*` in 2026-08 on mini).
+// checkpoint advances normally.
+//
+// ⚠️ SCOPE — this detector does NOT see a "v3" (bare-`name`) record, and must not be read as
+// if it did. Such a record never reaches this mapper: the tailer's `shouldForward`
+// (lib/tail.ts) drops it for matching no known shape, and `processLine` (index.ts) drops
+// anything that still has no `attributes`. The 531 `phase.rescue.*` + 1 `phase.orphan-pr.*`
+// of 2026-08 were discarded at those two gates, NOT forwarded degenerately — they never left
+// the host. That loss is reported by `noteUnrecognizedLine` / `skippedNoAttributes`, which
+// sit at the gates that can actually observe it (round-1 review, Codex P1).
+//
+// What DOES reach here is a record carrying a present-but-EMPTY `attributes` object (`{}`
+// passes the truthiness guard above) with no resolvable body — degenerate yet forwarded.
+// That is a narrower case than v3, and a real one: it is integrity loss on a delivered
+// record rather than a drop.
 //
 // The counter is deliberately NOT a repair. The mapping output is left byte-identical so a
 // degenerate record still forwards (dropping it here would trade silent corruption for
-// silent loss) and so the regression test can still observe the defect on a raw v3 fixture.
-// It is a DETECTOR: after the producer fix this should sit at zero forever, so any non-zero
-// value is itself the alarm.
+// silent loss) and so the regression test can still observe the defect on a raw fixture.
+// It is a DETECTOR: it should sit at zero, so any non-zero value is itself the alarm.
 //
 // It is reported on destLog — the pino `~/catalyst/otel-forward.log`, which Alloy tails and
 // ships to Loki independently of this file's OTLP egress (log-shipper/config.alloy:22). That

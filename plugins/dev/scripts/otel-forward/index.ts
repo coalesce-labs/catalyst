@@ -101,7 +101,13 @@ const CONFIG_PATH =
 const cfg = loadForwarderConfig(CONFIG_PATH, PROJECT_KEY);
 const ck = readCheckpoint(CHECKPOINT_PATH);
 
-let stats = { processed: 0, skipped: 0 };
+// CTL-1817: `unrecognized` counts lines the TAILER filtered out for matching no known
+// envelope shape; `skippedNoAttributes` counts records that got past the tailer but were
+// dropped by processLine for having no attributes. Both were previously folded into the
+// undifferentiated `skipped`, which no surface reads — so a whole event family could vanish
+// with every health signal green. They are reported on the pino log (Alloy-shipped,
+// independent of this daemon's own OTLP egress), never as an event on the pipe they describe.
+let stats = { processed: 0, skipped: 0, unrecognized: 0, skippedNoAttributes: 0 };
 
 // CTL-1060 Phase 3: lag tracking state. lastLocalTs = newest event ts seen from the log.
 // lastForwardedTs = newest event ts confirmed delivered to OTLP/Loki (seeded from checkpoint).
@@ -236,6 +242,35 @@ function emitLag(): void {
   }
 }
 
+// CTL-1817: best-effort identity for a line that is, by definition, not in a shape we can
+// read. Tries all three envelope discriminators (v2 attributes ?? v1 event ?? v3 name) so a
+// dropped record can be NAMED rather than reported as an anonymous tally, then falls back to
+// a bounded raw prefix. Never throws — it runs on the drop path.
+export function describeUnknownShape(line: string): string {
+  try {
+    const o = JSON.parse(line) as Record<string, unknown>;
+    const attrs = o.attributes as Record<string, unknown> | undefined;
+    const v2 = attrs?.["event.name"];
+    if (typeof v2 === "string" && v2) return v2;
+    if (typeof o.event === "string" && o.event) return o.event;
+    if (typeof o.name === "string" && o.name) return o.name;
+    return `(no name; keys: ${Object.keys(o).slice(0, 6).join(",")})`;
+  } catch {
+    return `(unparseable: ${line.slice(0, 60)})`;
+  }
+}
+
+// CTL-1817: wired into the tailer as onUnrecognized. This is the ONLY place that can see a
+// line the tailer's shouldForward filter discards, because such a line never reaches
+// processLine at all.
+export function noteUnrecognizedLine(line: string): void {
+  stats.unrecognized++;
+  log.warn(
+    { event: describeUnknownShape(line), unrecognized_total: stats.unrecognized },
+    "unrecognized envelope shape — line dropped by the tailer, never forwarded (CTL-1817)",
+  );
+}
+
 export function processLine(line: string): void {
   try {
     let ev = JSON.parse(line) as CanonicalEvent;
@@ -246,7 +281,15 @@ export function processLine(line: string): void {
     if (isPinoRecord(ev)) ev = normalizePinoRecord(ev as unknown as Record<string, unknown>);
     else if (isFlatEvent(ev)) ev = normalizeFlatEvent(ev as unknown as Record<string, unknown>);
     if (!ev.attributes) {
+      // CTL-1817: a record that survived the tailer but carries no attributes is dropped
+      // here. Name it so the loss is diagnosable — reading all three shapes, because a
+      // record that reaches this branch is by definition not in the shape we expect.
       stats.skipped++;
+      stats.skippedNoAttributes++;
+      log.warn(
+        { event: describeUnknownShape(line), skipped_no_attributes: stats.skippedNoAttributes },
+        "dropping record with no attributes — it will not be forwarded (CTL-1817)",
+      );
       return;
     }
     stats.processed++;
@@ -336,6 +379,7 @@ if (import.meta.main) {
     eventsDir: EVENTS_DIR,
     offset: ck?.offset ?? 0,
     onLine: processLine,
+    onUnrecognized: noteUnrecognizedLine, // CTL-1817: make the tailer's silent drop loud
     signal: ac.signal,
   });
 
