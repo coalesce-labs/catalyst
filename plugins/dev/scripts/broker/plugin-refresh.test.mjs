@@ -30,6 +30,9 @@ import {
   startPluginDriftCheck,
   handlePluginRefreshEvent,
   changedPackageDirs,
+  changedLockfiles,
+  bunInstallArgv,
+  workspaceRootsFor,
   workspaceMemberNodeModules,
   PLUGIN_REFRESH_THROTTLE_MS,
   PLUGIN_DRIFT_CHECK_INTERVAL_MS,
@@ -1750,5 +1753,397 @@ describe("refreshPluginCheckout — stale-lock pre-pull clear (CTL-1415)", () =>
     expect(removed).toEqual([]);
     expect(emitted.some((e) => e.event === "plugin.checkout.stale_lock_cleared")).toBe(false);
     expect(gitFn.calls.some((c) => c.args[0] === "fetch")).toBe(true);
+  });
+});
+
+// ─── install-must-relink (CTL-1831) ─────────────────────────────────────────
+//
+// MEASURED on `mini` 2026-08-13, right after #3337 moved bun.lock from
+// @catalyst-cloud/schema@0.1.3 to 0.1.5. The refresh pulled the merge correctly
+// (plugin-source HEAD and bun.lock both right) and the daemons STILL loaded
+// 0.1.3, because bun does not relink an existing node_modules when only a
+// TRANSITIVE resolution changed — and both `--frozen-lockfile` and the plain
+// fallback exit 0 while doing nothing. `deps_install_failed` covers a FAILING
+// install; a no-op produced no signal at all. These tests pin the signal, the
+// forced relink, and — critically — that the force fires ONLY on a proven
+// mismatch (a blanket --force re-extracts 1168 packages, 3-8 s measured, on
+// every single refresh).
+
+describe("changedLockfiles (CTL-1831)", () => {
+  test("maps a root bun.lock change to the checkout root", () => {
+    expect(changedLockfiles("/repo", "bun.lock\n")).toEqual([{ rel: "bun.lock", dir: "/repo" }]);
+  });
+
+  test("maps a nested bun.lock change to its own dir", () => {
+    expect(changedLockfiles("/repo", "plugins/dev/scripts/orch-monitor/ui/bun.lock\n")).toEqual([
+      {
+        rel: "plugins/dev/scripts/orch-monitor/ui/bun.lock",
+        dir: "/repo/plugins/dev/scripts/orch-monitor/ui",
+      },
+    ]);
+  });
+
+  test("a package.json-only change yields no lockfile to audit", () => {
+    expect(changedLockfiles("/repo", "package.json\nsrc/index.ts\n")).toEqual([]);
+  });
+
+  test("does not match a file merely ENDING in bun.lock", () => {
+    expect(changedLockfiles("/repo", "vendor/notbun.lock\n")).toEqual([]);
+  });
+
+  test("dedupes a repeated path and tolerates empty input", () => {
+    expect(changedLockfiles("/repo", "bun.lock\nbun.lock\n")).toHaveLength(1);
+    expect(changedLockfiles("/repo", "")).toEqual([]);
+    expect(changedLockfiles("/repo", null)).toEqual([]);
+  });
+});
+
+describe("bunInstallArgv (CTL-1831)", () => {
+  test("frozen is the default — the checkout was just reset, so the lockfile IS authoritative", () => {
+    expect(bunInstallArgv()).toEqual(["install", "--frozen-lockfile"]);
+  });
+
+  test("the non-frozen fallback drops the flag rather than adding another", () => {
+    expect(bunInstallArgv({ frozen: false })).toEqual(["install"]);
+  });
+
+  test("force is the only argv that actually relinks a transitive-only change", () => {
+    expect(bunInstallArgv({ force: true })).toEqual(["install", "--force"]);
+  });
+});
+
+describe("workspaceRootsFor (CTL-1831)", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ctl1831-roots-"));
+  });
+
+  test("the lock dir itself is always a root, even with no manifest", () => {
+    expect(workspaceRootsFor(dir)).toEqual([dir]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("literal workspace members with a package.json are added", () => {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ workspaces: ["pkg/a", "pkg/b"] }));
+    mkdirSync(join(dir, "pkg", "a"), { recursive: true });
+    writeFileSync(join(dir, "pkg", "a", "package.json"), "{}");
+    // pkg/b has no package.json → not a member dir anything can resolve from.
+    expect(workspaceRootsFor(dir)).toEqual([dir, join(dir, "pkg", "a")]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a GLOB entry is skipped, not expanded", () => {
+    // `packages/y` is a REAL package dir that only the glob could reach — the
+    // literal list names `packages/x` alone. Without a decoy the glob entry
+    // resolves to a path named "*" that has no package.json and is dropped for
+    // the wrong reason, so the assertion would pass whether or not the glob
+    // guard exists.
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ workspaces: ["packages/*", "packages/x"] }));
+    mkdirSync(join(dir, "packages", "x"), { recursive: true });
+    writeFileSync(join(dir, "packages", "x", "package.json"), "{}");
+    mkdirSync(join(dir, "packages", "y"), { recursive: true });
+    writeFileSync(join(dir, "packages", "y", "package.json"), "{}");
+    expect(workspaceRootsFor(dir)).toEqual([dir, join(dir, "packages", "x")]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("refreshPluginCheckout — post-install resolution audit (CTL-1831)", () => {
+  beforeEach(() => __clearThrottleForTest());
+
+  const OLD_LOCK = "OLD-LOCK-TEXT";
+  const NEW_LOCK = "NEW-LOCK-TEXT";
+
+  // git stub that also answers `show <sha>:<path>` with the pre-pull lockfile.
+  function makeAuditGitFn({ diffOutput = "bun.lock\n" } = {}) {
+    const calls = [];
+    const gitFn = (root, args) => {
+      calls.push({ root, args });
+      const sub = args[0];
+      if (sub === "rev-parse") {
+        const seen = calls.filter((c) => c.args[0] === "rev-parse").length;
+        return seen === 1 ? "oldsha" : "newsha";
+      }
+      if (sub === "diff") return diffOutput;
+      if (sub === "show") return OLD_LOCK;
+      return "";
+    };
+    gitFn.calls = calls;
+    return gitFn;
+  }
+
+  const MISMATCH = {
+    conclusive: true,
+    reason: null,
+    checked: 1,
+    matched: [],
+    mismatched: [
+      {
+        key: "@catalyst-cloud/schema",
+        id: "@catalyst-cloud/schema",
+        from: "0.1.3",
+        to: "0.1.5",
+        expected: "0.1.5",
+        found: ["0.1.3"],
+        importers: ["@catalyst-cloud/sdk"],
+        paths: [],
+      },
+    ],
+    alternates: [],
+    inconclusive: [],
+  };
+  const CLEAN = {
+    conclusive: true,
+    reason: null,
+    checked: 1,
+    matched: [{}],
+    mismatched: [],
+    alternates: [],
+    inconclusive: [],
+  };
+
+  // baseArgs — everything refreshPluginCheckout needs to reach the audit.
+  function baseArgs(overrides = {}) {
+    return {
+      root: "/repo",
+      now: 0,
+      emitFn: () => {},
+      readFileFn: () => NEW_LOCK,
+      workspaceRootsFn: () => ["/repo"],
+      resolvePackageFn: () => null,
+      ...overrides,
+    };
+  }
+
+  test("a CLEAN audit runs the install exactly once — no --force, no noop event", () => {
+    const installs = [];
+    const emitted = [];
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: (dir, opts) => installs.push({ dir, opts }),
+        auditFn: () => CLEAN,
+      }),
+    );
+    expect(installs).toHaveLength(1);
+    expect(installs[0].opts?.force).toBeFalsy();
+    expect(emitted.some((e) => e.event === "plugin.checkout.deps_install_noop")).toBe(false);
+  });
+
+  test("THE DEFECT: a mismatch after a 0-exit install emits deps_install_noop (WARN) naming the importer", () => {
+    const emitted = [];
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: () => {},
+        auditFn: () => MISMATCH,
+      }),
+    );
+    const ev = emitted.find((e) => e.event === "plugin.checkout.deps_install_noop");
+    expect(ev).toBeDefined();
+    expect(ev.severity).toBe("WARN");
+    expect(ev.detail.package_dir).toBe("/repo");
+    expect(ev.detail.mismatched[0].id).toBe("@catalyst-cloud/schema");
+    expect(ev.detail.mismatched[0].importers).toContain("@catalyst-cloud/sdk");
+  });
+
+  test("a mismatch triggers a SECOND install with force:true", () => {
+    const installs = [];
+    let audits = 0;
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        bunInstallFn: (dir, opts) => installs.push({ dir, opts }),
+        auditFn: () => (++audits === 1 ? MISMATCH : CLEAN),
+      }),
+    );
+    expect(installs).toHaveLength(2);
+    expect(installs[1]).toEqual({ dir: "/repo", opts: { force: true } });
+  });
+
+  test("a successful relink lands in plugin.checkout.updated → deps_relinked", () => {
+    const emitted = [];
+    let audits = 0;
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: () => {},
+        auditFn: () => (++audits === 1 ? MISMATCH : CLEAN),
+      }),
+    );
+    const upd = emitted.find((e) => e.event === "plugin.checkout.updated");
+    expect(upd.detail.deps_relinked).toEqual(["/repo"]);
+    expect(emitted.some((e) => e.event === "plugin.checkout.deps_relink_failed")).toBe(false);
+  });
+
+  test("a force that does NOT fix it emits deps_relink_failed (ERROR) and claims no relink", () => {
+    const emitted = [];
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: () => {},
+        auditFn: () => MISMATCH, // still mismatched after the force
+      }),
+    );
+    const fail = emitted.find((e) => e.event === "plugin.checkout.deps_relink_failed");
+    expect(fail).toBeDefined();
+    expect(fail.severity).toBe("ERROR");
+    expect(emitted.find((e) => e.event === "plugin.checkout.updated").detail.deps_relinked).toEqual([]);
+  });
+
+  test("a THROWING forced install surfaces deps_install_failed(forced) and never crashes the refresh", () => {
+    const emitted = [];
+    let installs = 0;
+    const res = refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: () => {
+          installs += 1;
+          if (installs === 2) throw new Error("bun install --force exploded");
+        },
+        auditFn: () => MISMATCH,
+      }),
+    );
+    const fail = emitted.find(
+      (e) => e.event === "plugin.checkout.deps_install_failed" && e.detail.forced === true,
+    );
+    expect(fail).toBeDefined();
+    expect(emitted.some((e) => e.event === "plugin.checkout.deps_relink_failed")).toBe(false);
+    expect(res.changed).toBe(true);
+  });
+
+  test("an INCONCLUSIVE audit is surfaced and does NOT force — 'could not look' is not 'stale'", () => {
+    const installs = [];
+    const emitted = [];
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: (dir, opts) => installs.push({ dir, opts }),
+        auditFn: () => ({
+          conclusive: false,
+          reason: "previous lockfile unavailable",
+          checked: 0,
+          matched: [],
+          mismatched: [],
+          alternates: [],
+          inconclusive: [],
+        }),
+      }),
+    );
+    const ev = emitted.find((e) => e.event === "plugin.checkout.deps_audit_inconclusive");
+    expect(ev).toBeDefined();
+    expect(ev.severity).toBe("WARN");
+    expect(ev.detail.reason).toBe("previous lockfile unavailable");
+    expect(installs).toHaveLength(1);
+  });
+
+  test("a per-entry inconclusive verdict is surfaced too, even on a conclusive audit", () => {
+    const emitted = [];
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: () => {},
+        auditFn: () => ({
+          conclusive: true,
+          reason: null,
+          checked: 1,
+          matched: [],
+          mismatched: [],
+          alternates: [],
+          inconclusive: [{ key: "x", id: "x", to: "1.0.0", reason: "no importer on disk resolves x" }],
+        }),
+      }),
+    );
+    const ev = emitted.find((e) => e.event === "plugin.checkout.deps_audit_inconclusive");
+    expect(ev).toBeDefined();
+    expect(ev.detail.inconclusive[0].id).toBe("x");
+  });
+
+  test("a THROWING audit degrades to inconclusive — the guardrail cannot take down the refresh", () => {
+    const emitted = [];
+    const installs = [];
+    const res = refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: (dir, opts) => installs.push({ dir, opts }),
+        auditFn: () => {
+          throw new Error("resolver blew up");
+        },
+      }),
+    );
+    const ev = emitted.find((e) => e.event === "plugin.checkout.deps_audit_inconclusive");
+    expect(ev).toBeDefined();
+    expect(ev.detail.reason).toContain("resolver blew up");
+    expect(installs).toHaveLength(1);
+    expect(res.changed).toBe(true);
+  });
+
+  test("the pre-pull lockfile is read with `git show <oldSha>:<rel>`", () => {
+    const gitFn = makeAuditGitFn({ diffOutput: "plugins/dev/scripts/orch-monitor/ui/bun.lock\n" });
+    let seen = null;
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn,
+        bunInstallFn: () => {},
+        auditFn: (a) => {
+          seen = a;
+          return CLEAN;
+        },
+      }),
+    );
+    expect(
+      gitFn.calls.some(
+        (c) =>
+          c.args[0] === "show" && c.args[1] === "oldsha:plugins/dev/scripts/orch-monitor/ui/bun.lock",
+      ),
+    ).toBe(true);
+    expect(seen.oldLockText).toBe(OLD_LOCK);
+    expect(seen.newLockText).toBe(NEW_LOCK);
+  });
+
+  test("no bun.lock in the diff → the audit never runs (package.json-only change)", () => {
+    let audits = 0;
+    const installs = [];
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn({ diffOutput: "plugins/dev/scripts/orch-monitor/ui/package.json\n" }),
+        bunInstallFn: (dir, opts) => installs.push({ dir, opts }),
+        auditFn: () => {
+          audits += 1;
+          return MISMATCH;
+        },
+      }),
+    );
+    expect(audits).toBe(0);
+    expect(installs).toHaveLength(1);
+  });
+
+  test("an install that FAILED is never audited or forced — the tree was never built", () => {
+    let audits = 0;
+    const emitted = [];
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: () => {
+          throw new Error("frozen lockfile rejected");
+        },
+        auditFn: () => {
+          audits += 1;
+          return MISMATCH;
+        },
+      }),
+    );
+    expect(audits).toBe(0);
+    expect(emitted.some((e) => e.event === "plugin.checkout.deps_install_failed")).toBe(true);
+    expect(emitted.some((e) => e.event === "plugin.checkout.deps_install_noop")).toBe(false);
   });
 });

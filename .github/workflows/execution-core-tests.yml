@@ -524,6 +524,24 @@ jobs:
         working-directory: plugins/dev/scripts/broker
         run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs
 
+      - name: plugin-refresh + lock-resolution-audit tests (CTL-1831)
+        # `grep plugin-refresh .github/workflows/` returned only two COMMENTS
+        # before this step — plugin-refresh.test.mjs (97 tests guarding the
+        # merge-to-main checkout refresh, the deps install, the stale-index.lock
+        # clear and the pull-owner cutover) had never run in CI at all. Positive
+        # control: the same grep for `worker-state-projection` returned the `run:`
+        # line directly above. CTL-1831 adds the install-must-relink guard to that
+        # same file plus its own audit suite, and an unlisted suite is a guard that
+        # lands with no gate — this job's list is hand-enumerated, not globbed.
+        #
+        # Both files run: measured 151 pass / 0 fail on this branch and 97 / 0 for
+        # plugin-refresh.test.mjs at the merge base, so there is no pre-existing
+        # red to import. They cannot join the `bun test` allowlist below — that
+        # step's working-directory is execution-core, and plugin-refresh.test.mjs
+        # reaches router.mjs, which needs the BROKER package's own pino.
+        working-directory: plugins/dev/scripts/broker
+        run: bun test plugin-refresh.test.mjs lock-resolution-audit.test.mjs
+
       - name: catalyst-agent tests (CTL-1825)
         # catalyst-agent had NO CI coverage at all before CTL-1825
         # (`grep catalyst-agent .github/workflows/` returned nothing — positive
