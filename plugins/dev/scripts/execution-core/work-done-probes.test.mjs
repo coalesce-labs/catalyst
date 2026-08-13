@@ -1271,3 +1271,49 @@ describe("CTL-663: probe descriptions updated for plan-phase gate", () => {
     expect(WORK_DONE_PROBE_DESCRIPTIONS.remediate).toBe("commits ahead of origin/main + clean worktree");
   });
 });
+
+// Codex #3307 P2 — an override that cannot be honored must degrade to the BOUNDED
+// default, never to unbounded and never to a throw. Both failure modes are real:
+// spawnSync treats timeout:0 as NO TIMEOUT, and rejects negative/fractional/NaN with
+// ERR_OUT_OF_RANGE before our never-throw normalizer can run.
+describe("CTL-1810 — an unusable timeout override degrades to bounded, not to off", () => {
+  const seenTimeout = (timeoutMs) => {
+    let seen = null;
+    defaultRunGit(["status"], {
+      timeoutMs,
+      spawn: (_b, _a, opts) => {
+        seen = opts.timeout;
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    return seen;
+  };
+
+  // 0 is the dangerous one: it is a plausible "disable it" value AND spawnSync reads
+  // it as unbounded, so it would silently restore the defect this bounds.
+  test("0 does NOT reach spawn — it would mean 'no timeout'", () => {
+    const t = seenTimeout(0);
+    expect(t).toBeGreaterThan(0);
+  });
+
+  for (const bad of [-5, 1.5, NaN, "abc", null, "", "0"]) {
+    test(`unusable override ${JSON.stringify(bad)} falls back to a positive integer`, () => {
+      const t = seenTimeout(bad);
+      expect(Number.isInteger(t)).toBe(true);
+      expect(t).toBeGreaterThan(0);
+    });
+  }
+
+  test("a usable override is still honored exactly", () => {
+    expect(seenTimeout(1234)).toBe(1234);
+  });
+
+  // The seams must never throw, whatever the override — spawnSync's own
+  // ERR_OUT_OF_RANGE would otherwise land inside schedulerTick.
+  test("a real spawn with an unusable override never throws", () => {
+    expect(() => {
+      defaultRunGit(["--version"], { timeoutMs: -5 });
+      defaultRunGh(["--version"], { timeoutMs: NaN });
+    }).not.toThrow();
+  });
+});
