@@ -26,16 +26,19 @@ TMPS=()
 # the verdict.
 cleanup() { local d; for d in "${TMPS[@]:-}"; do [[ -n "$d" ]] && rm -rf "$d"; done; true; }
 trap cleanup EXIT
-newdir() { local d; d="$(mktemp -d)"; TMPS+=("$d"); printf '%s' "$d"; }
+# NOTE: `newdir` is called inside a command substitution, which is a SUBSHELL — an array
+# append inside it never reaches the parent, so registering the path here would silently leak
+# every directory (Codex #3318 P2). The caller registers it instead.
+newdir() { mktemp -d; }
 monthfile() { printf '%s/%s.jsonl' "$1" "$(date -u +%Y-%m)"; }
 fail() { echo "FAIL: $*"; exit 1; }
 
 # --- 1. A TORN first line must NOT rotate, and must lose nothing ---------------
-D="$(newdir)"; F="$(monthfile "$D")"
+D="$(newdir)"; TMPS+=("$D"); F="$(monthfile "$D")"
 printf 'not json at all\n' > "$F"
 for i in $(seq 1 20); do printf '{"attributes":{"event.name":"e%s"}}\n' "$i" >> "$F"; done
 
-WARN="$(newdir)/warn.txt"
+WARNDIR="$(newdir)"; TMPS+=("$WARNDIR"); WARN="$WARNDIR/warn.txt"
 canonical_jsonl_append "$D" '{"attributes":{"event.name":"new"}}' 2>"$WARN"
 
 ROTATED="$(find "$D" -name '*legacy*' | wc -l | tr -d ' ')"
@@ -51,7 +54,7 @@ grep -q 'does not parse' "$WARN" || fail "refusing to rotate a damaged log was s
 # --- 2. A GENUINE legacy first line still rotates -----------------------------
 # POSITIVE CONTROL for case 1: proves the rotation feature still works, so case 1 is testing
 # the parse distinction rather than a rotation that has simply been disabled.
-D2="$(newdir)"; F2="$(monthfile "$D2")"
+D2="$(newdir)"; TMPS+=("$D2"); F2="$(monthfile "$D2")"
 printf '{"ts":"x","event":"MONTH_A"}\n' > "$F2"
 canonical_jsonl_append "$D2" '{"attributes":{"event.name":"n1"}}' 2>/dev/null
 [[ "$(find "$D2" -name '*legacy*' | wc -l | tr -d ' ')" == "1" ]] \

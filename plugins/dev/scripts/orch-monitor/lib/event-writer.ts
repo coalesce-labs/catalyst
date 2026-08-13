@@ -20,7 +20,8 @@ import {
   mkdirSync,
   openSync,
   readSync,
-  renameSync,
+  linkSync,
+  unlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import type { CanonicalEvent } from "./canonical-event";
@@ -182,13 +183,33 @@ export class CanonicalEventWriter {
     // inside the same millisecond produce the same name and the collision returns. So probe
     // for a free name and never rename onto an existing file — the whole point is that no
     // rotation may destroy a previous one.
+    // `existsSync` then `renameSync` is check-then-act: two writers can both see the name
+    // free, and POSIX rename() OVERWRITES — so the second would destroy the first's rescue
+    // copy, which is this ticket's own defect one layer down (Codex #3318 P1).
+    //
+    // `linkSync` is the atomic primitive: it throws EEXIST rather than overwriting, so the
+    // link itself RESERVES the name. Unlink the source only once the link succeeded; if it
+    // fails we try the next name and the original is untouched.
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    let legacyPath = `${filePath}.legacy.${stamp}`;
-    for (let n = 1; existsSync(legacyPath); n += 1) {
-      legacyPath = `${filePath}.legacy.${stamp}.${n}`;
+    let legacyPath = "";
+    let reserved = false;
+    for (let n = 0; n <= 50 && !reserved; n += 1) {
+      legacyPath = n === 0 ? `${filePath}.legacy.${stamp}` : `${filePath}.legacy.${stamp}.${n}`;
+      try {
+        linkSync(filePath, legacyPath);
+        reserved = true;
+      } catch {
+        // EEXIST (a peer reserved it) or a real error — either way, try the next name.
+      }
+    }
+    if (!reserved) {
+      this.logger.warn?.(
+        `[event-writer] could not reserve a rotation name for ${filePath} — leaving it in place`,
+      );
+      return;
     }
     try {
-      renameSync(filePath, legacyPath);
+      unlinkSync(filePath);
       this.logger.warn?.(
         `[event-writer] rotated legacy file ${filePath} → ${legacyPath}`,
       );

@@ -470,20 +470,34 @@ canonical_jsonl_append() {
           # A genuine legacy log. Rotate to a UNIQUE destination: a fixed `.legacy` is a
           # rescue slot of depth one, and the next rotation clobbers the previous month's
           # only copy.
-          # A destination that CANNOT COLLIDE. A timestamp plus pid is still not unique —
-          # the same process can rotate twice within one second — and a collision here means
-          # one rotation destroying another's rescue copy, which is the whole defect.
+          # A destination that cannot collide AND cannot be clobbered by a concurrent
+          # rotation. `[[ -e ]]` then `mv` is check-then-act: two writers can both see the
+          # name free, and POSIX rename() OVERWRITES, so the second would destroy the first's
+          # rescue copy — this ticket's own defect, one layer down (Codex #3318 P1).
+          #
+          # `ln` is the atomic primitive: hard-linking onto an existing path fails EEXIST
+          # rather than overwriting, so the name is RESERVED by the link itself. Unlink the
+          # source only once the link succeeded; if it fails we simply try the next name and
+          # the original is still in place.
           local stamp dest n
           stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-          dest="${month_file}.legacy.${stamp}.$$"
-          n=1
-          while [[ -e "$dest" ]]; do
-            dest="${month_file}.legacy.${stamp}.$$.${n}"
+          n=0
+          while :; do
+            if [[ "$n" -eq 0 ]]; then dest="${month_file}.legacy.${stamp}.$$"
+            else dest="${month_file}.legacy.${stamp}.$$.${n}"; fi
+            if ln "$month_file" "$dest" 2>/dev/null; then
+              rm -f "$month_file" 2>/dev/null || true
+              printf '[catalyst] rotated legacy event log %s -> %s\n' "$month_file" "$dest" >&2
+              break
+            fi
             n=$((n + 1))
+            # Bounded: an unbounded loop here would spin forever if the directory were
+            # unwritable, and a rotation is never worth wedging an append path for.
+            if [[ "$n" -gt 50 ]]; then
+              printf '[catalyst] WARNING: could not reserve a rotation name for %s — leaving it in place\n' "$month_file" >&2
+              break
+            fi
           done
-          if mv "$month_file" "$dest" 2>/dev/null; then
-            printf '[catalyst] rotated legacy event log %s -> %s\n' "$month_file" "$dest" >&2
-          fi
         fi
       else
         # Silence is a defect: an unparseable first line means the log has been damaged, and
