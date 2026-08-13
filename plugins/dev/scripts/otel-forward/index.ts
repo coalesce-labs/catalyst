@@ -223,7 +223,18 @@ const senders = {
     : null,
 };
 
-function emitLag(): void {
+/**
+ * The 30 s tick body. EXPORTED for the CTL-1818 wiring test, not for production use — the
+ * `lagTimer` in the `import.meta.main` block below is its only runtime caller.
+ *
+ * Why it has to be exported: the drop surface's alert-CLEAR branch (`lib/drop-surface.ts`) is
+ * reachable from `evaluateDropSurface()` and from nothing else, so a test that calls that
+ * function directly passes whether or not this daemon ever calls it — which is exactly how the
+ * call below survived deletion with a fully green suite. Exporting the tick lets the test assert
+ * the CALL (raise a latched alert, run one tick, watch it clear) rather than the callee in
+ * isolation. See index-drop-wiring.test.ts.
+ */
+export function emitLag(): void {
   // CTL-1280: deterministic liveness heartbeat to otel-forward.log (Alloy→Loki),
   // emitted UNCONDITIONALLY each tick — BEFORE the cold-start skip below — so an
   // idle/quiet forwarder still proves it is alive (it previously wrote only a
@@ -237,6 +248,9 @@ function emitLag(): void {
   // drop-driven call can do: CLEAR a latched sustained-loss alert on a host that recovered
   // and went quiet (nothing else re-evaluates once the drops stop), and keep the marker's
   // rolling-window figures honest while nothing is being discarded. Best-effort, never throws.
+  // Placed BEFORE the cold-start skip below for the same reason CTL-1280's heartbeat is: the
+  // skip is about the lag EVENT having nothing to report, and a forwarder with a latched drop
+  // alert must still be able to clear it. index-drop-wiring.test.ts asserts this call.
   evaluateDropSurface();
   // Skip on cold start before any event has been processed or delivered
   if (!lastLocalTs && !lastForwardedTs) return;
