@@ -25,19 +25,29 @@
 // MODULE_NOT_FOUND while the SDK resolves it fine). A top-level probe would have
 // reported "absent" or "fine" and never seen the stale 0.1.3 the daemons loaded.
 //
-// Resolution — not directory enumeration — is the only honest instrument here.
+// Placement — not directory enumeration — is the only honest instrument here.
 // bun's `.bun` store keeps STALE entries after an upgrade (measured on this
 // checkout: @catalyst-cloud+schema@0.1.3 and @0.1.5 both present, and
 // @catalyst-cloud+sdk@0.8.1 alongside 0.8.2), so "0.1.3 exists on disk" says
-// nothing about what any importer loads. Only a resolve from the importer's own
-// directory answers that, and it is layout-agnostic: it works identically under
-// the hoisted and isolated linkers because both are built to make resolution
-// give the right answer.
+// nothing about what any importer loads. Only the entry the importer's own
+// node_modules ladder lands on answers that, and reading that ladder is
+// layout-agnostic: under the hoisted linker the rung IS the package, under the
+// isolated linker it is a symlink into `.bun/`, and a plain file read follows
+// either.
 //
 // The single filesystem interaction is the injected `resolvePackageFn(fromDir,
 // id) -> {dir, version} | null` seam, so the whole audit is deterministically
 // testable without a real node_modules. Mirrors the seam-injection convention of
 // plugin-refresh.mjs / cloud-sync-deps.mjs.
+//
+// CONTRACT ON THAT SEAM, and the trap the first implementation fell into: it
+// must answer from the DISK ON EVERY CALL. `createRequire().resolve()` looks
+// like the obvious implementation and is disqualified — Node/bun module
+// resolution is cached PROCESS-WIDE and a fresh `createRequire` does not clear
+// it, so inside a long-lived daemon the post-`--force` re-audit re-reads the
+// pre-force answer and a process that once saw a good tree never sees it go
+// stale. See `plugin-refresh.mjs` `defaultResolvePackageFn` for the ladder walk
+// that satisfies this.
 
 // ─── lock key parsing ────────────────────────────────────────────────────────
 

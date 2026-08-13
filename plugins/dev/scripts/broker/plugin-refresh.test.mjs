@@ -16,7 +16,7 @@
 // Run: bun test plugins/dev/scripts/broker/plugin-refresh.test.mjs
 
 import { describe, test, expect, beforeEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -33,6 +33,7 @@ import {
   changedLockfiles,
   bunInstallArgv,
   workspaceRootsFor,
+  defaultResolvePackageFn,
   workspaceMemberNodeModules,
   PLUGIN_REFRESH_THROTTLE_MS,
   PLUGIN_DRIFT_CHECK_INTERVAL_MS,
@@ -1832,19 +1833,298 @@ describe("workspaceRootsFor (CTL-1831)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test("a GLOB entry is skipped, not expanded", () => {
-    // `packages/y` is a REAL package dir that only the glob could reach — the
-    // literal list names `packages/x` alone. Without a decoy the glob entry
-    // resolves to a path named "*" that has no package.json and is dropped for
-    // the wrong reason, so the assertion would pass whether or not the glob
-    // guard exists.
+  test("a GLOB entry is skipped, not expanded — and not merely dropped for the wrong reason", () => {
+    // TWO decoys, killing two different mutations, because either one alone
+    // leaves the assertion passing on broken code:
+    //
+    //   packages/*  — a directory LITERALLY named "*" (a legal filename), with a
+    //     package.json. Deleting the `entry.includes("*")` guard does not add
+    //     glob EXPANSION, so without this decoy the literal path `packages/*`
+    //     simply has no package.json and is dropped by the existsFn check on the
+    //     next line — the right answer for the wrong reason, and the guard
+    //     survives its own mutation. With the decoy, dropping the guard admits
+    //     `<dir>/packages/*` as a root and the assertion fails.
+    //   packages/y  — a real package dir reachable ONLY by expanding the glob, so
+    //     an implementation that started expanding globs also fails.
     writeFileSync(join(dir, "package.json"), JSON.stringify({ workspaces: ["packages/*", "packages/x"] }));
     mkdirSync(join(dir, "packages", "x"), { recursive: true });
     writeFileSync(join(dir, "packages", "x", "package.json"), "{}");
     mkdirSync(join(dir, "packages", "y"), { recursive: true });
     writeFileSync(join(dir, "packages", "y", "package.json"), "{}");
+    mkdirSync(join(dir, "packages", "*"), { recursive: true });
+    writeFileSync(join(dir, "packages", "*", "package.json"), "{}");
     expect(workspaceRootsFor(dir)).toEqual([dir, join(dir, "packages", "x")]);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ─── defaultResolvePackageFn (CTL-1831) ──────────────────────────────────────
+//
+// The one component of the audit that touches disk, and — until this block — the
+// one with no coverage at all: every audit test injects a fake resolvePackageFn
+// and every refresh test injects a fake auditFn, so the production probe was
+// exercised by nothing. It shipped answering from Node's PROCESS-WIDE module
+// resolution cache, which made the post-force RE-audit report a FALSE
+// deps_relink_failed on every real repair and made a long-lived daemon
+// permanently blind to a tree that went stale after its first clean audit.
+// These tests run against a REAL temp tree in the isolated-linker layout the
+// incident occurred in.
+
+// isolatedTree — a minimal bun isolated-linker layout:
+//   node_modules/.bun/<pkg>@<ver>/node_modules/<pkg>/     the real copies
+//   node_modules/<pkg>                        -> symlink into the store
+// linkTo(pkg, ver) repoints that symlink, which is exactly what an install does
+// when it relinks a moved resolution.
+function isolatedTree(versionsByPkg) {
+  const root = mkdtempSync(join(tmpdir(), "ctl1831-tree-"));
+  const store = join(root, "node_modules", ".bun");
+  mkdirSync(store, { recursive: true });
+  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "host", version: "1.0.0" }));
+  for (const [pkg, versions] of Object.entries(versionsByPkg)) {
+    for (const version of versions) {
+      const dir = join(store, `${pkg.replace("/", "+")}@${version}`, "node_modules", ...pkg.split("/"));
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: pkg, version }));
+    }
+  }
+  const linkTo = (fromDir, pkg, version) => {
+    const at = join(fromDir, "node_modules", ...pkg.split("/"));
+    mkdirSync(join(at, ".."), { recursive: true });
+    try {
+      rmSync(at, { force: true, recursive: false });
+    } catch {
+      /* first link — nothing to remove */
+    }
+    symlinkSync(join(store, `${pkg.replace("/", "+")}@${version}`, "node_modules", ...pkg.split("/")), at, "dir");
+  };
+  const storeDirOf = (pkg, version) =>
+    join(store, `${pkg.replace("/", "+")}@${version}`, "node_modules", ...pkg.split("/"));
+  return { root, store, linkTo, storeDirOf, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+describe("defaultResolvePackageFn (CTL-1831)", () => {
+  test("reads the version off the entry the importer's node_modules actually points at", () => {
+    const t = isolatedTree({ "@scope/dep": ["0.1.3", "0.1.5"] });
+    t.linkTo(t.root, "@scope/dep", "0.1.5");
+    const got = defaultResolvePackageFn(t.root, "@scope/dep");
+    expect(got.version).toBe("0.1.5");
+    // dir is the realpath'd STORE entry, not the link — a mismatch report has to
+    // name the bytes, since both versions sit in the store simultaneously.
+    expect(got.dir).toBe(realpathSync(t.storeDirOf("@scope/dep", "0.1.5")));
+    t.cleanup();
+  });
+
+  test("THE DEFECT: a SECOND call in the SAME process sees the relink — no resolution cache in the path", () => {
+    // This is F2 at the unit altitude, and the assertion the shipped probe could
+    // not pass: createRequire().resolve() answers from a process-wide cache that
+    // a fresh createRequire does not clear. Measured pre-fix, one process:
+    //   before: symlink 0.1.5 -> resolve 0.1.5 | after flip: symlink 0.1.3 -> resolve 0.1.5
+    const t = isolatedTree({ "@scope/dep": ["0.1.3", "0.1.5"] });
+    t.linkTo(t.root, "@scope/dep", "0.1.5");
+    expect(defaultResolvePackageFn(t.root, "@scope/dep").version).toBe("0.1.5");
+    t.linkTo(t.root, "@scope/dep", "0.1.3");
+    expect(defaultResolvePackageFn(t.root, "@scope/dep").version).toBe("0.1.3");
+    // …and back again, so the test cannot pass on an implementation that merely
+    // caches the LAST answer rather than the first.
+    t.linkTo(t.root, "@scope/dep", "0.1.5");
+    expect(defaultResolvePackageFn(t.root, "@scope/dep").version).toBe("0.1.5");
+    t.cleanup();
+  });
+
+  test("the incident's own shape: the schema resolved THROUGH the SDK, with no top-level copy", () => {
+    // Under the isolated linker the workspace root has no @scope/schema at all,
+    // so a top-level probe reports "absent" and never sees what the daemon loads.
+    const t = isolatedTree({ "@scope/sdk": ["0.8.2"], "@scope/schema": ["0.1.3", "0.1.5"] });
+    t.linkTo(t.root, "@scope/sdk", "0.8.2");
+    const sdkDir = t.storeDirOf("@scope/sdk", "0.8.2");
+    t.linkTo(sdkDir, "@scope/schema", "0.1.3");
+    expect(defaultResolvePackageFn(t.root, "@scope/schema")).toBeNull();
+    const sdk = defaultResolvePackageFn(t.root, "@scope/sdk");
+    expect(defaultResolvePackageFn(sdk.dir, "@scope/schema").version).toBe("0.1.3");
+    t.cleanup();
+  });
+
+  test("climbs the node_modules ladder — a nested importer resolves the parent's copy", () => {
+    const t = isolatedTree({ "@scope/dep": ["0.1.5"] });
+    t.linkTo(t.root, "@scope/dep", "0.1.5");
+    const deep = join(t.root, "packages", "a", "src");
+    mkdirSync(deep, { recursive: true });
+    expect(defaultResolvePackageFn(deep, "@scope/dep").version).toBe("0.1.5");
+    t.cleanup();
+  });
+
+  test("an id with no entry anywhere up the ladder is null — not a guessed version", () => {
+    const t = isolatedTree({ "@scope/dep": ["0.1.5"] });
+    t.linkTo(t.root, "@scope/dep", "0.1.5");
+    expect(defaultResolvePackageFn(t.root, "@scope/absent")).toBeNull();
+    t.cleanup();
+  });
+
+  test("a manifest with no usable version is null — the audit reads that as 'could not look'", () => {
+    const t = isolatedTree({});
+    const at = join(t.root, "node_modules", "broken");
+    mkdirSync(at, { recursive: true });
+    writeFileSync(join(at, "package.json"), JSON.stringify({ name: "broken" })); // no version
+    expect(defaultResolvePackageFn(t.root, "broken")).toBeNull();
+    writeFileSync(join(at, "package.json"), "{not json");
+    expect(defaultResolvePackageFn(t.root, "broken")).toBeNull();
+    t.cleanup();
+  });
+
+  test("a realpath failure keeps the literal path — the VERSION is the verdict, never nulled", () => {
+    const t = isolatedTree({ "@scope/dep": ["0.1.5"] });
+    t.linkTo(t.root, "@scope/dep", "0.1.5");
+    const got = defaultResolvePackageFn(t.root, "@scope/dep", {
+      realpathFn: () => {
+        throw new Error("EACCES");
+      },
+    });
+    expect(got.version).toBe("0.1.5");
+    expect(got.dir).toBe(join(t.root, "node_modules", "@scope", "dep"));
+    t.cleanup();
+  });
+
+  test("a missing or non-string argument is null, never a probe of the wrong directory", () => {
+    expect(defaultResolvePackageFn("", "dep")).toBeNull();
+    expect(defaultResolvePackageFn(null, "dep")).toBeNull();
+    expect(defaultResolvePackageFn("/tmp", "")).toBeNull();
+    expect(defaultResolvePackageFn("/tmp", undefined)).toBeNull();
+  });
+});
+
+// ─── the audit end-to-end, against a REAL tree (CTL-1831) ────────────────────
+//
+// Every other refresh test injects auditFn, so the wiring was proven while the
+// thing being wired was not. These drive the SHIPPED refreshPluginCheckout with
+// resolvePackageFn / workspaceRootsFn / readFileFn / auditFn ALL at their
+// production defaults; only gitFn and bunInstallFn are faked, because the alt
+// is a network fetch and a 5 s 1168-package extract.
+
+describe("refreshPluginCheckout — audit against a REAL node_modules (CTL-1831)", () => {
+  const SCHEMA = "@scope/schema";
+  const SDK = "@scope/sdk";
+
+  // A bun.lock `packages` block in the real emitted shape (see this repo's own
+  // bun.lock): `"<key>": ["<name>@<version>", "<resolution>", {<meta>}, "<sha>"],`
+  const lockText = (schemaVersion) =>
+    [
+      "{",
+      '  "lockfileVersion": 1,',
+      '  "packages": {',
+      `    "${SCHEMA}": ["${SCHEMA}@${schemaVersion}", "", {}, "sha512-aaa"],`,
+      `    "${SDK}": ["${SDK}@0.8.2", "", { "dependencies": { "${SCHEMA}": "^0.1.3" } }, "sha512-bbb"],`,
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+
+  // The incident's tree: the SDK is the only importer of the schema, and the
+  // schema link under the SDK is what a relink moves.
+  function incidentTree(schemaOnDisk) {
+    const t = isolatedTree({ [SDK]: ["0.8.2"], [SCHEMA]: ["0.1.3", "0.1.5"] });
+    t.linkTo(t.root, SDK, "0.8.2");
+    t.linkTo(t.storeDirOf(SDK, "0.8.2"), SCHEMA, schemaOnDisk);
+    writeFileSync(join(t.root, "bun.lock"), lockText("0.1.5")); // post-pull lockfile
+    return t;
+  }
+
+  function runRefresh(t, { forceRelinksTo = null } = {}) {
+    __clearThrottleForTest();
+    const emitted = [];
+    const installs = [];
+    let revParse = 0;
+    return {
+      emitted,
+      installs,
+      res: refreshPluginCheckout({
+        root: t.root,
+        now: Date.now(),
+        loadedCommit: null,
+        emitFn: (e) => emitted.push(e),
+        memberNodeModulesFn: () => [],
+        pruneFn: () => {},
+        gitFn: (_root, args) => {
+          if (args[0] === "rev-parse") return (revParse += 1) === 1 ? "oldsha" : "newsha";
+          if (args[0] === "diff") return "bun.lock\n";
+          if (args[0] === "show") return lockText("0.1.3"); // pre-pull lockfile
+          return "";
+        },
+        bunInstallFn: (_dir, opts) => {
+          installs.push(opts ?? null);
+          // Model bun exactly: the plain install is the measured NO-OP; only
+          // --force moves the link.
+          if (opts?.force && forceRelinksTo) t.linkTo(t.storeDirOf(SDK, "0.8.2"), SCHEMA, forceRelinksTo);
+        },
+      }),
+    };
+  }
+
+  test("a stale tree is DETECTED through the real resolver — deps_install_noop names the found version", () => {
+    const t = incidentTree("0.1.3");
+    const { emitted } = runRefresh(t);
+    const noop = emitted.find((e) => e.event === "plugin.checkout.deps_install_noop");
+    expect(noop).toBeDefined();
+    expect(noop.detail.mismatched[0].id).toBe(SCHEMA);
+    expect(noop.detail.mismatched[0].found).toEqual(["0.1.3"]);
+    expect(noop.detail.mismatched[0].expected).toBe("0.1.5");
+    expect(noop.detail.mismatched[0].importers).toContain(SDK);
+    t.cleanup();
+  });
+
+  test("a REPAIR reports success: force fires, the re-audit sees the new bytes, deps_relinked is non-empty", () => {
+    // F1. Pre-fix this emitted deps_relink_failed (ERROR, documented as
+    // unfixable) with deps_relinked:[] even though the force HAD relinked the
+    // tree — the re-audit was answering from the cache the first audit filled.
+    const t = incidentTree("0.1.3");
+    const { emitted, installs } = runRefresh(t, { forceRelinksTo: "0.1.5" });
+    expect(installs).toEqual([null, { force: true }]);
+    expect(emitted.some((e) => e.event === "plugin.checkout.deps_relink_failed")).toBe(false);
+    expect(emitted.find((e) => e.event === "plugin.checkout.updated").detail.deps_relinked).toEqual([t.root]);
+    t.cleanup();
+  });
+
+  test("a force that genuinely does not fix it still reports deps_relink_failed", () => {
+    // The other side of the same edge: the ERROR must stay reachable, or the fix
+    // above would have bought a detector that can never say no.
+    const t = incidentTree("0.1.3");
+    const { emitted } = runRefresh(t, { forceRelinksTo: null });
+    const fail = emitted.find((e) => e.event === "plugin.checkout.deps_relink_failed");
+    expect(fail).toBeDefined();
+    expect(fail.severity).toBe("ERROR");
+    expect(emitted.find((e) => e.event === "plugin.checkout.updated").detail.deps_relinked).toEqual([]);
+    t.cleanup();
+  });
+
+  test("TWO refreshes in ONE process: a clean pass does not blind the next one to a tree that went stale", () => {
+    // F2. Pre-fix, pass 2 returned CLEAN with a single non-forced install — the
+    // long-lived updater/broker daemon (setInterval) could never see an incident
+    // that began after its first successful audit.
+    const t = incidentTree("0.1.5"); // pass 1: the tree is CORRECT
+    const first = runRefresh(t);
+    expect(first.installs).toEqual([null]);
+    expect(first.emitted.some((e) => e.event === "plugin.checkout.deps_install_noop")).toBe(false);
+
+    t.linkTo(t.storeDirOf(SDK, "0.8.2"), SCHEMA, "0.1.3"); // the tree goes stale
+    const second = runRefresh(t, { forceRelinksTo: "0.1.5" });
+    const noop = second.emitted.find((e) => e.event === "plugin.checkout.deps_install_noop");
+    expect(noop).toBeDefined();
+    expect(noop.detail.mismatched[0].found).toEqual(["0.1.3"]);
+    expect(second.installs).toEqual([null, { force: true }]);
+    t.cleanup();
+  });
+
+  test("a correct tree stays quiet — no noop, no force, no inconclusive", () => {
+    // The positive control for every negative above: the same instrument on a
+    // tree known to be right returns a clean verdict, so a CLEAN result means
+    // "looked and found nothing", not "could not look".
+    const t = incidentTree("0.1.5");
+    const { emitted, installs } = runRefresh(t);
+    expect(installs).toEqual([null]);
+    const names = emitted.map((e) => e.event);
+    expect(names).not.toContain("plugin.checkout.deps_install_noop");
+    expect(names).not.toContain("plugin.checkout.deps_audit_inconclusive");
+    expect(names).toContain("plugin.checkout.updated");
+    t.cleanup();
   });
 });
 

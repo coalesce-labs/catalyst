@@ -778,15 +778,25 @@ covered a FAILING install; a no-op produced no signal at all.
   just reset to `origin/main`, so the lockfile IS authoritative.
 - **The discriminator is the IMPORTING package's resolved dependency, not the hoisted top-level
   copy.** `cloud-sync.mjs` imports the schema THROUGH the SDK, and under bun's isolated linker there
-  is frequently no top-level copy at all (measured on this repo:
-  `require.resolve("@catalyst-cloud/schema")` from the workspace root is `MODULE_NOT_FOUND` while
-  the SDK resolves it fine). A top-level probe reports "absent" or "fine" and never sees the stale
-  copy the daemons load.
-- **Resolution, not enumeration.** bun's `.bun` store keeps stale entries after an upgrade (measured
-  on this checkout: `@catalyst-cloud+schema@0.1.3` and `@0.1.5` both present, and
-  `@catalyst-cloud+sdk@0.8.1` alongside `0.8.2`), so a version's presence on disk says nothing about
-  what any importer loads. Only a resolve from the importer's own directory answers that — and it is
-  layout-agnostic, giving identical answers under the hoisted and isolated linkers.
+  is frequently no top-level copy at all (measured on this repo, both instruments agreeing:
+  `require.resolve("@catalyst-cloud/schema")` from the workspace root is `MODULE_NOT_FOUND` and the
+  disk probe returns null, while resolving it from the SDK's own directory returns 0.1.5). A
+  top-level probe reports "absent" or "fine" and never sees the stale copy the daemons load.
+- **Placement, not enumeration — and read off the DISK, never through the module loader.** bun's
+  `.bun` store keeps stale entries after an upgrade (measured on this checkout:
+  `@catalyst-cloud+schema@0.1.3` and `@0.1.5` both present, and `@catalyst-cloud+sdk@0.8.1`
+  alongside `0.8.2`), so a version's presence in the store says nothing about what any importer
+  loads; only the entry the importer's own `node_modules` ladder lands on does. The probe
+  (`plugin-refresh.mjs` `defaultResolvePackageFn`) walks that ladder with `readFileSync`, which is
+  layout-agnostic — under the hoisted linker the rung IS the package, under the isolated linker it
+  is a symlink into `.bun/`, and the read follows either. It deliberately does **not** use
+  `createRequire().resolve()`: **Node/bun module resolution is cached PROCESS-WIDE and a fresh
+  `createRequire` does not clear it**, so the first cut of this detector answered from cache rather
+  than disk (measured identically under node v25.8.2 and bun 1.3.5 — link flipped to 0.1.3, resolve
+  still reported 0.1.5). Inside the long-lived updater/broker daemons that meant the post-`--force`
+  re-audit reported a FALSE `deps_relink_failed` on every genuine repair, `deps_relinked` was always
+  `[]`, and a process that had once audited a good tree reported CLEAN on a tree that later went
+  stale. A question about bytes on disk gets answered by reading the disk.
 - **Scope of the audit** (`broker/lock-resolution-audit.mjs`, a leaf whose only I/O is an injected
   `resolvePackageFn` seam): just the entries whose resolution the pulled range MOVED, read off a
   structured parse of the `packages` block in `git show <oldSha>:<lockfile>` versus the file on disk.

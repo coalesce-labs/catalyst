@@ -37,9 +37,8 @@
 // deterministically testable without real load, timers, network, or a checkout.
 // Mirrors the gc-liveness.mjs / autotune.mjs seam-injection convention.
 
-import { readFileSync, existsSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { resolve, join, dirname } from "node:path";
 import { getEventName } from "./event-name.mjs"; // CTL-1348: leaf, not the heavy router
@@ -294,52 +293,69 @@ export function workspaceRootsFor(lockDir, { readFileFn = readFileSync, existsFn
 }
 
 /**
- * defaultResolvePackageFn — what `<id>` ACTUALLY resolves to when required from
+ * defaultResolvePackageFn — what `<id>` ACTUALLY resolves to when imported from
  * `fromDir`, as `{dir, version}` or null.
  *
- * Resolution, not directory enumeration, is the instrument: bun's `.bun` store
- * keeps stale entries after an upgrade (measured on this checkout,
- * @catalyst-cloud+schema@0.1.3 and @0.1.5 both present), so a package's presence
- * on disk says nothing about what an importer loads. It is also the only
- * layout-agnostic probe — identical answers under the hoisted and isolated
- * linkers.
+ * Directory PLACEMENT read off the disk, not `createRequire().resolve()`. The
+ * first cut of this probe used module resolution and was unusable for the exact
+ * reason this whole module exists: **Node/bun module resolution is cached
+ * PROCESS-WIDE, and a fresh `createRequire` does not clear that cache**. Measured
+ * identically under node v25.8.2 and bun 1.3.5 (macOS 26.5, arm64), isolated-
+ * linker layout, one process:
  *
- * `<id>/package.json` is tried first and the bare specifier second, because a
- * package with an `exports` map may not expose its own manifest. Either way the
- * version is read from the package.json that OWNS the resolved file (name ===
- * id), walking up — a package can ship a nested `dist/package.json`, and reading
- * a version out of THAT would silently record undefined (the same trap
- * cloud-sync-deps.mjs's findPackageJson documents).
+ *     before:              symlink -> 0.1.5 | resolve -> 0.1.5
+ *     after flip to 0.1.3: symlink -> 0.1.3 | resolve -> 0.1.5   <- STALE
+ *
+ * Held as a standing regression by the "THE DEFECT: a SECOND call in the SAME
+ * process sees the relink" test in plugin-refresh.test.mjs.
+ *
+ * In the long-lived updater daemon (`updater.mjs`'s setInterval) and the broker
+ * that consequence is total: the post-`--force` RE-audit answers from the cache
+ * the pre-force audit populated, so a SUCCESSFUL relink reported
+ * `deps_relink_failed` (an ERROR the docs describe as unfixable) and
+ * `deps_relinked` was permanently `[]`; and once a process had audited one good
+ * tree it reported CLEAN on a tree that had since gone stale — the detector
+ * blind to its own incident. A question about BYTES ON DISK must be answered by
+ * reading the disk.
+ *
+ * The walk is node's own `node_modules` ladder — `<dir>/node_modules/<id>`,
+ * rising to the filesystem root — which is what makes it layout-agnostic: under
+ * the hoisted linker the entry IS the package, under bun's isolated linker it is
+ * a symlink into `.bun/<id>@<version>/`, and `readFileSync` follows either. (The
+ * ladder is not pruned at a `node_modules` segment the way NODE_MODULES_PATHS
+ * prunes it; the extra probe is a miss on a path that cannot exist, and every
+ * directory the spec DOES visit is still visited, in the same order.)
+ *
+ * Version comes from the addressed `<id>/package.json` itself — no walking up to
+ * an "owning" manifest, since the path already names the package — and `dir` is
+ * realpath'd so a mismatch report names the store entry rather than the link.
+ * A realpath failure keeps the literal path: the version is the verdict, and
+ * losing the cosmetic path must not turn a real answer into a null (which the
+ * audit reads as "could not look").
+ *
+ * @param {string} fromDir importer directory to resolve from
+ * @param {string} id      package id, e.g. `@catalyst-cloud/schema`
  */
-function defaultResolvePackageFn(fromDir, id) {
-  let req;
-  try {
-    req = createRequire(join(fromDir, "package.json"));
-  } catch {
-    return null;
-  }
-  let entry = null;
-  try {
-    entry = req.resolve(`${id}/package.json`);
-  } catch {
-    /* an exports map may hide the manifest — fall through to the bare specifier */
-  }
-  if (!entry) {
-    try {
-      entry = req.resolve(id);
-    } catch {
-      return null;
-    }
-  }
-  let dir = dirname(entry);
+export function defaultResolvePackageFn(fromDir, id, { readFileFn = readFileSync, realpathFn = realpathSync } = {}) {
+  if (typeof fromDir !== "string" || !fromDir) return null;
+  if (typeof id !== "string" || !id) return null;
+  let dir = resolve(fromDir);
   for (;;) {
+    const candidate = join(dir, "node_modules", ...id.split("/"));
+    let parsed = null;
     try {
-      const parsed = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-      if (parsed?.name === id && typeof parsed.version === "string" && parsed.version) {
-        return { dir, version: parsed.version };
-      }
+      parsed = JSON.parse(readFileFn(join(candidate, "package.json"), "utf8"));
     } catch {
-      /* absent/malformed — keep walking up to the owning manifest */
+      parsed = null; // absent/unreadable/malformed here — keep climbing the ladder
+    }
+    if (parsed && typeof parsed.version === "string" && parsed.version) {
+      let real = candidate;
+      try {
+        real = realpathFn(candidate);
+      } catch {
+        /* keep the literal path — the version is the verdict */
+      }
+      return { dir: real, version: parsed.version };
     }
     const parent = dirname(dir);
     if (parent === dir) return null;
