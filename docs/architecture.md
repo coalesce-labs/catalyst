@@ -718,6 +718,28 @@ argv. Dep-skew is neither — the writer is healthy and fully capable of self-ac
   record-identity (pid must still name a live `cloud-sync.mjs`; a recycled pid is stale evidence),
   loaded-vs-locked (the incident), installed-vs-locked (the partial install a restart does **not**
   fix) — and can never PASS on absent, stale, or zero-comparison input.
+- **Unified event log** (the ticket's AC1 clause "the restart is visible in the event log"). The
+  heartbeat line above is a **log** stream; it never reaches `catalyst-events wait-for`, the broker,
+  the HUD, or orch-monitor, all of which read `~/catalyst/events/YYYY-MM.jsonl`. So the dep-skew
+  path appends a **v2 envelope** to that file through the same `getEventLogPath()` +
+  `appendFileSync` call `emitWriterIdleEvent` (CAT-21) already used in `cloud-sync.mjs` — the
+  capability was present and merely unused here. Two names, not one name plus a payload flag,
+  because `otel-forward` strips `body.payload` off-machine and an alert must be able to select a
+  real restart from `attributes` alone:
+
+  | Event                                    | Emitted when                                                                                    |
+  | ---------------------------------------- | ----------------------------------------------------------------------------------------------- |
+  | `catalyst.replica.dep_skew_restart`      | the writer IS exiting — budget spent, before `exitAfterClose`. At most once per process.        |
+  | `catalyst.replica.dep_skew_would_restart`| sustained skew that did NOT act: shadow mode (the default), exhausted budget, or an undurable ledger. `reason` names which. |
+
+  Both are built by the pure `depSkewEventEnvelope` (`cloud-sync-deps.mjs`) so the shape is
+  unit-testable without running the script-shaped writer, and both reuse `depSkewFields` for their
+  digest attributes so the event and the heartbeat line cannot drift. Emission is **fail-open** —
+  a failed append never blocks the self-heal exit — and the restart event is sequenced **before**
+  `exitAfterClose`, which can terminate the process at any point once called. Ordering rule: the
+  posture block emits only the *held* event (`wouldRestart && !restart`); the restart block owns
+  the acted one, so an event never claims a restart the ledger then declines. Registered in
+  `broker/namespace-parity.test.mjs` by import, not by re-typed literal.
 
 ### Two-axis worker state & the recordTransition chokepoint (CTL-764)
 

@@ -65,7 +65,11 @@
 // already nets a failed relaunch, with no change to either. Ships SHADOW by default
 // (CATALYST_CLOUD_SYNC_DEP_SKEW=off|shadow|enforce); the skew fields ride the freshness
 // heartbeat line in every mode, so the signal is alertable in Loki from day one instead of
-// being another `restart_needed` nobody watches.
+// being another `restart_needed` nobody watches. The restart ALSO lands on the unified event
+// log (`catalyst.replica.dep_skew_restart`, with `…_would_restart` for a detected-but-held
+// posture) via the same append emitWriterIdleEvent already uses — the heartbeat line is a LOG
+// stream and reaches neither `catalyst-events wait-for`, the broker, the HUD, nor
+// orch-monitor, which is the ticket's "the restart is visible in the event log" clause.
 import { CatalystReplica } from "@catalyst-cloud/sdk/node";
 import { getCloudSyncDepSkewLedgerPath, getCloudSyncDepsPath, getCloudSyncSelfHealPath, getEventLogPath, getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
@@ -75,8 +79,11 @@ import { classifyDepSkew, classifyStall, clearSelfHealBreadcrumb, exitAfterClose
 import {
   DEP_SKEW_ALERT,
   DEP_SKEW_REASON,
+  DEP_SKEW_RESTART_EVENT,
+  DEP_SKEW_WOULD_RESTART_EVENT,
   captureLoadedDeps,
   classifyRestartBudget,
+  depSkewEventEnvelope,
   depSkewFields,
   readRestartLedger,
   recordRestartAttempt,
@@ -142,6 +149,42 @@ function emitWriterIdleEvent({ host, tokenEnv, tokenSource, dbPath }) {
       },
       body: { message: `cloud-sync writer idle: no token in ${tokenEnv} (source=${tokenSource})` },
     };
+    const logPath = getEventLogPath();
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, `${JSON.stringify(envelope)}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// CTL-1659 — the AC1 clause "And the restart is visible in the event log". Deliberately the
+// SAME append that emitWriterIdleEvent performs (same file, same v2 envelope, same
+// fail-open `try`/`return false`): the unified log at ~/catalyst/events/YYYY-MM.jsonl is the
+// surface `catalyst-events wait-for`, the broker, the HUD and orch-monitor all read, and the
+// heartbeat line alone reaches none of them. The envelope itself is built by the pure
+// `depSkewEventEnvelope` in cloud-sync-deps.mjs so its shape is unit-testable without
+// running this script-shaped module. FAIL-OPEN, without exception: emitting the observation
+// must never be able to block or crash the self-heal exit it is describing — a lost event is
+// a lost event, a wedged writer is the incident.
+function emitDepSkewEvent({ name, currentLockHash, depSkew, restart }) {
+  try {
+    const envelope = depSkewEventEnvelope({
+      name,
+      host: getHostName(),
+      mode: DEP_SKEW_MODE,
+      reason: depSkew.reason,
+      bootLockHash: DEP_SKEW_BOOT_LOCK_HASH,
+      currentLockHash,
+      lockPath: DEP_SKEW_LOCK_PATH,
+      sustained: depSkew.sustained,
+      wouldRestart: depSkew.wouldRestart,
+      restart,
+      id: randomBytes(8).toString("hex"),
+      traceId: randomBytes(16).toString("hex"),
+      spanId: randomBytes(8).toString("hex"),
+      resource: buildCatalystResource({ serviceName: "catalyst.cloud-sync", host: getHostName() }),
+    });
     const logPath = getEventLogPath();
     mkdirSync(dirname(logPath), { recursive: true });
     appendFileSync(logPath, `${JSON.stringify(envelope)}\n`);
@@ -458,6 +501,15 @@ const emitTelemetry = () => {
         `cloud-sync: the root lockfile changed since this writer loaded its modules — the daemon is serving PRE-CHANGE code (mode=${DEP_SKEW_MODE}${depSkew.restart ? ", self-healing via restart" : `, no restart: ${depSkew.reason ?? "held"}`})`,
       );
     } catch { /* the alarm must never crash the writer */ }
+    // …and the same escalation step onto the UNIFIED EVENT LOG, gated on the same posture
+    // latch so a 30s heartbeat cannot spam it. Only the HELD case is emitted here: when
+    // `depSkew.restart` is true the restart block below owns the emission, because only
+    // AFTER the budget is spent is "restarting" a truthful claim — a ledger that cannot be
+    // persisted declines the exit, and an event announcing a restart that never happened is
+    // the same lie `restart_needed` told.
+    if (depSkew.wouldRestart && !depSkew.restart) {
+      emitDepSkewEvent({ name: DEP_SKEW_WOULD_RESTART_EVENT, currentLockHash, depSkew, restart: false });
+    }
   }
   if (depSkew.restart) {
     // Spend the durable budget FIRST: if the ledger cannot be persisted there is no loop
@@ -467,12 +519,29 @@ const emitTelemetry = () => {
     const spent = recordRestartAttempt(getCloudSyncDepSkewLedgerPath(), { ledger: depSkewLedger, now, windowMs: DEP_SKEW_BUDGET_WINDOW_MS });
     if (spent === null) {
       try { hlog.error({ event: "catalyst.replica.dep_skew", "catalyst.alert": DEP_SKEW_ALERT }, "cloud-sync: dep-skew restart DECLINED — the restart-budget ledger could not be persisted, so the loop has no terminator"); } catch { /* best-effort */ }
+      // The posture block above skipped its would-restart event (it saw `restart: true`, and
+      // deferred to this block), so without this line an enforce-mode host with an unwritable
+      // ledger would emit NOTHING to the unified log — silence on precisely the configuration
+      // that is trying to act and cannot. `reason` carries the ledger failure.
+      emitDepSkewEvent({
+        name: DEP_SKEW_WOULD_RESTART_EVENT,
+        currentLockHash,
+        depSkew: { ...depSkew, reason: "the dep-skew restart-budget ledger could not be persisted — declining the restart (the loop would have no terminator)" },
+        restart: false,
+      });
     } else {
       // Same exit path as the CTL-1508 genuine-stall self-heal, with a `reason`
       // discriminator: breadcrumb (so health-responder.sh's no-respawn condition nets a
       // failed relaunch) + bounded close + exit 1. NEVER exit 0 — the plist pairs
       // KeepAlive={SuccessfulExit:false} with an exit-0 "clean no-op, stay DOWN" contract,
       // so a clean exit here would permanently stop the replica writer.
+      //
+      // AC1's second clause, emitted HERE — after the budget is spent and before the exit,
+      // the one window in which "this writer is restarting for dep-skew" is both true and
+      // still recordable. Ordered ahead of clearInterval/exitAfterClose deliberately: the
+      // bounded close can exit the process at any point after it is called, so an append
+      // sequenced after it could be lost on exactly the runs that matter most.
+      emitDepSkewEvent({ name: DEP_SKEW_RESTART_EVENT, currentLockHash, depSkew, restart: true });
       writeSelfHealBreadcrumb(getCloudSyncSelfHealPath(), { cursor, stalledMs: null, sdkStatus, reason: DEP_SKEW_REASON });
       try { if (hbTimer) clearInterval(hbTimer); } catch { /* best-effort */ }
       exitAfterClose({ closePromise: replica.close(), exitCode: 1, timeoutMs: CLOSE_TIMEOUT_MS });

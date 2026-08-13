@@ -478,3 +478,82 @@ export function depSkewFields({ mode = null, bootLockHash = null, currentLockHas
     "catalyst.cloud_sync.deps.current_lock_hash": currentLockHash ? short(currentLockHash) : null,
   };
 }
+
+// ─── the unified-log event (AC1: "the restart is visible in the event log") ──
+//
+// The heartbeat fields above ride stderr → cloud-sync.log → Alloy → Loki, which is a LOG
+// stream: queryable, but not the same surface `catalyst-events wait-for`, the broker, the
+// HUD, and orch-monitor read. AC1's second clause asks for the RESTART itself on
+// `~/catalyst/events/YYYY-MM.jsonl`, and the capability was already present in cloud-sync.mjs
+// and simply unused here — `emitWriterIdleEvent` writes a v2 envelope to that very file for
+// the tokenless-writer case. So the dep-skew self-heal gets the same treatment, for the same
+// reason the ticket exists: a restart nobody can observe is indistinguishable from no
+// restart, which is exactly how `restart_needed` failed.
+//
+// TWO names rather than one name with an action attribute, because the alert that matters is
+// "a writer restarted itself" and a Grafana/LogQL rule must be able to select it WITHOUT
+// filtering on a payload field (otel-forward strips `body.payload` off-machine — everything
+// load-bearing here therefore rides `attributes`):
+//   • `…dep_skew_restart`       — the writer IS exiting now; the budget was spent and the
+//                                 relaunch is launchd's. Emitted at most once per process.
+//   • `…dep_skew_would_restart` — sustained skew that did NOT act: shadow mode (the shipping
+//                                 default), an exhausted budget, or a ledger that could not be
+//                                 persisted. `reason` names which.
+export const DEP_SKEW_RESTART_EVENT = "catalyst.replica.dep_skew_restart";
+export const DEP_SKEW_WOULD_RESTART_EVENT = "catalyst.replica.dep_skew_would_restart";
+
+// depSkewEventEnvelope — the v2 OTel envelope, built PURELY so the shape is unit-testable
+// without running the script-shaped writer. Everything non-deterministic (`ts`, the ids, the
+// resource) is injected by the caller exactly as `emitWriterIdleEvent` supplies its own —
+// which also keeps this module's zero-import property (node crypto/fs/path only), the one
+// `catalyst doctor`'s bare-Node runtime depends on.
+//
+// The digest attributes come from `depSkewFields`, NOT from a second hand-written copy, so
+// the event-log surface and the heartbeat line can never drift apart in what they name.
+export function depSkewEventEnvelope({
+  name,
+  host = null,
+  mode = null,
+  reason = null,
+  bootLockHash = null,
+  currentLockHash = null,
+  lockPath = null,
+  sustained = null,
+  wouldRestart = null,
+  restart = false,
+  ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+  id = null,
+  traceId = null,
+  spanId = null,
+  resource = null,
+} = {}) {
+  const acted = restart === true;
+  return {
+    ts,
+    id,
+    observedTs: ts,
+    // WARN, matching the pino line this rides beside: a dep-skew episode is actionable but
+    // not an outage — the writer is serving, just serving pre-change code.
+    severityText: "WARN",
+    severityNumber: 13,
+    traceId,
+    spanId,
+    resource,
+    attributes: {
+      "event.name": name,
+      "event.entity": "replica",
+      "event.action": acted ? "dep_skew_restart" : "dep_skew_would_restart",
+      "event.label": host,
+      host,
+      ...depSkewFields({ mode, bootLockHash, currentLockHash, skewed: true, sustained, wouldRestart }),
+      "catalyst.cloud_sync.deps.restart": acted,
+      "catalyst.cloud_sync.deps.lock_path": lockPath,
+      "catalyst.cloud_sync.deps.reason": reason,
+    },
+    body: {
+      message: acted
+        ? `cloud-sync: restarting to load the installed dependency fix — the root lockfile changed since this writer loaded its modules (${lockPath ?? "lockfile path not recorded"})`
+        : `cloud-sync: dependency skew detected, NOT restarting (mode=${mode ?? "?"}): ${reason ?? "held"}`,
+    },
+  };
+}

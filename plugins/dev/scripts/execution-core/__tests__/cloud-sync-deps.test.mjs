@@ -14,8 +14,11 @@ import { describe, test, expect } from "bun:test";
 import {
   CRITICAL_DEPS,
   DEP_SKEW_REASON,
+  DEP_SKEW_RESTART_EVENT,
+  DEP_SKEW_WOULD_RESTART_EVENT,
   captureLoadedDeps,
   classifyRestartBudget,
+  depSkewEventEnvelope,
   depSkewFields,
   evaluateDepSkew,
   findLockRoot,
@@ -427,6 +430,55 @@ describe("dep-skew restart budget", () => {
     }
   });
 
+  // The fixtures above all carry `count >= maxRestarts`, so the COUNT branch alone returns
+  // allowed:false and the timestamp guard is never the thing under test — deleting the guard
+  // outright leaves that test green (measured: `if (!Number.isFinite(ts) || ts > now)` →
+  // `if (false)` survived the whole file at 44 pass / 0 fail). The discriminating input is a
+  // ledger whose timestamp is unusable while its COUNT is still under the cap: with the guard
+  // the ledger is refused, without it `now - NaN >= windowMs` is false (NaN comparisons are
+  // always false), `count 0 >= 1` is false, and the fail-closed refusal degrades into a
+  // FULL budget — the loop terminator silently disarmed on exactly the corrupt/clock-skewed
+  // ledger it exists to survive.
+  test("an unusable timestamp refuses the restart EVEN WHEN the count is under the cap (isolates the guard from the count branch)", () => {
+    const underCap = [
+      { ledger: { ts: "nope", count: 0 }, why: "non-numeric ts (Number('nope') → NaN)" },
+      { ledger: { ts: NaN, count: 0 }, why: "literal NaN ts" },
+      { ledger: { ts: NOW + 60_000, count: 0 }, why: "future-dated ts (clock skew / a tampered ledger)" },
+      { ledger: { count: 0 }, why: "ts absent entirely" },
+    ];
+    for (const { ledger, why } of underCap) {
+      const v = classifyRestartBudget({ ledger, now: NOW, windowMs: 21_600_000, maxRestarts: 1 });
+      expect(v.allowed, `${why}: an unusable timestamp must NOT read as free budget`).toBe(false);
+      // The REASON separates the two branches: the timestamp guard says "no usable
+      // timestamp", the count branch says "exhausted". Asserting the text is what keeps this
+      // test honest about WHICH branch refused — an outcome-only assertion would pass again
+      // the moment someone widened the count branch to cover it.
+      expect(v.reason, `${why}: must be refused BY THE TIMESTAMP GUARD, not by the count cap`).toMatch(/no usable timestamp/i);
+      expect(v.count, `${why}: the guard reports an unknown count, never a fabricated 0`).toBeNull();
+    }
+  });
+
+  // POSITIVE CONTROL for the negative above: the same call shape, same maxRestarts, with a
+  // ledger whose timestamp IS usable and whose count is under the cap, DOES return free
+  // budget. Without this, a `classifyRestartBudget` that returned `allowed:false` for
+  // literally every input would satisfy every assertion in this describe block.
+  test("POSITIVE CONTROL — a well-formed in-window ledger under the cap still grants budget", () => {
+    const v = classifyRestartBudget({ ledger: { ts: NOW - 60_000, count: 0 }, now: NOW, windowMs: 21_600_000, maxRestarts: 1 });
+    expect(v.allowed).toBe(true);
+    expect(v.count).toBe(0);
+    expect(v.reason).toBeNull();
+  });
+
+  // `ts === now` is the boundary the guard's `ts > now` draws: a ledger written in this very
+  // millisecond is legitimate, not future-dated, so it must fall through to the count branch.
+  // Pinned because tightening the comparison to `>=` would refuse a same-millisecond write.
+  test("a ledger stamped at exactly `now` is NOT future-dated — it falls through to the count branch", () => {
+    expect(classifyRestartBudget({ ledger: { ts: NOW, count: 0 }, now: NOW, windowMs: 21_600_000, maxRestarts: 1 }).allowed).toBe(true);
+    const held = classifyRestartBudget({ ledger: { ts: NOW, count: 1 }, now: NOW, windowMs: 21_600_000, maxRestarts: 1 });
+    expect(held.allowed).toBe(false);
+    expect(held.reason).toMatch(/exhausted/i); // refused by the COUNT branch, proving the fall-through
+  });
+
   test("recordRestartAttempt increments within the window and resets past it", () => {
     const store = {};
     const io = {
@@ -474,5 +526,108 @@ describe("depSkewFields (the heartbeat-carried alert surface)", () => {
 describe("the self-heal exit reason", () => {
   test("dep-skew is a DISTINCT reason from the CTL-1508 stall, so the two paths stay separable", () => {
     expect(DEP_SKEW_REASON).toBe("dep-skew");
+  });
+});
+
+// ─── the unified-log event (AC1: "the restart is visible in the event log") ─────────────
+//
+// The acceptance clause this covers was REFUTED on the first cut of this PR: the dep-skew
+// restart wrote a pino line to stderr and nothing at all to ~/catalyst/events/YYYY-MM.jsonl,
+// so `catalyst-events wait-for`, the broker, the HUD and orch-monitor could not observe the
+// restart at all. The capability was present and simply unused — cloud-sync.mjs's
+// `emitWriterIdleEvent` already appends a v2 envelope to that exact file.
+describe("depSkewEventEnvelope (the unified event-log surface)", () => {
+  const base = {
+    host: "mini-2",
+    mode: "enforce",
+    reason: null,
+    bootLockHash: "sha256:0123456789abcdef",
+    currentLockHash: "sha256:fedcba9876543210",
+    lockPath: "/opt/plugin-source/bun.lock",
+    sustained: true,
+    wouldRestart: true,
+    ts: "2026-08-13T00:00:00Z",
+    id: "deadbeefdeadbeef",
+    traceId: "0".repeat(32),
+    spanId: "1".repeat(16),
+    resource: { "service.name": "catalyst.cloud-sync" },
+  };
+
+  test("is a V2 envelope — {ts, attributes, body, resource}, the shape catalyst-events reads", () => {
+    // v1 is the bash `{ts, event, orchestrator, worker, detail}` shape; a v2 consumer keys on
+    // attributes["event.name"], so an envelope missing `attributes` is an unreadable event.
+    const e = depSkewEventEnvelope({ name: DEP_SKEW_RESTART_EVENT, ...base, restart: true });
+    expect(e.ts).toBe("2026-08-13T00:00:00Z");
+    expect(e.observedTs).toBe(e.ts);
+    expect(e.resource).toEqual({ "service.name": "catalyst.cloud-sync" });
+    expect(e.attributes["event.name"]).toBe(DEP_SKEW_RESTART_EVENT);
+    expect(typeof e.body.message).toBe("string");
+    expect(e.severityText).toBe("WARN");
+    expect(e.severityNumber).toBe(13);
+    // It must survive the transport it will actually take.
+    expect(() => JSON.parse(JSON.stringify(e))).not.toThrow();
+    expect(JSON.stringify(e)).not.toContain("\n"); // one event, one JSONL line
+  });
+
+  test("the acted restart and the held would-restart are DISTINCT names and distinct actions", () => {
+    // Two names rather than one-name-plus-a-payload-field, because otel-forward strips
+    // `body.payload` off-machine: an alert rule that has to reach into the payload to tell a
+    // real restart from a shadow-mode observation cannot fire off-machine at all.
+    expect(DEP_SKEW_RESTART_EVENT).not.toBe(DEP_SKEW_WOULD_RESTART_EVENT);
+    const acted = depSkewEventEnvelope({ name: DEP_SKEW_RESTART_EVENT, ...base, restart: true });
+    const held = depSkewEventEnvelope({ name: DEP_SKEW_WOULD_RESTART_EVENT, ...base, mode: "shadow", reason: "dep-skew mode is shadow — would restart, mutating nothing", restart: false });
+    expect(acted.attributes["event.action"]).toBe("dep_skew_restart");
+    expect(held.attributes["event.action"]).toBe("dep_skew_would_restart");
+    expect(acted.attributes["catalyst.cloud_sync.deps.restart"]).toBe(true);
+    expect(held.attributes["catalyst.cloud_sync.deps.restart"]).toBe(false);
+    // The held event must NOT read as a restart in prose either — an operator scanning the
+    // log body is the second reader of this line.
+    expect(acted.body.message).toMatch(/restarting/i);
+    expect(held.body.message).toMatch(/NOT restarting/i);
+    expect(held.attributes["catalyst.cloud_sync.deps.reason"]).toMatch(/shadow/);
+  });
+
+  test("every load-bearing field rides ATTRIBUTES, because body.payload is stripped off-machine", () => {
+    const e = depSkewEventEnvelope({ name: DEP_SKEW_RESTART_EVENT, ...base, restart: true });
+    // Both digests, the mode, the sustained/would-restart verdict, the lockfile path and the
+    // host must all be answerable from `attributes` alone.
+    expect(e.attributes["catalyst.cloud_sync.deps.boot_lock_hash"]).toBe("0123456789ab");
+    expect(e.attributes["catalyst.cloud_sync.deps.current_lock_hash"]).toBe("fedcba987654");
+    expect(e.attributes["catalyst.cloud_sync.deps.mode"]).toBe("enforce");
+    expect(e.attributes["catalyst.cloud_sync.deps.sustained"]).toBe(true);
+    expect(e.attributes["catalyst.cloud_sync.deps.would_restart"]).toBe(true);
+    expect(e.attributes["catalyst.cloud_sync.deps.lock_path"]).toBe("/opt/plugin-source/bun.lock");
+    expect(e.attributes.host).toBe("mini-2");
+    expect(e.attributes["event.label"]).toBe("mini-2");
+    expect(e.body.payload).toBeUndefined();
+  });
+
+  test("the digest attributes come from depSkewFields, so the event and the heartbeat cannot drift", () => {
+    // Not a tautology: it pins that the envelope REUSES the shared field builder rather than
+    // hand-copying six key names that a later rename would silently split in two.
+    const e = depSkewEventEnvelope({ name: DEP_SKEW_RESTART_EVENT, ...base, restart: true });
+    const fields = depSkewFields({ mode: "enforce", bootLockHash: base.bootLockHash, currentLockHash: base.currentLockHash, skewed: true, sustained: true, wouldRestart: true });
+    for (const [k, v] of Object.entries(fields)) expect(e.attributes[k], `attribute ${k}`).toEqual(v);
+  });
+
+  test("carries no secret-shaped substring (it lands in a world-readable log file)", () => {
+    const e = depSkewEventEnvelope({ name: DEP_SKEW_RESTART_EVENT, ...base, restart: true });
+    expect(JSON.stringify(e)).not.toMatch(/token|secret|lin_|Bearer|sk-/i);
+  });
+
+  test("an unknown lock path degrades the message instead of printing 'undefined'", () => {
+    const e = depSkewEventEnvelope({ name: DEP_SKEW_RESTART_EVENT, ...base, lockPath: null, restart: true });
+    expect(e.body.message).not.toMatch(/undefined|null/);
+    expect(e.attributes["catalyst.cloud_sync.deps.lock_path"]).toBeNull();
+  });
+
+  test("the event names stay inside catalyst.replica.* — the family cloud-sync already owns", () => {
+    // Sibling of catalyst.replica.writer_idle, and clear of every CTL-1142 broker-protected
+    // prefix (`filter.`, `broker.daemon`, `session.heartbeat`, `phase.<slot>.<status>`).
+    for (const n of [DEP_SKEW_RESTART_EVENT, DEP_SKEW_WOULD_RESTART_EVENT]) {
+      expect(n).toMatch(/^catalyst\.replica\./);
+      expect(n.startsWith("filter.")).toBe(false);
+      expect(n.startsWith("broker.daemon")).toBe(false);
+    }
   });
 });

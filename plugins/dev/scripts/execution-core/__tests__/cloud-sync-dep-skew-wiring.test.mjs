@@ -72,10 +72,69 @@ describe("cloud-sync.mjs dep-skew wiring", () => {
     expect(SRC).toMatch(/\bexitAfterClose\s*\(/);
   });
 
+  // AC1's second clause — "And the restart is visible in the event log" — was REFUTED on the
+  // first cut of this PR: the restart block wrote a pino line to stderr and appended NOTHING
+  // to ~/catalyst/events/YYYY-MM.jsonl, so the surface `catalyst-events wait-for`, the broker,
+  // the HUD and orch-monitor all read had no record of it. These assertions are the standing
+  // guard against that regression, and they are checked against the block itself rather than
+  // the whole file — an emitter that exists somewhere in cloud-sync.mjs but is never called
+  // from the restart path is exactly the `restart_needed` failure with a new name.
+  test("the RESTART is appended to the unified event log, before the exit that would lose it", () => {
+    const restartBlock = SRC.slice(SRC.indexOf("if (depSkew.restart)"));
+    expect(restartBlock).toContain("DEP_SKEW_RESTART_EVENT");
+    const emit = restartBlock.indexOf("emitDepSkewEvent({ name: DEP_SKEW_RESTART_EVENT");
+    expect(emit).toBeGreaterThan(-1);
+    // Ordering is asserted against the CALLS (`name(` / `name({`), never the bare identifier:
+    // this file's prose names `exitAfterClose` and `recordRestartAttempt` in comments, and an
+    // offset taken from a comment is the unstructured-match-over-structured-data trap.
+    const exitCall = restartBlock.indexOf("exitAfterClose({");
+    const spendCall = restartBlock.indexOf("recordRestartAttempt(");
+    expect(exitCall).toBeGreaterThan(-1);
+    expect(spendCall).toBeGreaterThan(-1);
+    // exitAfterClose can terminate the process at any point after it is called, so an append
+    // sequenced after it is lost on exactly the runs that matter.
+    expect(emit).toBeLessThan(exitCall);
+    // …and after the budget is spent: announcing a restart the ledger then declines is the
+    // same lie `restart_needed` told.
+    expect(emit).toBeGreaterThan(spendCall);
+  });
+
+  test("the emitter appends to the UNIFIED LOG — the same file+call emitWriterIdleEvent uses", () => {
+    // A "telemetry" function that only writes a pino line would satisfy the test above while
+    // leaving the acceptance clause refuted, so the append itself is asserted structurally.
+    const emitter = SRC.slice(SRC.indexOf("function emitDepSkewEvent"), SRC.indexOf("function scrub"));
+    expect(emitter).toContain("getEventLogPath()");
+    expect(emitter).toMatch(/appendFileSync\(logPath, `\$\{JSON\.stringify\(envelope\)\}\\n`\)/);
+    expect(emitter).toContain("depSkewEventEnvelope"); // the unit-tested v2 envelope, not a hand-rolled one
+    // POSITIVE CONTROL for those anchors: the same instrument finds the KNOWN-WORKING
+    // emitter this one is modelled on. If `emitWriterIdleEvent` ever stops matching, the
+    // assertions above are measuring a moved target rather than a present one.
+    const known = SRC.slice(SRC.indexOf("function emitWriterIdleEvent"), SRC.indexOf("function emitDepSkewEvent"));
+    expect(known).toContain("getEventLogPath()");
+    expect(known).toMatch(/appendFileSync\(logPath, `\$\{JSON\.stringify\(envelope\)\}\\n`\)/);
+  });
+
+  test("the HELD posture is emitted too, and never claims a restart it did not perform", () => {
+    // Shadow is the shipping default, so the would-restart event is the one an operator sees
+    // in practice; without it the default configuration is silent on the unified log.
+    expect(SRC).toContain("DEP_SKEW_WOULD_RESTART_EVENT");
+    expect(SRC).toMatch(/if \(depSkew\.wouldRestart && !depSkew\.restart\)/);
+    // The undurable-ledger decline also emits — the posture block deferred to the restart
+    // block on `restart: true`, so without this an enforce-mode host with an unwritable
+    // ledger would emit nothing at all on the configuration that is trying to act.
+    const declineBlock = SRC.slice(SRC.indexOf("if (spent === null)"), SRC.indexOf("} else {", SRC.indexOf("if (spent === null)")));
+    expect(declineBlock).toContain("DEP_SKEW_WOULD_RESTART_EVENT");
+    expect(declineBlock).not.toContain("DEP_SKEW_RESTART_EVENT");
+  });
+
   test("the durable restart budget is spent BEFORE the exit (the loop terminator is wired)", () => {
     const restartBlock = SRC.slice(SRC.indexOf("if (depSkew.restart)"));
-    expect(restartBlock.indexOf("recordRestartAttempt")).toBeGreaterThan(-1);
-    expect(restartBlock.indexOf("recordRestartAttempt")).toBeLessThan(restartBlock.indexOf("exitAfterClose"));
+    // Anchored on the CALL shapes, not the bare identifiers — both names also appear in this
+    // block's prose, and an offset read out of a comment would still "pass" if the calls were
+    // reordered or removed.
+    expect(restartBlock.indexOf("recordRestartAttempt(")).toBeGreaterThan(-1);
+    expect(restartBlock.indexOf("exitAfterClose({")).toBeGreaterThan(-1);
+    expect(restartBlock.indexOf("recordRestartAttempt(")).toBeLessThan(restartBlock.indexOf("exitAfterClose({"));
   });
 
   test("mode defaults to SHADOW and is operator-selectable", () => {
