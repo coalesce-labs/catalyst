@@ -368,6 +368,22 @@ let _depSkewMismatches = 0;
 // Loki would be the earliest and weakest one, saying "no restart" about a run that went on
 // to restart. It re-arms (null) the moment skew clears.
 let _depSkewAlertedPosture = null;
+// A SECOND latch, for the undurable-ledger decline. That branch lives inside
+// `if (depSkew.restart)`, OUTSIDE the posture latch above, so with sustained skew in
+// enforce mode and a ledger that stays unwritable (a full or read-only ~/catalyst) it fires
+// on EVERY heartbeat: one ERROR line plus one `dep_skew_would_restart` event every 30s for
+// the whole incident — an alarm flooding the very surfaces (cloud-sync.log, the unified
+// event log) it exists to make legible. Same count-exactly / warn-sparsely discipline as
+// CTL-1817/CTL-1823 (otel-forward/lib/sparse-warn.ts): the condition is re-evaluated every
+// tick, the ANNOUNCEMENT is edge-triggered. Keyed on the same posture string as the alert
+// latch, so a genuine change (skew clears, the budget runs out, the run stops being
+// sustained) re-announces once; it re-arms (null) the moment skew clears.
+//
+// Deliberately latches only the EMISSIONS, never the write attempt: retrying
+// `recordRestartAttempt` each tick is what lets a repaired filesystem resume the self-heal,
+// and a latch that suppressed the retry would turn one transient EROFS into a permanent
+// refusal.
+let _depSkewDeclinedPosture = null;
 
 // CTL-1395: liveness + freshness telemetry. Every HEARTBEAT_INTERVAL_MS emit (a) the
 // CTL-1280 `daemon heartbeat` marker — feed-independent proof the writer is alive, → the
@@ -466,7 +482,7 @@ const emitTelemetry = () => {
     budgetReason: budget.reason,
   });
   const depSkewPosture = `${depSkew.skewed}:${depSkew.sustained}:${depSkew.wouldRestart}:${depSkew.restart}`;
-  if (!depSkew.skewed) _depSkewAlertedPosture = null; // re-arm the one-shot for the next episode
+  if (!depSkew.skewed) { _depSkewAlertedPosture = null; _depSkewDeclinedPosture = null; } // re-arm the one-shots for the next episode
   try {
     hlog.info(
       {
@@ -518,17 +534,26 @@ const emitTelemetry = () => {
     // running writer), which the doctor check and the alert above both name.
     const spent = recordRestartAttempt(getCloudSyncDepSkewLedgerPath(), { ledger: depSkewLedger, now, windowMs: DEP_SKEW_BUDGET_WINDOW_MS });
     if (spent === null) {
-      try { hlog.error({ event: "catalyst.replica.dep_skew", "catalyst.alert": DEP_SKEW_ALERT }, "cloud-sync: dep-skew restart DECLINED — the restart-budget ledger could not be persisted, so the loop has no terminator"); } catch { /* best-effort */ }
-      // The posture block above skipped its would-restart event (it saw `restart: true`, and
-      // deferred to this block), so without this line an enforce-mode host with an unwritable
-      // ledger would emit NOTHING to the unified log — silence on precisely the configuration
-      // that is trying to act and cannot. `reason` carries the ledger failure.
-      emitDepSkewEvent({
-        name: DEP_SKEW_WOULD_RESTART_EVENT,
-        currentLockHash,
-        depSkew: { ...depSkew, reason: "the dep-skew restart-budget ledger could not be persisted — declining the restart (the loop would have no terminator)" },
-        restart: false,
-      });
+      // EDGE-TRIGGERED, not per-tick. The write above is retried every heartbeat (that is
+      // how a repaired filesystem resumes the self-heal), but the ERROR line and the
+      // unified-log event are announced once per DECLINED POSTURE — otherwise a sustained
+      // skew with a permanently-unwritable ledger emits both every 30s for the duration of
+      // the incident, burying the one line an operator needs under thousands of copies of
+      // itself. The latch re-arms on any posture change and the moment skew clears.
+      if (depSkewPosture !== _depSkewDeclinedPosture) {
+        _depSkewDeclinedPosture = depSkewPosture;
+        try { hlog.error({ event: "catalyst.replica.dep_skew", "catalyst.alert": DEP_SKEW_ALERT }, "cloud-sync: dep-skew restart DECLINED — the restart-budget ledger could not be persisted, so the loop has no terminator"); } catch { /* best-effort */ }
+        // The posture block above skipped its would-restart event (it saw `restart: true`, and
+        // deferred to this block), so without this line an enforce-mode host with an unwritable
+        // ledger would emit NOTHING to the unified log — silence on precisely the configuration
+        // that is trying to act and cannot. `reason` carries the ledger failure.
+        emitDepSkewEvent({
+          name: DEP_SKEW_WOULD_RESTART_EVENT,
+          currentLockHash,
+          depSkew: { ...depSkew, reason: "the dep-skew restart-budget ledger could not be persisted — declining the restart (the loop would have no terminator)" },
+          restart: false,
+        });
+      }
     } else {
       // Same exit path as the CTL-1508 genuine-stall self-heal, with a `reason`
       // discriminator: breadcrumb (so health-responder.sh's no-respawn condition nets a

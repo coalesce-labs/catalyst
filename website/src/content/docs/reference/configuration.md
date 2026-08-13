@@ -821,13 +821,29 @@ one:
 and the one-shot episode warning carries `"catalyst.alert": "replica_dep_skew"` with both short
 digests, the lockfile path, and the reason a restart was or was not taken.
 
-`catalyst doctor` grades the same boot record as the advisory `cloud-sync-skew` check, over three
-links that each fail **closed**: the record's pid must still name a live `cloud-sync.mjs` (a dead or
+`catalyst doctor` grades the same boot record as the advisory `cloud-sync-skew` check, over links
+that each fail **closed**: the record's pid must still name a live `cloud-sync.mjs` (a dead or
 recycled pid makes the whole comparison stale evidence); the boot lockfile digest is compared against
 the current one at the **recorded root** (the daemons run from `~/catalyst/plugin-source`, not your
-dev checkout); and the installed `node_modules` version is compared against the lockfile's resolution
-— which catches the partial install a restart does **not** fix. An absent boot record, an unreadable
-lockfile, or zero packages compared all report **WARN "skew unknown"**, never PASS.
+dev checkout); **each package's boot entry-file digest is re-hashed and compared** — a repointed
+mutable artifact or a rebuilt workspace output changes the bytes the process holds while the lockfile
+text and the package version stay byte-identical, so the digest is the only discriminator that can
+see it; and the installed `node_modules` version is compared against **that install location's own
+lockfile entry** — bun keys its `packages` map by install location (`<id>` hoisted,
+`<parent>/<id>` nested), so a stale root install is never excused by an unrelated nested resolution
+carrying the same version. An absent boot record, an unreadable lockfile or entry file, an install
+path that cannot be associated with a lock entry, and zero packages compared all report
+**WARN "skew unknown"**, never PASS.
+
+The durable restart budget (`~/catalyst/cloud-sync.depskew.json`) is read **tri-state**: genuinely
+absent (`ENOENT`) is a full budget, but a ledger that exists and cannot be read or parsed **declines**
+the restart, and every field is type-checked before any numeric coercion (`Number(null)` is `0`, which
+would otherwise read as an expired window and re-arm a full budget). A corrupt ledger therefore holds
+restarts until an operator removes it — never destructive, since a skewed-but-running writer is
+exactly the pre-CTL-1659 behavior, now named by the check above. When the ledger cannot be persisted
+at all, the write is retried on every heartbeat (so a repaired filesystem resumes the self-heal) but
+the ERROR line and its `dep_skew_would_restart` event are **edge-triggered per posture**, so a
+sustained incident announces once instead of flooding the log every 30 s.
 
 > **Rollout note.** A writer that has not restarted since this shipped has no boot record, so the
 > first `catalyst doctor` run after deploy legitimately reports `cloud-sync-skew` WARN "skew

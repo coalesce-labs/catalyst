@@ -127,6 +127,43 @@ describe("cloud-sync.mjs dep-skew wiring", () => {
     expect(declineBlock).not.toContain("DEP_SKEW_RESTART_EVENT");
   });
 
+  // Round-2 finding 5. The decline branch sits INSIDE `if (depSkew.restart)` and therefore
+  // OUTSIDE the posture latch that guards the alert above it. With sustained skew in enforce
+  // mode and a ledger that stays unwritable (a full or read-only ~/catalyst), it ran on every
+  // heartbeat: one ERROR line plus one `dep_skew_would_restart` event every 30s for the whole
+  // incident — an alarm flooding the very two surfaces it exists to make legible. Same
+  // count-exactly / warn-sparsely shape as CTL-1817/CTL-1823's sparse-warn: the CONDITION is
+  // re-evaluated every tick, the ANNOUNCEMENT is edge-triggered.
+  test("the undurable-ledger DECLINE is latched, so a sustained incident announces once and not every 30s", () => {
+    const start = SRC.indexOf("if (spent === null)");
+    expect(start).toBeGreaterThan(-1);
+    const declineBlock = SRC.slice(start, SRC.indexOf("} else {", start));
+    // The guard, the assignment, and BOTH emissions must be inside it — a latch that covered
+    // only the pino line would still spam the unified event log, and vice versa.
+    const guard = declineBlock.indexOf("if (depSkewPosture !== _depSkewDeclinedPosture)");
+    expect(guard, "the decline must be gated on a posture latch, not run every tick").toBeGreaterThan(-1);
+    expect(declineBlock).toContain("_depSkewDeclinedPosture = depSkewPosture");
+    expect(declineBlock.indexOf("hlog.error("), "the ERROR line must sit inside the latch").toBeGreaterThan(guard);
+    expect(declineBlock.indexOf("emitDepSkewEvent({"), "the event emission must sit inside the latch").toBeGreaterThan(guard);
+    // The WRITE ATTEMPT must stay OUTSIDE the latch: retrying it each tick is what lets a
+    // repaired filesystem resume the self-heal. A latch over the retry would turn one
+    // transient EROFS into a permanent refusal.
+    expect(declineBlock).not.toContain("recordRestartAttempt(");
+    expect(SRC.slice(SRC.indexOf("if (depSkew.restart)"), start)).toContain("recordRestartAttempt(");
+  });
+
+  test("the decline latch is DECLARED and RE-ARMS when the skew clears (a latch that never resets is a permanent silence)", () => {
+    expect(SRC).toMatch(/let _depSkewDeclinedPosture = null;/);
+    // The re-arm rides the same `!depSkew.skewed` line as the alert latch, so the two can
+    // never drift into one resetting while the other stays stuck.
+    const rearm = SRC.match(/if \(!depSkew\.skewed\)[^\n]*\n?/)?.[0] ?? "";
+    expect(rearm).toContain("_depSkewAlertedPosture = null");
+    expect(rearm, "the decline latch must re-arm alongside the alert latch").toContain("_depSkewDeclinedPosture = null");
+    // POSITIVE CONTROL for this instrument: the pre-existing alert latch it is modelled on
+    // matches the same declaration shape, so a zero above is a measurement, not a bad regex.
+    expect(SRC).toMatch(/let _depSkewAlertedPosture = null;/);
+  });
+
   test("the durable restart budget is spent BEFORE the exit (the loop terminator is wired)", () => {
     const restartBlock = SRC.slice(SRC.indexOf("if (depSkew.restart)"));
     // Anchored on the CALL shapes, not the bare identifiers — both names also appear in this

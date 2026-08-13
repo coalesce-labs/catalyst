@@ -16,14 +16,18 @@ import {
   DEP_SKEW_REASON,
   DEP_SKEW_RESTART_EVENT,
   DEP_SKEW_WOULD_RESTART_EVENT,
+  RESTART_LEDGER_UNREADABLE,
   captureLoadedDeps,
   classifyRestartBudget,
   depSkewEventEnvelope,
   depSkewFields,
   evaluateDepSkew,
   findLockRoot,
+  lockKeyForPackageJsonPath,
+  lockedVersionForKey,
   lockedVersionsFor,
   readDepsBreadcrumb,
+  readRestartLedger,
   recordRestartAttempt,
   sha256File,
   writeDepsBreadcrumb,
@@ -502,6 +506,267 @@ describe("dep-skew restart budget", () => {
     expect(recordRestartAttempt("/tmp/led.json", { ledger: null, now: NOW }, { writeFile: () => { throw new Error("EROFS"); } })).toBeNull();
     // Positive control: the same call with a working writer DOES return a ledger.
     expect(recordRestartAttempt("/tmp/led.json", { ledger: null, now: NOW }, { writeFile: () => {}, rename: () => {} })).toEqual({ ts: NOW, count: 1 });
+  });
+});
+
+// ─── the ledger READ is tri-state (absent ≠ unreadable) ─────────────────────
+//
+// Round-2 finding 1. `readRestartLedger` returned the SAME `null` for "no file" and for
+// "a file I could not read or parse", and `classifyRestartBudget(null)` grants a FULL
+// budget. So in enforce mode a corrupt or momentarily-unreadable ledger permitted another
+// restart past the cap and then overwrote the evidence — the durable loop terminator
+// disarmed by exactly the corruption it exists to survive. Each negative below is paired
+// with the positive control on the same instrument.
+const enoent = () => { throw Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" }); };
+
+describe("readRestartLedger — absent and unreadable are DIFFERENT answers", () => {
+  test("a genuinely ABSENT ledger (ENOENT) reads as null → full budget (the normal first trip)", () => {
+    expect(readRestartLedger("/nope", { readText: enoent })).toBeNull();
+    // …and that null is what grants budget, which is why the cases below must NOT be null.
+    expect(classifyRestartBudget({ ledger: readRestartLedger("/nope", { readText: enoent }), now: NOW, maxRestarts: 1 }).allowed).toBe(true);
+  });
+
+  test("a ledger that EXISTS but does not parse is UNREADABLE, and the budget is DECLINED", () => {
+    const led = readRestartLedger("/bad", { readText: () => "{not json" });
+    expect(led).not.toBeNull();
+    expect(led).toBe(RESTART_LEDGER_UNREADABLE);
+    const v = classifyRestartBudget({ ledger: led, now: NOW, maxRestarts: 1 });
+    expect(v.allowed, "a corrupt ledger must never read as free budget").toBe(false);
+    expect(v.reason).toMatch(/could not be read or parsed/i);
+    expect(v.count).toBeNull();
+  });
+
+  test("a NON-ENOENT read failure (EACCES/EIO) is UNREADABLE, not absent — 'I could not look' ≠ 'not there'", () => {
+    for (const code of ["EACCES", "EIO", undefined]) {
+      const led = readRestartLedger("/x", { readText: () => { throw Object.assign(new Error(code ?? "boom"), code ? { code } : {}); } });
+      expect(led, `code=${code}`).toBe(RESTART_LEDGER_UNREADABLE);
+      expect(classifyRestartBudget({ ledger: led, now: NOW, maxRestarts: 1 }).allowed, `code=${code}`).toBe(false);
+    }
+  });
+
+  test("valid JSON that is not a ledger OBJECT (null / array / scalar) is UNREADABLE, never absent", () => {
+    for (const text of ["null", "[]", "42", '"ts"']) {
+      expect(readRestartLedger("/x", { readText: () => text }), text).toBe(RESTART_LEDGER_UNREADABLE);
+    }
+  });
+
+  test("POSITIVE CONTROL — a well-formed ledger file reads back as its object and still grades normally", () => {
+    const led = readRestartLedger("/ok", { readText: () => JSON.stringify({ ts: NOW - 60_000, count: 0 }) });
+    expect(led).toEqual({ ts: NOW - 60_000, count: 0 });
+    expect(classifyRestartBudget({ ledger: led, now: NOW, maxRestarts: 1 }).allowed).toBe(true);
+  });
+});
+
+// ─── raw types before coercion ──────────────────────────────────────────────
+//
+// Round-2 finding 2, and it is the SAME defect class the round-1 remediation just fixed one
+// level up: a guard that looks right while the fixture cannot discriminate. Every case here
+// therefore keeps `count` UNDER the cap, so the count branch can never be the thing that
+// refuses, and asserts the REASON so the test names WHICH guard fired.
+describe("classifyRestartBudget — raw field TYPES are checked before any Number() coercion", () => {
+  test("a syntactically valid `{ts: null}` must not become an epoch anchor and re-arm a full budget", () => {
+    // Number(null) === 0 → finite → not future → `now - 0 >= windowMs` → "expired window"
+    // → allowed:true, count:0. A FULL budget handed out by a corrupt ledger.
+    const v = classifyRestartBudget({ ledger: { ts: null, count: 0 }, now: NOW, windowMs: 21_600_000, maxRestarts: 1 });
+    expect(v.allowed, "`ts: null` coerces to 0 and reads as an expired window").toBe(false);
+    expect(v.reason).toMatch(/no usable timestamp/i);
+    expect(v.count).toBeNull();
+  });
+
+  test("every non-number `ts` that Number() would launder into a finite value is refused", () => {
+    // Each of these coerces to a finite number: [] → 0, true → 1, "0" → 0, "" → 0.
+    for (const ts of [null, [], true, false, "0", "", "1800000000000"]) {
+      const v = classifyRestartBudget({ ledger: { ts, count: 0 }, now: NOW, windowMs: 21_600_000, maxRestarts: 1 });
+      expect(v.allowed, `ts=${JSON.stringify(ts)} must not read as a usable anchor`).toBe(false);
+      expect(v.reason, `ts=${JSON.stringify(ts)}`).toMatch(/no usable timestamp/i);
+    }
+  });
+
+  test("a missing or non-numeric `count` is refused BY THE COUNT GUARD, not coerced to zero", () => {
+    // Number(undefined) || 0 === 0 and Number(null) || 0 === 0 → "nothing spent yet".
+    for (const ledger of [{ ts: NOW - 60_000 }, { ts: NOW - 60_000, count: null }, { ts: NOW - 60_000, count: "1" }, { ts: NOW - 60_000, count: 1.5 }, { ts: NOW - 60_000, count: -1 }, { ts: NOW - 60_000, count: NaN }]) {
+      const v = classifyRestartBudget({ ledger, now: NOW, windowMs: 21_600_000, maxRestarts: 1 });
+      expect(v.allowed, `count=${JSON.stringify(ledger.count)} must not read as "nothing spent yet"`).toBe(false);
+      // Naming the branch is what keeps this isolated: the timestamp here is perfectly
+      // usable, so a refusal blamed on the timestamp would mean the test is measuring the
+      // wrong guard.
+      expect(v.reason, `count=${JSON.stringify(ledger.count)}`).toMatch(/no usable count/i);
+      expect(v.count).toBeNull();
+    }
+  });
+
+  test("the type gate runs BEFORE the expired-window shortcut — a bogus count cannot re-arm on an untrusted anchor", () => {
+    // An expired window normally returns allowed:true without ever reading `count`; that
+    // shortcut must not be reachable from a ledger whose fields failed validation.
+    const v = classifyRestartBudget({ ledger: { ts: NOW - 21_600_001, count: "99" }, now: NOW, windowMs: 21_600_000, maxRestarts: 1 });
+    expect(v.allowed).toBe(false);
+    expect(v.reason).toMatch(/no usable count/i);
+  });
+
+  test("POSITIVE CONTROL — the same shapes with real numbers still grant and still exhaust", () => {
+    expect(classifyRestartBudget({ ledger: { ts: NOW - 60_000, count: 0 }, now: NOW, windowMs: 21_600_000, maxRestarts: 1 }).allowed).toBe(true);
+    expect(classifyRestartBudget({ ledger: { ts: NOW - 60_000, count: 1 }, now: NOW, windowMs: 21_600_000, maxRestarts: 1 }).allowed).toBe(false);
+    expect(classifyRestartBudget({ ledger: { ts: NOW - 21_600_001, count: 9 }, now: NOW, windowMs: 21_600_000, maxRestarts: 1 }).allowed).toBe(true);
+  });
+
+  test("recordRestartAttempt applies the SAME gate — a coercible-but-invalid prior never seeds the next ledger", () => {
+    const io = { writeFile: () => {}, rename: () => {} };
+    // Number("7") === 7, so the old coercion would have written count 8 and carried the
+    // untrusted anchor forward. The gate resets to a fresh, honest window instead.
+    expect(recordRestartAttempt("/tmp/led.json", { ledger: { ts: NOW - 60_000, count: "7" }, now: NOW, windowMs: 21_600_000 }, io)).toEqual({ ts: NOW, count: 1 });
+    expect(recordRestartAttempt("/tmp/led.json", { ledger: RESTART_LEDGER_UNREADABLE, now: NOW, windowMs: 21_600_000 }, io)).toEqual({ ts: NOW, count: 1 });
+    // POSITIVE CONTROL: a valid in-window prior IS carried forward and incremented.
+    expect(recordRestartAttempt("/tmp/led.json", { ledger: { ts: NOW - 60_000, count: 7 }, now: NOW, windowMs: 21_600_000 }, io)).toEqual({ ts: NOW - 60_000, count: 8 });
+  });
+});
+
+// ─── the captured entry digest is actually COMPARED ─────────────────────────
+//
+// Round-2 finding 3, and the most important of the five: `captureLoadedDeps` records
+// `entryHash` expressly as the discriminator ("the VERDICT keys on the digest") and NO
+// comparator read it back. A repointed mutable artifact / workspace output changes the bytes
+// the running process holds while the lockfile TEXT and the package version are identical —
+// so loaded-vs-locked reported ok, doctor PASSed, and the writer never restarted.
+describe("evaluateDepSkew — the captured ENTRY DIGEST is compared, not merely recorded", () => {
+  test("THE UNCOMPARED-DISCRIMINATOR DEFECT: same lockfile, same version, DIFFERENT entry bytes → skew", () => {
+    const files = fs();
+    const args = evalDeps(files);
+    // Nothing else moves: the lockfile text is byte-identical (so its digest matches) and
+    // package.json still says 0.8.2 (so installed-vs-locked is clean). ONLY the bytes the
+    // process loaded have changed underneath it.
+    files[SDK_ENTRY] = "// sdk entry bytes v2 — a repointed tarball, same semver\n";
+    const r = evaluateDepSkew(args);
+    const v = linkOf(r, "loaded-vs-locked");
+    expect(v.status, "changed entry bytes under an unchanged lockfile MUST skew").toBe("skew");
+    expect(r.skew).toBe(true);
+    expect(v.detail).toContain("@catalyst-cloud/sdk");
+    expect(v.detail).toMatch(/entry bytes changed/i);
+    expect(v.detail).toContain(SDK_ENTRY);
+    // The lockfile-digest half is genuinely clean here, which is what makes this a proof
+    // that the ENTRY digest is what produced the verdict.
+    expect(linkOf(r, "installed-vs-locked").status).toBe("ok");
+  });
+
+  test("the loaded entry file is unreadable NOW → INCONCLUSIVE, never ok (bytes UNKNOWN ≠ unchanged)", () => {
+    const files = fs();
+    const args = evalDeps(files);
+    delete files[SDK_ENTRY];
+    const v = linkOf(evaluateDepSkew(args), "loaded-vs-locked");
+    expect(v.status).toBe("inconclusive");
+    expect(v.detail).toMatch(/unreadable now/i);
+  });
+
+  test("a boot record carrying NO entry digest is INCONCLUSIVE — an unmeasured discriminator is not a clean one", () => {
+    const files = fs();
+    const args = evalDeps(files);
+    args.breadcrumb = { ...args.breadcrumb, packages: args.breadcrumb.packages.map((p) => ({ ...p, entryHash: null })) };
+    expect(linkOf(evaluateDepSkew(args), "loaded-vs-locked").status).toBe("inconclusive");
+  });
+
+  test("ZERO recorded packages cannot produce an ok loaded-vs-locked ([].every(p) === true)", () => {
+    const files = fs();
+    const args = evalDeps(files);
+    args.breadcrumb = { ...args.breadcrumb, packages: [] };
+    const v = linkOf(evaluateDepSkew(args), "loaded-vs-locked");
+    expect(v.status).toBe("inconclusive");
+    expect(v.detail).toMatch(/zero entry-digest comparisons/i);
+  });
+
+  test("POSITIVE CONTROL — unchanged bytes under an unchanged lockfile still report ok, naming the count", () => {
+    const v = linkOf(evaluateDepSkew(evalDeps(fs())), "loaded-vs-locked");
+    expect(v.status).toBe("ok");
+    expect(v.detail).toMatch(/entry digest\(s\) are unchanged/i);
+  });
+});
+
+// ─── the installed package is matched to ITS OWN lock resolution ────────────
+//
+// Round-2 finding 4. `locked.versions.includes(installed)` accepts ANY resolution anywhere
+// in the lockfile, so a stale ROOT install is excused by an unrelated NESTED entry that
+// happens to carry the same version — hiding the shadowed/partial install this link exists
+// to detect.
+const LOCK_TEXT_MULTI = `{
+  "lockfileVersion": 1,
+  "packages": {
+    "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.2", "", { "dependencies": {} }, "sha512-aaa=="],
+    "legacy-tool/@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.7.0", "", {}, "sha512-ddd=="],
+    "pino": ["pino@9.6.0", "", {}, "sha512-ccc=="],
+  }
+}`;
+
+describe("lockKeyForPackageJsonPath — install location → bun lock key", () => {
+  test("a hoisted install keys on the bare id; a nested one chains its parents", () => {
+    expect(lockKeyForPackageJsonPath(ROOT, `${ROOT}/node_modules/pino/package.json`)).toBe("pino");
+    expect(lockKeyForPackageJsonPath(ROOT, SDK_PKG)).toBe("@catalyst-cloud/sdk");
+    expect(lockKeyForPackageJsonPath(ROOT, `${ROOT}/node_modules/legacy-tool/node_modules/@catalyst-cloud/sdk/package.json`)).toBe("legacy-tool/@catalyst-cloud/sdk");
+    expect(lockKeyForPackageJsonPath(ROOT, `${ROOT}/node_modules/@babel/core/node_modules/semver/package.json`)).toBe("@babel/core/semver");
+    expect(lockKeyForPackageJsonPath(ROOT, `${ROOT}/node_modules/a/node_modules/b/node_modules/c/package.json`)).toBe("a/b/c");
+    expect(lockKeyForPackageJsonPath(`${ROOT}/`, SDK_PKG), "a trailing slash on the root is not a different root").toBe("@catalyst-cloud/sdk");
+  });
+
+  test("anything the path cannot answer returns null (→ the caller reports inconclusive), never a guess", () => {
+    // Outside the serving root; a workspace link that is not under node_modules at all
+    // (its bun key is the WORKSPACE's package name, which no path can supply); a dangling
+    // scope directory; a root that is not a string.
+    expect(lockKeyForPackageJsonPath(ROOT, "/elsewhere/node_modules/pino/package.json")).toBeNull();
+    expect(lockKeyForPackageJsonPath(ROOT, `${ROOT}/plugins/dev/scripts/execution-core/package.json`)).toBeNull();
+    expect(lockKeyForPackageJsonPath(ROOT, `${ROOT}/node_modules/@scope/package.json`)).toBeNull();
+    expect(lockKeyForPackageJsonPath(null, SDK_PKG)).toBeNull();
+    expect(lockKeyForPackageJsonPath(ROOT, null)).toBeNull();
+    // POSITIVE CONTROL on the same instrument: a well-formed path DOES resolve, so the
+    // nulls above are measurements rather than a function that only ever returns null.
+    expect(lockKeyForPackageJsonPath(ROOT, SDK_PKG)).toBe("@catalyst-cloud/sdk");
+  });
+});
+
+describe("lockedVersionForKey — the ONE resolution at a specific install location", () => {
+  test("reads the exact key, and does NOT accept a sibling nesting of the same id", () => {
+    expect(lockedVersionForKey(LOCK_TEXT_MULTI, "@catalyst-cloud/sdk", "@catalyst-cloud/sdk")).toEqual({ conclusive: true, version: "0.8.2", reason: null });
+    expect(lockedVersionForKey(LOCK_TEXT_MULTI, "legacy-tool/@catalyst-cloud/sdk", "@catalyst-cloud/sdk").version).toBe("0.7.0");
+    // The old any-occurrence matcher conflates exactly these two.
+    expect(lockedVersionsFor(LOCK_TEXT_MULTI, "@catalyst-cloud/sdk").versions).toEqual(["0.7.0", "0.8.2"]);
+  });
+
+  test("an absent key or an underivable one is INCONCLUSIVE, never 'no drift'", () => {
+    expect(lockedVersionForKey(LOCK_TEXT_MULTI, "other/@catalyst-cloud/sdk", "@catalyst-cloud/sdk").conclusive).toBe(false);
+    expect(lockedVersionForKey(LOCK_TEXT_MULTI, null, "@catalyst-cloud/sdk").reason).toMatch(/could not be associated/i);
+    expect(lockedVersionForKey("", "@catalyst-cloud/sdk", "@catalyst-cloud/sdk").conclusive).toBe(false);
+  });
+});
+
+describe("evaluateDepSkew — installed-vs-locked matches the package to ITS OWN lock entry", () => {
+  test("A STALE ROOT INSTALL IS NOT EXCUSED BY A NESTED RESOLUTION OF THE SAME VERSION", () => {
+    // Root locks 0.8.2, a nested copy locks 0.7.0, the ROOT install is at 0.7.0. The
+    // any-occurrence matcher reports ok on the strength of the nested entry — precisely the
+    // shadowed/partial install this link exists to detect.
+    const files = fs({ [LOCK]: LOCK_TEXT_MULTI });
+    const args = evalDeps(files);
+    files[SDK_PKG] = JSON.stringify({ name: "@catalyst-cloud/sdk", version: "0.7.0" });
+    const v = linkOf(evaluateDepSkew(args), "installed-vs-locked");
+    expect(v.status, "0.7.0 at the ROOT is skew even though 0.7.0 is locked for a NESTED key").toBe("skew");
+    expect(v.detail).toContain("installed 0.7.0");
+    expect(v.detail).toContain("0.8.2");
+    expect(v.detail, "the detail must name the install location that was compared").toContain('"@catalyst-cloud/sdk"');
+  });
+
+  test("POSITIVE CONTROL — the SAME multi-version lockfile reports ok when the root install matches the root entry", () => {
+    // Without this, the assertion above would also be satisfied by a comparator that had
+    // simply started reporting skew for everything.
+    expect(linkOf(evaluateDepSkew(evalDeps(fs({ [LOCK]: LOCK_TEXT_MULTI }))), "installed-vs-locked").status).toBe("ok");
+  });
+
+  test("an install path that cannot be associated with a lock entry is INCONCLUSIVE, and NAMES the elsewhere-versions without accepting them", () => {
+    const files = fs({ [LOCK]: LOCK_TEXT_MULTI });
+    const args = evalDeps(files);
+    // A workspace-linked package: real on disk, outside node_modules, so its bun key is the
+    // workspace's name and no path can supply it.
+    const outside = `${ROOT}/packages/sdk/package.json`;
+    files[outside] = JSON.stringify({ name: "@catalyst-cloud/sdk", version: "0.7.0" });
+    args.breadcrumb = { ...args.breadcrumb, packages: args.breadcrumb.packages.map((p) => ({ ...p, packageJsonPath: outside })) };
+    const v = linkOf(evaluateDepSkew(args), "installed-vs-locked");
+    expect(v.status, "an unassociable path must not silently match some other resolution").toBe("inconclusive");
+    expect(v.detail).toMatch(/could not be associated/i);
+    expect(v.detail).toMatch(/locked elsewhere at 0\.7\.0, 0\.8\.2/);
   });
 });
 

@@ -248,6 +248,68 @@ export function lockedVersionsFor(lockText, id) {
   return { conclusive: true, versions, reason: null };
 }
 
+// lockKeyForPackageJsonPath — bun's `packages` map is keyed by the INSTALL LOCATION, not by
+// the bare package name: a hoisted resolution is keyed `<id>` and a nested one
+// `<parent>/<id>`, with deeper nesting chaining the parents (`a/b/x`; measured in this
+// repo's own bun.lock as `@babel/core/semver`, `@eslint/eslintrc/ajv`, …). That key is
+// precisely the association `lockedVersionsFor` throws away, and throwing it away is a
+// fail-open: `versions.includes(installed)` accepts ANY resolution anywhere in the file, so
+// a ROOT install stranded at 0.7.0 while the root entry locks 0.8.2 reports "ok" on the
+// strength of some unrelated NESTED 0.7.0 — hiding the shadowed/partial install that is the
+// entire reason the installed-vs-locked link exists.
+//
+// Derived STRUCTURALLY from the recorded package directory relative to the serving root:
+// every hop must be a literal `node_modules` segment followed by a package name (two path
+// segments when the name is scoped). Anything that does not fit that shape returns null —
+// a path outside the recorded root, or a workspace package linked in from outside
+// `node_modules` (whose bun key is the WORKSPACE's package name, which the path alone
+// cannot supply). The caller renders a null key as INCONCLUSIVE and never falls back to the
+// permissive any-occurrence match: "I could not associate it" must not read as "it matches".
+export function lockKeyForPackageJsonPath(root, packageJsonPath) {
+  if (typeof root !== "string" || root.length === 0) return null;
+  if (typeof packageJsonPath !== "string" || packageJsonPath.length === 0) return null;
+  const dir = dirname(packageJsonPath);
+  const prefix = root.endsWith("/") ? root : `${root}/`;
+  if (!dir.startsWith(prefix)) return null;
+  const segs = dir.slice(prefix.length).split("/").filter((s) => s.length > 0);
+  const chain = [];
+  let i = 0;
+  while (i < segs.length) {
+    if (segs[i] !== "node_modules") return null;
+    i += 1;
+    if (i >= segs.length) return null;
+    let name = segs[i];
+    i += 1;
+    if (name.startsWith("@")) {
+      if (i >= segs.length) return null; // a scope with no package after it is not a package dir
+      name = `${name}/${segs[i]}`;
+      i += 1;
+    }
+    chain.push(name);
+  }
+  return chain.length > 0 ? chain.join("/") : null;
+}
+
+// lockedVersionForKey — the ONE resolution bun records at a specific install location.
+// Anchored on the exact key AND the value's `name@` prefix (the same structured-match
+// discipline `lockedVersionsFor` uses, minus the `(?:[^"]*/)?` wildcard that made it accept
+// every nesting). Three-valued: a key with no entry is INCONCLUSIVE, never "no drift".
+export function lockedVersionForKey(lockText, key, id) {
+  if (typeof lockText !== "string" || lockText.length === 0) {
+    return { conclusive: false, version: null, reason: "lockfile text unavailable" };
+  }
+  if (typeof key !== "string" || key.length === 0) {
+    return {
+      conclusive: false,
+      version: null,
+      reason: "the installed path could not be associated with a lockfile install location (outside the serving root, or a workspace link)",
+    };
+  }
+  const m = new RegExp(`"${escapeRe(key)}"\\s*:\\s*\\[\\s*"${escapeRe(id)}@([^"]+)"`).exec(lockText);
+  if (!m) return { conclusive: false, version: null, reason: `no "${key}" entry in the lockfile's packages map` };
+  return { conclusive: true, version: m[1], reason: null };
+}
+
 // ─── the three-link comparator ──────────────────────────────────────────────
 //
 // Each link answers a question the others cannot, and each fails closed:
@@ -320,7 +382,27 @@ export function evaluateDepSkew({
       : ok("boot-record-complete", `${(breadcrumb.packages ?? []).length} package(s) recorded at boot`),
   );
 
-  // Link 3 — loaded vs locked (the incident).
+  const packages = Array.isArray(breadcrumb.packages) ? breadcrumb.packages : [];
+
+  // Link 3 — loaded vs locked (the incident). TWO independent digests, both required, and
+  // a drift in EITHER is skew:
+  //   (a) the ROOT LOCKFILE's digest — did the resolution graph change since boot?
+  //   (b) each package's ENTRY-FILE digest — did the bytes the process actually loaded
+  //       change on disk since boot?
+  //
+  // (b) is not redundant with (a). `captureLoadedDeps` records `entryHash` expressly as the
+  // discriminator — this module's own header says "the VERDICT keys on the digest and the
+  // versions ride along only because the alert has to name them" — and until now NO
+  // comparator read it back. A repointed mutable artifact, a `bun link`ed workspace output,
+  // or an in-place rebuild changes the bytes the running process holds while the lockfile
+  // TEXT and the package version stay byte-identical: (a) alone reports ok, doctor PASSes,
+  // and the writer never restarts although it is serving pre-change code. A field captured
+  // as the discriminator and never compared is "a check that cannot fail" — the same defect
+  // class as `restart_needed`, one level further in.
+  //
+  // Fail-closed on both halves: an unknown digest on either side is INCONCLUSIVE (never
+  // ok), and ZERO recorded packages is inconclusive too — a loop that never ran is not a
+  // clean bill of health ([].every(p) === true is the trap this file is built against).
   const lockPath = breadcrumb.lockPath;
   const bootLockHash = breadcrumb.lockHash;
   let lockText = null;
@@ -330,27 +412,57 @@ export function evaluateDepSkew({
     lockText = null;
   }
   const currentLockHash = lockText === null ? null : sha256File(lockPath, { readText: () => lockText });
+  const loadedDrifts = [];
+  const loadedUnknowns = [];
   if (typeof bootLockHash !== "string" || bootLockHash.length === 0) {
-    verdicts.push(unknown("loaded-vs-locked", "boot record carries no lockfile digest — nothing to compare against"));
+    loadedUnknowns.push("boot record carries no lockfile digest — nothing to compare against");
   } else if (currentLockHash === null) {
-    verdicts.push(unknown("loaded-vs-locked", `lockfile ${lockPath} is unreadable now — skew is UNKNOWN, not absent`));
+    loadedUnknowns.push(`lockfile ${lockPath} is unreadable now — skew is UNKNOWN, not absent`);
   } else if (currentLockHash !== bootLockHash) {
+    loadedDrifts.push(`the root lockfile changed since the writer loaded its modules (boot ${short(bootLockHash)} → now ${short(currentLockHash)}, ${lockPath})`);
+  }
+  if (packages.length === 0) {
+    loadedUnknowns.push("no package identities recorded at boot — zero entry-digest comparisons is not a clean result");
+  }
+  for (const p of packages) {
+    const id = p?.id ?? "(unnamed package)";
+    if (typeof p?.entryHash !== "string" || p.entryHash.length === 0) {
+      loadedUnknowns.push(`${id}: no entry digest recorded at boot — the loaded bytes cannot be compared`);
+      continue;
+    }
+    if (typeof p?.resolvedPath !== "string" || p.resolvedPath.length === 0) {
+      loadedUnknowns.push(`${id}: no resolved entry path recorded at boot`);
+      continue;
+    }
+    const currentEntryHash = sha256File(p.resolvedPath, { readText });
+    if (currentEntryHash === null) {
+      loadedUnknowns.push(`${id}: entry file ${p.resolvedPath} is unreadable now — the loaded bytes are UNKNOWN, not unchanged`);
+      continue;
+    }
+    if (currentEntryHash !== p.entryHash) {
+      loadedDrifts.push(`${id} entry bytes changed on disk since the writer loaded them (boot ${short(p.entryHash)} → now ${short(currentEntryHash)}, ${p.resolvedPath})`);
+    }
+  }
+  if (loadedDrifts.length > 0) {
     verdicts.push(
       skew(
         "loaded-vs-locked",
-        `the root lockfile changed since the writer loaded its modules (boot ${short(bootLockHash)} → now ${short(currentLockHash)}, ${lockPath}) — ` +
-          "the daemon is serving pre-change modules; restart it (launchctl kickstart -k) to load the installed fix",
+        `${loadedDrifts.join("; ")} — the daemon is serving pre-change modules; restart it (launchctl kickstart -k) to load the installed fix`,
       ),
     );
+  } else if (loadedUnknowns.length > 0) {
+    verdicts.push(unknown("loaded-vs-locked", `could not compare: ${loadedUnknowns.join("; ")}`));
   } else {
-    verdicts.push(ok("loaded-vs-locked", `loaded modules match the current lockfile (${short(bootLockHash)})`));
+    verdicts.push(
+      ok("loaded-vs-locked", `loaded modules match the current lockfile (${short(bootLockHash)}) and all ${packages.length} entry digest(s) are unchanged on disk`),
+    );
   }
 
   // Link 4 — installed vs locked (what a restart does NOT fix).
-  const packages = Array.isArray(breadcrumb.packages) ? breadcrumb.packages : [];
   if (packages.length === 0) {
     verdicts.push(unknown("installed-vs-locked", "no package identities recorded at boot — zero comparisons is not a clean result"));
   } else {
+    const root = typeof breadcrumb.root === "string" ? breadcrumb.root : null;
     const drifts = [];
     const unknowns = [];
     for (const p of packages) {
@@ -364,13 +476,27 @@ export function evaluateDepSkew({
         unknowns.push(`${p.id}: installed package.json unreadable (${p.packageJsonPath ?? "path not recorded"})`);
         continue;
       }
-      const locked = lockText === null ? { conclusive: false, versions: [], reason: "lockfile unreadable" } : lockedVersionsFor(lockText, p.id);
-      if (!locked.conclusive) {
-        unknowns.push(`${p.id}: ${locked.reason}`);
+      if (lockText === null) {
+        unknowns.push(`${p.id}: lockfile unreadable`);
         continue;
       }
-      if (!locked.versions.includes(String(installed))) {
-        drifts.push(`${p.id} installed ${installed}, lockfile resolves ${locked.versions.join(", ")}`);
+      // The installed package is matched to ITS OWN lock entry, keyed by the install
+      // location, rather than to "any occurrence of this id anywhere in the lockfile".
+      const key = lockKeyForPackageJsonPath(root, p.packageJsonPath);
+      const locked = lockedVersionForKey(lockText, key, p.id);
+      if (!locked.conclusive) {
+        // Deliberately NOT a fallback onto `lockedVersionsFor`'s any-occurrence match —
+        // that permissive match IS the defect. The other resolutions still ride the REASON,
+        // so an operator gets the full diagnosis without the comparator accepting them.
+        const elsewhere = lockedVersionsFor(lockText, p.id);
+        const hint = elsewhere.conclusive
+          ? ` (the id IS locked elsewhere at ${elsewhere.versions.join(", ")}, under a different install location — not evidence about this one)`
+          : "";
+        unknowns.push(`${p.id}: ${locked.reason}${hint}`);
+        continue;
+      }
+      if (String(installed) !== locked.version) {
+        drifts.push(`${p.id} installed ${installed}, lockfile resolves ${locked.version} for "${key}"`);
       }
     }
     if (drifts.length > 0) {
@@ -410,28 +536,86 @@ export { short as shortDigest };
 // Same shape as health-responder.sh's attempt-cap markers: a window anchor plus a count,
 // where the passage of time re-arms the budget for free.
 
+// The ledger read is TRI-STATE, and the third state is the whole point. Collapsing
+// "no file" and "a file I could not read or parse" into one `null` hands
+// `classifyRestartBudget(null)` a FULL budget — so in enforce mode a corrupted or
+// momentarily-unreadable ledger PERMITS another restart past the cap and then
+// `recordRestartAttempt` overwrites the only surviving evidence of the previous one. The
+// durable loop terminator would be disarmed by exactly the corruption it exists to survive.
+//
+//   • `null`                      — genuinely ABSENT (ENOENT/ENOTDIR): never spent, full
+//                                   budget. This is the normal first-trip case.
+//   • `RESTART_LEDGER_UNREADABLE` — a ledger is (or may be) on disk and could not be read
+//                                   or parsed: the classifier declines, fail-closed.
+//   • the parsed object           — grade it on its contents.
+//
+// A read error carrying no `code` (an exotic fs, an injected reader) classifies as
+// UNREADABLE rather than absent, for the same reason the rest of this module fails closed:
+// "I could not look" is never "it is not there".
+export const RESTART_LEDGER_UNREADABLE = Object.freeze({ unreadable: true });
+
+const LEDGER_ABSENT_CODES = new Set(["ENOENT", "ENOTDIR"]);
+
 export function readRestartLedger(path, { readText = (p) => readFileSync(p, "utf8") } = {}) {
+  let raw;
   try {
-    const parsed = JSON.parse(readText(path));
-    return parsed && typeof parsed === "object" ? parsed : null;
+    raw = readText(path);
+  } catch (err) {
+    return LEDGER_ABSENT_CODES.has(err?.code) ? null : RESTART_LEDGER_UNREADABLE;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    // A bare `null`, a scalar, or an array is a file that EXISTS carrying something that is
+    // not a ledger — corruption, not absence, so it must not re-arm the budget either.
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    return RESTART_LEDGER_UNREADABLE;
   } catch {
-    return null; // absent = never spent = full budget (the normal case)
+    return RESTART_LEDGER_UNREADABLE;
   }
 }
 
+// readLedgerFields — the RAW-TYPE gate, run BEFORE any numeric coercion, because `Number()`
+// launders several distinct malformations into valid-looking numbers: `Number(null)` and
+// `Number([])` are 0, `Number(true)` is 1, `Number("5")` is 5, and `Number(undefined) || 0`
+// is 0. A syntactically valid ledger `{ts: null, count: 0}` therefore used to read as an
+// anchor at the epoch — an "expired window" — and re-armed a FULL budget; a missing or
+// non-numeric `count` coerced to zero and read as "nothing spent yet". Both are the
+// fail-OPEN direction inside a guard whose entire purpose is to fail closed. So the types
+// are CHECKED, never coerced: `typeof x === "number"` is the only test that rejects
+// null/""/[]/true/"5" before a coercion can rescue them, and `Number.isFinite` then rejects
+// NaN and ±Infinity.
+function readLedgerFields(ledger) {
+  if (ledger == null || typeof ledger !== "object" || Array.isArray(ledger)) return { ok: false, kind: "shape" };
+  // Identity would be enough within one module instance; the property check also covers a
+  // sentinel that crossed a module realm or a JSON round-trip.
+  if (ledger === RESTART_LEDGER_UNREADABLE || ledger.unreadable === true) return { ok: false, kind: "unreadable" };
+  if (typeof ledger.ts !== "number" || !Number.isFinite(ledger.ts)) return { ok: false, kind: "ts" };
+  if (typeof ledger.count !== "number" || !Number.isInteger(ledger.count) || ledger.count < 0) return { ok: false, kind: "count" };
+  return { ok: true, ts: ledger.ts, count: ledger.count };
+}
+
+const LEDGER_REFUSAL = {
+  unreadable: "restart budget ledger exists but could not be read or parsed — declining the restart (fail-closed; an unreadable ledger is not an empty one)",
+  shape: "restart budget ledger is malformed — declining the restart (fail-closed)",
+  ts: "restart budget ledger has no usable timestamp (malformed or future-dated) — declining the restart (fail-closed)",
+  count: "restart budget ledger has no usable count (absent or non-numeric) — declining the restart (fail-closed)",
+};
+
 // classifyRestartBudget — may this process spend a dep-skew restart? FAIL-CLOSED on a
-// malformed or future-dated ledger: a corrupt-but-numeric or clock-skewed `ts` must not
-// read as free budget (the same future-timestamp trap health-responder.sh hit, where a
-// negative age was permanently "within grace").
+// malformed, unreadable, or future-dated ledger: a corrupt-but-numeric or clock-skewed `ts`
+// must not read as free budget (the same future-timestamp trap health-responder.sh hit,
+// where a negative age was permanently "within grace"). Note the ordering: the type gate
+// runs BEFORE the expired-window shortcut, so a ledger with a bogus count cannot re-arm the
+// budget on the strength of an anchor read out of the same untrusted file. A corrupt ledger
+// therefore holds restarts until an operator removes it — which is never destructive: a
+// skewed-but-running writer is exactly today's behavior, and `catalyst doctor` names it.
 export function classifyRestartBudget({ ledger = null, now = Date.now(), windowMs = 21_600_000, maxRestarts = 1 } = {}) {
-  if (ledger == null) return { allowed: true, count: 0, reason: null };
-  if (typeof ledger !== "object") return { allowed: false, count: null, reason: "restart budget ledger is malformed — declining the restart (fail-closed)" };
-  const ts = Number(ledger.ts);
-  if (!Number.isFinite(ts) || ts > now) {
-    return { allowed: false, count: null, reason: "restart budget ledger has no usable timestamp (malformed or future-dated) — declining the restart (fail-closed)" };
-  }
+  if (ledger === null || ledger === undefined) return { allowed: true, count: 0, reason: null };
+  const fields = readLedgerFields(ledger);
+  if (!fields.ok) return { allowed: false, count: null, reason: LEDGER_REFUSAL[fields.kind] };
+  const { ts, count } = fields;
+  if (ts > now) return { allowed: false, count: null, reason: LEDGER_REFUSAL.ts };
   if (now - ts >= windowMs) return { allowed: true, count: 0, reason: null };
-  const count = Number(ledger.count) || 0;
   if (count >= maxRestarts) {
     return {
       allowed: false,
@@ -448,9 +632,14 @@ export function classifyRestartBudget({ ledger = null, now = Date.now(), windowM
 // no terminator, and declining a restart is never destructive — a skewed-but-running
 // daemon is exactly today's behavior, which doctor now names.
 export function recordRestartAttempt(path, { ledger = null, now = Date.now(), windowMs = 21_600_000 } = {}, { writeFile = writeFileSync, rename = renameSync } = {}) {
-  const ts = Number(ledger?.ts);
-  const withinWindow = Number.isFinite(ts) && ts <= now && now - ts < windowMs;
-  const next = withinWindow ? { ts, count: (Number(ledger?.count) || 0) + 1 } : { ts: now, count: 1 };
+  // The SAME raw-type gate the classifier uses, for the same reason: a prior whose fields
+  // cannot be trusted must not seed the next one. An unreadable/malformed prior anchors a
+  // FRESH window at `now` with count 1 rather than inheriting a coerced anchor — the
+  // conservative direction, since a fabricated older anchor would expire the window early
+  // and silently re-arm the budget on the next tick.
+  const prior = readLedgerFields(ledger);
+  const withinWindow = prior.ok && prior.ts <= now && now - prior.ts < windowMs;
+  const next = withinWindow ? { ts: prior.ts, count: prior.count + 1 } : { ts: now, count: 1 };
   try {
     const tmp = `${path}.tmp`;
     writeFile(tmp, JSON.stringify(next));

@@ -14,13 +14,22 @@ import { checkCloudSyncSkew } from "../doctor.mjs";
 const ROOT = "/opt/plugin-source";
 const LOCK = `${ROOT}/bun.lock`;
 const SDK_PKG = `${ROOT}/node_modules/@catalyst-cloud/sdk/package.json`;
+const SDK_ENTRY = `${ROOT}/node_modules/@catalyst-cloud/sdk/dist/node.js`;
+const SDK_ENTRY_BYTES = "// sdk entry bytes v1\n";
 const LOCK_TEXT = `{
   "packages": {
     "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.2", "", {}, "sha512-aaa=="],
   }
 }`;
+const sha256 = (s) => "sha256:" + new Bun.CryptoHasher("sha256").update(s).digest("hex");
 // The digest the writer would have recorded at boot for LOCK_TEXT above.
-const BOOT_LOCK_HASH = "sha256:" + new Bun.CryptoHasher("sha256").update(LOCK_TEXT).digest("hex");
+const BOOT_LOCK_HASH = sha256(LOCK_TEXT);
+// …and for the ENTRY FILE it actually loaded. This fixture used to carry a placeholder
+// `entryHash: "sha256:deadbeef"` with no corresponding file on the synthetic disk, which
+// was harmless only because NO comparator read `entryHash` back — the round-2 defect. Now
+// that the loaded-vs-locked link compares it, the healthy fixture has to supply the real
+// bytes; a fixture that cannot present the discriminator cannot exercise the check.
+const BOOT_ENTRY_HASH = sha256(SDK_ENTRY_BYTES);
 
 function breadcrumb(over = {}) {
   return {
@@ -35,10 +44,10 @@ function breadcrumb(over = {}) {
       {
         id: "@catalyst-cloud/sdk",
         specifier: "@catalyst-cloud/sdk/node",
-        resolvedPath: `${ROOT}/node_modules/@catalyst-cloud/sdk/dist/node.js`,
+        resolvedPath: SDK_ENTRY,
         packageJsonPath: SDK_PKG,
         version: "0.8.2",
-        entryHash: "sha256:deadbeef",
+        entryHash: BOOT_ENTRY_HASH,
       },
     ],
     ...over,
@@ -49,6 +58,7 @@ function deps(over = {}) {
   const files = {
     [LOCK]: LOCK_TEXT,
     [SDK_PKG]: JSON.stringify({ name: "@catalyst-cloud/sdk", version: "0.8.2" }),
+    [SDK_ENTRY]: SDK_ENTRY_BYTES,
     ...(over.files ?? {}),
   };
   delete over.files;

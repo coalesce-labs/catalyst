@@ -714,10 +714,38 @@ argv. Dep-skew is neither — the writer is healthy and fully capable of self-ac
 - **Alarm** rides the writer's existing structured heartbeat line in **every** mode
   (`depSkewFields` → stderr → `cloud-sync.log` → Alloy → Loki, `service_name=catalyst.cloud-sync`),
   because shadow-with-nobody-watching is precisely the failure being fixed. `catalyst doctor`'s
-  advisory `cloud-sync-skew` check grades the same record over three fail-closed links —
+  advisory `cloud-sync-skew` check grades the same record over four fail-closed links —
   record-identity (pid must still name a live `cloud-sync.mjs`; a recycled pid is stale evidence),
-  loaded-vs-locked (the incident), installed-vs-locked (the partial install a restart does **not**
-  fix) — and can never PASS on absent, stale, or zero-comparison input.
+  boot-record-complete, loaded-vs-locked (the incident), installed-vs-locked (the partial install a
+  restart does **not** fix) — and can never PASS on absent, stale, or zero-comparison input.
+- **What each comparator is anchored on, and why the obvious anchor is not enough.**
+  `loaded-vs-locked` compares TWO digests, not one: the root lockfile's, AND each package's boot
+  `entryHash` re-hashed from its recorded `resolvedPath`. The entry digest is not redundant — a
+  repointed mutable artifact, a `bun link`ed workspace output, or an in-place rebuild changes the
+  bytes the running process holds while the lockfile TEXT and the package version stay
+  byte-identical, so the lockfile digest alone reports ok and the writer never restarts. (Capturing
+  a field as the discriminator and never reading it back is "a check that cannot fail" — the same
+  shape as `restart_needed`, one level in.) `installed-vs-locked` matches each package to **its own**
+  lock entry via the install-location key bun uses (`<id>` hoisted, `<parent>/<id>` nested,
+  chained deeper — `lockKeyForPackageJsonPath`), never to "any occurrence of this id in the file":
+  with the SDK locked at 0.8.2 at the root and 0.7.0 under a nested parent, an any-occurrence match
+  accepts a stale 0.7.0 root install, hiding exactly the shadowed/partial install the link exists to
+  detect. A path that cannot be associated with a lock entry (outside the recorded root, or a
+  workspace link) reports **inconclusive naming the elsewhere-resolutions**, never a permissive match.
+- **The restart-budget ledger read is TRI-STATE.** Absent (`ENOENT`) → full budget; a ledger that
+  exists but cannot be read or parsed → `RESTART_LEDGER_UNREADABLE`, and the classifier declines.
+  Collapsing the two into one `null` meant a corrupt or momentarily-unreadable ledger granted a full
+  budget and then overwrote the evidence — the durable loop terminator disarmed by the corruption it
+  exists to survive. Field types are checked before any coercion, since `Number(null)`/`Number([])`
+  are `0` (an "expired window" → full budget) and `Number(undefined) || 0` is `0` ("nothing spent
+  yet"); the gate runs BEFORE the expired-window shortcut so a bogus count cannot re-arm on an anchor
+  read out of the same untrusted file.
+- **The undurable-ledger decline is edge-triggered.** That branch sits inside `if (depSkew.restart)`,
+  outside the posture latch guarding the alert above it, so a sustained skew with an unwritable
+  ledger emitted an ERROR line plus a `dep_skew_would_restart` event on **every** 30 s heartbeat for
+  the whole incident. `_depSkewDeclinedPosture` latches the announcement (re-arming on any posture
+  change and when skew clears) while the write itself is still retried each tick — same
+  count-exactly / warn-sparsely discipline as CTL-1817/CTL-1823's `otel-forward/lib/sparse-warn.ts`.
 - **Unified event log** (the ticket's AC1 clause "the restart is visible in the event log"). The
   heartbeat line above is a **log** stream; it never reaches `catalyst-events wait-for`, the broker,
   the HUD, or orch-monitor, all of which read `~/catalyst/events/YYYY-MM.jsonl`. So the dep-skew
