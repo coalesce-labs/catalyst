@@ -52,7 +52,66 @@ function toUnixNano(ts: string | undefined): number {
   return (Number.isNaN(t) ? Date.now() : t) * 1_000_000;
 }
 
+// CTL-1817: DEGENERATE-RECORD DETECTION.
+//
+// A record whose body maps to "" AND whose attributes map to [] carries nothing but a
+// timestamp and a severity once it is off this machine — its identity is destroyed in
+// transit. That is not a delivery failure, so none of the three existing guardrails can see
+// it: the forward SUCCEEDS, so `forward_failed`/DLQ-size never fire, and `forward_lag`'s
+// checkpoint advances normally. It was invisible for the same reason for a whole month
+// (531 `phase.rescue.*` + 1 `phase.orphan-pr.*` in 2026-08 on mini).
+//
+// The counter is deliberately NOT a repair. The mapping output is left byte-identical so a
+// degenerate record still forwards (dropping it here would trade silent corruption for
+// silent loss) and so the regression test can still observe the defect on a raw v3 fixture.
+// It is a DETECTOR: after the producer fix this should sit at zero forever, so any non-zero
+// value is itself the alarm.
+//
+// It is reported on destLog — the pino `~/catalyst/otel-forward.log`, which Alloy tails and
+// ships to Loki independently of this file's OTLP egress (log-shipper/config.alloy:22). That
+// independence is the point: an alarm that rides the transport it measures reads clean during
+// exactly the outage it exists to detect.
+let degenerateRecordCount = 0;
+
+/** Running count of degenerate records seen by this process. Expected to stay 0. */
+export function degenerateRecordTotal(): number {
+  return degenerateRecordCount;
+}
+
+/** Test seam — reset the process-scoped counter between cases. */
+export function resetDegenerateRecordTotal(): void {
+  degenerateRecordCount = 0;
+}
+
+// Best-effort identity for a record that, by definition, failed to present one in the shape
+// the mapper expects. Reads all three envelope shapes (v2 attributes ?? v1 event ?? v3 name)
+// so the warning can NAME the offending event instead of reporting an anonymous count.
+function describeDegenerate(ev: CanonicalEvent): string {
+  const raw = ev as unknown as Record<string, unknown>;
+  const v2 = ev.attributes?.["event.name"];
+  if (typeof v2 === "string" && v2) return v2;
+  if (typeof raw.event === "string" && raw.event) return raw.event;
+  if (typeof raw.name === "string" && raw.name) return raw.name;
+  return "(unidentifiable)";
+}
+
 export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
+  for (const ev of events) {
+    const bodyEmpty = !(ev.body?.message ?? ev.attributes?.["event.name"] ?? "");
+    const attrsEmpty = Object.keys((ev.attributes as unknown as Record<string, unknown>) ?? {}).length === 0;
+    if (bodyEmpty && attrsEmpty) {
+      degenerateRecordCount++;
+      destLog.warn(
+        {
+          event: describeDegenerate(ev),
+          ts: ev.ts,
+          service: ev.resource?.["service.name"] ?? null,
+          degenerate_total: degenerateRecordCount,
+        },
+        "otlp: DEGENERATE record — empty body AND no attributes; forwarded anyway, identity lost off-machine (CTL-1817)",
+      );
+    }
+  }
   return {
     resourceLogs: events.map((ev) => ({
       resource: {

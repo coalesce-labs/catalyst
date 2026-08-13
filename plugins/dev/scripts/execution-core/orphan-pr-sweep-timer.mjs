@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { appendFileSync } from "node:fs";
 import { log, getEventLogPath } from "./config.mjs";
+import { buildCanonicalEventLine } from "./lib/canonical-event.mjs"; // CTL-1817
 import { DEFAULTS, decideOrphanNotify } from "./orphan-pr-sweep.mjs";
 
 // readOrphanPrSweepConfig — read catalyst.orchestration.orphanPrSweep.*
@@ -143,11 +144,30 @@ function defaultPersist(orchDir, state) {
   renameSync(tmp, final);
 }
 
-// defaultEmit — append a bare event envelope to the event log (best-effort).
-function defaultEmit(name, payload) {
+// defaultEmit — append a CANONICAL event envelope to the event log (best-effort).
+//
+// CTL-1817: was a bare `{ name, ...payload, ts }` line (the "v3" shape), which otel-forward
+// maps to an OTLP record with an EMPTY body and EMPTY attributes — the PR number survived
+// only inside the event name, and the name never reached the wire. Same defect, same fix as
+// stale-pr-rescue-timer.mjs; these were the only two v3 producers on the log (measured on
+// mini over 2026-08: 531 phase.rescue + 1 phase.orphan-pr = the entire v3 population).
+//
+// `vcs.pr.number` is the established attribute for a PR number (77 uses in-tree), so the
+// orphan notification is queryable by PR instead of by string-matching the event name.
+// Exported for unit tests (canonical-event.test.mjs).
+export function defaultEmit(name, payload) {
   try {
-    const line = JSON.stringify({ name, ...payload, ts: new Date().toISOString() });
-    appendFileSync(getEventLogPath(), line + "\n");
+    appendFileSync(
+      getEventLogPath(),
+      buildCanonicalEventLine({
+        name,
+        payload,
+        attributes: {
+          ...(payload?.number !== undefined ? { "vcs.pr.number": payload.number } : {}),
+          ...(payload?.repo ? { "vcs.repository.name": payload.repo } : {}),
+        },
+      }),
+    );
   } catch { /* best-effort */ }
 }
 
