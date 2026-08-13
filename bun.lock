@@ -211,7 +211,7 @@
 
     "@catalyst-cloud/replicate": ["@catalyst-cloud/replicate@0.1.3", "", { "dependencies": { "@catalyst-cloud/schema": "^0.1.3" } }, "sha512-7LyYJTG5fkjq9RA8OaCpCzP2b/gjPOYJJmCxRce++TPsIviQULpTiaffL7MuBfwGODf2dwGrO0ozeW7n8slTTQ=="],
 
-    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.3", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-qZGbGvJuvputQlX2TCH5IYAGGVJjunh7tZc9tsp4YxoE82Bj34F+zjqgtCuMTAc6yzR7rNJv90ZjZBLDNoKYwg=="],
+    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.5", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-00jtw6f9bUwwR3aeviECqNHfuMrlLK73cOym4wCLBdMJNLOBo0NYM7HlkH6ejWpqycq7EI2ECfys4wqzqnhT5g=="],
 
     "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.2", "", { "dependencies": { "@catalyst-cloud/read-model": "^0.1.0", "@catalyst-cloud/replicate": "^0.1.3", "@catalyst-cloud/schema": "^0.1.3" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <2", "@sqlite.org/sqlite-wasm": "*", "better-sqlite3": "*" }, "optionalPeers": ["@opentelemetry/api", "@sqlite.org/sqlite-wasm", "better-sqlite3"] }, "sha512-QJZFWZAfDdLCr4jvfS05BfuZDR5jr6bN4n/DN2vgMQB9pRTTrZAtk+mbvcK8M3NwfxyuPD0ICVM4Qe+/8jtnEg=="],
 
