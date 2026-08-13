@@ -370,10 +370,19 @@ The lesson generalizes past this one shape: **reasoning from the mapper alone sk
 front of it.** A detector placed at the mapper cannot observe what a filter already threw away —
 which is exactly the mistake the first fix made.
 
-⏳ **Status of the fix (as of this revision): the drops are still silent.** CTL-1817's PR #3325 adds
-the gate-level detectors — `noteUnrecognizedLine` (tailer) and a `skippedNoAttributes` counter
-(`processLine`) — but until it merges, **neither exists in the tree**, and both gates discard without
-recording anything. Treat "the loss is observable" as pending, not as current behavior.
+✅ **Status of the fix: both gates now record their drops** (CTL-1817, PR #3325, merged 2026-08-13).
+`noteUnrecognizedLine` reports at the tailer and a `skippedNoAttributes` counter reports at
+`processLine`; both count every occurrence and warn sparsely (once per distinct event name, then on
+exponentially-spaced totals), on the pino `~/catalyst/otel-forward.log` that Alloy ships
+**independently of otel-forward's own OTLP egress** — an alarm riding the pipe it measures reads
+clean during exactly the outage it exists to detect. Both producers of the v3 shape were fixed in the
+same PR, so the counters should sit at zero; any non-zero value is itself the alarm.
+
+⚠ One caveat, tracked as **CTL-1823**: the separate *mapper*-level degenerate counter
+(`degenerateRecordTotal`) is incremented inside `buildOtlpPayload`, which runs once per send
+**attempt** — so under OTLP retries or a DLQ replay it counts the same record more than once. It is
+an attempt count, not a record count, precisely when the backend is in trouble. The two **gate**
+counters above sit on the tail path, run once per line, and do not have this defect.
 
 **Four producers put an identifier in the name and nowhere else.** All four must gain an attribute
 **before** any suffix is stripped, or the migration destroys information:
@@ -470,9 +479,10 @@ label — 1,476 names cost zero index cardinality and zero Prometheus series. If
 name count, the honest answer would be "don't bother." It does not. It rests on three measured
 facts:
 
-1. **Live data loss** — 531 events/month **discarded before they leave the host**, at
-   `tail.ts`'s `shouldForward` filter and `index.ts`'s no-attributes drop (see §4.1b; NOT forwarded
-   degenerately at `otlp.ts` — that was the original, corrected reading). Fixed by Step 0 alone.
+1. **Live data loss** — 531 events/month **discarded before they leave the host**, all of them at
+   `tail.ts`'s `shouldForward` filter (see §4.1b — NOT forwarded degenerately at `otlp.ts`, the
+   original and corrected reading, and NOT at `index.ts`'s no-attributes drop, which these records
+   never reach). Fixed by Step 0 alone.
 2. **Proven grammar drift** — the phase grammar exists in **four** hand-copies, and one of them has
    _already_ silently diverged in production:
 
