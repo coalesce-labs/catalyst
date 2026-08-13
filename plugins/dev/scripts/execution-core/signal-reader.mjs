@@ -107,6 +107,50 @@ export function computeLastPhaseAdvanceTs(signals, { self, now = Date.now() } = 
   return latest == null ? null : new Date(latest).toISOString();
 }
 
+// CAT-126 (deferred CAT-57 finding 5): readAllPhaseSignals is a readdir +
+// JSON.parse of every retained per-phase signal, and two publishers in the same
+// daemon need the same derived value on different cadences. A short shared TTL
+// memo drops the slower publisher's duplicate walk while remaining below the
+// 30-second heartbeat cadence. Null is a legitimate result and is cached; a
+// failed walk is not, so the next call retries.
+const LAST_ADVANCE_CACHE_MS_DEFAULT = 25_000;
+const lastAdvanceCache = new Map();
+
+function resolveLastAdvanceCacheMs(env) {
+  const configured = Number(env?.EXECUTION_CORE_LAST_ADVANCE_CACHE_MS);
+  return Number.isFinite(configured) && configured >= 0
+    ? configured
+    : LAST_ADVANCE_CACHE_MS_DEFAULT;
+}
+
+export function clearLastPhaseAdvanceCache() {
+  lastAdvanceCache.clear();
+}
+
+export function readLastPhaseAdvanceCached(
+  { orchDir, self },
+  { now = Date.now, env = process.env, readSignals = readAllPhaseSignals } = {},
+) {
+  const ttlMs = resolveLastAdvanceCacheMs(env);
+  const timestamp = now();
+  const key = `${orchDir}\0${self ?? ""}`;
+  if (ttlMs > 0) {
+    const cached = lastAdvanceCache.get(key);
+    const ageMs = cached ? timestamp - cached.cachedAt : -1;
+    if (cached && ageMs >= 0 && ageMs < ttlMs) return cached.value;
+  }
+
+  let signals;
+  try {
+    signals = readSignals(orchDir);
+  } catch {
+    return null;
+  }
+  const value = computeLastPhaseAdvanceTs(signals, { self, now: timestamp });
+  if (ttlMs > 0) lastAdvanceCache.set(key, { cachedAt: timestamp, value });
+  return value;
+}
+
 // readWorkerSignals — glob both layouts under ${orchDir}/workers/ and return
 // a canonical WorkerSignal per worker:
 //   { ticket, layout:'flat'|'nested', signalPath, phase, status,
@@ -149,6 +193,20 @@ export function readWorkerSignals(orchDir) {
 // freshest active one byActivePhase picks. readWorkerSignals stays the
 // canonical active-phase projection for the scheduler; this is the strictly
 // wider observation set the fact collector records.
+//
+// PERFORMANCE, measured — CAT-126 (CAT-57 deferred finding 5), 2026-08-12.
+// This is an un-memoized two-level scan called by two independent timers in the
+// daemon process: the 30 s node heartbeat (daemon.mjs lastAdvanceAtFn, ~120/hr,
+// unconditional) and the 120 s liveness publisher (cluster-heartbeat-publisher.mjs
+// lastAdvanceAt, ≤30/hr, linear mode only). CAT-57's review flagged the missing memo.
+// MEASURED on a live orchDir (28 worker dirs / 133 signals): 2.18 ms per invocation,
+// ~0.33 s/hr of blocked event loop across both callers — 0.009% of wall-clock, and
+// ~1.6 s/hr even at the 137-dir size of the 2026-06-16 incident that motivated
+// worker-dir-gc. A memo would recover ~0.07 s/hr and would have to be either a
+// module-level TTL cache (shared mutable state + a staleness window on a LIVENESS
+// path — what recovery.mjs:4080-4084 argues against) or a per-tick closure (no tick
+// exists here; both callers are setInterval). Deliberately NOT memoized. Re-measure
+// before reopening.
 export function readAllPhaseSignals(orchDir) {
   const workersDir = join(orchDir, "workers");
   const out = [];

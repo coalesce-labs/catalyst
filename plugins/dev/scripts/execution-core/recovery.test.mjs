@@ -49,6 +49,8 @@ import {
   defaultAppendOperatorEvent,
   // 2026-08-03
   detectSessionRateLimitHit,
+  readPeerLivenessRecords,
+  peerLivenessConfigured,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -66,6 +68,39 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(orchDir, { recursive: true, force: true });
+});
+
+describe("CAT-126 shared peer-liveness seam", () => {
+  test("readPeerLivenessRecords dispatches to the cached reader for the active source", () => {
+    const calls = [];
+    const deps = {
+      readSource: () => "loki",
+      readLokiUrl: () => "http://loki.test",
+      readLoki: (...args) => (calls.push(["loki", ...args]), { mini: { last_seen: "now" } }),
+      readLinear: (...args) => (calls.push(["linear", ...args]), {}),
+    };
+
+    expect(readPeerLivenessRecords("CAT-1", { strict: true }, deps)).toEqual({
+      mini: { last_seen: "now" },
+    });
+    expect(calls).toEqual([
+      ["loki", { lokiUrl: "http://loki.test" }, { strict: true }],
+    ]);
+
+    calls.length = 0;
+    deps.readSource = () => "linear";
+    readPeerLivenessRecords("CAT-1", {}, deps);
+    expect(calls).toEqual([
+      ["linear", { anchorIssue: "CAT-1" }, { strict: false }],
+    ]);
+  });
+
+  test("peerLivenessConfigured reports configuration for the active source", () => {
+    expect(peerLivenessConfigured(null, { readSource: () => "loki", readLokiUrl: () => null })).toBe(false);
+    expect(peerLivenessConfigured(null, { readSource: () => "loki", readLokiUrl: () => "http://loki.test" })).toBe(true);
+    expect(peerLivenessConfigured(null, { readSource: () => "linear", readLokiUrl: () => null })).toBe(false);
+    expect(peerLivenessConfigured("CAT-1", { readSource: () => "linear", readLokiUrl: () => null })).toBe(true);
+  });
 });
 
 // --- helpers --------------------------------------------------------------

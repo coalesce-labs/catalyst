@@ -2,8 +2,12 @@
 // (CTL-1090, Phase 4). Injects fakes for publish, ownedTickets, roster, etc.
 // so no network, fs, or subprocess is touched.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startLivenessPublisher } from "./cluster-heartbeat-publisher.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
+import { clearLastPhaseAdvanceCache } from "./signal-reader.mjs";
 
 describe("startLivenessPublisher (CTL-1090)", () => {
   // CTL-1420 follow-up: the publisher now consults the shared CTL-679 breaker
@@ -84,6 +88,29 @@ describe("startLivenessPublisher (CTL-1090)", () => {
     startLivenessPublisher({ ...base, lastAdvanceAt: () => { throw new Error("bad signal"); } }).stop();
     expect(calls[0].lastAdvanceAt).toBe("2026-08-09T02:00:00Z");
     expect(calls[1].lastAdvanceAt).toBeNull();
+  });
+
+  test("CAT-126: the default lastAdvanceAt seam shares the signal-reader memo", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cat126-publisher-"));
+    const worker = join(dir, "workers", "CAT-126");
+    mkdirSync(worker, { recursive: true });
+    clearLastPhaseAdvanceCache();
+    const signalPath = join(worker, "phase-implement.json");
+    writeFileSync(signalPath, JSON.stringify({ ticket: "CAT-126", phase: "implement", status: "done", completedAt: "2026-08-09T01:00:00Z" }));
+    const calls = [];
+    const base = { orchDir: dir, roster: ["mini", "peer"], anchorIssue: "CAT-1", self: "mini",
+      ownedTickets: () => [], publish: (args) => calls.push(args), intervalMs: 60_000 };
+    try {
+      startLivenessPublisher(base).stop();
+      writeFileSync(signalPath, JSON.stringify({ ticket: "CAT-126", phase: "implement", status: "done", completedAt: "2026-08-09T02:00:00Z" }));
+      startLivenessPublisher(base).stop();
+      expect(calls.map((call) => call.lastAdvanceAt)).toEqual([
+        "2026-08-09T01:00:00.000Z",
+        "2026-08-09T01:00:00.000Z",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("CTL-1092: publishes this host's currentMaxParallel() with each heartbeat", () => {

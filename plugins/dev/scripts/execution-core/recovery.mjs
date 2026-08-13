@@ -71,19 +71,31 @@ import { readClusterLivenessFromLokiSyncCached } from "./loki-liveness-sync.mjs"
 // wrappers spread it straight through to the sync reader on a miss; a cache HIT (a
 // recent determinate success) legitimately skips the read. Default false = recovery's
 // fail-open.
-function defaultReadPeers(anchorIssue, { strict = false } = {}) {
-  if (getLivenessReadSource() === "loki") {
-    return readClusterLivenessFromLokiSyncCached({ lokiUrl: getLokiQueryUrl() }, { strict });
+export function readPeerLivenessRecords(
+  anchorIssue,
+  { strict = false } = {},
+  {
+    readSource = getLivenessReadSource,
+    readLokiUrl = getLokiQueryUrl,
+    readLoki = readClusterLivenessFromLokiSyncCached,
+    readLinear = readPeerHeartbeatsSyncCached,
+  } = {},
+) {
+  if (readSource() === "loki") {
+    return readLoki({ lokiUrl: readLokiUrl() }, { strict });
   }
-  return readPeerHeartbeatsSyncCached({ anchorIssue }, { strict });
+  return readLinear({ anchorIssue }, { strict });
 }
 
 // peerLivenessConfigured — is the cross-host peer read wired for the ACTIVE source?
 // loki → a Loki query URL resolves; linear → the anchor issue is set. Gates the
 // multi-host merge so a source with no transport configured is an exact no-op
 // (local-map-only) instead of a wasted/failing read.
-function peerLivenessConfigured(anchorIssue) {
-  return getLivenessReadSource() === "loki" ? Boolean(getLokiQueryUrl()) : Boolean(anchorIssue);
+export function peerLivenessConfigured(
+  anchorIssue,
+  { readSource = getLivenessReadSource, readLokiUrl = getLokiQueryUrl } = {},
+) {
+  return readSource() === "loki" ? Boolean(readLokiUrl()) : Boolean(anchorIssue);
 }
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
@@ -4123,7 +4135,7 @@ export function readClusterHeartbeats({
   logPath = getEventLogPath(),
   roster = getClusterHosts(),
   anchorIssue = getLivenessAnchorIssue(),
-  readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
+  readPeers = readPeerLivenessRecords, // CTL-1420 (#17): loki|linear source-aware peer read
   // CTL-1529 bounded-read seams. `scanLocal` is a zero-arg memo (makeHeartbeatScanMemo)
   // shared across a tick; when supplied it WINS over logPath/nowMs/tuning. Tuning
   // params exist for tests — production uses the config-derived defaults.
@@ -4506,7 +4518,7 @@ function defaultOwnedTicketsForHost(
   {
     orchDir,
     anchorIssue = getLivenessAnchorIssue(),
-    readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
+    readPeers = readPeerLivenessRecords, // CTL-1420 (#17): loki|linear source-aware peer read
   } = {}
 ) {
   if (peerLivenessConfigured(anchorIssue)) {

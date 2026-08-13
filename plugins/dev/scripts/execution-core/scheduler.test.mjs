@@ -42,6 +42,7 @@ import {
   maybeEscalateRemediateExhausted,
   listStartedTickets,
   schedulerTick,
+  makePeerProductivityReader,
   readAllEligibleTickets,
   hydrateOutOfSetBlockers,
   startScheduler,
@@ -108,6 +109,47 @@ import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079
 import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
 import { recordRemovalFailure } from "./label-guard.mjs"; // CTL-1605 Codex thread: drive needs-human into CTL-1078 backoff for the terminal-stale multi-label tests
 import { getDrainFlagPath, getEventLogPath } from "./config.mjs"; // CTL-1678: drain-disabled override integration test
+
+describe("CAT-126 productivity liveness seam", () => {
+  test("routes a multi-host read through the shared seam exactly once", () => {
+    const records = { mini: { last_advance_at: "2026-08-11T00:00:00Z" } };
+    const calls = [];
+    const read = makePeerProductivityReader({
+      roster: ["mini", "studio"],
+      getAnchorIssue: () => "CAT-1",
+      configured: (anchor) => (calls.push(["configured", anchor]), true),
+      readRecords: (anchor) => (calls.push(["read", anchor]), records),
+    });
+
+    expect(read()).toBe(records);
+    expect(calls).toEqual([["configured", "CAT-1"], ["read", "CAT-1"]]);
+  });
+
+  test("returns null without reading when the active transport is unconfigured", () => {
+    let reads = 0;
+    const read = makePeerProductivityReader({
+      roster: ["mini", "studio"],
+      getAnchorIssue: () => null,
+      configured: () => false,
+      readRecords: () => (reads += 1),
+    });
+    expect(read()).toBeNull();
+    expect(reads).toBe(0);
+  });
+
+  test("stays a single-host no-op ahead of the transport check", () => {
+    let configuredCalls = 0;
+    let reads = 0;
+    const read = makePeerProductivityReader({
+      roster: ["mini"],
+      configured: () => (configuredCalls += 1),
+      readRecords: () => (reads += 1),
+    });
+    expect(read()).toBeNull();
+    expect(configuredCalls).toBe(0);
+    expect(reads).toBe(0);
+  });
+});
 
 let orchDir;
 let catalystDir;

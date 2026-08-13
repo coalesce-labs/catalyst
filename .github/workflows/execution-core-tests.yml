@@ -589,6 +589,11 @@ jobs:
         run: bash __tests__/merge-delete-branch-worktree-guard.test.sh
 
       - name: Run stable unit tests
+        # CAT-126 (CAT-57 deferred finding 1): cluster-heartbeat{,-capacity,-publisher,-sync}
+        # were on disk but referenced by no workflow, so the CAT-57 cross-host heartbeat wire
+        # protocol — the --last-advance-at flag parse, last_advance_at normalisation, the
+        # clock-skew rejection, and the "future last_seen stays positive liveness" asymmetry —
+        # could regress and still merge green. Now enforced below.
         # CTL-1789 round-1 P2 (Codex): assertion-evidence.test.mjs and
         # assertion-evidence-parity.test.mjs are added below. The parity
         # suite is the ONLY mechanism keeping the two hand-written bash
@@ -682,8 +687,13 @@ jobs:
             tick-timing.test.mjs \
             tracing.test.mjs \
             cloud-token-env.test.mjs \
+            ci-allowlist-drift-guard.test.mjs \
             cluster-claim-sync.test.mjs \
             cluster-claim.test.mjs \
+            cluster-heartbeat.test.mjs \
+            cluster-heartbeat-capacity.test.mjs \
+            cluster-heartbeat-publisher.test.mjs \
+            cluster-heartbeat-sync.test.mjs \
             comms-drain.test.mjs \
             codex-run-phase-agent.test.mjs \
             daemon-watchdog-alert.test.mjs \
@@ -729,6 +739,9 @@ jobs:
             halt-on-complete.test.mjs \
             heartbeat-event.test.mjs \
             loki-liveness.test.mjs \
+            cluster-heartbeat.test.mjs \
+            cluster-heartbeat-publisher.test.mjs \
+            cluster-heartbeat-sync.test.mjs \
             hrw.test.mjs \
             integration-ctl-701.test.mjs \
             integration-ctl-705.test.mjs \
