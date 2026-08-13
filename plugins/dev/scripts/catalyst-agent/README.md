@@ -18,7 +18,12 @@ up uniformly.
   `check-import-graph.mjs`, a required step in `execution-core-tests.yml`, which imports
   every agent module under plain `node` (not a bundler: `bun build --target=node` resolves
   `bun:*` as an external and exits 0 on a graph `node` cannot load) and separately audits
-  the source for any non-`node:` specifier.
+  the source for any non-`node:` specifier. The source audit is the half that carries the
+  contract — CI installs node_modules before the step runs, so on the runner a bare npm
+  specifier resolves and the load probe cannot see it. It records **every** occurrence of
+  an external specifier and exempts exactly one import by identity (`pino`, dynamic, in
+  `config.mjs`, inside a `try {} catch`); a second `pino` import of any shape fails, and so
+  does deleting the guarded one.
 
 ## Domains
 

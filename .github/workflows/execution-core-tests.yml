@@ -538,6 +538,12 @@ jobs:
         # the source graph so a stray node_modules on the runner cannot let a bare
         # npm specifier pass here and fail on a launchd tick. Its own non-vacuity
         # gates fail it closed if the enumeration ever goes empty.
+        #
+        # That source audit is the half that carries the contract, because THIS job
+        # runs `bun install` many steps above: on the runner `pino` and every other
+        # hoisted package RESOLVES, so the load probe alone cannot fail for a newly
+        # added npm dependency. The audit records every external-import occurrence
+        # (not one row per package name) and exempts exactly one import by identity.
         working-directory: plugins/dev/scripts/catalyst-agent
         run: node check-import-graph.mjs
 
