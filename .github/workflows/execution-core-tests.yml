@@ -116,6 +116,11 @@ on:
       - "plugins/legacy/skills/orchestrate/**"
       # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
       # every member package's install (incl. execution-core, broker, otel-forward).
+      # CTL-1836: the root installer, whose cloud-replica provisioning is covered by
+      # __tests__/setup-cloud-replica.test.sh below. Without this path a setup-only
+      # change would neither trigger the workflow on push nor mark a PR relevant —
+      # the tested implementation would bypass its own regression test.
+      - "setup-catalyst.sh"
       - "package.json"
       - "bun.lock"
       - "turbo.json"
@@ -155,6 +160,8 @@ jobs:
               - "plugins/dev/scripts/migrate-dual-harness.sh"
               - "plugins/dev/scripts/check-project-setup.sh"
               - ".github/workflows/execution-core-tests.yml"
+              # CTL-1836: root installer — see the matching note in on.push.paths.
+              - "setup-catalyst.sh"
               - "package.json"
               - "bun.lock"
               - "turbo.json"

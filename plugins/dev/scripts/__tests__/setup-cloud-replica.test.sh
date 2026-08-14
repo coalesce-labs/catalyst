@@ -112,14 +112,14 @@ if [[ -f "$ENV_FILE" ]]; then
 	# mode, so this passes even with EVERY chmod removed — mutation-verified.
 	# Case 5 below is what actually makes the permission behaviour load-bearing.
 
-	if grep -q '^CATALYST_CLOUD_ACCOUNT=tenant-7$' "$ENV_FILE"; then
+	if grep -q '^export CATALYST_CLOUD_ACCOUNT=tenant-7$' "$ENV_FILE"; then
 		ok "account pinned EXPLICITLY (never left to the tenant-0 default)"
 	else
 		bad "account not pinned explicitly in cloud-sync.env"
 	fi
 
 	# The legacy host is being retired; a new user must not be pointed at it.
-	if grep -q '^CATALYST_CLOUD_BASE_URL=' "$ENV_FILE"; then
+	if grep -q '^export CATALYST_CLOUD_BASE_URL=' "$ENV_FILE"; then
 		ok "base URL pinned explicitly"
 	else
 		bad "base URL not pinned — new install would inherit the LEGACY default"
@@ -130,7 +130,7 @@ if [[ -f "$ENV_FILE" ]]; then
 		ok "cloud-sync.env does not pin the legacy base URL"
 	fi
 
-	if grep -q '^CATALYST_CLOUD_TOKEN=tok_test_abc$' "$ENV_FILE"; then
+	if grep -q '^export CATALYST_CLOUD_TOKEN=tok_test_abc$' "$ENV_FILE"; then
 		ok "token written"
 	else
 		bad "token missing from cloud-sync.env"
@@ -150,7 +150,7 @@ H4=$(mktemp -d)
 	set +e
 	setup_cloud_replica >/dev/null 2>&1
 )
-if grep -q '^CATALYST_CLOUD_BASE_URL=https://example.invalid/api/v1$' "$H4/.config/catalyst/cloud-sync.env" 2>/dev/null; then
+if grep -q '^export CATALYST_CLOUD_BASE_URL=https://example.invalid/api/v1$' "$H4/.config/catalyst/cloud-sync.env" 2>/dev/null; then
 	ok "explicit CATALYST_CLOUD_BASE_URL override is honoured"
 else
 	bad "base URL override ignored"
@@ -182,12 +182,69 @@ else
 fi
 # And it must be REPLACED, not appended to: a stale token line surviving alongside
 # the new one would leave the writer reading whichever the shell sourced last.
-if [[ $(grep -c '^CATALYST_CLOUD_TOKEN=' "$H5/.config/catalyst/cloud-sync.env" 2>/dev/null) == "1" ]]; then
+if [[ $(grep -c '^export CATALYST_CLOUD_TOKEN=' "$H5/.config/catalyst/cloud-sync.env" 2>/dev/null) == "1" ]]; then
 	ok "env file replaced, not appended (exactly one token line)"
 else
-	bad "env file has $(grep -c '^CATALYST_CLOUD_TOKEN=' "$H5/.config/catalyst/cloud-sync.env" 2>/dev/null) token lines — expected exactly 1"
+	bad "env file has $(grep -c '^export CATALYST_CLOUD_TOKEN=' "$H5/.config/catalyst/cloud-sync.env" 2>/dev/null) token lines — expected exactly 1"
 fi
 rm -rf "$H5"
+
+# ── Case 6: EVERY line must be exported (Codex P1 on #3365) ─────────────────
+# launch.sh SOURCES this file and then execs bun. A bare `FOO=bar` in a sourced
+# file is shell-local — not in the child's environment — so the writer would see no
+# token, take its tokenless idle path, and process.exit(0). Under
+# KeepAlive={SuccessfulExit:false} that clean exit is PERMANENT: launchd never
+# restarts it and the only symptom is a replica that quietly stops advancing.
+# This is not theoretical bookkeeping — it is the exact silent-death shape of
+# CTL-1844, which cost hours to diagnose on a live host.
+H6=$(mktemp -d)
+rc=$(run_case "$H6" "tok_export_check" "tenant-3")
+E6="$H6/.config/catalyst/cloud-sync.env"
+if [[ -f $E6 ]]; then
+	assigns=$(grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' "$E6" || true)
+	exports=$(grep -cE '^export [A-Za-z_][A-Za-z0-9_]*=' "$E6" || true)
+	if [[ $assigns -eq 0 && $exports -gt 0 ]]; then
+		ok "every assignment is exported ($exports exported, 0 bare) — the writer's child process sees them"
+	else
+		bad "$assigns BARE assignment(s) present — a sourced non-exported var never reaches bun (silent idle exit)"
+	fi
+	# Prove the child really would see it, rather than trusting the text: source the
+	# file in a subshell and check the variable is in the ENVIRONMENT, not just set.
+	if (
+		# shellcheck disable=SC1090
+		. "$E6"
+		env | grep -q '^CATALYST_CLOUD_TOKEN=tok_export_check$'
+	); then
+		ok "sourcing the file puts the token in the ENVIRONMENT (env|grep, not just set)"
+	else
+		bad "after sourcing, the token is not in env — bun would receive no token"
+	fi
+else
+	bad "case 6: no env file written"
+fi
+rm -rf "$H6"
+
+# ── Case 7: the configured token NAME is honoured (CTL-1668, Codex P2) ──────
+# Writing a fixed name while the writer resolves a custom one produces the same
+# silent idle as case 6.
+H7=$(mktemp -d)
+(
+	export HOME="$H7" CATALYST_SETUP_LIB_ONLY=1
+	export CATALYST_CLOUD_TOKEN_ENV="MY_CUSTOM_CLOUD_TOKEN"
+	export MY_CUSTOM_CLOUD_TOKEN="tok_custom_name"
+	export CATALYST_CLOUD_ACCOUNT="tenant-4"
+	# shellcheck disable=SC1090
+	source "$SETUP" >/dev/null 2>&1
+	set +e
+	setup_cloud_replica >/dev/null 2>&1
+)
+E7="$H7/.config/catalyst/cloud-sync.env"
+if grep -q '^export MY_CUSTOM_CLOUD_TOKEN=tok_custom_name$' "$E7" 2>/dev/null; then
+	ok "token written under the CONFIGURED name, not the hardcoded default"
+else
+	bad "configured token name ignored — writer would resolve a name the file never sets"
+fi
+rm -rf "$H7"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

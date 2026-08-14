@@ -1561,7 +1561,15 @@ EOF
 setup_cloud_replica() {
 	# Flags win over env. Absent → this whole function is a no-op and setup is
 	# byte-identical to before CTL-1836.
-	local token="${CLOUD_TOKEN:-${CATALYST_CLOUD_TOKEN:-}}"
+	# CTL-1668: also LOOK UP the token under the configured name, not just the
+	# default — otherwise a host using a custom name has its valid token treated as
+	# absent and provisioning is silently skipped (Codex P2 on #3365).
+	local _tv="${CATALYST_CLOUD_TOKEN_ENV:-}"
+	if [[ -z $_tv ]] && [[ -r "$HOME/.config/catalyst/config.json" ]] && command -v jq >/dev/null 2>&1; then
+		_tv="$(jq -r '.catalyst.cloud.tokenEnv // empty' "$HOME/.config/catalyst/config.json" 2>/dev/null || true)"
+	fi
+	[[ -n $_tv ]] || _tv="CATALYST_CLOUD_TOKEN"
+	local token="${CLOUD_TOKEN:-${!_tv:-}}"
 	local account="${CLOUD_ACCOUNT:-${CATALYST_CLOUD_ACCOUNT:-}}"
 	[[ -n $token ]] || return 0
 
@@ -1590,6 +1598,28 @@ setup_cloud_replica() {
 	# relies on the default is pointed at a host that is going away. Pin it here.
 	local base_url="${CATALYST_CLOUD_BASE_URL:-https://app.catalystcloud.dev/api/v1}"
 
+	# ⛔ EVERY LINE MUST BE `export` (Codex P1 on #3365). launch.sh SOURCES this file
+	# and then `exec`s bun. A bare `FOO=bar` in a sourced file is a SHELL-LOCAL
+	# variable — it is not in the child's environment, so bun would see no token,
+	# take its tokenless idle path, and `process.exit(0)`. Under the agent's
+	# `KeepAlive={SuccessfulExit:false}` a clean exit is PERMANENT: launchd never
+	# restarts it, and the only symptom is a replica that quietly stops advancing.
+	# (Verified against the three hosts already running: every existing
+	# cloud-sync.env uses `export`. This is the established form, not a new one.)
+	#
+	# CTL-1668: the token's env-var NAME is configurable, so honour the same
+	# precedence the writer resolves with — env override → Layer-2
+	# catalyst.cloud.tokenEnv → default. Writing a fixed name while the writer looks
+	# up a custom one produces the identical silent idle.
+	local token_var="${CATALYST_CLOUD_TOKEN_ENV:-}"
+	if [[ -z $token_var ]]; then
+		local l2_cfg="$HOME/.config/catalyst/config.json"
+		if [[ -r $l2_cfg ]] && command -v jq >/dev/null 2>&1; then
+			token_var="$(jq -r '.catalyst.cloud.tokenEnv // empty' "$l2_cfg" 2>/dev/null || true)"
+		fi
+	fi
+	[[ -n $token_var ]] || token_var="CATALYST_CLOUD_TOKEN"
+
 	# launchd does not read ~/.zshenv, so the writer's credentials have to live in
 	# this file. Written 0600 BEFORE the secret lands in it — never world-readable,
 	# not even momentarily.
@@ -1599,9 +1629,11 @@ setup_cloud_replica() {
 	{
 		echo "# Written by setup-catalyst.sh (CTL-1836). Consumed by"
 		echo "# plugins/dev/scripts/execution-core/cloud-sync/launch.sh under launchd."
-		echo "CATALYST_CLOUD_TOKEN=${token}"
-		echo "CATALYST_CLOUD_ACCOUNT=${account}"
-		echo "CATALYST_CLOUD_BASE_URL=${base_url}"
+		echo "# Every line is exported: launch.sh sources this then execs bun, and a"
+		echo "# non-exported assignment would leave the writer tokenless (silent idle exit)."
+		echo "export ${token_var}=${token}"
+		echo "export CATALYST_CLOUD_ACCOUNT=${account}"
+		echo "export CATALYST_CLOUD_BASE_URL=${base_url}"
 	} >"$tmp_env"
 	mv "$tmp_env" "$env_file"
 	chmod 600 "$env_file"
