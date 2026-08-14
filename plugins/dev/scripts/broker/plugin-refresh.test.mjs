@@ -1494,6 +1494,69 @@ describe("workspaceMemberNodeModules", () => {
     expect(workspaceMemberNodeModules("/co", glob)).toEqual([]);
   });
 
+  // CTL-1835 gap 3. The assertion directly above is a CHECK THAT CANNOT FAIL:
+  // its fixture registers `/co/packages/a/...` but the un-guarded code path
+  // probes the LITERAL `/co/packages/*/...`, which the fixture never registers —
+  // so it returns [] with or without the guard. Measured: deleting
+  // `|| entry.includes("*")` at workspaceMemberNodeModules left the THEN-CURRENT
+  // suite — this file alone, before the two tests below existed — at 137 pass /
+  // 0 fail (bun 1.3.5, Darwin arm64 26.5.2, at origin/main 3f60190c6). With the
+  // two tests below present the same deletion gives 137 pass / 2 fail, which is
+  // the point; re-measure rather than trust either number. (Its SIBLING guard in
+  // workspaceRootsFor is genuinely covered; only this one was blind.) The two
+  // tests below fail when it is dropped, from the two independent directions.
+  test("a glob entry is skipped at the ENTRY level — no path containing '*' is ever probed", () => {
+    // The load-bearing meaning of "SKIPPED, not expanded": the pattern must
+    // never enter path construction at all. This holds on every filesystem,
+    // including the normal one where no literal `*` directory exists — which is
+    // precisely why the returned-value assertion above could not see the guard.
+    const probed = [];
+    const fs = {
+      readFileFn: () => JSON.stringify({ workspaces: ["packages/*", "plugins/dev"] }),
+      existsFn: (path) => {
+        probed.push(String(path));
+        return true; // everything exists — maximum opportunity to construct a bad path
+      },
+    };
+    const out = workspaceMemberNodeModules("/co", fs);
+
+    // POSITIVE CONTROL: the recorder is wired and the literal sibling entry DID
+    // travel the full path-construction route. Without this, "no '*' probed"
+    // would be indistinguishable from "nothing was probed at all".
+    expect(probed).toContain("/co/plugins/dev/package.json");
+    expect(probed.length).toBeGreaterThan(1);
+
+    // The guard: with it dropped, `/co/packages/*/package.json` is probed here.
+    expect(probed.filter((p) => p.includes("*"))).toEqual([]);
+    // ...and the glob never reaches the caller's prune list. (`plugins/dev` is
+    // absent because existsFn:true also gives it its own bun.lock, i.e. it reads
+    // as standalone-managed — the point of this test is the probe log.)
+    expect(out.filter((p) => p.includes("*"))).toEqual([]);
+  });
+
+  test("a directory LITERALLY named '*' on disk is still not pruned — the rm -rf fan-out guard", () => {
+    // The rare-but-real filesystem state the previous test cannot express: `*` is
+    // a legal POSIX filename, and `mkdir packages/*` under a shell that found no
+    // match creates it for real. In that tree the un-guarded code returns
+    // `/co/packages/*/node_modules` and the caller rm -rf's it — deleting a
+    // directory no workspace member ever claimed.
+    const files = new Set([
+      "/co/package.json",
+      "/co/bun.lock",
+      "/co/packages/*/package.json",
+      "/co/packages/*/node_modules",
+    ]);
+    const fs = {
+      readFileFn: () => JSON.stringify({ workspaces: ["packages/*"] }),
+      existsFn: (path) => files.has(String(path)),
+    };
+    // POSITIVE CONTROL: this fixture really does describe an existing literal
+    // glob dir, so [] below means "the guard shed it", not "nothing was there".
+    expect(fs.existsFn("/co/packages/*/node_modules")).toBe(true);
+
+    expect(workspaceMemberNodeModules("/co", fs)).toEqual([]);
+  });
+
   test("an unreadable root package.json yields [] rather than a throw — refresh must not die on it", () => {
     expect(
       workspaceMemberNodeModules("/co", {
