@@ -102,9 +102,16 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
     builders `execution-core/lib/canonical-event.mjs` (`buildDualEnvelopeLine`) and
     `lib/canonical-event.sh` (`canonical_dual_envelope_line`). Measured motivation: 159,009 v1
     events across **31 distinct names** in 2026-08 were invisible to any consumer reading
-    `attributes["event.name"]`. It is **one** line, not two, because `getEventName` reads
-    `event.event` FIRST (`broker/event-name.mjs:16`) — a v1 line plus a v2 twin would be routed
-    twice, double-applying `handleAgentCheckin`'s `upsertAgent`/`_autoRegisterPrLifecycle`. Flat
+    `attributes["event.name"]`. It is **one** line, not two: a v1 line plus a v2 twin would be
+    routed twice, double-applying `handleAgentCheckin`'s `upsertAgent`/`_autoRegisterPrLifecycle`.
+    Key **order** within that one line is a separate question and this paragraph used to conflate
+    them — a single dual line resolves to one name and routes once under *any* ordering.
+    Measured across every log file ever written (4,034,067 parsed lines), all **322** dual lines
+    carry identical values in both keys and disagreement is not constructible on the dual path
+    (`canonical_dual_envelope_line` reads `name` from `.event` and passes that same string to
+    `--event-name`), so order is unobservable. The boundary
+    (`lib/event-name.mjs`, CTL-1834 — see "The one event-name boundary" below) reads `event`
+    first because that is what shipped, not because routing depends on it. Flat
     fields are promoted to attributes by the same map otel-forward's `normalizeFlatEvent` uses, so
     the OTLP attribute set is unchanged; unmapped fields land in `body.payload`; every v1 key also
     survives verbatim. Phase 1 is **additive** — removing v1 emission and narrowing
@@ -200,6 +207,26 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
     line has no extractable id for its dedup ring to suppress.
   - Consumers: `catalyst-events tail` (stream), `catalyst-events wait-for` (blocking single-event).
     Both shapes handled. See `website/src/content/docs/observability/catalyst-events.md`.
+  - **The one event-name boundary (CTL-1834).** Every JS/TS consumer resolves a name through
+    `plugins/dev/scripts/lib/event-name.mjs` `getEventName(event)` — `event` →
+    `attributes["event.name"]` → `name`, **first non-empty string wins**. It is an import-free leaf
+    in the zero-npm-import `lib/` zone (bare-Node `catalyst doctor` must load it) with an
+    `event-name.d.mts` sidecar for the TS stacks; it was `broker/event-name.mjs` until this ticket.
+    The motivation is measured, not hypothetical: **three separate v3 producers were each
+    discovered and fixed reactively, one at a time, after their events were already lost**, and
+    CTL-1817's own in-tree comment undercounted the v3 population it had just measured by 1.9×
+    (531 claimed vs 1,006 actual, 44 distinct names). Before this ticket five files hand-rolled
+    their own key ladder in three mutually-incompatible orders, each with a different blind spot:
+    `event ?? attributes` missed 1,006 lines/month, `attributes ?? name` missed 160,789, and
+    `attributes`-only missed 161,795 — the last not as a visible zero but as a **biased slice**
+    (`orphans.reap-requested` reads as 1.56% of its real volume, which looks like data).
+    `execution-core/event-name-read-guard.test.mjs` holds the multi-key-ladder set at snapshot
+    equality so the next drift fails at CI rather than on the log; it fails in BOTH directions, so
+    a fixed site must delete its allowlist entry. **Deliberately still out of scope** and tracked
+    separately: ~35 single-key `attributes`-only presentation/analysis readers, the v1-only
+    `execution-core/reaper.mjs` family (whose *payload* reads are v1-flat too, so a name-only fold
+    would recognize-then-silently-drop), and the bash/jq consumers (`catalyst-events --filter`'s
+    97 caller sites, `god-gather.sh`'s 7 provably-dead v1 selects).
 - **history/** — full snapshots archived on completion/failure/stale.
 - **execution-core/registry.json** — for `dispatchMode: execution-core` teams, the central
   `team → repoRoot → eligibleQuery` registry. The Linear-state contract is setup-tooling-owned (D8):

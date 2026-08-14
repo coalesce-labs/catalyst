@@ -7,6 +7,8 @@
  * No IO. The CLI in `analyze-events.ts` reads files and calls these.
  */
 
+import { getEventName } from "../../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary
+
 export type Severity = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
 export interface NormalizedEvent {
@@ -103,9 +105,11 @@ export function normalize(line: string): NormalizedEvent | null {
   const attrs = asObject(obj.attributes);
   const isCanonical = attrs !== null;
 
-  const rawEventName = isCanonical
-    ? asString(attrs["event.name"])
-    : asString(obj.event);
+  // CTL-1834: one boundary instead of a shape branch. The old form picked the key
+  // off `attributes` being present, so a canonical-shaped line whose name lived at
+  // the v1 or v3 key resolved to null and the whole line was dropped.
+  const resolvedName = getEventName(obj);
+  const rawEventName = resolvedName === "" ? null : resolvedName;
   if (rawEventName === null) return null;
 
   const eventName = LEGACY_NAME_MAP[rawEventName] ?? rawEventName;

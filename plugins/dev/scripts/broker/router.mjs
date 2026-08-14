@@ -101,7 +101,7 @@ import {
   startPluginDriftCheck,
 } from "./plugin-refresh.mjs";
 import { handleStackReloadEvent } from "./stack-reload.mjs";
-import { getEventName } from "./event-name.mjs"; // CTL-1348: leaf so plugin-refresh stays light
+import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary
 import { getLastByteOffset } from "./tailer.mjs";
 import {
   severityNumber,
@@ -280,7 +280,7 @@ export function summarizeEvent(event) {
   const id = event.id ?? synthesizeEventId(event);
   const attrs = event.attributes ?? {};
   const ts = event.ts ?? new Date().toISOString();
-  const name = event.event ?? attrs["event.name"] ?? "";
+  const name = getEventName(event); // CTL-1834: the shared boundary, not a 5th hand-rolled ladder
   const payload =
     event.body && typeof event.body === "object" && "payload" in event.body
       ? event.body.payload
@@ -962,10 +962,13 @@ export function maybeEmitProseDisabled() {
 // (data in `attributes` + `body.payload`) as well as legacy flat events
 // (data in `event` + `detail` + `orchestrator`). Resolved here so the
 // rest of the broker can stay shape-agnostic.
-// CTL-1348: getEventName moved to ./event-name.mjs (a dependency-free leaf so
-// plugin-refresh.mjs / the standalone updater don't import the heavy router);
-// imported above and re-exported here so existing `from "./router.mjs"` callers
-// keep working.
+// CTL-1348: getEventName moved out of router.mjs to a dependency-free leaf so
+// plugin-refresh.mjs / the standalone updater don't import the heavy router.
+// CTL-1834: that leaf now lives at ../lib/event-name.mjs — the ONE boundary every
+// consumer of the event log resolves a name through (it also reads the v3
+// top-level `name` key, which this file's two-key version never could).
+// Imported above and re-exported here so existing `from "./router.mjs"` callers
+// (tailer.mjs) keep working.
 export { getEventName };
 function getEventPayload(event) {
   return event.detail ?? event.body?.payload ?? {};

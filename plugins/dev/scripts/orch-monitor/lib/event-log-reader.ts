@@ -18,6 +18,7 @@ import {
   closeSync,
 } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
+import { getEventName } from "../../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary
 import { join } from "node:path";
 import { createFilterStream } from "./event-filter";
 import type { EventRing } from "./event-ring";
@@ -423,11 +424,12 @@ function accumulateGithubStat(
   } catch {
     return;
   }
-  // CTL-300: canonical envelope — event name lives at attributes."event.name"
-  // and repo lives at attributes."vcs.repository.name".
+  // CTL-300: canonical envelope — repo lives at attributes."vcs.repository.name".
+  // CTL-1834: the NAME comes from the shared boundary, not from the v2 key alone —
+  // this counter previously could not see a v1- or v3-shaped github.* line at all.
   const attrs = evt.attributes as Record<string, unknown> | undefined;
-  const eventName = attrs ? attrs["event.name"] : undefined;
-  if (typeof eventName !== "string" || !eventName.startsWith("github.")) return;
+  const eventName = getEventName(evt);
+  if (!eventName.startsWith("github.")) return;
 
   const ts = typeof evt.ts === "string" ? evt.ts : null;
   if (ts === null) return;

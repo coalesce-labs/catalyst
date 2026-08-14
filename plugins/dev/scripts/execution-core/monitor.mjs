@@ -64,6 +64,7 @@ import {
 // (linear-query.mjs never imports replica-read.mjs either; daemon.mjs:681 builds
 // the reader and passes it in). monitor.mjs stays Node-loadable.
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
+import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary
 import {
   claimDispatchSync,
   readTriageAttemptCountSync,
@@ -177,7 +178,7 @@ const DRAG_OUT_STATES = new Set(["Backlog", "Canceled", "Duplicate"]);
 // (event.event + event.detail). Returns null for anything that is not a
 // linear.issue.state_changed event with an extractable ticket identifier.
 export function parseStateChangedEvent(event) {
-  const name = event?.attributes?.["event.name"] ?? event?.event;
+  const name = getEventName(event); // CTL-1834: the shared boundary
   if (name !== "linear.issue.state_changed") return null;
   const payload = event?.body?.payload ?? event?.detail ?? {};
   const identifier =
@@ -200,7 +201,7 @@ export function parseStateChangedEvent(event) {
 // Returns null for anything that is not a linear.issue.updated event or that
 // lacks an extractable ticket identifier. CTL-681.
 export function parseIssueUpdatedEvent(event) {
-  const name = event?.attributes?.["event.name"] ?? event?.event;
+  const name = getEventName(event); // CTL-1834: the shared boundary
   if (name !== "linear.issue.updated") return null;
   const payload = event?.body?.payload ?? event?.detail ?? {};
   const identifier =
@@ -238,7 +239,7 @@ export function parseIssueUpdatedEvent(event) {
 // parseCommentCreatedEvent — accept canonical OTel and legacy flat shapes.
 // Returns null for anything that is not a linear.comment.created event. CTL-681.
 export function parseCommentCreatedEvent(event) {
-  const name = event?.attributes?.["event.name"] ?? event?.event;
+  const name = getEventName(event); // CTL-1834: the shared boundary
   if (name !== "linear.comment.created") return null;
   const payload = event?.body?.payload ?? event?.detail ?? {};
   const ticket = event?.attributes?.["linear.issue.identifier"] ?? payload.ticket ?? null;
@@ -1803,7 +1804,7 @@ export function readNewEvents({ foldOnly = false } = {}) {
       // dispatch fires twice for one Linear comment (the CTL-1653 pathology).
       // foldOnly drains do NOT insert — replayed events must not permanently
       // poison the dedup set and block their own future live delivery.
-      const eventName681 = event?.attributes?.["event.name"] ?? event?.event;
+      const eventName681 = getEventName(event); // CTL-1834: the shared boundary
       if (eventName681 === "linear.comment.created" && !foldOnly) {
         if (markAndCheckCommentSeen(commentKeyOf(event))) continue;
       }
@@ -1867,7 +1868,7 @@ export function readNewCoordinationComments({ foldOnly = false } = {}) {
         continue; // skip malformed line, keep tailing (constraint 3)
       }
       // Constraint 1: comment-only filter.
-      const evName = event?.attributes?.["event.name"] ?? event?.event;
+      const evName = getEventName(event); // CTL-1834: the shared boundary
       if (evName !== "linear.comment.created") continue;
 
       // Constraint 2: cross-source dedup. foldOnly drains do NOT insert (boot

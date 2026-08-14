@@ -35,6 +35,7 @@
 import { statSync } from "node:fs";
 import { scanEventsChunked } from "./event-tail.mjs";
 import { getEventLogPath } from "./config.mjs";
+import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary
 
 // CTL-735: revive events are phase-agnostic — `phase.<phase>.revive.<ticket>`.
 // CTL-604 extended revive to triage/research/plan/verify, but this scan still
@@ -120,7 +121,7 @@ function refreshIndex(path) {
     fromOffset: entry.cursor,
     leftover: entry.leftover,
     onEvent: (ev) => {
-      const name = ev?.attributes?.["event.name"];
+      const name = getEventName(ev); // CTL-1834: the shared boundary
       if (isRelevant(name)) {
         entry.events.push({
           name,

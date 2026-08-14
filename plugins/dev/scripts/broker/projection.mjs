@@ -18,6 +18,7 @@ import {
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { scanEventsChunked } from "../execution-core/event-tail.mjs"; // CTL-1529: bounded event-log scan
+import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary
 import { resolve, dirname } from "node:path";
 import {
   log,
@@ -301,9 +302,12 @@ export function persistBrokerState({ probe } = {}) {
 // legacy flat envelopes carry it under `event` + `detail` + `orchestrator`.
 // These local copies of the router's getEventName/Payload/Orchestrator logic
 // keep this module pure and DAG-clean (projection.mjs must not import router.mjs).
-function localEventName(event) {
-  return event.event ?? event.attributes?.["event.name"] ?? "";
-}
+//
+// CTL-1834: localEventName is GONE. It was a byte-identical copy of the router's
+// two-key reader, so it inherited the same v3 blind spot — and a copy-of-a-copy is
+// exactly how one envelope shape becomes visible to some readers and not others.
+// The name now comes from ../lib/event-name.mjs, an import-free leaf, so the
+// "must not import router.mjs" constraint above is still satisfied.
 function localPayload(event) {
   return event.detail ?? event.body?.payload ?? {};
 }
@@ -357,7 +361,7 @@ function extractPrNumber(state) {
 
 export function reduceWorkerStateEvent(event) {
   if (!event || typeof event !== "object") return null;
-  const name = localEventName(event);
+  const name = getEventName(event); // CTL-1834: the shared boundary
   if (!name) return null;
 
   const payload = localPayload(event);

@@ -420,9 +420,11 @@ build_canonical_line() {
 # consumer filtering on attributes["event.name"] stops silently seeing a smaller universe —
 # while every existing v1 reader keeps reading the same top-level fields it always did.
 #
-# ONE line, never two: broker/event-name.mjs's getEventName reads `event.event` FIRST, so a v1
-# line and a separate v2 twin would both resolve to the same name and both be routed —
-# `agent.checkin`/`agent.checkout` would run upsertAgent and _autoRegisterPrLifecycle twice.
+# ONE line, never two: a v1 line and a separate v2 twin would both resolve to the same name and
+# both be routed — `agent.checkin`/`agent.checkout` would run upsertAgent and
+# _autoRegisterPrLifecycle twice. (CTL-1834: the safety is that it is ONE line, not the key
+# order; one line resolves to one name under any ordering. The JS boundary that resolves it is
+# lib/event-name.mjs, which reads event -> attributes["event.name"] -> name.)
 
 # canonical_merge_v1 V1_JSON CANONICAL_LINE
 #

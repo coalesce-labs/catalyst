@@ -476,7 +476,8 @@ this is a subtraction:
 **The reading rule every consumer adopts (and the one thing that makes the flip incremental):**
 
 ```
-name   = attributes["event.name"] ?? event ?? name          // three keys, always
+name   = getEventName(event)   // lib/event-name.mjs — THE boundary, CTL-1834
+       // = event ?? attributes["event.name"] ?? name, first NON-EMPTY string wins
 ticket = attributes["linear.issue.identifier"]
       ?? attributes["event.label"]
       ?? <legacy: trailing name segment>                     // fallback, dated
