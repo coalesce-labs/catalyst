@@ -365,12 +365,25 @@ describe("live corpus (opt-in)", () => {
       try {
         const size = statSync(sample).size;
         const start = Math.max(0, size - MAX);
-        const buf = Buffer.allocUnsafe(Math.min(size, MAX));
-        readSync(fd, buf, 0, buf.length, start);
+        // Codex round 7: read ONE BYTE BEFORE `start` so we can tell an aligned
+        // boundary from a mid-record one. When `size - MAX` lands exactly at the
+        // start of a record, the first line is COMPLETE, and unconditionally
+        // slicing it off discards a real record as though it were a partial
+        // prefix — Codex reproduced a malformed record vanishing that way while
+        // the test still reported success. A scan that silently drops the record
+        // it was meant to inspect is the false-clean shape this file exists to
+        // prevent.
+        const probeStart = start > 0 ? start - 1 : 0;
+        const buf = Buffer.allocUnsafe(Math.min(size - probeStart, MAX + (start > 0 ? 1 : 0)));
+        readSync(fd, buf, 0, buf.length, probeStart);
         text = buf.toString("utf8");
-        // Drop the leading partial line when we started mid-file — the same
-        // reason every reader in this repo holds its fragment back.
-        if (start > 0) text = text.slice(text.indexOf("\n") + 1);
+        if (start > 0) {
+          // text[0] is the byte before `start`. If it is a newline, `start` is a
+          // record boundary and everything from index 1 is whole; otherwise the
+          // first line really is a partial prefix and gets dropped.
+          const aligned = text[0] === "\n";
+          text = aligned ? text.slice(1) : text.slice(text.indexOf("\n") + 1);
+        }
       } finally {
         closeSync(fd);
       }

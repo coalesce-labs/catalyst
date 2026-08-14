@@ -174,16 +174,24 @@ export function startTailing() {
 export function loadExistingRegistrations(logPath = lastLogPath) {
   try {
     for (const event of tailParsedEvents({ path: logPath, maxLines: LOOKBACK_LINES })) {
-      // CTL-1819 (Codex round 6): boot replay is the broker's OTHER read of this
-      // log, and it is a genuine once-per-record consumer — it runs before the
-      // live tail starts, over bytes the live tail will never re-read, so this
-      // cannot double-count with the checkEnvelope in readNewEvents.
+      // CTL-1819: boot replay deliberately does NOT count (Codex rounds 6+7).
       //
-      // It needs its own call because making tailParsedEvents validation-free
-      // (the round-3 anti-recount fix) removed the coverage round 1 had here.
-      // Without it a parseable-but-malformed recovery record — a `filter.register`
-      // missing `ts` — is routed on restart with the detector silent.
-      checkEnvelope(event);
+      // Round 6 correctly observed that this consumer routes records without
+      // validating them. I added a checkEnvelope call here and justified it with
+      // "boot replay runs before the live tail over bytes readNewEvents never
+      // re-reads" — which round 7 then falsified: on a broker SELF-RELOAD,
+      // index.mjs runs this replay first and then seeds the live tail at the
+      // handoff's OLDER byte offset, so the overlap is counted twice.
+      //
+      // The two findings together establish that boot replay cannot be a counting
+      // site without byte-range or position dedup logic. Until that exists the call
+      // is removed rather than left half-right, because the fail directions are not
+      // symmetric: an uncounted malformed record is SILENCE, which is recoverable
+      // and shows up as a counter at zero; a double-counted one is FABRICATION in
+      // the number an operator reads during an incident. That is the same rule that
+      // made countEnvelopes opt-in in round 2.
+      //
+      // Proper boot coverage is CTL-1857.
       const name = getEventName(event);
       if (name === "filter.register") handleRegister(event);
       if (name === "filter.deregister") handleDeregister(event);
