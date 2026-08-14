@@ -808,23 +808,48 @@ covered a FAILING install; a no-op produced no signal at all.
   `@typescript-eslint/typescript-estree/minimatch/brace-expansion/balanced-match`); resolving only
   the immediate parent finds whichever copy is root-visible, which is a different tree. A BARE key is
   judged from the workspace roots plus every lockfile entry that DECLARES the id, minus any site
-  carrying its OWN nested key for that id — a declarer (`<declarer>/<id>`) or a workspace member root
-  (`<member>/<id>`, of which this repo really has three: `orch-monitor-ui/react`,
-  `orch-monitor-ui/@types/react`, `orch-monitor-ui/typescript`). Shedding the member **root** is not
-  sufficient: entitlement to that member's nested version belongs to the whole SUBTREE reached
+  whose resolution of that id is governed by a nested entry — its own (`<declarer>/<id>`), an
+  ANCESTOR's, or a workspace member root's (`<member>/<id>`, of which this repo really has three:
+  `orch-monitor-ui/react`, `orch-monitor-ui/@types/react`, `orch-monitor-ui/typescript`).
+  Entitlement climbs with resolution, so the governing entry is the one keyed by the longest prefix
+  of the site's install path that carries `<prefix>/<id>`; testing only the site's OWN key misses
+  the sibling shape bun really produces (measured: `@opentelemetry/exporter-trace-otlp-http/
+  @opentelemetry/sdk-trace-base` and `…/@opentelemetry/resources` are siblings under the exporter
+  with no `…/sdk-trace-base/@opentelemetry/resources` key, so sdk-trace-base is entitled to
+  resources 2.8.0 by its PARENT while the bare entry is 2.10.0). Shedding the member **root** is not
+  sufficient either: entitlement to that member's nested version belongs to the whole SUBTREE reached
   through it, so a declarer is located only from the roots that survived the shed. Locating it by
   first hit across every root is the bare-key twin of the one-hop bug the deep path fixes — bun's
-  isolated linker writes a separate **peer-disambiguated** store entry per peer set (measured:
-  `.bun/@dnd-kit+core@6.3.1/` resolves react 18.3.1, `.bun/@dnd-kit+core@6.3.1+005eabf3d8b6ef06/`
-  resolves 19.2.8) while the lockfile records ONE bare `@dnd-kit/core` entry covering both, so
-  `packages.has("@dnd-kit/core/react")` is false and the nested-key exclusion cannot see the
-  difference. Measured on this repo's real `bun.lock` + `node_modules`, a bare `react` move reported
-  `mismatched=1, expected 18.3.1, found ["19.2.8"], 16 importers` on a correct tree — every one of
-  those 16 located through `orch-monitor-ui` — and a real `bun install --force` (1168 packages,
-  4.21 s) does **not** clear it, because the placement is lockfile-determined: a permanent ERROR plus
-  a re-extract on every refresh carrying that move. A declarer reachable ONLY through a shed root is
-  named in the INCONCLUSIVE reason, never folded into "could not locate" and never silently matched.
-  Because selection already sheds
+  isolated linker writes a separate **peer-disambiguated** store entry per peer set while the
+  lockfile records ONE bare entry covering all of them, so `packages.has("<declarer>/<id>")` is false
+  and the nested-key exclusion cannot see the difference. Reproducible on this checkout: a single
+  bare `eslint@9.39.5` lock entry with no nested key anywhere, two store copies
+  (`.bun/eslint@9.39.5+1a1acd4c2fa5b1a4` and `+5e91b0bf22d6303b`) resolving
+  `@eslint-community/eslint-utils` to two different store dirs — same version, different peer set,
+  one lock key. Measured on this repo's real `bun.lock` + `node_modules`, a bare `react` move
+  reported `mismatched=1, expected 18.3.1, found ["19.2.8"], 16 importers` on a correct tree — every
+  one of those 16 located through `orch-monitor-ui` — and a real `bun install --force`
+  (1168 packages, 4.21 s) does **not** clear it, because the placement is lockfile-determined: a
+  permanent ERROR plus a re-extract on every refresh carrying that move. A declarer reachable ONLY
+  through a shed root is named in the INCONCLUSIVE reason, never folded into "could not locate" and
+  never silently matched.
+- **Selecting the right root is only half of it — the site must be located as the COPY ITS OWN LOCK
+  KEY NAMES.** A site is EXCLUDED by its key but was LOCATED by its id, so a nested declarer was
+  found at whatever the first bare hit from a root happened to be. Measured on the real tree, which
+  is CORRECT on disk: `@opentelemetry/sdk-logs/@opentelemetry/resources` is locked at 2.8.0, has no
+  nested core key, is selected as a site for a bare `@opentelemetry/core` move, and was then located
+  at the 2.10.0 `@opentelemetry/resources` copy — the copy of the entry the exclusion had just shed —
+  whose core is legitimately 2.10.0. That emitted `deps_relink_failed, expected 2.8.0,
+  found ["2.10.0"], 2 importers` on a tree no install can repair. Six such sites; over all 689 bare
+  ids, **5** had at least one — 1 produced that live false ERROR and **4** (`@opentelemetry/api`,
+  `@opentelemetry/semantic-conventions`, `@opentelemetry/resources`, `csstype`) read `matched` ONLY
+  because the wrong copy happened to agree, a latent FALSE CLEAN in the other direction. One defect,
+  both failure modes. Every site is therefore located by walking its own lock key as an install path
+  with the located copy's version checked against the governing entry at EVERY hop; a hop that lands
+  on a version the lockfile does not record for that path is not evidence in either direction — it
+  can neither raise a mismatch nor contribute to a match, and it is named on the verdict as
+  `wrongCopy` rather than dropped. (A `workspace:` hop is exempt from the version check alone: a link
+  records `<name>@workspace:<path>`, not a semver.) Because selection already sheds
   every site entitled to a different version, a SELECTED site holding anything but the locked version
   is a **mismatch** — including a version the lockfile records elsewhere for the same id. Excusing
   those as a benign `alternate` hid the defect the audit exists to catch: with bare `x` moving

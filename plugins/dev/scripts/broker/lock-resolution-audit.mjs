@@ -304,17 +304,31 @@ function normalizeWorkspaceRoots(workspaceRoots) {
  *     declarer is located only from the roots that survived the shed. Locating
  *     it by first hit across every root is the bare-key twin of the one-hop bug
  *     the deep path already fixes — bun's isolated linker writes a separate,
- *     peer-disambiguated store entry per peer set (measured here:
- *     `.bun/@dnd-kit+core@6.3.1/` -> react 18.3.1,
- *     `.bun/@dnd-kit+core@6.3.1+005eabf3d8b6ef06/` -> react 19.2.8) while the
- *     lockfile records ONE bare `@dnd-kit/core` entry for both, so
- *     `packages.has("@dnd-kit/core/react")` is false and the nested-key
- *     exclusion cannot see the difference. Measured on this repo's real tree, a
- *     bare `react` move reported 16 false mismatched importers, every one of
- *     them located through `orch-monitor-ui`, and `bun install --force` cannot
- *     clear it because the placement is lockfile-determined. A declarer
- *     reachable ONLY through a shed root is reported by name in the
- *     inconclusive reason, never folded into "could not locate".
+ *     peer-disambiguated store entry per peer set while the lockfile records ONE
+ *     bare entry covering all of them, so `packages.has("<declarer>/<id>")` is
+ *     false and the nested-key exclusion cannot see the difference. Reproducible
+ *     on this checkout: the lockfile holds a single bare `eslint@9.39.5` entry
+ *     with NO nested key anywhere, and the store holds two copies of it
+ *     (`.bun/eslint@9.39.5+1a1acd4c2fa5b1a4` and `+5e91b0bf22d6303b`), which
+ *     resolve `@eslint-community/eslint-utils` to two DIFFERENT store dirs
+ *     (`…+5e91b0bf22d6303b` vs `…+bd61bba68491e3a8`) — same version, different
+ *     peer set, one lock key. Measured on this repo's real tree, a bare `react`
+ *     move reported 16 false mismatched importers, every one of them located
+ *     through `orch-monitor-ui`, and `bun install --force` cannot clear it
+ *     because the placement is lockfile-determined. A declarer reachable ONLY
+ *     through a shed root is reported by name in the inconclusive reason, never
+ *     folded into "could not locate".
+ *
+ *     Selecting the right ROOT is only half of it: the declarer must also be
+ *     located as the COPY ITS OWN LOCK KEY NAMES. A site is excluded by
+ *     `pkg.key` but was located by `pkg.id`, so a nested declarer was found at
+ *     whatever the first bare hit from a root happened to be — frequently the
+ *     copy of the entry that exclusion had just shed. It is therefore located by
+ *     walking its own key as an install path, version-checked at every hop
+ *     (`walkInstallPath`, which carries the measurement). A hop that lands on a
+ *     version the lockfile does not record for that path is NOT evidence about
+ *     this key, in either direction: it can neither raise a mismatch nor
+ *     contribute to a match, and it is named on the verdict as `wrongCopy`.
  *
  * Because site selection already sheds every site entitled to a different
  * version, a SELECTED site that resolves anything other than the locked version
@@ -374,6 +388,35 @@ export function auditLockResolution({
   const memberNames = [];
   for (const pkg of parsed.packages.values()) if (pkg.workspaceLink) memberNames.push(pkg.id);
 
+  /**
+   * governingEntryFor — the lockfile entry that decides what `id` resolves to
+   * FROM a copy installed at `parentChain`, or null if the lockfile records no
+   * resolution for it at all.
+   *
+   * Resolution climbs, so entitlement climbs with it: the governing entry is the
+   * one keyed by the LONGEST prefix of `parentChain` that carries `<prefix>/<id>`
+   * — the copy's own nested key first, then each ancestor's, and only if no
+   * ancestor nests it does the BARE `<id>` entry govern.
+   *
+   * Asking only about the copy's OWN key (`<parentChain>/<id>`) is a real
+   * false-ERROR source, MEASURED on this repo's tree. bun nests one level from a
+   * top-level entry: `@opentelemetry/exporter-trace-otlp-http/@opentelemetry/
+   * sdk-trace-base` (2.8.0) and `@opentelemetry/exporter-trace-otlp-http/
+   * @opentelemetry/resources` (2.8.0) are SIBLINGS under the exporter, and there
+   * is no `…/sdk-trace-base/@opentelemetry/resources` key. So sdk-trace-base@2.8.0
+   * is entitled to resources 2.8.0 by its PARENT's key, while the bare
+   * `@opentelemetry/resources` entry is 2.10.0. An own-key-only test selects it
+   * as a site for the bare 2.10.0 move and reports `expected 2.10.0, found
+   * ["2.8.0"]` on a tree that is correct on disk.
+   */
+  const governingEntryFor = (parentChain, id) => {
+    for (let i = parentChain.length; i >= 1; i -= 1) {
+      const nested = parsed.packages.get(`${parentChain.slice(0, i).join("/")}/${id}`);
+      if (nested) return nested;
+    }
+    return parsed.packages.get(id) ?? null;
+  };
+
   // rootShadowedByOwnNestedKey — does this workspace root resolve `id` through
   // its OWN nested lock entry rather than the bare one? Named root: ask exactly
   // that root's key. Unnamed root: we cannot tell which member nests the id, so
@@ -383,6 +426,17 @@ export function auditLockResolution({
     root.name
       ? parsed.packages.has(`${root.name}/${id}`)
       : memberNames.some((member) => parsed.packages.has(`${member}/${id}`));
+
+  // siteEntitledElsewhere — does a copy installed at `parentChain` resolve `id`
+  // through some nested entry rather than the bare one? Then it is judged at
+  // that entry, not here, and probing it would compare against the wrong
+  // resolution. Key identity, not version equality, is the test: two entries
+  // that happen to carry the same version are still two entries, and shedding is
+  // the safe direction (a site list that empties reports INCONCLUSIVE).
+  const siteEntitledElsewhere = (parentChain, id) => {
+    const governing = governingEntryFor(parentChain, id);
+    return governing !== null && governing.key !== id;
+  };
 
   // resolve/locate memo — one probe per (fromDir, id) across the whole audit.
   const memo = new Map();
@@ -400,6 +454,78 @@ export function auditLockResolution({
     return out;
   };
 
+  /**
+   * walkInstallPath — locate the copy an install PATH names, hop by hop from
+   * `rootDir`, CHECKING AT EVERY HOP that the copy landed on is the one the
+   * lockfile records for that path.
+   *
+   * The check is the whole point, and the discriminator was already in hand and
+   * unused: `resolvePackageFn` returns the located package's OWN version, and a
+   * site selected by lock key K but located at a copy whose version disagrees
+   * with K is a probe of a DIFFERENT copy — an observation that is not evidence
+   * about K, in either direction.
+   *
+   * MEASURED on this repo's real bun.lock + node_modules (node v25.8.2 / bun
+   * 1.3.5, macOS 26.5): the lockfile records `@opentelemetry/resources` at
+   * 2.8.0 under six parents AND at 2.10.0 as its own bare entry, and both store
+   * copies exist and are both correct:
+   *
+   *   .bun/@opentelemetry+resources@2.8.0+e40b…/…  -> @opentelemetry/core 2.8.0
+   *   .bun/@opentelemetry+resources@2.10.0+e40b…/… -> @opentelemetry/core 2.10.0
+   *
+   * Locating `@opentelemetry/sdk-logs/@opentelemetry/resources` by a bare
+   * `resolve(root, "@opentelemetry/resources")` takes the FIRST hit from the
+   * root — the 2.10.0 copy, i.e. the copy of the very entry the nested-key
+   * exclusion had just shed — and then judged its core@2.10.0 against the bare
+   * lock's 2.8.0. That produced `deps_relink_failed, expected 2.8.0,
+   * found ["2.10.0"]` on a tree that is CORRECT on disk, so no install could
+   * ever repair it: a permanent ERROR, the same shape as the react incident
+   * reached by a different route. Measured over all 689 bare ids, 5 ids had at
+   * least one such site: `@opentelemetry/core` (6 sites) produced the live false
+   * ERROR, and `@opentelemetry/api` (6), `@opentelemetry/semantic-conventions`
+   * (6), `@opentelemetry/resources` (2) and `csstype` (2) read `matched` ONLY
+   * because the wrong copy happened to agree — a latent FALSE CLEAN in the other
+   * direction. One defect, both failure modes.
+   *
+   * Walking the declarer's OWN key path fixes both: root ->
+   * `@opentelemetry/exporter-trace-otlp-http` -> `@opentelemetry/resources`
+   * lands on the 2.8.0 copy and judges THAT.
+   *
+   * Three failure kinds, kept distinct because they mean different things to an
+   * operator: `absent` (a hop is not on disk — could not look), `wrong-copy`
+   * (the hop resolved a version the lockfile does not record for that path — we
+   * looked at the wrong thing), `unanchored` (no lock entry governs the path, so
+   * right and wrong cannot be told apart). All three are non-evidence; NONE of
+   * them may become a silent `matched`.
+   *
+   * A `workspace:` hop is exempt from the version check ONLY: a workspace link
+   * has no installed version to compare (its recorded "version" is the literal
+   * `workspace:<path>`), and it is identified by name, not by version.
+   */
+  const walkInstallPath = (rootDir, pathChain) => {
+    let cursor = rootDir;
+    for (let i = 0; i < pathChain.length; i += 1) {
+      const at = pathChain.slice(0, i + 1).join("/");
+      const step = resolve(cursor, pathChain[i]);
+      if (!step || typeof step.dir !== "string" || !step.dir) return { ok: false, kind: "absent", at };
+      const governing = governingEntryFor(pathChain.slice(0, i), pathChain[i]);
+      if (!governing) return { ok: false, kind: "unanchored", at };
+      if (!governing.workspaceLink && step.version !== governing.version) {
+        return { ok: false, kind: "wrong-copy", at, want: governing.version, got: step.version };
+      }
+      cursor = step.dir;
+    }
+    return { ok: true, dir: cursor };
+  };
+
+  // A walk that failed for a reason OTHER than "the hop is simply not there" —
+  // rendered for the inconclusive reason so the operator can tell "I could not
+  // look" from "I looked at the wrong copy".
+  const describeBadWalk = (label, walk) =>
+    walk.kind === "wrong-copy"
+      ? `${label} (install path ${walk.at}: the lockfile records ${walk.want} there, the located copy is ${walk.got})`
+      : `${label} (install path ${walk.at}: no lockfile entry governs it)`;
+
   const matched = [];
   const mismatched = [];
   const inconclusive = [];
@@ -415,33 +541,31 @@ export function auditLockResolution({
     const sites = [];
     const unlocatable = [];
     const shedThroughNestedRoot = [];
+    const wrongCopy = [];
     if (chain.length > 1) {
       // The key minus its last element is an install PATH, not a single parent.
       // Walk it hop by hop — root -> chain[0] -> chain[1] -> … — so the importer
       // located is the copy the path actually names. Resolving only
       // chain[length-2] from a root finds whichever copy is root-visible, which
       // for a deep key is either absent (inconclusive) or a separately hoisted
-      // copy in a different tree (the wrong probe, silently).
+      // copy in a different tree (the wrong probe, silently). Every hop is
+      // version-checked against the lock entry governing it (walkInstallPath),
+      // so a hop that lands on a peer copy the path does not name is rejected
+      // rather than followed into the wrong subtree.
       const parentPath = chain.slice(0, -1);
       const importer = parentPath.join("/");
       let importerDir = null;
+      let badWalk = null;
       for (const root of roots) {
-        let cursor = root.dir;
-        let walked = true;
-        for (const hop of parentPath) {
-          const step = resolve(cursor, hop);
-          if (!step || typeof step.dir !== "string" || !step.dir) {
-            walked = false;
-            break;
-          }
-          cursor = step.dir;
-        }
-        if (walked) {
-          importerDir = cursor;
+        const walk = walkInstallPath(root.dir, parentPath);
+        if (walk.ok) {
+          importerDir = walk.dir;
           break;
         }
+        if (!badWalk && walk.kind !== "absent") badWalk = walk;
       }
       if (importerDir) sites.push({ importer, dir: importerDir });
+      else if (badWalk) wrongCopy.push(describeBadWalk(importer, badWalk));
       else unlocatable.push(importer);
     } else {
       // The roots ENTITLED to the bare resolution. A member root carrying its
@@ -457,39 +581,67 @@ export function auditLockResolution({
       for (const pkg of parsed.packages.values()) {
         if (pkg.workspaceLink) continue;
         if (!Array.isArray(pkg.declaredDeps) || !pkg.declaredDeps.includes(entry.id)) continue;
-        // A declarer with its own nested key for this id resolves THAT entry, not
-        // this bare one — probing it would compare against the wrong resolution.
-        if (parsed.packages.has(`${pkg.key}/${entry.id}`)) continue;
-        // Locate the declarer only from a bare-entitled root. Taking the first
-        // hit across ALL roots is the bare-key twin of the one-hop bug the deep
-        // path already fixes: bun's isolated linker writes a SEPARATE,
-        // peer-disambiguated store entry per peer set (measured on this repo:
-        // `.bun/@dnd-kit+core@6.3.1/` resolves react 18.3.1 while
-        // `.bun/@dnd-kit+core@6.3.1+005eabf3d8b6ef06/` resolves 19.2.8), and the
-        // lockfile records ONE bare `@dnd-kit/core` entry for both — so
-        // `parsed.packages.has("@dnd-kit/core/react")` is false and the nested-key
-        // exclusion above cannot see the distinction. A declarer found through a
-        // shed member root IS the copy peered to that member's nested version;
-        // comparing it against the bare one reported 16 false mismatched importers
-        // for `react` on this repo's real tree, an ERROR no `--force` can clear
-        // because the placement is lockfile-determined.
-        let located = null;
-        for (const root of bareRoots) {
-          located = resolve(root.dir, pkg.id);
-          if (located) break;
-        }
-        if (located) {
-          sites.push({ importer: pkg.id, dir: located.dir });
+        const declarerPath = splitLockKey(pkg.key);
+        if (!declarerPath) {
+          unlocatable.push(pkg.key);
           continue;
         }
-        // Not reachable from any bare-entitled root. Separate "shed on purpose"
-        // from "could not look" — folding the two together would let a wholly
-        // shed site list read as an absent dependency in the inconclusive reason.
+        // A declarer whose resolution of this id is governed by a nested entry —
+        // its OWN or any ANCESTOR's — resolves THAT entry, not this bare one;
+        // probing it would compare against the wrong resolution. Testing only
+        // the declarer's own key misses the sibling case bun really produces
+        // (see governingEntryFor for the measurement).
+        if (siteEntitledElsewhere(declarerPath, entry.id)) continue;
+        // Locate the declarer only from a bare-entitled root, and locate it by
+        // walking its OWN lock key as an install path — never by a bare
+        // `resolve(root.dir, pkg.id)` first hit.
+        //
+        // Two distinct bugs are excluded here, and only the first was closed
+        // before. (1) Root SELECTION: taking the first hit across ALL roots is
+        // the bare-key twin of the one-hop bug the deep path already fixes —
+        // bun's isolated linker writes a SEPARATE, peer-disambiguated store
+        // entry per peer set (reproducible here: one bare `eslint@9.39.5` lock
+        // entry with no nested key anywhere, two store copies of it) while the
+        // lockfile records ONE bare entry for all of them, so
+        // `parsed.packages.has("<declarer>/<id>")` is false and the nested-key
+        // exclusion above cannot see the distinction; that reported 16 false
+        // mismatched importers for `react`. (2) COPY selection, the
+        // defect this walk closes: a declarer is EXCLUDED above by `pkg.key`
+        // but was LOCATED by `pkg.id`, so a nested declarer
+        // (`@opentelemetry/sdk-logs/@opentelemetry/resources`, locked 2.8.0)
+        // was located at the first bare hit for `@opentelemetry/resources` —
+        // the 2.10.0 copy, the copy of the entry just shed — and its
+        // core@2.10.0 judged against the bare lock's 2.8.0. See walkInstallPath
+        // for the full measurement; both routes end in an ERROR no `--force`
+        // can clear, because the placement is lockfile-determined.
+        let located = null;
+        let badWalk = null;
+        for (const root of bareRoots) {
+          const walk = walkInstallPath(root.dir, declarerPath);
+          if (walk.ok) {
+            located = walk;
+            break;
+          }
+          if (!badWalk && walk.kind !== "absent") badWalk = walk;
+        }
+        if (located) {
+          sites.push({ importer: pkg.key, dir: located.dir });
+          continue;
+        }
+        // Located nowhere as the copy its key names. Three reasons, kept apart:
+        // we probed the WRONG copy (not evidence about this key), the site was
+        // shed on purpose, or we simply could not look. Folding any of them
+        // together would let a wholly-unjudged site list read as an absent
+        // dependency in the inconclusive reason.
+        if (badWalk) {
+          wrongCopy.push(describeBadWalk(pkg.key, badWalk));
+          continue;
+        }
         const reachableOnlyViaShedRoot = roots.some(
           (root) => rootShadowedByOwnNestedKey(root, entry.id) && resolve(root.dir, pkg.id),
         );
-        if (reachableOnlyViaShedRoot) shedThroughNestedRoot.push(pkg.id);
-        else unlocatable.push(pkg.id);
+        if (reachableOnlyViaShedRoot) shedThroughNestedRoot.push(pkg.key);
+        else unlocatable.push(pkg.key);
       }
     }
 
@@ -504,11 +656,15 @@ export function auditLockResolution({
     if (observations.length === 0) {
       inconclusive.push({
         ...entry,
+        ...(wrongCopy.length > 0 ? { wrongCopy } : {}),
         reason:
           `no importer on disk resolves ${entry.id}` +
           (unlocatable.length > 0 ? ` (could not locate: ${unlocatable.join(", ")})` : "") +
           (shedThroughNestedRoot.length > 0
             ? ` (reachable only through a workspace member that nests ${entry.id}: ${shedThroughNestedRoot.join(", ")})`
+            : "") +
+          (wrongCopy.length > 0
+            ? ` (probed the wrong copy — not evidence about this lock key: ${wrongCopy.join("; ")})`
             : ""),
       });
       continue;
@@ -523,16 +679,25 @@ export function auditLockResolution({
     // ride through as a benign `alternate` and never get forced.
     const wrong = observations.filter((o) => o.version !== entry.to);
 
+    // A site excluded as a wrong-copy probe is carried on the verdict even when
+    // other sites DID answer. Dropping it silently is how the latent false-clean
+    // stayed invisible: four ids read `matched` on this repo's real tree only
+    // because a copy the lock key never selected happened to agree.
     if (wrong.length > 0) {
       mismatched.push({
         ...entry,
+        ...(wrongCopy.length > 0 ? { wrongCopy } : {}),
         expected: entry.to,
         found: [...new Set(wrong.map((o) => o.version))],
         importers: [...new Set(wrong.map((o) => o.importer))],
         paths: [...new Set(wrong.map((o) => o.path).filter(Boolean))],
       });
     } else {
-      matched.push({ ...entry, importers: [...new Set(observations.map((o) => o.importer))] });
+      matched.push({
+        ...entry,
+        ...(wrongCopy.length > 0 ? { wrongCopy } : {}),
+        importers: [...new Set(observations.map((o) => o.importer))],
+      });
     }
   }
 

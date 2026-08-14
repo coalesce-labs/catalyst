@@ -467,13 +467,17 @@ describe("auditLockResolution", () => {
   //
   // MEASURED on this repo's real bun.lock + node_modules (node v25.8.2 / bun
   // 1.3.5, macOS 26.5, Ryans-MBP-2.rozich). bun's isolated linker writes a
-  // SEPARATE, peer-disambiguated store entry per peer set, and both are on disk:
+  // SEPARATE, peer-disambiguated store entry per peer set. Reproducible on this
+  // checkout — one bare lock entry, two store copies, different peer sets:
   //
-  //   node_modules/.bun/@dnd-kit+core@6.3.1/…                  -> react 18.3.1
-  //   node_modules/.bun/@dnd-kit+core@6.3.1+005eabf3d8b6ef06/… -> react 19.2.8
+  //   lock: "eslint": ["eslint@9.39.5", …]   (no nested `*/eslint` key at all)
+  //   .bun/eslint@9.39.5+1a1acd4c2fa5b1a4/…  -> @eslint-community/eslint-utils
+  //                                             @…+5e91b0bf22d6303b
+  //   .bun/eslint@9.39.5+5e91b0bf22d6303b/…  -> @eslint-community/eslint-utils
+  //                                             @…+bd61bba68491e3a8
   //
-  // The lockfile records ONE bare `@dnd-kit/core` entry covering both, so
-  // `packages.has("@dnd-kit/core/react")` is FALSE and the declarer's own
+  // The lockfile records ONE bare entry covering both copies, so
+  // `packages.has("<declarer>/<id>")` is FALSE and the declarer's own
   // nested-key exclusion cannot see the distinction. A declarer located by
   // first hit across every root lands on whichever copy some root can see —
   // measured, all 16 of `react`'s declarers are reachable ONLY through
@@ -742,6 +746,309 @@ describe("auditLockResolution", () => {
     expect(a.mismatched).toEqual([]);
     expect(a.inconclusive).toHaveLength(1);
     expect(a.inconclusive[0].reason).toContain("outer/mid");
+  });
+
+  // ── the declarer is EXCLUDED by its key but was LOCATED by its id ──
+  //
+  // MEASURED on this repo's real bun.lock + node_modules (node v25.8.2 / bun
+  // 1.3.5, macOS 26.5). The tree is CORRECT on disk — both store copies exist
+  // and both match the lockfile:
+  //
+  //   .bun/@opentelemetry+resources@2.8.0+e40b…/…/@opentelemetry/core  = 2.8.0
+  //   .bun/@opentelemetry+resources@2.10.0+e40b…/…/@opentelemetry/core = 2.10.0
+  //
+  // The bare `@opentelemetry/resources` declarer IS correctly shed (the lockfile
+  // carries `@opentelemetry/resources/@opentelemetry/core`). But
+  // `@opentelemetry/sdk-logs/@opentelemetry/resources` — locked at 2.8.0, with
+  // no nested core key of its own — is SELECTED, and was then located by
+  // `resolve(root, "@opentelemetry/resources")`: a first hit from a bare root,
+  // which lands on the 2.10.0 copy, i.e. the copy of the entry just shed. Six
+  // such sites; a bare `@opentelemetry/core` move reported
+  //
+  //   ERROR plugin.checkout.deps_relink_failed  expected=2.8.0 found=["2.10.0"]
+  //
+  // on a tree no install can repair — a permanent ERROR, the react incident's
+  // shape reached by a different route. Over all 689 bare ids, 5 had at least
+  // one such site: 1 produced that live false ERROR and 4 read `matched` ONLY
+  // because the wrong copy happened to agree (the latent false-clean below).
+
+  const WRONGCOPY_LOCK = `{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "catalyst" },
+  },
+  "packages": {
+    "core": ["core@2.8.0", "", {}, "sha512-aaa=="],
+
+    "resources": ["resources@2.10.0", "", { "dependencies": { "core": "2.10.0" } }, "sha512-bbb=="],
+
+    "resources/core": ["core@2.10.0", "", {}, "sha512-ccc=="],
+
+    "sdk-logs": ["sdk-logs@0.219.0", "", { "dependencies": { "resources": "2.8.0" } }, "sha512-ddd=="],
+
+    "sdk-logs/resources": ["resources@2.8.0", "", { "dependencies": { "core": "2.8.0" } }, "sha512-eee=="],
+  }
+}
+`;
+  // Only the BARE core entry moves. `resources/core` legitimately stays 2.10.0.
+  const WRONGCOPY_MOVED = WRONGCOPY_LOCK.replace('"core@2.8.0"', '"core@2.8.1"');
+
+  // The two store copies of `resources` the lockfile records separately.
+  const RES_210 = `${ROOT}/node_modules/.bun/resources@2.10.0+h/node_modules/resources`;
+  const RES_28 = `${ROOT}/node_modules/.bun/resources@2.8.0+h/node_modules/resources`;
+  const SDKLOGS_DIR = `${ROOT}/node_modules/.bun/sdk-logs@0.219.0+h/node_modules/sdk-logs`;
+
+  test("THE WRONG COPY: a declarer selected by its lock key is located by walking THAT key, not by a bare first hit", () => {
+    // Exactly the measured shape. `sdk-logs/resources` (locked 2.8.0) is a
+    // selected site for the bare core move; the bare first hit for `resources`
+    // from the root is the 2.10.0 copy, whose core is legitimately 2.10.0.
+    // Judging THAT against the moved bare 2.8.1 is the permanent false ERROR.
+    // Restoring `located = resolve(root.dir, pkg.id)` in the declarer loop
+    // fails this test.
+    const a = auditLockResolution({
+      workspaceRoots: [{ dir: ROOT, name: "catalyst" }],
+      oldLockText: WRONGCOPY_LOCK,
+      newLockText: WRONGCOPY_MOVED,
+      resolvePackageFn: stubResolver({
+        // The decoy: a bare `resources` hit from the root is the 2.10.0 copy.
+        [`${ROOT}|resources`]: { dir: RES_210, version: "2.10.0" },
+        [`${RES_210}|core`]: { dir: "/store/core@2.10.0", version: "2.10.0" },
+        // The copy `sdk-logs/resources` actually names, reachable only through
+        // sdk-logs — and correctly relinked to the moved core.
+        [`${ROOT}|sdk-logs`]: { dir: SDKLOGS_DIR, version: "0.219.0" },
+        [`${SDKLOGS_DIR}|resources`]: { dir: RES_28, version: "2.8.0" },
+        [`${RES_28}|core`]: { dir: "/store/core@2.8.1", version: "2.8.1" },
+        [`${SDKLOGS_DIR}|core`]: { dir: "/store/core@2.8.1", version: "2.8.1" },
+      }),
+    });
+    expect(a.mismatched).toEqual([]);
+    expect(a.matched).toHaveLength(1);
+    // The site is named by its lock KEY, so the two `resources` declarers are
+    // distinguishable in the report at all.
+    expect(a.matched[0].importers).toContain("sdk-logs/resources");
+    expect(a.matched[0].importers).not.toContain("resources");
+  });
+
+  test("THE LATENT FALSE CLEAN: the wrong copy AGREEING is not evidence either — the right copy is still judged", () => {
+    // The other direction of the same defect, and the half that fixing the
+    // ERROR alone would leave open. Same wiring, but now the decoy 2.10.0 copy
+    // coincidentally resolves the MOVED core (2.8.1) while the copy
+    // `sdk-logs/resources` really names is stale at 2.8.0. Probing the wrong
+    // copy reports a clean tree; probing the right one reports the real defect.
+    // Measured: 4 ids on this repo's real tree read `matched` only because a
+    // copy the lock key never selected happened to agree.
+    const a = auditLockResolution({
+      workspaceRoots: [{ dir: ROOT, name: "catalyst" }],
+      oldLockText: WRONGCOPY_LOCK,
+      newLockText: WRONGCOPY_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|resources`]: { dir: RES_210, version: "2.10.0" },
+        [`${RES_210}|core`]: { dir: "/store/core@2.8.1", version: "2.8.1" }, // coincidental agreement
+        [`${ROOT}|sdk-logs`]: { dir: SDKLOGS_DIR, version: "0.219.0" },
+        [`${SDKLOGS_DIR}|resources`]: { dir: RES_28, version: "2.8.0" },
+        [`${RES_28}|core`]: { dir: "/store/core@2.8.0", version: "2.8.0" }, // the REAL stale placement
+        [`${SDKLOGS_DIR}|core`]: { dir: "/store/core@2.8.1", version: "2.8.1" },
+      }),
+    });
+    expect(a.matched).toEqual([]);
+    expect(a.mismatched).toHaveLength(1);
+    expect(a.mismatched[0].expected).toBe("2.8.1");
+    expect(a.mismatched[0].found).toEqual(["2.8.0"]);
+    expect(a.mismatched[0].importers).toEqual(["sdk-logs/resources"]);
+  });
+
+  test("a declarer whose own key path lands on a DISAGREEING copy is not evidence — inconclusive, naming the wrong copy", () => {
+    // The walk cannot reach the copy the key names: `sdk-logs` on disk is a
+    // stale 0.9.9, not the 0.219.0 the lockfile records, so everything below it
+    // is a different subtree. That observation says nothing about the bare core
+    // move — it must not be a mismatch and must not be a silent match.
+    const a = auditLockResolution({
+      workspaceRoots: [{ dir: ROOT, name: "catalyst" }],
+      oldLockText: WRONGCOPY_LOCK,
+      newLockText: WRONGCOPY_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|sdk-logs`]: { dir: SDKLOGS_DIR, version: "0.9.9" }, // NOT the locked 0.219.0
+        [`${SDKLOGS_DIR}|resources`]: { dir: RES_28, version: "2.8.0" },
+        [`${RES_28}|core`]: { dir: "/store/core@0.0.1", version: "0.0.1" },
+      }),
+    });
+    expect(a.matched).toEqual([]);
+    expect(a.mismatched).toEqual([]);
+    expect(a.inconclusive).toHaveLength(1);
+    expect(a.inconclusive[0].reason).toContain("probed the wrong copy");
+    expect(a.inconclusive[0].reason).toContain("install path sdk-logs");
+    expect(a.inconclusive[0].reason).toContain("0.219.0");
+    expect(a.inconclusive[0].reason).toContain("0.9.9");
+    expect(a.inconclusive[0].wrongCopy).toHaveLength(1);
+  });
+
+  test("a wrong-copy site is carried on the verdict even when other sites DID answer — never silently dropped", () => {
+    // The root answers correctly, so the entry is `matched`. The shed-for-wrong-
+    // copy declarer must still be NAMED on that verdict: dropping it silently is
+    // exactly how the latent false-clean stayed invisible for four ids.
+    const a = auditLockResolution({
+      workspaceRoots: [{ dir: ROOT, name: "catalyst" }],
+      oldLockText: WRONGCOPY_LOCK,
+      newLockText: WRONGCOPY_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|core`]: { dir: "/store/core@2.8.1", version: "2.8.1" },
+        [`${ROOT}|sdk-logs`]: { dir: SDKLOGS_DIR, version: "0.9.9" }, // wrong copy
+        [`${SDKLOGS_DIR}|resources`]: { dir: RES_28, version: "2.8.0" },
+        [`${RES_28}|core`]: { dir: "/store/core@2.8.0", version: "2.8.0" },
+      }),
+    });
+    expect(a.mismatched).toEqual([]);
+    expect(a.matched).toHaveLength(1);
+    expect(a.matched[0].importers).toEqual([`workspace:${ROOT}`]);
+    expect(a.matched[0].wrongCopy).toHaveLength(1);
+    expect(a.matched[0].wrongCopy[0]).toContain("sdk-logs/resources");
+  });
+
+  // ── entitlement climbs: an ANCESTOR's nested key governs too ──
+  //
+  // MEASURED on this repo's real lockfile: bun nests one level from a top-level
+  // entry, so `@opentelemetry/exporter-trace-otlp-http/@opentelemetry/
+  // sdk-trace-base` (2.8.0) and `@opentelemetry/exporter-trace-otlp-http/
+  // @opentelemetry/resources` (2.8.0) are SIBLINGS under the exporter and there
+  // is no `…/sdk-trace-base/@opentelemetry/resources` key at all. sdk-trace-base
+  // is entitled to resources 2.8.0 by its PARENT's key while the bare
+  // `@opentelemetry/resources` entry is 2.10.0.
+
+  const ANCESTOR_LOCK = `{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "catalyst" },
+  },
+  "packages": {
+    "resources": ["resources@2.10.0", "", {}, "sha512-aaa=="],
+
+    "exporter": ["exporter@0.219.0", "", { "dependencies": { "resources": "2.8.0", "sdk-trace-base": "2.8.0" } }, "sha512-bbb=="],
+
+    "exporter/resources": ["resources@2.8.0", "", {}, "sha512-ccc=="],
+
+    "exporter/sdk-trace-base": ["sdk-trace-base@2.8.0", "", { "dependencies": { "resources": "2.8.0" } }, "sha512-ddd=="],
+  }
+}
+`;
+  const ANCESTOR_MOVED = ANCESTOR_LOCK.replace('"resources@2.10.0"', '"resources@2.10.1"');
+  const EXPORTER_DIR = `${ROOT}/node_modules/.bun/exporter@0.219.0+h/node_modules/exporter`;
+  const STB_DIR = `${ROOT}/node_modules/.bun/sdk-trace-base@2.8.0+h/node_modules/sdk-trace-base`;
+
+  test("a declarer entitled by an ANCESTOR's nested key is shed too — not only by its own", () => {
+    // `exporter/sdk-trace-base` has no nested resources key of its own, so an
+    // own-key-only exclusion selects it, and the walk then correctly locates its
+    // legitimate 2.8.0 resources and reports `expected 2.10.1, found ["2.8.0"]`
+    // on a correct tree. Narrowing governingEntryFor to the declarer's own key
+    // (dropping the ancestor loop) fails this test.
+    const a = auditLockResolution({
+      workspaceRoots: [{ dir: ROOT, name: "catalyst" }],
+      oldLockText: ANCESTOR_LOCK,
+      newLockText: ANCESTOR_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|resources`]: { dir: "/store/resources@2.10.1", version: "2.10.1" },
+        [`${ROOT}|exporter`]: { dir: EXPORTER_DIR, version: "0.219.0" },
+        [`${EXPORTER_DIR}|sdk-trace-base`]: { dir: STB_DIR, version: "2.8.0" },
+        [`${STB_DIR}|resources`]: { dir: "/store/resources@2.8.0", version: "2.8.0" },
+        [`${EXPORTER_DIR}|resources`]: { dir: "/store/resources@2.8.0", version: "2.8.0" },
+      }),
+    });
+    expect(a.mismatched).toEqual([]);
+    expect(a.matched).toHaveLength(1);
+    expect(a.matched[0].importers).toEqual([`workspace:${ROOT}`]);
+  });
+
+  test("the ancestor shed does not swallow a declarer no ancestor nests — the positive control", () => {
+    // Same lockfile, but the audited move is on `sdk-trace-base`, which NO
+    // ancestor key nests (`exporter/sdk-trace-base` is the declarer's own
+    // identity here, not a nested resolution of the audited id). A shed that
+    // fired on any nested key anywhere would lose this site and read
+    // inconclusive; the stale copy must surface as a mismatch instead.
+    const stbMoved = ANCESTOR_LOCK.replace('"exporter@0.219.0"', '"exporter@0.219.1"');
+    const a = auditLockResolution({
+      workspaceRoots: [{ dir: ROOT, name: "catalyst" }],
+      oldLockText: ANCESTOR_LOCK,
+      newLockText: stbMoved,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|exporter`]: { dir: EXPORTER_DIR, version: "0.219.0" }, // genuinely stale
+      }),
+    });
+    expect(a.matched).toEqual([]);
+    expect(a.mismatched).toHaveLength(1);
+    expect(a.mismatched[0].expected).toBe("0.219.1");
+    expect(a.mismatched[0].found).toEqual(["0.219.0"]);
+  });
+
+  test("a DEEP key's hop that lands on a disagreeing copy stops the walk — never followed into the wrong subtree", () => {
+    // `outer` on disk is a stale 9.9.9, not the locked 1.0.0, so its mid/leaf is
+    // a different tree entirely. Following it reports a confident mismatch off a
+    // subtree the install path never named. Deleting the version check in
+    // walkInstallPath turns this inconclusive into exactly that false mismatch.
+    const a = auditLockResolution({
+      workspaceRoots: [ROOT],
+      oldLockText: DEEP_LOCK,
+      newLockText: DEEP_LOCK_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|outer`]: { dir: OUTER_DIR, version: "9.9.9" }, // NOT the locked 1.0.0
+        [`${OUTER_DIR}|mid`]: { dir: MID_UNDER_OUTER, version: "1.0.0" },
+        [`${MID_UNDER_OUTER}|leaf`]: { dir: "/store/leaf@7.7.7", version: "7.7.7" },
+      }),
+    });
+    expect(a.matched).toEqual([]);
+    expect(a.mismatched).toEqual([]);
+    expect(a.inconclusive).toHaveLength(1);
+    expect(a.inconclusive[0].reason).toContain("probed the wrong copy");
+    expect(a.inconclusive[0].reason).toContain("install path outer");
+  });
+
+  test("a hop no lockfile entry governs is INCONCLUSIVE — right and wrong copy cannot be told apart", () => {
+    // bun's keys are prefix-closed on every lockfile measured here (745 keys, 48
+    // nested, 0 missing prefixes), so this shape should not occur — which is
+    // precisely why it must fail CLOSED rather than be waved through. `ghost` is
+    // a hop with no entry of its own.
+    const orphanLock = `{
+  "lockfileVersion": 1,
+  "packages": {
+    "leaf": ["leaf@2.0.0", "", {}, "sha512-aaa=="],
+
+    "ghost/leaf": ["leaf@1.0.0", "", {}, "sha512-bbb=="],
+  }
+}
+`;
+    const orphanMoved = orphanLock.replace('"leaf@1.0.0"', '"leaf@1.0.1"');
+    const GHOST_DIR = `${ROOT}/node_modules/.bun/ghost@1.0.0+h/node_modules/ghost`;
+    const a = auditLockResolution({
+      workspaceRoots: [ROOT],
+      oldLockText: orphanLock,
+      newLockText: orphanMoved,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|ghost`]: { dir: GHOST_DIR, version: "1.0.0" },
+        [`${GHOST_DIR}|leaf`]: { dir: "/store/leaf@1.0.1", version: "1.0.1" },
+      }),
+    });
+    expect(a.matched).toEqual([]);
+    expect(a.mismatched).toEqual([]);
+    expect(a.inconclusive).toHaveLength(1);
+    expect(a.inconclusive[0].reason).toContain("no lockfile entry governs it");
+  });
+
+  test("a workspace: hop is exempt from the version check — a link has no installed version to compare", () => {
+    // A member root's lock entry records `ui@workspace:ui`, never a semver, so
+    // comparing the member's package.json version against it rejects EVERY
+    // key nested under a workspace member. Dropping the workspaceLink exemption
+    // in walkInstallPath turns this matched into an inconclusive.
+    const a = auditLockResolution({
+      workspaceRoots: [{ dir: ROOT, name: "catalyst" }],
+      oldLockText: SUBTREE_LOCK,
+      newLockText: SUBTREE_LOCK.replace('"react@19.2.8"', '"react@19.2.9"'),
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|ui`]: { dir: UI_DIR, version: "0.0.0" }, // the member's own manifest version
+        [`${UI_DIR}|react`]: { dir: "/store/react@19.2.9", version: "19.2.9" },
+      }),
+    });
+    expect(a.mismatched).toEqual([]);
+    expect(a.inconclusive).toEqual([]);
+    expect(a.matched).toHaveLength(1);
+    expect(a.matched[0].importers).toEqual(["ui"]);
   });
 
   test("no importer resolves the id on disk → INCONCLUSIVE, never a clean pass", () => {
