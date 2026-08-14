@@ -272,7 +272,10 @@ import { loadMonitorConfig } from "./lib/monitor-config";
 // Shared Layer-1 config-path resolver (env pointer > cwd) — keeps
 // projectsConfigPath / monitorConfigPath / resolveProjectConfigPath in lockstep.
 import { resolveLayer1ConfigPath } from "./lib/config-path";
-import { createRouteHealthMonitor } from "./lib/webhook-route-health"; // CTL-1841
+import {
+  createRouteHealthMonitor,
+  getLinearWebhook401MarkerPath,
+} from "./lib/webhook-route-health"; // CTL-1841
 // CTL-1152: config-driven project roster behind GET /api/projects.
 import { loadProjects } from "./lib/project-roster";
 // CTL-1153 (M2): config mutation for PUT /api/projects/:key.
@@ -2262,7 +2265,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // Stamps /api/webhook and /api/webhook/linear response codes, then evaluates on
   // a periodic tick. ALERT-ONLY (durable marker + console.warn → orch-monitor.log →
   // Alloy → Loki, independent of the broken webhook path). Cleared in server.stop().
-  const routeHealth = createRouteHealthMonitor();
+  // Pin the marker under this server's already-resolved CATALYST_DIR (honors the
+  // opts.catalystDir override) so isolated instances don't share stale latch state.
+  const routeHealth = createRouteHealthMonitor({
+    markerPath: getLinearWebhook401MarkerPath(CATALYST_DIR),
+  });
   const linearWebhookAlarmTimer = setInterval(
     () => { try { routeHealth.evaluate(); } catch { /* alarm must never wedge the server */ } },
     routeHealth.config.tickMs,

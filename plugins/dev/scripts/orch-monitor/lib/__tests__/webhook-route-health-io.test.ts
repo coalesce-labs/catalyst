@@ -167,6 +167,64 @@ describe("createRouteHealthMonitor — evaluate + marker write", () => {
     }
   });
 
+  it("restores persisted route timestamps on hydration and does not erase them on marker refresh", () => {
+    // A prior process latched an episode carrying real route evidence.
+    const markerPath = join(tmpDir, "linear-webhook-401-latch.json");
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(
+      markerPath,
+      JSON.stringify({
+        latched: true,
+        latchedAtMs: 100 * 60_000,
+        lastLinear2xxMs: 10 * 60_000,
+        lastLinearFailMs: 120 * 60_000,
+        lastGithub2xxMs: 121 * 60_000,
+      }),
+    );
+
+    // A fresh process hydrates (latched) and its first evaluate() hits the
+    // marker-refresh branch. Without hydrating the timestamps, that refresh would
+    // rewrite the marker from an all-null in-memory state and ERASE the evidence.
+    const mon = createRouteHealthMonitor({ now: () => 130 * 60_000, markerPath });
+    mon.evaluate();
+
+    const m = JSON.parse(readFileSync(markerPath, "utf8")) as Record<string, unknown>;
+    expect(m.latched).toBe(true);
+    expect(m.lastLinear2xxMs).toBe(10 * 60_000);
+    expect(m.lastLinearFailMs).toBe(120 * 60_000);
+    expect(m.lastGithub2xxMs).toBe(121 * 60_000);
+  });
+
+  it("still emits the log alarm when the durable marker write fails, deduped per episode", () => {
+    // Force writeMarker() to throw by placing the marker under a path whose parent
+    // is a regular FILE (mkdirSync of the dirname → ENOTDIR).
+    const blocker = join(tmpDir, "blocker");
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(blocker, "x");
+    const markerPath = join(blocker, "latch.json");
+
+    const emits: string[] = [];
+    let t = 500 * 60_000;
+    const mon = createRouteHealthMonitor({
+      now: () => t,
+      markerPath,
+      onEmit: (k) => emits.push(k),
+    });
+    mon.stampGithub(200);
+    mon.stampLinear(401);
+    t += 20 * 60_000;
+    mon.stampGithub(200);
+    mon.stampLinear(401);
+
+    mon.evaluate(); // RAISE — marker write throws, but the log alarm must still fire
+    expect(emits).toContain("raised");
+    expect(existsSync(markerPath)).toBe(false); // marker never persisted
+
+    // Same raise edge next tick (marker still unwritable) must NOT re-log every tick.
+    mon.evaluate();
+    expect(emits.filter((e) => e === "raised")).toHaveLength(1);
+  });
+
   it("onEmit fires with 'raised' on the rising edge", () => {
     const markerPath = join(tmpDir, "linear-webhook-401-latch.json");
     const emits: string[] = [];

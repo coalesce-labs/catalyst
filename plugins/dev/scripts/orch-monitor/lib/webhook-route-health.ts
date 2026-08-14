@@ -185,9 +185,11 @@ export function buildRouteHealthMarker(args: {
 
 // ─── Marker path ──────────────────────────────────────────────────────────────
 
-export function getLinearWebhook401MarkerPath(): string {
-  const dir =
-    process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
+export function getLinearWebhook401MarkerPath(baseDir?: string): string {
+  // Prefer an explicitly-resolved base dir (the server threads its own resolved
+  // CATALYST_DIR, which honors the opts.catalystDir override) so isolated server
+  // instances never share stale latch state under a divergent process env.
+  const dir = baseDir ?? process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
   return join(dir, "linear-webhook-401-latch.json");
 }
 
@@ -218,6 +220,9 @@ export function createRouteHealthMonitor(opts: RouteHealthMonitorOpts = {}) {
   let latched = false;
   let latchedAtMs: number | null = null;
   let hydrated = false;
+  // Survives the latch rollback below so the log line is deduped by episode, not by
+  // tick, even when a marker-write failure keeps rolling the latch back (see evaluate()).
+  let lastEmittedEdge: "raised" | "recovered" | null = null;
 
   // Three-valued hydration (mirrors broker-degraded.mjs hydrateLatch):
   //   ENOENT / unparseable → CONFIRMED unlatched (hydrated = true, latched = false)
@@ -246,6 +251,18 @@ export function createRouteHealthMonitor(opts: RouteHealthMonitorOpts = {}) {
       latchedAtMs = Number.isFinite(m?.latchedAtMs)
         ? (m.latchedAtMs as number)
         : null;
+      // Restore the three persisted route timestamps too — buildRouteHealthMarker
+      // writes them precisely so they survive a restart. Without this, the first
+      // post-restart evaluate() reaches the marker-refresh branch with an all-null
+      // in-memory state and OVERWRITES the durable marker, erasing the last Linear
+      // success / Linear failure / GitHub-control evidence the marker exists to
+      // preserve. Use `??=` so a stamp that already arrived on this (fresh, always
+      // more-recent) process wins and is never clobbered by the older persisted value.
+      const restore = (v: unknown): number | null =>
+        typeof v === "number" && Number.isFinite(v) ? v : null;
+      state.lastLinear2xxMs ??= restore(m?.lastLinear2xxMs);
+      state.lastLinearFailMs ??= restore(m?.lastLinearFailMs);
+      state.lastGithub2xxMs ??= restore(m?.lastGithub2xxMs);
     } catch {
       latched = false;
       latchedAtMs = null;
@@ -291,7 +308,11 @@ export function createRouteHealthMonitor(opts: RouteHealthMonitorOpts = {}) {
     const edge = nextLinearWebhook401Latch(latched, v);
 
     if (edge.emit) {
-      // EMIT-THEN-ADVANCE: persist first; only advance the latch on success.
+      // EMIT-THEN-ADVANCE: advance the latch, then persist. On a marker-write failure
+      // roll the latch AND episode-start back so the SAME edge is retried next tick —
+      // the durable marker is the cross-restart source of truth. Restoring the captured
+      // prevLatchedAtMs (not a recomputed value) keeps a failed recovered-edge write
+      // from losing the open episode's start time.
       const nextLatched = edge.latched;
       const nextAt = edge.emit === "raised" ? nowMs : null;
       const prevLatched = latched;
@@ -301,26 +322,30 @@ export function createRouteHealthMonitor(opts: RouteHealthMonitorOpts = {}) {
       try {
         writeMarker(nowMs);
       } catch {
-        // Rollback latch AND episode-start on write failure — retry same edge next
-        // tick. Restoring the captured prevLatchedAtMs (not a recomputed value) keeps
-        // a failed recovered-edge write from losing the open episode's start time.
         latched = prevLatched;
         latchedAtMs = prevLatchedAtMs;
-        return;
       }
-      // Log line → orch-monitor.log → Alloy → Loki (independent of the broken webhook
-      // path). Latch edges are inherently rare — one per rising/falling transition,
-      // serialized by nextLinearWebhook401Latch — so there is no flood to dedup and no
-      // sparse-warn gate: this line MUST fire on EVERY episode (a second outage after a
-      // recovery, days into a long-lived process), not just the first, since it is the
-      // alarm's only durable signal besides the marker.
-      console.warn(
-        `[linear-webhook-alarm] ${edge.emit.toUpperCase()}: /api/webhook/linear ` +
-          `non-2xx-only for ${v.linearFailAgeMs}ms ` +
-          `(last ok ${v.linearOkAgeMs ?? "never"}ms ago, ` +
-          `github ok ${v.githubOkAgeMs}ms ago)`,
-      );
-      opts.onEmit?.(edge.emit, v);
+      // The console.warn is the alarm's INDEPENDENT durable signal: it rides
+      // orch-monitor.log → Alloy → Loki, independent of BOTH the broken webhook path
+      // AND the marker filesystem. It MUST therefore fire on the edge even when
+      // writeMarker() threw — a temporarily-unwritable dir must not silence BOTH the
+      // latch and the log for the entire outage (that would defeat the alarm). It must
+      // still fire on EVERY episode (a second outage after a recovery, days into a
+      // long-lived process), not just the first. `lastEmittedEdge` survives the latch
+      // rollback above, so a re-detected same-edge (marker still unwritable next tick)
+      // does not re-log every tick, while the opposite edge — or a fresh episode after a
+      // recovery — always logs. Edges are otherwise rare (serialized by
+      // nextLinearWebhook401Latch), so this is the only dedup needed; no sparse-warn gate.
+      if (edge.emit !== lastEmittedEdge) {
+        console.warn(
+          `[linear-webhook-alarm] ${edge.emit.toUpperCase()}: /api/webhook/linear ` +
+            `non-2xx-only for ${v.linearFailAgeMs}ms ` +
+            `(last ok ${v.linearOkAgeMs ?? "never"}ms ago, ` +
+            `github ok ${v.githubOkAgeMs}ms ago)`,
+        );
+        opts.onEmit?.(edge.emit, v);
+        lastEmittedEdge = edge.emit;
+      }
     } else if (latched) {
       // Refresh marker stamps while an episode is open (best-effort).
       try {
