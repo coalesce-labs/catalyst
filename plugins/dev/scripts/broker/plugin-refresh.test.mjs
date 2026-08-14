@@ -1498,10 +1498,13 @@ describe("workspaceMemberNodeModules", () => {
   // its fixture registers `/co/packages/a/...` but the un-guarded code path
   // probes the LITERAL `/co/packages/*/...`, which the fixture never registers —
   // so it returns [] with or without the guard. Measured: deleting
-  // `|| entry.includes("*")` at workspaceMemberNodeModules leaves the suite at
-  // 137 pass / 0 fail. (Its SIBLING guard in workspaceRootsFor is genuinely
-  // covered; only this one was blind.) The two tests below fail when it is
-  // dropped, from the two independent directions.
+  // `|| entry.includes("*")` at workspaceMemberNodeModules left the THEN-CURRENT
+  // suite — this file alone, before the two tests below existed — at 137 pass /
+  // 0 fail (bun 1.3.5, Darwin arm64 26.5.2, at origin/main 3f60190c6). With the
+  // two tests below present the same deletion gives 137 pass / 2 fail, which is
+  // the point; re-measure rather than trust either number. (Its SIBLING guard in
+  // workspaceRootsFor is genuinely covered; only this one was blind.) The two
+  // tests below fail when it is dropped, from the two independent directions.
   test("a glob entry is skipped at the ENTRY level — no path containing '*' is ever probed", () => {
     // The load-bearing meaning of "SKIPPED, not expanded": the pattern must
     // never enter path construction at all. This holds on every filesystem,
