@@ -1820,7 +1820,7 @@ describe("workspaceRootsFor (CTL-1831)", () => {
   });
 
   test("the lock dir itself is always a root, even with no manifest", () => {
-    expect(workspaceRootsFor(dir)).toEqual([dir]);
+    expect(workspaceRootsFor(dir)).toEqual([{ dir, name: null }]);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1829,7 +1829,35 @@ describe("workspaceRootsFor (CTL-1831)", () => {
     mkdirSync(join(dir, "pkg", "a"), { recursive: true });
     writeFileSync(join(dir, "pkg", "a", "package.json"), "{}");
     // pkg/b has no package.json → not a member dir anything can resolve from.
-    expect(workspaceRootsFor(dir)).toEqual([dir, join(dir, "pkg", "a")]);
+    expect(workspaceRootsFor(dir)).toEqual([
+      { dir, name: null },
+      { dir: join(dir, "pkg", "a"), name: null },
+    ]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("each root carries its own package NAME — the discriminator the bare-key audit sheds a nested member with", () => {
+    // Without the name the audit cannot tell WHICH member root a `<member>/<id>`
+    // lock key shadows, and falls back to shedding every nameless root. Mutating
+    // either `manifestNameAt` call site to `null` fails this assertion.
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "the-root", workspaces: ["pkg/named", "pkg/nameless", "pkg/broken"] }),
+    );
+    mkdirSync(join(dir, "pkg", "named"), { recursive: true });
+    writeFileSync(join(dir, "pkg", "named", "package.json"), JSON.stringify({ name: "member-ui" }));
+    mkdirSync(join(dir, "pkg", "nameless"), { recursive: true });
+    writeFileSync(join(dir, "pkg", "nameless", "package.json"), "{}");
+    // A member whose manifest EXISTS but does not parse is still a resolvable
+    // dir — membership stays keyed on existence, the name is what degrades.
+    mkdirSync(join(dir, "pkg", "broken"), { recursive: true });
+    writeFileSync(join(dir, "pkg", "broken", "package.json"), "{ not json");
+    expect(workspaceRootsFor(dir)).toEqual([
+      { dir, name: "the-root" },
+      { dir: join(dir, "pkg", "named"), name: "member-ui" },
+      { dir: join(dir, "pkg", "nameless"), name: null },
+      { dir: join(dir, "pkg", "broken"), name: null },
+    ]);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1853,7 +1881,10 @@ describe("workspaceRootsFor (CTL-1831)", () => {
     writeFileSync(join(dir, "packages", "y", "package.json"), "{}");
     mkdirSync(join(dir, "packages", "*"), { recursive: true });
     writeFileSync(join(dir, "packages", "*", "package.json"), "{}");
-    expect(workspaceRootsFor(dir)).toEqual([dir, join(dir, "packages", "x")]);
+    expect(workspaceRootsFor(dir)).toEqual([
+      { dir, name: null },
+      { dir: join(dir, "packages", "x"), name: null },
+    ]);
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -2169,7 +2200,6 @@ describe("refreshPluginCheckout — post-install resolution audit (CTL-1831)", (
         paths: [],
       },
     ],
-    alternates: [],
     inconclusive: [],
   };
   const CLEAN = {
@@ -2178,7 +2208,6 @@ describe("refreshPluginCheckout — post-install resolution audit (CTL-1831)", (
     checked: 1,
     matched: [{}],
     mismatched: [],
-    alternates: [],
     inconclusive: [],
   };
 
@@ -2259,6 +2288,104 @@ describe("refreshPluginCheckout — post-install resolution audit (CTL-1831)", (
     expect(emitted.some((e) => e.event === "plugin.checkout.deps_relink_failed")).toBe(false);
   });
 
+  // ── the post-force re-audit must be CONCLUSIVE before it may claim repair ──
+  //
+  // A re-audit that throws, or one whose entries come back per-entry
+  // inconclusive, carries an EMPTY `mismatched` — byte-identical to a genuinely
+  // repaired tree. Reading that emptiness as success is a check-that-cannot-fail
+  // sitting inside the fix for a check-that-cannot-fail: the refresh would
+  // announce a known mismatch repaired with no positive evidence, and emit no
+  // doubt at all. Mutating the guard back to `else { depsRelinked.push(...) }`
+  // fails both tests below.
+
+  test("a post-force re-audit that THROWS claims no relink and says so, loudly", () => {
+    const emitted = [];
+    let audits = 0;
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: () => {},
+        auditFn: () => {
+          audits += 1;
+          if (audits === 1) return MISMATCH;
+          throw new Error("package manifest momentarily unreadable");
+        },
+      }),
+    );
+    expect(emitted.find((e) => e.event === "plugin.checkout.updated").detail.deps_relinked).toEqual([]);
+    const ev = emitted.find(
+      (e) => e.event === "plugin.checkout.deps_audit_inconclusive" && e.detail.forced === true,
+    );
+    expect(ev).toBeDefined();
+    expect(ev.severity).toBe("WARN");
+    expect(ev.detail.reason).toContain("package manifest momentarily unreadable");
+    // Not silently reclassified as a relink FAILURE either — we do not know that.
+    expect(emitted.some((e) => e.event === "plugin.checkout.deps_relink_failed")).toBe(false);
+  });
+
+  test("a post-force re-audit with PER-ENTRY inconclusives claims no relink", () => {
+    // conclusive:true and mismatched:[] — the shape that looks cleanest of all,
+    // and still proves nothing: no importer could be read for the entry.
+    const emitted = [];
+    let audits = 0;
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: () => {},
+        auditFn: () =>
+          ++audits === 1
+            ? MISMATCH
+            : {
+                conclusive: true,
+                reason: null,
+                checked: 1,
+                matched: [],
+                mismatched: [],
+                inconclusive: [
+                  {
+                    key: "@catalyst-cloud/schema",
+                    id: "@catalyst-cloud/schema",
+                    to: "0.1.5",
+                    reason: "no importer on disk resolves @catalyst-cloud/schema",
+                  },
+                ],
+              },
+      }),
+    );
+    expect(emitted.find((e) => e.event === "plugin.checkout.updated").detail.deps_relinked).toEqual([]);
+    const ev = emitted.find(
+      (e) => e.event === "plugin.checkout.deps_audit_inconclusive" && e.detail.forced === true,
+    );
+    expect(ev).toBeDefined();
+    expect(ev.detail.inconclusive[0].id).toBe("@catalyst-cloud/schema");
+  });
+
+  test("the detection-pass and post-force inconclusives are distinguishable by `forced`", () => {
+    // Both emit the same event name; an operator (and any alert) has to be able
+    // to tell "could not look BEFORE remediating" from "could not confirm the
+    // remediation". Dropping either `forced` literal fails this.
+    const emitted = [];
+    refreshPluginCheckout(
+      baseArgs({
+        gitFn: makeAuditGitFn(),
+        emitFn: (e) => emitted.push(e),
+        bunInstallFn: () => {},
+        auditFn: () => ({
+          conclusive: false,
+          reason: "previous lockfile unavailable",
+          checked: 0,
+          matched: [],
+          mismatched: [],
+          inconclusive: [],
+        }),
+      }),
+    );
+    const ev = emitted.find((e) => e.event === "plugin.checkout.deps_audit_inconclusive");
+    expect(ev.detail.forced).toBe(false);
+  });
+
   test("a force that does NOT fix it emits deps_relink_failed (ERROR) and claims no relink", () => {
     const emitted = [];
     refreshPluginCheckout(
@@ -2311,7 +2438,6 @@ describe("refreshPluginCheckout — post-install resolution audit (CTL-1831)", (
           checked: 0,
           matched: [],
           mismatched: [],
-          alternates: [],
           inconclusive: [],
         }),
       }),
@@ -2336,7 +2462,6 @@ describe("refreshPluginCheckout — post-install resolution audit (CTL-1831)", (
           checked: 1,
           matched: [],
           mismatched: [],
-          alternates: [],
           inconclusive: [{ key: "x", id: "x", to: "1.0.0", reason: "no importer on disk resolves x" }],
         }),
       }),

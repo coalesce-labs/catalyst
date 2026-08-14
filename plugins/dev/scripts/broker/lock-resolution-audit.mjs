@@ -239,36 +239,90 @@ export function changedResolutions(oldLockText, newLockText) {
 // ─── the on-disk audit ───────────────────────────────────────────────────────
 
 /**
+ * normalizeWorkspaceRoots — accept a bare dir string OR `{dir, name}`, and drop
+ * anything that is neither. `name` is the root's own package name; it is what
+ * makes the bare-key member-nesting exclusion PRECISE (shed exactly the member
+ * whose `<name>/<id>` key exists) instead of blunt.
+ *
+ * A string entry is kept, with `name: null` — "present, name unknown" — rather
+ * than rejected, because the caller contract predates the name and every unit
+ * test passes bare dirs. The fallback for an unnamed root is deliberately blunt
+ * (see rootShadowedByOwnNestedKey): it cannot tell WHICH member nests an id, so
+ * it sheds every unnamed root for that id. Shedding is the safe direction — a
+ * site list that empties reports INCONCLUSIVE, never a clean pass.
+ *
+ * @returns {{dir:string, name:string|null}[]}
+ */
+function normalizeWorkspaceRoots(workspaceRoots) {
+  if (!Array.isArray(workspaceRoots)) return [];
+  const out = [];
+  for (const root of workspaceRoots) {
+    if (typeof root === "string" && root) {
+      out.push({ dir: root, name: null });
+      continue;
+    }
+    if (root && typeof root === "object" && typeof root.dir === "string" && root.dir) {
+      out.push({ dir: root.dir, name: typeof root.name === "string" && root.name ? root.name : null });
+    }
+  }
+  return out;
+}
+
+/**
  * auditLockResolution — for every resolution the pulled range moved, does the
  * IMPORTING package on disk actually resolve the locked version?
  *
  * Importer selection is what keeps this both precise and free of false alarms:
  *
- *   - a NESTED key (`chalk/ansi-styles`) names its own importer. It is judged
- *     from that parent's directory ONLY. Judging it from the workspace root
- *     would compare against the hoisted copy — a legitimately different version
- *     — and force a needless 1168-package re-extract on every refresh.
+ *   - a NESTED key (`chalk/ansi-styles`) names its own importer: the WHOLE key
+ *     minus the last element is an install PATH, and the importer is reached by
+ *     resolving each element of that path in sequence from a workspace root.
+ *     Resolving only the immediate parent is wrong for anything deeper than one
+ *     hop — this repo's own bun.lock really carries
+ *     `@typescript-eslint/typescript-estree/minimatch/brace-expansion/balanced-match`
+ *     (measured: 48 nested keys, 5 of them deeper than one hop, max chain 4) —
+ *     because the parent named by that path is `brace-expansion` UNDER
+ *     `minimatch` UNDER `typescript-estree`, not whichever `brace-expansion`
+ *     happens to be visible from the root. A root-visible parent that is a
+ *     separately hoisted copy makes the audit probe the wrong tree; an absent
+ *     one makes it inconclusive. It is judged from that located parent ONLY —
+ *     judging it from the workspace root would compare against the hoisted copy,
+ *     a legitimately different version, and force a needless 1168-package
+ *     re-extract on every refresh.
  *   - a BARE key is the single graph-wide resolution for that id, so every
  *     importer must agree. Sites are the workspace roots plus every lockfile
  *     entry that DECLARES the id, each located by resolving it from a workspace
- *     root. A declarer that carries its own nested key for the id is excluded —
- *     it resolves the other entry, not this one.
+ *     root. A site that carries its OWN nested key for the id is excluded — it
+ *     resolves that entry, not this bare one. That exclusion applies to BOTH
+ *     kinds of site: to a declarer (`<declarer>/<id>`) and to a workspace member
+ *     root (`<member>/<id>`, which this repo's lockfile really has three of:
+ *     `orch-monitor-ui/react`, `orch-monitor-ui/@types/react`,
+ *     `orch-monitor-ui/typescript`, and `plugins/dev/scripts/orch-monitor/ui` is
+ *     a literal workspace member the caller passes as a root).
  *
- * An observed version that the lockfile records ELSEWHERE for the same id is an
- * `alternate`, not a mismatch: a legitimate second resolution must not trigger a
- * force. Only a version the lockfile records NOWHERE for that id proves the tree
- * was not materialized from this lockfile — which is exactly the measured
- * incident (after #3337 the lockfile recorded 0.1.5 and only 0.1.5, and the disk
- * held 0.1.3).
+ * Because site selection already sheds every site entitled to a different
+ * version, a SELECTED site that resolves anything other than the locked version
+ * is a MISMATCH — including a version the lockfile records elsewhere for the
+ * same id. Excusing those as a benign "alternate" hid the exact defect this
+ * module exists to catch: with bare `x` moving 1.0.0 -> 2.0.0 while a nested
+ * `a/x` legitimately stays at 1.0.0, a stale workspace-root link at 1.0.0 was
+ * labelled an alternate, `refreshPluginCheckout` ignores alternates, no force
+ * ever ran, and the bare resolution stayed stale.
  *
  * FAIL-CLOSED THROUGHOUT. An unusable lockfile, an empty site list, an
- * unlocatable importer, or a throwing resolver each produce an explicit
- * INCONCLUSIVE — never a clean pass. `[].every(p)` is `true`, and a zero-site
+ * unlocatable importer, a broken hop part-way along an install path, or a
+ * throwing resolver each produce an explicit INCONCLUSIVE — never a clean pass
+ * and never a probe of a half-walked directory. `[].every(p)` is `true`, and a zero-site
  * loop that prints an all-clear on the strength of zero iterations is one of the
  * false-clean mechanisms this repo has actually shipped.
  *
- * @param {object}   opts
- * @param {string[]} opts.workspaceRoots  dirs to resolve from (lock dir + literal members)
+ * @param {object} opts
+ * @param {(string|{dir:string,name:string|null})[]} opts.workspaceRoots
+ *        dirs to resolve from (lock dir + literal members). An entry may be a
+ *        bare dir string or `{dir, name}`; `name` is the root's own package
+ *        name, which is what lets the bare-key exclusion above name the ONE
+ *        member root a `<member>/<id>` key shadows. See normalizeWorkspaceRoots
+ *        for the deliberately blunt fallback when a name is not supplied.
  * @param {string?}  opts.oldLockText     lockfile content at the pre-pull sha
  * @param {string?}  opts.newLockText     lockfile content on disk now
  * @param {Function} opts.resolvePackageFn (fromDir, id) => {dir, version} | null
@@ -279,7 +333,7 @@ export function auditLockResolution({
   newLockText = null,
   resolvePackageFn,
 } = {}) {
-  const empty = { checked: 0, matched: [], mismatched: [], alternates: [], inconclusive: [] };
+  const empty = { checked: 0, matched: [], mismatched: [], inconclusive: [] };
 
   const change = changedResolutions(oldLockText, newLockText);
   if (!change.conclusive) return { ...empty, conclusive: false, reason: change.reason };
@@ -288,7 +342,7 @@ export function auditLockResolution({
   // The vacuity guard, asserted BEFORE the per-entry loop: with no site to probe
   // every entry would fall through the loop body and the audit would report a
   // clean tree it never looked at.
-  const roots = Array.isArray(workspaceRoots) ? workspaceRoots.filter((r) => typeof r === "string" && r) : [];
+  const roots = normalizeWorkspaceRoots(workspaceRoots);
   if (roots.length === 0) {
     return { ...empty, conclusive: false, reason: "no workspace root to resolve from — nothing could be probed" };
   }
@@ -297,12 +351,22 @@ export function auditLockResolution({
   }
 
   const parsed = parseLockPackages(newLockText);
-  const lockedVersionsById = new Map();
-  for (const entry of parsed.packages.values()) {
-    if (entry.workspaceLink) continue;
-    if (!lockedVersionsById.has(entry.id)) lockedVersionsById.set(entry.id, new Set());
-    lockedVersionsById.get(entry.id).add(entry.version);
-  }
+
+  // The lockfile's workspace members, by package name — the possible parents of
+  // a `<member>/<id>` key, which is how a member root legitimately resolves a
+  // version other than the bare one.
+  const memberNames = [];
+  for (const pkg of parsed.packages.values()) if (pkg.workspaceLink) memberNames.push(pkg.id);
+
+  // rootShadowedByOwnNestedKey — does this workspace root resolve `id` through
+  // its OWN nested lock entry rather than the bare one? Named root: ask exactly
+  // that root's key. Unnamed root: we cannot tell which member nests the id, so
+  // if ANY member does, shed every unnamed root for this entry (safe direction —
+  // see normalizeWorkspaceRoots).
+  const rootShadowedByOwnNestedKey = (root, id) =>
+    root.name
+      ? parsed.packages.has(`${root.name}/${id}`)
+      : memberNames.some((member) => parsed.packages.has(`${member}/${id}`));
 
   // resolve/locate memo — one probe per (fromDir, id) across the whole audit.
   const memo = new Map();
@@ -322,7 +386,6 @@ export function auditLockResolution({
 
   const matched = [];
   const mismatched = [];
-  const alternates = [];
   const inconclusive = [];
 
   for (const entry of change.entries) {
@@ -336,16 +399,40 @@ export function auditLockResolution({
     const sites = [];
     const unlocatable = [];
     if (chain.length > 1) {
-      const parentId = chain[chain.length - 2];
-      let located = null;
+      // The key minus its last element is an install PATH, not a single parent.
+      // Walk it hop by hop — root -> chain[0] -> chain[1] -> … — so the importer
+      // located is the copy the path actually names. Resolving only
+      // chain[length-2] from a root finds whichever copy is root-visible, which
+      // for a deep key is either absent (inconclusive) or a separately hoisted
+      // copy in a different tree (the wrong probe, silently).
+      const parentPath = chain.slice(0, -1);
+      const importer = parentPath.join("/");
+      let importerDir = null;
       for (const root of roots) {
-        located = resolve(root, parentId);
-        if (located) break;
+        let cursor = root.dir;
+        let walked = true;
+        for (const hop of parentPath) {
+          const step = resolve(cursor, hop);
+          if (!step || typeof step.dir !== "string" || !step.dir) {
+            walked = false;
+            break;
+          }
+          cursor = step.dir;
+        }
+        if (walked) {
+          importerDir = cursor;
+          break;
+        }
       }
-      if (located) sites.push({ importer: parentId, dir: located.dir });
-      else unlocatable.push(parentId);
+      if (importerDir) sites.push({ importer, dir: importerDir });
+      else unlocatable.push(importer);
     } else {
-      for (const root of roots) sites.push({ importer: `workspace:${root}`, dir: root });
+      for (const root of roots) {
+        // A member root with its own `<member>/<id>` key resolves THAT entry,
+        // not this bare one — the same exclusion the declarer loop below applies.
+        if (rootShadowedByOwnNestedKey(root, entry.id)) continue;
+        sites.push({ importer: `workspace:${root.dir}`, dir: root.dir });
+      }
       for (const pkg of parsed.packages.values()) {
         if (pkg.workspaceLink) continue;
         if (!Array.isArray(pkg.declaredDeps) || !pkg.declaredDeps.includes(entry.id)) continue;
@@ -354,7 +441,7 @@ export function auditLockResolution({
         if (parsed.packages.has(`${pkg.key}/${entry.id}`)) continue;
         let located = null;
         for (const root of roots) {
-          located = resolve(root, pkg.id);
+          located = resolve(root.dir, pkg.id);
           if (located) break;
         }
         if (located) sites.push({ importer: pkg.id, dir: located.dir });
@@ -380,9 +467,14 @@ export function auditLockResolution({
       continue;
     }
 
-    const lockedElsewhere = lockedVersionsById.get(entry.id) ?? new Set();
-    const wrong = observations.filter((o) => o.version !== entry.to && !lockedElsewhere.has(o.version));
-    const other = observations.filter((o) => o.version !== entry.to && lockedElsewhere.has(o.version));
+    // Site selection above already shed every site entitled to a different
+    // version (a nested key is judged only at the importer its install path
+    // names; a bare key skips any declarer or member root carrying its own
+    // nested key). So the locked version is the ONLY correct answer at a site
+    // that survived, and "this version is recorded elsewhere in the lockfile" is
+    // no longer an excuse — that excuse is what let the stale bare resolution
+    // ride through as a benign `alternate` and never get forced.
+    const wrong = observations.filter((o) => o.version !== entry.to);
 
     if (wrong.length > 0) {
       mismatched.push({
@@ -391,13 +483,6 @@ export function auditLockResolution({
         found: [...new Set(wrong.map((o) => o.version))],
         importers: [...new Set(wrong.map((o) => o.importer))],
         paths: [...new Set(wrong.map((o) => o.path).filter(Boolean))],
-      });
-    } else if (other.length > 0) {
-      alternates.push({
-        ...entry,
-        expected: entry.to,
-        found: [...new Set(other.map((o) => o.version))],
-        importers: [...new Set(other.map((o) => o.importer))],
       });
     } else {
       matched.push({ ...entry, importers: [...new Set(observations.map((o) => o.importer))] });
@@ -410,7 +495,6 @@ export function auditLockResolution({
     checked: change.entries.length,
     matched,
     mismatched,
-    alternates,
     inconclusive,
   };
 }

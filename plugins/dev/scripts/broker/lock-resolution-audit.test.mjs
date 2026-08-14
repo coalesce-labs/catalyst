@@ -344,10 +344,17 @@ describe("auditLockResolution", () => {
     expect(a.mismatched[0].importers).toEqual(["chalk"]);
   });
 
-  test("an observed version the lockfile records ELSEWHERE for the same id is an alternate, not a mismatch", () => {
-    // The lockfile keeps ansi-styles@6.2.3 hoisted AND ansi-styles@4.3.0 under
-    // chalk. If some importer legitimately resolves the other recorded version we
-    // must not force: a false positive costs a full re-extract on every refresh.
+  test("THE HIDDEN DEFECT: a wrong version at a SELECTED site is a mismatch even when the lockfile records it elsewhere", () => {
+    // The lockfile keeps ansi-styles@6.2.3 bare AND ansi-styles@4.3.0 under
+    // chalk; the BARE entry moves 6.2.3 -> 6.2.4. The workspace root must hold
+    // the bare resolution — chalk's nested copy is judged at chalk, not here —
+    // so a root still on 4.3.0 is precisely the stale placement this module
+    // exists to catch.
+    //
+    // Excusing it as a benign `alternate` (because 4.3.0 is recorded SOMEWHERE)
+    // was the bug: refreshPluginCheckout ignores alternates, never forces, and
+    // leaves the bare resolution stale forever. Restoring the
+    // `&& !lockedElsewhere.has(o.version)` filter on `wrong` fails this test.
     const newText = LOCK_0_1_5.replace('"ansi-styles@6.2.3"', '"ansi-styles@6.2.4"');
     const a = auditLockResolution({
       workspaceRoots: [ROOT],
@@ -358,9 +365,209 @@ describe("auditLockResolution", () => {
         [`${ROOT}|ansi-styles`]: { dir: "/store/ansi-styles@4.3.0", version: "4.3.0" },
       }),
     });
+    expect(a.matched).toEqual([]);
+    expect(a.mismatched).toHaveLength(1);
+    expect(a.mismatched[0].expected).toBe("6.2.4");
+    expect(a.mismatched[0].found).toContain("4.3.0");
+  });
+
+  // ── the false positive the `alternate` excuse was really shielding ──
+  //
+  // A workspace MEMBER root legitimately resolves its own nested copy. This repo
+  // really has three such keys (orch-monitor-ui/react, orch-monitor-ui/@types/react,
+  // orch-monitor-ui/typescript) and plugins/dev/scripts/orch-monitor/ui is a
+  // literal member passed in as a root — so this is a live shape, not a
+  // hypothetical. The honest fix is to shed the site, not to excuse the version.
+
+  const MEMBER_NEST_LOCK = `{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "catalyst" },
+  },
+  "packages": {
+    "catalyst-execution-core": ["catalyst-execution-core@workspace:plugins/dev/scripts/execution-core"],
+
+    "ansi-styles": ["ansi-styles@6.2.3", "", {}, "sha512-aaa=="],
+
+    "catalyst-execution-core/ansi-styles": ["ansi-styles@4.3.0", "", {}, "sha512-bbb=="],
+  }
+}
+`;
+  const MEMBER_NEST_MOVED = MEMBER_NEST_LOCK.replace('"ansi-styles@6.2.3"', '"ansi-styles@6.2.4"');
+  const MEMBER_DIR = `${ROOT}/plugins/dev/scripts/execution-core`;
+
+  test("a member root with its OWN nested key for the id is SHED, not judged against the bare resolution", () => {
+    // The member is entitled to 4.3.0 by `catalyst-execution-core/ansi-styles`.
+    // Probing it would report a mismatch and force a needless re-extract on
+    // every refresh that moves the bare entry. Deleting the
+    // rootShadowedByOwnNestedKey guard fails this test.
+    const a = auditLockResolution({
+      workspaceRoots: [
+        { dir: ROOT, name: "catalyst" },
+        { dir: MEMBER_DIR, name: "catalyst-execution-core" },
+      ],
+      oldLockText: MEMBER_NEST_LOCK,
+      newLockText: MEMBER_NEST_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|ansi-styles`]: { dir: "/store/ansi-styles@6.2.4", version: "6.2.4" },
+        [`${MEMBER_DIR}|ansi-styles`]: { dir: "/store/ansi-styles@4.3.0", version: "4.3.0" },
+      }),
+    });
     expect(a.mismatched).toEqual([]);
-    expect(a.alternates).toHaveLength(1);
-    expect(a.alternates[0].found).toContain("4.3.0");
+    expect(a.matched).toHaveLength(1);
+    // The shed member must NOT be credited as a site that agreed, either.
+    expect(a.matched[0].importers).toEqual([`workspace:${ROOT}`]);
+  });
+
+  test("a NAMED member root without a nested key for the id is still judged — the guard sheds one member, not all of them", () => {
+    // The positive control for the test above: same wiring, but the member's
+    // nested key names a DIFFERENT package, so nothing shields it and its stale
+    // copy must surface. A guard that shed every member root passes the previous
+    // test and fails this one.
+    const otherNest = MEMBER_NEST_LOCK.replace(
+      '"catalyst-execution-core/ansi-styles": ["ansi-styles@4.3.0"',
+      '"catalyst-execution-core/chalk": ["chalk@4.3.0"',
+    );
+    const a = auditLockResolution({
+      workspaceRoots: [
+        { dir: ROOT, name: "catalyst" },
+        { dir: MEMBER_DIR, name: "catalyst-execution-core" },
+      ],
+      oldLockText: otherNest,
+      newLockText: otherNest.replace('"ansi-styles@6.2.3"', '"ansi-styles@6.2.4"'),
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|ansi-styles`]: { dir: "/store/ansi-styles@6.2.4", version: "6.2.4" },
+        [`${MEMBER_DIR}|ansi-styles`]: { dir: "/store/ansi-styles@4.3.0", version: "4.3.0" },
+      }),
+    });
+    expect(a.mismatched).toHaveLength(1);
+    expect(a.mismatched[0].importers).toEqual([`workspace:${MEMBER_DIR}`]);
+  });
+
+  test("an UNNAMED root falls back to shedding every root the nesting could apply to — inconclusive, never a false force", () => {
+    // A caller that passes bare dir strings gives the audit no way to tell WHICH
+    // member nests the id. Shedding is the safe direction: the site list empties
+    // and the entry reports INCONCLUSIVE. A fallback that instead kept the roots
+    // would report a mismatch here and force on every refresh.
+    const a = auditLockResolution({
+      workspaceRoots: [ROOT, MEMBER_DIR],
+      oldLockText: MEMBER_NEST_LOCK,
+      newLockText: MEMBER_NEST_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|ansi-styles`]: { dir: "/store/ansi-styles@6.2.4", version: "6.2.4" },
+        [`${MEMBER_DIR}|ansi-styles`]: { dir: "/store/ansi-styles@4.3.0", version: "4.3.0" },
+      }),
+    });
+    expect(a.mismatched).toEqual([]);
+    expect(a.matched).toEqual([]);
+    expect(a.inconclusive).toHaveLength(1);
+  });
+
+  // ── deep install paths: the importer is reached hop by hop ──
+  //
+  // This repo's own bun.lock carries chains deeper than one nesting level
+  // (measured: 48 nested keys, 5 of them deeper than one hop, max chain 4 —
+  // `@typescript-eslint/typescript-estree/minimatch/brace-expansion/balanced-match`).
+  // Resolving only the IMMEDIATE parent from a workspace root finds whichever
+  // copy is root-visible, which is a different tree.
+
+  const DEEP_LOCK = `{
+  "lockfileVersion": 1,
+  "packages": {
+    "outer": ["outer@1.0.0", "", { "dependencies": { "mid": "^1" } }, "sha512-aaa=="],
+
+    "outer/mid": ["mid@1.0.0", "", { "dependencies": { "leaf": "^1" } }, "sha512-bbb=="],
+
+    "outer/mid/leaf": ["leaf@1.0.0", "", {}, "sha512-ccc=="],
+
+    "mid": ["mid@2.0.0", "", { "dependencies": { "leaf": "^2" } }, "sha512-ddd=="],
+
+    "leaf": ["leaf@2.0.0", "", {}, "sha512-eee=="],
+  }
+}
+`;
+  // Only the DEEP entry moves: outer/mid/leaf 1.0.0 -> 1.0.1.
+  const DEEP_LOCK_MOVED = DEEP_LOCK.replace('"leaf@1.0.0"', '"leaf@1.0.1"');
+
+  const OUTER_DIR = `${ROOT}/node_modules/.bun/outer@1.0.0+h/node_modules/outer`;
+  const MID_UNDER_OUTER = `${ROOT}/node_modules/.bun/mid@1.0.0+h/node_modules/mid`;
+  const MID_HOISTED = `${ROOT}/node_modules/.bun/mid@2.0.0+h/node_modules/mid`;
+
+  test("a DEEP key probes the parent its install path names, not a separately hoisted copy of that parent", () => {
+    // Both `mid@1.0.0` (under outer) and `mid@2.0.0` (hoisted) exist. The key
+    // `outer/mid/leaf` names the FORMER. Resolving `mid` straight from the root
+    // lands on the hoisted 2.0.0, whose leaf is 2.0.0 — the wrong tree, reported
+    // as a defect in a tree that is perfectly correct.
+    const a = auditLockResolution({
+      workspaceRoots: [ROOT],
+      oldLockText: DEEP_LOCK,
+      newLockText: DEEP_LOCK_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|outer`]: { dir: OUTER_DIR, version: "1.0.0" },
+        [`${OUTER_DIR}|mid`]: { dir: MID_UNDER_OUTER, version: "1.0.0" },
+        [`${ROOT}|mid`]: { dir: MID_HOISTED, version: "2.0.0" }, // the decoy
+        [`${MID_UNDER_OUTER}|leaf`]: { dir: "/store/leaf@1.0.1", version: "1.0.1" },
+        [`${MID_HOISTED}|leaf`]: { dir: "/store/leaf@2.0.0", version: "2.0.0" },
+      }),
+    });
+    expect(a.checked).toBe(1);
+    expect(a.mismatched).toEqual([]);
+    expect(a.matched).toHaveLength(1);
+    expect(a.matched[0].importers).toEqual(["outer/mid"]);
+  });
+
+  test("a DEEP key whose located parent is genuinely stale IS a mismatch — the walk still fails loudly", () => {
+    // The positive control for the walk: identical wiring, but the copy the
+    // install path names is stale. An implementation that located nothing would
+    // report inconclusive here instead of a mismatch.
+    const a = auditLockResolution({
+      workspaceRoots: [ROOT],
+      oldLockText: DEEP_LOCK,
+      newLockText: DEEP_LOCK_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|outer`]: { dir: OUTER_DIR, version: "1.0.0" },
+        [`${OUTER_DIR}|mid`]: { dir: MID_UNDER_OUTER, version: "1.0.0" },
+        [`${MID_UNDER_OUTER}|leaf`]: { dir: "/store/leaf@1.0.0", version: "1.0.0" },
+      }),
+    });
+    expect(a.inconclusive).toEqual([]);
+    expect(a.mismatched).toHaveLength(1);
+    expect(a.mismatched[0].importers).toEqual(["outer/mid"]);
+    expect(a.mismatched[0].found).toContain("1.0.0");
+  });
+
+  test("a DEEP key's parent that is NOT visible from the root is still located by walking the chain", () => {
+    // No hoisted `mid` at all — the only way to reach the importer is
+    // root -> outer -> mid. Resolving the immediate parent from the root returns
+    // null here, and the entry would be written off as "could not locate".
+    const a = auditLockResolution({
+      workspaceRoots: [ROOT],
+      oldLockText: DEEP_LOCK,
+      newLockText: DEEP_LOCK_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|outer`]: { dir: OUTER_DIR, version: "1.0.0" },
+        [`${OUTER_DIR}|mid`]: { dir: MID_UNDER_OUTER, version: "1.0.0" },
+        [`${MID_UNDER_OUTER}|leaf`]: { dir: "/store/leaf@1.0.1", version: "1.0.1" },
+      }),
+    });
+    expect(a.inconclusive).toEqual([]);
+    expect(a.matched).toHaveLength(1);
+  });
+
+  test("a broken hop in the chain is INCONCLUSIVE naming the install path, never a clean pass", () => {
+    const a = auditLockResolution({
+      workspaceRoots: [ROOT],
+      oldLockText: DEEP_LOCK,
+      newLockText: DEEP_LOCK_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|outer`]: { dir: OUTER_DIR, version: "1.0.0" },
+        // `mid` resolves from nowhere — the walk cannot complete.
+      }),
+    });
+    expect(a.matched).toEqual([]);
+    expect(a.mismatched).toEqual([]);
+    expect(a.inconclusive).toHaveLength(1);
+    expect(a.inconclusive[0].reason).toContain("outer/mid");
   });
 
   test("no importer resolves the id on disk → INCONCLUSIVE, never a clean pass", () => {

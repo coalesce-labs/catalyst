@@ -802,14 +802,29 @@ covered a FAILING install; a no-op produced no signal at all.
   structured parse of the `packages` block in `git show <oldSha>:<lockfile>` versus the file on disk.
   A NESTED key (`chalk/ansi-styles`) is judged from its own parent only — judging it from the
   workspace root would compare against a legitimately different hoisted copy and force a needless
-  re-extract. A BARE key is judged from the workspace roots plus every lockfile entry that DECLARES
-  the id. An observed version the lockfile records ELSEWHERE for the same id is an `alternate`, not
-  a mismatch; only a version recorded NOWHERE proves the tree was not materialized from this
-  lockfile.
+  re-extract. The key minus its last element is an install PATH, walked hop by hop from a workspace
+  root, because this repo's own lockfile nests deeper than one level (measured: 48 nested keys, 5
+  deeper than one hop, max chain 4 —
+  `@typescript-eslint/typescript-estree/minimatch/brace-expansion/balanced-match`); resolving only
+  the immediate parent finds whichever copy is root-visible, which is a different tree. A BARE key is
+  judged from the workspace roots plus every lockfile entry that DECLARES the id, minus any site
+  carrying its OWN nested key for that id — a declarer (`<declarer>/<id>`) or a workspace member root
+  (`<member>/<id>`, of which this repo really has three: `orch-monitor-ui/react`,
+  `orch-monitor-ui/@types/react`, `orch-monitor-ui/typescript`). Because selection already sheds
+  every site entitled to a different version, a SELECTED site holding anything but the locked version
+  is a **mismatch** — including a version the lockfile records elsewhere for the same id. Excusing
+  those as a benign `alternate` hid the defect the audit exists to catch: with bare `x` moving
+  1.0.0 → 2.0.0 while a nested `a/x` legitimately stays 1.0.0, a stale workspace-root link at 1.0.0
+  was labelled an alternate, `refreshPluginCheckout` ignores alternates, and no force ever ran.
 - **Every verdict is three-valued and fails closed.** An unusable lockfile, an empty site list, an
-  unlocatable importer, or a throwing probe each yield a named INCONCLUSIVE — never a clean pass
-  (`[].every(p)` is `true`, and a zero-site loop printing an all-clear is a false-clean mechanism
-  this repo has shipped before).
+  unlocatable importer, a broken hop in an install path, or a throwing probe each yield a named
+  INCONCLUSIVE — never a clean pass (`[].every(p)` is `true`, and a zero-site loop printing an
+  all-clear is a false-clean mechanism this repo has shipped before). That applies to the
+  **post-`--force` re-audit** too: only a CONCLUSIVE re-audit with neither mismatches nor per-entry
+  inconclusives may record the dir in `deps_relinked`. An empty `mismatched` from a re-audit that
+  threw is byte-identical to a repaired tree, so claiming repair off it would be a
+  check-that-cannot-fail inside the fix for a check-that-cannot-fail; the doubt is emitted as
+  `deps_audit_inconclusive` with `forced: true` (the detection pass carries `forced: false`).
 
 | Event                                     | Severity | Emitted when                                                                                     |
 | ----------------------------------------- | -------- | -------------------------------------------------------------------------------------------------- |

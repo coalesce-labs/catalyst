@@ -534,11 +534,16 @@ jobs:
         # same file plus its own audit suite, and an unlisted suite is a guard that
         # lands with no gate — this job's list is hand-enumerated, not globbed.
         #
-        # Both files run: measured 151 pass / 0 fail on this branch and 97 / 0 for
-        # plugin-refresh.test.mjs at the merge base, so there is no pre-existing
-        # red to import. They cannot join the `bun test` allowlist below — that
-        # step's working-directory is execution-core, and plugin-refresh.test.mjs
-        # reaches router.mjs, which needs the BROKER package's own pino.
+        # Both files run: measured 175 tests / 0 fail on this branch, so there is
+        # no pre-existing red to import. (Instrument: `bun test
+        # plugin-refresh.test.mjs lock-resolution-audit.test.mjs` from this step's
+        # working-directory, bun 1.3.5, macOS arm64, single run — the count is
+        # deterministic, no spread. On a checkout WITHOUT the broker package's
+        # pino installed, one of the 175 fails to load rather than failing an
+        # assertion; CI installs it, so CI sees 175/0.) They cannot join the
+        # `bun test` allowlist below — that step's working-directory is
+        # execution-core, and plugin-refresh.test.mjs reaches router.mjs, which
+        # needs the BROKER package's own pino.
         working-directory: plugins/dev/scripts/broker
         run: bun test plugin-refresh.test.mjs lock-resolution-audit.test.mjs
 

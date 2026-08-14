@@ -273,21 +273,42 @@ export function changedLockfiles(root, diffOutput) {
  * workspaceMemberNodeModules. The fail direction is safe here: a skipped member
  * can only SHRINK the site set, and an entry with no reachable site is reported
  * INCONCLUSIVE, never clean.
+ *
+ * Each root carries its own package `name` when the manifest declares one,
+ * because the audit's bare-key site selection has to shed exactly the member
+ * root that owns a `<member>/<id>` nested key. This repo's bun.lock really has
+ * three (`orch-monitor-ui/react`, `orch-monitor-ui/@types/react`,
+ * `orch-monitor-ui/typescript`) and `plugins/dev/scripts/orch-monitor/ui` is a
+ * literal member passed here as a root — so without the name, a version move on
+ * `react` would read that member's legitimately-nested copy as a stale bare
+ * resolution and force a needless re-extract. `name` is null when the manifest
+ * is absent, unparseable, or nameless; the audit's fallback for a nameless root
+ * is blunt but safe (it sheds the root rather than trusting it).
+ *
+ * @returns {{dir:string, name:string|null}[]}
  */
 export function workspaceRootsFor(lockDir, { readFileFn = readFileSync, existsFn = existsSync } = {}) {
-  const roots = [lockDir];
-  let manifest;
-  try {
-    manifest = JSON.parse(readFileFn(resolve(lockDir, "package.json"), "utf8"));
-  } catch {
-    return roots;
-  }
+  const nameOf = (parsed) => (typeof parsed?.name === "string" && parsed.name ? parsed.name : null);
+  const manifestAt = (dir) => {
+    try {
+      return JSON.parse(readFileFn(resolve(dir, "package.json"), "utf8"));
+    } catch {
+      return null; // absent/unreadable/malformed — no name, and no members
+    }
+  };
+  // One read of the root manifest, used for BOTH its name and its members.
+  const manifest = manifestAt(lockDir);
+  const roots = [{ dir: lockDir, name: nameOf(manifest) }];
+  if (manifest === null) return roots;
   const entries = Array.isArray(manifest?.workspaces) ? manifest.workspaces : [];
   for (const entry of entries) {
     if (typeof entry !== "string" || entry === "" || entry.includes("*")) continue;
     const memberDir = resolve(lockDir, entry);
+    // Membership stays keyed on the package.json EXISTING, exactly as before —
+    // a member whose manifest is present but unparseable is still a resolvable
+    // dir, it just contributes no name.
     if (!existsFn(join(memberDir, "package.json"))) continue;
-    roots.push(memberDir);
+    roots.push({ dir: memberDir, name: nameOf(manifestAt(memberDir)) });
   }
   return roots;
 }
@@ -915,7 +936,7 @@ export function refreshPluginCheckout({
       } catch (err) {
         // The audit is a guardrail, not a gate: a throw here must degrade to a
         // named inconclusive, never take down the refresh that already succeeded.
-        audit = { conclusive: false, reason: `audit threw: ${err?.message ?? String(err)}`, checked: 0, matched: [], mismatched: [], alternates: [], inconclusive: [] };
+        audit = { conclusive: false, reason: `audit threw: ${err?.message ?? String(err)}`, checked: 0, matched: [], mismatched: [], inconclusive: [] };
       }
 
       if (audit.mismatched.length > 0) {
@@ -951,7 +972,7 @@ export function refreshPluginCheckout({
         try {
           after = auditFn(auditArgs);
         } catch (err) {
-          after = { conclusive: false, reason: `re-audit threw: ${err?.message ?? String(err)}`, checked: 0, matched: [], mismatched: [], alternates: [], inconclusive: [] };
+          after = { conclusive: false, reason: `re-audit threw: ${err?.message ?? String(err)}`, checked: 0, matched: [], mismatched: [], inconclusive: [] };
         }
         if (after.mismatched.length > 0) {
           // --force is the strongest lever this path has. Still stale after it
@@ -970,8 +991,33 @@ export function refreshPluginCheckout({
               mismatched: after.mismatched,
             },
           });
-        } else {
+        } else if (after.conclusive && after.inconclusive.length === 0) {
           depsRelinked.push(lock.dir);
+        } else {
+          // A re-audit that could not LOOK is not evidence of repair. The
+          // synthesized throw-result above, and an audit whose entries came back
+          // per-entry inconclusive, both carry an EMPTY `mismatched` — identical
+          // to a genuinely clean tree. Claiming `deps_relinked` off that emptiness
+          // would be a check-that-cannot-fail sitting inside the fix for a
+          // check-that-cannot-fail: the refresh would report a known mismatch
+          // repaired with no positive evidence, and say nothing about the doubt.
+          // Only a CONCLUSIVE re-audit with neither mismatches nor per-entry
+          // inconclusives proves the force worked.
+          emitFn({
+            event: "plugin.checkout.deps_audit_inconclusive",
+            orchestrator: null,
+            worker: null,
+            severity: "WARN",
+            detail: {
+              checkout: root,
+              package_dir: lock.dir,
+              lockfile: lock.rel,
+              forced: true, // the POST-force re-audit, not the detection pass
+              reason: after.reason ?? null,
+              checked: after.checked,
+              inconclusive: after.inconclusive,
+            },
+          });
         }
       } else if (!audit.conclusive || audit.inconclusive.length > 0) {
         // "I could not look" must be distinguishable from "the tree is correct".
@@ -986,6 +1032,7 @@ export function refreshPluginCheckout({
             checkout: root,
             package_dir: lock.dir,
             lockfile: lock.rel,
+            forced: false, // the DETECTION pass, not a post-force re-audit
             reason: audit.reason ?? null,
             checked: audit.checked,
             inconclusive: audit.inconclusive,
