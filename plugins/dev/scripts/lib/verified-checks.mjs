@@ -27,13 +27,14 @@
 // inconclusive — never a bare `0`/`false`/`undefined` that a caller can mistake for
 // a measured answer. Malformed input THROWS rather than returning a falsy sentinel.
 //
-// Zero imports beyond node builtins, so `catalyst doctor`'s bare-Node runtime and
-// the bash callers' `node -e` one-liners can both load this without a dependency
-// graph.
+// Zero imports beyond node builtins and ./event-name.mjs (itself import-free), so
+// `catalyst doctor`'s bare-Node runtime and the bash callers' `node -e` one-liners
+// can both load this without a dependency graph.
 
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { getEventName } from "./event-name.mjs"; // CTL-1834: THE shared event-name boundary (import-free leaf)
 
 // VerificationError — thrown for malformed input. Distinct class so a caller can
 // tell "you asked the question wrong" from "the question has no answer today".
@@ -135,8 +136,14 @@ export async function countEventsByName(eventName, { lines, logPath, maxBytes } 
       parseFailures += 1;
       return;
     }
-    const name = obj?.attributes?.["event.name"];
-    if (typeof name !== "string") return;
+    // CTL-1834: resolve through the SHARED boundary. This helper is the repo's
+    // own anti-false-clean instrument, and it read only the v2 key — so a v1-only
+    // family (e.g. `phase.terminal.reap-requested`, 140,017 lines in 2026-08) came
+    // back as a CONCLUSIVE zero with its own positive control asserting it could
+    // look. That is mechanism (4) above — the right question asked of the wrong
+    // surface — inside the tool written to prevent mechanisms (1)-(4).
+    const name = getEventName(obj);
+    if (name === "") return;
     parsedEvents += 1;
     if (name === eventName || name.startsWith(prefix)) matched += 1;
   };
@@ -159,7 +166,7 @@ export async function countEventsByName(eventName, { lines, logPath, maxBytes } 
   const evidence = { parsedEvents, parseFailures, matched, eventName };
   if (parsedEvents === 0) {
     return inconclusive(
-      "no parseable events carrying an event.name were read — cannot distinguish " +
+      "no parseable events carrying a resolvable event name were read — cannot distinguish " +
         "'this event never occurred' from 'the instrument could not look'",
       evidence,
     );

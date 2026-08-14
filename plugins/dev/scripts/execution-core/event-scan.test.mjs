@@ -496,6 +496,43 @@ describe("countTicketEventsInWindow (CTL-671)", () => {
     }
   });
 
+  // CTL-1834. Widening this site's name read newly admitted `phase.*` events whose
+  // trailing segment is NOT a ticket id — `phase.terminal.reap-requested` keys as
+  // "reap-requested", which countTicketEventsInWindow can never match. They are pure
+  // dead weight, and they EVICT: the cap splices the OLDEST entries, which are real
+  // ticket events still inside the window. Measured on 2026-08, unfiltered occupancy
+  // ran to 17,994 against a 20,000 cap (headroom 114x -> 1.11x), so a phase-event storm
+  // — precisely what CTL-671's runaway detector exists to catch — would silently
+  // undercount and never fire the alert.
+  test("CTL-1834: an unmatchable phase key is never bucketed, so cap eviction cannot blind the detector", async () => {
+    const prev = process.env.EXECUTION_CORE_PHASE_EVENT_CAP;
+    process.env.EXECUTION_CORE_PHASE_EVENT_CAP = "3";
+    try {
+      const mod = await import(`./event-scan.mjs?ctl1834=${Date.now()}-${Math.random()}`);
+      mod.__resetEventScanIndexForTest();
+      const now = 10_000_000;
+      const ts = new Date(now - 1000).toISOString();
+      // A raw phase event whose trailing segment is not ticket-shaped.
+      const deadWeight = () =>
+        JSON.stringify({ ts, attributes: { "event.name": "phase.terminal.reap-requested" } });
+      // The real ticket event goes FIRST so it is the oldest — i.e. the one an
+      // over-cap splice would drop.
+      const lines = [makeEvent({ phase: "implement", action: "probe", ticket: "CTL-9", ts })];
+      for (let i = 0; i < 8; i++) lines.push(deadWeight());
+      const { path } = tempLog(lines);
+      // Unfiltered, 9 entries overflow a cap of 3 and the CTL-9 record is spliced out,
+      // so this count is 0 — the detector goes blind during the storm.
+      expect(
+        mod.countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
+      ).toBe(1);
+      // And the dead weight never occupied the list at all.
+      expect(mod.__phaseEventsLengthForTest(path)).toBe(1);
+    } finally {
+      if (prev === undefined) delete process.env.EXECUTION_CORE_PHASE_EVENT_CAP;
+      else process.env.EXECUTION_CORE_PHASE_EVENT_CAP = prev;
+    }
+  });
+
   test("ignores a non-phase event whose trailing segment collides with the ticket id", () => {
     __resetEventScanIndexForTest();
     const now = 10_000_000;

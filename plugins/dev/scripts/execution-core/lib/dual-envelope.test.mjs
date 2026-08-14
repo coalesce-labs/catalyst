@@ -3,20 +3,26 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test lib/dual-envelope.test.mjs
 //
-// WHY ONE LINE AND NOT TWO. Three in-tree readers extract the event name v1-FIRST:
-//   broker/event-name.mjs:16, broker/projection.mjs:305, broker/router.mjs (re-export)
-//     getEventName = event.event ?? event.attributes["event.name"]
-// so a v1 line and a v2 twin of the SAME event would both resolve to the same name and both
-// be routed. handleAgentCheckin/handleAgentCheckout run upsertAgent and _autoRegisterPrLifecycle
-// on each — two lines would double-apply them. A superset line is processed exactly once by
-// every existing consumer while being visible to an attributes-only reader for the first time.
+// WHY ONE LINE AND NOT TWO. A v1 line and a v2 twin of the SAME event would BOTH resolve to
+// the same name and BOTH be routed; handleAgentCheckin/handleAgentCheckout run upsertAgent and
+// _autoRegisterPrLifecycle on each, so two lines would double-apply them. A superset line is
+// processed exactly once by every existing consumer while being visible to an attributes-only
+// reader for the first time.
+//
+// CTL-1834: the "safe because getEventName reads event.event FIRST" wording this comment used
+// to carry was imprecise. What makes it safe is that it is ONE line — one line resolves to one
+// name and routes once under ANY key ordering. Order only matters if the two keys disagree, and
+// across every log file ever written all 322 dual lines carry identical values in both.
+// The single boundary is now lib/event-name.mjs (three keys: event, attributes["event.name"],
+// name); broker/projection.mjs's byte-identical copy and broker/router.mjs's inline ladder are
+// gone.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildDualEnvelopeLine, FLAT_ATTRIBUTE_MAP } from "./canonical-event.mjs";
-import { getEventName } from "../../broker/event-name.mjs";
+import { getEventName } from "../../lib/event-name.mjs"; // CTL-1834: moved out of broker/
 import { isFlatEvent, isPinoRecord } from "../../otel-forward/lib/normalize.ts";
 
 const parse = (line) => JSON.parse(line.trimEnd());

@@ -41,7 +41,7 @@ import { readFileSync, existsSync, rmSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { resolve, join, dirname } from "node:path";
-import { getEventName } from "./event-name.mjs"; // CTL-1348: leaf, not the heavy router
+import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary (still a leaf)
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 import { auditLockResolution } from "./lock-resolution-audit.mjs"; // CTL-1831
 

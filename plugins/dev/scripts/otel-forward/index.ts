@@ -9,6 +9,7 @@ import { readCheckpoint, writeCheckpoint } from "./lib/checkpoint.ts";
 import { createTailer } from "./lib/tail.ts";
 import { log } from "./lib/logger.ts";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
+import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary
 import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { OtlpSender } from "./lib/destinations/otlp.ts";
 import { PosthogSender } from "./lib/destinations/posthog.ts";
@@ -275,17 +276,18 @@ export function emitLag(): void {
 }
 
 // CTL-1817: best-effort identity for a line that is, by definition, not in a shape we can
-// read. Tries all three envelope discriminators (v2 attributes ?? v1 event ?? v3 name) so a
-// dropped record can be NAMED rather than reported as an anonymous tally, then falls back to
-// a bounded raw prefix. Never throws — it runs on the drop path.
+// read, so a dropped record can be NAMED rather than reported as an anonymous tally, with a
+// bounded raw prefix as the fallback. Never throws — it runs on the drop path.
+//
+// CTL-1834: this was the repo's ONLY correct three-key reader, hand-rolled on the drop path
+// while the shared boundary read two. It now delegates. Precedence is unobservable here BY
+// CONSTRUCTION: both callers sit behind `shouldForward` having already REJECTED the line, so
+// the line has no `attributes` key and no string `event` — only the v3 arm can ever fire.
 export function describeUnknownShape(line: string): string {
   try {
     const o = JSON.parse(line) as Record<string, unknown>;
-    const attrs = o.attributes as Record<string, unknown> | undefined;
-    const v2 = attrs?.["event.name"];
-    if (typeof v2 === "string" && v2) return v2;
-    if (typeof o.event === "string" && o.event) return o.event;
-    if (typeof o.name === "string" && o.name) return o.name;
+    const name = getEventName(o);
+    if (name) return name;
     return `(no name; keys: ${Object.keys(o).slice(0, 6).join(",")})`;
   } catch {
     return `(unparseable: ${line.slice(0, 60)})`;

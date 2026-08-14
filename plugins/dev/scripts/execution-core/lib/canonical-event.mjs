@@ -121,12 +121,11 @@ export function buildCanonicalEvent(
 //
 // THE WIRE SHAPE IS ONE SUPERSET LINE, NOT TWO LINES. The line carries BOTH the top-level v1
 // `event` and a full v2 `attributes`/`body`/`resource` block. Two separate lines would be a
-// correctness bug, not merely wasteful: three readers extract the name **v1-first** —
-//   broker/event-name.mjs:16 · broker/projection.mjs:305 · broker/router.mjs (re-export)
-//     getEventName = event.event ?? event.attributes?.["event.name"]
-// so a v1 line and its v2 twin BOTH resolve to the same name and BOTH get routed. For
-// `agent.checkin`/`agent.checkout` that means `handleAgentCheckin`/`handleAgentCheckout` run
-// `upsertAgent` and `_autoRegisterPrLifecycle` twice per real event.
+// correctness bug, not merely wasteful: a v1 line and its v2 twin BOTH resolve to the same name
+// and BOTH get routed. For `agent.checkin`/`agent.checkout` that means `handleAgentCheckin`/
+// `handleAgentCheckout` run `upsertAgent` and `_autoRegisterPrLifecycle` twice per real event.
+// (CTL-1834: the safety is in it being ONE line, not in the key order — one line resolves to one
+// name under any ordering. The name is now resolved in exactly one place, lib/event-name.mjs.)
 //
 // The superset line is safe against every shape discriminator that reads this log, each verified
 // against the tree rather than assumed:
