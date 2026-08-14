@@ -30,7 +30,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scanEventsSince, tailParsedEvents } from "./event-tail.mjs";
+import { scanEventsSince, tailParsedEvents, scanEventsChunked } from "./event-tail.mjs";
 import {
   ENVELOPE_SHAPES,
   KNOWN_TOP_LEVEL_KEYS,
@@ -130,6 +130,13 @@ describe("drift reddens CI", () => {
   // applied IN CI to a committed corpus of REAL producer output — 25 lines
   // captured from the live log by greedy key-coverage, carrying all 36 keys and
   // all four shapes (12 v1, 3 dual, 7 v2, 3 v3).
+  //
+  // SANITIZED (Codex round 2, P1) per AGENTS.md → Version Control, which forbids
+  // committing specific ticket prefixes: the 14 real ticket ids are mapped to
+  // stable PROJ-N, `/Users/ryanrozich` → `/Users/dev`, and the org/repo and PR
+  // URL are generic. Only VALUES were rewritten — key shapes are untouched, which
+  // is what these assertions actually read, and the mapping is deterministic so
+  // the fixture stays diff-friendly.
   //
   // ⚠️ Honest bound, stated so nobody over-trusts this: a corpus is a SNAPSHOT.
   // A brand-new producer field appears here only when the corpus is refreshed.
@@ -279,6 +286,40 @@ describe("malformed records are counted once per physical record", () => {
     const out = tailParsedEvents({ path: logPath, maxLines: 100, bytesPerLineEstimate: 8 });
     expect(out.length).toBe(MALFORMED * 2);
     expect(malformedEventCount()).toBe(MALFORMED);
+  });
+});
+
+// Codex round 2, P1. scanEventsChunked is SHARED with readers whose records are
+// not event envelopes — transcript-tail.mjs feeds it `{type, message}` lines. A
+// default of countEnvelopes:true made every VALID transcript record increment the
+// malformed counter, fabricating damage in the number an operator reads during an
+// incident. Counting is opt-in now; this is the proof.
+describe("non-envelope readers do not contaminate the counter", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl1819-t-"));
+  const tPath = join(dir, "transcript.jsonl");
+
+  test("a transcript scanned through the shared parser counts nothing", () => {
+    const lines = [];
+    for (let i = 0; i < 12; i++) {
+      lines.push(JSON.stringify({ type: "assistant", message: { content: [{ text: `turn ${i}` }] } }));
+    }
+    writeFileSync(tPath, lines.join("\n") + "\n");
+    resetMalformedEventCount();
+
+    const seen = [];
+    scanEventsChunked({ path: tPath, fromOffset: 0, onEvent: (e) => seen.push(e) });
+
+    expect(seen.length).toBe(12); // records still delivered — this is not a filter
+    expect(malformedEventCount()).toBe(0); // and none of them is "damage"
+  });
+
+  test("the same records DO count when a caller opts in — the control", () => {
+    // Proves the assertion above is not vacuous: these records genuinely fail
+    // envelope validation, so a zero count is the opt-out working, not the
+    // validator being inert.
+    resetMalformedEventCount();
+    scanEventsChunked({ path: tPath, fromOffset: 0, countEnvelopes: true, onEvent: () => {} });
+    expect(malformedEventCount()).toBe(12);
   });
 });
 

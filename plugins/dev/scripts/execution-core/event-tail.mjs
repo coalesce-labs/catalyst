@@ -105,7 +105,7 @@ export function noteTornLine(line) {
 // that makes an operator read it. That is the CTL-1823 lesson verbatim: take the
 // count at the one point each record is seen exactly once. Torn-line counting is
 // NOT gated by this flag: it predates the option and its call sites are unchanged.
-export function parseEventTailChunk(chunk, leftover = "", lineFilter = null, countEnvelopes = true) {
+export function parseEventTailChunk(chunk, leftover = "", lineFilter = null, countEnvelopes = false) {
   const text = leftover + chunk;
   const lines = text.split("\n");
   // The final element is the trailing partial line (empty if the chunk ended
@@ -177,10 +177,18 @@ export function scanEventsChunked({
   // returned verbatim (an emit does not consume it) so the flag can never corrupt
   // a byte cursor if someone sets it on a resuming reader by mistake.
   emitTrailingLine = false,
-  // CTL-1819 (Codex P2): see parseEventTailChunk. FALSE for exploratory reads
-  // that will be re-read (window probes, doubling attempts); TRUE for the one
-  // definitive pass whose events actually reach a consumer.
-  countEnvelopes = true,
+  // CTL-1819. OPT-IN, default FALSE (Codex round 2, P1). This parser is shared
+  // with readers whose records are NOT event envelopes at all —
+  // transcript-tail.mjs feeds it `{type, message}` transcript lines — so a
+  // default of `true` made every VALID transcript record increment the
+  // malformed-event counter and warn, contaminating the process-wide total for
+  // the unified event log with fabricated damage.
+  //
+  // The fail direction decides the default: a missed opt-in loses coverage,
+  // which shows up as a counter that stays at zero; a wrong opt-out invents
+  // damage in the one number an operator consults during an incident. Silence
+  // is recoverable, fabrication is not.
+  countEnvelopes = false,
 } = {}) {
   let fd;
   let size;
@@ -429,6 +437,12 @@ export function scanEventsSince({
     skipFirstLine: fromOffset > 0,
     lineFilter,
     onRead,
+    // CTL-1819: the DEFINITIVE pass, and one of the two places that opt in to
+    // envelope counting (the other two counting sites are the broker's and the
+    // monitor's live tails, which call checkEnvelope directly, plus
+    // tailParsedEvents which counts over the records it returns). The probe walk
+    // above deliberately does NOT count — it re-reads the same bytes.
+    countEnvelopes: true,
     // CTL-1529 (Codex P2): scanEventsSince is BY CONSTRUCTION a one-shot read to
     // EOF — it has no cursor and no next pass — so a final record without a
     // trailing newline is a real event, not a partial line. Every consumer of this
