@@ -112,10 +112,15 @@ emit_phase_complete() {
     --message "$message" \
     --payload-json "$enriched_payload")" || return 1
 
-  # Test override: write the single line directly to the file.
+  # CATALYST_EVENTS_FILE override: write the single line directly to that file. It bypasses
+  # canonical_jsonl_append's month resolution and rotation, but NOT the atomic primitive —
+  # CTL-1809. This producer is `catalyst.phase-agent`, whose lines now AVERAGE 1,075 B under
+  # the CTL-1795 superset envelope (max 3,105 B), i.e. its median already sits past the
+  # 1,025-byte macOS tear threshold; it is one of the two producers most exposed to this bug,
+  # not a test-only curiosity.
   if [[ -n "${CATALYST_EVENTS_FILE:-}" ]]; then
     mkdir -p "$(dirname "$CATALYST_EVENTS_FILE")" 2>/dev/null || true
-    printf '%s\n' "$line" >> "$CATALYST_EVENTS_FILE" || return 1
+    canonical_atomic_append_line "$CATALYST_EVENTS_FILE" "$line" || return 1
     return 0
   fi
 

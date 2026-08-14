@@ -318,6 +318,20 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/canonical-event.test.sh
 
+      - name: event-append atomicity test (CTL-1809)
+        # The bash append seam must be exactly ONE write(2) per event: `printf >>` is
+        # ⌈n/BUFSIZ⌉ write() calls (BUFSIZ = 1024 on macOS, 8192 on glibc), so a line over
+        # that tears when a concurrent producer appends between them. Runs 8 concurrent
+        # producers x 150 lines at 1,025 B and at the real 19,086 B fleet maximum, and
+        # asserts BOTH halves of the contract — every line parses, AND every line's contents
+        # belong to exactly one event (a splice can parse perfectly; the RCA reproduced one).
+        # Carries its own positive control: the same harness on a naive `printf >>` must go
+        # RED, so a green run is evidence rather than a machine that happens not to tear.
+        # Also covers the hard 256 KiB cap + tombstone, the all-producers convergence scan,
+        # and catalyst-events' torn-line batch-abort fix.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/event-append-atomicity.test.sh
+
       - name: SKILL.md ${PLUGIN_ROOT} assignment guard (CTL-1832)
         # CTL-1832: a SKILL.md that EXPANDS ${PLUGIN_ROOT} must also ASSIGN it, or
         # the expansion is empty and the command silently addresses a bogus path.
@@ -489,7 +503,7 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/deployment-mode-parity.test.sh
 
-      - name: Broker worker-state projection test (CTL-1529)
+      - name: Broker tests (CTL-1529, CTL-1809)
         # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the
         # bounded event-log scan in broker/projection.mjs (replayWorkerStateProjection),
         # and `grep worker-state-projection .github/workflows/` used to return NOTHING —
@@ -500,8 +514,15 @@ jobs:
         # CTL-1628: the root workspace install above already covers broker's deps
         # (bun resolves the workspace root's node_modules from this cwd), so no
         # per-package install here anymore.
+        #
+        # CTL-1809: this list is HAND-MAINTAINED — an unlisted broker test simply never
+        # runs, which is the same trap CTL-1529 documents one paragraph up. tailer-torn
+        # guards the broker's live-tail torn-line counter; it is named explicitly rather
+        # than globbed because the rest of the broker suite has a pre-existing failure
+        # (fence-held-fold, red on origin/main) that a `bun test` glob here would import
+        # into this job as a new red.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs
+        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs
 
       - name: catalyst-agent tests (CTL-1825)
         # catalyst-agent had NO CI coverage at all before CTL-1825
@@ -691,6 +712,12 @@ jobs:
         #   out at 9 s locally under load (bun default 5 000 ms). The test
         #   relies on real-time event-log delivery latency.
         #   Memory ref: project_execution_core_daemon_flaky_test
+        #
+        #   CTL-1809 NOTE: because monitor.test.mjs is excluded, a monitor case added
+        #   there would never run here. monitor-torn.test.mjs is therefore a SEPARATE
+        #   file in the list below — it drives readNewEvents directly and calls
+        #   stopMonitor() before every append, so it arms no timer and no watcher
+        #   (measured max 1.6 s per case locally, vs bun's 5 000 ms default).
         run: |
           bun test \
             beliefs/advance-rules.test.mjs \
@@ -775,6 +802,7 @@ jobs:
             event-cursor.test.mjs \
             event-scan.test.mjs \
             event-tail.test.mjs \
+            monitor-torn.test.mjs \
             event-log-window.test.mjs \
             event-log-read-guard.test.mjs \
             lib/canonical-event.test.mjs \

@@ -114,7 +114,13 @@ configureDropSurface(cfg.otlp.dropSurface);
 // undifferentiated `skipped`, which no surface reads — so a whole event family could vanish
 // with every health signal green. They are reported on the pino log (Alloy-shipped,
 // independent of this daemon's own OTLP egress), never as an event on the pipe they describe.
-let stats = { processed: 0, skipped: 0, unrecognized: 0, skippedNoAttributes: 0 };
+// CTL-1809: `torn` counts lines that did not parse as JSON AT ALL — the product of a bash
+// producer's multi-write(2) append being interleaved by a concurrent producer. It is a
+// strictly different failure from `unrecognized` (parses fine, matches no known envelope
+// shape) and must not be folded into it: one says a producer emitted a shape we cannot map,
+// the other says the log was damaged in transit. It is deliberately NOT added to `skipped`
+// either — `skipped` counts records that reached processLine, and a torn line never does.
+let stats = { processed: 0, skipped: 0, unrecognized: 0, skippedNoAttributes: 0, torn: 0 };
 
 // CTL-1060 Phase 3: lag tracking state. lastLocalTs = newest event ts seen from the log.
 // lastForwardedTs = newest event ts confirmed delivered to OTLP/Loki (seeded from checkpoint).
@@ -305,6 +311,40 @@ export function noteUnrecognizedLine(line: string): void {
   );
 }
 
+// CTL-1809: its own gate, not shouldWarnForShape's. A torn line's "key" is a raw byte
+// prefix, so a sustained tear produces a near-unique key per line — sharing the shape gate
+// would exhaust the 50-key budget that the unknown-envelope alarm depends on within 50
+// lines, silencing a completely different detector. Same reason CTL-1818 gave each caller
+// its own gate in the first place.
+const shouldWarnForTear = createSparseWarnGate({ maxTracked: 20 });
+
+// Wired into the tailer as onUnparseable. The tailer's JSON.parse catch is the ONLY place in
+// this process that can see a torn line — it never reaches shouldForward's shape test, let
+// alone processLine.
+//
+// The counter is a LOWER BOUND on corruption, never proof of cleanliness. The CTL-1809 RCA
+// reproduced a splice that parses as valid JSON, whose declared length matches, and whose
+// contents are three different events; nothing here or in any other parser can see that.
+// The write side (lib/canonical-event.sh's one-write(2) primitive) is the fix — this is the
+// tripwire that says the fix is not holding somewhere.
+//
+// Note for whoever reads these numbers across hosts: a MONITOR node's count will legitimately
+// exceed a worker's. event-mirror is a transport, not a repair layer — a torn line has no
+// extractable event id, so its dedup ring cannot suppress it and it is always appended
+// (event-mirror/lib/state.ts), faithfully propagating worker-host damage plus any duplicates
+// from a cursor-0 re-read.
+export function noteUnparseableLine(line: string): void {
+  stats.torn++;
+  // A torn line has no name to report, by definition — a bounded raw prefix is the only
+  // identity available, and it is what an operator greps the source log for.
+  const prefix = line.slice(0, 60);
+  if (!shouldWarnForTear(`t:${prefix}`, stats.torn)) return;
+  log.warn(
+    { prefix, torn_total: stats.torn, bytes: line.length },
+    "TORN event-log line — did not parse as JSON; counted and skipped, never forwarded (CTL-1809)",
+  );
+}
+
 export function processLine(line: string): void {
   try {
     let ev = JSON.parse(line) as CanonicalEvent;
@@ -418,6 +458,7 @@ if (import.meta.main) {
     offset: ck?.offset ?? 0,
     onLine: processLine,
     onUnrecognized: noteUnrecognizedLine, // CTL-1817: make the tailer's silent drop loud
+    onUnparseable: noteUnparseableLine, // CTL-1809: make the tailer's silent TORN line loud
     signal: ac.signal,
   });
 
@@ -529,5 +570,8 @@ if (import.meta.main) {
     });
   }
   await flushAll();
-  log.info({ processed: stats.processed, skipped: stats.skipped }, "stopped");
+  // CTL-1809: `torn` on the shutdown line too — the sparse gate above means a long, slow
+  // tear may only ever have logged its first sighting, so this is the one place the
+  // process-total is guaranteed to be reported.
+  log.info({ processed: stats.processed, skipped: stats.skipped, torn: stats.torn }, "stopped");
 }

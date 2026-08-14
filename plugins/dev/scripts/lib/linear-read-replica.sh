@@ -72,7 +72,13 @@ _lrr_emit_fallback_event() {
     --session "${CATALYST_SESSION_ID:-}" \
     --message "Linear single-ticket read fell back to linearis ($reason) for $id" \
     --payload-json "$(jq -nc --arg s "$source" '{source:$s}')" 2>/dev/null)" || return 0
-  canonical_jsonl_append "$events_dir" "$line" 2>/dev/null || true
+  # CTL-1809: the `2>/dev/null` above belongs to build_canonical_line (a jq program whose
+  # noise is not actionable); the append below must NOT be muted. Its stderr is the only
+  # report that the event was refused over the byte cap or lost to a failed write, and this
+  # helper is on the canonical agent read path — a silent drop here is a hole in the very
+  # "every client reads the replica" accounting the event exists to prove. Still `|| true`:
+  # a diagnostic tap must never fail its caller (CTL-988).
+  canonical_jsonl_append "$events_dir" "$line" || true
 }
 
 # _lrr_emit_read_event <ID> <source> <result> [age_ms] — CTL-1403 reads-by-source.
@@ -113,7 +119,9 @@ _lrr_emit_read_event() {
     ${age_args[@]+"${age_args[@]}"} \
     --session "${CATALYST_SESSION_ID:-}" \
     --message "linear read $id source=$source result=$result" 2>/dev/null)" || return 0
-  canonical_jsonl_append "$events_dir" "$line" 2>/dev/null || true
+  # CTL-1809: same split as _lrr_emit_fallback_event above — the builder's jq noise stays
+  # muted, the append's refusal/failure WARNING does not. Still `|| true` (CTL-988).
+  canonical_jsonl_append "$events_dir" "$line" || true
 }
 
 # _lrr_live_read <ID> → run the linearis fallback, CAPPED so a 429-stalled / hung

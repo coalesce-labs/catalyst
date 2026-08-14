@@ -49,9 +49,15 @@ fi
 # status=failed because an unclean exit is always a failure from the broker's
 # perspective; reason field distinguishes this path from a normal end call.
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# CTL-1809: the TRAILING `2>/dev/null` (the one after the closing paren) applied to
+# canonical_jsonl_append itself, not to jq, and has been removed. It is the easiest of the
+# five to miss precisely because the call spans six lines and the inner jq redirect looks
+# like the same thing. The inner one stays — jq's parse noise is not actionable; the
+# primitive's refused-line / failed-write WARNING is. `|| true` stays too: a Stop hook must
+# never fail the session it is closing.
 canonical_jsonl_append "$EVENTS_DIR" \
   "$(jq -nc \
     --arg ts "$ts" \
     --arg sid "$CATALYST_SESSION_ID" \
     '{ts:$ts,event:"agent.checkout",detail:{session_id:$sid,status:"failed",reason:"lifecycle-hook-stop"}}' \
-    2>/dev/null)" 2>/dev/null || true
+    2>/dev/null)" || true

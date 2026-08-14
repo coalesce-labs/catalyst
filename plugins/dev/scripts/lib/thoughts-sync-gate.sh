@@ -106,7 +106,10 @@ if [[ "$SYNC_MODE" == "shadow" ]]; then
       --event-name "$EVENT_NAME" 2>/dev/null || true)"
     if [[ -n "$LINE" ]]; then
       EVENTS_BASE="${CATALYST_DIR:-${HOME}/catalyst}/events"
-      canonical_jsonl_append "$EVENTS_BASE" "$LINE" 2>/dev/null || true
+      # CTL-1809: no `2>/dev/null` — the primitive's refused-line / failed-write WARNING is
+      # the only report that this event was dropped, and a muted loud fallback is a silent
+      # one. `|| true` still keeps the shadow-mode gate non-blocking.
+      canonical_jsonl_append "$EVENTS_BASE" "$LINE" || true
     fi
   fi
   exit 0

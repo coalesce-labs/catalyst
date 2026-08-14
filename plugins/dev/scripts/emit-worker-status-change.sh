@@ -158,7 +158,17 @@ append_event() {
       events_file="${CATALYST_EVENTS_DIR:-$CATALYST_DIR/events}/$(date -u +%Y-%m).jsonl"
       mkdir -p "$(dirname "$events_file")"
     fi
-    printf '%s\n' "$event_json" >> "$events_file"
+    # CTL-1809: one write(2). canonical-event.sh was already sourced just above (for the
+    # v1-only breadcrumb), so the primitive is normally in scope here. The fallback is kept
+    # because this branch's whole premise is "the canonical helpers may be unavailable" —
+    # but it is LOUD, because a silent printf here is indistinguishable from a working
+    # append until two producers overlap on a large line.
+    if command -v canonical_atomic_append_line >/dev/null 2>&1; then
+      canonical_atomic_append_line "$events_file" "$event_json" || return 1
+    else
+      printf '[catalyst] WARNING: canonical-event.sh unavailable — appending a worker-status event WITHOUT the atomic primitive; this write can tear above BUFSIZ (CTL-1809)\n' >&2
+      printf '%s\n' "$event_json" >> "$events_file"
+    fi
   fi
 }
 

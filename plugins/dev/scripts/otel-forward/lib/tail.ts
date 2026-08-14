@@ -22,6 +22,17 @@ export interface TailerOpts {
    * warning so the drop is loud instead of silent. See shouldForward below.
    */
   onUnrecognized?: (line: string) => void;
+  /**
+   * CTL-1809: called with the raw line when it does not parse as JSON at all — a TORN line,
+   * i.e. the product of a bash producer's multi-write(2) append being interleaved by a
+   * concurrent producer. Distinct from onUnrecognized, which fires for a line that parses
+   * fine but matches no known envelope shape. Both are drops; only this one means the log
+   * itself was damaged on the way in.
+   *
+   * Optional so every existing caller is unchanged; index.ts wires it to a counter +
+   * sparse warning. See shouldForward's catch below.
+   */
+  onUnparseable?: (line: string) => void;
 }
 
 export interface Tailer {
@@ -36,6 +47,12 @@ export function createTailer(opts: TailerOpts): Tailer {
   const monthFn = opts.monthFn ?? (() => defaultMonthPath(opts.eventsDir ?? ""));
   let currentPath = opts.filePath ?? monthFn();
   let offset = opts.offset;
+  // CTL-1809: the trailing bytes of a read that did not end on a newline. A poll landing
+  // while a producer is mid-append sees a nonempty final fragment with no "\n" yet — that is
+  // a healthy in-flight write, not damage. Held here and stitched onto the front of the next
+  // read, which is the same `leftover` contract execution-core/event-tail.mjs's
+  // parseEventTailChunk and broker/tailer.mjs's readNewEvents already ship.
+  let leftover = "";
 
   // Accept canonical OTel envelopes (have `attributes`), flat reap-intent
   // records (have `event` but no `attributes`), and pino operational logs
@@ -71,6 +88,29 @@ export function createTailer(opts: TailerOpts): Tailer {
       }
       return recognized;
     } catch {
+      // CTL-1809: THIS IS THE TORN-LINE SEAM. Until now this catch swallowed an unparseable
+      // line with no counter and no log line anywhere in the process — so a damaged event
+      // log and a quiet one were byte-for-byte indistinguishable from here, which is how a
+      // measured 200-fragment corpus on the monitor node went unreported for a week.
+      //
+      // COUNT AND SKIP. A torn line can never be forwarded (it has no readable envelope),
+      // and it is permanently corrupt — parking `offset` on it would wedge this tailer, and
+      // with it the whole forwarder, on damage that will never resolve. The byte cursor has
+      // already advanced past it by the time we get here (readNewLines sets `offset = size`
+      // before splitting), which is the same never-revisit contract every other reader on
+      // this log ships.
+      //
+      // Every line reaching here is a COMPLETE line: readNewLines pops the trailing fragment
+      // into `leftover` before this loop, so an in-flight append can no longer be counted as
+      // a tear. It used to be: the fragment was passed straight in, `stats.torn` ticked on a
+      // perfectly healthy write, and because `offset` had already advanced the NEXT poll
+      // counted the rest of the same record again. A torn-line counter that counts healthy
+      // in-flight writes is not a torn-line counter.
+      try {
+        opts.onUnparseable?.(line);
+      } catch {
+        /* best-effort — a reporting hook must never break the tail loop */
+      }
       return false;
     }
   }
@@ -79,7 +119,10 @@ export function createTailer(opts: TailerOpts): Tailer {
     if (!existsSync(currentPath)) return;
     const size = statSync(currentPath).size;
     if (size < offset) {
+      // Truncation/rotation in place: the held fragment belonged to bytes that no longer
+      // exist, so stitching it onto the new file's first line would manufacture a tear.
       offset = 0;
+      leftover = "";
       return;
     }
     if (size === offset) return;
@@ -92,8 +135,14 @@ export function createTailer(opts: TailerOpts): Tailer {
       closeSync(fd);
     }
     offset = size;
-    const text = buf.toString("utf8");
-    for (const line of text.split("\n")) {
+    const text = leftover + buf.toString("utf8");
+    const lines = text.split("\n");
+    // The final element is the trailing partial line — empty when the read ended exactly on a
+    // newline. Hold it back until a newline arrives rather than handing it to shouldForward,
+    // whose catch would report it as a tear AND leave its suffix to be counted a second time
+    // on the next poll (the offset has already advanced).
+    leftover = lines.pop() ?? "";
+    for (const line of lines) {
       if (line.length > 0 && shouldForward(line)) opts.onLine(line);
     }
   }
@@ -108,6 +157,9 @@ export function createTailer(opts: TailerOpts): Tailer {
       if (expected !== currentPath) {
         currentPath = expected;
         offset = 0;
+        // Month rollover: any fragment held from the previous month's file must not be
+        // prepended to the new file's first line.
+        leftover = "";
       }
       readNewLines();
       await new Promise<void>((resolve) => {

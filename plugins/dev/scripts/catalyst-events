@@ -46,6 +46,26 @@ esac
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 EVENTS_DIR="${CATALYST_EVENTS_DIR:-$CATALYST_DIR/events}"
 
+# CTL-1809: this CLI is a READER that also emits a handful of `wait.*` events, so it is a
+# bash producer too and must append through the one atomic seam. Sourced best-effort — the
+# reader half must keep working on a host where the helper is missing, and the one emitter
+# below degrades loudly rather than silently.
+#
+# The symlink walk is not decoration: install-cli.sh installs this script as a symlink on
+# the PATH, so a bare `dirname "$BASH_SOURCE"` resolves to the symlink's directory, `lib/`
+# is not there, and the helper would silently never load on exactly the installed path that
+# matters. Same walk the --version block above already does, for the same reason.
+_CE_SRC="${BASH_SOURCE[0]}"
+while [[ -L "$_CE_SRC" ]]; do
+  _CE_D="$(cd -P "$(dirname "$_CE_SRC")" && pwd)" && _CE_SRC="$(readlink "$_CE_SRC")"
+  [[ "$_CE_SRC" != /* ]] && _CE_SRC="$_CE_D/$_CE_SRC"
+done
+_CE_LIB="$(cd -P "$(dirname "$_CE_SRC")" && pwd)/lib/canonical-event.sh"
+if [[ -r "$_CE_LIB" ]]; then
+  # shellcheck source=lib/canonical-event.sh
+  . "$_CE_LIB" 2>/dev/null || true
+fi
+
 # Resolve the current month's events file. Re-resolved each loop iteration so
 # month rollover is handled transparently.
 events_file_path() {
@@ -57,14 +77,58 @@ events_file_path() {
 }
 
 # Apply a jq predicate filter to a stream. With no filter, pass through.
-# The filter is wrapped in `select(...)` so callers write predicates, not full
-# jq programs. Lines that don't parse as JSON are silently skipped.
+# The filter is wrapped in `select(...)` so callers write predicates, not full jq programs.
+#
+# CTL-1809. The comment that used to sit here said "Lines that don't parse as JSON are
+# silently skipped." That was FALSE, and it was a sixth check-that-cannot-fail: plain
+# `jq -c "select(...)"` treats an unparseable line as a fatal parse error and ABORTS
+# (verified: exit 5), so every valid event AFTER a torn line in the same wake batch was
+# never emitted, and a `wait-for` whose awaited event shared a batch with an upstream torn
+# line simply timed out. Because the tail loop's cursor is a line COUNT rather than a byte
+# offset, the abort is batch-scoped instead of a permanent wedge — which is precisely why it
+# went unnoticed for so long. It was worse than skip-and-advance, not equivalent to it.
+#
+# `-R` + `fromjson` reads each line as raw text and decides per line, so one torn line costs
+# exactly one event. `torn_lines_total` is the named counter — carried in jq's `foreach`
+# state so each warning reports the running total for the batch and an operator can alert on
+# the rate. The line is written to stderr, which rides the caller's `.log` (Alloy → Loki)
+# rather than the event log whose damage it is reporting.
+#
+# COUNT-AND-ADVANCE is deliberate. A torn line is permanently corrupt: parking the cursor on
+# it would wedge the reader forever on damage that will never resolve, contradicting the
+# invariant every other reader on this log already ships
+# (execution-core/event-tail.mjs:12-17 — "their bytes are already behind the byte cursor and
+# will never be revisited").
+#
+# The counter is a LOWER BOUND, never proof of cleanliness. The CTL-1809 RCA reproduced a
+# splice that parses as valid JSON with a matching declared length and three different
+# events' contents — invisible to this and to every other parser. The write side is the fix;
+# this is a tripwire.
+#
+# Note the unfiltered branch is plain `cat`: it makes no parse decision and drops nothing,
+# so there is no skipped line there to count.
 apply_filter() {
   local filter="$1"
   if [[ -z "$filter" ]]; then
     cat
   else
-    jq -c --unbuffered "select($filter)" 2>/dev/null
+    jq -nRc --unbuffered "
+      foreach (inputs | select(length > 0)) as \$raw (
+        { n: 0, ok: false, obj: null };
+        (\$raw | try { ok: true, obj: fromjson } catch { ok: false, obj: null }) as \$p
+        | if \$p.ok then { n: .n, ok: true, obj: \$p.obj }
+          else { n: (.n + 1), ok: false, obj: null } end;
+        if .ok then .obj | select($filter)
+        else
+          (\"[catalyst] WARNING: catalyst-events skipped an unparseable event-log line (torn_lines_total=\(.n)); first 80 bytes: \" + (\$raw[0:80]) + \"\n\")
+          | stderr | empty
+        end
+      )
+    "
+    # NOTE: no `2>/dev/null` here, unlike the call this replaced. That redirect existed to
+    # hide jq's own parse errors — the very signal this change turns into a counted warning.
+    # Re-adding it would restore the silence while leaving the counter code in place, i.e. a
+    # counter that can never be observed.
   fi
 }
 
@@ -202,7 +266,14 @@ _emit_wait_event() {
        + $extra)}' 2>/dev/null)" || return 0
   local dest; dest="$(events_file_path)"
   mkdir -p "$(dirname "$dest")" 2>/dev/null || true
-  printf '%s\n' "$event_json" >> "$dest" 2>/dev/null || true
+  # CTL-1809: one write(2). Loud fallback if the helper could not be sourced — see the
+  # source block near the top of this file.
+  if command -v canonical_atomic_append_line >/dev/null 2>&1; then
+    canonical_atomic_append_line "$dest" "$event_json" || true
+  else
+    printf '[catalyst] WARNING: canonical-event.sh unavailable — appending a wait event WITHOUT the atomic primitive; this write can tear above BUFSIZ (CTL-1809)\n' >&2
+    printf '%s\n' "$event_json" >> "$dest" 2>/dev/null || true
+  fi
 }
 
 cmd_wait_for() {

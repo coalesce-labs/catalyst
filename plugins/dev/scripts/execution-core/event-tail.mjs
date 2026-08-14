@@ -6,6 +6,80 @@ import { StringDecoder } from "node:string_decoder";
 
 const DEFAULT_CHUNK = 1 << 20; // 1 MiB — bounds peak memory regardless of file size.
 
+// ─── CTL-1809: torn-line counter ─────────────────────────────────────────────
+//
+// parseEventTailChunk's `catch { continue; }` below is a DROP, and until now it was a
+// completely silent one: this module backs the daemon's live tail, event-scan's incremental
+// counters, the reaper's boot replay, reaper-metrics and transcript-tail, and not one of
+// them could distinguish a damaged event log from a quiet one.
+//
+// COUNT AND ADVANCE, deliberately. A torn line is permanently corrupt — parking the byte
+// cursor on it would wedge every reader above on damage that will never resolve. The
+// module's own contract at the top of parseEventTailChunk already states the invariant
+// ("their bytes are already behind the byte cursor and will never be revisited"); this only
+// makes the drop audible.
+//
+// The count is a LOWER BOUND on corruption, never proof of cleanliness: the CTL-1809 RCA
+// reproduced a splice that parses as valid JSON with a matching declared length and three
+// different events inside it, which no parser can detect. The write side
+// (lib/canonical-event.sh's one-write(2) primitive) is the fix; this is the tripwire.
+//
+// Module-level rather than a parameter: parseEventTailChunk is positional and called from
+// five readers, and a per-call callback would have to be threaded through all of them to
+// report anything. Zero-dependency by design — this is a leaf module, so the warning goes
+// straight to stderr (which lands in the caller's launchd-captured `.log`, Alloy-shipped to
+// Loki INDEPENDENTLY of the event log whose damage it reports).
+let tornLineTotal = 0;
+const tornWarned = new Set();
+
+/** Process-total torn (unparseable) complete lines seen by parseEventTailChunk. */
+export function tornLineCount() {
+  return tornLineTotal;
+}
+
+/** Test seam — resets the process counter and the sparse-warn key set. */
+export function resetTornLineCount() {
+  tornLineTotal = 0;
+  tornWarned.clear();
+}
+
+// Count every occurrence, log sparsely — the same discipline as
+// otel-forward/lib/sparse-warn.ts, hand-rolled here because this module must stay
+// dependency-free (it is imported by the daemon, the reaper and standalone scan CLIs).
+// First sighting per distinct 60-byte prefix, capped at 20 keys, then 10/100/1000…
+// heartbeats on the running total so a sustained tear still reports a live, accurate count
+// without flooding the log surface it is reporting on.
+//
+// EXPORTED because a process can hold more than one reader of the SAME log and must not
+// hold more than one count of it. The broker is exactly that case: its BOOT replay comes
+// through tailParsedEvents (counted here), while its LIVE tail — the path that carries
+// essentially every routed event — hand-rolls its own read loop in broker/tailer.mjs and
+// calls this directly. Sharing the counter and the sparse-warn key budget is correct there:
+// the two paths are one detector reading one file, so a torn line seen at boot and the same
+// prefix seen live should not each spend a key. The "one flood must not exhaust another
+// detector's budget" rule applies ACROSS readers (separate processes / separate files), not
+// within one process's view of one log.
+export function noteTornLine(line) {
+  tornLineTotal += 1;
+  const key = line.slice(0, 60);
+  let warn = false;
+  if (!tornWarned.has(key) && tornWarned.size < 20) {
+    tornWarned.add(key);
+    warn = true;
+  } else if (tornLineTotal >= 10 && Math.log10(tornLineTotal) % 1 === 0) {
+    warn = true;
+  }
+  if (!warn) return;
+  try {
+    process.stderr.write(
+      `[catalyst] WARNING: TORN event-log line — did not parse as JSON; counted and skipped ` +
+        `(torn_lines_total=${tornLineTotal}, bytes=${line.length}): ${key}\n`
+    );
+  } catch {
+    /* a reporting hook must never break the tail */
+  }
+}
+
 // parseEventTailChunk — (moved from daemon.mjs, unchanged). Stitches `leftover`
 // (the partial line carried from the previous read) onto the front of `chunk`,
 // returns parsed events for the COMPLETE lines and the new trailing partial
@@ -33,6 +107,10 @@ export function parseEventTailChunk(chunk, leftover = "", lineFilter = null) {
     try {
       events.push(JSON.parse(line));
     } catch {
+      // CTL-1809: count and warn before skipping. This is a COMPLETE line (the trailing
+      // partial was popped off above), so an unparseable one here is real damage, not a
+      // read that raced a writer.
+      noteTornLine(line);
       continue; // skip a malformed complete line, keep tailing
     }
   }
@@ -134,6 +212,11 @@ export function scanEventsChunked({
         onEvent(JSON.parse(carry));
       } catch {
         /* genuinely partial mid-write line — skip, same as the old split path */
+        // CTL-1809 deliberately does NOT count this one. `carry` is the text after the last
+        // newline, i.e. a line a writer may be in the middle of appending right now. Feeding
+        // it to the torn counter would report a healthy in-flight write as log corruption on
+        // every scan of an actively-written log — a detector that alarms constantly is one
+        // nobody reads. Only COMPLETE lines (the loop in parseEventTailChunk) are counted.
       }
     }
     return { endOffset: size, leftover: carry };

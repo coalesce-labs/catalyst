@@ -9,7 +9,7 @@
 import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync } from "node:fs";
 // CTL-1529: bounded boot replay. tailParsedEvents returns the last N parsed events
 // in file order from a small window near EOF.
-import { tailParsedEvents } from "../execution-core/event-tail.mjs";
+import { tailParsedEvents, noteTornLine } from "../execution-core/event-tail.mjs";
 import { resolve, basename } from "node:path";
 import { getEventLogPath, log, CATALYST_DIR, LOOKBACK_LINES } from "./config.mjs";
 import {
@@ -59,7 +59,11 @@ export function getLastByteOffset() {
   return lastByteOffset;
 }
 
-function readNewEvents() {
+// CTL-1809: exported as a test seam, in the shape seedTailer already established. The live
+// path is driven by an fs.watch callback, so without this the only way to exercise it is to
+// start a real watcher and race a timer — which is how a flaky test that proves nothing gets
+// written. Production still reaches it only through startTailing's watcher.
+export function readNewEvents() {
   const logPath = getEventLogPath();
 
   if (logPath !== lastLogPath) {
@@ -99,6 +103,23 @@ function readNewEvents() {
       try {
         event = JSON.parse(line);
       } catch {
+        // CTL-1809: the broker's LIVE tail is the load-bearing reader of this log — it
+        // routes every filter.wake, every phase-lifecycle terminal, and the ingestion-recency
+        // and worker-state projections — and this drop was completely silent. Its BOOT replay
+        // (tailParsedEvents above) has been counted since CTL-1809; without this the covered
+        // half was the one that runs once per process and the uncounted half was the one that
+        // runs for the process's whole life.
+        //
+        // `line` is a COMPLETE line: leftoverBuf popped the trailing partial off `lines`
+        // before this loop, so an unparseable line here is real damage and not a read that
+        // raced a writer mid-append. Shares event-tail.mjs's process counter deliberately —
+        // one detector per process per log (see noteTornLine).
+        //
+        // COUNT AND ADVANCE. lastByteOffset was already moved to stat.size above, and that is
+        // correct: a torn line is permanently corrupt, so re-reading it would wedge the
+        // broker on damage that never resolves. The counter is a LOWER BOUND — a splice that
+        // happens to parse is invisible here, which is why the write side is the fix.
+        noteTornLine(line);
         continue;
       }
       // CTL-1330 Tier 1: time each route; surface ONLY slow routes (default

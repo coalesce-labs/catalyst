@@ -922,7 +922,12 @@ _emit_checkout_updated() {
     command -v jq >/dev/null 2>&1 || exit 0
     local events_dir="${CATALYST_DIR:-$HOME/catalyst}/events"
     mkdir -p "$events_dir" 2>/dev/null || exit 0
-    build_canonical_line \
+    # CTL-1809: this used to redirect build_canonical_line's STDOUT straight at the log —
+    # a whole-function `>>` that looks nothing like the `printf … >>` at the other emit
+    # sites, which is exactly why it is the easiest one to miss when auditing them. Capture
+    # to a variable first so the line goes out through the one atomic seam.
+    local line
+    line="$(build_canonical_line \
       --ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
       --severity INFO \
       --service catalyst.stack \
@@ -931,8 +936,9 @@ _emit_checkout_updated() {
       --label "$checkout" \
       --message "plugin checkout updated ${old:0:8} → ${new:0:8}" \
       --payload-json "$(jq -nc --arg c "$checkout" --arg o "$old" --arg n "$new" \
-        '{checkout:$c, old_commit:$o, new_commit:$n}')" \
-      >> "${events_dir}/$(date -u +%Y-%m).jsonl"
+        '{checkout:$c, old_commit:$o, new_commit:$n}')")" || exit 0
+    [[ -n "$line" ]] || exit 0
+    canonical_atomic_append_line "${events_dir}/$(date -u +%Y-%m).jsonl" "$line" || exit 0
   ) || true
 }
 
