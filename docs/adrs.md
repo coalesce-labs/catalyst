@@ -58,7 +58,7 @@ WAL) and `~/catalyst/wt/`.
   stale >10 min as `abandoned`.
 - Contract schemas: `plugins/dev/templates/global-state.json`. The event envelope's contract is
   **executable**, not a template — `plugins/dev/scripts/lib/event-envelope.mjs` (CTL-1819). The
-  former `global-event.json` was deleted: measured against the live log it passed **0 of 1,194,150**
+  former `global-event.json` was deleted: measured against the live log it passed **0 of 1,202,573**
   events and no code ever imported it.
 
 ## ADR-008: SQLite Session Store

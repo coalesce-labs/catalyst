@@ -330,9 +330,19 @@ describe("snapshot readers never count", () => {
 
 describe("live corpus (opt-in)", () => {
   const sample = process.env.CATALYST_EVENT_LOG_SAMPLE;
-  test.skipIf(!sample || !existsSync(sample ?? ""))(
+  // Codex round 6: skip ONLY when the variable is unset. A mistyped path used to
+  // skip and exit 0 — an operator pointing this at a real log and getting a green
+  // run would conclude the log was validated when nothing was inspected. That is
+  // the check-that-cannot-fail shape, in the test written to prevent it.
+  test.skipIf(!sample)(
     "every line of the scanned region of a real log validates (bounded tail)",
     () => {
+      if (!existsSync(sample)) {
+        throw new Error(
+          `CATALYST_EVENT_LOG_SAMPLE was set to "${sample}" but that path does not exist. ` +
+            `Refusing to report success without inspecting anything.`
+        );
+      }
       // BOUNDED TAIL, never a whole-file read. The live log is ~1.0 GB on a
       // fleet host (measured, mini 2026-08), and whole-log readFileSync is a
       // recorded incident shape here — it produced multi-second-to-115s stalls.

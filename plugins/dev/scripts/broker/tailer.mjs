@@ -174,6 +174,16 @@ export function startTailing() {
 export function loadExistingRegistrations(logPath = lastLogPath) {
   try {
     for (const event of tailParsedEvents({ path: logPath, maxLines: LOOKBACK_LINES })) {
+      // CTL-1819 (Codex round 6): boot replay is the broker's OTHER read of this
+      // log, and it is a genuine once-per-record consumer — it runs before the
+      // live tail starts, over bytes the live tail will never re-read, so this
+      // cannot double-count with the checkEnvelope in readNewEvents.
+      //
+      // It needs its own call because making tailParsedEvents validation-free
+      // (the round-3 anti-recount fix) removed the coverage round 1 had here.
+      // Without it a parseable-but-malformed recovery record — a `filter.register`
+      // missing `ts` — is routed on restart with the detector silent.
+      checkEnvelope(event);
       const name = getEventName(event);
       if (name === "filter.register") handleRegister(event);
       if (name === "filter.deregister") handleDeregister(event);
