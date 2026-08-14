@@ -101,9 +101,22 @@
 /** The four envelope shapes observed on the log. */
 export const ENVELOPE_SHAPES = Object.freeze(["v1", "v2", "v3", "dual"]);
 
-// The complete top-level key vocabulary, MEASURED (`jq -rc 'keys[]' | sort -u`)
-// over mini's 2026-08 log: 36 distinct keys, no truncation. Recorded in sorted
-// order so a diff against a fresh census is a plain sorted-set comparison.
+// The top-level key vocabulary. 36 keys MEASURED (`jq -rc 'keys[]' | sort -u`)
+// over mini's 2026-08 log, plus 2 added from a PRODUCER that host cannot exercise.
+// Sorted, so a diff against a fresh census is a plain sorted-set comparison.
+//
+// ⚠️ A CENSUS IS HOST-SCOPED, NOT PRODUCER-SCOPED (Codex round 8). The first cut
+// called this "the complete vocabulary, measured" — complete for the log I read,
+// which is not the same claim. `catalyst-state.sh`'s jq-less branch writes the
+// caller's RAW v1 line (`{ts, event, orchestrator, worker, detail}`, per
+// docs/architecture.md) and is reachable on any supported host WITHOUT jq. The
+// host I censused has jq, so that producer never ran there and `orchestrator` and
+// `worker` could not appear at any sample size. Measuring harder would not have
+// found them; only reading the producers does.
+//
+// So the live-corpus check would have rejected legitimate output on a jq-less
+// host as vocabulary drift — a false positive on a supported configuration,
+// produced by a census that was accurate and incomplete at the same time.
 //
 // This list is a SNAPSHOT OF REALITY, not a wish. When a producer legitimately
 // adds a key, the guard test fails, and the fix is to add the key here in the
@@ -129,6 +142,8 @@ export const KNOWN_TOP_LEVEL_KEYS = Object.freeze([
   "name",
   "number",
   "observedTs",
+  // From catalyst-state.sh's jq-less v1 fallback — see the host-scope note above.
+  "orchestrator",
   "phase",
   "pid",
   "prevStateJsonMtime",
@@ -145,6 +160,8 @@ export const KNOWN_TOP_LEVEL_KEYS = Object.freeze([
   "traceId",
   "ts",
   "url",
+  // From catalyst-state.sh's jq-less v1 fallback — see the host-scope note above.
+  "worker",
   "worktree_path",
 ]);
 

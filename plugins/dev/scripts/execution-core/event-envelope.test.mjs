@@ -172,11 +172,22 @@ describe("drift reddens CI", () => {
       expect(offenders).toEqual([]);
     });
 
-    test("every vocabulary key is exercised by real output — fails in BOTH directions", () => {
-      // ⊆ alone would let a key be added to the vocabulary that no producer
-      // emits; this equality also catches that.
+    // Codex round 8: the corpus comes from a host WITH jq, so it can never contain
+    // the two keys emitted only by catalyst-state.sh's jq-less v1 fallback. Rather
+    // than weaken this to a bare subset check — which would let anyone add an
+    // unexercised key to the vocabulary unnoticed — the exemption is NAMED, and the
+    // assertion still fails in both directions for everything else.
+    const PRODUCER_ONLY_KEYS = ["orchestrator", "worker"];
+
+    test("every vocabulary key is exercised by real output, except the named producer-only pair", () => {
       const seen = new Set(corpus.flatMap((ev) => Object.keys(ev)));
-      expect([...seen].sort()).toEqual([...KNOWN_TOP_LEVEL_KEYS]);
+      // Direction 1: no real line carries a key outside the vocabulary (asserted
+      // separately above too).
+      expect([...seen].filter((k) => !KNOWN_TOP_LEVEL_KEYS.includes(k))).toEqual([]);
+      // Direction 2: every vocabulary key IS exercised — and the only permitted
+      // shortfall is exactly the documented producer-only pair, no more and no less.
+      const unexercised = KNOWN_TOP_LEVEL_KEYS.filter((k) => !seen.has(k)).sort();
+      expect(unexercised).toEqual([...PRODUCER_ONLY_KEYS].sort());
     });
 
     test("every real line validates", () => {
@@ -189,7 +200,7 @@ describe("drift reddens CI", () => {
     // 36 distinct keys, measured `jq -rc 'keys[]' | sort -u` over 2026-08.
     // Fails in BOTH directions: adding a producer key without recording it here
     // fails, and deleting a key that is still on the log fails too.
-    expect(KNOWN_TOP_LEVEL_KEYS.length).toBe(36);
+    expect(KNOWN_TOP_LEVEL_KEYS.length).toBe(38); // 36 censused + orchestrator/worker (jq-less v1 producer)
     expect(KNOWN_TOP_LEVEL_KEYS).toContain("attributes");
     expect(KNOWN_TOP_LEVEL_KEYS).toContain("event");
     expect(KNOWN_TOP_LEVEL_KEYS).toContain("name");
@@ -388,7 +399,18 @@ describe("live corpus (opt-in)", () => {
         closeSync(fd);
       }
 
-      const lines = text.split("\n").filter(Boolean);
+      // Codex round 8: a COMPLETE line that does not parse is real damage in the
+      // inspected region and must fail this scan. Previously any unparseable line
+      // was written off as "event-tail.mjs's detector, not this one" — so one valid
+      // envelope alongside `{not json}` reported 23 passes and exit 0, a clean
+      // corpus verdict over a corrupted one.
+      //
+      // Only the FINAL element can be a raced trailing fragment, and only when the
+      // text does not end in a newline. Everything else is complete by construction.
+      const endsWithNewline = text.endsWith("\n");
+      const rawLines = text.split("\n");
+      const trailingFragment = endsWithNewline ? null : rawLines[rawLines.length - 1];
+      const lines = rawLines.filter(Boolean);
       const failures = [];
       let torn = 0;
       for (const line of lines) {
@@ -396,7 +418,14 @@ describe("live corpus (opt-in)", () => {
         try {
           ev = JSON.parse(line);
         } catch {
-          torn += 1; // a torn line is event-tail.mjs's detector, not this one
+          if (line === trailingFragment) {
+            torn += 1; // a genuine mid-write fragment — not damage
+            continue;
+          }
+          if (failures.length < 10) {
+            failures.push({ errors: ["COMPLETE line did not parse — torn record in the scanned region"], line: line.slice(0, 160) });
+          }
+          torn += 1;
           continue;
         }
         const r = validateEnvelope(ev);

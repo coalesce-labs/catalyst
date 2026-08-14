@@ -1,6 +1,23 @@
 # Catalyst Event Schema Reference
 
-Authoritative field-level reference for all event types in `~/catalyst/events/YYYY-MM.jsonl`.
+> ⛔ **SCOPE CORRECTION (CTL-1819).** This document is the authoritative **field-level** reference
+> for the **canonical v2 envelope**. It is **NOT** the envelope-shape contract, and the statements
+> below that *"all producers emit the canonical envelope"* and that *"every event has this shape"*
+> are **measurably false**.
+>
+> The envelope contract is executable: **`plugins/dev/scripts/lib/event-envelope.mjs`**. Measured on
+> one frozen byte snapshot of a single host-month (1,202,573 lines, counts summing to the total
+> exactly): **v2-only 1,175,708 · v1-only 25,355 · dual 978 · v3-only 532**. Four shapes are live and
+> accepted, not three, and v1 is not legacy residue.
+>
+> ⚠️ **Why this matters for the thing this doc is used for.** It is the source for
+> `catalyst-events --filter` expressions and is hand-derived into `lib/dsl-fields.mjs`. A reader who
+> takes "every event has this shape" at face value writes an **attribute-only filter** and silently
+> misses every v1 and v3 record. That is not hypothetical — CTL-1834 measured attribute-only readers
+> missing **161,795** lines in a month, and it presented as a biased slice rather than a visible zero.
+> Resolve names through `lib/event-name.mjs`, never by reading `attributes["event.name"]` alone.
+
+Authoritative field-level reference for the canonical v2 envelope in `~/catalyst/events/YYYY-MM.jsonl`.
 Derived directly from `plugins/dev/scripts/orch-monitor/lib/canonical-event.ts` and
 `plugins/dev/scripts/lib/canonical-event.sh`.
 
