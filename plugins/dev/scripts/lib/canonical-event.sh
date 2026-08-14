@@ -635,10 +635,24 @@ CATALYST_EVENT_LINE_MAX_BYTES=262144
 
 # _canonical_event_name_of LINE
 # Best-effort name for a line we are about to refuse. Reads all three envelope
-# discriminators in the house order — attributes["event.name"] ?? event ?? name — because a
-# refused line may be in any of them and an anonymous tally is not actionable. Uses sed
-# rather than jq: this must work on the jq-less catalyst-state.sh path too, and it is a COLD
-# path (only a cap breach reaches it), so the fork is free.
+# discriminators attributes["event.name"] ?? event ?? name, because a refused line may be in
+# any of them and an anonymous tally is not actionable. Uses sed rather than jq: this must
+# work on the jq-less catalyst-state.sh path too, and it is a COLD path (only a cap breach
+# reaches it), so the fork is free.
+#
+# ⚠️ CTL-1834: this order is the REVERSE of the JS boundary (lib/event-name.mjs resolves
+# event -> attributes["event.name"] -> name), and the divergence is DELIBERATE, not drift.
+# Two reasons it is tolerated rather than reconciled:
+#   1. It is unobservable. Across every log file ever written (4,052,369 lines) only 323
+#      carry BOTH keys and ZERO carry differing values, so both orders return the same
+#      string on 100% of real lines.
+#   2. Reconciling it would mean re-pointing the broker's routing read for no measured gain,
+#      and this function is not a parser — it is a best-effort NAMER for a line that was
+#      already REFUSED, reached only by _canonical_append_oversized_tombstone on a cap
+#      breach (zero production executions to date). Its output lands in a tombstone's
+#      diagnostic field, never in a routing decision.
+# So: no parity suite here, by ruling. If this ever becomes a hot path or feeds routing,
+# that ruling is void and the orders must be unified first.
 _canonical_event_name_of() {
   local line="$1" n=""
   n="$(printf '%s' "$line" | LC_ALL=C sed -n 's/.*"event\.name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"

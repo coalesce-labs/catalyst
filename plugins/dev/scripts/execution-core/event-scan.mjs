@@ -139,7 +139,23 @@ function refreshIndex(path) {
       // so it no longer re-scans the whole file. Skip unparseable ts (matches the
       // old detector, which ignored them). Cap the list as a memory backstop.
       const k = ticketOfPhaseEvent(name);
-      if (k) {
+      // CTL-1834: bucket ONLY keys this index is ever queried with. `ticketOfPhaseEvent`
+      // takes the trailing dot-segment, so `phase.terminal.reap-requested` keys as
+      // "reap-requested" — and countTicketEventsInWindow (:354) only ever compares
+      // `e.k === <ticket id>`, so such a key can never match anything.
+      //
+      // Why this is load-bearing rather than tidiness: widening the read at this site
+      // made 97.9% of bucketed entries unmatchable, taking rolling 10-min occupancy from
+      // 175 to 17,994 against PHASE_EVENT_CAP=20,000 — headroom 114x -> 1.11x. The cap
+      // splices the OLDEST entries, which are real-ticket events still inside the
+      // window, so a phase-event storm (exactly what CTL-671's runaway detector exists
+      // to catch — phantom CTL-9 spammed ~24,560 events over 3 days) would silently
+      // undercount and `phase.dispatch.runaway.<ticket>` would never fire. A detector
+      // that goes blind precisely when it matters is the failure this repo keeps paying
+      // for. Measured with the filter: peak occupancy 17,994 -> 98, losing nothing —
+      // the newly-visible v3 rescue events DO key to real tickets
+      // (`phase.rescue.escalated.CTC-310` -> `CTC-310`) and are retained.
+      if (k && /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(k)) {
         const t = Date.parse(ev?.ts || "");
         if (Number.isFinite(t)) {
           entry.phaseEvents.push({ t, k });
