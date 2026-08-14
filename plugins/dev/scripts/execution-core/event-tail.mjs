@@ -3,9 +3,6 @@
 // (incremental counters), and reaper.mjs (boot replay).
 import { openSync, fstatSync, readSync, closeSync, statSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-// CTL-1819. lib/event-envelope.mjs is itself import-free, so this keeps
-// event-tail.mjs npm-free (node: builtins only) and bare-Node loadable.
-import { checkEnvelope } from "../lib/event-envelope.mjs";
 
 const DEFAULT_CHUNK = 1 << 20; // 1 MiB — bounds peak memory regardless of file size.
 
@@ -97,15 +94,7 @@ export function noteTornLine(line) {
 // before they were bounded. Preserving it keeps a bounded scan from paying a
 // full JSON.parse for every unrelated line in the window. Default null = parse
 // every complete line (the pre-CTL-1529 behavior).
-// `countEnvelopes` (CTL-1819, Codex P2) — count malformed envelopes only on a
-// DEFINITIVE pass. This parser is re-entered on every expanding-window probe
-// (`probeOldestTs`) and on every doubling attempt in `tailParsedEvents`, so
-// counting unconditionally here made `malformed_events_total` a multiple of the
-// number of physical malformed records — inflating during exactly the trouble
-// that makes an operator read it. That is the CTL-1823 lesson verbatim: take the
-// count at the one point each record is seen exactly once. Torn-line counting is
-// NOT gated by this flag: it predates the option and its call sites are unchanged.
-export function parseEventTailChunk(chunk, leftover = "", lineFilter = null, countEnvelopes = false) {
+export function parseEventTailChunk(chunk, leftover = "", lineFilter = null) {
   const text = leftover + chunk;
   const lines = text.split("\n");
   // The final element is the trailing partial line (empty if the chunk ended
@@ -115,9 +104,8 @@ export function parseEventTailChunk(chunk, leftover = "", lineFilter = null, cou
   for (const line of lines) {
     if (!line) continue;
     if (lineFilter && !lineFilter(line)) continue;
-    let parsed;
     try {
-      parsed = JSON.parse(line);
+      events.push(JSON.parse(line));
     } catch {
       // CTL-1809: count and warn before skipping. This is a COMPLETE line (the trailing
       // partial was popped off above), so an unparseable one here is real damage, not a
@@ -125,16 +113,6 @@ export function parseEventTailChunk(chunk, leftover = "", lineFilter = null, cou
       noteTornLine(line);
       continue; // skip a malformed complete line, keep tailing
     }
-    // CTL-1819: validate the envelope, COUNT a violation, and PASS THE EVENT
-    // THROUGH REGARDLESS. Dropping here would be a silent routing change — an
-    // event missing `ts` reaches the broker today, and a schema landing as a
-    // filter would stop delivering it with no ticket, no alarm and no diff at
-    // the call site. This layer is a detector, not a gate: `checkEnvelope`
-    // never throws, and the only observable effect is the counter plus a
-    // sparse stderr warning. Tearing (unparseable) is the branch above and a
-    // different detector; see lib/event-envelope.mjs on why they are separate.
-    if (countEnvelopes) checkEnvelope(parsed);
-    events.push(parsed);
   }
   return { events, leftover: newLeftover };
 }
@@ -177,18 +155,6 @@ export function scanEventsChunked({
   // returned verbatim (an emit does not consume it) so the flag can never corrupt
   // a byte cursor if someone sets it on a resuming reader by mistake.
   emitTrailingLine = false,
-  // CTL-1819. OPT-IN, default FALSE (Codex round 2, P1). This parser is shared
-  // with readers whose records are NOT event envelopes at all —
-  // transcript-tail.mjs feeds it `{type, message}` transcript lines — so a
-  // default of `true` made every VALID transcript record increment the
-  // malformed-event counter and warn, contaminating the process-wide total for
-  // the unified event log with fabricated damage.
-  //
-  // The fail direction decides the default: a missed opt-in loses coverage,
-  // which shows up as a counter that stays at zero; a wrong opt-out invents
-  // damage in the one number an operator consults during an incident. Silence
-  // is recoverable, fabrication is not.
-  countEnvelopes = false,
 } = {}) {
   let fd;
   let size;
@@ -224,7 +190,7 @@ export function scanEventsChunked({
         chunkStr = chunkStr.slice(nl + 1); // resume after the first line boundary
         skipping = false;
       }
-      const { events, leftover: next } = parseEventTailChunk(chunkStr, carry, lineFilter, countEnvelopes);
+      const { events, leftover: next } = parseEventTailChunk(chunkStr, carry, lineFilter);
       for (const ev of events) onEvent(ev);
       carry = next;
     };
@@ -243,15 +209,7 @@ export function scanEventsChunked({
     // partial mid-write line is still dropped rather than half-parsed.
     if (emitTrailingLine && !skipping && carry && (!lineFilter || lineFilter(carry))) {
       try {
-        const trailing = JSON.parse(carry);
-        // CTL-1819 (Codex P2): this record IS delivered to the consumer, so it
-        // gets the same envelope check a complete line gets. Note the asymmetry
-        // with the torn note below and why it is correct: an UNPARSEABLE carry
-        // may be a healthy in-flight write and is deliberately not counted, but
-        // a carry that parses is a whole record being routed — if it is
-        // malformed, the consumer sees it and the detector must too.
-        if (countEnvelopes) checkEnvelope(trailing);
-        onEvent(trailing);
+        onEvent(JSON.parse(carry));
       } catch {
         /* genuinely partial mid-write line — skip, same as the old split path */
         // CTL-1809 deliberately does NOT count this one. `carry` is the text after the last
@@ -323,11 +281,6 @@ function probeOldestTs({ path, fromOffset, chunkSize, onRead, tsOf }) {
       // parseable record is the unterminated final line probes as empty and the
       // walk keeps doubling toward BOF for no reason.
       emitTrailingLine: true,
-      // CTL-1819 (Codex P2): a PROBE, by construction re-run over overlapping,
-      // doubling windows and then superseded by the definitive scan. Counting
-      // here multiplies every malformed record by the number of probes that
-      // happened to span it.
-      countEnvelopes: false,
       onEvent: (e) => {
         const t = tsOf(e);
         if (typeof t === "string" && t.length > 0) {
@@ -437,12 +390,6 @@ export function scanEventsSince({
     skipFirstLine: fromOffset > 0,
     lineFilter,
     onRead,
-    // CTL-1819: the DEFINITIVE pass, and one of the two places that opt in to
-    // envelope counting (the other two counting sites are the broker's and the
-    // monitor's live tails, which call checkEnvelope directly, plus
-    // tailParsedEvents which counts over the records it returns). The probe walk
-    // above deliberately does NOT count — it re-reads the same bytes.
-    countEnvelopes: true,
     // CTL-1529 (Codex P2): scanEventsSince is BY CONSTRUCTION a one-shot read to
     // EOF — it has no cursor and no next pass — so a final record without a
     // trailing newline is a real event, not a partial line. Every consumer of this
@@ -500,17 +447,10 @@ export function tailParsedEvents({
       fromOffset,
       skipFirstLine: fromOffset > 0,
       emitTrailingLine: true,
-      // CTL-1819 (Codex P2): every non-returning attempt is re-read by the next,
-      // larger one, so counting per attempt multiplies each malformed record by
-      // the number of doublings. Count ONCE, below, over the records actually
-      // returned — the only ones a consumer ever sees.
-      countEnvelopes: false,
       onEvent: (e) => collected.push(e),
     });
     if (collected.length >= maxLines || fromOffset === 0) {
-      const out = collected.slice(-maxLines);
-      for (const ev of out) checkEnvelope(ev);
-      return out;
+      return collected.slice(-maxLines);
     }
     window *= 2;
   }

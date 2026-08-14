@@ -50,12 +50,12 @@ const V2 = {
   body: { payload: {} },
   resource: { "service.name": "catalyst.monitor" },
 };
-const V1 = { ts: "2026-08-14T20:10:01Z", event: "phase.implement.abandoned.CTC-487" };
-const V3 = { ts: "2026-08-14T19:57:49Z", name: "phase.rescue.attempted.CTC-495" };
+const V1 = { ts: "2026-08-14T20:10:01Z", event: "phase.implement.abandoned.PROJ-101" };
+const V3 = { ts: "2026-08-14T19:57:49Z", name: "phase.rescue.attempted.PROJ-102" };
 const DUAL = {
   ts: "2026-08-14T20:28:40Z",
-  event: "phase.pr.complete.CTC-494",
-  attributes: { "event.name": "phase.pr.complete.CTC-494" },
+  event: "phase.pr.complete.PROJ-103",
+  attributes: { "event.name": "phase.pr.complete.PROJ-103" },
   body: {},
   resource: {},
 };
@@ -86,10 +86,10 @@ describe("the schema describes reality", () => {
   test("classification agrees with the event-name boundary about which key wins", () => {
     // If these two modules disagree, an event is classified as one shape and
     // named from another — the exact class of bug CTL-1834 existed to close.
-    expect(getEventName(V1)).toBe("phase.implement.abandoned.CTC-487");
+    expect(getEventName(V1)).toBe("phase.implement.abandoned.PROJ-101");
     expect(getEventName(V2)).toBe("github.pr.merged");
-    expect(getEventName(V3)).toBe("phase.rescue.attempted.CTC-495");
-    expect(getEventName(DUAL)).toBe("phase.pr.complete.CTC-494");
+    expect(getEventName(V3)).toBe("phase.rescue.attempted.PROJ-102");
+    expect(getEventName(DUAL)).toBe("phase.pr.complete.PROJ-103");
     for (const ev of [V1, V2, V3, DUAL]) {
       expect(classifyEnvelope(ev)).not.toBe("unknown");
       expect(getEventName(ev)).not.toBe("");
@@ -250,76 +250,75 @@ describe("positive control — the validator can observe the defect", () => {
   });
 });
 
-// Codex P2: counting inside the shared low-level parser made the total a
-// MULTIPLE of the physical record count, because scanEventsSince probes
-// overlapping doubling windows and tailParsedEvents re-reads growing ones. Codex's
-// worked example: eight malformed lines producing a count of 23. These tests are
-// the proof the fix holds — they FAIL if `countEnvelopes` is removed.
-describe("malformed records are counted once per physical record", () => {
+// ── WHERE COUNTING LIVES, and why it is only two places (Codex rounds 1-3) ──
+//
+// Three review rounds found three layers of one defect, each a consequence of
+// counting inside the SHARED byte parser:
+//   r1  expanding-window probes re-parsed the same bytes → one record counted many times
+//   r2  transcript-tail.mjs feeds that parser {type,message} records → valid lines
+//       counted as damage
+//   r3  board-health calls tailParsedEvents every 5 minutes → the same physical
+//       record recounted on every scheduler pass, forever
+//
+// The root cause is that a byte-level parser cannot know whether its input is an
+// event envelope, nor whether these bytes have been read before. So it does not
+// validate at all any more — event-tail.mjs is byte-identical to main.
+//
+// ⭐ Counting happens at the TWO readers that see each physical record exactly
+// once: the broker's live tail and the monitor's live tail, each driven by a byte
+// cursor that only ever advances. Everything else — scanEventsSince,
+// tailParsedEvents, transcript-tail — is a SNAPSHOT reader that re-reads history
+// by design, and a detector that counts there reports how often it looked rather
+// than how much damage exists.
+describe("snapshot readers never count", () => {
   const dir = mkdtempSync(join(tmpdir(), "ctl1819-"));
   const logPath = join(dir, "events.jsonl");
+  const tPath = join(dir, "transcript.jsonl");
   const MALFORMED = 8;
 
   beforeEach(() => {
-    // 8 malformed (no ts) interleaved with valid lines, oldest first so the
-    // expanding walk has to double several times before it covers them.
     const lines = [];
     for (let i = 0; i < MALFORMED; i++) {
       lines.push(JSON.stringify({ attributes: { "event.name": `bad.${i}` } })); // no ts
       lines.push(JSON.stringify({ ts: `2026-08-14T00:00:${String(i).padStart(2, "0")}Z`, event: `ok.${i}` }));
     }
     writeFileSync(logPath, lines.join("\n") + "\n");
+    writeFileSync(
+      tPath,
+      Array.from({ length: 12 }, (_, i) => JSON.stringify({ type: "assistant", message: { content: [{ text: `turn ${i}` }] } })).join("\n") + "\n"
+    );
     resetMalformedEventCount();
   });
 
-  test("scanEventsSince counts each malformed record exactly once", () => {
-    scanEventsSince({
-      path: logPath,
-      targetSinceMs: 0, // forces the window to expand all the way to BOF
-      initialWindow: 64, // tiny, so it doubles many times over the same bytes
-      onEvent: () => {},
-    });
-    expect(malformedEventCount()).toBe(MALFORMED);
+  test("scanEventsSince counts nothing (it re-reads on every call)", () => {
+    scanEventsSince({ path: logPath, targetSinceMs: 0, initialWindow: 64, onEvent: () => {} });
+    expect(malformedEventCount()).toBe(0);
   });
 
-  test("tailParsedEvents counts each malformed record exactly once", () => {
-    const out = tailParsedEvents({ path: logPath, maxLines: 100, bytesPerLineEstimate: 8 });
-    expect(out.length).toBe(MALFORMED * 2);
-    expect(malformedEventCount()).toBe(MALFORMED);
+  test("tailParsedEvents counts nothing, and repeat calls stay at zero", () => {
+    // Codex round 3: board-health calls this every 5 minutes over the last 800
+    // events. Counting here made a single stale malformed record an ever-growing
+    // incident count. Two calls must move the total by zero, not by two.
+    tailParsedEvents({ path: logPath, maxLines: 100, bytesPerLineEstimate: 8 });
+    tailParsedEvents({ path: logPath, maxLines: 100, bytesPerLineEstimate: 8 });
+    expect(malformedEventCount()).toBe(0);
   });
-});
 
-// Codex round 2, P1. scanEventsChunked is SHARED with readers whose records are
-// not event envelopes — transcript-tail.mjs feeds it `{type, message}` lines. A
-// default of countEnvelopes:true made every VALID transcript record increment the
-// malformed counter, fabricating damage in the number an operator reads during an
-// incident. Counting is opt-in now; this is the proof.
-describe("non-envelope readers do not contaminate the counter", () => {
-  const dir = mkdtempSync(join(tmpdir(), "ctl1819-t-"));
-  const tPath = join(dir, "transcript.jsonl");
-
-  test("a transcript scanned through the shared parser counts nothing", () => {
-    const lines = [];
-    for (let i = 0; i < 12; i++) {
-      lines.push(JSON.stringify({ type: "assistant", message: { content: [{ text: `turn ${i}` }] } }));
-    }
-    writeFileSync(tPath, lines.join("\n") + "\n");
-    resetMalformedEventCount();
-
+  test("a transcript through the shared parser counts nothing", () => {
     const seen = [];
     scanEventsChunked({ path: tPath, fromOffset: 0, onEvent: (e) => seen.push(e) });
-
-    expect(seen.length).toBe(12); // records still delivered — this is not a filter
-    expect(malformedEventCount()).toBe(0); // and none of them is "damage"
+    expect(seen.length).toBe(12); // still delivered — this was never a filter
+    expect(malformedEventCount()).toBe(0);
   });
 
-  test("the same records DO count when a caller opts in — the control", () => {
-    // Proves the assertion above is not vacuous: these records genuinely fail
-    // envelope validation, so a zero count is the opt-out working, not the
-    // validator being inert.
+  test("CONTROL: those same records DO count at a live-tail boundary", () => {
+    // Without this, every zero above is satisfiable by a validator that does
+    // nothing. This is what the broker and monitor live tails actually do: one
+    // checkEnvelope per record, as it arrives, exactly once.
     resetMalformedEventCount();
-    scanEventsChunked({ path: tPath, fromOffset: 0, countEnvelopes: true, onEvent: () => {} });
-    expect(malformedEventCount()).toBe(12);
+    const events = readFileSync(logPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    for (const ev of events) checkEnvelope(ev);
+    expect(malformedEventCount()).toBe(MALFORMED);
   });
 });
 
