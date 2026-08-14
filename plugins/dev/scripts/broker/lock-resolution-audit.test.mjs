@@ -463,6 +463,180 @@ describe("auditLockResolution", () => {
     expect(a.inconclusive).toHaveLength(1);
   });
 
+  // ── shedding the member ROOT is not enough: its whole SUBTREE is shed ──
+  //
+  // MEASURED on this repo's real bun.lock + node_modules (node v25.8.2 / bun
+  // 1.3.5, macOS 26.5, Ryans-MBP-2.rozich). bun's isolated linker writes a
+  // SEPARATE, peer-disambiguated store entry per peer set, and both are on disk:
+  //
+  //   node_modules/.bun/@dnd-kit+core@6.3.1/…                  -> react 18.3.1
+  //   node_modules/.bun/@dnd-kit+core@6.3.1+005eabf3d8b6ef06/… -> react 19.2.8
+  //
+  // The lockfile records ONE bare `@dnd-kit/core` entry covering both, so
+  // `packages.has("@dnd-kit/core/react")` is FALSE and the declarer's own
+  // nested-key exclusion cannot see the distinction. A declarer located by
+  // first hit across every root lands on whichever copy some root can see —
+  // measured, all 16 of `react`'s declarers are reachable ONLY through
+  // `orch-monitor-ui`, the one member the lockfile shows nesting react at
+  // 19.2.8. That produced `mismatched=1, expected 18.3.1, found ["19.2.8"], 16
+  // importers` on a tree that is in fact correct, and `bun install --force`
+  // (1168 packages, 4.21 s) does NOT clear it because the placement is
+  // lockfile-determined.
+
+  const SUBTREE_LOCK = `{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "catalyst" },
+  },
+  "packages": {
+    "ui": ["ui@workspace:ui"],
+
+    "react": ["react@18.3.1", "", {}, "sha512-aaa=="],
+
+    "ui/react": ["react@19.2.8", "", {}, "sha512-bbb=="],
+
+    "dnd": ["dnd@6.3.1", "", { "peerDependencies": { "react": "*" } }, "sha512-ccc=="],
+  }
+}
+`;
+  const SUBTREE_MOVED = SUBTREE_LOCK.replace('"react@18.3.1"', '"react@18.3.2"');
+  const UI_DIR = `${ROOT}/ui`;
+  // The two peer-disambiguated store copies of the SAME bare `dnd` entry.
+  const DND_BARE = `${ROOT}/node_modules/.bun/dnd@6.3.1/node_modules/dnd`;
+  const DND_PEERED = `${ROOT}/node_modules/.bun/dnd@6.3.1+005eabf3d8b6ef06/node_modules/dnd`;
+
+  test("THE FALSE ERROR: a declarer reachable ONLY through a member root that nests the id is shed with that root", () => {
+    // Exactly the measured shape: `dnd` is invisible from the bare-entitled root
+    // and resolves only from `ui`, where it is the react-19 peered copy. The
+    // tree is correct — root react is the moved 18.3.2 — so this must be
+    // MATCHED. Locating the declarer from `roots` instead of `bareRoots` (the
+    // `for (const root of bareRoots)` line in the declarer loop) reports a
+    // mismatch here, which is the permanent, unforceable ERROR this test exists
+    // to prevent.
+    const a = auditLockResolution({
+      workspaceRoots: [
+        { dir: ROOT, name: "catalyst" },
+        { dir: UI_DIR, name: "ui" },
+      ],
+      oldLockText: SUBTREE_LOCK,
+      newLockText: SUBTREE_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|react`]: { dir: "/store/react@18.3.2", version: "18.3.2" },
+        [`${UI_DIR}|react`]: { dir: "/store/react@19.2.8", version: "19.2.8" },
+        // `dnd` is NOT visible from the bare-entitled root — only from `ui`.
+        [`${UI_DIR}|dnd`]: { dir: DND_PEERED, version: "6.3.1" },
+        [`${DND_PEERED}|react`]: { dir: "/store/react@19.2.8", version: "19.2.8" },
+      }),
+    });
+    expect(a.mismatched).toEqual([]);
+    expect(a.matched).toHaveLength(1);
+    // Only the bare-entitled root is credited; the shed subtree is not a site.
+    expect(a.matched[0].importers).toEqual([`workspace:${ROOT}`]);
+  });
+
+  test("a declarer visible from BOTH roots is probed at the BARE-entitled copy, not the peered one", () => {
+    // The positive control for the test above, and the guard against buying
+    // silence by simply dropping declarers: here `dnd` IS reachable from the
+    // bare-entitled root, so it stays a site — and the copy probed must be the
+    // bare one (react 18.3.2), not `ui`'s peered copy. A fix that skipped every
+    // declarer a shed root can also see would lose this site entirely and this
+    // assertion on `importers` would fail.
+    const a = auditLockResolution({
+      workspaceRoots: [
+        { dir: ROOT, name: "catalyst" },
+        { dir: UI_DIR, name: "ui" },
+      ],
+      oldLockText: SUBTREE_LOCK,
+      newLockText: SUBTREE_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|react`]: { dir: "/store/react@18.3.2", version: "18.3.2" },
+        [`${UI_DIR}|react`]: { dir: "/store/react@19.2.8", version: "19.2.8" },
+        [`${ROOT}|dnd`]: { dir: DND_BARE, version: "6.3.1" },
+        [`${UI_DIR}|dnd`]: { dir: DND_PEERED, version: "6.3.1" },
+        [`${DND_BARE}|react`]: { dir: "/store/react@18.3.2", version: "18.3.2" },
+        [`${DND_PEERED}|react`]: { dir: "/store/react@19.2.8", version: "19.2.8" },
+      }),
+    });
+    expect(a.mismatched).toEqual([]);
+    expect(a.matched).toHaveLength(1);
+    expect(a.matched[0].importers).toEqual([`workspace:${ROOT}`, "dnd"]);
+  });
+
+  test("THE TRUE POSITIVE SURVIVES: a bare-entitled declarer still on the OLD version is a mismatch", () => {
+    // Same wiring as the control above, but the bare copy of `dnd` genuinely
+    // resolves the pre-move react. Shedding must not have widened into an
+    // excuse: this is the stale placement the module exists to force on.
+    const a = auditLockResolution({
+      workspaceRoots: [
+        { dir: ROOT, name: "catalyst" },
+        { dir: UI_DIR, name: "ui" },
+      ],
+      oldLockText: SUBTREE_LOCK,
+      newLockText: SUBTREE_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|react`]: { dir: "/store/react@18.3.2", version: "18.3.2" },
+        [`${UI_DIR}|react`]: { dir: "/store/react@19.2.8", version: "19.2.8" },
+        [`${ROOT}|dnd`]: { dir: DND_BARE, version: "6.3.1" },
+        [`${UI_DIR}|dnd`]: { dir: DND_PEERED, version: "6.3.1" },
+        [`${DND_BARE}|react`]: { dir: "/store/react@18.3.1", version: "18.3.1" },
+        [`${DND_PEERED}|react`]: { dir: "/store/react@19.2.8", version: "19.2.8" },
+      }),
+    });
+    expect(a.matched).toEqual([]);
+    expect(a.mismatched).toHaveLength(1);
+    expect(a.mismatched[0].expected).toBe("18.3.2");
+    expect(a.mismatched[0].found).toEqual(["18.3.1"]);
+    expect(a.mismatched[0].importers).toEqual(["dnd"]);
+  });
+
+  test("a wholly-shed site list is INCONCLUSIVE naming the shed declarers — not folded into 'could not locate'", () => {
+    // Nothing survives selection: the bare-entitled root cannot see react at
+    // all, and the only declarer lives under the shed member. That is "I could
+    // not look", and it must SAY which member subtree swallowed the site —
+    // reporting `dnd` as merely unlocatable would read as an absent dependency
+    // and hide that the audit deliberately declined to judge it.
+    const a = auditLockResolution({
+      workspaceRoots: [
+        { dir: ROOT, name: "catalyst" },
+        { dir: UI_DIR, name: "ui" },
+      ],
+      oldLockText: SUBTREE_LOCK,
+      newLockText: SUBTREE_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${UI_DIR}|react`]: { dir: "/store/react@19.2.8", version: "19.2.8" },
+        [`${UI_DIR}|dnd`]: { dir: DND_PEERED, version: "6.3.1" },
+        [`${DND_PEERED}|react`]: { dir: "/store/react@19.2.8", version: "19.2.8" },
+      }),
+    });
+    expect(a.mismatched).toEqual([]);
+    expect(a.matched).toEqual([]);
+    expect(a.inconclusive).toHaveLength(1);
+    expect(a.inconclusive[0].reason).toContain("reachable only through a workspace member that nests react");
+    expect(a.inconclusive[0].reason).toContain("dnd");
+    expect(a.inconclusive[0].reason).not.toContain("could not locate");
+  });
+
+  test("a declarer absent from EVERY root is still plain 'could not locate' — the shed reason is not a catch-all", () => {
+    // The positive control for the reason above: `dnd` is on disk nowhere, so
+    // the shed clause must NOT claim a member subtree swallowed it. A shed
+    // check that reported every unlocatable declarer as shed passes the
+    // previous test and fails this one.
+    const a = auditLockResolution({
+      workspaceRoots: [
+        { dir: ROOT, name: "catalyst" },
+        { dir: UI_DIR, name: "ui" },
+      ],
+      oldLockText: SUBTREE_LOCK,
+      newLockText: SUBTREE_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${UI_DIR}|react`]: { dir: "/store/react@19.2.8", version: "19.2.8" },
+      }),
+    });
+    expect(a.inconclusive).toHaveLength(1);
+    expect(a.inconclusive[0].reason).toContain("could not locate: dnd");
+    expect(a.inconclusive[0].reason).not.toContain("reachable only through");
+  });
+
   // ── deep install paths: the importer is reached hop by hop ──
   //
   // This repo's own bun.lock carries chains deeper than one nesting level

@@ -810,7 +810,21 @@ covered a FAILING install; a no-op produced no signal at all.
   judged from the workspace roots plus every lockfile entry that DECLARES the id, minus any site
   carrying its OWN nested key for that id — a declarer (`<declarer>/<id>`) or a workspace member root
   (`<member>/<id>`, of which this repo really has three: `orch-monitor-ui/react`,
-  `orch-monitor-ui/@types/react`, `orch-monitor-ui/typescript`). Because selection already sheds
+  `orch-monitor-ui/@types/react`, `orch-monitor-ui/typescript`). Shedding the member **root** is not
+  sufficient: entitlement to that member's nested version belongs to the whole SUBTREE reached
+  through it, so a declarer is located only from the roots that survived the shed. Locating it by
+  first hit across every root is the bare-key twin of the one-hop bug the deep path fixes — bun's
+  isolated linker writes a separate **peer-disambiguated** store entry per peer set (measured:
+  `.bun/@dnd-kit+core@6.3.1/` resolves react 18.3.1, `.bun/@dnd-kit+core@6.3.1+005eabf3d8b6ef06/`
+  resolves 19.2.8) while the lockfile records ONE bare `@dnd-kit/core` entry covering both, so
+  `packages.has("@dnd-kit/core/react")` is false and the nested-key exclusion cannot see the
+  difference. Measured on this repo's real `bun.lock` + `node_modules`, a bare `react` move reported
+  `mismatched=1, expected 18.3.1, found ["19.2.8"], 16 importers` on a correct tree — every one of
+  those 16 located through `orch-monitor-ui` — and a real `bun install --force` (1168 packages,
+  4.21 s) does **not** clear it, because the placement is lockfile-determined: a permanent ERROR plus
+  a re-extract on every refresh carrying that move. A declarer reachable ONLY through a shed root is
+  named in the INCONCLUSIVE reason, never folded into "could not locate" and never silently matched.
+  Because selection already sheds
   every site entitled to a different version, a SELECTED site holding anything but the locked version
   is a **mismatch** — including a version the lockfile records elsewhere for the same id. Excusing
   those as a benign `alternate` hid the defect the audit exists to catch: with bare `x` moving

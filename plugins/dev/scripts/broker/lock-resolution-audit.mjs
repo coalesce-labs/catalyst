@@ -298,7 +298,23 @@ function normalizeWorkspaceRoots(workspaceRoots) {
  *     root (`<member>/<id>`, which this repo's lockfile really has three of:
  *     `orch-monitor-ui/react`, `orch-monitor-ui/@types/react`,
  *     `orch-monitor-ui/typescript`, and `plugins/dev/scripts/orch-monitor/ui` is
- *     a literal workspace member the caller passes as a root).
+ *     a literal workspace member the caller passes as a root). Shedding the
+ *     member ROOT is not enough on its own: entitlement to the member's nested
+ *     version belongs to the whole subtree reached THROUGH that root, so a
+ *     declarer is located only from the roots that survived the shed. Locating
+ *     it by first hit across every root is the bare-key twin of the one-hop bug
+ *     the deep path already fixes — bun's isolated linker writes a separate,
+ *     peer-disambiguated store entry per peer set (measured here:
+ *     `.bun/@dnd-kit+core@6.3.1/` -> react 18.3.1,
+ *     `.bun/@dnd-kit+core@6.3.1+005eabf3d8b6ef06/` -> react 19.2.8) while the
+ *     lockfile records ONE bare `@dnd-kit/core` entry for both, so
+ *     `packages.has("@dnd-kit/core/react")` is false and the nested-key
+ *     exclusion cannot see the difference. Measured on this repo's real tree, a
+ *     bare `react` move reported 16 false mismatched importers, every one of
+ *     them located through `orch-monitor-ui`, and `bun install --force` cannot
+ *     clear it because the placement is lockfile-determined. A declarer
+ *     reachable ONLY through a shed root is reported by name in the
+ *     inconclusive reason, never folded into "could not locate".
  *
  * Because site selection already sheds every site entitled to a different
  * version, a SELECTED site that resolves anything other than the locked version
@@ -398,6 +414,7 @@ export function auditLockResolution({
     // ── site selection (see the doc comment above) ──
     const sites = [];
     const unlocatable = [];
+    const shedThroughNestedRoot = [];
     if (chain.length > 1) {
       // The key minus its last element is an install PATH, not a single parent.
       // Walk it hop by hop — root -> chain[0] -> chain[1] -> … — so the importer
@@ -427,10 +444,14 @@ export function auditLockResolution({
       if (importerDir) sites.push({ importer, dir: importerDir });
       else unlocatable.push(importer);
     } else {
-      for (const root of roots) {
-        // A member root with its own `<member>/<id>` key resolves THAT entry,
-        // not this bare one — the same exclusion the declarer loop below applies.
-        if (rootShadowedByOwnNestedKey(root, entry.id)) continue;
+      // The roots ENTITLED to the bare resolution. A member root carrying its
+      // own `<member>/<id>` key resolves THAT entry, not this bare one — and
+      // that entitlement is a property of the whole subtree reached through
+      // the root, not of the root directory alone. So this one list governs
+      // BOTH kinds of site below: the roots probed directly, and the roots a
+      // declarer may be LOCATED from.
+      const bareRoots = roots.filter((root) => !rootShadowedByOwnNestedKey(root, entry.id));
+      for (const root of bareRoots) {
         sites.push({ importer: `workspace:${root.dir}`, dir: root.dir });
       }
       for (const pkg of parsed.packages.values()) {
@@ -439,12 +460,35 @@ export function auditLockResolution({
         // A declarer with its own nested key for this id resolves THAT entry, not
         // this bare one — probing it would compare against the wrong resolution.
         if (parsed.packages.has(`${pkg.key}/${entry.id}`)) continue;
+        // Locate the declarer only from a bare-entitled root. Taking the first
+        // hit across ALL roots is the bare-key twin of the one-hop bug the deep
+        // path already fixes: bun's isolated linker writes a SEPARATE,
+        // peer-disambiguated store entry per peer set (measured on this repo:
+        // `.bun/@dnd-kit+core@6.3.1/` resolves react 18.3.1 while
+        // `.bun/@dnd-kit+core@6.3.1+005eabf3d8b6ef06/` resolves 19.2.8), and the
+        // lockfile records ONE bare `@dnd-kit/core` entry for both — so
+        // `parsed.packages.has("@dnd-kit/core/react")` is false and the nested-key
+        // exclusion above cannot see the distinction. A declarer found through a
+        // shed member root IS the copy peered to that member's nested version;
+        // comparing it against the bare one reported 16 false mismatched importers
+        // for `react` on this repo's real tree, an ERROR no `--force` can clear
+        // because the placement is lockfile-determined.
         let located = null;
-        for (const root of roots) {
+        for (const root of bareRoots) {
           located = resolve(root.dir, pkg.id);
           if (located) break;
         }
-        if (located) sites.push({ importer: pkg.id, dir: located.dir });
+        if (located) {
+          sites.push({ importer: pkg.id, dir: located.dir });
+          continue;
+        }
+        // Not reachable from any bare-entitled root. Separate "shed on purpose"
+        // from "could not look" — folding the two together would let a wholly
+        // shed site list read as an absent dependency in the inconclusive reason.
+        const reachableOnlyViaShedRoot = roots.some(
+          (root) => rootShadowedByOwnNestedKey(root, entry.id) && resolve(root.dir, pkg.id),
+        );
+        if (reachableOnlyViaShedRoot) shedThroughNestedRoot.push(pkg.id);
         else unlocatable.push(pkg.id);
       }
     }
@@ -462,7 +506,10 @@ export function auditLockResolution({
         ...entry,
         reason:
           `no importer on disk resolves ${entry.id}` +
-          (unlocatable.length > 0 ? ` (could not locate: ${unlocatable.join(", ")})` : ""),
+          (unlocatable.length > 0 ? ` (could not locate: ${unlocatable.join(", ")})` : "") +
+          (shedThroughNestedRoot.length > 0
+            ? ` (reachable only through a workspace member that nests ${entry.id}: ${shedThroughNestedRoot.join(", ")})`
+            : ""),
       });
       continue;
     }
