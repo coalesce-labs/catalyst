@@ -54,6 +54,10 @@ function seed() {
   db.run(`INSERT INTO labels VALUES ('l1','needs-human','#ff0000',NULL)`);
   db.run(`INSERT INTO labels VALUES ('l2','no-colour',NULL,NULL)`);
   db.run(`INSERT INTO labels VALUES ('l3','tombstoned','#00ff00',1700)`);
+  // A label whose NAME is NULL — the degenerate row details()' label-name type
+  // guard exists for. Attached only to CTL-13 so it cannot perturb the exact
+  // label assertions on CTL-1.
+  db.run(`INSERT INTO labels VALUES ('l4',NULL,'#123456',NULL)`);
 
   // CTL-1 — the full-payload row: started, has everything.
   db.run(
@@ -88,6 +92,45 @@ function seed() {
   // CTL-9 — a `related` peer reached only INVERSELY.
   db.run(`INSERT INTO issues VALUES ('i9','CTL-9','Inverse related',NULL,'Todo',NULL,1,NULL,NULL,NULL,NULL,NULL)`);
 
+  // ── Degenerate-cell rows. Every one of these is written as a REAL SQLite
+  // literal rather than faked at the JS layer: the point of each guard is what
+  // the driver actually hands back from a column of that affinity, and a value
+  // injected past the driver would prove nothing about the read.
+  //
+  // CTL-10 — an EMPTY-STRING state name. `state` is TEXT affinity, so '' stays
+  // ''. The row is started, so a fabricated ref would carry a real-looking type.
+  db.run(
+    `INSERT INTO issues VALUES ('i10','CTL-10','Empty state name',NULL,'',NULL,1,NULL,1000,NULL,NULL,NULL)`
+  );
+  // CTL-11 — a NON-FINITE estimate. 9e999 overflows REAL and comes back as a JS
+  // number whose Number.isFinite is false (i.e. Infinity) — verified against this
+  // driver, not assumed.
+  db.run(
+    `INSERT INTO issues VALUES ('i11','CTL-11','Non-finite estimate',NULL,'Todo',NULL,9e999,NULL,NULL,NULL,NULL,NULL)`
+  );
+  // CTL-12 — a NON-NUMERIC STRING in the REAL estimate column. REAL affinity
+  // only converts text that is losslessly convertible, so this is stored — and
+  // returned — as a JS string.
+  db.run(
+    `INSERT INTO issues VALUES ('i12','CTL-12','String estimate',NULL,'Todo',NULL,'not a number',NULL,NULL,NULL,NULL,NULL)`
+  );
+  // CTL-13 — carries the NULL-named label l4 alongside a well-formed one.
+  db.run(
+    `INSERT INTO issues VALUES ('i13','CTL-13','Null label name',NULL,'Todo',NULL,NULL,NULL,NULL,NULL,NULL,NULL)`
+  );
+  db.run(`INSERT INTO issue_labels VALUES ('i13','l1')`);
+  db.run(`INSERT INTO issue_labels VALUES ('i13','l4')`); // NULL name → must be dropped
+  // CTL-14 — an EMPTY-STRING description on an otherwise valid detail HIT.
+  db.run(
+    `INSERT INTO issues VALUES ('i14','CTL-14','Empty description','','Todo',NULL,NULL,NULL,NULL,NULL,NULL,NULL)`
+  );
+  // CTL-15 — blocks CTL-5, whose title is ''. CTL-5 is thus reachable as a
+  // relation TARGET, which is the only way the target-title normalize is
+  // exercised (details() rejects an empty title before it ever gets there).
+  db.run(
+    `INSERT INTO issues VALUES ('i15','CTL-15','Blocks an untitled ticket',NULL,'Todo',NULL,NULL,NULL,NULL,NULL,NULL,NULL)`
+  );
+
   // Relations on CTL-1: forward blocks/duplicate/related, inverse blocks/related.
   db.run(`INSERT INTO relations VALUES ('r1','blocks','CTL-1','CTL-2')`);
   db.run(`INSERT INTO relations VALUES ('r2','duplicate','CTL-1','CTL-3')`);
@@ -100,6 +143,9 @@ function seed() {
   // precede CTL-9 in `related`.
   db.run(`INSERT INTO relations VALUES ('r7','related','CTL-1','CTL-8')`);
   db.run(`INSERT INTO relations VALUES ('r8','related','CTL-9','CTL-1')`);
+  // Edge onto the empty-titled CTL-5. Sourced from CTL-15 (not CTL-1) so the
+  // relation-grouping and pass-order assertions above stay untouched.
+  db.run(`INSERT INTO relations VALUES ('r9','blocks','CTL-15','CTL-5')`);
   db.close();
 }
 
@@ -136,7 +182,44 @@ describe("estimates() — CTL-1806", () => {
     });
   });
 
-  test("empty / non-array input → {} without opening the db", () => {
+  test("a NON-FINITE estimate is a MISS (omitted), never served as Infinity", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    // 9e999 overflows SQLite's REAL and the driver hands back a JS number whose
+    // Number.isFinite is false. Serving it would put Infinity on the board's
+    // estimate chip and into any arithmetic downstream of it; the caller must
+    // instead fall through, exactly as for a NULL estimate.
+    const out = reader.estimates(["CTL-11"]);
+    expect(Object.hasOwn(out, "CTL-11")).toBe(false);
+    expect(out).toEqual({});
+  });
+
+  test("a NON-NUMERIC STRING estimate is a MISS (omitted), never served as text", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    // REAL affinity converts text only when it is losslessly convertible, so
+    // 'not a number' really is stored and returned as a JS string — the board
+    // must never receive a string where it expects a point estimate.
+    //
+    // Mutation note: numOrNull's `typeof v === "number"` conjunct is on its own
+    // an EQUIVALENT mutant — Number.isFinite returns true only for number
+    // primitives, so deleting the typeof test cannot change any answer. What
+    // this case does kill is removal of the guard as a whole, which the
+    // non-finite case above cannot distinguish from a bare typeof check.
+    const out = reader.estimates(["CTL-12"]);
+    expect(Object.hasOwn(out, "CTL-12")).toBe(false);
+    expect(out).toEqual({});
+  });
+
+  test("empty / non-array input → {}", () => {
+    // Scope note: this asserts ONLY the return value. The original name also
+    // claimed "without opening the db", which the body never checked and cannot
+    // check — createReplicaReader constructs its Database inline with no
+    // injectable opener, and on an absent path the open throws and is caught,
+    // yielding the identical {}. Dropping the early return is therefore an
+    // equivalent mutant here, and adding a production seam purely to observe it
+    // is not worth the surface. A test name must not claim a property its body
+    // does not verify.
     reader = createReplicaReader({ dbPath: join(tmpDir, "absent.db") });
     expect(reader.estimates([])).toEqual({});
     expect(reader.estimates(null)).toEqual({});
@@ -200,6 +283,25 @@ describe("relations() — CTL-1806", () => {
       priority: null,
       project: null,
     });
+  });
+
+  test("a target whose title is EMPTY normalizes to null, so the rail renders its id", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    const rel = reader.relations(["CTL-15"])["CTL-15"];
+    // The rail renders `title ?? identifier`. An empty string is not null, so it
+    // wins that coalesce and the row draws BLANK — a genuine blocker rendered as
+    // an empty line instead of "CTL-5". Normalizing to null is what restores the
+    // identifier fallback.
+    expect(rel.blocks).toEqual([
+      {
+        identifier: "CTL-5",
+        title: null,
+        state: { name: "Todo", type: "backlog" },
+        priority: null,
+        project: null,
+      },
+    ]);
   });
 
   test("an id with no edges is OMITTED (a miss, not an empty map)", () => {
@@ -284,6 +386,47 @@ describe("details() — CTL-1806", () => {
     // is not. Emitting {name:null,type:"backlog"} would invent a workflow state
     // that does not exist in the workspace and break the LinearStateRef contract.
     expect(reader.details(["CTL-7"])["CTL-7"].state).toBe(null);
+  });
+
+  test("an EMPTY state name yields state:null — an empty ref is never fabricated", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    // Distinct from the NULL-state case above: '' IS a string, so only the
+    // length check stands between the row and a {name:"", type:"started"} ref.
+    // That ref satisfies LinearStateRef structurally while naming a workflow
+    // state that does not exist, so the consumer renders a nameless chip with a
+    // confident icon instead of falling through.
+    expect(reader.details(["CTL-10"])["CTL-10"].state).toBe(null);
+  });
+
+  test("an EMPTY description normalizes to null, not the empty string", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    const d = reader.details(["CTL-14"])["CTL-14"];
+    expect(d.title).toBe("Empty description"); // the row IS served
+    // The detail page's availability check is `title !== null || description
+    // !== null`, and callers coalesce on null. An empty string reads as present
+    // content, so the page renders an empty body instead of falling through.
+    expect(d.description).toBe(null);
+  });
+
+  test("a label whose NAME is NULL is DROPPED, never pushed as {name:null}", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    const d = reader.details(["CTL-13"])["CTL-13"];
+    // ORDER BY l.name puts a NULL name FIRST in SQLite, so an ungated push
+    // would lead the chip row with a nameless label.
+    expect(d.labels).toEqual([{ name: "needs-human", color: "#ff0000" }]);
+    expect(d.labels.every((l) => typeof l.name === "string" && l.name.length > 0)).toBe(true);
+    expect(d.labels.length).toBe(1); // fail closed: an emptied list is not a pass
+  });
+
+  test("a NON-FINITE estimate on a detail HIT is null, never Infinity", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    const d = reader.details(["CTL-11"])["CTL-11"];
+    expect(d.title).toBe("Non-finite estimate"); // the row IS served
+    expect(d.estimate).toBe(null);
   });
 
   test("absent db → {} (fail-open)", () => {
