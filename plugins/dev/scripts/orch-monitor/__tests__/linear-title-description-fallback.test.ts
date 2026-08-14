@@ -15,7 +15,15 @@
 //  6. Fail-open: network failure → { title:null, description:null }, no throw.
 //  7. _clearTitleDescCache(id) evicts a single entry (webhook invalidation).
 
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from "bun:test";
+// CTL-1806: these cases assert the DEGRADED (Linear) tier. Force the
+// replica file-presence gate CLOSED so a dev box (which HAS a real
+// ~/catalyst/catalyst-replica.db) runs the same path as CI (which does not).
+import { pinNoReplica } from "./helpers/no-replica";
+let _restoreReplicaPin: () => void;
+beforeAll(() => { _restoreReplicaPin = pinNoReplica(); });
+afterAll(() => { _restoreReplicaPin?.(); });
+
 import {
   fillTitleDescriptionFallback,
   _clearTitleDescCache,
@@ -67,13 +75,20 @@ function mockFetchFail() {
 
 // A token must be present for graphql() to attempt a fetch; the spy intercepts
 // the actual call so no real network traffic happens.
-function withToken<T>(fn: () => T): T {
+// CTL-1806: this MUST await `fn()` before restoring. It used to restore
+// synchronously, which only worked because the resolver happened to read the
+// token before its first `await`. Adding the replica tier put an `await` ahead of
+// that read, so the token was already deleted by the time the degraded fetch ran
+// — every Linear-tier case silently exercised the no-token path instead. A test
+// helper whose correctness depends on how many microtasks the code under test
+// yields is a test that can pass for the wrong reason.
+async function withToken<T>(fn: () => T | Promise<T>): Promise<T> {
   const prevToken = process.env.LINEAR_API_TOKEN;
   const prevKey = process.env.LINEAR_API_KEY;
   process.env.LINEAR_API_TOKEN = "lin_api_test_token";
   delete process.env.LINEAR_API_KEY;
   try {
-    return fn();
+    return await fn();
   } finally {
     if (prevToken !== undefined) process.env.LINEAR_API_TOKEN = prevToken;
     else delete process.env.LINEAR_API_TOKEN;

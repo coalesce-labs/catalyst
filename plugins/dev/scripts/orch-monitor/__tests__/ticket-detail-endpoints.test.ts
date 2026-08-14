@@ -8,6 +8,14 @@
 // CTL-996: also covers the /api/linear-ticket route which now returns
 // labels + relations in addition to title + description.
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+// CTL-1806: these cases assert the DEGRADED (Linear) tier. Force the
+// replica file-presence gate CLOSED so a dev box (which HAS a real
+// ~/catalyst/catalyst-replica.db) runs the same path as CI (which does not).
+import { pinNoReplica } from "./helpers/no-replica";
+let _restoreReplicaPin: () => void;
+beforeAll(() => { _restoreReplicaPin = pinNoReplica(); });
+afterAll(() => { _restoreReplicaPin?.(); });
+
 import { mkdtempSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";

@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from "bun:test";
+// CTL-1806: these cases assert the DEGRADED (Linear) tier. Force the
+// replica file-presence gate CLOSED so a dev box (which HAS a real
+// ~/catalyst/catalyst-replica.db) runs the same path as CI (which does not).
+import { pinNoReplica } from "./helpers/no-replica";
+let _restoreReplicaPin: () => void;
+beforeAll(() => { _restoreReplicaPin = pinNoReplica(); });
+afterAll(() => { _restoreReplicaPin?.(); });
+
 import {
   fillTitleDescriptionFallback,
   _clearTitleDescCache,

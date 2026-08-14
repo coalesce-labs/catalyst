@@ -25,6 +25,45 @@ the token FIRST, activate the writer, wait for a verified seed, and only then fl
 The canonical seed-before-flip runbook, including every key's precedence, lives in
 `website/src/content/docs/reference/configuration.md`; this list is its replica-tier summary.
 
+## Supplemental display reads (CTL-1806)
+
+Three resolvers outside the eligible path used to call the Linear GraphQL API with no replica
+consultation at all. Two are now replica-first; the third cannot be, and says so.
+
+| Resolver | Local tier | Gate | On a miss |
+| --- | --- | --- | --- |
+| `orch-monitor/lib/linear-estimate-fallback.mjs` | `replica-read.mjs` `estimates()` | file presence | `catalyst.linear.read {source:"linearis_miss", op:"estimate"}` |
+| `orch-monitor/lib/linear-title-description-fallback.mjs` | `details()` (+ `relations()`) | file presence | `… {source:"linearis_miss", op:"title_desc"}` |
+| `execution-core/linear-estimation-method.mjs` | **none — see below** | 7-day on-disk TTL | `… {source:"linearis", op:"team_method"}` |
+
+Three properties are deliberate and easy to "fix" wrongly:
+
+- **File presence, never writer liveness.** A liveness gate on a *display* read falls through to
+  Linear precisely when the board is UNCHANGED (a live writer on a quiet feed reads as stale —
+  CTL-1397), turning a healthy quiet period into a burst of API calls. That is backwards for a read
+  whose purpose is removing them.
+- **A replica `NULL` estimate is a MISS, not an authoritative null.** Locally, "Linear has none" and
+  "this row predates the estimate projection" are indistinguishable, so serving the null would drop
+  the board chip for a refresh. Mirrors what `titles()` already does with an empty title.
+- **The team estimation method has no replica source and must not be defaulted.** The replica has no
+  `teams` table and carries no `issueEstimation`; the `$.team` projection is `{id,key,name}` only. So
+  its Linear fetch stays, labelled and bounded at 8 team keys per host per TTL. It is **never**
+  defaulted to a scale: the value gates a real Linear write (`applyEstimate` on the triage→research
+  advance), where `null` makes the scheduler SKIP the write and a guess would write a Fibonacci
+  number into a tShirt team's estimate field. The durable fix is a cloud-side `teams.issue_estimation`
+  column, not a local guess.
+
+`state.type` is not in the replica either (the enrichment pass overwrites `raw` with a projection
+that drops it). It is **synthesized from lifecycle timestamps** — `canceled_at` → `completed_at` →
+`started_at` → `backlog` — deliberately not from the state NAME, which would hardcode this
+workspace's contract states and break under a bring-your-own-workspace tenant. Measured 109/109
+exact on every class the consumer renders distinctly, against a committed ground-truth fixture
+(`execution-core/__fixtures__/state-type-ground-truth.json`); the one residual is a true `unstarted`
+collapsing to `backlog`, which costs a stroke-dash difference on a muted ring. The type is carried
+rather than omitted because it also selects the 24h-vs-5min cache TTL, and dropping it would move
+every terminal ticket to the short TTL — a quota regression inside a quota reduction. The durable
+fix is a cloud-side `workflow_states` table (`issues.state_id` is already fully populated).
+
 ## Signals
 
 | Signal | Where | Meaning |

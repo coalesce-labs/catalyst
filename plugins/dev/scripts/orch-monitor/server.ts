@@ -3202,8 +3202,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
           ) {
             return new Response("Bad Request", { status: 400 });
           }
+          // CTL-1806: this call is now REPLICA-FIRST. The tier lives inside
+          // fillTitleDescriptionFallback, so this route — which previously had no
+          // replica tier at all and hit the rate-limited Linear API once per cold
+          // ticket view, relation targets included — is served locally whenever
+          // the replica holds the ticket, with no change here beyond reporting the
+          // provenance honestly below.
           const map = await fillTitleDescriptionFallback([ticket]);
-          const entry = map[ticket] ?? { title: null, description: null, labels: null, relations: null, state: null, priority: null, project: null, estimate: null };
+          const entry = map[ticket] ?? { title: null, description: null, labels: null, relations: null, state: null, priority: null, project: null, estimate: null, source: null };
           const available =
             entry.title !== null || entry.description !== null;
           return Response.json({
@@ -3216,7 +3222,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
             priority: entry.priority ?? null,
             project: entry.project ?? null,
             estimate: entry.estimate ?? null,
-            source: available ? "linear-live" : "unavailable",
+            // CTL-1806: report where the answer actually came from. Reporting
+            // "linear-live" for a read served entirely from local SQLite would be
+            // a false provenance claim on a user-facing field.
+            source: available
+              ? entry.source === "replica"
+                ? "replica"
+                : "linear-live"
+              : "unavailable",
           });
         }
 

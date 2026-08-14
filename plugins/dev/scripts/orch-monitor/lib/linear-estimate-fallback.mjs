@@ -33,31 +33,32 @@
 //
 // Dependencies: none beyond node built-ins + Bun's global `fetch`.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 // CTL-1616 PR3: fold this file's inline LINEAR_API_TOKEN/LINEAR_API_KEY ladder
 // onto the shared secret-contract engine (design §8 PR3 table).
 import { resolveSecret } from "../../lib/secret-contract.mjs";
-
-const HOME = homedir();
+// CTL-1806: the replica tier (read #1) + the degraded-path anomaly (D3).
+import { readReplicaEstimates } from "./linear-cache-reader.mjs";
+import { noteDegradedLinearRead } from "./linear-degraded-read.mjs";
+// CTL-1806 (D1): the team estimation method's cache lives in execution-core and
+// is now shared rather than duplicated here. This module previously carried its
+// own 24h TTL, its own path fn, its own memo, a byte-copy of the GraphQL query
+// and its own atomic write — all over THE SAME FILE the scheduler writes with a
+// 7-day TTL. A record written at T+30h was therefore valid to the scheduler and
+// stale here, so the board re-fetched from Linear and rewrote a file the
+// scheduler was already serving: a duplicated Linear call caused purely by the
+// two caches disagreeing. One TTL now, one path, one query, one writer.
+import {
+  TEAM_ESTIMATION_QUERY,
+  readTeamEstimationCache,
+  writeTeamEstimationCache,
+  _resetMemoForTests,
+} from "../../execution-core/linear-estimation-method.mjs";
 
 // ── In-memory TTL cache ───────────────────────────────────────────────────────
 // Keyed by ticket ID (e.g. "CTL-774"). Value: { estimate: number|null, ts: number }.
 // null means we fetched and Linear returned no estimate; absent means uncached.
 const ESTIMATE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const _estimateCache = new Map(); // ticketId → { estimate: number|null, ts: number }
-
-// ── Team estimation-method on-disk cache (mirrors execution-core) ─────────────
-// File: ~/catalyst/execution-core/team-estimation-<TEAM>.json
-// Reuses the same file the scheduler's getEstimationMethod writes, so a fresh
-// scheduler run primes this cache for free.
-const METHOD_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const _methodCache = new Map(); // teamId → { type, fetchedAt }
-
-function methodCachePath(teamId) {
-  return join(HOME, "catalyst", "execution-core", `team-estimation-${teamId}.json`);
-}
 
 // ── Linear GraphQL helpers ────────────────────────────────────────────────────
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
@@ -103,19 +104,6 @@ const ESTIMATE_QUERY_FOR_TEAM = `query FallbackEstimates($teamKey: String!, $num
   }
 }`;
 
-// The team estimation-method query (reused from linear-estimation-method.mjs).
-const TEAM_METHOD_QUERY = `query GetTeamEstimation($key: String!) {
-  teams(filter: { key: { eq: $key } }) {
-    nodes {
-      issueEstimation {
-        type
-        allowZero
-        extended
-      }
-    }
-  }
-}`;
-
 function linearAuthHeader() {
   const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
   if (!token) return null;
@@ -124,9 +112,22 @@ function linearAuthHeader() {
 
 // graphql — one async GraphQL call via Bun's native fetch.  Returns the parsed
 // `data` object on success, or null on any failure (network, auth, 429, bad JSON).
-async function graphql(query, variables) {
+//
+// CTL-1806 (D3): every reachable exit from this function is a Linear read on the
+// DEGRADED path, so each one emits `catalyst.linear.read` BEFORE the outbound
+// call. `source`/`op` are threaded from the call site because both queries below
+// route through this one helper — without that, the estimate read and the
+// team-method read would be indistinguishable in Loki, and one of them consults a
+// replica while the other has no local source at all.
+async function graphql(query, variables, { source, op, entity = null } = {}) {
   const auth = linearAuthHeader();
-  if (!auth) return null;
+  if (!auth) {
+    // Reached the degraded path but cannot even dispatch — a node with no Linear
+    // credential otherwise returns nulls in total silence. WARN via result:failed.
+    noteDegradedLinearRead({ source, result: "failed", op, entity });
+    return null;
+  }
+  noteDegradedLinearRead({ source, result: "ok", op, entity });
   try {
     const res = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
       method: "POST",
@@ -155,51 +156,29 @@ async function graphql(query, variables) {
 export async function getEstimationMethodAsync(teamId) {
   if (!teamId || typeof teamId !== "string") return null;
 
-  const now = Date.now();
+  // 1+2. The SHARED memo + on-disk record, under the ONE 7-day TTL (D1). This is
+  // the same helper the scheduler's synchronous getEstimationMethod uses, so a
+  // record either module writes is honoured by both.
+  const cached = readTeamEstimationCache(teamId);
+  if (cached) return cached;
 
-  // 1. In-process memo.
-  if (_methodCache.has(teamId)) {
-    const r = _methodCache.get(teamId);
-    if (now - new Date(r.fetchedAt).getTime() < METHOD_TTL_MS) {
-      return r.method ?? null;
-    }
-    _methodCache.delete(teamId);
-  }
-
-  // 2. On-disk cache (shared with execution-core/linear-estimation-method.mjs).
-  const path = methodCachePath(teamId);
-  if (existsSync(path)) {
-    try {
-      const record = JSON.parse(readFileSync(path, "utf8"));
-      if (record?.method && typeof record.method.type === "string") {
-        if (now - new Date(record.fetchedAt).getTime() < METHOD_TTL_MS) {
-          _methodCache.set(teamId, record);
-          return record.method;
-        }
-      }
-    } catch {
-      // corrupt cache — fall through
-    }
-  }
-
-  // 3. Live fetch.
-  const data = await graphql(TEAM_METHOD_QUERY, { key: teamId });
+  // 3. Live fetch — the labelled DEGRADED path (D1). The replica has no teams
+  // table and carries no issueEstimation, so unlike the estimate read below there
+  // is no local tier to consult first; source is "linearis", not "linearis_miss".
+  //
+  // The async fetch stays here rather than delegating to the sync
+  // getEstimationMethod: that one spawns curl SYNCHRONOUSLY, which is right for
+  // the scheduler's synchronous pull loop and wrong for a board request path.
+  const data = await graphql(
+    TEAM_ESTIMATION_QUERY,
+    { key: teamId },
+    { source: "linearis", op: "team_method", entity: teamId }
+  );
   const method = data?.teams?.nodes?.[0]?.issueEstimation;
   if (!method || typeof method.type !== "string") return null;
 
   const normalized = { type: method.type, allowZero: !!method.allowZero, extended: !!method.extended };
-  const record = { teamId, method: normalized, fetchedAt: new Date().toISOString() };
-  // Atomic write — same convention as linear-estimation-method.mjs.
-  try {
-    const dir = join(HOME, "catalyst", "execution-core");
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(record, null, 2));
-    renameSync(tmp, path);
-  } catch {
-    // disk write failed — in-mem cache is still valid
-  }
-  _methodCache.set(teamId, record);
+  writeTeamEstimationCache(teamId, normalized); // shared atomic write + memo seed
   return normalized;
 }
 
@@ -213,7 +192,7 @@ export async function getEstimationMethodAsync(teamId) {
 // - null is stored for IDs that Linear returned no estimate for (unset in
 //   Linear) so a subsequent call within the TTL does not re-fetch.
 // - Always resolves; never rejects.
-export async function fillEstimateFallback(ticketIds) {
+export async function fillEstimateFallback(ticketIds, { replicaOptions = {} } = {}) {
   const result = {};
   const toFetch = [];
   const now = Date.now();
@@ -229,10 +208,37 @@ export async function fillEstimateFallback(ticketIds) {
 
   if (toFetch.length === 0) return result;
 
+  // ── Tier 1: the LOCAL replica (CTL-1806) ───────────────────────────────────
+  // The whole point of this ticket. This resolver used to go straight from a
+  // durable-cache miss to the rate-limited Linear API, for a value that is
+  // already on this node in SQLite. Gated on FILE PRESENCE only and fail-open:
+  // an absent/unreadable replica yields {} and every id simply proceeds to the
+  // degraded path exactly as before.
+  //
+  // A replica row whose estimate is NULL is OMITTED by the primitive — i.e. it
+  // is a MISS and falls through, never an authoritative null. "Linear has none"
+  // and "this row predates the estimate projection" are indistinguishable
+  // locally, and serving the null would silently drop the chip for a refresh.
+  const replicaHits = await readReplicaEstimates({ ids: toFetch, ...replicaOptions });
+  const stillMissing = [];
+  for (const id of toFetch) {
+    const hit = replicaHits[id];
+    if (typeof hit === "number" && Number.isFinite(hit)) {
+      _estimateCache.set(id, { estimate: hit, ts: Date.now() });
+      result[id] = hit;
+    } else {
+      stillMissing.push(id);
+    }
+  }
+  if (stillMissing.length === 0) return result;
+  // From here on, every id is a genuine REPLICA MISS — which is exactly what the
+  // `linearis_miss` source on the emission below records.
+  const toQuery = stillMissing;
+
   // Group uncached IDs by team key (e.g. "CTL" → [774, 930, ...]).
   // IDs that don't parse are quietly stored as null (can't query them).
-  const teamGroups = groupByTeam(toFetch);
-  const unparseable = toFetch.filter((id) => parseIdentifier(id) === null);
+  const teamGroups = groupByTeam(toQuery);
+  const unparseable = toQuery.filter((id) => parseIdentifier(id) === null);
   for (const id of unparseable) {
     _estimateCache.set(id, { estimate: null, ts: Date.now() });
     result[id] = null;
@@ -248,7 +254,12 @@ export async function fillEstimateFallback(ticketIds) {
 
   await Promise.allSettled(
     perTeamChunks.map(async ({ teamKey, numbers }) => {
-      const data = await graphql(ESTIMATE_QUERY_FOR_TEAM, { teamKey, numbers });
+      // CTL-1806 (D3): a replica WAS consulted above and missed → linearis_miss.
+      const data = await graphql(
+        ESTIMATE_QUERY_FOR_TEAM,
+        { teamKey, numbers },
+        { source: "linearis_miss", op: "estimate" }
+      );
       const nodes = data?.issues?.nodes ?? [];
 
       // Build a set of numbers returned for this team.
@@ -282,8 +293,10 @@ export async function fillEstimateFallback(ticketIds) {
 export function _clearEstimateCache() {
   _estimateCache.clear();
 }
+// CTL-1806: the method memo now lives in execution-core (one cache, one TTL), so
+// this delegates rather than clearing a second map that no longer exists.
 export function _clearMethodCache() {
-  _methodCache.clear();
+  _resetMemoForTests();
 }
 export function _getEstimateCacheSize() {
   return _estimateCache.size;
