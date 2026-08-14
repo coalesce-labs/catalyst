@@ -116,6 +116,11 @@ on:
       - "plugins/legacy/skills/orchestrate/**"
       # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
       # every member package's install (incl. execution-core, broker, otel-forward).
+      # CTL-1836: the root installer, whose cloud-replica provisioning is covered by
+      # __tests__/setup-cloud-replica.test.sh below. Without this path a setup-only
+      # change would neither trigger the workflow on push nor mark a PR relevant —
+      # the tested implementation would bypass its own regression test.
+      - "setup-catalyst.sh"
       - "package.json"
       - "bun.lock"
       - "turbo.json"
@@ -155,6 +160,8 @@ jobs:
               - "plugins/dev/scripts/migrate-dual-harness.sh"
               - "plugins/dev/scripts/check-project-setup.sh"
               - ".github/workflows/execution-core-tests.yml"
+              # CTL-1836: root installer — see the matching note in on.push.paths.
+              - "setup-catalyst.sh"
               - "package.json"
               - "bun.lock"
               - "turbo.json"
@@ -331,6 +338,19 @@ jobs:
         # and catalyst-events' torn-line batch-abort fix.
         working-directory: plugins/dev/scripts
         run: bash __tests__/event-append-atomicity.test.sh
+
+      - name: setup-catalyst.sh cloud replica provisioning (CTL-1836)
+        # CTL-1836: the installer's --cloud-token path. The load-bearing case is the
+        # REFUSAL: cloud-sync.mjs:125 defaults CATALYST_CLOUD_ACCOUNT to "tenant-0"
+        # (the maintainer's own tenant), so a token supplied without an account must
+        # fail loudly rather than silently point a new user's host at somebody else's
+        # workspace. Equally load-bearing is the no-op: with no cloud flags, setup must
+        # be byte-identical to before the flag existed.
+        # Carries its own precondition assertion — case 5 starts from a 0644 env file
+        # and proves it is tightened to 0600, because the naive mode check passes for
+        # free (mktemp creates 0600 and mv preserves it, verified by mutation).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/setup-cloud-replica.test.sh
 
       - name: SKILL.md ${PLUGIN_ROOT} assignment guard (CTL-1832)
         # CTL-1832: a SKILL.md that EXPANDS ${PLUGIN_ROOT} must also ASSIGN it, or

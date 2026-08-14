@@ -24,6 +24,10 @@ THOUGHTS_REPO=""
 WORKTREE_BASE=""
 USER_NAME=""
 NON_INTERACTIVE=0
+# CTL-1836: Catalyst Cloud replica provisioning. Empty → the cloud path is a
+# no-op and setup behaves exactly as it did before the flags existed.
+CLOUD_TOKEN=""
+CLOUD_ACCOUNT=""
 
 #
 # Utility functions
@@ -56,6 +60,24 @@ can_open_tty() {
 	(: </dev/tty) 2>/dev/null
 }
 
+print_usage() {
+	cat <<'USAGE'
+Usage: setup-catalyst.sh [--non-interactive|--defaults]
+                         [--cloud-token <token>] [--cloud-account <account>]
+
+  --non-interactive, --defaults   Answer every prompt with its default.
+
+  --cloud-token <token>     Provision the Catalyst Cloud read replica on this host.
+                            Env: CATALYST_CLOUD_TOKEN (or the name configured by
+                            CATALYST_CLOUD_TOKEN_ENV / Layer-2 catalyst.cloud.tokenEnv).
+  --cloud-account <account> REQUIRED whenever a cloud token is supplied. There is
+                            deliberately NO default here — see below.
+                            Env: CATALYST_CLOUD_ACCOUNT
+
+Omit the cloud flags and setup behaves exactly as it always has.
+USAGE
+}
+
 # Parse CLI flags. CATALYST_AUTONOMOUS is the project-wide headless signal
 # (same contract as plugins/dev/scripts/check-project-setup.sh).
 parse_args() {
@@ -68,13 +90,32 @@ parse_args() {
 			NON_INTERACTIVE=1
 			shift
 			;;
+		# CTL-1836: the Catalyst Cloud replica path. Absent → every behaviour below
+		# is byte-identical to before this flag existed, so existing installs are
+		# untouched. Env vars are the headless equivalent.
+		--cloud-token)
+			[[ $# -ge 2 ]] || {
+				print_error "--cloud-token requires a value"
+				exit 1
+			}
+			CLOUD_TOKEN="$2"
+			shift 2
+			;;
+		--cloud-account)
+			[[ $# -ge 2 ]] || {
+				print_error "--cloud-account requires a value"
+				exit 1
+			}
+			CLOUD_ACCOUNT="$2"
+			shift 2
+			;;
 		-h | --help)
-			echo "Usage: setup-catalyst.sh [--non-interactive|--defaults]"
+			print_usage
 			exit 0
 			;;
 		*)
 			print_error "Unknown option: $1"
-			echo "Usage: setup-catalyst.sh [--non-interactive|--defaults]"
+			print_usage
 			exit 1
 			;;
 		esac
@@ -1495,6 +1536,143 @@ EOF
 	echo ""
 }
 
+# ── CTL-1836: provision the Catalyst Cloud read replica ─────────────────────
+#
+# Before this, a brand-new user finished setup with a working local node, no
+# replica, and no indication one existed — every step below was a separate,
+# undocumented manual procedure. This closes the six blockers a new install hits,
+# in the order it hits them: no cloud path in the installer; hand-writing the
+# writer env; the tenant-0 account default; the legacy base URL; replica reads
+# defaulting off; and the project never being enrolled.
+#
+# ⛔ NO-DEFAULT RULE FOR THE ACCOUNT. cloud-sync.mjs:125 and cloud-sync/launch.sh:68
+# both default CATALYST_CLOUD_ACCOUNT to "tenant-0" — Ryan's workspace. For an
+# external user that default silently points their host at somebody else's tenant.
+# With a per-tenant key it fails CLOSED (the mirror forces the account to match the
+# key), but the result is an opaque 403 with no hint about why. So when a cloud
+# token is supplied here, the account is REQUIRED and we fail loudly instead.
+#
+# ⚠️ WHAT THIS DELIBERATELY DOES NOT DO: it does not change those runtime defaults.
+# Measured on the live fleet — both minis' ~/.config/catalyst/cloud-sync.env is a
+# single line containing only the token, pinning NEITHER the account NOR the base
+# URL. Changing either default would repoint or break both running replica writers
+# the moment they restarted. New installs get explicit values written here; the
+# defaults are a separate, evidence-gathering change.
+setup_cloud_replica() {
+	# Flags win over env. Absent → this whole function is a no-op and setup is
+	# byte-identical to before CTL-1836.
+	# CTL-1668: also LOOK UP the token under the configured name, not just the
+	# default — otherwise a host using a custom name has its valid token treated as
+	# absent and provisioning is silently skipped (Codex P2 on #3365).
+	local _tv="${CATALYST_CLOUD_TOKEN_ENV:-}"
+	if [[ -z $_tv ]] && [[ -r "$HOME/.config/catalyst/config.json" ]] && command -v jq >/dev/null 2>&1; then
+		_tv="$(jq -r '.catalyst.cloud.tokenEnv // empty' "$HOME/.config/catalyst/config.json" 2>/dev/null || true)"
+	fi
+	[[ -n $_tv ]] || _tv="CATALYST_CLOUD_TOKEN"
+	local token="${CLOUD_TOKEN:-${!_tv:-}}"
+	local account="${CLOUD_ACCOUNT:-${CATALYST_CLOUD_ACCOUNT:-}}"
+	[[ -n $token ]] || return 0
+
+	print_header "Provisioning Catalyst Cloud Replica"
+
+	if [[ -z $account ]]; then
+		print_error "A cloud token was supplied without an account."
+		echo ""
+		echo "  Pass --cloud-account <id> (or set CATALYST_CLOUD_ACCOUNT)."
+		echo ""
+		echo "  There is no default on purpose. The writer's built-in fallback is"
+		echo "  'tenant-0', which is the Catalyst maintainer's own tenant — defaulting"
+		echo "  to it would point THIS host at somebody else's workspace. Your key"
+		echo "  would be refused with an opaque 403 and no explanation."
+		return 1
+	fi
+
+	local config_dir="$HOME/.config/catalyst"
+	local env_file="${config_dir}/cloud-sync.env"
+
+	harden_secrets_dir "$config_dir"
+	ensure_secrets_gitignore "$config_dir"
+
+	# The canonical host. cloud-sync.mjs:124 still defaults to the LEGACY
+	# api.catalyst-cloud.coalescelabs.ai, which is being retired, so a new user who
+	# relies on the default is pointed at a host that is going away. Pin it here.
+	local base_url="${CATALYST_CLOUD_BASE_URL:-https://app.catalystcloud.dev/api/v1}"
+
+	# ⛔ EVERY LINE MUST BE `export` (Codex P1 on #3365). launch.sh SOURCES this file
+	# and then `exec`s bun. A bare `FOO=bar` in a sourced file is a SHELL-LOCAL
+	# variable — it is not in the child's environment, so bun would see no token,
+	# take its tokenless idle path, and `process.exit(0)`. Under the agent's
+	# `KeepAlive={SuccessfulExit:false}` a clean exit is PERMANENT: launchd never
+	# restarts it, and the only symptom is a replica that quietly stops advancing.
+	# (Verified against the three hosts already running: every existing
+	# cloud-sync.env uses `export`. This is the established form, not a new one.)
+	#
+	# CTL-1668: the token's env-var NAME is configurable, so honour the same
+	# precedence the writer resolves with — env override → Layer-2
+	# catalyst.cloud.tokenEnv → default. Writing a fixed name while the writer looks
+	# up a custom one produces the identical silent idle.
+	local token_var="${CATALYST_CLOUD_TOKEN_ENV:-}"
+	if [[ -z $token_var ]]; then
+		local l2_cfg="$HOME/.config/catalyst/config.json"
+		if [[ -r $l2_cfg ]] && command -v jq >/dev/null 2>&1; then
+			token_var="$(jq -r '.catalyst.cloud.tokenEnv // empty' "$l2_cfg" 2>/dev/null || true)"
+		fi
+	fi
+	[[ -n $token_var ]] || token_var="CATALYST_CLOUD_TOKEN"
+
+	# launchd does not read ~/.zshenv, so the writer's credentials have to live in
+	# this file. Written 0600 BEFORE the secret lands in it — never world-readable,
+	# not even momentarily.
+	local tmp_env
+	tmp_env=$(mktemp)
+	chmod 600 "$tmp_env"
+	{
+		echo "# Written by setup-catalyst.sh (CTL-1836). Consumed by"
+		echo "# plugins/dev/scripts/execution-core/cloud-sync/launch.sh under launchd."
+		echo "# Every line is exported: launch.sh sources this then execs bun, and a"
+		echo "# non-exported assignment would leave the writer tokenless (silent idle exit)."
+		echo "export ${token_var}=${token}"
+		echo "export CATALYST_CLOUD_ACCOUNT=${account}"
+		echo "export CATALYST_CLOUD_BASE_URL=${base_url}"
+	} >"$tmp_env"
+	mv "$tmp_env" "$env_file"
+	chmod 600 "$env_file"
+	print_success "Wrote $env_file (0600) — account and base URL pinned explicitly"
+
+	# Adopt the writer. Optional by design: a host without the stack installed still
+	# gets a correct env file, and adopting later picks it up.
+	local stack
+	stack=$(command -v catalyst-stack 2>/dev/null || true)
+	if [[ -n $stack ]]; then
+		if "$stack" adopt-cloud-sync >/dev/null 2>&1; then
+			print_success "cloud-sync writer adopted (launchd agent installed)"
+		else
+			print_warning "catalyst-stack adopt-cloud-sync failed — run it by hand once the stack is installed"
+		fi
+	else
+		print_warning "catalyst-stack not on PATH — run 'catalyst-stack adopt-cloud-sync' after installing the stack"
+	fi
+
+	# A populated replica that nothing reads is the failure this step exists to
+	# avoid: reads are opt-in (CATALYST_LINEAR_REPLICA=on) and off by default.
+	print_warning "Replica READS are opt-in. Add to your shell env and restart execution-core:"
+	echo "    export CATALYST_LINEAR_REPLICA=on"
+
+	# Without a registry entry the daemon dispatches nothing — a running stack that
+	# does literally nothing, which looks identical to a broken one.
+	if [[ -n ${TICKET_PREFIX:-} ]]; then
+		echo ""
+		echo "  Enroll this project so the daemon has work to find:"
+		echo "    catalyst-execution-core register --team ${TICKET_PREFIX}"
+	else
+		echo ""
+		echo "  Enroll this project so the daemon has work to find:"
+		echo "    catalyst-execution-core register --team <TEAM_KEY>"
+	fi
+
+	return 0
+}
+
 setup_catalyst_secrets() {
 	print_header "Setting Up Catalyst Secrets"
 
@@ -2594,6 +2772,10 @@ main() {
 	setup_project_config
 	setup_humanlayer_config
 	setup_catalyst_secrets
+	# CTL-1836: no-op unless a cloud token was supplied. Placed after secrets so it
+	# can reuse the hardened ~/.config/catalyst dir, and before the Linear/state
+	# steps so a failure here stops setup before it reports success.
+	setup_cloud_replica || exit 1
 	update_config_with_linear_states
 	setup_execution_core_states
 	init_session_database
