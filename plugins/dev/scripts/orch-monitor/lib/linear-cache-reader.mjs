@@ -362,6 +362,27 @@ export async function readReplicaTicketDetails({
     }
     reader = factory({ dbPath });
     if (typeof reader.details !== "function") return {};
+    // ⛔ SINGLE-TICKET READS ARE FRESHNESS-GATED (Codex P1 on #3355).
+    // This is the ticket-DETAIL path, not the board batch, and the repo rule is
+    // explicit that a single-ticket read gates freshness and falls back LOUDLY.
+    // File presence alone is not enough: when the writer stops but its database
+    // remains, every field below is a stale hit that then gets cached for 5-24h.
+    //
+    // Not hypothetical — observed on the developer laptop 2026-08-14: the writer
+    // took a clean SIGTERM, `KeepAlive={SuccessfulExit:false}` never revived it,
+    // the .db stayed on disk, and reads silently served ~15-minute-old state
+    // (CTL-1736 / CTL-1844).
+    //
+    // This does NOT re-create CTL-1397, and the distinction matters: that incident
+    // was gating on the .db/-wal MTIME, which a legitimately QUIET Linear feed makes
+    // look stale. `isFresh()` reads the `.writer.lock` HEARTBEAT, which the writer
+    // touches every few seconds regardless of Linear activity — it tracks writer
+    // LIVENESS, not data-change cadence. The D4 ruling's file-presence choice stands
+    // for the high-volume board resolvers; it was never about this path.
+    //
+    // Returning {} is the documented miss contract, so the caller falls through to
+    // its existing (loud, degraded-labelled) Linear chain rather than serving stale.
+    if (typeof reader.isFresh === "function" && !reader.isFresh()) return {};
     const out = reader.details(wanted);
     return out && typeof out === "object" ? out : {};
   } catch {

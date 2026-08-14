@@ -28,6 +28,7 @@ import {
   _getTitleDescCacheSize,
   _sweepTitleDescCache,
 } from "../lib/linear-title-description-fallback.mjs";
+import { readReplicaTicketDetails } from "../lib/linear-cache-reader.mjs";
 
 // ── fetch spy ────────────────────────────────────────────────────────────────
 // Counts EVERY outbound call. Returns an empty-but-well-formed GraphQL body so a
@@ -55,10 +56,14 @@ function spyFetch(responseData: unknown = { data: { issues: { nodes: [] } } }) {
 function fakeReplica({
   estimates = {} as Record<string, number>,
   details = {} as Record<string, unknown>,
+  // Codex P1 (#3355): the single-ticket DETAIL path gates on writer liveness.
+  // Defaults true so every pre-existing case behaves exactly as before.
+  isFresh = true,
 } = {}) {
   let closed = false;
   return {
     factory: () => ({
+      isFresh: () => isFresh,
       estimates: (ids: string[]) =>
         Object.fromEntries(
           ids.filter((id) => id in estimates).map((id) => [id, estimates[id]])
@@ -462,6 +467,52 @@ describe("CTL-1806 AC3: the degraded path is LOUD", () => {
   // silently unguarded on the branch an operator most needs to see: a degraded
   // Linear read that did not even dispatch. AC3 is "the miss is LOUD" — a failure
   // that emits nothing is the exact condition the emission exists to announce.
+  // Codex P1 on #3355. The ticket-DETAIL path is a SINGLE-ticket read, and the repo
+  // rule requires those to gate freshness and fall back loudly. File presence alone
+  // is not enough: when the writer stops but its .db remains, a stale hit is served
+  // AND cached for 5-24 hours. Observed for real on the developer laptop 2026-08-14
+  // (clean SIGTERM, KeepAlive={SuccessfulExit:false} never revived it, .db left on
+  // disk, reads served ~15-minute-old state — CTL-1736 / CTL-1844).
+  //
+  // This is NOT the CTL-1397 hazard: that was gating on .db/-wal MTIME, which a quiet
+  // Linear feed makes look stale. isFresh() reads the .writer.lock HEARTBEAT, which
+  // ticks every few seconds regardless of Linear activity.
+  it("a STALE replica (writer stopped) is a MISS on the detail path, not a stale hit", async () => {
+    const spy = spyFetch();
+    const replica = fakeReplica({
+      isFresh: false,
+      details: { "CTL-905": { title: "stale title", description: "stale" } },
+    });
+    try {
+      const out = await readReplicaTicketDetails({
+        ids: ["CTL-905"],
+        readerFactory: replica.factory,
+      });
+      // The row EXISTS in the replica — it is withheld because the writer is dead,
+      // so the caller falls through to its loud degraded Linear chain.
+      expect(out).toEqual({});
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("a FRESH replica still serves the detail hit (the gate is not a blanket refusal)", async () => {
+    const spy = spyFetch();
+    const replica = fakeReplica({
+      isFresh: true,
+      details: { "CTL-906": { title: "live title", description: "live" } },
+    });
+    try {
+      const out = await readReplicaTicketDetails({
+        ids: ["CTL-906"],
+        readerFactory: replica.factory,
+      });
+      expect(Object.keys(out)).toEqual(["CTL-906"]);
+    } finally {
+      spy.restore();
+    }
+  });
+
   it("the title/description path ALSO emits result=failed (WARN) with no credential", async () => {
     delete process.env.LINEAR_API_TOKEN;
     delete process.env.LINEAR_API_KEY;
