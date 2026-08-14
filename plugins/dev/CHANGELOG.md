@@ -1,5 +1,31 @@
 # Changelog
 
+## [12.54.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.54.0...catalyst-dev-v12.54.1)
+
+Aug 14, 2026
+
+<!-- ai-enhanced -->
+
+### Event Pipeline Integrity Fixes
+
+This release addresses a cluster of reliability issues in the event pipeline: torn lines from concurrent bash appends, degenerate records destroyed in transit to Loki, double-counted drop metrics, and terminal events that went invisible to the worker-state projection when the primary emit path failed. Dependency installs that silently no-op'd after a transitive resolution change — leaving daemons running stale code — now detect the skew and force a relink. The commits-behind gauge is also fixed to measure the roots daemons actually run from rather than always reporting zero.
+
+
+
+### PRs
+
+* **dev:** CTL-1659 — a dependency fix that lands on main must reach the running cloud-sync writer ([#3344](https://github.com/coalesce-labs/catalyst/issues/3344)) ([1ce1c5a](https://github.com/coalesce-labs/catalyst/commit/1ce1c5a49e4f870693327474d51e277a539f9362))
+* **dev:** CTL-1795 — dual-emit the v2 envelope from every v1 site, so a consumer filtering on event.name stops seeing a smaller universe ([#3343](https://github.com/coalesce-labs/catalyst/issues/3343)) ([b724db9](https://github.com/coalesce-labs/catalyst/commit/b724db966e14770cde997cf5d658d62f49c60424))
+* **dev:** CTL-1809 — make a bash event append exactly one write(2), so a concurrent producer cannot splice two events into one line ([#3350](https://github.com/coalesce-labs/catalyst/issues/3350)) ([388edf4](https://github.com/coalesce-labs/catalyst/commit/388edf41b2b2c374f0bff0e57e6113eedd52c31a))
+* **dev:** CTL-1814 — stamp the orchestrator on fallback terminals, so worker state is not blind exactly when the primary path failed ([#3342](https://github.com/coalesce-labs/catalyst/issues/3342)) ([a834c9a](https://github.com/coalesce-labs/catalyst/commit/a834c9a51a221b88947a2bff94767109eb59742b))
+* **dev:** CTL-1817 — carry every envelope shape off-machine, so a rescue escalation is not destroyed in transit ([#3325](https://github.com/coalesce-labs/catalyst/issues/3325)) ([d14e477](https://github.com/coalesce-labs/catalyst/commit/d14e477b9f846bbaf856896c26b159b5ba252233))
+* **dev:** CTL-1818 — count the events the forwarder throws away, on a surface that survives the throwing-away ([#3341](https://github.com/coalesce-labs/catalyst/issues/3341)) ([e60321f](https://github.com/coalesce-labs/catalyst/commit/e60321fb8d7f2bae0ab2289a711a794829449f59))
+* **dev:** CTL-1823 — count degenerate RECORDS at batch accept, so the detector cannot inflate during the outage that makes someone read it ([#3347](https://github.com/coalesce-labs/catalyst/issues/3347)) ([2e6cc71](https://github.com/coalesce-labs/catalyst/commit/2e6cc7199746937768c35ef941c9e21900665c1c))
+* **dev:** CTL-1825 — measure code currency at every executing root, so a 24-behind node cannot report zero ([#3345](https://github.com/coalesce-labs/catalyst/issues/3345)) ([e4401a6](https://github.com/coalesce-labs/catalyst/commit/e4401a6228931a91dac4839fe974f403c8f3286f))
+* **dev:** CTL-1831 — prove the install RELINKED, so a merged lockfile is not installed in name only ([#3349](https://github.com/coalesce-labs/catalyst/issues/3349)) ([3f60190](https://github.com/coalesce-labs/catalyst/commit/3f60190c682ffccb4633566b50e4bba74f0bfdcd))
+* **dev:** CTL-1832 — a triage escalation must carry its question, not an empty object ([#3340](https://github.com/coalesce-labs/catalyst/issues/3340)) ([0e92516](https://github.com/coalesce-labs/catalyst/commit/0e92516679c40b750f2cd8a7654595327ee63988))
+* **dev:** CTL-1835 — close the four residual gaps from [#3349](https://github.com/coalesce-labs/catalyst/issues/3349), and prove each closure ([#3353](https://github.com/coalesce-labs/catalyst/issues/3353)) ([725922a](https://github.com/coalesce-labs/catalyst/commit/725922a8ee6514d315714cd344ded4313d476605))
+
 ## [12.54.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.53.0...catalyst-dev-v12.54.0)
 
 Aug 13, 2026
