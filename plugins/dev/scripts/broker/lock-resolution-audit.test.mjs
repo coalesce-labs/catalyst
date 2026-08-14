@@ -19,11 +19,13 @@
 // Run: bun test plugins/dev/scripts/broker/lock-resolution-audit.test.mjs
 
 import { describe, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   splitLockKey,
   parseLockPackages,
   changedResolutions,
   auditLockResolution,
+  MEMO_KEY_SEP,
 } from "./lock-resolution-audit.mjs";
 
 // ─── fixtures ────────────────────────────────────────────────────────────────
@@ -904,6 +906,47 @@ describe("auditLockResolution", () => {
     expect(a.matched[0].wrongCopy[0]).toContain("sdk-logs/resources");
   });
 
+  test("a wrong-copy site is carried on a MISMATCHED verdict too — the verdict an operator acts on", () => {
+    // CTL-1835 gap 1. `wrongCopy` was asserted on the `matched` verdict (above)
+    // and inside the `inconclusive` REASON string, but never on `mismatched` —
+    // measured as the single surviving mutant of round 4's 17-mutation pass on
+    // CTL-1831: deleting the spread from the mismatched branch left the suite
+    // GREEN while its siblings went RED.
+    //
+    // Mismatched is the verdict that costs something: it triggers a
+    // `bun install --force` re-extract and, if that does not clear it, a
+    // permanent `deps_relink_failed` ERROR. An operator reading that ERROR needs
+    // to know some sites were EXCLUDED as wrong-copy probes rather than judged —
+    // otherwise the report reads as a complete census of the importers when it
+    // is not, which is the same "could not look" / "not there" conflation the
+    // three-valued verdict exists to prevent.
+    //
+    // Same wiring as the matched case, with one byte changed: the workspace root
+    // answers the STALE 2.8.0 instead of the moved 2.8.1, so the entry lands in
+    // `mismatched` while `sdk-logs/resources` is still shed as a wrong-copy probe
+    // (sdk-logs on disk is 0.9.9, not the locked 0.219.0).
+    const a = auditLockResolution({
+      workspaceRoots: [{ dir: ROOT, name: "catalyst" }],
+      oldLockText: WRONGCOPY_LOCK,
+      newLockText: WRONGCOPY_MOVED,
+      resolvePackageFn: stubResolver({
+        [`${ROOT}|core`]: { dir: "/store/core@2.8.0", version: "2.8.0" }, // STALE — the real defect
+        [`${ROOT}|sdk-logs`]: { dir: SDKLOGS_DIR, version: "0.9.9" }, // wrong copy
+        [`${SDKLOGS_DIR}|resources`]: { dir: RES_28, version: "2.8.0" },
+        [`${RES_28}|core`]: { dir: "/store/core@2.8.0", version: "2.8.0" },
+      }),
+    });
+    expect(a.matched).toEqual([]);
+    expect(a.mismatched).toHaveLength(1);
+    expect(a.mismatched[0].expected).toBe("2.8.1");
+    expect(a.mismatched[0].found).toEqual(["2.8.0"]);
+    expect(a.mismatched[0].importers).toEqual([`workspace:${ROOT}`]);
+    // The guard: deleting `...(wrongCopy.length > 0 ? { wrongCopy } : {})` from
+    // the mismatched branch of auditLockResolution fails exactly here.
+    expect(a.mismatched[0].wrongCopy).toHaveLength(1);
+    expect(a.mismatched[0].wrongCopy[0]).toContain("sdk-logs/resources");
+  });
+
   // ── entitlement climbs: an ANCESTOR's nested key governs too ──
   //
   // MEASURED on this repo's real lockfile: bun nests one level from a top-level
@@ -1118,5 +1161,83 @@ describe("auditLockResolution", () => {
     });
     expect(a.mismatched).toEqual([]);
     expect(a.inconclusive).toHaveLength(1);
+  });
+});
+
+// ─── CTL-1835: the memo separator, and this module staying plain TEXT ─────────
+//
+// The resolve memo keys on `${fromDir}${MEMO_KEY_SEP}${id}`. That separator was
+// written as a LITERAL NUL BYTE in the source, which had a consequence that went
+// unnoticed for the length of CTL-1831. Measured on the pre-fix file:
+//
+//   $ file   plugins/dev/scripts/broker/lock-resolution-audit.mjs   -> "data"
+//   $ grep -c  wrongCopy <that file>                                -> (nothing)
+//   $ grep -ac wrongCopy <that file>                                -> 9
+//
+// One 0x00 byte made grep(1) report a SILENT ZERO — no error, no warning, no
+// distinguishing exit code — on the one module that is the fleet's only defence
+// against a silently stale install. A silent-zero instrument living inside the
+// silent-failure detector. Two INDEPENDENT properties keep that fixed and both
+// are load-bearing: the separator's VALUE (a visible character reintroduces key
+// collisions) and this file's TEXTNESS (a re-inlined byte reintroduces the blind
+// grep). Asserting either one alone leaves the other free to regress.
+describe("memo key separator (CTL-1835)", () => {
+  const SRC_PATH = new URL("./lock-resolution-audit.mjs", import.meta.url);
+  const srcBytes = readFileSync(SRC_PATH);
+  const countNul = (buf) => buf.reduce((n, b) => n + (b === 0 ? 1 : 0), 0);
+
+  test("the separator is U+0000 — the one code unit neither a path nor a package id can contain", () => {
+    expect(MEMO_KEY_SEP).toHaveLength(1);
+    expect(MEMO_KEY_SEP.charCodeAt(0)).toBe(0);
+    expect(MEMO_KEY_SEP).toBe("\u0000");
+  });
+
+  test("joining on it keeps (fromDir, id) pairs that a path separator would collide DISTINCT", () => {
+    // Why the VALUE matters, stated as the behaviour it buys rather than as the
+    // constant restated back to itself. Both pairs below are real shapes — every
+    // scoped package id contains a `/`, and so does every directory — so a `/`
+    // separator (or an empty one) makes the memo hand the first pair's cached
+    // resolution to the second, a false answer about what is on disk.
+    const viaScopeDir = `/x/node_modules/@scope${MEMO_KEY_SEP}name`;
+    const viaScopedId = `/x/node_modules${MEMO_KEY_SEP}@scope/name`;
+    expect(viaScopeDir).not.toBe(viaScopedId);
+    // The collision being avoided, spelled out: with "/" the two keys ARE equal,
+    // so this test fails the moment the separator becomes a path character.
+    expect(`/x/node_modules/@scope` + "/" + `name`).toBe(`/x/node_modules` + "/" + `@scope/name`);
+  });
+
+  test("the memo actually USES the constant — a hardcoded separator in the template is not allowed", () => {
+    // Without this, MEMO_KEY_SEP could be exported, asserted, and entirely unused
+    // while the template literal quietly carried some other separator: the two
+    // tests above would still pass. POSITIVE CONTROL that this read is looking at
+    // the right lines at all — the memo's own guard is asserted present by the
+    // same instrument, so a moved/renamed memo fails loudly instead of silently
+    // matching nothing.
+    const src = srcBytes.toString("utf8");
+    expect(src).toContain("if (memo.has(cacheKey)) return memo.get(cacheKey);");
+    expect(src).toContain("const cacheKey = `${fromDir}${MEMO_KEY_SEP}${id}`;");
+  });
+
+  test("the source file contains NO literal NUL byte — grep(1) on it must not return a silent zero", () => {
+    // POSITIVE CONTROL FIRST. Otherwise "zero NULs found" is indistinguishable
+    // from "the scanner cannot see a NUL", which is the very defect class this
+    // module exists to prevent and the exact way the original byte hid. The
+    // control is the real thing asserted absent: the pre-fix line, rebuilt with
+    // an actual 0x00 in it — written as the `\u0000` ESCAPE so that constructing
+    // the control does not itself put a literal NUL back into this test file.
+    const preFixLine = Buffer.from(
+      "    const cacheKey = `${fromDir}" + "\u0000" + "${id}`;\n",
+      "utf8",
+    );
+    expect(countNul(preFixLine)).toBe(1);
+
+    // The assertion itself, by the instrument just controlled.
+    expect(countNul(srcBytes)).toBe(0);
+
+    // And THIS file, which is where the byte most easily comes back: writing
+    // this very test is what re-introduced three literal NULs during CTL-1835,
+    // because a NUL pastes invisibly and nothing downstream complains. A blind
+    // grep over the test suite is the same hazard one file over.
+    expect(countNul(readFileSync(new URL(import.meta.url)))).toBe(0);
   });
 });

@@ -99,6 +99,29 @@ const BLOCK_CLOSE_RE = /^\s{0,3}\}/;
 // contributes a change the audit could verify on disk.
 const WORKSPACE_VERSION_PREFIX = "workspace:";
 
+// MEMO_KEY_SEP — the separator joining (fromDir, id) into the resolve memo key.
+//
+// It has to be a code unit that cannot occur in EITHER half, or two distinct
+// (fromDir, id) pairs collide and one probe silently answers for the other. A
+// path separator is exactly the wrong choice: `("/a", "b/c")` and `("/a/b",
+// "c")` would then share a key, and the memo would hand the first pair's
+// resolution to the second — a false answer from the module whose entire job is
+// to be trustworthy about what is on disk. U+0000 cannot appear in a filesystem
+// path or an npm package id, so it is the safe joiner.
+//
+// WRITTEN AS THE ESCAPE `\0`, NEVER AS A LITERAL NUL BYTE IN THIS SOURCE.
+// A literal NUL made file(1) classify this module as `data` and made plain
+// grep(1) return a SILENT ZERO on it — no error, no warning, no matches — i.e.
+// a check-that-cannot-fail instrument sitting inside the fleet's only defence
+// against a silently stale install (CTL-1835, follow-up to CTL-1831). The
+// escape produces the identical string value (`\0` in a template literal IS
+// U+0000), so behaviour is unchanged. BOTH halves of that contract — the
+// separator's VALUE and this file being plain TEXT — are locked by
+// lock-resolution-audit.test.mjs; neither assertion alone is sufficient, since
+// a later "cleanup" could swap the value for a visible character (reintroducing
+// the collision) or re-inline the byte (reintroducing the silent zero).
+export const MEMO_KEY_SEP = "\0";
+
 /**
  * parseLockPackages — the lockfile's `packages` map as structured data.
  *
@@ -439,9 +462,12 @@ export function auditLockResolution({
   };
 
   // resolve/locate memo — one probe per (fromDir, id) across the whole audit.
+  // Keyed by the two strings joined on MEMO_KEY_SEP (U+0000); see that
+  // declaration for why the separator is that value and why it must be written
+  // as the `\0` ESCAPE and never as a literal NUL byte in this source.
   const memo = new Map();
   const resolve = (fromDir, id) => {
-    const cacheKey = `${fromDir} ${id}`;
+    const cacheKey = `${fromDir}${MEMO_KEY_SEP}${id}`;
     if (memo.has(cacheKey)) return memo.get(cacheKey);
     let out = null;
     try {
