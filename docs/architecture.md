@@ -125,10 +125,21 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
     `obs=64k`). The replaced `printf '%s\n' … >>` is NOT atomic: `O_APPEND` makes the file *offset*
     atomic, not a multi-`write(2)` sequence, and bash's builtin printf flushes through stdio in
     BUFSIZ chunks (1024 on macOS, 8192 on glibc), so a line past BUFSIZ is ⌈n/BUFSIZ⌉ writes and a
-    concurrent producer's append lands between them. Measured at 8 producers × 150 lines:
-    658/1200 damaged at 1,025 B and 1,196/1200 at 19,086 B. Under the CTL-1795 superset envelope
-    two producers' *median* line already sits past the macOS threshold (`catalyst.phase-agent`
-    averages 1,075 B; `catalyst.worktree-salvage` 919 B), so this was latent, not theoretical.
+    concurrent producer's append lands between them. Measured with
+    `__tests__/event-append-atomicity.test.sh` case 3 (the same 8-producer × 150-line harness run
+    through the naive `printf >>`), over 20 runs on two hosts — a 12-core M2 laptop (macOS 26.5,
+    bash 5.3) and a 10-core Mac mini (macOS 26.6, bash 3.2): **28–134 of 1,200** lines damaged at
+    1,025 B and **165–523 of 1,200** at 19,086 B. Those are ranges, not point values — the count
+    is load- and host-dependent and swung ~5× run to run on one host, so it is not a regression
+    threshold. What reproduces is the direction: the 19 KB line tore more often than the 1 KB line
+    in 20 of 20 runs (2.6–7.2×). Under the CTL-1795 superset envelope
+    a large share of one bash producer's lines already sits past the 1,024 B macOS threshold, so
+    this was latent, not theoretical. Measured on mini's `2026-08.jsonl` (through 2026-08-13):
+    `catalyst.phase-agent` n=671, mean 1,094 B, median 1,021 B, max 2,870 B — **40.8% of its lines
+    exceed 1,024 B**; `catalyst.worktree-salvage` n=4,891, mean 910 B, median 900 B, max 1,216 B —
+    1.9% exceed it. Note neither *median* clears the threshold (phase-agent's sits 3 bytes under
+    it); the exposure is the upper tail, not the typical line, and the mean is above the median in
+    both because that tail is what drags it there.
     `/bin/dd` is absolute because a restricted-`PATH` phase-agent worker is exactly where a
     PATH-resolved helper becomes a silent no-op; there is deliberately no size branch and no
     printf fallback in the primitive. **Hard cap 262,144 bytes** (byte length, 4.2× the observed
@@ -145,10 +156,19 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
     The three dependency-free leaves keep a raw-append fallback for a missing helper, but a **loud**
     one; `__tests__/event-append-atomicity.test.sh` scans for any silent raw append and recognizes
     the exemption only by that warning.
-  - **Read side is a tripwire, not the fix (CTL-1809).** Torn lines are COUNTED and SKIPPED at three
+  - **Read side is a tripwire, not the fix (CTL-1809).** Torn lines are COUNTED and SKIPPED at four
     readers — `otel-forward/lib/tail.ts` (`onUnparseable` → `stats.torn`),
-    `execution-core/event-tail.mjs` (`tornLineCount()`), and `catalyst-events`' filter
-    (`torn_lines_total` on stderr). Every one **advances past** the line: a torn line is permanently
+    `execution-core/event-tail.mjs` (`tornLineCount()`), `broker/tailer.mjs`'s **live** tail, and
+    `catalyst-events`' filter (`torn_lines_total` on stderr). The broker is the load-bearing one —
+    it routes every `filter.wake`, every phase-lifecycle terminal, the ingestion-recency map and
+    the worker-state projection — and it is covered in two halves that must not be confused: its
+    **boot replay** goes through `tailParsedEvents` (counted inside `event-tail.mjs`), while its
+    **live** `readNewEvents` loop hand-rolls its own `JSON.parse` and calls the same module's
+    exported `noteTornLine` directly. Sharing one process counter (and one sparse-warn key budget)
+    across those two is deliberate: they are one detector reading one file. The
+    "one flood must not exhaust another detector's budget" rule applies **across** readers —
+    separate processes, separate files — not within a single process's view of one log.
+    Every reader **advances past** the line: a torn line is permanently
     corrupt, so parking a cursor on it would wedge the reader forever
     (`event-tail.mjs:12-17`). `catalyst-events` was worse than skipping — plain
     `jq -c "select(...)"` ABORTS at the first unparseable line (exit 5), so every valid event after

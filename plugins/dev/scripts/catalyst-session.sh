@@ -290,7 +290,12 @@ __session_emit_agent_event() {
     canonical_note_v1_only "canonical-build-unavailable:${name}"
     superset="$v1"
   fi
-  canonical_jsonl_append "$EVENTS_DIR" "$superset" 2>/dev/null || true
+  # CTL-1809: NO `2>/dev/null` here. The append primitive's only report of a refused
+  # oversized line or a failed dd is a stderr WARNING; muting it locally reproduces exactly
+  # the silence this ticket removed from canonical-event.sh's own call site. `|| true` stays —
+  # the emit is still best-effort and must not fail the caller — but the reason is now audible
+  # in the caller's launchd-captured `.log`.
+  canonical_jsonl_append "$EVENTS_DIR" "$superset" || true
 }
 
 # ─── Commands ───────────────────────────────────────────────────────────────

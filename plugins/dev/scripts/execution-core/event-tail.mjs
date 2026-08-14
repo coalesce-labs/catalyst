@@ -49,7 +49,17 @@ export function resetTornLineCount() {
 // First sighting per distinct 60-byte prefix, capped at 20 keys, then 10/100/1000…
 // heartbeats on the running total so a sustained tear still reports a live, accurate count
 // without flooding the log surface it is reporting on.
-function noteTornLine(line) {
+//
+// EXPORTED because a process can hold more than one reader of the SAME log and must not
+// hold more than one count of it. The broker is exactly that case: its BOOT replay comes
+// through tailParsedEvents (counted here), while its LIVE tail — the path that carries
+// essentially every routed event — hand-rolls its own read loop in broker/tailer.mjs and
+// calls this directly. Sharing the counter and the sparse-warn key budget is correct there:
+// the two paths are one detector reading one file, so a torn line seen at boot and the same
+// prefix seen live should not each spend a key. The "one flood must not exhaust another
+// detector's budget" rule applies ACROSS readers (separate processes / separate files), not
+// within one process's view of one log.
+export function noteTornLine(line) {
   tornLineTotal += 1;
   const key = line.slice(0, 60);
   let warn = false;

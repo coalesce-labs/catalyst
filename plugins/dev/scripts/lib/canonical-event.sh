@@ -580,8 +580,23 @@ _canonical_is_sentinel_leak() {
 # flushes through stdio in BUFSIZ-sized chunks — 1024 on macOS, 8192 on glibc, an
 # undocumented implementation detail that differs by platform — so a line longer than
 # BUFSIZ becomes ⌈n/BUFSIZ⌉ separate write() calls and a concurrent producer's append lands
-# BETWEEN them. Measured against this repo's own harness at 8 producers × 150 lines:
-# 658/1200 lines damaged at 1,025 B and 1,196/1200 at 19,086 B.
+# BETWEEN them.
+#
+# Instrument: `__tests__/event-append-atomicity.test.sh` case 3 — the same 8-producer ×
+# 150-line harness as cases 1 and 2, run through the naive `printf >>` instead of this
+# primitive, counting unparseable + spliced lines out of 1,200. Measured over 20 runs on two
+# hosts: 15 on a 12-core M2 laptop (macOS 26.5, bash 5.3) and 5 on a 10-core Mac mini (macOS
+# 26.6, bash 3.2, the fleet's stock-macOS shape):
+#
+#     1,025 B  →   28–134 of 1,200 damaged   (2–11%)
+#    19,086 B  →  165–523 of 1,200 damaged  (14–44%)
+#
+# A RANGE, not a point value, and deliberately so: the count is load- and host-dependent and
+# swung ~5× run to run on one host (the 523 came from a run that overlapped other work). Do
+# not read a single number off this as a target or a regression threshold. What DOES reproduce
+# is the direction — the 19 KB line tore more often than the 1 KB line in 20 of 20 runs, by
+# 2.6–7.2× — and case 3 asserts only that the naive path tears at all, which is the property
+# that keeps cases 1 and 2 honest.
 #
 # The relevant constant is stdio BUFSIZ, NOT PIPE_BUF — the destination is a regular file,
 # not a pipe, so the familiar "a write below PIPE_BUF is atomic" reasoning does not apply

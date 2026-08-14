@@ -296,4 +296,91 @@ grep -q 'torn_lines_total' "$ERRF" \
   || fail "the skipped line was silent — no counted operator-visible warning. stderr: $(cat "$ERRF")"
 pass "catalyst-events: torn line counted and skipped, the rest of the batch survives"
 
+# --- 8. No caller may re-silence the primitive's stderr ----------------------
+# The primitive reports a refused (over-cap) line and a failed dd on stderr and NOTHING else
+# — that WARNING is the whole loud-failure contract, and canonical-event.sh's own former
+# `2>/dev/null || true` is the silence this ticket removed. A caller that re-adds `2>/dev/null`
+# around the append undoes it locally: the event is still dropped, and the drop is silent
+# again. `|| true` is fine and expected (the emit is best-effort at most call sites); it is
+# only the stderr mute that is banned.
+#
+# Two shapes to catch, and the second is why this scan is not a plain grep:
+#   (a) `canonical_jsonl_append "$d" "$l" 2>/dev/null || true`     — on the call line;
+#   (b) a six-line call whose TRAILING `2>/dev/null` sits after the closing paren of an
+#       inner `$(jq …)` that has its OWN legitimate redirect. A line-oriented grep either
+#       misses (b) entirely or flags every builder's jq noise as a violation.
+# So: join backslash-continuations into one logical line, strip balanced `$(…)` spans (where
+# the legitimate inner redirects live), and only then look for a surviving `2>/dev/null`.
+scan_silenced_appends() {
+  awk '
+    # Depth-aware removal of $( … ) spans, so an inner jq redirect is not mistaken for the
+    # append being muted. Errs toward stripping MORE on an unbalanced span, i.e. toward a
+    # false NEGATIVE — which is exactly what decoy (c) below is positive control for.
+    function strip_cmdsub(s,   out, i, c, depth, n) {
+      out = ""; depth = 0; n = length(s)
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (depth == 0 && c == "$" && substr(s, i + 1, 1) == "(") { depth = 1; i++; continue }
+        if (depth > 0) {
+          if (c == "(") depth++
+          else if (c == ")") depth--
+          continue
+        }
+        out = out c
+      }
+      return out
+    }
+    FNR == 1 { acc = ""; startline = 0 }
+    {
+      line = $0
+      if (acc == "") startline = FNR
+      # Join a backslash-continuation onto the accumulator and wait for the real end.
+      if (line ~ /\\[[:space:]]*$/) { sub(/\\[[:space:]]*$/, "", line); acc = acc line; next }
+      acc = acc line
+      if (acc ~ /canonical_(atomic_append_line|jsonl_append)[[:space:]]/) {
+        bare = strip_cmdsub(acc)
+        if (bare ~ /2>[[:space:]]*\/dev\/null/)
+          printf "%s:%d:%s\n", FILENAME, startline, acc
+      }
+      acc = ""
+    }
+  ' "$@" 2>/dev/null || true
+}
+# Discover callers rather than hard-code them: a new file that calls the primitive must be
+# covered the day it lands, not the day someone remembers to add it to a list. plugins/dev,
+# not just scripts/, because the Stop hook (hooks/emit-lifecycle-event.sh) is a caller and
+# was one of the five.
+PLUGIN_DIR="$(dirname "$SCRIPTS_DIR")"
+CALLER_FILES=()
+while IFS= read -r f; do
+  case "$f" in */__tests__/*) continue ;; esac
+  CALLER_FILES+=("$f")
+done < <(grep -rlE 'canonical_(atomic_append_line|jsonl_append)[[:space:]]' "$PLUGIN_DIR" 2>/dev/null || true)
+[[ ${#CALLER_FILES[@]} -gt 0 ]] \
+  || fail "found NO callers of the append primitive — the discovery glob is broken, so a clean result here would be meaningless"
+SILENCED="$(scan_silenced_appends "${CALLER_FILES[@]}")"
+[[ -z "$SILENCED" ]] || fail "a caller re-silences the atomic append primitive's stderr — a loud fallback a caller mutes is a silent fallback (CTL-1809):
+$SILENCED"
+
+# POSITIVE CONTROLS, one per way this scan can fail silently.
+D="$(newdir)"; TMPS+=("$D")
+# (a) the plain single-line mute must be reported, or the scan is blind.
+printf 'canonical_jsonl_append "$d" "$l" 2>/dev/null || true\n' > "$D/silenced-simple.sh"
+[[ -n "$(scan_silenced_appends "$D/silenced-simple.sh")" ]] \
+  || fail "the silenced-append scan cannot detect a plain 2>/dev/null — the clean result above is meaningless"
+# (b) a builder's inner jq redirect must NOT be reported, or the scan is really "match
+#     everything" and (a) passed for the wrong reason.
+{ printf 'canonical_jsonl_append "$d" \\\n'
+  printf '  "$(jq -nc --arg t "$ts" %s 2>/dev/null)" || true\n' "'{ts:\$t}'"; } > "$D/ok-inner-jq.sh"
+[[ -z "$(scan_silenced_appends "$D/ok-inner-jq.sh")" ]] \
+  || fail "the scan flags a legitimate inner jq redirect — it would force callers to un-mute jq noise"
+# (c) the multi-line TRAILING mute — the emit-lifecycle-event.sh shape, the one of the five
+#     that a line-oriented grep misses. If this decoy is not reported, the scan is only
+#     covering shape (a) and shape (b)'s file could hide a real mute.
+{ printf 'canonical_jsonl_append "$d" \\\n'
+  printf '  "$(jq -nc --arg t "$ts" %s 2>/dev/null)" 2>/dev/null || true\n' "'{ts:\$t}'"; } > "$D/silenced-trailing.sh"
+[[ -n "$(scan_silenced_appends "$D/silenced-trailing.sh")" ]] \
+  || fail "the scan misses a TRAILING 2>/dev/null on a continued call — the exact shape of the fifth re-silenced call site"
+pass "no caller re-silences the primitive (${#CALLER_FILES[@]} callers scanned, controlled 3 ways)"
+
 echo "PASS: event-append-atomicity (CTL-1809)"
