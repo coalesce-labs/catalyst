@@ -16,7 +16,11 @@
 //   3. runs `git fetch --no-tags origin main && git reset --hard origin/main`
 //      in each root (self-healing: the clone is disposable per CTL-992, so
 //      reset --hard is always safe regardless of working-tree dirt — CTL-1106)
-//   4. emits plugin.checkout.updated (new HEAD sha + daemon-skew restart_needed)
+//   4. runs `bun install` in each dir whose package.json/bun.lock moved, then
+//      AUDITS whether the install actually relinked (CTL-1831 — a bun install
+//      that skips a transitive-only resolution change still exits 0), forcing a
+//      relink only on a proven mismatch
+//   5. emits plugin.checkout.updated (new HEAD sha + daemon-skew restart_needed)
 //      on success, or plugin.checkout.refresh_failed (WARN) on a genuine
 //      network/auth failure — never failing silently.
 //
@@ -33,12 +37,13 @@
 // deterministically testable without real load, timers, network, or a checkout.
 // Mirrors the gc-liveness.mjs / autotune.mjs seam-injection convention.
 
-import { readFileSync, existsSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { resolve, join } from "node:path";
+import { resolve, join, dirname } from "node:path";
 import { getEventName } from "./event-name.mjs"; // CTL-1348: leaf, not the heavy router
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
+import { auditLockResolution } from "./lock-resolution-audit.mjs"; // CTL-1831
 
 // Throttle window: at most one pull per N seconds per checkout root. A merge
 // often arrives as both a github.pr.merged AND a github.push to main within the
@@ -184,26 +189,200 @@ export function clearStaleIndexLock({
 const BUN_INSTALL_TIMEOUT_MS =
   Number(process.env.CATALYST_PLUGIN_REFRESH_BUN_TIMEOUT_MS) || 180_000;
 
+/**
+ * bunInstallArgv — the argv for one `bun install` variant. Extracted as a pure
+ * helper (CTL-1831) so the flags themselves are assertable: the ONLY difference
+ * between an install that relinks a transitive-only resolution change and one
+ * that exits 0 having done nothing is `--force`, and that distinction had no
+ * test anywhere.
+ */
+export function bunInstallArgv({ force = false, frozen = true } = {}) {
+  if (force) return ["install", "--force"];
+  return frozen ? ["install", "--frozen-lockfile"] : ["install"];
+}
+
 // defaultBunInstallFn — run `bun install` in a package dir. Frozen first (the
 // checkout was just reset to origin/main, so the lockfile is authoritative);
 // fall back to a plain install if frozen rejects. Throws on non-zero exit, which
 // the caller catches and surfaces as deps_install_failed (non-fatal).
-function defaultBunInstallFn(pkgDir) {
+//
+// CTL-1831: `force:true` is the RELINK variant, and it is deliberately NOT the
+// default — measured, `--force` re-extracts 1168 packages (3-8 s) even when
+// nothing changed, so paying it on every refresh is the wrong trade. The caller
+// escalates to it only after the post-install resolution audit PROVES the tree
+// on disk disagrees with the lockfile.
+function defaultBunInstallFn(pkgDir, { force = false } = {}) {
+  const run = (argv) =>
+    execFileSync("bun", argv, {
+      cwd: pkgDir, encoding: "utf8", timeout: BUN_INSTALL_TIMEOUT_MS,
+      killSignal: "SIGKILL", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+  if (force) {
+    run(bunInstallArgv({ force: true }));
+    return;
+  }
   try {
-    execFileSync("bun", ["install", "--frozen-lockfile"], {
-      cwd: pkgDir, encoding: "utf8", timeout: BUN_INSTALL_TIMEOUT_MS,
-      killSignal: "SIGKILL", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-    });
+    run(bunInstallArgv({ frozen: true }));
   } catch {
-    execFileSync("bun", ["install"], {
-      cwd: pkgDir, encoding: "utf8", timeout: BUN_INSTALL_TIMEOUT_MS,
-      killSignal: "SIGKILL", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-    });
+    run(bunInstallArgv({ frozen: false }));
   }
 }
 
 // Files whose change means deps may need (re)installing in their containing dir.
 const DEP_MANIFEST_RE = /(^|\/)(package\.json|bun\.lock)$/;
+
+// The lockfile alone — the subset of DEP_MANIFEST_RE whose change can move a
+// RESOLUTION, and therefore the only one the CTL-1831 audit has anything to
+// verify. A package.json-only change (a script rename, a field edit) resolves to
+// the same versions, so auditing it would spend probes to prove nothing.
+const LOCKFILE_RE = /(^|\/)bun\.lock$/;
+
+/**
+ * changedLockfiles — pure helper (CTL-1831): map a `git diff --name-only` output
+ * to the bun.lock files the pulled range touched, each with the absolute dir
+ * that owns it. Order-preserving and deduped. Exported for direct unit testing
+ * (no I/O — path logic only).
+ *
+ * @returns {{rel:string, dir:string}[]}
+ */
+export function changedLockfiles(root, diffOutput) {
+  const out = [];
+  const seen = new Set();
+  for (const line of String(diffOutput || "").split("\n")) {
+    const rel = line.trim();
+    if (!rel || !LOCKFILE_RE.test(rel)) continue;
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    const dirRel = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : ".";
+    out.push({ rel, dir: dirRel === "." ? root : resolve(root, dirRel) });
+  }
+  return out;
+}
+
+/**
+ * workspaceRootsFor — the directories the CTL-1831 audit may resolve FROM: the
+ * lockfile's own dir plus each literal workspace member that has a package.json.
+ *
+ * The member dirs matter because bun's isolated linker gives the workspace root
+ * no copy of a package it does not itself depend on (measured on this repo:
+ * `require.resolve("@catalyst-cloud/schema")` from the root is MODULE_NOT_FOUND
+ * while it resolves fine from execution-core), so a root-only site list would
+ * report "no importer resolves it" for exactly the packages that matter.
+ *
+ * Glob entries ("packages/*") are SKIPPED, not expanded — same discipline as
+ * workspaceMemberNodeModules. The fail direction is safe here: a skipped member
+ * can only SHRINK the site set, and an entry with no reachable site is reported
+ * INCONCLUSIVE, never clean.
+ *
+ * Each root carries its own package `name` when the manifest declares one,
+ * because the audit's bare-key site selection has to shed exactly the member
+ * root that owns a `<member>/<id>` nested key. This repo's bun.lock really has
+ * three (`orch-monitor-ui/react`, `orch-monitor-ui/@types/react`,
+ * `orch-monitor-ui/typescript`) and `plugins/dev/scripts/orch-monitor/ui` is a
+ * literal member passed here as a root — so without the name, a version move on
+ * `react` would read that member's legitimately-nested copy as a stale bare
+ * resolution and force a needless re-extract. `name` is null when the manifest
+ * is absent, unparseable, or nameless; the audit's fallback for a nameless root
+ * is blunt but safe (it sheds the root rather than trusting it).
+ *
+ * @returns {{dir:string, name:string|null}[]}
+ */
+export function workspaceRootsFor(lockDir, { readFileFn = readFileSync, existsFn = existsSync } = {}) {
+  const nameOf = (parsed) => (typeof parsed?.name === "string" && parsed.name ? parsed.name : null);
+  const manifestAt = (dir) => {
+    try {
+      return JSON.parse(readFileFn(resolve(dir, "package.json"), "utf8"));
+    } catch {
+      return null; // absent/unreadable/malformed — no name, and no members
+    }
+  };
+  // One read of the root manifest, used for BOTH its name and its members.
+  const manifest = manifestAt(lockDir);
+  const roots = [{ dir: lockDir, name: nameOf(manifest) }];
+  if (manifest === null) return roots;
+  const entries = Array.isArray(manifest?.workspaces) ? manifest.workspaces : [];
+  for (const entry of entries) {
+    if (typeof entry !== "string" || entry === "" || entry.includes("*")) continue;
+    const memberDir = resolve(lockDir, entry);
+    // Membership stays keyed on the package.json EXISTING, exactly as before —
+    // a member whose manifest is present but unparseable is still a resolvable
+    // dir, it just contributes no name.
+    if (!existsFn(join(memberDir, "package.json"))) continue;
+    roots.push({ dir: memberDir, name: nameOf(manifestAt(memberDir)) });
+  }
+  return roots;
+}
+
+/**
+ * defaultResolvePackageFn — what `<id>` ACTUALLY resolves to when imported from
+ * `fromDir`, as `{dir, version}` or null.
+ *
+ * Directory PLACEMENT read off the disk, not `createRequire().resolve()`. The
+ * first cut of this probe used module resolution and was unusable for the exact
+ * reason this whole module exists: **Node/bun module resolution is cached
+ * PROCESS-WIDE, and a fresh `createRequire` does not clear that cache**. Measured
+ * identically under node v25.8.2 and bun 1.3.5 (macOS 26.5, arm64), isolated-
+ * linker layout, one process:
+ *
+ *     before:              symlink -> 0.1.5 | resolve -> 0.1.5
+ *     after flip to 0.1.3: symlink -> 0.1.3 | resolve -> 0.1.5   <- STALE
+ *
+ * Held as a standing regression by the "THE DEFECT: a SECOND call in the SAME
+ * process sees the relink" test in plugin-refresh.test.mjs.
+ *
+ * In the long-lived updater daemon (`updater.mjs`'s setInterval) and the broker
+ * that consequence is total: the post-`--force` RE-audit answers from the cache
+ * the pre-force audit populated, so a SUCCESSFUL relink reported
+ * `deps_relink_failed` (an ERROR the docs describe as unfixable) and
+ * `deps_relinked` was permanently `[]`; and once a process had audited one good
+ * tree it reported CLEAN on a tree that had since gone stale — the detector
+ * blind to its own incident. A question about BYTES ON DISK must be answered by
+ * reading the disk.
+ *
+ * The walk is node's own `node_modules` ladder — `<dir>/node_modules/<id>`,
+ * rising to the filesystem root — which is what makes it layout-agnostic: under
+ * the hoisted linker the entry IS the package, under bun's isolated linker it is
+ * a symlink into `.bun/<id>@<version>/`, and `readFileSync` follows either. (The
+ * ladder is not pruned at a `node_modules` segment the way NODE_MODULES_PATHS
+ * prunes it; the extra probe is a miss on a path that cannot exist, and every
+ * directory the spec DOES visit is still visited, in the same order.)
+ *
+ * Version comes from the addressed `<id>/package.json` itself — no walking up to
+ * an "owning" manifest, since the path already names the package — and `dir` is
+ * realpath'd so a mismatch report names the store entry rather than the link.
+ * A realpath failure keeps the literal path: the version is the verdict, and
+ * losing the cosmetic path must not turn a real answer into a null (which the
+ * audit reads as "could not look").
+ *
+ * @param {string} fromDir importer directory to resolve from
+ * @param {string} id      package id, e.g. `@catalyst-cloud/schema`
+ */
+export function defaultResolvePackageFn(fromDir, id, { readFileFn = readFileSync, realpathFn = realpathSync } = {}) {
+  if (typeof fromDir !== "string" || !fromDir) return null;
+  if (typeof id !== "string" || !id) return null;
+  let dir = resolve(fromDir);
+  for (;;) {
+    const candidate = join(dir, "node_modules", ...id.split("/"));
+    let parsed = null;
+    try {
+      parsed = JSON.parse(readFileFn(join(candidate, "package.json"), "utf8"));
+    } catch {
+      parsed = null; // absent/unreadable/malformed here — keep climbing the ladder
+    }
+    if (parsed && typeof parsed.version === "string" && parsed.version) {
+      let real = candidate;
+      try {
+        real = realpathFn(candidate);
+      } catch {
+        /* keep the literal path — the version is the verdict */
+      }
+      return { dir: real, version: parsed.version };
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
 
 // changedPackageDirs — pure helper: map a `git diff --name-only` output to
 // unique absolute package dirs that need `bun install`. Exported for direct
@@ -537,6 +716,14 @@ export function refreshPluginCheckout({
   // falls through to staleLockStatus's real statSync default in production.
   statFn = undefined,
   rmFn = defaultRmFn,
+  // CTL-1831 seams: the post-install "did the install actually RELINK?" audit.
+  // All four are injectable so the wiring (signal → force → re-audit) is testable
+  // without a real node_modules; the audit's own logic has direct unit coverage
+  // in lock-resolution-audit.test.mjs.
+  auditFn = auditLockResolution,
+  workspaceRootsFn = workspaceRootsFor,
+  resolvePackageFn = defaultResolvePackageFn,
+  readFileFn = (p) => readFileSync(p, "utf8"),
 }) {
   if (!root) return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
 
@@ -671,6 +858,7 @@ export function refreshPluginCheckout({
   // triggers the monitor restart). Install failures are surfaced as WARN events
   // and never block the checkout-updated signal (reset already succeeded).
   const depsInstalled = [];
+  const depsRelinked = [];
   const staleNodeModulesPruned = [];
   if (oldSha) {
     let diffOut = "";
@@ -711,6 +899,147 @@ export function refreshPluginCheckout({
         });
       }
     }
+
+    // CTL-1831: an install that exits 0 is NOT evidence that it relinked
+    // anything. Measured on `mini` immediately after #3337 moved bun.lock from
+    // @catalyst-cloud/schema@0.1.3 to 0.1.5: `--frozen-lockfile` and the plain
+    // fallback BOTH reported "no changes", exited 0, and left the SDK's resolved
+    // schema at 0.1.3; only `--force` relinked it. So the loop above could
+    // succeed on every host while the correct lockfile never reached the running
+    // code — the second link of the CTL-1506 chain, and the one that had no
+    // detector at all (deps_install_failed covers only a FAILING install).
+    //
+    // The audit compares the lockfile's moved resolutions against what the
+    // IMPORTING package resolves on disk, and only a proven mismatch escalates
+    // to `--force`. Detect-then-force, never force-always: a blanket --force
+    // re-extracts 1168 packages (3-8 s measured) on every refresh.
+    //
+    // Scoped to dirs whose install SUCCEEDED: a tree that was never built has
+    // nothing to audit, and forcing on top of a failed install would replace one
+    // loud failure with a slower one.
+    const installedDirs = new Set(depsInstalled);
+    for (const lock of changedLockfiles(root, diffOut)) {
+      if (!installedDirs.has(lock.dir)) continue;
+      let oldLockText = null;
+      try { oldLockText = gitFn(root, ["show", `${oldSha}:${lock.rel}`]); } catch { oldLockText = null; }
+      let newLockText = null;
+      try { newLockText = readFileFn(join(lock.dir, "bun.lock")); } catch { newLockText = null; }
+      const auditArgs = {
+        workspaceRoots: workspaceRootsFn(lock.dir),
+        oldLockText,
+        newLockText,
+        resolvePackageFn,
+      };
+      let audit;
+      try {
+        audit = auditFn(auditArgs);
+      } catch (err) {
+        // The audit is a guardrail, not a gate: a throw here must degrade to a
+        // named inconclusive, never take down the refresh that already succeeded.
+        audit = { conclusive: false, reason: `audit threw: ${err?.message ?? String(err)}`, checked: 0, matched: [], mismatched: [], inconclusive: [] };
+      }
+
+      if (audit.mismatched.length > 0) {
+        // THE SIGNAL the no-op install never produced. Emitted at DETECTION,
+        // before any remediation, so the record exists even if the force below
+        // throws or fails to fix it.
+        emitFn({
+          event: "plugin.checkout.deps_install_noop",
+          orchestrator: null,
+          worker: null,
+          severity: "WARN",
+          detail: {
+            checkout: root,
+            package_dir: lock.dir,
+            lockfile: lock.rel,
+            checked: audit.checked,
+            mismatched: audit.mismatched,
+          },
+        });
+        try {
+          bunInstallFn(lock.dir, { force: true });
+        } catch (err) {
+          emitFn({
+            event: "plugin.checkout.deps_install_failed",
+            orchestrator: null,
+            worker: null,
+            severity: "WARN",
+            detail: { checkout: root, package_dir: lock.dir, forced: true, error: err?.message ?? String(err) },
+          });
+          continue;
+        }
+        let after;
+        try {
+          after = auditFn(auditArgs);
+        } catch (err) {
+          after = { conclusive: false, reason: `re-audit threw: ${err?.message ?? String(err)}`, checked: 0, matched: [], mismatched: [], inconclusive: [] };
+        }
+        if (after.mismatched.length > 0) {
+          // --force is the strongest lever this path has. Still stale after it
+          // means the drift is not bun's relink heuristic (a shadowing member
+          // node_modules, a registry serving the wrong bytes, a read-only tree),
+          // so it is ERROR: nothing further here will fix it.
+          emitFn({
+            event: "plugin.checkout.deps_relink_failed",
+            orchestrator: null,
+            worker: null,
+            severity: "ERROR",
+            detail: {
+              checkout: root,
+              package_dir: lock.dir,
+              lockfile: lock.rel,
+              mismatched: after.mismatched,
+            },
+          });
+        } else if (after.conclusive && after.inconclusive.length === 0) {
+          depsRelinked.push(lock.dir);
+        } else {
+          // A re-audit that could not LOOK is not evidence of repair. The
+          // synthesized throw-result above, and an audit whose entries came back
+          // per-entry inconclusive, both carry an EMPTY `mismatched` — identical
+          // to a genuinely clean tree. Claiming `deps_relinked` off that emptiness
+          // would be a check-that-cannot-fail sitting inside the fix for a
+          // check-that-cannot-fail: the refresh would report a known mismatch
+          // repaired with no positive evidence, and say nothing about the doubt.
+          // Only a CONCLUSIVE re-audit with neither mismatches nor per-entry
+          // inconclusives proves the force worked.
+          emitFn({
+            event: "plugin.checkout.deps_audit_inconclusive",
+            orchestrator: null,
+            worker: null,
+            severity: "WARN",
+            detail: {
+              checkout: root,
+              package_dir: lock.dir,
+              lockfile: lock.rel,
+              forced: true, // the POST-force re-audit, not the detection pass
+              reason: after.reason ?? null,
+              checked: after.checked,
+              inconclusive: after.inconclusive,
+            },
+          });
+        }
+      } else if (!audit.conclusive || audit.inconclusive.length > 0) {
+        // "I could not look" must be distinguishable from "the tree is correct".
+        // A silent inconclusive is exactly how the original defect stayed
+        // invisible for a year of refreshes.
+        emitFn({
+          event: "plugin.checkout.deps_audit_inconclusive",
+          orchestrator: null,
+          worker: null,
+          severity: "WARN",
+          detail: {
+            checkout: root,
+            package_dir: lock.dir,
+            lockfile: lock.rel,
+            forced: false, // the DETECTION pass, not a post-force re-audit
+            reason: audit.reason ?? null,
+            checked: audit.checked,
+            inconclusive: audit.inconclusive,
+          },
+        });
+      }
+    }
   }
 
   emitFn({
@@ -724,6 +1053,7 @@ export function refreshPluginCheckout({
       loaded_commit: loadedCommit,
       restart_needed: restartNeeded,
       deps_installed: depsInstalled,
+      deps_relinked: depsRelinked, // CTL-1831: dirs a forced relink actually repaired
       stale_node_modules_pruned: staleNodeModulesPruned,
     },
   });

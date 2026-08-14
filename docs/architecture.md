@@ -759,6 +759,124 @@ one is not counted here, which is the deliberate fail direction for a detector w
 at zero. The asymmetry with the two GATE counters (`unrecognized`, `skippedNoAttributes`) is
 intended and unchanged: those sit on the tail path, run once per line, and were always exact.
 
+### Installed-in-name-only: the install that exits 0 without relinking (CTL-1831)
+
+The link BEFORE the one below, and the one that makes a correct lockfile on `main` never reach any
+host's disk in the first place. `plugin-refresh.mjs` installs with `bun install --frozen-lockfile`,
+falling back to a plain `bun install`. **Neither relinks an existing `node_modules` when only a
+TRANSITIVE resolution changed** — bun prints `no changes` and exits 0, so a successful install and a
+no-op install are byte-identical to the caller. Measured on `mini` 2026-08-13, immediately after
+#3337 moved the root `bun.lock` from `@catalyst-cloud/schema@0.1.3` to `0.1.5`: plugin-source HEAD
+and `bun.lock` were both correct, and `--frozen-lockfile` **and** the plain fallback each left the
+SDK's resolved schema at 0.1.3; only `bun install --force` relinked it. The fleet was unblocked that
+day only by an operator running `--force` by hand on three hosts. `deps_install_failed` already
+covered a FAILING install; a no-op produced no signal at all.
+
+- **Detect, then force — never force always.** A blanket `--force` re-extracts 1168 packages (3-8 s
+  measured) on every refresh, so the refresh instead AUDITS the tree after the normal install and
+  escalates only on a proven mismatch. `--frozen-lockfile` stays the right default: the checkout was
+  just reset to `origin/main`, so the lockfile IS authoritative.
+- **The discriminator is the IMPORTING package's resolved dependency, not the hoisted top-level
+  copy.** `cloud-sync.mjs` imports the schema THROUGH the SDK, and under bun's isolated linker there
+  is frequently no top-level copy at all (measured on this repo, both instruments agreeing:
+  `require.resolve("@catalyst-cloud/schema")` from the workspace root is `MODULE_NOT_FOUND` and the
+  disk probe returns null, while resolving it from the SDK's own directory returns 0.1.5). A
+  top-level probe reports "absent" or "fine" and never sees the stale copy the daemons load.
+- **Placement, not enumeration — and read off the DISK, never through the module loader.** bun's
+  `.bun` store keeps stale entries after an upgrade (measured on this checkout:
+  `@catalyst-cloud+schema@0.1.3` and `@0.1.5` both present, and `@catalyst-cloud+sdk@0.8.1`
+  alongside `0.8.2`), so a version's presence in the store says nothing about what any importer
+  loads; only the entry the importer's own `node_modules` ladder lands on does. The probe
+  (`plugin-refresh.mjs` `defaultResolvePackageFn`) walks that ladder with `readFileSync`, which is
+  layout-agnostic — under the hoisted linker the rung IS the package, under the isolated linker it
+  is a symlink into `.bun/`, and the read follows either. It deliberately does **not** use
+  `createRequire().resolve()`: **Node/bun module resolution is cached PROCESS-WIDE and a fresh
+  `createRequire` does not clear it**, so the first cut of this detector answered from cache rather
+  than disk (measured identically under node v25.8.2 and bun 1.3.5 — link flipped to 0.1.3, resolve
+  still reported 0.1.5). Inside the long-lived updater/broker daemons that meant the post-`--force`
+  re-audit reported a FALSE `deps_relink_failed` on every genuine repair, `deps_relinked` was always
+  `[]`, and a process that had once audited a good tree reported CLEAN on a tree that later went
+  stale. A question about bytes on disk gets answered by reading the disk.
+- **Scope of the audit** (`broker/lock-resolution-audit.mjs`, a leaf whose only I/O is an injected
+  `resolvePackageFn` seam): just the entries whose resolution the pulled range MOVED, read off a
+  structured parse of the `packages` block in `git show <oldSha>:<lockfile>` versus the file on disk.
+  A NESTED key (`chalk/ansi-styles`) is judged from its own parent only — judging it from the
+  workspace root would compare against a legitimately different hoisted copy and force a needless
+  re-extract. The key minus its last element is an install PATH, walked hop by hop from a workspace
+  root, because this repo's own lockfile nests deeper than one level (measured: 48 nested keys, 5
+  deeper than one hop, max chain 4 —
+  `@typescript-eslint/typescript-estree/minimatch/brace-expansion/balanced-match`); resolving only
+  the immediate parent finds whichever copy is root-visible, which is a different tree. A BARE key is
+  judged from the workspace roots plus every lockfile entry that DECLARES the id, minus any site
+  whose resolution of that id is governed by a nested entry — its own (`<declarer>/<id>`), an
+  ANCESTOR's, or a workspace member root's (`<member>/<id>`, of which this repo really has three:
+  `orch-monitor-ui/react`, `orch-monitor-ui/@types/react`, `orch-monitor-ui/typescript`).
+  Entitlement climbs with resolution, so the governing entry is the one keyed by the longest prefix
+  of the site's install path that carries `<prefix>/<id>`; testing only the site's OWN key misses
+  the sibling shape bun really produces (measured: `@opentelemetry/exporter-trace-otlp-http/
+  @opentelemetry/sdk-trace-base` and `…/@opentelemetry/resources` are siblings under the exporter
+  with no `…/sdk-trace-base/@opentelemetry/resources` key, so sdk-trace-base is entitled to
+  resources 2.8.0 by its PARENT while the bare entry is 2.10.0). Shedding the member **root** is not
+  sufficient either: entitlement to that member's nested version belongs to the whole SUBTREE reached
+  through it, so a declarer is located only from the roots that survived the shed. Locating it by
+  first hit across every root is the bare-key twin of the one-hop bug the deep path fixes — bun's
+  isolated linker writes a separate **peer-disambiguated** store entry per peer set while the
+  lockfile records ONE bare entry covering all of them, so `packages.has("<declarer>/<id>")` is false
+  and the nested-key exclusion cannot see the difference. Reproducible on this checkout: a single
+  bare `eslint@9.39.5` lock entry with no nested key anywhere, two store copies
+  (`.bun/eslint@9.39.5+1a1acd4c2fa5b1a4` and `+5e91b0bf22d6303b`) resolving
+  `@eslint-community/eslint-utils` to two different store dirs — same version, different peer set,
+  one lock key. Measured on this repo's real `bun.lock` + `node_modules`, a bare `react` move
+  reported `mismatched=1, expected 18.3.1, found ["19.2.8"], 16 importers` on a correct tree — every
+  one of those 16 located through `orch-monitor-ui` — and a real `bun install --force`
+  (1168 packages, 4.21 s) does **not** clear it, because the placement is lockfile-determined: a
+  permanent ERROR plus a re-extract on every refresh carrying that move. A declarer reachable ONLY
+  through a shed root is named in the INCONCLUSIVE reason, never folded into "could not locate" and
+  never silently matched.
+- **Selecting the right root is only half of it — the site must be located as the COPY ITS OWN LOCK
+  KEY NAMES.** A site is EXCLUDED by its key but was LOCATED by its id, so a nested declarer was
+  found at whatever the first bare hit from a root happened to be. Measured on the real tree, which
+  is CORRECT on disk: `@opentelemetry/sdk-logs/@opentelemetry/resources` is locked at 2.8.0, has no
+  nested core key, is selected as a site for a bare `@opentelemetry/core` move, and was then located
+  at the 2.10.0 `@opentelemetry/resources` copy — the copy of the entry the exclusion had just shed —
+  whose core is legitimately 2.10.0. That emitted `deps_relink_failed, expected 2.8.0,
+  found ["2.10.0"], 2 importers` on a tree no install can repair. Six such sites; over all 689 bare
+  ids, **5** had at least one — 1 produced that live false ERROR and **4** (`@opentelemetry/api`,
+  `@opentelemetry/semantic-conventions`, `@opentelemetry/resources`, `csstype`) read `matched` ONLY
+  because the wrong copy happened to agree, a latent FALSE CLEAN in the other direction. One defect,
+  both failure modes. Every site is therefore located by walking its own lock key as an install path
+  with the located copy's version checked against the governing entry at EVERY hop; a hop that lands
+  on a version the lockfile does not record for that path is not evidence in either direction — it
+  can neither raise a mismatch nor contribute to a match, and it is named on the verdict as
+  `wrongCopy` rather than dropped. (A `workspace:` hop is exempt from the version check alone: a link
+  records `<name>@workspace:<path>`, not a semver.) Because selection already sheds
+  every site entitled to a different version, a SELECTED site holding anything but the locked version
+  is a **mismatch** — including a version the lockfile records elsewhere for the same id. Excusing
+  those as a benign `alternate` hid the defect the audit exists to catch: with bare `x` moving
+  1.0.0 → 2.0.0 while a nested `a/x` legitimately stays 1.0.0, a stale workspace-root link at 1.0.0
+  was labelled an alternate, `refreshPluginCheckout` ignores alternates, and no force ever ran.
+- **Every verdict is three-valued and fails closed.** An unusable lockfile, an empty site list, an
+  unlocatable importer, a broken hop in an install path, or a throwing probe each yield a named
+  INCONCLUSIVE — never a clean pass (`[].every(p)` is `true`, and a zero-site loop printing an
+  all-clear is a false-clean mechanism this repo has shipped before). That applies to the
+  **post-`--force` re-audit** too: only a CONCLUSIVE re-audit with neither mismatches nor per-entry
+  inconclusives may record the dir in `deps_relinked`. An empty `mismatched` from a re-audit that
+  threw is byte-identical to a repaired tree, so claiming repair off it would be a
+  check-that-cannot-fail inside the fix for a check-that-cannot-fail; the doubt is emitted as
+  `deps_audit_inconclusive` with `forced: true` (the detection pass carries `forced: false`).
+
+| Event                                     | Severity | Emitted when                                                                                     |
+| ----------------------------------------- | -------- | -------------------------------------------------------------------------------------------------- |
+| `plugin.checkout.deps_install_noop`       | WARN     | the install exited 0 and the tree still disagrees with the lockfile — emitted at DETECTION, before any remediation, so the record survives a failed force |
+| `plugin.checkout.deps_relink_failed`      | ERROR    | still mismatched after `--force`; nothing further on this path will fix it                       |
+| `plugin.checkout.deps_audit_inconclusive` | WARN     | the audit could not conclude — "could not look" made distinguishable from "the tree is correct"  |
+| `plugin.checkout.deps_install_failed`     | WARN     | pre-existing; now also carries `forced: true` when the remediation install itself throws         |
+
+`plugin.checkout.updated` gains `deps_relinked` — the dirs a forced relink actually repaired. The
+audit only runs for dirs whose install SUCCEEDED (a tree that was never built has nothing to audit),
+and it is fail-open end to end: a throwing audit degrades to an inconclusive event and never takes
+down the refresh that already succeeded.
+
 ### Installed-but-unloaded: cloud-sync dependency skew (CTL-1659)
 
 The **third** link in the CTL-1506 chain, and the one no existing mechanism covers. `plugin-refresh`
