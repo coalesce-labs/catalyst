@@ -156,18 +156,38 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
     The three dependency-free leaves keep a raw-append fallback for a missing helper, but a **loud**
     one; `__tests__/event-append-atomicity.test.sh` scans for any silent raw append and recognizes
     the exemption only by that warning.
-  - **Read side is a tripwire, not the fix (CTL-1809).** Torn lines are COUNTED and SKIPPED at four
-    readers — `otel-forward/lib/tail.ts` (`onUnparseable` → `stats.torn`),
-    `execution-core/event-tail.mjs` (`tornLineCount()`), `broker/tailer.mjs`'s **live** tail, and
-    `catalyst-events`' filter (`torn_lines_total` on stderr). The broker is the load-bearing one —
-    it routes every `filter.wake`, every phase-lifecycle terminal, the ingestion-recency map and
-    the worker-state projection — and it is covered in two halves that must not be confused: its
-    **boot replay** goes through `tailParsedEvents` (counted inside `event-tail.mjs`), while its
-    **live** `readNewEvents` loop hand-rolls its own `JSON.parse` and calls the same module's
-    exported `noteTornLine` directly. Sharing one process counter (and one sparse-warn key budget)
-    across those two is deliberate: they are one detector reading one file. The
+  - **Read side is a tripwire, not the fix (CTL-1809).** Torn lines are COUNTED and SKIPPED at the
+    readers listed below. This is a LIST OF THE COVERED SITES, not a census of every reader of the
+    log — read it as "these are instrumented", never as "these are all of them":
+    `otel-forward/lib/tail.ts` (`onUnparseable` → `stats.torn`), `execution-core/event-tail.mjs`
+    (`tornLineCount()`), `broker/tailer.mjs`'s **live** tail, `execution-core/monitor.mjs`'s
+    **live** `readNewEvents`, and `catalyst-events`' filter (`torn_lines_total` on stderr).
+    (`grep -n 'noteTornLine' plugins/dev/scripts` is the instrument that enumerates the JS half;
+    the count it returns is the number to trust, not this sentence.)
+
+    Two of those are **hand-rolled live tails of the same file, and they are peers** — the broker's
+    `readNewEvents` (`broker/tailer.mjs`) and the monitor's (`execution-core/monitor.mjs`), both
+    resolving `getEventLogPath()` to `~/catalyst/events/YYYY-MM.jsonl`, each driven for its whole
+    process lifetime. Neither is "the" load-bearing one. The broker routes every `filter.wake`,
+    every phase-lifecycle terminal, the ingestion-recency map and the worker-state projection; the
+    monitor routes `handleStateChangedEvent` → **dispatchTriage**, `handleIssueUpdatedEvent` → the
+    eligible projection fold, and `handleCommentCreatedEvent` → **onComment** (the CTL-768
+    comment-wake needs-input clear + worker redispatch). A torn line on either drops real work.
+
+    The broker is additionally covered in two halves that must not be confused: its **boot replay**
+    goes through `tailParsedEvents` (counted inside `event-tail.mjs`), while its **live**
+    `readNewEvents` loop hand-rolls its own `JSON.parse` and calls the same module's exported
+    `noteTornLine` directly — as the monitor's now does too. Sharing one process counter (and one
+    sparse-warn key budget) across those is deliberate: they are one detector reading one file. The
     "one flood must not exhaust another detector's budget" rule applies **across** readers —
     separate processes, separate files — not within a single process's view of one log.
+
+    Only COMPLETE lines are counted. Every hand-rolled reader holds its trailing fragment back
+    (`leftover`/`leftoverBuf`) until a newline arrives, because a poll landing mid-append sees a
+    nonempty final fragment that is a healthy in-flight write, not damage — and since the byte
+    cursor has already advanced, counting it would also let the record's suffix be counted a
+    second time on the next poll. A torn-line counter that counts healthy writes is not a
+    torn-line counter.
     Every reader **advances past** the line: a torn line is permanently
     corrupt, so parking a cursor on it would wedge the reader forever
     (`event-tail.mjs:12-17`). `catalyst-events` was worse than skipping — plain

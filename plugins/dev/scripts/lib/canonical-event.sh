@@ -657,9 +657,18 @@ _canonical_event_name_of() {
 # A name-specific waiter therefore still misses its event; nothing in the fleet is within 4×
 # of the cap, so this is a tripwire for a pathological producer, not a routing policy.
 #
-# Hand-built with printf, not jq: the cap must hold on the jq-less path too. The dropped
-# event's name is the only untrusted text here and is scrubbed to the event-name charset
-# before embedding, since there is no jq available to escape it.
+# Hand-built with printf, not jq: the cap must hold on the jq-less path too. There is
+# therefore no escaper available, so EVERY externally-supplied string interpolated below is
+# scrubbed to a JSON-safe charset first. Two of them, not one:
+#
+#   · the dropped event's name (`$name`);
+#   · the HOST name (`$host`). `catalyst_host_name` returns `CATALYST_HOST_NAME` — or Layer-2
+#     `catalyst.host.name` — verbatim, and neither is validated anywhere upstream. A host
+#     named `bad"host` produced `"host.name":"bad"host"`, which fails `jq -e`, so every reader
+#     discards the tombstone: the durable record silently loses exactly the event it exists to
+#     preserve, on the one line that reports a drop. Scrubbed with the SAME charset as the
+#     event name (a legal DNS label is a strict subset of it), so neither `"` nor `\` nor a
+#     control byte can reach the printf template.
 _canonical_append_oversized_tombstone() {
   local file="$1" name="$2" bytes="$3"
   # Recursion guard: the tombstone is appended through the same primitive. It is fixed-size
@@ -669,6 +678,8 @@ _canonical_append_oversized_tombstone() {
   local ts host safe tomb
   ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   host="$(catalyst_host_name 2>/dev/null || echo unknown)"
+  host="$(printf '%s' "$host" | LC_ALL=C tr -c 'A-Za-z0-9._:-' '_' | cut -c1-120)"
+  [[ -n "$host" ]] || host="unknown"
   safe="$(printf '%s' "$name" | LC_ALL=C tr -c 'A-Za-z0-9._:-' '_' | cut -c1-120)"
   tomb="$(printf '{"ts":"%s","observedTs":"%s","severityText":"ERROR","severityNumber":17,"body":{"message":"event dropped: %s bytes exceeds the %s-byte append cap"},"attributes":{"event.name":"catalyst.event.oversized","event.entity":"event","event.action":"dropped","catalyst.event.oversized.name":"%s","catalyst.event.oversized.bytes":%s,"catalyst.event.oversized.cap":%s},"resource":{"service.name":"catalyst.event-append","host.name":"%s"}}' \
     "$ts" "$ts" "$bytes" "$CATALYST_EVENT_LINE_MAX_BYTES" "$safe" "$bytes" "$CATALYST_EVENT_LINE_MAX_BYTES" "$host")"

@@ -712,6 +712,12 @@ jobs:
         #   out at 9 s locally under load (bun default 5 000 ms). The test
         #   relies on real-time event-log delivery latency.
         #   Memory ref: project_execution_core_daemon_flaky_test
+        #
+        #   CTL-1809 NOTE: because monitor.test.mjs is excluded, a monitor case added
+        #   there would never run here. monitor-torn.test.mjs is therefore a SEPARATE
+        #   file in the list below — it drives readNewEvents directly and calls
+        #   stopMonitor() before every append, so it arms no timer and no watcher
+        #   (measured max 1.6 s per case locally, vs bun's 5 000 ms default).
         run: |
           bun test \
             beliefs/advance-rules.test.mjs \
@@ -796,6 +802,7 @@ jobs:
             event-cursor.test.mjs \
             event-scan.test.mjs \
             event-tail.test.mjs \
+            monitor-torn.test.mjs \
             event-log-window.test.mjs \
             event-log-read-guard.test.mjs \
             lib/canonical-event.test.mjs \

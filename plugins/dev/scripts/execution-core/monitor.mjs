@@ -150,6 +150,11 @@ import {
 } from "./reconcile-health-event.mjs";
 import { checkFleetFreeze } from "./fleet-freeze-alert.mjs"; // CTL-1420: fleet-frozen-for-admission alert
 import { recordReplicaRead } from "./replica-health.mjs"; // CAT-35
+// CTL-1809: the shared torn-line detector. readNewEvents below hand-rolls its own read loop
+// over the SAME unified event log the broker tails, so it needs the same tripwire — and it
+// must share the counter rather than start a second one. See noteTornLine's own comment: one
+// detector per process per log.
+import { noteTornLine } from "./event-tail.mjs";
 
 const MONITOR_BOOT_TS = Date.now();
 
@@ -1760,6 +1765,23 @@ export function readNewEvents({ foldOnly = false } = {}) {
       try {
         event = JSON.parse(line);
       } catch {
+        // CTL-1809: this is the daemon monitor's LIVE tail of the unified event log —
+        // structurally the same reader as broker/tailer.mjs's readNewEvents, on the same file
+        // (getEventLogPath), and it was silent in exactly the same way. It is not a minor
+        // path: startTailing drives it from both an fs.watch callback and a setInterval poll
+        // for the daemon's whole life, and it routes handleStateChangedEvent → dispatchTriage,
+        // handleIssueUpdatedEvent → the projection fold, and handleCommentCreatedEvent →
+        // onComment (the CTL-768 comment-wake needs-input clear + worker redispatch). A torn
+        // line here silently drops a dispatch or a human's reply.
+        //
+        // `line` is a COMPLETE line: leftoverBuf popped the trailing partial off `lines`
+        // before this loop, so an unparseable line here is real damage, not a read that raced
+        // a writer mid-append.
+        //
+        // COUNT AND ADVANCE. lastByteOffset (and the durable saveCursor) already moved to
+        // stat.size above, deliberately: a torn line is permanently corrupt, so parking on it
+        // would wedge the monitor forever on damage that never resolves.
+        noteTornLine(line);
         continue; // skip a malformed line, keep tailing
       }
       // CTL-731: handleStateChangedEvent gates its dispatch side-effects on

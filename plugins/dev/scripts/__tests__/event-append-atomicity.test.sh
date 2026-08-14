@@ -180,6 +180,40 @@ jq -e '.attributes["catalyst.event.oversized.bytes"] > 262144' < "$F4" >/dev/nul
 [[ "$(wc -l < "$F4" | tr -d ' ')" == "1" ]] || fail "expected exactly one tombstone line"
 pass "tombstone: catalyst.event.oversized, own name, records the dropped name and size"
 
+# --- 4b. The tombstone survives a hostile host name --------------------------
+# The tombstone is hand-built with printf because the cap must hold on the jq-less path, so
+# there is no escaper — every interpolated string has to be scrubbed by hand. TWO of them are
+# externally supplied, and the host name was the one that was not: `catalyst_host_name`
+# returns CATALYST_HOST_NAME (or Layer-2 `catalyst.host.name`) VERBATIM, and nothing upstream
+# validates it. A host named `bad"host` produced `"host.name":"bad"host"` — invalid JSON, so
+# `jq -e` fails and every reader discards the line. The one record whose entire job is to
+# preserve the dropped event would silently lose it.
+#
+# Asserted on the SHIPPED function with a hostile value covering all three ways to break the
+# template: a bare quote, a backslash (which would escape the following quote), and a newline
+# (which would split one line into two).
+D="$(newdir)"; TMPS+=("$D"); F4B="$D/e.jsonl"; : > "$F4B"
+HOSTILE_HOST='bad"host\evil
+second-line'
+CATALYST_HOST_NAME="$HOSTILE_HOST" canonical_atomic_append_line "$F4B" "$BIG_LINE" 2>/dev/null || true
+[[ "$(wc -l < "$F4B" | tr -d ' ')" == "1" ]] \
+  || fail "a hostile host name split the tombstone across $(wc -l < "$F4B" | tr -d ' ') lines"
+jq -e '.attributes["event.name"] == "catalyst.event.oversized"' < "$F4B" >/dev/null \
+  || fail "the tombstone did not parse under CATALYST_HOST_NAME='$HOSTILE_HOST' — readers discard it, so the drop is unrecorded. got: $(cat "$F4B")"
+jq -e '.attributes["catalyst.event.oversized.name"] == "phase.implement.complete.CTL-9999"' < "$F4B" >/dev/null \
+  || fail "the hostile-host tombstone parsed but lost the dropped event's name"
+# The scrub must not silently blank the field either — an empty host.name is a different way
+# to lose the evidence.
+jq -e '.resource["host.name"] | length > 0' < "$F4B" >/dev/null \
+  || fail "the tombstone's host.name was scrubbed to empty"
+# POSITIVE CONTROL: the same instrument on the UNSCRUBBED interpolation must FAIL, or the
+# three assertions above pass on any implementation, including one that never escapes.
+CTRL="$D/ctrl.jsonl"
+printf '{"resource":{"host.name":"%s"}}\n' "$HOSTILE_HOST" > "$CTRL"
+jq -e '.resource["host.name"]' < "$CTRL" >/dev/null 2>&1 \
+  && fail "the control (raw interpolation of the hostile host name) PARSED — this check cannot detect the defect it exists for"
+pass "tombstone: hostile CATALYST_HOST_NAME is scrubbed, one line, still parses (control: raw interpolation does not)"
+
 # --- 5. Cap boundary: exactly at the cap is ACCEPTED --------------------------
 # Off-by-one guard in the direction that matters. 262,144 B is 4.2x the all-time observed
 # fleet maximum (62,597 B) and is inside the range dd is proven atomic over, so a line at
@@ -277,17 +311,41 @@ mkdir -p "$(dirname "$EV")"
   printf '{"attributes":{"event.name":"after.torn"}}\n'
 } > "$EV"
 ERRF="$D/tail.err"; OUTF="$D/tail.out"
-# `tail` is a live tail — it never returns on its own. Start it, let it emit its one
-# --since-line 0 backlog batch, then kill it. The deadline is a fixed sleep in the
-# foreground, so nothing here can outlive this test even if the kill fails.
+# `tail` is a live tail — `cmd_tail`'s poll branch is a literal `while :; do sleep 1; …`, so
+# it NEVER returns on its own. This is a REQUIRED CI job, so the deadline may not live in the
+# parent: a foreground `sleep 2` is a pause, not a bound, and if the kill below is never
+# delivered the job blocks forever and the child outlives the harness (AGENTS.md "Spawning a
+# background process"). Two structural guards, both of which hold with every cleanup line
+# below deleted:
+#
+#   · `set -m` puts the tail in its OWN process group, so `kill -<pgid>` reaches the helpers
+#     it forks as well as the tail itself. This is not belt-and-braces: `cmd_tail`'s fswatch
+#     branch runs `fswatch -o "$file" | while read …`, whose two members are children of the
+#     tail — a pid-only kill orphans an `fswatch` watching a deleted temp dir forever.
+#     Measured with the same three-process fixture: pid-only kill leaks the grandchild
+#     (1 leaked), group kill leaks none (0).
+#   · The watchdog carries the deadline IN A CHILD that only sleeps and signals, and it
+#     ESCALATES: `cmd_tail` installs `trap 'exit 0' TERM …`, and a trapped signal is a signal
+#     that can be missed, so TERM at 20 s is followed by an untrappable KILL at 25 s. That
+#     bounds the `wait` below at ~25 s no matter what. The watchdog is itself bounded by its
+#     own two sleeps, so it cannot outlive this test even if its own cleanup never runs.
+set -m
 CATALYST_EVENTS_DIR="$D/events" "${SCRIPTS_DIR}/catalyst-events" tail \
   --since-line 0 --filter '.attributes["event.name"] | test("torn")' \
   >"$OUTF" 2>"$ERRF" &
 TAILPID=$!
+set +m
+( sleep 20; kill -TERM -"$TAILPID" 2>/dev/null; sleep 5; kill -KILL -"$TAILPID" 2>/dev/null ) &
+TAILWDPID=$!
 sleep 2
-kill "$TAILPID" 2>/dev/null || true
+kill -TERM -"$TAILPID" 2>/dev/null || true
 wait "$TAILPID" 2>/dev/null || true
+kill "$TAILWDPID" 2>/dev/null || true
+wait "$TAILWDPID" 2>/dev/null || true
+# Fail CLOSED, positively: `kill -0 … && echo` prints nothing when the PROBE errors, which is
+# how a script self-certifies a cleanup that never happened.
 ps -p "$TAILPID" >/dev/null 2>&1 && fail "LEAKED catalyst-events tail pid $TAILPID"
+ps -p "$TAILWDPID" >/dev/null 2>&1 && fail "LEAKED tail watchdog pid $TAILWDPID"
 grep -q 'after.torn' "$OUTF" \
   || fail "a torn line swallowed the rest of the batch — 'after.torn' never reached the consumer. got: $(cat "$OUTF")"
 grep -q 'before.torn' "$OUTF" \

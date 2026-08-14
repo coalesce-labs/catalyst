@@ -16,7 +16,7 @@
 //
 // Run: cd plugins/dev/scripts/otel-forward && bun test lib/tail-torn.test.ts
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, writeFileSync, appendFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,6 +129,118 @@ describe("CTL-1809 — a torn line is counted, skipped, and does not wedge the t
     const r = await runTailer([clean("a"), TORN, clean("b")], false);
     expect(r.forwarded).toHaveLength(2); // still advances — the skip was never the bug
     expect(r.torn).toHaveLength(0); // …but the damage is unobservable
+  });
+});
+
+// ── the in-flight write is not a tear ────────────────────────────────────────────────────────
+// A poll landing while a producer is mid-append reads a final fragment with no newline yet.
+// That is a HEALTHY write, and counting it made the detector wrong twice over: it reported a
+// tear that never happened, and — because `offset` had already advanced to EOF — the next poll
+// saw the record's SUFFIX as a fresh line and could count the same record a second time. Every
+// other reader on this log (execution-core/event-tail.mjs's parseEventTailChunk,
+// broker/tailer.mjs's readNewEvents) already holds the fragment back; this one now does too.
+//
+// Driven as SEQUENTIAL DRAINS over one growing file, because a single drain cannot show the
+// defect: the interleaving IS the test.
+async function drainSteps(
+  steps: string[]
+): Promise<{ forwarded: string[]; torn: string[]; endOffset: number; size: number }> {
+  const dir = mkdtempSync(join(tmpdir(), "ctl1809-partial-"));
+  const filePath = join(dir, "2026-08.jsonl");
+  writeFileSync(filePath, "");
+  const forwarded: string[] = [];
+  const torn: string[] = [];
+  const ac = new AbortController();
+  let endOffset = -1;
+  let size = -1;
+  try {
+    const tailer = createTailer({
+      filePath,
+      offset: 0,
+      onLine: (l) => forwarded.push(l),
+      onUnparseable: (l: string) => torn.push(l),
+      signal: ac.signal,
+    });
+    for (const chunk of steps) {
+      appendFileSync(filePath, chunk);
+      await tailer.drain();
+    }
+    endOffset = tailer.currentOffset();
+    size = statSync(filePath).size;
+  } finally {
+    ac.abort();
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return { forwarded, torn, endOffset, size };
+}
+
+describe("CTL-1809 — a mid-append read is not a tear", () => {
+  test("a record split across two polls is forwarded ONCE and never counted torn", async () => {
+    const record = clean("split.across.polls");
+    const cut = Math.floor(record.length / 2);
+    // Poll 1 lands mid-append: the producer has written only the first half, no newline.
+    // Poll 2 sees the rest.
+    const r = await drainSteps([record.slice(0, cut), record.slice(cut) + "\n"]);
+
+    expect(r.torn).toHaveLength(0); // it was never damaged
+    expect(r.forwarded).toHaveLength(1); // …and it was not lost either
+    expect(JSON.parse(r.forwarded[0]).attributes["event.name"]).toBe("split.across.polls");
+    // The suffix was not re-counted as a second line on the later poll.
+    expect(r.forwarded.filter((l) => l.includes("split.across.polls"))).toHaveLength(1);
+  });
+
+  test("a complete line ahead of the in-flight one is delivered immediately, not held", async () => {
+    // The fragment must be held WITHOUT stalling the lines that did finish — holding the whole
+    // read back would turn a partial write into forwarding latency for everything behind it.
+    const done = clean("finished");
+    const half = clean("still.writing").slice(0, 20);
+    const r = await drainSteps([`${done}\n${half}`]);
+
+    expect(r.torn).toHaveLength(0);
+    expect(r.forwarded).toHaveLength(1);
+    expect(JSON.parse(r.forwarded[0]).attributes["event.name"]).toBe("finished");
+    // ADVANCE is unchanged: the byte cursor still sits at EOF even with a fragment held, so
+    // the held bytes are carried in memory, not re-read.
+    expect(r.endOffset).toBe(r.size);
+  });
+
+  test("POSITIVE CONTROL: a torn line is still counted across the same sequential drives", async () => {
+    // Without this, the two zeros above would also be produced by a harness whose onUnparseable
+    // hook is simply never reachable on this code path.
+    const r = await drainSteps([`${clean("a")}\n${TORN}\n${clean("b")}\n`]);
+    expect(r.torn).toHaveLength(1);
+    expect(r.forwarded).toHaveLength(2);
+  });
+
+  test("a fragment held across a TRUNCATION is dropped, not stitched onto the new first line", async () => {
+    // Rotation-in-place: the held bytes belong to a file that no longer exists. Prepending them
+    // would MANUFACTURE a torn line out of two healthy ones.
+    const dir = mkdtempSync(join(tmpdir(), "ctl1809-trunc-"));
+    const filePath = join(dir, "2026-08.jsonl");
+    const forwarded: string[] = [];
+    const torn: string[] = [];
+    const ac = new AbortController();
+    try {
+      writeFileSync(filePath, clean("before.truncate").slice(0, 30)); // fragment, no newline
+      const tailer = createTailer({
+        filePath,
+        offset: 0,
+        onLine: (l) => forwarded.push(l),
+        onUnparseable: (l: string) => torn.push(l),
+        signal: ac.signal,
+      });
+      await tailer.drain(); // holds the fragment
+      writeFileSync(filePath, ""); // truncate → size < offset
+      await tailer.drain(); // resets offset AND the held fragment
+      writeFileSync(filePath, `${clean("after.truncate")}\n`);
+      await tailer.drain();
+    } finally {
+      ac.abort();
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(torn).toHaveLength(0);
+    expect(forwarded).toHaveLength(1);
+    expect(JSON.parse(forwarded[0]).attributes["event.name"]).toBe("after.truncate");
   });
 });
 
