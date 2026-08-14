@@ -10,6 +10,7 @@ import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync } from "node
 // CTL-1529: bounded boot replay. tailParsedEvents returns the last N parsed events
 // in file order from a small window near EOF.
 import { tailParsedEvents, noteTornLine } from "../execution-core/event-tail.mjs";
+import { checkEnvelope } from "../lib/event-envelope.mjs";
 import { resolve, basename } from "node:path";
 import { getEventLogPath, log, CATALYST_DIR, LOOKBACK_LINES } from "./config.mjs";
 import {
@@ -122,6 +123,13 @@ export function readNewEvents() {
         noteTornLine(line);
         continue;
       }
+      // CTL-1819: envelope check on the LIVE path, for exactly the reason the torn
+      // counter above is here — this loop is the load-bearing reader, and covering
+      // only the boot replay (tailParsedEvents) would instrument the half that runs
+      // once per process while leaving the half that runs for the process's whole
+      // life blind. Same process counter, same non-gating contract: the event is
+      // ROUTED regardless, so this can never change what the broker delivers.
+      checkEnvelope(event);
       // CTL-1330 Tier 1: time each route; surface ONLY slow routes (default
       // >100ms) so we catch a broker-side hot-loop stall without flooding Loki —
       // the broker routes every appended event. ON by default (CATALYST_TICK_TIMING).

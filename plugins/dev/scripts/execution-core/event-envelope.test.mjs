@@ -18,7 +18,19 @@
 // fixtures only catch a schema drifting away from itself.
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
+import {
+  existsSync,
+  openSync,
+  readSync,
+  closeSync,
+  statSync,
+  readFileSync,
+  writeFileSync,
+  mkdtempSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { scanEventsSince, tailParsedEvents } from "./event-tail.mjs";
 import {
   ENVELOPE_SHAPES,
   KNOWN_TOP_LEVEL_KEYS,
@@ -112,6 +124,54 @@ describe("drift reddens CI", () => {
     }
   });
 
+  // Codex P2: the four fixtures above prove `unknownTopLevelKeys` works when
+  // called by hand; they prove nothing about what producers actually emit, and
+  // the live-log test is opt-in and skipped in CI. So the vocabulary check is
+  // applied IN CI to a committed corpus of REAL producer output — 25 lines
+  // captured from the live log by greedy key-coverage, carrying all 36 keys and
+  // all four shapes (12 v1, 3 dual, 7 v2, 3 v3).
+  //
+  // ⚠️ Honest bound, stated so nobody over-trusts this: a corpus is a SNAPSHOT.
+  // A brand-new producer field appears here only when the corpus is refreshed.
+  // What this does catch is the vocabulary drifting away from the corpus in
+  // either direction, in CI, with no live log. Closing the gap fully needs the
+  // opt-in live check below run on a fleet host on a schedule.
+  describe("real producer output", () => {
+    const corpus = readFileSync(
+      new URL("./__fixtures__/event-envelope-corpus.jsonl", import.meta.url),
+      "utf8"
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+
+    test("the corpus is non-empty and covers all four shapes", () => {
+      // A zero-line corpus would make every assertion below vacuously true —
+      // `[].every(p)` is `true`, this repo's signature false-clean shape.
+      expect(corpus.length).toBeGreaterThan(0);
+      expect(new Set(corpus.map(classifyEnvelope))).toEqual(new Set(["v1", "v2", "v3", "dual"]));
+    });
+
+    test("no real line carries a key outside the vocabulary", () => {
+      const offenders = corpus
+        .map((ev, i) => ({ i, unknown: unknownTopLevelKeys(ev) }))
+        .filter((r) => r.unknown.length > 0);
+      expect(offenders).toEqual([]);
+    });
+
+    test("every vocabulary key is exercised by real output — fails in BOTH directions", () => {
+      // ⊆ alone would let a key be added to the vocabulary that no producer
+      // emits; this equality also catches that.
+      const seen = new Set(corpus.flatMap((ev) => Object.keys(ev)));
+      expect([...seen].sort()).toEqual([...KNOWN_TOP_LEVEL_KEYS]);
+    });
+
+    test("every real line validates", () => {
+      const bad = corpus.map((ev) => validateEnvelope(ev)).filter((r) => !r.ok);
+      expect(bad).toEqual([]);
+    });
+  });
+
   test("the vocabulary holds the measured key set at snapshot equality", () => {
     // 36 distinct keys, measured `jq -rc 'keys[]' | sort -u` over 2026-08.
     // Fails in BOTH directions: adding a producer key without recording it here
@@ -183,6 +243,45 @@ describe("positive control — the validator can observe the defect", () => {
   });
 });
 
+// Codex P2: counting inside the shared low-level parser made the total a
+// MULTIPLE of the physical record count, because scanEventsSince probes
+// overlapping doubling windows and tailParsedEvents re-reads growing ones. Codex's
+// worked example: eight malformed lines producing a count of 23. These tests are
+// the proof the fix holds — they FAIL if `countEnvelopes` is removed.
+describe("malformed records are counted once per physical record", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl1819-"));
+  const logPath = join(dir, "events.jsonl");
+  const MALFORMED = 8;
+
+  beforeEach(() => {
+    // 8 malformed (no ts) interleaved with valid lines, oldest first so the
+    // expanding walk has to double several times before it covers them.
+    const lines = [];
+    for (let i = 0; i < MALFORMED; i++) {
+      lines.push(JSON.stringify({ attributes: { "event.name": `bad.${i}` } })); // no ts
+      lines.push(JSON.stringify({ ts: `2026-08-14T00:00:${String(i).padStart(2, "0")}Z`, event: `ok.${i}` }));
+    }
+    writeFileSync(logPath, lines.join("\n") + "\n");
+    resetMalformedEventCount();
+  });
+
+  test("scanEventsSince counts each malformed record exactly once", () => {
+    scanEventsSince({
+      path: logPath,
+      targetSinceMs: 0, // forces the window to expand all the way to BOF
+      initialWindow: 64, // tiny, so it doubles many times over the same bytes
+      onEvent: () => {},
+    });
+    expect(malformedEventCount()).toBe(MALFORMED);
+  });
+
+  test("tailParsedEvents counts each malformed record exactly once", () => {
+    const out = tailParsedEvents({ path: logPath, maxLines: 100, bytesPerLineEstimate: 8 });
+    expect(out.length).toBe(MALFORMED * 2);
+    expect(malformedEventCount()).toBe(MALFORMED);
+  });
+});
+
 describe("live corpus (opt-in)", () => {
   const sample = process.env.CATALYST_EVENT_LOG_SAMPLE;
   test.skipIf(!sample || !existsSync(sample ?? ""))(
@@ -222,6 +321,14 @@ describe("live corpus (opt-in)", () => {
         }
         const r = validateEnvelope(ev);
         if (!r.ok && failures.length < 10) failures.push({ errors: r.errors, line: line.slice(0, 160) });
+        // Codex P2: also apply the VOCABULARY here. validateEnvelope deliberately
+        // ignores unknown keys (it is the non-gating runtime layer), so without
+        // this the live check could never surface a producer's new field — the
+        // one place with enough real output to notice it first.
+        const unknown = unknownTopLevelKeys(ev);
+        if (unknown.length && failures.length < 10) {
+          failures.push({ errors: [`unknown top-level keys: ${unknown.join(", ")}`], line: line.slice(0, 160) });
+        }
       }
       // A zero-line sample must not read as a pass — `[].every(p)` is `true`,
       // and a loop that never ran printing an all-clear is this repo's
