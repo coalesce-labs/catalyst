@@ -126,6 +126,47 @@ describe("createRouteHealthMonitor — evaluate + marker write", () => {
     expect(emits).toContain("recovered");
   });
 
+  it("logs a RAISED line on EVERY episode, not just the first (regression: sparse-warn total=1)", () => {
+    const markerPath = join(tmpDir, "linear-webhook-401-latch.json");
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      let t = 500 * 60_000;
+      const mon = createRouteHealthMonitor({ now: () => t, markerPath });
+
+      // Episode 1 — raise.
+      mon.stampGithub(200);
+      mon.stampLinear(401);
+      t += 20 * 60_000;
+      mon.stampGithub(200);
+      mon.stampLinear(401);
+      mon.evaluate(); // RAISED #1
+
+      // Operator fixes the secret — recover.
+      t += 1 * 60_000;
+      mon.stampLinear(200);
+      mon.evaluate(); // RECOVERED
+
+      // A SECOND outage days later — this must RAISE and log again. With the
+      // old `total = 1` sparse-warn gate this line was suppressed after the first.
+      t += 1 * 60_000;
+      mon.stampGithub(200);
+      mon.stampLinear(401);
+      t += 19 * 60_000; // past silentThreshold since the recovery 2xx
+      mon.stampGithub(200);
+      mon.evaluate(); // RAISED #2
+
+      const raised = warnings.filter((w) => w.includes("RAISED"));
+      expect(raised.length).toBeGreaterThanOrEqual(2);
+      expect(warnings.some((w) => w.includes("RECOVERED"))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
   it("onEmit fires with 'raised' on the rising edge", () => {
     const markerPath = join(tmpDir, "linear-webhook-401-latch.json");
     const emits: string[] = [];

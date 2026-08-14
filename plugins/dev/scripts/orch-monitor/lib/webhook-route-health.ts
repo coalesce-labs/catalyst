@@ -11,7 +11,6 @@
 import { mkdirSync, writeFileSync, renameSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { hostname, homedir } from "node:os";
-import { createSparseWarnGate } from "../../otel-forward/lib/sparse-warn";
 
 // ─── State shape ─────────────────────────────────────────────────────────────
 
@@ -214,7 +213,6 @@ export function createRouteHealthMonitor(opts: RouteHealthMonitorOpts = {}) {
   const now = opts.now ?? (() => Date.now());
   const cfg = resolveWebhookRouteHealthConfig(opts.cfg);
   const markerPath = opts.markerPath ?? getLinearWebhook401MarkerPath();
-  const warn = createSparseWarnGate({ maxTracked: 2 });
 
   const state: WebhookRouteHealthState = initialRouteHealthState();
   let latched = false;
@@ -297,26 +295,31 @@ export function createRouteHealthMonitor(opts: RouteHealthMonitorOpts = {}) {
       const nextLatched = edge.latched;
       const nextAt = edge.emit === "raised" ? nowMs : null;
       const prevLatched = latched;
+      const prevLatchedAtMs = latchedAtMs;
       latched = nextLatched;
       latchedAtMs = nextAt;
       try {
         writeMarker(nowMs);
       } catch {
-        // Rollback latch on write failure — retry same edge next tick.
+        // Rollback latch AND episode-start on write failure — retry same edge next
+        // tick. Restoring the captured prevLatchedAtMs (not a recomputed value) keeps
+        // a failed recovered-edge write from losing the open episode's start time.
         latched = prevLatched;
-        latchedAtMs = edge.emit === "raised" ? null : latchedAtMs;
+        latchedAtMs = prevLatchedAtMs;
         return;
       }
-      // Sparse-warn gated log line → orch-monitor.log → Alloy → Loki (independent path).
-      const total = 1; // one alarm key per emit kind; gate dedups the flood.
-      if (warn(`linear-webhook-401:${edge.emit}`, total)) {
-        console.warn(
-          `[linear-webhook-alarm] ${edge.emit.toUpperCase()}: /api/webhook/linear ` +
-            `non-2xx-only for ${v.linearFailAgeMs}ms ` +
-            `(last ok ${v.linearOkAgeMs ?? "never"}ms ago, ` +
-            `github ok ${v.githubOkAgeMs}ms ago)`,
-        );
-      }
+      // Log line → orch-monitor.log → Alloy → Loki (independent of the broken webhook
+      // path). Latch edges are inherently rare — one per rising/falling transition,
+      // serialized by nextLinearWebhook401Latch — so there is no flood to dedup and no
+      // sparse-warn gate: this line MUST fire on EVERY episode (a second outage after a
+      // recovery, days into a long-lived process), not just the first, since it is the
+      // alarm's only durable signal besides the marker.
+      console.warn(
+        `[linear-webhook-alarm] ${edge.emit.toUpperCase()}: /api/webhook/linear ` +
+          `non-2xx-only for ${v.linearFailAgeMs}ms ` +
+          `(last ok ${v.linearOkAgeMs ?? "never"}ms ago, ` +
+          `github ok ${v.githubOkAgeMs}ms ago)`,
+      );
       opts.onEmit?.(edge.emit, v);
     } else if (latched) {
       // Refresh marker stamps while an episode is open (best-effort).
