@@ -96,11 +96,21 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
   `plugins/dev/scripts/lib/event-envelope.mjs` (CTL-1819) — an executable, measured contract
   validated at the read boundary, counting violations without ever throwing. It replaced
   `plugins/dev/templates/global-event.json`, a draft-07 file cited here and in `docs/adrs.md` as the
-  contract for the life of the project which **passed 0 of 1,194,150 live events** and was imported
-  by no code; that file is deleted. Multiple writers, two envelope shapes coexisting:
+  contract for the life of the project which **passed 0 of 1,202,573 live events** and was imported
+  by no code; that file is deleted. Multiple writers, **four** envelope shapes coexisting — measured
+  on one frozen byte snapshot (2026-08, 1,117,890,759 B), the counts summing to the line total
+  exactly, so every line is accounted for by arithmetic rather than a separate query:
+  v2-only 1,175,708 · v1-only 25,355 · dual (v1+v2) 978 · **v3-only `name` 532** · total 1,202,573.
+  `ENVELOPE_SHAPES` in the module is the authoritative list; the v3 shape is live and accepted, and
+  omitting it here is how a reader following the architecture misses a real envelope:
   - **v1** (bash, `catalyst-state.sh event`): `{ts, event, orchestrator, worker, detail}`.
   - **v2 OTel** (`plugins/dev/scripts/orch-monitor/lib/webhook-events.ts` for `github.*`/`linear.*`;
     `catalyst-comms send` for `comms.message.posted`): `{ts, attributes, body, resource}`.
+  - **v3 bare-name** — `{ts, name, …flat payload}` (e.g. `phase.rescue.*`,
+    `phase.orphan-pr.detected.*`, `ticket.completion.declared.*`). 532 lines on the snapshot. Live
+    and accepted, not legacy residue: CTL-1834 records **three separate v3 producers each discovered
+    and fixed reactively, one at a time, after their events had already been lost** — which is why
+    `lib/event-name.mjs` resolves it and this contract validates it.
   - **Superset (CTL-1795, phase 1)** — every v1 emit site now writes ONE line carrying BOTH the
     top-level `event` and a full v2 `attributes`/`body`/`resource` block, built through the shared
     builders `execution-core/lib/canonical-event.mjs` (`buildDualEnvelopeLine`) and

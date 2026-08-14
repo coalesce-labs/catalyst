@@ -13,11 +13,15 @@
 // "schema describes reality" AC is served two ways: the fixture set here, and
 // an opt-in scan of a real log that an operator (or a fleet host) can run —
 //
-//   CATALYST_EVENT_LOG_SAMPLE=~/catalyst/events/2026-08.jsonl bun test event-envelope.test.mjs
+//   CATALYST_EVENT_LOG_SAMPLE=<log> bun test event-envelope.test.mjs
 //
-// which validates every line and fails naming the first offenders. That is the
-// test that would actually catch a schema drifting away from the log; the
-// fixtures only catch a schema drifting away from itself.
+// ⚠️ SCOPE (Codex round 5): it scans a BOUNDED TAIL, not the whole file — the
+// live log is ~1 GB and a whole-file read is a recorded stall incident here. A
+// sample larger than the cap therefore leaves earlier bytes unexamined, and a
+// pass over the tail must NOT read as whole-file coverage. So the test REFUSES
+// to truncate silently: point it at an already-bounded sample, or set
+// CATALYST_EVENT_LOG_SAMPLE_ALLOW_TRUNCATION=1 to accept tail-only scope
+// knowingly. Either way it reports the bytes it actually read.
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import {
@@ -327,14 +331,25 @@ describe("snapshot readers never count", () => {
 describe("live corpus (opt-in)", () => {
   const sample = process.env.CATALYST_EVENT_LOG_SAMPLE;
   test.skipIf(!sample || !existsSync(sample ?? ""))(
-    "every line of a real log validates",
+    "every line of the scanned region of a real log validates (bounded tail)",
     () => {
       // BOUNDED TAIL, never a whole-file read. The live log is ~1.0 GB on a
       // fleet host (measured, mini 2026-08), and whole-log readFileSync is a
       // recorded incident shape here — it produced multi-second-to-115s stalls.
       // The AC asks for a 24h SAMPLE, and the tail is that sample. Cap mirrors
       // event-tail.mjs's DEFAULT_TAIL_MAX_BYTES.
-      const MAX = 64 * 1024 * 1024;
+      // Overridable so the truncation guard itself is testable (below).
+      const MAX = Number(process.env.CATALYST_EVENT_LOG_SAMPLE_MAX_BYTES) || 64 * 1024 * 1024;
+      // Refuse to silently examine a fraction of what the caller pointed at.
+      const fileSize = statSync(sample).size;
+      if (fileSize > MAX && process.env.CATALYST_EVENT_LOG_SAMPLE_ALLOW_TRUNCATION !== "1") {
+        throw new Error(
+          `CATALYST_EVENT_LOG_SAMPLE is ${fileSize} bytes but this test scans at most ${MAX}. ` +
+            `A pass would cover only the final ${MAX} bytes and say nothing about the rest. ` +
+            `Bound the sample first (e.g. tail -c ${MAX}), or set ` +
+            `CATALYST_EVENT_LOG_SAMPLE_ALLOW_TRUNCATION=1 to accept tail-only scope.`
+        );
+      }
       const fd = openSync(sample, "r");
       let text;
       try {

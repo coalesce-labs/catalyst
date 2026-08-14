@@ -43,6 +43,20 @@
 // discriminator" is a reconciliation rather than a separate query that could
 // disagree with the others.
 //
+// POSITIVE CONTROLS (Codex round 5). Freezing the input prevents inter-query
+// growth; it does NOT show that a predicate could have selected a mismatch. Both
+// zero-results below were therefore re-run against a COPY of the snapshot with
+// one known instance of each appended:
+//
+//   dual-agreement predicate   snapshot 978 AGREE / 0 DISAGREE
+//                              probe    978 AGREE / 1 DISAGREE   ← selects it
+//   unmodeled-combination      snapshot 0
+//                              probe    1                        ← selects it
+//
+// So the zeros are evidence rather than an instrument that cannot fail. This
+// matters most for the combination result, which is used to justify deferring
+// the unmodeled-combination fix to CTL-1857.
+//
 // Two further invariants, same snapshot:
 //   • `ts` is present and a string on 1,202,573 of 1,202,573 lines.
 //   • All 978 dual lines AGREE between `.event` and `.attributes["event.name"]`
@@ -208,12 +222,14 @@ export function validateEnvelope(event) {
     errors.push('no event name: none of `event`, `attributes["event.name"]`, `name` is a non-empty string');
   }
 
-  // Measured universal: 1,194,144 of 1,194,144 lines carry ts as a string.
+  // Measured universal (frozen snapshot): ts is a string on 1,202,573 of
+  // 1,202,573 lines. Same snapshot as the header — no second census.
   if (!nonEmptyString(event.ts)) {
     errors.push("`ts` missing or not a non-empty string");
   }
 
-  // Measured invariant: 951 of 951 dual lines agree. The dual writer
+  // Measured invariant (frozen snapshot): 978 of 978 dual lines agree, and the
+  // predicate was positive-controlled (below). The dual writer
   // (canonical_dual_envelope_line) reads the name once and passes the same
   // string to both keys, so a disagreement means something else wrote the line.
   if (shape === "dual" && event.event !== event.attributes["event.name"]) {
