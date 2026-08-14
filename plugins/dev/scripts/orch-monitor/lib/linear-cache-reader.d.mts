@@ -88,3 +88,56 @@ export interface ReadReplicaTitlesOptions {
  *  read-only display) and is FAIL-OPEN: any error returns {} so the existing title
  *  chain is preserved. Returns { identifier → title } of HITS only. Never throws. */
 export function readReplicaTitles(opts?: ReadReplicaTitlesOptions): Promise<Record<string, string>>;
+
+/** CTL-1806: a batched replica ESTIMATE reader — `factory({dbPath})` returns an
+ *  object whose `estimates(ids)` yields an { identifier → estimate } map of HITS
+ *  only. A replica row with a NULL estimate is a MISS (omitted), never an
+ *  authoritative null. Injected in tests so the contract is driven offline. */
+export interface ReplicaEstimateReader {
+  estimates(ids: string[]): Record<string, number>;
+  close?: () => void;
+}
+
+export interface ReadReplicaEstimatesOptions {
+  /** Ticket ids to resolve estimates for (de-duped; empty/falsy skipped). */
+  ids?: string[];
+  /** Replica DB path; defaults to CATALYST_REPLICA_DB || ~/catalyst/catalyst-replica.db. */
+  dbPath?: string;
+  /** Test seam: a `factory({dbPath})` → ReplicaEstimateReader. When set, the
+   *  file-presence gate is skipped (the injected reader IS the DB). */
+  readerFactory?: ((opts: { dbPath: string }) => ReplicaEstimateReader) | null;
+}
+
+/** CTL-1806: serve the supplemental ESTIMATE resolver from the local replica
+ *  instead of the rate-limited Linear API. FILE-PRESENCE gate only (a
+ *  writer-liveness gate would burst Linear calls during a quiet feed — CTL-1397)
+ *  and FAIL-OPEN: any error returns {}. Returns { identifier → estimate } of HITS
+ *  only. Never throws. */
+export function readReplicaEstimates(
+  opts?: ReadReplicaEstimatesOptions,
+): Promise<Record<string, number>>;
+
+/** CTL-1806: a batched replica DETAIL reader — `factory({dbPath})` returns an
+ *  object whose `details(ids)` yields the full per-ticket payload for HITS only. */
+export interface ReplicaDetailReader {
+  details(ids: string[]): Record<string, unknown>;
+  close?: () => void;
+}
+
+export interface ReadReplicaTicketDetailsOptions {
+  /** Ticket ids to resolve details for (de-duped; empty/falsy skipped). */
+  ids?: string[];
+  /** Replica DB path; defaults to CATALYST_REPLICA_DB || ~/catalyst/catalyst-replica.db. */
+  dbPath?: string;
+  /** Test seam: a `factory({dbPath})` → ReplicaDetailReader. When set, the
+   *  file-presence gate is skipped (the injected reader IS the DB). */
+  readerFactory?: ((opts: { dbPath: string }) => ReplicaDetailReader) | null;
+}
+
+/** CTL-1806: serve the supplemental TITLE/DESCRIPTION resolver — and therefore
+ *  the ticket-DETAIL page and every relation target — from the local replica.
+ *  Same FILE-PRESENCE gate and fail-open contract as readReplicaTitles. A hit
+ *  requires a non-empty title; misses are omitted. Never throws. */
+export function readReplicaTicketDetails(
+  opts?: ReadReplicaTicketDetailsOptions,
+): Promise<Record<string, unknown>>;

@@ -59,7 +59,8 @@ interface LinearTicketResponse {
   priority: number | null;
   project: string | null;
   estimate: number | null;
-  source: "linear-live" | "unavailable";
+  /** CTL-1806: "replica" = served from the local Linear replica (no API call). */
+  source: "linear-live" | "replica" | "unavailable";
 }
 
 export interface LinearTicketState {

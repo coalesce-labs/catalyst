@@ -42,6 +42,14 @@
 // shared secret-contract engine for the LINEAR_API_TOKEN/LINEAR_API_KEY
 // resolution below (design §8 PR3 table).
 import { resolveSecret } from "../../lib/secret-contract.mjs";
+// CTL-1806: the replica tier + the degraded-path anomaly (D3). This is the read
+// that closes the REAL AC2 gap — the board's title backfill was already
+// replica-aware one layer up (CTL-1372's readReplicaTitles in board-data), but
+// the ticket-DETAIL route (server.ts's /api/linear-ticket) calls this resolver
+// with no replica tier at all, and every RELATION TARGET it renders came from
+// Linear too. Putting the tier INSIDE the resolver serves both callers at once.
+import { readReplicaTicketDetails } from "./linear-cache-reader.mjs";
+import { noteDegradedLinearRead } from "./linear-degraded-read.mjs";
 
 // ── In-memory TTL cache ───────────────────────────────────────────────────────
 // Keyed by ticket ID (e.g. "CTL-926"). Value:
@@ -176,9 +184,20 @@ function linearAuthHeader() {
 
 // graphql — one async GraphQL call via Bun's native fetch. Returns the parsed
 // `data` object on success, or null on any failure (network, auth, 429, bad JSON).
-async function graphql(query, variables) {
+//
+// CTL-1806 (D3): emit `catalyst.linear.read` IMMEDIATELY BEFORE the outbound
+// call — never after, since an after-the-fact emission is lost on exactly the
+// failures (timeout, throw) worth knowing about. Every id reaching here has
+// already missed the replica, hence source "linearis_miss".
+async function graphql(query, variables, { source = "linearis_miss", op = "title_desc" } = {}) {
   const auth = linearAuthHeader();
-  if (!auth) return null;
+  if (!auth) {
+    // Degraded path reached but undispatchable — a node with no Linear
+    // credential otherwise returns nulls in total silence. WARN via result:failed.
+    noteDegradedLinearRead({ source, result: "failed", op });
+    return null;
+  }
+  noteDegradedLinearRead({ source, result: "ok", op });
   try {
     const res = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
       method: "POST",
@@ -314,23 +333,42 @@ const NULL_ENTRY = {
   priority: null,
   project: null,
   estimate: null,
+  // CTL-1806: provenance for the detail route's `source` field. "replica" = served
+  // from the local replica, "linear" = served by the degraded Linear fetch, null =
+  // nothing served it. A user-facing field must not report "linear-live" for a read
+  // that never touched Linear.
+  source: null,
 };
 
-// fillTitleDescriptionFallback — given an array of ticket IDs (or ticket objects
-// with an `id` field), enriches each with { title, description, labels, relations }.
-// When called with an array of objects, mutates each object in place AND returns
-// the ID-keyed map.  When called with an array of strings, returns the map only.
+// ttlForState — D4's cache-lifetime decision, hoisted so the replica tier and the
+// Linear tier can never disagree about it. Terminal tickets (completed/canceled)
+// hold for 24h; everything else 5 min. This is exactly why the replica tier must
+// carry a `state.type` rather than omitting it: dropping the type would move
+// every terminal ticket (measured: 2725 of 3887) from a 24h to a 5-min cache — a
+// quota REGRESSION inside a quota-reduction change.
+function ttlForState(state) {
+  return state?.type === "completed" || state?.type === "canceled"
+    ? DONE_TTL_MS
+    : TITLE_DESC_TTL_MS;
+}
+
+// fillTitleDescriptionFallback — given an array of ticket IDs, enrich each with
+// { title, description, labels, relations, state, priority, project, estimate }.
 //
-// - Hits are served from _titleDescCache (5-min TTL).
-// - Remaining IDs are batched into one Linear GraphQL call per team-chunk.
-// - Null values are stored for IDs Linear returned nothing for (not found),
-//   so a subsequent call within the TTL does not re-fetch.
+// - Hits are served from _titleDescCache (5-min TTL; 24h for terminal tickets).
+// - Remaining IDs are served from the LOCAL REPLICA (CTL-1806).
+// - Only genuine replica misses are batched into a Linear GraphQL call per
+//   team-chunk, and each such call emits a `catalyst.linear.read` anomaly.
+// - Null values are stored for IDs nothing returned (not found), so a subsequent
+//   call within the TTL does not re-fetch.
 // - Always resolves; never rejects (fail-open).
-export async function fillTitleDescriptionFallback(ticketIds) {
-  // Support being called with an array of objects (the board-data pattern) as
-  // well as an array of string IDs (the server.ts linear-ticket route pattern).
-  const isObjectArray = ticketIds.length > 0 && typeof ticketIds[0] === "object" && ticketIds[0] !== null;
-  const ids = isObjectArray ? ticketIds.map((t) => t.id ?? t.ticket ?? "") : ticketIds;
+//
+// CTL-1806 subtraction: the old "array of objects, mutate in place" mode
+// (`isObjectArray`) is gone. It had ZERO production callers — board-data passes
+// `nullTitleIds` (strings from collectNullTitleIds) and server.ts passes
+// `[ticket]` (a string) — and the .d.mts already typed the parameter `string[]`.
+export async function fillTitleDescriptionFallback(ticketIds, { replicaOptions = {} } = {}) {
+  const ids = Array.isArray(ticketIds) ? ticketIds : [];
 
   const result = {};
   const toFetch = [];
@@ -348,33 +386,64 @@ export async function fillTitleDescriptionFallback(ticketIds) {
         priority: cached.priority ?? null,
         project: cached.project ?? null,
         estimate: cached.estimate ?? null,
+        source: cached.source ?? null,
       };
     } else {
       toFetch.push(id);
     }
   }
 
-  if (toFetch.length === 0) {
-    if (isObjectArray) {
-      for (const t of ticketIds) {
-        const id = t.id ?? t.ticket ?? "";
-        const r = result[id] ?? NULL_ENTRY;
-        t.title = r.title;
-        t.description = r.description;
-        t.labels = r.labels;
-        t.relations = r.relations;
-        // B3: board-data mutation only touches title/description/labels/relations
-        // (board payload shape unchanged); state/priority/project/estimate are
-        // only on the returned map (for the linear-ticket route).
-      }
+  if (toFetch.length === 0) return result;
+
+  // ── Tier 1: the LOCAL replica (CTL-1806) ───────────────────────────────────
+  // Serves title, description, labels (with colour), relations (with enriched
+  // targets), state, priority, project and estimate — the entire payload both
+  // callers consume. FILE-PRESENCE gate only, fail-open: an absent/unreadable
+  // replica yields {} and every id proceeds to the degraded path as before.
+  //
+  // A hit requires a NON-EMPTY title (the primitive omits anything less), so a
+  // replica row that could not actually populate the detail page still falls
+  // through to Linear rather than being cached as a hollow "available" entry.
+  //
+  // Note on the BOARD caller specifically: board-data already filters its ids
+  // through readReplicaTitles, so the set it passes here is precisely the ids the
+  // replica could NOT title — which means this read will miss for all of them.
+  // That is one extra local SQLite query over a usually-empty set (the resolver
+  // is not called at all when nothing is null-titled), and it is the price of
+  // putting the tier INSIDE the resolver, which is what gives the ticket-detail
+  // route and its relation targets a replica tier at all.
+  const replicaHits = await readReplicaTicketDetails({ ids: toFetch, ...replicaOptions });
+  const stillMissing = [];
+  for (const id of toFetch) {
+    const hit = replicaHits[id];
+    if (hit && typeof hit.title === "string" && hit.title.length > 0) {
+      const entry = {
+        title: hit.title,
+        description: hit.description ?? null,
+        labels: hit.labels ?? null,
+        relations: hit.relations ?? null,
+        state: hit.state ?? null,
+        priority: hit.priority ?? null,
+        project: hit.project ?? null,
+        estimate: hit.estimate ?? null,
+        source: "replica",
+      };
+      _titleDescCache.set(id, { ...entry, ts: Date.now(), ttlMs: ttlForState(entry.state) });
+      result[id] = entry;
+    } else {
+      stillMissing.push(id);
     }
-    return result;
   }
+  _capTitleDescCache();
+  if (stillMissing.length === 0) return result;
+  // From here on, every id is a genuine REPLICA MISS — which is exactly what the
+  // `linearis_miss` source on the emissions records.
+  const toQuery = stillMissing;
 
   // Group uncached IDs by team key. IDs that don't parse are stored as nulls
   // (can't query them).
-  const teamGroups = groupByTeam(toFetch);
-  const unparseable = toFetch.filter((id) => parseIdentifier(id) === null);
+  const teamGroups = groupByTeam(toQuery);
+  const unparseable = toQuery.filter((id) => parseIdentifier(id) === null);
   for (const id of unparseable) {
     _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now(), ttlMs: TITLE_DESC_TTL_MS });
     result[id] = { ...NULL_ENTRY };
@@ -410,12 +479,9 @@ export async function fillTitleDescriptionFallback(ticketIds) {
         // B3: parse own-ticket meta fields.
         const { state, priority, project, estimate } = parseTicketMeta(node);
         // D4: completed/canceled tickets cached for 24h; all others 5m.
-        const ttlMs =
-          state?.type === "completed" || state?.type === "canceled"
-            ? DONE_TTL_MS
-            : TITLE_DESC_TTL_MS;
-        _titleDescCache.set(id, { title, description, labels, relations, state, priority, project, estimate, ts: Date.now(), ttlMs });
-        result[id] = { title, description, labels, relations, state, priority, project, estimate };
+        const ttlMs = ttlForState(state);
+        _titleDescCache.set(id, { title, description, labels, relations, state, priority, project, estimate, source: "linear", ts: Date.now(), ttlMs });
+        result[id] = { title, description, labels, relations, state, priority, project, estimate, source: "linear" };
         fetchedNumbers.add(node.number);
       }
 
@@ -433,7 +499,7 @@ export async function fillTitleDescriptionFallback(ticketIds) {
 
   // Any ID that fail-open dropped (graphql null → no nodes loop ran for its
   // chunk) still needs an honest entry. Backfill from the cache or as null.
-  for (const id of toFetch) {
+  for (const id of toQuery) {
     if (result[id] === undefined) {
       const cached = _titleDescCache.get(id);
       if (cached !== undefined) {
@@ -446,6 +512,7 @@ export async function fillTitleDescriptionFallback(ticketIds) {
           priority: cached.priority ?? null,
           project: cached.project ?? null,
           estimate: cached.estimate ?? null,
+          source: cached.source ?? null,
         };
       } else {
         _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now(), ttlMs: TITLE_DESC_TTL_MS });
@@ -454,18 +521,6 @@ export async function fillTitleDescriptionFallback(ticketIds) {
     }
   }
   _capTitleDescCache();
-
-  // If called with objects, mutate them in place (board-data pattern).
-  if (isObjectArray) {
-    for (const t of ticketIds) {
-      const id = t.id ?? t.ticket ?? "";
-      const r = result[id] ?? NULL_ENTRY;
-      t.title = r.title;
-      t.description = r.description;
-      t.labels = r.labels;
-      t.relations = r.relations;
-    }
-  }
 
   return result;
 }

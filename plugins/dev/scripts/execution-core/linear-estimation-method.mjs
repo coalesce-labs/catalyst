@@ -20,19 +20,56 @@
 // (identical to runBatchOnce in linear-query.mjs).  No async seams are needed.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 // CTL-1616 PR3: fold this file's inline LINEAR_API_TOKEN/LINEAR_API_KEY ladder
 // onto the shared secret-contract engine (design §8 PR3 table).
 import { resolveSecret } from "../lib/secret-contract.mjs";
+// CTL-1806 (D3): the degraded-path anomaly. This module CANNOT be served from the
+// replica (see the DEGRADED note below), so its Linear call is labelled rather
+// than removed — and a labelled call has to actually be observable.
+import { emitLinearReadEvent } from "./linear-read-event.mjs";
 
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
-const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/**
+ * CTL-1806 (D1) — the ONE TTL for the team estimation method, and the reason the
+ * Linear fetch below stays.
+ *
+ * DEGRADED BY NECESSITY, not by choice: the local Linear replica has no `teams`
+ * table and no workflow/state table (measured 2026-08-14: `sqlite_master` LIKE
+ * '%team%' and '%state%' return ZERO tables, against a positive control of
+ * '%issue%' returning 3 and '%label%' returning 2), and `issueEstimation` appears
+ * in 0 of 3887 `raw` blobs against a positive control of '%estimate%' matching
+ * 3864. The `$.team` projection that DOES exist carries exactly {id,key,name} —
+ * the container is there and the estimation config is not in it. So this read has
+ * no local source and cannot be made replica-first; it is bounded instead, at 8
+ * distinct team keys per host per TTL window.
+ *
+ * It is NOT defaulted to Fibonacci on a miss, and that is the sharpest constraint
+ * in this file: the value gates a REAL LINEAR WRITE (scheduler.mjs's triage→
+ * research advance reads the triage estimate and calls
+ * writeStatus.applyEstimate). Today an unavailable method returns null and the
+ * scheduler SKIPS the write. A default would flip that from "skip" to "derive and
+ * write a Fibonacci number into a tShirt team's estimate field" — irreversible
+ * without an audit. A guessed scale is worse than no estimate.
+ *
+ * CTL-1806 also collapses the duplicate cache: orch-monitor's
+ * linear-estimate-fallback.mjs wrote THIS SAME FILE with a 24h TTL while this
+ * module used 7 days, so a record written at T+30h was valid here and stale
+ * there — the board re-fetched from Linear and rewrote a file the scheduler was
+ * already happily serving, the exact duplicated call this ticket removes. Both
+ * now share this constant, the path fn, the query, and the read/write helpers.
+ */
+export const TEAM_ESTIMATION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // GraphQL query — filter by key (the short mnemonic like "CTL") instead of
 // UUID, matching the pattern in setup-execution-core-states.sh line 351.
 // The scheduler knows team keys (CTL/ADV/OTL) not UUIDs.
-const TEAM_ESTIMATION_QUERY = `query GetTeamEstimation($key: String!) {
+// Exported (CTL-1806) so the orch-monitor async resolver reuses this text rather
+// than carrying a byte-copy that can drift.
+export const TEAM_ESTIMATION_QUERY = `query GetTeamEstimation($key: String!) {
   teams(filter: { key: { eq: $key } }) {
     nodes {
       issueEstimation {
@@ -53,27 +90,93 @@ const _memo = new Map();
 
 // ── Cache file path ───────────────────────────────────────────────────────────
 // Same durable-state directory as registry.json / eligible / state.json.
-function cacheFilePath(teamId) {
-  const dir = join(process.env.HOME ?? "/tmp", "catalyst", "execution-core");
-  return join(dir, `team-estimation-${teamId}.json`);
+// CTL-1806: `process.env.HOME ?? homedir()` rather than the old `?? "/tmp"` —
+// orch-monitor's now-deleted duplicate resolved this with homedir(), so with HOME
+// unset the two "same file" writers silently targeted two DIFFERENT files.
+function cacheDir() {
+  return join(process.env.HOME ?? homedir(), "catalyst", "execution-core");
+}
+
+/**
+ * teamEstimationCachePath — the single on-disk location for a team's estimation
+ * method. Exported (CTL-1806) so every writer of this file agrees on the path.
+ * @param {string} teamId
+ * @returns {string}
+ */
+export function teamEstimationCachePath(teamId) {
+  return join(cacheDir(), `team-estimation-${teamId}.json`);
 }
 
 // ── Atomic cache write ────────────────────────────────────────────────────────
 // Write to a .tmp sibling, then rename — avoids a corrupt half-written read on
 // the next tick if the process is killed mid-write.
-function writeCacheFile(teamId, method) {
-  const path = cacheFilePath(teamId);
-  const dir = join(process.env.HOME ?? "/tmp", "catalyst", "execution-core");
+/**
+ * writeTeamEstimationCache — persist a resolved method under the shared TTL
+ * contract. Exported (CTL-1806) so the async orch-monitor resolver reuses this
+ * atomic write instead of its own copy. Returns the written record, or null when
+ * the disk write failed (the caller's in-memory cache remains valid).
+ * @param {string} teamId
+ * @param {{type: string, allowZero: boolean, extended: boolean}} method
+ */
+export function writeTeamEstimationCache(teamId, method) {
+  const record = { teamId, method, fetchedAt: new Date().toISOString() };
+  // Seed the in-process memo BEFORE attempting the disk write: an unwritable
+  // disk must not force a fresh Linear fetch on every subsequent tick. (The
+  // orch-monitor duplicate this replaces already behaved this way; the sync
+  // scheduler path did not, and re-fetched forever on a read-only disk.)
+  _memo.set(teamId, record);
   try {
+    const dir = cacheDir();
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const record = { teamId, method, fetchedAt: new Date().toISOString() };
+    const path = teamEstimationCachePath(teamId);
     const tmp = `${path}.tmp`;
     writeFileSync(tmp, JSON.stringify(record, null, 2));
     renameSync(tmp, path);
     return record;
   } catch {
-    return null;
+    return null; // disk write failed — the memo above is still valid
   }
+}
+
+/**
+ * readTeamEstimationCache — the shared cache tiers (in-process memo, then the
+ * on-disk record), under the ONE TTL. Exported (CTL-1806) so the async
+ * orch-monitor resolver stops carrying a second memo, a second path fn and a
+ * second (shorter) TTL over the same file.
+ *
+ * @param {string} teamId
+ * @param {{ttlMs?: number}} [opts]
+ * @returns {{type: string, allowZero: boolean, extended: boolean} | null}
+ *   null means "not cached / stale / corrupt" — the caller must fetch.
+ */
+export function readTeamEstimationCache(teamId, { ttlMs = TEAM_ESTIMATION_TTL_MS } = {}) {
+  if (!teamId || typeof teamId !== "string") return null;
+  const now = Date.now();
+
+  // 1. In-process memo (within a single daemon run).
+  if (_memo.has(teamId)) {
+    const cached = _memo.get(teamId);
+    if (now - new Date(cached.fetchedAt).getTime() < ttlMs) return cached.method;
+    _memo.delete(teamId); // stale — re-fetch
+  }
+
+  // 2. On-disk cache.
+  const path = teamEstimationCachePath(teamId);
+  if (existsSync(path)) {
+    try {
+      const record = JSON.parse(readFileSync(path, "utf8"));
+      if (record?.method && typeof record.method.type === "string") {
+        if (now - new Date(record.fetchedAt).getTime() < ttlMs) {
+          _memo.set(teamId, record);
+          return record.method;
+        }
+        // stale — fall through to fetch
+      }
+    } catch {
+      // corrupt cache — fall through to fetch
+    }
+  }
+  return null;
 }
 
 // ── Linear API fetch ─────────────────────────────────────────────────────────
@@ -109,6 +212,21 @@ function fetchFromLinear(teamId) {
     "--data",
     "@-",
   ];
+
+  // CTL-1806 (D3): emit the degraded-path anomaly IMMEDIATELY BEFORE the outbound
+  // call, never after — an emission placed after is lost on exactly the failures
+  // worth knowing about (curl absent, timeout, throw). source is "linearis"
+  // (not "linearis_miss") because NO replica was consulted: there is no replica
+  // source for team estimation config at all, so this is not a miss, it is a read
+  // with no local tier. `result` records only what is knowable here — whether the
+  // call could be dispatched at all.
+  emitLinearReadEvent({
+    source: "linearis",
+    result: token ? "ok" : "failed",
+    op: "team_method",
+    entity: teamId,
+    serviceName: "catalyst.execution-core",
+  });
 
   let res;
   try {
@@ -154,45 +272,23 @@ function fetchFromLinear(teamId) {
  *           spawnSync is always used because the function must be synchronous).
  * @returns {{ type: string, allowZero: boolean, extended: boolean } | null}
  */
-export function getEstimationMethod(teamId, { ttlMs = DEFAULT_TTL_MS } = {}) {
+export function getEstimationMethod(teamId, { ttlMs = TEAM_ESTIMATION_TTL_MS } = {}) {
   if (!teamId || typeof teamId !== "string") return null;
 
-  const now = Date.now();
+  // 1+2. In-process memo, then the on-disk record — both under the ONE shared TTL
+  // (CTL-1806: this is the same helper the orch-monitor async resolver now uses,
+  // so the two writers of this file can no longer disagree about staleness).
+  const cached = readTeamEstimationCache(teamId, { ttlMs });
+  if (cached) return cached;
 
-  // 1. In-process memo (within a single daemon run).
-  if (_memo.has(teamId)) {
-    const cached = _memo.get(teamId);
-    if (now - new Date(cached.fetchedAt).getTime() < ttlMs) {
-      return cached.method;
-    }
-    _memo.delete(teamId); // stale — re-fetch
-  }
-
-  // 2. On-disk cache.
-  const path = cacheFilePath(teamId);
-  if (existsSync(path)) {
-    try {
-      const raw = readFileSync(path, "utf8");
-      const record = JSON.parse(raw);
-      if (record?.method && typeof record.method.type === "string") {
-        const age = now - new Date(record.fetchedAt).getTime();
-        if (age < ttlMs) {
-          _memo.set(teamId, record);
-          return record.method;
-        }
-        // stale — fall through to fetch
-      }
-    } catch {
-      // corrupt cache — fall through to fetch
-    }
-  }
-
-  // 3. Live Linear GraphQL fetch (cache miss / stale).
+  // 3. Live Linear GraphQL fetch (cache miss / stale) — the labelled degraded
+  // path (D1). Still returns null on ANY failure so the caller fails open; it is
+  // deliberately NOT defaulted to a scale, because null makes the scheduler SKIP
+  // its estimate write while a guess would make it write the wrong number.
   const method = fetchFromLinear(teamId);
-  if (!method) return null; // fail-open; caller uses Fibonacci fallback
+  if (!method) return null;
 
-  const record = writeCacheFile(teamId, method);
-  if (record) _memo.set(teamId, record);
+  writeTeamEstimationCache(teamId, method); // also seeds the memo
 
   return method;
 }

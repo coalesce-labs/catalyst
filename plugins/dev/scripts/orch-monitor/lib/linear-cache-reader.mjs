@@ -268,6 +268,134 @@ export async function readReplicaTitles({
 }
 
 
+// readReplicaEstimates — CTL-1806. The replica tier for the supplemental ESTIMATE
+// resolver. linear-estimate-fallback.mjs had ZERO replica consultation: a board
+// ticket whose broker durable-cache estimate is null went straight to the
+// rate-limited Linear GraphQL API for a value sitting in local SQLite (measured
+// 2026-08-14: 2954 of 3887 replica rows carry an estimate; the broker's
+// ticket_state working set is ~100 rows).
+//
+// Gate + fail-open contract copied VERBATIM from readReplicaTitles above:
+// FILE-PRESENCE only (deliberately NOT writer-liveness — CTL-1397 documents that
+// a live writer on a QUIET Linear feed reads as stale, so a liveness gate here
+// would burst Linear calls exactly when the board is unchanged, which is
+// backwards for a read that exists to remove them), {} on ANY failure, reader
+// closed either way.
+//
+// Returns { [identifier]: number } of HITS only. A replica row whose estimate is
+// NULL is a MISS (omitted) — see replica-read.mjs::estimates for why an
+// authoritative null would be wrong. Never throws.
+//
+// HONEST NOTE on the file-presence gate (verified by mutation, CTL-1806): it is a
+// FAST PATH, not a correctness guard. Deleting it does not change any observable
+// result — `new Database(absentPath, {readonly:true})` THROWS ("unable to open
+// database file", measured), and the catch below converts that to the same {}.
+// What the gate buys is avoiding a dynamic import + a constructed-and-thrown
+// handle on every call on a node that has no replica. The same is true of
+// readReplicaTitles's gate above, from which this is copied verbatim. Do not
+// remove it, but do not mistake it for the thing that keeps this read safe —
+// that is the try/catch and the hits-only contract.
+export async function readReplicaEstimates({
+  ids = [],
+  dbPath = process.env.CATALYST_REPLICA_DB || defaultReplicaDbPath(),
+  readerFactory = null,
+} = {}) {
+  const wanted = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
+  if (wanted.length === 0) return {};
+  if (!readerFactory) {
+    try {
+      if (!existsSync(dbPath)) return {};
+    } catch {
+      return {};
+    }
+  }
+  let reader = null;
+  try {
+    let factory = readerFactory;
+    if (!factory) {
+      ({ createReplicaReader: factory } = await import(REPLICA_READ_MODULE));
+    }
+    reader = factory({ dbPath });
+    if (typeof reader.estimates !== "function") return {};
+    const out = reader.estimates(wanted);
+    return out && typeof out === "object" ? out : {};
+  } catch {
+    return {}; // any failure → fail-open to the existing estimate chain
+  } finally {
+    try {
+      reader?.close?.();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
+// readReplicaTicketDetails — CTL-1806. The replica tier for the supplemental
+// TITLE/DESCRIPTION resolver, which serves BOTH the board's null-title backfill
+// and — the real gap this closes — the ticket-DETAIL page (server.ts's
+// /api/linear-ticket route calls fillTitleDescriptionFallback with no replica
+// tier at all) plus every RELATION TARGET it renders.
+//
+// Same FILE-PRESENCE gate and fail-open contract as readReplicaTitles /
+// readReplicaEstimates above. Returns { [identifier]: TitleDescription } of HITS
+// only (a hit requires a non-empty title); misses are omitted so the caller falls
+// through to its existing chain. Never throws.
+export async function readReplicaTicketDetails({
+  ids = [],
+  dbPath = process.env.CATALYST_REPLICA_DB || defaultReplicaDbPath(),
+  readerFactory = null,
+} = {}) {
+  const wanted = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
+  if (wanted.length === 0) return {};
+  if (!readerFactory) {
+    try {
+      if (!existsSync(dbPath)) return {};
+    } catch {
+      return {};
+    }
+  }
+  let reader = null;
+  try {
+    let factory = readerFactory;
+    if (!factory) {
+      ({ createReplicaReader: factory } = await import(REPLICA_READ_MODULE));
+    }
+    reader = factory({ dbPath });
+    if (typeof reader.details !== "function") return {};
+    // ⛔ SINGLE-TICKET READS ARE FRESHNESS-GATED (Codex P1 on #3355).
+    // This is the ticket-DETAIL path, not the board batch, and the repo rule is
+    // explicit that a single-ticket read gates freshness and falls back LOUDLY.
+    // File presence alone is not enough: when the writer stops but its database
+    // remains, every field below is a stale hit that then gets cached for 5-24h.
+    //
+    // Not hypothetical — observed on the developer laptop 2026-08-14: the writer
+    // took a clean SIGTERM, `KeepAlive={SuccessfulExit:false}` never revived it,
+    // the .db stayed on disk, and reads silently served ~15-minute-old state
+    // (CTL-1736 / CTL-1844).
+    //
+    // This does NOT re-create CTL-1397, and the distinction matters: that incident
+    // was gating on the .db/-wal MTIME, which a legitimately QUIET Linear feed makes
+    // look stale. `isFresh()` reads the `.writer.lock` HEARTBEAT, which the writer
+    // touches every few seconds regardless of Linear activity — it tracks writer
+    // LIVENESS, not data-change cadence. The D4 ruling's file-presence choice stands
+    // for the high-volume board resolvers; it was never about this path.
+    //
+    // Returning {} is the documented miss contract, so the caller falls through to
+    // its existing (loud, degraded-labelled) Linear chain rather than serving stale.
+    if (typeof reader.isFresh === "function" && !reader.isFresh()) return {};
+    const out = reader.details(wanted);
+    return out && typeof out === "object" ? out : {};
+  } catch {
+    return {}; // any failure → fail-open to the existing title/description chain
+  } finally {
+    try {
+      reader?.close?.();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
 // readReplicaHumanHolds — replica-backed needs-human/needs-input holds for a
 // bounded id set (the CTL-1588 queue annotation's SECOND source). The parked
 // descriptor set (filter-state.db) is webhook-fed, and the webhook receiver is

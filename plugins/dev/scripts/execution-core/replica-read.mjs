@@ -56,6 +56,123 @@ function titlesSelect(n) {
     .join(",")}) AND removed_at IS NULL`;
 }
 
+// CTL-1806: the display-resolver reads. The orch-monitor's two supplemental
+// resolvers (linear-estimate-fallback / linear-title-description-fallback) called
+// the rate-limited Linear GraphQL API with ZERO replica consultation; these are
+// the local primitives that make them replica-first. Same fail-open contract as
+// titles(): a HIT is an entry, anything else is OMITTED (never fabricated), and
+// any throw yields {} so the caller's existing chain runs unchanged.
+//
+// estimates(): a replica row whose `estimate` is NULL is a MISS, NOT an
+// authoritative null. The two are indistinguishable in the replica ("Linear has
+// none" vs "this row predates the estimate projection"), and serving the null
+// would silently drop the board's estimate chip for a refresh. Mirrors exactly
+// what titles() does with an empty title: omit, never fabricate.
+const ESTIMATES_CHUNK = 400;
+function estimatesSelect(n) {
+  return `SELECT identifier, estimate FROM issues WHERE identifier IN (${Array(n)
+    .fill("?")
+    .join(",")}) AND removed_at IS NULL`;
+}
+
+// details(): the own-ticket payload the ticket-DETAIL page needs
+// (title/description/labels/relations/state/priority/project/estimate). The
+// LEFT JOIN on projects supplies `project.name`; labels and relations are read
+// as separate batched queries inside the same snapshot.
+function detailsSelect(n) {
+  return `SELECT i.identifier, i.title, i.description, i.state, i.priority, i.estimate, i.started_at, i.completed_at, i.canceled_at, p.name AS project_name FROM issues i LEFT JOIN projects p ON p.id = i.project_id WHERE i.identifier IN (${Array(
+    n
+  )
+    .fill("?")
+    .join(",")}) AND i.removed_at IS NULL`;
+}
+// Batched label read for a bounded id set, carrying `color` (the detail page's
+// label chips need it). Tombstoned labels are excluded for the same reason
+// LABELS_SELECT excludes them: a removed label name can be recycled.
+function detailLabelsSelect(n) {
+  return `SELECT i.identifier AS identifier, l.name AS name, l.color AS color FROM issues i JOIN issue_labels il ON il.issue_id = i.id JOIN labels l ON l.id = il.label_id WHERE i.identifier IN (${Array(
+    n
+  )
+    .fill("?")
+    .join(",")}) AND i.removed_at IS NULL AND l.removed_at IS NULL ORDER BY l.name`;
+}
+// Relation edges in both directions for a bounded id set. `relations` is keyed by
+// display identifier (not the internal PK), so no id resolution is needed.
+function relationsForwardSelect(n) {
+  return `SELECT issue_identifier AS src, type, related_identifier AS target FROM relations WHERE issue_identifier IN (${Array(
+    n
+  )
+    .fill("?")
+    .join(",")})`;
+}
+function relationsInverseSelect(n) {
+  return `SELECT related_identifier AS src, type, issue_identifier AS target FROM relations WHERE related_identifier IN (${Array(
+    n
+  )
+    .fill("?")
+    .join(",")})`;
+}
+// Relation-TARGET enrichment: the {title,state,priority,project} each rendered
+// relation row shows. Same shape as detailsSelect minus description/estimate.
+function relationTargetsSelect(n) {
+  return `SELECT i.identifier, i.title, i.state, i.priority, i.started_at, i.completed_at, i.canceled_at, p.name AS project_name FROM issues i LEFT JOIN projects p ON p.id = i.project_id WHERE i.identifier IN (${Array(
+    n
+  )
+    .fill("?")
+    .join(",")}) AND i.removed_at IS NULL`;
+}
+
+/**
+ * synthesizeStateType — CTL-1806 (D2). Derive Linear's workflow-state `type`
+ * from the replica's own lifecycle TIMESTAMPS.
+ *
+ * The replica has no `workflow_states` table and its enriched `raw` projection
+ * DROPS `state.type` (measured 2026-08-14: `$.state.type` extracts on 110 of
+ * 3887 rows — only the ~4-day window of un-enriched webhook-shape blobs —
+ * against a positive control of `$.state.name` extracting on 3887/3887). So the
+ * type must be derived, and it is derived from timestamps rather than from the
+ * state NAME on purpose: a name→type map hardcodes THIS workspace's contract
+ * states (Implement/PR/Validate/Research/Remediate are not Linear defaults) and
+ * breaks under the bring-your-own-workspace model this read exists to serve.
+ *
+ * Ladder (order is load-bearing): canceled_at → completed_at → started_at →
+ * "backlog". `canceled` precedes `completed` because Linear can stamp
+ * completedAt and then cancel; `completed` precedes `started` because a finished
+ * ticket keeps its startedAt (measured: 2215 rows carry BOTH, by far the most
+ * exercised rung).
+ *
+ * Accuracy against ground truth (the rows that still carry a real
+ * `raw.$.state.type`): 109/109 exact on every class the consumer renders
+ * distinctly. The single residual is a true `unstarted` state, which
+ * synthesizes to `backlog` — `stateIconSpec` draws both as a MUTED ring
+ * differing only in stroke dash, so it costs a dash pattern and nothing else.
+ *
+ * @param {{started_at?: unknown, completed_at?: unknown, canceled_at?: unknown}} row
+ * @returns {"canceled"|"completed"|"started"|"backlog"|null} null only for a non-object.
+ */
+export function synthesizeStateType(row) {
+  if (!row || typeof row !== "object") return null;
+  if (row.canceled_at != null) return "canceled";
+  if (row.completed_at != null) return "completed";
+  if (row.started_at != null) return "started";
+  return "backlog";
+}
+
+// stateRefOf — the {name,type} the display consumers expect, or null. The NAME
+// must be a non-empty string: the downstream LinearStateRef contract requires
+// it, and fabricating a name from a synthesized type would invent a workflow
+// state that does not exist in the workspace.
+function stateRefOf(row) {
+  if (!row || typeof row.state !== "string" || row.state.length === 0) return null;
+  return { name: row.state, type: synthesizeStateType(row) };
+}
+
+// numOrNull — the replica stores estimate as REAL and priority as INTEGER;
+// anything non-finite (NULL included) is not a value.
+function numOrNull(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
 // coerce a replica `updated_at` cell to epoch-ms. Accepts an epoch-ms integer
 // (the cloud change-feed shape) OR an ISO-8601 string (Date.parse fallback).
 // Anything that resolves to neither (null, NaN, garbage) → undefined → the
@@ -294,6 +411,248 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
       return out;
     } catch {
       // Drop the handle so a later call re-opens fresh (DB may be re-seeded).
+      dropHandle();
+      return {};
+    }
+  };
+
+  // estimates(identifiers) → { [identifier]: number }  (CTL-1806)
+  //   HIT (non-removed row with a FINITE numeric estimate) → entry in the map.
+  //   absent / removed / NULL estimate → OMITTED. A NULL estimate is a MISS, not
+  //     an authoritative null (see the ESTIMATES_CHUNK note above).
+  //   empty input / no db / any throw → {}  (fail-open, mirroring titles()).
+  // Gated exactly like titles(): NO writer-liveness gate. A liveness gate on a
+  // display read falls through to the rate-limited path precisely when the board
+  // is UNCHANGED (CTL-1397: a live writer on a quiet feed reads as stale), which
+  // is backwards for a read whose whole purpose is removing Linear calls.
+  const estimates = (identifiers) => {
+    const wanted = [
+      ...new Set(
+        (Array.isArray(identifiers) ? identifiers : []).filter(
+          (id) => typeof id === "string" && id.length > 0
+        )
+      ),
+    ];
+    if (wanted.length === 0) return {};
+    const out = {};
+    try {
+      const handle = open();
+      for (let i = 0; i < wanted.length; i += ESTIMATES_CHUNK) {
+        const slice = wanted.slice(i, i + ESTIMATES_CHUNK);
+        for (const row of handle.prepare(estimatesSelect(slice.length)).all(...slice)) {
+          if (!row || typeof row.identifier !== "string") continue;
+          const est = numOrNull(row.estimate);
+          if (est === null) continue; // NULL estimate → MISS, never an authoritative null
+          out[row.identifier] = est;
+        }
+      }
+      return out;
+    } catch {
+      dropHandle();
+      return {};
+    }
+  };
+
+  // readRelations(handle, wanted) — the relation half, taking an already-open
+  // handle so details() can run it inside its own snapshot without nesting a
+  // second transaction. Returns { [identifier]: RelationMap }, one entry per
+  // requested id that has at least one edge (ids with no edges are OMITTED, so
+  // the caller can tell "no relation data" from "genuinely none" the same way
+  // every other read here distinguishes a miss).
+  //
+  // Grouping mirrors linear-title-description-fallback's parseRelations exactly:
+  //   forward  "blocks"    → blocks[]        (this ticket blocks the target)
+  //   forward  "duplicate" → duplicateOf[]
+  //   forward  "related"   → related[]
+  //   inverse  "blocks"    → blockedBy[]     (the target blocks this ticket)
+  //   inverse  "related"   → related[]       (deduped by identifier, forward wins)
+  const readRelations = (handle, wanted) => {
+    const edges = [];
+    for (let i = 0; i < wanted.length; i += ESTIMATES_CHUNK) {
+      const slice = wanted.slice(i, i + ESTIMATES_CHUNK);
+      for (const r of handle.prepare(relationsForwardSelect(slice.length)).all(...slice)) {
+        edges.push({ src: r.src, type: r.type, target: r.target, inverse: false });
+      }
+      for (const r of handle.prepare(relationsInverseSelect(slice.length)).all(...slice)) {
+        edges.push({ src: r.src, type: r.type, target: r.target, inverse: true });
+      }
+    }
+    if (edges.length === 0) return {};
+
+    // Enrich every distinct target in one batched pass (never N+1).
+    const targetIds = [
+      ...new Set(edges.map((e) => e.target).filter((t) => typeof t === "string" && t.length > 0)),
+    ];
+    const targetById = {};
+    for (let i = 0; i < targetIds.length; i += ESTIMATES_CHUNK) {
+      const slice = targetIds.slice(i, i + ESTIMATES_CHUNK);
+      for (const row of handle.prepare(relationTargetsSelect(slice.length)).all(...slice)) {
+        if (!row || typeof row.identifier !== "string") continue;
+        targetById[row.identifier] = {
+          identifier: row.identifier,
+          title: typeof row.title === "string" && row.title.length > 0 ? row.title : null,
+          state: stateRefOf(row),
+          priority: numOrNull(row.priority),
+          project: row.project_name ?? null,
+        };
+      }
+    }
+
+    const out = {};
+    // Forward edges first so a related edge seen in BOTH directions keeps its
+    // forward-resolved target (the dedup order the GraphQL parser uses).
+    for (const pass of [false, true]) {
+      for (const e of edges) {
+        if (e.inverse !== pass) continue;
+        if (typeof e.src !== "string" || typeof e.target !== "string") continue;
+        // Resolve the destination group BEFORE materializing an entry. An edge
+        // this mapping does not carry — notably an INVERSE "duplicate", which the
+        // GraphQL parser also ignores — must not create an empty relation map:
+        // that would turn a genuine "no relation data" miss into an
+        // authoritative-looking empty answer for the id on the OTHER end of
+        // someone else's duplicate edge.
+        const group =
+          e.type === "related"
+            ? "related"
+            : e.inverse
+              ? e.type === "blocks"
+                ? "blockedBy"
+                : null
+              : e.type === "blocks"
+                ? "blocks"
+                : e.type === "duplicate"
+                  ? "duplicateOf"
+                  : null;
+        if (group === null) continue;
+        // A target with no live issues row still keeps its edge: the identifier
+        // alone is real information (the rail renders `title ?? identifier`),
+        // and dropping it would silently hide a genuine blocker.
+        const target = targetById[e.target] ?? {
+          identifier: e.target,
+          title: null,
+          state: null,
+          priority: null,
+          project: null,
+        };
+        const map = (out[e.src] ??= {
+          blockedBy: [],
+          blocks: [],
+          related: [],
+          duplicateOf: [],
+        });
+        // `related` is deduped by identifier (an edge can appear in both
+        // directions); the others cannot collide the same way.
+        if (group === "related") {
+          if (!map.related.some((t) => t.identifier === target.identifier)) map.related.push(target);
+        } else {
+          map[group].push(target);
+        }
+      }
+    }
+    return out;
+  };
+
+  // relations(identifiers) → { [identifier]: RelationMap }  (CTL-1806)
+  //   The standalone relation-target read. Same fail-open contract as titles():
+  //   {} on empty input / no db / any throw; an id with no edges is omitted.
+  const relations = (identifiers) => {
+    const wanted = [
+      ...new Set(
+        (Array.isArray(identifiers) ? identifiers : []).filter(
+          (id) => typeof id === "string" && id.length > 0
+        )
+      ),
+    ];
+    if (wanted.length === 0) return {};
+    try {
+      const handle = open();
+      return handle.transaction(() => readRelations(handle, wanted))();
+    } catch {
+      dropHandle();
+      return {};
+    }
+  };
+
+  // details(identifiers) → { [identifier]: TitleDescription }  (CTL-1806)
+  //   The full ticket-DETAIL payload, replica-served: title, description, labels
+  //   (with colour), relations (with enriched targets), state {name,type},
+  //   priority, project, estimate.
+  //
+  //   HIT requires a NON-EMPTY title — the same bar titles() sets. The detail
+  //   page's own availability check is `title !== null || description !== null`,
+  //   so an entry with neither would render as "unavailable" while suppressing
+  //   the Linear fall-through that could have served it.
+  //   absent / removed / empty title → OMITTED (caller falls through).
+  //   empty input / no db / any throw → {}  (fail-open).
+  //
+  //   `state.type` is SYNTHESIZED from the row's timestamps — see
+  //   synthesizeStateType for why the replica cannot read it directly and why the
+  //   state NAME is deliberately not used as the source.
+  //
+  //   Rows, labels and relations are read inside ONE deferred read snapshot so a
+  //   forced re-seed cannot splice a pre-reseed ticket with post-reseed labels.
+  const details = (identifiers) => {
+    const wanted = [
+      ...new Set(
+        (Array.isArray(identifiers) ? identifiers : []).filter(
+          (id) => typeof id === "string" && id.length > 0
+        )
+      ),
+    ];
+    if (wanted.length === 0) return {};
+    try {
+      const handle = open();
+      return handle.transaction(() => {
+        const out = {};
+        for (let i = 0; i < wanted.length; i += ESTIMATES_CHUNK) {
+          const slice = wanted.slice(i, i + ESTIMATES_CHUNK);
+          for (const row of handle.prepare(detailsSelect(slice.length)).all(...slice)) {
+            if (!row || typeof row.identifier !== "string") continue;
+            if (typeof row.title !== "string" || row.title.length === 0) continue; // MISS
+            out[row.identifier] = {
+              title: row.title,
+              description:
+                typeof row.description === "string" && row.description.length > 0
+                  ? row.description
+                  : null,
+              labels: [],
+              relations: null,
+              state: stateRefOf(row),
+              priority: numOrNull(row.priority),
+              project: row.project_name ?? null,
+              estimate: numOrNull(row.estimate),
+            };
+          }
+        }
+        const hits = Object.keys(out);
+        if (hits.length === 0) return {};
+        for (let i = 0; i < hits.length; i += ESTIMATES_CHUNK) {
+          const slice = hits.slice(i, i + ESTIMATES_CHUNK);
+          for (const row of handle.prepare(detailLabelsSelect(slice.length)).all(...slice)) {
+            const entry = out[row?.identifier];
+            if (!entry || typeof row.name !== "string") continue;
+            entry.labels.push({
+              name: row.name,
+              // Match the GraphQL parser's default so a colourless replica label
+              // renders identically to a colourless Linear one.
+              color: typeof row.color === "string" && row.color.length > 0 ? row.color : "#8d8d8d",
+            });
+          }
+        }
+        const rel = readRelations(handle, hits);
+        for (const id of hits) {
+          // An id with no edges gets an EMPTY map, not null: we read the relation
+          // table for it and it genuinely has none. null means "unknown".
+          out[id].relations = rel[id] ?? {
+            blockedBy: [],
+            blocks: [],
+            related: [],
+            duplicateOf: [],
+          };
+        }
+        return out;
+      })();
+    } catch {
       dropHandle();
       return {};
     }
@@ -588,6 +947,9 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     lookup,
     freshness,
     titles,
+    estimates, // CTL-1806
+    relations, // CTL-1806
+    details, // CTL-1806
     eligible,
     triageState, // CTL-1589
     ownership,

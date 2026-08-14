@@ -917,6 +917,7 @@ jobs:
             recovery.test.mjs \
             registry.test.mjs \
             replica-read.test.mjs \
+            replica-supplemental-reads.test.mjs \
             scan.test.mjs \
             scheduler-created-at.test.mjs \
             scheduler-perproject.test.mjs \

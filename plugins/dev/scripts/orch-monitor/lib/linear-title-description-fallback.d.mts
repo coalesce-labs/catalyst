@@ -59,6 +59,18 @@ export interface TitleDescription {
   project: string | null;
   /** Own-ticket estimate (story points), or null when unset. */
   estimate: number | null;
+  /** CTL-1806 provenance: "replica" = served from the local replica (no Linear
+   *  call), "linear" = served by the degraded Linear fetch, null = unresolved. */
+  source: "replica" | "linear" | null;
+}
+
+/** CTL-1806: test seam for the replica tier, forwarded verbatim to
+ *  readReplicaTicketDetails. */
+export interface ReplicaTierOptions {
+  replicaOptions?: {
+    dbPath?: string;
+    readerFactory?: ((opts: { dbPath: string }) => unknown) | null;
+  };
 }
 
 /**
@@ -66,11 +78,17 @@ export interface TitleDescription {
  * { [id]: TitleDescription } for those IDs.
  *
  * - Hits are served from the in-memory TTL cache (5 min default; 24h for completed/canceled).
- * - Remaining IDs are batched into one Linear GraphQL call per team-chunk.
+ * - CTL-1806: remaining IDs are served from the LOCAL REPLICA — including
+ *   relation targets, and including the ticket-DETAIL route, which previously had
+ *   no replica tier at all. `state.type` is synthesized from the replica's
+ *   lifecycle timestamps (the replica has no workflow_states table).
+ * - Only genuine replica misses reach a Linear GraphQL call, and each such call
+ *   emits `catalyst.linear.read {source:"linearis_miss", op:"title_desc"}`.
  * - Always resolves; never rejects (fail-open → all null fields).
  */
 export function fillTitleDescriptionFallback(
   ticketIds: string[],
+  opts?: ReplicaTierOptions,
 ): Promise<Record<string, TitleDescription>>;
 
 /** CTL-1215: hard size cap (insertion-order LRU) on the in-memory cache. */

@@ -1,0 +1,881 @@
+{
+  "_readme": "CTL-1806 D2 ground-truth fixture for synthesizeStateType(). Captured from the live Catalyst replica; each row is a real ticket that STILL carried a genuine `raw.$.state.type` at capture time, paired with the three lifecycle timestamps the synthesis reads. This is COMMITTED rather than re-queried at test time on purpose: `state.type` survives only in the ~4-day window of un-enriched webhook-shape blobs (the enrichment pass overwrites raw with a projection that drops it), so a live query is a sliding window that can legitimately return ZERO rows \u2014 at which point a for-loop assertion passes on zero iterations and self-certifies. A fixture cannot do that, and the accompanying test additionally fails closed if this file is empty or loses a class.",
+  "_captured_at": "2026-08-14",
+  "_capture_query": "SELECT identifier, json_extract(raw,'$.state.type'), started_at, completed_at, canceled_at, state FROM issues WHERE removed_at IS NULL AND json_extract(raw,'$.state.type') IS NOT NULL",
+  "_positive_control": "json_extract(raw,'$.state.name') extracts on 3887/3887 rows and json_extract(raw,'$.state.type') on 109 \u2014 the extractor works; the field is genuinely sparse.",
+  "_expected_accuracy": "109/109 exact on every class the consumer renders distinctly. The single `unstarted` row synthesizes to `backlog`, which stateIconSpec draws as the same MUTED ring differing only in stroke dash.",
+  "rows": [
+    {
+      "identifier": "COA-5",
+      "groundTruthType": "unstarted",
+      "stateName": "Todo",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-133",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-295",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-297",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-298",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786544026888,
+      "completed_at": 1786544592334,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-300",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-316",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-378",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-398",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786478263496,
+      "completed_at": 1786536783906,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-399",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786538239531,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-400",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786540712943,
+      "completed_at": 1786541537553,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-401",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-402",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-403",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-404",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-405",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-406",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-408",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786536785176,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-410",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786536786322,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-411",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786539073124,
+      "completed_at": 1786540029074,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-412",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786536787281,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-414",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-416",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786539593415,
+      "completed_at": 1786540854510,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-417",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786543117042,
+      "completed_at": 1786544061810,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-418",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786541797801,
+      "completed_at": 1786543225569,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-419",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-423",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-425",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-461",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-480",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-481",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-482",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTC-483",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786679773098
+    },
+    {
+      "identifier": "CTL-1502",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1784846457126,
+      "completed_at": 1786366992270,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1645",
+      "groundTruthType": "started",
+      "stateName": "PR",
+      "started_at": 1785890831315,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1659",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786652282442,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1681",
+      "groundTruthType": "started",
+      "stateName": "Implement",
+      "started_at": 1786140558617,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1742",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1743",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786405316318
+    },
+    {
+      "identifier": "CTL-1744",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1745",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786451452600
+    },
+    {
+      "identifier": "CTL-1746",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786451453664
+    },
+    {
+      "identifier": "CTL-1747",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786451454639
+    },
+    {
+      "identifier": "CTL-1748",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786451455683
+    },
+    {
+      "identifier": "CTL-1749",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786451457011
+    },
+    {
+      "identifier": "CTL-1750",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786451459103
+    },
+    {
+      "identifier": "CTL-1751",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786452022417
+    },
+    {
+      "identifier": "CTL-1752",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1753",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1754",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1755",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786458754591,
+      "completed_at": 1786465510947,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1757",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1758",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1759",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1761",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1764",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1765",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1766",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1767",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1768",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1769",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1770",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1771",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1772",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1773",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1775",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1776",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1779",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1780",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1781",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1782",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1783",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1784",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1785",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1786",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1791",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786541291724,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1792",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1793",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786541292721,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1794",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1795",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786649537920,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1797",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1798",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786541747164,
+      "completed_at": 1786542075130,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1801",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786543010067,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1802",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786541620595,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1803",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1804",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786586335852,
+      "completed_at": 1786586564790,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1806",
+      "groundTruthType": "started",
+      "stateName": "Implement",
+      "started_at": 1786679823254,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1809",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786670896645,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1811",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786582437470,
+      "completed_at": 1786582669918,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1814",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786649173387,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1815",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1816",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1817",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786631444294,
+      "completed_at": 1786633419327,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1818",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786649945680,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1820",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1821",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1822",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1823",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786653547362,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1824",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786642066731
+    },
+    {
+      "identifier": "CTL-1825",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786653159704,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1826",
+      "groundTruthType": "canceled",
+      "stateName": "Canceled",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": 1786657914212
+    },
+    {
+      "identifier": "CTL-1827",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1830",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1831",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": null,
+      "completed_at": 1786675503492,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1832",
+      "groundTruthType": "completed",
+      "stateName": "Done",
+      "started_at": 1786645935769,
+      "completed_at": 1786647555420,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1833",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1834",
+      "groundTruthType": "started",
+      "stateName": "Implement",
+      "started_at": 1786679322977,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "CTL-1835",
+      "groundTruthType": "started",
+      "stateName": "Implement",
+      "started_at": 1786679755027,
+      "completed_at": null,
+      "canceled_at": null
+    },
+    {
+      "identifier": "OTL-66",
+      "groundTruthType": "backlog",
+      "stateName": "Backlog",
+      "started_at": null,
+      "completed_at": null,
+      "canceled_at": null
+    }
+  ]
+}
