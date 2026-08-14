@@ -1074,6 +1074,15 @@ export function workerDirHasPhaseSignals(names) {
 // Unknown/non-pipeline phases (recovery-pass) have no ordinal and phaseIndex
 // throws on them, so they rank -1 and keep their existing relative order;
 // livePhaseEntries ignores their position anyway.
+//
+// That leaves one residual, and it is DELIBERATE AND BOUNDED: two phases that
+// BOTH rank -1 still tie, so their order is still readdirSync's. Nothing reads
+// it — livePhaseEntries admits every non-pipeline phase unconditionally
+// (`!isKnownPhase(phase)`) and latestKnownPhase skips them when picking the
+// latest dispatch, so no advancement, supersession, or in-flight decision can
+// observe which of two unknown phases came first. Do not "finish" this by
+// inventing an ordinal for unknown phases: there is no correct one, and
+// manufacturing a rank would make them supersede each other.
 function tieRank(phase) {
   return isKnownPhase(phase) ? phaseIndex(phase) : -1;
 }
