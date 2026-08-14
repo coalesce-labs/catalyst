@@ -36,6 +36,21 @@ bad() {
 	echo "  FAIL — $1"
 }
 
+# file_mode PATH -> the octal permission bits, portably.
+# ⛔ ORDER MATTERS AND BSD-FIRST IS WRONG. On Linux `stat -f` is --file-system, which
+# SUCCEEDS and prints filesystem info, so a `stat -f ... || stat -c ...` chain never
+# reaches the fallback and yields garbage like `File: "/tmp/..."`. GNU (-c) is tried
+# first for exactly that reason — the same ordering AGENTS.md's replica freshness-gate
+# snippet uses. Returns empty when neither form works, so callers fail loudly rather
+# than comparing against a non-numeric string.
+file_mode() {
+	local m
+	m="$(stat -c %a "$1" 2>/dev/null)" || m=""
+	[[ $m =~ ^[0-7]+$ ]] || m="$(stat -f %Lp "$1" 2>/dev/null)" || m=""
+	[[ $m =~ ^[0-7]+$ ]] || m=""
+	printf '%s' "$m"
+}
+
 # Run setup_cloud_replica in a subshell with a fake HOME, sourcing the real script.
 # setup-catalyst.sh already guards main() behind a sourced-detection test;
 # CATALYST_SETUP_LIB_ONLY is its explicit belt-and-braces form.
@@ -90,7 +105,7 @@ if [[ $rc == "0" ]]; then ok "token + account → returns 0"; else bad "token + 
 if [[ -f "$ENV_FILE" ]]; then
 	ok "token + account → cloud-sync.env written"
 
-	mode=$(stat -f %Lp "$ENV_FILE" 2>/dev/null || stat -c %a "$ENV_FILE" 2>/dev/null)
+	mode=$(file_mode "$ENV_FILE")
 	if [[ $mode == "600" ]]; then ok "cloud-sync.env is 0600"; else bad "cloud-sync.env mode is $mode, expected 600"; fi
 	# ⚠️ NOTE: the assertion above is NOT sufficient on its own and must not be
 	# trusted alone. mktemp creates its file 0600 by default and mv preserves the
@@ -152,9 +167,9 @@ H5=$(mktemp -d)
 mkdir -p "$H5/.config/catalyst"
 : >"$H5/.config/catalyst/cloud-sync.env"
 chmod 644 "$H5/.config/catalyst/cloud-sync.env"
-pre_mode=$(stat -f %Lp "$H5/.config/catalyst/cloud-sync.env" 2>/dev/null || stat -c %a "$H5/.config/catalyst/cloud-sync.env" 2>/dev/null)
+pre_mode=$(file_mode "$H5/.config/catalyst/cloud-sync.env")
 rc=$(run_case "$H5" "tok_test_abc" "tenant-9")
-post_mode=$(stat -f %Lp "$H5/.config/catalyst/cloud-sync.env" 2>/dev/null || stat -c %a "$H5/.config/catalyst/cloud-sync.env" 2>/dev/null)
+post_mode=$(file_mode "$H5/.config/catalyst/cloud-sync.env")
 if [[ $pre_mode == "644" ]]; then
 	ok "precondition established: env file started 0644 (proves this case can discriminate)"
 else
