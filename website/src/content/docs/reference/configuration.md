@@ -547,6 +547,30 @@ value) rather than silently disabling the counter.
 PostHog and Cloudflare AE keys mirror the JSON above; see the developer reference for their delivery
 semantics.
 
+## Linear webhook 401 alarm (`CATALYST_LINEAR_WEBHOOK_ALARM`, CTL-1841)
+
+The orch-monitor server compares `/api/webhook/linear` and `/api/webhook` (GitHub) response codes
+to detect a 401-only Linear delivery window — the failure mode that stopped all new-work dispatch
+for 7.5 hours on 2026-08-14. Both routes share the same smee tunnel, Bun process, and minute, so a
+GitHub 200 while Linear returns only 4xx proves the Linear HMAC secret is broken, not the
+network. The alarm is **alert-only**: it writes a durable marker and a `console.warn` line that
+Alloy ships to Loki independently of the broken webhook path. It never restarts the server.
+
+**Marker path**: `~/catalyst/linear-webhook-401-latch.json` (atomic tmp+rename; survives restarts).
+**Log format**: `[linear-webhook-alarm] RAISED/RECOVERED: /api/webhook/linear …` in `orch-monitor.log`.
+
+| Env var                                       | Default           | Description |
+| --------------------------------------------- | ----------------- | ----------- |
+| `CATALYST_LINEAR_WEBHOOK_ALARM`               | `1` (enabled)     | Set to `0` to disable the alarm entirely (kill-switch). |
+| `CATALYST_LINEAR_WEBHOOK_ALARM_SILENT_MS`     | `900000` (15 min) | No Linear 2xx for this long → "silent window". |
+| `CATALYST_LINEAR_WEBHOOK_ALARM_FAIL_RECENCY_MS` | `1800000` (30 min) | A Linear non-2xx must be seen within this window to be considered "recent". |
+| `CATALYST_LINEAR_WEBHOOK_ALARM_GITHUB_WINDOW_MS` | `1800000` (30 min) | The GitHub control 2xx must be seen within this window to prove the tunnel is up. |
+| `CATALYST_LINEAR_WEBHOOK_ALARM_TICK_MS`       | `60000` (1 min)   | Evaluation interval. |
+
+The alarm does **not** depend on Linear event volume — it detects HTTP authentication failure
+directly. A genuinely-quiet Linear feed (no deliveries at all, not even 401s) does not alarm.
+Wiring the marker to a pager (a Loki alert rule in `catalyst-otel`) is a separate follow-up.
+
 ## Cluster machine-level cloud token (`CATALYST_CLOUD_TOKEN`, CTL-1307)
 
 `CATALYST_CLOUD_TOKEN` is a single **shared** service credential — the catalyst-cloud `ADMIN_TOKEN`
