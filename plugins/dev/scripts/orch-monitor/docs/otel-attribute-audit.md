@@ -10,10 +10,10 @@ Do **not** edit this file directly.
 
 | Classification | Count |
 | --- | --- |
-| ✓ Conforming | 20 |
+| ✓ Conforming | 34 |
 | → Rename-to | 37 |
-| ● Legitimately Custom | 40 |
-| **Total** | 97 |
+| ● Legitimately Custom | 43 |
+| **Total** | 114 |
 
 ## Classification by Emitter
 
@@ -74,16 +74,33 @@ Do **not** edit this file directly.
 
 | Key | Source | Classification | Target | Cluster | Note |
 | --- | --- | --- | --- | --- | --- |
+| `attributes` | `canonical-event.sh:684` | ✓ conforming |  |  | CTL-1809 tombstone: OTLP log-record field |
+| `bg_job_id` | `canonical-event.sh:460` | ✓ conforming |  |  | CTL-1795 flat→OTel map: promoted to catalyst.worker.bg_job_id; never reaches OTLP under this name |
+| `body` | `canonical-event.sh:684` | ✓ conforming |  |  | CTL-1809 tombstone: OTLP log-record field |
+| `branch` | `canonical-event.sh:461` | ✓ conforming |  |  | CTL-1795 flat→OTel map: promoted to catalyst.worker.branch; never reaches OTLP under this name |
+| `catalyst.event.oversized.bytes` | `canonical-event.sh:684` | ● custom |  |  | CTL-1809 |
+| `catalyst.event.oversized.cap` | `canonical-event.sh:684` | ● custom |  |  | CTL-1809 |
+| `catalyst.event.oversized.name` | `canonical-event.sh:684` | ● custom |  |  | CTL-1809 |
 | `catalyst.executor` | `canonical-event.sh:406` | ● custom |  |  | CTL-1457 |
 | `catalyst.ticket.type` | `canonical-event.sh:349` | ● custom |  |  | CTL-1023 |
 | `claude.ratelimit.five_hour_pct` | `canonical-event.sh:343` | ● custom |  |  | CTL-760 |
 | `claude.ratelimit.seven_day_opus_pct` | `canonical-event.sh:345` | ● custom |  |  | CTL-763 |
 | `claude.ratelimit.seven_day_pct` | `canonical-event.sh:344` | ● custom |  |  | CTL-760 |
 | `claude.ratelimit.seven_day_sonnet_pct` | `canonical-event.sh:346` | ● custom |  |  | CTL-763 |
+| `dominant_phase` | `canonical-event.sh:463` | ✓ conforming |  |  | CTL-1795 flat→OTel map: promoted to catalyst.worker.dominant_phase; never reaches OTLP under this name |
 | `linear.read.age_ms` | `canonical-event.sh:375` | ● custom |  |  | CTL-1403 |
 | `linear.read.op` | `canonical-event.sh:374` | ● custom |  |  | CTL-1403 |
 | `linear.read.result` | `canonical-event.sh:373` | ● custom |  |  | CTL-1403 |
 | `linear.read.source` | `canonical-event.sh:372` | ● custom |  |  | CTL-1403 |
+| `message` | `canonical-event.sh:684` | ✓ conforming |  |  | CTL-1809 tombstone: body.message |
+| `observedTs` | `canonical-event.sh:684` | ✓ conforming |  |  | CTL-1809 tombstone: OTLP log-record field |
+| `orch_id` | `canonical-event.sh:462` | ✓ conforming |  |  | CTL-1795 flat→OTel map: promoted to catalyst.orchestrator.id; never reaches OTLP under this name |
+| `phase` | `canonical-event.sh:459` | ✓ conforming |  |  | CTL-1795 flat→OTel map: promoted to catalyst.worker.phase; never reaches OTLP under this name |
+| `resource` | `canonical-event.sh:684` | ✓ conforming |  |  | CTL-1809 tombstone: OTLP log-record field |
+| `severityNumber` | `canonical-event.sh:684` | ✓ conforming |  |  | CTL-1809 tombstone: OTLP log-record field |
+| `severityText` | `canonical-event.sh:684` | ✓ conforming |  |  | CTL-1809 tombstone: OTLP log-record field |
+| `ticket` | `canonical-event.sh:458` | ✓ conforming |  |  | CTL-1795 flat→OTel map: promoted to catalyst.worker.ticket; never reaches OTLP under this name |
+| `ts` | `canonical-event.sh:684` | ✓ conforming |  |  | CTL-1809 tombstone: OTLP log-record field |
 
 ### MJS (execution-core / catalyst-agent)
 

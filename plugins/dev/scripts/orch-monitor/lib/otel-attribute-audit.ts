@@ -117,6 +117,42 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   // legitimately-custom (catalyst.* namespace). Emitted at canonical-event.sh:406.
   { key: "catalyst.executor", emitter: "sh", source: "canonical-event.sh:406", classification: "legitimately-custom", note: "CTL-1457" },
 
+  // ── CTL-1795: the flat→OTel promotion map (_CE_FLAT_ATTR_JQ) ──────────────
+  // extractShellAttributeKeys matches every `"key":` in the file, so it captures
+  // the LEFT side of this map as well as emitted attributes. These six are the
+  // v1 flat field NAMES being renamed; the right-hand targets below are what
+  // actually reaches OTLP. Recorded as rename-to with the target the map already
+  // applies — the rename is shipped, not pending (same convention as the
+  // phase.attempt pair below, which kept rename-to after CTL-764 promoted it).
+  { key: "ticket", emitter: "sh", source: "canonical-event.sh:458", classification: "conforming", note: "CTL-1795 flat→OTel map: promoted to catalyst.worker.ticket; never reaches OTLP under this name" },
+  { key: "phase", emitter: "sh", source: "canonical-event.sh:459", classification: "conforming", note: "CTL-1795 flat→OTel map: promoted to catalyst.worker.phase; never reaches OTLP under this name" },
+  { key: "bg_job_id", emitter: "sh", source: "canonical-event.sh:460", classification: "conforming", note: "CTL-1795 flat→OTel map: promoted to catalyst.worker.bg_job_id; never reaches OTLP under this name" },
+  { key: "branch", emitter: "sh", source: "canonical-event.sh:461", classification: "conforming", note: "CTL-1795 flat→OTel map: promoted to catalyst.worker.branch; never reaches OTLP under this name" },
+  { key: "orch_id", emitter: "sh", source: "canonical-event.sh:462", classification: "conforming", note: "CTL-1795 flat→OTel map: promoted to catalyst.orchestrator.id; never reaches OTLP under this name" },
+  { key: "dominant_phase", emitter: "sh", source: "canonical-event.sh:463", classification: "conforming", note: "CTL-1795 flat→OTel map: promoted to catalyst.worker.dominant_phase; never reaches OTLP under this name" },
+
+  // ── CTL-1809: the oversized-line tombstone envelope ───────────────────────
+  // _canonical_append_oversized_tombstone builds a COMPLETE v2 log record inline,
+  // so the extractor sees the OTLP structural fields too. These eight are the
+  // log-record shape defined by OTel itself, not catalyst attributes — conforming
+  // by construction. (They appear only here because every other bash emit path
+  // builds its envelope through jq helpers whose structural keys are TS-owned.)
+  { key: "ts",             emitter: "sh", source: "canonical-event.sh:684", classification: "conforming", note: "CTL-1809 tombstone: OTLP log-record field" },
+  { key: "observedTs",     emitter: "sh", source: "canonical-event.sh:684", classification: "conforming", note: "CTL-1809 tombstone: OTLP log-record field" },
+  { key: "severityText",   emitter: "sh", source: "canonical-event.sh:684", classification: "conforming", note: "CTL-1809 tombstone: OTLP log-record field" },
+  { key: "severityNumber", emitter: "sh", source: "canonical-event.sh:684", classification: "conforming", note: "CTL-1809 tombstone: OTLP log-record field" },
+  { key: "body",           emitter: "sh", source: "canonical-event.sh:684", classification: "conforming", note: "CTL-1809 tombstone: OTLP log-record field" },
+  { key: "message",        emitter: "sh", source: "canonical-event.sh:684", classification: "conforming", note: "CTL-1809 tombstone: body.message" },
+  { key: "attributes",     emitter: "sh", source: "canonical-event.sh:684", classification: "conforming", note: "CTL-1809 tombstone: OTLP log-record field" },
+  { key: "resource",       emitter: "sh", source: "canonical-event.sh:684", classification: "conforming", note: "CTL-1809 tombstone: OTLP log-record field" },
+
+  // The tombstone's own three attributes. It carries its OWN event name rather
+  // than the dropped event's, so a refused line cannot fire that event's
+  // wait-for subscribers on fabricated content — these describe the drop.
+  { key: "catalyst.event.oversized.name",  emitter: "sh", source: "canonical-event.sh:684", classification: "legitimately-custom", note: "CTL-1809" },
+  { key: "catalyst.event.oversized.bytes", emitter: "sh", source: "canonical-event.sh:684", classification: "legitimately-custom", note: "CTL-1809" },
+  { key: "catalyst.event.oversized.cap",   emitter: "sh", source: "canonical-event.sh:684", classification: "legitimately-custom", note: "CTL-1809" },
+
   // §4h: Phase attempt tracking (CTL-761) — rename-to cluster F. CTL-764 promoted
   // these to the TS interface (worker-transition-event emits them), so they are
   // now ts-emitted; the sh extractor excludes any key present in the TS interface.
