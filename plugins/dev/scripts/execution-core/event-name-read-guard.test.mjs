@@ -115,12 +115,58 @@ export function maskStrings(text) {
   );
 }
 
-// statementAt — the line plus continuation lines until the statement terminates,
-// so a prettier-wrapped ternary is judged as one expression. Bounded so a
+// statementAt — the whole statement containing line `i`, so a prettier-wrapped
+// ternary is judged as one expression. Bounded in BOTH directions so a
 // pathological file cannot make the guard slow.
+//
+// ⛔ IT MUST SCAN BACKWARD TOO (Codex P2 on #3356). The caller anchors on the line
+// holding the v2 key, but prettier is free to put the OTHER arm first:
+//
+//     const name =
+//       event.event ??                       // <- v1 arm, ABOVE the anchor
+//       event.attributes?.["event.name"];    // <- anchor line
+//
+// A forward-only window starting at the anchor never sees `event.event`, so
+// `laddersInSource` returned no hit and the empty allowlist stayed green for a
+// hand-rolled ladder the guard claims to detect. The original positive-control
+// fixture only exercised the opposite ordering, so it could not catch this — a
+// guard that cannot see half its own target is the defect class this repo keeps
+// paying for.
+//
+// The anchor stays "v2 key on THIS line", so a multi-line statement still reports
+// exactly once (the dedup that collapsed 19 raw hits to 10 real sites is intact).
 function statementAt(lines, i, maxLines = 4) {
-  let out = lines[i];
-  for (let k = i + 1; k < Math.min(lines.length, i + maxLines); k++) {
+  // Walk back ONLY across lines that clearly CONTINUE an expression — i.e. that end
+  // in a joiner or assignment (`??`, `||`, `&&`, `=`, `(`). That is exactly the
+  // shape prettier produces when it wraps a ladder:
+  //
+  //     const name =            <- ends `=`,  crossed
+  //       event.event ??        <- ends `??`, crossed
+  //       event.attributes?.["event.name"];
+  //
+  // A permissive "stop only at `;{}`" rule is WRONG and I measured it: it walked up
+  // into an object-literal KEY line (`"event.name":` in
+  // orch-monitor/ui/src/hooks/use-activity.ts), whose bare `name` plus the
+  // following ternary's `?` satisfied the ladder pattern and reported a builder
+  // that is not a ladder at all. Widening a detector until it invents hits is the
+  // same failure as one that misses them — this bound keeps it honest in both
+  // directions.
+  let start = i;
+  for (let k = i - 1; k >= 0 && k > i - maxLines; k--) {
+    const prev = lines[k].trim();
+    if (prev === "" || COMMENT_LINE.test(prev)) break;
+    if (!/(\?\?|\|\||&&|=|\()\s*$/.test(prev)) break;
+    start = k;
+  }
+  // Forward extent is measured from the ANCHOR, not from `start`. Widening it to
+  // `start + maxLines*2` swallowed neighbouring object-literal properties and
+  // produced a false positive on use-activity.ts (an `attributes: { "event.name":
+  // … }` builder, which is not a ladder at all) — the backward walk had correctly
+  // stopped at `attributes: {`. Extending the window backward must not also extend
+  // it forward: a detector that starts inventing hits is no better than one that
+  // misses them.
+  let out = lines[start];
+  for (let k = start + 1; k < Math.min(lines.length, i + maxLines); k++) {
     if (/;\s*$/.test(out)) break;
     out += " " + lines[k].trim();
   }
@@ -328,6 +374,32 @@ describe("detector fixtures — ladders are caught, non-ladders are not", () => 
       "  : asString(obj.event);",
     ].join("\n");
     expect(line(src)).toEqual([2]);
+  });
+
+  // Codex P2 on #3356. The fixture above only exercises v2-BEFORE-v1. Prettier is
+  // equally free to emit the other order, and a forward-only statement window
+  // starting at the v2 anchor never sees the v1 arm above it — so the guard
+  // returned NO hit and the empty allowlist stayed green for a ladder it claims to
+  // detect. Both orderings are now pinned; neither alone is sufficient evidence.
+  test("a prettier-wrapped ladder with the v1 arm ABOVE the v2 key is caught too", () => {
+    const src = [
+      "const name =",
+      "  event.event ??",
+      '  event.attributes?.["event.name"];',
+    ].join("\n");
+    // Reported at the v2 key's line (3), same anchor convention as above.
+    expect(line(src)).toEqual([3]);
+  });
+
+  test("the backward scan stops at a statement boundary (no false positive across statements)", () => {
+    // A `;`-terminated line above must NOT be pulled into the window, or every
+    // attributes-only read following an unrelated `event.event` line would be
+    // reported — the guard would go from missing hits to inventing them.
+    const src = [
+      "const prev = obj.event;",
+      'const only = attrs?.["event.name"];',
+    ].join("\n");
+    expect(line(src)).toEqual([]);
   });
 
   test("BLIND SPOT (a), asserted not claimed: a cross-statement ladder is NOT caught", () => {

@@ -109,11 +109,17 @@ Taken verbatim from `mini:~/catalyst/events/2026-08.jsonl` — this is the subst
 matches commit messages and Linear descriptions that merely quote it — measured: 46 raw matches for
 `phase.advance.applied`, of which **all 46 were false positives**. Parse the JSON.
 
-⛔ **And read the name from both envelope shapes:**
+⛔ **And read the name through the shared boundary — never hand-roll the ladder:**
 
 ```js
-const name = event.attributes?.["event.name"] ?? event.event; // v2 ?? v1
+import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE boundary
+const name = getEventName(event); // v1 `event` -> v2 attributes["event.name"] -> v3 `name`
 ```
+
+A hand-rolled two-key read (`attributes?.["event.name"] ?? event`) misses **v3** entirely and
+returns the wrong value for an empty-string key. That is exactly the drift CTL-1834 removed by
+folding every read point onto one resolver, so a fourth envelope shape is a one-line change in one
+file instead of a hunt across five.
 
 An `attributes`-only reader misses every v1 event — **19,914 of them in 2026-08 on mini**, including
 the whole `reap-requested` family, which is the fleet's most active actuator (§4.1). This is the
@@ -248,7 +254,9 @@ Three consequences, all load-bearing:
 
 1. **A consumer matching only on `attributes["event.name"]` silently sees none of them.** That is
    19,914 events — including the single most active actuator in the fleet — invisible to an
-   attribute-only subscriber. Any filter must read `attributes["event.name"] ?? event`.
+   attribute-only subscriber. Any filter must resolve the name through the shared boundary
+   (`lib/event-name.mjs`'s `getEventName`, CTL-1834) — not a hand-rolled two-key read, which
+   misses v3.
 2. **`<T>` is genuinely absent here**, so the reaper cannot learn the ticket from the event. It
    doesn't try: the event is a **contentless wake**, and the reaper then makes its own authoritative
    read of the worker directories. That is "let the event wake the scan" working correctly in
