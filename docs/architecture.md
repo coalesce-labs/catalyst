@@ -93,7 +93,11 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
 - **state.json** — active-orchestrator registry (progress, worker status, attention items). Schema:
   `plugins/dev/templates/global-state.json`.
 - **events/** — every phase transition, PR creation, verification result, attention item. Schema:
-  `plugins/dev/templates/global-event.json`. Multiple writers, two envelope shapes coexisting:
+  `plugins/dev/scripts/lib/event-envelope.mjs` (CTL-1819) — an executable, measured contract
+  validated at the read boundary, counting violations without ever throwing. It replaced
+  `plugins/dev/templates/global-event.json`, a draft-07 file cited here and in `docs/adrs.md` as the
+  contract for the life of the project which **passed 0 of 1,194,150 live events** and was imported
+  by no code; that file is deleted. Multiple writers, two envelope shapes coexisting:
   - **v1** (bash, `catalyst-state.sh event`): `{ts, event, orchestrator, worker, detail}`.
   - **v2 OTel** (`plugins/dev/scripts/orch-monitor/lib/webhook-events.ts` for `github.*`/`linear.*`;
     `catalyst-comms send` for `comms.message.posted`): `{ts, attributes, body, resource}`.

@@ -3,6 +3,9 @@
 // (incremental counters), and reaper.mjs (boot replay).
 import { openSync, fstatSync, readSync, closeSync, statSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
+// CTL-1819. lib/event-envelope.mjs is itself import-free, so this keeps
+// event-tail.mjs npm-free (node: builtins only) and bare-Node loadable.
+import { checkEnvelope } from "../lib/event-envelope.mjs";
 
 const DEFAULT_CHUNK = 1 << 20; // 1 MiB — bounds peak memory regardless of file size.
 
@@ -104,8 +107,9 @@ export function parseEventTailChunk(chunk, leftover = "", lineFilter = null) {
   for (const line of lines) {
     if (!line) continue;
     if (lineFilter && !lineFilter(line)) continue;
+    let parsed;
     try {
-      events.push(JSON.parse(line));
+      parsed = JSON.parse(line);
     } catch {
       // CTL-1809: count and warn before skipping. This is a COMPLETE line (the trailing
       // partial was popped off above), so an unparseable one here is real damage, not a
@@ -113,6 +117,16 @@ export function parseEventTailChunk(chunk, leftover = "", lineFilter = null) {
       noteTornLine(line);
       continue; // skip a malformed complete line, keep tailing
     }
+    // CTL-1819: validate the envelope, COUNT a violation, and PASS THE EVENT
+    // THROUGH REGARDLESS. Dropping here would be a silent routing change — an
+    // event missing `ts` reaches the broker today, and a schema landing as a
+    // filter would stop delivering it with no ticket, no alarm and no diff at
+    // the call site. This layer is a detector, not a gate: `checkEnvelope`
+    // never throws, and the only observable effect is the counter plus a
+    // sparse stderr warning. Tearing (unparseable) is the branch above and a
+    // different detector; see lib/event-envelope.mjs on why they are separate.
+    checkEnvelope(parsed);
+    events.push(parsed);
   }
   return { events, leftover: newLeftover };
 }

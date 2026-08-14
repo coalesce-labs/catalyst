@@ -896,6 +896,7 @@ jobs:
             event-log-read-guard.test.mjs \
             event-name-fold.test.mjs \
             event-name-read-guard.test.mjs \
+            event-envelope.test.mjs \
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \
