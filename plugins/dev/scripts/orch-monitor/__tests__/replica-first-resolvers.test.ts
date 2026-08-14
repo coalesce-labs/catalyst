@@ -454,6 +454,34 @@ describe("CTL-1806 AC3: the degraded path is LOUD", () => {
     expect((events[0].attributes as Record<string, unknown>)["linear.read.result"]).toBe("failed");
     expect(events[0].severityText).toBe("WARN");
   });
+
+  // The twin of the test above, for the OTHER resolver. Without it, deleting the
+  // `result: "failed"` emission from linear-title-description-fallback.mjs left the
+  // whole suite GREEN (mutation-verified), while the same deletion in
+  // linear-estimate-fallback.mjs went RED. Two sibling resolvers, one of them
+  // silently unguarded on the branch an operator most needs to see: a degraded
+  // Linear read that did not even dispatch. AC3 is "the miss is LOUD" — a failure
+  // that emits nothing is the exact condition the emission exists to announce.
+  it("the title/description path ALSO emits result=failed (WARN) with no credential", async () => {
+    delete process.env.LINEAR_API_TOKEN;
+    delete process.env.LINEAR_API_KEY;
+    const spy = spyFetch();
+    const replica = fakeReplica({ details: {} });
+    try {
+      await fillTitleDescriptionFallback(["CTL-904"], {
+        replicaOptions: { readerFactory: replica.factory },
+      });
+      expect(spy.callCount).toBe(0); // undispatchable — no outbound call at all
+    } finally {
+      spy.restore();
+    }
+    const events = readEmitted();
+    expect(events.length).toBe(1);
+    const a = events[0].attributes as Record<string, unknown>;
+    expect(a["linear.read.result"]).toBe("failed");
+    expect(a["linear.read.op"]).toBe("title_desc");
+    expect(events[0].severityText).toBe("WARN");
+  });
 });
 
 describe("CTL-1806 D1: the team estimation method stays a LABELLED degraded fetch", () => {
