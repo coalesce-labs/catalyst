@@ -20,8 +20,16 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test in-flight-supersede.test.mjs
 
-import { describe, test, expect } from "bun:test";
-import { isTicketInFlight, livePhaseEntries, deriveAdvancement } from "./scheduler.mjs";
+import { afterAll, describe, test, expect } from "bun:test";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  isTicketInFlight,
+  livePhaseEntries,
+  deriveAdvancement,
+  readPhaseSignals,
+} from "./scheduler.mjs";
 
 // Key order IS the fixture: readPhaseSignals inserts entries in ascending-mtime
 // order, so "first key = oldest dispatch, last key = most recent dispatch".
@@ -171,5 +179,103 @@ describe("deriveAdvancement — a superseded successor must not wedge the pipeli
   test("normal forward advancement is still unchanged", () => {
     expect(deriveAdvancement({ triage: "done" })).toBe("research");
     expect(deriveAdvancement({ triage: "done", research: "done" })).toBe("plan");
+  });
+});
+
+// ─── readPhaseSignals ordering (CTL-1723) ────────────────────────────────────
+//
+// The round-1 fix replaced raw readdirSync order with an ascending-mtime sort so
+// "last key = most recent dispatch" would not depend on the filesystem. It left a
+// hole: mtimeMs is coarse enough that two back-to-back writeFileSync calls land on
+// the IDENTICAL value, and Array#sort is stable — so a tie fell straight back to
+// readdirSync order, which is HASH order and hashes differently on APFS than on the
+// ext4 CI runners. Identical bytes on disk therefore derived `nextPhase: "review"`
+// on a Mac and `nextPhase: "verify"` on Linux, which is how
+// orch-monitor/__tests__/governance-journey.contract.test.ts came to fail in GitHub
+// Actions while passing on every developer machine.
+//
+// These tests inject a readdir that REVERSES the real enumeration, so the adversarial
+// order is present on every filesystem rather than only on the one whose hash happens
+// to disagree. Without the tieRank fallback in readPhaseSignals they fail here too.
+const tmpRoots = [];
+afterAll(() => {
+  for (const d of tmpRoots) {
+    try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// seedWorkerDir — writes one phase-<phase>.json per entry. `at` (epoch ms), when
+// given, is stamped onto the file so a test can pin an exact mtime relationship
+// instead of inheriting the clock's granularity.
+function seedWorkerDir(ticket, phases) {
+  const orchDir = mkdtempSync(join(tmpdir(), "phase-signal-order-"));
+  tmpRoots.push(orchDir);
+  const workerDir = join(orchDir, "workers", ticket);
+  mkdirSync(workerDir, { recursive: true });
+  for (const { phase, status, at } of phases) {
+    const path = join(workerDir, `phase-${phase}.json`);
+    writeFileSync(path, JSON.stringify({ status, bg_job_id: "bg_test" }));
+    if (at !== undefined) utimesSync(path, new Date(at), new Date(at));
+  }
+  return orchDir;
+}
+
+// reversedReaddir — the seam that makes the enumeration adversarial everywhere.
+const reversedReaddir = (dir) => [...readdirSync(dir)].reverse();
+
+describe("readPhaseSignals — ordering does not depend on directory enumeration order", () => {
+  const TICKET = "CTL-5555";
+  const SAME = Date.parse("2026-08-14T12:00:00.000Z");
+
+  test("two signals sharing an mtime order by pipeline ordinal, not by readdir", () => {
+    const orchDir = seedWorkerDir(TICKET, [
+      { phase: "implement", status: "done", at: SAME },
+      { phase: "verify", status: "done", at: SAME },
+    ]);
+    const signals = readPhaseSignals(orchDir, TICKET, { readdir: reversedReaddir });
+    expect(Object.keys(signals)).toEqual(["implement", "verify"]);
+  });
+
+  test("the same-tick tie derives the verify verdict edges, not a re-dispatch of verify", () => {
+    // The exact governance-journey contract: implement done + verify done seeded in
+    // one tick must route on the verdict (review / remediate). Reading `verify` as
+    // the phase still OWED means the verdict is never consulted at all.
+    const orchDir = seedWorkerDir(TICKET, [
+      { phase: "implement", status: "done", at: SAME },
+      { phase: "verify", status: "done", at: SAME },
+    ]);
+    const signals = readPhaseSignals(orchDir, TICKET, { readdir: reversedReaddir });
+    expect(deriveAdvancement(signals, { verifyVerdict: "pass" })).toBe("review");
+    expect(deriveAdvancement(signals, { verifyVerdict: "fail" })).toBe("remediate");
+  });
+
+  test("DISTINCT mtimes still win over the ordinal — a backward redispatch is preserved", () => {
+    // The property round 1 bought, which the tie-break must not trade away: verify
+    // and review are the OLD pass, implement is the newer dispatch, so implement is
+    // the latest and verify is owed again.
+    const orchDir = seedWorkerDir(TICKET, [
+      { phase: "verify", status: "done", at: SAME },
+      { phase: "review", status: "done", at: SAME + 1000 },
+      { phase: "implement", status: "done", at: SAME + 2000 },
+    ]);
+    const signals = readPhaseSignals(orchDir, TICKET, { readdir: reversedReaddir });
+    expect(Object.keys(signals)).toEqual(["verify", "review", "implement"]);
+    expect(deriveAdvancement(signals)).toBe("verify");
+  });
+
+  test("an unknown phase sharing the tick has no ordinal and does not throw", () => {
+    // phaseIndex throws on an unrecognized phase; tieRank must absorb that rather
+    // than let a recovery-pass signal crash every read of the worker dir.
+    const orchDir = seedWorkerDir(TICKET, [
+      { phase: "implement", status: "done", at: SAME },
+      { phase: "recovery-pass", status: "done", at: SAME },
+    ]);
+    const signals = readPhaseSignals(orchDir, TICKET, { readdir: reversedReaddir });
+    expect(signals.implement).toBe("done");
+    expect(signals["recovery-pass"]).toBe("done");
+  });
+
+  test("the default readdir seam is still the real one (absent dir → {})", () => {
+    expect(readPhaseSignals(join(tmpdir(), "no-such-orch-dir-phase-signal"), TICKET)).toEqual({});
   });
 });

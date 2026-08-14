@@ -1040,7 +1040,8 @@ export function readCurrentRunPrRepo(orchDir, ticket) {
 // ACTUALLY dispatched most recently rather than assuming higher pipeline-ordinal
 // always means more recent (false whenever an earlier phase is deliberately
 // re-dispatched after a later phase already left a signal, e.g. re-running
-// `implement` after `review` requested changes).
+// `implement` after `review` requested changes). Equal mtimes are broken by
+// pipeline ordinal rather than by readdirSync — see tieRank below.
 export function isPhaseSignalName(name) {
   const match = /^phase-(.+)\.json$/.exec(name);
   return Boolean(match && !match[1].includes("-yield-"));
@@ -1050,12 +1051,48 @@ export function workerDirHasPhaseSignals(names) {
   return (names ?? []).some(isPhaseSignalName);
 }
 
-export function readPhaseSignals(orchDir, ticket) {
+// tieRank — the tie-break ordinal for two signals written inside the SAME
+// filesystem timestamp tick (CTL-1723, the P2 deferred from CTL-1660 P1 /
+// #3081 round 4 — "use dispatch metadata or a reliable tie-break instead of
+// treating equal mtimes as ordered"). mtimeMs is coarse: two
+// writeFileSync calls in immediate succession land on the IDENTICAL mtime
+// (measured on APFS; necessarily true on the CI runner too, since a signal
+// written SECOND can only sort first when its mtime ties), and Array#sort is
+// stable, so a tie falls straight back to readdirSync order — the
+// filesystem-dependent order the ascending-mtime sort exists to eliminate.
+// readdirSync returns neither creation nor name order but HASH order (measured
+// on APFS: creating zzz, aaa, mmm, then phase-verify, phase-implement
+// enumerates as phase-implement, zzz, phase-verify, aaa, mmm), and filesystems
+// hash differently — so the SAME on-disk state ordered `implement, verify` on a
+// Mac and `verify, implement` on a Linux runner, and latestKnownPhase read a
+// different "most recent dispatch" from identical bytes.
+//
+// Under a tie there is no chronological signal left to consult, so fall back to
+// the canonical pipeline ordinal: same-tick writes are forward progress
+// (implement then verify), never a backward re-dispatch — that requires an
+// agent to run between the two writes, which cannot happen inside one tick.
+// Unknown/non-pipeline phases (recovery-pass) have no ordinal and phaseIndex
+// throws on them, so they rank -1 and keep their existing relative order;
+// livePhaseEntries ignores their position anyway.
+//
+// That leaves one residual, and it is DELIBERATE AND BOUNDED: two phases that
+// BOTH rank -1 still tie, so their order is still readdirSync's. Nothing reads
+// it — livePhaseEntries admits every non-pipeline phase unconditionally
+// (`!isKnownPhase(phase)`) and latestKnownPhase skips them when picking the
+// latest dispatch, so no advancement, supersession, or in-flight decision can
+// observe which of two unknown phases came first. Do not "finish" this by
+// inventing an ordinal for unknown phases: there is no correct one, and
+// manufacturing a rank would make them supersede each other.
+function tieRank(phase) {
+  return isKnownPhase(phase) ? phaseIndex(phase) : -1;
+}
+
+export function readPhaseSignals(orchDir, ticket, { readdir = readdirSync } = {}) {
   const dir = join(orchDir, "workers", ticket);
   const signals = {};
   let files;
   try {
-    files = readdirSync(dir);
+    files = readdir(dir);
   } catch {
     return signals; // no worker dir yet
   }
@@ -1078,7 +1115,7 @@ export function readPhaseSignals(orchDir, ticket) {
     }
     entries.push({ phase: m[1], status, mtimeMs });
   }
-  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs || tieRank(a.phase) - tieRank(b.phase));
   for (const e of entries) signals[e.phase] = e.status;
   return signals;
 }
