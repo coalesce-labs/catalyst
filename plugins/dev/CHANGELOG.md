@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.54.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.54.0...catalyst-dev-v12.54.1) (2026-08-14)
+## [12.54.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.54.0...catalyst-dev-v12.54.1)
+
+Aug 14, 2026
+
+<!-- ai-enhanced -->
+
+### Event Pipeline Integrity Fixes
+
+This release addresses a cluster of reliability issues in the event pipeline: torn lines from concurrent bash appends, degenerate records destroyed in transit to Loki, double-counted drop metrics, and terminal events that went invisible to the worker-state projection when the primary emit path failed. Dependency installs that silently no-op'd after a transitive resolution change — leaving daemons running stale code — now detect the skew and force a relink. The commits-behind gauge is also fixed to measure the roots daemons actually run from rather than always reporting zero.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** CTL-1659 — a dependency fix that lands on main must reach the running cloud-sync writer ([#3344](https://github.com/coalesce-labs/catalyst/issues/3344)) ([1ce1c5a](https://github.com/coalesce-labs/catalyst/commit/1ce1c5a49e4f870693327474d51e277a539f9362))
 * **dev:** CTL-1795 — dual-emit the v2 envelope from every v1 site, so a consumer filtering on event.name stops seeing a smaller universe ([#3343](https://github.com/coalesce-labs/catalyst/issues/3343)) ([b724db9](https://github.com/coalesce-labs/catalyst/commit/b724db966e14770cde997cf5d658d62f49c60424))
