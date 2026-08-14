@@ -3,9 +3,11 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test event-envelope.test.mjs
 //
 // The fixtures below are not invented. Each is the minimal form of a shape
-// MEASURED on mini's 2026-08 log (1,194,150 lines, 100% parsed):
+// MEASURED on ONE FROZEN BYTE SNAPSHOT of mini's 2026-08 log (1,117,890,759 B;
+// 1,202,573 lines, 100% parsed). The shape counts SUM to the total exactly, so
+// "every line has a discriminator" is arithmetic, not a separate query:
 //
-//   v2-only  1,167,253   v1-only  25,355   dual  951   v3-only  532
+//   v2-only 1,175,708 + v1-only 25,355 + dual 978 + v3-only 532 = 1,202,573
 //
 // LIVE-CORPUS CHECK. CI cannot reach ~/catalyst/events/*.jsonl, so the
 // "schema describes reality" AC is served two ways: the fixture set here, and

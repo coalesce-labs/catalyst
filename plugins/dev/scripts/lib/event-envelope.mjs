@@ -8,27 +8,47 @@
 // docs/architecture.md as THE event contract for the life of the project. It
 // required `{ts, orchestrator, event}` with a closed enum of names like
 // `orchestrator-started`. MEASURED against the live log: it passes 0 of
-// 1,194,150 events, no code has ever imported it, and both citations are prose.
+// 1,202,573 events, no code has ever imported it, and both citations are prose.
 // A mechanism that has never produced an output does not exist — so it is
 // deleted in the same change that adds this file. Leaving a false contract next
 // to a true one is the duplication this work exists to remove.
 //
 // ── THE SCHEMA IS MEASURED, NOT DESIGNED ────────────────────────────────────
 // Every rule below was derived by counting the live corpus, not by deciding what
-// events ought to look like. Full census of mini's 2026-08 log, 1,194,150 lines,
-// 100% parsed (zero torn):
+// events ought to look like.
 //
-//   v2-only  `attributes`            1,167,253
-//   v1-only  `event`                    25,355
-//   dual     `event`+`attributes`          951   ← the CTL-1795 superset
-//   v3-only  `name`                        532
-//   ────────────────────────────────────────────
-//   lines with none of the three                0
+// METHODOLOGY (Codex round 4). Every figure here comes from ONE FROZEN BYTE
+// SNAPSHOT — `head -c $(stat -f %z "$LOG") "$LOG" > snapshot` — and every count
+// reads only that snapshot. The first cut of this header did not: its counts were
+// separate queries minutes apart against a file being appended to, so the four
+// shape counts summed to 1,194,091 against a stated 1,194,150 total, leaving 59
+// lines unexplained. That mattered because the numbers were used to support a
+// NEGATIVE ("no line lacked a discriminator"), and AGENTS.md is explicit that a
+// negative is only evidence if the instrument could have shown otherwise. Counts
+// taken at different times against a growing file cannot.
 //
-// Two invariants were confirmed the same way rather than assumed:
-//   • `ts` is present and a string on 1,194,144 of 1,194,144 lines.
-//   • All 951 dual lines AGREE between `.event` and `.attributes["event.name"]`
+// mini's 2026-08 log, snapshot 1,117,890,759 bytes:
+//
+//   total lines                              1,202,573
+//   parsed (JSON.parse succeeds)             1,202,573   ← 100%, zero torn
+//
+//   v2-only  `attributes`                    1,175,708
+//   v1-only  `event`                            25,355
+//   dual     `event`+`attributes`                  978   ← the CTL-1795 superset
+//   v3-only  `name`                               532
+//   ────────────────────────────────────────────────────
+//   sum                                      1,202,573   ← EQUALS total, exactly
+//
+// The shapes account for every line by arithmetic, so "no line lacks a
+// discriminator" is a reconciliation rather than a separate query that could
+// disagree with the others.
+//
+// Two further invariants, same snapshot:
+//   • `ts` is present and a string on 1,202,573 of 1,202,573 lines.
+//   • All 978 dual lines AGREE between `.event` and `.attributes["event.name"]`
 //     (consistent with CTL-1834's all-files census: 322/322 agreed there).
+//   • ZERO lines carry `name` alongside `event` or `attributes` — see the
+//     classifyEnvelope note on why that combination is nonetheless unmodeled.
 //
 // ── TWO LAYERS, AND THE SPLIT IS THE WHOLE DESIGN ───────────────────────────
 // The ticket's constraints pull in opposite directions: drift must redden CI,
@@ -146,6 +166,16 @@ function nonEmptyString(v) {
  * classified as one shape and named from another.
  *
  * Returns "v1" | "v2" | "v3" | "dual" | "unknown".
+ *
+ * ⚠️ UNMODELED COMBINATION, known and deliberately left open (Codex round 4, P2,
+ * deferred to CTL-1857). `name` alongside `event` or `attributes` collapses to
+ * v1/v2 here, and validateEnvelope only cross-checks the v1+v2 pair — so
+ * `{ts, event:"a", name:"b"}` validates clean and the vocabulary guard stays
+ * green because both keys are already known. MEASURED on the frozen snapshot:
+ * ZERO of 1,202,573 lines carry that combination, so there is no live instance;
+ * it would arise during an envelope migration, which is exactly when a silent
+ * pass is least affordable. Fix is to compare every discriminator present, not
+ * only the modeled pair.
  */
 export function classifyEnvelope(event) {
   if (!isPlainObject(event)) return "unknown";
