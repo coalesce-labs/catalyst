@@ -63,6 +63,8 @@ const INLINE_EVENT_NAMES = [
   "phase.triage.linear-transition.CTL-1", // triage-transition-event.mjs:53
   "phase.advance.held.CTL-1",         // CTL-755 recovery.mjs defaultAppendPhaseAdvanceHeldEvent
   "phase.advance.applied.CTL-1",      // CTL-1789 recovery.mjs defaultAppendPhaseAdvanceAppliedEvent
+  "phase.advance.suppressed-duplicate.CTL-1", // CTL-1805 recovery.mjs defaultAppendPhaseAdvanceSuppressedEvent (idempotency guard)
+  "phase.dispatch.claim-lost.CTL-1",  // CTL-1805 phase-agent-dispatch bow-out (audible lost single-flight claim)
   "linear.state.write.CTL-1",         // linear-state-write-event.mjs:77
   "agent.waiting_on_user",            // wait-event.mjs:buildWaitEnvelope
   "agent.resumed",                    // wait-event.mjs:buildWaitEnvelope
@@ -190,6 +192,31 @@ describe("recovery.mjs dynamic phase-slot producers", () => {
     // The slot itself is a documented exception (used by both actions).
     expect(isAllowedPhaseSlot("advance")).toBe(true);
     expect(KNOWN_PHASES.includes("advance")).toBe(false);
+  });
+
+  // CTL-1805: the idempotency-guard's two new audit events join the same
+  // allowed-but-non-routing posture. `suppressed-duplicate` rides the "advance"
+  // exception slot; `claim-lost` rides the pre-existing "dispatch" exception
+  // slot. Neither action ("suppressed-duplicate" / "claim-lost") is in
+  // PHASE_EVENT_PATTERN's terminal-status alternation, so phaseSlotOf returns
+  // null → tryPhaseLifecycleRoute returns [] → pure audit, no wake (identical to
+  // the CTL-1789 applied-advance property above). This is load-bearing: an
+  // 8-tick-per-window suppression storm must NEVER become a wake storm.
+  test("CTL-1805: suppressed-duplicate + claim-lost are allowed but create NO routing match", () => {
+    const suppressedName = "phase.advance.suppressed-duplicate.CTL-1";
+    const claimLostName = "phase.dispatch.claim-lost.CTL-1";
+    for (const name of [suppressedName, claimLostName]) {
+      expect(isBrokerProtectedName(name), `${name} must not be broker-protected`).toBe(false);
+      expect(PHASE_EVENT_PATTERN.test(name), `${name} must not match the routing pattern`).toBe(
+        false
+      );
+      expect(phaseSlotOf(name), `${name} must not resolve to a routable phase slot`).toBeNull();
+    }
+    // Both exception slots are documented and non-canonical.
+    expect(isAllowedPhaseSlot("advance")).toBe(true);
+    expect(isAllowedPhaseSlot("dispatch")).toBe(true);
+    expect(KNOWN_PHASES.includes("advance")).toBe(false);
+    expect(KNOWN_PHASES.includes("dispatch")).toBe(false);
   });
 });
 

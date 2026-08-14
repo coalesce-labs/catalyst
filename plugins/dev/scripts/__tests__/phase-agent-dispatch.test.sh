@@ -2506,6 +2506,66 @@ assert_eq "yes" "$(case "$STATUS74B" in claim-lost|running|dispatched|idempotent
 assert_eq "no" "$LAUNCHED74B" "74: the racing twin launched NO second worker (no double-spawn)"
 assert_eq "$CLAIMS_BEFORE74" "$CLAIMS_AFTER74" "74: the twin won no additional generation (claim count unchanged)"
 
+# ─── CTL-1805 (A3): a lost single-flight claim is AUDIBLE ────────────────────
+# Before CTL-1805 the dispatcher's bow-out (`status:"claim-lost"` on stdout,
+# exit 0) was completely silent — no stderr, no log, no event. Across the 13
+# CTL-56 collisions in the RCA there were ZERO claim-lost events. The fix emits
+# exactly one `phase.dispatch.claim-lost.<TICKET>` at the single point the
+# collision is confirmed, carrying ticket, phase, and the contested generation.
+# Fail-open: the emit must never change the exit-0 / stdout contract.
+
+echo ""
+echo "Test 100 (CTL-1805 A3): a lost claim emits exactly one phase.dispatch.claim-lost.<TICKET> event"
+fresh_env t100_claim_lost_event
+# Isolate the events dir so we assert only on THIS dispatch's emissions.
+CL_EVENTS_DIR="${TEST_DIR}/events"
+mkdir -p "$CL_EVENTS_DIR"
+export CATALYST_EVENTS_DIR="$CL_EVENTS_DIR"
+# Pre-seed a YOUNG (within-grace, fresh mtime) held claim at gen 1 with NO signal
+# file — the fixed-target claim-lost path (mirrors Test 43): a fresh dispatch
+# targets gen 1, collides with the tombstone, and — because the claim is young
+# (mtime ~now) — does NOT reap it, so it bows out as claim-lost.
+printf '{"generation":1,"claimedAt":"2026-05-30T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC100=$?
+assert_eq "0" "$RC100" "100: claim-lost still exits 0 (contract preserved)"
+assert_eq "claim-lost" "$(echo "$STDOUT" | jq -r '.status')" "100: stdout status = claim-lost (contract preserved)"
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "100: no worker spawned"
+# The event log for the current month — canonical_jsonl_append writes YYYY-MM.jsonl.
+CL_MONTH_FILE="$(ls "${CL_EVENTS_DIR}"/*.jsonl 2>/dev/null | head -1)"
+assert_eq "yes" "$([[ -n "$CL_MONTH_FILE" && -s "$CL_MONTH_FILE" ]] && echo yes || echo no)" \
+	"100: an event line was appended to the events dir"
+# Exactly one line whose event.name is the claim-lost name for this ticket.
+CL_COUNT=$(jq -c 'select(.attributes["event.name"] == "phase.dispatch.claim-lost.CTL-100")' "$CL_MONTH_FILE" 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "1" "$CL_COUNT" "100: exactly one phase.dispatch.claim-lost.CTL-100 event emitted"
+# The line carries ticket, phase, and the contested generation.
+CL_LINE=$(jq -c 'select(.attributes["event.name"] == "phase.dispatch.claim-lost.CTL-100")' "$CL_MONTH_FILE" 2>/dev/null | head -1)
+assert_eq "triage" "$(echo "$CL_LINE" | jq -r '.body.payload.phase // .attributes["catalyst.phase"] // empty')" \
+	"100: event carries phase=triage"
+assert_eq "1" "$(echo "$CL_LINE" | jq -r '.body.payload.generation // empty')" \
+	"100: event carries generation=1 (the contested target)"
+unset CATALYST_EVENTS_DIR
+
+echo ""
+echo "Test 100b (CTL-1805 A3, POSITIVE CONTROL): a fresh no-collision dispatch emits ZERO claim-lost events"
+fresh_env t100b_claim_lost_control
+CL_EVENTS_DIR2="${TEST_DIR}/events"
+mkdir -p "$CL_EVENTS_DIR2"
+export CATALYST_EVENTS_DIR="$CL_EVENTS_DIR2"
+# No pre-seeded claim → a clean fresh dispatch that WINS its generation and spawns.
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC100B=$?
+assert_eq "0" "$RC100B" "100b: fresh dispatch exits 0"
+assert_eq "running" "$(echo "$STDOUT" | jq -r '.status')" "100b: fresh dispatch status = running (won its claim)"
+# Positive control: the events dir must contain NO claim-lost line for this ticket.
+CL_MONTH_FILE2="$(ls "${CL_EVENTS_DIR2}"/*.jsonl 2>/dev/null | head -1)"
+CL_COUNT2=0
+if [[ -n "$CL_MONTH_FILE2" ]]; then
+	CL_COUNT2=$(jq -c 'select(.attributes["event.name"] == "phase.dispatch.claim-lost.CTL-100")' "$CL_MONTH_FILE2" 2>/dev/null | wc -l | tr -d ' ')
+fi
+assert_eq "0" "$CL_COUNT2" "100b: ZERO claim-lost events on a successful dispatch (positive control)"
+unset CATALYST_EVENTS_DIR
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
