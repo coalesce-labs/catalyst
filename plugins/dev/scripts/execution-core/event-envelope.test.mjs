@@ -409,16 +409,24 @@ describe("live corpus (opt-in)", () => {
       // text does not end in a newline. Everything else is complete by construction.
       const endsWithNewline = text.endsWith("\n");
       const rawLines = text.split("\n");
-      const trailingFragment = endsWithNewline ? null : rawLines[rawLines.length - 1];
-      const lines = rawLines.filter(Boolean);
+      // Codex round 9: identify the fragment by POSITION, never by value. Comparing
+      // `line === trailingFragment` exempted every line whose TEXT matched the final
+      // unterminated one — so a complete `{not json}` earlier in the file was waved
+      // through because an identical fragment happened to end it. Only the last
+      // element can be a fragment, and only when the text does not end in a newline.
+      const fragmentIndex = endsWithNewline ? -1 : rawLines.length - 1;
+      const lines = [];
+      for (let i = 0; i < rawLines.length; i++) {
+        if (rawLines[i]) lines.push({ line: rawLines[i], isFragment: i === fragmentIndex });
+      }
       const failures = [];
       let torn = 0;
-      for (const line of lines) {
+      for (const { line, isFragment } of lines) {
         let ev;
         try {
           ev = JSON.parse(line);
         } catch {
-          if (line === trailingFragment) {
+          if (isFragment) {
             torn += 1; // a genuine mid-write fragment — not damage
             continue;
           }
