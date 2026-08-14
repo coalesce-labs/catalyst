@@ -62,6 +62,13 @@ beforeAll(() => {
   mkdirSync(workerDir(), { recursive: true });
 
   // Seed: implement done → verify done (no high findings → should advance to review).
+  // These two writes land in ONE filesystem timestamp tick, so their signal files
+  // carry the IDENTICAL mtime and readPhaseSignals has no chronology to order them
+  // by — it falls back to its tie-break. Until CTL-1723 that tie-break was
+  // readdirSync order, which is hash order and hashes differently per filesystem:
+  // this suite passed on macOS and failed deterministically on the Linux CI runner,
+  // where `implement` read as the latest phase and every fetch below answered
+  // nextPhase "verify" instead of routing on the verdict.
   writeSignal("implement", "done");
   writeSignal("verify", "done");
   writeVerify(0, []); // regression_risk < 5, no high findings → "pass"
