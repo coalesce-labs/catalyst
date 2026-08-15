@@ -36,12 +36,21 @@
 #     [--asserted-by <writer-id>] \
 #     [--no-signal-update]
 #
-# --status yield (CTL-1854): declare a BOUNDED, resumable wait on the agent's own
-#   background work, instead of ending the turn undeclared. An undeclared exit is
-#   written as failed/abandoned/ended-without-declaration by
-#   sdk-run-phase-agent — measured 2026-08-14 on five real runs whose work had
-#   actually finished — so this is the declaration that turns a silent
-#   abandonment into an explicit wait. Writes status "awaiting-work" plus
+# --status yield (CTL-1854): declare a BOUNDED wait on the agent's own background
+#   work, instead of ending the turn undeclared.
+#
+#   ⚠️ A YIELD DOES NOT RESUME YOU. Nothing redispatches an `awaiting-work` phase;
+#   the scheduler preserves it while the deadline is live and writes `failed` when
+#   it passes. It buys an accurate, bounded RECORD and nothing else. If you want to
+#   be resumed, do not stop — finish, or stay alive until the work lands. (An
+#   event-driven resume path is CTL-1861; until it exists, do not read "wait" as
+#   "you will be woken".)
+#
+#   Why declare at all, then: an undeclared exit is written as
+#   failed/abandoned/ended-without-declaration by sdk-run-phase-agent — measured
+#   2026-08-14 on five real runs whose work had actually finished — so this
+#   replaces a silent, misattributed abandonment with an explicit, bounded, and
+#   accurately-named one. Writes status "awaiting-work" plus
 #   `yieldedAt` / `firstYieldedAt`; NOT terminal, so completedAt stays unset.
 #
 #   It is deliberately NOT `park` (needs-input): that means waiting on a HUMAN and
@@ -49,7 +58,8 @@
 #
 #   ⚠️ A YIELD IS A DEADLINE, NOT A PERMIT. `isTicketInFlight` frees a slot only
 #   for failed|stalled|aborted, so any other status HOLDS it. Past the deadline
-#   the runner writes the same terminal it writes today, with failureReason
+#   the SCHEDULER TICK — not this script and not the runner, neither of which runs
+#   again — writes the same terminal an undeclared exit gets, with failureReason
 #   "yield-expired". --yield-seconds requests LESS than the 30-minute ceiling
 #   (Linear's session-stale deadline); it can never request more, and the ceiling
 #   bounds the whole episode via `firstYieldedAt`, so re-yielding buys nothing.

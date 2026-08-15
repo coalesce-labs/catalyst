@@ -12,6 +12,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "./config.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
 
 // CTL-1367 P2-G: the grace window for a "young" single-flight claim — matches
 // phase-agent-dispatch's CTL-837 pre-spawn orphan-reap grace (find -mmin +2). A
@@ -244,7 +245,14 @@ export function listDispatchedPhases(orchDir, ticket) {
 // SDK_INFLIGHT_STATUSES — the non-terminal worker statuses an in-process SDK
 // phase worker passes through: the shared pre-launch writes "dispatched"; the
 // phase skill flips it to "running". Both are "occupying a slot".
-const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
+// CTL-1854: `awaiting-work` counts as occupancy. A yield HOLDS the ticket's slot
+// (isTicketInFlight frees a slot only for failed|stalled|aborted), but occupancy
+// is counted here through a DIFFERENT allow-list — so without this entry the
+// phase worker exits, the yield contributes zero, and at maxParallel=1 the next
+// tick dispatches another ticket while the first is still notionally holding its
+// slot. Two allow-lists for one question is how a limit gets exceeded while every
+// individual check looks right; they must agree for as long as the yield lives.
+const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running", YIELDED_STATUS]);
 
 // countSdkInflight — CTL-1367 P1: the executor=sdk occupancy analogue of
 // liveBackgroundCount (claude-agents.mjs:countBackgroundAgents). Under executor=sdk
