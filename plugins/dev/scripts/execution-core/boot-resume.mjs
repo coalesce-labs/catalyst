@@ -71,6 +71,7 @@ import { defaultDispatch } from "./dispatch.mjs";
 // must stay synchronous to complete before the monitor/scheduler start.)
 import { liveAgents } from "./cli/sessions.mjs";
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
+import { countYieldedOccupancy } from "./signal-reader.mjs"; // CTL-1854: mode-independent yield occupancy
 
 // ─── CTL-644: cheap/expensive classification ───────────────────────────────
 //
@@ -464,13 +465,12 @@ export function selectBootResumeCandidates({
     // second place would give the deadline two writers and re-open the
     // late-completion race by widening it.
     if (String(active.status) === YIELDED_STATUS) {
-      // ⚠️ CHARGE THE SLOT BEFORE SKIPPING. `continue` here bypasses the liveCount
-      // increment below, so the first cut of this skip fixed the false page and
-      // opened a capacity hole in the same line: a yielded ticket still HOLDS its
-      // slot, but boot would compute free slots as if it did not and resume
-      // another candidate straight through it. Not resuming a ticket is not the
-      // same as the ticket not existing.
-      liveCount += 1;
+      // Slot accounting for yields happens OUTSIDE this loop — see the
+      // countYieldedOccupancy term at the computeFreeSlots call below. It cannot
+      // live here: this loop iterates `listInFlightTickets`, which EXCLUDES a
+      // ticket whose only yield is an ancillary phase (a recovery-pass yielding
+      // beside a failed/stalled pipeline phase), so an in-loop increment silently
+      // misses exactly the case that most needs charging.
       logger.debug(
         { ticket, phase: active.phase },
         "boot-resume: skipping awaiting-work (bounded wait; the tick owns expiry) — slot still charged"
@@ -532,7 +532,18 @@ export function selectBootResumeCandidates({
     }
   }
 
-  const free = computeFreeSlots(maxParallel, liveCount);
+  // CTL-1854: yielded phases hold their slots and are counted independently of the
+  // in-flight loop above, so an ANCILLARY yield (recovery-pass beside a terminal
+  // pipeline phase — the ticket is not "in flight") is still charged. Disjoint from
+  // liveCount, which counts tickets with a LIVE bg worker; a yielded worker has
+  // exited. Best-effort: a scan failure must not block boot resume.
+  let yieldedOccupancy = 0;
+  try {
+    yieldedOccupancy = countYieldedOccupancy(orchDir);
+  } catch {
+    /* best-effort */
+  }
+  const free = computeFreeSlots(maxParallel, liveCount + yieldedOccupancy);
   needResume.sort((a, b) => a.ticket.localeCompare(b.ticket));
   // CTL-1422 (B): warm candidates always survive selection; the slice caps
   // only cold candidates, against the slots warm did not consume.

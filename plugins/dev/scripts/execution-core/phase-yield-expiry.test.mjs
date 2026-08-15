@@ -327,3 +327,42 @@ describe("⚠️ expiry does not depend on ticket-level in-flight", () => {
     expect(yieldAt).toBeLessThan(filterAt);
   });
 });
+
+describe("⚠️ round 12: the ancillary-yield shape, three more places", () => {
+  test("delegate dedup short-circuits a yield BEFORE the liveness probe", async () => {
+    // Adding the status to an allow-list that then asks a question it must fail is
+    // not the same as handling it: a yielded worker has EXITED, so its retained
+    // bg_job_id necessarily fails isBgJobAlive, and the probe reported "not live".
+    //
+    // Scoped to the ENCLOSING FUNCTION: delegate-queue.mjs probes isBgJobAlive in
+    // an earlier, unrelated function, so a file-wide index comparison compares
+    // across functions and answers a different question than the one asked.
+    for (const f of ["delegate-queue.mjs", "delegate-runner-entry.mjs"]) {
+      const src = await Bun.file(new URL(`./${f}`, import.meta.url)).text();
+      const sc = src.indexOf("if (sig.status === YIELDED_STATUS) return true;");
+      expect({ f, hasShortCircuit: sc > -1 }).toEqual({ f, hasShortCircuit: true });
+      // Body = from the short-circuit to the end of its function.
+      const bodyEnd = src.indexOf("\n}", sc);
+      expect(bodyEnd).toBeGreaterThan(sc);
+      const before = src.slice(0, sc);
+      const fnStart = Math.max(before.lastIndexOf("\nfunction "), before.lastIndexOf("\nexport function "));
+      expect(fnStart).toBeGreaterThan(-1);
+      const fnBody = src.slice(fnStart, bodyEnd);
+      const scInFn = fnBody.indexOf("if (sig.status === YIELDED_STATUS) return true;");
+      const probeInFn = fnBody.indexOf("isBgJobAlive(bgJobId)");
+      expect({ f, probeFound: probeInFn > -1 }).toEqual({ f, probeFound: true });
+      expect({ f, shortCircuitFirst: scInFn < probeInFn }).toEqual({ f, shortCircuitFirst: true });
+    }
+  });
+
+  test("boot-resume charges yields OUTSIDE the in-flight loop", async () => {
+    // listInFlightTickets excludes a ticket whose only yield is ancillary, so an
+    // in-loop increment misses exactly the case that most needs charging.
+    const src = await Bun.file(new URL("./boot-resume.mjs", import.meta.url)).text();
+    expect(src).toContain("countYieldedOccupancy(orchDir)");
+    expect(src).toContain("liveCount + yieldedOccupancy");
+    // and the in-loop increment must be gone (it would double-count)
+    const loopArea = src.slice(src.indexOf("skipping awaiting-work"), src.indexOf("skipping awaiting-work") + 400);
+    expect(loopArea).not.toContain("liveCount += 1");
+  });
+});

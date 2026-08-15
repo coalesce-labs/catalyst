@@ -100,6 +100,15 @@ function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, executor) {
   // CTL-1854: see delegate-queue.mjs — a yielded worker still owns its signal.
   if (sig.status !== "dispatched" && sig.status !== "running" && sig.status !== YIELDED_STATUS)
     return false;
+  // ⚠️ CTL-1854: a yielded worker OWNS the signal without a live job, so it must
+  // short-circuit BEFORE the liveness probe below. Under the default background
+  // executor it has already exited, so its retained bg_job_id necessarily fails
+  // isBgJobAlive — meaning the previous allow-list entry alone still reported
+  // "not live", let another recovery intent through, and let the dispatcher
+  // overwrite a live yielded signal with duplicate recovery work. Adding the
+  // status to a list that then asks a question it must fail is not the same as
+  // handling it.
+  if (sig.status === YIELDED_STATUS) return true;
   const bgJobId = sig.bg_job_id ?? null;
   if (!bgJobId) return executor === "sdk"; // sdk in-process worker: live with no bg id
   try {

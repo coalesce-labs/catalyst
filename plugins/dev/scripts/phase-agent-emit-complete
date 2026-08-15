@@ -517,6 +517,18 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		done | complete | completed | failed | stalled | skipped | aborted)
 			die "--status yield: phase already terminal ($_CUR_STATUS) — refusing to overwrite a finished phase with a wait"
 			;;
+		preempted)
+			# CTL-1854 (Codex round 12): `preempted` is NOT terminal, so a
+			# terminal-only guard let it through — and the ordering here is the
+			# REVERSE of the yielded-victim case. The scheduler preempted this
+			# worker but cannot stop an in-process query (killBgJob(null) is a
+			# no-op), so the still-running worker reaches this emitter and would
+			# overwrite `preempted` with `awaiting-work`. The resume sweep then no
+			# longer sees the victim, and the yield holds the capacity the
+			# preemption was freeing for queued priority work — defeating the
+			# preemption entirely. Preserve the victim state.
+			die "--status yield: phase was preempted — refusing to overwrite the victim state (the scheduler freed this slot for higher-priority work)"
+			;;
 		esac
 	fi
 	if [[ -f $SIGNAL_FILE ]]; then
