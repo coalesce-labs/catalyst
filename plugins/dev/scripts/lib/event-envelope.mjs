@@ -43,19 +43,30 @@
 // discriminator" is a reconciliation rather than a separate query that could
 // disagree with the others.
 //
-// POSITIVE CONTROLS (Codex round 5). Freezing the input prevents inter-query
-// growth; it does NOT show that a predicate could have selected a mismatch. Both
-// zero-results below were therefore re-run against a COPY of the snapshot with
-// one known instance of each appended:
+// POSITIVE CONTROLS (Codex rounds 5 + 18). Freezing the input prevents inter-query
+// growth; it does NOT show that a predicate could have selected a defect. EVERY
+// universal claim below was therefore re-run against a COPY of the snapshot with
+// one known instance appended — and each control was run in ISOLATION, because a
+// probe carrying two defects masks one behind the other (see the abort note):
 //
-//   dual-agreement predicate   snapshot 978 AGREE / 0 DISAGREE
-//                              probe    978 AGREE / 1 DISAGREE   ← selects it
-//   unmodeled-combination      snapshot 0
-//                              probe    1                        ← selects it
+//   dual-agreement          snapshot 978 AGREE / 0 DISAGREE
+//                           probe    978 AGREE / 1 DISAGREE   ← selects it
+//   unmodeled-combination   snapshot 0        probe 1         ← selects it
+//   non-string `ts`         snapshot 0        probe 1         ← selects it
+//   unparseable line        snapshot 0 torn   probe 1 torn    ← selects it
 //
-// So the zeros are evidence rather than an instrument that cannot fail. This
-// matters most for the combination result, which is used to justify deferring
-// the unmodeled-combination fix to CTL-1857.
+// ⚠️ METHODOLOGY CORRECTION from running the last one. The parse census must use a
+// NON-ABORTING reader: `jq -c .` exits 5 at the first unparseable line, so every
+// line after it goes uncounted. Measured — a probe with ONE bad line reported
+// `torn=2`, because the abort also swallowed the valid line following it, and the
+// bad-`ts` control run in the same probe found NOTHING because jq never reached it.
+// `jq -R 'fromjson?'` is the correct instrument and gives torn=1 / torn=0.
+//
+// ⭐ That means the original `jq -c .` census was sound ONLY BECAUSE its answer was
+// zero — an instrument that cannot count damage past the first instance cannot
+// establish there is none. It is the same abort CTL-1809 records for
+// `catalyst-events`' filter, hit here in the measurement rather than the pipeline.
+// So the zeros are evidence now, and the method that produced them is stated.
 //
 // Two further invariants, same snapshot:
 //   • `ts` is present and a string on 1,202,573 of 1,202,573 lines.
