@@ -64,14 +64,22 @@ describe("classifyLinearWebhookHealth", () => {
     expect(classifyLinearWebhookHealth(stateRecentOk, now, CFG).raise).toBe(false);
   });
 
-  it("does not raise when GitHub control is also stale (cannot prove the tunnel is up)", () => {
+  it("STILL raises when the GitHub control is stale — the two tunnels are independent", () => {
+    // Expectation deliberately reversed. GitHub and Linear use INDEPENDENT smee
+    // channels and separate tunnel instances, so GitHub's health says nothing about
+    // Linear's — and GitHub merely being QUIET suppressed a real Linear alarm
+    // entirely (on a Linear-only install it could never fire at all).
+    //
+    // The gate was also redundant: a Linear 401 already proves the Linear pipe
+    // DELIVERED — the request arrived and was rejected. If the tunnel were down
+    // there would be no 401 to stamp.
     const now = 1_000 * MIN;
     const state = {
       lastLinear2xxMs: null,
       lastLinearFailMs: now - 1 * MIN,
       lastGithub2xxMs: now - 999 * MIN, // GitHub way outside its healthy window
     };
-    expect(classifyLinearWebhookHealth(state, now, CFG).raise).toBe(false);
+    expect(classifyLinearWebhookHealth(state, now, CFG).raise).toBe(true);
   });
 
   it("clears when a Linear 2xx arrives after the failures (operator fixed the secret)", () => {
@@ -97,14 +105,16 @@ describe("classifyLinearWebhookHealth", () => {
     expect(classifyLinearWebhookHealth(state, now, CFG).raise).toBe(false);
   });
 
-  it("does not raise when no GitHub control seen at all", () => {
+  it("raises with NO GitHub control at all — a Linear-only install must still alarm", () => {
+    // The case that could never fire before: nothing about a Linear-only
+    // installation should require a GitHub witness.
     const now = 1_000 * MIN;
     const state = {
       lastLinear2xxMs: null,
       lastLinearFailMs: now - 1 * MIN,
-      lastGithub2xxMs: null, // no GitHub data
+      lastGithub2xxMs: null,
     };
-    expect(classifyLinearWebhookHealth(state, now, CFG).raise).toBe(false);
+    expect(classifyLinearWebhookHealth(state, now, CFG).raise).toBe(true);
   });
 });
 

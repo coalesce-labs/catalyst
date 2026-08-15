@@ -549,12 +549,27 @@ semantics.
 
 ## Linear webhook 401 alarm (`CATALYST_LINEAR_WEBHOOK_ALARM`, CTL-1841)
 
-The orch-monitor server compares `/api/webhook/linear` and `/api/webhook` (GitHub) response codes
-to detect a 401-only Linear delivery window — the failure mode that stopped all new-work dispatch
-for 7.5 hours on 2026-08-14. Both routes share the same smee tunnel, Bun process, and minute, so a
-GitHub 200 while Linear returns only 4xx proves the Linear HMAC secret is broken, not the
-network. The alarm is **alert-only**: it writes a durable marker and a `console.warn` line that
-Alloy ships to Loki independently of the broken webhook path. It never restarts the server.
+The orch-monitor server watches `/api/webhook/linear` response codes to detect a sustained
+authentication-failure window — the failure mode that stopped all new-work dispatch for 7.5 hours
+on 2026-08-14. The alarm is **alert-only**: it writes a durable marker and a `console.warn` line
+that Alloy ships to Loki independently of the broken webhook path. It never restarts the server.
+
+Two properties are worth stating precisely, because an earlier version of this page got both wrong
+and the code followed the page:
+
+- **The two webhook routes do NOT share a tunnel.** `linearWebhookConfig` is *"independent of
+  `webhookConfig`… so a daemon can run Linear-only or GitHub-only setups"*, and its `smeeChannel`
+  drives a **second** smee tunnel (CTL-242). So a GitHub 200 is **not** a control for Linear, and
+  requiring one meant a Linear-only install could never raise this alarm, while GitHub merely being
+  quiet for the window suppressed a real one. The alarm no longer consults GitHub at all — a Linear
+  **401 already proves the Linear pipe delivered**, since the request had to arrive to be rejected.
+  `githubOkAgeMs` is still reported for observability; it does not gate the decision.
+- **Not every Linear 4xx is an auth failure.** The handler verifies the HMAC signature **first**,
+  then returns 400 for a missing delivery header or invalid JSON — those are *validly signed*
+  requests. Only **401/403** are stamped as evidence here. A 400/404/5xx stamps nothing and leaves
+  the previous outcome standing, so an authentic-but-malformed delivery cannot latch this alarm and
+  send an operator to rotate a secret that is fine. (A 5xx storm deserves its own alarm; it is not
+  this one.)
 
 **Marker path**: `~/catalyst/linear-webhook-401-latch.json` (atomic tmp+rename; survives restarts).
 **Log format**: `[linear-webhook-alarm] RAISED/RECOVERED: /api/webhook/linear …` in `orch-monitor.log`.

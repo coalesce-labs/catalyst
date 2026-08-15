@@ -132,10 +132,21 @@ export function classifyLinearWebhookHealth(
     s.lastLinearFailMs !== null &&
     (s.lastLinear2xxMs === null || s.lastLinear2xxMs < s.lastLinearFailMs);
 
+  // ⚠️ NO CROSS-SOURCE GATE. This used to also require a recent GitHub 2xx as a
+  // "control is live" check — but GitHub and Linear use INDEPENDENT smee channels
+  // and separate tunnel instances, so GitHub's health says nothing about Linear's,
+  // and GitHub merely being QUIET for the window suppressed a real Linear alarm
+  // entirely. On a Linear-only installation it could never fire at all.
+  //
+  // The control was also redundant: a Linear 401 already proves the Linear pipe
+  // DELIVERED — the request arrived and was rejected. If the tunnel were down
+  // there would be no 401 to stamp. The failure is self-evidencing, so the alarm
+  // needs no witness from an unrelated transport.
+  //
+  // githubOkAgeMs stays in the returned snapshot for observability; it just no
+  // longer gates the decision.
   const raise =
     lastOutcomeIsFail &&
-    githubOkAgeMs !== null &&
-    githubOkAgeMs <= cfg.githubHealthyWindowMs && // control is live
     linearFailAgeMs !== null &&
     linearFailAgeMs <= cfg.failRecencyWindowMs && // fail is recent
     (linearOkAgeMs === null || linearOkAgeMs >= cfg.silentThresholdMs); // silent long enough
@@ -283,12 +294,22 @@ export function createRouteHealthMonitor(opts: RouteHealthMonitorOpts = {}) {
     renameSync(tmp, markerPath);
   }
 
+  // ⚠️ Only an AUTH status is evidence for this alarm. The handler verifies the
+  // HMAC signature FIRST and then returns 400 for a missing delivery header or
+  // invalid JSON (linear-webhook-handler.ts) — those are VALIDLY SIGNED requests,
+  // so treating every non-2xx as an auth failure lets a malformed-but-authentic
+  // delivery latch a "401" alarm that tells the operator to go rotate a secret
+  // that is fine. An alarm that misdirects is worse than one that stays quiet.
+  //
+  // 401/403 are the statuses that actually prove the signature was rejected.
+  // Anything else non-2xx is neither evidence of health nor of an auth failure, so
+  // it stamps nothing and leaves the previous outcome standing.
   function stampLinear(status: number): void {
     if (!cfg.enabled) return;
     const t = now();
     if (status >= 200 && status < 300) {
       state.lastLinear2xxMs = t;
-    } else {
+    } else if (status === 401 || status === 403) {
       state.lastLinearFailMs = t;
     }
   }

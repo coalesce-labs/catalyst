@@ -37,10 +37,30 @@ describe("createRouteHealthMonitor — stamping", () => {
     expect(mon.snapshot().lastLinearFailMs).toBeNull();
   });
 
-  it("stamps a 500 as a Linear failure", () => {
-    const mon = createRouteHealthMonitor({ now: () => 3000 });
-    mon.stampLinear(500);
-    expect(mon.snapshot().lastLinearFailMs).toBe(3000);
+  it("stamps 401/403 as the Linear auth failure", () => {
+    for (const status of [401, 403]) {
+      const mon = createRouteHealthMonitor({ now: () => 3000 });
+      mon.stampLinear(status);
+      expect(mon.snapshot().lastLinearFailMs).toBe(3000);
+    }
+  });
+
+  it("does NOT stamp a non-auth non-2xx as an auth failure", () => {
+    // Expectation deliberately reversed from its first version, which asserted a
+    // 500 stamps a failure. The handler verifies the HMAC FIRST and then returns
+    // 400 for a missing delivery header or invalid JSON — those are VALIDLY SIGNED
+    // requests. Treating every non-2xx as an auth failure lets an authentic but
+    // malformed delivery latch a "401" alarm that sends the operator to rotate a
+    // secret that is fine. An alarm that misdirects is worse than one that is quiet.
+    //
+    // A 500/400 is neither evidence of health nor of an auth failure, so it stamps
+    // nothing and leaves the previous outcome standing. (A 5xx storm deserves its
+    // own alarm; it is not this one.)
+    for (const status of [400, 404, 500, 502]) {
+      const mon = createRouteHealthMonitor({ now: () => 3000 });
+      mon.stampLinear(status);
+      expect({ status, fail: mon.snapshot().lastLinearFailMs }).toEqual({ status, fail: null });
+    }
   });
 
   it("stamps a GitHub 200 as the control", () => {
