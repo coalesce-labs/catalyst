@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFeedSource, shapeEdgeRow } from "./linear-feed-source.mjs";
@@ -28,12 +28,12 @@ CREATE TABLE issue_history (id TEXT PRIMARY KEY, issue_id TEXT, actor_id TEXT, c
   from_project_id TEXT, to_project_id TEXT, from_cycle_id TEXT, to_cycle_id TEXT,
   from_parent_id TEXT, to_parent_id TEXT, from_team_id TEXT, to_team_id TEXT,
   from_title TEXT, to_title TEXT, from_due_date TEXT, to_due_date TEXT,
-  updated_description INTEGER);
+  updated_description INTEGER, added_label_ids TEXT, removed_label_ids TEXT);
 CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT);
 CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT);
 CREATE TABLE labels (id TEXT PRIMARY KEY, name TEXT);
 CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT);
-CREATE TABLE comments (id TEXT PRIMARY KEY, issue_id TEXT, body TEXT, created_at INTEGER, user_id TEXT);
+CREATE TABLE comments (id TEXT PRIMARY KEY, issue_id TEXT, body TEXT, created_at INTEGER, author_id TEXT, author_name TEXT, is_bot INTEGER);
 `;
 
 const seed = (db) => {
@@ -266,8 +266,8 @@ describe("bounds and shape helpers", () => {
 
   test("comments page the same way", () => {
     const db = new Database(dbPath);
-    db.run(`INSERT INTO comments VALUES ('c1','i1','hello',1000,'u1')`);
-    db.run(`INSERT INTO comments VALUES ('c2','i1','again',1000,'u1')`);
+    db.run(`INSERT INTO comments VALUES ('c1','i1','hello',1000,'u1','Ryan Rozich',0)`);
+    db.run(`INSERT INTO comments VALUES ('c2','i1','again',1000,'u1','Ryan Rozich',0)`);
     db.close();
     const src = createFeedSource({ dbPath, limit: 1 });
     const p1 = src.commentsSince({ lastCreatedAt: 0, lastId: "" });
@@ -281,5 +281,42 @@ describe("bounds and shape helpers", () => {
 
   test("shapeEdgeRow rejects junk rather than half-shaping it", () => {
     for (const bad of [null, undefined, 42, "row"]) expect(shapeEdgeRow(bad)).toBeNull();
+  });
+});
+
+describe("⭐ schema conformance against the REAL replica", () => {
+  // This is the test that was missing when `c.user_id` shipped. The unit fixtures
+  // above are written BY ME, so they can only ever agree with the query they were
+  // written for — the first cut declared `user_id` because the query assumed it, and
+  // the mistake surfaced only when the query first met a real database.
+  //
+  // ⚠️ When the replica is absent this REPORTS INCONCLUSIVE rather than passing.
+  // A silent skip here would restore exactly the blind spot it exists to close.
+  test("every column the queries read exists in the live replica", async () => {
+    const { REQUIRED_COLUMNS } = await import("./linear-feed-source.mjs");
+    const real = `${process.env.HOME}/catalyst/catalyst-replica.db`;
+    if (!existsSync(real)) {
+      console.warn(
+        `INCONCLUSIVE: no replica at ${real}; schema conformance was NOT verified. ` +
+          `This test cannot pass or fail here — treat it as unrun.`,
+      );
+      expect(Object.keys(REQUIRED_COLUMNS).length).toBeGreaterThan(0); // shape only
+      return;
+    }
+    const db = new Database(real, { readonly: true });
+    const missing = [];
+    try {
+      for (const [table, cols] of Object.entries(REQUIRED_COLUMNS)) {
+        const have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name));
+        if (have.size === 0) {
+          missing.push(`${table}: TABLE ABSENT`);
+          continue;
+        }
+        for (const c of cols) if (!have.has(c)) missing.push(`${table}.${c}`);
+      }
+    } finally {
+      db.close();
+    }
+    expect(missing).toEqual([]);
   });
 });

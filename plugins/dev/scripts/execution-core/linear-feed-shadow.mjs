@@ -64,6 +64,16 @@ export function assertNotEventLog(path, { eventsDir } = {}) {
 /**
  * The coverage class for one emitted event.
  *
+ * ⚠️ `updated:none` is a REAL class, not a bucket for junk. Measured on the live
+ * replica over a two-day window: 61 of ~700 CTL edges changed none of the modeled
+ * columns — not state, assignee, priority, estimate, project, cycle, parent, title,
+ * due-date, description, labels, archived, trashed, or auto-closed. Whatever they
+ * record lives only in the history row's `raw`. They are almost certainly not
+ * dispatch-relevant, but they are EMITTED AND NAMED rather than dropped, so the
+ * parity harness still diffs them against smee's output. Do not "clean this up" by
+ * discarding them — an unattributed edge that both producers agree on is evidence;
+ * a silently discarded one is a hole in the comparison.
+ *
  * `state_changed` and `comment.created` are single classes. `issue.updated` is
  * counted as `updated:<key>` per changed field — one event touching two fields
  * counts toward BOTH, because coverage asks "has this field's mapping been

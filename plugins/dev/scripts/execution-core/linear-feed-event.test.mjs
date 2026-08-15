@@ -348,3 +348,37 @@ describe("comment events", () => {
     expect(ev.body.payload).toMatchObject({ ticket: "CTL-1234", commentId: "c1", actorName: "Ryan Rozich" });
   });
 });
+
+describe("⭐ label changes are a named class, not 'nothing changed'", () => {
+  // Found by running against the live replica, not by a test: 90 of ~700 edges in a
+  // two-day window carried a label edit and reported updatedFromKeys: [] — coverage
+  // class `updated:none`. Labels feed the eligible projection, so that was a
+  // dispatch-relevant edge no coverage cell would ever have named.
+  const h = (over) => historyRow({ from_state: "Todo", to_state: "Todo", ...over });
+
+  test("an added label is reported", () => {
+    expect(edgeDelta(h({ added_label_ids: '["l1"]' })).updatedFromKeys).toContain("labels");
+  });
+
+  test("a removed label is reported", () => {
+    expect(edgeDelta(h({ removed_label_ids: '["l2"]' })).updatedFromKeys).toContain("labels");
+  });
+
+  test("⚠️ an EMPTY json array is not a change — it arrives as '[]', not NULL", () => {
+    // A truthiness check alone would call every row a label change, since the column
+    // is "[]" rather than NULL when nothing moved.
+    for (const empty of ['[]', "", null, undefined]) {
+      expect(edgeDelta(h({ added_label_ids: empty, removed_label_ids: empty })).updatedFromKeys).not.toContain("labels");
+    }
+  });
+
+  test("the previous value records what moved, both directions", () => {
+    const d = edgeDelta(h({ added_label_ids: '["a"]', removed_label_ids: '["b","c"]' }));
+    expect(d.previousFromValues.labels).toEqual({ added: ["a"], removed: ["b", "c"] });
+  });
+
+  test("a malformed value yields no change rather than throwing — one bad row must not stop a sweep", () => {
+    expect(() => edgeDelta(h({ added_label_ids: "{not json" }))).not.toThrow();
+    expect(edgeDelta(h({ added_label_ids: "{not json" })).updatedFromKeys).not.toContain("labels");
+  });
+});

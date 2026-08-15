@@ -70,6 +70,8 @@ const EDGE_SELECT = `
     h.from_due_date     AS from_due_date,
     h.to_due_date       AS to_due_date,
     h.updated_description AS updated_description,
+    h.added_label_ids   AS added_label_ids,
+    h.removed_label_ids AS removed_label_ids,
     i.id                AS issue__id,
     i.identifier        AS issue__identifier,
     i.team_key          AS issue__team_key,
@@ -94,25 +96,51 @@ const EDGE_SELECT = `
   LIMIT $limit
 `;
 
+// ⚠️ Column names here are the REPLICA's, verified against the live schema — not
+// inferred from the builder. The first cut of this query selected `c.user_id` and a
+// `users` join for the author name; the real table has `author_id`, `author_name`
+// and `is_bot` ON THE ROW, so it failed with `no such column` the first time it ran
+// against a real database. The unit fixture had declared `user_id` because THIS
+// QUERY assumed it, so the test could only ever agree with the mistake. See the
+// schema-conformance test, which now checks these names against the real replica.
 const COMMENT_SELECT = `
   SELECT
-    c.id         AS id,
-    c.issue_id   AS issue_id,
-    c.body       AS body,
-    c.created_at AS created_at,
-    c.user_id    AS user_id,
-    i.id         AS issue__id,
-    i.identifier AS issue__identifier,
-    i.team_key   AS issue__team_key,
-    u.name       AS author__name
+    c.id          AS id,
+    c.issue_id    AS issue_id,
+    c.body        AS body,
+    c.created_at  AS created_at,
+    c.author_id   AS author_id,
+    c.is_bot      AS is_bot,
+    c.author_name AS author__name,
+    i.id          AS issue__id,
+    i.identifier  AS issue__identifier,
+    i.team_key    AS issue__team_key
   FROM comments c
   JOIN issues i ON i.id = c.issue_id
-  LEFT JOIN users u ON u.id = c.user_id
   WHERE (c.created_at > $sinceMs)
      OR (c.created_at = $sinceMs AND c.id > $sinceId)
   ORDER BY c.created_at ASC, c.id ASC
   LIMIT $limit
 `;
+
+/** Every column this module reads, per table — asserted against the live replica. */
+export const REQUIRED_COLUMNS = Object.freeze({
+  issue_history: [
+    "id", "issue_id", "actor_id", "created_at", "from_state", "to_state",
+    "from_assignee_id", "to_assignee_id", "from_priority", "to_priority",
+    "from_estimate", "to_estimate", "from_project_id", "to_project_id",
+    "from_cycle_id", "to_cycle_id", "from_parent_id", "to_parent_id",
+    "from_team_id", "to_team_id", "from_title", "to_title",
+    "from_due_date", "to_due_date", "updated_description",
+    "added_label_ids", "removed_label_ids",
+  ],
+  issues: ["id", "identifier", "team_key", "description", "estimate", "delegate_id", "project_id"],
+  comments: ["id", "issue_id", "body", "created_at", "author_id", "author_name", "is_bot"],
+  users: ["id", "name"],
+  projects: ["id", "name"],
+  labels: ["id", "name"],
+  issue_labels: ["issue_id", "label_id"],
+});
 
 // group_concat with the default "," separator would be ambiguous — a Linear label
 // may legitimately contain a comma. ASCII Unit Separator (0x1F) cannot appear in a
@@ -145,7 +173,10 @@ export function shapeEdgeRow(row) {
 export function shapeCommentRow(row) {
   if (!row || typeof row !== "object") return null;
   return {
-    comment: { id: row.id, issue_id: row.issue_id, body: row.body, user_id: row.user_id, created_at: row.created_at },
+    comment: {
+      id: row.id, issue_id: row.issue_id, body: row.body,
+      author_id: row.author_id, is_bot: row.is_bot, created_at: row.created_at,
+    },
     issue: { id: row.issue__id, identifier: row.issue__identifier, team_key: row.issue__team_key },
     author: row.author__name ? { name: row.author__name } : null,
   };

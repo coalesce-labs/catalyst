@@ -75,6 +75,25 @@ export const EDGE_PAIRS = Object.freeze([
 const present = (v) => v !== null && v !== undefined && v !== "";
 
 /**
+ * `added_label_ids` / `removed_label_ids` arrive as a JSON array in a TEXT column —
+ * empty is `"[]"`, not NULL, so a truthiness check alone would call every row a
+ * label change. Parses defensively: an unparseable value yields `[]` rather than
+ * throwing, because one malformed history row must not stop a sweep.
+ */
+function parseIds(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== "string" || raw === "") return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+const hasIds = (raw) => parseIds(raw).length > 0;
+
+/**
  * A stable, replica-supplied identity for one edge.
  *
  * ⭐ `issue_history.id` is a PRIMARY KEY, so idempotency across boot-replay,
@@ -125,6 +144,20 @@ export function edgeDelta(history) {
   }
   if (history?.updated_description) {
     updatedFromKeys.push("description");
+  }
+  // ⭐ Label changes are NOT a from_/to_ pair — `issue_history` records them as
+  // `added_label_ids` / `removed_label_ids`. Omitting them was a real gap, caught by
+  // running against the live replica rather than by a test: 90 of ~700 edges in a
+  // two-day window reported `updatedFromKeys: []` (coverage class
+  // `linear.issue.updated:none`) while actually carrying a label edit. Labels feed
+  // the eligible projection, so a label change reading as "nothing changed" is a
+  // dispatch-relevant edge that no coverage cell would ever name.
+  if (hasIds(history?.added_label_ids) || hasIds(history?.removed_label_ids)) {
+    updatedFromKeys.push("labels");
+    previousFromValues.labels = {
+      added: parseIds(history?.added_label_ids),
+      removed: parseIds(history?.removed_label_ids),
+    };
   }
   return { updatedFromKeys, previousFromValues };
 }
