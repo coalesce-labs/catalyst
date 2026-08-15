@@ -75,6 +75,7 @@ import { getCloudSyncDepSkewLedgerPath, getCloudSyncDepsPath, getCloudSyncSelfHe
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { sdkLogRecord } from "./cloud-sync-log.mjs";
+import { createSchemaReportingWsFactory } from "./cloud-sync-schema-identity.mjs"; // CTL-1869
 import { classifyDepSkew, classifyStall, clearSelfHealBreadcrumb, exitAfterClose, freshnessFields, readReplicaCounts, resolveDepSkewMode, writeSelfHealBreadcrumb } from "./cloud-sync-telemetry.mjs";
 import {
   DEP_SKEW_ALERT,
@@ -254,6 +255,15 @@ const replica = new CatalystReplica({
   // crash. Default two-writer protection is unchanged for any writer without an ownerKey
   // (a second LIVE writer with a DIFFERENT ownerKey still throws loudly).
   writerGuard: { ownerKey: `${getHostName()}-${account}` },
+  // CTL-1869: report the schema bundle this process ACTUALLY LOADED, so the hub can
+  // classify skew instead of recording `unreported`. CTC-471 shipped the receiving
+  // half and CTC-487/PR #435 shipped a sender — for apps/host-sync, which no real
+  // host runs; THIS is the replica the fleet runs, so all 3 connected replicas
+  // reported `unreported`. Replicates the SDK's default factory on a URL carrying
+  // schema_tail/schema_count; a null tail appends nothing and stays honestly
+  // `unreported`. Runs per (re)connect, so the identity tracks the loaded bundle
+  // across reconnects rather than freezing at process start.
+  wsFactory: createSchemaReportingWsFactory(),
   // CTL-1402: arm the SDK's opt-in telemetry. The apply-result signal the fleet consumes is
   // the structured `catalyst.replica.apply` LOG line (via the `log` callback below), which emits
   // regardless of this flag; enabling it additionally arms the `catalyst.replica.applied` OTLP
