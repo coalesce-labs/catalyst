@@ -128,13 +128,23 @@ describe("the schema describes reality", () => {
 // remains is the measured, universal contract — which is what the corpus of REAL
 // producer output is for.
 describe("real producer output", () => {
-  const corpus = readFileSync(
+  // Codex round 15: this loader still dropped blank records — the round-14 fix
+  // covered the live scan and missed the committed-corpus one, so a blank row in
+  // the fixture would still have read clean. Only the synthetic final element from
+  // a trailing newline is not a record.
+  const corpusText = readFileSync(
     new URL("./__fixtures__/event-envelope-corpus.jsonl", import.meta.url),
     "utf8"
-  )
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => JSON.parse(l));
+  );
+  const corpusRaw = corpusText.split("\n");
+  if (corpusText.endsWith("\n")) corpusRaw.pop();
+  const corpus = corpusRaw.map((l, i) => {
+    try {
+      return JSON.parse(l);
+    } catch {
+      throw new Error(`corpus line ${i + 1} is not valid JSON (blank or corrupt): ${JSON.stringify(l.slice(0, 80))}`);
+    }
+  });
 
   test("the corpus is non-empty and covers all four shapes", () => {
     // A zero-line corpus would make every assertion below vacuously true.

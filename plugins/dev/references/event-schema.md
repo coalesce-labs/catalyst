@@ -15,7 +15,15 @@
 > takes "every event has this shape" at face value writes an **attribute-only filter** and silently
 > misses every v1 and v3 record. That is not hypothetical — CTL-1834 measured attribute-only readers
 > missing **161,795** lines in a month, and it presented as a biased slice rather than a visible zero.
-> Resolve names through `lib/event-name.mjs`, never by reading `attributes["event.name"]` alone.
+> `--filter` is a **jq** predicate, so the JS resolver is not callable there. Use the equivalent
+> ladder — it matches `lib/event-name.mjs` exactly, including skipping an empty string:
+>
+> ```jq
+> ([.event, .attributes."event.name", .name] | map(select(type=="string" and . != "")) | first // "")
+> ```
+>
+> e.g. `catalyst-events tail --filter '([.event, .attributes."event.name", .name] | map(select(type=="string" and . != "")) | first // "") | startswith("phase.")'`.
+> Reading `attributes["event.name"]` alone silently misses every v1 and v3 record.
 
 Authoritative field-level reference for the canonical v2 envelope in `~/catalyst/events/YYYY-MM.jsonl`.
 Derived directly from `plugins/dev/scripts/orch-monitor/lib/canonical-event.ts` and

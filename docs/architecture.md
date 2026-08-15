@@ -106,7 +106,7 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
   - **v2 OTel** (`plugins/dev/scripts/orch-monitor/lib/webhook-events.ts` for `github.*`/`linear.*`;
     `catalyst-comms send` for `comms.message.posted`): `{ts, attributes, body, resource}`.
   - **v3 bare-name** — `{ts, name, …flat payload}` (e.g. `phase.rescue.*`,
-    `phase.orphan-pr.detected.*`, `ticket.completion.declared.*`). 532 lines on the snapshot. Live
+    `phase.orphan-pr.detected.*`, `ticket.completion.declared.*`). Live
     and accepted, not legacy residue: CTL-1834 records **three separate v3 producers each discovered
     and fixed reactively, one at a time, after their events had already been lost** — which is why
     `lib/event-name.mjs` resolves it and this contract validates it.
