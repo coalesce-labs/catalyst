@@ -73,6 +73,7 @@ import {
   Semaphore,
 } from "./sdk-run-phase-agent.mjs";
 import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 
 const CODEX_EXECUTOR_ID = "codex-exec";
 
@@ -1749,7 +1750,12 @@ export async function codexRunPhaseAgent(
         // terminal sweep reclaims it. A skill that wrote its own terminal status
         // already advanced — don't clobber it.
         const status = readSignalStatus(signalFile);
-        if (status === "dispatched" || status === "running") {
+        // CTL-1854: a yielded signal is marked failed here too. The codex run has
+        // FAILED, so the wait is moot — recording `codex-failed` now is accurate and
+        // frees the slot immediately, whereas leaving it would have the tick record
+        // `yield-expired` up to 30 minutes later, misattributing a process failure to
+        // a broken promise.
+        if (status === "dispatched" || status === "running" || status === YIELDED_STATUS) {
           markLaunchFailed(
             { phase, ticket, status: "failed", reason: "codex-failed", orchDir, signalFile },
             { spawn },

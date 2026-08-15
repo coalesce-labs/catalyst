@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import { log } from "./config.mjs";
 import { coerceExplanation } from "./escalation-explanation.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 
 // ─── labelOnce — moved from scheduler.mjs (CTL-585, then CTL-638 re-home) ───
 //
@@ -397,7 +398,10 @@ export function inEscalationCooldown(orchDir, ticket, phase, now) {
 // phase-recovery-pass.json. Must stay in sync with delegate-queue.mjs's
 // recoveryPassWorkerLive (the enqueue-time dedup probe) — those are the reads
 // that go blind if this file's status is overwritten.
-const LIVE_RECOVERY_PASS_STATUSES = new Set(["dispatched", "running"]);
+// CTL-1854: awaiting-work included — its own comment above requires staying in sync
+// with delegate-queue.mjs's recoveryPassWorkerLive, and a yielded worker still owns
+// the file this guard protects from being overwritten.
+const LIVE_RECOVERY_PASS_STATUSES = new Set(["dispatched", "running", YIELDED_STATUS]);
 
 function writeExplanationSignal(orchDir, ticket, explanation, { log: logArg = null } = {}) {
   if (!orchDir || !ticket || !explanation) return;

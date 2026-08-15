@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 import { sdkRunPhaseAgent, defaultEmitBackstop, scrubSecrets } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query()); CTL-1367 P1: shared failed-terminal backstop for a rejected async dispatch; CTL-1367 item 11: scrub token-shaped substrings out of a rejected-dispatch reason before it is backstopped/logged
 import { codexRunPhaseAgent } from "./codex-run-phase-agent.mjs"; // CTL-1457: the executor=codex-exec launch verb (spawns `codex exec --json` as a child process)
 import { hasFreshClaim } from "./signal-reader.mjs"; // CTL-1367 P2-G: a young single-flight claim makes a missing SDK signal a benign claim-lost no-op
@@ -488,7 +489,10 @@ export function sdkSignalRunnable(orchDir, ticket, phase) {
   try {
     const sig = JSON.parse(readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"));
     const st = sig?.status;
-    return st === "dispatched" || st === "running" || st === "done";
+    // CTL-1854: awaiting-work is a legitimate post-dispatch state (the worker
+    // declared a bounded wait), so it must read as runnable like "done" does —
+    // otherwise a fast yield reads as a failed dispatch.
+    return st === "dispatched" || st === "running" || st === "done" || st === YIELDED_STATUS;
   } catch {
     // signal absent/unparseable → benign only if a fresh claim is in flight (claim-lost).
     return hasFreshClaim(orchDir, ticket, phase);

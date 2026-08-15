@@ -59,9 +59,18 @@ describe("the bash writer mirrors the JS contract", () => {
     // The whole point is a resumable, non-terminal wait. If `yield` ever falls
     // through to the SET_COMPLETED branch the slot frees and the ticket advances
     // on a phase that never finished.
-    const m = src.match(/if \[\[ \$STATUS == "turn-cap-exhausted"(.*?)\]\]; then\n\t*SET_COMPLETED='\.'/s);
+    // Anchored on the CONDITION, not on the body: the branch now sets
+    // SET_COMPLETED per-status inside (a yield must also CLEAR any inherited
+    // completedAt), so matching the old `then SET_COMPLETED='.'` shape would fail
+    // for the right reason but the wrong cause. Still fails closed — if the
+    // condition disappears, m is null and this cannot pass vacuously.
+    const m = src.match(/if \[\[ \$STATUS == "turn-cap-exhausted"(.*?)\]\]; then/);
     expect(m, "no non-terminal SET_COMPLETED branch found — anchor gone").not.toBeNull();
     expect(m[1]).toContain('$STATUS == "yield"');
+    // And a yield must never take the completedAt-setting path.
+    const yieldArm = src.match(/if \[\[ \$STATUS == "yield" \]\]; then\n\t*SET_COMPLETED='([^']+)'/);
+    expect(yieldArm, "no per-status SET_COMPLETED arm for yield — anchor gone").not.toBeNull();
+    expect(yieldArm[1]).toBe("del(.completedAt)");
   });
 
   test("the writer stamps both the per-yield and the episode anchor", () => {

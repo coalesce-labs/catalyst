@@ -158,6 +158,7 @@ import { recordReplicaRead } from "./replica-health.mjs"; // CAT-35
 import { noteTornLine } from "./event-tail.mjs";
 // CTL-1819: the envelope detector, shared with the broker's peer live tail.
 import { checkEnvelope } from "../lib/event-envelope.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 
 const MONITOR_BOOT_TS = Date.now();
 
@@ -1306,7 +1307,14 @@ export function readTriageSignalStatus(orchDir, ticket) {
 // no-op dispatch is not a retry) and (b) defer cap PARKING (an allowed attempt
 // may still complete — only park after the signal settles without an artifact).
 function isTriageInFlight(status) {
-  return status === "dispatched" || status === "running" || status === "pending";
+  // CTL-1854: a yielded triage phase has NOT settled — counting it as settled would
+  // let the cap park a phase that is still holding its slot.
+  return (
+    status === "dispatched" ||
+    status === "running" ||
+    status === "pending" ||
+    status === YIELDED_STATUS
+  );
 }
 
 // Codex R4: the cap state lives at orchDir level — NOT under workers/<t>/ —

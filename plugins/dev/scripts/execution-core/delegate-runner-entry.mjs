@@ -57,6 +57,7 @@ import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-
 import { isBgJobAlive as defaultIsBgJobAlive } from "./claude-agents.mjs";
 import { countYieldedOccupancy as defaultCountYieldedOccupancy, countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1157 Codex round-6: existing dispatched/running sdk workers occupancy (no bg job → countBg misses them)
 import { computeFreeSlots, readMaxParallel } from "./scheduler.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 
 const RECOVERY_PASS_PHASE = "recovery-pass";
 
@@ -96,7 +97,9 @@ function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, executor) {
     join(orchDir, "workers", ticket, "phase-recovery-pass.json")
   );
   if (!sig) return false;
-  if (sig.status !== "dispatched" && sig.status !== "running") return false;
+  // CTL-1854: see delegate-queue.mjs — a yielded worker still owns its signal.
+  if (sig.status !== "dispatched" && sig.status !== "running" && sig.status !== YIELDED_STATUS)
+    return false;
   const bgJobId = sig.bg_job_id ?? null;
   if (!bgJobId) return executor === "sdk"; // sdk in-process worker: live with no bg id
   try {

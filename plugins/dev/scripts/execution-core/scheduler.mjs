@@ -3235,8 +3235,10 @@ export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = 
     return { ok: false, reason: "signal_unparseable" };
   }
   const status = signal?.status;
+  // CTL-1854: awaiting-work is runnable — a worker that dispatched and immediately
+  // declared a bounded wait has not failed to dispatch.
   const runnable = requireBgJob
-    ? status === "dispatched" || status === "running"
+    ? status === "dispatched" || status === "running" || status === YIELDED_STATUS
     : status === "dispatched" || status === "running" || status === "done";
   if (!runnable) {
     return { ok: false, reason: "status_not_runnable" };

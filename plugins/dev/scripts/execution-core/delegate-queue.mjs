@@ -31,6 +31,7 @@ import {
 import { join } from "node:path";
 import { log } from "./config.mjs";
 import { isSdkWorkerLive as registrySdkWorkerLive } from "./sdk-worker-registry.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 
 // The queue dir name, derived from orchDir exactly like recovery-reasoning.mjs
 // derives `.recovery-intents/` (recoveryIntentPath: join(orchDir, ".recovery-intents", …)).
@@ -106,7 +107,10 @@ function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, isSdkWorkerLive, 
   const signalPath = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
   const sig = readIntentFile(signalPath);
   if (!sig) return false;
-  if (sig.status !== "dispatched" && sig.status !== "running") return false;
+  // CTL-1854: a yielded recovery-pass worker still OWNS phase-recovery-pass.json.
+  // Reading it as not-live lets the enqueue dedup spawn a duplicate over a live one.
+  if (sig.status !== "dispatched" && sig.status !== "running" && sig.status !== YIELDED_STATUS)
+    return false;
   const bgJobId = sig.bg_job_id ?? null;
   if (!bgJobId) {
     try {

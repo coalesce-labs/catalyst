@@ -224,6 +224,20 @@ if [[ -n $YIELD_SECONDS ]]; then
 		die "--yield-seconds must be a positive integer (got: $YIELD_SECONDS)"
 fi
 
+# CTL-1854 (Codex round 10): a yield that does not establish `awaiting-work` is
+# WORSE than no yield. The phase.*.yield.* event is deliberately not
+# lifecycle-routed, so the signal write is the ONLY thing that records the wait —
+# and the caller ends its turn believing it was declared. Exiting 0 there makes
+# success and failure byte-identical to the caller, which is the exact defect class
+# this ticket exists to remove. Refuse the two configurations that structurally
+# cannot write, BEFORE any event is emitted.
+if [[ $STATUS == "yield" ]]; then
+	[[ $NO_SIGNAL_UPDATE -eq 0 ]] ||
+		die "--status yield cannot be combined with --no-signal-update: the signal write is the only record of the wait"
+	[[ -n $ORCH_DIR ]] ||
+		die "--status yield requires --orch-dir (or CATALYST_ORCHESTRATOR_DIR): without it no signal can be written and the wait would go unrecorded"
+fi
+
 # Validate ticket shape against the same pattern the broker uses.
 if [[ ! $TICKET =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
 	die "invalid --ticket: $TICKET (expected e.g. CTL-100)"
@@ -481,6 +495,23 @@ fi
 
 if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 	SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+	# CTL-1854 (Codex round 10): a yield must never replace a COMPLETED phase. If the
+	# delegated work wrote `done` just before the agent declared its wait, an
+	# unconditional mutation destroys a real result, holds the slot, and eventually
+	# records `yield-expired` for work that actually finished — manufacturing exactly
+	# the misattributed abandonment this ticket removes. Refuse from any terminal
+	# status. This is a PRECONDITION, not a race fix: the read and the write are
+	# separate operations and the competing writer is another process, so a
+	# completion landing inside that window is still possible — that residual is
+	# CTL-1860, which covers both writers.
+	if [[ $STATUS == "yield" && -f $SIGNAL_FILE ]]; then
+		_CUR_STATUS="$(jq -r '.status // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")"
+		case "$_CUR_STATUS" in
+		done | complete | completed | failed | stalled | skipped | aborted)
+			die "--status yield: phase already terminal ($_CUR_STATUS) — refusing to overwrite a finished phase with a wait"
+			;;
+		esac
+	fi
 	if [[ -f $SIGNAL_FILE ]]; then
 		# CTL-484: turn-cap-exhausted is a non-terminal status the continuation
 		# branch of orchestrate-revive picks up. Map the canonical event status to
@@ -502,7 +533,15 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		# turn-cap-exhausted, park and yield are NOT terminal states — leave completedAt unset.
 		# CTL-512: skipped IS terminal (slot frees), so it falls through to SET_COMPLETED.
 		if [[ $STATUS == "turn-cap-exhausted" || $STATUS == "park" || $STATUS == "yield" ]]; then
-			SET_COMPLETED='.'
+			# CTL-1854: a yield is non-terminal, so it must not INHERIT a completedAt
+			# from a previous terminal write on the same signal — a non-terminal status
+			# carrying a completion timestamp is a contradiction downstream readers
+			# resolve inconsistently.
+			if [[ $STATUS == "yield" ]]; then
+				SET_COMPLETED='del(.completedAt)'
+			else
+				SET_COMPLETED='.'
+			fi
 		else
 			SET_COMPLETED='.completedAt = $ts'
 		fi
@@ -550,9 +589,18 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 			mv "$TMP" "$SIGNAL_FILE"
 		else
 			rm -f "$TMP"
+			# CTL-1854: for a yield this is FATAL, not a warning. The signal is the only
+			# record of the wait, so exiting 0 here tells the agent it may stop when
+			# nothing recorded that it would come back.
+			if [[ $STATUS == "yield" ]]; then
+				die "--status yield: failed to update signal file $SIGNAL_FILE — refusing to report a wait that was not recorded"
+			fi
 			warn "failed to update signal file $SIGNAL_FILE"
 		fi
 	else
+		if [[ $STATUS == "yield" ]]; then
+			die "--status yield: signal file not found: $SIGNAL_FILE — the wait cannot be recorded, so refusing to report success"
+		fi
 		warn "signal file not found: $SIGNAL_FILE (skipping update)"
 	fi
 fi
