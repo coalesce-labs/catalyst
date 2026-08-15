@@ -1988,6 +1988,32 @@ export function readStallJanitorConfig() {
   return { mode, terminalIdleMs, censusIntervalMs };
 }
 
+// --- Blocked listing ghosts (CAT-171) ---
+// Source-A (`claude agents --json`) liveness policy. This is intentionally a
+// separate mode from the stall janitor because it changes the Tier-1 presence
+// verdict rather than inspecting state.json terminal leftovers.
+const BLOCKED_GHOST_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2BlockedGhost() {
+  try {
+    const value = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.blockedGhost;
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+export function readBlockedGhostConfig({ env = process.env } = {}) {
+  const l2 = readLayer2BlockedGhost();
+  const raw = env.CATALYST_BLOCKED_GHOST;
+  let mode;
+  if (raw === "0") mode = "off";
+  else if (typeof raw === "string" && BLOCKED_GHOST_MODES.has(raw)) mode = raw;
+  else if (typeof l2.mode === "string" && BLOCKED_GHOST_MODES.has(l2.mode)) mode = l2.mode;
+  else mode = "shadow";
+  return { mode };
+}
+
 // --- Unstuck sweep (CTL-1064) ---
 // OFF by default — operators opt in via shadow then enforce. Same three-layer
 // precedence as CTL-1004/CTL-1029 (env > Layer-2 catalyst.unstuckSweep.* >
@@ -2578,6 +2604,7 @@ export function readGovernanceConfig(env = process.env) {
     ...beliefs,
     // mode subsystems — reuse existing three-layer readers so Layer-2 flows through
     stallJanitor: { mode: readStallJanitorConfig().mode },
+    blockedGhost: { mode: readBlockedGhostConfig().mode },
     watchdog: { mode: readWatchdogConfig().mode },
     unstuckSweep: { mode: readUnstuckSweepConfig().mode },
     // CTL-1331: surface the async board-health delegate runner so operators can
@@ -2634,6 +2661,11 @@ export function readGovernanceSources(env = process.env) {
     env.CATALYST_UNSTUCK_SWEEP ?? env.EXECUTION_CORE_UNSTUCK_SWEEP_MODE,
     readLayer2UnstuckSweep().mode,
     UNSTUCK_SWEEP_MODES
+  );
+  out.blockedGhost = resolveModeSource(
+    env.CATALYST_BLOCKED_GHOST,
+    readLayer2BlockedGhost().mode,
+    BLOCKED_GHOST_MODES,
   );
   out.deadDocWorker = resolveModeSource(
     env.CATALYST_DEAD_DOC_WORKER_RECLAIM,

@@ -166,7 +166,6 @@ import {
 import {
   countBackgroundAgents,
   getAgentsCached,
-  isBgJobAlive as defaultIsBgJobAlive,
   livenessForBgJob as defaultLivenessForBgJob, // CTL-768
   setLivenessLogger, // CTL-1330: wire the liveness-refresh observability sink
   setLivenessSpanSink, // CTL-1330 Tier 3: wire the liveness.refresh span sink
@@ -179,6 +178,7 @@ import {
   emitLivenessRefreshSpan,
 } from "./tracing.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
+import { createConfiguredBlockedGhostProbe } from "./blocked-ghost.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
 // is the real recovery-module function; tests inject a fake. See
 // reclaimDeadWorkIfPossible in recovery.mjs for the decision tree.
@@ -216,6 +216,7 @@ import {
   defaultAppendPhaseAdvanceAppliedEvent, // CTL-1789: the positive half of the advancement gate
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
+  defaultAppendOperatorEvent,
 } from "./recovery.mjs";
 import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolve.mjs";
 // CTL-729: progress-watchdog imports.
@@ -228,6 +229,7 @@ import {
   readStallJanitorConfig,
   readCostCapConfig,
   readEmptyWorkerDirGraceMs,
+  readBlockedGhostConfig,
   EMPTY_WORKER_DIR_GRACE_DEFAULT_MS,
 } from "./config.mjs";
 // CTL-1137: cost-cap watcher (Pass 0c) — out-of-process per-session $ preemption.
@@ -1327,6 +1329,14 @@ export function isReclaimableEmptyWorkerDir({ hasSignals, ageMs, graceMs }) {
 export function bgLivenessProtects(bgId, snapshot, isBgJobAlive) {
   if (!bgId) return false;
   if (!snapshot?.isFresh) return true; // fail open on a cold/stale snapshot
+  return Boolean(isBgJobAlive(bgId, { agents: snapshot.agents }));
+}
+
+// CAT-171: delegate GC uses the same cold-snapshot fail-open contract as Pass
+// 0a. A stale cache may never prove a listed session blocked/dead.
+export function delegateBgLivenessProtects(bgId, snapshot, isBgJobAlive) {
+  if (!bgId) return false;
+  if (!snapshot?.isFresh) return true;
   return Boolean(isBgJobAlive(bgId, { agents: snapshot.agents }));
 }
 
@@ -4484,8 +4494,8 @@ export function schedulerTick(
     // here are deliberately SAFE no-ops (resolution always "unknown", liveness
     // always alive) so a bare unit tick never shells out to linearis /
     // `claude agents` and never quarantines. The daemon (runTick) injects the
-    // real classifyTicketResolution + isBgJobAlive to arm the sweep in
-    // production; sweep-specific tests inject their own stubs.
+    // real classifyTicketResolution plus a mode-aware isBgJobAlive wrapper to
+    // arm the sweep in production; sweep-specific tests inject their own stubs.
     classifyResolution = () => "unknown",
     isBgJobAlive = () => true,
     // CTL-1410 Phase B: in-process SDK-worker probe for the sweep. The REAL
@@ -6196,7 +6206,16 @@ export function schedulerTick(
     // it as a dead bg job — dropping it would free the reservation/existence guard and
     // let the next scan re-dispatch the same in-flight ticket. Inert under bg (executor
     // null → the no-bg_job_id launched intent still drops exactly as today).
-    gcDelegateIntents(orchDir, now(), { executor: dispatchMode === "sdk" ? "sdk" : null });
+    // Resolve the expensive agents snapshot only if GC encounters a launched
+    // intent with a bg_job_id. Queued/claimed/empty passes stay spawn-free.
+    let delegateSnapshot;
+    gcDelegateIntents(orchDir, now(), {
+      executor: dispatchMode === "sdk" ? "sdk" : null,
+      isBgJobAlive: (id) => {
+        delegateSnapshot ??= getAgents();
+        return delegateBgLivenessProtects(id, delegateSnapshot, isBgJobAlive);
+      },
+    });
   } catch {
     /* GC is best-effort — never block the tick */
   }
@@ -9830,7 +9849,8 @@ export function startScheduler({
   checkOpenPrs,
   // CTL-671: phantom-sweep seams. Undefined → schedulerTick's safe no-op
   // defaults (hermetic for unit tests that call startScheduler directly). The
-  // real daemon (startDaemon) and the standalone main() pass the real impls.
+  // real daemon (startDaemon) passes the blocked-ghost-aware implementation;
+  // standalone/test callers may inject their own probe.
   classifyResolution,
   isBgJobAlive,
   // CTL-781: respect-assignment + self-assign. Undefined → gate off (fail-open).
@@ -10024,13 +10044,19 @@ function main() {
     process.exit(1);
   }
   log.info({ orchDir }, "execution-core scheduler starting");
+  const blockedGhostMode = readBlockedGhostConfig().mode;
+  const isBgJobAliveGhostAware = createConfiguredBlockedGhostProbe({
+    emit: (name, payload) => defaultAppendOperatorEvent({ "event.name": name, payload }),
+    emitReap: emitReapIntent,
+  });
+  log.info({ blockedGhostMode }, "execution-core scheduler: blocked-ghost mode resolved");
   // CTL-671: arm the phantom worker-dir validity sweep + bg-liveness reader with
   // the real impls (startScheduler defaults them to safe no-ops for hermetic
   // unit tests). This standalone dry-run mirrors the real daemon's behavior.
   startScheduler({
     orchDir,
     classifyResolution: classifyTicketResolution,
-    isBgJobAlive: defaultIsBgJobAlive,
+    isBgJobAlive: isBgJobAliveGhostAware,
   });
   const shutdown = (sig) => {
     log.info({ sig }, "execution-core scheduler shutting down");

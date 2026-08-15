@@ -135,7 +135,8 @@ export const TERMINAL_FAILURE = new Set(["failed", "stalled"]);
 // a signal can say `running` while the durable job state is `stopped`/`failed`/
 // `done` — that disagreement is exactly the dead-worker-shown-active bug. Kept in
 // lock-step with execution-core/recovery.mjs TERMINAL_JOB_STATES (the daemon's
-// dead-detection source); `working` is the sole non-terminal value.
+// dead-detection source); terminal-states-parity.test.mjs enforces equality.
+// `working` is the sole non-terminal value.
 export const TERMINAL_JOB_STATES = new Set(["stopped", "failed", "done", "blocked"]);
 
 // CTL-928: the FINAL pipeline phases. A ticket whose CURRENT phase (per

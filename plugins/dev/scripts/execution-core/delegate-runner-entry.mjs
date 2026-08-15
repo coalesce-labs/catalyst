@@ -51,10 +51,16 @@ import {
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
   defaultAppendDispatchFailedEvent,
+  defaultAppendOperatorEvent,
 } from "./recovery.mjs";
 import { defaultInvokeRecoveryPass } from "./recovery-reasoning.mjs";
-import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-agents.mjs";
-import { isBgJobAlive as defaultIsBgJobAlive } from "./claude-agents.mjs";
+import {
+  cachedListClaudeAgents,
+  countBackgroundAgents as defaultCountBackgroundAgents,
+  isBgJobAlive as defaultIsBgJobAlive,
+} from "./claude-agents.mjs";
+import { createConfiguredBlockedGhostProbe } from "./blocked-ghost.mjs";
+import { emitReapIntent } from "./reap-intent.mjs";
 import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1157 Codex round-6: existing dispatched/running sdk workers occupancy (no bg job → countBg misses them)
 import { computeFreeSlots, readMaxParallel } from "./scheduler.mjs";
 
@@ -162,7 +168,13 @@ export function drainOnce(deps = {}) {
   const invokeFn = deps.invokeFn ?? defaultInvokeRecoveryPass;
   const countBg = deps.countBackgroundAgents ?? defaultCountBackgroundAgents;
   const countSdkInflight = deps.countSdkInflight ?? defaultCountSdkInflight;
-  const isBgJobAlive = deps.isBgJobAlive ?? defaultIsBgJobAlive;
+  const isBgJobAlive =
+    deps.isBgJobAlive ??
+    createConfiguredBlockedGhostProbe({
+      base: defaultIsBgJobAlive,
+      emit: (name, payload) => defaultAppendOperatorEvent({ "event.name": name, payload }),
+      emitReap: emitReapIntent,
+    });
   const appendRequested =
     deps.appendRequested ?? defaultAppendDispatchRequestedEvent;
   const appendLaunched =
@@ -202,6 +214,13 @@ export function drainOnce(deps = {}) {
   // awaits result.pending before process.exit(0). bg dispatch is synchronous, so
   // pendingSdk is null and this array stays empty (byte-identical to before).
   const pending = [];
+
+  // CAT-171: one Tier-1 listing per drain pass, shared by every queued ticket.
+  let passAgents;
+  const isBgJobAliveForPass = (id, opts = {}) => {
+    passAgents ??= deps.agents ?? cachedListClaudeAgents({});
+    return isBgJobAlive(id, { agents: passAgents, ...opts });
+  };
 
   // (0) Crash safety: reclaim claimed-* sidecars older than one ceiling window
   //     back to queued so a dead runner doesn't strand an intent forever.
@@ -246,7 +265,7 @@ export function drainOnce(deps = {}) {
     //     (the work it would have started already exists), so it is removed:
     //     it must NOT keep reserving a slot, and there is nothing to re-drain.
     //     We unlink the consumed claim sidecar and the canonical intent file.
-    if (recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, executor)) {
+    if (recoveryPassWorkerLive(orchDir, ticket, isBgJobAliveForPass, executor)) {
       for (const p of [claimPath, intentPath(orchDir, ticket)]) {
         try {
           unlinkSync(p);

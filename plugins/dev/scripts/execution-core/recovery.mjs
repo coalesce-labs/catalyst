@@ -303,7 +303,8 @@ export function defaultStatJob(bgJobId) {
 // `claude --bg` job reaches a terminal lifecycle (empirically: stopped/failed/
 // done/blocked; `working` is the sole non-terminal value). DISTINCT from the
 // worker-SIGNAL `TERMINAL` set imported from signal-reader.mjs (phase signal
-// status like done/skipped) — do not conflate the two.
+// status like done/skipped) — do not conflate the two. Equality with the other
+// Tier-2 copies is enforced by terminal-states-parity.test.mjs.
 export const TERMINAL_JOB_STATES = new Set(["stopped", "failed", "done", "blocked"]);
 
 // CTL-927 — doc/long-fan-out phases whose forward-progress is an artifact-byte

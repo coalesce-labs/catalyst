@@ -673,6 +673,27 @@ reclaim storms). Three additive defenses:
   `not-found`) means a Linear outage can't quarantine a healthy in-flight ticket.
   `classifyTicketResolution`/`isBgJobAlive` are safe no-ops by default in `schedulerTick`, armed
   with real impls by the daemon's `runTick`.
+
+  Background liveness has two deliberately distinct `state` sources (CAT-171). Tier 1 reads the raw
+  `claude agents --json` listing; Tier 2 reads `~/.claude/jobs/<id>/state.json`, and their
+  vocabularies can disagree for the same session. The `catalyst.blockedGhost.mode` guard applies
+  only to Tier 1's observed `state:"blocked"`: its default `shadow` mode records the ghost without
+  changing the presence verdict, while `enforce` treats it as not alive and routes deregistration
+  through the existing `phase.terminal.reap-requested` pipeline. A cold listing snapshot still fails
+  open and protects the worker. `enforce` intentionally covers every listed blocked session,
+  including one that did work before blocking; CTL-932 already handles only the never-started
+  subset. **The emitted intent is not stop-only, and its worst case is destructive.** The normal
+  path is a `claude stop`, which deregisters the session and leaves its worktree, branch, and
+  commits intact — but a blocked ghost lists as `status:"idle"`, which `isSweepReapableStatus`
+  accepts, so when that `claude stop` returns non-ok and a confirming re-read still lists the
+  session, the reaper escalates to `claude rm` (`reaper.mjs`), which deletes the session **and its
+  worktree**. Under `enforce` the same probe call also frees the ticket for redispatch into that
+  worktree, so a reclaim and a `claude rm` of the tree it runs in can race. Narrowing the intent to
+  a stop-only variant is tracked in CAT-267; until that lands, treat this as the standing caveat on
+  the rollout gate. Before an operator enables `enforce`, run `shadow` for at least 24 hours with
+  one observation and confirm every observed short ID is terminal in the Tier-2 job state. Roll out
+  one host per day in the order aldebaran, vega, sophon. Query
+  `{service_name="catalyst.execution-core"} | event_name=~"liveness\\.blocked-ghost\\..*"`.
 - **Dispatch circuit breaker** (Linear-independent backstop): the CTL-624 cool-down marker carries
   `consecutiveFailures`; after `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` (default 8) consecutive failed
   dispatches with no progress → quarantine `stalled` (`stalledReason:"dispatch-circuit-breaker"`). A

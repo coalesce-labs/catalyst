@@ -8,6 +8,7 @@
 //
 // Ordered fallback: (auto-fix [deferred]) → delegate → human.
 import { enqueueDelegateIntent } from "./delegate-queue.mjs";
+import { createConfiguredBlockedGhostProbe } from "./blocked-ghost.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
 import { readDelegateRunnerConfig, readDelegateFirstConfig } from "./config.mjs";
 
@@ -110,7 +111,17 @@ export function routeStuckTicketToDelegate(
   }
 
   const enqueue = deps.enqueue ?? enqueueDelegateIntent;
-  const q = enqueue(ticket, { kind, phase: "recovery-pass", reason, boardContext, briefObj }, deps);
+  // Arm the enqueue-side worker-live dedup seam too. Without this, enforce
+  // mode can still let a terminal blocked listing suppress the replacement
+  // intent before the runner or scheduler gets a chance to reclaim it.
+  const enqueueDeps = deps.isBgJobAlive
+    ? deps
+    : { ...deps, isBgJobAlive: createConfiguredBlockedGhostProbe({ env }) };
+  const q = enqueue(
+    ticket,
+    { kind, phase: "recovery-pass", reason, boardContext, briefObj },
+    enqueueDeps
+  );
 
   // Mirror enqueueRecoveryItemDelegate's `initiated` predicate: a fresh enqueue
   // OR an idempotent no-op both mean the delegate already owns the ticket.

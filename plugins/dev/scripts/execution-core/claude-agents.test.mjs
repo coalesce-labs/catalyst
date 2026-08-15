@@ -13,6 +13,8 @@ import {
   refreshAgents,
   getAgentsCached,
   agentForShortId,
+  TERMINAL_AGENT_STATES,
+  isTerminalAgentState,
   isBgJobAlive,
   livenessForBgJob,
   countBackgroundAgents,
@@ -241,6 +243,67 @@ describe("isBgJobAlive", () => {
 
   test("falls back to listing agents when no list is injected", () => {
     expect(isBgJobAlive("22222222", { exec: () => JSON.stringify(agents) })).toBe(true);
+  });
+});
+
+describe("isTerminalAgentState (CAT-171)", () => {
+  test("blocked is terminal", () => {
+    expect(isTerminalAgentState("blocked")).toBe(true);
+  });
+
+  test("state.json terminal values are NOT members of the listing set", () => {
+    for (const value of ["stopped", "failed", "done"]) {
+      expect(isTerminalAgentState(value)).toBe(false);
+    }
+  });
+
+  test("null / undefined / non-string / unknown values are not terminal", () => {
+    for (const value of [null, undefined, 42, {}, "", "working", "idle"]) {
+      expect(isTerminalAgentState(value)).toBe(false);
+    }
+  });
+});
+
+describe("isBgJobAlive terminalStates option (CAT-171)", () => {
+  const sessionId = "5ad5c1ff-0000-0000-0000-000000000000";
+  const blocked = [{ sessionId, kind: "background", status: "idle", state: "blocked" }];
+  const working = [{ sessionId, kind: "background", status: "busy", state: "working" }];
+
+  test("option omitted keeps presence-only behavior", () => {
+    expect(isBgJobAlive(sessionId, { agents: blocked })).toBe(true);
+  });
+
+  test("a blocked record is not alive when terminalStates is supplied", () => {
+    expect(isBgJobAlive(sessionId, { agents: blocked, terminalStates: TERMINAL_AGENT_STATES })).toBe(
+      false,
+    );
+  });
+
+  test("a non-terminal record remains alive", () => {
+    expect(isBgJobAlive(sessionId, { agents: working, terminalStates: TERMINAL_AGENT_STATES })).toBe(
+      true,
+    );
+  });
+
+  test("a listed record without state remains alive", () => {
+    const noState = [{ sessionId, kind: "background", status: "idle" }];
+    expect(isBgJobAlive(sessionId, { agents: noState, terminalStates: TERMINAL_AGENT_STATES })).toBe(
+      true,
+    );
+  });
+
+  test("an absent session remains not alive", () => {
+    expect(isBgJobAlive(sessionId, { agents: [], terminalStates: TERMINAL_AGENT_STATES })).toBe(false);
+  });
+
+  test("a malformed id short-circuits without shelling out", () => {
+    let spawned = false;
+    const exec = () => {
+      spawned = true;
+      return "";
+    };
+    expect(isBgJobAlive("bg-9", { exec, terminalStates: TERMINAL_AGENT_STATES })).toBe(false);
+    expect(spawned).toBe(false);
   });
 });
 

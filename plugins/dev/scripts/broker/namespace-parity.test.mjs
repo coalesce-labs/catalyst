@@ -73,6 +73,8 @@ const INLINE_EVENT_NAMES = [
   "delegate.routed",                  // CTL-1609 delegate-first.mjs (enforce mode — enqueued ok)
   "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
   "catalyst.replica.writer_idle",     // CAT-21 cloud-sync.mjs (tokenless writer provisioning gap)
+  "liveness.blocked-ghost.observed", // CAT-171 blocked-ghost.mjs (shadow)
+  "liveness.blocked-ghost.reclaimable", // CAT-171 blocked-ghost.mjs (enforce)
 ];
 
 // Build the flat list of all static exec-core event names.
@@ -96,6 +98,13 @@ const EXEC_CORE_EVENT_NAMES = [
 ];
 
 describe("exec-core static event names", () => {
+  test("every liveness.* literal in blocked-ghost.mjs is registered", () => {
+    const src = readFileSync(join(EC_DIR, "blocked-ghost.mjs"), "utf8");
+    const found = [...src.matchAll(/"(liveness\.[a-z0-9.\-]+)"/g)].map((m) => m[1]);
+    expect(found.length).toBeGreaterThan(0);
+    for (const name of found) expect(INLINE_EVENT_NAMES).toContain(name);
+  });
+
   test("none collide with the broker-protected namespace", () => {
     for (const name of EXEC_CORE_EVENT_NAMES) {
       expect(
