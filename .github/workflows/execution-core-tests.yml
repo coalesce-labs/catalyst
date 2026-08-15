@@ -915,6 +915,7 @@ jobs:
             cloud-sync-account.test.mjs \
             cloud-sync-schema-identity.test.mjs \
             linear-feed-event.test.mjs \
+            linear-feed-cursor.test.mjs \
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \
