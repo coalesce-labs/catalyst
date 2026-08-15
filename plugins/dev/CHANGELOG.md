@@ -1,5 +1,15 @@
 # Changelog
 
+## [12.56.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.55.0...catalyst-dev-v12.56.0) (2026-08-15)
+
+
+### Features
+
+* **dev:** CTL-1805 — durable once-per-edge advancement idempotency guard ([#3404](https://github.com/coalesce-labs/catalyst/issues/3404)) ([0d9e25f](https://github.com/coalesce-labs/catalyst/commit/0d9e25f789c7019cb66d60beeaf3078024f424c6))
+* **dev:** CTL-1841 — Linear webhook 401 alarm (route-comparison detector) ([#3364](https://github.com/coalesce-labs/catalyst/issues/3364)) ([dfae529](https://github.com/coalesce-labs/catalyst/commit/dfae529b3581894c0ebab47c0abfc14d0700e552))
+* **dev:** CTL-1854 — let a phase agent declare a bounded wait, so finishing work is not recorded as abandonment ([#3383](https://github.com/coalesce-labs/catalyst/issues/3383)) ([3ebbf30](https://github.com/coalesce-labs/catalyst/commit/3ebbf3048922d42cd7d7a53ec7bde53b04a83449))
+* **dev:** CTL-1869 — report the schema bundle the replica actually loaded ([#3399](https://github.com/coalesce-labs/catalyst/issues/3399)) ([309966f](https://github.com/coalesce-labs/catalyst/commit/309966f42fcfeb60c3bca86c2b42747bb574929d))
+
 ## [12.55.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.54.1...catalyst-dev-v12.55.0)
 
 Aug 15, 2026
