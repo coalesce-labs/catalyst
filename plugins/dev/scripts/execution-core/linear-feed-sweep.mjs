@@ -110,6 +110,26 @@ export function runSweep({
   // before every id, so the first page is inclusive of that instant.
   let position = { lastCreatedAt: start.since, lastId: read?.position?.lastId ?? "" };
 
+  // ⛔ ESTABLISH THE POSITION IMMEDIATELY on a cold start or reset, before sweeping.
+  // Found by running the producer, not by a test: `positionAfter` returns null for an
+  // empty page, so a sweep that finds nothing writes NO cursor — and the next sweep
+  // cold-starts again from a FRESH `now`. Every sweep reported `mode: cold-start`
+  // forever, and worse, the interval between one sweep's `now` and the next one's is
+  // never queried by anything: with a 60s tick that is a permanent 60s blind spot,
+  // repeated. A producer whose whole job is not to lose edges was dropping every edge
+  // that arrived between ticks until its first non-empty page.
+  //
+  // Persisting `since` up front is safe precisely BECAUSE of what these modes mean:
+  // cold-start deliberately declines to replay history, and reset's bound is already
+  // stated — so there is nothing before `since` that we intended to sweep.
+  if (start.mode !== "resume") {
+    try {
+      writeCursorFn(cursorPath, position);
+    } catch (err) {
+      note(counts, `cursor-init-failed:${err?.code ?? err?.message ?? "unknown"}`);
+    }
+  }
+
   let batches = 0;
   let stopped = false;
   const advance = (handled) => {

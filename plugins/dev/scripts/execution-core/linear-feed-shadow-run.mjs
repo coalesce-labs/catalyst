@@ -36,6 +36,13 @@ const flag = (name, fallback) => {
 };
 const ONCE = argv.includes("--once");
 const INTERVAL_SEC = Math.max(5, Number(flag("--interval-sec", "30")) || 30);
+// ⚠️ SELF-LIMITING BY CONSTRUCTION. A shadow window is an experiment, and an
+// experiment that outlives the person who started it is a leak. The deadline lives
+// INSIDE the process so it dies on its own even if every external cleanup is broken
+// — the AGENTS.md rule about background loops. Default 24h; --max-hours 0 disables
+// it, which should be a deliberate, stated choice and not the default.
+const MAX_HOURS = Number(flag("--max-hours", "24"));
+const DEADLINE_MS = Number.isFinite(MAX_HOURS) && MAX_HOURS > 0 ? Date.now() + MAX_HOURS * 3600_000 : null;
 const ORCH_DIR = flag("--orch-dir", null) ?? getExecutionCoreDir();
 
 
@@ -50,6 +57,11 @@ let stopping = false;
 
 function tick() {
   if (stopping) return [];
+  if (DEADLINE_MS !== null && Date.now() >= DEADLINE_MS) {
+    log("deadline reached — stopping", { maxHours: MAX_HOURS, ticks });
+    shutdown("deadline");
+    return [];
+  }
   ticks += 1;
   let reports;
   try {
@@ -105,7 +117,7 @@ function shutdown(signal) {
   process.exit(0);
 }
 
-log("starting", { orchDir: ORCH_DIR, once: ONCE, intervalSec: INTERVAL_SEC });
+log("starting", { orchDir: ORCH_DIR, once: ONCE, intervalSec: INTERVAL_SEC, maxHours: MAX_HOURS, deadline: DEADLINE_MS ? new Date(DEADLINE_MS).toISOString() : null });
 const plans = planTenants({ orchDir: ORCH_DIR });
 for (const p of plans) {
   log("tenant", { account: p.account, teams: [...(p.teams ?? [])], skip: p.skip, shadow: p.shadowPath });

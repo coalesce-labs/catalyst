@@ -106,8 +106,14 @@ describe("⭐ cursor advances to the LAST CONTIGUOUS SUCCESS", () => {
     };
     runSweep({ source: fakeSource(edges), cursorPath, teams: TEAMS, emit, now: () => 0,
       maxBatches: 3 });
-    // no cursor written at all — nothing was handled
-    expect(readCursor(cursorPath).state).toBe("absent");
+    // The cursor sits at the START position, NOT past the failed row — so h1 and h2
+    // are both still pending. (This used to assert the cursor was absent, which was a
+    // PROXY for "didn't advance"; a cold start now persists its position up front, so
+    // the proxy broke while the property it stood for held. Assert the property.)
+    const c = readCursor(cursorPath);
+    expect(c.state).toBe("ok");
+    expect(c.position.lastCreatedAt).toBe(0); // the cold-start instant, before h1@10
+    expect(c.position.lastId).toBeNull();
   });
 });
 
@@ -283,5 +289,43 @@ describe("processPage — the unit the loop is built on", () => {
     expect(res.stopped).toBe(true);
     expect(res.handled).toEqual([]);
     expect(Object.keys(counts.byReason)[0]).toContain("build-failed");
+  });
+});
+
+describe("⭐ a cold start PERSISTS its position, or every sweep restarts from a new now", () => {
+  // Found by running the producer on a real host: every sweep logged `cold-start`
+  // because an empty page writes no cursor, so the next sweep began from a FRESH
+  // `now` — making the interval between ticks a permanent blind spot.
+  test("an empty cold-start still writes the cursor", () => {
+    const r = runSweep({ source: fakeSource([]), cursorPath, teams: TEAMS, emit: () => {}, now: () => 5000, maxBatches: 2 });
+    expect(r.mode).toBe("cold-start");
+    expect(readCursor(cursorPath)).toMatchObject({ state: "ok", position: { lastCreatedAt: 5000 } });
+  });
+
+  test("the NEXT sweep resumes instead of cold-starting again", () => {
+    const src = fakeSource([]);
+    runSweep({ source: src, cursorPath, teams: TEAMS, emit: () => {}, now: () => 5000, maxBatches: 2 });
+    const second = runSweep({ source: src, cursorPath, teams: TEAMS, emit: () => {}, now: () => 9999, maxBatches: 2 });
+    expect(second.mode).toBe("resume"); // NOT cold-start
+  });
+
+  test("⭐ an edge arriving between two ticks is NOT skipped", () => {
+    // The defect in its consequential form: with per-sweep `now`, an edge landing in
+    // the gap between ticks was never queried by either.
+    const edges = [];
+    const src = fakeSource(edges);
+    runSweep({ source: src, cursorPath, teams: TEAMS, emit: () => {}, now: () => 1000, maxBatches: 2 });
+    edges.push(edge("gap", 1500)); // lands between tick 1 (t=1000) and tick 2 (t=2000)
+    const emitted = [];
+    runSweep({ source: src, cursorPath, teams: TEAMS, emit: (_e, i) => emitted.push(i.history.id), now: () => 2000, maxBatches: 2 });
+    expect(emitted).toEqual(["gap"]);
+  });
+
+  test("a reset also persists its stated bound", () => {
+    writeCursor(cursorPath, { lastCreatedAt: 10, lastId: "x" });
+    require("node:fs").writeFileSync(cursorPath, "corrupt", "utf8");
+    const r = runSweep({ source: fakeSource([]), cursorPath, teams: TEAMS, emit: () => {}, now: () => 9000, resetLookbackMs: 1000, maxBatches: 2 });
+    expect(r.mode).toBe("reset");
+    expect(readCursor(cursorPath).position.lastCreatedAt).toBe(8000);
   });
 });
