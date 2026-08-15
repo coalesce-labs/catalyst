@@ -72,6 +72,11 @@ export { EMPTY_WORKER_DIR_GRACE_DEFAULT_MS };
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { explainAdvanceEvidence } from "./assertion-evidence.mjs"; // CTL-1789: from-phase terminal attribution
+import {
+  computeAdvanceEdgeKey,
+  isAdvanceAlreadyApplied,
+  recordAdvanceApplied,
+} from "./advance-guard.mjs"; // CTL-1805: durable once-per-edge advancement idempotency guard
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
@@ -216,6 +221,7 @@ import {
   defaultAppendCooldownEscalatedEvent,
   defaultAppendPhaseAdvanceHeldEvent,
   defaultAppendPhaseAdvanceAppliedEvent, // CTL-1789: the positive half of the advancement gate
+  defaultAppendPhaseAdvanceSuppressedEvent, // CTL-1805: the idempotency-guard's suppressed-duplicate canary
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
 } from "./recovery.mjs";
@@ -3287,6 +3293,11 @@ export function readDispatchFailureReason(orchDir, ticket, phase) {
 // (the SDK path — see settleDispatchSync), leaving bg verification (the default,
 // requireBgJob:true) byte-identical. For the SDK path `done` is also a runnable
 // terminal state (an idempotent duplicate dispatch of an already-completed phase).
+// CTL-1805 (A2): the reason string for the idempotent SDK `done` prelaunch no-op.
+// Named (not a bare literal) so it stays greppable alongside the other
+// verifyDispatchedSignal reasons and is referenced identically at the call site.
+export const NOOP_DONE_PRELAUNCH = "noop_done_prelaunch";
+
 export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = true } = {}) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   let raw;
@@ -3312,17 +3323,32 @@ export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = 
     return { ok: false, reason: "signal_unparseable" };
   }
   const status = signal?.status;
+  // CTL-1805 (A2): an SDK (requireBgJob:false) dispatch of an already-`done`
+  // phase is NOT a launch — the worker never ran; the signal was already
+  // terminal. Before this fix `done` was folded into `runnable` on the SDK path
+  // and returned {ok:true}, which the call site read as a successful launch: it
+  // cleared the failure-only cooldown (re-arming the loop every tick) and emitted
+  // a phase.dispatch.launched with bg_job_id:null. Classify it as a distinct
+  // NON-success, NON-failure no-op so the caller neither clears nor writes the
+  // cooldown — this is the fuel the CTL-56 re-advance loop ran on.
+  if (requireBgJob === false && status === "done") {
+    return { ok: false, reason: NOOP_DONE_PRELAUNCH, noop: true };
+  }
   // CTL-1854: awaiting-work is runnable — a worker that dispatched and immediately
-  // declared a bounded wait has not failed to dispatch.
-  // CTL-1854: YIELDED_STATUS belongs on BOTH branches. Round 10 added it only to
-  // the bg branch, so an in-process (SDK/codex) retry against an already-yielded
-  // phase reported `status_not_runnable` and recorded a FALSE dispatch failure +
-  // cooldown — while dispatch.mjs's sdkSignalRunnable accepted the same signal.
-  // Two verifiers disagreeing about one lifecycle is how a phase gets punished for
-  // a state it correctly declared.
-  const runnable = requireBgJob
-    ? status === "dispatched" || status === "running" || status === YIELDED_STATUS
-    : status === "dispatched" || status === "running" || status === "done" || status === YIELDED_STATUS;
+  // declared a bounded wait has not failed to dispatch. YIELDED_STATUS belongs on
+  // BOTH paths: round 10 added it only to the bg branch, so an in-process
+  // (SDK/codex) retry against an already-yielded phase reported
+  // `status_not_runnable` and recorded a FALSE dispatch failure + cooldown — while
+  // dispatch.mjs's sdkSignalRunnable accepted the same signal. Two verifiers
+  // disagreeing about one lifecycle is how a phase gets punished for a state it
+  // correctly declared.
+  //
+  // Rebase note (CTL-1805 × CTL-1854): CTL-1854's SDK branch also listed `done` as
+  // runnable. The A2 guard above now returns before `done` can reach here on the
+  // SDK path, and `done` was never runnable on the bg path — so the two branches
+  // became identical and collapse to one expression. Both intents are preserved:
+  // SDK `done` is a no-op (A2), YIELDED_STATUS is runnable everywhere (CTL-1854).
+  const runnable = status === "dispatched" || status === "running" || status === YIELDED_STATUS;
   if (!runnable) {
     return { ok: false, reason: "status_not_runnable" };
   }
@@ -4532,6 +4558,10 @@ export function schedulerTick(
     // the advancement gate must not stay refusal-only on any host that forgets to
     // wire it. Tests inject a spy.
     appendPhaseAdvanceAppliedEvent = defaultAppendPhaseAdvanceAppliedEvent,
+    // CTL-1805: suppressed-duplicate audit emitter — phase.advance.suppressed-duplicate.<ticket>.
+    // Best-effort, at most once per throttle window per (ticket,from,to) edge. The
+    // idempotency guard's canary. Default-on; tests inject a spy.
+    appendPhaseAdvanceSuppressedEvent = defaultAppendPhaseAdvanceSuppressedEvent,
     // CTL-757: canonical linear.state.write audit emitter, injectable for tests.
     // Caller-emitted at the 4 scheduler write sites (scheduler-advance,
     // preemption-resume, terminal-sweep, reconcile-backstop) via the emitStateWrite
@@ -5067,6 +5097,18 @@ export function schedulerTick(
       // the SDK prelaunch signal has no bg_job_id, so the async path must not
       // require one.
       const v = verifyDispatched(orchDir, ticket, phase, { requireBgJob: !dispatchWasAsync });
+      // CTL-1805 (A2): an SDK dispatch of an already-`done` phase is an idempotent
+      // NO-OP, not a launch and not a failure. Short-circuit BEFORE the v.ok /
+      // failure ladder so we neither clear the cooldown (which re-armed the CTL-56
+      // re-advance loop every tick) nor emit a phase.dispatch.launched with
+      // bg_job_id:null nor record a dispatch failure (which would spuriously trip
+      // the circuit breaker / escalation ladder). The edge simply does not advance
+      // this tick — the loop's fuel is removed. The advancement sweep's caller
+      // treats a non-ok result as "did not advance" and (in its else branch) only
+      // reaps the predecessor, which is acceptable for a no-op.
+      if (v.noop === true) {
+        return { ok: false, noop: true, code: 0, reason: v.reason ?? NOOP_DONE_PRELAUNCH, signal: null };
+      }
       if (v.ok) {
         clearDispatchCooldown(orchDir, ticket, phase); // CTL-624: success clears any prior cool-down
         // CTL-660: record the VERIFIED launch. Re-read the signal for the

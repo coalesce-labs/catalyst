@@ -1328,6 +1328,55 @@ export function defaultAppendPhaseAdvanceAppliedEvent({
   );
 }
 
+// CTL-1805: the SUPPRESSED-duplicate advance event —
+// phase.advance.suppressed-duplicate.<ticket>.
+//
+// The advancement sweep is a pure re-derivation on every tick with no durable
+// record that an edge was ever applied, so an unchanging predecessor signal
+// re-fires the same edge forever (on mini 2026-08-12 the monitor-merge→
+// monitor-deploy edge for CTL-56 applied 13× in 55s). The CTL-1805 idempotency
+// guard suppresses every replay after the first by keying on the predecessor's
+// identity (ticket|from|to|generation|updatedAt). This event is the CANARY the
+// RCA wanted: a bounded blast radius that is now VISIBLE instead of discovered
+// by accident from an 8-hour-retention log.
+//
+// WARN severity (deliberately, mirroring `held`): a suppressed duplicate is not
+// the system working — it is an input that stopped changing while the sweep kept
+// firing, worth an operator's attention. Emitted at most once per throttle window
+// per (ticket,from,to) edge so a wedged input can't flood the log.
+//
+// `from`/`to`/`edge_key` promoted to attributes because otel-forward strips
+// body.payload off-machine (from/to are bounded enums; edge_key is a bounded
+// per-ticket-lifetime string — no Loki cardinality risk at fleet scale). Same
+// "advance" phase slot as `held`/`applied`, so the namespace-parity source-scan
+// + hardcoded-slot snapshot ({advance,dispatch,scheduler}) stay unchanged, and
+// the action ("suppressed-duplicate") is outside PHASE_EVENT_PATTERN's
+// terminal-status alternation → pure audit, no wake.
+export function defaultAppendPhaseAdvanceSuppressedEvent({ orchId, ticket, from, to, edgeKey }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "advance",
+      ticket,
+      orchId,
+      action: "suppressed-duplicate",
+      severityText: "WARN",
+      severityNumber: 13,
+      reason: "duplicate-edge",
+      payloadExtras: {
+        from: from ?? null,
+        to: to ?? null,
+        edge_key: edgeKey ?? null,
+      },
+      attrExtras: {
+        "catalyst.advance.from": from ?? undefined,
+        "catalyst.advance.to": to ?? undefined,
+        "catalyst.advance.edge_key": edgeKey ?? undefined,
+      },
+    }),
+    "advance-suppressed-duplicate"
+  );
+}
+
 // CTL-713: cooldown GC event — phase.scheduler.cooldown-gc.<ticket>.
 // Emitted once per reaped cooldown marker so GC activity is queryable from the
 // unified event log.

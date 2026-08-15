@@ -6403,7 +6403,13 @@ describe("verifyDispatchedSignal (CTL-611)", () => {
     );
   });
 
-  test("requireBgJob:false also accepts a 'done' signal (idempotent duplicate sdk dispatch)", () => {
+  // CTL-1805 (A2): CONTRACT CHANGE (was {ok:true} under CTL-1367). An SDK
+  // (requireBgJob:false) dispatch of an already-`done` phase is NOT a launch —
+  // it is an idempotent no-op. It now returns a distinct NON-success,
+  // NON-failure outcome { ok:false, reason:"noop_done_prelaunch", noop:true } so
+  // the call site neither clears nor writes the failure-only cooldown (the
+  // cleared cooldown was the fuel the CTL-56 re-advance loop re-armed on).
+  test("CTL-1805: requireBgJob:false + 'done' is a non-success NO-OP, not a launch", () => {
     const dir = join(orchDir, "workers", "CTL-105");
     mkdirSync(dir, { recursive: true });
     writeFileSync(
@@ -6411,10 +6417,33 @@ describe("verifyDispatchedSignal (CTL-611)", () => {
       JSON.stringify({ ticket: "CTL-105", phase: "research", status: "done", bg_job_id: null })
     );
     expect(verifyDispatchedSignal(orchDir, "CTL-105", "research", { requireBgJob: false })).toEqual(
-      { ok: true }
+      { ok: false, reason: "noop_done_prelaunch", noop: true }
     );
     // bg verification rejects a `done` status as not-runnable (unchanged).
-    expect(verifyDispatchedSignal(orchDir, "CTL-105", "research").ok).toBe(false);
+    expect(verifyDispatchedSignal(orchDir, "CTL-105", "research")).toEqual({
+      ok: false,
+      reason: "status_not_runnable",
+    });
+  });
+
+  // CTL-1805 (A2): the noop demotion is SCOPED to `done`. An in-flight SDK
+  // prelaunch (dispatched / running) still verifies ok:true and is NOT a noop —
+  // a legitimate idempotent re-dispatch of a live phase must not be demoted.
+  test("CTL-1805: requireBgJob:false + 'dispatched'/'running' stay ok:true (no noop demotion)", () => {
+    for (const [id, status] of [
+      ["CTL-105a", "dispatched"],
+      ["CTL-105b", "running"],
+    ]) {
+      const dir = join(orchDir, "workers", id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "phase-research.json"),
+        JSON.stringify({ ticket: id, phase: "research", status, bg_job_id: null })
+      );
+      const v = verifyDispatchedSignal(orchDir, id, "research", { requireBgJob: false });
+      expect(v).toEqual({ ok: true });
+      expect(v.noop).toBeUndefined();
+    }
   });
 
   test("requireBgJob:false STILL rejects a stalled/failed signal", () => {
