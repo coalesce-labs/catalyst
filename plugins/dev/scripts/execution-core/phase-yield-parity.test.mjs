@@ -73,6 +73,17 @@ describe("the bash writer mirrors the JS contract", () => {
     expect(yieldArm[1]).toBe("del(.completedAt)");
   });
 
+  test("the dispatcher's idempotency guard mirrors YIELDED_STATUS too", () => {
+    // THIRD hand-written bash mirror. phase-agent-dispatch cannot import the
+    // module either, and drift here is not silent-but-harmless: the guard would
+    // stop recognizing a live yield, treat it as a retry, bump the generation and
+    // launch DUPLICATE phase work over a worker that said it was coming back.
+    const dispatch = readFileSync(join(HERE, "..", "phase-agent-dispatch"), "utf8");
+    const m = dispatch.match(/if \[\[ \$EXISTING_STATUS == "dispatched"(.*?)\]\]; then/);
+    expect(m, "no dispatcher idempotency guard found — anchor gone, not passing by default").not.toBeNull();
+    expect(m[1]).toContain(`$EXISTING_STATUS == "${YIELDED_STATUS}"`);
+  });
+
   test("the writer stamps both the per-yield and the episode anchor", () => {
     // classifyYield reads `yieldedAt` (rewritten per yield) and `firstYieldedAt`
     // (set once per episode). A writer that emits only the first silently removes
