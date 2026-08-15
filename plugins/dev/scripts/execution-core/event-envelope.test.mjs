@@ -376,24 +376,46 @@ describe("live corpus (opt-in)", () => {
       // unterminated one — so a complete `{not json}` earlier in the file was waved
       // through because an identical fragment happened to end it. Only the last
       // element can be a fragment, and only when the text does not end in a newline.
-      const fragmentIndex = endsWithNewline ? -1 : rawLines.length - 1;
+      //
+      // Codex round 11: and waiving it AT ALL is only defensible when the file is
+      // being written concurrently. On a STABLE sample an unterminated corrupt
+      // record at EOF is real corruption, not a race — and waiving it produced a
+      // clean verdict over exactly that (one valid envelope plus unterminated
+      // `{not json}` reported 20 passes, exit 0). EOF is also the likeliest place
+      // for a truncated log to be damaged, so it is the worst place to be lenient.
+      //
+      // Default is therefore to FAIL. The waiver is explicit and opt-in, for the
+      // operator who knowingly points this at a live, actively-appended log:
+      //   CATALYST_EVENT_LOG_SAMPLE_ALLOW_TAIL_FRAGMENT=1
+      // Deterministic and directly testable — no "did the file change under us"
+      // branch that only production ever exercises.
+      const waiveFragment = process.env.CATALYST_EVENT_LOG_SAMPLE_ALLOW_TAIL_FRAGMENT === "1";
+      const fragmentIndex = endsWithNewline || !waiveFragment ? -1 : rawLines.length - 1;
       const lines = [];
       for (let i = 0; i < rawLines.length; i++) {
-        if (rawLines[i]) lines.push({ line: rawLines[i], isFragment: i === fragmentIndex });
+        if (rawLines[i]) lines.push({ line: rawLines[i], isFragment: i === fragmentIndex, i });
       }
       const failures = [];
       let torn = 0;
-      for (const { line, isFragment } of lines) {
+      for (const { line, isFragment, i } of lines) {
         let ev;
         try {
           ev = JSON.parse(line);
         } catch {
           if (isFragment) {
-            torn += 1; // a genuine mid-write fragment — not damage
+            torn += 1; // waived by explicit opt-in — assumed mid-write
             continue;
           }
           if (failures.length < 10) {
-            failures.push({ errors: ["COMPLETE line did not parse — torn record in the scanned region"], line: line.slice(0, 160) });
+            failures.push({
+              errors: [
+                "line did not parse — torn record in the scanned region" +
+                  (i === rawLines.length - 1 && !endsWithNewline
+                    ? " (unterminated final record; set CATALYST_EVENT_LOG_SAMPLE_ALLOW_TAIL_FRAGMENT=1 only if this log is being appended to right now)"
+                    : ""),
+              ],
+              line: line.slice(0, 160),
+            });
           }
           torn += 1;
           continue;
