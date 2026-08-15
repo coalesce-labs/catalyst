@@ -254,7 +254,13 @@ Before continuing to the End block, check for mid-flight context updates from th
 
 > **⚠️ Reaching this block is not optional (CTL-1854).** If you are about to end your turn while
 > still waiting on work you started — a background job, a delegated agent, a long build — do not
-> simply stop. Declare the wait:
+> simply stop. Declare the wait.
+>
+> **⚠️ A yield does NOT resume you.** Nothing redispatches a yielded phase; the runtime returns
+> `noop` while the deadline is live and writes `failed` when it passes. A yield buys an accurate,
+> bounded record — `yield-expired` rather than `ended-without-declaration` — and nothing else. **If
+> you want to be resumed, do not stop:** finish the work, or stay alive until the thing you are
+> waiting on lands. Declare only when you are ending the turn regardless.
 >
 > ```bash
 > # Runnable as written. The bracket notation used elsewhere in docs is NOT shell:

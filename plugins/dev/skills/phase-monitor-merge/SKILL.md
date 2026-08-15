@@ -154,8 +154,18 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    the wait (defeats the assistant `end_turn` rendering bleed described in [[monitor-events]] §
    Narration). Shape: `wake: <event.name> #<PR_NUMBER> — <action being taken>`.
 
-6. **⚠️ Never end your turn undeclared (CTL-1854).** If you are about to stop while still waiting
-   on work you started — a background job, a CI run, a re-review you requested — you MUST say so:
+6. **⚠️ A yield does NOT resume you — it names an ending (CTL-1854).**
+
+   **For CI and re-review, the answer is the event-driven wait above, not a yield.** Nothing
+   redispatches a yielded phase when the GitHub event lands: the only runtime handling of
+   `awaiting-work` returns `noop` while the deadline is live and writes `failed` when it passes. So
+   yielding *instead of* staying in the `catalyst-events wait-for` loop guarantees you never observe
+   the merge you were waiting for — it converts a wait that works into a bounded one that cannot.
+   **Stay in the wait.**
+
+   Use a yield only when you are ending the turn regardless and the alternative is ending it
+   silently. It buys an accurate, bounded record — `yield-expired` instead of
+   `ended-without-declaration` — and buys nothing else. If you want to be resumed, do not stop.
 
    ```bash
    # Runnable as written. Do NOT use "$EMIT" here — it is assigned in the terminal

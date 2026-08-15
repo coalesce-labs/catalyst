@@ -2154,9 +2154,18 @@ export function defaultExpireYield(
   } catch {
     return false; // nothing on disk to expire
   }
-  // Only expire what is STILL yielded. Between the tick's read and this write a
-  // late completion may have landed; overwriting it would destroy a real result
-  // and re-manufacture the abandonment this whole ticket exists to remove.
+  // Only expire what is STILL yielded: a late completion may have landed since
+  // the tick read this signal, and overwriting it would destroy a real result and
+  // re-manufacture the abandonment this ticket exists to remove.
+  //
+  // ⚠️ This NARROWS the window; it does not close it. The read above and the
+  // write below are separate syscalls and the competing writer is a different
+  // PROCESS (the background work's own completion emitter), so a completion
+  // landing between them is still overwritten — most likely exactly when the work
+  // finishes near its deadline. Closing it needs the same serialization competing
+  // signal writers use; tracked as CTL-1860. Stated plainly here because a comment
+  // that claims a guarantee the code does not provide is how the next reader stops
+  // looking.
   if (String(cur.status) !== YIELDED_STATUS) return false;
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   try {
