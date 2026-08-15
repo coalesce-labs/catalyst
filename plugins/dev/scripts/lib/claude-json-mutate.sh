@@ -51,20 +51,35 @@ _cjm_signal_exit() {
   exit 143  # 128 + SIGTERM — conventional signal-terminated status
 }
 
+_cjm_mark_held() {
+  echo "$$" > "${_CJM_LOCK_DIR}/owner" 2>/dev/null || true
+  _CJM_LOCK_HELD=1
+  trap _cjm_release EXIT
+  trap _cjm_signal_exit INT TERM
+}
+
 _cjm_acquire() {
   local waited=0
   [[ -n "$_CJM_LOCK_HELD" ]] && return 0  # reentrant: already ours
   while [[ $waited -lt $_CJM_LOCK_TURNS ]]; do
     if mkdir "$_CJM_LOCK_DIR" 2>/dev/null; then
-      echo "$$" > "${_CJM_LOCK_DIR}/owner" 2>/dev/null || true
-      _CJM_LOCK_HELD=1
-      trap _cjm_release EXIT
-      trap _cjm_signal_exit INT TERM
+      _cjm_mark_held
       return 0
     fi
     if _cjm_lock_is_stale; then
       rm -rf "$_CJM_LOCK_DIR" 2>/dev/null || true
-      continue  # retry immediately after removing stale lock
+      # Immediately try to claim the vacated slot rather than looping back via
+      # `continue`. This tightens the stale-reaper TOCTOU window: a concurrent
+      # waiter that also observed the stale owner and whose rm+mkdir completes
+      # before this mkdir will cause this mkdir to fail, and we fall through to
+      # sleep. With the former `continue`, the additional instructions before the
+      # next mkdir widened the window during which a concurrent rm -rf could
+      # delete our newly-acquired lock dir.
+      if mkdir "$_CJM_LOCK_DIR" 2>/dev/null; then
+        _cjm_mark_held
+        return 0
+      fi
+      # Another waiter claimed the slot — treat as normal contention.
     fi
     sleep "$_CJM_LOCK_SLEEP"
     waited=$((waited + 1))
