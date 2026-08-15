@@ -104,6 +104,7 @@ import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registr
 import {
   readWorkerSignals,
   countSdkInflight as defaultCountSdkInflight,
+  countYieldedOccupancy as defaultCountYieldedOccupancy, // CTL-1854
   hasFreshClaim,
 } from "./signal-reader.mjs";
 // CTL-1410 Phase B: the in-process SDK worker registry — the liveness fact for
@@ -4361,6 +4362,7 @@ export function schedulerTick(
     // (see below), so it is provably inert under bg/oneshot-legacy. Injectable so a
     // unit tick injects a deterministic count.
     countSdkInflight = defaultCountSdkInflight,
+    countYieldedOccupancy = defaultCountYieldedOccupancy, // CTL-1854: mode-independent
     // CTL-731 Phase 00 / CTL-736: `livenessIsFresh` gates new-work admission — a
     // stale/never-populated `claude agents` snapshot means the live count is
     // untrustworthy, so we HOLD new dispatch (fail-safe, never over-spawn) while
@@ -6231,7 +6233,20 @@ export function schedulerTick(
   // `let` (not const): a successful board-health enforce dispatch below reserves a
   // slot by incrementing this AFTER the sample — see the board-health pass (CTL-1157
   // Codex round-5). Every other read of occupiedCount is downstream of that point.
-  let occupiedCount = liveCount + queuedDelegates + sdkInflight;
+  // CTL-1854: yielded phases occupy their slots in EVERY dispatch mode, so this
+  // term is added unconditionally — unlike sdkInflight, which is gated above. A
+  // yielded bg worker's `claude --bg` job is terminal (so liveCount drops it) and
+  // countSdkInflight both excludes bg signals and is never called under the default
+  // `phase-agents` mode, so without this the slot is silently free for the whole
+  // live yield and maxParallel is exceeded. Best-effort, like the term above: a
+  // signal-scan failure must never block the tick.
+  let yieldedOccupancy = 0;
+  try {
+    yieldedOccupancy = countYieldedOccupancy(orchDir);
+  } catch {
+    /* best-effort — never block the tick on a signal-scan failure */
+  }
+  let occupiedCount = liveCount + queuedDelegates + sdkInflight + yieldedOccupancy;
 
   tick?.lap("liveness-read");
 

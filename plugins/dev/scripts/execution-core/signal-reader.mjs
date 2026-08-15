@@ -245,14 +245,7 @@ export function listDispatchedPhases(orchDir, ticket) {
 // SDK_INFLIGHT_STATUSES — the non-terminal worker statuses an in-process SDK
 // phase worker passes through: the shared pre-launch writes "dispatched"; the
 // phase skill flips it to "running". Both are "occupying a slot".
-// CTL-1854: `awaiting-work` counts as occupancy. A yield HOLDS the ticket's slot
-// (isTicketInFlight frees a slot only for failed|stalled|aborted), but occupancy
-// is counted here through a DIFFERENT allow-list — so without this entry the
-// phase worker exits, the yield contributes zero, and at maxParallel=1 the next
-// tick dispatches another ticket while the first is still notionally holding its
-// slot. Two allow-lists for one question is how a limit gets exceeded while every
-// individual check looks right; they must agree for as long as the yield lives.
-const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running", YIELDED_STATUS]);
+const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 
 // countSdkInflight — CTL-1367 P1: the executor=sdk occupancy analogue of
 // liveBackgroundCount (claude-agents.mjs:countBackgroundAgents). Under executor=sdk
@@ -270,6 +263,34 @@ const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running", YIELDED_STATUS])
 // term on executor==="sdk" (dispatchMode==="sdk") so it is provably inert under bg/
 // oneshot-legacy: the term is simply never added. Pure over the filesystem; never
 // throws (a missing workers/ dir → 0).
+// countYieldedOccupancy — CTL-1854. Phase signals in the declared bounded wait
+// (`awaiting-work`), counted for EVERY dispatch mode.
+//
+// ⚠️ This is deliberately NOT folded into SDK_INFLIGHT_STATUSES, which was the
+// first (wrong) fix. That set is consumed only by countSdkInflight, which
+// excludes any signal carrying a bg_job_id and which the scheduler calls ONLY for
+// in-process modes — so under the DEFAULT `phase-agents` mode the term is never
+// even added. A yielded bg worker's `claude --bg` job is terminal, so
+// liveBackgroundCount stops counting it too, and the slot silently freed: at
+// maxParallel=1 another ticket is admitted for the whole live yield.
+//
+// A yield holds its slot because of its STATUS, not because of how it was
+// dispatched, so it is counted once here, unconditionally, and the caller adds it
+// for every mode. No double-count with either existing term: liveBackgroundCount
+// counts LIVE bg jobs (a yielded worker has exited) and countSdkInflight no longer
+// recognizes the status at all.
+//
+// Pure over the filesystem; never throws (a missing workers/ dir → 0).
+export function countYieldedOccupancy(orchDir) {
+  let n = 0;
+  for (const s of readAllPhaseSignals(orchDir)) {
+    if (s.layout !== "nested") continue;
+    if (s.status !== YIELDED_STATUS) continue;
+    n += 1;
+  }
+  return n;
+}
+
 export function countSdkInflight(orchDir) {
   let n = 0;
   for (const s of readAllPhaseSignals(orchDir)) {

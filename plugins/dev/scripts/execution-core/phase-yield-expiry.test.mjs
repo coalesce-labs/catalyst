@@ -111,7 +111,7 @@ describe("the expiry write itself", () => {
       "/orch",
       { ticket: "PROJ-1", phase: "implement" },
       { reason: "deadline-passed" },
-      { readFile: () => JSON.stringify(diskSig()), writeFile: (_p, s) => { written = JSON.parse(s); } }
+      { readFile: () => JSON.stringify(diskSig()), writeFile: (_p, s) => { written = JSON.parse(s); }, rename: () => {}, rm: () => {} }
     );
     expect(ok).toBe(true);
     // `failed` (not a novel token) so all 29 existing status sets handle it, and
@@ -139,7 +139,7 @@ describe("the expiry write itself", () => {
         "/orch",
         { ticket: "PROJ-1", phase: "implement" },
         { reason: "deadline-passed" },
-        { readFile: () => JSON.stringify(diskSig(status)), writeFile: (_p, s) => { written = s; } }
+        { readFile: () => JSON.stringify(diskSig(status)), writeFile: (_p, s) => { written = s; }, rename: () => {}, rm: () => {} }
       );
       expect({ status, ok, wrote: written !== null }).toEqual({ status, ok: false, wrote: false });
     }
@@ -152,6 +152,8 @@ describe("the expiry write itself", () => {
       defaultExpireYield("/o", { ticket: "T", phase: "p" }, {}, {
         readFile: () => JSON.stringify(diskSig()),
         writeFile: boom,
+        rename: () => {},
+        rm: () => {},
       })
     ).toBe(false);
   });
@@ -189,5 +191,88 @@ describe("⚠️ sweeps that must leave a yield alone", () => {
     expect(yieldAt).toBeGreaterThan(0);
     expect(worktreeAt).toBeGreaterThan(0);
     expect(yieldAt).toBeLessThan(worktreeAt);
+  });
+});
+
+describe("⚠️ a yield occupies its slot in EVERY dispatch mode", () => {
+  // Round 5's fix added the status to SDK_INFLIGHT_STATUSES. That was half a fix:
+  // countSdkInflight excludes any signal with a bg_job_id AND the scheduler calls
+  // it only for in-process modes, so under the DEFAULT `phase-agents` mode the
+  // term is never added. Meanwhile the yielded worker's `claude --bg` job is
+  // terminal, so liveBackgroundCount drops it too — the slot silently freed for
+  // the whole live yield.
+  test("countYieldedOccupancy counts a yielded signal that HAS a bg_job_id", async () => {
+    const { countYieldedOccupancy } = await import("./signal-reader.mjs");
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const orch = mkdtempSync(join(tmpdir(), "yieldocc-"));
+    mkdirSync(join(orch, "workers", "PROJ-9"), { recursive: true });
+    writeFileSync(
+      join(orch, "workers", "PROJ-9", "phase-implement.json"),
+      // bg_job_id present — this is the bg-worker shape countSdkInflight EXCLUDES.
+      JSON.stringify({ status: YIELDED_STATUS, ticket: "PROJ-9", phase: "implement", bg_job_id: "bg-123" })
+    );
+    expect(countYieldedOccupancy(orch)).toBe(1);
+  });
+
+  test("it does not count non-yielded signals, and never throws on a missing dir", async () => {
+    const { countYieldedOccupancy } = await import("./signal-reader.mjs");
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const orch = mkdtempSync(join(tmpdir(), "yieldocc2-"));
+    mkdirSync(join(orch, "workers", "PROJ-8"), { recursive: true });
+    writeFileSync(
+      join(orch, "workers", "PROJ-8", "phase-implement.json"),
+      JSON.stringify({ status: "running", ticket: "PROJ-8", phase: "implement" })
+    );
+    expect(countYieldedOccupancy(orch)).toBe(0);
+    expect(countYieldedOccupancy(join(orch, "does-not-exist"))).toBe(0);
+  });
+});
+
+describe("the expiry write is atomic", () => {
+  // A direct write TRUNCATES the canonical signal first: a crash mid-write leaves
+  // partial JSON, every scan skips an unparseable signal, and the ticket drops out
+  // of BOTH recovery and capacity accounting — permanently, since the next tick
+  // can no longer see it to retry.
+  test("writes to a temp path and renames over the signal", () => {
+    const calls = [];
+    defaultExpireYield(
+      "/orch",
+      { ticket: "PROJ-1", phase: "implement" },
+      { reason: "deadline-passed" },
+      {
+        readFile: () => JSON.stringify({ status: YIELDED_STATUS }),
+        writeFile: (p) => calls.push(["write", p]),
+        rename: (from, to) => calls.push(["rename", from, to]),
+        rm: () => calls.push(["rm"]),
+      }
+    );
+    const [write, ren] = calls;
+    expect(write[0]).toBe("write");
+    expect(write[1]).toContain(".tmp."); // never the canonical path directly
+    expect(ren[0]).toBe("rename");
+    expect(ren[1]).toBe(write[1]);
+    expect(ren[2]).toMatch(/phase-implement\.json$/);
+    expect(ren[2]).not.toContain(".tmp.");
+  });
+
+  test("a failed rename cleans up its temp file rather than leaving debris", () => {
+    let removed = null;
+    const ok = defaultExpireYield(
+      "/orch",
+      { ticket: "PROJ-1", phase: "implement" },
+      {},
+      {
+        readFile: () => JSON.stringify({ status: YIELDED_STATUS }),
+        writeFile: () => {},
+        rename: () => { throw new Error("EXDEV"); },
+        rm: (p) => { removed = p; },
+      }
+    );
+    expect(ok).toBe(false);
+    expect(removed).toContain(".tmp.");
   });
 });

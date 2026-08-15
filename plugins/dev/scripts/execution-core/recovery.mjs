@@ -2145,7 +2145,7 @@ export function defaultExpireYield(
   orchDir,
   signal,
   verdict,
-  { readFile = readFileSync, writeFile = writeFileSync } = {}
+  { readFile = readFileSync, writeFile = writeFileSync, rename = renameSync, rm = rmSync } = {}
 ) {
   const p = join(orchDir, "workers", signal?.ticket ?? "", `phase-${signal?.phase ?? ""}.json`);
   let cur;
@@ -2168,9 +2168,18 @@ export function defaultExpireYield(
   // looking.
   if (String(cur.status) !== YIELDED_STATUS) return false;
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  // Atomic tmp+rename, matching the SDK abandonment writer this mirrors
+  // (sdk-run-phase-agent). A direct write TRUNCATES the canonical signal first, so
+  // a crash or ENOSPC mid-write leaves partial JSON — and a signal that will not
+  // parse is skipped by every scan, which means the next tick cannot retry the
+  // expiry and the ticket drops out of BOTH recovery and capacity accounting. The
+  // failure mode is therefore not "the expiry is lost" but "the ticket is",
+  // permanently. Claiming to write the same terminal as that writer while writing
+  // it less durably is a parity claim that is not true.
+  const tmp = `${p}.tmp.${process.pid}`;
   try {
     writeFile(
-      p,
+      tmp,
       JSON.stringify({
         ...cur,
         status: "failed",
@@ -2181,8 +2190,16 @@ export function defaultExpireYield(
         updatedAt: ts,
       })
     );
+    rename(tmp, p);
   } catch {
-    return false; // best-effort — the next tick retries
+    // Best-effort: the next tick retries. Clear the temp file so a failed rename
+    // cannot leave debris in workers/ for the dir sweeps to trip over.
+    try {
+      rm(tmp, { force: true });
+    } catch {
+      /* nothing further to do */
+    }
+    return false;
   }
   return true;
 }
