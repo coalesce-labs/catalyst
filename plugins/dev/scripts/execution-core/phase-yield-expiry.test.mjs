@@ -366,3 +366,30 @@ describe("⚠️ round 12: the ancillary-yield shape, three more places", () => 
     expect(loopArea).not.toContain("liveCount += 1");
   });
 });
+
+describe("⚠️ the dispatcher change and the spec parser are one change", () => {
+  // Found by sweeping my OWN round-13 fix rather than by the next review round.
+  // The dispatcher's idempotent branch echoes the EXISTING signal status into the
+  // spec it prints on stdout. Teaching it to short-circuit on `awaiting-work`
+  // therefore makes that status reach isLaunchSpec's structural parser — and the
+  // parser rejects any status outside its closed set, so the runner would find NO
+  // spec at all. Adding one without the other is a broken half-change.
+  test("isLaunchSpec accepts an idempotent awaiting-work spec", async () => {
+    const src = await Bun.file(new URL("./sdk-run-phase-agent.mjs", import.meta.url)).text();
+    const i = src.indexOf("const PRELAUNCH_SPEC_STATUSES");
+    const j = src.indexOf("]);", i);
+    expect(i).toBeGreaterThan(-1);
+    expect(j).toBeGreaterThan(i);
+    expect(src.slice(i, j)).toContain("YIELDED_STATUS");
+  });
+
+  test("the dispatcher really does emit that status (the reason the above matters)", async () => {
+    const dispatch = await Bun.file(new URL("../phase-agent-dispatch", import.meta.url)).text();
+    // The idempotent branch echoes $EXISTING_STATUS into the spec's `status`.
+    const guard = dispatch.indexOf('$EXISTING_STATUS == "awaiting-work"');
+    expect(guard).toBeGreaterThan(-1);
+    const branch = dispatch.slice(guard, guard + 900);
+    expect(branch).toContain('--arg status "$EXISTING_STATUS"');
+    expect(branch).toContain("idempotent: true");
+  });
+});

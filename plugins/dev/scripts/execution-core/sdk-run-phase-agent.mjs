@@ -799,6 +799,13 @@ const PRELAUNCH_SPEC_STATUSES = new Set([
   "dispatched",      // idempotent: an in-flight worker already owns this phase
   "running",         // idempotent: ditto
   "done",            // idempotent: already completed
+  // CTL-1854: the dispatcher's idempotency guard now also short-circuits on a live
+  // yield, and that branch echoes the EXISTING signal status into the spec — so
+  // `awaiting-work` reaches this structural parser. Omitting it would make
+  // isLaunchSpec reject a perfectly valid idempotent spec, and the runner would
+  // fail to find any spec at all. This entry is REQUIRED BY the dispatcher change,
+  // not optional alongside it; the two must be added together or neither.
+  YIELDED_STATUS,    // idempotent: a worker declared a bounded wait and owns this phase
   "claim-lost",      // idempotent: a concurrent dispatcher won the single-flight claim
 ]);
 
