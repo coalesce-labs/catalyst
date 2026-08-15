@@ -73,6 +73,7 @@ import {
   Semaphore,
 } from "./sdk-run-phase-agent.mjs";
 import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 
 const CODEX_EXECUTOR_ID = "codex-exec";
 
@@ -1350,6 +1351,18 @@ function normalizeUsage(usage) {
 // readSignalStatus — the current on-disk phase-signal status (or null when the
 // file is absent/unreadable). Used to gate the generic-failure backstop to a
 // still-in-flight (dispatched/running) signal.
+// CTL-1854: the signal's generation, for the failure-path fence. Returns null on
+// any read/parse failure so a missing value FAILS OPEN (no fence), matching the
+// sdk fence's rule — an unreadable generation must not silently suppress a real
+// failure write.
+function readSignalGeneration(signalFile) {
+  try {
+    return JSON.parse(readFileSync(signalFile, "utf8"))?.generation ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function readSignalStatus(signalFile) {
   if (!signalFile) return null;
   try {
@@ -1694,10 +1707,30 @@ export async function codexRunPhaseAgent(
 
       const classification = res.spawnError ? "failed" : classifyCodexOutcome(res);
 
+      // ⚠️ ONE GENERATION FENCE FOR EVERY POST-LAUNCH TERMINAL WRITER.
+      // Computed here, above the branch set, because the first cut fenced only the
+      // `failed` branch and the auth-park / rate-park siblings RETURN BEFORE it —
+      // so an old generation surviving a restart or a false-dead redispatch could
+      // still overwrite a NEWER generation's live yield through those paths.
+      // Fencing one writer in a family of three is not fencing the family.
+      // Fail-open parity with the sdk fence: only a numeric mine < numeric signal
+      // counts as stale, so legacy and unfenced dispatches are unaffected.
+      const _sigGen = readSignalGeneration(signalFile);
+      const _mine = spec?.generation;
+      // ⚠️ Number("") / Number(null) / Number(false) / Number([]) are all 0, which
+      // Number.isInteger accepts — so a null generation compared against a real
+      // one would compute stale=true and SUPPRESS all three terminal writers.
+      // Require a plain integer (or an integer-valued string), never a coercion.
+      const _isPlainInt = (v) =>
+        (typeof v === "number" && Number.isInteger(v)) ||
+        (typeof v === "string" && /^\d+$/.test(v.trim()) && v.trim() !== "");
+      const _staleGeneration =
+        _isPlainInt(_mine) && _isPlainInt(_sigGen) && Number(_mine) < Number(_sigGen);
+
       if (classification === "auth-park") {
         // STICKY needs-human path — a fresh `codex login` for this home is required.
         // Do NOT loop (a re-dispatch would just re-fail the same way).
-        writeSignalStalled(signalFile, "codex-auth");
+        if (!_staleGeneration) writeSignalStalled(signalFile, "codex-auth");
         emitEvent("execution-core.codex.auth-park", {
           ticket,
           phase,
@@ -1730,10 +1763,12 @@ export async function codexRunPhaseAgent(
         // / circuit-breaker retry — the scheduler re-dispatches after the cool-down,
         // which is the TRANSIENT behavior rate-park intends. Classification stays
         // "rate-park" for any caller that inspects it.
-        markLaunchFailed(
-          { phase, ticket, status: "failed", reason: "codex-rate-park-exhausted", orchDir, signalFile },
-          { spawn },
-        );
+        if (!_staleGeneration) {
+          markLaunchFailed(
+            { phase, ticket, status: "failed", reason: "codex-rate-park-exhausted", orchDir, signalFile },
+            { spawn },
+          );
+        }
         return {
           code: 1,
           stdout: "",
@@ -1749,7 +1784,22 @@ export async function codexRunPhaseAgent(
         // terminal sweep reclaims it. A skill that wrote its own terminal status
         // already advanced — don't clobber it.
         const status = readSignalStatus(signalFile);
-        if (status === "dispatched" || status === "running") {
+        // CTL-1854: a yielded signal is marked failed here too. The codex run has
+        // FAILED, so the wait is moot — recording `codex-failed` now is accurate and
+        // frees the slot immediately, whereas leaving it would have the tick record
+        // `yield-expired` up to 30 minutes later, misattributing a process failure to
+        // a broken promise.
+        // ⚠️ GENERATION FENCE. markLaunchFailed has none of its own, and the
+        // clean-exit path four lines below fences via
+        // flipSignalAbandonedOnUndeclaredExit ("...or when this generation is
+        // stale"). Without the same guard here, an OLD codex generation that
+        // survived a daemon restart or a false-dead redispatch can exit non-zero
+        // later and overwrite the NEWER worker's live yield with a failure —
+        // killing a wait that is doing its job. Bow out only when both generations
+        // are plain integers and mine is older; anything missing or non-numeric
+        // fails open, matching the sdk fence's parity rule so legacy and unfenced
+        // dispatches are unaffected.
+        if (!_staleGeneration && (status === "dispatched" || status === "running" || status === YIELDED_STATUS)) {
           markLaunchFailed(
             { phase, ticket, status: "failed", reason: "codex-failed", orchDir, signalFile },
             { spawn },

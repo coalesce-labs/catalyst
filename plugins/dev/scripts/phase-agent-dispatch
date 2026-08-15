@@ -604,7 +604,8 @@ WORKER_DIR="${ORCH_DIR}/workers/${TICKET}"
 SIGNAL_FILE="${WORKER_DIR}/phase-${PHASE}.json"
 mkdir -p "$WORKER_DIR" 2>/dev/null || die "cannot create $WORKER_DIR"
 
-# Idempotency: if a signal exists and its status is one of dispatched|running|done,
+# Idempotency: if a signal exists and its status is one of
+# dispatched|running|done|awaiting-work, we no-op.
 # we no-op. Failed signals are overwritten (retry path).
 EXISTING_STATUS=""
 EXISTING_GENERATION=""
@@ -642,7 +643,17 @@ if [[ -n "$EXISTING_STATUS" ]] \
 	POSTSTALE_SIGNAL=1            # prior-run tombstone → its leftover claim is reapable (CTL-1667, Codex P1 #3061)
 fi
 
-if [[ $EXISTING_STATUS == "dispatched" || $EXISTING_STATUS == "running" || $EXISTING_STATUS == "done" ]]; then
+# CTL-1854: `awaiting-work` is idempotent here for the same reason `running` is —
+# a live worker owns this phase. Without it a queued retry, revive, or direct
+# dispatch treated the declared wait as a retry: generation incremented, signal
+# rewritten to `dispatched`, DUPLICATE phase work launched over a worker that had
+# said it was coming back. An EXPIRED yield is not special-cased: the scheduler
+# tick converts it to `failed` (which is already the retry path here) within a
+# tick, so dispatch resumes by itself and this guard never has to reason about
+# deadlines. The literal is a hand-written mirror of YIELDED_STATUS in
+# lib/phase-yield.mjs — the THIRD such mirror — held byte-identical by
+# execution-core/phase-yield-parity.test.mjs.
+if [[ $EXISTING_STATUS == "dispatched" || $EXISTING_STATUS == "running" || $EXISTING_STATUS == "done" || $EXISTING_STATUS == "awaiting-work" ]]; then
 	EXISTING_JOB=$(jq -r '.bg_job_id // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
 	jq -nc \
 		--arg ticket "$TICKET" \

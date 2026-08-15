@@ -1323,6 +1323,50 @@ a revive, a resume, and a new-work pull).
   never advance-eligible (`deriveAdvancement` gates on `done`, or `skipped` for `monitor-deploy`
   only), so they can never be the `from` signal of an applied advance.
 
+### The declared, bounded wait — `awaiting-work` (CTL-1854)
+
+An agent that delegates to a background job, says "I'll be re-invoked when it completes", and ends
+its turn is recorded by `sdk-run-phase-agent` as `failed`/`abandoned`/`ended-without-declaration`
+(CTL-1790). Measured 2026-08-14: **5 such runs across both hosts in one day**, all in `implement`
+and `monitor-merge` — the two phases with a reason to await background work — every one a clean SDK
+exit at turn 11–15 of 500 with 8% context left. Two were fleet-blocking; one *was* the
+ingestion-silence alarm, so the defect ate the fix for another defect.
+
+`phase-agent-emit-complete --status yield` is the declaration. It writes status **`awaiting-work`**
+plus `yieldedAt`/`firstYieldedAt`, reusing the shape `park` already established: non-terminal (no
+`completedAt`) and **no `PHASE_EVENT_PATTERN` match**, so it creates no phase-lifecycle route.
+Deliberately NOT `needs-input` — that means waiting on a HUMAN and pages one; an agent waiting on
+its own job needs nobody, and conflating them imports CTL-1850's false-page defect.
+
+- **A yield is a deadline, not a permit.** `isTicketInFlight` frees a slot only for
+  `failed|stalled|aborted`, so `awaiting-work` HOLDS it. Contract + classifier:
+  `lib/phase-yield.mjs` (zero-import leaf).
+- **⚠️ Expiry lives in the scheduler tick, NOT in the runner.**
+  `sdk-run-phase-agent` evaluates a yield exactly once, as the worker exits — microseconds after
+  `yieldedAt` was written, when it is always live — so that call site can never observe a deadline
+  pass. Enforcement is `reclaimDeadWorkIfPossible` (recovery.mjs), which `schedulerTick` runs once
+  per signal per tick, placed **above** the `classifyWorker` short-circuit (an SDK-path signal has
+  no `bg_job_id` → `unknown` → early `noop`, the exact stranding path) **and above the
+  `inFlightTickets` filter**. That second placement is not symmetry: the tempting argument — "the
+  sweep must reach every yield, because a yield holds the slot" — is true only for a **pipeline**
+  phase. An **ancillary** yield (a `recovery-pass` beside a failed/stalled pipeline phase) leaves
+  `isTicketInFlight` false, so the filter skipped it and its deadline was never evaluated, reserving
+  the slot forever. The yield branch is therefore evaluated unconditionally.
+- **The ceiling bounds the EPISODE** (30 min, matching Linear's session-stale deadline).
+  The deadline **never moves later**: both anchors are set once per episode and `yieldMs` only ever
+  shrinks (a re-yield takes the minimum, and never deletes it). Ten re-yields buy exactly as much as
+  one — and that holds for SHORT waits too, not just at the ceiling: a 60-second yield re-declared
+  after 30 seconds still expires at 60. Absent anchor → anchors on `yieldedAt`; **present but
+  unreadable → expires**.
+- **An expired yield is TERMINAL, not a re-dispatch.** It writes `failed` + `outcome: "abandoned"` +
+  `failureReason: "yield-expired"`, `assertedBy: recovery-reclaim` (fabricated by the sweep, not
+  declared). `failed` is in `signal-reader.mjs`'s `TERMINAL` set, so reclaim short-circuits to
+  `noop` and the terminal sweep routes through the CTL-1609 delegate-first path — identical to a
+  plain abandonment, so no yield-expire-redispatch loop is constructible. Deliberately not
+  `stalled`, which routes to `needs-human` and would page an operator for every expired yield.
+- **Vocabulary collision**: CTL-615/CTL-702's `phase-*-yield-*.json` tombstones are an unrelated
+  mechanism (a duplicate worker bowing out to the canonical one). A `grep` for "yield" returns both.
+
 **Enforcement surfaces:**
 
 - `plugins/dev/scripts/broker/namespace-contract.mjs` — single source of truth:

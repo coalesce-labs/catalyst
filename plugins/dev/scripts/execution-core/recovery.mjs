@@ -27,6 +27,11 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import {
+  YIELDED_STATUS,
+  YIELD_EXPIRED_REASON,
+  classifyYield,
+} from "../lib/phase-yield.mjs";
+import {
   getJobsRoot,
   getEventLogPath,
   getClusterHosts,
@@ -96,7 +101,8 @@ import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 // supersede-guard below.
 import { RECOVERY_PASS_PHASE } from "./recovery-reasoning.mjs";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
-import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
+import { ASSERTED_BY } from "./assertion-evidence.mjs";
+import { defaultAppendEventLog } from "./sdk-run-phase-agent.mjs"; // CTL-1854: the abandonment event emitter // CTL-1789: terminal-writer attribution
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
@@ -2119,6 +2125,148 @@ function markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalle
   }
 }
 
+// CTL-1854: expire a yield whose deadline has passed, in place on the existing
+// phase signal (every other field preserved), mirroring writeTerminalStalled's
+// shape. Writes the SAME terminal the runner writes on an undeclared exit —
+// `failed` + `outcome: "abandoned"` — so all 29 existing status sets, the
+// broker, and the orch-monitor readers already handle it and none needs a new
+// token. See sdk-run-phase-agent's CTL-1790 note for why introducing a novel
+// status value fails in the worst direction.
+//
+// The failureReason is the one distinction that matters: an expired yield BROKE
+// A PROMISE IT MADE, a silent exit never made one, and an operator reading the
+// signal must be able to tell those apart.
+//
+// assertedBy is RECOVERY_RECLAIM, not the SDK id — this terminal is FABRICATED
+// by the sweep, not declared by the agent, and the advancement audit must
+// classify it that way. Idempotent and best-effort: an unreadable or
+// already-terminal signal is a no-op, and a failed write never throws into the
+// tick.
+export function defaultExpireYield(
+  orchDir,
+  signal,
+  verdict,
+  {
+    readFile = readFileSync,
+    writeFile = writeFileSync,
+    rename = renameSync,
+    rm = rmSync,
+    // CTL-1854 (Codex round 19): the abandonment event. The RUNNER cannot emit it
+    // later — it evaluated the yield immediately after declaration and exited — so
+    // if this writer stays silent the terminal is invisible to phase-lifecycle
+    // interests, the CTL-532 worker-state fold, the HUD and every unified-log
+    // consumer. That is the same "SILENCE IS A DEFECT" lesson CTL-1790 recorded on
+    // the runner's own flip, reintroduced on the path that replaced it.
+    appendEventLog = defaultAppendEventLog,
+  } = {}
+) {
+  // CTL-1854 (Codex round 25): refuse rather than build a nonsense path. A signal
+  // that omits ticket/phase produced `workers//phase-.json`, which cannot exist —
+  // so the expiry silently no-op'd while occupancy still counted the yield, and the
+  // slot was held forever. Callers that have path-derived identity pass it in.
+  // ⚠️ `??` picks the record's value whenever it is merely NON-NULL, so a numeric
+  // or object ticket won the coalesce and then failed the type check below — the
+  // expiry refused and the hold became permanent. Round 26 fixed exactly this in
+  // the occupancy reader; the SWEEP uses a different reader (readAllPhaseSignals),
+  // so the same conflation survived on this path. Prefer a VALID identity, not a
+  // present one.
+  const _valid = (v) => (typeof v === "string" && v !== "" ? v : undefined);
+  const _ticket = _valid(signal?.ticket) ?? _valid(signal?.derivedTicket);
+  const _phase = _valid(signal?.phase) ?? _valid(signal?.derivedPhase);
+  if (typeof _ticket !== "string" || !_ticket || typeof _phase !== "string" || !_phase) {
+    return false;
+  }
+  const p = join(orchDir, "workers", _ticket, `phase-${_phase}.json`);
+  let cur;
+  try {
+    cur = JSON.parse(readFile(p, "utf8"));
+  } catch {
+    return false; // nothing on disk to expire
+  }
+  // Only expire what is STILL yielded: a late completion may have landed since
+  // the tick read this signal, and overwriting it would destroy a real result and
+  // re-manufacture the abandonment this ticket exists to remove.
+  //
+  // ⚠️ This NARROWS the window; it does not close it. The read above and the
+  // write below are separate syscalls and the competing writer is a different
+  // PROCESS (the background work's own completion emitter), so a completion
+  // landing between them is still overwritten — most likely exactly when the work
+  // finishes near its deadline. Closing it needs the same serialization competing
+  // signal writers use; tracked as CTL-1860. Stated plainly here because a comment
+  // that claims a guarantee the code does not provide is how the next reader stops
+  // looking.
+  if (String(cur.status) !== YIELDED_STATUS) return false;
+  const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  // Atomic tmp+rename, matching the SDK abandonment writer this mirrors.
+//
+// ⚠️ "The SAME terminal" refers to the STATUS TRIPLE the runner writes
+// (failed / abandoned / a named failureReason) and to writing it atomically — NOT
+// to byte-identical output. The runner also stamps `phaseTimestamps.failed`,
+// which this writer does not, so the HUD's per-phase timing is absent for a
+// yield-expiry. Stated rather than silently implied, because a `toMatchObject`
+// assertion cannot notice a missing key and the earlier wording claimed more
+// parity than the code delivers. Tracked with the other timing work rather than
+// widened here
+  // (sdk-run-phase-agent). A direct write TRUNCATES the canonical signal first, so
+  // a crash or ENOSPC mid-write leaves partial JSON — and a signal that will not
+  // parse is skipped by every scan, which means the next tick cannot retry the
+  // expiry and the ticket drops out of BOTH recovery and capacity accounting. The
+  // failure mode is therefore not "the expiry is lost" but "the ticket is",
+  // permanently. Claiming to write the same terminal as that writer while writing
+  // it less durably is a parity claim that is not true.
+  const tmp = `${p}.tmp.${process.pid}`;
+  try {
+    writeFile(
+      tmp,
+      JSON.stringify({
+        ...cur,
+        status: "failed",
+        outcome: "abandoned",
+        failureReason: YIELD_EXPIRED_REASON,
+        yieldExpiredReason: verdict?.reason ?? null,
+        assertedBy: ASSERTED_BY.RECOVERY_RECLAIM,
+        updatedAt: ts,
+        // Strip the episode anchors. Every other terminal writer spreads the prior
+        // signal and leaves them, so emit-complete's `.firstYieldedAt // $ts` then
+        // anchors a NEW wait on the OLD episode and expires it immediately.
+        yieldedAt: undefined,
+        firstYieldedAt: undefined,
+        yieldMs: undefined,
+      })
+    );
+    rename(tmp, p);
+    // Emitted ONLY after the rename commits, and outside no try of its own so a
+    // logging failure cannot undo a written terminal — it is caught by the outer
+    // handler below, which already treats this as best-effort.
+    try {
+      appendEventLog({
+        // The RESOLVED identity, not the record's raw fields. Using the latter
+        // emitted `phase.null.abandoned.null` for exactly the older signals the
+        // path-derivation was added to support — the write succeeded and the event
+        // named nothing, which is worse than silence because it looks like a real
+        // terminal for a phase that does not exist.
+        phase: _phase,
+        ticket: _ticket,
+        status: "abandoned",
+        reason: YIELD_EXPIRED_REASON,
+        orchestrator: cur?.orchestrator,
+      });
+    } catch {
+      /* the signal is authoritative; a failed emit must not fail the expiry */
+    }
+  } catch {
+    // Best-effort: the next tick retries. Clear the temp file so a failed rename
+    // cannot leave debris in workers/ for the dir sweeps to trip over.
+    try {
+      rm(tmp, { force: true });
+    } catch {
+      /* nothing further to do */
+    }
+    return false;
+  }
+  return true;
+}
+
 export function reclaimDeadWorkIfPossible(
   orchDir,
   signal,
@@ -2330,8 +2478,77 @@ export function reclaimDeadWorkIfPossible(
     multiHost = false,
     self = undefined,
     gateway = undefined,
+    // CTL-1854: the seam that expires a yield. Injectable so the branch is
+    // testable without a filesystem; defaults to the real in-place writer.
+    expireYield = defaultExpireYield,
   } = {}
 ) {
+  // ─── CTL-1854: yield evaluation, BEFORE classifyWorker ────────────────────
+  //
+  // ⚠️ THIS IS THE ONLY PLACE A YIELD CAN EXPIRE, AND IT MUST RUN FIRST.
+  //
+  // The runner (sdk-run-phase-agent) evaluates a yield exactly once, as the
+  // worker exits — microseconds after `yieldedAt` was written, when it is
+  // ALWAYS live. So the runner can never observe a deadline pass: left there
+  // alone, `--yield-seconds` and the 30-minute ceiling are a bound whose only
+  // enforcement point cannot fire, and an `awaiting-work` signal holds its slot
+  // forever (isTicketInFlight frees a slot only for failed|stalled|aborted).
+  // This function is the per-tick, per-signal evaluator (schedulerTick calls it
+  // for every worker signal), so it is where the deadline actually lives.
+  //
+  // ⚠️ HOW THE SWEEP REACHES A YIELDED SIGNAL — and why the obvious argument is
+  // WRONG. This comment used to reason: the loop skips any ticket not in
+  // `inFlightTickets`, and a yield HOLDS the slot, so every yield is necessarily
+  // swept. That holds for a PIPELINE phase and FAILS for an ancillary one — a
+  // `recovery-pass` yielding beside a failed/stalled pipeline phase leaves
+  // isTicketInFlight false, so the filter skipped it and its deadline was never
+  // evaluated (slot reserved forever). The caller therefore evaluates
+  // YIELDED_STATUS UNCONDITIONALLY, before that filter
+  // (scheduler.mjs, "YIELD EXPIRY MUST NOT DEPEND ON TICKET-LEVEL IN-FLIGHT").
+  //
+  // Do not move the check back behind the filter on the strength of the
+  // slot-holding argument: it is an elegant claim that is only true for the case
+  // one has in mind.
+  //
+  // It must sit ABOVE the classifyWorker short-circuit: an SDK-path signal has
+  // no bg_job_id, so classifyWorker returns "unknown" and the function returns
+  // "noop" before any status is consulted — the exact path that would strand
+  // the ticket. Placing this below that line would leave the bound unenforced
+  // for precisely the workers that need it most.
+  if (String(signal?.status) === YIELDED_STATUS) {
+    const verdict = classifyYield(
+      { ...(signal?.raw ?? {}), status: signal?.status },
+      now()
+    );
+    if (!verdict.expired) {
+      // A LIVE yield is honored like needs-input: neither reclaim nor escalate.
+      // Without this the default `claude --bg` worker is dead-terminal the
+      // moment it writes the status, so the next tick would reclaim or revive
+      // it — cutting the declared wait short and risking a duplicate worker.
+      log.debug(
+        { ticket: signal?.ticket, phase: signal?.phase, deadlineMs: verdict.deadlineMs },
+        "reclaimDeadWork: honoring live yield (CTL-1854)"
+      );
+      return "noop";
+    }
+    // EXPIRED: write the same terminal the runner writes on an undeclared exit,
+    // naming which promise was broken. Deliberately `failed`, NOT `stalled` —
+    // stalled routes through the terminal sweep to needs-human, which would
+    // page an operator for every expired yield and make this state STRICTLY
+    // WORSE than the abandonment it replaces.
+    const wrote = expireYield(orchDir, signal, verdict);
+    // Report what HAPPENED. The previous line logged "writing terminal" before the
+    // attempt and ignored its result, so a refused or failed write logged a
+    // success every tick — a log that cannot be wrong about the thing it reports.
+    log.warn(
+      { ticket: signal?.ticket, phase: signal?.phase, reason: verdict.reason, wrote },
+      wrote
+        ? "reclaimDeadWork: yield expired — terminal written (CTL-1854)"
+        : "reclaimDeadWork: yield expired but the terminal was NOT written (CTL-1854)"
+    );
+    return "noop";
+  }
+
   const klass = classifyWorker(signal, { statJob });
   // CTL-662: terminal (phase finished) and unknown (no bg_job_id) still
   // short-circuit — boot-classification gating is unchanged. Everything else

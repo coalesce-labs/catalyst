@@ -252,6 +252,45 @@ Before continuing to the End block, check for mid-flight context updates from th
 
 ## End block (terminal emit — copy verbatim)
 
+> **⚠️ Reaching this block is not optional (CTL-1854).** If you are about to end your turn while
+> still waiting on work you started — a background job, a delegated agent, a long build — do not
+> simply stop. Declare the wait.
+>
+> **⚠️ A yield does NOT resume you.** Nothing redispatches a yielded phase; the runtime returns
+> `noop` while the deadline is live and writes `failed` when it passes. A yield buys an accurate,
+> bounded record — `yield-expired` rather than `ended-without-declaration` — and nothing else. **If
+> you want to be resumed, do not stop:** finish the work, or stay alive until the thing you are
+> waiting on lands. Declare only when you are ending the turn regardless.
+>
+> ```bash
+> # Runnable as written. The bracket notation used elsewhere in docs is NOT shell:
+> # `[--yield-seconds <n>]` makes bash read from a file named `n` and redirect into
+> # a file named `]`, so the emitter never runs and the phase is recorded as the
+> # undeclared abandonment this command exists to prevent.
+> "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+>   --phase "$PHASE" --ticket "$TICKET" --status yield
+>
+> # To wait less than the 30-minute ceiling, pass a concrete number of seconds:
+> "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+>   --phase "$PHASE" --ticket "$TICKET" --status yield --yield-seconds 600
+> ```
+>
+> **⚠️ A yield does not bound the child process — you must.** The emitter updates JSON; it does not
+> terminate anything. A backgrounded child reparents to PID 1 and survives your exit, so yielding
+> next to an unbounded background job leaves it running forever even after the signal expires. Only
+> yield when the background work is **self-limiting** (its own internal deadline, per `AGENTS.md` →
+> "Spawning a background process"); otherwise keep the phase alive until it finishes. Four such
+> spinners once burned ~4 CPU cores for 16.5 hours while the script that spawned them reported
+> `cleanup verified` — do not let a yield become a fifth.
+>
+> An undeclared exit is **not** a pause. `sdk-run-phase-agent` writes `failed` / `abandoned` /
+> `ended-without-declaration`, and a human is paged for a phase whose work may already be done.
+> Measured 2026-08-14: five such runs across both hosts in one day, all in this phase and
+> `monitor-merge`, every one a clean SDK exit at turn 11–15 of 500 with 8% context left — the
+> agents were not out of room, they believed they would be re-invoked. The runtime holds no such
+> contract; the yield is how you state it, and it is bounded (30 min per episode, re-yielding buys
+> no more) so it defers this terminal rather than replacing it.
+
 Mirror the phase output to Linear as a single comment (CTL-632). Re-derives the commit list at
 end-block time (no captured variable upstream), falling back to `_base branch unknown_` if neither
 `origin/main` nor `main` exists. Fail-open and idempotent via the per-phase marker file.

@@ -180,6 +180,16 @@ if [[ -z "$DEPLOY_EVENT" ]]; then
     '{
       ticket: $ticket,
       generation: (if $gen == "" then null else ($gen | tonumber) end),
+      # CTL-1854: write `status` UP FRONT. This record is composed from scratch and
+      # its real terminal is set by the phase-agent-emit-complete wrapper 8-73 lines
+      # later, with a thoughts-sync (git/network) and a Linear comment in between. A
+      # worker dying in that window left a phase file with NO `status` at all —
+      # uninterpretable to every occupancy/lifecycle reader, and 10 such records were
+      # measured on disk. "running" is the honest value here: the phase IS in flight
+      # at this point, and the wrapper overwrites it with the terminal moments later.
+      # A dead worker then leaves an ordinary in-flight signal the existing reclaim
+      # machinery understands, instead of a file nothing can reason about.
+      status: "running",
       deploy_sha: $sha,
       deploy_env: $env,
       deploy_state: "skipped",
@@ -249,6 +259,16 @@ case "$DEPLOY_STATE" in
       '{
         ticket: $ticket,
         generation: (if $gen == "" then null else ($gen | tonumber) end),
+        # CTL-1854: write `status` UP FRONT. This record is composed from scratch and
+        # its real terminal is set by the phase-agent-emit-complete wrapper 8-73 lines
+        # later, with a thoughts-sync (git/network) and a Linear comment in between. A
+        # worker dying in that window left a phase file with NO `status` at all —
+        # uninterpretable to every occupancy/lifecycle reader, and 10 such records were
+        # measured on disk. "running" is the honest value here: the phase IS in flight
+        # at this point, and the wrapper overwrites it with the terminal moments later.
+        # A dead worker then leaves an ordinary in-flight signal the existing reclaim
+        # machinery understands, instead of a file nothing can reason about.
+        status: "running",
         deploy_sha: $sha,
         deploy_env: $env,
         deploy_state: $state,
@@ -305,6 +325,16 @@ jq -nc \
   '{
     ticket: $ticket,
     generation: (if $gen == "" then null else ($gen | tonumber) end),
+    # CTL-1854: write `status` UP FRONT. This record is composed from scratch and
+    # its real terminal is set by the phase-agent-emit-complete wrapper 8-73 lines
+    # later, with a thoughts-sync (git/network) and a Linear comment in between. A
+    # worker dying in that window left a phase file with NO `status` at all —
+    # uninterpretable to every occupancy/lifecycle reader, and 10 such records were
+    # measured on disk. "running" is the honest value here: the phase IS in flight
+    # at this point, and the wrapper overwrites it with the terminal moments later.
+    # A dead worker then leaves an ordinary in-flight signal the existing reclaim
+    # machinery understands, instead of a file nothing can reason about.
+    status: "running",
     deploy_sha: $sha,
     deploy_env: $env,
     deploy_state: "success",

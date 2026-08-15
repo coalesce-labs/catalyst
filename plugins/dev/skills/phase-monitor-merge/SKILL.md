@@ -154,6 +154,46 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    the wait (defeats the assistant `end_turn` rendering bleed described in [[monitor-events]] §
    Narration). Shape: `wake: <event.name> #<PR_NUMBER> — <action being taken>`.
 
+6. **⚠️ A yield does NOT resume you — it names an ending (CTL-1854).**
+
+   **For CI and re-review, the answer is the event-driven wait above, not a yield.** Nothing
+   redispatches a yielded phase when the GitHub event lands: the only runtime handling of
+   `awaiting-work` returns `noop` while the deadline is live and writes `failed` when it passes. So
+   yielding *instead of* staying in the `catalyst-events wait-for` loop guarantees you never observe
+   the merge you were waiting for — it converts a wait that works into a bounded one that cannot.
+   **Stay in the wait.**
+
+   Use a yield only when you are ending the turn regardless and the alternative is ending it
+   silently. It buys an accurate, bounded record — `yield-expired` instead of
+   `ended-without-declaration` — and buys nothing else. If you want to be resumed, do not stop.
+
+   ```bash
+   # Runnable as written. Do NOT use "$EMIT" here — it is assigned in the terminal
+   # block near the end of this skill, and under the prelude's `set -u` expanding it
+   # this early aborts the shell, so no yield is written and the runner records the
+   # very abandonment this path exists to prevent.
+   "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+     --phase "$PHASE" --ticket "$TICKET" --status yield
+
+   # To wait less than the 30-minute ceiling, pass a concrete number of seconds:
+   "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+     --phase "$PHASE" --ticket "$TICKET" --status yield --yield-seconds 600
+   ```
+
+   **⚠️ A yield does not bound the child process — you must.** The emitter updates JSON; it
+   terminates nothing. A backgrounded child reparents to PID 1 and outlives your exit, so yielding
+   beside an unbounded background job leaves it running long after the signal expires. Yield only
+   when the background work is **self-limiting** (its own internal deadline — `AGENTS.md` →
+   "Spawning a background process"); otherwise stay alive until it finishes.
+
+   Ending the turn without a declaration is **not** neutral and does not mean "resume later":
+   `sdk-run-phase-agent` writes `failed` / `abandoned` / `ended-without-declaration`, and a human is
+   paged for a phase whose work may have completed. Measured 2026-08-14: five such runs across both
+   hosts in one day, in exactly this phase and `implement`, every one with a clean SDK exit — two of
+   them fleet-blocking. "I'll be re-invoked when it completes" is a belief the runtime does not
+   share; a yield is how you actually say it. It is bounded (30 min per episode, re-yielding buys
+   no more), so it defers the terminal — it never removes it.
+
 ## Merge
 
 Once `mergeable_state == "clean"` (and the PR isn't already merged):

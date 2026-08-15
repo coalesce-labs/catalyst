@@ -142,9 +142,15 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   # mirrors phase-agent-dispatch's idempotency guard.
   MONITOR_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-monitor-merge.json"
   if [ -f "$MONITOR_SIGNAL" ]; then
-    MONITOR_STATUS=$(jq -r '.status // empty' "$MONITOR_SIGNAL" 2>/dev/null || echo "")
+    # ⚠️ FAIL CLOSED — see orchestrate-auto-fixup. An unparseable ownership record
+    # is "unknown owner", not "no owner"; dispatching a parallel rebase on that is
+    # the two-merge-owners race this guard exists to prevent.
+    if ! MONITOR_STATUS=$(jq -re 'if type=="object" and (.status|type)=="string" and .status != "" then .status else error("no-status") end' "$MONITOR_SIGNAL" 2>/dev/null); then
+      SKIPPED=$((SKIPPED+1))
+      continue
+    fi
     case "$MONITOR_STATUS" in
-      dispatched|running|done)
+      dispatched|running|done|awaiting-work)
         SKIPPED=$((SKIPPED+1))
         continue
         ;;

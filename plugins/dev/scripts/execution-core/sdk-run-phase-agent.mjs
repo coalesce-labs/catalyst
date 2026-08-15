@@ -69,6 +69,7 @@ import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
 import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
+import { YIELDED_STATUS, shouldFlipOnUndeclaredExit } from "../lib/phase-yield.mjs";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
 
 // phase-agent-dispatch + phase-agent-emit-complete sit one directory up.
@@ -469,6 +470,19 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
     sig.assertedBy = ASSERTED_BY.SDK_BACKSTOP;
     sig.updatedAt = ts;
     sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), [status]: ts };
+    // ⚠️ CTL-1854: strip the yield anchors on ANY non-yield terminal. This writer
+    // PATCHES the parsed object, so `yieldedAt`/`firstYieldedAt`/`yieldMs` survive
+    // into e.g. `turn-cap-exhausted`; orchestrate-revive's continuation then sets
+    // status back to "running" and keeps them, and emit-complete's
+    // `.firstYieldedAt // $ts` re-anchors a BRAND-NEW wait on the OLD episode —
+    // expiring it the instant it is declared. The bash emitter already does this
+    // (`del(.yieldedAt) | del(.firstYieldedAt) | del(.yieldMs)` on every non-yield
+    // status); every other terminal writer must match, or the anchors leak through
+    // whichever writer was missed. Fixing one writer of a family is not fixing the
+    // family — the third time that shape has appeared on this ticket.
+    delete sig.yieldedAt;
+    delete sig.firstYieldedAt;
+    delete sig.yieldMs;
     const tmp = `${signalFile}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(sig));
     renameSync(tmp, signalFile);
@@ -526,6 +540,15 @@ export function defaultWriteSignalStalled(signalFile, reason) {
 //     block at the write site for why each of those three is load-bearing.
 const SIGNAL_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 
+// CTL-1854 option 3. `awaiting-work` is a DECLARED, BOUNDED wait: the agent
+// delegated to a background job and said so, instead of ending its turn silently
+// and being recorded as abandoned. The status is not in the in-flight set above,
+// so the early return already protects it — but that protection is UNBOUNDED, and
+// isTicketInFlight holds a slot for any non-terminal status. So the yield has a
+// DEADLINE, and past it this flip proceeds exactly as before with a failureReason
+// that names which promise was broken. See lib/phase-yield.mjs for why the bound
+// is the entire safety argument.
+
 // Plain-integer test shared by the generation fence — mirrors the bash
 // `[[ $x =~ ^[0-9]+$ ]]` in phase-agent-emit-complete and claim.mjs's
 // isCurrentGeneration semantics exactly.
@@ -544,7 +567,17 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
     if (!sig || typeof sig !== "object") return;
     // In-flight-only precondition. A terminal signal is already correct; a
     // needs-input (parked) signal must stay parked.
-    if (!SIGNAL_INFLIGHT_STATUSES.has(String(sig.status))) return;
+    // CTL-1854: a declared yield is honoured only while it is UNEXPIRED. An
+    // expired one falls through to the terminal write below, so a yield can never
+    // become the permanent hold the abandon-flip exists to prevent.
+    let yieldFailureReason = null;
+    if (String(sig.status) === YIELDED_STATUS) {
+      const verdict = shouldFlipOnUndeclaredExit(sig);
+      if (!verdict.flip) return; // live, bounded wait — leave the signal alone
+      yieldFailureReason = verdict.failureReason;
+    } else if (!SIGNAL_INFLIGHT_STATUSES.has(String(sig.status))) {
+      return;
+    }
     // CTL-736 generation fence (adversarial-review catch, CTL-1410 Phase A): an
     // in-process query cannot be killed (preemption's killBgJob(null) is a no-op,
     // the per-attempt AbortController is not externally wired), so a preempt→
@@ -584,7 +617,9 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
     // `abandoned` for orchestrator heartbeat-expiry GC.)
     sig.status = "failed";
     sig.outcome = "abandoned";
-    sig.failureReason = "ended-without-declaration";
+    // An expired yield and a silent exit are DIFFERENT failures and must not share
+    // a reason: one broke a promise it made, the other never made one.
+    sig.failureReason = yieldFailureReason ?? "ended-without-declaration";
     // CTL-1789: this fires on a CLEAN SDK EXIT, not on an agent declaring anything —
     // the agent never ran its wrapper (if it had, `status` would already be terminal
     // and the in-flight precondition above would have returned). Stamp the writer so
@@ -614,7 +649,13 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
         phase: p,
         ticket: t,
         status: "abandoned",
-        reason: "ended-without-declaration",
+        // CTL-1854: read the reason back off the SIGNAL rather than re-typing the
+        // literal. The signal is authoritative, and an expired yield writes
+        // `yield-expired` there — a hard-coded string here would hand the event
+        // log, the HUD and every alert consumer a DIFFERENT diagnosis than the
+        // record they are supposed to be describing. Sourcing both from one value
+        // makes that divergence unconstructible rather than merely fixed.
+        reason: sig.failureReason ?? "ended-without-declaration",
         // CTL-1814: the SIGNAL FILE is the authoritative local record of whose run
         // this was — phase-agent-dispatch writes `orchestrator` into it at prelaunch
         // — and this function has already parsed it, so attribution costs no extra
@@ -771,6 +812,13 @@ const PRELAUNCH_SPEC_STATUSES = new Set([
   "dispatched",      // idempotent: an in-flight worker already owns this phase
   "running",         // idempotent: ditto
   "done",            // idempotent: already completed
+  // CTL-1854: the dispatcher's idempotency guard now also short-circuits on a live
+  // yield, and that branch echoes the EXISTING signal status into the spec — so
+  // `awaiting-work` reaches this structural parser. Omitting it would make
+  // isLaunchSpec reject a perfectly valid idempotent spec, and the runner would
+  // fail to find any spec at all. This entry is REQUIRED BY the dispatcher change,
+  // not optional alongside it; the two must be added together or neither.
+  YIELDED_STATUS,    // idempotent: a worker declared a bounded wait and owns this phase
   "claim-lost",      // idempotent: a concurrent dispatcher won the single-flight claim
 ]);
 

@@ -70,6 +70,8 @@ import { defaultDispatch } from "./dispatch.mjs";
 // Phase-1 exports import-light, but a lazy `import()` is async and the boot pass
 // must stay synchronous to complete before the monitor/scheduler start.)
 import { liveAgents } from "./cli/sessions.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
+import { countYieldedOccupancy } from "./signal-reader.mjs"; // CTL-1854: mode-independent yield occupancy
 
 // ─── CTL-644: cheap/expensive classification ───────────────────────────────
 //
@@ -448,6 +450,33 @@ export function selectBootResumeCandidates({
       );
       continue;
     }
+    // CTL-1854: a declared bounded wait is not a resume candidate. Treated as an
+    // active phase, the expensive-phase branch below opens an OPERATOR-APPROVAL
+    // GATE for a state whose entire contract is that it needs no human — so a
+    // routine daemon bounce during a yield manufactures a page. That is the exact
+    // harm the status was designed to avoid (it is deliberately not `needs-input`
+    // BECAUSE that pages someone), reintroduced through a different door. Worse, an
+    // unapproved gate is later swept to `stalled` without checking whether expiry
+    // or a late completion already made the signal terminal — so the bounce can
+    // also overwrite a valid result.
+    //
+    // Skip, do NOT expire here: the scheduler tick's reclaim sweep is the single
+    // owner of yield expiry, and it runs within a tick of boot. Expiring in a
+    // second place would give the deadline two writers and re-open the
+    // late-completion race by widening it.
+    if (String(active.status) === YIELDED_STATUS) {
+      // Slot accounting for yields happens OUTSIDE this loop — see the
+      // countYieldedOccupancy term at the computeFreeSlots call below. It cannot
+      // live here: this loop iterates `listInFlightTickets`, which EXCLUDES a
+      // ticket whose only yield is an ancillary phase (a recovery-pass yielding
+      // beside a failed/stalled pipeline phase), so an in-loop increment silently
+      // misses exactly the case that most needs charging.
+      logger.debug(
+        { ticket, phase: active.phase },
+        "boot-resume: skipping awaiting-work (bounded wait; the tick owns expiry) — slot still charged"
+      );
+      continue;
+    }
     if (!active.worktreePath) {
       logger.warn(
         { ticket, phase: active.phase },
@@ -503,13 +532,45 @@ export function selectBootResumeCandidates({
     }
   }
 
-  const free = computeFreeSlots(maxParallel, liveCount);
+  // CTL-1854: yielded phases hold their slots and are counted independently of the
+  // in-flight loop above, so an ANCILLARY yield (recovery-pass beside a terminal
+  // pipeline phase — the ticket is not "in flight") is still charged. Disjoint from
+  // liveCount, which counts tickets with a LIVE bg worker; a yielded worker has
+  // exited. Best-effort: a scan failure must not block boot resume.
+  // ⚠️ FAIL CLOSED: an unreadable scan must not resume workers into slots it
+  // cannot prove are empty.
+  let yo = { count: 0, ok: false };
+  try {
+    yo = countYieldedOccupancy(orchDir);
+  } catch {
+    yo = { count: 0, ok: false };
+  }
+  if (!yo.ok) {
+    logger.warn({ orchDir, reason: yo.reason ?? null }, "boot-resume: yielded-occupancy scan failed host-wide — resuming nothing this boot (CTL-1854)");
+  }
+  const free = yo.ok ? computeFreeSlots(maxParallel, liveCount + yo.count) : 0;
   needResume.sort((a, b) => a.ticket.localeCompare(b.ticket));
   // CTL-1422 (B): warm candidates always survive selection; the slice caps
   // only cold candidates, against the slots warm did not consume.
   const warm = needResume.filter((c) => sdkSessionHarvest.has?.(c.ticket));
   const cold = needResume.filter((c) => !sdkSessionHarvest.has?.(c.ticket));
-  return [...warm, ...cold.slice(0, Math.max(0, free - warm.length))];
+  // ⚠️ CTL-1854: warm candidates "always survive selection" (CTL-1422 B) — but
+  // that exemption was written when `free` only ever reflected LIVE workers. With
+  // yielded occupancy charged (and with the fail-closed zero on an unreadable
+  // scan), free can legitimately be 0 while a warm candidate exists, and the
+  // exemption would dispatch straight past maxParallel into a slot a yield holds.
+  // The exemption is preserved wherever there IS budget; it no longer overrides a
+  // budget of zero.
+  const warmAdmitted = warm.slice(0, Math.max(0, free));
+  if (warmAdmitted.length < warm.length) {
+    // CTL-1422's harvested session UUIDs are the ONLY copy; dropping a warm
+    // candidate silently loses the continuity it exists to preserve.
+    logger.warn(
+      { dropped: warm.slice(warmAdmitted.length).map((c) => c.ticket), free },
+      "boot-resume: warm candidates dropped for lack of slots (CTL-1854)"
+    );
+  }
+  return [...warmAdmitted, ...cold.slice(0, Math.max(0, free - warmAdmitted.length))];
 }
 
 // resolveAgents — normalize the injectable `agents` seam to a concrete array.

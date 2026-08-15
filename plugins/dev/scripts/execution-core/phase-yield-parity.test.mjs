@@ -1,0 +1,111 @@
+// phase-yield-parity.test.mjs — CTL-1854: the JS contract vs its bash mirror.
+//
+// Run: cd plugins/dev/scripts/execution-core && bun test phase-yield-parity.test.mjs
+//
+// ── WHY THIS FILE EXISTS ────────────────────────────────────────────────────
+// `lib/phase-yield.mjs` owns the yielded-status string. The writer that produces
+// it — `phase-agent-emit-complete` — is bash and CANNOT import the module, so it
+// carries a hand-written copy of the literal. That is the same one-registry /
+// unavoidable-mirror shape as `lib/secret-contract.mjs` and CTL-1789's
+// `ASSERTED_BY`, and it gets the same treatment: the copy is held byte-identical
+// MECHANICALLY, not by a comment asking the next editor to remember.
+//
+// The failure this prevents is silent in the worst direction. If the bash writer
+// emits "awaiting_work" while the reader expects "awaiting-work", the reader's
+// `String(sig.status) !== YIELDED_STATUS` check falls through to "not-yielded",
+// the runner writes the abandoned terminal, and the agent's correctly-declared
+// yield is discarded — i.e. the drift reintroduces EXACTLY the CTL-1854 defect
+// this ticket fixes, while every test that mocks the signal shape stays green.
+//
+// ⚠️ Each anchor matches on the FLAG/CASE-LABEL, never on the value, and every
+// assertion fails CLOSED when its anchor disappears. A rename on one side alone
+// must fail here rather than quietly reclassifying a live yield as an abandon.
+
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const EMIT = join(HERE, "..", "phase-agent-emit-complete");
+const src = readFileSync(EMIT, "utf8");
+
+describe("the bash writer mirrors the JS contract", () => {
+  test("the yield case label maps to exactly YIELDED_STATUS", () => {
+    // Anchor: the `yield)` case arm in the STATUS -> NEW_STATUS map.
+    const m = src.match(/^\s*yield\)\s*NEW_STATUS="([^"]*)"/m);
+    expect(m, `no 'yield) NEW_STATUS=' arm found in ${EMIT} — anchor gone, not passing by default`)
+      .not.toBeNull();
+    expect(m[1]).toBe(YIELDED_STATUS);
+  });
+
+  test("the anchor test above can actually fail", () => {
+    // Positive control for the regex itself: the same pattern must NOT match a
+    // renamed label, so a green result above is evidence and not a vacuous match.
+    const renamed = src.replace(/^(\s*)yield\)(\s*NEW_STATUS=)/m, "$1yeild)$2");
+    expect(renamed).not.toBe(src); // the substitution really happened
+    expect(renamed.match(/^\s*yield\)\s*NEW_STATUS="([^"]*)"/m)).toBeNull();
+  });
+
+  test("`yield` is an accepted --status value", () => {
+    // A correct mapping is useless if the arg validator rejects the status first.
+    const m = src.match(/^case "\$STATUS" in\n([a-z |-]+)\)\s*;;/m);
+    expect(m, "no '--status' validation case found — anchor gone").not.toBeNull();
+    expect(m[1].split("|").map((s) => s.trim())).toContain("yield");
+  });
+
+  test("a yield is NOT terminal — completedAt must stay unset", () => {
+    // The whole point is a resumable, non-terminal wait. If `yield` ever falls
+    // through to the SET_COMPLETED branch the slot frees and the ticket advances
+    // on a phase that never finished.
+    // Anchored on the CONDITION, not on the body: the branch now sets
+    // SET_COMPLETED per-status inside (a yield must also CLEAR any inherited
+    // completedAt), so matching the old `then SET_COMPLETED='.'` shape would fail
+    // for the right reason but the wrong cause. Still fails closed — if the
+    // condition disappears, m is null and this cannot pass vacuously.
+    const m = src.match(/if \[\[ \$STATUS == "turn-cap-exhausted"(.*?)\]\]; then/);
+    expect(m, "no non-terminal SET_COMPLETED branch found — anchor gone").not.toBeNull();
+    expect(m[1]).toContain('$STATUS == "yield"');
+    // And a yield must never take the completedAt-setting path.
+    const yieldArm = src.match(/if \[\[ \$STATUS == "yield" \]\]; then\n\t*SET_COMPLETED='([^']+)'/);
+    expect(yieldArm, "no per-status SET_COMPLETED arm for yield — anchor gone").not.toBeNull();
+    expect(yieldArm[1]).toBe("del(.completedAt)");
+  });
+
+  test("the dispatcher's idempotency guard mirrors YIELDED_STATUS too", () => {
+    // THIRD hand-written bash mirror. phase-agent-dispatch cannot import the
+    // module either, and drift here is not silent-but-harmless: the guard would
+    // stop recognizing a live yield, treat it as a retry, bump the generation and
+    // launch DUPLICATE phase work over a worker that said it was coming back.
+    const dispatch = readFileSync(join(HERE, "..", "phase-agent-dispatch"), "utf8");
+    const m = dispatch.match(/if \[\[ \$EXISTING_STATUS == "dispatched"(.*?)\]\]; then/);
+    expect(m, "no dispatcher idempotency guard found — anchor gone, not passing by default").not.toBeNull();
+    expect(m[1]).toContain(`$EXISTING_STATUS == "${YIELDED_STATUS}"`);
+  });
+
+  test("⚠️ a re-yield can never move the deadline LATER", () => {
+    // Both anchors are set-once-per-episode (`// $ts`), NOT rewritten per
+    // declaration. That is the whole of the "re-yielding buys nothing" promise:
+    // when `yieldedAt` was rewritten each time, a 60-second yield re-declared
+    // after 30 seconds expired at 90 — firstYieldedAt bounded only the 30-minute
+    // ceiling, so short deadlines were extendable at will.
+    expect(src).toContain(".yieldedAt = (.yieldedAt // \\$ts)");
+    expect(src).toContain(".firstYieldedAt = (.firstYieldedAt // \\$ts)");
+    // A re-yield with no flag must NOT delete yieldMs (that stretched the wait to
+    // the ceiling); a shorter request must win; a longer one must not.
+    const arm = src.slice(src.indexOf("if \\$yieldms == null"), src.indexOf("else del(.yieldedAt)"));
+    expect(arm.length).toBeGreaterThan(40); // fails closed if the arm is restructured
+    expect(arm).toContain(".yieldMs <= \\$yieldms");
+    expect(arm).not.toContain("del(.yieldMs)");
+  });
+
+  test("a non-yield write clears both anchors", () => {
+    // Stale anchors on a done/failed signal are not read by classifyYield (it
+    // gates on status first), but leaving them lets a LATER yield inherit a spent
+    // episode — expiring a legitimate wait the instant it is declared.
+    const m = src.match(/else del\(\.yieldedAt\)(.*?)end\)/);
+    expect(m, "no clear-on-non-yield branch found — anchor gone").not.toBeNull();
+    expect(m[1]).toContain("del(.firstYieldedAt)");
+  });
+});

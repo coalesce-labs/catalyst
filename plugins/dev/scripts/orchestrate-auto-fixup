@@ -205,6 +205,35 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
     continue
   fi
 
+  # CTL-1854: skip while phase-monitor-merge holds a LIVE declared wait. A yielded
+  # monitor-merge has exited its worker but still owns the ticket worktree — its
+  # self-limiting background work is what it is waiting on — so dispatching
+  # orchestrate-fixup here puts a SECOND WRITER in that worktree. The 10-minute
+  # stability window fires comfortably inside the 30-minute yield.
+  #
+  # Deliberately narrow: this checks ONLY `awaiting-work`, the state this ticket
+  # introduces. orchestrate-auto-rebase additionally skips dispatched|running|done
+  # (CTL-617); this script has never had that guard, and adding it here would
+  # change pre-existing behaviour beyond the harm being fixed. That broader gap is
+  # noted on the PR rather than widened into unrelated scope.
+  MM_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-monitor-merge.json"
+  if [ -f "$MM_SIGNAL" ]; then
+    # ⚠️ FAIL CLOSED on an unparseable signal. `jq ... || echo ""` turns "I could
+    # not read the ownership record" into "there is no owner", and a torn or
+    # transiently-unreadable file is exactly when a live yield's child is still
+    # writing in that worktree. An ABSENT file genuinely means no monitor-merge
+    # phase; a PRESENT one we cannot parse means we do not know, and dispatching a
+    # second writer on "do not know" is the failure this guard exists to prevent.
+    if ! MM_STATUS=$(jq -re 'if type=="object" and (.status|type)=="string" and .status != "" then .status else error("no-status") end' "$MM_SIGNAL" 2>/dev/null); then
+      SKIPPED=$((SKIPPED+1))
+      continue
+    fi
+    if [ "$MM_STATUS" = "awaiting-work" ]; then
+      SKIPPED=$((SKIPPED+1))
+      continue
+    fi
+  fi
+
   PR_NUMBER=$(jq -r '.pr.number // empty' "$SIGNAL" 2>/dev/null || echo "")
   PR_URL=$(jq -r '.pr.url // empty' "$SIGNAL" 2>/dev/null || echo "")
   if [ -z "$PR_NUMBER" ] || [ -z "$PR_URL" ]; then

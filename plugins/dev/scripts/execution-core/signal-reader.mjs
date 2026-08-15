@@ -12,6 +12,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "./config.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
 
 // CTL-1367 P2-G: the grace window for a "young" single-flight claim — matches
 // phase-agent-dispatch's CTL-837 pre-spawn orphan-reap grace (find -mmin +2). A
@@ -262,6 +263,160 @@ const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 // term on executor==="sdk" (dispatchMode==="sdk") so it is provably inert under bg/
 // oneshot-legacy: the term is simply never added. Pure over the filesystem; never
 // throws (a missing workers/ dir → 0).
+// countYieldedOccupancy — CTL-1854. Phase signals in the declared bounded wait
+// (`awaiting-work`), counted for EVERY dispatch mode.
+//
+// ⚠️ This is deliberately NOT folded into SDK_INFLIGHT_STATUSES, which was the
+// first (wrong) fix. That set is consumed only by countSdkInflight, which
+// excludes any signal carrying a bg_job_id and which the scheduler calls ONLY for
+// in-process modes — so under the DEFAULT `phase-agents` mode the term is never
+// even added. A yielded bg worker's `claude --bg` job is terminal, so
+// liveBackgroundCount stops counting it too, and the slot silently freed: at
+// maxParallel=1 another ticket is admitted for the whole live yield.
+//
+// A yield holds its slot because of its STATUS, not because of how it was
+// dispatched, so it is counted once here, unconditionally, and the caller adds it
+// for every mode. No double-count with either existing term: liveBackgroundCount
+// counts LIVE bg jobs (a yielded worker has exited) and countSdkInflight no longer
+// recognizes the status at all.
+//
+// Pure over the filesystem; never throws (a missing workers/ dir → 0).
+// CTL-1854: per-path warn throttle for the reader above. Module-level so the
+// scheduler/monitor/boot/delegate callers in one process share one budget — they
+// are one detector looking at one directory.
+const UNREADABLE_WARN_INTERVAL_MS = 10 * 60 * 1000;
+const _unreadableWarnAt = new Map();
+
+export function countYieldedOccupancy(orchDir) {
+  // ⚠️ FAIL CLOSED TO THE TICKET, NOT TO THE HOST.
+  //
+  // The first cut returned ok:false for ANY uninterpretable phase file, and every
+  // consumer holds admission on ok:false — so one bad file stopped dispatch on the
+  // WHOLE HOST until a human deleted it. That is not a conservative reading, it is
+  // a single point of failure with no self-heal, and it made a pre-existing
+  // one-ticket problem global.
+  //
+  // The trigger is real and reachable: phase-monitor-deploy's SKILL.md writes its
+  // own signal with `jq -nc '{ticket,generation,deploy_sha,…}'` — NO status — and
+  // patches `.status` in a LATER step, with a thoughts-sync (git/network) and a
+  // Linear comment in between. A worker dying in that window leaves a status-less
+  // file forever. There is a real instance on disk in an archived workers dir
+  // (CTL-676/phase-monitor-deploy.json).
+  //
+  // So an uninterpretable PHASE FILE is charged as one held slot for ITS OWN
+  // ticket — the conservative reading, scoped to the blast radius it actually has
+  // — and the scan stays ok:true. Only a failure that makes the whole directory
+  // unreadable (EACCES/EIO on workers/) is genuinely host-scope and returns
+  // ok:false.
+  //
+  // Every uninterpretable file is reported with its PATH, because "the fleet
+  // stopped dispatching" is undiagnosable without one.
+  const workersDir = join(orchDir ?? "", "workers");
+  let tickets;
+  try {
+    tickets = readdirSync(workersDir, { withFileTypes: true });
+  } catch (err) {
+    if (err?.code === "ENOENT") return { count: 0, ok: true, yields: [], unreadable: [] };
+    return { count: 0, ok: false, reason: "workers-dir-unreadable", yields: [], unreadable: [] };
+  }
+  let count = 0;
+  const countedYields = [];
+  const unreadable = []; // paths charged a slot because they could not be interpreted
+  for (const t of tickets) {
+    if (!t.isDirectory() || t.name === "output") continue;
+    let files;
+    try {
+      files = readdirSync(join(workersDir, t.name));
+    } catch {
+      // Same rule: report it, do not charge. We cannot see this ticket's signals,
+      // and inventing occupancy for it is the imagined-population error again.
+      unreadable.push({ path: join(workersDir, t.name), reason: "worker-dir-unreadable" });
+      continue;
+    }
+    for (const f of files) {
+      if (!isPhaseSignalFile(f)) continue;
+      const full = join(workersDir, t.name, f);
+      let sig = null;
+      let bad = null;
+      try {
+        sig = JSON.parse(readFileSync(full, "utf8"));
+      } catch {
+        bad = "signal-unparseable";
+      }
+      if (!bad) {
+        if (sig === null || typeof sig !== "object" || Array.isArray(sig) || typeof sig.status !== "string") {
+          bad = "signal-malformed";
+        }
+      }
+      if (!bad && typeof sig.phase === "string" && sig.phase !== f.slice("phase-".length, -".json".length)) {
+        bad = "signal-identity-mismatch";
+      }
+      if (!bad && typeof sig.ticket === "string" && sig.ticket !== t.name) {
+        bad = "signal-identity-mismatch";
+      }
+      if (!bad && (sig.phase !== undefined && sig.phase !== null && typeof sig.phase !== "string")) {
+        bad = "signal-identity-mismatch";
+      }
+      if (!bad && (sig.ticket !== undefined && sig.ticket !== null && typeof sig.ticket !== "string")) {
+        bad = "signal-identity-mismatch";
+      }
+      if (bad) {
+        // ⚠️ SKIP, DO NOT CHARGE. The earlier version charged one slot per ticket
+        // with an uninterpretable file, on the assumption that such files are rare
+        // corruption. Measured against the real population — the reader run
+        // read-only over all 16 on-disk orchDirs — that assumption was wrong:
+        // 12 uninterpretable files, ZERO corrupt. Every one was legitimate:
+        //   • phase-monitor-deploy.json ×10 — COMPLETE, SUCCESSFUL records
+        //     ({"deploy_state":"skipped",…}); that phase's schema has no `status`
+        //     at all, so they recur at NORMAL rate, not crash rate
+        //   • phase-implement.turncap.json — a real sidecar (derived phase
+        //     `implement.turncap` ≠ record `implement` → identity mismatch)
+        //   • phase-pr-blocker.json — an intentional blocker note (`pr-blocker`)
+        // isPhaseSignalFile accepts all three: it excludes only `-yield-`
+        // tombstones and ARTIFACT_NAMES. So charging produced a SILENT permanent
+        // capacity loss on long-finished tickets — 5 such tickets measured to
+        // 5 charged slots, freeSlots(maxParallel=3)=0 — and because ok stayed
+        // true, no consumer reported a fault. A loud wedge is bad; a silent
+        // capacity leak that looks exactly like occupancy is worse.
+        //
+        // A phase-* file that is not an object with a string `status` is NOT A
+        // SIGNAL for occupancy purposes — skip it exactly as tombstones and
+        // artifacts are skipped. That restores pre-PR semantics (a dead worker's
+        // odd file held no slot). The only cost is a torn LIVE yield being
+        // under-counted by one slot transiently, which that ticket's own liveness
+        // already bounds.
+        unreadable.push({ path: full, reason: bad });
+        continue;
+      }
+      if (sig.status === YIELDED_STATUS) {
+        countedYields.push({ ticket: t.name, phase: f.slice("phase-".length, -".json".length) });
+        count += 1;
+      }
+    }
+  }
+  if (unreadable.length > 0) {
+    // ⚠️ COUNT EXACTLY, WARN SPARSELY — the repo's existing discipline
+    // (otel-forward/lib/sparse-warn.ts). This reader is called by the scheduler
+    // per tick, by the monitor, by boot-resume, and by the delegate runner ONCE
+    // PER PASS *plus* once per intent — so an unconditional warn here meant a
+    // single permanently-bad file produced several identical lines every tick,
+    // forever. The paths are always RETURNED (`unreadable`) so a caller can
+    // report them; the log is throttled per path.
+    const now = Date.now();
+    for (const u of unreadable) {
+      const last = _unreadableWarnAt.get(u.path) ?? 0;
+      if (now - last < UNREADABLE_WARN_INTERVAL_MS) continue;
+      _unreadableWarnAt.set(u.path, now);
+      log.warn(
+        { path: u.path, reason: u.reason, totalThisScan: unreadable.length },
+        "countYieldedOccupancy: uninterpretable phase signal charged as a held slot — " +
+          "inspect or remove the file; it will hold one slot for its ticket until then (CTL-1854)"
+      );
+    }
+  }
+  return { count, ok: true, yields: countedYields, unreadable };
+}
+
 export function countSdkInflight(orchDir) {
   let n = 0;
   for (const s of readAllPhaseSignals(orchDir)) {

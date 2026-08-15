@@ -134,7 +134,7 @@ import { emitFenceClaimed } from "./fence-event.mjs";
 // CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
 // won cluster claim. Never the claim arbiter — see worker-label.mjs header.
 import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
-import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1367 P1: executor=sdk occupancy reader for the triage budget
+import { countSdkInflight as defaultCountSdkInflight, countYieldedOccupancy as defaultCountYieldedOccupancy } from "./signal-reader.mjs"; // CTL-1367 P1: executor=sdk occupancy reader for the triage budget; CTL-1854: mode-independent yield occupancy
 import {
   recordReconcileSuccess,
   recordReconcileFailure,
@@ -158,6 +158,7 @@ import { recordReplicaRead } from "./replica-health.mjs"; // CAT-35
 import { noteTornLine } from "./event-tail.mjs";
 // CTL-1819: the envelope detector, shared with the broker's peer live tail.
 import { checkEnvelope } from "../lib/event-envelope.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 
 const MONITOR_BOOT_TS = Date.now();
 
@@ -552,6 +553,7 @@ export function handleStateChangedEvent(
     // byte-identical bg budget. Threaded from startMonitor via tailerOpts.
     dispatchMode = "phase-agents",
     countSdkInflight = defaultCountSdkInflight,
+    countYieldedOccupancy = defaultCountYieldedOccupancy, // CTL-1854
     // CTL-1457 (N1): per-phase in-process route flag → the computed budget (below)
     // arms the SDK-occupancy term on a bg node. Default false → unchanged.
     hasInProcessRoute = false,
@@ -604,6 +606,7 @@ export function handleStateChangedEvent(
       liveBackgroundCount,
       dispatchMode,
       countSdkInflight,
+      countYieldedOccupancy,
       hasInProcessRoute,
     });
   for (const p of listProjects()) {
@@ -753,6 +756,9 @@ export function computeTriageBudget({
   // CTL-1367 P1: executor=sdk occupancy reader (in-process SDK workers have no
   // `claude --bg` job → invisible to liveBackgroundCount). Injectable for tests.
   countSdkInflight = defaultCountSdkInflight,
+  // CTL-1854: yielded-phase occupancy. Unconditional — a yield holds its slot in
+  // every dispatch mode. Injectable for tests, like the reader above.
+  countYieldedOccupancy = defaultCountYieldedOccupancy,
   // CTL-1457 (N1): true when executorByPhase routes ANY phase to an in-process
   // executor (sdk|codex-exec) while the node boot dispatchMode is still bg — the
   // per-phase rollout. ORed into the gate so the routed no-bg triage worker is
@@ -777,7 +783,26 @@ export function computeTriageBudget({
       /* best-effort — never block triage admission on a signal-scan failure */
     }
   }
-  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight) };
+  // CTL-1854: yielded phases hold their slots in EVERY dispatch mode, so this term
+  // is unconditional — unlike sdkInflight above. Without it a webhook drain or
+  // sweepMissingTriage dispatches a Triage worker straight through a live yield at
+  // maxParallel=1: the yielded worker's bg job is terminal (so `live` drops it) and
+  // countSdkInflight neither recognizes the status nor runs under the default
+  // phase-agents mode. Every budget that computes free slots has to charge the same
+  // occupancy, or the limit holds in one admission path and leaks in the next.
+  // ⚠️ FAIL CLOSED — see the scheduler's identical gate. A scan failure must not
+  // read as free capacity and let a webhook drain dispatch past maxParallel.
+  let y = { count: 0, ok: false };
+  try {
+    y = countYieldedOccupancy(orchDir);
+  } catch {
+    y = { count: 0, ok: false };
+  }
+  if (!y.ok) {
+    log.warn({ orchDir, reason: y.reason ?? null }, "computeTriageBudget: yielded-occupancy scan failed host-wide — holding triage admission (CTL-1854)");
+    return { remaining: 0 };
+  }
+  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight + y.count) };
 }
 
 // dispatchTriage — fire the triage phase agent for a →Triage transition. Guards
@@ -1288,7 +1313,14 @@ export function readTriageSignalStatus(orchDir, ticket) {
 // no-op dispatch is not a retry) and (b) defer cap PARKING (an allowed attempt
 // may still complete — only park after the signal settles without an artifact).
 function isTriageInFlight(status) {
-  return status === "dispatched" || status === "running" || status === "pending";
+  // CTL-1854: a yielded triage phase has NOT settled — counting it as settled would
+  // let the cap park a phase that is still holding its slot.
+  return (
+    status === "dispatched" ||
+    status === "running" ||
+    status === "pending" ||
+    status === YIELDED_STATUS
+  );
 }
 
 // Codex R4: the cap state lives at orchDir level — NOT under workers/<t>/ —
@@ -1470,6 +1502,7 @@ export function sweepMissingTriage({
   // "phase-agents" → byte-identical bg budget). Threaded from startMonitor.
   dispatchMode = "phase-agents",
   countSdkInflight = defaultCountSdkInflight,
+  countYieldedOccupancy = defaultCountYieldedOccupancy, // CTL-1854
   // CTL-1457 (N1): per-phase in-process route flag (arms the SDK-occupancy term on
   // a bg node). Threaded from startMonitor. Default false → unchanged.
   hasInProcessRoute = false,
@@ -1519,6 +1552,7 @@ export function sweepMissingTriage({
     liveBackgroundCount,
     dispatchMode, // CTL-1367 P1
     countSdkInflight, // CTL-1367 P1
+    countYieldedOccupancy, // CTL-1854: charge yields to the triage budget too
     hasInProcessRoute, // CTL-1457 (N1)
   });
   for (const p of listProjects()) {

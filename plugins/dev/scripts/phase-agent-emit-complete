@@ -26,14 +26,44 @@
 #   phase-agent-emit-complete \
 #     --phase <name> \
 #     --ticket <id> \
-#     --status complete|failed \
+#     --status complete|failed|turn-cap-exhausted|skipped|park|yield \
 #     [--reason <text>] \
+#     [--yield-seconds <n>] \
 #     [--payload-json <json>] \
 #     [--orch-dir <path>] \
 #     [--orch-id <id>] \
 #     [--session-id <id>] \
 #     [--asserted-by <writer-id>] \
 #     [--no-signal-update]
+#
+# --status yield (CTL-1854): declare a BOUNDED wait on the agent's own background
+#   work, instead of ending the turn undeclared.
+#
+#   ⚠️ A YIELD DOES NOT RESUME YOU. Nothing redispatches an `awaiting-work` phase;
+#   the scheduler preserves it while the deadline is live and writes `failed` when
+#   it passes. It buys an accurate, bounded RECORD and nothing else. If you want to
+#   be resumed, do not stop — finish, or stay alive until the work lands. (An
+#   event-driven resume path is CTL-1861; until it exists, do not read "wait" as
+#   "you will be woken".)
+#
+#   Why declare at all, then: an undeclared exit is written as
+#   failed/abandoned/ended-without-declaration by sdk-run-phase-agent — measured
+#   2026-08-14 on five real runs whose work had actually finished — so this
+#   replaces a silent, misattributed abandonment with an explicit, bounded, and
+#   accurately-named one. Writes status "awaiting-work" plus
+#   `yieldedAt` / `firstYieldedAt`; NOT terminal, so completedAt stays unset.
+#
+#   It is deliberately NOT `park` (needs-input): that means waiting on a HUMAN and
+#   pages one. An agent waiting on its own job needs nobody.
+#
+#   ⚠️ A YIELD IS A DEADLINE, NOT A PERMIT. `isTicketInFlight` frees a slot only
+#   for failed|stalled|aborted, so any other status HOLDS it. Past the deadline
+#   the SCHEDULER TICK — not this script and not the runner, neither of which runs
+#   again — writes the same terminal an undeclared exit gets, with failureReason
+#   "yield-expired". --yield-seconds requests LESS than the 30-minute ceiling
+#   (Linear's session-stale deadline); it can never request more, and the ceiling
+#   bounds the whole episode via `firstYieldedAt`, so re-yielding buys nothing.
+#   Contract + classifier: lib/phase-yield.mjs.
 #
 # --asserted-by (CTL-1789): the writer id stamped onto the signal file's
 #   `assertedBy` field, recording WHO asserted this phase finished. Defaults to
@@ -99,6 +129,10 @@ TICKET=""
 STATUS=""
 REASON=""
 HANDOFF_PATH=""
+# CTL-1854: seconds an agent asks to wait on its own background job. Empty means
+# "use the ceiling". Only read for --status yield.
+YIELD_SECONDS=""
+YIELD_SECONDS_GIVEN=0
 CALLER_PAYLOAD=""
 ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR-}"
 ORCH_ID="${CATALYST_ORCHESTRATOR_ID-}"
@@ -157,6 +191,16 @@ while [[ $# -gt 0 ]]; do
 		ASSERTED_BY="$2"
 		shift 2
 		;;
+	--yield-seconds)
+		# CTL-1854: record that the FLAG was passed, separately from its value. An
+		# empty expansion (`--yield-seconds "$WAIT"` with WAIT unset) otherwise looks
+		# identical to the flag being absent, and the emitter silently substituted the
+		# 30-minute default for the caller's intended bound — a documented
+		# positive-integer argument accepted as nothing at all.
+		YIELD_SECONDS_GIVEN=1
+		YIELD_SECONDS="$2"
+		shift 2
+		;;
 	--no-signal-update)
 		NO_SIGNAL_UPDATE=1
 		shift
@@ -174,9 +218,32 @@ done
 [[ -n $STATUS ]] || die "--status is required"
 
 case "$STATUS" in
-complete | failed | turn-cap-exhausted | skipped | park) ;;
-*) die "--status must be 'complete', 'failed', 'turn-cap-exhausted', 'skipped', or 'park' (got: $STATUS)" ;;
+complete | failed | turn-cap-exhausted | skipped | park | yield) ;;
+*) die "--status must be 'complete', 'failed', 'turn-cap-exhausted', 'skipped', 'park', or 'yield' (got: $STATUS)" ;;
 esac
+
+# CTL-1854: --yield-seconds is meaningful ONLY for a yield. Accepting it silently
+# elsewhere would make a typo'd status ("--status complete --yield-seconds 600")
+# indistinguishable from a correct yield to the caller, so refuse it outright.
+if [[ $YIELD_SECONDS_GIVEN -eq 1 ]]; then
+	[[ $STATUS == "yield" ]] || die "--yield-seconds is only valid with --status yield (got: --status $STATUS)"
+	[[ $YIELD_SECONDS =~ ^[0-9]+$ && $YIELD_SECONDS -gt 0 ]] ||
+		die "--yield-seconds must be a positive integer (got: $YIELD_SECONDS)"
+fi
+
+# CTL-1854 (Codex round 10): a yield that does not establish `awaiting-work` is
+# WORSE than no yield. The phase.*.yield.* event is deliberately not
+# lifecycle-routed, so the signal write is the ONLY thing that records the wait —
+# and the caller ends its turn believing it was declared. Exiting 0 there makes
+# success and failure byte-identical to the caller, which is the exact defect class
+# this ticket exists to remove. Refuse the two configurations that structurally
+# cannot write, BEFORE any event is emitted.
+if [[ $STATUS == "yield" ]]; then
+	[[ $NO_SIGNAL_UPDATE -eq 0 ]] ||
+		die "--status yield cannot be combined with --no-signal-update: the signal write is the only record of the wait"
+	[[ -n $ORCH_DIR ]] ||
+		die "--status yield requires --orch-dir (or CATALYST_ORCHESTRATOR_DIR): without it no signal can be written and the wait would go unrecorded"
+fi
 
 # Validate ticket shape against the same pattern the broker uses.
 if [[ ! $TICKET =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
@@ -423,7 +490,14 @@ LINE=$(build_canonical_line \
 	--executor "$EXECUTOR" \
 	2>/dev/null) || warn "failed to build canonical event line"
 
-if [[ -n $LINE ]]; then
+# CTL-1854 (Codex round 11): a YIELD event must not escape before the signal it
+# describes has committed. The event is observable by the broker, HUD,
+# orch-monitor and `catalyst-events wait-for`, so publishing it and THEN failing
+# the signal write leaves consumers holding a declared wait that never existed —
+# a false coordination signal is worse than a missing one. Every other status
+# keeps its existing publish-then-write order byte-identical; only yield defers,
+# and it is appended immediately after the rename commits.
+if [[ -n $LINE && $STATUS != "yield" ]]; then
 	canonical_jsonl_append "$EVENTS_DIR" "$LINE" || warn "failed to append event to ${EVENTS_DIR}"
 fi
 
@@ -435,6 +509,46 @@ fi
 
 if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 	SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+	# CTL-1854 (Codex round 10): a yield must never replace a COMPLETED phase. If the
+	# delegated work wrote `done` just before the agent declared its wait, an
+	# unconditional mutation destroys a real result, holds the slot, and eventually
+	# records `yield-expired` for work that actually finished — manufacturing exactly
+	# the misattributed abandonment this ticket removes. Refuse from any terminal
+	# status. This is a PRECONDITION, not a race fix: the read and the write are
+	# separate operations and the competing writer is another process, so a
+	# completion landing inside that window is still possible — that residual is
+	# CTL-1860, which covers both writers.
+	if [[ $STATUS == "yield" && -f $SIGNAL_FILE ]]; then
+		# ⚠️ Structural read, fail-closed. `jq -r '.status // empty'` degrades `{}` or a
+		# non-string status to an EMPTY string, which slips past the terminal/preempted
+		# guard below — so the emitter could not establish what it was overwriting and
+		# claimed a new hold anyway. Same lesson as the occupancy reader and the bash
+		# ownership guards: parseable is not the same as interpretable.
+		if ! _CUR_STATUS="$(jq -re 'if type=="object" and (.status|type)=="string" and .status != "" then .status else error("no-status") end' "$SIGNAL_FILE" 2>/dev/null)"; then
+			die "--status yield: existing signal $SIGNAL_FILE has no readable status — refusing to overwrite a phase whose state cannot be established"
+		fi
+		case "$_CUR_STATUS" in
+		done | complete | completed | failed | stalled | skipped | aborted | turn-cap-exhausted)
+			# `turn-cap-exhausted` is in signal-reader's TERMINAL set, so every consumer
+			# already treats it as finished; a late yield replacing it would delete
+			# completedAt, hold a slot, and eventually manufacture `yield-expired` for a
+			# phase that had genuinely stopped.
+			die "--status yield: phase already terminal ($_CUR_STATUS) — refusing to overwrite a finished phase with a wait"
+			;;
+		preempted)
+			# CTL-1854 (Codex round 12): `preempted` is NOT terminal, so a
+			# terminal-only guard let it through — and the ordering here is the
+			# REVERSE of the yielded-victim case. The scheduler preempted this
+			# worker but cannot stop an in-process query (killBgJob(null) is a
+			# no-op), so the still-running worker reaches this emitter and would
+			# overwrite `preempted` with `awaiting-work`. The resume sweep then no
+			# longer sees the victim, and the yield holds the capacity the
+			# preemption was freeing for queued priority work — defeating the
+			# preemption entirely. Preserve the victim state.
+			die "--status yield: phase was preempted — refusing to overwrite the victim state (the scheduler freed this slot for higher-priority work)"
+			;;
+		esac
+	fi
 	if [[ -f $SIGNAL_FILE ]]; then
 		# CTL-484: turn-cap-exhausted is a non-terminal status the continuation
 		# branch of orchestrate-revive picks up. Map the canonical event status to
@@ -447,11 +561,24 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		turn-cap-exhausted) NEW_STATUS="turn-cap-exhausted" ;;
 		skipped) NEW_STATUS="skipped" ;;  # CTL-512: monitor-deploy terminal-no-deploy
 		park) NEW_STATUS="needs-input" ;; # CTL-549: parked waiting for human comment
+		# CTL-1854: a BOUNDED wait on the agent's own background job. Deliberately
+		# NOT needs-input — that means waiting on a HUMAN and pages one. This value
+		# is a hand-written mirror of YIELDED_STATUS in lib/phase-yield.mjs, held
+		# byte-identical by execution-core/phase-yield-parity.test.mjs.
+		yield) NEW_STATUS="awaiting-work" ;;
 		esac
-		# turn-cap-exhausted and park are NOT terminal states — leave completedAt unset.
+		# turn-cap-exhausted, park and yield are NOT terminal states — leave completedAt unset.
 		# CTL-512: skipped IS terminal (slot frees), so it falls through to SET_COMPLETED.
-		if [[ $STATUS == "turn-cap-exhausted" || $STATUS == "park" ]]; then
-			SET_COMPLETED='.'
+		if [[ $STATUS == "turn-cap-exhausted" || $STATUS == "park" || $STATUS == "yield" ]]; then
+			# CTL-1854: a yield is non-terminal, so it must not INHERIT a completedAt
+			# from a previous terminal write on the same signal — a non-terminal status
+			# carrying a completion timestamp is a contradiction downstream readers
+			# resolve inconsistently.
+			if [[ $STATUS == "yield" ]]; then
+				SET_COMPLETED='del(.completedAt)'
+			else
+				SET_COMPLETED='.'
+			fi
 		else
 			SET_COMPLETED='.completedAt = $ts'
 		fi
@@ -460,7 +587,16 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		_EMIT_HOST_NAME="$(catalyst_host_name 2>/dev/null || true)"
 		_EMIT_HOST_ID="$(catalyst_host_id 2>/dev/null || true)"
 		TMP="${SIGNAL_FILE}.tmp.$$"
+		# CTL-1854: requested yield window as JSON (null = use the ceiling). Built in
+		# bash so the jq program stays free of arithmetic on untrusted input; the
+		# value was already validated as a positive integer above.
+		if [[ -n $YIELD_SECONDS ]]; then
+			YIELD_MS_JSON=$((YIELD_SECONDS * 1000))
+		else
+			YIELD_MS_JSON="null"
+		fi
 		if jq --arg status "$NEW_STATUS" \
+			--argjson yieldms "$YIELD_MS_JSON" \
 			--arg rawstatus "$STATUS" \
 			--arg ts "$TS" \
 			--arg reason "$REASON" \
@@ -480,14 +616,46 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
            | (if \$status  == \"needs-input\" then .parkedFrom = \$phase
                 | (if (.needsHumanSince == null) then .needsHumanSince = \$ts else . end)
               else . end)
+           | (if \$rawstatus == \"yield\"
+              then .yieldedAt = (.yieldedAt // \$ts)
+                 | .firstYieldedAt = (.firstYieldedAt // \$ts)
+                 | (if \$yieldms == null then .
+                    elif (.yieldMs | type) == \"number\" and .yieldMs <= \$yieldms then .
+                    else .yieldMs = \$yieldms end)
+              else del(.yieldedAt) | del(.firstYieldedAt) | del(.yieldMs) end)
            | (if .host == null and \$host_name != \"\" then .host = {name: \$host_name, id: \$host_id} else . end)" \
 			"$SIGNAL_FILE" >"$TMP" 2>/dev/null; then
-			mv "$TMP" "$SIGNAL_FILE"
+			# CTL-1854 (Codex round 11): the rename is part of the success condition.
+			# `set -e` is deliberately NOT enabled here, so an unchecked `mv` failure
+			# left the script exiting 0 with the signal still `running` — telling the
+			# agent it could stop when no wait had been recorded.
+			if mv "$TMP" "$SIGNAL_FILE"; then
+				# The signal has committed; NOW the yield event may be published.
+				if [[ $STATUS == "yield" && -n $LINE ]]; then
+					canonical_jsonl_append "$EVENTS_DIR" "$LINE" ||
+						warn "failed to append event to ${EVENTS_DIR}"
+				fi
+			else
+				rm -f "$TMP"
+				if [[ $STATUS == "yield" ]]; then
+					die "--status yield: could not commit $SIGNAL_FILE (rename failed) — refusing to report a wait that was not recorded"
+				fi
+				warn "failed to commit signal file $SIGNAL_FILE (rename failed)"
+			fi
 		else
 			rm -f "$TMP"
+			# CTL-1854: for a yield this is FATAL, not a warning. The signal is the only
+			# record of the wait, so exiting 0 here tells the agent it may stop when
+			# nothing recorded that it would come back.
+			if [[ $STATUS == "yield" ]]; then
+				die "--status yield: failed to update signal file $SIGNAL_FILE — refusing to report a wait that was not recorded"
+			fi
 			warn "failed to update signal file $SIGNAL_FILE"
 		fi
 	else
+		if [[ $STATUS == "yield" ]]; then
+			die "--status yield: signal file not found: $SIGNAL_FILE — the wait cannot be recorded, so refusing to report success"
+		fi
 		warn "signal file not found: $SIGNAL_FILE (skipping update)"
 	fi
 fi

@@ -55,8 +55,9 @@ import {
 import { defaultInvokeRecoveryPass } from "./recovery-reasoning.mjs";
 import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-agents.mjs";
 import { isBgJobAlive as defaultIsBgJobAlive } from "./claude-agents.mjs";
-import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1157 Codex round-6: existing dispatched/running sdk workers occupancy (no bg job → countBg misses them)
+import { countYieldedOccupancy as defaultCountYieldedOccupancy, countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1157 Codex round-6: existing dispatched/running sdk workers occupancy (no bg job → countBg misses them)
 import { computeFreeSlots, readMaxParallel } from "./scheduler.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 
 const RECOVERY_PASS_PHASE = "recovery-pass";
 
@@ -96,7 +97,18 @@ function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, executor) {
     join(orchDir, "workers", ticket, "phase-recovery-pass.json")
   );
   if (!sig) return false;
-  if (sig.status !== "dispatched" && sig.status !== "running") return false;
+  // CTL-1854: see delegate-queue.mjs — a yielded worker still owns its signal.
+  if (sig.status !== "dispatched" && sig.status !== "running" && sig.status !== YIELDED_STATUS)
+    return false;
+  // ⚠️ CTL-1854: a yielded worker OWNS the signal without a live job, so it must
+  // short-circuit BEFORE the liveness probe below. Under the default background
+  // executor it has already exited, so its retained bg_job_id necessarily fails
+  // isBgJobAlive — meaning the previous allow-list entry alone still reported
+  // "not live", let another recovery intent through, and let the dispatcher
+  // overwrite a live yielded signal with duplicate recovery work. Adding the
+  // status to a list that then asks a question it must fail is not the same as
+  // handling it.
+  if (sig.status === YIELDED_STATUS) return true;
   const bgJobId = sig.bg_job_id ?? null;
   if (!bgJobId) return executor === "sdk"; // sdk in-process worker: live with no bg id
   try {
@@ -162,6 +174,9 @@ export function drainOnce(deps = {}) {
   const invokeFn = deps.invokeFn ?? defaultInvokeRecoveryPass;
   const countBg = deps.countBackgroundAgents ?? defaultCountBackgroundAgents;
   const countSdkInflight = deps.countSdkInflight ?? defaultCountSdkInflight;
+  // CTL-1854: yielded phases hold their slots in EVERY executor mode, so this is
+  // sampled unconditionally — unlike the sdk-only baseline below.
+  const countYieldedOccupancy = deps.countYieldedOccupancy ?? defaultCountYieldedOccupancy;
   const isBgJobAlive = deps.isBgJobAlive ?? defaultIsBgJobAlive;
   const appendRequested =
     deps.appendRequested ?? defaultAppendDispatchRequestedEvent;
@@ -195,6 +210,27 @@ export function drainOnce(deps = {}) {
   // Sampling ONCE here (no this-pass launch has happened yet) keeps the two terms disjoint.
   let sdkInflightBaseline = 0;
   let sdkBaselineOk = true;
+  // CTL-1854: yielded-phase occupancy baseline. Sampled for EVERY executor (a
+  // yield holds its slot regardless of how it was dispatched) and fail-closed on a
+  // count failure, matching the sdk baseline and countBg posture: never launch on
+  // an untrustworthy occupancy count.
+  let yieldedBaseline = 0;
+  try {
+    const y = countYieldedOccupancy(orchDir);
+    yieldedBaseline = y?.count ?? 0;
+    // ⚠️ An inconclusive scan holds every intent, exactly like a failed sdk
+    // baseline: inability to inspect is not evidence of an available slot.
+    if (y?.ok !== true) {
+      sdkBaselineOk = false;
+      log.warn({ orchDir, reason: y?.reason ?? null }, "delegate-runner: yielded-occupancy scan failed host-wide — holding every intent this pass (CTL-1854)");
+    }
+  } catch (err) {
+    sdkBaselineOk = false;
+    log.warn(
+      { err: err?.message },
+      "delegate-runner: yielded-occupancy count failed — holding every intent (fail-closed)"
+    );
+  }
   // CTL-1157 F P1: under executor=sdk each dispatch launches an IN-PROCESS query()
   // that settles asynchronously (invokeFn returns the settled chain in
   // details.pendingSdk). This disposable child must await those before exiting or
@@ -284,8 +320,34 @@ export function drainOnce(deps = {}) {
     // concurrent sdk phase workers with no double-count. bg path is byte-identical
     // (sdkInflightBaseline and localLaunched both stay 0). A failed sdk baseline sample
     // (sdkBaselineOk=false) holds every intent this pass (fail-closed).
+    // CTL-1854: + yielded occupancy, for BOTH executors. A yielded phase's bg worker
+    // has exited, so countBg does not see it, and countSdkInflight neither recognizes
+    // the status nor is sampled outside sdk mode — yet the phase still holds its slot.
+    // Without this term a queued recovery or board-health delegate launches straight
+    // through a live yield at maxParallel=1. Disjoint from the other terms (a yielded
+    // worker is neither live-bg nor sdk-inflight), so no double-count. Sampled once per
+    // pass beside the sdk baseline and fails CLOSED, matching the countBg posture.
+    // ⚠️ RE-READ the yielded occupancy per item, alongside countBg. A once-per-pass
+    // baseline has a window: a phase that is `running` at sample time, yields, and
+    // exits before this item's countBg is in NEITHER count — the baseline missed
+    // the yield and the live count missed the (now exited) worker — so at
+    // maxParallel=1 effectiveLive reports a free slot the yield is holding. The
+    // baseline is kept as the fail-closed floor: whichever is larger wins, so a
+    // transient read failure here cannot LOWER the occupancy already established.
+    let yieldedNow = yieldedBaseline;
+    try {
+      const y = countYieldedOccupancy(orchDir);
+      if (y?.ok === true) yieldedNow = Math.max(yieldedBaseline, y.count);
+      else {
+        countOk = false; // inconclusive → hold this intent, like a failed countBg
+        log.warn({ ticket, reason: y?.reason ?? null }, "delegate-runner: yielded-occupancy re-read failed — holding this intent (CTL-1854)");
+      }
+    } catch {
+      countOk = false;
+    }
     const effectiveLive =
-      executor === "sdk" ? (live ?? 0) + sdkInflightBaseline + localLaunched : live;
+      (executor === "sdk" ? (live ?? 0) + sdkInflightBaseline + localLaunched : live) +
+      yieldedNow;
     if (!countOk || !sdkBaselineOk || computeFreeSlots(max, effectiveLive) <= 0) {
       try {
         transitionFn(orchDir, ticket, { from: claimPath, status: "queued" });

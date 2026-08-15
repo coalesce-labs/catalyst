@@ -31,6 +31,7 @@ import {
 import { join } from "node:path";
 import { log } from "./config.mjs";
 import { isSdkWorkerLive as registrySdkWorkerLive } from "./sdk-worker-registry.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 
 // The queue dir name, derived from orchDir exactly like recovery-reasoning.mjs
 // derives `.recovery-intents/` (recoveryIntentPath: join(orchDir, ".recovery-intents", …)).
@@ -106,7 +107,19 @@ function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, isSdkWorkerLive, 
   const signalPath = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
   const sig = readIntentFile(signalPath);
   if (!sig) return false;
-  if (sig.status !== "dispatched" && sig.status !== "running") return false;
+  // CTL-1854: a yielded recovery-pass worker still OWNS phase-recovery-pass.json.
+  // Reading it as not-live lets the enqueue dedup spawn a duplicate over a live one.
+  if (sig.status !== "dispatched" && sig.status !== "running" && sig.status !== YIELDED_STATUS)
+    return false;
+  // ⚠️ CTL-1854: a yielded worker OWNS the signal without a live job, so it must
+  // short-circuit BEFORE the liveness probe below. Under the default background
+  // executor it has already exited, so its retained bg_job_id necessarily fails
+  // isBgJobAlive — meaning the previous allow-list entry alone still reported
+  // "not live", let another recovery intent through, and let the dispatcher
+  // overwrite a live yielded signal with duplicate recovery work. Adding the
+  // status to a list that then asks a question it must fail is not the same as
+  // handling it.
+  if (sig.status === YIELDED_STATUS) return true;
   const bgJobId = sig.bg_job_id ?? null;
   if (!bgJobId) {
     try {
