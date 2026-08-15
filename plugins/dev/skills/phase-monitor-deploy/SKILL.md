@@ -181,7 +181,7 @@ if [[ -z "$DEPLOY_EVENT" ]]; then
       ticket: $ticket,
       generation: (if $gen == "" then null else ($gen | tonumber) end),
       # CTL-1854: write `status` UP FRONT. This record is composed from scratch and
-      # its real terminal is set by the phase-agent-emit-complete wrapper 17-66 lines
+      # its real terminal is set by the phase-agent-emit-complete wrapper 8-73 lines
       # later, with a thoughts-sync (git/network) and a Linear comment in between. A
       # worker dying in that window left a phase file with NO `status` at all —
       # uninterpretable to every occupancy/lifecycle reader, and 10 such records were
@@ -260,7 +260,7 @@ case "$DEPLOY_STATE" in
         ticket: $ticket,
         generation: (if $gen == "" then null else ($gen | tonumber) end),
         # CTL-1854: write `status` UP FRONT. This record is composed from scratch and
-        # its real terminal is set by the phase-agent-emit-complete wrapper 17-66 lines
+        # its real terminal is set by the phase-agent-emit-complete wrapper 8-73 lines
         # later, with a thoughts-sync (git/network) and a Linear comment in between. A
         # worker dying in that window left a phase file with NO `status` at all —
         # uninterpretable to every occupancy/lifecycle reader, and 10 such records were
@@ -326,7 +326,7 @@ jq -nc \
     ticket: $ticket,
     generation: (if $gen == "" then null else ($gen | tonumber) end),
     # CTL-1854: write `status` UP FRONT. This record is composed from scratch and
-    # its real terminal is set by the phase-agent-emit-complete wrapper 17-66 lines
+    # its real terminal is set by the phase-agent-emit-complete wrapper 8-73 lines
     # later, with a thoughts-sync (git/network) and a Linear comment in between. A
     # worker dying in that window left a phase file with NO `status` at all —
     # uninterpretable to every occupancy/lifecycle reader, and 10 such records were
