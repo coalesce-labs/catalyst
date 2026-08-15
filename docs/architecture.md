@@ -101,6 +101,14 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
   on one frozen byte snapshot (2026-08, 1,117,890,759 B), the counts summing to the line total
   exactly, so every line is accounted for by arithmetic rather than a separate query:
   v2-only 1,175,708 · v1-only 25,355 · dual (v1+v2) 978 · **v3-only `name` 532** · total 1,202,573.
+  ⚠️ The **978** here and the **322** cited further down look contradictory — a broader corpus
+  cannot hold fewer records than a month inside it — but they are the same population counted at
+  different **times**, and that is MEASURED rather than assumed. Re-counting every log file on the
+  host: **1,011 dual lines, all of them in `2026-08`; June and July hold zero.** So the sequence is
+  322 (CTL-1834's all-files census) → 978 (this snapshot, mid-day) → 1,011 (all files, later the
+  same day). Dual emission began with CTL-1795 phase 1 and is still accumulating, so a later
+  single-month count exceeding an earlier all-time one is exactly what growth looks like. Both
+  figures are quoted with scope and vintage so the pair reads as a time series, not a contradiction.
   `ENVELOPE_SHAPES` in the module is the authoritative list; the v3 shape is live and accepted, and
   omitting it here is how a reader following the architecture misses a real envelope:
   - **v1** (bash, `catalyst-state.sh event`): `{ts, event, orchestrator, worker, detail}`.
@@ -120,7 +128,8 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
     routed twice, double-applying `handleAgentCheckin`'s `upsertAgent`/`_autoRegisterPrLifecycle`.
     Key **order** within that one line is a separate question and this paragraph used to conflate
     them — a single dual line resolves to one name and routes once under *any* ordering.
-    Measured across every log file ever written (4,034,067 parsed lines), all **322** dual lines
+    Measured by CTL-1834 across every log file ever written **as of that ticket** (4,034,067
+    parsed lines), all **322** dual lines
     carry identical values in both keys and disagreement is not constructible on the dual path
     (`canonical_dual_envelope_line` reads `name` from `.event` and passes that same string to
     `--event-name`), so order is unobservable. The boundary

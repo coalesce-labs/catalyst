@@ -15,13 +15,19 @@
 //
 //   CATALYST_EVENT_LOG_SAMPLE=<log> bun test event-envelope.test.mjs
 //
-// ⚠️ SCOPE (Codex round 5): it scans a BOUNDED TAIL, not the whole file — the
-// live log is ~1 GB and a whole-file read is a recorded stall incident here. A
-// sample larger than the cap therefore leaves earlier bytes unexamined, and a
-// pass over the tail must NOT read as whole-file coverage. So the test REFUSES
-// to truncate silently: point it at an already-bounded sample, or set
-// CATALYST_EVENT_LOG_SAMPLE_ALLOW_TRUNCATION=1 to accept tail-only scope
-// knowingly. Either way it reports the bytes it actually read.
+// ⚠️ SCOPE: the CALLER bounds the sample; this scan does not sample. It validates
+// every line of whatever it is given and REFUSES a file over the cap (default
+// 64 MiB, CATALYST_EVENT_LOG_SAMPLE_MAX_BYTES) with the exact command to bound it.
+// The live log is ~1 GB and a whole-file read is a recorded stall incident here,
+// so an oversized sample is a hard failure rather than a silent partial pass.
+//
+// It used to do the tail read itself. That byte arithmetic produced four separate
+// false-passes (Codex rounds 7, 9, 11, 12) and existed only to save a `tail -c`,
+// so it was deleted along with the ALLOW_TRUNCATION flag it needed.
+//
+// One optional flag remains: CATALYST_EVENT_LOG_SAMPLE_ALLOW_TAIL_FRAGMENT=1
+// waives an unterminated FINAL record, for a log being appended to right now. It
+// is off by default — on a stable file that record is corruption, not a race.
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { existsSync, statSync, readFileSync, writeFileSync, mkdtempSync } from "node:fs";
