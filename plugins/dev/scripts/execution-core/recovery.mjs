@@ -2433,12 +2433,19 @@ export function reclaimDeadWorkIfPossible(
   // This function is the per-tick, per-signal evaluator (schedulerTick calls it
   // for every worker signal), so it is where the deadline actually lives.
   //
-  // Why the sweep is guaranteed to reach a yielded signal: its loop skips any
-  // ticket not in `inFlightTickets`, and a yield HOLDS the slot precisely
-  // because isTicketInFlight does not free it. The property that made an
-  // unenforced yield dangerous is the same one that keeps it under the
-  // instrument that expires it. (A yield that freed its slot would fall out of
-  // this sweep — and would also no longer need it.)
+  // ⚠️ HOW THE SWEEP REACHES A YIELDED SIGNAL — and why the obvious argument is
+  // WRONG. This comment used to reason: the loop skips any ticket not in
+  // `inFlightTickets`, and a yield HOLDS the slot, so every yield is necessarily
+  // swept. That holds for a PIPELINE phase and FAILS for an ancillary one — a
+  // `recovery-pass` yielding beside a failed/stalled pipeline phase leaves
+  // isTicketInFlight false, so the filter skipped it and its deadline was never
+  // evaluated (slot reserved forever). The caller therefore evaluates
+  // YIELDED_STATUS UNCONDITIONALLY, before that filter
+  // (scheduler.mjs, "YIELD EXPIRY MUST NOT DEPEND ON TICKET-LEVEL IN-FLIGHT").
+  //
+  // Do not move the check back behind the filter on the strength of the
+  // slot-holding argument: it is an elegant claim that is only true for the case
+  // one has in mind.
   //
   // It must sit ABOVE the classifyWorker short-circuit: an SDK-path signal has
   // no bg_job_id, so classifyWorker returns "unknown" and the function returns

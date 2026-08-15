@@ -1346,10 +1346,12 @@ its own job needs nobody, and conflating them imports CTL-1850's false-page defe
   `yieldedAt` was written, when it is always live — so that call site can never observe a deadline
   pass. Enforcement is `reclaimDeadWorkIfPossible` (recovery.mjs), which `schedulerTick` runs once
   per signal per tick, placed **above** the `classifyWorker` short-circuit (an SDK-path signal has
-  no `bg_job_id` → `unknown` → early `noop`, the exact stranding path). The sweep is guaranteed to
-  reach these signals because it skips tickets not in flight, and a yield holds the slot — the
-  property that makes an unenforced yield dangerous is what keeps it under the instrument that
-  expires it.
+  no `bg_job_id` → `unknown` → early `noop`, the exact stranding path) **and above the
+  `inFlightTickets` filter**. That second placement is not symmetry: the tempting argument — "the
+  sweep must reach every yield, because a yield holds the slot" — is true only for a **pipeline**
+  phase. An **ancillary** yield (a `recovery-pass` beside a failed/stalled pipeline phase) leaves
+  `isTicketInFlight` false, so the filter skipped it and its deadline was never evaluated, reserving
+  the slot forever. The yield branch is therefore evaluated unconditionally.
 - **The ceiling bounds the EPISODE** (30 min, matching Linear's session-stale deadline).
   `yieldedAt` is rewritten per declaration, so a per-yield bound would let an agent re-yield at
   minute 29 forever; `firstYieldedAt` is set once and preserved, so ten re-yields buy exactly as
