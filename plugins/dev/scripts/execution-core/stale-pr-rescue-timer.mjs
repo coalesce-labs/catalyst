@@ -144,7 +144,13 @@ function anyPhaseJobAlive(orchDir, ticket, jobLifecycleFn) {
       if (String(raw?.status) === YIELDED_STATUS && !classifyYield(raw).expired) return true;
       if (raw?.bg_job_id && jobLifecycleFn(raw.bg_job_id) === "alive") return true;
     } catch {
-      /* skip */
+      // ⚠️ FAIL CLOSED on an unreadable/malformed phase file. Skipping treats it as
+      // "no owner", and because a yielding worker has intentionally exited, NO
+      // background-job probe can recover that ownership later — so a transiently
+      // torn signal would let the rescue rebase a worktree whose background work is
+      // still running. Claiming ownership on doubt costs a delayed rescue; the
+      // other direction costs a second writer in a live worktree.
+      return true;
     }
   }
   return false;

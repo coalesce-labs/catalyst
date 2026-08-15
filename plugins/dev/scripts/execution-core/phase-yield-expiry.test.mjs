@@ -539,3 +539,62 @@ describe("⚠️ a live yield still OWNS its worktree", () => {
     expect(rescue).toContain("!classifyYield(raw).expired");
   });
 });
+
+describe("⚠️ round 19: silence, warm slots, and ownership on doubt", () => {
+  test("expiry EMITS the abandonment event — the runner cannot emit it later", async () => {
+    // The runner evaluated the yield immediately after declaration and exited, so
+    // if this writer stays silent the terminal is invisible to phase-lifecycle
+    // interests, the CTL-532 worker-state fold, the HUD and every log consumer.
+    const { defaultExpireYield } = await import("./recovery.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldemit-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"),
+      JSON.stringify({ status: YIELDED_STATUS, ticket: "PROJ-1", phase: "implement" }));
+    let emitted = null;
+    defaultExpireYield(orch, { ticket: "PROJ-1", phase: "implement" }, { reason: "deadline-passed" },
+      { appendEventLog: (e) => { emitted = e; } });
+    expect(emitted).toMatchObject({ phase: "implement", ticket: "PROJ-1", status: "abandoned", reason: YIELD_EXPIRED_REASON });
+  });
+
+  test("a REFUSED expiry emits nothing — no event for a transition that did not happen", async () => {
+    const { defaultExpireYield } = await import("./recovery.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldnoemit-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"),
+      JSON.stringify({ status: "done", ticket: "PROJ-1", phase: "implement" }));
+    let emitted = null;
+    const ok = defaultExpireYield(orch, { ticket: "PROJ-1", phase: "implement" }, {},
+      { appendEventLog: (e) => { emitted = e; } });
+    expect({ ok, emitted }).toEqual({ ok: false, emitted: null });
+  });
+
+  test("a WARM boot candidate cannot bypass a zero budget", async () => {
+    // "Warm candidates always survive selection" (CTL-1422 B) predates yielded
+    // occupancy. With a yield holding the only slot, free is 0 and the exemption
+    // would have dispatched straight past maxParallel.
+    const { selectBootResumeCandidates } = await import("./boot-resume.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "warmyield-"));
+    const wt = join(orch, "wt-1");
+    mkdirSync(wt, { recursive: true });
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    mkdirSync(join(orch, "workers", "PROJ-2"), { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"),
+      JSON.stringify({ ticket: "PROJ-1", phase: "implement", status: "running", worktreePath: wt, updatedAt: now }));
+    writeFileSync(join(orch, "workers", "PROJ-2", "phase-implement.json"),
+      JSON.stringify({ ticket: "PROJ-2", phase: "implement", status: YIELDED_STATUS, yieldedAt: now, updatedAt: now }));
+    const picked = selectBootResumeCandidates({
+      orchDir: orch, agents: [], maxParallel: 1,
+      sdkSessionHarvest: new Map([["PROJ-1", "sess-1"]]), // PROJ-1 is WARM
+    });
+    expect(picked.map((c) => c.ticket)).not.toContain("PROJ-1");
+  });
+
+  test("the rescue claims ownership on an unreadable signal, not abandons it", async () => {
+    const src = await Bun.file(new URL("./stale-pr-rescue-timer.mjs", import.meta.url)).text();
+    const probe = src.indexOf("anyPhaseJobAlive");
+    const body = src.slice(probe, src.indexOf("\n}", probe));
+    // The catch must return true (owned), not fall through to "no owner".
+    expect(body).toMatch(/catch \{[\s\S]*?return true;/);
+  });
+});

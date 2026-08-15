@@ -101,7 +101,8 @@ import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 // supersede-guard below.
 import { RECOVERY_PASS_PHASE } from "./recovery-reasoning.mjs";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
-import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
+import { ASSERTED_BY } from "./assertion-evidence.mjs";
+import { defaultAppendEventLog } from "./sdk-run-phase-agent.mjs"; // CTL-1854: the abandonment event emitter // CTL-1789: terminal-writer attribution
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
@@ -2145,7 +2146,19 @@ export function defaultExpireYield(
   orchDir,
   signal,
   verdict,
-  { readFile = readFileSync, writeFile = writeFileSync, rename = renameSync, rm = rmSync } = {}
+  {
+    readFile = readFileSync,
+    writeFile = writeFileSync,
+    rename = renameSync,
+    rm = rmSync,
+    // CTL-1854 (Codex round 19): the abandonment event. The RUNNER cannot emit it
+    // later — it evaluated the yield immediately after declaration and exited — so
+    // if this writer stays silent the terminal is invisible to phase-lifecycle
+    // interests, the CTL-532 worker-state fold, the HUD and every unified-log
+    // consumer. That is the same "SILENCE IS A DEFECT" lesson CTL-1790 recorded on
+    // the runner's own flip, reintroduced on the path that replaced it.
+    appendEventLog = defaultAppendEventLog,
+  } = {}
 ) {
   const p = join(orchDir, "workers", signal?.ticket ?? "", `phase-${signal?.phase ?? ""}.json`);
   let cur;
@@ -2191,6 +2204,20 @@ export function defaultExpireYield(
       })
     );
     rename(tmp, p);
+    // Emitted ONLY after the rename commits, and outside no try of its own so a
+    // logging failure cannot undo a written terminal — it is caught by the outer
+    // handler below, which already treats this as best-effort.
+    try {
+      appendEventLog({
+        phase: signal?.phase,
+        ticket: signal?.ticket,
+        status: "abandoned",
+        reason: YIELD_EXPIRED_REASON,
+        orchestrator: cur?.orchestrator,
+      });
+    } catch {
+      /* the signal is authoritative; a failed emit must not fail the expiry */
+    }
   } catch {
     // Best-effort: the next tick retries. Clear the temp file so a failed rename
     // cannot leave debris in workers/ for the dir sweeps to trip over.

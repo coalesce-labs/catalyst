@@ -551,7 +551,15 @@ export function selectBootResumeCandidates({
   // only cold candidates, against the slots warm did not consume.
   const warm = needResume.filter((c) => sdkSessionHarvest.has?.(c.ticket));
   const cold = needResume.filter((c) => !sdkSessionHarvest.has?.(c.ticket));
-  return [...warm, ...cold.slice(0, Math.max(0, free - warm.length))];
+  // ⚠️ CTL-1854: warm candidates "always survive selection" (CTL-1422 B) — but
+  // that exemption was written when `free` only ever reflected LIVE workers. With
+  // yielded occupancy charged (and with the fail-closed zero on an unreadable
+  // scan), free can legitimately be 0 while a warm candidate exists, and the
+  // exemption would dispatch straight past maxParallel into a slot a yield holds.
+  // The exemption is preserved wherever there IS budget; it no longer overrides a
+  // budget of zero.
+  const warmAdmitted = warm.slice(0, Math.max(0, free));
+  return [...warmAdmitted, ...cold.slice(0, Math.max(0, free - warmAdmitted.length))];
 }
 
 // resolveAgents — normalize the injectable `agents` seam to a concrete array.
