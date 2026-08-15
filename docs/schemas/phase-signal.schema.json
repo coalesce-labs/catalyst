@@ -41,7 +41,7 @@
     },
     "status": {
       "type": "string",
-      "description": "Current lifecycle status of this phase, written by the daemon on dispatch and updated by the phase-agent as work progresses.",
+      "description": "Current lifecycle status of this phase, written by the daemon on dispatch and updated by the phase-agent as work progresses. NOTE: this enum is known to be INCOMPLETE — the runtime also writes at least `needs-input`, `preempted` and `aborted`, which are absent here (tracked separately). A schema that rejects valid production signals is worse than none, so treat a failure against this enum as a schema gap until proven otherwise.",
       "enum": [
         "dispatched",
         "running",
@@ -49,8 +49,24 @@
         "failed",
         "stalled",
         "skipped",
-        "turn-cap-exhausted"
+        "turn-cap-exhausted",
+        "awaiting-work"
       ]
+    },
+    "yieldedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "CTL-1854. When the agent declared its CURRENT bounded wait (status `awaiting-work`). Rewritten on every yield declaration, so it moves when an agent re-yields. Absent unless the phase is, or recently was, yielded."
+    },
+    "firstYieldedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "CTL-1854. When the agent declared the FIRST yield of the current episode; preserved across re-yields. The 30-minute ceiling is measured from here, not from `yieldedAt`, so repeatedly re-yielding cannot extend the wait. A present-but-unparseable value is treated as expired, never as a fresh anchor."
+    },
+    "yieldMs": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "CTL-1854. Optional per-yield window in milliseconds, from `--yield-seconds`. Clamped to the 30-minute ceiling — an agent may request LESS, never more. Absent means use the ceiling."
     },
     "bg_job_id": {
       "type": ["string", "null"],

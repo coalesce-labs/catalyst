@@ -55,7 +55,7 @@ import {
 import { defaultInvokeRecoveryPass } from "./recovery-reasoning.mjs";
 import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-agents.mjs";
 import { isBgJobAlive as defaultIsBgJobAlive } from "./claude-agents.mjs";
-import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1157 Codex round-6: existing dispatched/running sdk workers occupancy (no bg job → countBg misses them)
+import { countYieldedOccupancy as defaultCountYieldedOccupancy, countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1157 Codex round-6: existing dispatched/running sdk workers occupancy (no bg job → countBg misses them)
 import { computeFreeSlots, readMaxParallel } from "./scheduler.mjs";
 
 const RECOVERY_PASS_PHASE = "recovery-pass";
@@ -162,6 +162,9 @@ export function drainOnce(deps = {}) {
   const invokeFn = deps.invokeFn ?? defaultInvokeRecoveryPass;
   const countBg = deps.countBackgroundAgents ?? defaultCountBackgroundAgents;
   const countSdkInflight = deps.countSdkInflight ?? defaultCountSdkInflight;
+  // CTL-1854: yielded phases hold their slots in EVERY executor mode, so this is
+  // sampled unconditionally — unlike the sdk-only baseline below.
+  const countYieldedOccupancy = deps.countYieldedOccupancy ?? defaultCountYieldedOccupancy;
   const isBgJobAlive = deps.isBgJobAlive ?? defaultIsBgJobAlive;
   const appendRequested =
     deps.appendRequested ?? defaultAppendDispatchRequestedEvent;
@@ -195,6 +198,20 @@ export function drainOnce(deps = {}) {
   // Sampling ONCE here (no this-pass launch has happened yet) keeps the two terms disjoint.
   let sdkInflightBaseline = 0;
   let sdkBaselineOk = true;
+  // CTL-1854: yielded-phase occupancy baseline. Sampled for EVERY executor (a
+  // yield holds its slot regardless of how it was dispatched) and fail-closed on a
+  // count failure, matching the sdk baseline and countBg posture: never launch on
+  // an untrustworthy occupancy count.
+  let yieldedBaseline = 0;
+  try {
+    yieldedBaseline = countYieldedOccupancy(orchDir) ?? 0;
+  } catch (err) {
+    sdkBaselineOk = false;
+    log.warn(
+      { err: err?.message },
+      "delegate-runner: yielded-occupancy count failed — holding every intent (fail-closed)"
+    );
+  }
   // CTL-1157 F P1: under executor=sdk each dispatch launches an IN-PROCESS query()
   // that settles asynchronously (invokeFn returns the settled chain in
   // details.pendingSdk). This disposable child must await those before exiting or
@@ -284,8 +301,16 @@ export function drainOnce(deps = {}) {
     // concurrent sdk phase workers with no double-count. bg path is byte-identical
     // (sdkInflightBaseline and localLaunched both stay 0). A failed sdk baseline sample
     // (sdkBaselineOk=false) holds every intent this pass (fail-closed).
+    // CTL-1854: + yielded occupancy, for BOTH executors. A yielded phase's bg worker
+    // has exited, so countBg does not see it, and countSdkInflight neither recognizes
+    // the status nor is sampled outside sdk mode — yet the phase still holds its slot.
+    // Without this term a queued recovery or board-health delegate launches straight
+    // through a live yield at maxParallel=1. Disjoint from the other terms (a yielded
+    // worker is neither live-bg nor sdk-inflight), so no double-count. Sampled once per
+    // pass beside the sdk baseline and fails CLOSED, matching the countBg posture.
     const effectiveLive =
-      executor === "sdk" ? (live ?? 0) + sdkInflightBaseline + localLaunched : live;
+      (executor === "sdk" ? (live ?? 0) + sdkInflightBaseline + localLaunched : live) +
+      yieldedBaseline;
     if (!countOk || !sdkBaselineOk || computeFreeSlots(max, effectiveLive) <= 0) {
       try {
         transitionFn(orchDir, ticket, { from: claimPath, status: "queued" });
