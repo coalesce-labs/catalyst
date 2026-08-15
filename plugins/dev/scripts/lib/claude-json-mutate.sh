@@ -130,7 +130,8 @@ _cmd_trust_project() {
         "projectOnboardingSeenCount": 0,
         "hasClaudeMdExternalIncludesApproved": false,
         "hasClaudeMdExternalIncludesWarningShown": false,
-        "hasCompletedProjectOnboarding": false
+        "hasCompletedProjectOnboarding": false,
+        "_catalystManaged": true
       }
     end
   ' --arg p "$path"
@@ -139,11 +140,57 @@ _cmd_trust_project() {
 }
 
 # ── Subcommand: converge-owned <topLevelKey> <ownedSpecJson> ─────────────────
-# (Phase 2 — placeholder; wired in the Phase 2 commit)
+# Marker-aware converge for a top-level key (e.g. "mcpServers").
+# Invariant: an entry WITHOUT _catalystManaged:true is NEVER removed — it may be
+# operator-managed. Only entries that were created by this seam (marked) and are
+# absent from the desired spec are removed.
+#
+# spec is a JSON object {name: {…fields…}} where each entry in the desired owned
+# set is keyed by name. The spec entries are upserted and stamped with
+# _catalystManaged:true. Unmarked entries in the current file are preserved as-is.
 _cmd_converge_owned() {
-  echo "claude-json-mutate: converge-owned is not yet implemented (Phase 2)" >&2
-  return 2
+  local key="${1:?usage: converge-owned <topLevelKey> <ownedSpecJson>}"
+  local spec="${2:?usage: converge-owned <topLevelKey> <ownedSpecJson>}"
+
+  # Validate spec is parseable JSON before acquiring the lock.
+  jq -e . <<<"$spec" >/dev/null 2>&1 \
+    || { echo "claude-json-mutate: converge-owned: spec is not valid JSON" >&2; return 1; }
+
+  # shellcheck disable=SC2016  # $key and $spec are jq args, not shell variables
+  _cjm_mutate '
+    # Keep: unmarked entries (not _catalystManaged) OR in the desired spec.
+    # Remove: marked entries absent from the desired spec.
+    # Upsert: every entry in the spec, stamping _catalystManaged:true.
+    #
+    # Inside with_entries the input is {key, value}; capture as $e so that
+    # $e.key (the entry name) is available inside the ($spec | has(...)) context
+    # switch — without the capture, .key after the | refers to $spec.key (wrong).
+    .[$key] = (
+      reduce ($spec | keys_unsorted[]) as $n (
+        (
+          (.[$key] // {})
+          | with_entries(
+              . as $e |
+              select(
+                ($e.value._catalystManaged // false | not)
+                or ($spec | has($e.key))
+              )
+            )
+        );
+        .[$n] = ($spec[$n] + {"_catalystManaged": true})
+      )
+    )
+  ' --arg key "$key" --argjson spec "$spec"
 }
+
+# ── Subcommand: _converge_owned_implemented_sentinel ─────────────────────────
+# Used by the test gate to detect whether converge-owned is available (rc=0)
+# or still a placeholder (rc=2). The gate calls `converge-owned ignored '{}'`
+# against /dev/null; a real implementation succeeds (or fails on bad input),
+# but must not return 2 (the placeholder sentinel).
+#
+# Implementation exists above — this sentinel comment is kept only to document
+# the protocol so the gate's behaviour remains clear.
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 case "${1:-}" in

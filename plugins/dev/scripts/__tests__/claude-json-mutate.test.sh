@@ -267,5 +267,104 @@ proj_count=$(jq '.projects | length' "$FIXTURE_F")
   || fail "Case F: expected 2 project entries after flip, found $proj_count"
 pass "Case F — pre-existing entry: trust flipped, no marker added, project count unchanged (2)"
 
+# --- Phase 2: Ownership marker + marker-aware converge -------------------------
+# Cases G-I are gated on converge-owned being implemented. If the seam returns
+# rc=2 (not yet implemented) for converge-owned, skip G-I with a clear message.
+# Use a real temp file so _cjm_acquire can create the lock directory.
+_GATE_DIR="$(newdir)"
+echo '{"mcpServers":{}}' > "${_GATE_DIR}/gate.json"
+set +e
+CLAUDE_JSON="${_GATE_DIR}/gate.json" bash "$SEAM" converge-owned mcpServers '{}' 2>/dev/null
+CONVERGE_RC=$?
+set -e
+
+if [[ "$CONVERGE_RC" -eq 2 ]]; then
+  echo "  SKIP: converge-owned not yet implemented — Cases G-I deferred to Phase 2"
+else
+
+# --- Case G: trust-project stamps _catalystManaged on NEW entries only ----------
+D7="$(newdir)"
+FIXTURE_G="$(make_fixture "$D7")"
+NEW_PATH="${D7}/new-managed-path"
+mkdir -p "$NEW_PATH"
+PRE_PATH_G="${D7}/pre-existing-g"
+mkdir -p "$PRE_PATH_G"
+
+# Seed a pre-existing entry (no marker)
+jq --arg p "$PRE_PATH_G" '.projects[$p] = {
+  "hasTrustDialogAccepted": false,
+  "allowedTools": []
+}' "$FIXTURE_G" > "${FIXTURE_G}.tmp" && mv "${FIXTURE_G}.tmp" "$FIXTURE_G"
+
+# Trust the NEW path — should stamp the marker
+CLAUDE_JSON="$FIXTURE_G" bash "$SEAM" trust-project "$NEW_PATH"
+marker_new=$(jq -r --arg p "$NEW_PATH" '.projects[$p]._catalystManaged // "absent"' "$FIXTURE_G")
+[[ "$marker_new" == "true" ]] \
+  || fail "Case G: _catalystManaged not stamped on a NEW entry (got: $marker_new)"
+
+# Trust the PRE-EXISTING path — must NOT stamp the marker (Case F re-assertion)
+CLAUDE_JSON="$FIXTURE_G" bash "$SEAM" trust-project "$PRE_PATH_G"
+marker_pre=$(jq -r --arg p "$PRE_PATH_G" '.projects[$p]._catalystManaged // "absent"' "$FIXTURE_G")
+[[ "$marker_pre" == "absent" || "$marker_pre" == "false" || "$marker_pre" == "null" ]] \
+  || fail "Case G: _catalystManaged stamped on PRE-EXISTING entry (got: $marker_pre) — must not be"
+pass "Case G — new entry gets _catalystManaged:true; pre-existing entry gets no marker"
+
+# --- Case H: converge-owned never removes an unmarked (hand-added) entry -------
+D8="$(newdir)"
+FIXTURE_H="$(make_fixture "$D8")"
+
+# Seed mcpServers: serena (managed), stale_owned (managed), operator_added (no marker)
+jq '.mcpServers = {
+  "serena":        {"command": "serena", "_catalystManaged": true},
+  "stale_owned":   {"command": "stale",  "_catalystManaged": true},
+  "operator_added":{"command": "op"}
+}' "$FIXTURE_H" > "${FIXTURE_H}.tmp" && mv "${FIXTURE_H}.tmp" "$FIXTURE_H"
+
+# converge-owned: desired owned-set = only serena
+DESIRED_H='{"serena": {"command": "serena"}}'
+CLAUDE_JSON="$FIXTURE_H" bash "$SEAM" converge-owned mcpServers "$DESIRED_H"
+
+# operator_added must survive (no marker → untouchable)
+jq -e '.mcpServers.operator_added' "$FIXTURE_H" >/dev/null 2>&1 \
+  || fail "Case H: operator_added (no _catalystManaged marker) was removed — must be preserved"
+# stale_owned must be removed (marked but absent from the desired spec)
+jq -e '.mcpServers.stale_owned' "$FIXTURE_H" >/dev/null 2>&1 \
+  && fail "Case H: stale_owned (managed, not in desired spec) was NOT removed"
+# serena must be present (in the desired spec)
+jq -e '.mcpServers.serena' "$FIXTURE_H" >/dev/null 2>&1 \
+  || fail "Case H: serena (in desired spec) was removed or absent"
+jq -e . "$FIXTURE_H" >/dev/null 2>&1 \
+  || fail "Case H: output file is not valid JSON after converge-owned"
+pass "Case H — converge-owned: operator_added preserved, stale_owned removed, serena present, file valid JSON"
+
+# --- Case I: converge-owned is additive and idempotent --------------------------
+D9="$(newdir)"
+FIXTURE_I="$(make_fixture "$D9")"
+
+# Initial: mcpServers has only one server with no marker
+jq '.mcpServers = {"existing_unmanaged": {"command": "ex"}}' \
+  "$FIXTURE_I" > "${FIXTURE_I}.tmp" && mv "${FIXTURE_I}.tmp" "$FIXTURE_I"
+
+DESIRED_I='{"new_server": {"command": "new"}}'
+# First run: adds new_server, stamps marker, leaves existing_unmanaged alone
+CLAUDE_JSON="$FIXTURE_I" bash "$SEAM" converge-owned mcpServers "$DESIRED_I"
+jq -e '.mcpServers.new_server' "$FIXTURE_I" >/dev/null 2>&1 \
+  || fail "Case I: new_server was not added by converge-owned"
+marker_i=$(jq -r '.mcpServers.new_server._catalystManaged // "absent"' "$FIXTURE_I")
+[[ "$marker_i" == "true" ]] \
+  || fail "Case I: new_server added by converge-owned missing _catalystManaged:true (got: $marker_i)"
+jq -e '.mcpServers.existing_unmanaged' "$FIXTURE_I" >/dev/null 2>&1 \
+  || fail "Case I (first run): existing_unmanaged (no marker) was removed"
+
+# Second run: idempotent — no change
+BEFORE_I="$(jq -c . "$FIXTURE_I")"
+CLAUDE_JSON="$FIXTURE_I" bash "$SEAM" converge-owned mcpServers "$DESIRED_I"
+AFTER_I="$(jq -c . "$FIXTURE_I")"
+[[ "$BEFORE_I" == "$AFTER_I" ]] \
+  || fail "Case I: second converge-owned run changed the file — must be idempotent"
+pass "Case I — converge-owned: additive (new_server added+marked), idempotent on second run, existing_unmanaged preserved"
+
+fi  # end converge-owned implemented gate
+
 echo ""
-echo "PASS: claude-json-mutate (CTL-1890, Phase 1 Cases A-F)"
+echo "PASS: claude-json-mutate (CTL-1890, Phase 1+2 Cases A-I)"
