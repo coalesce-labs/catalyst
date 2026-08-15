@@ -2218,8 +2218,13 @@ export function defaultExpireYield(
     // handler below, which already treats this as best-effort.
     try {
       appendEventLog({
-        phase: signal?.phase,
-        ticket: signal?.ticket,
+        // The RESOLVED identity, not the record's raw fields. Using the latter
+        // emitted `phase.null.abandoned.null` for exactly the older signals the
+        // path-derivation was added to support — the write succeeded and the event
+        // named nothing, which is worse than silence because it looks like a real
+        // terminal for a phase that does not exist.
+        phase: _phase,
+        ticket: _ticket,
         status: "abandoned",
         reason: YIELD_EXPIRED_REASON,
         orchestrator: cur?.orchestrator,

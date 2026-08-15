@@ -353,11 +353,18 @@ export function countYieldedOccupancy(orchDir) {
       // one that CONTRADICTS the path is not, because that is corruption we cannot
       // interpret.
       const expectedPhase = f.slice("phase-".length, -".json".length);
-      if (typeof sig.phase === "string" && sig.phase !== expectedPhase) {
-        return { count, ok: false, reason: "signal-identity-mismatch" };
-      }
-      if (typeof sig.ticket === "string" && sig.ticket !== t.name) {
-        return { count, ok: false, reason: "signal-identity-mismatch" };
+      // PRESENT means "the key exists with a non-null value" — a numeric or
+      // object-valued ticket/phase is present and WRONG, not absent. Checking only
+      // `typeof === "string" && mismatched` let those through as if the field were
+      // missing, and downstream `signal.ticket ?? derivedTicket` then PREFERRED the
+      // invalid value over the path fallback, so expiry refused and the hold became
+      // permanent — the very defect round 25 fixed, re-entered through the type.
+      for (const [key, expected] of [["phase", expectedPhase], ["ticket", t.name]]) {
+        const v = sig[key];
+        if (v === undefined || v === null) continue; // genuinely absent: path wins
+        if (typeof v !== "string" || v !== expected) {
+          return { count, ok: false, reason: "signal-identity-mismatch" };
+        }
       }
       if (sig.status === YIELDED_STATUS) {
         // ⚠️ Identity is DERIVED FROM THE PATH when the record omits it. Tolerating

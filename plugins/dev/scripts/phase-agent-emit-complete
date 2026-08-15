@@ -519,7 +519,14 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 	# completion landing inside that window is still possible — that residual is
 	# CTL-1860, which covers both writers.
 	if [[ $STATUS == "yield" && -f $SIGNAL_FILE ]]; then
-		_CUR_STATUS="$(jq -r '.status // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")"
+		# ⚠️ Structural read, fail-closed. `jq -r '.status // empty'` degrades `{}` or a
+		# non-string status to an EMPTY string, which slips past the terminal/preempted
+		# guard below — so the emitter could not establish what it was overwriting and
+		# claimed a new hold anyway. Same lesson as the occupancy reader and the bash
+		# ownership guards: parseable is not the same as interpretable.
+		if ! _CUR_STATUS="$(jq -re 'if type=="object" and (.status|type)=="string" and .status != "" then .status else error("no-status") end' "$SIGNAL_FILE" 2>/dev/null)"; then
+			die "--status yield: existing signal $SIGNAL_FILE has no readable status — refusing to overwrite a phase whose state cannot be established"
+		fi
 		case "$_CUR_STATUS" in
 		done | complete | completed | failed | stalled | skipped | aborted | turn-cap-exhausted)
 			# `turn-cap-exhausted` is in signal-reader's TERMINAL set, so every consumer

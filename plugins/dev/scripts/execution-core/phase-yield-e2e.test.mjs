@@ -364,3 +364,52 @@ describe("⚠️ round 25: a yield with no identity in its JSON must still expir
     expect(signalOf(orch2).yieldMs).toBeUndefined();
   });
 });
+
+describe("⚠️ round 26: present-and-wrong is not absent", () => {
+  test("non-string identity is rejected, not ignored", () => {
+    // `typeof v === "string" && v !== expected` let a numeric or object-valued
+    // ticket/phase through as if the field were MISSING — and downstream
+    // `signal.ticket ?? derivedTicket` then PREFERRED the invalid value over the
+    // path fallback, so expiry refused and the hold became permanent. The round-25
+    // defect, re-entered through the type.
+    const orch = mkdtempSync(join(tmpdir(), "yieldtype-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    const p = join(orch, "workers", "PROJ-1", "phase-implement.json");
+    for (const bad of [123, { x: 1 }, [], true]) {
+      writeFileSync(p, JSON.stringify({ status: YIELDED_STATUS, ticket: bad, phase: "implement" }));
+      expect({ bad: JSON.stringify(bad), ok: countYieldedOccupancy(orch).ok })
+        .toEqual({ bad: JSON.stringify(bad), ok: false });
+    }
+    // ...while genuinely absent identity still counts, and null is absent too.
+    writeFileSync(p, JSON.stringify({ status: YIELDED_STATUS }));
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true });
+    writeFileSync(p, JSON.stringify({ status: YIELDED_STATUS, ticket: null, phase: null }));
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true });
+  });
+
+  test("the abandonment event carries the RESOLVED identity, never null", async () => {
+    // The write succeeded using path-derived identity while the event still used
+    // the record's raw fields, emitting `phase.null.abandoned.null` for exactly the
+    // older signals path-derivation was added to support. An event that names
+    // nothing is worse than silence: it looks like a real terminal for a phase that
+    // does not exist.
+    const { defaultExpireYield } = await import("./recovery.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldev-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"),
+      JSON.stringify({ status: YIELDED_STATUS, yieldedAt: "2020-01-01T00:00:00Z" }));
+    let ev = null;
+    defaultExpireYield(orch,
+      { ticket: null, phase: null, derivedTicket: "PROJ-1", derivedPhase: "implement" },
+      { reason: "deadline-passed" }, { appendEventLog: (e) => { ev = e; } });
+    expect(ev).toMatchObject({ ticket: "PROJ-1", phase: "implement", status: "abandoned" });
+  });
+
+  test("the emitter refuses a yield onto a signal whose status is unreadable", () => {
+    const orch = scenario();
+    for (const bad of ["{}", '{"status":123}', '{"status":""}']) {
+      writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"), bad);
+      expect(() => declareYield(orch)).toThrow();
+    }
+  });
+});
