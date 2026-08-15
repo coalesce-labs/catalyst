@@ -132,10 +132,6 @@ function mergeInputs(sig, derived, adapters) {
     signalMergedAt: sig.pr?.mergedAt ?? null,
     skipDeployVerification: adapters.deploy.skipDeployVerification(repo),
     currentStatus: sig.status,
-    // CTL-1854: the raw signal, so detectStalled can classify a live yield. Without
-    // it the classifier sees no `status`/`yieldedAt` and reports "not a yield",
-    // which the detector must (and now does) treat as NO exemption.
-    signal: sig.raw ?? sig,
   };
 }
 
@@ -160,6 +156,15 @@ function deployInputs(sig, derived, adapters, nowMs, event) {
 // stalledInputs — shape a worker's state for detectStalled (Step G).
 function stalledInputs(sig, derived, nowMs) {
   return {
+    // CTL-1854: the raw signal, so detectStalled can classify a live yield.
+    // ⚠️ It belongs HERE, in the adapter that feeds detectStalled — the first
+    // attempt put it in mergeInputs (which feeds nextMergeState) because the
+    // anchor `currentStatus: sig.status,` appears in both and the edit took the
+    // first match. The exemption was therefore never granted: the classifier saw
+    // the inputs object, found no `status`/`yieldedAt`, reported "not a yield",
+    // and a live yield past 15 minutes raised the operator page this ticket
+    // exists to avoid.
+    signal: sig.raw ?? sig,
     ticket: sig.ticket,
     nowMs,
     updatedAtMs: sig.updatedAt ? Date.parse(sig.updatedAt) : null,

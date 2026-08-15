@@ -487,8 +487,10 @@ describe("⚠️ occupancy fails CLOSED: could-not-look is not an empty slot", (
     // Now truncate that same present signal — a torn write lands exactly here.
     writeFileSync(p, '{"status":"awaiting-work","tick');
     const out = countYieldedOccupancy(orch);
-    expect(out.ok).toBe(false);
-    expect(out.reason).toBe("signal-unparseable");
+    // SCOPED: charged to this ticket (1 slot), host still readable, path reported.
+    // Returning ok:false here made one bad file stop dispatch host-wide.
+    expect({ count: out.count, ok: out.ok }).toEqual({ count: 1, ok: true });
+    expect(out.unreadable[0]).toMatchObject({ reason: "signal-unparseable" });
   });
 
   test("⚠️ a torn CTL-702 yield TOMBSTONE must not wedge admission", async () => {
@@ -510,7 +512,11 @@ describe("⚠️ occupancy fails CLOSED: could-not-look is not an empty slot", (
     // ...while a torn REAL signal still fails closed. Both directions, or the
     // exclusion could have been a blanket "ignore everything unparseable".
     writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"), "{tor");
-    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: false });
+    // A torn REAL signal is still charged (1 slot for this ticket) — the tombstone
+    // exclusion did not become a blanket "ignore anything unparseable".
+    const torn = countYieldedOccupancy(orch);
+    expect({ count: torn.count, ok: torn.ok }).toEqual({ count: 1, ok: true });
+    expect(torn.unreadable).toHaveLength(1);
   });
 
   test("callers hold admission rather than treating it as capacity", async () => {

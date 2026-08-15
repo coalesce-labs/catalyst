@@ -1717,10 +1717,15 @@ export async function codexRunPhaseAgent(
       // counts as stale, so legacy and unfenced dispatches are unaffected.
       const _sigGen = readSignalGeneration(signalFile);
       const _mine = spec?.generation;
+      // ⚠️ Number("") / Number(null) / Number(false) / Number([]) are all 0, which
+      // Number.isInteger accepts — so a null generation compared against a real
+      // one would compute stale=true and SUPPRESS all three terminal writers.
+      // Require a plain integer (or an integer-valued string), never a coercion.
+      const _isPlainInt = (v) =>
+        (typeof v === "number" && Number.isInteger(v)) ||
+        (typeof v === "string" && /^\d+$/.test(v.trim()) && v.trim() !== "");
       const _staleGeneration =
-        Number.isInteger(Number(_mine)) &&
-        Number.isInteger(Number(_sigGen)) &&
-        Number(_mine) < Number(_sigGen);
+        _isPlainInt(_mine) && _isPlainInt(_sigGen) && Number(_mine) < Number(_sigGen);
 
       if (classification === "auth-park") {
         // STICKY needs-human path — a fresh `codex login` for this home is required.

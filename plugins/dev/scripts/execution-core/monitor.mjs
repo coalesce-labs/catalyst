@@ -798,7 +798,10 @@ export function computeTriageBudget({
   } catch {
     y = { count: 0, ok: false };
   }
-  if (!y.ok) return { remaining: 0 };
+  if (!y.ok) {
+    log.warn({ orchDir, reason: y.reason ?? null }, "computeTriageBudget: yielded-occupancy scan failed host-wide — holding triage admission (CTL-1854)");
+    return { remaining: 0 };
+  }
   return { remaining: computeFreeSlots(maxParallel, live + sdkInflight + y.count) };
 }
 

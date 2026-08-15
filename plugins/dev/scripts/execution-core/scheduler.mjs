@@ -1308,7 +1308,10 @@ export function expireYieldedSignals(
   let signals;
   try {
     signals = readAll(orchDir);
-  } catch {
+  } catch (err) {
+    // ⚠️ NEVER SILENT. A swallowed throw here disables expiry exactly the way the
+    // TDZ ReferenceError did — the defect this function was extracted to fix.
+    log.warn({ orchDir, err: err?.message }, "expireYieldedSignals: signal read failed — no yield evaluated this tick (CTL-1854)");
     return { evaluated: 0, ok: false };
   }
   for (const sig of signals ?? []) {
@@ -1336,8 +1339,12 @@ export function expireYieldedSignals(
       // call here — and it cannot capture a variable that is not yet in scope.
       reclaim(orchDir, sig, {});
       evaluated += 1;
-    } catch {
-      /* one unreadable signal must not stop the others */
+    } catch (err) {
+      // One bad signal must not stop the others — but it must not be invisible.
+      log.warn(
+        { ticket: sig?.ticket, phase: sig?.phase, signalPath: sig?.signalPath, err: err?.message },
+        "expireYieldedSignals: yield evaluation threw for one signal (CTL-1854)"
+      );
     }
   }
   return { evaluated, ok: true };
@@ -6327,17 +6334,31 @@ export function schedulerTick(
   // maxParallel. Inability to inspect is not evidence of an empty slot.
   let yieldedOccupancy = 0;
   let yieldedOccupancyOk = true;
+  let yieldedOccupancyReason = null;
   try {
     const y = countYieldedOccupancy(orchDir);
     yieldedOccupancy = y.count;
     yieldedOccupancyOk = y.ok;
-  } catch {
+    yieldedOccupancyReason = y.reason ?? null;
+    if (Array.isArray(y.unreadable) && y.unreadable.length > 0) {
+      // Charged, not blocking — but an operator needs the paths to clear them.
+      log.warn(
+        { files: y.unreadable.slice(0, 10) },
+        "scheduler: uninterpretable phase signal(s) charged as held slots (CTL-1854)"
+      );
+    }
+  } catch (err) {
     yieldedOccupancyOk = false;
+    yieldedOccupancyReason = err?.message ?? "threw";
   }
   if (!yieldedOccupancyOk) {
+    // Only a HOST-scope failure (workers/ itself unreadable) reaches here now;
+    // an uninterpretable single file is charged to its own ticket instead. Log the
+    // reason, because a held fleet with no diagnostic is the failure this branch
+    // used to cause rather than report.
     log.warn(
-      { orchDir },
-      "scheduler: yielded-occupancy unreadable — holding new-work admission this tick (CTL-1854, fail-closed)"
+      { orchDir, reason: yieldedOccupancyReason },
+      "scheduler: yielded-occupancy scan failed host-wide — holding new-work admission this tick (CTL-1854)"
     );
   }
   let occupiedCount = yieldedOccupancyOk

@@ -545,6 +545,9 @@ export function selectBootResumeCandidates({
   } catch {
     yo = { count: 0, ok: false };
   }
+  if (!yo.ok) {
+    logger.warn({ orchDir, reason: yo.reason ?? null }, "boot-resume: yielded-occupancy scan failed host-wide — resuming nothing this boot (CTL-1854)");
+  }
   const free = yo.ok ? computeFreeSlots(maxParallel, liveCount + yo.count) : 0;
   needResume.sort((a, b) => a.ticket.localeCompare(b.ticket));
   // CTL-1422 (B): warm candidates always survive selection; the slice caps
@@ -559,6 +562,14 @@ export function selectBootResumeCandidates({
   // The exemption is preserved wherever there IS budget; it no longer overrides a
   // budget of zero.
   const warmAdmitted = warm.slice(0, Math.max(0, free));
+  if (warmAdmitted.length < warm.length) {
+    // CTL-1422's harvested session UUIDs are the ONLY copy; dropping a warm
+    // candidate silently loses the continuity it exists to preserve.
+    logger.warn(
+      { dropped: warm.slice(warmAdmitted.length).map((c) => c.ticket), free },
+      "boot-resume: warm candidates dropped for lack of slots (CTL-1854)"
+    );
+  }
   return [...warmAdmitted, ...cold.slice(0, Math.max(0, free - warmAdmitted.length))];
 }
 

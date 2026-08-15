@@ -131,10 +131,16 @@ describe("CTL-1854 end to end: declare → hold → expire", () => {
     expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true }); // control
     writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"), '{"status":"awaiting-w');
     const out = countYieldedOccupancy(orch);
-    expect(out.ok).toBe(false);
-    expect(out.count).toBe(0);
-    // The pair (count 0, ok false) is what lets every caller hold admission; a bare
-    // 0 would be indistinguishable from "no yields outstanding".
+    // ⚠️ SCOPED to the ticket, not the host. Returning ok:false here made ONE bad
+    // file stop dispatch on the whole host (every consumer holds on ok:false) —
+    // a real, reachable wedge: phase-monitor-deploy writes its own signal with no
+    // `status` and patches it in a later step. An uninterpretable file is charged
+    // as one held slot for ITS ticket, and the PATH is reported so a held fleet is
+    // diagnosable.
+    expect(out.ok).toBe(true);
+    expect(out.count).toBe(1);
+    expect(out.unreadable[0]).toMatchObject({ reason: "signal-unparseable" });
+    expect(out.unreadable[0].path).toContain("phase-implement.json");
   });
 
   test("a short --yield-seconds expires on ITS deadline, through the real emitter", () => {
@@ -283,7 +289,10 @@ describe("⚠️ round 22: terminals a yield must not overwrite", () => {
     expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true }); // control
     for (const bad of ["{}", "null", "[]", '"str"', "42", '{"status":123}']) {
       writeFileSync(p, bad);
-      expect({ bad, ok: countYieldedOccupancy(orch).ok }).toEqual({ bad, ok: false });
+      const out = countYieldedOccupancy(orch);
+      // Charged to the ticket (1 slot), host still readable (ok), path reported.
+      expect({ bad, count: out.count, ok: out.ok }).toEqual({ bad, count: 1, ok: true });
+      expect(out.unreadable).toHaveLength(1);
     }
     // ...and a valid non-yield is still a CONCLUSIVE zero, so the check did not
     // simply become "everything is inconclusive".
@@ -309,9 +318,10 @@ describe("⚠️ round 24: a record must be about the file it lives in", () => {
     w({ status: YIELDED_STATUS, ticket: "PROJ-1", phase: "implement" });
     expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true }); // control
     w({ status: YIELDED_STATUS, ticket: "PROJ-1", phase: "review" });
-    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: false, reason: "signal-identity-mismatch" });
+    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: true, count: 1 });
+    expect(countYieldedOccupancy(orch).unreadable[0].reason).toBe("signal-identity-mismatch");
     w({ status: YIELDED_STATUS, ticket: "PROJ-9", phase: "implement" });
-    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: false, reason: "signal-identity-mismatch" });
+    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: true, count: 1 });
     // Absent identity must NOT become inconclusive, or every legacy signal wedges
     // admission — the failure mode of over-tightening this check.
     w({ status: YIELDED_STATUS });
@@ -377,8 +387,9 @@ describe("⚠️ round 26: present-and-wrong is not absent", () => {
     const p = join(orch, "workers", "PROJ-1", "phase-implement.json");
     for (const bad of [123, { x: 1 }, [], true]) {
       writeFileSync(p, JSON.stringify({ status: YIELDED_STATUS, ticket: bad, phase: "implement" }));
-      expect({ bad: JSON.stringify(bad), ok: countYieldedOccupancy(orch).ok })
-        .toEqual({ bad: JSON.stringify(bad), ok: false });
+      const out = countYieldedOccupancy(orch);
+      expect({ bad: JSON.stringify(bad), count: out.count, ok: out.ok })
+        .toEqual({ bad: JSON.stringify(bad), count: 1, ok: true });
     }
     // ...while genuinely absent identity still counts, and null is absent too.
     writeFileSync(p, JSON.stringify({ status: YIELDED_STATUS }));
@@ -433,5 +444,90 @@ describe("⚠️ self-audit: invalid identity must not block expiry on the SWEEP
       const sig = JSON.parse(readFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"), "utf8"));
       expect({ bad: JSON.stringify(bad), status: sig.status }).toEqual({ bad: JSON.stringify(bad), status: "failed" });
     }
+  });
+});
+
+describe("⚠️ THE WIRING: proving the functions are CALLED, not just correct", () => {
+  // Independent review's line: "this PR proved its functions execute but never
+  // proved they are called." Three load-bearing lines could be DELETED with the
+  // whole suite green. Each test below targets what its line UNIQUELY does —
+  // the first attempt failed to distinguish, because reclaimDeadWorkIfPossible's
+  // own yield branch already expires an IN-FLIGHT ticket, so deleting the sweep
+  // changed nothing for that shape.
+
+  test("the SWEEP expires an ANCILLARY yield the reclaim loop cannot reach", async () => {
+    // A recovery-pass yield beside a FAILED pipeline phase leaves the ticket
+    // not-in-flight, so the reclaim loop skips it entirely. Only the standalone
+    // sweep reaches it — which is the whole reason the sweep exists. Delete
+    // `expireYieldedSignals(orchDir, …)` from schedulerTick and this goes red.
+    const { schedulerTick } = await import("./scheduler.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldwire1-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"),
+      JSON.stringify({ ticket: "PROJ-1", phase: "implement", status: "failed", updatedAt: now }));
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-recovery-pass.json"),
+      JSON.stringify({ ticket: "PROJ-1", phase: "recovery-pass", status: YIELDED_STATUS,
+                      yieldedAt: "2020-01-01T00:00:00Z", updatedAt: "2020-01-01T00:00:00Z" }));
+
+    schedulerTick(orch, {
+      readEligible: () => [],
+      readMaxParallelFn: () => 1,
+      liveBackgroundCount: () => 0,
+      countSdkInflight: () => 0,
+      countYieldedOccupancy: () => ({ count: 0, ok: true }),
+    });
+
+    const rp = JSON.parse(readFileSync(join(orch, "workers", "PROJ-1", "phase-recovery-pass.json"), "utf8"));
+    expect(rp).toMatchObject({ status: "failed", failureReason: YIELD_EXPIRED_REASON });
+  });
+
+  test("the OCCUPANCY TERM suppresses dispatch when a yield holds the only slot", async () => {
+    // Asserting the reader was CALLED is not enough — the read sits on its own
+    // line, so deleting `+ yieldedOccupancy` from the sum leaves the call intact.
+    // Assert the EFFECT: at maxParallel=1 with one yield outstanding, nothing
+    // dispatches.
+    const { schedulerTick } = await import("./scheduler.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldwire2-"));
+    mkdirSync(join(orch, "workers"), { recursive: true });
+    const dispatched = [];
+    schedulerTick(orch, {
+      readEligible: () => [{ identifier: "PROJ-9", id: "9", title: "t", state: { name: "Todo" }, labels: { nodes: [] } }],
+      dispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+      readMaxParallelFn: () => 1,
+      liveBackgroundCount: () => 0,
+      countSdkInflight: () => 0,
+      hasTriageArtifact: () => true,
+      countYieldedOccupancy: () => ({ count: 1, ok: true }), // the only slot is held
+    });
+    expect(dispatched).toHaveLength(0);
+  });
+
+  test("runScan feeds detectStalled the signal, so a live yield raises no attention", async () => {
+    // Reaches detectStalled THROUGH the real adapter. The field was first added to
+    // mergeInputs (which feeds nextMergeState) rather than stalledInputs, so the
+    // exemption was never granted and a live yield raised the operator page this
+    // ticket exists to avoid. Deleting `signal:` from stalledInputs turns this red.
+    const { runScan } = await import("./scan.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldwire3-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    const twentyMinAgo = new Date(Date.now() - 20 * 60_000).toISOString();
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"),
+      JSON.stringify({ ticket: "PROJ-1", phase: "implement", status: YIELDED_STATUS,
+                      yieldedAt: twentyMinAgo, updatedAt: twentyMinAgo }));
+
+    const out = runScan({
+      orchDir: orch, orchId: "o1", nowMs: Date.now(),
+      adapters: {
+        git: { branch: () => "", commitCount: () => 0, remoteBranchExists: () => false },
+        gh: { prForBranch: () => null, prView: () => null },
+        deploy: {
+          skipDeployVerification: () => true, productionEnvironment: () => "prod", timeoutSec: () => 1,
+        },
+        comms: { readSince: () => [] },
+      },
+    });
+    const stalled = (out?.attentions ?? []).filter((a) => a?.kind === "stalled");
+    expect(stalled).toHaveLength(0);
   });
 });

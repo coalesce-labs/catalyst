@@ -282,105 +282,101 @@ const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 //
 // Pure over the filesystem; never throws (a missing workers/ dir → 0).
 export function countYieldedOccupancy(orchDir) {
-  // ⚠️ THREE-VALUED, AND IT FAILS CLOSED. Returning a bare number made "no yields"
-  // and "could not look" byte-identical to every caller — and since each caller
-  // subtracts this from maxParallel, an unreadable workers/ dir or ONE truncated
-  // signal read as FREE CAPACITY and admitted work past the limit. That is the
-  // repo's own rule ("a zero needs a positive control") violated by the function
-  // written to enforce a limit.
+  // ⚠️ FAIL CLOSED TO THE TICKET, NOT TO THE HOST.
   //
-  // It scans the directory itself rather than going through readAllPhaseSignals,
-  // because that reader SKIPS an unparseable file with a warning — the skip is
-  // exactly the event that must be reported, and it is invisible from outside.
+  // The first cut returned ok:false for ANY uninterpretable phase file, and every
+  // consumer holds admission on ok:false — so one bad file stopped dispatch on the
+  // WHOLE HOST until a human deleted it. That is not a conservative reading, it is
+  // a single point of failure with no self-heal, and it made a pre-existing
+  // one-ticket problem global.
+  //
+  // The trigger is real and reachable: phase-monitor-deploy's SKILL.md writes its
+  // own signal with `jq -nc '{ticket,generation,deploy_sha,…}'` — NO status — and
+  // patches `.status` in a LATER step, with a thoughts-sync (git/network) and a
+  // Linear comment in between. A worker dying in that window leaves a status-less
+  // file forever. There is a real instance on disk in an archived workers dir
+  // (CTL-676/phase-monitor-deploy.json).
+  //
+  // So an uninterpretable PHASE FILE is charged as one held slot for ITS OWN
+  // ticket — the conservative reading, scoped to the blast radius it actually has
+  // — and the scan stays ok:true. Only a failure that makes the whole directory
+  // unreadable (EACCES/EIO on workers/) is genuinely host-scope and returns
+  // ok:false.
+  //
+  // Every uninterpretable file is reported with its PATH, because "the fleet
+  // stopped dispatching" is undiagnosable without one.
   const workersDir = join(orchDir ?? "", "workers");
   let tickets;
   try {
     tickets = readdirSync(workersDir, { withFileTypes: true });
   } catch (err) {
-    // ENOENT is a genuine, conclusive zero: no workers dir means no yields. Any
-    // other error (EACCES, EIO) means we could not look.
-    if (err?.code === "ENOENT") return { count: 0, ok: true };
-    return { count: 0, ok: false, reason: "workers-dir-unreadable" };
+    if (err?.code === "ENOENT") return { count: 0, ok: true, yields: [], unreadable: [] };
+    return { count: 0, ok: false, reason: "workers-dir-unreadable", yields: [], unreadable: [] };
   }
   let count = 0;
-  const countedYields = []; // path-derived identity for every yield counted
+  const countedYields = [];
+  const unreadable = []; // paths charged a slot because they could not be interpreted
   for (const t of tickets) {
     if (!t.isDirectory() || t.name === "output") continue;
     let files;
     try {
       files = readdirSync(join(workersDir, t.name));
     } catch {
-      return { count, ok: false, reason: "worker-dir-unreadable" };
+      // One unreadable worker dir is that ticket's problem: charge it a slot.
+      count += 1;
+      unreadable.push({ path: join(workersDir, t.name), reason: "worker-dir-unreadable" });
+      continue;
     }
+    let ticketCharged = false;
     for (const f of files) {
-      // ⚠️ Use the CANONICAL predicate, not a hand-rolled filter. It also excludes
-      // CTL-702's `phase-*-yield-*.json` AUDIT TOMBSTONES — an unrelated mechanism
-      // that merely shares the word "yield" (see the name-collision note in
-      // lib/phase-yield.mjs). Scanning them here meant ONE torn tombstone made this
-      // return ok:false forever, and since round 17 every admission gate fails
-      // closed on that, a stale audit artifact would stall fleet dispatch
-      // indefinitely. Fail-closed must be scoped to the files that actually carry
-      // the lifecycle, or it becomes an availability defect of its own.
       if (!isPhaseSignalFile(f)) continue;
-      let raw;
+      const full = join(workersDir, t.name, f);
+      let sig = null;
+      let bad = null;
       try {
-        raw = readFileSync(join(workersDir, t.name, f), "utf8");
+        sig = JSON.parse(readFileSync(full, "utf8"));
       } catch {
-        return { count, ok: false, reason: "signal-unreadable" };
+        bad = "signal-unparseable";
       }
-      let sig;
-      try {
-        sig = JSON.parse(raw);
-      } catch {
-        // A malformed signal could be a yield we cannot see. Refusing to guess is
-        // the whole point; a torn write mid-append lands here too.
-        return { count, ok: false, reason: "signal-unparseable" };
-      }
-      // ⚠️ Validate STRUCTURE, not just parseability. `{}` and `null` are
-      // syntactically valid JSON, and `sig?.status === YIELDED_STATUS` reads them
-      // as a CONFIRMED non-yield — a confident zero from a record that says
-      // nothing. A canonical phase file must be an object carrying a string
-      // status; anything else means we could not determine occupancy, which is the
-      // same verdict as an unparseable file and must fail the same way.
-      if (sig === null || typeof sig !== "object" || Array.isArray(sig) || typeof sig.status !== "string") {
-        return { count, ok: false, reason: "signal-malformed" };
-      }
-      // Identity: the record must describe the file it was found in. A signal whose
-      // `phase` disagrees with its filename is not a signal about this phase, and
-      // counting it as one would charge a slot to the wrong worker — or, in the
-      // mirror case, miss the yield that is really holding it. Absent identity is
-      // tolerated (older signals omit it and the path is authoritative); a PRESENT
-      // one that CONTRADICTS the path is not, because that is corruption we cannot
-      // interpret.
-      const expectedPhase = f.slice("phase-".length, -".json".length);
-      // PRESENT means "the key exists with a non-null value" — a numeric or
-      // object-valued ticket/phase is present and WRONG, not absent. Checking only
-      // `typeof === "string" && mismatched` let those through as if the field were
-      // missing, and downstream `signal.ticket ?? derivedTicket` then PREFERRED the
-      // invalid value over the path fallback, so expiry refused and the hold became
-      // permanent — the very defect round 25 fixed, re-entered through the type.
-      for (const [key, expected] of [["phase", expectedPhase], ["ticket", t.name]]) {
-        const v = sig[key];
-        if (v === undefined || v === null) continue; // genuinely absent: path wins
-        if (typeof v !== "string" || v !== expected) {
-          return { count, ok: false, reason: "signal-identity-mismatch" };
+      if (!bad) {
+        if (sig === null || typeof sig !== "object" || Array.isArray(sig) || typeof sig.status !== "string") {
+          bad = "signal-malformed";
         }
       }
+      if (!bad && typeof sig.phase === "string" && sig.phase !== f.slice("phase-".length, -".json".length)) {
+        bad = "signal-identity-mismatch";
+      }
+      if (!bad && typeof sig.ticket === "string" && sig.ticket !== t.name) {
+        bad = "signal-identity-mismatch";
+      }
+      if (!bad && (sig.phase !== undefined && sig.phase !== null && typeof sig.phase !== "string")) {
+        bad = "signal-identity-mismatch";
+      }
+      if (!bad && (sig.ticket !== undefined && sig.ticket !== null && typeof sig.ticket !== "string")) {
+        bad = "signal-identity-mismatch";
+      }
+      if (bad) {
+        unreadable.push({ path: full, reason: bad });
+        if (!ticketCharged) {
+          count += 1; // one slot for this ticket, however many of its files are bad
+          ticketCharged = true;
+        }
+        continue;
+      }
       if (sig.status === YIELDED_STATUS) {
-        // ⚠️ Identity is DERIVED FROM THE PATH when the record omits it. Tolerating
-        // absence is right — older signals have no ticket/phase and the path is
-        // authoritative — but tolerating it silently was not: the expiry writer
-        // builds its target as `workers/<signal.ticket>/phase-<signal.phase>.json`,
-        // so an identity-less signal made it write to `workers//phase-.json`, a
-        // path that does not exist. Occupancy counted the yield and expiry could
-        // never clear it: a permanent hold, assembled from two individually
-        // reasonable choices.
-        countedYields.push({ ticket: t.name, phase: expectedPhase });
+        countedYields.push({ ticket: t.name, phase: f.slice("phase-".length, -".json".length) });
         count += 1;
       }
     }
   }
-  return { count, ok: true, yields: countedYields };
+  if (unreadable.length > 0) {
+    // WARN, with paths. Without this, a held fleet is undiagnosable.
+    log.warn(
+      { count: unreadable.length, files: unreadable.slice(0, 10) },
+      "countYieldedOccupancy: uninterpretable phase signal(s) charged as held slots (CTL-1854)"
+    );
+  }
+  return { count, ok: true, yields: countedYields, unreadable };
 }
 
 export function countSdkInflight(orchDir) {

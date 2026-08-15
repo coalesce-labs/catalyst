@@ -2197,7 +2197,16 @@ export function defaultExpireYield(
   // looking.
   if (String(cur.status) !== YIELDED_STATUS) return false;
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-  // Atomic tmp+rename, matching the SDK abandonment writer this mirrors
+  // Atomic tmp+rename, matching the SDK abandonment writer this mirrors.
+//
+// ⚠️ "The SAME terminal" refers to the STATUS TRIPLE the runner writes
+// (failed / abandoned / a named failureReason) and to writing it atomically — NOT
+// to byte-identical output. The runner also stamps `phaseTimestamps.failed`,
+// which this writer does not, so the HUD's per-phase timing is absent for a
+// yield-expiry. Stated rather than silently implied, because a `toMatchObject`
+// assertion cannot notice a missing key and the earlier wording claimed more
+// parity than the code delivers. Tracked with the other timing work rather than
+// widened here
   // (sdk-run-phase-agent). A direct write TRUNCATES the canonical signal first, so
   // a crash or ENOSPC mid-write leaves partial JSON — and a signal that will not
   // parse is skipped by every scan, which means the next tick cannot retry the
@@ -2217,6 +2226,12 @@ export function defaultExpireYield(
         yieldExpiredReason: verdict?.reason ?? null,
         assertedBy: ASSERTED_BY.RECOVERY_RECLAIM,
         updatedAt: ts,
+        // Strip the episode anchors. Every other terminal writer spreads the prior
+        // signal and leaves them, so emit-complete's `.firstYieldedAt // $ts` then
+        // anchors a NEW wait on the OLD episode and expires it immediately.
+        yieldedAt: undefined,
+        firstYieldedAt: undefined,
+        yieldMs: undefined,
       })
     );
     rename(tmp, p);
@@ -2521,11 +2536,16 @@ export function reclaimDeadWorkIfPossible(
     // stalled routes through the terminal sweep to needs-human, which would
     // page an operator for every expired yield and make this state STRICTLY
     // WORSE than the abandonment it replaces.
+    const wrote = expireYield(orchDir, signal, verdict);
+    // Report what HAPPENED. The previous line logged "writing terminal" before the
+    // attempt and ignored its result, so a refused or failed write logged a
+    // success every tick — a log that cannot be wrong about the thing it reports.
     log.warn(
-      { ticket: signal?.ticket, phase: signal?.phase, reason: verdict.reason },
-      "reclaimDeadWork: yield expired — writing terminal (CTL-1854)"
+      { ticket: signal?.ticket, phase: signal?.phase, reason: verdict.reason, wrote },
+      wrote
+        ? "reclaimDeadWork: yield expired — terminal written (CTL-1854)"
+        : "reclaimDeadWork: yield expired but the terminal was NOT written (CTL-1854)"
     );
-    expireYield(orchDir, signal, verdict);
     return "noop";
   }
 
