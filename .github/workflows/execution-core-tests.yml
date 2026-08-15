@@ -910,6 +910,7 @@ jobs:
             phase-yield.test.mjs \
             phase-yield-parity.test.mjs \
             phase-yield-expiry.test.mjs \
+            phase-yield-e2e.test.mjs \
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \

@@ -218,7 +218,16 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   # noted on the PR rather than widened into unrelated scope.
   MM_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-monitor-merge.json"
   if [ -f "$MM_SIGNAL" ]; then
-    MM_STATUS=$(jq -r '.status // empty' "$MM_SIGNAL" 2>/dev/null || echo "")
+    # ⚠️ FAIL CLOSED on an unparseable signal. `jq ... || echo ""` turns "I could
+    # not read the ownership record" into "there is no owner", and a torn or
+    # transiently-unreadable file is exactly when a live yield's child is still
+    # writing in that worktree. An ABSENT file genuinely means no monitor-merge
+    # phase; a PRESENT one we cannot parse means we do not know, and dispatching a
+    # second writer on "do not know" is the failure this guard exists to prevent.
+    if ! MM_STATUS=$(jq -re '.status // ""' "$MM_SIGNAL" 2>/dev/null); then
+      SKIPPED=$((SKIPPED+1))
+      continue
+    fi
     if [ "$MM_STATUS" = "awaiting-work" ]; then
       SKIPPED=$((SKIPPED+1))
       continue

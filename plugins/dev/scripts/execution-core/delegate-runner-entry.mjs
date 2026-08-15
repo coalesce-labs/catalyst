@@ -324,9 +324,24 @@ export function drainOnce(deps = {}) {
     // through a live yield at maxParallel=1. Disjoint from the other terms (a yielded
     // worker is neither live-bg nor sdk-inflight), so no double-count. Sampled once per
     // pass beside the sdk baseline and fails CLOSED, matching the countBg posture.
+    // ⚠️ RE-READ the yielded occupancy per item, alongside countBg. A once-per-pass
+    // baseline has a window: a phase that is `running` at sample time, yields, and
+    // exits before this item's countBg is in NEITHER count — the baseline missed
+    // the yield and the live count missed the (now exited) worker — so at
+    // maxParallel=1 effectiveLive reports a free slot the yield is holding. The
+    // baseline is kept as the fail-closed floor: whichever is larger wins, so a
+    // transient read failure here cannot LOWER the occupancy already established.
+    let yieldedNow = yieldedBaseline;
+    try {
+      const y = countYieldedOccupancy(orchDir);
+      if (y?.ok === true) yieldedNow = Math.max(yieldedBaseline, y.count);
+      else countOk = false; // inconclusive → hold this intent, like a failed countBg
+    } catch {
+      countOk = false;
+    }
     const effectiveLive =
       (executor === "sdk" ? (live ?? 0) + sdkInflightBaseline + localLaunched : live) +
-      yieldedBaseline;
+      yieldedNow;
     if (!countOk || !sdkBaselineOk || computeFreeSlots(max, effectiveLive) <= 0) {
       try {
         transitionFn(orchDir, ticket, { from: claimPath, status: "queued" });
