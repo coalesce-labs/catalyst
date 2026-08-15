@@ -106,6 +106,7 @@ import {
   countSdkInflight as defaultCountSdkInflight,
   countYieldedOccupancy as defaultCountYieldedOccupancy, // CTL-1854
   hasFreshClaim,
+  readAllPhaseSignals, // CTL-1854: all-phase reader, so a yield cannot hide behind a sibling
 } from "./signal-reader.mjs";
 // CTL-1410 Phase B: the in-process SDK worker registry — the liveness fact for
 // workers with no bg job (leaf module; a Map read, never a shell-out).
@@ -1271,6 +1272,58 @@ export function isTicketInFlight(signals) {
     if (phase === TERMINAL_PHASE && (status === "done" || status === "skipped")) return false;
   }
   return true;
+}
+
+// expireYieldedSignals — CTL-1854. Evaluate EVERY yielded phase signal's deadline,
+// once per tick, independently of the reclaim loop.
+//
+// ⚠️ Extracted for two reasons, both of which were live defects:
+//
+// 1. SCOPE. This ran inline inside the reclaim loop and passed `reclaimOpts` —
+//    which is declared LATER, inside that loop's own try block. The reference
+//    threw a TDZ ReferenceError that the branch's own best-effort catch
+//    swallowed, so the expiry NEVER RAN. The fix for "a bound whose enforcement
+//    point cannot fire" had itself become one, and the test could not see it
+//    because it asserted the source ORDER of the branch rather than executing it.
+//    Hence: a standalone, exported function with real execution tests.
+//
+// 2. PROJECTION. It iterated `readWorkerSignals`, which returns ONE canonical
+//    active-phase row per ticket. A yielded `recovery-pass` sitting behind a
+//    newer running pipeline phase is not that row, so it was invisible — while
+//    countYieldedOccupancy (which reads every phase file) still charged its slot.
+//    This reads `readAllPhaseSignals`, the all-phase reader, so no yield hides
+//    behind a sibling.
+//
+// Deliberately NOT gated on `inFlightTickets`: an ANCILLARY yield beside a
+// terminal pipeline phase leaves that predicate false, which is exactly the case
+// that strands a slot forever.
+//
+// Fail-open per signal: one bad signal must never wedge the tick or stop the
+// remaining yields from being evaluated.
+export function expireYieldedSignals(
+  orchDir,
+  { reclaim = defaultReclaimDeadWork, readAll = readAllPhaseSignals } = {}
+) {
+  let evaluated = 0;
+  let signals;
+  try {
+    signals = readAll(orchDir);
+  } catch {
+    return { evaluated: 0, ok: false };
+  }
+  for (const sig of signals ?? []) {
+    if (String(sig?.status) !== YIELDED_STATUS) continue;
+    try {
+      // The yield path inside reclaimDeadWorkIfPossible uses only defaulted seams
+      // (expireYield, now), so an empty options object is the complete and correct
+      // call here — and it cannot capture a variable that is not yet in scope.
+      reclaim(orchDir, sig, {});
+      evaluated += 1;
+    } catch {
+      /* one unreadable signal must not stop the others */
+    }
+  }
+  return { evaluated, ok: true };
 }
 
 // CTL-1323: the set of REAL pipeline phases — a signal whose phase is one of these
@@ -3237,9 +3290,15 @@ export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = 
   const status = signal?.status;
   // CTL-1854: awaiting-work is runnable — a worker that dispatched and immediately
   // declared a bounded wait has not failed to dispatch.
+  // CTL-1854: YIELDED_STATUS belongs on BOTH branches. Round 10 added it only to
+  // the bg branch, so an in-process (SDK/codex) retry against an already-yielded
+  // phase reported `status_not_runnable` and recorded a FALSE dispatch failure +
+  // cooldown — while dispatch.mjs's sdkSignalRunnable accepted the same signal.
+  // Two verifiers disagreeing about one lifecycle is how a phase gets punished for
+  // a state it correctly declared.
   const runnable = requireBgJob
     ? status === "dispatched" || status === "running" || status === YIELDED_STATUS
-    : status === "dispatched" || status === "running" || status === "done";
+    : status === "dispatched" || status === "running" || status === "done" || status === YIELDED_STATUS;
   if (!runnable) {
     return { ok: false, reason: "status_not_runnable" };
   }
@@ -5992,27 +6051,11 @@ export function schedulerTick(
     // fail-open — a missing/unreadable workers dir does not abort the tick
   }
 
+  // CTL-1854: expire yields BEFORE (and independently of) the reclaim loop below.
+  // Two reasons, both learned the hard way — see expireYieldedSignals.
+  expireYieldedSignals(orchDir, { reclaim: reclaimDeadWork });
+
   for (const sig of readWorkerSignals(orchDir)) {
-    // ⚠️ CTL-1854 (Codex round 11): YIELD EXPIRY MUST NOT DEPEND ON TICKET-LEVEL
-    // IN-FLIGHT. I previously argued this sweep was guaranteed to reach every
-    // yielded signal because a yield holds the ticket's slot — true for a PIPELINE
-    // phase, false for an ancillary one. A `recovery-pass` that yields on a ticket
-    // whose pipeline phase is already `failed`/`stalled` leaves isTicketInFlight
-    // FALSE (livePhaseEntries keeps the terminal phase alongside the unknown
-    // recovery-pass), so `continue` fired before the expiry branch ever ran — while
-    // the recovery-pass dedup probes and countYieldedOccupancy both went on
-    // treating the yield as live. Deadline never evaluated, slot reserved forever:
-    // the exact permanent hold this state was designed to make impossible.
-    //
-    // So the yield check runs BEFORE the filter. Everything else keeps the filter.
-    if (String(sig.status) === YIELDED_STATUS) {
-      try {
-        reclaimDeadWork(orchDir, sig, reclaimOpts);
-      } catch {
-        /* best-effort — an expiry failure must never wedge the tick */
-      }
-      continue;
-    }
     if (!inFlightTickets.has(sig.ticket)) continue;
     // CTL-705: a parked ("preempted") worker is paused, not dead. Its signal
     // preserves the now-killed bg_job_id, so classifyWorker would route it

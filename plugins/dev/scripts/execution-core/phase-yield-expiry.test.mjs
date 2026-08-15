@@ -18,6 +18,9 @@
 import { describe, expect, test } from "bun:test";
 import { reclaimDeadWorkIfPossible, defaultExpireYield } from "./recovery.mjs";
 import { YIELDED_STATUS, MAX_YIELD_MS, YIELD_EXPIRED_REASON } from "../lib/phase-yield.mjs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const T0 = Date.parse("2026-08-15T04:00:00Z");
 const sig = (over = {}, raw = {}) => ({
@@ -309,22 +312,73 @@ describe("⚠️ every admission budget charges the yield, not just the schedule
   });
 });
 
-describe("⚠️ expiry does not depend on ticket-level in-flight", () => {
-  // I argued this sweep was guaranteed to reach every yielded signal because a
-  // yield holds the ticket's slot. True for a PIPELINE phase; FALSE for an
-  // ancillary one. A `recovery-pass` yielding on a ticket whose pipeline phase is
-  // already failed/stalled leaves isTicketInFlight false, so the `continue` fired
-  // before the expiry branch — deadline never evaluated, slot held forever.
-  test("the yield branch runs BEFORE the inFlightTickets filter", async () => {
-    const src = await Bun.file(new URL("./scheduler.mjs", import.meta.url)).text();
-    const loop = src.slice(src.indexOf("for (const sig of readWorkerSignals(orchDir)) {"));
-    const body = loop.slice(0, loop.indexOf("// CTL-705"));
-    expect(body.length).toBeGreaterThan(80); // fails closed if the loop is refactored away
-    const yieldAt = body.indexOf("YIELDED_STATUS");
-    const filterAt = body.indexOf("inFlightTickets.has");
-    expect(yieldAt).toBeGreaterThan(-1);
-    expect(filterAt).toBeGreaterThan(-1);
-    expect(yieldAt).toBeLessThan(filterAt);
+describe("⚠️ expiry EXECUTES — not merely appears in the right place", () => {
+  // The previous version of this suite asserted the SOURCE ORDER of the expiry
+  // branch. It passed while the branch was dead: the inline code referenced
+  // `reclaimOpts`, declared later inside the loop's own try block, so every call
+  // threw a TDZ ReferenceError that the branch's best-effort catch swallowed.
+  // The fix for "a bound whose enforcement point cannot fire" had become one, and
+  // a text-position assertion is structurally incapable of noticing.
+  //
+  // These tests RUN the sweep against real files on disk.
+
+  function orchWith(signals) {
+    const orch = mkdtempSync(join(tmpdir(), "yieldsweep-"));
+    for (const [ticket, phases] of Object.entries(signals)) {
+      mkdirSync(join(orch, "workers", ticket), { recursive: true });
+      for (const [phase, body] of Object.entries(phases)) {
+        writeFileSync(join(orch, "workers", ticket, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
+      }
+    }
+    return orch;
+  }
+  const read = (orch, t, p) => JSON.parse(readFileSync(join(orch, "workers", t, `phase-${p}.json`), "utf8"));
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+
+  test("an expired yield is actually written to disk", async () => {
+    const { expireYieldedSignals } = await import("./scheduler.mjs");
+    const orch = orchWith({ "PROJ-1": { implement: { status: YIELDED_STATUS, yieldedAt: ago(2 * MAX_YIELD_MS) } } });
+    const r = expireYieldedSignals(orch);
+    expect(r).toMatchObject({ evaluated: 1, ok: true });
+    expect(read(orch, "PROJ-1", "implement")).toMatchObject({
+      status: "failed",
+      failureReason: YIELD_EXPIRED_REASON,
+    });
+  });
+
+  test("a LIVE yield is left alone", async () => {
+    const { expireYieldedSignals } = await import("./scheduler.mjs");
+    const orch = orchWith({ "PROJ-1": { implement: { status: YIELDED_STATUS, yieldedAt: ago(60_000) } } });
+    expireYieldedSignals(orch);
+    expect(read(orch, "PROJ-1", "implement").status).toBe(YIELDED_STATUS);
+  });
+
+  test("⚠️ a yield HIDDEN behind a newer sibling is still expired", async () => {
+    // readWorkerSignals projects ONE canonical active-phase row per ticket, so a
+    // yielded recovery-pass behind a newer running pipeline phase was invisible to
+    // the sweep — while countYieldedOccupancy still charged its slot. The sweep
+    // must read every phase file, not the per-ticket projection.
+    const { expireYieldedSignals } = await import("./scheduler.mjs");
+    const orch = orchWith({
+      "PROJ-1": {
+        "recovery-pass": { status: YIELDED_STATUS, yieldedAt: ago(2 * MAX_YIELD_MS), updatedAt: ago(2 * MAX_YIELD_MS) },
+        implement: { status: "running", updatedAt: new Date().toISOString() },
+      },
+    });
+    expect(expireYieldedSignals(orch).evaluated).toBe(1);
+    expect(read(orch, "PROJ-1", "recovery-pass")).toMatchObject({ status: "failed", failureReason: YIELD_EXPIRED_REASON });
+    expect(read(orch, "PROJ-1", "implement").status).toBe("running"); // sibling untouched
+  });
+
+  test("it never throws: unreadable dir, and one bad signal does not stop the rest", async () => {
+    const { expireYieldedSignals } = await import("./scheduler.mjs");
+    expect(expireYieldedSignals("/nope/does/not/exist")).toMatchObject({ evaluated: 0 });
+    const orch = orchWith({
+      "PROJ-1": { implement: { status: YIELDED_STATUS, yieldedAt: ago(2 * MAX_YIELD_MS) } },
+      "PROJ-2": { implement: { status: YIELDED_STATUS, yieldedAt: ago(2 * MAX_YIELD_MS) } },
+    });
+    expect(() => expireYieldedSignals(orch)).not.toThrow();
+    expect(read(orch, "PROJ-2", "implement").status).toBe("failed");
   });
 });
 

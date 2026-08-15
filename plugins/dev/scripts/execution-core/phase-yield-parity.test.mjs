@@ -84,12 +84,20 @@ describe("the bash writer mirrors the JS contract", () => {
     expect(m[1]).toContain(`$EXISTING_STATUS == "${YIELDED_STATUS}"`);
   });
 
-  test("the writer stamps both the per-yield and the episode anchor", () => {
-    // classifyYield reads `yieldedAt` (rewritten per yield) and `firstYieldedAt`
-    // (set once per episode). A writer that emits only the first silently removes
-    // the cumulative bound: re-yielding would extend the hold indefinitely.
-    expect(src).toContain(".yieldedAt = \\$ts");
+  test("⚠️ a re-yield can never move the deadline LATER", () => {
+    // Both anchors are set-once-per-episode (`// $ts`), NOT rewritten per
+    // declaration. That is the whole of the "re-yielding buys nothing" promise:
+    // when `yieldedAt` was rewritten each time, a 60-second yield re-declared
+    // after 30 seconds expired at 90 — firstYieldedAt bounded only the 30-minute
+    // ceiling, so short deadlines were extendable at will.
+    expect(src).toContain(".yieldedAt = (.yieldedAt // \\$ts)");
     expect(src).toContain(".firstYieldedAt = (.firstYieldedAt // \\$ts)");
+    // A re-yield with no flag must NOT delete yieldMs (that stretched the wait to
+    // the ceiling); a shorter request must win; a longer one must not.
+    const arm = src.slice(src.indexOf("if \\$yieldms == null"), src.indexOf("else del(.yieldedAt)"));
+    expect(arm.length).toBeGreaterThan(40); // fails closed if the arm is restructured
+    expect(arm).toContain(".yieldMs <= \\$yieldms");
+    expect(arm).not.toContain("del(.yieldMs)");
   });
 
   test("a non-yield write clears both anchors", () => {

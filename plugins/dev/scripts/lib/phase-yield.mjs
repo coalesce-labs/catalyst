@@ -104,15 +104,16 @@ export function classifyYield(sig, nowMs = Date.now(), maxYieldMs = MAX_YIELD_MS
     return { yielded: true, expired: true, reason: "yield-start-unreadable", deadlineMs: null };
   }
 
-  // ⚠️ THE CEILING BOUNDS THE EPISODE, NOT THE INDIVIDUAL YIELD.
-  // `yieldedAt` is rewritten on every yield declaration, so an agent that
-  // re-yields before its deadline would earn a fresh window each time and hold
-  // the slot forever by repetition — the exact unbounded hold this state exists
-  // to prevent, reachable in a loop instead of in one write. `firstYieldedAt` is
-  // set once per episode and preserved across re-yields, so the total wait can
-  // never exceed the ceiling however many times an agent asks. A signal without
-  // it (written before this shipped, or by a single yield) anchors on
-  // `yieldedAt`, which is the same instant — so the bound is unchanged there.
+  // ⚠️ THE DEADLINE NEVER MOVES LATER.
+  // Both anchors are set ONCE PER EPISODE by the writer (`.yieldedAt = (.yieldedAt
+  // // $ts)`), and `yieldMs` only ever shrinks — a re-yield takes the MINIMUM of
+  // the existing and requested windows and never deletes it. Without that, a
+  // re-yield earned a fresh window each time and could hold the slot forever by
+  // repetition. `firstYieldedAt` bounds the EPISODE at the ceiling; the monotonic
+  // `yieldedAt`/`yieldMs` pair is what makes the promise hold for SHORT waits too
+  // — a 60-second yield re-declared after 30 seconds still expires at 60, not 90.
+  // A signal carrying only `yieldedAt` (a single yield, or one written before the
+  // episode anchor existed) anchors on it, which is the same instant.
   // ABSENT anchors on this yield; PRESENT-BUT-UNREADABLE expires. Collapsing the
   // two would let a corrupt anchor buy the fresh window the anchor exists to deny.
   const hasEpisodeAnchor = sig.firstYieldedAt !== undefined && sig.firstYieldedAt !== null;

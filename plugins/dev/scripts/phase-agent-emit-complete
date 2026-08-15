@@ -599,9 +599,11 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
                 | (if (.needsHumanSince == null) then .needsHumanSince = \$ts else . end)
               else . end)
            | (if \$rawstatus == \"yield\"
-              then .yieldedAt = \$ts
+              then .yieldedAt = (.yieldedAt // \$ts)
                  | .firstYieldedAt = (.firstYieldedAt // \$ts)
-                 | (if \$yieldms == null then del(.yieldMs) else .yieldMs = \$yieldms end)
+                 | (if \$yieldms == null then .
+                    elif (.yieldMs | type) == \"number\" and .yieldMs <= \$yieldms then .
+                    else .yieldMs = \$yieldms end)
               else del(.yieldedAt) | del(.firstYieldedAt) | del(.yieldMs) end)
            | (if .host == null and \$host_name != \"\" then .host = {name: \$host_name, id: \$host_id} else . end)" \
 			"$SIGNAL_FILE" >"$TMP" 2>/dev/null; then

@@ -74,9 +74,10 @@ describe("⚠️ the bound is the whole safety argument", () => {
 });
 
 describe("⚠️ re-yielding cannot buy an unbounded hold", () => {
-  // yieldedAt is rewritten on EVERY yield declaration. Without an episode anchor
-  // an agent re-yielding at minute 29 earns a fresh 30 — the same unbounded hold,
-  // reached in a loop instead of in one write.
+  // These fixtures model what the writer used to produce (a MOVED `yieldedAt`) and
+  // pin that even then the episode anchor caps the hold. The writer no longer moves
+  // it — see the short-wait describe below — but the classifier must stay correct
+  // for signals written by an older emitter during a rollout.
   test("a re-yield inside the window does NOT extend past the episode ceiling", () => {
     const reYielded = {
       status: YIELDED_STATUS,
@@ -148,5 +149,33 @@ describe("every other signal shape behaves exactly as before", () => {
     // false-page defect into the fix for CTL-1854.
     expect(YIELDED_STATUS).not.toBe("needs-input");
     expect(classifyYield({ status: "needs-input" }, T0).yielded).toBe(false);
+  });
+});
+
+describe("⚠️ 're-yielding buys nothing' must hold for SHORT waits too", () => {
+  // The claim was only true at the 30-minute ceiling. With `yieldedAt` rewritten
+  // per declaration, a 60s yield re-declared after 30s expired at 90s, and a
+  // re-yield with no flag stretched the wait to the full ceiling. firstYieldedAt
+  // bounded the episode but not the short deadline inside it.
+  test("a re-declared short yield keeps its ORIGINAL deadline", () => {
+    const sig = {
+      status: YIELDED_STATUS,
+      // The writer preserves both anchors, so a re-yield leaves these at T0.
+      yieldedAt: new Date(T0).toISOString(),
+      firstYieldedAt: new Date(T0).toISOString(),
+      yieldMs: 60_000,
+    };
+    expect(classifyYield(sig, T0 + 30_000).deadlineMs).toBe(T0 + 60_000);
+    // 90s in, a naively-extended deadline would still be live. It must not be.
+    expect(shouldFlipOnUndeclaredExit(sig, T0 + 90_000).flip).toBe(true);
+  });
+
+  test("the episode ceiling still caps a long chain of re-yields", () => {
+    const sig = {
+      status: YIELDED_STATUS,
+      yieldedAt: new Date(T0).toISOString(),
+      firstYieldedAt: new Date(T0).toISOString(),
+    };
+    expect(classifyYield(sig, T0).deadlineMs).toBe(T0 + MAX_YIELD_MS);
   });
 });

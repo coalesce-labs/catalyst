@@ -1353,9 +1353,11 @@ its own job needs nobody, and conflating them imports CTL-1850's false-page defe
   `isTicketInFlight` false, so the filter skipped it and its deadline was never evaluated, reserving
   the slot forever. The yield branch is therefore evaluated unconditionally.
 - **The ceiling bounds the EPISODE** (30 min, matching Linear's session-stale deadline).
-  `yieldedAt` is rewritten per declaration, so a per-yield bound would let an agent re-yield at
-  minute 29 forever; `firstYieldedAt` is set once and preserved, so ten re-yields buy exactly as
-  much as one. Absent anchor → anchors on `yieldedAt`; **present but unreadable → expires**.
+  The deadline **never moves later**: both anchors are set once per episode and `yieldMs` only ever
+  shrinks (a re-yield takes the minimum, and never deletes it). Ten re-yields buy exactly as much as
+  one — and that holds for SHORT waits too, not just at the ceiling: a 60-second yield re-declared
+  after 30 seconds still expires at 60. Absent anchor → anchors on `yieldedAt`; **present but
+  unreadable → expires**.
 - **An expired yield is TERMINAL, not a re-dispatch.** It writes `failed` + `outcome: "abandoned"` +
   `failureReason: "yield-expired"`, `assertedBy: recovery-reclaim` (fabricated by the sweep, not
   declared). `failed` is in `signal-reader.mjs`'s `TERMINAL` set, so reclaim short-circuits to
