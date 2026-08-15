@@ -156,3 +156,38 @@ describe("the expiry write itself", () => {
     ).toBe(false);
   });
 });
+
+// ── CTL-1854 round 4: the two sweeps that must NOT touch a yielded signal ─────
+// Both findings are the same shape — a sweep that keys on "non-terminal" and so
+// adopts a status invented after it was written. Neither is hypothetical: one
+// strands the ticket permanently, the other pages a human on a daemon bounce.
+describe("⚠️ sweeps that must leave a yield alone", () => {
+  test("preemption never selects awaiting-work as a victim", async () => {
+    // A yielded worker has already exited and has no bg_job_id, so killBgJob
+    // frees NO capacity — but the sweep would rewrite the signal to `preempted`,
+    // and the reclaim sweep explicitly skips PREEMPTED_STATUS, which disables
+    // yield expiry forever while the real slot-holder survives.
+    const src = await Bun.file(new URL("./scheduler.mjs", import.meta.url)).text();
+    const reduce = src.slice(src.indexOf("const activePhase = Object.entries(signals).reduce"));
+    const body = reduce.slice(0, reduce.indexOf("}, null);"));
+    expect(body).toContain("YIELDED_STATUS");
+    // Fails closed: if the reduce is refactored away, the slice above is empty
+    // and this assertion cannot pass vacuously.
+    expect(body.length).toBeGreaterThan(80);
+  });
+
+  test("boot-resume skips awaiting-work instead of opening an approval gate", async () => {
+    // Treated as an active phase, the expensive-phase branch opens an OPERATOR
+    // APPROVAL gate for a state whose contract is that it needs no human — the
+    // exact false page this status exists to avoid, through a different door.
+    const src = await Bun.file(new URL("./boot-resume.mjs", import.meta.url)).text();
+    expect(src).toContain("YIELDED_STATUS");
+    // The skip must sit beside the needs-input skip, i.e. BEFORE the worktreePath
+    // branch that leads to candidate creation.
+    const yieldAt = src.indexOf("YIELDED_STATUS)");
+    const worktreeAt = src.indexOf("if (!active.worktreePath)");
+    expect(yieldAt).toBeGreaterThan(0);
+    expect(worktreeAt).toBeGreaterThan(0);
+    expect(yieldAt).toBeLessThan(worktreeAt);
+  });
+});

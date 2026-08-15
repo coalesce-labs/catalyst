@@ -70,6 +70,7 @@ import { defaultDispatch } from "./dispatch.mjs";
 // Phase-1 exports import-light, but a lazy `import()` is async and the boot pass
 // must stay synchronous to complete before the monitor/scheduler start.)
 import { liveAgents } from "./cli/sessions.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
 
 // ─── CTL-644: cheap/expensive classification ───────────────────────────────
 //
@@ -445,6 +446,27 @@ export function selectBootResumeCandidates({
       logger.debug(
         { ticket, phase: active.phase },
         "boot-resume: skipping needs-input (awaiting human comment)"
+      );
+      continue;
+    }
+    // CTL-1854: a declared bounded wait is not a resume candidate. Treated as an
+    // active phase, the expensive-phase branch below opens an OPERATOR-APPROVAL
+    // GATE for a state whose entire contract is that it needs no human — so a
+    // routine daemon bounce during a yield manufactures a page. That is the exact
+    // harm the status was designed to avoid (it is deliberately not `needs-input`
+    // BECAUSE that pages someone), reintroduced through a different door. Worse, an
+    // unapproved gate is later swept to `stalled` without checking whether expiry
+    // or a late completion already made the signal terminal — so the bounce can
+    // also overwrite a valid result.
+    //
+    // Skip, do NOT expire here: the scheduler tick's reclaim sweep is the single
+    // owner of yield expiry, and it runs within a tick of boot. Expiring in a
+    // second place would give the deadline two writers and re-open the
+    // late-completion race by widening it.
+    if (String(active.status) === YIELDED_STATUS) {
+      logger.debug(
+        { ticket, phase: active.phase },
+        "boot-resume: skipping awaiting-work (bounded wait; the tick owns expiry)"
       );
       continue;
     }

@@ -217,6 +217,7 @@ import {
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
 } from "./recovery.mjs";
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
 import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolve.mjs";
 // CTL-729: progress-watchdog imports.
 import { evaluateHungWorker } from "./hung-detector.mjs";
@@ -7041,6 +7042,15 @@ export function schedulerTick(
         const signals = readPhaseSignals(orchDir, candidate.identifier);
         const activePhase = Object.entries(signals).reduce((best, [phase, status]) => {
           if (TERMINAL_SIGNAL_STATUSES.has(status)) return best;
+          // CTL-1854: a yielded worker is NEVER a preemption victim. It has already
+          // exited and carries no bg_job_id, so killBgJob frees NO capacity — but the
+          // sweep would still rewrite the signal to `preempted` and stop after one
+          // victim. That is doubly wrong: the reclaim sweep explicitly skips
+          // PREEMPTED_STATUS, which disables yield expiry and strands the ticket
+          // permanently, while the worker actually holding the slot survives and the
+          // queued priority work is no closer to running. Preempting it costs a
+          // ticket and buys nothing.
+          if (String(status) === YIELDED_STATUS) return best;
           if (phase === TERMINAL_PHASE && (status === "done" || status === "skipped")) return best;
           const rank = STAGE_RANK[phase] ?? -1;
           return rank > (STAGE_RANK[best] ?? -1) ? phase : best;
