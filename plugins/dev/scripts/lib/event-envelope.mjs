@@ -76,10 +76,10 @@
 //     runtime that rejected an unrecognised one would turn a new producer
 //     field into a production incident.
 //
-//   CI (unknownTopLevelKeys)    — STRICT vocabulary. A producer that adds a
-//     top-level key fails the guard test naming the key. This is where "drift
-//     reddens CI" lives, and it is safe here precisely because it is not on the
-//     read path.
+//   CI (the corpus test)        — the same structural rules, run against committed
+//     REAL producer output plus an opt-in live-log scan. There is deliberately no
+//     top-level KEY check in either polarity; see "THERE IS NO TOP-LEVEL KEY
+//     CONTRACT" below for the two that were tried and measured false.
 //
 // ── WHAT A SCHEMA CANNOT DO, STATED SO NOBODY RELIES ON IT ──────────────────
 // A schema validates SHAPE, not TRUTH. CTL-1809 reproduced a torn line that
@@ -101,71 +101,6 @@
 /** The four envelope shapes observed on the log. */
 export const ENVELOPE_SHAPES = Object.freeze(["v1", "v2", "v3", "dual"]);
 
-// The top-level key vocabulary. 36 keys MEASURED (`jq -rc 'keys[]' | sort -u`)
-// over mini's 2026-08 log, plus 2 added from a PRODUCER that host cannot exercise.
-// Sorted, so a diff against a fresh census is a plain sorted-set comparison.
-//
-// ⚠️ A CENSUS IS HOST-SCOPED, NOT PRODUCER-SCOPED (Codex round 8). The first cut
-// called this "the complete vocabulary, measured" — complete for the log I read,
-// which is not the same claim. `catalyst-state.sh`'s jq-less branch writes the
-// caller's RAW v1 line (`{ts, event, orchestrator, worker, detail}`, per
-// docs/architecture.md) and is reachable on any supported host WITHOUT jq. The
-// host I censused has jq, so that producer never ran there and `orchestrator` and
-// `worker` could not appear at any sample size. Measuring harder would not have
-// found them; only reading the producers does.
-//
-// So the live-corpus check would have rejected legitimate output on a jq-less
-// host as vocabulary drift — a false positive on a supported configuration,
-// produced by a census that was accurate and incomplete at the same time.
-//
-// This list is a SNAPSHOT OF REALITY, not a wish. When a producer legitimately
-// adds a key, the guard test fails, and the fix is to add the key here in the
-// same commit that adds the producer — which is the point: the addition becomes
-// visible in review instead of appearing silently on the log.
-export const KNOWN_TOP_LEVEL_KEYS = Object.freeze([
-  "attempt",
-  "attributes",
-  "bg_job_id",
-  "body",
-  "branch",
-  "canonical_bg_job_id",
-  "category",
-  "caused_by",
-  "channel",
-  "command",
-  "detail",
-  "dominant_phase",
-  "error",
-  "event",
-  "id",
-  "mergeStateStatus",
-  "name",
-  "number",
-  "observedTs",
-  // From catalyst-state.sh's jq-less v1 fallback — see the host-scope note above.
-  "orchestrator",
-  "phase",
-  "pid",
-  "prevStateJsonMtime",
-  "reason",
-  "reclaimed",
-  "repo",
-  "resource",
-  "scanned",
-  "session_id",
-  "severityNumber",
-  "severityText",
-  "spanId",
-  "ticket",
-  "traceId",
-  "ts",
-  "url",
-  // From catalyst-state.sh's jq-less v1 fallback — see the host-scope note above.
-  "worker",
-  "worktree_path",
-]);
-
-const KNOWN_KEY_SET = new Set(KNOWN_TOP_LEVEL_KEYS);
 
 // Test-only bypass. Set CATALYST_EVENT_SCHEMA_OFF=1 to make validation inert:
 // validateEnvelope reports ok and noteMalformedEvent counts nothing. This exists
@@ -263,10 +198,32 @@ export function validateEnvelope(event) {
  * Top-level keys not in the measured vocabulary. CI-only — see the header for
  * why this is deliberately not consulted on the read path.
  */
-export function unknownTopLevelKeys(event) {
-  if (!isPlainObject(event)) return [];
-  return Object.keys(event).filter((k) => !KNOWN_KEY_SET.has(k));
-}
+// ── THERE IS NO TOP-LEVEL KEY CONTRACT, IN EITHER DIRECTION (Codex 8 + 10) ──
+//
+// Two CI layers were tried here and both were falsified by measurement. Recording
+// the negative result, because the next person will otherwise try the same thing.
+//
+// 1. An ALLOWLIST ("no unexpected keys"). Wrong because the key space is OPEN by
+//    construction: otel-forward's `normalizeFlatEvent` iterates every key, promotes
+//    those in its ATTR_MAP, and drops EVERYTHING ELSE into `body.payload`. Review
+//    found two instances before the premise did — `orchestrator`/`worker` (jq-less
+//    v1 fallback) and `quiet_ms`/`orch_id` (reap-intent) — each legitimate output
+//    reported as drift. Even pure v2 carries producer-added keys (`channel`).
+//
+// 2. A COMPLETENESS check ("every canonical field present on v2"). Also wrong:
+//    canonical fields are ADDITIVE, so absence is not a defect. MEASURED on the
+//    frozen snapshot's 1,175,708 v2-only lines — `ts` 1,175,708 but `id` only
+//    1,175,408, and `caused_by` (CTL-1135, explicitly "additive; null when
+//    absent") is missing from real corpus lines.
+//
+// ⭐ So the key layer is GONE rather than narrowed a third time. What survives is
+// what was measured and holds on 100% of lines, and it is already enforced by
+// validateEnvelope above: `ts` is a non-empty string, a name resolves through one
+// of the three keys, and a dual envelope's two names agree. Drift that can actually
+// redden CI is SHAPE drift — a new envelope shape or a name that stops resolving —
+// which this module's classification plus event-name-read-guard.test.mjs (CTL-1834)
+// already cover. A key-level contract was never supportable; asserting one produced
+// false positives on legitimate producer output for two review rounds.
 
 // ── Malformed-event counter ─────────────────────────────────────────────────
 // Deliberately the same shape as event-tail.mjs's `noteTornLine`: count every

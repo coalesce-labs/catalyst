@@ -4,7 +4,6 @@
 // lib/event-name.d.mts and lib/event-stream-class.d.mts already use.
 
 export declare const ENVELOPE_SHAPES: readonly string[];
-export declare const KNOWN_TOP_LEVEL_KEYS: readonly string[];
 
 export interface EnvelopeVerdict {
   ok: boolean;
@@ -15,7 +14,6 @@ export interface EnvelopeVerdict {
 
 export declare function classifyEnvelope(event: unknown): string;
 export declare function validateEnvelope(event: unknown): EnvelopeVerdict;
-export declare function unknownTopLevelKeys(event: unknown): string[];
 
 export declare function malformedEventCount(): number;
 export declare function malformedCountsByShape(): Record<string, number>;
