@@ -10,6 +10,7 @@ import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync } from "node
 // CTL-1529: bounded boot replay. tailParsedEvents returns the last N parsed events
 // in file order from a small window near EOF.
 import { tailParsedEvents, noteTornLine } from "../execution-core/event-tail.mjs";
+import { checkEnvelope } from "../lib/event-envelope.mjs";
 import { resolve, basename } from "node:path";
 import { getEventLogPath, log, CATALYST_DIR, LOOKBACK_LINES } from "./config.mjs";
 import {
@@ -122,6 +123,13 @@ export function readNewEvents() {
         noteTornLine(line);
         continue;
       }
+      // CTL-1819: envelope check on the LIVE path, for exactly the reason the torn
+      // counter above is here — this loop is the load-bearing reader, and covering
+      // only the boot replay (tailParsedEvents) would instrument the half that runs
+      // once per process while leaving the half that runs for the process's whole
+      // life blind. Same process counter, same non-gating contract: the event is
+      // ROUTED regardless, so this can never change what the broker delivers.
+      checkEnvelope(event);
       // CTL-1330 Tier 1: time each route; surface ONLY slow routes (default
       // >100ms) so we catch a broker-side hot-loop stall without flooding Loki —
       // the broker routes every appended event. ON by default (CATALYST_TICK_TIMING).
@@ -166,6 +174,24 @@ export function startTailing() {
 export function loadExistingRegistrations(logPath = lastLogPath) {
   try {
     for (const event of tailParsedEvents({ path: logPath, maxLines: LOOKBACK_LINES })) {
+      // CTL-1819: boot replay deliberately does NOT count (Codex rounds 6+7).
+      //
+      // Round 6 correctly observed that this consumer routes records without
+      // validating them. I added a checkEnvelope call here and justified it with
+      // "boot replay runs before the live tail over bytes readNewEvents never
+      // re-reads" — which round 7 then falsified: on a broker SELF-RELOAD,
+      // index.mjs runs this replay first and then seeds the live tail at the
+      // handoff's OLDER byte offset, so the overlap is counted twice.
+      //
+      // The two findings together establish that boot replay cannot be a counting
+      // site without byte-range or position dedup logic. Until that exists the call
+      // is removed rather than left half-right, because the fail directions are not
+      // symmetric: an uncounted malformed record is SILENCE, which is recoverable
+      // and shows up as a counter at zero; a double-counted one is FABRICATION in
+      // the number an operator reads during an incident. That is the same rule that
+      // made countEnvelopes opt-in in round 2.
+      //
+      // Proper boot coverage is CTL-1857.
       const name = getEventName(event);
       if (name === "filter.register") handleRegister(event);
       if (name === "filter.deregister") handleDeregister(event);

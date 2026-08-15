@@ -1,6 +1,41 @@
 # Catalyst Event Schema Reference
 
-Authoritative field-level reference for all event types in `~/catalyst/events/YYYY-MM.jsonl`.
+> ⛔ **SCOPE CORRECTION (CTL-1819).** This document is the authoritative **field-level** reference
+> for the **canonical v2 envelope**. It is **NOT** the envelope-shape contract, and the statements
+> below that *"all producers emit the canonical envelope"* and that *"every event has this shape"*
+> are **measurably false**.
+>
+> The envelope contract is executable: **`plugins/dev/scripts/lib/event-envelope.mjs`**. **Four**
+> shapes are live and accepted — v1, v2, their dual superset, and v3 `name` — and v1 is not legacy
+> residue. The measured counts live in that module's header and deliberately are NOT restated here;
+> they are volatile, and copies of them have drifted before.
+>
+> ⚠️ **Why this matters for the thing this doc is used for.** It is the source for
+> `catalyst-events --filter` expressions and is hand-derived into `lib/dsl-fields.mjs`. A reader who
+> takes "every event has this shape" at face value writes an **attribute-only filter** and silently
+> misses every v1 and v3 record. That is not hypothetical — CTL-1834 measured attribute-only readers
+> missing **161,795** lines in a month, and it presented as a biased slice rather than a visible zero.
+> `--filter` is a **jq** predicate, so the JS resolver is not callable there. Use the equivalent
+> ladder — it matches `lib/event-name.mjs` exactly, including skipping an empty string:
+>
+> ```jq
+> if type=="object" then [.event, (.attributes | if type=="object" then ."event.name" else null end), .name] | map(select(type=="string" and . != "")) | first // "" else "" end
+> ```
+>
+> ⚠️ **Both** `if type=="object"` guards are load-bearing, not defensive style. The outer one covers a
+> parseable non-object record (`42`, `"str"`, `[1,2]`, `true`, `null` — `getEventName` returns `""`
+> for all of them, an unguarded ladder raises `Cannot index number with string "event"`); the inner
+> one covers a record whose `.attributes` is not an object. `.attributes` is not always
+> an object on an accepted record — for `{"ts":"t","event":"phase.ok","attributes":"payload"}` the JS
+> boundary returns `phase.ok`, while an unguarded `.attributes."event.name"` raises
+> `Cannot index string with string "event.name"`. And a jq error **aborts the whole drain**, so every
+> valid record after it is lost and a `wait-for` sharing that batch times out — the same failure
+> CTL-1809 records for `jq -c select` over a torn line.
+>
+> e.g. `catalyst-events tail --filter 'if type=="object" then [.event, (.attributes | if type=="object" then ."event.name" else null end), .name] | map(select(type=="string" and . != "")) | first // "" else "" end | startswith("phase.")'`.
+> Reading `attributes["event.name"]` alone silently misses every v1 and v3 record.
+
+Authoritative field-level reference for the canonical v2 envelope in `~/catalyst/events/YYYY-MM.jsonl`.
 Derived directly from `plugins/dev/scripts/orch-monitor/lib/canonical-event.ts` and
 `plugins/dev/scripts/lib/canonical-event.sh`.
 

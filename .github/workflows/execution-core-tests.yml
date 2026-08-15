@@ -47,6 +47,12 @@ on:
   push:
     branches: [main]
     paths:
+      # CTL-1819 (Codex round 19): event-envelope.test.mjs EXTRACTS the jq name ladder
+      # from plugins/dev/references/event-schema.md and asserts parity with
+      # lib/event-name.mjs. Without this path a PR editing ONLY that document skips
+      # the job, so the documented predicate can drift past the guard built to hold
+      # it — a guard that cannot fire for the exact change it guards against.
+      - "plugins/dev/references/**"
       - "plugins/dev/scripts/execution-core/**"
       # CTL-1348: the updater safety tests (updater/plugin-pull-defer.test.mjs) import and
       # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
@@ -142,6 +148,10 @@ jobs:
         with:
           filters: |
             relevant:
+              # CTL-1819 (Codex round 19): see the note on the push trigger — the
+              # jq-ladder parity guard reads this document, so a doc-only PR must
+              # run the job.
+              - "plugins/dev/references/**"
               - "plugins/dev/scripts/execution-core/**"
               - "plugins/dev/scripts/broker/**"
               - "plugins/dev/scripts/**"
@@ -896,6 +906,7 @@ jobs:
             event-log-read-guard.test.mjs \
             event-name-fold.test.mjs \
             event-name-read-guard.test.mjs \
+            event-envelope.test.mjs \
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \

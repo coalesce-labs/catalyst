@@ -93,10 +93,23 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
 - **state.json** — active-orchestrator registry (progress, worker status, attention items). Schema:
   `plugins/dev/templates/global-state.json`.
 - **events/** — every phase transition, PR creation, verification result, attention item. Schema:
-  `plugins/dev/templates/global-event.json`. Multiple writers, two envelope shapes coexisting:
+  `plugins/dev/scripts/lib/event-envelope.mjs` (CTL-1819) — an executable, measured contract
+  validated at the read boundary, counting violations without ever throwing. It replaced
+  `plugins/dev/templates/global-event.json`, a draft-07 file cited here and in `docs/adrs.md` as the
+  contract for the life of the project which **passed ZERO live events** (the denominator lives in
+  the module header — it grows) and was imported by no code; that file is deleted. Multiple writers, **four** envelope shapes coexisting — v1, v2,
+  their dual superset, and v3 `name`. ⚠️ **The census lives in ONE place: the module's own header.**
+  It is a volatile measurement (the log grows), and duplicating it here is what made three separate
+  review rounds spend their time reconciling copies that had drifted apart. Read the counts, the
+  frozen-snapshot methodology, and the positive controls there rather than from a restatement:
   - **v1** (bash, `catalyst-state.sh event`): `{ts, event, orchestrator, worker, detail}`.
   - **v2 OTel** (`plugins/dev/scripts/orch-monitor/lib/webhook-events.ts` for `github.*`/`linear.*`;
     `catalyst-comms send` for `comms.message.posted`): `{ts, attributes, body, resource}`.
+  - **v3 bare-name** — `{ts, name, …flat payload}` (e.g. `phase.rescue.*`,
+    `phase.orphan-pr.detected.*`, `ticket.completion.declared.*`). Live
+    and accepted, not legacy residue: CTL-1834 records **three separate v3 producers each discovered
+    and fixed reactively, one at a time, after their events had already been lost** — which is why
+    `lib/event-name.mjs` resolves it and this contract validates it.
   - **Superset (CTL-1795, phase 1)** — every v1 emit site now writes ONE line carrying BOTH the
     top-level `event` and a full v2 `attributes`/`body`/`resource` block, built through the shared
     builders `execution-core/lib/canonical-event.mjs` (`buildDualEnvelopeLine`) and
@@ -106,7 +119,10 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
     routed twice, double-applying `handleAgentCheckin`'s `upsertAgent`/`_autoRegisterPrLifecycle`.
     Key **order** within that one line is a separate question and this paragraph used to conflate
     them — a single dual line resolves to one name and routes once under *any* ordering.
-    Measured across every log file ever written (4,034,067 parsed lines), all **322** dual lines
+    Measured by CTL-1834 across every log file ever written **as of that ticket** (4,034,067
+    parsed lines), all **322** dual lines — a historical figure, deliberately left as CTL-1834
+    recorded it; the current count lives in `lib/event-envelope.mjs`'s header and is larger, because
+    dual emission began with CTL-1795 phase 1 and is still accumulating. All
     carry identical values in both keys and disagreement is not constructible on the dual path
     (`canonical_dual_envelope_line` reads `name` from `.event` and passes that same string to
     `--event-name`), so order is unobservable. The boundary

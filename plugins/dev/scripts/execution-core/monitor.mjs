@@ -156,6 +156,8 @@ import { recordReplicaRead } from "./replica-health.mjs"; // CAT-35
 // must share the counter rather than start a second one. See noteTornLine's own comment: one
 // detector per process per log.
 import { noteTornLine } from "./event-tail.mjs";
+// CTL-1819: the envelope detector, shared with the broker's peer live tail.
+import { checkEnvelope } from "../lib/event-envelope.mjs";
 
 const MONITOR_BOOT_TS = Date.now();
 
@@ -1785,6 +1787,12 @@ export function readNewEvents({ foldOnly = false } = {}) {
         noteTornLine(line);
         continue; // skip a malformed line, keep tailing
       }
+      // CTL-1819: envelope check on this live path too. docs/architecture.md is
+      // explicit that this reader and broker/tailer.mjs's are PEERS — "neither is
+      // 'the' load-bearing one" — so instrumenting only the broker would leave the
+      // reader that drives dispatchTriage and the comment-wake blind. Non-gating:
+      // the event is routed regardless, exactly like the torn counter above.
+      checkEnvelope(event);
       // CTL-731: handleStateChangedEvent gates its dispatch side-effects on
       // foldOnly; handleIssueUpdatedEvent is a pure projection fold (always safe);
       // handleCommentCreatedEvent's onComment is a side-effect — withhold it on

@@ -92,9 +92,13 @@ if [[ -n "$agent_changes" ]]; then
   migration_signals+="- **Plugin agent changes detected**:"$'\n'"$agent_changes"
 fi
 
-state_schema_changed=$(echo "$changed_files" | grep -E 'templates/global-(state|event)\.json$' || true)
+# CTL-1819: the event-envelope contract moved from templates/global-event.json
+# (deleted) to the executable lib/event-envelope.mjs. Detecting only the template
+# path would report "No migration or upgrade signals detected" for a change to the
+# very contract dashboard consumers read.
+state_schema_changed=$(echo "$changed_files" | grep -E 'templates/global-(state|event)\.json$|scripts/lib/event-envelope\.mjs$' || true)
 if [[ -n "$state_schema_changed" ]]; then
-  migration_signals+="- **Runtime schema change detected**: Global state or event schema templates were modified. Dashboard consumers may need updates."$'\n'
+  migration_signals+="- **Runtime schema change detected**: Global state schema template or the executable event-envelope contract (lib/event-envelope.mjs) was modified. Dashboard consumers may need updates."$'\n'
 fi
 
 if [[ -z "$migration_signals" ]]; then

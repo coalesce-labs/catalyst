@@ -15,7 +15,8 @@ no build step for the plugins themselves; the orchestration runtime under
     - `agents/` — subagent definitions (codebase-locator, codebase-analyzer, codebase-pattern-finder, external-research, …)
     - `skills/` — workflow skills (research-codebase, create-plan, implement-plan, validate-*, and the `phase-*` orchestrator phases)
     - `scripts/` — the runtime (see below)
-    - `templates/` — global-state.json, global-event.json schemas
+    - `templates/` — global-state.json schema (the former `global-event.json` was deleted in CTL-1819: it passed ZERO live events and no code imported it — counts in that module's header)
+    - `scripts/lib/` — zero-npm-import leaves: `event-name.mjs` (the one event-name boundary, CTL-1834) and `event-envelope.mjs` (the executable event-envelope contract, CTL-1819)
   - `plugins/pm/`, `plugins/meta/`, `plugins/legacy/`, `plugins/analytics/`, `plugins/debugging/`, `plugins/foundry/` — other plugins
 - `docs/` — `architecture.md`, `orchestrator-overview.md`, `adrs.md`, `releases.md`
 - `AGENTS.md` — portable, tool-agnostic source of truth (CLAUDE.md is a thin `@AGENTS.md` bridge)
