@@ -110,12 +110,35 @@ describe("the schema describes reality", () => {
     }
   });
 
-  test("the dead global-event.json contract passes none of them", () => {
-    // The schema this replaces required {ts, orchestrator, event}. Asserting the
-    // reason it was deleted, so a future reader does not restore it.
-    for (const ev of [V1, V2, V3, DUAL]) {
-      expect(Object.hasOwn(ev, "orchestrator")).toBe(false);
-    }
+  // Codex round 20: the "0 live events passed the dead schema" claim is evidence
+  // for deleting it, and the old test only checked that fixtures lacked an
+  // `orchestrator` key — which a broken or misapplied validator would also report.
+  // The deleted schema's contract, restated from templates/global-event.json as it
+  // stands on origin/main: required {ts, orchestrator, event}, with `event` drawn
+  // from a closed 23-name enum.
+  const DEAD_SCHEMA_REQUIRED = ["ts", "orchestrator", "event"];
+  const DEAD_SCHEMA_ENUM = ["orchestrator-started", "orchestrator-completed", "orchestrator-failed"];
+  const passesDeadSchema = (ev) =>
+    ev !== null &&
+    typeof ev === "object" &&
+    !Array.isArray(ev) &&
+    DEAD_SCHEMA_REQUIRED.every((k) => Object.hasOwn(ev, k)) &&
+    DEAD_SCHEMA_ENUM.includes(ev.event);
+
+  test("POSITIVE CONTROL: the dead-schema validator recognises a conforming event", () => {
+    // Without this, "zero live events passed" is satisfiable by a validator that
+    // passes nothing at all — the instrument could not have shown otherwise.
+    expect(
+      passesDeadSchema({
+        ts: "2026-08-14T00:00:00Z",
+        orchestrator: "orch-1",
+        event: "orchestrator-started",
+      })
+    ).toBe(true);
+  });
+
+  test("the dead global-event.json contract passes none of the real shapes", () => {
+    for (const ev of [V1, V2, V3, DUAL]) expect(passesDeadSchema(ev)).toBe(false);
   });
 
   test("ENVELOPE_SHAPES is frozen and holds exactly the four measured shapes", () => {
@@ -186,7 +209,14 @@ describe("real producer output", () => {
 describe("the documented jq ladder matches the JS boundary", () => {
   const docPath = new URL("../../references/event-schema.md", import.meta.url);
   const doc = readFileSync(docPath, "utf8");
-  const m = doc.match(/^> (if type=="object" then \[\.event,.*else "" end)$/m);
+  // Codex round 20: the ladder is published TWICE — as the standalone blockquote
+  // and inside the runnable `catalyst-events tail --filter '...'` example. The test
+  // extracted only the first, so the copy users actually PASTE could drift (or
+  // abort a drain) with CI green. Every published copy is now extracted and they
+  // must be byte-identical.
+  const LADDER_RE = /if type=="object" then \[\.event,.*?else "" end/g;
+  const allCopies = doc.match(LADDER_RE) ?? [];
+  const m = [null, allCopies[0]];
   const jqAvailable = (() => {
     try {
       return spawnSync("jq", ["--version"]).status === 0;
@@ -195,10 +225,12 @@ describe("the documented jq ladder matches the JS boundary", () => {
     }
   })();
 
-  test("the doc still publishes a ladder", () => {
+  test("the doc publishes a ladder, in every place, identically", () => {
     // Fails loudly if the expression is renamed or removed, so the parity test
-    // below can never pass by matching nothing.
-    expect(m && m[1].length > 0).toBe(true);
+    // below can never pass by matching nothing — and fails if the two published
+    // copies drift apart, which is the one CI could previously miss.
+    expect(allCopies.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(allCopies).size).toBe(1);
   });
 
   test.skipIf(!jqAvailable)("jq and JS agree on every shape, including the edge cases", () => {

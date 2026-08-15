@@ -10,14 +10,23 @@
 // `orchestrator-started`. MEASURED against the live log: it passed ZERO events,
 // and both citations were prose.
 //
-// ON "NO CODE EVER IMPORTED IT" (Codex round 19). That is a claim about HISTORY,
-// and a current-tree grep can only establish present absence. What was actually
-// demonstrated: `git log --all -S'global-event.json'` over `*.mjs *.ts *.js *.sh`
-// returns exactly TWO commits, and both are this PR's own (they add the string in
-// a comment and in the release-notes detector). Positive control on the same
-// instrument: `-S'getEventName'` over the same file set returns 35 commits, so it
-// does find real code references. So the demonstrated statement is: no code file
-// in this repository's history has ever contained a reference to that path.
+// ON "NO CODE EVER IMPORTED IT" (Codex rounds 19 + 20). That is a claim about
+// HISTORY, and a current-tree grep establishes only present absence. Round 19's
+// instrument was still wrong twice over: its four suffix globs missed extensionless
+// executables (`plugins/dev/scripts/catalyst-events` is real code), and it searched
+// `--all`, so committing the correction CHANGED ITS OWN RESULT — the recorded
+// command and the recorded number diverged the moment they were written down.
+//
+// Both fixed by scoping to the branch the claim is about and the tree it covers:
+//
+//   git log origin/main -S'global-event.json' -- plugins/dev/scripts   → 0
+//   git log origin/main -S'getEventName'      -- plugins/dev/scripts   → 19  (control)
+//
+// `origin/main` excludes this PR's own commits, so the result is STABLE as this
+// branch grows; the bare pathspec covers every file under the runtime including
+// extensionless ones. The control shows the instrument does find real code
+// references at the same scope. Demonstrated statement: no commit in main's
+// history has ever touched that filename anywhere under `plugins/dev/scripts`.
 //
 // A mechanism that has never produced an output does not exist — so it is deleted
 // in the same change that adds this file. Leaving a false contract next to a true
@@ -147,6 +156,28 @@ function nonEmptyString(v) {
   return typeof v === "string" && v !== "";
 }
 
+// Render a producer-controlled value for a message, BOUNDED (Codex round 20).
+// Event names are producer-controlled and unbounded: a disagreeing dual envelope
+// with two 1 MB names produced a 2,000,065-byte error string, written to stderr
+// from the broker's and monitor's live-tail callbacks BEFORE routing. The
+// sparse-warn gate limits how OFTEN a warning is emitted, never how BIG one is, so
+// a single malformed record could stall both readers and flood the launchd/Alloy
+// log surface the warning rides on. Same discipline as the peer torn detector,
+// which has always bounded its output (`line.slice(0, 60)`).
+const RENDER_MAX = 120;
+function renderBounded(v) {
+  let text;
+  try {
+    text = typeof v === "string" ? JSON.stringify(v) : JSON.stringify(v) ?? String(v);
+  } catch {
+    text = "<unrenderable>";
+  }
+  if (typeof text !== "string") text = String(text);
+  return text.length <= RENDER_MAX
+    ? text
+    : `${text.slice(0, RENDER_MAX)}…<truncated, ${text.length} chars>`;
+}
+
 /**
  * Which envelope shape is this? Mirrors event-name.mjs's key set exactly —
  * if these two ever disagree about which keys carry a name, an event can be
@@ -207,8 +238,8 @@ export function validateEnvelope(event) {
   // string to both keys, so a disagreement means something else wrote the line.
   if (shape === "dual" && event.event !== event.attributes["event.name"]) {
     errors.push(
-      `dual envelope disagrees: event=${JSON.stringify(event.event)} vs ` +
-        `attributes["event.name"]=${JSON.stringify(event.attributes["event.name"])}`
+      `dual envelope disagrees: event=${renderBounded(event.event)} vs ` +
+        `attributes["event.name"]=${renderBounded(event.attributes["event.name"])}`
     );
   }
 
@@ -296,9 +327,15 @@ export function noteMalformedEvent(result) {
   }
   if (!warn) return;
   try {
+    // Bounded a SECOND time at the write: renderBounded caps each value, this caps
+    // the assembled line, so a future error string built without renderBounded
+    // still cannot emit an unbounded warning.
+    const detail = errors.join("; ");
+    const bounded =
+      detail.length <= 400 ? detail : `${detail.slice(0, 400)}…<truncated, ${detail.length} chars>`;
     process.stderr.write(
       `[catalyst] WARNING: MALFORMED event envelope — counted and skipped ` +
-        `(malformed_events_total=${malformedTotal}, shape=${shape}): ${errors.join("; ")}\n`
+        `(malformed_events_total=${malformedTotal}, shape=${shape}): ${bounded}\n`
     );
   } catch {
     /* a reporting hook must never break the tail */
