@@ -12,6 +12,7 @@
 
 import { TERMINAL } from "./signal-reader.mjs";
 import { STALE_WORKER_CUTOFF_MS } from "./config.mjs";
+import { YIELDED_STATUS, classifyYield } from "../lib/phase-yield.mjs"; // CTL-1854
 
 const NO_OP = Object.freeze({ patch: {}, attention: null });
 
@@ -30,6 +31,22 @@ export function detectStalled(inputs) {
   // A missing/unknown updatedAt is treated as not-stale — escalating on
   // missing data would be a false positive.
   if (inputs.updatedAtMs == null) return NO_OP;
+
+  // CTL-1854: a LIVE declared wait is not stalled — it is a supported state whose
+  // worker has intentionally exited, so nothing refreshes `updatedAt` and the
+  // 15-minute staleness cutoff fires inside a perfectly valid 30-minute yield.
+  // Reporting that as `stalled` is a FALSE attention, and a detector that cries
+  // wolf on a supported state is worse than one that stays quiet.
+  //
+  // Only while LIVE: an EXPIRED yield gets no exemption. The tick rewrites it to
+  // `failed` (terminal, absorbed above) within a tick, and if that has not
+  // happened the ticket genuinely is stuck and should be reported.
+  if (
+    String(inputs.currentStatus) === YIELDED_STATUS &&
+    !classifyYield(inputs.signal ?? inputs, inputs.nowMs).expired
+  ) {
+    return NO_OP;
+  }
 
   // Fresh signal — nothing to do.
   if (inputs.nowMs - inputs.updatedAtMs <= STALE_WORKER_CUTOFF_MS) return NO_OP;

@@ -171,3 +171,29 @@ describe("CTL-1854 end to end: declare → hold → expire", () => {
     expect(any.trim()).toBe("");
   });
 });
+
+describe("⚠️ a supported wait is not an anomaly", () => {
+  // The stalled detector's cutoff is 15 minutes; a yield may live for 30, and its
+  // worker has intentionally exited so nothing refreshes `updatedAt`. Reporting a
+  // valid 15–30 minute yield as `stalled` is a FALSE attention, and a detector
+  // that cries wolf on a supported state is worse than one that stays quiet.
+  test("a live yield raises no stalled attention; an expired one still does", async () => {
+    const { detectStalled } = await import("./stalled-detector.mjs");
+    const now = Date.now();
+    const at = (min) => ({
+      currentStatus: YIELDED_STATUS,
+      updatedAtMs: now - min * 60_000,
+      nowMs: now,
+      signal: { status: YIELDED_STATUS, yieldedAt: new Date(now - min * 60_000).toISOString() },
+    });
+    // Inside the ceiling — silent, even past the 15-minute staleness cutoff.
+    expect(detectStalled(at(5)).attention).toBeNull();
+    expect(detectStalled(at(20)).attention).toBeNull();
+    // Past it — the exemption ends with the deadline, so a genuinely stuck ticket
+    // is still reported rather than hidden forever by the status.
+    expect(detectStalled(at(45)).attention).toMatchObject({ kind: "stalled" });
+    // Control: an ordinary stale worker is unaffected by any of this.
+    expect(detectStalled({ currentStatus: "running", updatedAtMs: now - 45 * 60_000, nowMs: now }).attention)
+      .toMatchObject({ kind: "stalled" });
+  });
+});
