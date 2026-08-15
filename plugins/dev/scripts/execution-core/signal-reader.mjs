@@ -312,8 +312,15 @@ export function countYieldedOccupancy(orchDir) {
       return { count, ok: false, reason: "worker-dir-unreadable" };
     }
     for (const f of files) {
-      if (!f.startsWith("phase-") || !f.endsWith(".json")) continue;
-      if (ARTIFACT_NAMES.has(f)) continue;
+      // ⚠️ Use the CANONICAL predicate, not a hand-rolled filter. It also excludes
+      // CTL-702's `phase-*-yield-*.json` AUDIT TOMBSTONES — an unrelated mechanism
+      // that merely shares the word "yield" (see the name-collision note in
+      // lib/phase-yield.mjs). Scanning them here meant ONE torn tombstone made this
+      // return ok:false forever, and since round 17 every admission gate fails
+      // closed on that, a stale audit artifact would stall fleet dispatch
+      // indefinitely. Fail-closed must be scoped to the files that actually carry
+      // the lifecycle, or it becomes an availability defect of its own.
+      if (!isPhaseSignalFile(f)) continue;
       let raw;
       try {
         raw = readFileSync(join(workersDir, t.name, f), "utf8");

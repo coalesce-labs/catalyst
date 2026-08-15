@@ -491,6 +491,28 @@ describe("⚠️ occupancy fails CLOSED: could-not-look is not an empty slot", (
     expect(out.reason).toBe("signal-unparseable");
   });
 
+  test("⚠️ a torn CTL-702 yield TOMBSTONE must not wedge admission", async () => {
+    // Those files merely share the word "yield" (see the name-collision note in
+    // lib/phase-yield.mjs) — they are audit artifacts, not lifecycle signals.
+    // Scanning them meant one stale tombstone made this ok:false forever, and
+    // since every admission gate now fails closed on that, it would have stalled
+    // fleet dispatch indefinitely. Fail-closed has to be scoped to the files that
+    // actually carry the lifecycle.
+    const { countYieldedOccupancy } = await import("./signal-reader.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldtomb-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"),
+      JSON.stringify({ status: YIELDED_STATUS, ticket: "PROJ-1", phase: "implement" }));
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true });
+    // A torn tombstone is ignored...
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement-yield-abc123.json"), "{tor");
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true });
+    // ...while a torn REAL signal still fails closed. Both directions, or the
+    // exclusion could have been a blanket "ignore everything unparseable".
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"), "{tor");
+    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: false });
+  });
+
   test("callers hold admission rather than treating it as capacity", async () => {
     const { computeTriageBudget } = await import("./monitor.mjs");
     const base = {
