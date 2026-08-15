@@ -5,10 +5,10 @@
 > below that *"all producers emit the canonical envelope"* and that *"every event has this shape"*
 > are **measurably false**.
 >
-> The envelope contract is executable: **`plugins/dev/scripts/lib/event-envelope.mjs`**. Measured on
-> one frozen byte snapshot of a single host-month (1,202,573 lines, counts summing to the total
-> exactly): **v2-only 1,175,708 · v1-only 25,355 · dual 978 · v3-only 532**. Four shapes are live and
-> accepted, not three, and v1 is not legacy residue.
+> The envelope contract is executable: **`plugins/dev/scripts/lib/event-envelope.mjs`**. **Four**
+> shapes are live and accepted — v1, v2, their dual superset, and v3 `name` — and v1 is not legacy
+> residue. The measured counts live in that module's header and deliberately are NOT restated here;
+> they are volatile, and copies of them have drifted before.
 >
 > ⚠️ **Why this matters for the thing this doc is used for.** It is the source for
 > `catalyst-events --filter` expressions and is hand-derived into `lib/dsl-fields.mjs`. A reader who

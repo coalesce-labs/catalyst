@@ -2,12 +2,11 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test event-envelope.test.mjs
 //
-// The fixtures below are not invented. Each is the minimal form of a shape
-// MEASURED on ONE FROZEN BYTE SNAPSHOT of mini's 2026-08 log (1,117,890,759 B;
-// 1,202,573 lines, 100% parsed). The shape counts SUM to the total exactly, so
-// "every line has a discriminator" is arithmetic, not a separate query:
-//
-//   v2-only 1,175,708 + v1-only 25,355 + dual 978 + v3-only 532 = 1,202,573
+// The fixtures below are not invented — each is the minimal form of a shape
+// measured on the live log. The census itself (frozen-snapshot methodology, the
+// per-shape counts, the positive controls) lives in ONE place, lib/event-envelope.mjs's
+// header, and is deliberately not restated here: it is volatile, and duplicated
+// copies have drifted apart across three separate review rounds.
 //
 // LIVE-CORPUS CHECK. CI cannot reach ~/catalyst/events/*.jsonl, so the
 // "schema describes reality" AC is served two ways: the fixture set here, and
@@ -299,14 +298,26 @@ describe("snapshot readers never count", () => {
 });
 
 describe("live corpus (opt-in)", () => {
-  const sample = process.env.CATALYST_EVENT_LOG_SAMPLE;
+  // Codex round 14: `!sample` treated an explicitly EMPTY value as unset, so
+  // CATALYST_EVENT_LOG_SAMPLE='' skipped and exited 0 — an operator whose shell
+  // expanded a variable to nothing got a green run over nothing inspected. Absent
+  // and present-but-unusable are different states and must not share a branch.
+  const sampleRaw = process.env.CATALYST_EVENT_LOG_SAMPLE;
+  const sampleAbsent = sampleRaw === undefined;
+  const sample = sampleRaw;
   // Codex round 6: skip ONLY when the variable is unset. A mistyped path used to
   // skip and exit 0 — an operator pointing this at a real log and getting a green
   // run would conclude the log was validated when nothing was inspected. That is
   // the check-that-cannot-fail shape, in the test written to prevent it.
-  test.skipIf(!sample)(
+  test.skipIf(sampleAbsent)(
     "every line of the scanned region of a real log validates (bounded tail)",
     () => {
+      if (sample === "") {
+        throw new Error(
+          `CATALYST_EVENT_LOG_SAMPLE is set but EMPTY. Refusing to report success ` +
+            `without inspecting anything — unset it to skip deliberately.`
+        );
+      }
       if (!existsSync(sample)) {
         throw new Error(
           `CATALYST_EVENT_LOG_SAMPLE was set to "${sample}" but that path does not exist. ` +
@@ -346,9 +357,16 @@ describe("live corpus (opt-in)", () => {
       const waiveFragment = process.env.CATALYST_EVENT_LOG_SAMPLE_ALLOW_TAIL_FRAGMENT === "1";
       const rawLines = text.split("\n");
       const fragmentIndex = endsWithNewline || !waiveFragment ? -1 : rawLines.length - 1;
+      // Codex round 14: `.filter(Boolean)` silently dropped BLANK records. Under an
+      // "every line" check a newline-terminated blank line is a malformed record —
+      // swapping it for `{not json}` failed, so blanks were the one corruption that
+      // passed. The ONLY empty element that is not a record is the synthetic final
+      // one produced by a trailing newline.
+      const syntheticFinalIndex = endsWithNewline ? rawLines.length - 1 : -1;
       const lines = [];
       for (let i = 0; i < rawLines.length; i++) {
-        if (rawLines[i]) lines.push({ line: rawLines[i], isFragment: i === fragmentIndex, i });
+        if (i === syntheticFinalIndex && rawLines[i] === "") continue;
+        lines.push({ line: rawLines[i], isFragment: i === fragmentIndex, i });
       }
       const failures = [];
       let torn = 0;

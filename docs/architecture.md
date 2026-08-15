@@ -96,21 +96,12 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
   `plugins/dev/scripts/lib/event-envelope.mjs` (CTL-1819) — an executable, measured contract
   validated at the read boundary, counting violations without ever throwing. It replaced
   `plugins/dev/templates/global-event.json`, a draft-07 file cited here and in `docs/adrs.md` as the
-  contract for the life of the project which **passed 0 of 1,202,573 live events** and was imported
-  by no code; that file is deleted. Multiple writers, **four** envelope shapes coexisting — measured
-  on one frozen byte snapshot (2026-08, 1,117,890,759 B), the counts summing to the line total
-  exactly, so every line is accounted for by arithmetic rather than a separate query:
-  v2-only 1,175,708 · v1-only 25,355 · dual (v1+v2) 978 · **v3-only `name` 532** · total 1,202,573.
-  ⚠️ The **978** here and the **322** cited further down look contradictory — a broader corpus
-  cannot hold fewer records than a month inside it — but they are the same population counted at
-  different **times**, and that is MEASURED rather than assumed. Re-counting every log file on the
-  host: **1,011 dual lines, all of them in `2026-08`; June and July hold zero.** So the sequence is
-  322 (CTL-1834's all-files census) → 978 (this snapshot, mid-day) → 1,011 (all files, later the
-  same day). Dual emission began with CTL-1795 phase 1 and is still accumulating, so a later
-  single-month count exceeding an earlier all-time one is exactly what growth looks like. Both
-  figures are quoted with scope and vintage so the pair reads as a time series, not a contradiction.
-  `ENVELOPE_SHAPES` in the module is the authoritative list; the v3 shape is live and accepted, and
-  omitting it here is how a reader following the architecture misses a real envelope:
+  contract for the life of the project which **passed ZERO live events** (the denominator lives in
+  the module header — it grows) and was imported by no code; that file is deleted. Multiple writers, **four** envelope shapes coexisting — v1, v2,
+  their dual superset, and v3 `name`. ⚠️ **The census lives in ONE place: the module's own header.**
+  It is a volatile measurement (the log grows), and duplicating it here is what made three separate
+  review rounds spend their time reconciling copies that had drifted apart. Read the counts, the
+  frozen-snapshot methodology, and the positive controls there rather than from a restatement:
   - **v1** (bash, `catalyst-state.sh event`): `{ts, event, orchestrator, worker, detail}`.
   - **v2 OTel** (`plugins/dev/scripts/orch-monitor/lib/webhook-events.ts` for `github.*`/`linear.*`;
     `catalyst-comms send` for `comms.message.posted`): `{ts, attributes, body, resource}`.
@@ -129,7 +120,9 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
     Key **order** within that one line is a separate question and this paragraph used to conflate
     them — a single dual line resolves to one name and routes once under *any* ordering.
     Measured by CTL-1834 across every log file ever written **as of that ticket** (4,034,067
-    parsed lines), all **322** dual lines
+    parsed lines), all **322** dual lines — a historical figure, deliberately left as CTL-1834
+    recorded it; the current count lives in `lib/event-envelope.mjs`'s header and is larger, because
+    dual emission began with CTL-1795 phase 1 and is still accumulating. All
     carry identical values in both keys and disagreement is not constructible on the dual path
     (`canonical_dual_envelope_line` reads `name` from `.event` and passes that same string to
     `--event-name`), so order is unobservable. The boundary
