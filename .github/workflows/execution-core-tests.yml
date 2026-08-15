@@ -907,6 +907,9 @@ jobs:
             event-name-fold.test.mjs \
             event-name-read-guard.test.mjs \
             event-envelope.test.mjs \
+            phase-yield.test.mjs \
+            phase-yield-parity.test.mjs \
+            phase-yield-expiry.test.mjs \
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \
