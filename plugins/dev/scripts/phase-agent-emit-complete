@@ -483,7 +483,14 @@ LINE=$(build_canonical_line \
 	--executor "$EXECUTOR" \
 	2>/dev/null) || warn "failed to build canonical event line"
 
-if [[ -n $LINE ]]; then
+# CTL-1854 (Codex round 11): a YIELD event must not escape before the signal it
+# describes has committed. The event is observable by the broker, HUD,
+# orch-monitor and `catalyst-events wait-for`, so publishing it and THEN failing
+# the signal write leaves consumers holding a declared wait that never existed —
+# a false coordination signal is worse than a missing one. Every other status
+# keeps its existing publish-then-write order byte-identical; only yield defers,
+# and it is appended immediately after the rename commits.
+if [[ -n $LINE && $STATUS != "yield" ]]; then
 	canonical_jsonl_append "$EVENTS_DIR" "$LINE" || warn "failed to append event to ${EVENTS_DIR}"
 fi
 
@@ -586,7 +593,23 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
               else del(.yieldedAt) | del(.firstYieldedAt) | del(.yieldMs) end)
            | (if .host == null and \$host_name != \"\" then .host = {name: \$host_name, id: \$host_id} else . end)" \
 			"$SIGNAL_FILE" >"$TMP" 2>/dev/null; then
-			mv "$TMP" "$SIGNAL_FILE"
+			# CTL-1854 (Codex round 11): the rename is part of the success condition.
+			# `set -e` is deliberately NOT enabled here, so an unchecked `mv` failure
+			# left the script exiting 0 with the signal still `running` — telling the
+			# agent it could stop when no wait had been recorded.
+			if mv "$TMP" "$SIGNAL_FILE"; then
+				# The signal has committed; NOW the yield event may be published.
+				if [[ $STATUS == "yield" && -n $LINE ]]; then
+					canonical_jsonl_append "$EVENTS_DIR" "$LINE" ||
+						warn "failed to append event to ${EVENTS_DIR}"
+				fi
+			else
+				rm -f "$TMP"
+				if [[ $STATUS == "yield" ]]; then
+					die "--status yield: could not commit $SIGNAL_FILE (rename failed) — refusing to report a wait that was not recorded"
+				fi
+				warn "failed to commit signal file $SIGNAL_FILE (rename failed)"
+			fi
 		else
 			rm -f "$TMP"
 			# CTL-1854: for a yield this is FATAL, not a warning. The signal is the only

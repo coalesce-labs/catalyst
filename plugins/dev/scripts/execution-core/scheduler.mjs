@@ -5993,6 +5993,26 @@ export function schedulerTick(
   }
 
   for (const sig of readWorkerSignals(orchDir)) {
+    // ⚠️ CTL-1854 (Codex round 11): YIELD EXPIRY MUST NOT DEPEND ON TICKET-LEVEL
+    // IN-FLIGHT. I previously argued this sweep was guaranteed to reach every
+    // yielded signal because a yield holds the ticket's slot — true for a PIPELINE
+    // phase, false for an ancillary one. A `recovery-pass` that yields on a ticket
+    // whose pipeline phase is already `failed`/`stalled` leaves isTicketInFlight
+    // FALSE (livePhaseEntries keeps the terminal phase alongside the unknown
+    // recovery-pass), so `continue` fired before the expiry branch ever ran — while
+    // the recovery-pass dedup probes and countYieldedOccupancy both went on
+    // treating the yield as live. Deadline never evaluated, slot reserved forever:
+    // the exact permanent hold this state was designed to make impossible.
+    //
+    // So the yield check runs BEFORE the filter. Everything else keeps the filter.
+    if (String(sig.status) === YIELDED_STATUS) {
+      try {
+        reclaimDeadWork(orchDir, sig, reclaimOpts);
+      } catch {
+        /* best-effort — an expiry failure must never wedge the tick */
+      }
+      continue;
+    }
     if (!inFlightTickets.has(sig.ticket)) continue;
     // CTL-705: a parked ("preempted") worker is paused, not dead. Its signal
     // preserves the now-killed bg_job_id, so classifyWorker would route it

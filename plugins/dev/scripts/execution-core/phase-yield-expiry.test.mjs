@@ -308,3 +308,22 @@ describe("⚠️ every admission budget charges the yield, not just the schedule
     expect(out.remaining).toBe(2); // degrades, does not throw
   });
 });
+
+describe("⚠️ expiry does not depend on ticket-level in-flight", () => {
+  // I argued this sweep was guaranteed to reach every yielded signal because a
+  // yield holds the ticket's slot. True for a PIPELINE phase; FALSE for an
+  // ancillary one. A `recovery-pass` yielding on a ticket whose pipeline phase is
+  // already failed/stalled leaves isTicketInFlight false, so the `continue` fired
+  // before the expiry branch — deadline never evaluated, slot held forever.
+  test("the yield branch runs BEFORE the inFlightTickets filter", async () => {
+    const src = await Bun.file(new URL("./scheduler.mjs", import.meta.url)).text();
+    const loop = src.slice(src.indexOf("for (const sig of readWorkerSignals(orchDir)) {"));
+    const body = loop.slice(0, loop.indexOf("// CTL-705"));
+    expect(body.length).toBeGreaterThan(80); // fails closed if the loop is refactored away
+    const yieldAt = body.indexOf("YIELDED_STATUS");
+    const filterAt = body.indexOf("inFlightTickets.has");
+    expect(yieldAt).toBeGreaterThan(-1);
+    expect(filterAt).toBeGreaterThan(-1);
+    expect(yieldAt).toBeLessThan(filterAt);
+  });
+});
