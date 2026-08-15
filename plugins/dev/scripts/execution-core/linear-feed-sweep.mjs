@@ -144,6 +144,20 @@ export function runSweep({
   // Comments share the cursor's shape but not its position; they are a separate
   // stream and are swept only after edges, so a comment storm cannot starve the
   // dispatch trigger.
+  //
+  // ⛔ DELIBERATE: comments are scoped by TEAM ONLY — the `botUserIds` self-echo
+  // guard is NOT applied here, unlike the edge path above. Do not "fix" the
+  // asymmetry for consistency; it is the point. Ryan's decision on CTL-1891:
+  // "we want fleet agents communicating with each other over the activity feed so
+  // cant ignore all non human coments" — Linear activities/comments become the
+  // fleet's comms channel, replacing the comms md files. Bot-authored comments are
+  // therefore the PAYLOAD, not noise, and filtering them here would delete the
+  // messages the channel exists to carry.
+  //
+  // Echo suppression for that channel is expected to key on write receipts /
+  // session identity rather than "is a bot" (CTL-1892 covers why an identity-set
+  // must survive rotation). Until that lands, the edge path's filter stays
+  // provisional and this path stays unfiltered.
   const commentCounts = emptyCounts();
   let commentPosition = { lastCreatedAt: position.lastCreatedAt, lastId: "" };
   if (!stopped) {

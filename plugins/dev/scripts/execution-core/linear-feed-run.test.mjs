@@ -173,3 +173,55 @@ describe("runOnce — one tenant's failure does not silence the others", () => {
     expect(cursors[0]).not.toBe(cursors[1]);
   });
 });
+
+describe("⭐ coverageGaps — extracted because it already carried a bug", () => {
+  // An earlier cut computed this from an empty plan list, so it reported EVERY class
+  // missing immediately after a successful sweep. It lived in the script-shaped
+  // runner where no test could reach it — the CTL-1659 lesson about extracting the
+  // pure part.
+  test("merges coverage across tenants", async () => {
+    const { coverageGaps } = await import("./linear-feed-run.mjs");
+    const { merged } = coverageGaps(
+      [
+        { coverage: { classes: { "linear.issue.state_changed": 2 } } },
+        { coverage: { classes: { "linear.issue.state_changed": 3, "linear.comment.created": 1 } } },
+      ],
+      ["linear.issue.state_changed"],
+    );
+    expect(merged["linear.issue.state_changed"]).toBe(5);
+    expect(merged["linear.comment.created"]).toBe(1);
+  });
+
+  test("⚠️ an EMPTY report list is every class MISSING, never 'complete'", async () => {
+    const { coverageGaps, REQUIRED_CLASSES } = await import("./linear-feed-run.mjs");
+    const r = coverageGaps([], REQUIRED_CLASSES);
+    expect(r.complete).toBe(false);
+    expect(r.missing).toEqual([...REQUIRED_CLASSES]);
+    // the `[].every()` shape: an all-clear derived from having looked at nothing
+    for (const bad of [null, undefined, "not an array"]) {
+      expect(coverageGaps(bad, REQUIRED_CLASSES).complete).toBe(false);
+    }
+  });
+
+  test("a tenant that ERRORED contributes no coverage", async () => {
+    const { coverageGaps } = await import("./linear-feed-run.mjs");
+    const r = coverageGaps([{ account: "t", error: "boom" }], ["linear.issue.state_changed"]);
+    expect(r.complete).toBe(false);
+  });
+
+  test("complete only when every required class meets the floor", async () => {
+    const { coverageGaps } = await import("./linear-feed-run.mjs");
+    const reports = [{ coverage: { classes: { a: 2, b: 1 } } }];
+    expect(coverageGaps(reports, ["a", "b"], 1).complete).toBe(true);
+    expect(coverageGaps(reports, ["a", "b"], 2).complete).toBe(false);
+    expect(coverageGaps(reports, ["a", "b"], 2).missing).toEqual(["b"]);
+  });
+
+  test("REQUIRED_CLASSES covers all three daemon event names plus the updated fan-out", async () => {
+    const { REQUIRED_CLASSES } = await import("./linear-feed-run.mjs");
+    expect(REQUIRED_CLASSES).toContain("linear.issue.state_changed");
+    expect(REQUIRED_CLASSES).toContain("linear.comment.created");
+    expect(REQUIRED_CLASSES).toContain("linear.issue.updated:labels"); // the cell that was missing
+    expect(REQUIRED_CLASSES.filter((c) => c.startsWith("linear.issue.updated:")).length).toBeGreaterThan(8);
+  });
+});

@@ -127,3 +127,49 @@ export function runOnce({
   }
   return reports;
 }
+
+/**
+ * The coverage cells the shadow window must observe before it may exit. Three event
+ * names the daemon acts on, with `issue.updated` fanned out per payload variant —
+ * a single `updated` cell would let the window exit having exercised one mapping
+ * while claiming them all.
+ */
+export const REQUIRED_CLASSES = Object.freeze([
+  "linear.issue.state_changed",
+  "linear.comment.created",
+  "linear.issue.updated:state",
+  "linear.issue.updated:assigneeId",
+  "linear.issue.updated:priority",
+  "linear.issue.updated:estimate",
+  "linear.issue.updated:projectId",
+  "linear.issue.updated:cycleId",
+  "linear.issue.updated:parentId",
+  "linear.issue.updated:teamId",
+  "linear.issue.updated:title",
+  "linear.issue.updated:dueDate",
+  "linear.issue.updated:description",
+  "linear.issue.updated:labels",
+]);
+
+/**
+ * Merge per-tenant coverage and name the cells still short of `min`.
+ *
+ * Pure and exported so it is testable without running the script-shaped runner —
+ * this logic already carried a real bug (an earlier cut computed it from an empty
+ * plan list, reporting every class missing right after a successful sweep), which is
+ * exactly the CTL-1659 lesson about extracting the pure part of a script.
+ *
+ * ⚠️ An empty report list yields EVERY class missing, not "complete". An all-clear
+ * derived from having looked at nothing is the `[].every()` shape this repo keeps
+ * finding.
+ */
+export function coverageGaps(reports, required = REQUIRED_CLASSES, min = 1) {
+  const merged = {};
+  for (const r of Array.isArray(reports) ? reports : []) {
+    for (const [cls, n] of Object.entries(r?.coverage?.classes ?? {})) {
+      merged[cls] = (merged[cls] ?? 0) + n;
+    }
+  }
+  const missing = (required ?? []).filter((c) => (merged[c] ?? 0) < min);
+  return { merged, missing, complete: missing.length === 0 };
+}
