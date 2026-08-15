@@ -28,11 +28,28 @@
 // path; a corpus census cannot supply one, which is the whole lesson here.
 //
 // ⭐ The deletion never needed that count. It rests on two things that ARE
-// established: no commit in main's history imported the file (measured, with a
-// control), and it was cited as THE contract for this log while describing a shape
-// most of the log does not have — ZERO of 1,202,573 measured events. A contract
-// that no code reads and that the traffic does not match is dead regardless of how
-// many producers could theoretically satisfy it.
+// established — and the instrument, its control and its SCOPE are recorded here
+// because round 23 deleted them while keeping (and broadening) the conclusion they
+// supported, which is the wrong half to drop:
+//
+//   git log origin/main -S'global-event.json' -- plugins/dev/scripts   →  0
+//   git log origin/main -S'getEventName'      -- plugins/dev/scripts   → 19  (control)
+//   git log origin/main -S'global-event.json'  (WHOLE REPO)            →  2
+//
+// The whole-repo 2 are not a contradiction, they are the point: `c996d954` touched
+// `.serena/memories/codebase_map.md` and `9f45afa0` touched `docs/adrs.md` and
+// `docs/architecture.md`. Both are DOCUMENTATION — the citations themselves. In
+// main's entire history the filename never appears in a runtime file, while the
+// control shows the same instrument finds 19 commits for a string that does.
+//
+// ⚠️ State it at the scope measured: no commit in main's history has touched that
+// filename anywhere under `plugins/dev/scripts`; every reference that ever existed
+// was in prose. "No code imported it" is the conclusion, not the measurement.
+//
+// The second established fact: it was cited as THE contract for this log while
+// describing a shape ZERO of 1,202,573 measured events had. A contract that no code
+// reads and that the traffic does not match is dead regardless of how many
+// producers could theoretically satisfy it.
 // A mechanism that has never produced an output does not exist — so it is deleted
 // in the same change that adds this file. Leaving a false contract next to a true
 // one is the duplication this work exists to remove.
