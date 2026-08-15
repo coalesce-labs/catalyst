@@ -220,7 +220,10 @@ export function drainOnce(deps = {}) {
     yieldedBaseline = y?.count ?? 0;
     // ⚠️ An inconclusive scan holds every intent, exactly like a failed sdk
     // baseline: inability to inspect is not evidence of an available slot.
-    if (y?.ok !== true) sdkBaselineOk = false;
+    if (y?.ok !== true) {
+      sdkBaselineOk = false;
+      log.warn({ orchDir, reason: y?.reason ?? null }, "delegate-runner: yielded-occupancy scan failed host-wide — holding every intent this pass (CTL-1854)");
+    }
   } catch (err) {
     sdkBaselineOk = false;
     log.warn(
@@ -335,7 +338,10 @@ export function drainOnce(deps = {}) {
     try {
       const y = countYieldedOccupancy(orchDir);
       if (y?.ok === true) yieldedNow = Math.max(yieldedBaseline, y.count);
-      else countOk = false; // inconclusive → hold this intent, like a failed countBg
+      else {
+        countOk = false; // inconclusive → hold this intent, like a failed countBg
+        log.warn({ ticket, reason: y?.reason ?? null }, "delegate-runner: yielded-occupancy re-read failed — holding this intent (CTL-1854)");
+      }
     } catch {
       countOk = false;
     }

@@ -531,3 +531,46 @@ describe("⚠️ THE WIRING: proving the functions are CALLED, not just correct"
     expect(stalled).toHaveLength(0);
   });
 });
+
+describe("⚠️ residuals: the anchor-leak chain, and warn volume", () => {
+  test("EVERY non-yield terminal writer strips the yield anchors", async () => {
+    // Fixing one writer of a family is not fixing the family — the third time this
+    // shape appeared here. The real leak chain was: sdk backstop patches the parsed
+    // object (keeping the anchors) → orchestrate-revive's continuation sets status
+    // back to "running" and keeps them → emit-complete's `.firstYieldedAt // $ts`
+    // re-anchors a BRAND-NEW wait on the OLD episode and expires it on arrival.
+    const sdk = await Bun.file(new URL("./sdk-run-phase-agent.mjs", import.meta.url)).text();
+    expect(sdk).toContain("delete sig.yieldedAt");
+    expect(sdk).toContain("delete sig.firstYieldedAt");
+    const revive = await Bun.file(new URL("../orchestrate-revive", import.meta.url)).text();
+    // BOTH continuation sites, not just the first — count so a third site added
+    // later fails here rather than leaking.
+    expect((revive.match(/del\(\.yieldedAt\)/g) ?? []).length).toBe(2);
+    const emit = await Bun.file(new URL("../phase-agent-emit-complete", import.meta.url)).text();
+    expect(emit).toContain("del(.yieldedAt)");
+  });
+
+  test("a permanently bad file warns SPARSELY but is reported EVERY time", async () => {
+    // The reader is called by the scheduler per tick, the monitor, boot-resume, and
+    // the delegate runner once per pass PLUS once per intent — an unconditional
+    // warn meant several identical lines every tick, forever, for one bad file.
+    // Count exactly, warn sparsely (the repo's existing sparse-warn discipline).
+    const { countYieldedOccupancy } = await import("./signal-reader.mjs");
+    const cfg = await import("./config.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldwarn-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"), "{}");
+    let warns = 0;
+    const orig = cfg.log.warn.bind(cfg.log);
+    cfg.log.warn = () => { warns += 1; };
+    try {
+      for (let i = 0; i < 5; i++) countYieldedOccupancy(orch);
+    } finally { cfg.log.warn = orig; }
+    expect(warns).toBe(1); // throttled per path
+    // ...but the caller can still see it on EVERY call — throttling the log must
+    // not throttle the data.
+    const out = countYieldedOccupancy(orch);
+    expect(out.unreadable).toHaveLength(1);
+    expect(out).toMatchObject({ count: 1, ok: true });
+  });
+});

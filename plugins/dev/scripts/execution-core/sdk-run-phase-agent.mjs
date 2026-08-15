@@ -470,6 +470,19 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
     sig.assertedBy = ASSERTED_BY.SDK_BACKSTOP;
     sig.updatedAt = ts;
     sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), [status]: ts };
+    // ⚠️ CTL-1854: strip the yield anchors on ANY non-yield terminal. This writer
+    // PATCHES the parsed object, so `yieldedAt`/`firstYieldedAt`/`yieldMs` survive
+    // into e.g. `turn-cap-exhausted`; orchestrate-revive's continuation then sets
+    // status back to "running" and keeps them, and emit-complete's
+    // `.firstYieldedAt // $ts` re-anchors a BRAND-NEW wait on the OLD episode —
+    // expiring it the instant it is declared. The bash emitter already does this
+    // (`del(.yieldedAt) | del(.firstYieldedAt) | del(.yieldMs)` on every non-yield
+    // status); every other terminal writer must match, or the anchors leak through
+    // whichever writer was missed. Fixing one writer of a family is not fixing the
+    // family — the third time that shape has appeared on this ticket.
+    delete sig.yieldedAt;
+    delete sig.firstYieldedAt;
+    delete sig.yieldMs;
     const tmp = `${signalFile}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(sig));
     renameSync(tmp, signalFile);

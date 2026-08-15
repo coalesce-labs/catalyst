@@ -6340,13 +6340,9 @@ export function schedulerTick(
     yieldedOccupancy = y.count;
     yieldedOccupancyOk = y.ok;
     yieldedOccupancyReason = y.reason ?? null;
-    if (Array.isArray(y.unreadable) && y.unreadable.length > 0) {
-      // Charged, not blocking — but an operator needs the paths to clear them.
-      log.warn(
-        { files: y.unreadable.slice(0, 10) },
-        "scheduler: uninterpretable phase signal(s) charged as held slots (CTL-1854)"
-      );
-    }
+    // NOTE: the reader itself warns (throttled per path). Re-logging the same list
+    // here doubled every line each tick, so this caller deliberately stays quiet
+    // and relies on `y.unreadable` being returned for anything that needs it.
   } catch (err) {
     yieldedOccupancyOk = false;
     yieldedOccupancyReason = err?.message ?? "threw";

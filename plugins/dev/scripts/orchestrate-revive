@@ -916,6 +916,7 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
         jq --arg ts "$TS" --arg bg "$NEW_BG_JOB_ID" \
            '.status = "running"
             | .updatedAt = $ts
+            | del(.yieldedAt) | del(.firstYieldedAt) | del(.yieldMs)
             | (if $bg == "" then . else .bg_job_id = $bg end)' \
            "$PHASE_SIGNAL" > "${PHASE_SIGNAL}.tmp" && mv "${PHASE_SIGNAL}.tmp" "$PHASE_SIGNAL"
         emit_state event "$(jq -nc \
@@ -1262,6 +1263,7 @@ for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
        --arg hp "$P_HANDOFF" --argjson cc "$NEW_P_CC" \
        '.status = "running"
         | .updatedAt = $ts
+        | del(.yieldedAt) | del(.firstYieldedAt) | del(.yieldMs)
         | (if $bg == "" then . else .bg_job_id = $bg end)
         | .phaseContinuationCount = $cc
         | .phaseContinuations = ((.phaseContinuations // []) + [{ts:$ts, sessionId:$sid, handoffPath:$hp, bg_job_id:$bg}])' \

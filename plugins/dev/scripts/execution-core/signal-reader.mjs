@@ -281,6 +281,12 @@ const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 // recognizes the status at all.
 //
 // Pure over the filesystem; never throws (a missing workers/ dir → 0).
+// CTL-1854: per-path warn throttle for the reader above. Module-level so the
+// scheduler/monitor/boot/delegate callers in one process share one budget — they
+// are one detector looking at one directory.
+const UNREADABLE_WARN_INTERVAL_MS = 10 * 60 * 1000;
+const _unreadableWarnAt = new Map();
+
 export function countYieldedOccupancy(orchDir) {
   // ⚠️ FAIL CLOSED TO THE TICKET, NOT TO THE HOST.
   //
@@ -370,11 +376,24 @@ export function countYieldedOccupancy(orchDir) {
     }
   }
   if (unreadable.length > 0) {
-    // WARN, with paths. Without this, a held fleet is undiagnosable.
-    log.warn(
-      { count: unreadable.length, files: unreadable.slice(0, 10) },
-      "countYieldedOccupancy: uninterpretable phase signal(s) charged as held slots (CTL-1854)"
-    );
+    // ⚠️ COUNT EXACTLY, WARN SPARSELY — the repo's existing discipline
+    // (otel-forward/lib/sparse-warn.ts). This reader is called by the scheduler
+    // per tick, by the monitor, by boot-resume, and by the delegate runner ONCE
+    // PER PASS *plus* once per intent — so an unconditional warn here meant a
+    // single permanently-bad file produced several identical lines every tick,
+    // forever. The paths are always RETURNED (`unreadable`) so a caller can
+    // report them; the log is throttled per path.
+    const now = Date.now();
+    for (const u of unreadable) {
+      const last = _unreadableWarnAt.get(u.path) ?? 0;
+      if (now - last < UNREADABLE_WARN_INTERVAL_MS) continue;
+      _unreadableWarnAt.set(u.path, now);
+      log.warn(
+        { path: u.path, reason: u.reason, totalThisScan: unreadable.length },
+        "countYieldedOccupancy: uninterpretable phase signal charged as a held slot — " +
+          "inspect or remove the file; it will hold one slot for its ticket until then (CTL-1854)"
+      );
+    }
   }
   return { count, ok: true, yields: countedYields, unreadable };
 }
