@@ -1,16 +1,21 @@
 # Changelog
 
-## [12.55.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.54.1...catalyst-dev-v12.55.0) (2026-08-15)
+## [12.55.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.54.1...catalyst-dev-v12.55.0)
+
+Aug 15, 2026
+
+<!-- ai-enhanced -->
+
+### Event Schema Hardening & Installer Cloud Path
+
+Every event flowing through the daemon is now validated against a measured schema derived from 1.1 million real log lines, so envelope drift fails loudly in CI rather than silently dropping data at runtime. The installer gains a `--cloud-token` / `--cloud-account` path that completes a full cloud-connected setup in one step — and deliberately refuses to guess your tenant if the account is omitted. Two supporting fixes land alongside: supplemental Linear reads now route through the local replica to stop burning shared API quota, and event name resolution is unified through a single shared boundary so no envelope shape can be visible to some readers and invisible to others.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1819 — validate every event against one measured schema, so envelope drift fails loudly instead of silently losing data ([#3380](https://github.com/coalesce-labs/catalyst/issues/3380)) ([aec4886](https://github.com/coalesce-labs/catalyst/commit/aec48863d3d906e03dc8619d75f20e5a0471cfda))
 * **dev:** CTL-1836 — give the installer a cloud path, and make it refuse to guess the tenant ([#3365](https://github.com/coalesce-labs/catalyst/issues/3365)) ([13d8a07](https://github.com/coalesce-labs/catalyst/commit/13d8a07971c213df6cb55207fdfd81899c4312b6))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1806 — serve the board's supplemental reads from the local replica, so a display render stops spending the shared Linear quota ([#3355](https://github.com/coalesce-labs/catalyst/issues/3355)) ([effcbc8](https://github.com/coalesce-labs/catalyst/commit/effcbc8bd933fadbd669679dd19989c5f93f8345))
 * **dev:** CTL-1834 — resolve every event's name through one shared boundary, so a new envelope shape cannot be visible to some readers and invisible to others ([#3356](https://github.com/coalesce-labs/catalyst/issues/3356)) ([953d53e](https://github.com/coalesce-labs/catalyst/commit/953d53e50909c7760b9b4813ddceddd3916a4333))
 * **execution-core,orch-monitor:** CTL-1723 item 1 + OTEL attribute manifest — phase-signal mtime ties break by pipeline ordinal; 17 v2-envelope keys manifested ([b8cb40b](https://github.com/coalesce-labs/catalyst/commit/b8cb40b5f40ab8676932e003bdc2de054b30fc2f))
