@@ -24,16 +24,7 @@
 // knowingly. Either way it reports the bytes it actually read.
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import {
-  existsSync,
-  openSync,
-  readSync,
-  closeSync,
-  statSync,
-  readFileSync,
-  writeFileSync,
-  mkdtempSync,
-} from "node:fs";
+import { existsSync, statSync, readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scanEventsSince, tailParsedEvents, scanEventsChunked } from "./event-tail.mjs";
@@ -316,80 +307,38 @@ describe("live corpus (opt-in)", () => {
             `Refusing to report success without inspecting anything.`
         );
       }
-      // BOUNDED TAIL, never a whole-file read. The live log is ~1.0 GB on a
-      // fleet host (measured, mini 2026-08), and whole-log readFileSync is a
-      // recorded incident shape here — it produced multi-second-to-115s stalls.
-      // The AC asks for a 24h SAMPLE, and the tail is that sample. Cap mirrors
-      // event-tail.mjs's DEFAULT_TAIL_MAX_BYTES.
-      // Overridable so the truncation guard itself is testable (below).
+      // ── NO INTERNAL TRUNCATION (Codex rounds 7, 9, 11, 12) ────────────────
+      //
+      // This used to read a bounded TAIL of an oversized sample. That byte work
+      // produced FOUR separate false-passes, every one of them a boundary case:
+      //   • start landing exactly on a record boundary discarded a whole record
+      //   • the fragment identified by TEXT exempted an identical earlier line
+      //   • an unterminated corrupt record at EOF was waived as a race
+      //   • a window containing NO newline kept the entire partial suffix, so a
+      //     corrupt record passed whenever its retained tail happened to parse
+      //
+      // All four existed only to save the caller a `tail -c`. So the truncation is
+      // gone: an oversized sample now FAILS with instructions instead of being
+      // silently sampled. The caller bounds it, the file read here is small by
+      // contract, and the entire class of boundary bugs goes with it.
       const MAX = Number(process.env.CATALYST_EVENT_LOG_SAMPLE_MAX_BYTES) || 64 * 1024 * 1024;
-      // Refuse to silently examine a fraction of what the caller pointed at.
       const fileSize = statSync(sample).size;
-      if (fileSize > MAX && process.env.CATALYST_EVENT_LOG_SAMPLE_ALLOW_TRUNCATION !== "1") {
+      if (fileSize > MAX) {
         throw new Error(
-          `CATALYST_EVENT_LOG_SAMPLE is ${fileSize} bytes but this test scans at most ${MAX}. ` +
-            `A pass would cover only the final ${MAX} bytes and say nothing about the rest. ` +
-            `Bound the sample first (e.g. tail -c ${MAX}), or set ` +
-            `CATALYST_EVENT_LOG_SAMPLE_ALLOW_TRUNCATION=1 to accept tail-only scope.`
+          `CATALYST_EVENT_LOG_SAMPLE is ${fileSize} bytes, over the ${MAX}-byte cap. ` +
+            `This scan does NOT sample — a partial pass would say nothing about the rest. ` +
+            `Bound it first:  tail -c ${MAX} <log> > /tmp/sample.jsonl  (and note that a tail ` +
+            `may begin mid-record, so drop its first line).`
         );
       }
-      const fd = openSync(sample, "r");
-      let text;
-      try {
-        const size = statSync(sample).size;
-        const start = Math.max(0, size - MAX);
-        // Codex round 7: read ONE BYTE BEFORE `start` so we can tell an aligned
-        // boundary from a mid-record one. When `size - MAX` lands exactly at the
-        // start of a record, the first line is COMPLETE, and unconditionally
-        // slicing it off discards a real record as though it were a partial
-        // prefix — Codex reproduced a malformed record vanishing that way while
-        // the test still reported success. A scan that silently drops the record
-        // it was meant to inspect is the false-clean shape this file exists to
-        // prevent.
-        const probeStart = start > 0 ? start - 1 : 0;
-        const buf = Buffer.allocUnsafe(Math.min(size - probeStart, MAX + (start > 0 ? 1 : 0)));
-        readSync(fd, buf, 0, buf.length, probeStart);
-        text = buf.toString("utf8");
-        if (start > 0) {
-          // text[0] is the byte before `start`. If it is a newline, `start` is a
-          // record boundary and everything from index 1 is whole; otherwise the
-          // first line really is a partial prefix and gets dropped.
-          const aligned = text[0] === "\n";
-          text = aligned ? text.slice(1) : text.slice(text.indexOf("\n") + 1);
-        }
-      } finally {
-        closeSync(fd);
-      }
+      const text = readFileSync(sample, "utf8");
 
-      // Codex round 8: a COMPLETE line that does not parse is real damage in the
-      // inspected region and must fail this scan. Previously any unparseable line
-      // was written off as "event-tail.mjs's detector, not this one" — so one valid
-      // envelope alongside `{not json}` reported 23 passes and exit 0, a clean
-      // corpus verdict over a corrupted one.
-      //
-      // Only the FINAL element can be a raced trailing fragment, and only when the
-      // text does not end in a newline. Everything else is complete by construction.
+      // Only the final line can be an unterminated fragment, and only when the
+      // text does not end in a newline. Waiving it is opt-in — on a stable file an
+      // unterminated corrupt record at EOF is corruption, not a race (round 11).
       const endsWithNewline = text.endsWith("\n");
-      const rawLines = text.split("\n");
-      // Codex round 9: identify the fragment by POSITION, never by value. Comparing
-      // `line === trailingFragment` exempted every line whose TEXT matched the final
-      // unterminated one — so a complete `{not json}` earlier in the file was waved
-      // through because an identical fragment happened to end it. Only the last
-      // element can be a fragment, and only when the text does not end in a newline.
-      //
-      // Codex round 11: and waiving it AT ALL is only defensible when the file is
-      // being written concurrently. On a STABLE sample an unterminated corrupt
-      // record at EOF is real corruption, not a race — and waiving it produced a
-      // clean verdict over exactly that (one valid envelope plus unterminated
-      // `{not json}` reported 20 passes, exit 0). EOF is also the likeliest place
-      // for a truncated log to be damaged, so it is the worst place to be lenient.
-      //
-      // Default is therefore to FAIL. The waiver is explicit and opt-in, for the
-      // operator who knowingly points this at a live, actively-appended log:
-      //   CATALYST_EVENT_LOG_SAMPLE_ALLOW_TAIL_FRAGMENT=1
-      // Deterministic and directly testable — no "did the file change under us"
-      // branch that only production ever exercises.
       const waiveFragment = process.env.CATALYST_EVENT_LOG_SAMPLE_ALLOW_TAIL_FRAGMENT === "1";
+      const rawLines = text.split("\n");
       const fragmentIndex = endsWithNewline || !waiveFragment ? -1 : rawLines.length - 1;
       const lines = [];
       for (let i = 0; i < rawLines.length; i++) {
