@@ -158,7 +158,16 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    on work you started — a background job, a CI run, a re-review you requested — you MUST say so:
 
    ```bash
-   "$EMIT" --phase "$PHASE" --ticket "$TICKET" --status yield [--yield-seconds <n>]
+   # Runnable as written. Do NOT use "$EMIT" here — it is assigned in the terminal
+   # block near the end of this skill, and under the prelude's `set -u` expanding it
+   # this early aborts the shell, so no yield is written and the runner records the
+   # very abandonment this path exists to prevent.
+   "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+     --phase "$PHASE" --ticket "$TICKET" --status yield
+
+   # To wait less than the 30-minute ceiling, pass a concrete number of seconds:
+   "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+     --phase "$PHASE" --ticket "$TICKET" --status yield --yield-seconds 600
    ```
 
    **⚠️ A yield does not bound the child process — you must.** The emitter updates JSON; it

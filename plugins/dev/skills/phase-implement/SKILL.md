@@ -257,8 +257,16 @@ Before continuing to the End block, check for mid-flight context updates from th
 > simply stop. Declare the wait:
 >
 > ```bash
+> # Runnable as written. The bracket notation used elsewhere in docs is NOT shell:
+> # `[--yield-seconds <n>]` makes bash read from a file named `n` and redirect into
+> # a file named `]`, so the emitter never runs and the phase is recorded as the
+> # undeclared abandonment this command exists to prevent.
 > "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
->   --phase "$PHASE" --ticket "$TICKET" --status yield [--yield-seconds <n>]
+>   --phase "$PHASE" --ticket "$TICKET" --status yield
+>
+> # To wait less than the 30-minute ceiling, pass a concrete number of seconds:
+> "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+>   --phase "$PHASE" --ticket "$TICKET" --status yield --yield-seconds 600
 > ```
 >
 > **⚠️ A yield does not bound the child process — you must.** The emitter updates JSON; it does not
