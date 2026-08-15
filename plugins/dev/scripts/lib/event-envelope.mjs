@@ -10,37 +10,29 @@
 // against the live log: ZERO of the frozen snapshot's events satisfied it, and
 // both citations were prose.
 //
-// ⚠️ SCOPE OF THAT ZERO (Codex round 22). It is a fact about the MEASURED LOG, not
-// about what producers can emit — and the difference is real, not pedantic.
-// `emit-worker-status-change.sh`'s fallback (used when `$STATE_SCRIPT` is not
-// executable) writes `{ts, orchestrator, worker, event:"worker-status-terminal",
-// detail}`, and that name IS in the enum, so a SUPPORTED producer can emit a
-// conforming record. The measured host simply never exercised that path — the same
-// host-scope limit that hid `orchestrator`/`worker` from the key census in round 8.
+// ⚠️ SCOPE OF THAT ZERO (Codex rounds 22 + 23). It is a fact about the MEASURED
+// LOG, and NOT a statement about what producers can emit. Two supported producers
+// demonstrably CAN emit a conforming record:
 //
-// ⭐ That does not weaken the deletion; it sharpens it. A file cited as THE contract
-// for this log, which no code ever imported and which matches only the degraded
-// fallback output of one script, is a worse contract than one matching nothing —
-// it would have described the exception as the rule.
+//   emit-worker-status-change.sh  fallback → {ts, orchestrator, worker,
+//                                  event:"worker-status-terminal", detail}
+//   catalyst-state.sh cmd_register         → {ts, orchestrator, worker:null,
+//                                  event:"orchestrator-started", detail}
 //
-// ON "NO CODE EVER IMPORTED IT" (Codex rounds 19 + 20). That is a claim about
-// HISTORY, and a current-tree grep establishes only present absence. Round 19's
-// instrument was still wrong twice over: its four suffix globs missed extensionless
-// executables (`plugins/dev/scripts/catalyst-events` is real code), and it searched
-// `--all`, so committing the correction CHANGED ITS OWN RESULT — the recorded
-// command and the recorded number diverged the moment they were written down.
+// ⛔ HOW MANY MORE IS NOT ESTABLISHED, and this comment has now been wrong about
+// that TWICE. Round 22 said "no real producer line matches" (false). Round 23's
+// correction said "matches only one script's degraded fallback" (also false) —
+// I repeated the observed-to-universal inference inside the paragraph fixing it.
+// A partial grep shows the enum's names across several files each, so treat the
+// producer set as UNENUMERATED. Anyone needing a count must audit every producer
+// path; a corpus census cannot supply one, which is the whole lesson here.
 //
-// Both fixed by scoping to the branch the claim is about and the tree it covers:
-//
-//   git log origin/main -S'global-event.json' -- plugins/dev/scripts   → 0
-//   git log origin/main -S'getEventName'      -- plugins/dev/scripts   → 19  (control)
-//
-// `origin/main` excludes this PR's own commits, so the result is STABLE as this
-// branch grows; the bare pathspec covers every file under the runtime including
-// extensionless ones. The control shows the instrument does find real code
-// references at the same scope. Demonstrated statement: no commit in main's
-// history has ever touched that filename anywhere under `plugins/dev/scripts`.
-//
+// ⭐ The deletion never needed that count. It rests on two things that ARE
+// established: no commit in main's history imported the file (measured, with a
+// control), and it was cited as THE contract for this log while describing a shape
+// most of the log does not have — ZERO of 1,202,573 measured events. A contract
+// that no code reads and that the traffic does not match is dead regardless of how
+// many producers could theoretically satisfy it.
 // A mechanism that has never produced an output does not exist — so it is deleted
 // in the same change that adds this file. Leaving a false contract next to a true
 // one is the duplication this work exists to remove.
