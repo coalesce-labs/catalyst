@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.56.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.55.0...catalyst-dev-v12.56.0) (2026-08-15)
+## [12.56.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.55.0...catalyst-dev-v12.56.0)
+
+Aug 15, 2026
+
+<!-- ai-enhanced -->
+
+### Phase Agent Yield & Advancement Reliability
+
+Phase agents can now declare a bounded wait with `--status yield` when delegating to a background job, so finishing work is no longer recorded as abandonment. The advancement sweep gains a durable once-per-edge idempotency guard keyed on the predecessor's identity, preventing the same phase edge from firing multiple times in a single tick. Two supporting fixes round out the release: the Linear webhook monitor now detects 401 authentication failures via route-comparison against the GitHub control, and connected replicas report the schema bundle they actually loaded rather than a version string that may not reflect what's in memory.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1805 — durable once-per-edge advancement idempotency guard ([#3404](https://github.com/coalesce-labs/catalyst/issues/3404)) ([0d9e25f](https://github.com/coalesce-labs/catalyst/commit/0d9e25f789c7019cb66d60beeaf3078024f424c6))
 * **dev:** CTL-1841 — Linear webhook 401 alarm (route-comparison detector) ([#3364](https://github.com/coalesce-labs/catalyst/issues/3364)) ([dfae529](https://github.com/coalesce-labs/catalyst/commit/dfae529b3581894c0ebab47c0abfc14d0700e552))
