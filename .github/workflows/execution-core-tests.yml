@@ -914,6 +914,7 @@ jobs:
             phase-yield-e2e.test.mjs \
             cloud-sync-account.test.mjs \
             cloud-sync-schema-identity.test.mjs \
+            linear-feed-event.test.mjs \
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \
