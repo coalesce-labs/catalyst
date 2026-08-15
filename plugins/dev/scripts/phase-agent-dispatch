@@ -831,6 +831,46 @@ if [[ $DRY_RUN -eq 0 ]]; then
 				fi
 			fi
 			if [[ $REAPED_ORPHAN -eq 0 ]]; then
+				# ─── CTL-1805 (A3): make the lost claim AUDIBLE ─────────────────────
+				# The bow-out below is stdout-only + exit 0 — completely silent to
+				# the event log. In the CTL-56 re-advance incident there were ZERO
+				# claim-lost events across 13 collisions, so the give-up path was
+				# invisible. Emit exactly one canonical event at this single point of
+				# confirmed collision (a live worker, a young claim, or a re-won
+				# generation), carrying ticket/phase/generation. Strictly fail-open:
+				# a build/write failure must NEVER change the stdout+exit-0 contract
+				# (that JSON line is the load-bearing idempotent-noop return,
+				# CTL-1367), so the whole emit is `|| true`. Reuses the same bash
+				# canonical seam (build_canonical_line + canonical_jsonl_append,
+				# sourced transitively via worktree-rebase.sh → rebase-telemetry.sh →
+				# canonical-event.sh) and the same events-dir chain every other bash
+				# producer uses (lib/rebase-telemetry.sh).
+				_emit_claim_lost() {
+					command -v build_canonical_line >/dev/null 2>&1 || return 0
+					command -v canonical_jsonl_append >/dev/null 2>&1 || return 0
+					local _cl_ts _cl_payload _cl_line
+					_cl_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+					_cl_payload="$(jq -nc \
+						--arg phase "$PHASE" \
+						--argjson generation "$TARGET_GENERATION" \
+						'{phase: $phase, generation: $generation, reason: "single-flight-lost"}')" || return 0
+					_cl_line="$(build_canonical_line \
+						--ts "$_cl_ts" \
+						--severity WARN \
+						--service "catalyst.phase-agent" \
+						--event-name "phase.dispatch.claim-lost.${TICKET}" \
+						--entity "phase" \
+						--action "claim-lost" \
+						--label "$TICKET" \
+						--orch "$ORCH_ID" \
+						--worker "$TICKET" \
+						--linear-ticket "$TICKET" \
+						--payload-json "$_cl_payload")" || return 0
+					canonical_jsonl_append \
+						"${EVENTS_DIR:-${CATALYST_EVENTS_DIR:-${CATALYST_DIR:-$HOME/catalyst}/events}}" \
+						"$_cl_line" || return 0
+				}
+				_emit_claim_lost || true
 				# A live/in-flight worker (signal present, or young claim), OR a
 				# concurrent dispatcher re-won the reaped generation → bow out.
 				jq -nc \

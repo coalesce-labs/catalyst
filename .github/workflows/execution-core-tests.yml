@@ -854,6 +854,7 @@ jobs:
             phantom-worker-dir.test.mjs \
             worker-dir-gc.test.mjs \
             in-flight-supersede.test.mjs \
+            advance-idempotency.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
             claim.test.mjs \

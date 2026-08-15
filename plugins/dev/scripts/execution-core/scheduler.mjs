@@ -72,6 +72,11 @@ export { EMPTY_WORKER_DIR_GRACE_DEFAULT_MS };
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { explainAdvanceEvidence } from "./assertion-evidence.mjs"; // CTL-1789: from-phase terminal attribution
+import {
+  computeAdvanceEdgeKey,
+  isAdvanceAlreadyApplied,
+  recordAdvanceApplied,
+} from "./advance-guard.mjs"; // CTL-1805: durable once-per-edge advancement idempotency guard
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
@@ -216,6 +221,7 @@ import {
   defaultAppendCooldownEscalatedEvent,
   defaultAppendPhaseAdvanceHeldEvent,
   defaultAppendPhaseAdvanceAppliedEvent, // CTL-1789: the positive half of the advancement gate
+  defaultAppendPhaseAdvanceSuppressedEvent, // CTL-1805: the idempotency-guard's suppressed-duplicate canary
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
 } from "./recovery.mjs";
@@ -3287,6 +3293,11 @@ export function readDispatchFailureReason(orchDir, ticket, phase) {
 // (the SDK path — see settleDispatchSync), leaving bg verification (the default,
 // requireBgJob:true) byte-identical. For the SDK path `done` is also a runnable
 // terminal state (an idempotent duplicate dispatch of an already-completed phase).
+// CTL-1805 (A2): the reason string for the idempotent SDK `done` prelaunch no-op.
+// Named (not a bare literal) so it stays greppable alongside the other
+// verifyDispatchedSignal reasons and is referenced identically at the call site.
+export const NOOP_DONE_PRELAUNCH = "noop_done_prelaunch";
+
 export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = true } = {}) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   let raw;
@@ -3312,17 +3323,32 @@ export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = 
     return { ok: false, reason: "signal_unparseable" };
   }
   const status = signal?.status;
+  // CTL-1805 (A2): an SDK (requireBgJob:false) dispatch of an already-`done`
+  // phase is NOT a launch — the worker never ran; the signal was already
+  // terminal. Before this fix `done` was folded into `runnable` on the SDK path
+  // and returned {ok:true}, which the call site read as a successful launch: it
+  // cleared the failure-only cooldown (re-arming the loop every tick) and emitted
+  // a phase.dispatch.launched with bg_job_id:null. Classify it as a distinct
+  // NON-success, NON-failure no-op so the caller neither clears nor writes the
+  // cooldown — this is the fuel the CTL-56 re-advance loop ran on.
+  if (requireBgJob === false && status === "done") {
+    return { ok: false, reason: NOOP_DONE_PRELAUNCH, noop: true };
+  }
   // CTL-1854: awaiting-work is runnable — a worker that dispatched and immediately
-  // declared a bounded wait has not failed to dispatch.
-  // CTL-1854: YIELDED_STATUS belongs on BOTH branches. Round 10 added it only to
-  // the bg branch, so an in-process (SDK/codex) retry against an already-yielded
-  // phase reported `status_not_runnable` and recorded a FALSE dispatch failure +
-  // cooldown — while dispatch.mjs's sdkSignalRunnable accepted the same signal.
-  // Two verifiers disagreeing about one lifecycle is how a phase gets punished for
-  // a state it correctly declared.
-  const runnable = requireBgJob
-    ? status === "dispatched" || status === "running" || status === YIELDED_STATUS
-    : status === "dispatched" || status === "running" || status === "done" || status === YIELDED_STATUS;
+  // declared a bounded wait has not failed to dispatch. YIELDED_STATUS belongs on
+  // BOTH paths: round 10 added it only to the bg branch, so an in-process
+  // (SDK/codex) retry against an already-yielded phase reported
+  // `status_not_runnable` and recorded a FALSE dispatch failure + cooldown — while
+  // dispatch.mjs's sdkSignalRunnable accepted the same signal. Two verifiers
+  // disagreeing about one lifecycle is how a phase gets punished for a state it
+  // correctly declared.
+  //
+  // Rebase note (CTL-1805 × CTL-1854): CTL-1854's SDK branch also listed `done` as
+  // runnable. The A2 guard above now returns before `done` can reach here on the
+  // SDK path, and `done` was never runnable on the bg path — so the two branches
+  // became identical and collapse to one expression. Both intents are preserved:
+  // SDK `done` is a no-op (A2), YIELDED_STATUS is runnable everywhere (CTL-1854).
+  const runnable = status === "dispatched" || status === "running" || status === YIELDED_STATUS;
   if (!runnable) {
     return { ok: false, reason: "status_not_runnable" };
   }
@@ -4532,6 +4558,10 @@ export function schedulerTick(
     // the advancement gate must not stay refusal-only on any host that forgets to
     // wire it. Tests inject a spy.
     appendPhaseAdvanceAppliedEvent = defaultAppendPhaseAdvanceAppliedEvent,
+    // CTL-1805: suppressed-duplicate audit emitter — phase.advance.suppressed-duplicate.<ticket>.
+    // Best-effort, at most once per throttle window per (ticket,from,to) edge. The
+    // idempotency guard's canary. Default-on; tests inject a spy.
+    appendPhaseAdvanceSuppressedEvent = defaultAppendPhaseAdvanceSuppressedEvent,
     // CTL-757: canonical linear.state.write audit emitter, injectable for tests.
     // Caller-emitted at the 4 scheduler write sites (scheduler-advance,
     // preemption-resume, terminal-sweep, reconcile-backstop) via the emitStateWrite
@@ -5067,6 +5097,24 @@ export function schedulerTick(
       // the SDK prelaunch signal has no bg_job_id, so the async path must not
       // require one.
       const v = verifyDispatched(orchDir, ticket, phase, { requireBgJob: !dispatchWasAsync });
+      // CTL-1805 (A2): an SDK dispatch of an already-`done` phase is an idempotent
+      // NO-OP, not a launch and not a failure. Short-circuit BEFORE the v.ok /
+      // failure ladder so we neither clear the cooldown (which re-armed the CTL-56
+      // re-advance loop every tick) nor emit a phase.dispatch.launched with
+      // bg_job_id:null nor record a dispatch failure (which would spuriously trip
+      // the circuit breaker / escalation ladder). The edge simply does not advance
+      // this tick — the loop's fuel is removed. The advancement sweep's caller
+      // treats a non-ok result as "did not advance" and (in its else branch) only
+      // reaps the predecessor, which is acceptable for a no-op.
+      if (v.noop === true) {
+        return {
+          ok: false,
+          noop: true,
+          code: 0,
+          reason: v.reason ?? NOOP_DONE_PRELAUNCH,
+          signal: null,
+        };
+      }
       if (v.ok) {
         clearDispatchCooldown(orchDir, ticket, phase); // CTL-624: success clears any prior cool-down
         // CTL-660: record the VERIFIED launch. Re-read the signal for the
@@ -7345,6 +7393,12 @@ export function schedulerTick(
   // CTL-705: preempted workers are skipped — their active status is not "done" so
   // deriveAdvancement returns null, but an early continue makes the intent explicit
   // and provides a regression anchor (test 9 in the plan).
+  //
+  // CTL-1805 (A1): the durable once-per-edge idempotency guard's on/off switch,
+  // read ONCE per tick so a test (and an operator) can flip process.env between
+  // schedulerTick calls. Default ON (enforce); "off" restores the exact pre-fix
+  // unbounded-replay behavior — the mechanism behind the positive control.
+  const advanceGuardEnabled = process.env.CATALYST_ADVANCE_GUARD !== "off";
   const advanced = [];
   for (const ticket of listInFlightTickets(orchDir)) {
     // Skip parked (preempted) tickets — they re-enter via the resume sweep (1.5).
@@ -7385,6 +7439,64 @@ export function schedulerTick(
       remediateCycleCount: cycleCount,
     });
     if (!next) continue;
+
+    // CTL-1805 (A1): resolve the PREDECESSOR IDENTITY and the edge key ONCE, here
+    // — hoisted out of the dv.ok branch below so BOTH the idempotency guard
+    // (check-before-dispatch, immediately after) and the CTL-1789 applied-event
+    // emit (reused verbatim on success) key off the SAME predecessor rather than
+    // computing it twice. The remediate-detour handling is the CTL-1789 round-1
+    // P1 fix, preserved: a remediation re-entry's `from` is `remediate`, resolved
+    // from the PRE-reset snapshot (maybeResetForRemediateCycle already deleted
+    // phase-remediate.json above) via the SAME resolveReapPredecessor the reap
+    // path uses, so the guard key, the applied-event `from`, and the reaped
+    // worker are always the same phase; every other edge is the FSM's own input
+    // via latestLivePhase.
+    const advanceDetour = resolveReapPredecessor(preResetSignals, next);
+    const fromPhase =
+      advanceDetour?.phase === REMEDIATE_PHASE ? REMEDIATE_PHASE : latestLivePhase(signals);
+    const fromRaw = fromPhase
+      ? fromPhase === REMEDIATE_PHASE
+        ? // the reset already deleted the file — remediateRaw is the pre-reset capture
+          (remediateRaw ?? readPhaseSignalRaw(orchDir, ticket, fromPhase))
+        : readPhaseSignalRaw(orchDir, ticket, fromPhase)
+      : null;
+    const advanceEdgeKey = computeAdvanceEdgeKey({
+      ticket,
+      from: fromPhase,
+      to: next,
+      predRaw: fromRaw,
+    });
+
+    // CTL-1805 (A1): durable once-per-edge idempotency guard. If this exact edge
+    // — the SAME predecessor identity (ticket|from|to|generation|updatedAt) —
+    // already applied, suppress the ENTIRE fanout (no dispatch, no
+    // linear.state.write, no worker.transition, no predecessor reap) and emit at
+    // most one throttled canary per (ticket,from,to) edge per window. A LEGITIMATE
+    // re-advance (a CTL-1660 backward re-dispatch at a newer predecessor
+    // generation, a CTL-653 verify⇄remediate re-entry at a new remediate
+    // generation) presents a DIFFERENT key → not suppressed → the marker is
+    // overwritten on success below. This is the check-before-dispatch half; the
+    // write-after-success half is recordAdvanceApplied in the dv.ok branch.
+    if (
+      advanceGuardEnabled &&
+      isAdvanceAlreadyApplied(orchDir, ticket, fromPhase, next, advanceEdgeKey)
+    ) {
+      const suppressKey = `${ticket}|${fromPhase}|${next}`;
+      const lastSuppressEmit = lastAdvanceSuppressEmit.get(suppressKey);
+      if (
+        lastSuppressEmit === undefined ||
+        now() - lastSuppressEmit >= ADVANCE_SUPPRESS_WINDOW_MS
+      ) {
+        lastAdvanceSuppressEmit.set(suppressKey, now());
+        safeEmit(
+          appendPhaseAdvanceSuppressedEvent,
+          { orchId: ticket, ticket, from: fromPhase, to: next, edgeKey: advanceEdgeKey },
+          { ticket, phase: "advance" }
+        );
+      }
+      continue;
+    }
+
     // (STEP B) CTL-755 admission gate — hold the triage→research promotion unless
     // STEP A admitted this ticket (deps terminal + won priority/capacity). Soft
     // hold: no dispatch → applyPhaseStatus(research)/applyEstimate never fire, the
@@ -7418,9 +7530,14 @@ export function schedulerTick(
       // true and verified — dispatchAndVerify has already confirmed a live
       // successor worker. Emit the positive half of the advancement gate.
       //
-      // `from` is re-derived with latestLivePhase from the SAME post-sanitize map
-      // deriveAdvancement consumed above, so the audit names the FSM's actual
-      // input rather than a second, independently-guessed predecessor.
+      // `from`/`fromRaw` were resolved ONCE above (hoisted for the CTL-1805
+      // idempotency guard) from the SAME post-sanitize map deriveAdvancement
+      // consumed — including the CTL-1789 round-1 P1 remediate-detour fix (a
+      // remediation re-entry's `from` is `remediate`, resolved from the pre-reset
+      // snapshot via resolveReapPredecessor rather than latestLivePhase, which
+      // scans PHASES and can never return the ANCILLARY `remediate`). So the
+      // audit names the FSM's actual input, and the applied-event `from`, the
+      // guard key, and the reaped worker are always the same phase.
       //
       // `evidence` classifies WHO wrote that from-phase's terminal: the agent's
       // own wrapper (declared) vs an infrastructure flip/reclaim (fabricated) vs
@@ -7432,29 +7549,6 @@ export function schedulerTick(
       // so the first pipeline pass after deploy reads `absent` /
       // evidence_reason="no-marker". Do not alarm on `absent` until a full ticket
       // has cycled through.
-      //
-      // REMEDIATE DETOUR (CTL-1789 round-1 P1, Codex): latestLivePhase scans
-      // PHASES, and `remediate` is an ANCILLARY phase (∉ PHASES) — so it can
-      // NEVER return `remediate`, whether or not the signal still exists. On
-      // top of that, maybeResetForRemediateCycle deleted phase-remediate.json
-      // above, before `signals` was even read. Left alone, every remediation
-      // re-entry therefore reported `from=implement` and classified its
-      // evidence off the long-finished implement signal — laundering a
-      // FABRICATED remediation terminal into a DECLARED one, corrupting the
-      // exact metric this event exists to produce. Resolve that one edge from
-      // the SAME pre-reset snapshot and the SAME resolver the predecessor-reap
-      // path uses (resolveReapPredecessor), so the audit's `from` and the
-      // reaped worker can never be two different phases for one advance. Every
-      // other edge stays on latestLivePhase — the FSM's own input.
-      const detour = resolveReapPredecessor(preResetSignals, next);
-      const fromPhase =
-        detour?.phase === REMEDIATE_PHASE ? REMEDIATE_PHASE : latestLivePhase(signals);
-      const fromRaw = fromPhase
-        ? fromPhase === REMEDIATE_PHASE
-          ? // the reset already deleted the file — remediateRaw is the pre-reset capture
-            (remediateRaw ?? readPhaseSignalRaw(orchDir, ticket, fromPhase))
-          : readPhaseSignalRaw(orchDir, ticket, fromPhase)
-        : null;
       const ev = explainAdvanceEvidence(fromRaw, { predecessorPhase: fromPhase });
       safeEmit(
         appendPhaseAdvanceAppliedEvent,
@@ -7470,6 +7564,16 @@ export function schedulerTick(
         },
         { ticket, phase: "advance" }
       );
+      // CTL-1805 (A1): record this edge as applied AFTER the successor is verified
+      // live (write-after-success, NOT before dispatch — a failed first dispatch
+      // must leave no marker so it is correctly retried next tick). The atomic
+      // tmp+rename OVERWRITES a stale-key marker (a remediation re-entry at a new
+      // generation), so a legitimate re-advance re-arms the guard for its own new
+      // predecessor identity. Best-effort: a failed write merely leaves the next
+      // duplicate unsuppressed (status quo), never wedges the pipeline.
+      if (advanceGuardEnabled) {
+        recordAdvanceApplied(orchDir, ticket, fromPhase, next, advanceEdgeKey);
+      }
       // CTL-755: a verified triage→research promotion consumed a slot this tick.
       // liveCount was read at the top of the tick (before this dispatch), so the
       // promotion has not yet incremented it — STEP C subtracts promotedCount
@@ -8771,6 +8875,14 @@ export const CIRCUIT_BREAKER_THRESHOLD =
 export const RUNAWAY_THRESHOLD = Number(process.env.SCHEDULER_RUNAWAY_THRESHOLD) || 50;
 export const RUNAWAY_WINDOW_MS = Number(process.env.SCHEDULER_RUNAWAY_WINDOW_MS) || 10 * 60 * 1000;
 
+// CTL-1805 (A1): the throttle window for the advancement idempotency guard's
+// suppressed-duplicate canary. At most one phase.advance.suppressed-duplicate.
+// <ticket> per (ticket,from,to) edge per window, so a wedged (unchanging) input
+// map cannot flood the event log with the same suppression. Mirrors
+// RUNAWAY_WINDOW_MS (10 min); env-overridable for tests.
+export const ADVANCE_SUPPRESS_WINDOW_MS =
+  Number(process.env.ADVANCE_SUPPRESS_WINDOW_MS) || 10 * 60 * 1000;
+
 // --- daemon module state ---
 let tickTimer = null;
 let debounceTimer = null;
@@ -8843,6 +8955,12 @@ let starvationStreak = 0;
 // only-on-change guard. Mirrors lastHeldEmitState but covers the full disposition set
 // (null = no label / cleared). Cleared on daemon restart (via __resetForTests).
 const lastDispositionEmit = new Map();
+
+// CTL-1805 (A1): in-process throttle for the advancement guard's suppressed-
+// duplicate canary — key `${ticket}|${from}|${to}` → last-emit ms (via the tick's
+// injected clock). Re-emits once after a daemon restart (cleared alongside
+// lastDispositionEmit in resetSchedulerModuleState) — acceptable for pure audit.
+const lastAdvanceSuppressEmit = new Map();
 
 // clearDispositionEmit — Codex #2970 round 3: the daemon runs the scheduler
 // in-process (daemon.mjs imports startScheduler from this module directly), so
@@ -10138,6 +10256,7 @@ export function __resetForTests() {
   lastHoldLogged.clear();
   starvationStreak = 0;
   lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
+  lastAdvanceSuppressEmit.clear(); // CTL-1805 (A1): reset advance-suppress canary throttle
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests
   _stallJanitorCensusLastRunMs = 0; // CTL-1324: reset Pass 0j census throttle between tests
   // rankedAboveSince is cleared by stopScheduler above (CTL-705)
