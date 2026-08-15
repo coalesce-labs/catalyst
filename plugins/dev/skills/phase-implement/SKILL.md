@@ -261,6 +261,14 @@ Before continuing to the End block, check for mid-flight context updates from th
 >   --phase "$PHASE" --ticket "$TICKET" --status yield [--yield-seconds <n>]
 > ```
 >
+> **⚠️ A yield does not bound the child process — you must.** The emitter updates JSON; it does not
+> terminate anything. A backgrounded child reparents to PID 1 and survives your exit, so yielding
+> next to an unbounded background job leaves it running forever even after the signal expires. Only
+> yield when the background work is **self-limiting** (its own internal deadline, per `AGENTS.md` →
+> "Spawning a background process"); otherwise keep the phase alive until it finishes. Four such
+> spinners once burned ~4 CPU cores for 16.5 hours while the script that spawned them reported
+> `cleanup verified` — do not let a yield become a fifth.
+>
 > An undeclared exit is **not** a pause. `sdk-run-phase-agent` writes `failed` / `abandoned` /
 > `ended-without-declaration`, and a human is paged for a phase whose work may already be done.
 > Measured 2026-08-14: five such runs across both hosts in one day, all in this phase and

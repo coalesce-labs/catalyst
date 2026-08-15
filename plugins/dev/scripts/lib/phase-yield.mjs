@@ -41,6 +41,23 @@
 // Zero-import leaf, like event-name.mjs / event-envelope.mjs: bare-Node loadable,
 // pure, and callable from the runner, the scheduler and tests alike.
 
+// ── ⚠️ NAME COLLISION, READ BEFORE GREPPING ─────────────────────────────────
+// "Yield" already means something ELSE one directory over. CTL-615's
+// duplicate-worker gate (phase-agent-yield-check.sh, and the
+// `phase-*-yield-*.json` tombstones CTL-702's sweep scans in scheduler.mjs) is a
+// redispatch DUPLICATE bowing out to the canonical worker — a worker yielding to
+// another worker. This module is a worker yielding to its own BACKGROUND WORK
+// and expecting to be resumed. Same word, unrelated mechanisms, and a grep for
+// "yield" in exec-core returns both.
+//
+// ── WHERE A YIELD EXPIRES ───────────────────────────────────────────────────
+// NOT here, and NOT in the runner. `shouldFlipOnUndeclaredExit` is called by
+// sdk-run-phase-agent as the worker exits — microseconds after `yieldedAt` was
+// written, when a yield is ALWAYS live — so that call site can never observe a
+// deadline pass. The enforcing evaluator is `reclaimDeadWorkIfPossible`
+// (recovery.mjs), which schedulerTick runs once per signal per tick. If you add
+// a new caller of this module, assume it is an observer; the tick owns expiry.
+
 /** The status an agent writes to declare a bounded, resumable wait. */
 export const YIELDED_STATUS = "awaiting-work";
 

@@ -27,6 +27,11 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import {
+  YIELDED_STATUS,
+  YIELD_EXPIRED_REASON,
+  classifyYield,
+} from "../lib/phase-yield.mjs";
+import {
   getJobsRoot,
   getEventLogPath,
   getClusterHosts,
@@ -2119,6 +2124,60 @@ function markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalle
   }
 }
 
+// CTL-1854: expire a yield whose deadline has passed, in place on the existing
+// phase signal (every other field preserved), mirroring writeTerminalStalled's
+// shape. Writes the SAME terminal the runner writes on an undeclared exit —
+// `failed` + `outcome: "abandoned"` — so all 29 existing status sets, the
+// broker, and the orch-monitor readers already handle it and none needs a new
+// token. See sdk-run-phase-agent's CTL-1790 note for why introducing a novel
+// status value fails in the worst direction.
+//
+// The failureReason is the one distinction that matters: an expired yield BROKE
+// A PROMISE IT MADE, a silent exit never made one, and an operator reading the
+// signal must be able to tell those apart.
+//
+// assertedBy is RECOVERY_RECLAIM, not the SDK id — this terminal is FABRICATED
+// by the sweep, not declared by the agent, and the advancement audit must
+// classify it that way. Idempotent and best-effort: an unreadable or
+// already-terminal signal is a no-op, and a failed write never throws into the
+// tick.
+export function defaultExpireYield(
+  orchDir,
+  signal,
+  verdict,
+  { readFile = readFileSync, writeFile = writeFileSync } = {}
+) {
+  const p = join(orchDir, "workers", signal?.ticket ?? "", `phase-${signal?.phase ?? ""}.json`);
+  let cur;
+  try {
+    cur = JSON.parse(readFile(p, "utf8"));
+  } catch {
+    return false; // nothing on disk to expire
+  }
+  // Only expire what is STILL yielded. Between the tick's read and this write a
+  // late completion may have landed; overwriting it would destroy a real result
+  // and re-manufacture the abandonment this whole ticket exists to remove.
+  if (String(cur.status) !== YIELDED_STATUS) return false;
+  const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  try {
+    writeFile(
+      p,
+      JSON.stringify({
+        ...cur,
+        status: "failed",
+        outcome: "abandoned",
+        failureReason: YIELD_EXPIRED_REASON,
+        yieldExpiredReason: verdict?.reason ?? null,
+        assertedBy: ASSERTED_BY.RECOVERY_RECLAIM,
+        updatedAt: ts,
+      })
+    );
+  } catch {
+    return false; // best-effort — the next tick retries
+  }
+  return true;
+}
+
 export function reclaimDeadWorkIfPossible(
   orchDir,
   signal,
@@ -2330,8 +2389,65 @@ export function reclaimDeadWorkIfPossible(
     multiHost = false,
     self = undefined,
     gateway = undefined,
+    // CTL-1854: the seam that expires a yield. Injectable so the branch is
+    // testable without a filesystem; defaults to the real in-place writer.
+    expireYield = defaultExpireYield,
   } = {}
 ) {
+  // ─── CTL-1854: yield evaluation, BEFORE classifyWorker ────────────────────
+  //
+  // ⚠️ THIS IS THE ONLY PLACE A YIELD CAN EXPIRE, AND IT MUST RUN FIRST.
+  //
+  // The runner (sdk-run-phase-agent) evaluates a yield exactly once, as the
+  // worker exits — microseconds after `yieldedAt` was written, when it is
+  // ALWAYS live. So the runner can never observe a deadline pass: left there
+  // alone, `--yield-seconds` and the 30-minute ceiling are a bound whose only
+  // enforcement point cannot fire, and an `awaiting-work` signal holds its slot
+  // forever (isTicketInFlight frees a slot only for failed|stalled|aborted).
+  // This function is the per-tick, per-signal evaluator (schedulerTick calls it
+  // for every worker signal), so it is where the deadline actually lives.
+  //
+  // Why the sweep is guaranteed to reach a yielded signal: its loop skips any
+  // ticket not in `inFlightTickets`, and a yield HOLDS the slot precisely
+  // because isTicketInFlight does not free it. The property that made an
+  // unenforced yield dangerous is the same one that keeps it under the
+  // instrument that expires it. (A yield that freed its slot would fall out of
+  // this sweep — and would also no longer need it.)
+  //
+  // It must sit ABOVE the classifyWorker short-circuit: an SDK-path signal has
+  // no bg_job_id, so classifyWorker returns "unknown" and the function returns
+  // "noop" before any status is consulted — the exact path that would strand
+  // the ticket. Placing this below that line would leave the bound unenforced
+  // for precisely the workers that need it most.
+  if (String(signal?.status) === YIELDED_STATUS) {
+    const verdict = classifyYield(
+      { ...(signal?.raw ?? {}), status: signal?.status },
+      now()
+    );
+    if (!verdict.expired) {
+      // A LIVE yield is honored like needs-input: neither reclaim nor escalate.
+      // Without this the default `claude --bg` worker is dead-terminal the
+      // moment it writes the status, so the next tick would reclaim or revive
+      // it — cutting the declared wait short and risking a duplicate worker.
+      log.debug(
+        { ticket: signal?.ticket, phase: signal?.phase, deadlineMs: verdict.deadlineMs },
+        "reclaimDeadWork: honoring live yield (CTL-1854)"
+      );
+      return "noop";
+    }
+    // EXPIRED: write the same terminal the runner writes on an undeclared exit,
+    // naming which promise was broken. Deliberately `failed`, NOT `stalled` —
+    // stalled routes through the terminal sweep to needs-human, which would
+    // page an operator for every expired yield and make this state STRICTLY
+    // WORSE than the abandonment it replaces.
+    log.warn(
+      { ticket: signal?.ticket, phase: signal?.phase, reason: verdict.reason },
+      "reclaimDeadWork: yield expired — writing terminal (CTL-1854)"
+    );
+    expireYield(orchDir, signal, verdict);
+    return "noop";
+  }
+
   const klass = classifyWorker(signal, { statJob });
   // CTL-662: terminal (phase finished) and unknown (no bg_job_id) still
   // short-circuit — boot-classification gating is unchanged. Everything else

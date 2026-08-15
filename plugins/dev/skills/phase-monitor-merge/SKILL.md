@@ -161,6 +161,12 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    "$EMIT" --phase "$PHASE" --ticket "$TICKET" --status yield [--yield-seconds <n>]
    ```
 
+   **⚠️ A yield does not bound the child process — you must.** The emitter updates JSON; it
+   terminates nothing. A backgrounded child reparents to PID 1 and outlives your exit, so yielding
+   beside an unbounded background job leaves it running long after the signal expires. Yield only
+   when the background work is **self-limiting** (its own internal deadline — `AGENTS.md` →
+   "Spawning a background process"); otherwise stay alive until it finishes.
+
    Ending the turn without a declaration is **not** neutral and does not mean "resume later":
    `sdk-run-phase-agent` writes `failed` / `abandoned` / `ended-without-declaration`, and a human is
    paged for a phase whose work may have completed. Measured 2026-08-14: five such runs across both

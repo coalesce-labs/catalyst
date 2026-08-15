@@ -636,7 +636,13 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
         phase: p,
         ticket: t,
         status: "abandoned",
-        reason: "ended-without-declaration",
+        // CTL-1854: read the reason back off the SIGNAL rather than re-typing the
+        // literal. The signal is authoritative, and an expired yield writes
+        // `yield-expired` there — a hard-coded string here would hand the event
+        // log, the HUD and every alert consumer a DIFFERENT diagnosis than the
+        // record they are supposed to be describing. Sourcing both from one value
+        // makes that divergence unconstructible rather than merely fixed.
+        reason: sig.failureReason ?? "ended-without-declaration",
         // CTL-1814: the SIGNAL FILE is the authoritative local record of whose run
         // this was — phase-agent-dispatch writes `orchestrator` into it at prelaunch
         // — and this function has already parsed it, so attribution costs no extra
