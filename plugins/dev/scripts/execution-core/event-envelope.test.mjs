@@ -82,6 +82,46 @@ afterEach(() => {
   delete process.env.CATALYST_EVENT_SCHEMA_OFF;
 });
 
+const DEAD_SCHEMA_REQUIRED = ["ts", "orchestrator", "event"];
+// Codex round 21: the COMPLETE 23-name enum, copied verbatim from
+// templates/global-event.json as it stands on origin/main. The first cut listed
+// THREE of them, so a conforming record using any of the other twenty — say
+// `worker-done` — would have been rejected by the restatement, and the test could
+// report zero matches while the real schema would have matched. A control that
+// models a subset of the thing it stands for is not a control for that thing.
+const DEAD_SCHEMA_ENUM = [
+  "orchestrator-started",
+  "orchestrator-completed",
+  "orchestrator-failed",
+  "orchestrator-paused",
+  "orchestrator-resumed",
+  "orchestrator-heartbeat",
+  "wave-started",
+  "wave-completed",
+  "worker-dispatched",
+  "worker-phase-advanced",
+  "worker-status-terminal",
+  "worker-pr-created",
+  "worker-done",
+  "worker-failed",
+  "worker-stalled",
+  "verification-started",
+  "verification-passed",
+  "verification-failed",
+  "remediation-started",
+  "attention-raised",
+  "attention-resolved",
+  "worker-usage-captured",
+  "archive",
+];
+
+const passesDeadSchema = (ev) =>
+  ev !== null &&
+  typeof ev === "object" &&
+  !Array.isArray(ev) &&
+  DEAD_SCHEMA_REQUIRED.every((k) => Object.hasOwn(ev, k)) &&
+  DEAD_SCHEMA_ENUM.includes(ev.event);
+
 describe("the schema describes reality", () => {
   test("every shape measured on the live log validates", () => {
     for (const [label, ev] of [
@@ -116,25 +156,16 @@ describe("the schema describes reality", () => {
   // The deleted schema's contract, restated from templates/global-event.json as it
   // stands on origin/main: required {ts, orchestrator, event}, with `event` drawn
   // from a closed 23-name enum.
-  const DEAD_SCHEMA_REQUIRED = ["ts", "orchestrator", "event"];
-  const DEAD_SCHEMA_ENUM = ["orchestrator-started", "orchestrator-completed", "orchestrator-failed"];
-  const passesDeadSchema = (ev) =>
-    ev !== null &&
-    typeof ev === "object" &&
-    !Array.isArray(ev) &&
-    DEAD_SCHEMA_REQUIRED.every((k) => Object.hasOwn(ev, k)) &&
-    DEAD_SCHEMA_ENUM.includes(ev.event);
-
   test("POSITIVE CONTROL: the dead-schema validator recognises a conforming event", () => {
     // Without this, "zero live events passed" is satisfiable by a validator that
     // passes nothing at all — the instrument could not have shown otherwise.
-    expect(
-      passesDeadSchema({
-        ts: "2026-08-14T00:00:00Z",
-        orchestrator: "orch-1",
-        event: "orchestrator-started",
-      })
-    ).toBe(true);
+    // Every one of the 23 names must be recognised, not just the first — that is
+    // exactly the gap the three-name version had.
+    expect(DEAD_SCHEMA_ENUM.length).toBe(23);
+    const rejected = DEAD_SCHEMA_ENUM.filter(
+      (name) => !passesDeadSchema({ ts: "2026-08-14T00:00:00Z", orchestrator: "orch-1", event: name })
+    );
+    expect(rejected).toEqual([]);
   });
 
   test("the dead global-event.json contract passes none of the real shapes", () => {
@@ -174,6 +205,14 @@ describe("real producer output", () => {
     // A zero-line corpus would make every assertion below vacuously true.
     expect(corpus.length).toBeGreaterThan(0);
     expect(new Set(corpus.map(classifyEnvelope))).toEqual(new Set(["v1", "v2", "v3", "dual"]));
+  });
+
+  test("the dead schema passes NO real producer line either", () => {
+    // Round 20 claimed this test ran; it was never inserted, because that edit
+    // used a stale anchor name and the replace silently matched nothing. The claim
+    // outlived the code for a full round. Presence is now verified by mutation
+    // rather than asserted: a predicate that passes everything turns this red.
+    expect(corpus.filter((ev) => passesDeadSchema(ev))).toEqual([]);
   });
 
   test("every real line validates — this is the drift check that survived", () => {
