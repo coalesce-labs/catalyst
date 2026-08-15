@@ -41,10 +41,19 @@ export function detectStalled(inputs) {
   // Only while LIVE: an EXPIRED yield gets no exemption. The tick rewrites it to
   // `failed` (terminal, absorbed above) within a tick, and if that has not
   // happened the ticket genuinely is stuck and should be reported.
-  if (
-    String(inputs.currentStatus) === YIELDED_STATUS &&
-    !classifyYield(inputs.signal ?? inputs, inputs.nowMs).expired
-  ) {
+  // ⚠️ The exemption must be AFFIRMATIVELY EARNED. The first cut asked
+  // `!classifyYield(...).expired`, which is true when the classifier says
+  // "not a yield at all" — and the production adapter supplies `currentStatus`,
+  // not `status`, and none of the yield anchors. So the classifier saw no yield,
+  // `!expired` was true, and EVERY awaiting-work signal was exempted forever,
+  // including a 45-minute one. The fix for a false attention had become a
+  // permanent blindfold, which is strictly worse.
+  //
+  // Requiring `yielded === true` means absent or unreadable anchors grant NO
+  // exemption and the signal falls through to ordinary staleness — the
+  // pre-existing, safe behaviour.
+  const y = classifyYield(inputs.signal ?? inputs, inputs.nowMs);
+  if (String(inputs.currentStatus) === YIELDED_STATUS && y.yielded === true && y.expired === false) {
     return NO_OP;
   }
 

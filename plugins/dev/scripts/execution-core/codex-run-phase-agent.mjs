@@ -1351,6 +1351,18 @@ function normalizeUsage(usage) {
 // readSignalStatus — the current on-disk phase-signal status (or null when the
 // file is absent/unreadable). Used to gate the generic-failure backstop to a
 // still-in-flight (dispatched/running) signal.
+// CTL-1854: the signal's generation, for the failure-path fence. Returns null on
+// any read/parse failure so a missing value FAILS OPEN (no fence), matching the
+// sdk fence's rule — an unreadable generation must not silently suppress a real
+// failure write.
+function readSignalGeneration(signalFile) {
+  try {
+    return JSON.parse(readFileSync(signalFile, "utf8"))?.generation ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function readSignalStatus(signalFile) {
   if (!signalFile) return null;
   try {
@@ -1755,7 +1767,23 @@ export async function codexRunPhaseAgent(
         // frees the slot immediately, whereas leaving it would have the tick record
         // `yield-expired` up to 30 minutes later, misattributing a process failure to
         // a broken promise.
-        if (status === "dispatched" || status === "running" || status === YIELDED_STATUS) {
+        // ⚠️ GENERATION FENCE. markLaunchFailed has none of its own, and the
+        // clean-exit path four lines below fences via
+        // flipSignalAbandonedOnUndeclaredExit ("...or when this generation is
+        // stale"). Without the same guard here, an OLD codex generation that
+        // survived a daemon restart or a false-dead redispatch can exit non-zero
+        // later and overwrite the NEWER worker's live yield with a failure —
+        // killing a wait that is doing its job. Bow out only when both generations
+        // are plain integers and mine is older; anything missing or non-numeric
+        // fails open, matching the sdk fence's parity rule so legacy and unfenced
+        // dispatches are unaffected.
+        const _sigGen = readSignalGeneration(signalFile);
+        const _mine = spec?.generation;
+        const _stale =
+          Number.isInteger(Number(_mine)) &&
+          Number.isInteger(Number(_sigGen)) &&
+          Number(_mine) < Number(_sigGen);
+        if (!_stale && (status === "dispatched" || status === "running" || status === YIELDED_STATUS)) {
           markLaunchFailed(
             { phase, ticket, status: "failed", reason: "codex-failed", orchDir, signalFile },
             { spawn },

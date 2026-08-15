@@ -514,7 +514,11 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 	if [[ $STATUS == "yield" && -f $SIGNAL_FILE ]]; then
 		_CUR_STATUS="$(jq -r '.status // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")"
 		case "$_CUR_STATUS" in
-		done | complete | completed | failed | stalled | skipped | aborted)
+		done | complete | completed | failed | stalled | skipped | aborted | turn-cap-exhausted)
+			# `turn-cap-exhausted` is in signal-reader's TERMINAL set, so every consumer
+			# already treats it as finished; a late yield replacing it would delete
+			# completedAt, hold a slot, and eventually manufacture `yield-expired` for a
+			# phase that had genuinely stopped.
 			die "--status yield: phase already terminal ($_CUR_STATUS) — refusing to overwrite a finished phase with a wait"
 			;;
 		preempted)

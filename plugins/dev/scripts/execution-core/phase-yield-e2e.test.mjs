@@ -196,4 +196,46 @@ describe("⚠️ a supported wait is not an anomaly", () => {
     expect(detectStalled({ currentStatus: "running", updatedAtMs: now - 45 * 60_000, nowMs: now }).attention)
       .toMatchObject({ kind: "stalled" });
   });
+
+  test("⚠️ the PRODUCTION input shape — no hand-built signal — still reports", () => {
+    // The first cut of the exemption asked `!classifyYield(...).expired`, which is
+    // TRUE when the classifier says "not a yield at all". The real adapter supplies
+    // `currentStatus` (not `status`) and no anchors, so the classifier saw no yield,
+    // the exemption applied unconditionally, and EVERY awaiting-work signal was
+    // hidden forever — a permanent blindfold, strictly worse than the false
+    // attention it replaced. My test passed only because it hand-built inputs that
+    // production never produces.
+    const { detectStalled } = require("./stalled-detector.mjs");
+    const now = Date.now();
+    const legacyShape = {
+      ticket: "T", nowMs: now, updatedAtMs: now - 45 * 60_000,
+      currentStatus: YIELDED_STATUS, prState: "NONE", commitCount: 0,
+    };
+    // No `signal` key at all: the exemption must NOT be granted.
+    expect(detectStalled(legacyShape).attention).toMatchObject({ kind: "stalled" });
+  });
+});
+
+
+describe("⚠️ round 22: terminals a yield must not overwrite", () => {
+  test("turn-cap-exhausted is refused, like every other terminal", () => {
+    const orch = scenario();
+    writeFileSync(
+      join(orch, "workers", "PROJ-1", "phase-implement.json"),
+      JSON.stringify({ ticket: "PROJ-1", phase: "implement", status: "turn-cap-exhausted" })
+    );
+    expect(() => declareYield(orch)).toThrow();
+    expect(signalOf(orch).status).toBe("turn-cap-exhausted");
+  });
+
+  test("the codex failure path is generation-fenced", async () => {
+    // An OLD generation exiting non-zero must not overwrite a NEWER worker's live
+    // yield; the clean-exit path beside it has always fenced.
+    const src = await Bun.file(new URL("./codex-run-phase-agent.mjs", import.meta.url)).text();
+    // Anchored on the fence VARIABLE and its use in the guard, both of which must
+    // exist; fails closed if either anchor disappears.
+    expect(src).toContain("const _sigGen = readSignalGeneration(signalFile);");
+    const guard = src.match(/if \(!_stale && \(status ===[^)]*\)\)/);
+    expect(guard, "no fenced markLaunchFailed guard found — anchor gone").not.toBeNull();
+  });
 });

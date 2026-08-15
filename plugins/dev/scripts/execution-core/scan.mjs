@@ -132,6 +132,10 @@ function mergeInputs(sig, derived, adapters) {
     signalMergedAt: sig.pr?.mergedAt ?? null,
     skipDeployVerification: adapters.deploy.skipDeployVerification(repo),
     currentStatus: sig.status,
+    // CTL-1854: the raw signal, so detectStalled can classify a live yield. Without
+    // it the classifier sees no `status`/`yieldedAt` and reports "not a yield",
+    // which the detector must (and now does) treat as NO exemption.
+    signal: sig.raw ?? sig,
   };
 }
 
