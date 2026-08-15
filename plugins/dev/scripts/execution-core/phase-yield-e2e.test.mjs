@@ -131,14 +131,13 @@ describe("CTL-1854 end to end: declare → hold → expire", () => {
     expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true }); // control
     writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"), '{"status":"awaiting-w');
     const out = countYieldedOccupancy(orch);
-    // ⚠️ SCOPED to the ticket, not the host. Returning ok:false here made ONE bad
-    // file stop dispatch on the whole host (every consumer holds on ok:false) —
-    // a real, reachable wedge: phase-monitor-deploy writes its own signal with no
-    // `status` and patches it in a later step. An uninterpretable file is charged
-    // as one held slot for ITS ticket, and the PATH is reported so a held fleet is
-    // diagnosable.
-    expect(out.ok).toBe(true);
-    expect(out.count).toBe(1);
+    // ⚠️ SKIPPED, not charged. Two revisions of this contract were wrong before
+    // this one: ok:false wedged the whole host, and charging-a-slot leaked capacity
+    // silently — measured over 16 real orchDirs, 12 uninterpretable files, ZERO
+    // corrupt (phase-monitor-deploy records have no `status` by schema; .turncap
+    // and -blocker are sidecars). A phase file that is not an object with a string
+    // `status` is NOT AN OCCUPANCY SIGNAL. It is reported, never charged.
+    expect(out).toMatchObject({ ok: true, count: 0 });
     expect(out.unreadable[0]).toMatchObject({ reason: "signal-unparseable" });
     expect(out.unreadable[0].path).toContain("phase-implement.json");
   });
@@ -290,9 +289,8 @@ describe("⚠️ round 22: terminals a yield must not overwrite", () => {
     for (const bad of ["{}", "null", "[]", '"str"', "42", '{"status":123}']) {
       writeFileSync(p, bad);
       const out = countYieldedOccupancy(orch);
-      // Charged to the ticket (1 slot), host still readable (ok), path reported.
-      expect({ bad, count: out.count, ok: out.ok }).toEqual({ bad, count: 1, ok: true });
-      expect(out.unreadable).toHaveLength(1);
+      expect({ bad, count: out.count, ok: out.ok }).toEqual({ bad, count: 0, ok: true });
+      expect(out.unreadable).toHaveLength(1); // reported, not charged
     }
     // ...and a valid non-yield is still a CONCLUSIVE zero, so the check did not
     // simply become "everything is inconclusive".
@@ -318,10 +316,10 @@ describe("⚠️ round 24: a record must be about the file it lives in", () => {
     w({ status: YIELDED_STATUS, ticket: "PROJ-1", phase: "implement" });
     expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true }); // control
     w({ status: YIELDED_STATUS, ticket: "PROJ-1", phase: "review" });
-    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: true, count: 1 });
+    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: true, count: 0 });
     expect(countYieldedOccupancy(orch).unreadable[0].reason).toBe("signal-identity-mismatch");
     w({ status: YIELDED_STATUS, ticket: "PROJ-9", phase: "implement" });
-    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: true, count: 1 });
+    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: true, count: 0 });
     // Absent identity must NOT become inconclusive, or every legacy signal wedges
     // admission — the failure mode of over-tightening this check.
     w({ status: YIELDED_STATUS });
@@ -389,7 +387,7 @@ describe("⚠️ round 26: present-and-wrong is not absent", () => {
       writeFileSync(p, JSON.stringify({ status: YIELDED_STATUS, ticket: bad, phase: "implement" }));
       const out = countYieldedOccupancy(orch);
       expect({ bad: JSON.stringify(bad), count: out.count, ok: out.ok })
-        .toEqual({ bad: JSON.stringify(bad), count: 1, ok: true });
+        .toEqual({ bad: JSON.stringify(bad), count: 0, ok: true });
     }
     // ...while genuinely absent identity still counts, and null is absent too.
     writeFileSync(p, JSON.stringify({ status: YIELDED_STATUS }));
@@ -571,6 +569,41 @@ describe("⚠️ residuals: the anchor-leak chain, and warn volume", () => {
     // not throttle the data.
     const out = countYieldedOccupancy(orch);
     expect(out.unreadable).toHaveLength(1);
-    expect(out).toMatchObject({ count: 1, ok: true });
+    expect(out).toMatchObject({ count: 0, ok: true });
+  });
+});
+
+
+describe("⚠️ the REAL population: legitimate non-signals must not be charged", () => {
+  test("deploy records, .turncap and -blocker sidecars beside one real yield → count 1", () => {
+    // The conservative default was sized against an IMAGINED population. Run over
+    // 16 real orchDirs the reader found 12 uninterpretable files and ZERO corrupt:
+    // phase-monitor-deploy records (no `status` by schema, written at NORMAL rate),
+    // a `.turncap` sidecar, and a `pr-blocker` note. Charging them produced a
+    // silent permanent capacity loss on long-finished tickets — 5 such tickets
+    // measured to freeSlots(maxParallel=3) = 0, with ok:true so nothing reported a
+    // fault. This fixture is that population in miniature.
+    const orch = mkdtempSync(join(tmpdir(), "yieldpop-"));
+    const w = (t, f, o) => {
+      mkdirSync(join(orch, "workers", t), { recursive: true });
+      writeFileSync(join(orch, "workers", t, f), JSON.stringify(o));
+    };
+    // A COMPLETE, SUCCESSFUL deploy record — no `status` at all.
+    w("PROJ-1", "phase-monitor-deploy.json", { ticket: "PROJ-1", deploy_state: "skipped", generation: 1 });
+    // A legit sidecar: derived phase `implement.turncap` ≠ record phase `implement`.
+    w("PROJ-2", "phase-implement.turncap.json", { ticket: "PROJ-2", phase: "implement", status: "running" });
+    // An intentional blocker note: derived `pr-blocker` ≠ record `pr`.
+    w("PROJ-3", "phase-pr-blocker.json", { ticket: "PROJ-3", phase: "pr", status: "running" });
+    // ...and ONE genuine yield, which must still be counted.
+    w("PROJ-4", "phase-implement.json", {
+      ticket: "PROJ-4", phase: "implement", status: YIELDED_STATUS, yieldedAt: new Date().toISOString(),
+    });
+
+    const out = countYieldedOccupancy(orch);
+    expect(out.ok).toBe(true);
+    expect(out.count).toBe(1);                 // the real yield, and only it
+    expect(out.yields).toHaveLength(1);
+    expect(out.yields[0]).toMatchObject({ ticket: "PROJ-4", phase: "implement" });
+    expect(out.unreadable).toHaveLength(3);    // the three non-signals: reported, not charged
   });
 });

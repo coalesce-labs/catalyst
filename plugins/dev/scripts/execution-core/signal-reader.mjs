@@ -328,12 +328,11 @@ export function countYieldedOccupancy(orchDir) {
     try {
       files = readdirSync(join(workersDir, t.name));
     } catch {
-      // One unreadable worker dir is that ticket's problem: charge it a slot.
-      count += 1;
+      // Same rule: report it, do not charge. We cannot see this ticket's signals,
+      // and inventing occupancy for it is the imagined-population error again.
       unreadable.push({ path: join(workersDir, t.name), reason: "worker-dir-unreadable" });
       continue;
     }
-    let ticketCharged = false;
     for (const f of files) {
       if (!isPhaseSignalFile(f)) continue;
       const full = join(workersDir, t.name, f);
@@ -362,11 +361,31 @@ export function countYieldedOccupancy(orchDir) {
         bad = "signal-identity-mismatch";
       }
       if (bad) {
+        // ⚠️ SKIP, DO NOT CHARGE. The earlier version charged one slot per ticket
+        // with an uninterpretable file, on the assumption that such files are rare
+        // corruption. Measured against the real population — the reader run
+        // read-only over all 16 on-disk orchDirs — that assumption was wrong:
+        // 12 uninterpretable files, ZERO corrupt. Every one was legitimate:
+        //   • phase-monitor-deploy.json ×10 — COMPLETE, SUCCESSFUL records
+        //     ({"deploy_state":"skipped",…}); that phase's schema has no `status`
+        //     at all, so they recur at NORMAL rate, not crash rate
+        //   • phase-implement.turncap.json — a real sidecar (derived phase
+        //     `implement.turncap` ≠ record `implement` → identity mismatch)
+        //   • phase-pr-blocker.json — an intentional blocker note (`pr-blocker`)
+        // isPhaseSignalFile accepts all three: it excludes only `-yield-`
+        // tombstones and ARTIFACT_NAMES. So charging produced a SILENT permanent
+        // capacity loss on long-finished tickets — 5 such tickets measured to
+        // 5 charged slots, freeSlots(maxParallel=3)=0 — and because ok stayed
+        // true, no consumer reported a fault. A loud wedge is bad; a silent
+        // capacity leak that looks exactly like occupancy is worse.
+        //
+        // A phase-* file that is not an object with a string `status` is NOT A
+        // SIGNAL for occupancy purposes — skip it exactly as tombstones and
+        // artifacts are skipped. That restores pre-PR semantics (a dead worker's
+        // odd file held no slot). The only cost is a torn LIVE yield being
+        // under-counted by one slot transiently, which that ticket's own liveness
+        // already bounds.
         unreadable.push({ path: full, reason: bad });
-        if (!ticketCharged) {
-          count += 1; // one slot for this ticket, however many of its files are bad
-          ticketCharged = true;
-        }
         continue;
       }
       if (sig.status === YIELDED_STATUS) {

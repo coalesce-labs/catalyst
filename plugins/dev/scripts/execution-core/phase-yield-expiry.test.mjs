@@ -487,9 +487,10 @@ describe("⚠️ occupancy fails CLOSED: could-not-look is not an empty slot", (
     // Now truncate that same present signal — a torn write lands exactly here.
     writeFileSync(p, '{"status":"awaiting-work","tick');
     const out = countYieldedOccupancy(orch);
-    // SCOPED: charged to this ticket (1 slot), host still readable, path reported.
-    // Returning ok:false here made one bad file stop dispatch host-wide.
-    expect({ count: out.count, ok: out.ok }).toEqual({ count: 1, ok: true });
+    // SKIPPED, not charged — a phase file without a string `status` is not an
+    // occupancy signal. Two earlier revisions were wrong: ok:false wedged the host,
+    // charging leaked capacity silently on finished tickets.
+    expect({ count: out.count, ok: out.ok }).toEqual({ count: 0, ok: true });
     expect(out.unreadable[0]).toMatchObject({ reason: "signal-unparseable" });
   });
 
@@ -512,10 +513,10 @@ describe("⚠️ occupancy fails CLOSED: could-not-look is not an empty slot", (
     // ...while a torn REAL signal still fails closed. Both directions, or the
     // exclusion could have been a blanket "ignore everything unparseable".
     writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"), "{tor");
-    // A torn REAL signal is still charged (1 slot for this ticket) — the tombstone
-    // exclusion did not become a blanket "ignore anything unparseable".
+    // A torn REAL signal is REPORTED (so the tombstone exclusion did not become a
+    // blanket "ignore anything unparseable") but not charged.
     const torn = countYieldedOccupancy(orch);
-    expect({ count: torn.count, ok: torn.ok }).toEqual({ count: 1, ok: true });
+    expect({ count: torn.count, ok: torn.ok }).toEqual({ count: 0, ok: true });
     expect(torn.unreadable).toHaveLength(1);
   });
 
