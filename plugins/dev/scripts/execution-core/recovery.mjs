@@ -2164,8 +2164,15 @@ export function defaultExpireYield(
   // that omits ticket/phase produced `workers//phase-.json`, which cannot exist —
   // so the expiry silently no-op'd while occupancy still counted the yield, and the
   // slot was held forever. Callers that have path-derived identity pass it in.
-  const _ticket = signal?.ticket ?? signal?.derivedTicket;
-  const _phase = signal?.phase ?? signal?.derivedPhase;
+  // ⚠️ `??` picks the record's value whenever it is merely NON-NULL, so a numeric
+  // or object ticket won the coalesce and then failed the type check below — the
+  // expiry refused and the hold became permanent. Round 26 fixed exactly this in
+  // the occupancy reader; the SWEEP uses a different reader (readAllPhaseSignals),
+  // so the same conflation survived on this path. Prefer a VALID identity, not a
+  // present one.
+  const _valid = (v) => (typeof v === "string" && v !== "" ? v : undefined);
+  const _ticket = _valid(signal?.ticket) ?? _valid(signal?.derivedTicket);
+  const _phase = _valid(signal?.phase) ?? _valid(signal?.derivedPhase);
   if (typeof _ticket !== "string" || !_ticket || typeof _phase !== "string" || !_phase) {
     return false;
   }

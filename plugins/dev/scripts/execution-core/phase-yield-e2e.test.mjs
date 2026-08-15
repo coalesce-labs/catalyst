@@ -413,3 +413,25 @@ describe("⚠️ round 26: present-and-wrong is not absent", () => {
     }
   });
 });
+
+describe("⚠️ self-audit: invalid identity must not block expiry on the SWEEP path", () => {
+  test("a numeric/object/empty ticket still expires, via path-derived identity", () => {
+    // Found by auditing my own diff, not by review. Round 26 fixed invalid-vs-missing
+    // in the OCCUPANCY reader; the sweep uses a different reader
+    // (readAllPhaseSignals), so `signal?.ticket ?? signal?.derivedTicket` still won
+    // the coalesce for any NON-NULL value — a numeric ticket beat the path fallback,
+    // then failed the type check, and the expiry refused. Permanent hold, same class,
+    // different path.
+    for (const bad of [123, { x: 1 }, "", []]) {
+      const orch = mkdtempSync(join(tmpdir(), "yieldbadid-"));
+      mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+      writeFileSync(
+        join(orch, "workers", "PROJ-1", "phase-implement.json"),
+        JSON.stringify({ status: YIELDED_STATUS, yieldedAt: "2020-01-01T00:00:00Z", ticket: bad, phase: "implement" })
+      );
+      expireYieldedSignals(orch);
+      const sig = JSON.parse(readFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"), "utf8"));
+      expect({ bad: JSON.stringify(bad), status: sig.status }).toEqual({ bad: JSON.stringify(bad), status: "failed" });
+    }
+  });
+});
