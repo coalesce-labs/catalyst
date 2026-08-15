@@ -537,13 +537,15 @@ export function selectBootResumeCandidates({
   // pipeline phase — the ticket is not "in flight") is still charged. Disjoint from
   // liveCount, which counts tickets with a LIVE bg worker; a yielded worker has
   // exited. Best-effort: a scan failure must not block boot resume.
-  let yieldedOccupancy = 0;
+  // ⚠️ FAIL CLOSED: an unreadable scan must not resume workers into slots it
+  // cannot prove are empty.
+  let yo = { count: 0, ok: false };
   try {
-    yieldedOccupancy = countYieldedOccupancy(orchDir);
+    yo = countYieldedOccupancy(orchDir);
   } catch {
-    /* best-effort */
+    yo = { count: 0, ok: false };
   }
-  const free = computeFreeSlots(maxParallel, liveCount + yieldedOccupancy);
+  const free = yo.ok ? computeFreeSlots(maxParallel, liveCount + yo.count) : 0;
   needResume.sort((a, b) => a.ticket.localeCompare(b.ticket));
   // CTL-1422 (B): warm candidates always survive selection; the slice caps
   // only cold candidates, against the slots warm did not consume.

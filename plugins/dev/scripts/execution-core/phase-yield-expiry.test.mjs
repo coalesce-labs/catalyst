@@ -216,7 +216,7 @@ describe("⚠️ a yield occupies its slot in EVERY dispatch mode", () => {
       // bg_job_id present — this is the bg-worker shape countSdkInflight EXCLUDES.
       JSON.stringify({ status: YIELDED_STATUS, ticket: "PROJ-9", phase: "implement", bg_job_id: "bg-123" })
     );
-    expect(countYieldedOccupancy(orch)).toBe(1);
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true });
   });
 
   test("it does not count non-yielded signals, and never throws on a missing dir", async () => {
@@ -230,8 +230,10 @@ describe("⚠️ a yield occupies its slot in EVERY dispatch mode", () => {
       join(orch, "workers", "PROJ-8", "phase-implement.json"),
       JSON.stringify({ status: "running", ticket: "PROJ-8", phase: "implement" })
     );
-    expect(countYieldedOccupancy(orch)).toBe(0);
-    expect(countYieldedOccupancy(join(orch, "does-not-exist"))).toBe(0);
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 0, ok: true });
+    // A missing dir is a CONCLUSIVE zero (ENOENT: there are no yields), unlike an
+    // unreadable one.
+    expect(countYieldedOccupancy(join(orch, "does-not-exist"))).toMatchObject({ count: 0, ok: true });
   });
 });
 
@@ -293,12 +295,17 @@ describe("⚠️ every admission budget charges the yield, not just the schedule
       dispatchMode: "phase-agents", // the DEFAULT — countSdkInflight is not even called
       countSdkInflight: () => 0,
     };
-    expect(computeTriageBudget({ ...base, countYieldedOccupancy: () => 0 }).remaining).toBe(1);
+    expect(computeTriageBudget({ ...base, countYieldedOccupancy: () => ({ count: 0, ok: true }) }).remaining).toBe(1);
     // With one yield outstanding the only slot is taken.
-    expect(computeTriageBudget({ ...base, countYieldedOccupancy: () => 1 }).remaining).toBe(0);
+    expect(computeTriageBudget({ ...base, countYieldedOccupancy: () => ({ count: 1, ok: true }) }).remaining).toBe(0);
   });
 
-  test("a throwing occupancy reader never blocks triage admission", async () => {
+  test("a throwing occupancy reader HOLDS admission (fail-closed)", async () => {
+    // This expectation is deliberately the REVERSE of its first version, which
+    // asserted the budget "degrades, does not throw" and returned full capacity.
+    // Degrading to full capacity is precisely the fail-OPEN behaviour that let an
+    // unreadable scan read as an empty slot. It must still not throw — but the
+    // safe degraded value for a limit is zero, not everything.
     const { computeTriageBudget } = await import("./monitor.mjs");
     const out = computeTriageBudget({
       orchDir: "/orch",
@@ -308,7 +315,7 @@ describe("⚠️ every admission budget charges the yield, not just the schedule
       countSdkInflight: () => 0,
       countYieldedOccupancy: () => { throw new Error("scan failed"); },
     });
-    expect(out.remaining).toBe(2); // degrades, does not throw
+    expect(out.remaining).toBe(0);
   });
 });
 
@@ -409,15 +416,33 @@ describe("⚠️ round 12: the ancillary-yield shape, three more places", () => 
     }
   });
 
-  test("boot-resume charges yields OUTSIDE the in-flight loop", async () => {
-    // listInFlightTickets excludes a ticket whose only yield is ancillary, so an
-    // in-loop increment misses exactly the case that most needs charging.
-    const src = await Bun.file(new URL("./boot-resume.mjs", import.meta.url)).text();
-    expect(src).toContain("countYieldedOccupancy(orchDir)");
-    expect(src).toContain("liveCount + yieldedOccupancy");
-    // and the in-loop increment must be gone (it would double-count)
-    const loopArea = src.slice(src.indexOf("skipping awaiting-work"), src.indexOf("skipping awaiting-work") + 400);
-    expect(loopArea).not.toContain("liveCount += 1");
+  test("boot-resume charges an ANCILLARY yield against capacity (executed)", async () => {
+    // Replaces a source-text assertion that broke on a rename — the exact weakness
+    // that let the round-11 defect ship. This RUNS the selector.
+    //
+    // Shape: maxParallel 1. PROJ-2's only live phase is a yielded recovery-pass
+    // beside a FAILED pipeline phase, so listInFlightTickets excludes the ticket
+    // and an in-loop increment could never charge it. PROJ-1 is a resumable
+    // candidate. With the yield charged, the single slot is taken and PROJ-1 must
+    // NOT be selected.
+    const { selectBootResumeCandidates } = await import("./boot-resume.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "bootyield-"));
+    const wt = join(orch, "wt-1");
+    mkdirSync(wt, { recursive: true });
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    mkdirSync(join(orch, "workers", "PROJ-2"), { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"),
+      JSON.stringify({ ticket: "PROJ-1", phase: "implement", status: "running", worktreePath: wt, updatedAt: now }));
+    writeFileSync(join(orch, "workers", "PROJ-2", "phase-implement.json"),
+      JSON.stringify({ ticket: "PROJ-2", phase: "implement", status: "failed", updatedAt: now }));
+    writeFileSync(join(orch, "workers", "PROJ-2", "phase-recovery-pass.json"),
+      JSON.stringify({ ticket: "PROJ-2", phase: "recovery-pass", status: YIELDED_STATUS, yieldedAt: now, updatedAt: now }));
+
+    const picked = selectBootResumeCandidates({ orchDir: orch, agents: [], maxParallel: 1 });
+    expect(Array.isArray(picked)).toBe(true);
+    // The yielded ancillary phase holds the only slot, so nothing is resumed.
+    expect(picked.map((c) => c.ticket)).not.toContain("PROJ-1");
   });
 });
 
@@ -445,5 +470,50 @@ describe("⚠️ the dispatcher change and the spec parser are one change", () =
     const branch = dispatch.slice(guard, guard + 900);
     expect(branch).toContain('--arg status "$EXISTING_STATUS"');
     expect(branch).toContain("idempotent: true");
+  });
+});
+
+
+describe("⚠️ occupancy fails CLOSED: could-not-look is not an empty slot", () => {
+  test("a truncated signal yields ok:false, not a confident zero", async () => {
+    const { countYieldedOccupancy } = await import("./signal-reader.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldclosed-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    // Positive control first: a VALID yielded signal must report count 1 / ok true,
+    // so a later ok:false is evidence of the truncation and not of a broken probe.
+    const p = join(orch, "workers", "PROJ-1", "phase-implement.json");
+    writeFileSync(p, JSON.stringify({ status: YIELDED_STATUS, ticket: "PROJ-1", phase: "implement" }));
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true });
+    // Now truncate that same present signal — a torn write lands exactly here.
+    writeFileSync(p, '{"status":"awaiting-work","tick');
+    const out = countYieldedOccupancy(orch);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe("signal-unparseable");
+  });
+
+  test("callers hold admission rather than treating it as capacity", async () => {
+    const { computeTriageBudget } = await import("./monitor.mjs");
+    const base = {
+      orchDir: "/orch",
+      readMaxParallelFn: () => 4,
+      liveBackgroundCount: () => 0,
+      dispatchMode: "phase-agents",
+      countSdkInflight: () => 0,
+    };
+    // Conclusive zero → full budget. Inconclusive → zero, not four.
+    expect(computeTriageBudget({ ...base, countYieldedOccupancy: () => ({ count: 0, ok: true }) }).remaining).toBe(4);
+    expect(computeTriageBudget({ ...base, countYieldedOccupancy: () => ({ count: 0, ok: false }) }).remaining).toBe(0);
+    expect(computeTriageBudget({ ...base, countYieldedOccupancy: () => { throw new Error("EIO"); } }).remaining).toBe(0);
+  });
+});
+
+describe("⚠️ a live yield still OWNS its worktree", () => {
+  test("the rebase guard and the stale-PR rescue both recognize it", async () => {
+    const rebase = await Bun.file(new URL("../orchestrate-auto-rebase", import.meta.url)).text();
+    expect(rebase).toContain("dispatched|running|done|awaiting-work");
+    const rescue = await Bun.file(new URL("./stale-pr-rescue-timer.mjs", import.meta.url)).text();
+    // Ownership is read off the SIGNAL: the worker has exited by design, so a
+    // bg_job_id liveness probe necessarily says "not alive" for a live yield.
+    expect(rescue).toContain("!classifyYield(raw).expired");
   });
 });

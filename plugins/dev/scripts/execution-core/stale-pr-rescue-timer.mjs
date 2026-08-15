@@ -32,6 +32,7 @@ import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs
 // escalation reason would silently degrade to a log line and the ticket would
 // never reach the needs-human queue (verify finding, CTL-782).
 import * as linearWriteDefault from "./linear-write.mjs";
+import { YIELDED_STATUS, classifyYield } from "../lib/phase-yield.mjs"; // CTL-1854
 
 // defaultLinearWrite — exported so tests can assert the module-level default
 // is the real linear-write transport (not null).
@@ -131,6 +132,16 @@ function anyPhaseJobAlive(orchDir, ticket, jobLifecycleFn) {
     if (name.includes("-yield-")) continue;
     try {
       const raw = JSON.parse(readFileSync(join(dir, name), "utf8"));
+      // ⚠️ CTL-1854: a LIVE yield owns the worktree even though its worker has
+      // exited — that exit is the whole point of the state, so the bg_job_id
+      // probe below necessarily says "not alive" and the rescue would treat the
+      // ticket as orphaned. Dispatching orchestrate-rebase then runs a rebase in a
+      // worktree whose background work is still operating, and the default rescue
+      // cadence fires well inside the 30-minute yield window. The SIGNAL is the
+      // ownership record here, not the job table. An EXPIRED yield deliberately
+      // does NOT own it: the tick rewrites it to `failed` within a tick, and the
+      // rescue should proceed for a genuinely abandoned ticket.
+      if (String(raw?.status) === YIELDED_STATUS && !classifyYield(raw).expired) return true;
       if (raw?.bg_job_id && jobLifecycleFn(raw.bg_job_id) === "alive") return true;
     } catch {
       /* skip */

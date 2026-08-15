@@ -144,7 +144,7 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   if [ -f "$MONITOR_SIGNAL" ]; then
     MONITOR_STATUS=$(jq -r '.status // empty' "$MONITOR_SIGNAL" 2>/dev/null || echo "")
     case "$MONITOR_STATUS" in
-      dispatched|running|done)
+      dispatched|running|done|awaiting-work)
         SKIPPED=$((SKIPPED+1))
         continue
         ;;

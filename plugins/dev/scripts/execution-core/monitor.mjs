@@ -790,13 +790,16 @@ export function computeTriageBudget({
   // countSdkInflight neither recognizes the status nor runs under the default
   // phase-agents mode. Every budget that computes free slots has to charge the same
   // occupancy, or the limit holds in one admission path and leaks in the next.
-  let yieldedOccupancy = 0;
+  // ⚠️ FAIL CLOSED — see the scheduler's identical gate. A scan failure must not
+  // read as free capacity and let a webhook drain dispatch past maxParallel.
+  let y = { count: 0, ok: false };
   try {
-    yieldedOccupancy = countYieldedOccupancy(orchDir);
+    y = countYieldedOccupancy(orchDir);
   } catch {
-    /* best-effort — never block triage admission on a signal-scan failure */
+    y = { count: 0, ok: false };
   }
-  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight + yieldedOccupancy) };
+  if (!y.ok) return { remaining: 0 };
+  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight + y.count) };
 }
 
 // dispatchTriage — fire the triage phase agent for a →Triage transition. Guards

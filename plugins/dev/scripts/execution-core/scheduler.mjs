@@ -6305,13 +6305,27 @@ export function schedulerTick(
   // `phase-agents` mode, so without this the slot is silently free for the whole
   // live yield and maxParallel is exceeded. Best-effort, like the term above: a
   // signal-scan failure must never block the tick.
+  // ⚠️ FAIL CLOSED. An unreadable workers dir or one truncated signal used to read
+  // as zero yielded occupancy, i.e. as FREE CAPACITY, and admitted work past
+  // maxParallel. Inability to inspect is not evidence of an empty slot.
   let yieldedOccupancy = 0;
+  let yieldedOccupancyOk = true;
   try {
-    yieldedOccupancy = countYieldedOccupancy(orchDir);
+    const y = countYieldedOccupancy(orchDir);
+    yieldedOccupancy = y.count;
+    yieldedOccupancyOk = y.ok;
   } catch {
-    /* best-effort — never block the tick on a signal-scan failure */
+    yieldedOccupancyOk = false;
   }
-  let occupiedCount = liveCount + queuedDelegates + sdkInflight + yieldedOccupancy;
+  if (!yieldedOccupancyOk) {
+    log.warn(
+      { orchDir },
+      "scheduler: yielded-occupancy unreadable — holding new-work admission this tick (CTL-1854, fail-closed)"
+    );
+  }
+  let occupiedCount = yieldedOccupancyOk
+    ? liveCount + queuedDelegates + sdkInflight + yieldedOccupancy
+    : Math.max(maxParallel, liveCount + queuedDelegates + sdkInflight);
 
   tick?.lap("liveness-read");
 

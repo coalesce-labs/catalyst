@@ -216,7 +216,11 @@ export function drainOnce(deps = {}) {
   // an untrustworthy occupancy count.
   let yieldedBaseline = 0;
   try {
-    yieldedBaseline = countYieldedOccupancy(orchDir) ?? 0;
+    const y = countYieldedOccupancy(orchDir);
+    yieldedBaseline = y?.count ?? 0;
+    // ⚠️ An inconclusive scan holds every intent, exactly like a failed sdk
+    // baseline: inability to inspect is not evidence of an available slot.
+    if (y?.ok !== true) sdkBaselineOk = false;
   } catch (err) {
     sdkBaselineOk = false;
     log.warn(

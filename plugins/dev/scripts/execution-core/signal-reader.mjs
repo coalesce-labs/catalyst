@@ -282,13 +282,56 @@ const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 //
 // Pure over the filesystem; never throws (a missing workers/ dir → 0).
 export function countYieldedOccupancy(orchDir) {
-  let n = 0;
-  for (const s of readAllPhaseSignals(orchDir)) {
-    if (s.layout !== "nested") continue;
-    if (s.status !== YIELDED_STATUS) continue;
-    n += 1;
+  // ⚠️ THREE-VALUED, AND IT FAILS CLOSED. Returning a bare number made "no yields"
+  // and "could not look" byte-identical to every caller — and since each caller
+  // subtracts this from maxParallel, an unreadable workers/ dir or ONE truncated
+  // signal read as FREE CAPACITY and admitted work past the limit. That is the
+  // repo's own rule ("a zero needs a positive control") violated by the function
+  // written to enforce a limit.
+  //
+  // It scans the directory itself rather than going through readAllPhaseSignals,
+  // because that reader SKIPS an unparseable file with a warning — the skip is
+  // exactly the event that must be reported, and it is invisible from outside.
+  const workersDir = join(orchDir ?? "", "workers");
+  let tickets;
+  try {
+    tickets = readdirSync(workersDir, { withFileTypes: true });
+  } catch (err) {
+    // ENOENT is a genuine, conclusive zero: no workers dir means no yields. Any
+    // other error (EACCES, EIO) means we could not look.
+    if (err?.code === "ENOENT") return { count: 0, ok: true };
+    return { count: 0, ok: false, reason: "workers-dir-unreadable" };
   }
-  return n;
+  let count = 0;
+  for (const t of tickets) {
+    if (!t.isDirectory() || t.name === "output") continue;
+    let files;
+    try {
+      files = readdirSync(join(workersDir, t.name));
+    } catch {
+      return { count, ok: false, reason: "worker-dir-unreadable" };
+    }
+    for (const f of files) {
+      if (!f.startsWith("phase-") || !f.endsWith(".json")) continue;
+      if (ARTIFACT_NAMES.has(f)) continue;
+      let raw;
+      try {
+        raw = readFileSync(join(workersDir, t.name, f), "utf8");
+      } catch {
+        return { count, ok: false, reason: "signal-unreadable" };
+      }
+      let sig;
+      try {
+        sig = JSON.parse(raw);
+      } catch {
+        // A malformed signal could be a yield we cannot see. Refusing to guess is
+        // the whole point; a torn write mid-append lands here too.
+        return { count, ok: false, reason: "signal-unparseable" };
+      }
+      if (sig?.status === YIELDED_STATUS) count += 1;
+    }
+  }
+  return { count, ok: true };
 }
 
 export function countSdkInflight(orchDir) {
