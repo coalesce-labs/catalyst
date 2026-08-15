@@ -156,6 +156,27 @@ describe("the schema describes reality", () => {
   // The deleted schema's contract, restated from templates/global-event.json as it
   // stands on origin/main: required {ts, orchestrator, event}, with `event` drawn
   // from a closed 23-name enum.
+  // Codex round 22: this record is not synthetic — it is what
+  // emit-worker-status-change.sh's `append_event` fallback really writes when
+  // $STATE_SCRIPT is not executable (its terminal path builds exactly this shape,
+  // and `worker-status-terminal` IS one of the 23 enum names). So a SUPPORTED
+  // producer can emit a record the deleted schema accepts, and the honest claim is
+  // about the measured snapshot, not about what producers are capable of.
+  const RAW_V1_FALLBACK_RECORD = {
+    ts: "2026-08-14T00:00:00Z",
+    orchestrator: "orch-1",
+    worker: "PROJ-1",
+    event: "worker-status-terminal",
+    detail: {},
+  };
+
+  test("a supported producer CAN emit a record the deleted schema accepts", () => {
+    // Doubles as the strongest possible positive control: drawn from real producer
+    // output rather than invented for the test.
+    expect(passesDeadSchema(RAW_V1_FALLBACK_RECORD)).toBe(true);
+    expect(validateEnvelope(RAW_V1_FALLBACK_RECORD).ok).toBe(true); // and it is a valid v1 envelope
+  });
+
   test("POSITIVE CONTROL: the dead-schema validator recognises a conforming event", () => {
     // Without this, "zero live events passed" is satisfiable by a validator that
     // passes nothing at all — the instrument could not have shown otherwise.
@@ -207,11 +228,15 @@ describe("real producer output", () => {
     expect(new Set(corpus.map(classifyEnvelope))).toEqual(new Set(["v1", "v2", "v3", "dual"]));
   });
 
-  test("the dead schema passes NO real producer line either", () => {
-    // Round 20 claimed this test ran; it was never inserted, because that edit
-    // used a stale anchor name and the replace silently matched nothing. The claim
-    // outlived the code for a full round. Presence is now verified by mutation
-    // rather than asserted: a predicate that passes everything turns this red.
+  test("no line in the MEASURED corpus matches the deleted schema", () => {
+    // ⚠️ SCOPE (Codex round 22): this is a statement about the MEASURED corpus, not
+    // about producers. emit-worker-status-change.sh's fallback really can emit a
+    // conforming record (asserted above) — the measured log simply never exercised
+    // that path. Titled accordingly, because "no real producer line matches" was
+    // false and this test would have gone on quietly implying it.
+    //
+    // Round 20 claimed this test ran; it was never inserted (stale anchor, silent
+    // no-op). Presence verified by mutation, not asserted.
     expect(corpus.filter((ev) => passesDeadSchema(ev))).toEqual([]);
   });
 

@@ -6,9 +6,22 @@
 // ── WHY THIS EXISTS ─────────────────────────────────────────────────────────
 // `plugins/dev/templates/global-event.json` was cited by docs/adrs.md and
 // docs/architecture.md as THE event contract for the life of the project. It
-// required `{ts, orchestrator, event}` with a closed enum of names like
-// `orchestrator-started`. MEASURED against the live log: it passed ZERO events,
-// and both citations were prose.
+// required `{ts, orchestrator, event}` with a closed enum of 23 names. MEASURED
+// against the live log: ZERO of the frozen snapshot's events satisfied it, and
+// both citations were prose.
+//
+// ⚠️ SCOPE OF THAT ZERO (Codex round 22). It is a fact about the MEASURED LOG, not
+// about what producers can emit — and the difference is real, not pedantic.
+// `emit-worker-status-change.sh`'s fallback (used when `$STATE_SCRIPT` is not
+// executable) writes `{ts, orchestrator, worker, event:"worker-status-terminal",
+// detail}`, and that name IS in the enum, so a SUPPORTED producer can emit a
+// conforming record. The measured host simply never exercised that path — the same
+// host-scope limit that hid `orchestrator`/`worker` from the key census in round 8.
+//
+// ⭐ That does not weaken the deletion; it sharpens it. A file cited as THE contract
+// for this log, which no code ever imported and which matches only the degraded
+// fallback output of one script, is a worse contract than one matching nothing —
+// it would have described the exception as the rule.
 //
 // ON "NO CODE EVER IMPORTED IT" (Codex rounds 19 + 20). That is a claim about
 // HISTORY, and a current-tree grep establishes only present absence. Round 19's
