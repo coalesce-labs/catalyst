@@ -14369,3 +14369,157 @@ describe("CTL-1789 phase.advance.applied", () => {
     });
   });
 });
+
+// ─── CTL-1805: the durable once-per-edge advancement idempotency guard ───────
+//
+// THE INCIDENT. On mini 2026-08-12 the advancement sweep applied the
+// monitor-merge→monitor-deploy edge for CTL-56 THIRTEEN times in 55 seconds, each
+// tick re-reading the SAME stale phase-monitor-merge.json (a teardown agent had
+// patched .pr into it, bumping its mtime past monitor-deploy's, so latestLivePhase
+// named monitor-merge and deriveAdvancement re-owed monitor-deploy every tick).
+// The sweep is a pure re-derivation with NO durable record that an edge was ever
+// applied, so an unchanging input map re-fired the same edge forever.
+//
+// This is the load-bearing PROOF (13-tick reproduction) + POSITIVE CONTROL
+// (CATALYST_ADVANCE_GUARD=off reproduces the unbounded replay, proving the guard
+// is load-bearing). scheduler.test.mjs is CI-EXCLUDED (debounced-tick flakiness);
+// the CI-enforced distillation lives in advance-idempotency.test.mjs.
+describe("CTL-1805 advancement idempotency guard (13-tick CTL-56 reproduction)", () => {
+  // Hermetic env: the ambient phase-agent dispatch env can set
+  // CATALYST_RECOVERY_PASS=enforce / CATALYST_BOARD_HEALTH, which make each full
+  // schedulerTick run slow, unrelated passes (~300ms recovery-pass) and would
+  // blow the 13-tick budget non-deterministically depending on the launching
+  // shell. This reproduction exercises the ADVANCEMENT sweep only, so neutralize
+  // those passes here (see the "Dispatch env leaks into hermetic tests" hazard).
+  let savedRecovery, savedBoardHealth;
+  beforeEach(() => {
+    savedRecovery = process.env.CATALYST_RECOVERY_PASS;
+    savedBoardHealth = process.env.CATALYST_BOARD_HEALTH;
+    delete process.env.CATALYST_RECOVERY_PASS;
+    delete process.env.CATALYST_BOARD_HEALTH;
+  });
+  afterEach(() => {
+    if (savedRecovery === undefined) delete process.env.CATALYST_RECOVERY_PASS;
+    else process.env.CATALYST_RECOVERY_PASS = savedRecovery;
+    if (savedBoardHealth === undefined) delete process.env.CATALYST_BOARD_HEALTH;
+    else process.env.CATALYST_BOARD_HEALTH = savedBoardHealth;
+  });
+
+  // Build the CTL-56 mid-burst worker dir. deriveAdvancement over this fixture
+  // returns monitor-deploy every tick (verified: latestLivePhase = monitor-merge
+  // because its mtime is newest; the successor-veto consulted a set the mtime rule
+  // emptied of the done monitor-deploy). fakeDispatch writes no signal, so the map
+  // is invariant across ticks → the edge re-derives identically.
+  function seedCtl56() {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignalRaw("CTL-56", "monitor-deploy", {
+      ticket: "CTL-56",
+      phase: "monitor-deploy",
+      status: "done",
+      generation: 1,
+      updatedAt: "2026-08-12T05:18:36Z",
+    });
+    writeSignalRaw("CTL-56", "teardown", {
+      ticket: "CTL-56",
+      phase: "teardown",
+      status: "dispatched",
+      generation: 2,
+      updatedAt: "2026-08-12T05:18:00Z",
+    });
+    writeSignalRaw("CTL-56", "monitor-merge", {
+      ticket: "CTL-56",
+      phase: "monitor-merge",
+      status: "done",
+      pr: { number: 56 },
+      updatedAt: "2026-08-12T05:12:31Z",
+    });
+    // mtime control (the :232-249 template): monitor-merge NEWEST (the teardown
+    // agent's .pr patch), monitor-deploy older, teardown oldest.
+    const dir = join(orchDir, "workers", "CTL-56");
+    const base = Date.now();
+    utimesSync(join(dir, "phase-teardown.json"), new Date(base - 120000), new Date(base - 120000));
+    utimesSync(
+      join(dir, "phase-monitor-deploy.json"),
+      new Date(base - 60000),
+      new Date(base - 60000)
+    );
+    utimesSync(join(dir, "phase-monitor-merge.json"), new Date(base), new Date(base));
+  }
+
+  const tick = (dispatch) =>
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+  const countByName = (name) =>
+    readEventLog().filter((e) => e?.attributes?.["event.name"] === name).length;
+  const appliedFor = (ticket) =>
+    readEventLog().filter(
+      (e) => e?.attributes?.["event.name"] === `phase.advance.applied.${ticket}`
+    );
+
+  test("guard ON: monitor-merge→monitor-deploy applies EXACTLY ONCE over 13 ticks", () => {
+    delete process.env.CATALYST_ADVANCE_GUARD; // unset = enforce (default)
+    seedCtl56();
+    const dispatch = fakeDispatch(); // shared across all 13 ticks
+    for (let i = 0; i < 13; i++) tick(dispatch);
+
+    const applied = appliedFor("CTL-56");
+    expect(applied).toHaveLength(1);
+    expect(applied[0].body.payload).toMatchObject({ from: "monitor-merge", to: "monitor-deploy" });
+    // Ticks 2–13 are fully suppressed — the edge is NOT re-dispatched …
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-56", phase: "monitor-deploy" }]);
+    // … and the throttled canary fires exactly once within the window.
+    expect(countByName("phase.advance.suppressed-duplicate.CTL-56")).toBe(1);
+  }, 30000);
+
+  test("POSITIVE CONTROL — guard OFF reproduces the unbounded replay (>1 applied)", () => {
+    process.env.CATALYST_ADVANCE_GUARD = "off";
+    try {
+      seedCtl56();
+      const dispatch = fakeDispatch();
+      for (let i = 0; i < 13; i++) tick(dispatch);
+      // The bug, unguarded: every tick re-applies the same edge and re-dispatches.
+      expect(appliedFor("CTL-56").length).toBeGreaterThan(1);
+      expect(dispatch.calls.length).toBeGreaterThan(1);
+      // With the guard off, no suppressed-duplicate canary is ever emitted.
+      expect(countByName("phase.advance.suppressed-duplicate.CTL-56")).toBe(0);
+    } finally {
+      delete process.env.CATALYST_ADVANCE_GUARD;
+    }
+  }, 30000);
+
+  test("a LEGITIMATE re-advance (newer predecessor identity) is NOT suppressed", () => {
+    delete process.env.CATALYST_ADVANCE_GUARD;
+    seedCtl56();
+    tick(fakeDispatch());
+    expect(appliedFor("CTL-56")).toHaveLength(1);
+
+    // The predecessor's identity CHANGES — monitor-merge re-runs at a NEWER
+    // updatedAt (a genuine backward re-dispatch). The marker's stored key no
+    // longer matches → the edge advances again and the marker is overwritten.
+    // Keying on predecessor identity (not the bare edge) is what keeps this legal.
+    writeSignalRaw("CTL-56", "monitor-merge", {
+      ticket: "CTL-56",
+      phase: "monitor-merge",
+      status: "done",
+      pr: { number: 56 },
+      updatedAt: "2026-08-12T09:00:00Z", // NEWER than the recorded marker's key
+    });
+    const dir = join(orchDir, "workers", "CTL-56");
+    const base = Date.now();
+    utimesSync(
+      join(dir, "phase-monitor-merge.json"),
+      new Date(base + 10_000),
+      new Date(base + 10_000)
+    );
+    tick(fakeDispatch());
+    // A second applied event: the guard did not swallow a real re-advance.
+    expect(appliedFor("CTL-56").length).toBe(2);
+    // …and no suppressed-duplicate was emitted (the key changed, so it never
+    // matched a marker).
+    expect(countByName("phase.advance.suppressed-duplicate.CTL-56")).toBe(0);
+  });
+});
