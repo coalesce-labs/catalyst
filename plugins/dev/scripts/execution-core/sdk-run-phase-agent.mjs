@@ -69,6 +69,7 @@ import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
 import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
+import { YIELDED_STATUS, shouldFlipOnUndeclaredExit } from "../lib/phase-yield.mjs";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
 
 // phase-agent-dispatch + phase-agent-emit-complete sit one directory up.
@@ -526,6 +527,15 @@ export function defaultWriteSignalStalled(signalFile, reason) {
 //     block at the write site for why each of those three is load-bearing.
 const SIGNAL_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
 
+// CTL-1854 option 3. `awaiting-work` is a DECLARED, BOUNDED wait: the agent
+// delegated to a background job and said so, instead of ending its turn silently
+// and being recorded as abandoned. The status is not in the in-flight set above,
+// so the early return already protects it — but that protection is UNBOUNDED, and
+// isTicketInFlight holds a slot for any non-terminal status. So the yield has a
+// DEADLINE, and past it this flip proceeds exactly as before with a failureReason
+// that names which promise was broken. See lib/phase-yield.mjs for why the bound
+// is the entire safety argument.
+
 // Plain-integer test shared by the generation fence — mirrors the bash
 // `[[ $x =~ ^[0-9]+$ ]]` in phase-agent-emit-complete and claim.mjs's
 // isCurrentGeneration semantics exactly.
@@ -544,7 +554,17 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
     if (!sig || typeof sig !== "object") return;
     // In-flight-only precondition. A terminal signal is already correct; a
     // needs-input (parked) signal must stay parked.
-    if (!SIGNAL_INFLIGHT_STATUSES.has(String(sig.status))) return;
+    // CTL-1854: a declared yield is honoured only while it is UNEXPIRED. An
+    // expired one falls through to the terminal write below, so a yield can never
+    // become the permanent hold the abandon-flip exists to prevent.
+    let yieldFailureReason = null;
+    if (String(sig.status) === YIELDED_STATUS) {
+      const verdict = shouldFlipOnUndeclaredExit(sig);
+      if (!verdict.flip) return; // live, bounded wait — leave the signal alone
+      yieldFailureReason = verdict.failureReason;
+    } else if (!SIGNAL_INFLIGHT_STATUSES.has(String(sig.status))) {
+      return;
+    }
     // CTL-736 generation fence (adversarial-review catch, CTL-1410 Phase A): an
     // in-process query cannot be killed (preemption's killBgJob(null) is a no-op,
     // the per-attempt AbortController is not externally wired), so a preempt→
@@ -584,7 +604,9 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
     // `abandoned` for orchestrator heartbeat-expiry GC.)
     sig.status = "failed";
     sig.outcome = "abandoned";
-    sig.failureReason = "ended-without-declaration";
+    // An expired yield and a silent exit are DIFFERENT failures and must not share
+    // a reason: one broke a promise it made, the other never made one.
+    sig.failureReason = yieldFailureReason ?? "ended-without-declaration";
     // CTL-1789: this fires on a CLEAN SDK EXIT, not on an agent declaring anything —
     // the agent never ran its wrapper (if it had, `status` would already be terminal
     // and the in-flight precondition above would have returned). Stamp the writer so
