@@ -26,14 +26,34 @@
 #   phase-agent-emit-complete \
 #     --phase <name> \
 #     --ticket <id> \
-#     --status complete|failed \
+#     --status complete|failed|turn-cap-exhausted|skipped|park|yield \
 #     [--reason <text>] \
+#     [--yield-seconds <n>] \
 #     [--payload-json <json>] \
 #     [--orch-dir <path>] \
 #     [--orch-id <id>] \
 #     [--session-id <id>] \
 #     [--asserted-by <writer-id>] \
 #     [--no-signal-update]
+#
+# --status yield (CTL-1854): declare a BOUNDED, resumable wait on the agent's own
+#   background work, instead of ending the turn undeclared. An undeclared exit is
+#   written as failed/abandoned/ended-without-declaration by
+#   sdk-run-phase-agent — measured 2026-08-14 on five real runs whose work had
+#   actually finished — so this is the declaration that turns a silent
+#   abandonment into an explicit wait. Writes status "awaiting-work" plus
+#   `yieldedAt` / `firstYieldedAt`; NOT terminal, so completedAt stays unset.
+#
+#   It is deliberately NOT `park` (needs-input): that means waiting on a HUMAN and
+#   pages one. An agent waiting on its own job needs nobody.
+#
+#   ⚠️ A YIELD IS A DEADLINE, NOT A PERMIT. `isTicketInFlight` frees a slot only
+#   for failed|stalled|aborted, so any other status HOLDS it. Past the deadline
+#   the runner writes the same terminal it writes today, with failureReason
+#   "yield-expired". --yield-seconds requests LESS than the 30-minute ceiling
+#   (Linear's session-stale deadline); it can never request more, and the ceiling
+#   bounds the whole episode via `firstYieldedAt`, so re-yielding buys nothing.
+#   Contract + classifier: lib/phase-yield.mjs.
 #
 # --asserted-by (CTL-1789): the writer id stamped onto the signal file's
 #   `assertedBy` field, recording WHO asserted this phase finished. Defaults to
@@ -99,6 +119,9 @@ TICKET=""
 STATUS=""
 REASON=""
 HANDOFF_PATH=""
+# CTL-1854: seconds an agent asks to wait on its own background job. Empty means
+# "use the ceiling". Only read for --status yield.
+YIELD_SECONDS=""
 CALLER_PAYLOAD=""
 ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR-}"
 ORCH_ID="${CATALYST_ORCHESTRATOR_ID-}"
@@ -157,6 +180,10 @@ while [[ $# -gt 0 ]]; do
 		ASSERTED_BY="$2"
 		shift 2
 		;;
+	--yield-seconds)
+		YIELD_SECONDS="$2"
+		shift 2
+		;;
 	--no-signal-update)
 		NO_SIGNAL_UPDATE=1
 		shift
@@ -174,9 +201,18 @@ done
 [[ -n $STATUS ]] || die "--status is required"
 
 case "$STATUS" in
-complete | failed | turn-cap-exhausted | skipped | park) ;;
-*) die "--status must be 'complete', 'failed', 'turn-cap-exhausted', 'skipped', or 'park' (got: $STATUS)" ;;
+complete | failed | turn-cap-exhausted | skipped | park | yield) ;;
+*) die "--status must be 'complete', 'failed', 'turn-cap-exhausted', 'skipped', 'park', or 'yield' (got: $STATUS)" ;;
 esac
+
+# CTL-1854: --yield-seconds is meaningful ONLY for a yield. Accepting it silently
+# elsewhere would make a typo'd status ("--status complete --yield-seconds 600")
+# indistinguishable from a correct yield to the caller, so refuse it outright.
+if [[ -n $YIELD_SECONDS ]]; then
+	[[ $STATUS == "yield" ]] || die "--yield-seconds is only valid with --status yield (got: --status $STATUS)"
+	[[ $YIELD_SECONDS =~ ^[0-9]+$ && $YIELD_SECONDS -gt 0 ]] ||
+		die "--yield-seconds must be a positive integer (got: $YIELD_SECONDS)"
+fi
 
 # Validate ticket shape against the same pattern the broker uses.
 if [[ ! $TICKET =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
@@ -447,10 +483,15 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		turn-cap-exhausted) NEW_STATUS="turn-cap-exhausted" ;;
 		skipped) NEW_STATUS="skipped" ;;  # CTL-512: monitor-deploy terminal-no-deploy
 		park) NEW_STATUS="needs-input" ;; # CTL-549: parked waiting for human comment
+		# CTL-1854: a BOUNDED wait on the agent's own background job. Deliberately
+		# NOT needs-input — that means waiting on a HUMAN and pages one. This value
+		# is a hand-written mirror of YIELDED_STATUS in lib/phase-yield.mjs, held
+		# byte-identical by execution-core/phase-yield-parity.test.mjs.
+		yield) NEW_STATUS="awaiting-work" ;;
 		esac
-		# turn-cap-exhausted and park are NOT terminal states — leave completedAt unset.
+		# turn-cap-exhausted, park and yield are NOT terminal states — leave completedAt unset.
 		# CTL-512: skipped IS terminal (slot frees), so it falls through to SET_COMPLETED.
-		if [[ $STATUS == "turn-cap-exhausted" || $STATUS == "park" ]]; then
+		if [[ $STATUS == "turn-cap-exhausted" || $STATUS == "park" || $STATUS == "yield" ]]; then
 			SET_COMPLETED='.'
 		else
 			SET_COMPLETED='.completedAt = $ts'
@@ -460,7 +501,16 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		_EMIT_HOST_NAME="$(catalyst_host_name 2>/dev/null || true)"
 		_EMIT_HOST_ID="$(catalyst_host_id 2>/dev/null || true)"
 		TMP="${SIGNAL_FILE}.tmp.$$"
+		# CTL-1854: requested yield window as JSON (null = use the ceiling). Built in
+		# bash so the jq program stays free of arithmetic on untrusted input; the
+		# value was already validated as a positive integer above.
+		if [[ -n $YIELD_SECONDS ]]; then
+			YIELD_MS_JSON=$((YIELD_SECONDS * 1000))
+		else
+			YIELD_MS_JSON="null"
+		fi
 		if jq --arg status "$NEW_STATUS" \
+			--argjson yieldms "$YIELD_MS_JSON" \
 			--arg rawstatus "$STATUS" \
 			--arg ts "$TS" \
 			--arg reason "$REASON" \
@@ -480,6 +530,11 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
            | (if \$status  == \"needs-input\" then .parkedFrom = \$phase
                 | (if (.needsHumanSince == null) then .needsHumanSince = \$ts else . end)
               else . end)
+           | (if \$rawstatus == \"yield\"
+              then .yieldedAt = \$ts
+                 | .firstYieldedAt = (.firstYieldedAt // \$ts)
+                 | (if \$yieldms == null then del(.yieldMs) else .yieldMs = \$yieldms end)
+              else del(.yieldedAt) | del(.firstYieldedAt) | del(.yieldMs) end)
            | (if .host == null and \$host_name != \"\" then .host = {name: \$host_name, id: \$host_id} else . end)" \
 			"$SIGNAL_FILE" >"$TMP" 2>/dev/null; then
 			mv "$TMP" "$SIGNAL_FILE"

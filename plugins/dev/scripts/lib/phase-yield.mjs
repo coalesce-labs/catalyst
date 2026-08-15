@@ -87,11 +87,28 @@ export function classifyYield(sig, nowMs = Date.now(), maxYieldMs = MAX_YIELD_MS
     return { yielded: true, expired: true, reason: "yield-start-unreadable", deadlineMs: null };
   }
 
+  // ⚠️ THE CEILING BOUNDS THE EPISODE, NOT THE INDIVIDUAL YIELD.
+  // `yieldedAt` is rewritten on every yield declaration, so an agent that
+  // re-yields before its deadline would earn a fresh window each time and hold
+  // the slot forever by repetition — the exact unbounded hold this state exists
+  // to prevent, reachable in a loop instead of in one write. `firstYieldedAt` is
+  // set once per episode and preserved across re-yields, so the total wait can
+  // never exceed the ceiling however many times an agent asks. A signal without
+  // it (written before this shipped, or by a single yield) anchors on
+  // `yieldedAt`, which is the same instant — so the bound is unchanged there.
+  // ABSENT anchors on this yield; PRESENT-BUT-UNREADABLE expires. Collapsing the
+  // two would let a corrupt anchor buy the fresh window the anchor exists to deny.
+  const hasEpisodeAnchor = sig.firstYieldedAt !== undefined && sig.firstYieldedAt !== null;
+  const episodeStartMs = hasEpisodeAnchor ? parseMs(sig.firstYieldedAt) : startedMs;
+  if (episodeStartMs === null) {
+    return { yielded: true, expired: true, reason: "episode-start-unreadable", deadlineMs: null };
+  }
+
   // An agent may request less than the ceiling; it may never request more.
   const requested = typeof sig.yieldMs === "number" && Number.isFinite(sig.yieldMs) && sig.yieldMs > 0
     ? Math.min(sig.yieldMs, maxYieldMs)
     : maxYieldMs;
-  const deadlineMs = startedMs + requested;
+  const deadlineMs = Math.min(episodeStartMs + maxYieldMs, startedMs + requested);
 
   if (!Number.isFinite(nowMs)) {
     // A caller that cannot tell the time cannot extend a deadline either.

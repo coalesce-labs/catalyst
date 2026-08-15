@@ -73,6 +73,54 @@ describe("⚠️ the bound is the whole safety argument", () => {
   });
 });
 
+describe("⚠️ re-yielding cannot buy an unbounded hold", () => {
+  // yieldedAt is rewritten on EVERY yield declaration. Without an episode anchor
+  // an agent re-yielding at minute 29 earns a fresh 30 — the same unbounded hold,
+  // reached in a loop instead of in one write.
+  test("a re-yield inside the window does NOT extend past the episode ceiling", () => {
+    const reYielded = {
+      status: YIELDED_STATUS,
+      firstYieldedAt: new Date(T0).toISOString(),
+      yieldedAt: new Date(T0 + 29 * 60_000).toISOString(), // re-declared at minute 29
+    };
+    // Naive per-yield math would put the deadline at T0+59min. The episode bound
+    // holds it at T0+30min.
+    expect(classifyYield(reYielded, T0).deadlineMs).toBe(T0 + MAX_YIELD_MS);
+    expect(shouldFlipOnUndeclaredExit(reYielded, T0 + MAX_YIELD_MS + 1)).toMatchObject({
+      flip: true,
+      failureReason: YIELD_EXPIRED_REASON,
+    });
+  });
+
+  test("ten re-yields buy exactly as much as one", () => {
+    let deadline = null;
+    for (let i = 0; i < 10; i++) {
+      deadline = classifyYield({
+        status: YIELDED_STATUS,
+        firstYieldedAt: new Date(T0).toISOString(),
+        yieldedAt: new Date(T0 + i * 60_000).toISOString(),
+      }, T0).deadlineMs;
+    }
+    expect(deadline).toBe(T0 + MAX_YIELD_MS);
+  });
+
+  test("no anchor (a first yield, or a pre-existing signal) anchors on yieldedAt", () => {
+    // Backward compatibility: the bound is unchanged for a signal written before
+    // the anchor existed, because for a single yield the two instants are equal.
+    expect(classifyYield(yielded(), T0).deadlineMs).toBe(T0 + MAX_YIELD_MS);
+  });
+
+  test("a PRESENT but unreadable anchor expires; it never falls back to a fresh window", () => {
+    for (const bad of ["not-a-date", {}, [], ""]) {
+      const sig = { ...yielded(), firstYieldedAt: bad };
+      expect({ bad: String(bad), flip: shouldFlipOnUndeclaredExit(sig, T0).flip })
+        .toEqual({ bad: String(bad), flip: true });
+    }
+    // ...while an explicitly absent anchor still behaves as a first yield.
+    expect(shouldFlipOnUndeclaredExit({ ...yielded(), firstYieldedAt: null }, T0).flip).toBe(false);
+  });
+});
+
 describe("every other signal shape behaves exactly as before", () => {
   // The fix must be additive: if this state is not declared, the runner's
   // behaviour is unchanged. A regression here re-breaks CTL-1790.

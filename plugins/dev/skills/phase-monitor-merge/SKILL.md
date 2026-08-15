@@ -154,6 +154,21 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    the wait (defeats the assistant `end_turn` rendering bleed described in [[monitor-events]] §
    Narration). Shape: `wake: <event.name> #<PR_NUMBER> — <action being taken>`.
 
+6. **⚠️ Never end your turn undeclared (CTL-1854).** If you are about to stop while still waiting
+   on work you started — a background job, a CI run, a re-review you requested — you MUST say so:
+
+   ```bash
+   "$EMIT" --phase "$PHASE" --ticket "$TICKET" --status yield [--yield-seconds <n>]
+   ```
+
+   Ending the turn without a declaration is **not** neutral and does not mean "resume later":
+   `sdk-run-phase-agent` writes `failed` / `abandoned` / `ended-without-declaration`, and a human is
+   paged for a phase whose work may have completed. Measured 2026-08-14: five such runs across both
+   hosts in one day, in exactly this phase and `implement`, every one with a clean SDK exit — two of
+   them fleet-blocking. "I'll be re-invoked when it completes" is a belief the runtime does not
+   share; a yield is how you actually say it. It is bounded (30 min per episode, re-yielding buys
+   no more), so it defers the terminal — it never removes it.
+
 ## Merge
 
 Once `mergeable_state == "clean"` (and the PR isn't already merged):
