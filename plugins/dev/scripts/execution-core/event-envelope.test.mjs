@@ -31,6 +31,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { existsSync, statSync, readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { scanEventsSince, tailParsedEvents, scanEventsChunked } from "./event-tail.mjs";
 import {
@@ -173,6 +174,51 @@ describe("real producer output", () => {
     ]) {
       expect(validateEnvelope(ev).ok).toBe(true);
     }
+  });
+});
+
+// Codex round 16: references/event-schema.md publishes a jq name ladder and claims
+// it matches lib/event-name.mjs. Nothing enforced that — the claim was itself an
+// unverified assertion, and the first version diverged (it threw on a scalar
+// `.attributes` where the JS returns a name, and a jq error aborts the whole
+// drain). This extracts the ladder FROM THE DOC and runs it against the JS, so the
+// doc is the source and drift fails here.
+describe("the documented jq ladder matches the JS boundary", () => {
+  const docPath = new URL("../../references/event-schema.md", import.meta.url);
+  const doc = readFileSync(docPath, "utf8");
+  const m = doc.match(/^> (\[\.event,.*first \/\/ "")$/m);
+  const jqAvailable = (() => {
+    try {
+      return spawnSync("jq", ["--version"]).status === 0;
+    } catch {
+      return false;
+    }
+  })();
+
+  test("the doc still publishes a ladder", () => {
+    // Fails loudly if the expression is renamed or removed, so the parity test
+    // below can never pass by matching nothing.
+    expect(m && m[1].length > 0).toBe(true);
+  });
+
+  test.skipIf(!jqAvailable)("jq and JS agree on every shape, including the edge cases", () => {
+    const cases = [
+      { ts: "t", event: "v1.only" },
+      { ts: "t", attributes: { "event.name": "v2.only" } },
+      { ts: "t", name: "v3.only" },
+      { ts: "t", event: "dual.same", attributes: { "event.name": "dual.same" } },
+      { ts: "t", event: "phase.ok", attributes: "payload" }, // scalar attributes
+      { ts: "t", attributes: null, name: "v3.via.null.attrs" },
+      { ts: "t", event: "", attributes: { "event.name": "v2.wins.over.empty" } },
+      { ts: "t", attributes: { "event.name": 123 }, name: "v3.wins.over.nonstring" },
+      { ts: "t" },
+    ];
+    const input = cases.map((c) => JSON.stringify(c)).join("\n") + "\n";
+    const r = spawnSync("jq", ["-rc", m[1]], { input, encoding: "utf8" });
+    expect(r.status).toBe(0); // a jq ERROR would abort a real drain — never acceptable
+    expect(r.stdout.split("\n").filter((x) => x !== "")).toEqual(
+      cases.map((c) => getEventName(c)).filter((x) => x !== "")
+    );
   });
 });
 
