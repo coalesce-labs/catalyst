@@ -134,7 +134,7 @@ import { emitFenceClaimed } from "./fence-event.mjs";
 // CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
 // won cluster claim. Never the claim arbiter — see worker-label.mjs header.
 import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
-import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1367 P1: executor=sdk occupancy reader for the triage budget
+import { countSdkInflight as defaultCountSdkInflight, countYieldedOccupancy as defaultCountYieldedOccupancy } from "./signal-reader.mjs"; // CTL-1367 P1: executor=sdk occupancy reader for the triage budget; CTL-1854: mode-independent yield occupancy
 import {
   recordReconcileSuccess,
   recordReconcileFailure,
@@ -552,6 +552,7 @@ export function handleStateChangedEvent(
     // byte-identical bg budget. Threaded from startMonitor via tailerOpts.
     dispatchMode = "phase-agents",
     countSdkInflight = defaultCountSdkInflight,
+    countYieldedOccupancy = defaultCountYieldedOccupancy, // CTL-1854
     // CTL-1457 (N1): per-phase in-process route flag → the computed budget (below)
     // arms the SDK-occupancy term on a bg node. Default false → unchanged.
     hasInProcessRoute = false,
@@ -604,6 +605,7 @@ export function handleStateChangedEvent(
       liveBackgroundCount,
       dispatchMode,
       countSdkInflight,
+      countYieldedOccupancy,
       hasInProcessRoute,
     });
   for (const p of listProjects()) {
@@ -753,6 +755,9 @@ export function computeTriageBudget({
   // CTL-1367 P1: executor=sdk occupancy reader (in-process SDK workers have no
   // `claude --bg` job → invisible to liveBackgroundCount). Injectable for tests.
   countSdkInflight = defaultCountSdkInflight,
+  // CTL-1854: yielded-phase occupancy. Unconditional — a yield holds its slot in
+  // every dispatch mode. Injectable for tests, like the reader above.
+  countYieldedOccupancy = defaultCountYieldedOccupancy,
   // CTL-1457 (N1): true when executorByPhase routes ANY phase to an in-process
   // executor (sdk|codex-exec) while the node boot dispatchMode is still bg — the
   // per-phase rollout. ORed into the gate so the routed no-bg triage worker is
@@ -777,7 +782,20 @@ export function computeTriageBudget({
       /* best-effort — never block triage admission on a signal-scan failure */
     }
   }
-  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight) };
+  // CTL-1854: yielded phases hold their slots in EVERY dispatch mode, so this term
+  // is unconditional — unlike sdkInflight above. Without it a webhook drain or
+  // sweepMissingTriage dispatches a Triage worker straight through a live yield at
+  // maxParallel=1: the yielded worker's bg job is terminal (so `live` drops it) and
+  // countSdkInflight neither recognizes the status nor runs under the default
+  // phase-agents mode. Every budget that computes free slots has to charge the same
+  // occupancy, or the limit holds in one admission path and leaks in the next.
+  let yieldedOccupancy = 0;
+  try {
+    yieldedOccupancy = countYieldedOccupancy(orchDir);
+  } catch {
+    /* best-effort — never block triage admission on a signal-scan failure */
+  }
+  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight + yieldedOccupancy) };
 }
 
 // dispatchTriage — fire the triage phase agent for a →Triage transition. Guards

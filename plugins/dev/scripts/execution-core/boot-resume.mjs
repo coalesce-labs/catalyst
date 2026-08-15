@@ -464,9 +464,16 @@ export function selectBootResumeCandidates({
     // second place would give the deadline two writers and re-open the
     // late-completion race by widening it.
     if (String(active.status) === YIELDED_STATUS) {
+      // ⚠️ CHARGE THE SLOT BEFORE SKIPPING. `continue` here bypasses the liveCount
+      // increment below, so the first cut of this skip fixed the false page and
+      // opened a capacity hole in the same line: a yielded ticket still HOLDS its
+      // slot, but boot would compute free slots as if it did not and resume
+      // another candidate straight through it. Not resuming a ticket is not the
+      // same as the ticket not existing.
+      liveCount += 1;
       logger.debug(
         { ticket, phase: active.phase },
-        "boot-resume: skipping awaiting-work (bounded wait; the tick owns expiry)"
+        "boot-resume: skipping awaiting-work (bounded wait; the tick owns expiry) — slot still charged"
       );
       continue;
     }

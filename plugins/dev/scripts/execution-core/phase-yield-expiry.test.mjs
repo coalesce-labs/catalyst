@@ -276,3 +276,35 @@ describe("the expiry write is atomic", () => {
     expect(removed).toContain(".tmp.");
   });
 });
+
+describe("⚠️ every admission budget charges the yield, not just the scheduler's", () => {
+  // A limit that holds in one admission path and leaks in the next is not a
+  // limit. countYieldedOccupancy was first wired only into schedulerTick, so a
+  // webhook drain could still dispatch Triage straight through a live yield.
+  test("computeTriageBudget subtracts yielded occupancy at maxParallel=1", async () => {
+    const { computeTriageBudget } = await import("./monitor.mjs");
+    const base = {
+      orchDir: "/orch",
+      readMaxParallelFn: () => 1,
+      liveBackgroundCount: () => 0, // the yielded worker's bg job is TERMINAL
+      dispatchMode: "phase-agents", // the DEFAULT — countSdkInflight is not even called
+      countSdkInflight: () => 0,
+    };
+    expect(computeTriageBudget({ ...base, countYieldedOccupancy: () => 0 }).remaining).toBe(1);
+    // With one yield outstanding the only slot is taken.
+    expect(computeTriageBudget({ ...base, countYieldedOccupancy: () => 1 }).remaining).toBe(0);
+  });
+
+  test("a throwing occupancy reader never blocks triage admission", async () => {
+    const { computeTriageBudget } = await import("./monitor.mjs");
+    const out = computeTriageBudget({
+      orchDir: "/orch",
+      readMaxParallelFn: () => 2,
+      liveBackgroundCount: () => 0,
+      dispatchMode: "phase-agents",
+      countSdkInflight: () => 0,
+      countYieldedOccupancy: () => { throw new Error("scan failed"); },
+    });
+    expect(out.remaining).toBe(2); // degrades, does not throw
+  });
+});
