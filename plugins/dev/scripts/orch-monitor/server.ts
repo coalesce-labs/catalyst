@@ -272,6 +272,10 @@ import { loadMonitorConfig } from "./lib/monitor-config";
 // Shared Layer-1 config-path resolver (env pointer > cwd) — keeps
 // projectsConfigPath / monitorConfigPath / resolveProjectConfigPath in lockstep.
 import { resolveLayer1ConfigPath } from "./lib/config-path";
+import {
+  createRouteHealthMonitor,
+  getLinearWebhook401MarkerPath,
+} from "./lib/webhook-route-health"; // CTL-1841
 // CTL-1152: config-driven project roster behind GET /api/projects.
 import { loadProjects } from "./lib/project-roster";
 // CTL-1153 (M2): config mutation for PUT /api/projects/:key.
@@ -2257,6 +2261,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
     5 * 60 * 1000,
   );
 
+  // CTL-1841: route-comparison alarm for a 401-only Linear webhook delivery window.
+  // Stamps /api/webhook and /api/webhook/linear response codes, then evaluates on
+  // a periodic tick. ALERT-ONLY (durable marker + console.warn → orch-monitor.log →
+  // Alloy → Loki, independent of the broken webhook path). Cleared in server.stop().
+  // Pin the marker under this server's already-resolved CATALYST_DIR (honors the
+  // opts.catalystDir override) so isolated instances don't share stale latch state.
+  const routeHealth = createRouteHealthMonitor({
+    markerPath: getLinearWebhook401MarkerPath(CATALYST_DIR),
+  });
+  const linearWebhookAlarmTimer = setInterval(
+    () => { try { routeHealth.evaluate(); } catch { /* alarm must never wedge the server */ } },
+    routeHealth.config.tickMs,
+  );
+  linearWebhookAlarmTimer.unref?.();
+
   // CTL-1330 Tier 1: monitor request-timing. Surface only slow requests
   // (default >250ms) so healthy traffic doesn't flood the log. ON unless
   // CATALYST_TICK_TIMING=off. Fields land as structured attributes for the
@@ -3426,7 +3445,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
               status: 503,
             });
           }
-          return webhookHandler.handle(req);
+          const ghRes = await webhookHandler.handle(req);
+          routeHealth.stampGithub(ghRes.status); // CTL-1841: live control stamp
+          return ghRes;
         }
 
         if (url.pathname === "/api/webhook/linear" && req.method === "POST") {
@@ -3435,7 +3456,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
               status: 503,
             });
           }
-          return linearWebhookHandler.handle(req);
+          const lnRes = await linearWebhookHandler.handle(req);
+          routeHealth.stampLinear(lnRes.status); // CTL-1841: route-comparison stamp
+          return lnRes;
         }
 
         if (url.pathname === "/api/summarize" && req.method === "POST") {
@@ -5819,6 +5842,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     pushStore.closeDb();
     sseClients.clear();
     clearInterval(titleDescSweepTimer);
+    clearInterval(linearWebhookAlarmTimer); // CTL-1841
     if (anchorPollTimer) clearInterval(anchorPollTimer); // CTL-1251 anchor poll
     eventRing.stop();
     if (pidFile) {
