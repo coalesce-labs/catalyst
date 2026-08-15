@@ -7,11 +7,21 @@
 // `plugins/dev/templates/global-event.json` was cited by docs/adrs.md and
 // docs/architecture.md as THE event contract for the life of the project. It
 // required `{ts, orchestrator, event}` with a closed enum of names like
-// `orchestrator-started`. MEASURED against the live log: it passes 0 of
-// 1,202,573 events, no code has ever imported it, and both citations are prose.
-// A mechanism that has never produced an output does not exist — so it is
-// deleted in the same change that adds this file. Leaving a false contract next
-// to a true one is the duplication this work exists to remove.
+// `orchestrator-started`. MEASURED against the live log: it passed ZERO events,
+// and both citations were prose.
+//
+// ON "NO CODE EVER IMPORTED IT" (Codex round 19). That is a claim about HISTORY,
+// and a current-tree grep can only establish present absence. What was actually
+// demonstrated: `git log --all -S'global-event.json'` over `*.mjs *.ts *.js *.sh`
+// returns exactly TWO commits, and both are this PR's own (they add the string in
+// a comment and in the release-notes detector). Positive control on the same
+// instrument: `-S'getEventName'` over the same file set returns 35 commits, so it
+// does find real code references. So the demonstrated statement is: no code file
+// in this repository's history has ever contained a reference to that path.
+//
+// A mechanism that has never produced an output does not exist — so it is deleted
+// in the same change that adds this file. Leaving a false contract next to a true
+// one is the duplication this work exists to remove.
 //
 // ── THE SCHEMA IS MEASURED, NOT DESIGNED ────────────────────────────────────
 // Every rule below was derived by counting the live corpus, not by deciding what
