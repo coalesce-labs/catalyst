@@ -322,6 +322,19 @@ DEFERRED — the linear-webhook bot-skip guard suppresses bot-authored issue eve
 the log, so the source goes quiet even with a worker in flight.) `getStaleWorkers` is the one genuinely unwired export (its own comment
 says so). See ADR-018 for the full history.
 
+The Linear route now has a complementary **route-comparison** silence alarm (CTL-1841) that lives
+in the orch-monitor server, not in the broker. It compares `/api/webhook/linear` HTTP response
+codes against the `/api/webhook` (GitHub) control — both share the same smee tunnel, Bun process,
+and minute — and raises when Linear has returned only non-2xx past a threshold while GitHub keeps
+200-ing. This detects HMAC authentication failure (the 2026-08-14 7.5-hour outage) **without**
+depending on Linear event volume, so it does NOT revert the `RECENCY_SOURCES` `catalyst.linear`
+exclusion. It is **alert-only**: a durable marker (`~/catalyst/linear-webhook-401-latch.json`) and a
+`console.warn` line in `orch-monitor.log` (Alloy-shipped independently of the broken webhook path).
+No restart, no mutation. Routing the alarm to a human (a Loki `absent_over_time` rule in
+`catalyst-otel`) is the separate follow-up. Config knobs: `CATALYST_LINEAR_WEBHOOK_ALARM` and
+related `_SILENT_MS`/`_FAIL_RECENCY_MS`/`_GITHUB_WINDOW_MS`/`_TICK_MS` — see
+`website/src/content/docs/reference/configuration.md`.
+
 ## Deployment Mode (CTL-1617)
 
 One declared answer — **`catalyst.deployment.mode` ∈ `single-host` | `cluster` | `cloud`** —
