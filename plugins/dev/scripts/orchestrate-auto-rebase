@@ -145,7 +145,7 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
     # ⚠️ FAIL CLOSED — see orchestrate-auto-fixup. An unparseable ownership record
     # is "unknown owner", not "no owner"; dispatching a parallel rebase on that is
     # the two-merge-owners race this guard exists to prevent.
-    if ! MONITOR_STATUS=$(jq -re '.status // ""' "$MONITOR_SIGNAL" 2>/dev/null); then
+    if ! MONITOR_STATUS=$(jq -re 'if type=="object" and (.status|type)=="string" and .status != "" then .status else error("no-status") end' "$MONITOR_SIGNAL" 2>/dev/null); then
       SKIPPED=$((SKIPPED+1))
       continue
     fi

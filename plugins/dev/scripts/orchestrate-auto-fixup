@@ -224,7 +224,7 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
     # writing in that worktree. An ABSENT file genuinely means no monitor-merge
     # phase; a PRESENT one we cannot parse means we do not know, and dispatching a
     # second writer on "do not know" is the failure this guard exists to prevent.
-    if ! MM_STATUS=$(jq -re '.status // ""' "$MM_SIGNAL" 2>/dev/null); then
+    if ! MM_STATUS=$(jq -re 'if type=="object" and (.status|type)=="string" and .status != "" then .status else error("no-status") end' "$MM_SIGNAL" 2>/dev/null); then
       SKIPPED=$((SKIPPED+1))
       continue
     fi

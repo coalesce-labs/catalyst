@@ -262,3 +262,40 @@ describe("⚠️ round 22: terminals a yield must not overwrite", () => {
   });
 
 });
+
+describe("⚠️ round 24: a record must be about the file it lives in", () => {
+  test("identity mismatch is inconclusive; absent identity is tolerated", async () => {
+    // A signal whose `phase` disagrees with its filename is not a signal about
+    // this phase — counting it charges a slot to the wrong worker, or misses the
+    // yield really holding one. Absent identity is fine (older signals omit it and
+    // the path is authoritative); a PRESENT contradiction is corruption we cannot
+    // interpret, so it gets the same verdict as unparseable.
+    const { countYieldedOccupancy } = await import("./signal-reader.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldident-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    const p = join(orch, "workers", "PROJ-1", "phase-implement.json");
+    const w = (o) => writeFileSync(p, JSON.stringify(o));
+
+    w({ status: YIELDED_STATUS, ticket: "PROJ-1", phase: "implement" });
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true }); // control
+    w({ status: YIELDED_STATUS, ticket: "PROJ-1", phase: "review" });
+    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: false, reason: "signal-identity-mismatch" });
+    w({ status: YIELDED_STATUS, ticket: "PROJ-9", phase: "implement" });
+    expect(countYieldedOccupancy(orch)).toMatchObject({ ok: false, reason: "signal-identity-mismatch" });
+    // Absent identity must NOT become inconclusive, or every legacy signal wedges
+    // admission — the failure mode of over-tightening this check.
+    w({ status: YIELDED_STATUS });
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true });
+  });
+
+  test("the bash ownership guards reject a statusless record", async () => {
+    // `jq -e '.status // ""'` exits 0 on `{}` with an empty string, so the
+    // fail-closed guard fell through and dispatched. Structure must be validated,
+    // not just parseability — the same lesson as the JS occupancy reader.
+    for (const f of ["orchestrate-auto-fixup", "orchestrate-auto-rebase"]) {
+      const src = await Bun.file(new URL(`../${f}`, import.meta.url)).text();
+      expect(src).toContain('(.status|type)=="string"');
+      expect(src).toContain('.status != ""');
+    }
+  });
+});

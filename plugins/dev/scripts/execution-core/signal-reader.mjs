@@ -344,6 +344,20 @@ export function countYieldedOccupancy(orchDir) {
       if (sig === null || typeof sig !== "object" || Array.isArray(sig) || typeof sig.status !== "string") {
         return { count, ok: false, reason: "signal-malformed" };
       }
+      // Identity: the record must describe the file it was found in. A signal whose
+      // `phase` disagrees with its filename is not a signal about this phase, and
+      // counting it as one would charge a slot to the wrong worker — or, in the
+      // mirror case, miss the yield that is really holding it. Absent identity is
+      // tolerated (older signals omit it and the path is authoritative); a PRESENT
+      // one that CONTRADICTS the path is not, because that is corruption we cannot
+      // interpret.
+      const expectedPhase = f.slice("phase-".length, -".json".length);
+      if (typeof sig.phase === "string" && sig.phase !== expectedPhase) {
+        return { count, ok: false, reason: "signal-identity-mismatch" };
+      }
+      if (typeof sig.ticket === "string" && sig.ticket !== t.name) {
+        return { count, ok: false, reason: "signal-identity-mismatch" };
+      }
       if (sig.status === YIELDED_STATUS) count += 1;
     }
   }
