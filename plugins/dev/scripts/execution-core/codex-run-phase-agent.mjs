@@ -1707,10 +1707,25 @@ export async function codexRunPhaseAgent(
 
       const classification = res.spawnError ? "failed" : classifyCodexOutcome(res);
 
+      // ⚠️ ONE GENERATION FENCE FOR EVERY POST-LAUNCH TERMINAL WRITER.
+      // Computed here, above the branch set, because the first cut fenced only the
+      // `failed` branch and the auth-park / rate-park siblings RETURN BEFORE it —
+      // so an old generation surviving a restart or a false-dead redispatch could
+      // still overwrite a NEWER generation's live yield through those paths.
+      // Fencing one writer in a family of three is not fencing the family.
+      // Fail-open parity with the sdk fence: only a numeric mine < numeric signal
+      // counts as stale, so legacy and unfenced dispatches are unaffected.
+      const _sigGen = readSignalGeneration(signalFile);
+      const _mine = spec?.generation;
+      const _staleGeneration =
+        Number.isInteger(Number(_mine)) &&
+        Number.isInteger(Number(_sigGen)) &&
+        Number(_mine) < Number(_sigGen);
+
       if (classification === "auth-park") {
         // STICKY needs-human path — a fresh `codex login` for this home is required.
         // Do NOT loop (a re-dispatch would just re-fail the same way).
-        writeSignalStalled(signalFile, "codex-auth");
+        if (!_staleGeneration) writeSignalStalled(signalFile, "codex-auth");
         emitEvent("execution-core.codex.auth-park", {
           ticket,
           phase,
@@ -1743,10 +1758,12 @@ export async function codexRunPhaseAgent(
         // / circuit-breaker retry — the scheduler re-dispatches after the cool-down,
         // which is the TRANSIENT behavior rate-park intends. Classification stays
         // "rate-park" for any caller that inspects it.
-        markLaunchFailed(
-          { phase, ticket, status: "failed", reason: "codex-rate-park-exhausted", orchDir, signalFile },
-          { spawn },
-        );
+        if (!_staleGeneration) {
+          markLaunchFailed(
+            { phase, ticket, status: "failed", reason: "codex-rate-park-exhausted", orchDir, signalFile },
+            { spawn },
+          );
+        }
         return {
           code: 1,
           stdout: "",
@@ -1777,13 +1794,7 @@ export async function codexRunPhaseAgent(
         // are plain integers and mine is older; anything missing or non-numeric
         // fails open, matching the sdk fence's parity rule so legacy and unfenced
         // dispatches are unaffected.
-        const _sigGen = readSignalGeneration(signalFile);
-        const _mine = spec?.generation;
-        const _stale =
-          Number.isInteger(Number(_mine)) &&
-          Number.isInteger(Number(_sigGen)) &&
-          Number(_mine) < Number(_sigGen);
-        if (!_stale && (status === "dispatched" || status === "running" || status === YIELDED_STATUS)) {
+        if (!_staleGeneration && (status === "dispatched" || status === "running" || status === YIELDED_STATUS)) {
           markLaunchFailed(
             { phase, ticket, status: "failed", reason: "codex-failed", orchDir, signalFile },
             { spawn },

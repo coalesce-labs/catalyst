@@ -228,14 +228,37 @@ describe("⚠️ round 22: terminals a yield must not overwrite", () => {
     expect(signalOf(orch).status).toBe("turn-cap-exhausted");
   });
 
-  test("the codex failure path is generation-fenced", async () => {
-    // An OLD generation exiting non-zero must not overwrite a NEWER worker's live
-    // yield; the clean-exit path beside it has always fenced.
+  test("EVERY codex post-launch terminal writer is generation-fenced", async () => {
+    // Fencing one writer in a family of three is not fencing the family: the
+    // auth-park and rate-park siblings RETURN BEFORE the failed branch, so the
+    // first cut left two paths through which an old generation could overwrite a
+    // newer generation's live yield. One computation now guards all three.
     const src = await Bun.file(new URL("./codex-run-phase-agent.mjs", import.meta.url)).text();
-    // Anchored on the fence VARIABLE and its use in the guard, both of which must
-    // exist; fails closed if either anchor disappears.
-    expect(src).toContain("const _sigGen = readSignalGeneration(signalFile);");
-    const guard = src.match(/if \(!_stale && \(status ===[^)]*\)\)/);
-    expect(guard, "no fenced markLaunchFailed guard found — anchor gone").not.toBeNull();
+    expect(src).toContain("const _staleGeneration =");
+    // Each post-launch writer must sit behind it. Counted, so a NEW unfenced
+    // writer added later fails this rather than slipping in beside them.
+    const guarded = (src.match(/if \(!_staleGeneration/g) ?? []).length;
+    expect(guarded).toBe(3);
   });
+
+  test("structurally invalid signals are inconclusive, not a confident zero", async () => {
+    // `{}` and `null` are valid JSON. Validating parseability without structure
+    // let a record that says nothing read as "no yield here" — the same fail-open
+    // shape one level in from the torn-file case.
+    const { countYieldedOccupancy } = await import("./signal-reader.mjs");
+    const orch = mkdtempSync(join(tmpdir(), "yieldstruct-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    const p = join(orch, "workers", "PROJ-1", "phase-implement.json");
+    writeFileSync(p, JSON.stringify({ status: YIELDED_STATUS, ticket: "PROJ-1", phase: "implement" }));
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true }); // control
+    for (const bad of ["{}", "null", "[]", '"str"', "42", '{"status":123}']) {
+      writeFileSync(p, bad);
+      expect({ bad, ok: countYieldedOccupancy(orch).ok }).toEqual({ bad, ok: false });
+    }
+    // ...and a valid non-yield is still a CONCLUSIVE zero, so the check did not
+    // simply become "everything is inconclusive".
+    writeFileSync(p, JSON.stringify({ status: "running", ticket: "PROJ-1", phase: "implement" }));
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 0, ok: true });
+  });
+
 });

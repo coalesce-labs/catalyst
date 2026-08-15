@@ -335,7 +335,16 @@ export function countYieldedOccupancy(orchDir) {
         // the whole point; a torn write mid-append lands here too.
         return { count, ok: false, reason: "signal-unparseable" };
       }
-      if (sig?.status === YIELDED_STATUS) count += 1;
+      // ⚠️ Validate STRUCTURE, not just parseability. `{}` and `null` are
+      // syntactically valid JSON, and `sig?.status === YIELDED_STATUS` reads them
+      // as a CONFIRMED non-yield — a confident zero from a record that says
+      // nothing. A canonical phase file must be an object carrying a string
+      // status; anything else means we could not determine occupancy, which is the
+      // same verdict as an unparseable file and must fail the same way.
+      if (sig === null || typeof sig !== "object" || Array.isArray(sig) || typeof sig.status !== "string") {
+        return { count, ok: false, reason: "signal-malformed" };
+      }
+      if (sig.status === YIELDED_STATUS) count += 1;
     }
   }
   return { count, ok: true };
