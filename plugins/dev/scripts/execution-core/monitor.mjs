@@ -1488,6 +1488,7 @@ export function sweepMissingTriage({
   // "phase-agents" → byte-identical bg budget). Threaded from startMonitor.
   dispatchMode = "phase-agents",
   countSdkInflight = defaultCountSdkInflight,
+  countYieldedOccupancy = defaultCountYieldedOccupancy, // CTL-1854
   // CTL-1457 (N1): per-phase in-process route flag (arms the SDK-occupancy term on
   // a bg node). Threaded from startMonitor. Default false → unchanged.
   hasInProcessRoute = false,
@@ -1537,6 +1538,7 @@ export function sweepMissingTriage({
     liveBackgroundCount,
     dispatchMode, // CTL-1367 P1
     countSdkInflight, // CTL-1367 P1
+    countYieldedOccupancy, // CTL-1854: charge yields to the triage budget too
     hasInProcessRoute, // CTL-1457 (N1)
   });
   for (const p of listProjects()) {
