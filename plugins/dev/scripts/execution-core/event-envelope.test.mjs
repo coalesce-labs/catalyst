@@ -186,7 +186,7 @@ describe("real producer output", () => {
 describe("the documented jq ladder matches the JS boundary", () => {
   const docPath = new URL("../../references/event-schema.md", import.meta.url);
   const doc = readFileSync(docPath, "utf8");
-  const m = doc.match(/^> (\[\.event,.*first \/\/ "")$/m);
+  const m = doc.match(/^> (if type=="object" then \[\.event,.*else "" end)$/m);
   const jqAvailable = (() => {
     try {
       return spawnSync("jq", ["--version"]).status === 0;
@@ -203,6 +203,13 @@ describe("the documented jq ladder matches the JS boundary", () => {
 
   test.skipIf(!jqAvailable)("jq and JS agree on every shape, including the edge cases", () => {
     const cases = [
+      // Codex round 17: every case here used an OBJECT root, which is why the
+      // top-level scalar gap survived a round. Non-object records come first now.
+      42,
+      "a string",
+      [1, 2, 3],
+      true,
+      null,
       { ts: "t", event: "v1.only" },
       { ts: "t", attributes: { "event.name": "v2.only" } },
       { ts: "t", name: "v3.only" },
@@ -216,9 +223,11 @@ describe("the documented jq ladder matches the JS boundary", () => {
     const input = cases.map((c) => JSON.stringify(c)).join("\n") + "\n";
     const r = spawnSync("jq", ["-rc", m[1]], { input, encoding: "utf8" });
     expect(r.status).toBe(0); // a jq ERROR would abort a real drain — never acceptable
-    expect(r.stdout.split("\n").filter((x) => x !== "")).toEqual(
-      cases.map((c) => getEventName(c)).filter((x) => x !== "")
-    );
+    // Compare EXACTLY, empties included: filtering them out would hide a record
+    // that jq dropped, which is the very failure mode being guarded against.
+    const out = r.stdout.split("\n");
+    if (out[out.length - 1] === "") out.pop();
+    expect(out).toEqual(cases.map((c) => getEventName(c)));
   });
 });
 

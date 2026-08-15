@@ -19,17 +19,20 @@
 > ladder — it matches `lib/event-name.mjs` exactly, including skipping an empty string:
 >
 > ```jq
-> [.event, (.attributes | if type=="object" then ."event.name" else null end), .name] | map(select(type=="string" and . != "")) | first // ""
+> if type=="object" then [.event, (.attributes | if type=="object" then ."event.name" else null end), .name] | map(select(type=="string" and . != "")) | first // "" else "" end
 > ```
 >
-> ⚠️ The `if type=="object"` guard is load-bearing, not defensive style. `.attributes` is not always
+> ⚠️ **Both** `if type=="object"` guards are load-bearing, not defensive style. The outer one covers a
+> parseable non-object record (`42`, `"str"`, `[1,2]`, `true`, `null` — `getEventName` returns `""`
+> for all of them, an unguarded ladder raises `Cannot index number with string "event"`); the inner
+> one covers a record whose `.attributes` is not an object. `.attributes` is not always
 > an object on an accepted record — for `{"ts":"t","event":"phase.ok","attributes":"payload"}` the JS
 > boundary returns `phase.ok`, while an unguarded `.attributes."event.name"` raises
 > `Cannot index string with string "event.name"`. And a jq error **aborts the whole drain**, so every
 > valid record after it is lost and a `wait-for` sharing that batch times out — the same failure
 > CTL-1809 records for `jq -c select` over a torn line.
 >
-> e.g. `catalyst-events tail --filter '[.event, (.attributes | if type=="object" then ."event.name" else null end), .name] | map(select(type=="string" and . != "")) | first // "" | startswith("phase.")'`.
+> e.g. `catalyst-events tail --filter 'if type=="object" then [.event, (.attributes | if type=="object" then ."event.name" else null end), .name] | map(select(type=="string" and . != "")) | first // "" else "" end | startswith("phase.")'`.
 > Reading `attributes["event.name"]` alone silently misses every v1 and v3 record.
 
 Authoritative field-level reference for the canonical v2 envelope in `~/catalyst/events/YYYY-MM.jsonl`.
