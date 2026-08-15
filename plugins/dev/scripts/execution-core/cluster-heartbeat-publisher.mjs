@@ -36,6 +36,7 @@ import { publishHeartbeatSync } from "./cluster-heartbeat-sync.mjs";
 import { linearBreaker } from "./linear-breaker.mjs"; // CTL-1420 follow-up: share the CTL-679 breaker
 import { isRateClassLinearError } from "./cluster-heartbeat.mjs"; // rate-class discriminator (pure)
 import { emitFenceClaimed } from "./fence-event.mjs"; // CTL-863: Linear-free fence re-emit
+import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
 
 // localClusterGeneration — read this host's won fence generation for `ticket`
 // from workers/<ticket>/cluster-generation.json (the file writeClusterGeneration
@@ -99,7 +100,13 @@ export function localInFlightTickets(hostName, { orchDir } = {}) {
 // needs-input worker's job running and keeps counting it against maxParallel
 // until it is actually stopped, and the local board renders it as occupying —
 // peers must agree.
-const ACTIVE_STATUSES = new Set(["running", "dispatched", "needs-input"]);
+// CTL-1854: awaiting-work is included for exactly the reason needs-input is. A
+// declared bounded wait HOLDS its slot (isTicketInFlight frees a slot only for
+// failed|stalled|aborted) and is counted as occupancy locally
+// (signal-reader's SDK_INFLIGHT_STATUSES), so a peer that omitted it would
+// believe this host had a free slot the local scheduler knows it does not — the
+// cross-host version of the same disagreement CTL-1581 fixed here.
+const ACTIVE_STATUSES = new Set(["running", "dispatched", "needs-input", YIELDED_STATUS]);
 
 // localActiveTickets — the slot-OCCUPYING subset of localInFlightTickets on
 // this host. Triage-phase signals are carved out to match the deck/capacity
