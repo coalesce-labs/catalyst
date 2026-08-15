@@ -132,6 +132,7 @@ HANDOFF_PATH=""
 # CTL-1854: seconds an agent asks to wait on its own background job. Empty means
 # "use the ceiling". Only read for --status yield.
 YIELD_SECONDS=""
+YIELD_SECONDS_GIVEN=0
 CALLER_PAYLOAD=""
 ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR-}"
 ORCH_ID="${CATALYST_ORCHESTRATOR_ID-}"
@@ -191,6 +192,12 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--yield-seconds)
+		# CTL-1854: record that the FLAG was passed, separately from its value. An
+		# empty expansion (`--yield-seconds "$WAIT"` with WAIT unset) otherwise looks
+		# identical to the flag being absent, and the emitter silently substituted the
+		# 30-minute default for the caller's intended bound — a documented
+		# positive-integer argument accepted as nothing at all.
+		YIELD_SECONDS_GIVEN=1
 		YIELD_SECONDS="$2"
 		shift 2
 		;;
@@ -218,7 +225,7 @@ esac
 # CTL-1854: --yield-seconds is meaningful ONLY for a yield. Accepting it silently
 # elsewhere would make a typo'd status ("--status complete --yield-seconds 600")
 # indistinguishable from a correct yield to the caller, so refuse it outright.
-if [[ -n $YIELD_SECONDS ]]; then
+if [[ $YIELD_SECONDS_GIVEN -eq 1 ]]; then
 	[[ $STATUS == "yield" ]] || die "--yield-seconds is only valid with --status yield (got: --status $STATUS)"
 	[[ $YIELD_SECONDS =~ ^[0-9]+$ && $YIELD_SECONDS -gt 0 ]] ||
 		die "--yield-seconds must be a positive integer (got: $YIELD_SECONDS)"

@@ -1314,6 +1314,23 @@ export function expireYieldedSignals(
   for (const sig of signals ?? []) {
     if (String(sig?.status) !== YIELDED_STATUS) continue;
     try {
+      // CTL-1854 (Codex round 25): supply PATH-DERIVED identity so a signal whose
+      // JSON omits ticket/phase can still be expired. Without it the writer had no
+      // target, the expiry silently no-op'd, and occupancy went on counting the
+      // yield — a permanent hold assembled from two individually reasonable
+      // choices (tolerate absent identity; build the path from the record).
+      // signal-reader already derives both from the path, so this is a fallback,
+      // not a second source of truth.
+      // signalPath is always present from the reader, and the PATH is the
+      // authoritative identity — the record's own fields are a convenience that
+      // older signals simply omit (reader sets them null).
+      const _parts = String(sig.signalPath ?? "").split("/");
+      const _file = _parts[_parts.length - 1] ?? "";
+      sig.derivedTicket = _parts[_parts.length - 2] ?? null;
+      sig.derivedPhase =
+        _file.startsWith("phase-") && _file.endsWith(".json")
+          ? _file.slice("phase-".length, -".json".length)
+          : null;
       // The yield path inside reclaimDeadWorkIfPossible uses only defaulted seams
       // (expireYield, now), so an empty options object is the complete and correct
       // call here — and it cannot capture a variable that is not yet in scope.

@@ -2160,7 +2160,16 @@ export function defaultExpireYield(
     appendEventLog = defaultAppendEventLog,
   } = {}
 ) {
-  const p = join(orchDir, "workers", signal?.ticket ?? "", `phase-${signal?.phase ?? ""}.json`);
+  // CTL-1854 (Codex round 25): refuse rather than build a nonsense path. A signal
+  // that omits ticket/phase produced `workers//phase-.json`, which cannot exist —
+  // so the expiry silently no-op'd while occupancy still counted the yield, and the
+  // slot was held forever. Callers that have path-derived identity pass it in.
+  const _ticket = signal?.ticket ?? signal?.derivedTicket;
+  const _phase = signal?.phase ?? signal?.derivedPhase;
+  if (typeof _ticket !== "string" || !_ticket || typeof _phase !== "string" || !_phase) {
+    return false;
+  }
+  const p = join(orchDir, "workers", _ticket, `phase-${_phase}.json`);
   let cur;
   try {
     cur = JSON.parse(readFile(p, "utf8"));

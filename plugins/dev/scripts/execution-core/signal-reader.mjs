@@ -303,6 +303,7 @@ export function countYieldedOccupancy(orchDir) {
     return { count: 0, ok: false, reason: "workers-dir-unreadable" };
   }
   let count = 0;
+  const countedYields = []; // path-derived identity for every yield counted
   for (const t of tickets) {
     if (!t.isDirectory() || t.name === "output") continue;
     let files;
@@ -358,10 +359,21 @@ export function countYieldedOccupancy(orchDir) {
       if (typeof sig.ticket === "string" && sig.ticket !== t.name) {
         return { count, ok: false, reason: "signal-identity-mismatch" };
       }
-      if (sig.status === YIELDED_STATUS) count += 1;
+      if (sig.status === YIELDED_STATUS) {
+        // ⚠️ Identity is DERIVED FROM THE PATH when the record omits it. Tolerating
+        // absence is right — older signals have no ticket/phase and the path is
+        // authoritative — but tolerating it silently was not: the expiry writer
+        // builds its target as `workers/<signal.ticket>/phase-<signal.phase>.json`,
+        // so an identity-less signal made it write to `workers//phase-.json`, a
+        // path that does not exist. Occupancy counted the yield and expiry could
+        // never clear it: a permanent hold, assembled from two individually
+        // reasonable choices.
+        countedYields.push({ ticket: t.name, phase: expectedPhase });
+        count += 1;
+      }
     }
   }
-  return { count, ok: true };
+  return { count, ok: true, yields: countedYields };
 }
 
 export function countSdkInflight(orchDir) {

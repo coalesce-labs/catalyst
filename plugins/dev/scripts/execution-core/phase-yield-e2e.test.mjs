@@ -24,7 +24,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -156,6 +156,41 @@ describe("CTL-1854 end to end: declare → hold → expire", () => {
   });
 
   test("the emitter REFUSES a yield it cannot record, and publishes no event", () => {
+    // ⚠️ THIS ASSERTION USED TO BE VACUOUS — a check that cannot fail, inside the
+    // gate built to catch checks that cannot fail. It shelled out with stderr
+    // discarded and `|| true`, so a broken glob, a never-created log, or any error
+    // produced the expected empty output; and it substring-searched structured
+    // JSON, so an unrelated field could satisfy it.
+    //
+    // Now: read the log directly, parse each line, and match the EVENT NAME field.
+    // A POSITIVE CONTROL runs first — a successful yield must produce exactly one
+    // such event — so the later zero is evidence that nothing was emitted rather
+    // than evidence that nothing can be observed.
+    const yieldEvents = (orch) => {
+      const dir = join(orch, "events");
+      if (!existsSync(dir)) return null; // cannot observe — distinct from zero
+      const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+      if (files.length === 0) return null;
+      let n = 0;
+      for (const f of files) {
+        for (const line of readFileSync(join(dir, f), "utf8").split("\n")) {
+          if (!line.trim()) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch { continue; }
+          const name = ev?.attributes?.["event.name"] ?? ev?.event ?? ev?.name ?? "";
+          if (name === "phase.implement.yield.PROJ-1") n += 1;
+        }
+      }
+      return n;
+    };
+
+    // POSITIVE CONTROL: a real yield emits exactly one such event.
+    const okOrch = scenario();
+    declareYield(okOrch);
+    expect(yieldEvents(okOrch)).toBe(1);
+
+    // Now the negative: a refused yield emits none — and the instrument above is
+    // proven capable of returning non-zero.
     const orch = scenario();
     writeFileSync(
       join(orch, "workers", "PROJ-1", "phase-implement.json"),
@@ -163,12 +198,7 @@ describe("CTL-1854 end to end: declare → hold → expire", () => {
     );
     expect(() => declareYield(orch)).toThrow(); // non-zero exit
     expect(signalOf(orch).status).toBe("done"); // completed phase preserved
-    // No yield event escaped for a declaration that did not happen.
-    const eventsDir = join(orch, "events");
-    const any = existsSync(eventsDir)
-      ? execFileSync("bash", ["-c", `grep -l 'implement.yield' ${eventsDir}/*.jsonl 2>/dev/null || true`], { encoding: "utf8" })
-      : "";
-    expect(any.trim()).toBe("");
+    expect(yieldEvents(orch) ?? 0).toBe(0);
   });
 });
 
@@ -297,5 +327,40 @@ describe("⚠️ round 24: a record must be about the file it lives in", () => {
       expect(src).toContain('(.status|type)=="string"');
       expect(src).toContain('.status != ""');
     }
+  });
+});
+
+describe("⚠️ round 25: a yield with no identity in its JSON must still expire", () => {
+  test("identity is derived from the path, so the hold cannot become permanent", () => {
+    // Two individually reasonable choices combined into a permanent hold:
+    // occupancy TOLERATED an absent ticket/phase (older signals omit them, and the
+    // path is authoritative), while the expiry writer built its target FROM the
+    // record — producing `workers//phase-.json`, which cannot exist. The yield was
+    // counted forever and could never be cleared.
+    const orch = mkdtempSync(join(tmpdir(), "yieldnoident-"));
+    mkdirSync(join(orch, "workers", "PROJ-1"), { recursive: true });
+    writeFileSync(
+      join(orch, "workers", "PROJ-1", "phase-implement.json"),
+      JSON.stringify({ status: YIELDED_STATUS, yieldedAt: "2020-01-01T00:00:00Z" }) // no ticket/phase
+    );
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 1, ok: true }); // counted...
+    expireYieldedSignals(orch);
+    const sig = JSON.parse(readFileSync(join(orch, "workers", "PROJ-1", "phase-implement.json"), "utf8"));
+    expect(sig).toMatchObject({ status: "failed", failureReason: YIELD_EXPIRED_REASON }); // ...and cleared
+    expect(countYieldedOccupancy(orch)).toMatchObject({ count: 0, ok: true });
+  });
+
+  test("an empty --yield-seconds is rejected, not silently defaulted", () => {
+    // `--yield-seconds "$WAIT"` with WAIT unset looked identical to the flag being
+    // absent, so the emitter substituted the 30-minute ceiling for the caller's
+    // intended bound and exited 0.
+    const orch = scenario();
+    expect(() => declareYield(orch, ["--yield-seconds", ""])).toThrow();
+    expect(signalOf(orch).status).toBe("running"); // nothing written
+    // Control: the flag genuinely ABSENT still succeeds and uses the ceiling.
+    const orch2 = scenario();
+    declareYield(orch2);
+    expect(signalOf(orch2).status).toBe(YIELDED_STATUS);
+    expect(signalOf(orch2).yieldMs).toBeUndefined();
   });
 });
