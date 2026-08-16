@@ -31,10 +31,37 @@
  */
 export function resolveAccountProvenance(env = process.env, defaultAccount = "tenant-0") {
   const declared = env?.CATALYST_CLOUD_ACCOUNT || "";
+  // ⛔ THE LAUNCHER DEFAULTS THE ACCOUNT, so env-presence alone is NOT provenance.
+  // `cloud-sync/launch.sh` runs `CATALYST_CLOUD_ACCOUNT="${CATALYST_CLOUD_ACCOUNT:-tenant-0}"`,
+  // which makes the var always-set on the shipped launchd path. Deriving provenance from
+  // presence there returns "declared" for EVERY host, stamping every default replica as a
+  // declaration nobody made — the precise failure this contract exists to prevent, one
+  // layer further down. The launcher therefore captures the distinction BEFORE its own
+  // fallback and passes it here explicitly.
+  //
+  // ⚠️ Only the two known values are honoured, and anything else degrades to "default".
+  // An unrecognised marker must never be read as "declared": a declared stamp is permanent
+  // and refuses later transitions, while a default stamp stays recoverable. When the two
+  // directions cost different things, an unknown lands on the recoverable one.
+  const marker = env?.CATALYST_CLOUD_ACCOUNT_SOURCE;
+  const markerPresent = typeof marker === "string" && marker !== "";
+  // A PRESENT but unrecognised marker degrades to "default" — it does NOT fall through to
+  // presence-derivation. Falling through would re-open the whole bug on the launchd path,
+  // where the account is always set: a typo'd or truncated marker would derive "declared"
+  // for every host, which is exactly the state this marker exists to prevent. A marker that
+  // is present at all means something tried to tell us; if we cannot read it, the
+  // recoverable answer is the only safe one.
+  const accountSource = markerPresent
+    ? marker === "declared"
+      ? "declared"
+      : "default"
+    : declared
+      ? "declared"
+      : "default";
   return {
     account: declared || defaultAccount,
-    accountSource: declared ? "declared" : "default",
-    declared: Boolean(declared),
+    accountSource,
+    declared: accountSource === "declared",
   };
 }
 

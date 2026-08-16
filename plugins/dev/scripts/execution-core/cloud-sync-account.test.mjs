@@ -114,3 +114,46 @@ describe("the refusal envelope", () => {
     expect(accountMismatchEnvelope(base).body.message).toContain("staying down");
   });
 });
+
+describe("⭐ Codex round 2 P1: the LAUNCHER defaults the account, erasing provenance", () => {
+  // cloud-sync/launch.sh runs CATALYST_CLOUD_ACCOUNT="${CATALYST_CLOUD_ACCOUNT:-tenant-0}",
+  // so on the shipped launchd path the var is ALWAYS set by the time the writer reads it.
+  // Env-presence alone therefore reports "declared" for every host, stamping every default
+  // replica with a declaration nobody made — permanently, since the stamp cannot be undone.
+  test("⛔ presence-only would say declared; the explicit marker says default", () => {
+    const launcherDefaulted = { CATALYST_CLOUD_ACCOUNT: "tenant-0", CATALYST_CLOUD_ACCOUNT_SOURCE: "default" };
+    expect(resolveAccountProvenance(launcherDefaulted).accountSource).toBe("default");
+    // and without the marker the old derivation is what would have gone wrong:
+    expect(resolveAccountProvenance({ CATALYST_CLOUD_ACCOUNT: "tenant-0" }).accountSource).toBe("declared");
+  });
+
+  test("a genuine operator declaration still reports declared through the launcher", () => {
+    const declared = { CATALYST_CLOUD_ACCOUNT: "tenant-3", CATALYST_CLOUD_ACCOUNT_SOURCE: "declared" };
+    const r = resolveAccountProvenance(declared);
+    expect(r).toEqual({ account: "tenant-3", accountSource: "declared", declared: true });
+  });
+
+  test("⛔ an UNRECOGNISED marker degrades to default, never to declared", () => {
+    // A declared stamp is permanent and refuses later transitions; a default stamp stays
+    // recoverable. An unknown value must land on the recoverable side.
+    // ⚠️ These run with the ACCOUNT SET, i.e. the launchd path — where falling through to
+    // presence-derivation would answer "declared" and re-open the bug. A present-but-
+    // unreadable marker must therefore NOT fall through.
+    for (const bad of ["DECLARED", "yes", "1", "true", "Default"]) {
+      const r = resolveAccountProvenance({ CATALYST_CLOUD_ACCOUNT: "tenant-3", CATALYST_CLOUD_ACCOUNT_SOURCE: bad });
+      expect(r.accountSource).toBe("default");
+      expect(r.declared).toBe(false);
+    }
+    // absent / empty / non-string = no marker at all → presence-derivation is correct,
+    // since a non-launcher caller may legitimately pass no marker.
+    for (const absent of ["", null, undefined, {}, 0]) {
+      const r = resolveAccountProvenance({ CATALYST_CLOUD_ACCOUNT: "tenant-3", CATALYST_CLOUD_ACCOUNT_SOURCE: absent });
+      expect(r.accountSource).toBe("declared");
+    }
+  });
+
+  test("with NO marker at all, presence-derivation still applies (non-launcher callers)", () => {
+    expect(resolveAccountProvenance({ CATALYST_CLOUD_ACCOUNT: "tenant-3" }).accountSource).toBe("declared");
+    expect(resolveAccountProvenance({}).accountSource).toBe("default");
+  });
+});
