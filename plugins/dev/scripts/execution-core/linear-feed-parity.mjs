@@ -20,6 +20,8 @@
 // default is suspicion, not tolerance.
 
 /** Event names the daemon actually acts on. Anything else is out of scope. */
+import { getEventName } from "../lib/event-name.mjs";
+
 export const DISPATCH_NAMES = Object.freeze([
   "linear.issue.state_changed",
   "linear.issue.updated",
@@ -113,7 +115,14 @@ export function joinFields(keys) {
 /** Fields the diff source cannot observe, so their absence on the feed side is expected. */
 export const FEED_BLIND_FIELDS = Object.freeze(["actorId", "actorName"]);
 
-const nameOf = (e) => e?.attributes?.["event.name"] ?? e?.event ?? e?.name ?? null;
+// CTL-1834: the ONE event-name boundary. This file used to hand-roll
+// `attributes["event.name"] ?? event ?? name`, which differs from the canonical
+// resolver twice over: the key ORDER, and — the one that actually bites — `??`
+// only falls through on null/undefined, so an event carrying an EMPTY-STRING
+// attribute resolved to "" here while getEventName correctly falls through to
+// the next key ("first non-empty string wins"). In a parity harness that
+// mis-tallies BOTH sides, which is the instrument, not the subject.
+const nameOf = (e) => getEventName(e) || null;
 const ticketOf = (e) =>
   e?.attributes?.["linear.issue.identifier"] ?? e?.body?.payload?.ticket ?? null;
 const keysOf = (e) => {

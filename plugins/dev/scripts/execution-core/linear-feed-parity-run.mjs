@@ -13,7 +13,7 @@
 // `readFileSync` on it is the exact whole-file-read defect this repo has fixed twice
 // (CTL-1529 / the DLQ). Only the tail can contain a recent window anyway.
 
-import { existsSync, openSync, readSync, closeSync, statSync, readFileSync } from "node:fs";
+import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { getEventLogPath, getExecutionCoreDir } from "./config.mjs";
 import { DEFAULT_SETTLE_SEC, compareStreams, resolveWindow } from "./linear-feed-parity.mjs";
 import { Database } from "bun:sqlite";
@@ -123,7 +123,12 @@ const { since, until, clampedToFeedStart: clamped, emptyWindow } = resolveWindow
 });
 
 const smeeRaw = parseJsonl(tailLines(EVENTS, TAIL_BYTES));
-const feedRaw = parseJsonl(existsSync(SHADOW) ? readFileSync(SHADOW, "utf8").split("\n") : []);
+// The shadow file is append-only and never rotated, so it grows for as long as
+// the producer runs — unbounded under enforce. Read it with the SAME bounded
+// tail as the event log rather than whole (CTL-1529's rule is about the read,
+// not about which file). The reach is reported below so a tail that does not
+// cover the window reads as INCONCLUSIVE instead of as feed-side misses.
+const feedRaw = parseJsonl(tailLines(SHADOW, TAIL_BYTES));
 
 const result = compareStreams({ smee: smeeRaw.events, feed: feedRaw.events, since, until });
 // The verdict is THREE-VALUED. "clean" alone cannot distinguish "the two
@@ -131,8 +136,20 @@ const result = compareStreams({ smee: smeeRaw.events, feed: feedRaw.events, sinc
 // code (`clean ? 0 : 2`) reported the empty-feed case as 0 — so the warning
 // below was visible to a human reading stdout and invisible to anything
 // automated, which is the half that matters for a cutover gate.
+// How far back each bounded tail actually reaches. A tail that stops INSIDE the
+// window cannot see the window's early events, and their absence is
+// indistinguishable from a real miss — so it is "could not look", not a diff.
+const reachOf = (evts) =>
+  evts.reduce((min, e) => {
+    const t = Date.parse(e?.ts ?? "");
+    return Number.isFinite(t) && (min === null || t < min) ? t : min;
+  }, null);
+const feedReach = reachOf(feedRaw.events);
+const feedTailShort = feedReach !== null && feedReach > since;
+
 const inconclusiveReasons = [];
 if (emptyWindow) inconclusiveReasons.push("settle-period-exceeds-window");
+if (feedTailShort) inconclusiveReasons.push("feed-tail-does-not-reach-window-start");
 if (result.counts.feed === 0) inconclusiveReasons.push("feed-side-empty");
 if (result.counts.smee === 0) inconclusiveReasons.push("smee-side-empty");
 if (seededAt === null) inconclusiveReasons.push("no-feed-baseline");
@@ -145,6 +162,8 @@ const report = {
   settleSeconds: SETTLE_SEC,
   feedSeededAt: seededAt ? new Date(seededAt).toISOString() : null,
   clampedToFeedStart: clamped,
+  feedTailReachesBackTo: feedReach ? new Date(feedReach).toISOString() : null,
+  feedTailShort,
   inconclusive,
   inconclusiveReasons,
   shadow: SHADOW,
