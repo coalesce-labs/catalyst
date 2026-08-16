@@ -154,12 +154,26 @@ const tally = (events) => {
  * Classify a one-sided edge. Returns an explanation string when the asymmetry is
  * expected, or null when it is a genuine unexplained diff.
  */
-export function explain(side, key, event) {
+export function explain(side, key, event, ctx = {}) {
   const name = nameOf(event);
   const raw = keysOf(event);
   const keys = joinFields(raw);
 
   if (side === "smee") {
+    // ⭐ NET-EDGE COLLAPSE CAN ERASE A FIELD ENTIRELY, not merely merge two hops.
+    // Measured: CTC-167 and CTC-593 were added to a cycle and removed again between
+    // feed ticks. Smee saw each hop; the feed saw the NET result, and for `cycleId`
+    // the net change is NOTHING — so it emitted only the `state` edge and there is no
+    // cycleId edge to match. The replica confirms both end at cycle_id=null, so the
+    // feed is CORRECT about final state; it simply cannot see a round trip that
+    // closed inside one tick.
+    //
+    // ⚠️ Scoped deliberately to reversible/bookkeeping fields. A smee-only `state`
+    // edge is NOT explained by this: a state round-trip inside one tick could hide a
+    // dispatch-relevant transition, and that must stay visible.
+    if (keys.length > 0 && keys.every((k) => ["cycleId", "projectId", "parentId", "assigneeId"].includes(k))) {
+      return "net-edge-collapse:round-trip closed within one tick (feed reports net state; replica agrees)";
+    }
     // Smee emits names nothing handles; the feed reports the same change as a field
     // cell instead, so there is no matching feed edge under this key.
     if (SMEE_UNHANDLED_NAMES.includes(name)) return `smee-only-name:${name}`;
@@ -199,6 +213,29 @@ export function explain(side, key, event) {
     // edge, so the intermediate hop smee saw has no feed counterpart.
     if (keys.includes("state")) return "net-edge-collapse-candidate";
   }
+
+  // ⭐ LATE ARRIVAL: THE TWO PRODUCERS AGREE ON THE FACT AND DISAGREE ON THE TIME.
+  // Measured on CTL-1869: smee reported `addedToCycleAt,cycleId` at 2026-08-15T13:56Z;
+  // the feed emitted the same cycleId change at 2026-08-16T05:57Z — 16 hours later.
+  // The replica simply did not carry that field until an unrelated later update
+  // dragged it in, and the diff producer — correctly, given its inputs — reports a
+  // change when the SNAPSHOT changes. The feed diffs state; it does not read history.
+  //
+  // This is evidence-based, never a blanket excuse: it fires ONLY when smee actually
+  // reported this same (ticket, fields) edge BEFORE the window. Corroboration is the
+  // whole predicate — without a matching prior smee event it does not apply.
+  //
+  // ⛔ SINGLE OCCURRENCE ONLY. If the feed emitted this key more than once in the
+  // window, that is a re-emission bug (a baseline that failed to advance), and one
+  // stale smee event must not launder every repeat. Repeats stay UNEXPLAINED.
+  //
+  // ⚠️ Consumer-visible caveat this predicate is NOT allowed to hide: an edge's
+  // timestamp is OBSERVATION time, not change time. Safe for dispatch (the feed
+  // emits more, never less) but wrong for anything that reads the ts as "when".
+  if (side === "feed" && ctx?.priorSmeeTs && ctx?.count === 1) {
+    return `late-arrival:smee reported this same edge at ${ctx.priorSmeeTs}; the replica backfilled it (ts is observation time, not change time)`;
+  }
+
   return null;
 }
 
@@ -219,6 +256,17 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
     return true;
   };
   const smeeIn = smee.filter((e) => inWindow(e) && DISPATCH_NAMES.concat(SMEE_UNHANDLED_NAMES).includes(nameOf(e)));
+  // Corroboration index for the late-arrival predicate: the SAME edge key seen on the
+  // smee side BEFORE the window. Deliberately not window-bounded — the whole point is
+  // that the replica surfaced it late, so the proof lies outside the window.
+  const priorSmee = new Map();
+  for (const e of smee) {
+    if (inWindow(e)) continue;
+    if (since && Date.parse(e?.ts ?? "") >= since) continue;
+    const k = edgeKey(e);
+    if (!k) continue;
+    if (!priorSmee.has(k)) priorSmee.set(k, e.ts);
+  }
   const feedIn = feed.filter(inWindow);
 
   const S = tally(smeeIn);
@@ -235,7 +283,7 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
   }
   for (const [key, n] of F.byKey) {
     if (S.byKey.has(key)) continue;
-    const why = explain("feed", key, byKeyEvent(feedIn, key));
+    const why = explain("feed", key, byKeyEvent(feedIn, key), { priorSmeeTs: priorSmee.get(key) ?? null, count: n });
     (why ? explained : unexplained).push({ side: "feed-only", key, count: n, why: why ?? null });
   }
 

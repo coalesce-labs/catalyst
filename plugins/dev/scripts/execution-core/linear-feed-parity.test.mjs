@@ -227,3 +227,99 @@ describe("⭐ bot-authored comments are feed-only BY DESIGN (measured)", () => {
     expect(explain("feed", "k", ev("linear.issue.updated", "CTL-1", ["state"]))).toBe("net-edge-collapse-candidate");
   });
 });
+
+describe("⭐ net-edge collapse can ERASE a field, not just merge hops", () => {
+  // Measured: CTC-167/CTC-593 entered and left a cycle between feed ticks. Smee saw
+  // each hop; the feed saw net-nothing for cycleId and emitted only the state edge.
+  // The replica confirms cycle_id ends null, so the feed is right about final state.
+  test("a smee-only reversible-field edge is explained as a closed round trip", () => {
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]))).toStartWith("net-edge-collapse:");
+  });
+
+  test("⛔ a smee-only STATE edge is NOT explained away — it could hide a dispatch", () => {
+    expect(explain("smee", "k", ev("linear.issue.state_changed", "CTC-1", ["stateId"]))).toBeNull();
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-1", ["state", "cycleId"]))).toBeNull();
+  });
+
+  test("a smee-only title/estimate edge stays unexplained — those do not round-trip benignly", () => {
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-1", ["title"]))).toBeNull();
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-1", ["estimate"]))).toBeNull();
+  });
+});
+
+describe("⭐ late arrival — the producers agree on the FACT, disagree on the TIME", () => {
+  // Measured on CTL-1869: smee reported cycleId at 08-15T13:56Z, the feed emitted the
+  // same change at 08-16T05:57Z. The replica did not carry the field until an
+  // unrelated later update dragged it in. The feed diffs snapshots, not history.
+  const fed = ev("linear.issue.updated", "CTL-1869", ["cycleId"]);
+
+  test("a feed-only edge smee ALREADY reported before the window is explained", () => {
+    const why = explain("feed", "k", fed, { priorSmeeTs: "2026-08-15T13:56:03Z", count: 1 });
+    expect(why).toStartWith("late-arrival:");
+    expect(why).toContain("2026-08-15T13:56:03Z");
+    // The caveat must survive in the reason itself, not just in a comment.
+    expect(why).toContain("observation time");
+  });
+
+  test("⛔ WITHOUT corroboration it stays UNEXPLAINED — the predicate IS the evidence", () => {
+    expect(explain("feed", "k", fed, { priorSmeeTs: null, count: 1 })).toBeNull();
+    expect(explain("feed", "k", fed, {})).toBeNull();
+  });
+
+  test("⛔ a REPEATED feed edge is not laundered by one stale smee event", () => {
+    // Re-emission means the baseline failed to advance — the bug this harness exists
+    // to catch. One prior smee event must not explain away N repeats.
+    expect(explain("feed", "k", fed, { priorSmeeTs: "2026-08-15T13:56:03Z", count: 2 })).toBeNull();
+  });
+
+  test("⛔ late-arrival NEVER explains a SMEE-only edge — that is a missed dispatch", () => {
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTL-1", ["title"]), { priorSmeeTs: "2026-08-15T00:00:00Z", count: 1 })).toBeNull();
+  });
+
+  test("compareStreams corroborates from OUTSIDE the window and goes clean", () => {
+    const prior = ev("linear.issue.updated", "CTL-1869", ["cycleId"], "2026-08-15T13:56:03Z");
+    const now = ev("linear.issue.updated", "CTL-1869", ["cycleId"], "2026-08-16T05:57:00Z");
+    const r = compareStreams({ smee: [prior], feed: [now], since: Date.parse("2026-08-16T02:00:00Z") });
+    expect(r.counts.smee).toBe(0); // the corroborating event is outside the window
+    expect(r.clean).toBe(true);
+    expect(r.explained[0].why).toStartWith("late-arrival:");
+  });
+
+  test("⛔ the same setup with a REPEAT emission fails the window", () => {
+    const prior = ev("linear.issue.updated", "CTL-1869", ["cycleId"], "2026-08-15T13:56:03Z");
+    const a = ev("linear.issue.updated", "CTL-1869", ["cycleId"], "2026-08-16T05:57:00Z");
+    const b = ev("linear.issue.updated", "CTL-1869", ["cycleId"], "2026-08-16T05:58:00Z");
+    const r = compareStreams({ smee: [prior], feed: [a, b], since: Date.parse("2026-08-16T02:00:00Z") });
+    expect(r.clean).toBe(false);
+    expect(r.unexplained[0]).toMatchObject({ side: "feed-only", count: 2 });
+  });
+
+  test("an unrelated prior smee edge does not corroborate a different key", () => {
+    const prior = ev("linear.issue.updated", "CTL-1869", ["title"], "2026-08-15T13:56:03Z");
+    const now = ev("linear.issue.updated", "CTL-1869", ["cycleId"], "2026-08-16T05:57:00Z");
+    const r = compareStreams({ smee: [prior], feed: [now], since: Date.parse("2026-08-16T02:00:00Z") });
+    expect(r.clean).toBe(false);
+  });
+});
+
+describe("⛔ corroboration must come from BEFORE the window — never from inside it", () => {
+  test("with NO window, nothing counts as prior — there is no 'before'", () => {
+    // The vector: a smee event the comparator deliberately IGNORES (its name is
+    // outside the compared set) still yields an edge key. Were it admitted as
+    // corroboration, a feed-only edge would be explained by an event that was
+    // never compared — and the reason string would cite it as prior when it is not.
+    const ignored = ev("github.pr.merged", "CTL-1869", ["cycleId"]);
+    const fed = ev("linear.issue.updated", "CTL-1869", ["cycleId"]);
+    const r = compareStreams({ smee: [ignored], feed: [fed] }); // since: null
+    expect(r.counts.smee).toBe(0);
+    expect(r.clean).toBe(false); // ← must NOT be laundered into "late arrival"
+    expect(r.unexplained[0]).toMatchObject({ side: "feed-only" });
+  });
+
+  test("an ignored-name smee event inside a window is not corroboration either", () => {
+    const ignored = ev("github.pr.merged", "CTL-1869", ["cycleId"], "2026-08-16T05:00:00Z");
+    const fed = ev("linear.issue.updated", "CTL-1869", ["cycleId"], "2026-08-16T05:57:00Z");
+    const r = compareStreams({ smee: [ignored], feed: [fed], since: Date.parse("2026-08-16T02:00:00Z") });
+    expect(r.clean).toBe(false);
+  });
+});

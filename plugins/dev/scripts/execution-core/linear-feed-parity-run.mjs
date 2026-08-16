@@ -106,6 +106,15 @@ const report = {
   clampedToFeedStart: clamped,
   shadow: SHADOW,
   tornLines: { smee: smeeRaw.torn, feed: feedRaw.torn },
+  // How far back the tail actually reaches. The late-arrival predicate corroborates
+  // a feed-only edge against smee events BEFORE the window, so a tail that stops
+  // short simply finds nothing — which reads as UNEXPLAINED (the safe direction),
+  // but is "could not look", not "no corroboration exists". Report the reach so the
+  // two are distinguishable rather than silently conflated.
+  smeeTailReachesBackTo: smeeRaw.events.reduce((min, e) => {
+    const t = Date.parse(e?.ts ?? "");
+    return Number.isFinite(t) && (min === null || t < min) ? t : min;
+  }, null),
   ...result,
 };
 
@@ -121,6 +130,10 @@ if (AS_JSON) {
   }
   console.log(`${T} events compared — smee: ${result.counts.smee}  feed: ${result.counts.feed}  matched keys: ${result.matchedKeys}`);
   console.log(`${T} torn lines — smee: ${smeeRaw.torn}  feed: ${feedRaw.torn}`);
+  console.log(
+    `${T} smee tail reaches back to: ${report.smeeTailReachesBackTo ? new Date(report.smeeTailReachesBackTo).toISOString() : "(nothing parsed)"}` +
+      ` — corroboration for a late arrival can only be found within this reach`,
+  );
   console.log(`${T} classes (smee): ${JSON.stringify(result.classes.smee)}`);
   console.log(`${T} classes (feed): ${JSON.stringify(result.classes.feed)}`);
   console.log(`${T} explained asymmetries: ${result.explained.length}`);
