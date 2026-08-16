@@ -12,10 +12,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLastSeenStore } from "./linear-feed-lastseen.mjs";
 import { runDiffSweep, seedBaseline } from "./linear-feed-sweep.mjs";
-import { defaultCursorPath, readCursor } from "./linear-feed-cursor.mjs";
+import { CURSOR_ABSENT, CURSOR_OK, defaultCursorPath, readCursor } from "./linear-feed-cursor.mjs";
 
 let dir;
 let store;
+let storeSeq = 0;
+const makeStore = () => createLastSeenStore({ path: join(dir, `fresh-${storeSeq++}.db`) });
 let cursorPath;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "lfds-"));
@@ -246,5 +248,60 @@ describe("⭐ comments are swept in diff mode too — the harness caught their a
     const r = runDiffSweep({ source: src, store, cursorPath, teams: TEAMS, emit: () => {}, now: () => 1000 });
     expect(r.comments.emitted).toBe(0);
     expect(r.comments.byReason["foreign-team"]).toBe(1);
+  });
+});
+
+// ── CTL-1847 (Codex P1 round 5): a lost baseline with a live cursor ──────────
+describe("⛔ refuses to reseed when a durable cursor says we had a baseline", () => {
+  test("missing baseline + intact cursor ⇒ baseline-lost, NOT a fresh seed", () => {
+    // Deleting linear-feed-lastseen-*.db after the producer has been emitting,
+    // while the cursor survives, previously reseeded: snapshot the CURRENT
+    // replica, advance the cursor, emit nothing — absorbing every change since
+    // the former baseline, permanently. Under enforce those events' webhook
+    // copies are suppressed, so nothing can retry them.
+    const rows = [issue("a"), issue("b")];
+    const emitted = [];
+    const freshStore = makeStore(); // never seeded
+    const r = runDiffSweep({
+      source: fakeSource(rows),
+      store: freshStore,
+      cursorPath,
+      teams: TEAMS,
+      emit: (e, i) => emitted.push(i.issue.id),
+      // the durable evidence that a baseline once existed
+      readCursorFn: () => ({ state: CURSOR_OK, position: { lastCreatedAt: 500, lastId: "z" } }),
+    });
+    expect(r.mode).toBe("baseline-lost");
+    expect(r.stoppedEarly).toBe(true);
+    expect(emitted).toEqual([]);
+    expect(freshStore.isSeeded()).toBe(false); // did NOT silently reseed
+    expect(r.alarm?.severity).toBe("error");
+    expect(r.alarm?.reason).toBe("baseline-lost-with-live-cursor");
+    expect(Object.keys(r.edges.byReason)).toContain("baseline-lost-with-live-cursor");
+  });
+
+  test("NEGATIVE CONTROL: missing baseline + NO cursor is a legitimate first seed", () => {
+    // Without this, the guard could refuse every first run and nothing would
+    // ever seed.
+    const rows = [issue("a"), issue("b")];
+    const freshStore = makeStore();
+    const r = runDiffSweep({
+      source: fakeSource(rows),
+      store: freshStore,
+      cursorPath,
+      teams: TEAMS,
+      emit: () => {},
+      readCursorFn: () => ({ state: CURSOR_ABSENT, position: null }),
+    });
+    expect(r.mode).toBe("seeded");
+    expect(freshStore.isSeeded()).toBe(true);
+  });
+
+  test("a baseline-lost sweep can never arm enforce (it is not a clean sweep)", () => {
+    // Belt and braces with the readiness predicate: mode !== "resume" and a
+    // byReason entry both disqualify it independently.
+    const r = { mode: "baseline-lost", stoppedEarly: true, edges: { failed: 0, byReason: { "baseline-lost-with-live-cursor": 1 } }, comments: { failed: 0, byReason: {} } };
+    expect(r.mode).not.toBe("resume");
+    expect(Object.keys(r.edges.byReason).length).toBeGreaterThan(0);
   });
 });

@@ -429,16 +429,48 @@ describe("startCloudFeedTimer", () => {
     expect(handle.isReady()).toBe(true); // and it re-arms on the next clean sweep
   });
 
-  test("readiness survives a TRANSIENT failure once armed (only a re-seed reverts it)", () => {
-    // Un-arming would flap dispatch between two sources; a transient failing
-    // tick is already handled by the sweep's own cursor rules.
-    let reports = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0 }, comments: { failed: 0 } } }];
-    const handle = startCloudFeedTimer({ mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
+  test("⛔ ANY unhealthy report un-arms — readiness is not latched (Codex P1 round 5)", () => {
+    // This test previously asserted the OPPOSITE (a latch surviving transient
+    // failure). That was the defect: with the replica gone or the store failing
+    // to open, runOnce reports an error, emits nothing, and a latched readiness
+    // kept enforce suppressing every webhook copy indefinitely. Second time one
+    // of my own tests has pinned behaviour that turned out to be the bug.
+    const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+    const unhealthy = [
+      ["tenant error", [{ account: "t0", skipped: null, error: "replica gone" }]],
+      ["tenant skipped", [{ account: "t0", skipped: "replica-absent" }]],
+      ["re-seed", [{ account: "t0", skipped: null, sweep: { ...OKS, mode: "seeded" } }]],
+      ["emit failures", [{ account: "t0", skipped: null, sweep: { ...OKS, edges: { failed: 1, byReason: {} } } }]],
+      ["no tenants at all", []],
+    ];
+    for (const [label, bad] of unhealthy) {
+      let reports = [{ account: "t0", skipped: null, sweep: OKS }];
+      const handle = startCloudFeedTimer({ mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
+      handle.tick();
+      expect(handle.isReady()).toBe(true);
+      reports = bad;
+      handle.tick();
+      expect(handle.isReady(), `should un-arm on: ${label}`).toBe(false);
+      // ...and re-arm once healthy again.
+      reports = [{ account: "t0", skipped: null, sweep: OKS }];
+      handle.tick();
+      expect(handle.isReady()).toBe(true);
+    }
+  });
+
+  test("EVERY tenant must be clean — a healthy one cannot mask a failing one", () => {
+    const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [
+        { account: "t0", skipped: null, sweep: OKS },
+        { account: "t1", skipped: null, error: "boom" },
+      ],
+      setIntervalFn: () => "H",
+    });
     handle.tick();
-    expect(handle.isReady()).toBe(true);
-    reports = [{ account: "tenant-0", skipped: null, error: "transient" }];
-    handle.tick();
-    expect(handle.isReady()).toBe(true);
+    expect(handle.isReady()).toBe(false);
   });
 
   test("onReport receives the per-tenant reports", () => {

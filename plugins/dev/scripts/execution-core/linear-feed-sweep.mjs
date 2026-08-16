@@ -31,12 +31,7 @@
 
 import { buildCommentEvent, buildIssueEvent, classifyEdge } from "./linear-feed-event.mjs";
 import { diffSnapshots, diffToHistoryRow, snapshotOf } from "./linear-feed-diff.mjs";
-import {
-  readCursor,
-  resolveStartPosition,
-  writeCursor,
-  DEFAULT_RESET_LOOKBACK_MS,
-} from "./linear-feed-cursor.mjs";
+import { CURSOR_OK, DEFAULT_RESET_LOOKBACK_MS, readCursor, resolveStartPosition, writeCursor } from "./linear-feed-cursor.mjs";
 
 /** Bound the work one sweep may do, so a large backlog cannot monopolise a tick. */
 export const DEFAULT_MAX_BATCHES = 20;
@@ -277,6 +272,30 @@ export function runDiffSweep({
 } = {}) {
   const counts = emptyCounts();
 
+  // ⛔ A MISSING BASELINE + A LIVE CURSOR IS A LOSS, NOT A FIRST RUN
+  // (Codex P1 round 5). If the last-seen DB is deleted after the producer has
+  // been emitting while the cursor survives, seeding here would snapshot the
+  // CURRENT replica, advance the cursor, and emit nothing — absorbing every
+  // change since the former baseline into the new snapshot, permanently. The
+  // cursor is the durable evidence that we had a baseline: its presence turns
+  // this from "first seed" into a reportable failure.
+  if (!store.isSeeded() && readCursorFn(cursorPath)?.state === CURSOR_OK) {
+    const counts = emptyCounts();
+    note(counts, "baseline-lost-with-live-cursor");
+    return {
+      mode: "baseline-lost",
+      alarm: {
+        severity: "error",
+        reason: "baseline-lost-with-live-cursor",
+        message:
+          "last-seen baseline is missing but the cursor is intact — refusing to reseed, which would absorb every change since the old baseline into a fresh snapshot and emit nothing",
+      },
+      batches: 0,
+      stoppedEarly: true,
+      edges: counts,
+      comments: emptyCounts(),
+    };
+  }
   if (!store.isSeeded()) {
     const seed = seedBaseline({ source, store });
     // The watermark starts at the seed's own high-water mark: everything at or

@@ -60,8 +60,12 @@ describe("⛔ explained asymmetries are PREDICATES, not prose", () => {
     expect(why).toBe("feed-more-complete:ladder-named-differently");
   });
 
-  test("a feed state edge is flagged as a net-edge-collapse candidate", () => {
-    expect(explain("feed", "k", ev("linear.issue.updated", "CTL-1", ["state"]))).toBe("net-edge-collapse-candidate");
+  test("⛔ a feed-only STATE edge is NOT explained — it could be a spurious dispatch", () => {
+    // Deleted with its smee-side twin: explaining it unconditionally made the
+    // window CLEAN while hiding a spurious or duplicate state dispatch, and a
+    // net collapse cannot explain this direction anyway (two smee transitions
+    // against one feed transition yields a SMEE surplus, not a feed one).
+    expect(explain("feed", "k", ev("linear.issue.state_changed", "CTC-1", ["state"]))).toBeNull();
   });
 
   test("⭐ an asymmetry matching NO predicate is UNEXPLAINED — suspicion is the default", () => {
@@ -224,8 +228,8 @@ describe("⭐ bot-authored comments are feed-only BY DESIGN (measured)", () => {
     expect(explain("feed", "k", created)).toStartWith("feed-created-synthetic-edge");
   });
 
-  test("a plain state edge is still the collapse candidate, not a creation", () => {
-    expect(explain("feed", "k", ev("linear.issue.updated", "CTL-1", ["state"]))).toBe("net-edge-collapse-candidate");
+  test("a plain feed state edge is unexplained — it is not a creation either", () => {
+    expect(explain("feed", "k", ev("linear.issue.state_changed", "CTC-1", ["state"]))).toBeNull();
   });
 });
 

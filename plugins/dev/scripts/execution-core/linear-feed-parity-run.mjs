@@ -160,6 +160,14 @@ const inconclusiveReasons = [];
 if (emptyWindow) inconclusiveReasons.push("settle-period-exceeds-window");
 if (feedTailShort) inconclusiveReasons.push("feed-tail-does-not-reach-window-start");
 if (smeeTailShort) inconclusiveReasons.push("smee-tail-does-not-reach-window-start");
+// ⛔ A TORN RECORD MEANS THE STREAM WAS NOT FULLY READ (Codex P1 round 5).
+// parseJsonl already counted them and nothing consumed the count — a malformed
+// record inside the settled window is dropped before tallying, and the run could
+// then report CLEAN about a stream it did not completely read. The counters
+// existed; they just were not wired to the verdict, which is the same shape as
+// every other defect this review found.
+if (smeeRaw.torn > 0) inconclusiveReasons.push(`smee-torn-lines:${smeeRaw.torn}`);
+if (feedRaw.torn > 0) inconclusiveReasons.push(`feed-torn-lines:${feedRaw.torn}`);
 if (result.counts.feed === 0) inconclusiveReasons.push("feed-side-empty");
 if (result.counts.smee === 0) inconclusiveReasons.push("smee-side-empty");
 if (seededAt === null) inconclusiveReasons.push("no-feed-baseline");

@@ -196,73 +196,53 @@ export function startCloudFeedTimer({
         botUserIds,
         makeSink: sinkFactory,
       });
-      // ⛔ A RE-SEED UN-ARMS. Found by answering my own round-5 question rather
-      // than by review: `seeded` means "baseline built", not "has emitted".
-      // If the last-seen store is lost AFTER enforce armed, the next tick
-      // re-seeds — emitting nothing, absorbing every intervening change into
-      // the new baseline — while a latched readiness keeps the gate suppressing
-      // smee's copies. Those events reach nobody, exactly like the vanished
-      // cursor case.
+      // ⛔ READINESS IS NOT LATCHED. It reflects the LAST sweep, every tick.
       //
-      // This is the one thing that legitimately reverts readiness. The earlier
-      // "never un-arm" rule was about TRANSIENT failures, where flapping between
-      // sources buys nothing; a re-seed is not transient, it is a genuine loss
-      // of the producer's state. Un-arming is safe by construction: the gate
-      // makes smee authoritative again AND keeps suppressing feed events, so no
-      // double-dispatch is possible in either posture.
-      if (ready && Array.isArray(reports) && reports.some((r) => r?.sweep?.mode === "seeded")) {
-        ready = false;
+      // I defended a latch twice and it was wrong twice. First a re-seed had to
+      // break it; then (round 5) so did a plain failure — if the replica goes
+      // away or the last-seen store stops opening, `runOnce` reports an error,
+      // emits nothing, and a latched readiness kept enforce suppressing every
+      // webhook copy INDEFINITELY. "Assume transient" is not a property you can
+      // assume; it is one you would have to prove each tick, which is the same
+      // thing as not latching.
+      //
+      // Flapping is harmless here and that is what makes this safe: with ready
+      // false the gate makes smee authoritative AND still suppresses feed
+      // events, so no posture permits double-dispatch. The worst case is that
+      // dispatch alternates between two sources that both dispatch correctly.
+      //
+      // EVERY tenant must have swept cleanly — not `some`. A healthy tenant must
+      // not mask a skipped or failing one, whose events would otherwise be
+      // suppressed with nothing to replace them.
+      // A sweep counts as clean only by DEMONSTRATING it worked: no failure
+      // counters and NOTHING in byReason — any reason, known or unknown,
+      // disqualifies, so a future reason string needs no change here.
+      const clean = (counts) =>
+        counts != null &&
+        (counts.failed ?? 0) === 0 &&
+        Object.keys(counts.byReason ?? {}).length === 0;
+      // A skipped tenant is NOT clean: the feed produces nothing for it, so its
+      // events would be suppressed with no replacement. `mode === "seeded"` is
+      // not clean either — a (re)seed emits nothing.
+      const swept = (r) =>
+        r &&
+        !r.skipped &&
+        !r.error &&
+        r.sweep &&
+        r.sweep.mode !== "seeded" &&
+        r.sweep.stoppedEarly !== true &&
+        clean(r.sweep.edges) &&
+        clean(r.sweep.comments);
+
+      const wasReady = ready;
+      ready = Array.isArray(reports) && reports.length > 0 && reports.every(swept);
+      if (wasReady && !ready) {
         log.warn?.(
           { mode },
-          "cloud-feed: producer RE-SEEDED after arming — un-arming, smee is authoritative again",
+          "cloud-feed: producer NO LONGER healthy — un-arming, smee is authoritative again",
         );
-      }
-      if (!ready && Array.isArray(reports)) {
-        // A tenant that is skipped, errored, or still seeding does NOT arm it.
-        // ⛔ A ZERO-FAILURE sweep, not merely a non-seeding one (Codex P1 round 2).
-        // runDiffSweep CATCHES an emit failure and returns `stoppedEarly: true`
-        // with non-zero `failed` counts — it does NOT set `r.error`. So a sweep
-        // that emitted nothing at all (a persistent shadow-path EACCES, say)
-        // still reports mode "resume", and the previous predicate armed enforce
-        // on it: every dispatch-class event captured, nothing delivered in its
-        // place, total dispatch outage with the gate reporting itself healthy.
-        // ⛔ READINESS IS DERIVED POSITIVELY, NOT BY ENUMERATING FAILURES.
-        //
-        // Three review rounds each found a new way for a sweep to emit nothing
-        // while every failure counter I was checking read zero: stoppedEarly
-        // without r.error, `cursor-write-failed:*` never touching `failed`, and
-        // then a SECOND cursor reason `cursor-init-failed:*` my prefix match
-        // missed. Each fix was locally correct and the class kept producing new
-        // instances — the signature of safety enforced by a list that is only as
-        // good as what its author thought of.
-        //
-        // So the predicate no longer asks "was any known failure reported?" It
-        // asks "did this sweep demonstrably do its job?":
-        //   1. it got past seeding,
-        //   2. it ran to completion (not stoppedEarly),
-        //   3. NOTHING was reported in byReason — any reason at all, known or
-        //      not, disqualifies. A future reason string needs no code change
-        //      here to be respected, which is the whole point,
-        //   4. and no failure counter is set.
-        //
-        // The cost is that a benign future reason could delay arming. That is
-        // the correct direction: a late arm keeps smee authoritative, an early
-        // arm suppresses smee with nothing behind it.
-        const clean = (counts) =>
-          counts != null &&
-          (counts.failed ?? 0) === 0 &&
-          Object.keys(counts.byReason ?? {}).length === 0;
-        const swept = (r) =>
-          r &&
-          !r.skipped &&
-          !r.error &&
-          r.sweep &&
-          r.sweep.mode !== "seeded" &&
-          r.sweep.stoppedEarly !== true &&
-          clean(r.sweep.edges) &&
-          clean(r.sweep.comments);
-        ready = reports.some(swept);
-        if (ready) log.info?.({ mode }, "cloud-feed: producer armed (baseline seeded, emitting)");
+      } else if (!wasReady && ready) {
+        log.info?.({ mode }, "cloud-feed: producer armed (clean sweep)");
       }
       if (onReport) onReport(reports);
       return reports;

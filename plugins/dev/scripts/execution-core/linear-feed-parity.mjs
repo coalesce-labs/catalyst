@@ -247,8 +247,13 @@ export function explain(side, key, event, ctx = {}) {
       return "feed-more-complete:ladder-named-differently";
     }
     // Net-edge collapse — two transitions inside one tick appear once as the net
-    // edge, so the intermediate hop smee saw has no feed counterpart.
-    if (keys.includes("state")) return "net-edge-collapse-candidate";
+    // ⛔ DELETED (Codex P1 round 5) — the same defect as the smee-side one, in
+    // the other direction. A feed-only STATE edge was explained unconditionally
+    // as a collapse candidate, with no corroboration, which makes the window
+    // CLEAN while hiding a spurious or duplicate state dispatch. And a net
+    // collapse cannot even explain this direction: two smee transitions against
+    // one feed transition produces a SMEE surplus, not a feed one.
+
   }
 
   // ⭐ LATE ARRIVAL: THE TWO PRODUCERS AGREE ON THE FACT AND DISAGREE ON THE TIME.
