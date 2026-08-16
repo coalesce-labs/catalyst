@@ -709,3 +709,45 @@ describe("⛔ unkeyable dispatch events make the run inconclusive", () => {
     expect(src).toContain("feed-unkeyable-events");
   });
 });
+
+// ── The CLI must LOAD and RUN, not merely contain the right strings ──────────
+describe("⛔ linear-feed-parity-run.mjs is executed, not grepped", () => {
+  // An over-wide edit deleted `DEFAULT_SETTLE_SEC`; the module then failed to
+  // load at all, and NOTHING caught it:
+  //   • every unit test passes `settleSec` explicitly, so resolveWindow's
+  //     default parameter — which references the deleted const — never evaluated;
+  //   • the CLI's own checks asserted on its SOURCE TEXT, and a source-level
+  //     assertion cannot fail on a module that does not load.
+  // It shipped to main and was found by running the harness on a host.
+  const CLI = new URL("./linear-feed-parity-run.mjs", import.meta.url).pathname;
+
+  test("the CLI loads and produces a verdict against empty inputs", async () => {
+    const proc = Bun.spawn(
+      ["bun", CLI, "--since-min", "5", "--events", "/nonexistent-events.jsonl", "--shadow", "/nonexistent-shadow.jsonl", "--lastseen", "/nonexistent.db"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    const code = await proc.exited;
+
+    // The specific failure this pins: a module-load error, which surfaces as a
+    // SyntaxError/ReferenceError on stderr rather than any verdict at all.
+    expect(err).not.toContain("SyntaxError");
+    expect(err).not.toContain("ReferenceError");
+    expect(err).not.toContain("not found in module");
+    // Empty inputs must be INCONCLUSIVE (exit 3), never a clean pass.
+    expect(out).toContain("[parity]");
+    expect(code).toBe(3);
+  }, 30_000);
+
+  test("every symbol the CLI imports actually exists in the module", async () => {
+    // Generic guard: parse the CLI's own import list rather than naming symbols,
+    // so a future deletion of ANY of them fails here.
+    const src = await Bun.file(CLI).text();
+    const m = src.match(/import \{([^}]*)\} from "\.\/linear-feed-parity\.mjs";/);
+    expect(m).not.toBeNull();
+    const mod = await import("./linear-feed-parity.mjs");
+    for (const name of m[1].split(",").map((x) => x.trim()).filter(Boolean)) {
+      expect(mod[name], `linear-feed-parity.mjs must export ${name}`).toBeDefined();
+    }
+  });
+});
