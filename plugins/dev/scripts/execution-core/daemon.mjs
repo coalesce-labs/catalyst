@@ -65,6 +65,7 @@ import {
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
+import { defaultIdentityLedgerPath, syncAndResolveSelfIdentities } from "./linear-bot-identity.mjs"; // CTL-1892
 import {
   clusterSync as realClusterSync,
   refreshClusterSecretsIfChanged as realRefreshClusterSecrets, // CTL-1393: change-detecting secret re-decrypt
@@ -286,6 +287,40 @@ export function readLinearBotUserIds(layer1Path, layer2Path) {
     if (typeof uid === "string" && uid.length > 0) s.add(uid);
   });
   return ids;
+}
+
+// readSelfEchoIdentities — the ROTATION-DURABLE self-echo set (CTL-1892).
+//
+// `readLinearBotUserIds` above is correct but POINT-IN-TIME: it names the currently
+// configured app-actors, so a rotation REPLACES the set instead of extending it. From
+// the moment a new app-actor starts writing until the config names it, the fleet's own
+// echoes read as third-party changes and it dispatches on its own writes. Nothing
+// errors — the symptom is indistinguishable from ordinary board activity. Measured on
+// this fleet: `f51bc697…` (handle `catalystorchestrator`, 2,241 writes through
+// 2026-08-10) was superseded same-day by `ba2989f1…` (`catalystorchestrator2`), and
+// only the second is named by any config.
+//
+// This unions the config set with a durable per-host ledger of every identity the
+// fleet has WRITTEN AS, and records the current ones on the way through — so the next
+// rotation extends the set rather than reopening the window.
+//
+// Left as a separate seam rather than folded into readLinearBotUserIds: that function
+// is pure and has an inlined twin in doctor.mjs, and giving it a default on-disk
+// ledger would make every existing unit test touch real state.
+export function readSelfEchoIdentities(layer1Path, layer2Path, ledgerPath, { onDegraded = null } = {}) {
+  const configIds = readLinearBotUserIds(layer1Path, layer2Path);
+  if (!ledgerPath) return configIds;
+  try {
+    const r = syncAndResolveSelfIdentities({ configIds, ledgerPath, source: "config" });
+    // A degraded ledger is fail-open (config ids are still returned) but must never be
+    // silent — "the rotation window is open again" has no other symptom.
+    if (r.ledgerStatus === "unreadable" && typeof onDegraded === "function") {
+      onDegraded({ status: r.ledgerStatus, reason: r.ledgerReason, path: ledgerPath });
+    }
+    return r.ids;
+  } catch {
+    return configIds; // a ledger problem must never cost us the configured ids
+  }
 }
 
 // readLinearBotWriteId — the SINGLE bot UUID the daemon writes as assignee on
@@ -1275,7 +1310,12 @@ export function startDaemon({
     // Layer-2 new global path) so inbox writers and the comment-wake guard
     // suppress self-echo from BOTH the worker app-actor AND the orchestrator
     // app-actor. Returns a Set<string> — empty = no filter (fail-open).
-    const linearBotUserIds = readLinearBotUserIds(configPath, layer2Path);
+    // CTL-1892: rotation-durable — config ids UNION every identity this host has
+    // written as, so an app-actor re-mint extends the self-echo set instead of
+    // reopening a window where the fleet dispatches on its own echoes.
+    const linearBotUserIds = readSelfEchoIdentities(configPath, layer2Path, defaultIdentityLedgerPath(), {
+      onDegraded: (d) => log?.warn?.(d, "self-echo identity ledger unreadable — rotation window may be open"),
+    });
     const linearBotWriteId = readLinearBotWriteId(configPath, layer2Path); // CTL-781
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
     // CTL-1654 (Codex P2 "gate the daemon before starting actuators"): resolve the
