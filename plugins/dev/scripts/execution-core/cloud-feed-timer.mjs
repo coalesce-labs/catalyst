@@ -205,19 +205,32 @@ export function startCloudFeedTimer({
         // still reports mode "resume", and the previous predicate armed enforce
         // on it: every dispatch-class event captured, nothing delivered in its
         // place, total dispatch outage with the gate reporting itself healthy.
-        // ⛔ A CURSOR THAT CANNOT PERSIST IS ALSO A FAILURE (Codex P1 round 3).
-        // runDiffSweep records cursor-write errors only in `byReason` and never
-        // increments `failed`, so an unwritable cursor path armed enforce and
-        // then every tick cold-started at its own current time — permanently
-        // skipping every row created between ticks while the gate suppressed
-        // their webhook copies. Third variant of the same shape: the counters
-        // that say "the sweep succeeded" did not cover every way it can fail.
+        // ⛔ READINESS IS DERIVED POSITIVELY, NOT BY ENUMERATING FAILURES.
         //
-        // Read by PREFIX, not exact match: the reason carries an errno suffix
-        // (`cursor-write-failed:EACCES`), so an equality check would silently
-        // match nothing.
-        const cursorBroken = (counts) =>
-          Object.keys(counts?.byReason ?? {}).some((k) => k.startsWith("cursor-write-failed"));
+        // Three review rounds each found a new way for a sweep to emit nothing
+        // while every failure counter I was checking read zero: stoppedEarly
+        // without r.error, `cursor-write-failed:*` never touching `failed`, and
+        // then a SECOND cursor reason `cursor-init-failed:*` my prefix match
+        // missed. Each fix was locally correct and the class kept producing new
+        // instances — the signature of safety enforced by a list that is only as
+        // good as what its author thought of.
+        //
+        // So the predicate no longer asks "was any known failure reported?" It
+        // asks "did this sweep demonstrably do its job?":
+        //   1. it got past seeding,
+        //   2. it ran to completion (not stoppedEarly),
+        //   3. NOTHING was reported in byReason — any reason at all, known or
+        //      not, disqualifies. A future reason string needs no code change
+        //      here to be respected, which is the whole point,
+        //   4. and no failure counter is set.
+        //
+        // The cost is that a benign future reason could delay arming. That is
+        // the correct direction: a late arm keeps smee authoritative, an early
+        // arm suppresses smee with nothing behind it.
+        const clean = (counts) =>
+          counts != null &&
+          (counts.failed ?? 0) === 0 &&
+          Object.keys(counts.byReason ?? {}).length === 0;
         const swept = (r) =>
           r &&
           !r.skipped &&
@@ -225,10 +238,8 @@ export function startCloudFeedTimer({
           r.sweep &&
           r.sweep.mode !== "seeded" &&
           r.sweep.stoppedEarly !== true &&
-          (r.sweep.edges?.failed ?? 0) === 0 &&
-          (r.sweep.comments?.failed ?? 0) === 0 &&
-          !cursorBroken(r.sweep.edges) &&
-          !cursorBroken(r.sweep.comments);
+          clean(r.sweep.edges) &&
+          clean(r.sweep.comments);
         ready = reports.some(swept);
         if (ready) log.info?.({ mode }, "cloud-feed: producer armed (baseline seeded, emitting)");
       }

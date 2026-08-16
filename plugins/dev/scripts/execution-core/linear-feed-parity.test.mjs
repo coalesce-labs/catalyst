@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 // linear-feed-parity.test.mjs — CTL-1847.
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-feed-parity.test.mjs
@@ -248,17 +249,33 @@ describe("⭐ net-edge collapse can ERASE a field, not just merge hops", () => {
     ).toBeNull();
   });
 
-  test("a CORROBORATED reversible-field edge (>=2 observed transitions) IS explained", () => {
+  test("⛔ NOT explained even with 2+ observed transitions — counting is not verifying", () => {
+    // The corroboration-by-count heuristic was itself unsound and is gone: two
+    // cycleId updates can be A→B→C, or two unrelated changes across ticks whose
+    // feed copies were BOTH dropped. The only sound check reads the replica, and
+    // this module is pure — so the edge stays unexplained for a human.
     expect(
       explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]), {
         fieldHops: new Map([["CTC-167|cycleId", 2]]),
       }),
-    ).toStartWith("net-edge-collapse:CORROBORATED");
+    ).toBeNull();
+    expect(
+      explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId", "projectId"]), {
+        fieldHops: new Map([["CTC-167|cycleId", 9], ["CTC-167|projectId", 9]]),
+      }),
+    ).toBeNull();
   });
 
-  test("corroboration is required for EVERY field in a multi-field edge", () => {
-    const hops = new Map([["CTC-167|cycleId", 2], ["CTC-167|projectId", 1]]);
-    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId", "projectId"]), { fieldHops: hops })).toBeNull();
+  test("a dropped single reversible-field edge now surfaces as UNEXPLAINED", () => {
+    // The end-to-end shape of the retracted CLEAN: one smee cycleId edge, no
+    // feed counterpart. Previously "explained"; now visible.
+    const res = compareStreams({
+      smee: [{ ts: "2026-08-16T10:00:00Z", attributes: { "event.name": "linear.issue.updated" }, body: { payload: { ticket: "CTC-509", updatedFromKeys: ["cycleId"] } } }],
+      feed: [],
+    });
+    expect(res.unexplained).toHaveLength(1);
+    expect(res.unexplained[0].key).toBe("CTC-509|cycleId");
+    expect(res.clean).toBe(false);
   });
 
   test("⛔ a smee-only STATE edge is NOT explained away — it could hide a dispatch", () => {
@@ -558,5 +575,30 @@ describe("edgeKey — comment identity", () => {
     };
     expect(edgeKey(noId)).toBe("CTL-4|comment");
     expect(edgeKey(cmt("CTL-4", "Z", "2026-08-16T10:00:00Z"))).toBe("CTL-4|comment|Z");
+  });
+});
+
+// ── CTL-1847 (Codex P1 round 4): both tails are reach-checked ────────────────
+describe("parity-run bounded-tail reach guards", () => {
+  const src = readFileSync(
+    new URL("./linear-feed-parity-run.mjs", import.meta.url).pathname,
+    "utf8",
+  );
+
+  test("BOTH tails get a reach check, not just the feed", () => {
+    // I added the feed guard and not the smee one, even though the event log is
+    // far busier and capped at the same --tail-bytes, so it is the likelier to
+    // truncate. Asserted at source level because the reach math lives in a CLI.
+    expect(src).toContain("feedTailShort");
+    expect(src).toContain("smeeTailShort");
+  });
+
+  test("both short-tail conditions feed the INCONCLUSIVE reasons", () => {
+    expect(src).toContain("feed-tail-does-not-reach-window-start");
+    expect(src).toContain("smee-tail-does-not-reach-window-start");
+  });
+
+  test("the verdict is three-valued and inconclusive has its own exit code", () => {
+    expect(src).toContain("inconclusive ? 3 :");
   });
 });

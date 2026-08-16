@@ -146,10 +146,20 @@ const reachOf = (evts) =>
   }, null);
 const feedReach = reachOf(feedRaw.events);
 const feedTailShort = feedReach !== null && feedReach > since;
+// ⛔ THE SAME CHECK FOR SMEE (Codex P1 round 4). I added the reach guard for the
+// feed tail and not for the webhook tail — even though both are capped at the
+// same --tail-bytes and the unified event log is far busier, so IT is the one
+// likely to truncate. A smee tail covering only the latter part of the window
+// still passes the non-empty guard, and the earlier feed events then have no
+// webhook records to match against — exiting CLEAN without having read what it
+// claimed to compare.
+const smeeReach = reachOf(smeeRaw.events);
+const smeeTailShort = smeeReach !== null && smeeReach > since;
 
 const inconclusiveReasons = [];
 if (emptyWindow) inconclusiveReasons.push("settle-period-exceeds-window");
 if (feedTailShort) inconclusiveReasons.push("feed-tail-does-not-reach-window-start");
+if (smeeTailShort) inconclusiveReasons.push("smee-tail-does-not-reach-window-start");
 if (result.counts.feed === 0) inconclusiveReasons.push("feed-side-empty");
 if (result.counts.smee === 0) inconclusiveReasons.push("smee-side-empty");
 if (seededAt === null) inconclusiveReasons.push("no-feed-baseline");
@@ -164,6 +174,8 @@ const report = {
   clampedToFeedStart: clamped,
   feedTailReachesBackTo: feedReach ? new Date(feedReach).toISOString() : null,
   feedTailShort,
+  smeeTailReachesBackTo: smeeReach ? new Date(smeeReach).toISOString() : null,
+  smeeTailShort,
   inconclusive,
   inconclusiveReasons,
   shadow: SHADOW,

@@ -362,6 +362,14 @@ describe("startCloudFeedTimer", () => {
     ["edge cursor unwritable", { ...OK, edges: { failed: 0, byReason: { "cursor-write-failed:EACCES": 1 } } }],
     ["comment cursor unwritable", { ...OK, comments: { failed: 0, byReason: { "cursor-write-failed:ENOSPC": 1 } } }],
     ["cursor failure with an unknown errno", { ...OK, edges: { failed: 0, byReason: { "cursor-write-failed:unknown": 1 } } }],
+    // Round 4: a SECOND cursor reason my prefix match missed.
+    ["edge cursor init failed", { ...OK, edges: { failed: 0, byReason: { "cursor-init-failed:EACCES": 1 } } }],
+    ["comment cursor init failed", { ...OK, comments: { failed: 0, byReason: { "cursor-init-failed:EROFS": 1 } } }],
+    // ⭐ The point of deriving readiness positively: a reason nobody has thought
+    // of yet must disqualify WITHOUT a code change here. If this row ever needs
+    // a new prefix added to make it pass, the enumeration bug is back.
+    ["a completely unknown future reason", { ...OK, edges: { failed: 0, byReason: { "some-reason-invented-in-2027": 1 } } }],
+    ["an unknown reason on the comment side", { ...OK, comments: { failed: 0, byReason: { "totally-new-thing": 4 } } }],
   ];
 
   test.each(FAILURE_SHAPES)("readiness stays UNARMED: %s", (_label, sweep) => {

@@ -137,10 +137,38 @@ export const DEFAULT_RESET_LOOKBACK_MS = 15 * 60 * 1000;
  */
 export function resolveStartPosition(
   read,
-  { now = () => Date.now(), resetLookbackMs = DEFAULT_RESET_LOOKBACK_MS } = {},
+  { now = () => Date.now(), resetLookbackMs = DEFAULT_RESET_LOOKBACK_MS, everRan = false } = {},
 ) {
   if (read?.state === CURSOR_OK) {
     return { since: read.position.lastCreatedAt, mode: "resume", alarm: null };
+  }
+  // ⛔ ABSENT MEANS "FIRST RUN" ONLY IF THIS PRODUCER HAS NEVER RUN
+  // (Codex P1 round 4). A cursor deleted or lost AFTER the producer has been
+  // emitting is not a first run, and treating it as one silently resumes at
+  // `now` — skipping everything created since the last good cursor. That is
+  // survivable while smee is authoritative; under enforce, readiness is already
+  // latched, so those events' webhook copies are suppressed and the skipped
+  // window can never be retried by anyone.
+  //
+  // `everRan` comes from the last-seen store's `seeded` flag, which is durable
+  // and independent of the cursor file — so losing the cursor cannot also lose
+  // the knowledge that we had one.
+  if (read?.state === CURSOR_ABSENT && everRan) {
+    const b = Number.isInteger(resetLookbackMs) && resetLookbackMs >= 0
+      ? resetLookbackMs
+      : DEFAULT_RESET_LOOKBACK_MS;
+    return {
+      since: now() - b,
+      lookbackMs: b,
+      mode: "reset",
+      alarm: {
+        severity: "warn",
+        reason: "cursor-vanished-after-first-run",
+        lookbackMs: b,
+        message:
+          "cursor absent but the producer has run before — resuming with a bounded lookback instead of cold-starting at now, which would silently skip everything since the last good cursor",
+      },
+    };
   }
   if (read?.state === CURSOR_ABSENT) {
     // First run on this host. Nothing was ever emitted, so there is no backlog we

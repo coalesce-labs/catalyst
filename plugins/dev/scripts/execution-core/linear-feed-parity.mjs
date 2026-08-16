@@ -192,40 +192,25 @@ export function explain(side, key, event, ctx = {}) {
   const keys = joinFields(raw);
 
   if (side === "smee") {
-    // ⭐ NET-EDGE COLLAPSE CAN ERASE A FIELD ENTIRELY, not merely merge two hops.
-    // Measured: CTC-167 and CTC-593 were added to a cycle and removed again between
-    // feed ticks. Smee saw each hop; the feed saw the NET result, and for `cycleId`
-    // the net change is NOTHING — so it emitted only the `state` edge and there is no
-    // cycleId edge to match. The replica confirms both end at cycle_id=null, so the
-    // feed is CORRECT about final state; it simply cannot see a round trip that
-    // closed inside one tick.
+    // ⛔ THE ROUND-TRIP EXPLANATION IS DELETED (Codex P1 round 4), not repaired.
     //
-    // ⚠️ Scoped deliberately to reversible/bookkeeping fields. A smee-only `state`
-    // edge is NOT explained by this: a state round-trip inside one tick could hide a
-    // dispatch-relevant transition, and that must stay visible.
-    // ⛔ EVIDENCE REQUIRED (Codex P1 round 3). This predicate used to assert a
-    // closed round trip for any reversible-field edge, observing NOTHING. The
-    // comment above describes a replica check a human ran once on CTC-167/593;
-    // the CODE never read the replica and never counted transitions. So a
-    // genuinely DROPPED single `cycleId` update was reported as explained, and
-    // the window returned clean — the instrument approving a producer that lost
-    // a dispatch-class event.
+    // It has now been wrong twice, in two different ways. First it asserted a
+    // closed round trip for any reversible-field edge while observing NOTHING —
+    // its comment cited a replica check a human ran once, which the code never
+    // performed. Then corroboration-by-transition-count was unsound too: two
+    // `cycleId` updates in a window can be A→B→C, or two unrelated changes
+    // across ticks whose feed copies were BOTH dropped. Counting occurrences is
+    // not verifying a collapse.
     //
-    // A real round trip inside one tick means smee observed the field change at
-    // least TWICE (once each way). One observed transition is not a round trip;
-    // it is an unmatched edge, and it stays unexplained.
-    if (keys.length > 0 && keys.every((k) => REVERSIBLE_FIELDS.includes(k))) {
-      const hops = ctx?.fieldHops;
-      const corroborated =
-        hops instanceof Map &&
-        keys.every((k) => (hops.get(`${ticketOf(event)}|${k}`) ?? 0) >= 2);
-      if (corroborated) {
-        return "net-edge-collapse:CORROBORATED — smee observed >=2 transitions of each field in this window (feed reports net state)";
-      }
-      // Deliberately falls through to unexplained rather than returning a
-      // hedged explanation: an uncorroborated claim in the `explained` bucket
-      // is what made the gate approve losses.
-    }
+    // The only sound check is reading the replica to confirm the field returned
+    // to its prior value, and this module is deliberately pure — no DB, no I/O.
+    // Rather than ship a third inference that looks principled and is not, the
+    // edge now stays UNEXPLAINED and a human adjudicates it against the replica.
+    //
+    // This makes windows noisier and can never make one falsely clean. Given
+    // that this predicate already produced a CLEAN verdict that had to be
+    // retracted, noise is the better failure mode: an unexplained edge gets
+    // looked at, a wrongly-explained one does not.
     // Smee emits names nothing handles; the feed reports the same change as a field
     // cell instead, so there is no matching feed edge under this key.
     if (SMEE_UNHANDLED_NAMES.includes(name)) return `smee-only-name:${name}`;

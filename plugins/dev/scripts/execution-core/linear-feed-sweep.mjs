@@ -292,8 +292,17 @@ export function runDiffSweep({
     return { mode: "seeded", alarm: null, seeded: seed.seeded, complete: seed.complete, batches: seed.batches, edges: counts };
   }
 
+  // Durable, cursor-independent knowledge that this producer has emitted before.
+  // Losing the cursor file must not also lose the fact that we had one.
+  const hasRunBefore = (() => {
+    try {
+      return store?.isSeeded?.() === true;
+    } catch {
+      return false; // unreadable store ⇒ treat as first run (the conservative read)
+    }
+  })();
   const read = readCursorFn(cursorPath);
-  const start = resolveStartPosition(read, { now, resetLookbackMs });
+  const start = resolveStartPosition(read, { now, resetLookbackMs, everRan: hasRunBefore });
   let position = { lastCreatedAt: start.since, lastId: read?.position?.lastId ?? "" };
   if (start.mode !== "resume") {
     try {
@@ -373,7 +382,7 @@ export function runDiffSweep({
   if (!stopped && typeof source.commentsSince === "function") {
     const commentCursorPath = `${cursorPath}.comments`;
     const cRead = readCursorFn(commentCursorPath);
-    const cStart = resolveStartPosition(cRead, { now, resetLookbackMs });
+    const cStart = resolveStartPosition(cRead, { now, resetLookbackMs, everRan: hasRunBefore });
     let cPos = { lastCreatedAt: cStart.since, lastId: cRead?.position?.lastId ?? "" };
     if (cStart.mode !== "resume") {
       try {
