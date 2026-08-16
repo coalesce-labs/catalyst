@@ -199,3 +199,31 @@ describe("⭐ the join strips bookkeeping and aliases field names — found on l
     );
   });
 });
+
+describe("⭐ bot-authored comments are feed-only BY DESIGN (measured)", () => {
+  const botComment = (ticket) => ({
+    ts: "2026-08-16T01:00:00Z",
+    attributes: { "event.name": "linear.comment.created", "linear.issue.identifier": ticket },
+    body: { payload: { ticket, isBot: true } },
+  });
+
+  test("a bot-authored feed comment is explained, citing the requirement", () => {
+    const why = explain("feed", "k", botComment("CTC-596"));
+    expect(why).toContain("bot-authored");
+    expect(why).toContain("CTL-1891");
+  });
+
+  test("a HUMAN feed-only comment stays UNEXPLAINED — that would be a real diff", () => {
+    const human = { ...botComment("CTC-1"), body: { payload: { ticket: "CTC-1", isBot: false } } };
+    expect(explain("feed", "k", human)).toBeNull();
+  });
+
+  test("issue creation gets its own predicate, not net-edge-collapse", () => {
+    const created = ev("linear.issue.updated", "CTC-596", ["description", "priority", "projectId", "state", "teamId", "title"]);
+    expect(explain("feed", "k", created)).toStartWith("feed-created-synthetic-edge");
+  });
+
+  test("a plain state edge is still the collapse candidate, not a creation", () => {
+    expect(explain("feed", "k", ev("linear.issue.updated", "CTL-1", ["state"]))).toBe("net-edge-collapse-candidate");
+  });
+});

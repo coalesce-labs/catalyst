@@ -173,6 +173,23 @@ export function explain(side, key, event) {
   }
 
   if (side === "feed") {
+    // ⭐ BOT-AUTHORED COMMENTS ARE FEED-ONLY BY DESIGN.
+    // Measured on mini-2: bot comments on CTC-593/594/595/596 produced ZERO smee
+    // comment events, while human comments on CTL-1894/CTC-564/CTC-589/CTC-256/
+    // CTL-1882/CTL-1891 produced 2/4/2/2/1/14. Smee's receiver filters bot-authored
+    // comments before they reach the log; the feed deliberately does not, because
+    // Ryan's CTL-1891 decision makes agent comments the fleet's comms channel — they
+    // are the PAYLOAD, and filtering them would delete the messages the channel
+    // exists to carry. So the feed being more complete here is the requirement.
+    if (event?.body?.payload?.isBot === true || event?.body?.payload?.authorIsBot === true) {
+      return "feed-only-comment:bot-authored (smee filters bot comments; CTL-1891 requires the feed to carry them)";
+    }
+    // ⭐ ISSUE CREATION is one synthetic full-field edge on the feed and a single
+    // `linear.issue.created` on smee — different shapes for the same event, so it
+    // gets its own predicate rather than hiding under net-edge-collapse.
+    if (keys.includes("state") && keys.length >= 4) {
+      return "feed-created-synthetic-edge:feed emits a full-field edge where smee emits linear.issue.created";
+    }
     // The mirror image: the feed reports fields whose smee event was named by the
     // ladder and therefore keyed differently.
     if (keys.length > 0 && keys.every((k) => ["priority", "assigneeId", "delegateId"].includes(k))) {

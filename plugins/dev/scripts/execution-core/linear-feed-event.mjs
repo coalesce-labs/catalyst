@@ -298,6 +298,9 @@ export function buildCommentEvent({ comment, issue, author } = {}, seams = undef
         actorId: authorId,
         actorName: author?.name ?? null,
         body: comment?.body ?? null,
+        // Carried so the parity harness can recognise the bot-authored comments that
+        // smee's receiver filters and the feed deliberately does not (CTL-1891).
+        isBot: comment?.is_bot === 1 || comment?.is_bot === true,
         source: "cloud-feed",
       },
     },
