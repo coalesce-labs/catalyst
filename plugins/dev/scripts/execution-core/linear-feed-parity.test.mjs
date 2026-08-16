@@ -655,3 +655,57 @@ describe("⛔ `explained` is structurally always empty", () => {
     expect(r.matchedKeys).toBe(1);
   });
 });
+
+// ── CTL-1847 (Codex P1 round 7): an unkeyable event is counted, not dropped ──
+describe("⛔ unkeyable dispatch events make the run inconclusive", () => {
+  const keyed = (ticket) => ({
+    ts: "2026-08-16T10:00:00Z",
+    attributes: { "event.name": "linear.comment.created" },
+    body: { payload: { ticket, commentId: `c-${ticket}` } },
+  });
+  const ticketless = () => ({
+    ts: "2026-08-16T10:00:00Z",
+    attributes: { "event.name": "linear.issue.state_changed" },
+    body: { payload: { toState: "Done" } }, // syntactically valid, no ticket
+  });
+
+  test("⭐ Codex's exact repro: one matched edge + one ticketless feed event", () => {
+    // Previously: feed count 2, matchedKeys 1, no unexplained diffs → CLEAN,
+    // over a stream that contained an event never compared at all.
+    const r = compareStreams({ smee: [keyed("A")], feed: [keyed("A"), ticketless()] });
+    expect(r.counts.feed).toBe(2);
+    expect(r.matchedKeys).toBe(1);
+    expect(r.unexplained).toHaveLength(0); // still no DIFF...
+    expect(r.unkeyable.feed).toBe(1); // ...but the drop is now counted
+  });
+
+  test("both sides are counted", () => {
+    const r = compareStreams({ smee: [ticketless(), ticketless()], feed: [ticketless()] });
+    expect(r.unkeyable).toEqual({ smee: 2, feed: 1 });
+  });
+
+  test("NEGATIVE CONTROL: fully keyable streams report zero", () => {
+    const r = compareStreams({ smee: [keyed("A")], feed: [keyed("A")] });
+    expect(r.unkeyable).toEqual({ smee: 0, feed: 0 });
+    expect(r.clean).toBe(true);
+  });
+
+  test("non-dispatch-class events without tickets are NOT counted as unkeyable", () => {
+    // Only events that were supposed to be compared count as a loss.
+    const other = { ts: "2026-08-16T10:00:00Z", attributes: { "event.name": "github.pull_request.opened" }, body: { payload: {} } };
+    const r = compareStreams({ smee: [keyed("A"), other], feed: [keyed("A")] });
+    expect(r.unkeyable).toEqual({ smee: 0, feed: 0 });
+  });
+
+  test("out-of-window unkeyable events are not counted", () => {
+    const old = { ...ticketless(), ts: "2026-08-15T00:00:00Z" };
+    const r = compareStreams({ smee: [keyed("A")], feed: [keyed("A"), old], since: Date.parse("2026-08-16T00:00:00Z") });
+    expect(r.unkeyable.feed).toBe(0);
+  });
+
+  test("the runner turns a non-zero count into INCONCLUSIVE", () => {
+    const src = readFileSync(new URL("./linear-feed-parity-run.mjs", import.meta.url).pathname, "utf8");
+    expect(src).toContain("smee-unkeyable-events");
+    expect(src).toContain("feed-unkeyable-events");
+  });
+});

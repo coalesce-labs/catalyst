@@ -168,6 +168,9 @@ if (smeeTailShort) inconclusiveReasons.push("smee-tail-does-not-reach-window-sta
 // every other defect this review found.
 if (smeeRaw.torn > 0) inconclusiveReasons.push(`smee-torn-lines:${smeeRaw.torn}`);
 if (feedRaw.torn > 0) inconclusiveReasons.push(`feed-torn-lines:${feedRaw.torn}`);
+// A dispatch-class record we could not key was never compared at all.
+if (result.unkeyable?.smee > 0) inconclusiveReasons.push(`smee-unkeyable-events:${result.unkeyable.smee}`);
+if (result.unkeyable?.feed > 0) inconclusiveReasons.push(`feed-unkeyable-events:${result.unkeyable.feed}`);
 if (result.counts.feed === 0) inconclusiveReasons.push("feed-side-empty");
 if (result.counts.smee === 0) inconclusiveReasons.push("smee-side-empty");
 if (seededAt === null) inconclusiveReasons.push("no-feed-baseline");

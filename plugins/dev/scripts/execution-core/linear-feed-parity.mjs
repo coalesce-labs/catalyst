@@ -142,6 +142,12 @@ const keysOf = (e) => {
 /** The join key: a ticket plus the set of fields the event says changed. */
 export function edgeKey(event) {
   const t = ticketOf(event);
+  // ⛔ An unkeyable dispatch-class event is DROPPED from the tallies, and a drop
+  // that nothing counts is how a run reports CLEAN over a stream it did not
+  // fully compare (Codex P1 round 7: one matched edge plus one ticketless feed
+  // event gave feed count 2, matchedKeys 1, and no unexplained diffs).
+  // compareStreams counts these separately and the runner treats any non-zero
+  // count as INCONCLUSIVE.
   if (!t) return null;
   const n = nameOf(event);
   if (n === "linear.comment.created") {
@@ -263,6 +269,17 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
     if (until && ts > until) return false;
     return true;
   };
+  // Dispatch-class events we could not key at all. Counted, never silently
+  // dropped — see edgeKey.
+  const unkeyable = { smee: 0, feed: 0 };
+  const countUnkeyable = (evts, side) => {
+    for (const e of evts) {
+      if (!inWindow(e)) continue;
+      if (!DISPATCH_NAMES.includes(nameOf(e))) continue;
+      if (edgeKey(e) === null) unkeyable[side] += 1;
+    }
+  };
+
   const smeeIn = smee.filter((e) => inWindow(e) && DISPATCH_NAMES.concat(SMEE_UNHANDLED_NAMES).includes(nameOf(e)));
   // Corroboration index for the late-arrival predicate: the SAME edge key seen on the
   // smee side BEFORE the window. Deliberately not window-bounded — the whole point is
@@ -276,6 +293,9 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
     if (!priorSmee.has(k)) priorSmee.set(k, e.ts);
   }
   const feedIn = feed.filter(inWindow);
+
+  countUnkeyable(smee, "smee");
+  countUnkeyable(feed, "feed");
 
   const S = tally(smeeIn);
   const F = tally(feedIn);
@@ -347,6 +367,7 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
 
   return {
     counts: { smee: smeeIn.length, feed: feedIn.length },
+    unkeyable,
     classes: { smee: S.byClass, feed: F.byClass },
     // Keys present on both sides AT THE SAME COUNT. A key both sides carry but
     // in different quantities is a diff, so counting it as matched would report
