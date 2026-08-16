@@ -912,6 +912,7 @@ jobs:
             phase-yield-parity.test.mjs \
             phase-yield-expiry.test.mjs \
             phase-yield-e2e.test.mjs \
+            cloud-sync-account.test.mjs \
             cloud-sync-schema-identity.test.mjs \
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
@@ -934,10 +935,12 @@ jobs:
             linear-breaker.test.mjs \
             linear-ratelimit-event.test.mjs \
             linear-cache.test.mjs \
+            linear-bot-identity.test.mjs \
             linear-estimation-method.test.mjs \
             linear-query.test.mjs \
             linear-remint.test.mjs \
             linear-state-write-event.test.mjs \
+            linear-write-echo.test.mjs \
             linear-write.test.mjs \
             memory-event.test.mjs \
             memory-sampler-signal.test.mjs \
