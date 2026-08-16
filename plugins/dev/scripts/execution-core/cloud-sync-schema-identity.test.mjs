@@ -4,6 +4,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
+import { realpathSync } from "node:fs";
 import {
   appendSchemaIdentity,
   createSchemaReportingWsFactory,
@@ -50,15 +51,48 @@ describe("the reported identity is the bundle THE REPLICA APPLIES WITH", () => {
     // applying 16: three migrations behind, reported as CURRENT.
     const viaSdk = journalIdentity(sdkSchema);
     const viaBare = journalIdentity(bareSchema);
-    if (!viaSdk || !viaBare || viaSdk.tail === viaBare.tail) {
-      // Do NOT pass quietly: with one hoisted copy this cannot discriminate, and a
-      // green light here would mean "could not look", not "correct".
+    if (!viaSdk || !viaBare) {
+      // Do NOT pass quietly: a missing measurement is undiagnosable, and a green
+      // light here would mean "could not look", not "correct".
       throw new Error(
         `INCONCLUSIVE: this tree does not expose two distinct schema copies ` +
           `(sdk=${JSON.stringify(viaSdk)} bare=${JSON.stringify(viaBare)}); ` +
           `the regression cannot be observed here.`
       );
     }
+
+    if (viaSdk.tail === viaBare.tail) {
+      // ⭐ A UNIFIED tree — and that is a RESULT, not an absence of evidence.
+      // Once the SDK pin carries one exact schema through both `applyMigrations`
+      // and replicate's `applyDelta`, there is only one copy, so "reported the bare
+      // copy instead of the SDK's" is structurally unconstructible rather than
+      // merely unobserved. Treating that as INCONCLUSIVE turned the FIX into a red
+      // build (measured: this test failed CI on the 0.8.4 pin, whose whole purpose
+      // is to produce this state).
+      //
+      // ⛔ But identical journal tails are NOT proof of one copy — two distinct
+      // copies of the SAME version have identical tails, which is exactly the
+      // "could not look" case this test refuses to green-light. So PROVE it: the
+      // two resolutions must land on the same file on disk. If they don't, the
+      // discrimination really was possible and something else silenced it.
+      const realOf = (resolve) => {
+        try {
+          return realpathSync(resolve());
+        } catch {
+          return null;
+        }
+      };
+      const sdkPath = realOf(() => createRequire(req.resolve("@catalyst-cloud/sdk/node")).resolve("@catalyst-cloud/schema"));
+      const barePath = realOf(() => req.resolve("@catalyst-cloud/schema"));
+      expect(sdkPath).not.toBeNull();
+      expect(barePath).not.toBeNull();
+      expect(sdkPath).toBe(barePath);
+      // The invariant that still carries meaning in a unified tree: the reported
+      // identity is the one the replica applies with.
+      expect(replicaSchemaIdentity()).toEqual(viaSdk);
+      return;
+    }
+
     expect(replicaSchemaIdentity()).toEqual(viaSdk);
     expect(replicaSchemaIdentity().tail).not.toBe(viaBare.tail);
   });
