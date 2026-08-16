@@ -280,7 +280,7 @@ describe("startCloudFeedTimer", () => {
 
   test("⛔ isReady() is FALSE until a real non-seeding sweep completes (Codex P1)", () => {
     const seeding = [{ account: "tenant-0", skipped: null, sweep: { mode: "seeded", seeded: 4000 } }];
-    const real = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume", edges: {} } }];
+    const real = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0 }, comments: { failed: 0 } } }];
     let reports = seeding;
     const handle = startCloudFeedTimer({
       mode: "enforce",
@@ -294,6 +294,41 @@ describe("startCloudFeedTimer", () => {
     reports = real;
     handle.tick();
     expect(handle.isReady()).toBe(true); // a real sweep does
+  });
+
+  test("⛔ a sweep that FAILED to emit does NOT arm readiness (Codex P1 round 2)", () => {
+    // runDiffSweep catches an emit failure and returns stoppedEarly + failed
+    // counts WITHOUT setting r.error, so mode is still "resume". Arming on that
+    // would suppress every webhook copy while nothing replaced it — a total
+    // dispatch outage with the gate reporting itself healthy.
+    const cases = [
+      { label: "stoppedEarly", sweep: { mode: "resume", stoppedEarly: true, edges: { failed: 0 }, comments: { failed: 0 } } },
+      { label: "edge failures", sweep: { mode: "resume", edges: { failed: 3 }, comments: { failed: 0 } } },
+      { label: "comment failures", sweep: { mode: "resume", edges: { failed: 0 }, comments: { failed: 1 } } },
+    ];
+    for (const c of cases) {
+      const handle = startCloudFeedTimer({
+        mode: "enforce",
+        plans: [],
+        runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep: c.sweep }],
+        setIntervalFn: () => "H",
+      });
+      handle.tick();
+      expect(handle.isReady()).toBe(false);
+    }
+  });
+
+  test("NEGATIVE CONTROL: a clean zero-failure sweep DOES arm it", () => {
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [
+        { account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0 }, comments: { failed: 0 } } },
+      ],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(true);
   });
 
   test("a skipped or errored tenant does NOT arm readiness", () => {
@@ -316,7 +351,7 @@ describe("startCloudFeedTimer", () => {
   test("readiness never goes back to false once armed", () => {
     // Un-arming would flap dispatch between two sources; a transient failing
     // tick is already handled by the sweep's own cursor rules.
-    let reports = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume" } }];
+    let reports = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0 }, comments: { failed: 0 } } }];
     const handle = startCloudFeedTimer({ mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
     handle.tick();
     expect(handle.isReady()).toBe(true);

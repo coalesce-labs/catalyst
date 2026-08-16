@@ -135,7 +135,21 @@ export function edgeKey(event) {
   const t = ticketOf(event);
   if (!t) return null;
   const n = nameOf(event);
-  if (n === "linear.comment.created") return `${t}|comment`;
+  if (n === "linear.comment.created") {
+    // ⛔ KEY ON THE COMMENT ID (Codex P1 round 2). A ticket-level `<t>|comment`
+    // key made DIFFERENT comments cancel: smee carrying human comments A+B while
+    // the feed carries A plus a deliberately feed-only bot comment C gives both
+    // sides a count of 2 on the same key, so even the multiplicity comparison
+    // reported clean — while inbox delivery of B was dropped. Both producers
+    // stamp `body.payload.commentId`, so the identity is available and stable.
+    //
+    // A missing id degrades to the ticket-level key rather than dropping the
+    // event from the comparison: coarser is a weaker check, but silently not
+    // comparing an event at all is a hole. The degradation is visible because
+    // the key has no third segment.
+    const cid = event?.body?.payload?.commentId;
+    return typeof cid === "string" && cid !== "" ? `${t}|comment|${cid}` : `${t}|comment`;
+  }
   const keys = joinFields(keysOf(event));
   return `${t}|${keys.length ? keys.join(",") : "none"}`;
 }

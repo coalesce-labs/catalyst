@@ -198,7 +198,23 @@ export function startCloudFeedTimer({
       });
       if (!ready && Array.isArray(reports)) {
         // A tenant that is skipped, errored, or still seeding does NOT arm it.
-        ready = reports.some((r) => r && !r.skipped && !r.error && r.sweep && r.sweep.mode !== "seeded");
+        // ⛔ A ZERO-FAILURE sweep, not merely a non-seeding one (Codex P1 round 2).
+        // runDiffSweep CATCHES an emit failure and returns `stoppedEarly: true`
+        // with non-zero `failed` counts — it does NOT set `r.error`. So a sweep
+        // that emitted nothing at all (a persistent shadow-path EACCES, say)
+        // still reports mode "resume", and the previous predicate armed enforce
+        // on it: every dispatch-class event captured, nothing delivered in its
+        // place, total dispatch outage with the gate reporting itself healthy.
+        const swept = (r) =>
+          r &&
+          !r.skipped &&
+          !r.error &&
+          r.sweep &&
+          r.sweep.mode !== "seeded" &&
+          r.sweep.stoppedEarly !== true &&
+          (r.sweep.edges?.failed ?? 0) === 0 &&
+          (r.sweep.comments?.failed ?? 0) === 0;
+        ready = reports.some(swept);
         if (ready) log.info?.({ mode }, "cloud-feed: producer armed (baseline seeded, emitting)");
       }
       if (onReport) onReport(reports);

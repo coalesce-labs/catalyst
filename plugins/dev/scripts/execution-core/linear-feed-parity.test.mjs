@@ -475,3 +475,63 @@ describe("compareStreams — multiplicity", () => {
     expect(res.unexplained.concat(res.explained)[0].count).toBe(2);
   });
 });
+
+// ── CTL-1847 (Codex P1 round 2): comments join on their stable id ────────────
+describe("edgeKey — comment identity", () => {
+  const cmt = (ticket, id, ts, extra = {}) => ({
+    ts,
+    attributes: { "event.name": "linear.comment.created" },
+    body: { payload: { ticket, commentId: id, ...extra } },
+  });
+
+  test("⭐ different comments on one ticket no longer cancel", () => {
+    // smee: human A + human B. feed: A + feed-only bot C.
+    // Ticket-level counts are 2 vs 2 — "clean" — while inbox delivery of B was
+    // dropped. Keyed on commentId, B is a real miss and C is a real surplus.
+    const res = compareStreams({
+      smee: [cmt("CTL-1", "A", "2026-08-16T10:00:00Z"), cmt("CTL-1", "B", "2026-08-16T10:01:00Z")],
+      feed: [
+        cmt("CTL-1", "A", "2026-08-16T10:00:05Z"),
+        cmt("CTL-1", "C", "2026-08-16T10:02:00Z", { isBot: true }),
+      ],
+    });
+    expect(res.counts).toEqual({ smee: 2, feed: 2 });
+    const smeeOnly = res.unexplained.concat(res.explained).filter((d) => d.side === "smee-only");
+    expect(smeeOnly).toHaveLength(1);
+    expect(smeeOnly[0].key).toBe("CTL-1|comment|B");
+    expect(res.clean).toBe(false); // the dropped delivery is now visible
+  });
+
+  test("the feed-only BOT comment is still an EXPLAINED asymmetry, not a failure", () => {
+    // CTL-1891 requires the feed to carry bot comments smee filters out.
+    const res = compareStreams({
+      smee: [cmt("CTL-2", "A", "2026-08-16T10:00:00Z")],
+      feed: [
+        cmt("CTL-2", "A", "2026-08-16T10:00:05Z"),
+        cmt("CTL-2", "C", "2026-08-16T10:02:00Z", { isBot: true }),
+      ],
+    });
+    expect(res.unexplained).toHaveLength(0);
+    expect(res.explained.some((e) => e.side === "feed-only" && /bot-authored/.test(e.why))).toBe(true);
+  });
+
+  test("NEGATIVE CONTROL: identical comment ids on both sides stay clean", () => {
+    const res = compareStreams({
+      smee: [cmt("CTL-3", "A", "2026-08-16T10:00:00Z"), cmt("CTL-3", "B", "2026-08-16T10:01:00Z")],
+      feed: [cmt("CTL-3", "A", "2026-08-16T10:00:05Z"), cmt("CTL-3", "B", "2026-08-16T10:01:05Z")],
+    });
+    expect(res.clean).toBe(true);
+    expect(res.matchedKeys).toBe(2);
+  });
+
+  test("a missing commentId degrades to the ticket-level key, it does not drop the event", () => {
+    // Coarser is a weaker check; silently not comparing an event is a hole.
+    const noId = {
+      ts: "2026-08-16T10:00:00Z",
+      attributes: { "event.name": "linear.comment.created" },
+      body: { payload: { ticket: "CTL-4" } },
+    };
+    expect(edgeKey(noId)).toBe("CTL-4|comment");
+    expect(edgeKey(cmt("CTL-4", "Z", "2026-08-16T10:00:00Z"))).toBe("CTL-4|comment|Z");
+  });
+});
