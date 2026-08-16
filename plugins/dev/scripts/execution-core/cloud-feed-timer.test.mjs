@@ -348,6 +348,59 @@ describe("startCloudFeedTimer", () => {
     }
   });
 
+  // ⛔ TABLE-DRIVEN: every way runDiffSweep can fail to emit must leave enforce
+  // UNARMED (COORD ask, after Codex found three variants across three rounds).
+  // The bug was never one predicate — it was that each fix enumerated only the
+  // failure shapes known at the time. This table is the place a fourth variant
+  // gets added, so it cannot re-appear as a silent arming.
+  const OK = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+  const FAILURE_SHAPES = [
+    ["still seeding", { ...OK, mode: "seeded" }],
+    ["stopped early", { ...OK, stoppedEarly: true }],
+    ["edge emit failures", { ...OK, edges: { failed: 2, byReason: {} } }],
+    ["comment emit failures", { ...OK, comments: { failed: 1, byReason: {} } }],
+    ["edge cursor unwritable", { ...OK, edges: { failed: 0, byReason: { "cursor-write-failed:EACCES": 1 } } }],
+    ["comment cursor unwritable", { ...OK, comments: { failed: 0, byReason: { "cursor-write-failed:ENOSPC": 1 } } }],
+    ["cursor failure with an unknown errno", { ...OK, edges: { failed: 0, byReason: { "cursor-write-failed:unknown": 1 } } }],
+  ];
+
+  test.each(FAILURE_SHAPES)("readiness stays UNARMED: %s", (_label, sweep) => {
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep }],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(false);
+  });
+
+  test("NEGATIVE CONTROL for the whole table: the clean shape DOES arm", () => {
+    // Without this, every row above would pass against a predicate that never arms.
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep: OK }],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(true);
+  });
+
+  test("cursor failures are matched by PREFIX — the reason carries an errno suffix", () => {
+    // An equality check on "cursor-write-failed" would match nothing at all.
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [
+        { account: "tenant-0", skipped: null, sweep: { ...OK, comments: { failed: 0, byReason: { "cursor-write-failed:EROFS": 3 } } } },
+      ],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(false);
+  });
+
   test("readiness never goes back to false once armed", () => {
     // Un-arming would flap dispatch between two sources; a transient failing
     // tick is already handled by the sweep's own cursor rules.

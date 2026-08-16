@@ -378,8 +378,13 @@ export function runDiffSweep({
     if (cStart.mode !== "resume") {
       try {
         writeCursorFn(commentCursorPath, cPos);
-      } catch {
-        /* noted below if it recurs */
+      } catch (err) {
+        // ⛔ WAS SWALLOWED ENTIRELY (Codex P1 round 3). "Noted below if it
+        // recurs" is not true of the failure that matters: if this cold-start
+        // write cannot land, every subsequent tick cold-starts at ITS current
+        // time and permanently skips the comments created in between — and the
+        // readiness gate, which reads these counts, saw nothing wrong.
+        note(commentCounts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
       }
     }
     const page = source.commentsSince(cPos);

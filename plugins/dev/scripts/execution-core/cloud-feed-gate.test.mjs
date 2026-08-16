@@ -8,6 +8,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   CLOUD_FEED_MODES,
+  INTERNAL_SOURCES,
+  SOURCE_INTERNAL,
   DISPATCH_CLASS_NAMES,
   SOURCE_CLOUD_FEED,
   SOURCE_OTHER,
@@ -202,6 +204,60 @@ describe("decideDispatch — enforce is not armed until the producer is ready (C
       expect(decideDispatch(smeeEvent("linear.issue.state_changed"), { mode, isReady: () => false }).suppress).toBe(false);
       expect(decideDispatch(smeeEvent("linear.issue.state_changed"), { mode, isReady: ready }).suppress).toBe(false);
     }
+  });
+});
+
+describe("internal synthetic sources bypass the gate (Codex P1 round 3)", () => {
+  // buildResumeEvent (orch-monitor/lib/respond-ticket.mjs) emits a synthetic
+  // linear.comment.created that is the SOLE trigger resuming a held worker and
+  // is never written to Linear — so the feed can never produce a replacement.
+  // Capturing it left the worker parked forever while the endpoint said
+  // "resuming".
+  const resumeEvent = () => ({
+    attributes: { "event.name": "linear.comment.created", "linear.issue.identifier": "CTL-5" },
+    body: { payload: { ticket: "CTL-5", source: "orch-monitor/respond", body: "go on" } },
+  });
+
+  test("the allow-list is an EXPLICIT named set, not an inference", () => {
+    expect([...INTERNAL_SOURCES]).toEqual(["orch-monitor/respond"]);
+  });
+
+  test("a resume event is never suppressed, in ANY mode", () => {
+    for (const mode of ["off", "shadow", "enforce"]) {
+      const v = decideDispatch(resumeEvent(), { mode, isReady: () => true });
+      expect(v.suppress).toBe(false);
+      expect(v.reason).toBe("internal-source-no-replacement");
+      expect(v.source).toBe(SOURCE_INTERNAL);
+    }
+  });
+
+  test("⛔ CONTROL: an UNKNOWN source is still captured in enforce", () => {
+    // The exemption must be the named list, not "anything with a source field".
+    const unknown = {
+      attributes: { "event.name": "linear.comment.created", "linear.issue.identifier": "CTL-6" },
+      body: { payload: { ticket: "CTL-6", source: "some-future-producer" } },
+    };
+    const v = decideDispatch(unknown, { mode: "enforce", isReady: () => true });
+    expect(v.suppress).toBe(true);
+    expect(v.reason).toBe("smee-captured");
+  });
+
+  test("CONTROL: a near-miss source string is not exempted", () => {
+    for (const src of ["orch-monitor/respond ", "orch-monitor", "ORCH-MONITOR/RESPOND", "respond"]) {
+      const e = {
+        attributes: { "event.name": "linear.comment.created", "linear.issue.identifier": "CTL-7" },
+        body: { payload: { ticket: "CTL-7", source: src } },
+      };
+      expect(decideDispatch(e, { mode: "enforce", isReady: () => true }).suppress).toBe(true);
+    }
+  });
+
+  test("the internal exemption does not let it through when it is NOT dispatch-class", () => {
+    const e = {
+      attributes: { "event.name": "github.pull_request.opened" },
+      body: { payload: { source: "orch-monitor/respond" } },
+    };
+    expect(decideDispatch(e, { mode: "enforce", isReady: () => true }).reason).toBe("not-dispatch-class");
   });
 });
 

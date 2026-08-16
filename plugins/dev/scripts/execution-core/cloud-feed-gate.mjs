@@ -50,6 +50,25 @@ export const DISPATCH_CLASS_NAMES = Object.freeze([
 const DISPATCH_CLASS_SET = new Set(DISPATCH_CLASS_NAMES);
 
 export const SOURCE_CLOUD_FEED = "cloud-feed";
+
+/**
+ * INTERNAL_SOURCES — producers whose events have NO Linear row behind them, and
+ * which the cloud feed therefore can never generate a replacement for.
+ *
+ * ⛔ These must ALWAYS pass the gate, in every mode (Codex P1 round 3).
+ * `buildResumeEvent` (orch-monitor/lib/respond-ticket.mjs) emits a synthetic
+ * `linear.comment.created` stamped `orch-monitor/respond` that is the SOLE
+ * trigger resuming a held worker, and is deliberately never written to Linear.
+ * Capturing it left the worker parked forever while the respond endpoint
+ * cheerfully returned `resuming`.
+ *
+ * This is the correction to a rule that was right in the general case and wrong
+ * in its domain: "an unknown producer must not inherit the feed's authority" is
+ * sound for a competing producer OF LINEAR EVENTS, and unsound for an internal
+ * producer that Linear never sees. Suppression is only ever legitimate when a
+ * replacement exists.
+ */
+export const INTERNAL_SOURCES = Object.freeze(new Set(["orch-monitor/respond"]));
 export const SOURCE_WEBHOOK = "webhook";
 export const SOURCE_OTHER = "other";
 
@@ -70,9 +89,12 @@ export function isDispatchClass(event) {
  * default. It lands in `other`, which the enforce branch captures exactly like
  * smee's, so an unknown producer can never silently drive dispatch.
  */
+export const SOURCE_INTERNAL = "internal";
+
 export function sourceOf(event) {
   const src = event?.body?.payload?.source;
   if (typeof src === "string" && src === SOURCE_CLOUD_FEED) return SOURCE_CLOUD_FEED;
+  if (typeof src === "string" && INTERNAL_SOURCES.has(src)) return SOURCE_INTERNAL;
   const delivery = event?.attributes?.["webhook.delivery.id"];
   if (typeof delivery === "string" && delivery !== "") return SOURCE_WEBHOOK;
   return SOURCE_OTHER;
@@ -157,6 +179,12 @@ export function decideDispatch(event, { mode, isEcho = null, isReady = null } = 
   // `false` so the capture file's absences are diagnosable.
   if (!DISPATCH_CLASS_SET.has(name)) {
     return { suppress: false, reason: "not-dispatch-class", source, name };
+  }
+
+  // Checked BEFORE the mode branches, deliberately: there is no mode in which
+  // suppressing an event with no possible replacement is correct.
+  if (source === SOURCE_INTERNAL) {
+    return { suppress: false, reason: "internal-source-no-replacement", source, name };
   }
 
   // An unrecognized mode degrades to today's behaviour rather than to the new

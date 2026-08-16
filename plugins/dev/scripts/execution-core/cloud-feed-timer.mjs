@@ -205,6 +205,19 @@ export function startCloudFeedTimer({
         // still reports mode "resume", and the previous predicate armed enforce
         // on it: every dispatch-class event captured, nothing delivered in its
         // place, total dispatch outage with the gate reporting itself healthy.
+        // ⛔ A CURSOR THAT CANNOT PERSIST IS ALSO A FAILURE (Codex P1 round 3).
+        // runDiffSweep records cursor-write errors only in `byReason` and never
+        // increments `failed`, so an unwritable cursor path armed enforce and
+        // then every tick cold-started at its own current time — permanently
+        // skipping every row created between ticks while the gate suppressed
+        // their webhook copies. Third variant of the same shape: the counters
+        // that say "the sweep succeeded" did not cover every way it can fail.
+        //
+        // Read by PREFIX, not exact match: the reason carries an errno suffix
+        // (`cursor-write-failed:EACCES`), so an equality check would silently
+        // match nothing.
+        const cursorBroken = (counts) =>
+          Object.keys(counts?.byReason ?? {}).some((k) => k.startsWith("cursor-write-failed"));
         const swept = (r) =>
           r &&
           !r.skipped &&
@@ -213,7 +226,9 @@ export function startCloudFeedTimer({
           r.sweep.mode !== "seeded" &&
           r.sweep.stoppedEarly !== true &&
           (r.sweep.edges?.failed ?? 0) === 0 &&
-          (r.sweep.comments?.failed ?? 0) === 0;
+          (r.sweep.comments?.failed ?? 0) === 0 &&
+          !cursorBroken(r.sweep.edges) &&
+          !cursorBroken(r.sweep.comments);
         ready = reports.some(swept);
         if (ready) log.info?.({ mode }, "cloud-feed: producer armed (baseline seeded, emitting)");
       }

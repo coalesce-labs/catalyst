@@ -113,6 +113,15 @@ export function joinFields(keys) {
 }
 
 /** Fields the diff source cannot observe, so their absence on the feed side is expected. */
+/**
+ * Fields whose change can genuinely cancel inside one producer tick, leaving the
+ * feed with no net edge to emit. Only these are ELIGIBLE for the round-trip
+ * explanation — and eligibility still requires corroboration.
+ * `state` is deliberately absent: a state round trip could hide a
+ * dispatch-relevant transition and must stay visible.
+ */
+export const REVERSIBLE_FIELDS = Object.freeze(["cycleId", "projectId", "parentId", "assigneeId"]);
+
 export const FEED_BLIND_FIELDS = Object.freeze(["actorId", "actorName"]);
 
 // CTL-1834: the ONE event-name boundary. This file used to hand-roll
@@ -194,8 +203,28 @@ export function explain(side, key, event, ctx = {}) {
     // ⚠️ Scoped deliberately to reversible/bookkeeping fields. A smee-only `state`
     // edge is NOT explained by this: a state round-trip inside one tick could hide a
     // dispatch-relevant transition, and that must stay visible.
-    if (keys.length > 0 && keys.every((k) => ["cycleId", "projectId", "parentId", "assigneeId"].includes(k))) {
-      return "net-edge-collapse:round-trip closed within one tick (feed reports net state; replica agrees)";
+    // ⛔ EVIDENCE REQUIRED (Codex P1 round 3). This predicate used to assert a
+    // closed round trip for any reversible-field edge, observing NOTHING. The
+    // comment above describes a replica check a human ran once on CTC-167/593;
+    // the CODE never read the replica and never counted transitions. So a
+    // genuinely DROPPED single `cycleId` update was reported as explained, and
+    // the window returned clean — the instrument approving a producer that lost
+    // a dispatch-class event.
+    //
+    // A real round trip inside one tick means smee observed the field change at
+    // least TWICE (once each way). One observed transition is not a round trip;
+    // it is an unmatched edge, and it stays unexplained.
+    if (keys.length > 0 && keys.every((k) => REVERSIBLE_FIELDS.includes(k))) {
+      const hops = ctx?.fieldHops;
+      const corroborated =
+        hops instanceof Map &&
+        keys.every((k) => (hops.get(`${ticketOf(event)}|${k}`) ?? 0) >= 2);
+      if (corroborated) {
+        return "net-edge-collapse:CORROBORATED — smee observed >=2 transitions of each field in this window (feed reports net state)";
+      }
+      // Deliberately falls through to unexplained rather than returning a
+      // hedged explanation: an uncorroborated claim in the `explained` bucket
+      // is what made the gate approve losses.
     }
     // Smee emits names nothing handles; the feed reports the same change as a field
     // cell instead, so there is no matching feed edge under this key.
@@ -324,6 +353,20 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
   const S = tally(smeeIn);
   const F = tally(feedIn);
 
+  // Per-(ticket, field) transition counts observed on the SMEE side within the
+  // window. This is the corroboration the round-trip explanation now requires:
+  // two observed transitions of a field is evidence it went and came back; one
+  // is just an edge the feed did not match.
+  const fieldHops = new Map();
+  for (const e of smeeIn) {
+    const t = ticketOf(e);
+    if (!t) continue;
+    for (const k of joinFields(keysOf(e))) {
+      const kk = `${t}|${k}`;
+      fieldHops.set(kk, (fieldHops.get(kk) ?? 0) + 1);
+    }
+  }
+
   const explained = [];
   const unexplained = [];
   const byKeyEvent = (events, key) => events.find((e) => edgeKey(e) === key) ?? null;
@@ -339,7 +382,7 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
     const other = F.byKey.get(key) ?? 0;
     if (other >= n) continue;
     const missing = n - other;
-    const why = explain("smee", key, byKeyEvent(smeeIn, key));
+    const why = explain("smee", key, byKeyEvent(smeeIn, key), { fieldHops });
     (why ? explained : unexplained).push({
       side: "smee-only",
       key,

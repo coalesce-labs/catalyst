@@ -232,8 +232,33 @@ describe("⭐ net-edge collapse can ERASE a field, not just merge hops", () => {
   // Measured: CTC-167/CTC-593 entered and left a cycle between feed ticks. Smee saw
   // each hop; the feed saw net-nothing for cycleId and emitted only the state edge.
   // The replica confirms cycle_id ends null, so the feed is right about final state.
-  test("a smee-only reversible-field edge is explained as a closed round trip", () => {
-    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]))).toStartWith("net-edge-collapse:");
+  // ⛔ THIS TEST USED TO PIN THE DEFECT (Codex P1 round 3). It asserted that a
+  // reversible-field edge is explained as a round trip with NO corroboration —
+  // which is exactly the behaviour that let a genuinely dropped cycleId update
+  // read as explained and the window return clean. A test can encode a bug as
+  // firmly as code does.
+  test("⛔ an UNCORROBORATED reversible-field edge is NOT explained", () => {
+    // One observed transition is not a round trip; it is an unmatched edge.
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]))).toBeNull();
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]), { fieldHops: new Map() })).toBeNull();
+    expect(
+      explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]), {
+        fieldHops: new Map([["CTC-167|cycleId", 1]]),
+      }),
+    ).toBeNull();
+  });
+
+  test("a CORROBORATED reversible-field edge (>=2 observed transitions) IS explained", () => {
+    expect(
+      explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]), {
+        fieldHops: new Map([["CTC-167|cycleId", 2]]),
+      }),
+    ).toStartWith("net-edge-collapse:CORROBORATED");
+  });
+
+  test("corroboration is required for EVERY field in a multi-field edge", () => {
+    const hops = new Map([["CTC-167|cycleId", 2], ["CTC-167|projectId", 1]]);
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId", "projectId"]), { fieldHops: hops })).toBeNull();
   });
 
   test("⛔ a smee-only STATE edge is NOT explained away — it could hide a dispatch", () => {
