@@ -35,6 +35,8 @@ const flag = (name, fallback) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
 };
 const ONCE = argv.includes("--once");
+// --mode history runs the superseded producer for side-by-side comparison.
+const MODE = flag("--mode", "diff");
 const INTERVAL_SEC = Math.max(5, Number(flag("--interval-sec", "30")) || 30);
 // ⚠️ SELF-LIMITING BY CONSTRUCTION. A shadow window is an experiment, and an
 // experiment that outlives the person who started it is a leak. The deadline lives
@@ -65,7 +67,7 @@ function tick() {
   ticks += 1;
   let reports;
   try {
-    reports = runOnce({ orchDir: ORCH_DIR });
+    reports = runOnce({ orchDir: ORCH_DIR, plans });
   } catch (err) {
     // A throw here would kill the window silently under a supervisor that restarts
     // it; name it and keep ticking instead.
@@ -117,8 +119,8 @@ function shutdown(signal) {
   process.exit(0);
 }
 
-log("starting", { orchDir: ORCH_DIR, once: ONCE, intervalSec: INTERVAL_SEC, maxHours: MAX_HOURS, deadline: DEADLINE_MS ? new Date(DEADLINE_MS).toISOString() : null });
-const plans = planTenants({ orchDir: ORCH_DIR });
+log("starting", { orchDir: ORCH_DIR, mode: MODE, once: ONCE, intervalSec: INTERVAL_SEC, maxHours: MAX_HOURS, deadline: DEADLINE_MS ? new Date(DEADLINE_MS).toISOString() : null });
+const plans = planTenants({ orchDir: ORCH_DIR, mode: MODE });
 for (const p of plans) {
   log("tenant", { account: p.account, teams: [...(p.teams ?? [])], skip: p.skip, shadow: p.shadowPath });
 }

@@ -30,6 +30,7 @@
 // CTC 851 · EVR 158 · OTL 114 state edges) most rows are declines.
 
 import { buildCommentEvent, buildIssueEvent, classifyEdge } from "./linear-feed-event.mjs";
+import { diffSnapshots, diffToHistoryRow, snapshotOf } from "./linear-feed-diff.mjs";
 import {
   readCursor,
   resolveStartPosition,
@@ -204,4 +205,161 @@ export function runSweep({
     edges: counts,
     comments: commentCounts,
   };
+}
+
+// ── THE ISSUES-DIFF SWEEP (CTL-1847) ────────────────────────────────────────
+// Replaces the history sweep above as the DISPATCH source; the history sweep stays
+// for the parity harness's explanatory side. See linear-feed-diff.mjs for why
+// (issue_history is reconcile-only: 201s vs 11s measured, and empty for 140 issues).
+
+
+/** Bound one seeding pass so a cold start cannot monopolise a tick indefinitely. */
+export const SEED_MAX_BATCHES = 200;
+
+/**
+ * Establish the baseline WITHOUT emitting anything.
+ *
+ * ⛔ This is the cold-start safety. With no baseline every issue diffs against null
+ * and looks like a brand-new edge — a first tick would invent one for every issue in
+ * the replica (~4,000 here). Seeding is not "missing the first edge"; it is
+ * declining to fabricate thousands of them.
+ *
+ * `markSeeded` runs only AFTER the last page is written, so an interrupted seed
+ * leaves the store un-seeded and the next tick starts over — a partial baseline is
+ * not a baseline, and `count > 0` cannot tell the two apart.
+ */
+export function seedBaseline({ source, store, batchLimit, maxBatches = SEED_MAX_BATCHES } = {}) {
+  let position = { lastCreatedAt: 0, lastId: "" };
+  let seeded = 0;
+  let batches = 0;
+  while (batches < maxBatches) {
+    batches += 1;
+    const page = source.issuesSince(position, batchLimit);
+    if (page.length === 0) break;
+    store.putMany(
+      page.map((r) => ({
+        issueId: r.issue.id,
+        snapshot: snapshotOf(r.issue, r.labels),
+        updatedAt: r.issue.updated_at,
+      })),
+    );
+    seeded += page.length;
+    const next = source.positionAfter(page);
+    if (!next) break;
+    position = next;
+  }
+  const complete = batches < maxBatches;
+  if (complete) store.markSeeded();
+  return { seeded, batches, complete, position };
+}
+
+/**
+ * One diff sweep: page issues changed since the watermark, derive each edge against
+ * the stored baseline, emit what qualifies, and update the baseline.
+ *
+ * ⚠️ The baseline is updated ONLY for issues whose edge was successfully handled.
+ * Updating it for an issue whose emit failed would destroy the very `before` needed
+ * to re-derive that edge next tick — the change would be lost permanently, which is
+ * a strictly worse failure than the duplicate a retry risks.
+ */
+export function runDiffSweep({
+  source,
+  store,
+  cursorPath,
+  teams,
+  botUserIds,
+  emit,
+  maxBatches = DEFAULT_MAX_BATCHES,
+  resetLookbackMs = DEFAULT_RESET_LOOKBACK_MS,
+  now = () => Date.now(),
+  readCursorFn = readCursor,
+  writeCursorFn = writeCursor,
+} = {}) {
+  const counts = emptyCounts();
+
+  if (!store.isSeeded()) {
+    const seed = seedBaseline({ source, store });
+    // The watermark starts at the seed's own high-water mark: everything at or
+    // before it is already IN the baseline, so re-reading it would diff each issue
+    // against itself and emit nothing — wasted work, not incorrect.
+    if (seed.position && Number.isInteger(seed.position.lastCreatedAt)) {
+      try {
+        writeCursorFn(cursorPath, seed.position);
+      } catch (err) {
+        note(counts, `cursor-init-failed:${err?.code ?? err?.message ?? "unknown"}`);
+      }
+    }
+    return { mode: "seeded", alarm: null, seeded: seed.seeded, complete: seed.complete, batches: seed.batches, edges: counts };
+  }
+
+  const read = readCursorFn(cursorPath);
+  const start = resolveStartPosition(read, { now, resetLookbackMs });
+  let position = { lastCreatedAt: start.since, lastId: read?.position?.lastId ?? "" };
+  if (start.mode !== "resume") {
+    try {
+      writeCursorFn(cursorPath, position);
+    } catch (err) {
+      note(counts, `cursor-init-failed:${err?.code ?? err?.message ?? "unknown"}`);
+    }
+  }
+
+  let batches = 0;
+  let stopped = false;
+  while (batches < maxBatches && !stopped) {
+    batches += 1;
+    const page = source.issuesSince(position);
+    if (page.length === 0) break;
+
+    const handled = [];
+    for (const row of page) {
+      counts.examined += 1;
+      const before = store.get(row.issue.id);
+      const after = snapshotOf(row.issue, row.labels);
+      const diff = diffSnapshots(before, after);
+      if (!diff) {
+        // The mirror rewrote the row without changing anything we track. Not an
+        // event, and the baseline still advances so we don't re-examine it.
+        counts.declined += 1;
+        note(counts, "no-tracked-change");
+        store.put(row.issue.id, after, row.issue.updated_at);
+        handled.push(row);
+        continue;
+      }
+      const history = diffToHistoryRow(row.issue, diff, { now });
+      const item = { history, issue: row.issue, actor: null, assignee: null, project: row.project, labels: row.labels };
+      const verdict = classifyEdge(item, { teams, botUserIds });
+      if (!verdict?.emit) {
+        counts.declined += 1;
+        note(counts, verdict?.reason ?? "unclassified");
+        store.put(row.issue.id, after, row.issue.updated_at);
+        handled.push(row);
+        continue;
+      }
+      try {
+        emit(buildIssueEvent(item), item);
+      } catch (err) {
+        counts.failed += 1;
+        note(counts, `emit-failed:${err?.message ?? "unknown"}`);
+        stopped = true;
+        break; // baseline NOT updated — the `before` must survive for the retry
+      }
+      counts.emitted += 1;
+      store.put(row.issue.id, after, row.issue.updated_at);
+      handled.push(row);
+    }
+
+    const next = source.positionAfter(handled);
+    if (next) {
+      position = next;
+      try {
+        writeCursorFn(cursorPath, position);
+      } catch (err) {
+        note(counts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
+      }
+    } else if (handled.length === 0) {
+      break;
+    }
+  }
+
+  return { mode: start.mode, alarm: start.alarm, batches, stoppedEarly: stopped, position, edges: counts };
 }

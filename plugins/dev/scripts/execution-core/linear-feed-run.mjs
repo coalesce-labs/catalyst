@@ -28,7 +28,8 @@ import { getReplicaDbPath } from "./config.mjs";
 import { listProjects } from "./registry.mjs";
 import { createFeedSource } from "./linear-feed-source.mjs";
 import { createShadowSink } from "./linear-feed-shadow.mjs";
-import { runSweep } from "./linear-feed-sweep.mjs";
+import { runDiffSweep, runSweep } from "./linear-feed-sweep.mjs";
+import { createLastSeenStore } from "./linear-feed-lastseen.mjs";
 
 /** Matches cloud-sync.mjs's own resolution, so the two cannot disagree about which account this host is. */
 export const DEFAULT_ACCOUNT = "tenant-0";
@@ -42,6 +43,11 @@ export const DEFAULT_ACCOUNT = "tenant-0";
  */
 export function planTenants({
   orchDir,
+  // "diff" is the shipping edge source (issues-diff, webhook-fed, ~11s). "history"
+  // is the superseded one, kept runnable so the two can be compared side by side
+  // during the shadow window — separate cursor, shadow file and baseline, so neither
+  // can contaminate the other's measurement.
+  mode = "diff",
   account = process.env.CATALYST_CLOUD_ACCOUNT || DEFAULT_ACCOUNT,
   projects = listProjects(),
   replicaPathFor = () => getReplicaDbPath(),
@@ -55,8 +61,10 @@ export function planTenants({
     account,
     teams,
     dbPath,
-    cursorPath: join(orchDir, `linear-feed-cursor-${account}.json`),
-    shadowPath: join(orchDir, "shadow", `linear-feed-${account}.jsonl`),
+    mode,
+    cursorPath: join(orchDir, `linear-feed-cursor-${account}${mode === "diff" ? ".diff" : ""}.json`),
+    shadowPath: join(orchDir, "shadow", `linear-feed-${account}${mode === "diff" ? ".diff" : ""}.jsonl`),
+    lastSeenPath: join(orchDir, `linear-feed-lastseen-${account}.db`),
   };
   if (!exists(dbPath)) {
     return [{ ...plan, skip: "replica-absent" }];
@@ -83,7 +91,8 @@ export function runOnce({
   plans = planTenants({ orchDir }),
   makeSource = (p) => createFeedSource({ dbPath: p.dbPath }),
   makeSink = (p) => createShadowSink({ path: p.shadowPath }),
-  sweep = runSweep,
+  makeStore = (p) => createLastSeenStore({ path: p.lastSeenPath }),
+  sweep = null,
   botUserIds,
   now,
 } = {}) {
@@ -94,19 +103,23 @@ export function runOnce({
       continue;
     }
     let source = null;
+    let store = null;
     try {
       source = makeSource(plan);
       const sink = makeSink(plan);
-      const result = sweep({
-        source,
-        cursorPath: plan.cursorPath,
-        teams: plan.teams,
-        botUserIds,
-        emit: sink.emit,
-        now,
-      });
+      const args = { source, cursorPath: plan.cursorPath, teams: plan.teams, botUserIds, emit: sink.emit, now };
+      let result;
+      if (sweep) {
+        result = sweep(args); // injected (tests)
+      } else if (plan.mode === "diff") {
+        store = makeStore(plan);
+        result = runDiffSweep({ ...args, store });
+      } else {
+        result = runSweep(args);
+      }
       reports.push({
         account: plan.account,
+        mode: plan.mode,
         skipped: null,
         shadowPath: sink.path,
         sweep: result,
@@ -120,6 +133,11 @@ export function runOnce({
     } finally {
       try {
         source?.close();
+      } catch {
+        /* already closed */
+      }
+      try {
+        store?.close();
       } catch {
         /* already closed */
       }

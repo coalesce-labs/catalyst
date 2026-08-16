@@ -123,6 +123,41 @@ const COMMENT_SELECT = `
   LIMIT $limit
 `;
 
+
+// The issues-diff edge source (CTL-1847). Same keyset discipline as the history
+// query — `issues.updated_at` is no more unique than `issue_history.created_at`, so
+// a timestamp-only watermark would skip same-millisecond siblings or re-read them
+// forever. Column names verified against the live replica, not inferred.
+const ISSUE_SELECT = `
+  SELECT
+    i.id           AS id,
+    i.identifier   AS identifier,
+    i.team_key     AS team_key,
+    i.state        AS state,
+    i.assignee_id  AS assignee_id,
+    i.priority     AS priority,
+    i.estimate     AS estimate,
+    i.project_id   AS project_id,
+    i.cycle_id     AS cycle_id,
+    i.parent_id    AS parent_id,
+    i.team_id      AS team_id,
+    i.title        AS title,
+    i.due_date     AS due_date,
+    i.delegate_id  AS delegate_id,
+    i.description  AS description,
+    i.updated_at   AS updated_at,
+    p.name         AS project__name,
+    (SELECT group_concat(l.name, char(31))
+       FROM issue_labels il JOIN labels l ON l.id = il.label_id
+      WHERE il.issue_id = i.id)   AS labels__joined
+  FROM issues i
+  LEFT JOIN projects p ON p.id = i.project_id
+  WHERE (i.updated_at > $sinceMs)
+     OR (i.updated_at = $sinceMs AND i.id > $sinceId)
+  ORDER BY i.updated_at ASC, i.id ASC
+  LIMIT $limit
+`;
+
 /** Every column this module reads, per table — asserted against the live replica. */
 export const REQUIRED_COLUMNS = Object.freeze({
   issue_history: [
@@ -134,7 +169,8 @@ export const REQUIRED_COLUMNS = Object.freeze({
     "from_due_date", "to_due_date", "updated_description",
     "added_label_ids", "removed_label_ids",
   ],
-  issues: ["id", "identifier", "team_key", "description", "estimate", "delegate_id", "project_id"],
+  issues: ["id", "identifier", "team_key", "description", "estimate", "delegate_id", "project_id",
+    "state", "assignee_id", "priority", "cycle_id", "parent_id", "team_id", "title", "due_date", "updated_at"],
   comments: ["id", "issue_id", "body", "created_at", "author_id", "author_name", "is_bot"],
   users: ["id", "name"],
   projects: ["id", "name"],
@@ -146,6 +182,25 @@ export const REQUIRED_COLUMNS = Object.freeze({
 // may legitimately contain a comma. ASCII Unit Separator (0x1F) cannot appear in a
 // label name, so the split is unambiguous.
 const LABEL_SEP = String.fromCharCode(31);
+
+
+/** Shape an issues row for the diff path: the row itself plus its labels. */
+export function shapeIssueRow(row) {
+  if (!row || typeof row !== "object") return null;
+  const issue = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (k === "labels__joined" || k === "project__name") continue;
+    issue[k] = v;
+  }
+  return {
+    issue,
+    project: row.project__name ? { name: row.project__name } : null,
+    labels:
+      typeof row.labels__joined === "string" && row.labels__joined !== ""
+        ? row.labels__joined.split(LABEL_SEP)
+        : [],
+  };
+}
 
 /** Split the flat `alias__field` row into the nested shape the builder expects. */
 export function shapeEdgeRow(row) {
@@ -212,6 +267,10 @@ export function createFeedSource({ dbPath = getReplicaDbPath(), limit = DEFAULT_
     edgesSince(position, batchLimit) {
       return page(EDGE_SELECT, position, shapeEdgeRow, batchLimit);
     },
+    /** Issue rows whose `updated_at` is strictly after `position`, oldest first. */
+    issuesSince(position, batchLimit) {
+      return page(ISSUE_SELECT, position, shapeIssueRow, batchLimit);
+    },
     /** Comment rows strictly after `position`, oldest first. */
     commentsSince(position, batchLimit) {
       return page(COMMENT_SELECT, position, shapeCommentRow, batchLimit);
@@ -225,7 +284,9 @@ export function createFeedSource({ dbPath = getReplicaDbPath(), limit = DEFAULT_
     positionAfter(items) {
       if (!Array.isArray(items) || items.length === 0) return null;
       const last = items[items.length - 1];
-      const row = last?.history ?? last?.comment ?? null;
+      // Accepts all three row shapes: a history edge, a comment, or an issues-diff
+      // row (whose watermark is `updated_at`, not `created_at`).
+      const row = last?.history ?? last?.comment ?? (last?.issue ? { id: last.issue.id, created_at: last.issue.updated_at } : null);
       if (!row || !Number.isInteger(row.created_at) || typeof row.id !== "string") return null;
       return { lastCreatedAt: row.created_at, lastId: row.id };
     },
