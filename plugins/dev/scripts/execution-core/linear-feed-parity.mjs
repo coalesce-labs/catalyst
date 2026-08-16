@@ -245,6 +245,18 @@ export function explain(side, key, event, ctx = {}) {
   return hints.length ? hints.join(" | ") : null;
 }
 
+/**
+ * Default trailing-edge hold-back: replica write latency (~11 s measured) plus one
+ * producer tick (30 s default), with margin.
+ *
+ * ⛔ This constant was DELETED by an over-wide edit while rewriting explain(), and
+ * nothing caught it: every unit test passes `settleSec` explicitly so the default
+ * parameter below never evaluated, and the only importer is a CLI that no test
+ * EXECUTES — it was checked by grepping its source text. A source-level assertion
+ * cannot fail on a module that does not load.
+ */
+export const DEFAULT_SETTLE_SEC = 120;
+
 export function resolveWindow({
   nowMs,
   sinceMin = 60,
