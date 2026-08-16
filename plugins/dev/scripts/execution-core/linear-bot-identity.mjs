@@ -82,6 +82,21 @@ export const KNOWN_RETIRED_IDENTITIES = Object.freeze([
       "name 'Catalyst Orchestrator' as its successor, whose handle carries Linear's collision " +
       "suffix '2'; same-day handoff with no overlap; named by no config, live or backup (CTL-1892)",
   },
+  {
+    // ⚠️ The fleet runs TWO app identities, not one — an ORCHESTRATOR and a WORKER — and
+    // each has rotated. The first cut of this list seeded only the orchestrator pair, so
+    // the retired WORKER's 1,245 comments still read as third-party: the same defect this
+    // module exists to close, for the other identity. Found by enumerating every actor
+    // named Catalyst* in the replica rather than by reasoning from the one already known.
+    id: "72824b58-5a2f-4ff1-9565-d128fc355cda",
+    handle: "catalyst",
+    retiredOn: "2026-08-10",
+    supersededBy: "6dd38c1a-68d8-4cbf-8bae-40593481f324", // handle catalyst2
+    evidence:
+      "1,245 comments 2026-06-02..2026-08-10; same display name 'Catalyst' as its successor, " +
+      "whose handle carries Linear's collision suffix '2'; handoff with ZERO overlap " +
+      "(successor's first comment 2026-08-11); named by no config, live or backup (CTL-1892)",
+  },
 ]);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

@@ -98,7 +98,12 @@ describe("Feature: the fleet recognises its own writes across rotations", () => 
       syncAndResolveSelfIdentities({ configIds: new Set([id]), ledgerPath: ledger });
     }
     const { ids } = resolveSelfIdentities({ configIds: new Set([THIRD]), ledgerPath: ledger });
-    expect([...ids].sort()).toEqual([OLD, THIRD, NEW].sort());
+    // Assert ACCUMULATION, not an exact set: the seeded retired identities are also
+    // members by design, and an exact-equality here would just be asserting their absence.
+    for (const id of [OLD, NEW, THIRD]) expect(ids.has(id)).toBe(true);
+    // and every member is still justified — learned, or explicitly seeded as retired
+    const seeded = new Set(KNOWN_RETIRED_IDENTITIES.map((r) => r.id));
+    for (const id of ids) expect([OLD, NEW, THIRD].includes(id) || seeded.has(id)).toBe(true);
   });
 });
 
@@ -408,5 +413,40 @@ describe("⭐ P1: a LIVE rotation is picked up without a daemon restart", () => 
     const live = new Set();
     refreshSelfEchoIdentitiesInto(live, null, layer2At("t.json", NEW), ledger);
     expect(live.has(HUMAN)).toBe(false);
+  });
+});
+
+describe("⭐ the fleet runs TWO app identities, and BOTH have rotated", () => {
+  // The first cut seeded only the orchestrator pair. The fleet also runs a WORKER
+  // app-actor, which rotated on the same day — so its predecessor's 1,245 comments still
+  // read as third-party: the same defect, for the other identity. Enumerating every
+  // Catalyst* actor in the replica found it; reasoning from the known one did not.
+  const RETIRED_WORKER = "72824b58-5a2f-4ff1-9565-d128fc355cda"; // handle `catalyst`
+  const CURRENT_WORKER = "6dd38c1a-68d8-4cbf-8bae-40593481f324"; // handle `catalyst2`
+
+  test("the retired WORKER identity is recognised as self", () => {
+    const { ids } = resolveSelfIdentities({ configIds: new Set([CURRENT_WORKER]), ledgerPath: ledger });
+    expect(ids.has(RETIRED_WORKER)).toBe(true);
+  });
+
+  test("both retired identities are seeded — orchestrator AND worker", () => {
+    const seeded = new Set(KNOWN_RETIRED_IDENTITIES.map((r) => r.id));
+    expect(seeded.has(OLD)).toBe(true); // catalystorchestrator
+    expect(seeded.has(RETIRED_WORKER)).toBe(true); // catalyst
+    expect(seeded.size).toBe(2);
+  });
+
+  test("each seeded entry names the successor it was superseded BY", () => {
+    // Without this the list is just an allowlist; with it, each entry is a checkable claim.
+    const bySucc = Object.fromEntries(KNOWN_RETIRED_IDENTITIES.map((r) => [r.id, r.supersededBy]));
+    expect(bySucc[RETIRED_WORKER]).toBe(CURRENT_WORKER);
+    expect(bySucc[OLD]).toBe(NEW);
+  });
+
+  test("⛔ a CURRENT identity is never seeded as retired", () => {
+    // Seeding a live identity would be indistinguishable from seeding a retired one, and
+    // an id admitted here can never be dispatched on again.
+    const seeded = new Set(KNOWN_RETIRED_IDENTITIES.map((r) => r.id));
+    for (const live of [NEW, CURRENT_WORKER]) expect(seeded.has(live)).toBe(false);
   });
 });
