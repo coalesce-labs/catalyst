@@ -1861,6 +1861,15 @@ export function readNewEvents({ foldOnly = false } = {}) {
       // the fact. In the default mode (off) `decideDispatch` returns
       // suppress:false for every webhook event, so this block is byte-identical
       // to pre-CTL-1847 routing.
+      //
+      // ⚠️ ORDER IS LOAD-BEARING: this block must stay ABOVE the CTL-1655
+      // `markAndCheckCommentSeen` gate below. A suppressed smee comment must
+      // never enter the dedup set — if it did, it would mark the comment seen
+      // and the FEED's copy of that same comment would then be skipped as a
+      // duplicate, so the comment would reach no worker inbox at all. Because
+      // the suppression `continue`s first, exactly one copy (the feed's)
+      // dispatches. Moving this below the dedup turns enforce mode into a
+      // silent comment blackhole.
       if (_cloudFeedGate) {
         const verdict = decideDispatch(event, _cloudFeedGate);
         if (verdict.suppress) {
