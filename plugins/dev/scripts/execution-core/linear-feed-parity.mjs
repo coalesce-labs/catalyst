@@ -246,6 +246,35 @@ export function explain(side, key, event, ctx = {}) {
  * counts, coverage, and the explanations applied — so a reader can audit WHY a
  * difference was tolerated rather than taking the verdict on trust.
  */
+/** Default trailing-edge hold-back: replica write latency + one producer tick, with margin. */
+export const DEFAULT_SETTLE_SEC = 120;
+
+/**
+ * resolveWindow — the comparison window's BOTH bounds, as a pure function.
+ *
+ * Extracted from linear-feed-parity-run.mjs so the clamps are testable as
+ * wiring rather than as a value. The leading-edge clamp shipped inside the CLI
+ * and was therefore only ever verified by running it against live data; its
+ * trailing-edge twin was missing for exactly as long, and no test could have
+ * caught that while the computation had no seam.
+ *
+ * @returns {{since:number, until:number, clampedToFeedStart:boolean, emptyWindow:boolean}}
+ */
+export function resolveWindow({
+  nowMs,
+  sinceMin = 60,
+  seededAt = null,
+  settleSec = DEFAULT_SETTLE_SEC,
+} = {}) {
+  const requested = nowMs - sinceMin * 60_000;
+  // Leading edge: never reach back before the feed's baseline existed.
+  const since = Number.isFinite(seededAt) && seededAt !== null ? Math.max(requested, seededAt) : requested;
+  const clampedToFeedStart = Number.isFinite(seededAt) && seededAt !== null && seededAt > requested;
+  // Trailing edge: never reach forward into the feed's own latency.
+  const until = nowMs - settleSec * 1000;
+  return { since, until, clampedToFeedStart, emptyWindow: until <= since };
+}
+
 export function compareStreams({ smee = [], feed = [], since = null, until = null } = {}) {
   const inWindow = (e) => {
     if (!since && !until) return true;

@@ -3,7 +3,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-feed-parity.test.mjs
 
 import { describe, expect, test } from "bun:test";
-import { classOf, compareStreams, edgeKey, explain } from "./linear-feed-parity.mjs";
+import { classOf, compareStreams, edgeKey, explain, resolveWindow } from "./linear-feed-parity.mjs";
 
 const ev = (name, ticket, keys = [], ts = "2026-08-16T01:00:00Z") => ({
   ts,
@@ -321,5 +321,87 @@ describe("⛔ corroboration must come from BEFORE the window — never from insi
     const fed = ev("linear.issue.updated", "CTL-1869", ["cycleId"], "2026-08-16T05:57:00Z");
     const r = compareStreams({ smee: [ignored], feed: [fed], since: Date.parse("2026-08-16T02:00:00Z") });
     expect(r.clean).toBe(false);
+  });
+});
+
+// ── CTL-1847: the window's BOTH bounds ────────────────────────────────────────
+describe("resolveWindow — trailing-edge clamp", () => {
+  const NOW = Date.parse("2026-08-16T20:22:00Z");
+
+  test("holds the trailing edge back by the settle period", () => {
+    const w = resolveWindow({ nowMs: NOW, sinceMin: 240, seededAt: null, settleSec: 120 });
+    expect(new Date(w.until).toISOString()).toBe("2026-08-16T20:20:00.000Z");
+    expect(new Date(w.since).toISOString()).toBe("2026-08-16T16:22:00.000Z");
+  });
+
+  test("⭐ THE LIVE CASE: two comments inside the feed's latency are excluded, not counted as misses", () => {
+    // Measured 2026-08-16: comments written at 20:20:03Z and 20:20:08Z read as 2
+    // UNEXPLAINED smee-only diffs when the harness ran at 20:22Z; the same window
+    // minutes later, unchanged code, showed both on the feed side → CLEAN.
+    const w = resolveWindow({ nowMs: NOW, sinceMin: 240, seededAt: null, settleSec: 120 });
+    const smee = [
+      { ts: "2026-08-16T20:20:03Z", attributes: { "event.name": "linear.comment.created" }, body: { payload: { ticket: "CTC-617" } } },
+      { ts: "2026-08-16T20:20:08Z", attributes: { "event.name": "linear.comment.created" }, body: { payload: { ticket: "CTC-381" } } },
+    ];
+    const res = compareStreams({ smee, feed: [], since: w.since, until: w.until });
+    expect(res.counts.smee).toBe(0);
+    expect(res.unexplained).toHaveLength(0);
+  });
+
+  test("NEGATIVE CONTROL: WITHOUT the clamp those same two ARE unexplained misses", () => {
+    // Proves the clamp is what does the work — not that the fixture is inert.
+    const w = resolveWindow({ nowMs: NOW, sinceMin: 240, seededAt: null, settleSec: 0 });
+    const smee = [
+      { ts: "2026-08-16T20:20:03Z", attributes: { "event.name": "linear.comment.created" }, body: { payload: { ticket: "CTC-617" } } },
+      { ts: "2026-08-16T20:20:08Z", attributes: { "event.name": "linear.comment.created" }, body: { payload: { ticket: "CTC-381" } } },
+    ];
+    const res = compareStreams({ smee, feed: [], since: w.since, until: w.until });
+    expect(res.counts.smee).toBe(2);
+    expect(res.unexplained).toHaveLength(2);
+    expect(res.clean).toBe(false);
+  });
+
+  test("an edge OLDER than the settle period is still compared", () => {
+    // The clamp must not swallow the window it exists to protect.
+    const w = resolveWindow({ nowMs: NOW, sinceMin: 240, seededAt: null, settleSec: 120 });
+    const ev = (side) => ({ ts: "2026-08-16T19:00:00Z", attributes: { "event.name": "linear.comment.created" }, body: { payload: { ticket: `T-${side}` } } });
+    const res = compareStreams({ smee: [ev("a")], feed: [ev("a")], since: w.since, until: w.until });
+    expect(res.counts.smee).toBe(1);
+    expect(res.counts.feed).toBe(1);
+    expect(res.matchedKeys).toBe(1);
+  });
+
+  test("the clamp is SYMMETRIC — it excludes recent feed events too", () => {
+    // Clamping only smee would trade this bias for its mirror: a feed event with
+    // no smee twin yet would read as a feed-only diff.
+    const w = resolveWindow({ nowMs: NOW, sinceMin: 240, seededAt: null, settleSec: 120 });
+    const recentFeed = [{ ts: "2026-08-16T20:21:30Z", attributes: { "event.name": "linear.comment.created" }, body: { payload: { ticket: "CTL-9" } } }];
+    const res = compareStreams({ smee: [], feed: recentFeed, since: w.since, until: w.until });
+    expect(res.counts.feed).toBe(0);
+  });
+
+  test("the leading-edge clamp still works and is reported", () => {
+    const seededAt = Date.parse("2026-08-16T19:00:00Z");
+    const w = resolveWindow({ nowMs: NOW, sinceMin: 240, seededAt, settleSec: 120 });
+    expect(w.since).toBe(seededAt);
+    expect(w.clampedToFeedStart).toBe(true);
+  });
+
+  test("no baseline ⇒ leading edge is the requested start, and it says so", () => {
+    const w = resolveWindow({ nowMs: NOW, sinceMin: 60, seededAt: null, settleSec: 120 });
+    expect(w.clampedToFeedStart).toBe(false);
+    expect(new Date(w.since).toISOString()).toBe("2026-08-16T19:22:00.000Z");
+  });
+
+  test("a settle period longer than the window is EMPTY, not clean", () => {
+    // [].every(p) is true — a zero-event comparison reporting "no unexplained
+    // diffs" is the false-clean shape this repo keeps rediscovering.
+    const w = resolveWindow({ nowMs: NOW, sinceMin: 1, seededAt: null, settleSec: 600 });
+    expect(w.emptyWindow).toBe(true);
+    expect(w.until).toBeLessThanOrEqual(w.since);
+  });
+
+  test("NEGATIVE CONTROL: a normal window is not flagged empty", () => {
+    expect(resolveWindow({ nowMs: NOW, sinceMin: 240, seededAt: null, settleSec: 120 }).emptyWindow).toBe(false);
   });
 });

@@ -2097,6 +2097,43 @@ export function readDelegateFirstConfig(envObj = process.env) {
   return { mode };
 }
 
+// CTL-1847: cloud-feed dispatch-source mode reader. Same ladder as
+// readDelegateFirstConfig — env (CATALYST_CLOUD_FEED) > Layer-2
+// (.catalyst.cloudFeed.mode) > 'off'.
+//
+// Ships OFF, not shadow, and the asymmetry with e.g. the daemon watchdog is
+// deliberate: the watchdog's shadow observes a daemon it does not touch, while
+// this feature's shadow starts a producer that reads the replica on a timer
+// inside the daemon process. "Off" therefore has to mean "no new work in the
+// tick at all", which is the only default that makes a merge into a live
+// dispatch path a no-op on every host until an operator says otherwise.
+const CLOUD_FEED_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2CloudFeed() {
+  try {
+    const cf = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cloudFeed;
+    return cf && typeof cf === "object" ? cf : {};
+  } catch {
+    return {};
+  }
+}
+
+export function readCloudFeedConfig(envObj = process.env) {
+  const l2 = readLayer2CloudFeed();
+  const env = envObj.CATALYST_CLOUD_FEED;
+  let mode;
+  if (env === "0") mode = "off";
+  else if (typeof env === "string" && CLOUD_FEED_MODES.has(env)) mode = env;
+  else if (typeof l2.mode === "string" && CLOUD_FEED_MODES.has(l2.mode)) mode = l2.mode;
+  else mode = "off";
+  const rawInterval = envObj.CATALYST_CLOUD_FEED_INTERVAL_SEC ?? l2.intervalSeconds;
+  const parsed = Number(rawInterval);
+  // Number("") is 0 and Number(null) is 0 — both would read as a valid
+  // "0 seconds" and busy-spin the tick, so require a finite value >= 5.
+  const intervalSec = Number.isFinite(parsed) && parsed >= 5 ? Math.floor(parsed) : 30;
+  return { mode, intervalSec };
+}
+
 // CTL-1245: dead-but-running doc-worker reclaim mode reader. Mirrors
 // readRecoveryPassConfig / readUnstuckSweepConfig exactly: env
 // (CATALYST_DEAD_DOC_WORKER_RECLAIM) overrides Layer-2 config

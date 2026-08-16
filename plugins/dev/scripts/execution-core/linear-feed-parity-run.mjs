@@ -15,7 +15,7 @@
 
 import { existsSync, openSync, readSync, closeSync, statSync, readFileSync } from "node:fs";
 import { getEventLogPath, getExecutionCoreDir } from "./config.mjs";
-import { compareStreams } from "./linear-feed-parity.mjs";
+import { DEFAULT_SETTLE_SEC, compareStreams, resolveWindow } from "./linear-feed-parity.mjs";
 import { Database } from "bun:sqlite";
 
 const argv = process.argv.slice(2);
@@ -91,19 +91,62 @@ function feedSeededAt(path) {
     return null;
   }
 }
-const requested = Date.now() - SINCE_MIN * 60_000;
 const seededAt = feedSeededAt(LASTSEEN);
-const since = seededAt !== null ? Math.max(requested, seededAt) : requested;
-const clamped = seededAt !== null && seededAt > requested;
+
+// ⛔ THE WINDOW MAY NOT REACH FORWARD INTO THE FEED'S OWN LATENCY.
+// The exact twin of the seed clamp above, and missing until CTL-1847's wiring.
+// The two producers do not observe a change at the same time: smee is an
+// instant webhook, while the feed's path is replica-write latency (~11 s
+// measured) PLUS up to one producer tick (30 s default). So every event inside
+// roughly the last minute is one smee has reported and the feed has not YET
+// reported — structurally, on a perfectly healthy feed.
+//
+// Measured live on 2026-08-16: two comments written at 20:20:03Z and 20:20:08Z
+// read as 2 UNEXPLAINED smee-only diffs at 20:22Z (verdict NOT CLEAN); re-running
+// the identical window minutes later, with no code change, showed both on the
+// feed side and the verdict went CLEAN.
+//
+// ⚠️ The danger is NOT the false alarm. It is that once an operator learns
+// trailing-edge misses are normal, a REAL miss at the trailing edge gets waved
+// through by the same reasoning. Clamping makes the two distinguishable again.
+//
+// The clamp applies to BOTH sides (compareStreams' `inWindow` filters smee and
+// feed symmetrically). Clamping only smee would trade this bias for its mirror.
+const SETTLE_SEC = Number(flag("--settle-sec", String(DEFAULT_SETTLE_SEC))) || DEFAULT_SETTLE_SEC;
+// Both bounds come from the shared pure resolver so the CLI cannot drift from
+// what the tests pin.
+const { since, until, clampedToFeedStart: clamped, emptyWindow } = resolveWindow({
+  nowMs: Date.now(),
+  sinceMin: SINCE_MIN,
+  seededAt,
+  settleSec: SETTLE_SEC,
+});
+
 const smeeRaw = parseJsonl(tailLines(EVENTS, TAIL_BYTES));
 const feedRaw = parseJsonl(existsSync(SHADOW) ? readFileSync(SHADOW, "utf8").split("\n") : []);
 
-const result = compareStreams({ smee: smeeRaw.events, feed: feedRaw.events, since });
+const result = compareStreams({ smee: smeeRaw.events, feed: feedRaw.events, since, until });
+// The verdict is THREE-VALUED. "clean" alone cannot distinguish "the two
+// streams agree" from "there was nothing to compare", and the previous exit
+// code (`clean ? 0 : 2`) reported the empty-feed case as 0 — so the warning
+// below was visible to a human reading stdout and invisible to anything
+// automated, which is the half that matters for a cutover gate.
+const inconclusiveReasons = [];
+if (emptyWindow) inconclusiveReasons.push("settle-period-exceeds-window");
+if (result.counts.feed === 0) inconclusiveReasons.push("feed-side-empty");
+if (result.counts.smee === 0) inconclusiveReasons.push("smee-side-empty");
+if (seededAt === null) inconclusiveReasons.push("no-feed-baseline");
+const inconclusive = inconclusiveReasons.length > 0;
+
 const report = {
   windowMinutes: SINCE_MIN,
   windowStart: new Date(since).toISOString(),
+  windowEnd: new Date(until).toISOString(),
+  settleSeconds: SETTLE_SEC,
   feedSeededAt: seededAt ? new Date(seededAt).toISOString() : null,
   clampedToFeedStart: clamped,
+  inconclusive,
+  inconclusiveReasons,
   shadow: SHADOW,
   tornLines: { smee: smeeRaw.torn, feed: feedRaw.torn },
   // How far back the tail actually reaches. The late-arrival predicate corroborates
@@ -122,7 +165,10 @@ if (AS_JSON) {
   console.log(JSON.stringify(report, null, 2));
 } else {
   const T = "[parity]";
-  console.log(`${T} window: last ${SINCE_MIN}m → starts ${new Date(since).toISOString()}`);
+  console.log(
+    `${T} window: last ${SINCE_MIN}m → ${new Date(since).toISOString()} .. ${new Date(until).toISOString()}` +
+      ` (trailing edge held back ${SETTLE_SEC}s for feed latency)`,
+  );
   if (clamped) {
     console.log(`${T} ⛔ CLAMPED to the feed's seed time (${new Date(seededAt).toISOString()}) — the feed cannot know about changes before its baseline existed.`);
   } else if (seededAt === null) {
@@ -140,10 +186,18 @@ if (AS_JSON) {
   for (const e of result.explained.slice(0, 10)) console.log(`${T}   ${e.side} ${e.key} ×${e.count} — ${e.why}`);
   console.log(`${T} UNEXPLAINED diffs: ${result.unexplained.length}`);
   for (const u of result.unexplained.slice(0, 20)) console.log(`${T}   ${u.side} ${u.key} ×${u.count}`);
-  console.log(`${T} verdict: ${result.clean ? "CLEAN (no unexplained diffs)" : "NOT CLEAN"}`);
-  if (result.counts.feed === 0) {
+  if (inconclusive) {
     // Guard the exact false-clean this repo keeps finding: zero-vs-zero is not parity.
-    console.log(`${T} ⚠️ INCONCLUSIVE: the feed side is empty — "clean" here means nothing was compared.`);
+    console.log(
+      `${T} ⚠️ INCONCLUSIVE (${inconclusiveReasons.join(", ")}) — "clean" here would mean nothing was compared.`,
+    );
   }
+  console.log(
+    `${T} verdict: ${inconclusive ? "INCONCLUSIVE" : result.clean ? "CLEAN (no unexplained diffs)" : "NOT CLEAN"}`,
+  );
 }
-process.exit(result.clean ? 0 : 2);
+// 0 = clean · 2 = unexplained diffs · 3 = inconclusive. An inconclusive run is
+// reported as its own code rather than folded into either verdict: a caller
+// that cannot tell "agreed" from "could not look" is the thing this exit code
+// exists to prevent.
+process.exit(inconclusive ? 3 : result.clean ? 0 : 2);
