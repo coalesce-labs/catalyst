@@ -65,6 +65,14 @@ set -u
 
 # ─── Cloud feed coordinates (overridable; sane prod defaults) ────────────────
 export CATALYST_CLOUD_BASE_URL="${CATALYST_CLOUD_BASE_URL:-https://api.catalyst-cloud.coalescelabs.ai/api/v1}"
+# ⛔ CTL-1893: capture PROVENANCE BEFORE the fallback erases the distinction.
+# The fallback below makes CATALYST_CLOUD_ACCOUNT always-set by the time the writer reads
+# it, so the writer cannot tell "the operator declared tenant-0" from "nobody said
+# anything". Without this marker every default replica is stamped source=declared, and a
+# later REAL tenant declaration then hits the SDK's stored-declared refusal instead of the
+# intended truncate/cold-reseed transition — permanently, since the stamp cannot be undone.
+export CATALYST_CLOUD_ACCOUNT_SOURCE="${CATALYST_CLOUD_ACCOUNT:+declared}"
+export CATALYST_CLOUD_ACCOUNT_SOURCE="${CATALYST_CLOUD_ACCOUNT_SOURCE:-default}"
 export CATALYST_CLOUD_ACCOUNT="${CATALYST_CLOUD_ACCOUNT:-tenant-0}"
 
 # CATALYST_HOST_NAME may arrive pinned from the plist EnvironmentVariables; otherwise the

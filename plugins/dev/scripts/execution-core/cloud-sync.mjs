@@ -93,6 +93,7 @@ import {
 } from "./cloud-sync-deps.mjs";
 import { createRequire } from "node:module";
 import { appendFileSync, mkdirSync } from "node:fs";
+import { accountMismatchEnvelope, isAccountMismatchError, resolveAccountProvenance } from "./cloud-sync-account.mjs"; // CTL-1893
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -125,6 +126,33 @@ function hbLogger() {
 const DEFAULT_BASE_URL = "https://api.catalyst-cloud.coalescelabs.ai/api/v1";
 const DEFAULT_ACCOUNT = "tenant-0";
 export const WRITER_IDLE_EVENT = "catalyst.replica.writer_idle";
+
+// CTL-1893: a permanent, non-retryable refusal. Emitted on the SAME unified log and in the
+// SAME v2 envelope as emitWriterIdleEvent — the writer is about to stay DOWN, so this line
+// is the only thing that will say so. ERROR severity, since no restart can clear it.
+function emitAccountMismatchEvent({ host, db_path, stored_account, configured_account, configured_source }) {
+  try {
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const envelope = accountMismatchEnvelope({
+      host,
+      dbPath: db_path,
+      storedAccount: stored_account,
+      configuredAccount: configured_account,
+      configuredSource: configured_source,
+      ts,
+      id: randomBytes(8).toString("hex"),
+      traceId: randomBytes(16).toString("hex"),
+      spanId: randomBytes(8).toString("hex"),
+      resource: buildCatalystResource({ serviceName: "catalyst.cloud-sync", host }),
+    });
+    const logPath = getEventLogPath();
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, `${JSON.stringify(envelope)}\n`);
+    return true;
+  } catch {
+    return false; // emission must never mask the refusal it reports
+  }
+}
 
 function emitWriterIdleEvent({ host, tokenEnv, tokenSource, dbPath }) {
   try {
@@ -206,7 +234,19 @@ function scrub(s) {
 }
 
 const baseUrl = process.env.CATALYST_CLOUD_BASE_URL || DEFAULT_BASE_URL;
-const account = process.env.CATALYST_CLOUD_ACCOUNT || DEFAULT_ACCOUNT;
+// CTL-1893 / sdk 0.8.7: the account and its PROVENANCE are different facts, and the SDK's
+// tenant fence needs both. An operator setting CATALYST_CLOUD_ACCOUNT IS a declaration;
+// falling back to DEFAULT_ACCOUNT is not.
+//
+// ⛔ Passing only `account` makes the SDK apply its `accountSource: "default"` fallback, so
+// a host moving from the default tenant to an explicitly configured one is judged
+// default-vs-default — which the fence REFUSES (two disagreeing defaults give no basis to
+// prefer either, and therefore none to WIPE either) instead of taking the intended
+// truncate + cursor-drop + cold-reseed transition. The writer would then fail to start on
+// the very reconfiguration the operator just performed.
+//
+// An empty string is NOT a declaration: it falls back, and is reported as defaulted.
+const { account, accountSource } = resolveAccountProvenance(process.env, DEFAULT_ACCOUNT);
 // startTimeoutMs (sdk 0.2.1): reject start() if 'live' isn't reached within this — a
 // wedged cold /snapshot or unreachable host fails fast → exit 1 → launchd restarts, instead
 // of a supervised process hanging forever. A positive override wins; an explicit `0` DISABLES
@@ -246,6 +286,9 @@ const hlog = hbLogger();
 const replica = new CatalystReplica({
   baseUrl,
   account,
+  // sdk 0.8.7 tenant fence: provenance, not just the value. See the resolution above for
+  // why omitting this turns an operator's explicit reconfiguration into a refusal.
+  accountSource,
   auth: { kind: "token", token }, // the value flows ONLY here — never logged
   dbPath,
   startTimeoutMs,
@@ -307,6 +350,40 @@ try {
   // onStatus drives progress visibility meanwhile.
   await replica.start();
 } catch (err) {
+  // ⛔ A REPLICA ACCOUNT MISMATCH IS PERMANENT — it must not ride the retry path.
+  //
+  // sdk 0.8.7's tenant fence throws ReplicaAccountMismatchError when this database is
+  // stamped for a different account. That is a CONFIG fault: the same inputs fail
+  // identically forever. Exiting 1 hands it to `KeepAlive={SuccessfulExit:false}`, which
+  // relaunches — so the writer would spin on a misconfiguration indefinitely, which is
+  // exactly what the SDK exported a distinct error type to prevent. Exit 0 is the plist's
+  // "clean no-op, stay DOWN" contract, and staying down is the CORRECT response to a
+  // fault no restart can clear.
+  //
+  // Matched on `name`, not `instanceof`: the SDK can legitimately be present as more than
+  // one copy under the isolated linker, and a cross-copy `instanceof` is FALSE — which
+  // would silently drop this back onto the retry-forever path. Name-matching fails in the
+  // safe direction here.
+  //
+  // ⚠️ Staying down MUST be loud, or we trade a spin for a silent outage. The event goes to
+  // the unified log (broker/HUD/alerting read it) and the stderr line rides the
+  // Alloy-shipped .log — neither depends on the replica this process just refused to open.
+  if (isAccountMismatchError(err)) {
+    const detail = {
+      db_path: err?.dbPath ?? dbPath,
+      stored_account: err?.storedAccount ?? null,
+      configured_account: err?.configuredAccount ?? account,
+      configured_source: accountSource,
+    };
+    console.error(
+      `${TAG} REFUSING TO START — replica account mismatch: ${JSON.stringify(detail)}. ` +
+        `This database belongs to another account; nothing was written. This is a CONFIG ` +
+        `fault and will NOT be retried — fix CATALYST_CLOUD_ACCOUNT or the replica path, ` +
+        `then start the writer manually.`
+    );
+    emitAccountMismatchEvent({ host: getHostName(), ...detail });
+    process.exit(0); // stay DOWN under KeepAlive={SuccessfulExit:false}
+  }
   // A second live writer on this path, an unreachable host, or a seed failure lands
   // here. exit 1 → launchd restarts with backoff (and reclaims a stale self-lock).
   console.error(`${TAG} start failed: ${scrub(err?.message ?? String(err))}`);
