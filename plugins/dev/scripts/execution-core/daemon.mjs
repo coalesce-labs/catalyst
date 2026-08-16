@@ -314,13 +314,52 @@ export function readSelfEchoIdentities(layer1Path, layer2Path, ledgerPath, { onD
     const r = syncAndResolveSelfIdentities({ configIds, ledgerPath, source: "config" });
     // A degraded ledger is fail-open (config ids are still returned) but must never be
     // silent — "the rotation window is open again" has no other symptom.
-    if (r.ledgerStatus === "unreadable" && typeof onDegraded === "function") {
-      onDegraded({ status: r.ledgerStatus, reason: r.ledgerReason, path: ledgerPath });
+    //
+    // ⛔ A failed WRITE counts as degradation too. Reporting only `unreadable` misses
+    // the read-only-dir / full-disk case entirely: the re-read afterwards reports a
+    // healthy-looking `absent`, so durability is silently lost and nothing says so
+    // until the NEXT rotation, when the window is already open.
+    if (typeof onDegraded === "function") {
+      if (r.ledgerStatus === "unreadable") {
+        onDegraded({ kind: "ledger-unreadable", status: r.ledgerStatus, reason: r.ledgerReason, path: ledgerPath });
+      }
+      if (r.notDurable?.length) {
+        onDegraded({ kind: "ledger-not-durable", notDurable: r.notDurable, writeFailures: r.writeFailures, path: ledgerPath });
+      }
     }
     return r.ids;
   } catch {
     return configIds; // a ledger problem must never cost us the configured ids
   }
+}
+
+// refreshSelfEchoIdentitiesInto — re-resolve and merge INTO an existing Set (CTL-1892).
+//
+// The daemon resolves the identity set once and hands that Set to the monitor, the
+// scheduler, and both inbox writers, which capture it in closures. A rotation that
+// lands in Layer-2 while the daemon is running would therefore be invisible until a
+// restart — the boot-only failure the cluster-sync timer's own comment already warns
+// about for credentials ("a credential rotated at 03:00 on a daemon that booted at
+// 00:00 stays dead until a human restarts it"). The same argument applies here, and
+// the live-rotation moment is precisely the window this ticket exists to close.
+//
+// Merges in place and returns what it ADDED, so every existing closure observes the
+// new identity without re-plumbing. Deliberately MONOTONIC — never removes. A retired
+// id must stay recognised, and an id dropped from the set is one the fleet would begin
+// dispatching on: the exact defect, reintroduced by the refresh meant to fix it.
+export function refreshSelfEchoIdentitiesInto(target, layer1Path, layer2Path, ledgerPath, opts = {}) {
+  const added = [];
+  try {
+    for (const id of readSelfEchoIdentities(layer1Path, layer2Path, ledgerPath, opts)) {
+      if (!target.has(id)) {
+        target.add(id);
+        added.push(id);
+      }
+    }
+  } catch {
+    /* a refresh must never wedge the tick that carries it */
+  }
+  return added;
 }
 
 // readLinearBotWriteId — the SINGLE bot UUID the daemon writes as assignee on
@@ -1313,9 +1352,15 @@ export function startDaemon({
     // CTL-1892: rotation-durable — config ids UNION every identity this host has
     // written as, so an app-actor re-mint extends the self-echo set instead of
     // reopening a window where the fleet dispatches on its own echoes.
-    const linearBotUserIds = readSelfEchoIdentities(configPath, layer2Path, defaultIdentityLedgerPath(), {
-      onDegraded: (d) => log?.warn?.(d, "self-echo identity ledger unreadable — rotation window may be open"),
-    });
+    // A STABLE Set object, filled in place: the monitor, scheduler and both inbox
+    // writers capture this reference, so refreshing its CONTENTS on the cluster-sync
+    // tick is what makes a LIVE rotation visible without re-plumbing every closure.
+    const linearBotUserIds = new Set();
+    const refreshBotIdentities = () =>
+      refreshSelfEchoIdentitiesInto(linearBotUserIds, configPath, layer2Path, defaultIdentityLedgerPath(), {
+        onDegraded: (d) => log?.warn?.(d, "self-echo identity ledger degraded — rotation durability at risk"),
+      });
+    refreshBotIdentities();
     const linearBotWriteId = readLinearBotWriteId(configPath, layer2Path); // CTL-781
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
     // CTL-1654 (Codex P2 "gate the daemon before starting actuators"): resolve the
@@ -1650,6 +1695,19 @@ export function startDaemon({
           refreshClusterSecrets();
         } catch (err) {
           log.warn({ err: err?.message }, "cluster-sync timer: refresh threw (continuing)");
+        }
+        // CTL-1892: re-resolve the self-echo identity set on the SAME tick and for the
+        // SAME reason as the credential re-arm below — an app-actor rotated while this
+        // daemon is running is otherwise invisible until a restart, and that live
+        // window is exactly what this guard exists to close. Merges in place
+        // (monotonic), so the closures already holding the Set observe the new id.
+        try {
+          const addedIdentities = refreshBotIdentities();
+          if (addedIdentities.length) {
+            log.info({ added: addedIdentities }, "self-echo identity set extended (app-actor rotation)");
+          }
+        } catch (err) {
+          log.warn({ err: err?.message }, "cluster-sync timer: identity refresh threw (continuing)");
         }
         // CTL-1612: re-arm from disk on EVERY tick, unconditionally. Without this the
         // whole fix is boot-only: a credential rotated at 03:00 on a daemon that booted at

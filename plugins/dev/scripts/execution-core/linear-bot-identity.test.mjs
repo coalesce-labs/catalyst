@@ -10,6 +10,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  KNOWN_RETIRED_IDENTITIES,
+  defaultIdentityLedgerPath,
   isPlausibleIdentityId,
   readIdentityLedger,
   recordIdentity,
@@ -82,7 +84,12 @@ describe("Feature: the fleet recognises its own writes across rotations", () => 
     syncAndResolveSelfIdentities({ configIds: new Set([NEW]), ledgerPath: ledger });
     const { ids } = resolveSelfIdentities({ configIds: new Set([NEW]), ledgerPath: ledger });
     expect(ids.has(HUMAN)).toBe(false);
-    expect([...ids].sort()).toEqual([NEW]);
+    // Tightened rather than loosened: every member must be justified — either
+    // configured, or an explicitly evidenced retired identity. Nothing else may
+    // appear, which is the real claim (an exact-equality on [NEW] would just be
+    // asserting the absence of the deliberate seed).
+    const retired = new Set(KNOWN_RETIRED_IDENTITIES.map((r) => r.id));
+    for (const id of ids) expect(id === NEW || retired.has(id)).toBe(true);
   });
 
   test("repeated rotations accumulate — three identities, all still self", () => {
@@ -201,7 +208,7 @@ describe("id shape", () => {
 });
 
 // ── the daemon-level seam ────────────────────────────────────────────────────
-import { readSelfEchoIdentities } from "./daemon.mjs";
+import { readSelfEchoIdentities, refreshSelfEchoIdentitiesInto } from "./daemon.mjs";
 
 describe("readSelfEchoIdentities — the seam the daemon actually calls", () => {
   const layer2 = (dirPath, ids) => {
@@ -237,13 +244,19 @@ describe("readSelfEchoIdentities — the seam the daemon actually calls", () => 
 
   test("an unreadable ledger is REPORTED and still fail-open", () => {
     writeFileSync(ledger, "{corrupt");
-    let reported = null;
+    // Collect EVERY report: a corrupt ledger degrades in two distinct ways (the read
+    // is unreadable AND the write is refused, so the id is not durable). Capturing
+    // only the last call would silently assert whichever fired second.
+    const reports = [];
     const ids = readSelfEchoIdentities(null, layer2(dir, { orchestrator: NEW }), ledger, {
-      onDegraded: (d) => (reported = d),
+      onDegraded: (d) => reports.push(d),
     });
     expect(ids.has(NEW)).toBe(true); // fail-open: config ids survive
-    expect(reported).toMatchObject({ status: "unreadable" }); // but it is announced
-    expect(reported.reason).toBeTruthy();
+    const unreadable = reports.find((r) => r.kind === "ledger-unreadable");
+    expect(unreadable).toMatchObject({ status: "unreadable" }); // but it is announced
+    expect(unreadable.reason).toBeTruthy();
+    // and the lost durability is announced separately — different fault, different fix
+    expect(reports.find((r) => r.kind === "ledger-not-durable")?.notDurable).toContain(NEW);
   });
 
   test("both worker and orchestrator identities are learned", () => {
@@ -254,5 +267,146 @@ describe("readSelfEchoIdentities — the seam the daemon actually calls", () => 
     const after = readSelfEchoIdentities(null, layer2(dir, { orchestrator: HUMAN }), ledger);
     expect(after.has(NEW)).toBe(true);
     expect(after.has(OLD)).toBe(true);
+  });
+});
+
+// ── Codex round 1 ────────────────────────────────────────────────────────────
+
+describe("⭐ P1: the ROLLOUT case — a retired actor must be known on a fresh ledger", () => {
+  test("with an absent ledger and only the NEW id configured, the retired id is still self", () => {
+    // The deployment this change actually lands on: ledger absent, config already
+    // rotated. Without a committed seed the retired actor can never be learned, and
+    // its echoes stay third-party forever.
+    expect(readIdentityLedger(ledger).status).toBe("absent");
+    const { ids } = resolveSelfIdentities({ configIds: new Set([NEW]), ledgerPath: ledger });
+    expect(ids.has(OLD)).toBe(true);
+  });
+
+  test("the seed applies even when the ledger is UNREADABLE", () => {
+    writeFileSync(ledger, "{corrupt");
+    expect(resolveSelfIdentities({ configIds: new Set([NEW]), ledgerPath: ledger }).ids.has(OLD)).toBe(true);
+  });
+
+  test("the seed applies with no ledger path at all", () => {
+    expect(resolveSelfIdentities({ configIds: new Set([NEW]), ledgerPath: null }).ids.has(OLD)).toBe(true);
+  });
+
+  test("⛔ each seeded entry carries the evidence that justified admitting it", () => {
+    // An id admitted here can never be dispatched on again, so provenance is not
+    // decoration — it is the record that lets a later reader re-check the claim.
+    for (const e of KNOWN_RETIRED_IDENTITIES) {
+      expect(isPlausibleIdentityId(e.id)).toBe(true);
+      expect(isPlausibleIdentityId(e.supersededBy)).toBe(true);
+      expect(e.evidence.length).toBeGreaterThan(40);
+      expect(e.retiredOn).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+  });
+});
+
+describe("⭐ P1: a ledger WRITE failure must not be silent", () => {
+  test("a read-only directory is reported as a write failure, not swallowed", () => {
+    const rd = join(dir, "ro2");
+    require("node:fs").mkdirSync(rd);
+    chmodSync(rd, 0o500);
+    const r = syncAndResolveSelfIdentities({ configIds: new Set([NEW]), ledgerPath: join(rd, "l.json") });
+    expect(r.writeFailures.length).toBeGreaterThan(0);
+    expect(r.writeFailures[0]).toMatchObject({ id: NEW, status: "write-failed" });
+    // and the honest signal: the configured id is NOT durably on disk
+    expect(r.notDurable).toContain(NEW);
+    chmodSync(rd, 0o700);
+  });
+
+  test("a healthy write reports no failure and nothing non-durable", () => {
+    const r = syncAndResolveSelfIdentities({ configIds: new Set([NEW]), ledgerPath: ledger });
+    expect(r.writeFailures).toEqual([]);
+    expect(r.notDurable).toEqual([]);
+  });
+
+  test("an unreadable ledger surfaces as a refusal, not a quiet no-op", () => {
+    writeFileSync(ledger, "{corrupt");
+    const r = syncAndResolveSelfIdentities({ configIds: new Set([NEW]), ledgerPath: ledger });
+    expect(r.writeFailures[0]).toMatchObject({ status: "refused-unreadable" });
+    expect(r.notDurable).toContain(NEW);
+  });
+});
+
+describe("⭐ P2: the ledger honours CATALYST_DIR", () => {
+  test("CATALYST_DIR wins over $HOME, re-resolved per call", () => {
+    const prev = process.env.CATALYST_DIR;
+    try {
+      process.env.CATALYST_DIR = "/tmp/cat-dir-a";
+      expect(defaultIdentityLedgerPath()).toBe("/tmp/cat-dir-a/linear-bot-identities.json");
+      // per-call, not captured at import: two installations must not collide, and
+      // tests must be able to isolate.
+      process.env.CATALYST_DIR = "/tmp/cat-dir-b";
+      expect(defaultIdentityLedgerPath()).toBe("/tmp/cat-dir-b/linear-bot-identities.json");
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prev;
+    }
+  });
+
+  test("an explicit home argument still wins over the env", () => {
+    const prev = process.env.CATALYST_DIR;
+    try {
+      process.env.CATALYST_DIR = "/tmp/cat-dir-a";
+      expect(defaultIdentityLedgerPath("/tmp/explicit")).toBe("/tmp/explicit/linear-bot-identities.json");
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prev;
+    }
+  });
+});
+
+describe("⭐ P1: a LIVE rotation is picked up without a daemon restart", () => {
+  const layer2At = (name, ids) => {
+    const p = join(dir, name);
+    writeFileSync(p, JSON.stringify({ catalyst: { linear: { bot: { orchestrator: { botUserId: ids } } } } }));
+    return p;
+  };
+
+  test("the refresh merges IN PLACE, so a captured closure sees the new identity", () => {
+    // This is the whole mechanism: monitor/scheduler/inbox writers capture the Set by
+    // reference at boot. Replacing the Set would leave every one of them on the old
+    // one — the boot-only failure this fixes.
+    const live = new Set();
+    const capturedByAClosure = live; // what the daemon hands to its actuators
+    refreshSelfEchoIdentitiesInto(live, null, layer2At("l2a.json", OLD), ledger);
+    expect(capturedByAClosure.has(OLD)).toBe(true);
+
+    // rotation lands in Layer-2 while the "daemon" keeps running
+    const added = refreshSelfEchoIdentitiesInto(live, null, layer2At("l2b.json", NEW), ledger);
+    expect(added).toContain(NEW);
+    expect(capturedByAClosure.has(NEW)).toBe(true); // ← same object, no re-plumbing
+    expect(capturedByAClosure).toBe(live);
+  });
+
+  test("⛔ the refresh is MONOTONIC — it never removes a known identity", () => {
+    // An id dropped from the set is one the fleet would start dispatching on: the
+    // exact defect, reintroduced by the refresh meant to fix it.
+    const live = new Set();
+    refreshSelfEchoIdentitiesInto(live, null, layer2At("m1.json", OLD), ledger);
+    refreshSelfEchoIdentitiesInto(live, null, layer2At("m2.json", NEW), ledger);
+    expect(live.has(OLD)).toBe(true);
+    expect(live.has(NEW)).toBe(true);
+  });
+
+  test("a repeat refresh with no rotation adds nothing (quiet steady state)", () => {
+    const live = new Set();
+    const l2 = layer2At("s.json", NEW);
+    refreshSelfEchoIdentitiesInto(live, null, l2, ledger);
+    expect(refreshSelfEchoIdentitiesInto(live, null, l2, ledger)).toEqual([]);
+  });
+
+  test("a throwing refresh never wedges the tick that carries it", () => {
+    const live = new Set([NEW]);
+    expect(() => refreshSelfEchoIdentitiesInto(live, null, "/nonexistent/l2.json", "\0bad")).not.toThrow();
+    expect(live.has(NEW)).toBe(true); // and does not damage what is already known
+  });
+
+  test("a third party is still never merged in", () => {
+    const live = new Set();
+    refreshSelfEchoIdentitiesInto(live, null, layer2At("t.json", NEW), ledger);
+    expect(live.has(HUMAN)).toBe(false);
   });
 });

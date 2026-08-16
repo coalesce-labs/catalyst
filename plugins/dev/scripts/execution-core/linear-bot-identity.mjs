@@ -42,10 +42,47 @@ import { dirname, join } from "node:path";
 
 export const LEDGER_VERSION = 1;
 
-/** Default ledger location: beside the rest of the host's durable Catalyst state. */
+/**
+ * Default ledger location: beside the rest of the host's durable Catalyst state.
+ *
+ * ⚠️ Resolves CATALYST_DIR **per call**, exactly as `config.mjs` does. Hard-coding
+ * `$HOME/catalyst` would make two isolated installations sharing a home share retired
+ * identities — each suppressing the other's actors — and would lose persistence
+ * entirely on a host whose home is not writable but whose state root is. The env var
+ * is also how tests isolate, so a fixed path silently writes to real host state.
+ * Deliberately NOT imported from config.mjs: this module stays an import-light leaf
+ * (config.mjs pulls the bun:sqlite graph), so the one line is mirrored instead.
+ */
 export function defaultIdentityLedgerPath(catalystHome) {
-  return join(catalystHome || join(process.env.HOME || "", "catalyst"), "linear-bot-identities.json");
+  const home = catalystHome || process.env.CATALYST_DIR || join(process.env.HOME || "", "catalyst");
+  return join(home, "linear-bot-identities.json");
 }
+
+/**
+ * Identities this fleet has PROVABLY written as, established by evidence and committed
+ * so a host that first runs this code AFTER a rotation still recognises them.
+ *
+ * ⛔ Without this seed the ledger bootstraps empty while the config already names only
+ * the replacement, so a retired actor is never learned and its echoes stay third-party
+ * FOREVER — the rollout case, and the exact defect this module exists to close.
+ *
+ * The bar for adding an entry is the bar met below: same display name, a Linear
+ * handle-collision suffix, a same-day handoff with no overlap, and no other config
+ * anywhere naming it. "It wrote a lot" is NOT sufficient — an id admitted here can
+ * never be dispatched on again.
+ */
+export const KNOWN_RETIRED_IDENTITIES = Object.freeze([
+  {
+    id: "f51bc697-c64b-47b8-9fba-a2981fbfe652",
+    handle: "catalystorchestrator",
+    retiredOn: "2026-08-10",
+    supersededBy: "ba2989f1-f250-4273-943c-ca511c66e793", // handle catalystorchestrator2
+    evidence:
+      "2,241 writes 2026-06-05..2026-08-10 (1,404 state edges, 748 label writes); same display " +
+      "name 'Catalyst Orchestrator' as its successor, whose handle carries Linear's collision " +
+      "suffix '2'; same-day handoff with no overlap; named by no config, live or backup (CTL-1892)",
+  },
+]);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -149,6 +186,10 @@ export function resolveSelfIdentities({ configIds = new Set(), ledgerPath = null
   const ids = new Set();
   for (const id of configIds) if (isPlausibleIdentityId(id)) ids.add(id);
   for (const id of ledger.ids) ids.add(id);
+  // Seeded regardless of ledger state: a host whose ledger is absent (first run) or
+  // unreadable must still recognise a known retired actor, or the rollout case leaves
+  // its echoes third-party forever.
+  for (const { id } of KNOWN_RETIRED_IDENTITIES) ids.add(id);
   return {
     ids,
     ledgerStatus: ledger.status,
@@ -164,9 +205,21 @@ export function resolveSelfIdentities({ configIds = new Set(), ledgerPath = null
  */
 export function syncAndResolveSelfIdentities({ configIds = new Set(), ledgerPath = null, source = "config", now } = {}) {
   const recorded = [];
+  const writeFailures = [];
   for (const id of configIds) {
     const r = recordIdentity(ledgerPath, id, { source, now });
     if (r.recorded) recorded.push(id);
+    // ⛔ A DISCARDED write failure is invisible: the re-read below reports a
+    // healthy-looking `absent` or `ok`, so a read-only dir or a full disk silently
+    // costs rotation durability with no symptom until the NEXT rotation — by which
+    // time the window is already open. Surface it as its own degradation.
+    else if (r.status === "write-failed" || r.status === "refused-unreadable") {
+      writeFailures.push({ id, status: r.status, reason: r.reason ?? null });
+    }
   }
-  return { ...resolveSelfIdentities({ configIds, ledgerPath }), recorded };
+  const resolved = resolveSelfIdentities({ configIds, ledgerPath });
+  // A configured id that is NOT durably on disk is the honest signal of lost
+  // durability — independent of why the write failed.
+  const notDurable = [...configIds].filter((id) => isPlausibleIdentityId(id) && !readIdentityLedger(ledgerPath).ids.has(id));
+  return { ...resolved, recorded, writeFailures, notDurable };
 }
