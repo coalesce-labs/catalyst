@@ -409,7 +409,27 @@ describe("startCloudFeedTimer", () => {
     expect(handle.isReady()).toBe(false);
   });
 
-  test("readiness never goes back to false once armed", () => {
+  test("⛔ a RE-SEED after arming un-arms it (found by reasoning, not review)", () => {
+    // `seeded` means "baseline built", not "has emitted". If the last-seen store
+    // is lost after arming, the next tick re-seeds, emits nothing, and absorbs
+    // every intervening change — while a latched readiness keeps suppressing
+    // smee. Those events would reach nobody.
+    const clean = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+    let reports = [{ account: "tenant-0", skipped: null, sweep: clean }];
+    const handle = startCloudFeedTimer({ mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
+    handle.tick();
+    expect(handle.isReady()).toBe(true);
+
+    reports = [{ account: "tenant-0", skipped: null, sweep: { ...clean, mode: "seeded" } }];
+    handle.tick();
+    expect(handle.isReady()).toBe(false); // un-armed: smee is authoritative again
+
+    reports = [{ account: "tenant-0", skipped: null, sweep: clean }];
+    handle.tick();
+    expect(handle.isReady()).toBe(true); // and it re-arms on the next clean sweep
+  });
+
+  test("readiness survives a TRANSIENT failure once armed (only a re-seed reverts it)", () => {
     // Un-arming would flap dispatch between two sources; a transient failing
     // tick is already handled by the sweep's own cursor rules.
     let reports = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0 }, comments: { failed: 0 } } }];

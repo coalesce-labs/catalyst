@@ -196,6 +196,27 @@ export function startCloudFeedTimer({
         botUserIds,
         makeSink: sinkFactory,
       });
+      // ⛔ A RE-SEED UN-ARMS. Found by answering my own round-5 question rather
+      // than by review: `seeded` means "baseline built", not "has emitted".
+      // If the last-seen store is lost AFTER enforce armed, the next tick
+      // re-seeds — emitting nothing, absorbing every intervening change into
+      // the new baseline — while a latched readiness keeps the gate suppressing
+      // smee's copies. Those events reach nobody, exactly like the vanished
+      // cursor case.
+      //
+      // This is the one thing that legitimately reverts readiness. The earlier
+      // "never un-arm" rule was about TRANSIENT failures, where flapping between
+      // sources buys nothing; a re-seed is not transient, it is a genuine loss
+      // of the producer's state. Un-arming is safe by construction: the gate
+      // makes smee authoritative again AND keeps suppressing feed events, so no
+      // double-dispatch is possible in either posture.
+      if (ready && Array.isArray(reports) && reports.some((r) => r?.sweep?.mode === "seeded")) {
+        ready = false;
+        log.warn?.(
+          { mode },
+          "cloud-feed: producer RE-SEEDED after arming — un-arming, smee is authoritative again",
+        );
+      }
       if (!ready && Array.isArray(reports)) {
         // A tenant that is skipped, errored, or still seeding does NOT arm it.
         // ⛔ A ZERO-FAILURE sweep, not merely a non-seeding one (Codex P1 round 2).
