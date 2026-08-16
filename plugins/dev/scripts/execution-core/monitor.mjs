@@ -55,6 +55,12 @@ import {
   isDraining as isDrainingDefault, // CTL-1095: drain gate
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
+// CTL-1847: the dispatch-source gate. Imported here rather than the capture
+// sink or the producer, deliberately — cloud-feed-gate.mjs is a pure leaf whose
+// only import is lib/event-name.mjs, so it cannot drag `bun:sqlite` into this
+// module's graph (see the CTL-1397 note directly below). The capture sink and
+// the echo ring are INJECTED via setCloudFeedGate for the same reason.
+import { decideDispatch } from "./cloud-feed-gate.mjs";
 // CTL-1397 (Node-loadability): monitor.mjs MUST NOT import replica-read.mjs — that
 // module statically imports `bun:sqlite`, which the Node ESM loader rejects at
 // module-load (the broker entrypoint is `#!/usr/bin/env node` and loads
@@ -347,6 +353,26 @@ export function handleCommentCreatedEvent(event, { onComment } = {}) {
 // no reader (mode off, or the Node broker which never injects one) → the reconcile
 // path falls to the linearis exec, byte-identical to pre-CTL-1397.
 let _injectedEligibleReplica = null;
+
+// CTL-1847: the cloud-feed dispatch gate, or null when the feature is off.
+// Null (the default) means readNewEvents skips the gate block entirely, so an
+// off host's routing is byte-identical to pre-CTL-1847 rather than merely
+// equivalent — there is no gate to be wrong about.
+let _cloudFeedGate = null;
+
+/**
+ * setCloudFeedGate — install (or clear, with null) the dispatch gate.
+ * Called by startMonitor from resolved config; exported so tests can drive
+ * readNewEvents through each mode without a daemon.
+ */
+export function setCloudFeedGate(gate) {
+  _cloudFeedGate = gate ?? null;
+}
+
+/** getCloudFeedGate — test/diagnostic read of the installed gate. */
+export function getCloudFeedGate() {
+  return _cloudFeedGate;
+}
 
 // Teams that have been reconciled at least once — used by reconcileAll to
 // detect teams dropped from the registry that must be dropProject'd.
@@ -1827,6 +1853,30 @@ export function readNewEvents({ foldOnly = false } = {}) {
       // reader that drives dispatchTriage and the comment-wake blind. Non-gating:
       // the event is routed regardless, exactly like the torn counter above.
       checkEnvelope(event);
+      // CTL-1847: WHICH producer may drive dispatch. Both the smee→webhook
+      // receiver and the cloud feed write the same three dispatch-class names
+      // into this one log; the gate decides which is authoritative for this
+      // host right now, and the loser is CAPTURED rather than dropped so the
+      // parity harness can still answer "did the feed miss this edge?" after
+      // the fact. In the default mode (off) `decideDispatch` returns
+      // suppress:false for every webhook event, so this block is byte-identical
+      // to pre-CTL-1847 routing.
+      //
+      // ⚠️ ORDER IS LOAD-BEARING: this block must stay ABOVE the CTL-1655
+      // `markAndCheckCommentSeen` gate below. A suppressed smee comment must
+      // never enter the dedup set — if it did, it would mark the comment seen
+      // and the FEED's copy of that same comment would then be skipped as a
+      // duplicate, so the comment would reach no worker inbox at all. Because
+      // the suppression `continue`s first, exactly one copy (the feed's)
+      // dispatches. Moving this below the dedup turns enforce mode into a
+      // silent comment blackhole.
+      if (_cloudFeedGate) {
+        const verdict = decideDispatch(event, _cloudFeedGate);
+        if (verdict.suppress) {
+          _cloudFeedGate.capture?.append(event, verdict);
+          continue;
+        }
+      }
       // CTL-731: handleStateChangedEvent gates its dispatch side-effects on
       // foldOnly; handleIssueUpdatedEvent is a pure projection fold (always safe);
       // handleCommentCreatedEvent's onComment is a side-effect — withhold it on
@@ -1912,6 +1962,26 @@ export function readNewCoordinationComments({ foldOnly = false } = {}) {
       // Constraint 1: comment-only filter.
       const evName = getEventName(event); // CTL-1834: the shared boundary
       if (evName !== "linear.comment.created") continue;
+
+      // CTL-1847 (Codex P1, #3439): the SAME dispatch-source gate as the unified
+      // tail, and for a reason specific to this path. Webhook `linear.*` events
+      // are also published into coordination.jsonl, and this tail routed them
+      // straight into `markAndCheckCommentSeen` without consulting the gate — so
+      // on a multi-host deployment the webhook copy usually won the race, marked
+      // the comment seen, and the later cloud-feed copy was skipped as a
+      // duplicate. Enforce mode would therefore NOT be authoritative for human
+      // comments on exactly the hosts that matter most.
+      //
+      // Placed ABOVE the dedup for the same reason as in readNewEvents: a
+      // suppressed copy must never enter the dedup set, or it silences the copy
+      // that was supposed to replace it.
+      if (_cloudFeedGate) {
+        const verdict = decideDispatch(event, _cloudFeedGate);
+        if (verdict.suppress) {
+          _cloudFeedGate.capture?.append(event, { ...verdict, tail: "coordination" });
+          continue;
+        }
+      }
 
       // Constraint 2: cross-source dedup. foldOnly drains do NOT insert (boot
       // drain must not permanently poison the dedup set for future live delivery).

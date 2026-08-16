@@ -914,6 +914,18 @@ jobs:
             phase-yield-e2e.test.mjs \
             cloud-sync-account.test.mjs \
             cloud-sync-schema-identity.test.mjs \
+            linear-feed-event.test.mjs \
+            linear-feed-cursor.test.mjs \
+            linear-feed-source.test.mjs \
+            linear-feed-sweep.test.mjs \
+            linear-feed-shadow.test.mjs \
+            linear-feed-run.test.mjs \
+            linear-feed-diff.test.mjs \
+            linear-feed-diffsweep.test.mjs \
+            linear-feed-parity.test.mjs \
+            cloud-feed-gate.test.mjs \
+            cloud-feed-capture.test.mjs \
+            cloud-feed-timer.test.mjs \
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \

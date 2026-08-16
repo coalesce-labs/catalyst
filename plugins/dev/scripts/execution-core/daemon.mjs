@@ -52,6 +52,7 @@ import {
   isHostNamePinnedFromConfig, // CTL-1093
   getCatalystRepoDir, // CTL-1093 sticky dir
   readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
+  readCloudFeedConfig, // CTL-1847: cloud-feed dispatch-source mode
   readLinearReplica, // CTL-1340: read-replica tier flag (inert; default off)
   getExecutor, // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
   dispatchModeForExecutor, // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
@@ -86,6 +87,7 @@ import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-re
 import {
   recoverStartup,
   startMonitor,
+  setCloudFeedGate, // CTL-1847
   stopMonitor,
   startScheduler,
   stopScheduler,
@@ -105,6 +107,8 @@ import { sweepWorkerDirs } from "./worker-dir-gc.mjs"; // CTL-1205: execution-co
 import { sweepWtCleanupQueue } from "./wt-cleanup-drain.mjs"; // CTL-1218: wt-cleanup-queue drain
 import { ProcReaper } from "./proc-reaper.mjs"; // CTL-1165 D2: orphan child-process reaper (default shadow)
 import { startWorktreeRefreshTimer, readWorktreeRefreshConfig } from "./worktree-refresh-timer.mjs";
+import { startCloudFeedTimer } from "./cloud-feed-timer.mjs"; // CTL-1847
+import { createCaptureSink, defaultCapturePath } from "./cloud-feed-capture.mjs"; // CTL-1847
 // CTL-1331: the async board-health delegate runner timer (kicks the DETACHED
 // drainer that does the heavy worktree-provision + `claude --bg` off the daemon
 // event loop). Gated by readDelegateRunnerConfig; Phase A ships it inert.
@@ -223,6 +227,7 @@ let _linearReconcileTimer = null;
 let _stalledPrTimer = null;
 // CAT-40: periodic GitHub core REST quota snapshot sampler.
 let _githubQuotaTimer = null;
+let _cloudFeedTimer = null; // CTL-1847: cloud-feed producer tick
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
@@ -1422,6 +1427,52 @@ export function startDaemon({
     // unusable arms neither the monitor nor the scheduler, so it cannot dispatch or
     // reclaim work it has no way to execute.
     if (_isWorkerNode && bootDependencyState.ok) {
+    // CTL-1847: arm the cloud-feed dispatch source. Default mode is "off", in
+    // which case NO gate is installed (monitor.mjs's `_cloudFeedGate` stays
+    // null and its routing block is skipped entirely) and NO producer timer is
+    // started — so merging this into the live dispatch path is a no-op on every
+    // host until an operator opts in.
+    //
+    // Installed BEFORE monitorFn so the gate is in place before the tail's
+    // first drain; arming it after would leave a window in which enforce-mode
+    // smee events dispatched normally, which is exactly the double-dispatch the
+    // gate exists to prevent.
+    const cloudFeedCfg = readCloudFeedConfig();
+    if (cloudFeedCfg.mode !== "off") {
+      const cloudFeedCapture = createCaptureSink({ path: defaultCapturePath(orchDir) });
+      // Timer FIRST, gate second: the gate's enforce branch degrades to shadow
+      // routing until `isReady()` says the producer has completed a real,
+      // non-seeding sweep (Codex P1, #3439). setInterval does not fire
+      // immediately, so nothing is produced between these two statements.
+      _cloudFeedTimer = startCloudFeedTimer({
+        mode: cloudFeedCfg.mode,
+        intervalSec: cloudFeedCfg.intervalSec,
+        orchDir,
+        botUserIds: linearBotUserIds,
+      });
+      setCloudFeedGate({
+        mode: cloudFeedCfg.mode,
+        capture: cloudFeedCapture,
+        // Absent probe ⇒ NOT ready, so a wiring mistake here keeps smee
+        // authoritative rather than suppressing it with nothing to replace it.
+        isReady: _cloudFeedTimer ? () => _cloudFeedTimer.isReady() : null,
+        // CTL-1891's ring has no production RECORDER yet (the CTC-509 proxy
+        // caller is CTL-1889), so passing it here would wire a check that can
+        // never fire and read as protection we do not have. Left null until the
+        // recorder lands; decideDispatch treats an absent probe as "not an
+        // echo", which is the pre-ring behaviour.
+        isEcho: null,
+      });
+      log.info(
+        {
+          mode: cloudFeedCfg.mode,
+          intervalSec: cloudFeedCfg.intervalSec,
+          capture: cloudFeedCapture.path,
+          armed: false,
+        },
+        "cloud-feed: armed",
+      );
+    }
     monitorFn({
       orchDir,
       cache,
@@ -2328,6 +2379,23 @@ export function stopDaemon() {
       /* timer already stopped */
     }
     _refreshTimer = null;
+  }
+  // CTL-1847: stop the cloud-feed producer tick and UNINSTALL the gate. Both,
+  // not just the timer: a live gate with a dead producer would keep suppressing
+  // smee in enforce mode while nothing replaced it — a silent total dispatch
+  // outage, which is strictly worse than either half alone.
+  if (_cloudFeedTimer) {
+    try {
+      _cloudFeedTimer.stop();
+    } catch {
+      /* timer already stopped */
+    }
+    _cloudFeedTimer = null;
+  }
+  try {
+    setCloudFeedGate(null);
+  } catch {
+    /* monitor module not loaded */
   }
   // CTL-1331: stop the delegate runner timer (no-op handle when gated off).
   if (_delegateRunnerTimer) {
