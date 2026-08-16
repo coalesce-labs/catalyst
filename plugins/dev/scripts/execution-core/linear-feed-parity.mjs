@@ -314,21 +314,54 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
   const unexplained = [];
   const byKeyEvent = (events, key) => events.find((e) => edgeKey(e) === key) ?? null;
 
+  // ⛔ MULTIPLICITY, NOT PRESENCE (Codex P1, #3439).
+  //
+  // These loops used to `continue` whenever the other side merely HAD the key.
+  // Every comment on a ticket maps to the same key `<ticket>|comment`, so two
+  // smee comments against one feed comment satisfied "both sides have it" and
+  // produced NO diff and `clean: true` — the parity gate would approve a feed
+  // that dropped a dispatch-class event. Counts, not membership.
   for (const [key, n] of S.byKey) {
-    if (F.byKey.has(key)) continue;
+    const other = F.byKey.get(key) ?? 0;
+    if (other >= n) continue;
+    const missing = n - other;
     const why = explain("smee", key, byKeyEvent(smeeIn, key));
-    (why ? explained : unexplained).push({ side: "smee-only", key, count: n, why: why ?? null });
+    (why ? explained : unexplained).push({
+      side: "smee-only",
+      key,
+      count: missing,
+      smeeCount: n,
+      feedCount: other,
+      why: why ?? null,
+    });
   }
   for (const [key, n] of F.byKey) {
-    if (S.byKey.has(key)) continue;
-    const why = explain("feed", key, byKeyEvent(feedIn, key), { priorSmeeTs: priorSmee.get(key) ?? null, count: n });
-    (why ? explained : unexplained).push({ side: "feed-only", key, count: n, why: why ?? null });
+    const other = S.byKey.get(key) ?? 0;
+    if (other >= n) continue;
+    const extra = n - other;
+    const why = explain("feed", key, byKeyEvent(feedIn, key), {
+      priorSmeeTs: priorSmee.get(key) ?? null,
+      // The late-arrival predicate is only sound for a SINGLE unmatched
+      // occurrence; a surplus of several is not one straggler.
+      count: extra,
+    });
+    (why ? explained : unexplained).push({
+      side: "feed-only",
+      key,
+      count: extra,
+      smeeCount: other,
+      feedCount: n,
+      why: why ?? null,
+    });
   }
 
   return {
     counts: { smee: smeeIn.length, feed: feedIn.length },
     classes: { smee: S.byClass, feed: F.byClass },
-    matchedKeys: [...S.byKey.keys()].filter((k) => F.byKey.has(k)).length,
+    // Keys present on both sides AT THE SAME COUNT. A key both sides carry but
+    // in different quantities is a diff, so counting it as matched would report
+    // the discrepancy as agreement.
+    matchedKeys: [...S.byKey.keys()].filter((k) => (F.byKey.get(k) ?? 0) === S.byKey.get(k)).length,
     explained,
     unexplained,
     // The window's gate. Deliberately NOT "explained.length === 0" — explained

@@ -1440,9 +1440,22 @@ export function startDaemon({
     const cloudFeedCfg = readCloudFeedConfig();
     if (cloudFeedCfg.mode !== "off") {
       const cloudFeedCapture = createCaptureSink({ path: defaultCapturePath(orchDir) });
+      // Timer FIRST, gate second: the gate's enforce branch degrades to shadow
+      // routing until `isReady()` says the producer has completed a real,
+      // non-seeding sweep (Codex P1, #3439). setInterval does not fire
+      // immediately, so nothing is produced between these two statements.
+      _cloudFeedTimer = startCloudFeedTimer({
+        mode: cloudFeedCfg.mode,
+        intervalSec: cloudFeedCfg.intervalSec,
+        orchDir,
+        botUserIds: linearBotUserIds,
+      });
       setCloudFeedGate({
         mode: cloudFeedCfg.mode,
         capture: cloudFeedCapture,
+        // Absent probe ⇒ NOT ready, so a wiring mistake here keeps smee
+        // authoritative rather than suppressing it with nothing to replace it.
+        isReady: _cloudFeedTimer ? () => _cloudFeedTimer.isReady() : null,
         // CTL-1891's ring has no production RECORDER yet (the CTC-509 proxy
         // caller is CTL-1889), so passing it here would wire a check that can
         // never fire and read as protection we do not have. Left null until the
@@ -1450,17 +1463,12 @@ export function startDaemon({
         // echo", which is the pre-ring behaviour.
         isEcho: null,
       });
-      _cloudFeedTimer = startCloudFeedTimer({
-        mode: cloudFeedCfg.mode,
-        intervalSec: cloudFeedCfg.intervalSec,
-        orchDir,
-        botUserIds: linearBotUserIds,
-      });
       log.info(
         {
           mode: cloudFeedCfg.mode,
           intervalSec: cloudFeedCfg.intervalSec,
           capture: cloudFeedCapture.path,
+          armed: false,
         },
         "cloud-feed: armed",
       );

@@ -405,3 +405,73 @@ describe("resolveWindow — trailing-edge clamp", () => {
     expect(resolveWindow({ nowMs: NOW, sinceMin: 240, seededAt: null, settleSec: 120 }).emptyWindow).toBe(false);
   });
 });
+
+// ── CTL-1847 (Codex P1 #3439): multiplicity, not key presence ────────────────
+describe("compareStreams — multiplicity", () => {
+  const cmt = (ticket, ts) => ({
+    ts,
+    attributes: { "event.name": "linear.comment.created" },
+    body: { payload: { ticket } },
+  });
+
+  test("⭐ two smee comments vs one feed comment on the SAME ticket is a DIFF", () => {
+    // Every comment on a ticket maps to `<ticket>|comment`, so a presence check
+    // called this "matched" and returned clean:true — letting the parity gate
+    // approve a feed that dropped a dispatch-class event.
+    const res = compareStreams({
+      smee: [cmt("CTL-1", "2026-08-16T10:00:00Z"), cmt("CTL-1", "2026-08-16T10:01:00Z")],
+      feed: [cmt("CTL-1", "2026-08-16T10:00:05Z")],
+    });
+    expect(res.counts).toEqual({ smee: 2, feed: 1 });
+    expect(res.clean).toBe(false);
+    expect(res.unexplained).toHaveLength(1);
+    expect(res.unexplained[0]).toMatchObject({
+      side: "smee-only",
+      key: "CTL-1|comment",
+      count: 1,
+      smeeCount: 2,
+      feedCount: 1,
+    });
+  });
+
+  test("NEGATIVE CONTROL: equal counts on both sides stay clean", () => {
+    const res = compareStreams({
+      smee: [cmt("CTL-1", "2026-08-16T10:00:00Z"), cmt("CTL-1", "2026-08-16T10:01:00Z")],
+      feed: [cmt("CTL-1", "2026-08-16T10:00:05Z"), cmt("CTL-1", "2026-08-16T10:01:05Z")],
+    });
+    expect(res.clean).toBe(true);
+    expect(res.unexplained).toHaveLength(0);
+    expect(res.matchedKeys).toBe(1);
+  });
+
+  test("a feed SURPLUS is reported too, not just a shortfall", () => {
+    const res = compareStreams({
+      smee: [cmt("CTL-2", "2026-08-16T10:00:00Z")],
+      feed: [cmt("CTL-2", "2026-08-16T10:00:05Z"), cmt("CTL-2", "2026-08-16T10:01:00Z")],
+    });
+    expect(res.unexplained.concat(res.explained)[0]).toMatchObject({
+      side: "feed-only",
+      count: 1,
+      smeeCount: 1,
+      feedCount: 2,
+    });
+  });
+
+  test("matchedKeys counts only keys whose COUNTS agree", () => {
+    const res = compareStreams({
+      smee: [cmt("A", "2026-08-16T10:00:00Z"), cmt("A", "2026-08-16T10:01:00Z"), cmt("B", "2026-08-16T10:02:00Z")],
+      feed: [cmt("A", "2026-08-16T10:00:05Z"), cmt("B", "2026-08-16T10:02:05Z")],
+    });
+    // B agrees (1 vs 1); A does not (2 vs 1) — so exactly one matched key.
+    expect(res.matchedKeys).toBe(1);
+  });
+
+  test("the late-arrival explanation still applies only to a SINGLE straggler", () => {
+    // A surplus of several is not one straggler; `count` carries the surplus.
+    const res = compareStreams({
+      smee: [],
+      feed: [cmt("CTL-3", "2026-08-16T10:00:00Z"), cmt("CTL-3", "2026-08-16T10:01:00Z")],
+    });
+    expect(res.unexplained.concat(res.explained)[0].count).toBe(2);
+  });
+});

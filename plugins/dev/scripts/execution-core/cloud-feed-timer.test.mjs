@@ -136,7 +136,11 @@ describe("createModeSink — invariants across modes", () => {
     expect(() => sink.emit(feedEvent("linear.issue.state_changed"))).toThrow("disk full");
   });
 
-  test("an event-log append failure is COUNTED and does not throw", () => {
+  test("⛔ in ENFORCE an event-log append failure THROWS (Codex P1)", () => {
+    // In enforce the append IS the dispatch. Swallowing it would let the sweep
+    // settle the emission, advance the cursor past this edge, and never retry —
+    // while the gate suppresses smee's copy. The throw is what engages the
+    // sweep's last-contiguous-success rule so the next tick re-emits.
     const sink = createModeSink(plan, {
       mode: "enforce",
       appendFn: () => {
@@ -144,9 +148,23 @@ describe("createModeSink — invariants across modes", () => {
       },
       makeShadow: fakeShadow().factory,
     });
+    expect(() => sink.emit(feedEvent("linear.issue.state_changed"))).toThrow("EROFS");
+    expect(sink.stats().logged).toBe(0);
+  });
+
+  test("NEGATIVE CONTROL: in SHADOW the same failure does NOT throw", () => {
+    // The would-dispatch line is telemetry; nothing dispatches from it and smee
+    // is still authoritative, so losing one must not stall the cursor.
+    const sink = createModeSink(plan, {
+      mode: "shadow",
+      appendFn: () => {
+        throw new Error("EROFS");
+      },
+      makeShadow: fakeShadow().factory,
+    });
     expect(() => sink.emit(feedEvent("linear.issue.state_changed"))).not.toThrow();
     expect(sink.stats().appendFailed).toBe(1);
-    expect(sink.stats().logged).toBe(0);
+    expect(sink.stats().observed).toBe(0);
   });
 });
 
@@ -258,6 +276,53 @@ describe("startCloudFeedTimer", () => {
       },
     });
     expect(ms).toBe(5000);
+  });
+
+  test("⛔ isReady() is FALSE until a real non-seeding sweep completes (Codex P1)", () => {
+    const seeding = [{ account: "tenant-0", skipped: null, sweep: { mode: "seeded", seeded: 4000 } }];
+    const real = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume", edges: {} } }];
+    let reports = seeding;
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => reports,
+      setIntervalFn: () => "H",
+    });
+    expect(handle.isReady()).toBe(false); // before any tick
+    handle.tick();
+    expect(handle.isReady()).toBe(false); // the SEEDING tick must not arm it
+    reports = real;
+    handle.tick();
+    expect(handle.isReady()).toBe(true); // a real sweep does
+  });
+
+  test("a skipped or errored tenant does NOT arm readiness", () => {
+    for (const reports of [
+      [{ account: "tenant-0", skipped: "replica-absent" }],
+      [{ account: "tenant-0", skipped: null, error: "boom" }],
+      [],
+    ]) {
+      const handle = startCloudFeedTimer({
+        mode: "enforce",
+        plans: [],
+        runOnceFn: () => reports,
+        setIntervalFn: () => "H",
+      });
+      handle.tick();
+      expect(handle.isReady()).toBe(false);
+    }
+  });
+
+  test("readiness never goes back to false once armed", () => {
+    // Un-arming would flap dispatch between two sources; a transient failing
+    // tick is already handled by the sweep's own cursor rules.
+    let reports = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume" } }];
+    const handle = startCloudFeedTimer({ mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
+    handle.tick();
+    expect(handle.isReady()).toBe(true);
+    reports = [{ account: "tenant-0", skipped: null, error: "transient" }];
+    handle.tick();
+    expect(handle.isReady()).toBe(true);
   });
 
   test("onReport receives the per-tenant reports", () => {

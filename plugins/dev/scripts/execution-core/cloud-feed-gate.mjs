@@ -140,12 +140,15 @@ export function ticketOf(event) {
  * @param {string} opts.mode        "off" | "shadow" | "enforce" (anything else degrades to "off")
  * @param {function} [opts.isEcho]  (ticket, field, value) => boolean — the CTL-1891 ring's probe.
  *                                  Omitted/absent ⇒ nothing is ever an echo.
+ * @param {function|boolean} [opts.isReady]  () => boolean — has the producer seeded and
+ *                                  begun emitting? Enforce degrades to shadow routing until
+ *                                  this is true. Omitted/absent ⇒ NOT ready (safe half).
  * @returns {{suppress: boolean, reason: string, source: string, name: string}}
  *
  * `suppress: true` means "do not let this event reach monitor.mjs's handlers;
  * write it to the capture sink instead". It never means "discard".
  */
-export function decideDispatch(event, { mode, isEcho = null } = {}) {
+export function decideDispatch(event, { mode, isEcho = null, isReady = null } = {}) {
   const name = getEventName(event);
   const source = sourceOf(event);
 
@@ -160,7 +163,31 @@ export function decideDispatch(event, { mode, isEcho = null } = {}) {
   // one. Same direction as deployment-mode's "settle at the layer asserting the
   // fewest guarantees": a typo in a daemon env var must not silently cut a host
   // over to an unproven dispatch source.
-  const m = CLOUD_FEED_MODES.has(mode) ? mode : "off";
+  let m = CLOUD_FEED_MODES.has(mode) ? mode : "off";
+
+  // ⛔ ENFORCE IS NOT ARMED UNTIL THE PRODUCER CAN ACTUALLY PRODUCE
+  // (Codex P1, #3439). On a host with a missing or cleared last-seen database,
+  // the gate would start suppressing smee immediately while `runDiffSweep`'s
+  // FIRST tick only seeds the baseline and emits nothing. Issue changes in that
+  // interval get absorbed into the baseline silently; comments are worse — the
+  // seeding tick never reads them and the next tick cold-starts the comment
+  // cursor at the current time, so comments in the gap reach no inbox EVER.
+  //
+  // So enforce degrades to shadow's routing (smee authoritative, feed
+  // suppressed) until the producer reports itself ready. Absent probe ⇒ NOT
+  // ready: a caller that forgets to wire readiness gets the safe half, never
+  // the suppressing one.
+  if (m === "enforce") {
+    let ready = false;
+    try {
+      ready = typeof isReady === "function" ? isReady() === true : isReady === true;
+    } catch {
+      ready = false; // a throwing probe is not a ready producer
+    }
+    if (!ready) {
+      return { suppress: source === SOURCE_CLOUD_FEED, reason: "enforce-not-armed", source, name };
+    }
+  }
 
   if (m !== "enforce") {
     // off / shadow: smee remains authoritative, exactly as today.

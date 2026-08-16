@@ -117,7 +117,7 @@ describe("decideDispatch — shadow mode", () => {
 describe("decideDispatch — enforce mode", () => {
   test("the feed becomes authoritative", () => {
     for (const n of DISPATCH_CLASS_NAMES) {
-      const v = decideDispatch(feedEvent(n), { mode: "enforce" });
+      const v = decideDispatch(feedEvent(n), { mode: "enforce", isReady: () => true });
       expect(v.suppress).toBe(false);
       expect(v.reason).toBe("feed-authoritative");
     }
@@ -125,7 +125,7 @@ describe("decideDispatch — enforce mode", () => {
 
   test("smee's copies are CAPTURED, not dispatched", () => {
     for (const n of DISPATCH_CLASS_NAMES) {
-      const v = decideDispatch(smeeEvent(n), { mode: "enforce" });
+      const v = decideDispatch(smeeEvent(n), { mode: "enforce", isReady: () => true });
       expect(v.suppress).toBe(true);
       expect(v.reason).toBe("smee-captured");
     }
@@ -136,7 +136,7 @@ describe("decideDispatch — enforce mode", () => {
       attributes: { "event.name": "linear.issue.state_changed", "linear.issue.identifier": "CTL-1" },
       body: { payload: { ticket: "CTL-1" } },
     };
-    const v = decideDispatch(mystery, { mode: "enforce" });
+    const v = decideDispatch(mystery, { mode: "enforce", isReady: () => true });
     expect(v.suppress).toBe(true);
     expect(v.source).toBe(SOURCE_OTHER);
   });
@@ -146,6 +146,61 @@ describe("decideDispatch — enforce mode", () => {
       const v = decideDispatch(smeeEvent("github.pull_request.opened"), { mode });
       expect(v.suppress).toBe(false);
       expect(v.reason).toBe("not-dispatch-class");
+    }
+  });
+});
+
+describe("decideDispatch — enforce is not armed until the producer is ready (Codex P1)", () => {
+  const ready = () => true;
+
+  test("NOT ready ⇒ smee keeps dispatching (enforce degrades to shadow routing)", () => {
+    // The failure this prevents: on an unseeded host the gate would suppress
+    // smee while runDiffSweep's first tick only seeds and emits nothing —
+    // issue changes absorbed into the baseline, comments lost permanently.
+    const v = decideDispatch(smeeEvent("linear.issue.state_changed"), {
+      mode: "enforce",
+      isReady: () => false,
+    });
+    expect(v.suppress).toBe(false);
+    expect(v.reason).toBe("enforce-not-armed");
+  });
+
+  test("NOT ready ⇒ the feed still cannot dispatch (no double-dispatch in the gap)", () => {
+    const v = decideDispatch(feedEvent("linear.issue.state_changed"), {
+      mode: "enforce",
+      isReady: () => false,
+    });
+    expect(v.suppress).toBe(true);
+    expect(v.reason).toBe("enforce-not-armed");
+  });
+
+  test("ready ⇒ enforce behaves as enforce", () => {
+    expect(decideDispatch(feedEvent("linear.issue.state_changed"), { mode: "enforce", isReady: ready }).suppress).toBe(false);
+    expect(decideDispatch(smeeEvent("linear.issue.state_changed"), { mode: "enforce", isReady: ready }).suppress).toBe(true);
+  });
+
+  test("an ABSENT probe is treated as NOT ready — a wiring mistake gets the safe half", () => {
+    // Deliberately passes NO isReady key at all, and separately an explicit null.
+    const noKey = decideDispatch(smeeEvent("linear.issue.state_changed"), { mode: "enforce" });
+    expect(noKey.reason).toBe("enforce-not-armed");
+    expect(noKey.suppress).toBe(false);
+    expect(decideDispatch(smeeEvent("linear.issue.state_changed"), { mode: "enforce", isReady: null }).suppress).toBe(false);
+    // ...and the feed correspondingly cannot dispatch on an unwired gate.
+    expect(decideDispatch(feedEvent("linear.issue.state_changed"), { mode: "enforce" }).suppress).toBe(true);
+  });
+
+  test("a THROWING probe is NOT ready", () => {
+    const v = decideDispatch(smeeEvent("linear.issue.state_changed"), {
+      mode: "enforce",
+      isReady: () => { throw new Error("boom"); },
+    });
+    expect(v.suppress).toBe(false);
+  });
+
+  test("readiness does not affect off/shadow at all", () => {
+    for (const mode of ["off", "shadow"]) {
+      expect(decideDispatch(smeeEvent("linear.issue.state_changed"), { mode, isReady: () => false }).suppress).toBe(false);
+      expect(decideDispatch(smeeEvent("linear.issue.state_changed"), { mode, isReady: ready }).suppress).toBe(false);
     }
   });
 });
@@ -173,7 +228,7 @@ describe("echo suppression (CTL-1891 ring)", () => {
   test("a matching echo suppresses dispatch", () => {
     const isEcho = (ticket, field, value) =>
       ticket === "CTL-1" && field === "state" && value === "In Progress";
-    const v = decideDispatch(stateEvent(), { mode: "enforce", isEcho });
+    const v = decideDispatch(stateEvent(), { mode: "enforce", isEcho, isReady: () => true });
     expect(v.suppress).toBe(true);
     expect(v.reason).toBe("own-write-echo");
   });
@@ -182,19 +237,19 @@ describe("echo suppression (CTL-1891 ring)", () => {
     // Without this the suppression test above would pass against a ring that
     // always returns true, proving nothing.
     const isEcho = () => false;
-    expect(decideDispatch(stateEvent(), { mode: "enforce", isEcho }).suppress).toBe(false);
+    expect(decideDispatch(stateEvent(), { mode: "enforce", isEcho, isReady: () => true }).suppress).toBe(false);
   });
 
   test("no ring at all ⇒ nothing is an echo (the pre-ring behaviour)", () => {
-    expect(decideDispatch(stateEvent(), { mode: "enforce" }).suppress).toBe(false);
-    expect(decideDispatch(stateEvent(), { mode: "enforce", isEcho: null }).suppress).toBe(false);
+    expect(decideDispatch(stateEvent(), { mode: "enforce", isReady: () => true }).suppress).toBe(false);
+    expect(decideDispatch(stateEvent(), { mode: "enforce", isEcho: null, isReady: () => true }).suppress).toBe(false);
   });
 
   test("a THROWING ring fails OPEN — dispatch proceeds, nothing is swallowed", () => {
     const isEcho = () => {
       throw new Error("ring exploded");
     };
-    expect(decideDispatch(stateEvent(), { mode: "enforce", isEcho }).suppress).toBe(false);
+    expect(decideDispatch(stateEvent(), { mode: "enforce", isEcho, isReady: () => true }).suppress).toBe(false);
   });
 
   test("the ring is never consulted outside enforce", () => {
@@ -220,6 +275,7 @@ describe("echo suppression (CTL-1891 ring)", () => {
     decideDispatch(smeeEvent("linear.issue.state_changed", { toState: "Done" }), {
       mode: "enforce",
       isEcho,
+      isReady: () => true,
     });
     expect(consulted).toBe(0);
   });
@@ -284,7 +340,7 @@ describe("ticketOf", () => {
       body: { payload: { source: "cloud-feed", toState: "Done" } },
     };
     const isEcho = () => true; // a ring that says yes to everything
-    expect(decideDispatch(noTicket, { mode: "enforce", isEcho }).suppress).toBe(false);
+    expect(decideDispatch(noTicket, { mode: "enforce", isEcho, isReady: () => true }).suppress).toBe(false);
   });
 });
 

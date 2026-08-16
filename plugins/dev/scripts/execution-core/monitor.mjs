@@ -1963,6 +1963,26 @@ export function readNewCoordinationComments({ foldOnly = false } = {}) {
       const evName = getEventName(event); // CTL-1834: the shared boundary
       if (evName !== "linear.comment.created") continue;
 
+      // CTL-1847 (Codex P1, #3439): the SAME dispatch-source gate as the unified
+      // tail, and for a reason specific to this path. Webhook `linear.*` events
+      // are also published into coordination.jsonl, and this tail routed them
+      // straight into `markAndCheckCommentSeen` without consulting the gate — so
+      // on a multi-host deployment the webhook copy usually won the race, marked
+      // the comment seen, and the later cloud-feed copy was skipped as a
+      // duplicate. Enforce mode would therefore NOT be authoritative for human
+      // comments on exactly the hosts that matter most.
+      //
+      // Placed ABOVE the dedup for the same reason as in readNewEvents: a
+      // suppressed copy must never enter the dedup set, or it silences the copy
+      // that was supposed to replace it.
+      if (_cloudFeedGate) {
+        const verdict = decideDispatch(event, _cloudFeedGate);
+        if (verdict.suppress) {
+          _cloudFeedGate.capture?.append(event, { ...verdict, tail: "coordination" });
+          continue;
+        }
+      }
+
       // Constraint 2: cross-source dedup. foldOnly drains do NOT insert (boot
       // drain must not permanently poison the dedup set for future live delivery).
       if (!foldOnly) {

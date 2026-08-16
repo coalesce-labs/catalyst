@@ -100,25 +100,41 @@ export function createModeSink(
 
       if (!isDispatchClass(event)) return;
 
+      if (mode === "enforce") {
+        // ⛔ DELIBERATELY NOT CAUGHT (Codex P1, #3439).
+        //
+        // In enforce this append IS the dispatch. Swallowing a failure here
+        // would let `processPage` treat the emission as settled, advance the
+        // issue baseline / comment cursor past this edge, and never retry it —
+        // while the gate simultaneously suppresses smee's copy. The edge would
+        // reach nothing, permanently, with a counter and a warning as the only
+        // trace. Counting a loss is not preserving it.
+        //
+        // Letting it throw is what engages the sweep's last-contiguous-success
+        // rule: the cursor stays put and the next tick re-emits. Same reasoning
+        // as the shadow sink's throw immediately above — and the opposite of
+        // cloud-feed-capture.mjs, which is fail-open precisely because it is
+        // evidence and must never be load-bearing for the thing it observes.
+        appendEventLine(event, { eventLogPath, appendFn });
+        logged += 1;
+        return;
+      }
+
       try {
-        if (mode === "enforce") {
-          appendEventLine(event, { eventLogPath, appendFn });
-          logged += 1;
-        } else {
-          appendEventLine(buildWouldDispatchEvent(event, { account: plan.account }), {
-            eventLogPath,
-            appendFn,
-          });
-          observed += 1;
-        }
+        appendEventLine(buildWouldDispatchEvent(event, { account: plan.account }), {
+          eventLogPath,
+          appendFn,
+        });
+        observed += 1;
       } catch (err) {
-        // Fail-open but COUNTED. In enforce a failed append means a real edge
-        // did not reach dispatch, which is exactly the thing the operator must
-        // be able to see — so it is a warn, not a debug.
+        // Shadow only. The would-dispatch line is pure telemetry — nothing
+        // dispatches from it and smee is still authoritative — so losing one
+        // must not stall the producer's cursor. Counted, and warned, because a
+        // silent observation gap would make the window look quieter than it was.
         failed += 1;
         log.warn?.(
           { mode, err: err?.message ?? String(err) },
-          "cloud-feed: event-log append failed"
+          "cloud-feed: would-dispatch append failed (observation lost, dispatch unaffected)"
         );
       }
     },
@@ -156,6 +172,16 @@ export function startCloudFeedTimer({
     makeSink ?? ((plan) => createModeSink(plan, { mode, eventLogPath, appendFn }));
 
   let resolvedPlans = plans;
+  // ⛔ READINESS (Codex P1, #3439). `enforce` must not suppress smee until this
+  // producer can actually produce. runDiffSweep's FIRST tick on an unseeded host
+  // only seeds the baseline (mode "seeded") and emits nothing — and its comment
+  // cursor is not cold-started until the tick after that. A gate armed before
+  // then absorbs issue changes into the baseline silently and loses comments in
+  // the gap permanently. So: ready only once a tenant has completed a real,
+  // non-seeding sweep. Starts false, and never goes back to false — a later
+  // failing tick is a transient the sweep's own cursor rules already handle,
+  // whereas un-arming would flap dispatch between two sources.
+  let ready = false;
   const tick = () => {
     try {
       if (!resolvedPlans) resolvedPlans = planTenantsFn({ orchDir, mode: "diff" });
@@ -170,6 +196,11 @@ export function startCloudFeedTimer({
         botUserIds,
         makeSink: sinkFactory,
       });
+      if (!ready && Array.isArray(reports)) {
+        // A tenant that is skipped, errored, or still seeding does NOT arm it.
+        ready = reports.some((r) => r && !r.skipped && !r.error && r.sweep && r.sweep.mode !== "seeded");
+        if (ready) log.info?.({ mode }, "cloud-feed: producer armed (baseline seeded, emitting)");
+      }
       if (onReport) onReport(reports);
       return reports;
     } catch (err) {
@@ -184,6 +215,9 @@ export function startCloudFeedTimer({
 
   return {
     tick, // exposed so a caller (and the tests) can drive one sweep synchronously
+    // The gate's arming probe. Passed to decideDispatch as `isReady`; absent or
+    // false keeps enforce on shadow routing (smee authoritative).
+    isReady: () => ready,
     stop() {
       clearIntervalFn(handle);
     },

@@ -22,6 +22,7 @@ import {
   commentKeyOf,
   markAndCheckCommentSeen,
   readNewCoordinationComments,
+  setCloudFeedGate,
   readNewEvents,
   startMonitor,
   stopMonitor,
@@ -256,6 +257,74 @@ describe("readNewCoordinationComments (CTL-1655 Phase 2)", () => {
     // Only the comment row reaches onComment
     expect(onComment).toHaveBeenCalledTimes(1);
     expect(onComment.mock.calls[0][0]).toMatchObject({ ticket: "CTL-1" });
+  });
+
+  // ── CTL-1847 (Codex P1, #3439) ────────────────────────────────────────────
+  // This tail routed webhook comments straight into markAndCheckCommentSeen
+  // without consulting the dispatch-source gate, so on multi-host deployments
+  // the webhook copy won the race, poisoned dedup, and the later cloud-feed copy
+  // was skipped — enforce was NOT authoritative for human comments there.
+  test("CTL-1847: in enforce, a WEBHOOK comment on this tail is suppressed, not delivered", () => {
+    setMultiHost();
+    const onComment = mock(() => {});
+    const captured = [];
+    enroll("CTL", { status: "Todo" });
+    startMonitor({ exec: execReturning({}), reconcileIntervalMs: 60_000, onComment });
+    setCloudFeedGate({
+      mode: "enforce",
+      isReady: () => true,
+      capture: { append: (e, v) => captured.push(v) },
+    });
+    try {
+      const ev = commentEvent({ ticket: "CTL-8", commentId: "cmt-gate-1" });
+      ev.attributes["webhook.delivery.id"] = "d-1"; // a smee-sourced copy
+      appendCoordination(ev);
+      readNewCoordinationComments();
+      expect(onComment).not.toHaveBeenCalled();
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toMatchObject({ reason: "smee-captured", tail: "coordination" });
+    } finally {
+      setCloudFeedGate(null);
+    }
+  });
+
+  test("CTL-1847: the suppressed copy does NOT poison dedup — the feed copy still delivers", () => {
+    // The whole point of gating ABOVE the dedup. If the suppressed webhook copy
+    // were marked seen, the feed's copy would be skipped and the comment would
+    // reach no inbox at all.
+    setMultiHost();
+    const onComment = mock(() => {});
+    enroll("CTL", { status: "Todo" });
+    startMonitor({ exec: execReturning({}), reconcileIntervalMs: 60_000, onComment });
+    setCloudFeedGate({ mode: "enforce", isReady: () => true, capture: { append: () => {} } });
+    try {
+      const webhookCopy = commentEvent({ ticket: "CTL-9", commentId: "cmt-gate-2" });
+      webhookCopy.attributes["webhook.delivery.id"] = "d-2";
+      appendCoordination(webhookCopy);
+      readNewCoordinationComments();
+      expect(onComment).not.toHaveBeenCalled();
+
+      const feedCopy = commentEvent({ ticket: "CTL-9", commentId: "cmt-gate-2" });
+      feedCopy.body.payload.source = "cloud-feed";
+      appendCoordination(feedCopy);
+      readNewCoordinationComments();
+      expect(onComment).toHaveBeenCalledTimes(1);
+    } finally {
+      setCloudFeedGate(null);
+    }
+  });
+
+  test("NEGATIVE CONTROL: with no gate installed (mode off) the webhook comment delivers as before", () => {
+    setMultiHost();
+    const onComment = mock(() => {});
+    enroll("CTL", { status: "Todo" });
+    startMonitor({ exec: execReturning({}), reconcileIntervalMs: 60_000, onComment });
+    setCloudFeedGate(null);
+    const ev = commentEvent({ ticket: "CTL-10", commentId: "cmt-gate-3" });
+    ev.attributes["webhook.delivery.id"] = "d-3";
+    appendCoordination(ev);
+    readNewCoordinationComments();
+    expect(onComment).toHaveBeenCalledTimes(1);
   });
 
   test("constraint 2 (cross-source dedup): same commentId from local tail then coordination tail fires onComment exactly once", () => {
