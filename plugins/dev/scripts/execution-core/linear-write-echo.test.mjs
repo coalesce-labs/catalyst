@@ -167,3 +167,53 @@ describe("⛔ unidentifiable writes are not remembered — costing a dispatch, n
     expect(r.record("CTL-1", "state", "Done")).toBe(echoKey("CTL-1", "state", "Done"));
   });
 });
+
+describe("⭐ Codex round 1: serialisation must be one-to-one", () => {
+  test("⛔ label sets differing only by comma placement do NOT collide", () => {
+    // A comma-join is not injective: ["a,b","c"] and ["a","b,c"] both become "a,b,c",
+    // so recording one would SILENTLY SUPPRESS an unrelated inbound change to the other —
+    // the exact direction this module promises never to fail in.
+    const r = createWriteEchoRing();
+    r.record("CTL-1", "labels", ["a,b", "c"]);
+    expect(r.isEcho("CTL-1", "labels", ["a", "b,c"])).toBe(false); // must still dispatch
+    expect(r.isEcho("CTL-1", "labels", ["a,b", "c"])).toBe(true); // our own still matches
+  });
+
+  test("values containing the separator round-trip distinctly", () => {
+    expect(normalizeEchoValue(["a,b"])).not.toBe(normalizeEchoValue(["a", "b"]));
+    expect(normalizeEchoValue(['x"y'])).not.toBe(normalizeEchoValue(["x", "y"]));
+  });
+
+  test("order-independence survives the new encoding", () => {
+    expect(normalizeEchoValue(["b", "a"])).toBe(normalizeEchoValue(["a", "b"]));
+  });
+});
+
+describe("⭐ Codex round 1: each write keeps its own consumable echo token", () => {
+  test("two identical writes before either echo → BOTH are suppressed", () => {
+    // e.g. two successful identical comment creates. Collapsing them would let the second
+    // echo dispatch an event this host produced.
+    const r = createWriteEchoRing();
+    r.record("CTL-1", "comment", "hi");
+    r.record("CTL-1", "comment", "hi");
+    expect(r.isEcho("CTL-1", "comment", "hi")).toBe(true);
+    expect(r.isEcho("CTL-1", "comment", "hi")).toBe(true);
+    expect(r.isEcho("CTL-1", "comment", "hi")).toBe(false); // third dispatches
+  });
+
+  test("tokens do not carry across expiry — a stale count cannot accumulate", () => {
+    const c = clock();
+    const r = createWriteEchoRing({ ttlMs: 1000, now: c.now });
+    r.record("CTL-1", "state", "Done");
+    c.advance(1001); // expires
+    r.record("CTL-1", "state", "Done"); // fresh write, count restarts at 1
+    expect(r.isEcho("CTL-1", "state", "Done")).toBe(true);
+    expect(r.isEcho("CTL-1", "state", "Done")).toBe(false);
+  });
+
+  test("a multi-token entry still counts as ONE toward the size cap", () => {
+    const r = createWriteEchoRing({ maxEntries: 2 });
+    for (let i = 0; i < 5; i++) r.record("CTL-1", "comment", "same");
+    expect(r.size()).toBe(1);
+  });
+});

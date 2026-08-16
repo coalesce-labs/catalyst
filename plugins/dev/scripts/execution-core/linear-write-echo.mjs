@@ -61,7 +61,11 @@ export const ECHO_FIELDS = Object.freeze(["state", "labels", "comment", "assigne
 export function normalizeEchoValue(value) {
   if (value === null) return "~null";
   if (value === undefined) return "~undef";
-  if (Array.isArray(value)) return value.map((v) => String(v)).sort().join(",");
+  // ⛔ JSON, not join(","). A comma-join is NOT one-to-one: ["a,b","c"] and ["a","b,c"]
+  // both become "a,b,c", so recording one would suppress an unrelated inbound change to
+  // the other — a SILENT suppression, the exact direction this module promises never to
+  // fail in. Linear label names may contain commas, so the collision is reachable.
+  if (Array.isArray(value)) return JSON.stringify(value.map((v) => String(v)).sort());
   return String(value);
 }
 
@@ -81,12 +85,16 @@ export function createWriteEchoRing({
   maxEntries = DEFAULT_MAX_ENTRIES,
   now = () => Date.now(),
 } = {}) {
-  /** key → expiry epoch-ms. Insertion order is age order, which is what makes eviction O(1). */
+  /** key → { expiresAt, count }. Insertion order is age order, which makes eviction O(1).
+   *  `count` is one token per write: two identical writes issued before either echo
+   *  arrives must each be consumable, or the second echo dispatches an event this host
+   *  produced. Collapsing them would be safe-direction, but needlessly so — it is cheap
+   *  to be right. */
   const entries = new Map();
 
   const prune = (t) => {
-    for (const [k, expiresAt] of entries) {
-      if (expiresAt > t) break; // insertion-ordered: the first live entry ends the sweep
+    for (const [k, e] of entries) {
+      if (e.expiresAt > t) break; // insertion-ordered: the first live entry ends the sweep
       entries.delete(k);
     }
   };
@@ -103,9 +111,12 @@ export function createWriteEchoRing({
       const t = now();
       const key = echoKey(ticket, field, value);
       // Re-recording refreshes the TTL AND the age order, so a repeatedly-written value
-      // stays suppressible: delete first so the Map re-appends at the end.
+      // stays suppressible: delete first so the Map re-appends at the end. The token count
+      // CARRIES OVER, so each write keeps its own consumable echo.
+      const prior = entries.get(key);
+      const carried = prior && prior.expiresAt > t ? prior.count : 0;
       entries.delete(key);
-      entries.set(key, t + ttlMs);
+      entries.set(key, { expiresAt: t + ttlMs, count: carried + 1 });
       prune(t);
       while (entries.size > maxEntries) {
         const oldest = entries.keys().next().value;
@@ -132,9 +143,12 @@ export function createWriteEchoRing({
       // path, and this is O(1) rather than O(expired). Memory stays bounded by `record`'s
       // own prune plus the hard `maxEntries` cap.
       const key = echoKey(ticket, field, value);
-      const expiresAt = entries.get(key);
-      if (expiresAt === undefined || expiresAt <= t) return false;
-      entries.delete(key);
+      const e = entries.get(key);
+      if (e === undefined || e.expiresAt <= t) return false;
+      // Consume ONE token. An echo arrives once per write; leaving the record in place
+      // would suppress a genuine later change setting the same value.
+      if (e.count > 1) e.count -= 1;
+      else entries.delete(key);
       return true;
     },
 
