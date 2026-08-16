@@ -922,6 +922,7 @@ jobs:
             linear-feed-run.test.mjs \
             linear-feed-diff.test.mjs \
             linear-feed-diffsweep.test.mjs \
+            linear-feed-parity.test.mjs \
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \
