@@ -259,5 +259,18 @@ export function decideDispatch(event, { mode, isEcho = null, isReady = null } = 
     }
   }
 
+  // ⛔ THE EVENT'S OWN STAMP DECIDES, not a flag read now (Codex P1 round 6).
+  // `feedAuthority` is written by the sweep that emitted this line and is
+  // immutable thereafter, so a readiness transition between emission and
+  // consumption cannot retroactively grant authority to a line already on disk —
+  // which is exactly how the same edge got dispatched twice across an arming.
+  //
+  // Absent stamp ⇒ NOT authoritative. Every feed event written by this code path
+  // carries one; a line without it predates the stamp or came from somewhere
+  // else, and neither is something to dispatch on.
+  if (event?.body?.payload?.feedAuthority !== true) {
+    return { suppress: true, reason: "feed-emitted-while-unarmed", source, name };
+  }
+
   return { suppress: false, reason: "feed-authoritative", source, name };
 }

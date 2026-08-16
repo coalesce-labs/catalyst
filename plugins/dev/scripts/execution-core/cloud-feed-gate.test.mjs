@@ -22,11 +22,17 @@ import {
 } from "./cloud-feed-gate.mjs";
 
 /** A feed-produced event: stamped `source: "cloud-feed"` by linear-feed-event.mjs. */
+// Feed events carry the emission-time authority stamp (round 6). Tests that
+// want a dispatchable feed event must say so, exactly as the producer does.
 const feedEvent = (name, payload = {}) => ({
   ts: "2026-08-16T20:00:00Z",
   attributes: { "event.name": name, "linear.issue.identifier": payload.ticket ?? "CTL-1" },
-  body: { message: name, payload: { source: "cloud-feed", ticket: "CTL-1", ...payload } },
+  body: { message: name, payload: { source: "cloud-feed", ticket: "CTL-1", feedAuthority: true, ...payload } },
 });
+
+/** A feed event emitted by a sweep that was NOT armed. */
+const unarmedFeedEvent = (name, payload = {}) =>
+  feedEvent(name, { ...payload, feedAuthority: false });
 
 /** A smee-produced event: carries a webhook delivery id, no `source`. */
 const smeeEvent = (name, payload = {}) => ({
@@ -393,7 +399,7 @@ describe("ticketOf", () => {
     // silently drop a real edge.
     const noTicket = {
       attributes: { "event.name": "linear.issue.state_changed" },
-      body: { payload: { source: "cloud-feed", toState: "Done" } },
+      body: { payload: { source: "cloud-feed", toState: "Done", feedAuthority: true } },
     };
     const isEcho = () => true; // a ring that says yes to everything
     expect(decideDispatch(noTicket, { mode: "enforce", isEcho, isReady: () => true }).suppress).toBe(false);
@@ -409,4 +415,59 @@ describe("malformed input", () => {
       }
     },
   );
+});
+
+// ── CTL-1847 (Codex P1 round 6): authority is stamped, not read later ────────
+describe("⛔ the emission stamp decides, not a mutable flag", () => {
+  const armed = () => true;
+
+  test("an UNSTAMPED feed event never dispatches, even fully armed", () => {
+    // The race this closes: a webhook copy dispatches while readiness is false,
+    // the sweep synchronously appends its feed twin, `ready` flips before the
+    // event loop runs the log watcher, and the queued twin then dispatches AGAIN
+    // under the new value. Reading a flag at consumption time cannot see which
+    // sweep produced the line; the line itself can.
+    const noStamp = {
+      attributes: { "event.name": "linear.issue.state_changed", "linear.issue.identifier": "CTL-1" },
+      body: { payload: { source: "cloud-feed", ticket: "CTL-1" } },
+    };
+    const v = decideDispatch(noStamp, { mode: "enforce", isReady: armed });
+    expect(v.suppress).toBe(true);
+    expect(v.reason).toBe("feed-emitted-while-unarmed");
+  });
+
+  test("a feed event stamped FALSE never dispatches, even fully armed", () => {
+    const v = decideDispatch(unarmedFeedEvent("linear.issue.state_changed"), { mode: "enforce", isReady: armed });
+    expect(v.suppress).toBe(true);
+    expect(v.reason).toBe("feed-emitted-while-unarmed");
+  });
+
+  test("NEGATIVE CONTROL: a feed event stamped TRUE does dispatch", () => {
+    // Without this the two above would pass against a gate that suppresses
+    // everything.
+    const v = decideDispatch(feedEvent("linear.issue.state_changed"), { mode: "enforce", isReady: armed });
+    expect(v.suppress).toBe(false);
+    expect(v.reason).toBe("feed-authoritative");
+  });
+
+  test("⭐ the transition is safe in BOTH directions — never two dispatches, never zero", () => {
+    // Sweep N (unarmed): smee dispatches, its feed twin is stamped false.
+    const twin = unarmedFeedEvent("linear.issue.state_changed");
+    const smeeCopy = smeeEvent("linear.issue.state_changed");
+    expect(decideDispatch(smeeCopy, { mode: "enforce", isReady: () => false }).suppress).toBe(false); // smee delivers
+    // ...and the twin stays suppressed even after readiness flips mid-flight.
+    expect(decideDispatch(twin, { mode: "enforce", isReady: armed }).suppress).toBe(true);
+
+    // Sweep N+1 (armed): the feed delivers and smee's copy is captured.
+    expect(decideDispatch(feedEvent("linear.issue.state_changed"), { mode: "enforce", isReady: armed }).suppress).toBe(false);
+    expect(decideDispatch(smeeEvent("linear.issue.state_changed"), { mode: "enforce", isReady: armed }).suppress).toBe(true);
+  });
+
+  test("the stamp is ignored outside enforce", () => {
+    for (const mode of ["off", "shadow"]) {
+      // Feed events are suppressed on source alone; the stamp changes nothing.
+      expect(decideDispatch(feedEvent("linear.issue.updated"), { mode }).suppress).toBe(true);
+      expect(decideDispatch(unarmedFeedEvent("linear.issue.updated"), { mode }).suppress).toBe(true);
+    }
+  });
 });

@@ -51,13 +51,13 @@ describe("coverage classes match the sink's classification", () => {
 describe("⛔ explained asymmetries are PREDICATES, not prose", () => {
   test("a smee name no handler consumes is explained", () => {
     for (const n of ["linear.issue.priority_changed", "linear.issue.assignee_changed", "linear.issue.delegate_changed"]) {
-      expect(explain("smee", "k", ev(n, "CTL-1", ["priority"]))).toContain("smee-only-name");
+      expect(explain("smee", "k", ev(n, "CTL-1", ["priority"]))).toContain("smee-unhandled-name");
     }
   });
 
   test("a feed edge of only ladder-named fields is explained as MORE COMPLETE", () => {
     const why = explain("feed", "k", ev("linear.issue.updated", "CTL-1", ["priority"]));
-    expect(why).toBe("feed-more-complete:ladder-named-differently");
+    expect(why).toBe("resembles:ladder-named-field");
   });
 
   test("⛔ a feed-only STATE edge is NOT explained — it could be a spurious dispatch", () => {
@@ -105,14 +105,16 @@ describe("compareStreams", () => {
     expect(r.unexplained[0]).toMatchObject({ side: "smee-only" });
   });
 
-  test("explained asymmetries do NOT fail the window, but are reported", () => {
+  test("⛔ a resemblance hint does NOT clear the window (round 6: nothing is explained)", () => {
     const r = compareStreams({
       smee: [ev("linear.issue.priority_changed", "CTL-2", ["priority"])],
       feed: [],
     });
-    expect(r.clean).toBe(true);
-    expect(r.explained).toHaveLength(1);
-    expect(r.explained[0].why).toContain("smee-only-name");
+    // Round 6: a hint no longer clears the window. This IS a real asymmetry.
+    expect(r.clean).toBe(false);
+    expect(r.explained).toHaveLength(0);
+    expect(r.unexplained).toHaveLength(1);
+    expect(r.unexplained[0].hint).toContain("smee-unhandled-name:");
   });
 
   test("the window bounds which events are compared", () => {
@@ -154,7 +156,7 @@ describe("compareStreams", () => {
 describe("⭐ untracked-by-design smee fields are EXPLAINED, not widened into the edge source", () => {
   test("an edge of only untracked fields is explained, with the reason", () => {
     const why = explain("smee", "k", ev("linear.issue.updated", "CTL-1", ["updatedAt", "sortOrder"]));
-    expect(why).toStartWith("smee-only-fields:");
+    expect(why).toStartWith("smee-untracked-fields:");
     expect(why).toContain("every mirror rewrite");
   });
 
@@ -200,7 +202,7 @@ describe("⭐ the join strips bookkeeping and aliases field names — found on l
 
   test("an edge of ONLY bookkeeping still explains as smee-only-fields", () => {
     expect(explain("smee", "k", ev("linear.issue.updated", "CTL-1", ["updatedAt", "sortOrder"]))).toStartWith(
-      "smee-only-fields:",
+      "smee-untracked-fields:",
     );
   });
 });
@@ -225,7 +227,7 @@ describe("⭐ bot-authored comments are feed-only BY DESIGN (measured)", () => {
 
   test("issue creation gets its own predicate, not net-edge-collapse", () => {
     const created = ev("linear.issue.updated", "CTC-596", ["description", "priority", "projectId", "state", "teamId", "title"]);
-    expect(explain("feed", "k", created)).toStartWith("feed-created-synthetic-edge");
+    expect(explain("feed", "k", created)).toContain("resembles:issue-creation");
   });
 
   test("a plain feed state edge is unexplained — it is not a creation either", () => {
@@ -244,13 +246,9 @@ describe("⭐ net-edge collapse can ERASE a field, not just merge hops", () => {
   // firmly as code does.
   test("⛔ an UNCORROBORATED reversible-field edge is NOT explained", () => {
     // One observed transition is not a round trip; it is an unmatched edge.
-    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]))).toBeNull();
-    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]), { fieldHops: new Map() })).toBeNull();
-    expect(
-      explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]), {
-        fieldHops: new Map([["CTC-167|cycleId", 1]]),
-      }),
-    ).toBeNull();
+    // explain() now returns a RESEMBLANCE HINT, never a conclusion — and the
+    // hint can never move the item out of `unexplained` (asserted below).
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]))).toContain("resembles:reversible-field-round-trip");
   });
 
   test("⛔ NOT explained even with 2+ observed transitions — counting is not verifying", () => {
@@ -258,16 +256,13 @@ describe("⭐ net-edge collapse can ERASE a field, not just merge hops", () => {
     // cycleId updates can be A→B→C, or two unrelated changes across ticks whose
     // feed copies were BOTH dropped. The only sound check reads the replica, and
     // this module is pure — so the edge stays unexplained for a human.
-    expect(
-      explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]), {
-        fieldHops: new Map([["CTC-167|cycleId", 2]]),
-      }),
-    ).toBeNull();
-    expect(
-      explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId", "projectId"]), {
-        fieldHops: new Map([["CTC-167|cycleId", 9], ["CTC-167|projectId", 9]]),
-      }),
-    ).toBeNull();
+    // Transition counts are no longer consulted at all — the hint is the same
+    // regardless, and it is only ever a hint.
+    for (const hops of [new Map(), new Map([["CTC-167|cycleId", 2]]), new Map([["CTC-167|cycleId", 9]])]) {
+      const h = explain("smee", "k", ev("linear.issue.updated", "CTC-167", ["cycleId"]), { fieldHops: hops });
+      expect(h).toContain("resembles:");
+      expect(h).toContain("VERIFY against the replica");
+    }
   });
 
   test("a dropped single reversible-field edge now surfaces as UNEXPLAINED", () => {
@@ -299,12 +294,11 @@ describe("⭐ late arrival — the producers agree on the FACT, disagree on the 
   // unrelated later update dragged it in. The feed diffs snapshots, not history.
   const fed = ev("linear.issue.updated", "CTL-1869", ["cycleId"]);
 
-  test("a feed-only edge smee ALREADY reported before the window is explained", () => {
+  test("a feed-only edge smee reported before the window gets a late-arrival HINT", () => {
     const why = explain("feed", "k", fed, { priorSmeeTs: "2026-08-15T13:56:03Z", count: 1 });
-    expect(why).toStartWith("late-arrival:");
+    expect(why).toContain("resembles:late-arrival");
     expect(why).toContain("2026-08-15T13:56:03Z");
-    // The caveat must survive in the reason itself, not just in a comment.
-    expect(why).toContain("observation time");
+    // The hint names the corroborating timestamp so a human can go look.
   });
 
   test("⛔ WITHOUT corroboration it stays UNEXPLAINED — the predicate IS the evidence", () => {
@@ -315,20 +309,30 @@ describe("⭐ late arrival — the producers agree on the FACT, disagree on the 
   test("⛔ a REPEATED feed edge is not laundered by one stale smee event", () => {
     // Re-emission means the baseline failed to advance — the bug this harness exists
     // to catch. One prior smee event must not explain away N repeats.
-    expect(explain("feed", "k", fed, { priorSmeeTs: "2026-08-15T13:56:03Z", count: 2 })).toBeNull();
+    // Round 6: the count no longer gates anything, because the hint no longer
+    // concludes anything — N repeats and one repeat both stay UNEXPLAINED, which
+    // is the point. (The old predicate used `count` to avoid laundering repeats;
+    // now nothing is laundered at all.)
+    const h = explain("feed", "k", fed, { priorSmeeTs: "2026-08-15T13:56:03Z", count: 2 });
+    expect(h).toContain("resembles:late-arrival");
   });
 
   test("⛔ late-arrival NEVER explains a SMEE-only edge — that is a missed dispatch", () => {
     expect(explain("smee", "k", ev("linear.issue.updated", "CTL-1", ["title"]), { priorSmeeTs: "2026-08-15T00:00:00Z", count: 1 })).toBeNull();
   });
 
-  test("compareStreams corroborates from OUTSIDE the window and goes clean", () => {
+  test("compareStreams surfaces the late arrival as UNEXPLAINED with a hint", () => {
     const prior = ev("linear.issue.updated", "CTL-1869", ["cycleId"], "2026-08-15T13:56:03Z");
     const now = ev("linear.issue.updated", "CTL-1869", ["cycleId"], "2026-08-16T05:57:00Z");
     const r = compareStreams({ smee: [prior], feed: [now], since: Date.parse("2026-08-16T02:00:00Z") });
     expect(r.counts.smee).toBe(0); // the corroborating event is outside the window
-    expect(r.clean).toBe(true);
-    expect(r.explained[0].why).toStartWith("late-arrival:");
+    // Round 6: an out-of-window corroboration is a HINT, not a clearance. The
+    // feed-only edge is still surfaced for a human — precisely because "smee
+    // mentioned this ticket+field earlier" cannot distinguish a late arrival
+    // from an unrelated later change.
+    expect(r.clean).toBe(false);
+    expect(r.unexplained).toHaveLength(1);
+    expect(r.unexplained[0].hint).toContain("resembles:late-arrival");
   });
 
   test("⛔ the same setup with a REPEAT emission fails the window", () => {
@@ -548,7 +552,7 @@ describe("edgeKey — comment identity", () => {
     expect(res.clean).toBe(false); // the dropped delivery is now visible
   });
 
-  test("the feed-only BOT comment is still an EXPLAINED asymmetry, not a failure", () => {
+  test("the feed-only BOT comment is surfaced with a hint, NOT explained away", () => {
     // CTL-1891 requires the feed to carry bot comments smee filters out.
     const res = compareStreams({
       smee: [cmt("CTL-2", "A", "2026-08-16T10:00:00Z")],
@@ -557,8 +561,10 @@ describe("edgeKey — comment identity", () => {
         cmt("CTL-2", "C", "2026-08-16T10:02:00Z", { isBot: true }),
       ],
     });
-    expect(res.unexplained).toHaveLength(0);
-    expect(res.explained.some((e) => e.side === "feed-only" && /bot-authored/.test(e.why))).toBe(true);
+    // Round 6 refuted the premise: the webhook receiver suppresses bot-authored
+    // ISSUE events, not bot comments — so "smee filters these" was never true.
+    expect(res.explained).toHaveLength(0);
+    expect(res.unexplained.some((u) => u.side === "feed-only" && /bot-authored-comment/.test(u.hint ?? ""))).toBe(true);
   });
 
   test("NEGATIVE CONTROL: identical comment ids on both sides stay clean", () => {
@@ -604,5 +610,48 @@ describe("parity-run bounded-tail reach guards", () => {
 
   test("the verdict is three-valued and inconclusive has its own exit code", () => {
     expect(src).toContain("inconclusive ? 3 :");
+  });
+});
+
+// ── CTL-1847 (Codex round 6): the harness explains nothing ───────────────────
+describe("⛔ `explained` is structurally always empty", () => {
+  const mk = (name, ticket, keys = [], extra = {}) => ({
+    ts: "2026-08-16T10:00:00Z",
+    attributes: { "event.name": name },
+    body: { payload: { ticket, updatedFromKeys: keys, ...extra } },
+  });
+
+  test("every shape that USED to be explained is now unexplained-with-a-hint", () => {
+    // Six rounds refuted every predicate that lived here. The concept was the
+    // defect, not the four instances: an automatic "this difference is fine" is
+    // a conclusion the harness cannot reach, because it sees two event streams
+    // and not the world that produced them.
+    const cases = [
+      ["smee-unhandled name", { smee: [mk("linear.issue.priority_changed", "A", ["priority"])], feed: [] }],
+      ["smee untracked fields", { smee: [mk("linear.issue.updated", "B", ["sortOrder"])], feed: [] }],
+      ["feed-only bot comment", { smee: [], feed: [mk("linear.comment.created", "C", [], { commentId: "c1", isBot: true })] }],
+      ["feed synthetic creation", { smee: [], feed: [mk("linear.issue.updated", "D", ["state", "title", "priority", "teamId"])] }],
+      ["feed ladder field", { smee: [], feed: [mk("linear.issue.updated", "E", ["priority"])] }],
+      ["smee reversible field", { smee: [mk("linear.issue.updated", "F", ["cycleId"])], feed: [] }],
+    ];
+    for (const [label, streams] of cases) {
+      const r = compareStreams(streams);
+      expect(r.explained, `${label} must not be explained`).toHaveLength(0);
+      expect(r.unexplained.length, `${label} must be surfaced`).toBeGreaterThan(0);
+      expect(r.clean, `${label} must not read clean`).toBe(false);
+    }
+  });
+
+  test("the hint is still CARRIED — the information was useful, the conclusion was not", () => {
+    const r = compareStreams({ smee: [], feed: [mk("linear.comment.created", "C", [], { commentId: "c1", isBot: true })] });
+    expect(r.unexplained[0].hint).toContain("resembles:bot-authored-comment");
+  });
+
+  test("clean now means the two streams AGREE EXACTLY", () => {
+    const both = () => mk("linear.comment.created", "Z", [], { commentId: "same" });
+    const r = compareStreams({ smee: [both()], feed: [both()] });
+    expect(r.clean).toBe(true);
+    expect(r.unexplained).toHaveLength(0);
+    expect(r.matchedKeys).toBe(1);
   });
 });

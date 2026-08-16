@@ -27,7 +27,7 @@
 // identically before and after the flip. An instrument that changes shape at
 // the moment of cutover cannot be used to judge the cutover.
 
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { getEventLogPath, log } from "./config.mjs";
 import { buildCanonicalEvent } from "./lib/canonical-event.mjs";
 import { planTenants, runOnce } from "./linear-feed-run.mjs";
@@ -36,6 +36,36 @@ import { isDispatchClass, ticketOf } from "./cloud-feed-gate.mjs";
 import { getEventName } from "../lib/event-name.mjs";
 
 export const EVENT_WOULD_DISPATCH = "cloud-feed.would-dispatch";
+
+/** How stale the replica writer's heartbeat may be before the feed is untrustworthy. */
+export const DEFAULT_REPLICA_STALE_MS = 5 * 60 * 1000;
+
+/**
+ * defaultReplicaFresh — is the replica still being written?
+ *
+ * ⛔ Round-6 finding: when cloud-sync stalls while its SQLite file stays
+ * readable, every source query returns an EMPTY page — zero rows, zero failures,
+ * zero `byReason` entries. A sweep over a frozen replica is indistinguishable
+ * from a sweep over a quiet fleet, so readiness stayed armed and enforce went on
+ * suppressing webhook copies against a producer that could not produce.
+ *
+ * "No errors" is not "working". The writer heartbeats into
+ * `<replica>.writer.lock`, so that file is the positive evidence.
+ *
+ * Fail-CLOSED: absent, unreadable, malformed, or stale all read as NOT fresh.
+ * A host with no writer at all therefore never arms enforce, which is correct —
+ * there is nothing there to be authoritative.
+ */
+export function defaultReplicaFresh(dbPath, { now = Date.now, staleMs = DEFAULT_REPLICA_STALE_MS, readFileFn = readFileSync } = {}) {
+  if (typeof dbPath !== "string" || dbPath === "") return false;
+  try {
+    const hb = JSON.parse(readFileFn(`${dbPath}.writer.lock`, "utf8"))?.heartbeat;
+    if (!Number.isFinite(hb)) return false;
+    return now() - hb <= staleMs;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * appendEventLine — one line to the unified event log.
@@ -83,7 +113,15 @@ export function buildWouldDispatchEvent(produced, { account } = {}) {
  */
 export function createModeSink(
   plan,
-  { mode, eventLogPath = null, appendFn = appendFileSync, makeShadow = createShadowSink } = {}
+  {
+    mode,
+    eventLogPath = null,
+    appendFn = appendFileSync,
+    makeShadow = createShadowSink,
+    // The readiness in effect FOR THIS SWEEP. Read once per emit and STAMPED on
+    // the event, never consulted again downstream.
+    authorityNow = () => false,
+  } = {}
 ) {
   const shadow = makeShadow({ path: plan.shadowPath });
   let logged = 0;
@@ -115,7 +153,26 @@ export function createModeSink(
         // as the shadow sink's throw immediately above — and the opposite of
         // cloud-feed-capture.mjs, which is fail-open precisely because it is
         // evidence and must never be load-bearing for the thing it observes.
-        appendEventLine(event, { eventLogPath, appendFn });
+        // ⛔ AUTHORITY IS BOUND TO THE SWEEP THAT EMITTED THIS EVENT
+        // (Codex P1 round 6). The gate used to read a MUTABLE `ready` flag at
+        // consumption time, which loses a race I had asserted was impossible:
+        // a webhook copy dispatches while ready is false, this sweep
+        // synchronously appends the feed twin, `ready` flips true before the
+        // event loop runs the log watcher, and the queued twin is then consumed
+        // under ready=true and dispatches AGAIN. It fires on initial arming and
+        // on every recovery re-arm.
+        //
+        // Stamping at emission makes the decision immutable and local to the
+        // sweep that produced the event: whatever happens to `ready` afterwards
+        // cannot retroactively grant authority to a line already on disk.
+        const stamped = {
+          ...event,
+          body: {
+            ...event.body,
+            payload: { ...(event.body?.payload ?? {}), feedAuthority: authorityNow() === true },
+          },
+        };
+        appendEventLine(stamped, { eventLogPath, appendFn });
         logged += 1;
         return;
       }
@@ -165,13 +222,16 @@ export function startCloudFeedTimer({
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   onReport = null,
+  replicaFreshFn = defaultReplicaFresh,
 } = {}) {
   if (mode !== "shadow" && mode !== "enforce") return null;
 
+  // `ready` is only ever read HERE, to stamp what this sweep emits. It is never
+  // consulted at consumption time.
   const sinkFactory =
-    makeSink ?? ((plan) => createModeSink(plan, { mode, eventLogPath, appendFn }));
+    makeSink ??
+    ((plan) => createModeSink(plan, { mode, eventLogPath, appendFn, authorityNow: () => ready }));
 
-  let resolvedPlans = plans;
   // ⛔ READINESS (Codex P1, #3439). `enforce` must not suppress smee until this
   // producer can actually produce. runDiffSweep's FIRST tick on an unseeded host
   // only seeds the baseline (mode "seeded") and emits nothing — and its comment
@@ -184,7 +244,13 @@ export function startCloudFeedTimer({
   let ready = false;
   const tick = () => {
     try {
-      if (!resolvedPlans) resolvedPlans = planTenantsFn({ orchDir, mode: "diff" });
+      // ⛔ RE-PLAN EVERY TICK (Codex P1 round 6). The plan was resolved once at
+      // startup and cached forever, so a team added to registry.json afterwards
+      // was suppressed by the gate (monitor.mjs reads the LIVE registry) while
+      // the feed never produced anything for it — a whole team silently
+      // undispatched until the daemon restarted. planTenants is a registry read
+      // and an existsSync; paying it per tick is cheaper than the failure.
+      const resolvedPlans = plans ?? planTenantsFn({ orchDir, mode: "diff" });
       const reports = runOnceFn({
         orchDir,
         plans: resolvedPlans,
@@ -224,10 +290,15 @@ export function startCloudFeedTimer({
       // A skipped tenant is NOT clean: the feed produces nothing for it, so its
       // events would be suppressed with no replacement. `mode === "seeded"` is
       // not clean either — a (re)seed emits nothing.
+      // A sweep over a FROZEN replica reports zero of everything and looks
+      // perfect. Readiness therefore also requires positive evidence that the
+      // replica is still being written.
+      const planFor = (acct) => resolvedPlans.find((pl) => pl.account === acct);
       const swept = (r) =>
         r &&
         !r.skipped &&
         !r.error &&
+        replicaFreshFn(planFor(r.account)?.dbPath) === true &&
         r.sweep &&
         r.sweep.mode !== "seeded" &&
         r.sweep.stoppedEarly !== true &&

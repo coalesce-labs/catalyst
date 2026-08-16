@@ -306,6 +306,10 @@ describe("readNewCoordinationComments (CTL-1655 Phase 2)", () => {
 
       const feedCopy = commentEvent({ ticket: "CTL-9", commentId: "cmt-gate-2" });
       feedCopy.body.payload.source = "cloud-feed";
+      // Round 6: a feed event dispatches only if the sweep that emitted it
+      // stamped it authoritative. An unstamped copy is correctly suppressed —
+      // this test caught exactly that when the stamp landed.
+      feedCopy.body.payload.feedAuthority = true;
       appendCoordination(feedCopy);
       readNewCoordinationComments();
       expect(onComment).toHaveBeenCalledTimes(1);

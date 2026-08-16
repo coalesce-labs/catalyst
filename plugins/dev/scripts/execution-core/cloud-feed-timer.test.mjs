@@ -6,7 +6,9 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_REPLICA_STALE_MS,
   EVENT_WOULD_DISPATCH,
+  defaultReplicaFresh,
   buildWouldDispatchEvent,
   createModeSink,
   startCloudFeedTimer,
@@ -48,7 +50,10 @@ describe("createModeSink — enforce", () => {
 
     // The event log gets the real event — that is what monitor.mjs dispatches.
     expect(appended).toHaveLength(1);
-    expect(appended[0]).toEqual(e);
+    // The event-log copy carries the emission-time authority stamp (round 6).
+    expect(appended[0].body.payload.feedAuthority).toBe(false); // authorityNow defaults to false
+    expect({ ...appended[0], body: { ...appended[0].body, payload: { ...appended[0].body.payload, feedAuthority: undefined } } })
+      .toMatchObject({ attributes: e.attributes });
     // The shadow file still gets it too: the harness's feed-side input must not
     // change shape at the moment of cutover.
     expect(shadow.written).toEqual([e]);
@@ -220,6 +225,7 @@ describe("startCloudFeedTimer", () => {
     // date because linear-feed-shadow-run.mjs omitted this argument entirely.
     let seen;
     const handle = startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "shadow",
       plans: [],
       botUserIds: new Set(["bot-1"]),
@@ -237,6 +243,7 @@ describe("startCloudFeedTimer", () => {
   test("plans are resolved with mode 'diff' — the shipping edge source", () => {
     let planArgs;
     const handle = startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "enforce",
       orchDir: "/orch",
       planTenantsFn: (a) => {
@@ -252,6 +259,7 @@ describe("startCloudFeedTimer", () => {
 
   test("a THROWING tick never propagates — the daemon must not die with it", () => {
     const handle = startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => {
@@ -266,6 +274,7 @@ describe("startCloudFeedTimer", () => {
   test("the interval floors at 5s so a bad config cannot busy-spin", () => {
     let ms;
     startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "shadow",
       intervalSec: 0,
       plans: [],
@@ -283,6 +292,7 @@ describe("startCloudFeedTimer", () => {
     const real = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0 }, comments: { failed: 0 } } }];
     let reports = seeding;
     const handle = startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => reports,
@@ -308,6 +318,7 @@ describe("startCloudFeedTimer", () => {
     ];
     for (const c of cases) {
       const handle = startCloudFeedTimer({
+        replicaFreshFn: () => true,
         mode: "enforce",
         plans: [],
         runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep: c.sweep }],
@@ -320,6 +331,7 @@ describe("startCloudFeedTimer", () => {
 
   test("NEGATIVE CONTROL: a clean zero-failure sweep DOES arm it", () => {
     const handle = startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => [
@@ -338,6 +350,7 @@ describe("startCloudFeedTimer", () => {
       [],
     ]) {
       const handle = startCloudFeedTimer({
+        replicaFreshFn: () => true,
         mode: "enforce",
         plans: [],
         runOnceFn: () => reports,
@@ -374,6 +387,7 @@ describe("startCloudFeedTimer", () => {
 
   test.each(FAILURE_SHAPES)("readiness stays UNARMED: %s", (_label, sweep) => {
     const handle = startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep }],
@@ -386,6 +400,7 @@ describe("startCloudFeedTimer", () => {
   test("NEGATIVE CONTROL for the whole table: the clean shape DOES arm", () => {
     // Without this, every row above would pass against a predicate that never arms.
     const handle = startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep: OK }],
@@ -398,6 +413,7 @@ describe("startCloudFeedTimer", () => {
   test("cursor failures are matched by PREFIX — the reason carries an errno suffix", () => {
     // An equality check on "cursor-write-failed" would match nothing at all.
     const handle = startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => [
@@ -416,7 +432,7 @@ describe("startCloudFeedTimer", () => {
     // smee. Those events would reach nobody.
     const clean = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
     let reports = [{ account: "tenant-0", skipped: null, sweep: clean }];
-    const handle = startCloudFeedTimer({ mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
+    const handle = startCloudFeedTimer({ replicaFreshFn: () => true, mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
     handle.tick();
     expect(handle.isReady()).toBe(true);
 
@@ -445,7 +461,7 @@ describe("startCloudFeedTimer", () => {
     ];
     for (const [label, bad] of unhealthy) {
       let reports = [{ account: "t0", skipped: null, sweep: OKS }];
-      const handle = startCloudFeedTimer({ mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
+      const handle = startCloudFeedTimer({ replicaFreshFn: () => true, mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
       handle.tick();
       expect(handle.isReady()).toBe(true);
       reports = bad;
@@ -461,6 +477,7 @@ describe("startCloudFeedTimer", () => {
   test("EVERY tenant must be clean — a healthy one cannot mask a failing one", () => {
     const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
     const handle = startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => [
@@ -477,6 +494,7 @@ describe("startCloudFeedTimer", () => {
     const reports = [{ account: "tenant-0", skipped: null }];
     let got;
     const handle = startCloudFeedTimer({
+      replicaFreshFn: () => true,
       mode: "shadow",
       plans: [],
       runOnceFn: () => reports,
@@ -485,5 +503,124 @@ describe("startCloudFeedTimer", () => {
     });
     handle.tick();
     expect(got).toEqual(reports);
+  });
+});
+
+// ── CTL-1847 (Codex P1 round 6): a frozen replica must not stay armed ────────
+describe("⛔ replica freshness is required for readiness", () => {
+  const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+  const report = [{ account: "tenant-0", skipped: null, sweep: OKS }];
+
+  test("a STALE replica un-arms even though the sweep looks perfect", () => {
+    // When cloud-sync stalls while its SQLite file stays readable, every query
+    // returns an empty page — zero rows, zero failures, zero byReason. A sweep
+    // over a frozen replica is indistinguishable from a quiet fleet.
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [{ account: "tenant-0", dbPath: "/tmp/x.db" }],
+      runOnceFn: () => report,
+      replicaFreshFn: () => false,
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(false);
+  });
+
+  test("NEGATIVE CONTROL: the same sweep with a FRESH replica arms", () => {
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [{ account: "tenant-0", dbPath: "/tmp/x.db" }],
+      runOnceFn: () => report,
+      replicaFreshFn: () => true,
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(true);
+  });
+
+  test("defaultReplicaFresh fails CLOSED on absent/unreadable/malformed/stale", () => {
+    const NOW = 1_000_000_000;
+    const now = () => NOW;
+    const cases = [
+      ["absent", () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }],
+      ["malformed json", () => "not json"],
+      ["no heartbeat field", () => JSON.stringify({ pid: 1 })],
+      ["heartbeat not a number", () => JSON.stringify({ heartbeat: "soon" })],
+      ["stale heartbeat", () => JSON.stringify({ heartbeat: NOW - 10 * 60 * 1000 })],
+    ];
+    for (const [label, readFileFn] of cases) {
+      expect(defaultReplicaFresh("/tmp/x.db", { now, readFileFn }), label).toBe(false);
+    }
+    // ...and a positive control, so the above cannot pass against a probe that
+    // always returns false.
+    expect(defaultReplicaFresh("/tmp/x.db", { now, readFileFn: () => JSON.stringify({ heartbeat: NOW - 1000 }) })).toBe(true);
+  });
+
+  test("an empty/invalid dbPath is not fresh", () => {
+    expect(defaultReplicaFresh("")).toBe(false);
+    expect(defaultReplicaFresh(undefined)).toBe(false);
+  });
+});
+
+// ── CTL-1847 (Codex P1 round 6): the tenant plan is re-read every tick ───────
+describe("⛔ tenant scope is not cached at startup", () => {
+  test("planTenants is called on EVERY tick, so a new team is picked up", () => {
+    // The plan used to be resolved once and cached forever. monitor.mjs reads
+    // the LIVE registry for routing, so a team added to registry.json afterwards
+    // was suppressed by the gate while the feed never produced anything for it —
+    // a whole team silently undispatched until the daemon happened to restart.
+    let calls = 0;
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      orchDir: "/orch",
+      planTenantsFn: () => {
+        calls += 1;
+        return [];
+      },
+      runOnceFn: () => [],
+      replicaFreshFn: () => true,
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    handle.tick();
+    handle.tick();
+    expect(calls).toBe(3);
+  });
+
+  test("a team appearing mid-run reaches the sweep", () => {
+    let teams = ["CTL"];
+    let seenPlans = null;
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      orchDir: "/orch",
+      planTenantsFn: () => teams.map((t) => ({ account: "tenant-0", dbPath: "/tmp/x.db", teams: new Set([t]) })),
+      runOnceFn: ({ plans }) => {
+        seenPlans = plans;
+        return [];
+      },
+      replicaFreshFn: () => true,
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect([...seenPlans[0].teams]).toEqual(["CTL"]);
+    teams = ["CTC"]; // registry.json gains a project
+    handle.tick();
+    expect([...seenPlans[0].teams]).toEqual(["CTC"]);
+  });
+
+  test("NEGATIVE CONTROL: an explicitly injected plan list is still respected", () => {
+    // Callers (and tests) that pass `plans` must not have it silently re-planned.
+    let calls = 0;
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [{ account: "tenant-0", dbPath: "/tmp/x.db" }],
+      planTenantsFn: () => { calls += 1; return []; },
+      runOnceFn: () => [],
+      replicaFreshFn: () => true,
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    handle.tick();
+    expect(calls).toBe(0);
   });
 });

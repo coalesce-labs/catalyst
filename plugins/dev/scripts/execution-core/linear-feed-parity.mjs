@@ -187,121 +187,58 @@ const tally = (events) => {
  * expected, or null when it is a genuine unexplained diff.
  */
 export function explain(side, key, event, ctx = {}) {
-  const name = nameOf(event);
+  // ⛔ THIS NO LONGER EXPLAINS ANYTHING. It returns a HINT, and compareStreams
+  // never uses it to move an asymmetry out of the unexplained bucket.
+  //
+  // Six review rounds killed every predicate that lived here, one at a time, and
+  // round 6 killed all four survivors at once — each was an ASSERTION that a
+  // real difference was benign, and each was wrong in a different way:
+  //   • bot-comments      — premise false: the webhook receiver suppresses bot
+  //                         `issue` events, NOT bot comments.
+  //   • synthetic-creation — matched any state+3-field update with no observed
+  //                         `linear.issue.created` to correlate against.
+  //   • ladder-fields      — justified by "smee named it differently", but
+  //                         `edgeKey` deliberately ignores names.
+  //   • late-arrival       — corroborated on a ticket-only key, so an unrelated
+  //                         earlier change made `priorSmeeTs` truthy.
+  //
+  // The pattern is the concept, not the four instances: an automatic
+  // "this difference is fine" is a conclusion the harness is not in a position
+  // to reach, because it sees two event streams and not the world that produced
+  // them. So `clean` now means the two streams AGREE EXACTLY — a claim that can
+  // be defended — and every asymmetry is surfaced with a resemblance hint for a
+  // human to adjudicate against the replica.
+  //
+  // Keeping the hint is deliberate: the information was always useful, it was
+  // the conclusion drawn from it that was not.
   const raw = keysOf(event);
   const keys = joinFields(raw);
+  const name = nameOf(event);
+  const hints = [];
 
   if (side === "smee") {
-    // ⛔ THE ROUND-TRIP EXPLANATION IS DELETED (Codex P1 round 4), not repaired.
-    //
-    // It has now been wrong twice, in two different ways. First it asserted a
-    // closed round trip for any reversible-field edge while observing NOTHING —
-    // its comment cited a replica check a human ran once, which the code never
-    // performed. Then corroboration-by-transition-count was unsound too: two
-    // `cycleId` updates in a window can be A→B→C, or two unrelated changes
-    // across ticks whose feed copies were BOTH dropped. Counting occurrences is
-    // not verifying a collapse.
-    //
-    // The only sound check is reading the replica to confirm the field returned
-    // to its prior value, and this module is deliberately pure — no DB, no I/O.
-    // Rather than ship a third inference that looks principled and is not, the
-    // edge now stays UNEXPLAINED and a human adjudicates it against the replica.
-    //
-    // This makes windows noisier and can never make one falsely clean. Given
-    // that this predicate already produced a CLEAN verdict that had to be
-    // retracted, noise is the better failure mode: an unexplained edge gets
-    // looked at, a wrongly-explained one does not.
-    // Smee emits names nothing handles; the feed reports the same change as a field
-    // cell instead, so there is no matching feed edge under this key.
-    if (SMEE_UNHANDLED_NAMES.includes(name)) return `smee-only-name:${name}`;
-    // Every field smee reported is one the diff source deliberately does not treat
-    // as an edge, so there is no feed counterpart BY DESIGN.
+    if (SMEE_UNHANDLED_NAMES.includes(name)) hints.push(`smee-unhandled-name:${name}`);
     if (raw.length > 0 && keys.length === 0) {
-      return `smee-only-fields:${raw.map((k) => `${k}(${UNTRACKED_SMEE_FIELDS[k] ?? "untracked"})`).join("; ")}`;
+      hints.push(`smee-untracked-fields:${raw.map((k) => `${k}(${UNTRACKED_SMEE_FIELDS[k] ?? "untracked"})`).join("; ")}`);
     }
-    // A mixed edge — some tracked, some not — is NOT explained away wholesale. The
-    // tracked part should have a feed counterpart, and its absence is a real diff.
-  }
-
-  if (side === "feed") {
-    // ⭐ BOT-AUTHORED COMMENTS ARE FEED-ONLY BY DESIGN.
-    // Measured on mini-2: bot comments on CTC-593/594/595/596 produced ZERO smee
-    // comment events, while human comments on CTL-1894/CTC-564/CTC-589/CTC-256/
-    // CTL-1882/CTL-1891 produced 2/4/2/2/1/14. Smee's receiver filters bot-authored
-    // comments before they reach the log; the feed deliberately does not, because
-    // Ryan's CTL-1891 decision makes agent comments the fleet's comms channel — they
-    // are the PAYLOAD, and filtering them would delete the messages the channel
-    // exists to carry. So the feed being more complete here is the requirement.
+    if (keys.length > 0 && keys.every((k) => REVERSIBLE_FIELDS.includes(k))) {
+      hints.push("resembles:reversible-field-round-trip (VERIFY against the replica — the harness cannot)");
+    }
+  } else {
     if (event?.body?.payload?.isBot === true || event?.body?.payload?.authorIsBot === true) {
-      return "feed-only-comment:bot-authored (smee filters bot comments; CTL-1891 requires the feed to carry them)";
+      hints.push("resembles:bot-authored-comment (CTL-1891 wants these on the feed; CONFIRM smee genuinely lacks it)");
     }
-    // ⭐ ISSUE CREATION is one synthetic full-field edge on the feed and a single
-    // `linear.issue.created` on smee — different shapes for the same event, so it
-    // gets its own predicate rather than hiding under net-edge-collapse.
     if (keys.includes("state") && keys.length >= 4) {
-      return "feed-created-synthetic-edge:feed emits a full-field edge where smee emits linear.issue.created";
+      hints.push("resembles:issue-creation (CONFIRM a linear.issue.created exists for this ticket)");
     }
-    // The mirror image: the feed reports fields whose smee event was named by the
-    // ladder and therefore keyed differently.
     if (keys.length > 0 && keys.every((k) => ["priority", "assigneeId", "delegateId"].includes(k))) {
-      return "feed-more-complete:ladder-named-differently";
+      hints.push("resembles:ladder-named-field");
     }
-    // Net-edge collapse — two transitions inside one tick appear once as the net
-    // ⛔ DELETED (Codex P1 round 5) — the same defect as the smee-side one, in
-    // the other direction. A feed-only STATE edge was explained unconditionally
-    // as a collapse candidate, with no corroboration, which makes the window
-    // CLEAN while hiding a spurious or duplicate state dispatch. And a net
-    // collapse cannot even explain this direction: two smee transitions against
-    // one feed transition produces a SMEE surplus, not a feed one.
-
+    if (ctx?.priorSmeeTs) hints.push(`resembles:late-arrival (smee reported a same-key edge at ${ctx.priorSmeeTs})`);
   }
-
-  // ⭐ LATE ARRIVAL: THE TWO PRODUCERS AGREE ON THE FACT AND DISAGREE ON THE TIME.
-  // Measured on CTL-1869: smee reported `addedToCycleAt,cycleId` at 2026-08-15T13:56Z;
-  // the feed emitted the same cycleId change at 2026-08-16T05:57Z — 16 hours later.
-  // The replica simply did not carry that field until an unrelated later update
-  // dragged it in, and the diff producer — correctly, given its inputs — reports a
-  // change when the SNAPSHOT changes. The feed diffs state; it does not read history.
-  //
-  // This is evidence-based, never a blanket excuse: it fires ONLY when smee actually
-  // reported this same (ticket, fields) edge BEFORE the window. Corroboration is the
-  // whole predicate — without a matching prior smee event it does not apply.
-  //
-  // ⛔ SINGLE OCCURRENCE ONLY. If the feed emitted this key more than once in the
-  // window, that is a re-emission bug (a baseline that failed to advance), and one
-  // stale smee event must not launder every repeat. Repeats stay UNEXPLAINED.
-  //
-  // ⚠️ Consumer-visible caveat this predicate is NOT allowed to hide: an edge's
-  // timestamp is OBSERVATION time, not change time. Safe for dispatch (the feed
-  // emits more, never less) but wrong for anything that reads the ts as "when".
-  if (side === "feed" && ctx?.priorSmeeTs && ctx?.count === 1) {
-    return `late-arrival:smee reported this same edge at ${ctx.priorSmeeTs}; the replica backfilled it (ts is observation time, not change time)`;
-  }
-
-  return null;
+  return hints.length ? hints.join(" | ") : null;
 }
 
-/**
- * Compare the two streams.
- *
- * `unexplained` is what gates the window. Everything else is reported for context —
- * counts, coverage, and the explanations applied — so a reader can audit WHY a
- * difference was tolerated rather than taking the verdict on trust.
- */
-/** Default trailing-edge hold-back: replica write latency + one producer tick, with margin. */
-export const DEFAULT_SETTLE_SEC = 120;
-
-/**
- * resolveWindow — the comparison window's BOTH bounds, as a pure function.
- *
- * Extracted from linear-feed-parity-run.mjs so the clamps are testable as
- * wiring rather than as a value. The leading-edge clamp shipped inside the CLI
- * and was therefore only ever verified by running it against live data; its
- * trailing-edge twin was missing for exactly as long, and no test could have
- * caught that while the computation had no seam.
- *
- * @returns {{since:number, until:number, clampedToFeedStart:boolean, emptyWindow:boolean}}
- */
 export function resolveWindow({
   nowMs,
   sinceMin = 60,
@@ -357,6 +294,9 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
     }
   }
 
+  // Always empty since round 6: the harness no longer concludes that any real
+  // difference is benign. Retained so consumers reading `.explained` see [] rather
+  // than undefined, and so `clean` cannot be computed from a stale notion of it.
   const explained = [];
   const unexplained = [];
   const byKeyEvent = (events, key) => events.find((e) => edgeKey(e) === key) ?? null;
@@ -373,13 +313,15 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
     if (other >= n) continue;
     const missing = n - other;
     const why = explain("smee", key, byKeyEvent(smeeIn, key), { fieldHops });
-    (why ? explained : unexplained).push({
+    // The hint NEVER moves this out of `unexplained` — see explain().
+    unexplained.push({
       side: "smee-only",
       key,
       count: missing,
       smeeCount: n,
       feedCount: other,
-      why: why ?? null,
+      hint: why ?? null,
+      why: null,
     });
   }
   for (const [key, n] of F.byKey) {
@@ -392,13 +334,14 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
       // occurrence; a surplus of several is not one straggler.
       count: extra,
     });
-    (why ? explained : unexplained).push({
+    unexplained.push({
       side: "feed-only",
       key,
       count: extra,
       smeeCount: other,
       feedCount: n,
-      why: why ?? null,
+      hint: why ?? null,
+      why: null,
     });
   }
 
@@ -411,8 +354,9 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
     matchedKeys: [...S.byKey.keys()].filter((k) => (F.byKey.get(k) ?? 0) === S.byKey.get(k)).length,
     explained,
     unexplained,
-    // The window's gate. Deliberately NOT "explained.length === 0" — explained
-    // asymmetries are expected and permanent.
+    // The window's gate. Since round 6 there are no explained asymmetries at
+    // all, so this is simply "the two streams agree exactly" — a claim the
+    // harness is actually in a position to make.
     clean: unexplained.length === 0,
   };
 }
