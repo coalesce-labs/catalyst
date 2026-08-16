@@ -41,6 +41,75 @@ export const SMEE_UNHANDLED_NAMES = Object.freeze([
   "linear.issue.removed",
 ]);
 
+
+/**
+ * Fields smee reports in `updatedFrom` that the diff source deliberately does NOT
+ * track, each with the reason it is not an edge. Widening the edge source to cover
+ * these would make the producer emit on every touch — the exact noise the diff
+ * design exists to avoid.
+ *
+ * ⚠️ The test that mattered was not "does anything READ this field" but "does
+ * anything need an EVENT when it changes". `completed_at`/`canceled_at` are read by
+ * the scheduler's hot terminal check — but that check reads the replica DIRECTLY on
+ * its own tick (`replica-read.mjs`: "the scheduler's hot per-signal terminal checks
+ * read terminal-ness from this sub-ms local DB"), so it never waits on our stream.
+ * And completion moves `state`, which IS tracked, so the transition is captured
+ * anyway and the timestamp is its companion.
+ */
+export const UNTRACKED_SMEE_FIELDS = Object.freeze({
+  updatedAt: "bookkeeping — moves on every mirror rewrite, would make every touch an edge",
+  sortOrder: "board position — changes on any drag, no dispatch consumer",
+  addedToCycleAt: "companion timestamp of cycleId, which IS tracked",
+  completedAt: "companion of the state transition, which IS tracked; its consumer reads the replica directly",
+  canceledAt: "companion of the state transition, which IS tracked; its consumer reads the replica directly",
+  startedAt: "companion of the state transition, which IS tracked",
+  archivedAt: "archival bookkeeping, no dispatch consumer",
+  snoozedUntilAt: "snooze bookkeeping, no dispatch consumer",
+  boardOrder: "board position, no dispatch consumer",
+  subIssueSortOrder: "board position, no dispatch consumer",
+  trashed: "soft-delete bookkeeping, no dispatch consumer",
+});
+
+
+/**
+ * Smee reports Linear's RAW field names; the diff producer reports its own
+ * vocabulary. Normalising here — in the comparison, not in the producer — keeps the
+ * producer's payload semantic rather than making it adopt Linear's wire spelling.
+ *
+ * Found by running the harness on live data: `CTC-587|completedAt,sortOrder,stateId,
+ * updatedAt` never matched a feed edge because `stateId` and `state` are the same
+ * change under two names.
+ */
+export const SMEE_FIELD_ALIASES = Object.freeze({
+  stateId: "state",
+  assigneeId: "assigneeId",
+  projectId: "projectId",
+  cycleId: "cycleId",
+  parentId: "parentId",
+  teamId: "teamId",
+  delegateId: "delegateId",
+  dueDate: "dueDate",
+});
+
+/**
+ * The fields that actually participate in the join: aliased into the feed's
+ * vocabulary, with bookkeeping fields dropped.
+ *
+ * ⭐ Dropping the untracked fields is what makes the join WORK. Live evidence: one
+ * real change produced `smee CTL-1894|estimate,updatedAt` and `feed CTL-1894|estimate`
+ * — the same edit, reported as two different keys, counted as two one-sided diffs.
+ * `updatedAt` rides along on every smee payload, so leaving it in the key would make
+ * almost nothing ever match.
+ */
+export function joinFields(keys) {
+  const out = [];
+  for (const k of Array.isArray(keys) ? keys : []) {
+    if (k in UNTRACKED_SMEE_FIELDS) continue;
+    out.push(SMEE_FIELD_ALIASES[k] ?? k);
+  }
+  return [...new Set(out)].sort();
+}
+
 /** Fields the diff source cannot observe, so their absence on the feed side is expected. */
 export const FEED_BLIND_FIELDS = Object.freeze(["actorId", "actorName"]);
 
@@ -58,7 +127,7 @@ export function edgeKey(event) {
   if (!t) return null;
   const n = nameOf(event);
   if (n === "linear.comment.created") return `${t}|comment`;
-  const keys = keysOf(event);
+  const keys = joinFields(keysOf(event));
   return `${t}|${keys.length ? keys.join(",") : "none"}`;
 }
 
@@ -66,7 +135,7 @@ export function edgeKey(event) {
 export function classOf(event) {
   const n = nameOf(event);
   if (n !== "linear.issue.updated") return n ? [n] : [];
-  const keys = keysOf(event);
+  const keys = joinFields(keysOf(event));
   return keys.length ? keys.map((k) => `linear.issue.updated:${k}`) : ["linear.issue.updated:none"];
 }
 
@@ -87,12 +156,20 @@ const tally = (events) => {
  */
 export function explain(side, key, event) {
   const name = nameOf(event);
-  const keys = keysOf(event);
+  const raw = keysOf(event);
+  const keys = joinFields(raw);
 
   if (side === "smee") {
     // Smee emits names nothing handles; the feed reports the same change as a field
     // cell instead, so there is no matching feed edge under this key.
     if (SMEE_UNHANDLED_NAMES.includes(name)) return `smee-only-name:${name}`;
+    // Every field smee reported is one the diff source deliberately does not treat
+    // as an edge, so there is no feed counterpart BY DESIGN.
+    if (raw.length > 0 && keys.length === 0) {
+      return `smee-only-fields:${raw.map((k) => `${k}(${UNTRACKED_SMEE_FIELDS[k] ?? "untracked"})`).join("; ")}`;
+    }
+    // A mixed edge — some tracked, some not — is NOT explained away wholesale. The
+    // tracked part should have a feed counterpart, and its absence is a real diff.
   }
 
   if (side === "feed") {

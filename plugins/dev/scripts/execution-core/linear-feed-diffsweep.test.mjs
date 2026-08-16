@@ -204,3 +204,47 @@ describe("the baseline store", () => {
     raw.close();
   });
 });
+
+describe("⭐ comments are swept in diff mode too — the harness caught their absence", () => {
+  // The first cut of runDiffSweep omitted comments entirely. The parity harness
+  // found it on its first live run: smee reported 14 comment.created in the window
+  // and the feed could never match one.
+  const withComments = (rows, comments) => ({
+    ...fakeSource(rows),
+    commentsSince(pos, limit = 100) {
+      return comments
+        .filter((c) => c.comment.created_at > pos.lastCreatedAt)
+        .slice(0, limit);
+    },
+    positionAfter(items) {
+      if (!items?.length) return null;
+      const last = items[items.length - 1];
+      const row = last.issue ?? last.comment;
+      return { lastCreatedAt: row.updated_at ?? row.created_at, lastId: row.id };
+    },
+  });
+  const comment = (id, createdAt) => ({
+    comment: { id, issue_id: "a", body: "hi", created_at: createdAt, author_id: "u1" },
+    issue: { id: "a", identifier: "CTL-1", team_key: "CTL" },
+    author: { name: "Ryan Rozich" },
+  });
+
+  test("a comment is emitted", () => {
+    const src = withComments([issue("a")], [comment("c1", 5_000_000_000_000)]);
+    runDiffSweep({ source: src, store, cursorPath, teams: TEAMS, emit: () => {} }); // seed
+    const events = [];
+    const r = runDiffSweep({ source: src, store, cursorPath, teams: TEAMS, emit: (e) => events.push(e), now: () => 1000 });
+    expect(r.comments.emitted).toBe(1);
+    expect(events[0].attributes["event.name"]).toBe("linear.comment.created");
+  });
+
+  test("a foreign team's comment is declined", () => {
+    const c = comment("c1", 5_000_000_000_000);
+    c.issue.team_key = "ADV";
+    const src = withComments([issue("a")], [c]);
+    runDiffSweep({ source: src, store, cursorPath, teams: TEAMS, emit: () => {} });
+    const r = runDiffSweep({ source: src, store, cursorPath, teams: TEAMS, emit: () => {}, now: () => 1000 });
+    expect(r.comments.emitted).toBe(0);
+    expect(r.comments.byReason["foreign-team"]).toBe(1);
+  });
+});

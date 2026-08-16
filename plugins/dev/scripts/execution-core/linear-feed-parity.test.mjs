@@ -145,3 +145,57 @@ describe("compareStreams", () => {
     expect(r.clean).toBe(true);
   });
 });
+
+describe("⭐ untracked-by-design smee fields are EXPLAINED, not widened into the edge source", () => {
+  test("an edge of only untracked fields is explained, with the reason", () => {
+    const why = explain("smee", "k", ev("linear.issue.updated", "CTL-1", ["updatedAt", "sortOrder"]));
+    expect(why).toStartWith("smee-only-fields:");
+    expect(why).toContain("every mirror rewrite");
+  });
+
+  test("completedAt is explained — its consumer reads the replica directly", () => {
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTL-1", ["completedAt"]))).toContain("reads the replica directly");
+  });
+
+  test("⛔ a MIXED edge is NOT explained away — the tracked part should have matched", () => {
+    // The dangerous shortcut would be "contains an untracked field → explained",
+    // which would hide a genuinely missed dispatch riding alongside bookkeeping.
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTL-1", ["updatedAt", "title"]))).toBeNull();
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTL-1", ["stateId", "sortOrder"]))).toBeNull();
+  });
+});
+
+describe("⭐ the join strips bookkeeping and aliases field names — found on live data", () => {
+  test("the SAME edit keys identically despite updatedAt riding along", () => {
+    // Live evidence: smee `CTL-1894|estimate,updatedAt` vs feed `CTL-1894|estimate`
+    // were counted as two one-sided diffs. `updatedAt` is on every smee payload, so
+    // leaving it in the key means almost nothing ever matches.
+    const smee = ev("linear.issue.updated", "CTL-1894", ["estimate", "updatedAt"]);
+    const feed = ev("linear.issue.updated", "CTL-1894", ["estimate"]);
+    expect(edgeKey(smee)).toBe(edgeKey(feed));
+  });
+
+  test("stateId and state are the same change under two names", () => {
+    expect(edgeKey(ev("linear.issue.state_changed", "CTL-1", ["stateId"]))).toBe(
+      edgeKey(ev("linear.issue.updated", "CTL-1", ["state"])),
+    );
+  });
+
+  test("a real multi-field smee edge matches its feed counterpart", () => {
+    const smee = ev("linear.issue.state_changed", "CTC-1", ["completedAt", "sortOrder", "stateId", "updatedAt"]);
+    const feed = ev("linear.issue.updated", "CTC-1", ["state"]);
+    expect(edgeKey(smee)).toBe(edgeKey(feed));
+  });
+
+  test("coverage classes align across both vocabularies", () => {
+    expect(classOf(ev("linear.issue.updated", "CTL-1", ["stateId", "updatedAt"]))).toEqual([
+      "linear.issue.updated:state",
+    ]);
+  });
+
+  test("an edge of ONLY bookkeeping still explains as smee-only-fields", () => {
+    expect(explain("smee", "k", ev("linear.issue.updated", "CTL-1", ["updatedAt", "sortOrder"]))).toStartWith(
+      "smee-only-fields:",
+    );
+  });
+});

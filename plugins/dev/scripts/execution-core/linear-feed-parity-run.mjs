@@ -16,6 +16,7 @@
 import { existsSync, openSync, readSync, closeSync, statSync, readFileSync } from "node:fs";
 import { getEventLogPath, getExecutionCoreDir } from "./config.mjs";
 import { compareStreams } from "./linear-feed-parity.mjs";
+import { Database } from "bun:sqlite";
 
 const argv = process.argv.slice(2);
 const flag = (n, d) => {
@@ -64,13 +65,45 @@ function parseJsonl(lines) {
   return { events: out, torn };
 }
 
-const since = Date.now() - SINCE_MIN * 60_000;
+// ⛔ THE WINDOW MAY NOT REACH BACK BEFORE THE FEED EXISTED.
+// The feed can only know about changes AFTER its baseline was seeded — anything
+// earlier is already IN the baseline, so it correctly produces no diff. Comparing a
+// window that predates the seed therefore reports smee-only diffs for every change
+// in that period, which look exactly like missed dispatches and are not.
+//
+// Found on live data: CTC-587/594 changed at 05:18 and CTC-256 at 05:11, all before
+// the 05:20 seed. They showed as 7 "unexplained" smee-only diffs until the window
+// was clamped. A harness that manufactures false misses is worse than no harness —
+// people learn to discount it, and then discount the real one.
+const LASTSEEN = flag("--lastseen", `${getExecutionCoreDir()}/linear-feed-lastseen-tenant-0.db`);
+function feedSeededAt(path) {
+  if (!existsSync(path)) return null;
+  try {
+    const db = new Database(path, { readonly: true });
+    try {
+      const v = db.prepare("SELECT value FROM meta WHERE key = 'seeded_at'").get()?.value;
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
+}
+const requested = Date.now() - SINCE_MIN * 60_000;
+const seededAt = feedSeededAt(LASTSEEN);
+const since = seededAt !== null ? Math.max(requested, seededAt) : requested;
+const clamped = seededAt !== null && seededAt > requested;
 const smeeRaw = parseJsonl(tailLines(EVENTS, TAIL_BYTES));
 const feedRaw = parseJsonl(existsSync(SHADOW) ? readFileSync(SHADOW, "utf8").split("\n") : []);
 
 const result = compareStreams({ smee: smeeRaw.events, feed: feedRaw.events, since });
 const report = {
   windowMinutes: SINCE_MIN,
+  windowStart: new Date(since).toISOString(),
+  feedSeededAt: seededAt ? new Date(seededAt).toISOString() : null,
+  clampedToFeedStart: clamped,
   shadow: SHADOW,
   tornLines: { smee: smeeRaw.torn, feed: feedRaw.torn },
   ...result,
@@ -80,7 +113,12 @@ if (AS_JSON) {
   console.log(JSON.stringify(report, null, 2));
 } else {
   const T = "[parity]";
-  console.log(`${T} window: last ${SINCE_MIN}m`);
+  console.log(`${T} window: last ${SINCE_MIN}m → starts ${new Date(since).toISOString()}`);
+  if (clamped) {
+    console.log(`${T} ⛔ CLAMPED to the feed's seed time (${new Date(seededAt).toISOString()}) — the feed cannot know about changes before its baseline existed.`);
+  } else if (seededAt === null) {
+    console.log(`${T} ⚠️ no baseline found at ${LASTSEEN} — window NOT clamped; pre-seed changes will read as false smee-only diffs.`);
+  }
   console.log(`${T} events compared — smee: ${result.counts.smee}  feed: ${result.counts.feed}  matched keys: ${result.matchedKeys}`);
   console.log(`${T} torn lines — smee: ${smeeRaw.torn}  feed: ${feedRaw.torn}`);
   console.log(`${T} classes (smee): ${JSON.stringify(result.classes.smee)}`);

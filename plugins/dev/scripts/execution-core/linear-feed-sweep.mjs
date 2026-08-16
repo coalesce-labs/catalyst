@@ -361,5 +361,48 @@ export function runDiffSweep({
     }
   }
 
-  return { mode: start.mode, alarm: start.alarm, batches, stoppedEarly: stopped, position, edges: counts };
+  // ⚠️ COMMENTS ARE NOT DIFFED — they are appended, so a new row IS the event.
+  // The first cut of this sweep omitted them entirely, and the harness caught it
+  // immediately: smee reported 14 comment.created in the window and the feed could
+  // never match one. Comments swept AFTER edges so a comment storm cannot starve the
+  // dispatch trigger, and on their own cursor since they are a separate stream.
+  const commentCounts = emptyCounts();
+  // A source without a comment reader is a valid source (some callers only care
+  // about edges). Named skip rather than a throw — a missing capability must not
+  // take down the edge sweep that already succeeded.
+  if (!stopped && typeof source.commentsSince === "function") {
+    const commentCursorPath = `${cursorPath}.comments`;
+    const cRead = readCursorFn(commentCursorPath);
+    const cStart = resolveStartPosition(cRead, { now, resetLookbackMs });
+    let cPos = { lastCreatedAt: cStart.since, lastId: cRead?.position?.lastId ?? "" };
+    if (cStart.mode !== "resume") {
+      try {
+        writeCursorFn(commentCursorPath, cPos);
+      } catch {
+        /* noted below if it recurs */
+      }
+    }
+    const page = source.commentsSince(cPos);
+    if (page.length > 0) {
+      const res = processPage(page, {
+        classify: (item) =>
+          item?.issue?.team_key && teams?.has?.(item.issue.team_key)
+            ? { emit: true, reason: "ok" }
+            : { emit: false, reason: item?.issue?.team_key ? "foreign-team" : "unjoinable-issue" },
+        build: (item) => buildCommentEvent(item),
+        emit,
+        counts: commentCounts,
+      });
+      const next = source.positionAfter(res.handled);
+      if (next) {
+        try {
+          writeCursorFn(commentCursorPath, next);
+        } catch (err) {
+          note(commentCounts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
+        }
+      }
+    }
+  }
+
+  return { mode: start.mode, alarm: start.alarm, batches, stoppedEarly: stopped, position, edges: counts, comments: commentCounts };
 }
