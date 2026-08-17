@@ -33,6 +33,7 @@ import { buildCanonicalEvent } from "./lib/canonical-event.mjs";
 import { planTenants, runOnce } from "./linear-feed-run.mjs";
 import { createShadowSink } from "./linear-feed-shadow.mjs";
 import { isDispatchClass, ticketOf } from "./cloud-feed-gate.mjs";
+import { classifyFeedHealth, readFeedProgress } from "./feed-progress.mjs"; // CTL-1902
 import { getEventName } from "../lib/event-name.mjs";
 
 export const EVENT_WOULD_DISPATCH = "cloud-feed.would-dispatch";
@@ -41,20 +42,41 @@ export const EVENT_WOULD_DISPATCH = "cloud-feed.would-dispatch";
 export const DEFAULT_REPLICA_STALE_MS = 5 * 60 * 1000;
 
 /**
- * defaultReplicaFresh — is the replica still being written?
+ * defaultFeedHealthy — is the FEED still being fed? (CTL-1902)
  *
- * ⛔ Round-6 finding: when cloud-sync stalls while its SQLite file stays
- * readable, every source query returns an EMPTY page — zero rows, zero failures,
- * zero `byReason` entries. A sweep over a frozen replica is indistinguishable
- * from a sweep over a quiet fleet, so readiness stayed armed and enforce went on
- * suppressing webhook copies against a producer that could not produce.
+ * ⛔ THIS REPLACED A WRITER-LIVENESS CHECK, AND THE DIFFERENCE IS THE WHOLE POINT.
  *
- * "No errors" is not "working". The writer heartbeats into
- * `<replica>.writer.lock`, so that file is the positive evidence.
+ * Round 6 required `<replica>.writer.lock`'s heartbeat to be fresh. That file is
+ * written by the SDK's `CatalystReplica` and records that the writer PROCESS is
+ * alive. cloud-sync.mjs calls that heartbeat **feed-independent in its own
+ * comment** (~line 492) and documents the 18.5 h silent freeze where it kept
+ * beating against a frozen cursor. So a half-open feed kept enforce armed while
+ * live webhook copies were suppressed and no replacements were produced — the
+ * exact failure round 6 was trying to close, one level in.
  *
- * Fail-CLOSED: absent, unreadable, malformed, or stale all read as NOT fresh.
- * A host with no writer at all therefore never arms enforce, which is correct —
- * there is nothing there to be authoritative.
+ * The replacement asks about the feed instead: cloud-sync now publishes
+ * `<db>.feed-progress.json` every telemetry tick, and `classifyFeedHealth` reads
+ * inbound-frame recency off it. See feed-progress.mjs for why frame recency —
+ * and NOT cursor movement — is the right signal: a healthy QUIET feed freezes the
+ * cursor identically to a dead socket (reproduced live on mini-2, cursor frozen
+ * at 1146621 across successive ticks with frame staleness of 5–11 s), so gating
+ * on cursor movement would un-arm the producer through every quiet window.
+ *
+ * Fail-CLOSED, with the reason preserved: absent, unreadable, malformed, stale,
+ * frame-silent, and frame-unknown all read as NOT healthy. A host whose writer
+ * predates the publish therefore never arms enforce — correct, and loudly
+ * diagnosable via `lastFeedHealth()` rather than an unexplained un-armed gate.
+ */
+export function defaultFeedHealthy(dbPath, { now = Date.now, readFileFn = readFileSync, ...opts } = {}) {
+  return classifyFeedHealth(readFeedProgress(dbPath, { readFile: readFileFn }), { now: now(), ...opts }).healthy === true;
+}
+
+/**
+ * defaultReplicaFresh — RETAINED as the writer-liveness probe it always was, and
+ * deliberately NOT deleted: `catalyst doctor` and the replica readers still have
+ * legitimate reasons to ask "is the writer process alive?". What changed is that
+ * cloud-feed readiness no longer mistakes that question for "is the feed
+ * arriving?". Do not re-point readiness at this.
  */
 export function defaultReplicaFresh(dbPath, { now = Date.now, staleMs = DEFAULT_REPLICA_STALE_MS, readFileFn = readFileSync } = {}) {
   if (typeof dbPath !== "string" || dbPath === "") return false;
@@ -65,6 +87,69 @@ export function defaultReplicaFresh(dbPath, { now = Date.now, staleMs = DEFAULT_
   } catch {
     return false;
   }
+}
+
+/**
+ * countsClean — a sweep counts block is clean only by DEMONSTRATING it worked:
+ * no failure counter and NOTHING in byReason. Any reason, known or unknown,
+ * disqualifies — so a future reason string needs no change here.
+ */
+export function countsClean(counts) {
+  return counts != null && (counts.failed ?? 0) === 0 && Object.keys(counts.byReason ?? {}).length === 0;
+}
+
+/**
+ * countsDirtyWhy — why a counts block was NOT clean, as a short log string.
+ * Reports the byReason KEYS rather than a count of them: the reason string is
+ * the actionable part.
+ */
+export function countsDirtyWhy(counts) {
+  if (counts == null) return "absent";
+  const failed = counts.failed ?? 0;
+  const keys = Object.keys(counts.byReason ?? {});
+  if (failed > 0 && keys.length > 0) return `failed=${failed},${keys.join("|")}`;
+  if (failed > 0) return `failed=${failed}`;
+  return keys.join("|") || "unknown";
+}
+
+/**
+ * sweepUnreadyReason — WHY this tenant's report does not arm the producer, or
+ * null when it does. (CTL-1902)
+ *
+ * ⛔ Extracted because the un-arm alarm could not be acted on. The old predicate
+ * was a bare `&&` chain and its WARN line carried `{ mode }` and nothing else;
+ * the daemon also never passes `onReport`, so the reports reached no sink at
+ * all. Measured on mini-2 2026-08-17: 21 un-arm episodes in 3.1 h with ZERO
+ * recoverable evidence of which conjunct failed on any of them. An alarm that
+ * says "unhealthy" without saying why is the same family as a check whose pass
+ * and fail look identical to its caller.
+ *
+ * Pure: the feed-health verdict is passed IN (already computed against the
+ * injectable seam) rather than resolved here. Evaluation order is identical to
+ * the chain it replaces, so the verdict is unchanged — only the explanation is
+ * new.
+ *
+ * @param {object} report            one tenant's runOnce report
+ * @param {object} feedHealth        { healthy: boolean, reason?: string }
+ * @returns {string|null}            null ⇒ this tenant is ready
+ */
+export function sweepUnreadyReason(report, feedHealth = { healthy: false, reason: "unknown" }) {
+  const r = report;
+  if (!r) return "no-report";
+  if (r.skipped) return `skipped:${r.skipped}`;
+  if (r.error) return `error:${r.error}`;
+  if (feedHealth?.healthy !== true) return `feed-unhealthy:${feedHealth?.reason ?? "unknown"}`;
+  if (!r.sweep) return "no-sweep";
+  if (r.sweep.mode === "seeded") return "seeding";
+  if (r.sweep.stoppedEarly === true) return "stopped-early";
+  if (!countsClean(r.sweep.edges)) return `edges:${countsDirtyWhy(r.sweep.edges)}`;
+  if (!countsClean(r.sweep.comments)) return `comments:${countsDirtyWhy(r.sweep.comments)}`;
+  // CTL-1904: the label sweep counts too. `labels` is absent on a seeding tick
+  // and from runSweep (the superseded history path), and absent is treated as
+  // clean — a sweep that never ran a label pass is not a label pass that failed.
+  // A PRESENT-and-dirty one disqualifies.
+  if (r.sweep.labels !== undefined && !countsClean(r.sweep.labels)) return `labels:${countsDirtyWhy(r.sweep.labels)}`;
+  return null;
 }
 
 /**
@@ -222,7 +307,11 @@ export function startCloudFeedTimer({
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   onReport = null,
-  replicaFreshFn = defaultReplicaFresh,
+  // ⛔ CTL-1902: this is FEED health, not writer liveness. The parameter was
+  // renamed with the semantics it now carries — a caller still passing
+  // `replicaFreshFn` would otherwise silently re-install the very check this
+  // ticket removed, with no error and no test failure.
+  feedHealthyFn = defaultFeedHealthy,
 } = {}) {
   if (mode !== "shadow" && mode !== "enforce") return null;
 
@@ -272,10 +361,26 @@ export function startCloudFeedTimer({
       // assume; it is one you would have to prove each tick, which is the same
       // thing as not latching.
       //
-      // Flapping is harmless here and that is what makes this safe: with ready
-      // false the gate makes smee authoritative AND still suppresses feed
-      // events, so no posture permits double-dispatch. The worst case is that
-      // dispatch alternates between two sources that both dispatch correctly.
+      // ⛔ "Flapping is harmless" — I wrote that here, and it was FALSE IN BOTH
+      // DIRECTIONS (CTL-1901). With ready false the gate also suppressed feed
+      // events that had ALREADY been stamped authoritative by an armed sweep,
+      // while their webhook twins had already been captured under the older
+      // ready=true — so the posture lost the edge outright rather than merely
+      // alternating sources. Measured on mini-2 2026-08-17: 21 flaps in 3.1 h,
+      // every un-arm exactly ONE tick long (29.8–30.5 s), 5.4% of wall clock
+      // unarmed — routinely hit, not a rare race.
+      //
+      // What makes flapping safe NOW is not this flag being steady; it is that
+      // cloud-feed-gate no longer consults it for feed events at all. The stamp
+      // written below is the feed's whole authority, and it is read from the
+      // value carried INTO this tick — the same value the webhook twin's own
+      // decision was made under — so the two agree and each edge is delivered
+      // exactly once. See the derivation in cloud-feed-gate.mjs's enforce block.
+      //
+      // ⚠️ THAT ORDERING IS LOAD-BEARING: `runOnceFn` (which emits, and whose
+      // sink reads `ready` to stamp) must run BEFORE `ready` is recomputed
+      // below. Sealed by cloud-feed-timer.test.mjs's "authority is sampled
+      // BEFORE readiness is recomputed" block, not by this comment.
       //
       // EVERY tenant must have swept cleanly — not `some`. A healthy tenant must
       // not mask a skipped or failing one, whose events would otherwise be
@@ -283,42 +388,73 @@ export function startCloudFeedTimer({
       // A sweep counts as clean only by DEMONSTRATING it worked: no failure
       // counters and NOTHING in byReason — any reason, known or unknown,
       // disqualifies, so a future reason string needs no change here.
-      const clean = (counts) =>
-        counts != null &&
-        (counts.failed ?? 0) === 0 &&
-        Object.keys(counts.byReason ?? {}).length === 0;
+      // `countsClean` / `countsDirtyWhy` / `sweepUnreadyReason` are module-level
+      // pure functions (above) so the readiness rule is unit-testable without a
+      // replica, a clock, or a daemon.
       // A skipped tenant is NOT clean: the feed produces nothing for it, so its
       // events would be suppressed with no replacement. `mode === "seeded"` is
       // not clean either — a (re)seed emits nothing.
       // A sweep over a FROZEN replica reports zero of everything and looks
-      // perfect. Readiness therefore also requires positive evidence that the
-      // replica is still being written.
+      // perfect. Readiness therefore also requires positive evidence about the
+      // FEED — that this node is still being spoken to (inbound frames, incl.
+      // watchdog pongs), published by cloud-sync into `<db>.feed-progress.json`.
+      // ⛔ CTL-1902: this used to be `replicaFreshFn`, the writer's own heartbeat,
+      // which cloud-sync.mjs documents as feed-INDEPENDENT — it kept beating
+      // through an 18.5 h frozen-cursor incident. "The writer is alive" and "the
+      // feed is arriving" are different questions and only the second one licenses
+      // suppressing smee.
       const planFor = (acct) => resolvedPlans.find((pl) => pl.account === acct);
-      const swept = (r) =>
-        r &&
-        !r.skipped &&
-        !r.error &&
-        replicaFreshFn(planFor(r.account)?.dbPath) === true &&
-        r.sweep &&
-        r.sweep.mode !== "seeded" &&
-        r.sweep.stoppedEarly !== true &&
-        clean(r.sweep.edges) &&
-        clean(r.sweep.comments) &&
-        // CTL-1904: the label sweep counts too. `labels` is absent on a seeding
-        // tick and from runSweep (the superseded history path), and absent is
-        // treated as clean — a sweep that never ran a label pass is not a label
-        // pass that failed. A PRESENT-and-dirty one disqualifies.
-        (r.sweep.labels === undefined || clean(r.sweep.labels));
+      // ⛔ THE PREDICATE NAMES ITS OWN FAILING CONJUNCT (CTL-1902).
+      //
+      // This was a bare `&&` chain feeding `reports.every(swept)`, and the
+      // un-arm line it produced carried `{ mode }` and nothing else. The daemon
+      // also never passes `onReport`, so the reports themselves reached no sink
+      // either — measured tonight: 21 un-arm episodes on mini-2 in 3.1 h with
+      // ZERO recoverable evidence of which conjunct failed on any of them. An
+      // alarm that says "unhealthy" without saying why cannot be acted on, and
+      // it is the same family as a check whose pass and fail look identical to
+      // its caller.
+      //
+      // `unreadyReason` returns null when the tenant swept cleanly, else the
+      // FIRST failing conjunct by name. Evaluation order is unchanged, so the
+      // verdict is bit-identical to the old chain — only the explanation is new.
+      const unreadyReason = (r) => {
+        // The VERDICT stays on the injectable seam (so a caller's override is
+        // still authoritative); the classifier is consulted only to LABEL a
+        // failure the seam already returned, and a throwing explanation must
+        // never change the verdict.
+        const dbPath = planFor(r?.account)?.dbPath;
+        const healthy = feedHealthyFn(dbPath) === true;
+        let reason = "unknown";
+        if (!healthy) {
+          try {
+            reason = classifyFeedHealth(readFeedProgress(dbPath), { now: Date.now() }).reason;
+          } catch {
+            /* keep "unknown" */
+          }
+        }
+        return sweepUnreadyReason(r, { healthy, reason });
+      };
 
       const wasReady = ready;
-      ready = Array.isArray(reports) && reports.length > 0 && reports.every(swept);
+      const reasons =
+        Array.isArray(reports) && reports.length > 0
+          ? reports.map((r) => ({ account: r?.account ?? null, reason: unreadyReason(r) })).filter((x) => x.reason)
+          : [{ account: null, reason: "no-tenants" }];
+      ready = reasons.length === 0;
       if (wasReady && !ready) {
         log.warn?.(
-          { mode },
+          { mode, unready: reasons },
           "cloud-feed: producer NO LONGER healthy — un-arming, smee is authoritative again",
         );
       } else if (!wasReady && ready) {
         log.info?.({ mode }, "cloud-feed: producer armed (clean sweep)");
+      } else if (!ready) {
+        // Steady-state unready. Logged at DEBUG so a host that never arms is
+        // diagnosable without a 30 s WARN drumbeat for the whole outage — the
+        // count-every / warn-sparsely discipline used by otel-forward's
+        // sparse-warn gate.
+        log.debug?.({ mode, unready: reasons }, "cloud-feed: producer still not armed");
       }
       if (onReport) onReport(reports);
       return reports;

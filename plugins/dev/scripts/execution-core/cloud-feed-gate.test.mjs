@@ -173,13 +173,30 @@ describe("decideDispatch — enforce is not armed until the producer is ready (C
     expect(v.reason).toBe("enforce-not-armed");
   });
 
-  test("NOT ready ⇒ the feed still cannot dispatch (no double-dispatch in the gap)", () => {
+  // ⛔ CTL-1901. This test previously asserted the DEFECT: a feed event already
+  // stamped authoritative by an armed sweep was expected to be suppressed once
+  // readiness went false. Its twin had already been captured under the older
+  // ready=true and the sweep's cursor had advanced past the edge, so the edge
+  // reached NEITHER path. The stamp is now sufficient on its own.
+  test("NOT ready ⇒ a STAMPED feed event still dispatches (the stamp is not revocable)", () => {
     const v = decideDispatch(feedEvent("linear.issue.state_changed"), {
       mode: "enforce",
       isReady: () => false,
     });
+    expect(v.suppress).toBe(false);
+    expect(v.reason).toBe("feed-authoritative");
+  });
+
+  test("NOT ready ⇒ an UNSTAMPED feed event still cannot dispatch", () => {
+    // The other half of the same boundary: readiness going false must not GRANT
+    // authority either. Without this, the test above would pass against a gate
+    // that simply stopped suppressing the feed.
+    const v = decideDispatch(unarmedFeedEvent("linear.issue.state_changed"), {
+      mode: "enforce",
+      isReady: () => false,
+    });
     expect(v.suppress).toBe(true);
-    expect(v.reason).toBe("enforce-not-armed");
+    expect(v.reason).toBe("feed-emitted-while-unarmed");
   });
 
   test("ready ⇒ enforce behaves as enforce", () => {
@@ -193,8 +210,11 @@ describe("decideDispatch — enforce is not armed until the producer is ready (C
     expect(noKey.reason).toBe("enforce-not-armed");
     expect(noKey.suppress).toBe(false);
     expect(decideDispatch(smeeEvent("linear.issue.state_changed"), { mode: "enforce", isReady: null }).suppress).toBe(false);
-    // ...and the feed correspondingly cannot dispatch on an unwired gate.
-    expect(decideDispatch(feedEvent("linear.issue.state_changed"), { mode: "enforce" }).suppress).toBe(true);
+    // ...and an UNSTAMPED feed event correspondingly cannot dispatch on an
+    // unwired gate. (A stamped one still can, and must: an unwired readiness
+    // probe is a caller mistake, and CTL-1901's rule is that it can only ever
+    // cost a duplicate — never a loss. See the exactly-once scenario below.)
+    expect(decideDispatch(unarmedFeedEvent("linear.issue.state_changed"), { mode: "enforce" }).suppress).toBe(true);
   });
 
   test("a THROWING probe is NOT ready", () => {
@@ -469,5 +489,113 @@ describe("⛔ the emission stamp decides, not a mutable flag", () => {
       expect(decideDispatch(feedEvent("linear.issue.updated"), { mode }).suppress).toBe(true);
       expect(decideDispatch(unarmedFeedEvent("linear.issue.updated"), { mode }).suppress).toBe(true);
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1901 — a mid-sweep readiness drop must not strand an already-stamped edge.
+//
+// Counted as DELIVERIES, not as per-event verdicts. Both earlier attempts at
+// this boundary passed their own per-event assertions while the edge as a whole
+// reached zero handlers; the only assertion that catches that is "how many times
+// did this ONE edge get delivered".
+// ─────────────────────────────────────────────────────────────────────────────
+describe("CTL-1901 — exactly-once delivery across a readiness transition", () => {
+  const armed = () => true;
+  const unarmed = () => false;
+
+  /** Deliveries for one edge = the copies the gate did NOT suppress. */
+  const deliveries = (copies) =>
+    copies.filter(({ event, isReady }) => !decideDispatch(event, { mode: "enforce", isReady }).suppress).length;
+
+  test("ACCEPTANCE: armed sweep emits A, the sweep then fails and un-arms — A still dispatches, its twin stays captured, exactly ONE delivery", () => {
+    // The exact sequence from the ticket:
+    //   1. an armed sweep stamps event A authoritative
+    //   2. A's webhook twin is consumed while readiness is still true → captured
+    //   3. a later row in that same sweep fails, readiness flips false
+    //   4. only THEN does the log tail reach A
+    // Before the fix the armed check ran first, so step 4 suppressed A — and
+    // step 2 had already captured the twin, and the sweep's successful prefix
+    // had advanced the cursor, so there was no retry. Zero deliveries.
+    const A = feedEvent("linear.issue.state_changed");
+    const twin = smeeEvent("linear.issue.state_changed");
+
+    expect(
+      deliveries([
+        { event: twin, isReady: armed }, // consumed while still armed → captured
+        { event: A, isReady: unarmed }, // consumed after the drop
+      ])
+    ).toBe(1);
+
+    // ...and it is specifically the FEED copy that delivered.
+    expect(decideDispatch(A, { mode: "enforce", isReady: unarmed }).reason).toBe("feed-authoritative");
+    expect(decideDispatch(twin, { mode: "enforce", isReady: armed }).reason).toBe("smee-captured");
+  });
+
+  test("NEGATIVE CONTROL: an UNSTAMPED event under the same sequence is still suppressed", () => {
+    // Without this, the acceptance test above would pass against a gate that had
+    // simply stopped suppressing the feed altogether.
+    const A = unarmedFeedEvent("linear.issue.state_changed");
+    const twin = smeeEvent("linear.issue.state_changed");
+
+    // The twin dispatched (it was consumed while unarmed), the feed copy did not.
+    expect(deliveries([{ event: twin, isReady: unarmed }, { event: A, isReady: unarmed }])).toBe(1);
+    expect(decideDispatch(A, { mode: "enforce", isReady: unarmed }).reason).toBe("feed-emitted-while-unarmed");
+  });
+
+  test("the steady states are still exactly-once in both postures", () => {
+    // Fully armed: feed delivers, smee captured.
+    expect(
+      deliveries([
+        { event: smeeEvent("linear.issue.state_changed"), isReady: armed },
+        { event: feedEvent("linear.issue.state_changed"), isReady: armed },
+      ])
+    ).toBe(1);
+
+    // Fully unarmed: smee delivers, the feed's copy is stamped false by the
+    // unarmed sweep that produced it.
+    expect(
+      deliveries([
+        { event: smeeEvent("linear.issue.state_changed"), isReady: unarmed },
+        { event: unarmedFeedEvent("linear.issue.state_changed"), isReady: unarmed },
+      ])
+    ).toBe(1);
+  });
+
+  test("across a RE-ARM the edge is delivered exactly once", () => {
+    // The mirror of the acceptance case. An edge occurring while unarmed: its
+    // twin dispatches (readiness false at consumption) and its feed copy is
+    // emitted by the recovering tick, which stamps with the value carried INTO
+    // that tick — still false. One delivery, via smee.
+    expect(
+      deliveries([
+        { event: smeeEvent("linear.comment.created"), isReady: unarmed },
+        { event: unarmedFeedEvent("linear.comment.created"), isReady: armed }, // consumed after the re-arm
+      ])
+    ).toBe(1);
+  });
+
+  test("readiness is consulted for the SMEE side only", () => {
+    // The asymmetry stated as a property: flipping readiness changes the smee
+    // verdict and never the feed verdict.
+    const A = feedEvent("linear.issue.updated");
+    expect(decideDispatch(A, { mode: "enforce", isReady: armed }).suppress).toBe(
+      decideDispatch(A, { mode: "enforce", isReady: unarmed }).suppress
+    );
+
+    const twin = smeeEvent("linear.issue.updated");
+    expect(decideDispatch(twin, { mode: "enforce", isReady: armed }).suppress).not.toBe(
+      decideDispatch(twin, { mode: "enforce", isReady: unarmed }).suppress
+    );
+  });
+
+  test("an unknown producer is still captured while armed, and never inherits the stamp", () => {
+    // `other` must not be able to buy authority by carrying a feedAuthority key.
+    const mystery = {
+      attributes: { "event.name": "linear.issue.state_changed", "linear.issue.identifier": "CTL-1" },
+      body: { payload: { ticket: "CTL-1", feedAuthority: true } },
+    };
+    expect(decideDispatch(mystery, { mode: "enforce", isReady: armed }).suppress).toBe(true);
+    expect(decideDispatch(mystery, { mode: "enforce", isReady: armed }).reason).toBe("smee-captured");
   });
 });
