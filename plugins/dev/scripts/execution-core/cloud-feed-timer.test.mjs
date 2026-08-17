@@ -9,6 +9,10 @@ import {
   DEFAULT_REPLICA_STALE_MS,
   EVENT_WOULD_DISPATCH,
   defaultReplicaFresh,
+  defaultFeedHealthy,
+  sweepUnreadyReason,
+  countsClean,
+  countsDirtyWhy,
   buildWouldDispatchEvent,
   createModeSink,
   startCloudFeedTimer,
@@ -225,7 +229,7 @@ describe("startCloudFeedTimer", () => {
     // date because linear-feed-shadow-run.mjs omitted this argument entirely.
     let seen;
     const handle = startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "shadow",
       plans: [],
       botUserIds: new Set(["bot-1"]),
@@ -243,7 +247,7 @@ describe("startCloudFeedTimer", () => {
   test("plans are resolved with mode 'diff' — the shipping edge source", () => {
     let planArgs;
     const handle = startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "enforce",
       orchDir: "/orch",
       planTenantsFn: (a) => {
@@ -259,7 +263,7 @@ describe("startCloudFeedTimer", () => {
 
   test("a THROWING tick never propagates — the daemon must not die with it", () => {
     const handle = startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => {
@@ -274,7 +278,7 @@ describe("startCloudFeedTimer", () => {
   test("the interval floors at 5s so a bad config cannot busy-spin", () => {
     let ms;
     startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "shadow",
       intervalSec: 0,
       plans: [],
@@ -292,7 +296,7 @@ describe("startCloudFeedTimer", () => {
     const real = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0 }, comments: { failed: 0 } } }];
     let reports = seeding;
     const handle = startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => reports,
@@ -318,7 +322,7 @@ describe("startCloudFeedTimer", () => {
     ];
     for (const c of cases) {
       const handle = startCloudFeedTimer({
-        replicaFreshFn: () => true,
+        feedHealthyFn: () => true,
         mode: "enforce",
         plans: [],
         runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep: c.sweep }],
@@ -331,7 +335,7 @@ describe("startCloudFeedTimer", () => {
 
   test("NEGATIVE CONTROL: a clean zero-failure sweep DOES arm it", () => {
     const handle = startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => [
@@ -350,7 +354,7 @@ describe("startCloudFeedTimer", () => {
       [],
     ]) {
       const handle = startCloudFeedTimer({
-        replicaFreshFn: () => true,
+        feedHealthyFn: () => true,
         mode: "enforce",
         plans: [],
         runOnceFn: () => reports,
@@ -387,7 +391,7 @@ describe("startCloudFeedTimer", () => {
 
   test.each(FAILURE_SHAPES)("readiness stays UNARMED: %s", (_label, sweep) => {
     const handle = startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep }],
@@ -400,7 +404,7 @@ describe("startCloudFeedTimer", () => {
   test("NEGATIVE CONTROL for the whole table: the clean shape DOES arm", () => {
     // Without this, every row above would pass against a predicate that never arms.
     const handle = startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep: OK }],
@@ -413,7 +417,7 @@ describe("startCloudFeedTimer", () => {
   test("cursor failures are matched by PREFIX — the reason carries an errno suffix", () => {
     // An equality check on "cursor-write-failed" would match nothing at all.
     const handle = startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => [
@@ -432,7 +436,7 @@ describe("startCloudFeedTimer", () => {
     // smee. Those events would reach nobody.
     const clean = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
     let reports = [{ account: "tenant-0", skipped: null, sweep: clean }];
-    const handle = startCloudFeedTimer({ replicaFreshFn: () => true, mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
+    const handle = startCloudFeedTimer({ feedHealthyFn: () => true, mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
     handle.tick();
     expect(handle.isReady()).toBe(true);
 
@@ -461,7 +465,7 @@ describe("startCloudFeedTimer", () => {
     ];
     for (const [label, bad] of unhealthy) {
       let reports = [{ account: "t0", skipped: null, sweep: OKS }];
-      const handle = startCloudFeedTimer({ replicaFreshFn: () => true, mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
+      const handle = startCloudFeedTimer({ feedHealthyFn: () => true, mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
       handle.tick();
       expect(handle.isReady()).toBe(true);
       reports = bad;
@@ -477,7 +481,7 @@ describe("startCloudFeedTimer", () => {
   test("EVERY tenant must be clean — a healthy one cannot mask a failing one", () => {
     const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
     const handle = startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "enforce",
       plans: [],
       runOnceFn: () => [
@@ -494,7 +498,7 @@ describe("startCloudFeedTimer", () => {
     const reports = [{ account: "tenant-0", skipped: null }];
     let got;
     const handle = startCloudFeedTimer({
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       mode: "shadow",
       plans: [],
       runOnceFn: () => reports,
@@ -507,11 +511,11 @@ describe("startCloudFeedTimer", () => {
 });
 
 // ── CTL-1847 (Codex P1 round 6): a frozen replica must not stay armed ────────
-describe("⛔ replica freshness is required for readiness", () => {
+describe("⛔ CTL-1902 — FEED health (not writer liveness) is required for readiness", () => {
   const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
   const report = [{ account: "tenant-0", skipped: null, sweep: OKS }];
 
-  test("a STALE replica un-arms even though the sweep looks perfect", () => {
+  test("an UNHEALTHY feed un-arms even though the sweep looks perfect", () => {
     // When cloud-sync stalls while its SQLite file stays readable, every query
     // returns an empty page — zero rows, zero failures, zero byReason. A sweep
     // over a frozen replica is indistinguishable from a quiet fleet.
@@ -519,19 +523,19 @@ describe("⛔ replica freshness is required for readiness", () => {
       mode: "enforce",
       plans: [{ account: "tenant-0", dbPath: "/tmp/x.db" }],
       runOnceFn: () => report,
-      replicaFreshFn: () => false,
+      feedHealthyFn: () => false,
       setIntervalFn: () => "H",
     });
     handle.tick();
     expect(handle.isReady()).toBe(false);
   });
 
-  test("NEGATIVE CONTROL: the same sweep with a FRESH replica arms", () => {
+  test("NEGATIVE CONTROL: the same sweep with a HEALTHY feed arms", () => {
     const handle = startCloudFeedTimer({
       mode: "enforce",
       plans: [{ account: "tenant-0", dbPath: "/tmp/x.db" }],
       runOnceFn: () => report,
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       setIntervalFn: () => "H",
     });
     handle.tick();
@@ -578,7 +582,7 @@ describe("⛔ tenant scope is not cached at startup", () => {
         return [];
       },
       runOnceFn: () => [],
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       setIntervalFn: () => "H",
     });
     handle.tick();
@@ -598,7 +602,7 @@ describe("⛔ tenant scope is not cached at startup", () => {
         seenPlans = plans;
         return [];
       },
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       setIntervalFn: () => "H",
     });
     handle.tick();
@@ -616,7 +620,7 @@ describe("⛔ tenant scope is not cached at startup", () => {
       plans: [{ account: "tenant-0", dbPath: "/tmp/x.db" }],
       planTenantsFn: () => { calls += 1; return []; },
       runOnceFn: () => [],
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       setIntervalFn: () => "H",
     });
     handle.tick();
@@ -656,7 +660,7 @@ describe("⛔ CTL-1901 — authority is sampled BEFORE readiness is recomputed",
       mode: "enforce",
       plans: [],
       runOnceFn,
-      replicaFreshFn: () => true,
+      feedHealthyFn: () => true,
       setIntervalFn: () => "H",
     });
     const after = [];
@@ -691,5 +695,121 @@ describe("⛔ CTL-1901 — authority is sampled BEFORE readiness is recomputed",
     const { sampled, after } = run([OKS, OKS, OKS]);
     expect(after).toEqual([true, true, true]);
     expect(sampled).toEqual([false, true, true]); // false only on the very first tick
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1902 — the readiness probe the daemon actually uses, end to end.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1902 — defaultFeedHealthy reads published ingest evidence", () => {
+  const T = 1_786_940_000_000;
+  const now = () => T;
+  const record = (over = {}) => JSON.stringify({ updatedAt: T, lastFrameAt: T - 5_000, cursor: 1, genuineStall: false, ...over });
+
+  test("a HEALTHY published record arms it", () => {
+    expect(defaultFeedHealthy("/tmp/x.db", { now, readFileFn: () => record() })).toBe(true);
+  });
+
+  test("⭐ a frozen CURSOR with fresh frames still arms it — the quiet feed is healthy", () => {
+    // The literal reading of the AC would fail here, on a node that is fine.
+    expect(defaultFeedHealthy("/tmp/x.db", { now, readFileFn: () => record({ cursor: 1146621, maxUpdatedMs: T - 3_600_000 }) })).toBe(true);
+  });
+
+  test("⭐ ACCEPTANCE: a live writer with a FROZEN FEED does NOT arm it", () => {
+    // The record is fresh (so the writer is alive and publishing) but no inbound
+    // frames have arrived. Under the old writer-liveness probe this armed.
+    expect(defaultFeedHealthy("/tmp/x.db", { now, readFileFn: () => record({ lastFrameAt: T - 10 * 60 * 1000 }) })).toBe(false);
+  });
+
+  test("fails CLOSED on absent / unreadable / malformed / stale / stalled", () => {
+    const enoent = () => { const e = new Error("nope"); e.code = "ENOENT"; throw e; };
+    const cases = [
+      ["absent", enoent],
+      ["unreadable", () => { throw new Error("EACCES"); }],
+      ["malformed", () => "{not json"],
+      ["stale record", () => record({ updatedAt: T - 10 * 60 * 1000 })],
+      ["genuine stall", () => record({ genuineStall: true })],
+      ["no lastFrameAt (older SDK)", () => record({ lastFrameAt: null })],
+    ];
+    for (const [label, readFileFn] of cases) {
+      expect(defaultFeedHealthy("/tmp/x.db", { now, readFileFn }), label).toBe(false);
+    }
+  });
+
+  test("an empty db path is not healthy", () => {
+    expect(defaultFeedHealthy("")).toBe(false);
+    expect(defaultFeedHealthy(undefined)).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1902 — the un-arm alarm must say WHY.
+//
+// Measured on mini-2 2026-08-17: 21 un-arm episodes in 3.1 h, and NOT ONE of
+// them left recoverable evidence of which conjunct failed — the WARN line
+// carried `{ mode }` and the daemon never wires `onReport`. An alarm that says
+// "unhealthy" without saying why cannot be acted on.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1902 — sweepUnreadyReason names the failing conjunct", () => {
+  const OK = { failed: 0, byReason: {} };
+  const HEALTHY = { healthy: true };
+  const good = { account: "t0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: OK, comments: OK } };
+
+  test("NEGATIVE CONTROL: a clean report returns null (ready)", () => {
+    // Without this, every assertion below would pass against a function that
+    // always returned a string.
+    expect(sweepUnreadyReason(good, HEALTHY)).toBe(null);
+  });
+
+  test("each disqualifying condition is named, and named distinctly", () => {
+    const cases = [
+      [null, HEALTHY, "no-report"],
+      [{ account: "t0", skipped: "replica-absent" }, HEALTHY, "skipped:replica-absent"],
+      [{ account: "t0", error: "replica gone" }, HEALTHY, "error:replica gone"],
+      [good, { healthy: false, reason: "frame-silent" }, "feed-unhealthy:frame-silent"],
+      [{ account: "t0" }, HEALTHY, "no-sweep"],
+      [{ account: "t0", sweep: { ...good.sweep, mode: "seeded" } }, HEALTHY, "seeding"],
+      [{ account: "t0", sweep: { ...good.sweep, stoppedEarly: true } }, HEALTHY, "stopped-early"],
+      [{ account: "t0", sweep: { ...good.sweep, edges: { failed: 3, byReason: {} } } }, HEALTHY, "edges:failed=3"],
+      [{ account: "t0", sweep: { ...good.sweep, comments: { failed: 0, byReason: { "rate-limited": 2 } } } }, HEALTHY, "comments:rate-limited"],
+      [{ account: "t0", sweep: { ...good.sweep, labels: { failed: 1, byReason: { deferred: 1 } } } }, HEALTHY, "labels:failed=1,deferred"],
+    ];
+    const seen = new Set();
+    for (const [report, health, expected] of cases) {
+      const got = sweepUnreadyReason(report, health);
+      expect(got, JSON.stringify(report)).toBe(expected);
+      seen.add(got);
+    }
+    // Distinct: an explanation that collapses two causes to one string is not
+    // an explanation.
+    expect(seen.size).toBe(cases.length);
+  });
+
+  test("the feed-health verdict is passed IN, never re-derived here", () => {
+    // The seam stays authoritative: an unhealthy verdict disqualifies even a
+    // perfect sweep, and a healthy one never rescues a dirty sweep.
+    expect(sweepUnreadyReason(good, { healthy: false, reason: "absent" })).toBe("feed-unhealthy:absent");
+    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, edges: { failed: 1, byReason: {} } } }, HEALTHY)).toBe("edges:failed=1");
+  });
+
+  test("an ABSENT health argument is not healthy (fail-closed default)", () => {
+    expect(sweepUnreadyReason(good)).toBe("feed-unhealthy:unknown");
+    expect(sweepUnreadyReason(good, null)).toBe("feed-unhealthy:unknown");
+  });
+
+  test("a label sweep that never RAN is not a label sweep that FAILED", () => {
+    // CTL-1904: `labels` absent (seeding tick / the superseded runSweep path) is
+    // clean; present-and-dirty disqualifies.
+    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, labels: undefined } }, HEALTHY)).toBe(null);
+    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, labels: OK } }, HEALTHY)).toBe(null);
+  });
+
+  test("countsClean / countsDirtyWhy: any byReason entry disqualifies, and its KEY is reported", () => {
+    expect(countsClean({ failed: 0, byReason: {} })).toBe(true);
+    expect(countsClean(null)).toBe(false);
+    expect(countsClean({ failed: 0, byReason: { "some-future-reason": 1 } })).toBe(false);
+    expect(countsDirtyWhy({ failed: 0, byReason: { "some-future-reason": 1 } })).toBe("some-future-reason");
+    expect(countsDirtyWhy({ failed: 2, byReason: { a: 1, b: 1 } })).toBe("failed=2,a|b");
+    expect(countsDirtyWhy(null)).toBe("absent");
   });
 });
