@@ -56,7 +56,7 @@ async function gql(token, query, variables) {
 }
 
 const token = await mint();
-const d = await gql(token, `query($k:String!){ issue(id:$k){ id url comments(first:100, orderBy: createdAt){ nodes{ id createdAt parent{ id } user{ id name } botActor{ type userDisplayName } } } } }`, { k: issueKey });
+const d = await gql(token, `query($k:String!){ issue(id:$k){ id url comments(first:100, orderBy: createdAt){ nodes{ id createdAt parent{ id } user{ id name } botActor{ type userDisplayName } reactions{ id emoji } } } } }`, { k: issueKey });
 const issue = d.issue;
 if (!issue) { console.error("issue not found: " + issueKey); process.exit(1); }
 
@@ -65,11 +65,20 @@ if (parentArg) {
   const c = issue.comments.nodes.find(n => n.id === parentArg);
   parentId = c?.parent?.id ?? parentArg; // always the root
 } else if (!top) {
-  const humans = issue.comments.nodes.filter(n => n.user && !n.botActor);
+  const humans = issue.comments.nodes.filter(n => n.user && !n.botActor && n.user.id === (process.env.ASK_HUMAN_ID || "c2a8cc92-cab6-4536-9500-0f24abdf702b")).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)); // API order is newest-first; sort ASC explicitly
   const last = humans[humans.length - 1];
   if (last) parentId = last.parent?.id ?? last.id;
 }
 const m = await gql(token, `mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success comment{ id url } } }`, {
   in: { issueId: issue.id, body, createAsUser: asAgent, ...(parentId ? { parentId } : {}) },
 });
-console.log(JSON.stringify({ ok: m.commentCreate.success, commentId: m.commentCreate.comment.id, parentId, url: m.commentCreate.comment.url }));
+// Ryan (2026-08-17): 👀 on the human's LATEST comment means "read, working on it"; it comes OFF once the reply
+// is posted (not at resolution). Clear any eyes reactions on the comment we replied under, unless --keep-eyes.
+let cleared = 0;
+if (!process.argv.includes("--keep-eyes")) {
+  const target = issue.comments.nodes.filter(n => n.user && !n.botActor).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).slice(-1)[0];
+  for (const rx of (target?.reactions ?? []).filter(r => r.emoji === "eyes")) {
+    try { await gql(token, `mutation($id:String!){ reactionDelete(id:$id){ success } }`, { id: rx.id }); cleared++; } catch {}
+  }
+}
+console.log(JSON.stringify({ ok: m.commentCreate.success, commentId: m.commentCreate.comment.id, parentId, url: m.commentCreate.comment.url, eyesCleared: cleared }));
