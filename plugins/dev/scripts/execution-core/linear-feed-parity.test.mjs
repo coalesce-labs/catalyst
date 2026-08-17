@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-feed-parity.test.mjs
 
 import { describe, expect, test } from "bun:test";
-import { classOf, compareStreams, edgeKey, explain, resolveWindow } from "./linear-feed-parity.mjs";
+import { classOf, compareStreams, edgeKey, explain, isFeedSourced, resolveWindow } from "./linear-feed-parity.mjs";
 
 const ev = (name, ticket, keys = [], ts = "2026-08-16T01:00:00Z") => ({
   ts,
@@ -749,5 +749,100 @@ describe("⛔ linear-feed-parity-run.mjs is executed, not grepped", () => {
     for (const name of m[1].split(",").map((x) => x.trim()).filter(Boolean)) {
       expect(mod[name], `linear-feed-parity.mjs must export ${name}`).toBeDefined();
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1907 — under enforce the producer writes into the SAME event log the
+// harness reads for its smee side. Without a source filter the instrument
+// agrees with itself.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1907 — the smee side excludes the feed's own events", () => {
+  const W = { since: Date.parse("2026-08-16T00:00:00Z"), until: Date.parse("2026-08-16T02:00:00Z") };
+  const webhookEv = (name, ticket, keys = [], ts = "2026-08-16T01:00:00Z") => ({
+    ts,
+    attributes: { "event.name": name, "linear.issue.identifier": ticket, "webhook.delivery.id": "d-1" },
+    body: { payload: { ticket, updatedFromKeys: keys } },
+  });
+  const feedEv = (name, ticket, keys = [], ts = "2026-08-16T01:00:20Z") => ({
+    ts,
+    attributes: { "event.name": name, "linear.issue.identifier": ticket },
+    body: { payload: { ticket, updatedFromKeys: keys, source: "cloud-feed" } },
+  });
+
+  test("isFeedSourced identifies the producer POSITIVELY", () => {
+    expect(isFeedSourced(feedEv("linear.issue.state_changed", "CTL-1", ["state"]))).toBe(true);
+    expect(isFeedSourced(webhookEv("linear.issue.state_changed", "CTL-1", ["state"]))).toBe(false);
+    expect(isFeedSourced({})).toBe(false);
+    expect(isFeedSourced(null)).toBe(false);
+    // A near-miss must not inherit the identity.
+    expect(isFeedSourced({ body: { payload: { source: "cloud-feed-v2" } } })).toBe(false);
+  });
+
+  test("⭐ ACCEPTANCE: the enforce shape — one edge, both producers, ONE smee event counted", () => {
+    // This is the log as it looks under enforce: the webhook copy AND the feed's
+    // copy of the same edge both sit in the unified event log. The caller tails
+    // that log wholesale, so `smee` contains both.
+    const edge = ["state"];
+    const log = [webhookEv("linear.issue.state_changed", "CTL-1", edge), feedEv("linear.issue.state_changed", "CTL-1", edge)];
+    const shadow = [feedEv("linear.issue.state_changed", "CTL-1", edge)];
+
+    const r = compareStreams({ smee: log, feed: shadow, ...W });
+    expect(r.counts.smee).toBe(1); // NOT 2 — the feed's copy is not a smee event
+    expect(r.counts.feed).toBe(1);
+    expect(r.unexplained.length).toBe(0);
+  });
+
+  test("⛔ the defect this prevents: without the filter the feed appears on BOTH sides", () => {
+    // Demonstrated by feeding a log that contains ONLY feed events. Before the
+    // filter this reported a healthy-looking smee side built entirely out of the
+    // feed's own records — the instrument agreeing with itself.
+    const onlyFeed = [feedEv("linear.issue.state_changed", "CTL-1", ["state"])];
+    const r = compareStreams({ smee: onlyFeed, feed: onlyFeed, ...W });
+    expect(r.counts.smee).toBe(0); // smee genuinely delivered nothing
+    // ...and that asymmetry is now VISIBLE rather than cancelling out.
+    expect(r.unexplained.some((u) => u.side === "feed-only")).toBe(true);
+  });
+
+  test("NEGATIVE CONTROL: a real webhook event is still counted", () => {
+    // Without this, every assertion above would pass against a filter that
+    // dropped everything.
+    const r = compareStreams({
+      smee: [webhookEv("linear.issue.state_changed", "CTL-1", ["state"])],
+      feed: [],
+      ...W,
+    });
+    expect(r.counts.smee).toBe(1);
+  });
+
+  test("an UNKNOWN producer stays on the smee side rather than vanishing from both", () => {
+    // Identify the feed positively, not smee positively: a third producer with
+    // no `webhook.delivery.id` and no `source` must still be compared, where it
+    // shows up as an asymmetry.
+    const mystery = {
+      ts: "2026-08-16T01:00:00Z",
+      attributes: { "event.name": "linear.issue.state_changed", "linear.issue.identifier": "CTL-9" },
+      body: { payload: { ticket: "CTL-9", updatedFromKeys: ["state"] } },
+    };
+    const r = compareStreams({ smee: [mystery], feed: [], ...W });
+    expect(r.counts.smee).toBe(1);
+  });
+
+  test("the late-arrival corroboration index also excludes feed events", () => {
+    // `priorSmee` proves a feed-only edge was reported by smee BEFORE the window.
+    // If the feed's own earlier copy could serve as that proof, a genuine miss
+    // would be explained away by the very stream under test.
+    const before = feedEv("linear.issue.state_changed", "CTL-7", ["state"], "2026-08-15T23:00:00Z");
+    const inWin = feedEv("linear.issue.state_changed", "CTL-7", ["state"], "2026-08-16T01:00:00Z");
+    const r = compareStreams({ smee: [before], feed: [inWin], ...W });
+    const hit = r.unexplained.find((u) => u.side === "feed-only");
+    expect(hit).toBeTruthy();
+    expect(JSON.stringify(hit)).not.toContain("late-arrival");
+  });
+
+  test("an unkeyable FEED record does not make the SMEE side inconclusive", () => {
+    const unkeyableFeed = { ts: "2026-08-16T01:00:00Z", attributes: { "event.name": "linear.issue.state_changed" }, body: { payload: { source: "cloud-feed" } } };
+    const r = compareStreams({ smee: [unkeyableFeed], feed: [], ...W });
+    expect(r.unkeyable.smee).toBe(0);
   });
 });

@@ -272,6 +272,21 @@ export function resolveWindow({
   return { since, until, clampedToFeedStart, emptyWindow: until <= since };
 }
 
+/**
+ * isFeedSourced — was this event written by the cloud-feed producer?
+ *
+ * POSITIVE identification, deliberately: `body.payload.source === "cloud-feed"`
+ * is stamped by linear-feed-event.mjs on every event the producer builds, and it
+ * is the same discriminator cloud-feed-gate's `sourceOf` uses. Identifying the
+ * FEED positively — rather than identifying smee positively via
+ * `webhook.delivery.id` — means an unrecognised third producer stays on the smee
+ * side, where it surfaces as an asymmetry, instead of being dropped from both
+ * sides and never compared at all.
+ */
+export function isFeedSourced(event) {
+  return event?.body?.payload?.source === "cloud-feed";
+}
+
 export function compareStreams({ smee = [], feed = [], since = null, until = null } = {}) {
   const inWindow = (e) => {
     if (!since && !until) return true;
@@ -292,12 +307,36 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
     }
   };
 
-  const smeeIn = smee.filter((e) => inWindow(e) && DISPATCH_NAMES.concat(SMEE_UNHANDLED_NAMES).includes(nameOf(e)));
+  // ⛔ THE SMEE SIDE MUST EXCLUDE THE FEED'S OWN EVENTS (CTL-1907).
+  //
+  // The caller builds `smee` by tailing the unified event log. Under `off` and
+  // `shadow` that log holds webhook events only, so a name filter was sufficient.
+  // Under **enforce** the producer appends its events to that SAME log — that is
+  // how they reach monitor.mjs's handlers — so a name-only filter counts every
+  // feed event as a smee event too.
+  //
+  // The consequence is not a small miscount, it is the instrument agreeing with
+  // itself: the feed appears on BOTH sides, matched keys inflate, and the run
+  // reports agreement it never measured — a false CLEAN at the exact moment the
+  // harness exists to be trusted. This is the concrete form of the rule already
+  // written in cloud-feed-timer.mjs: an instrument that changes shape at the
+  // moment of cutover cannot be used to judge the cutover.
+  //
+  // The discriminator is POSITIVE and is the same one cloud-feed-gate's
+  // `sourceOf` uses — `body.payload.source === "cloud-feed"`, stamped by
+  // linear-feed-event.mjs on every event the producer builds. Identifying the
+  // feed positively (rather than smee positively via `webhook.delivery.id`)
+  // keeps a third producer we have not thought of on the SMEE side, where it
+  // shows up as an asymmetry, instead of silently vanishing from both.
+  const notFeed = (e) => !isFeedSourced(e);
+  const smeeIn = smee.filter(
+    (e) => notFeed(e) && inWindow(e) && DISPATCH_NAMES.concat(SMEE_UNHANDLED_NAMES).includes(nameOf(e)),
+  );
   // Corroboration index for the late-arrival predicate: the SAME edge key seen on the
   // smee side BEFORE the window. Deliberately not window-bounded — the whole point is
   // that the replica surfaced it late, so the proof lies outside the window.
   const priorSmee = new Map();
-  for (const e of smee) {
+  for (const e of smee.filter(notFeed)) {
     if (inWindow(e)) continue;
     if (since && Date.parse(e?.ts ?? "") >= since) continue;
     const k = edgeKey(e);
@@ -306,7 +345,9 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
   }
   const feedIn = feed.filter(inWindow);
 
-  countUnkeyable(smee, "smee");
+  // Also filtered: an unkeyable FEED event counted on the smee side would push
+  // the whole run to INCONCLUSIVE for a record that is not smee's at all.
+  countUnkeyable(smee.filter(notFeed), "smee");
   countUnkeyable(feed, "feed");
 
   const S = tally(smeeIn);
