@@ -624,3 +624,72 @@ describe("⛔ tenant scope is not cached at startup", () => {
     expect(calls).toBe(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1901 — the stamp must carry the readiness the tick STARTED with.
+//
+// This is a WIRING test, not a value test. cloud-feed-gate's exactly-once
+// argument rests on an edge's webhook twin and its feed copy being decided under
+// the SAME readiness value: the twin under rₖ (readiness while the edge
+// happened), the feed copy under whatever this tick stamps with. That holds only
+// while `runOnce` is called BEFORE `ready` is recomputed. Recompute first and
+// every feed copy is stamped rₖ₊₁ instead — exactly-once breaks at every
+// transition and NOTHING reddens, because each individual value is still
+// "correct". Pinning the value without pinning the order is the shape that has
+// already shipped unverified on this feature three times.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1901 — authority is sampled BEFORE readiness is recomputed", () => {
+  const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+  const DIRTY = { ...OKS, edges: { failed: 1, byReason: {} } };
+
+  const run = (sweeps) => {
+    const sampled = [];
+    let reports;
+    let handle;
+    const runOnceFn = () => {
+      // What the sink's `authorityNow()` would return for everything this sweep
+      // emits — read at the same point in the tick the real sink reads it.
+      sampled.push(handle.isReady());
+      return reports;
+    };
+    handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [],
+      runOnceFn,
+      replicaFreshFn: () => true,
+      setIntervalFn: () => "H",
+    });
+    const after = [];
+    for (const s of sweeps) {
+      reports = [{ account: "t0", skipped: null, sweep: s }];
+      handle.tick();
+      after.push(handle.isReady());
+    }
+    return { sampled, after };
+  };
+
+  test("the UN-ARMING tick stamps TRUE — the value its edges' webhook twins were decided under", () => {
+    // The exact CTL-1901 sequence: armed, then a sweep goes dirty. Its edges
+    // must still be stamped authoritative, because their twins were captured
+    // under the readiness that was in force when they happened.
+    const { sampled, after } = run([OKS, DIRTY]);
+    expect(after).toEqual([true, false]); // it really did un-arm on tick 2
+    expect(sampled[1]).toBe(true); // ...and tick 2 still stamped TRUE
+  });
+
+  test("the RE-ARMING tick stamps FALSE — the mirror of the same rule", () => {
+    // Its edges happened while unarmed, so their twins already dispatched via
+    // smee. Stamping them true would deliver each of them a second time.
+    const { sampled, after } = run([DIRTY, OKS]);
+    expect(after).toEqual([false, true]);
+    expect(sampled[1]).toBe(false);
+  });
+
+  test("NEGATIVE CONTROL: in a steady state the sampled value tracks readiness", () => {
+    // Without this, the two above would pass against a stamp hardwired to the
+    // previous tick's value in a way that never converged.
+    const { sampled, after } = run([OKS, OKS, OKS]);
+    expect(after).toEqual([true, true, true]);
+    expect(sampled).toEqual([false, true, true]); // false only on the very first tick
+  });
+});
