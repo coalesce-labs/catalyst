@@ -36,7 +36,7 @@ import { CURSOR_OK, DEFAULT_RESET_LOOKBACK_MS, readCursor, resolveStartPosition,
 /** Bound the work one sweep may do, so a large backlog cannot monopolise a tick. */
 export const DEFAULT_MAX_BATCHES = 20;
 
-const emptyCounts = () => ({ emitted: 0, declined: 0, failed: 0, examined: 0, byReason: {} });
+const emptyCounts = () => ({ emitted: 0, declined: 0, failed: 0, examined: 0, deferred: 0, byReason: {} });
 
 const note = (counts, reason) => {
   counts.byReason[reason] = (counts.byReason[reason] ?? 0) + 1;
@@ -211,6 +211,9 @@ export function runSweep({
 /** Bound one seeding pass so a cold start cannot monopolise a tick indefinitely. */
 export const SEED_MAX_BATCHES = 200;
 
+/** Max issues the label sweep will process in one tick (Codex P2, #3446). */
+export const DEFAULT_LABEL_BUDGET = 200;
+
 /**
  * Establish the baseline WITHOUT emitting anything.
  *
@@ -269,7 +272,7 @@ export function runDiffSweep({
   now = () => Date.now(),
   readCursorFn = readCursor,
   writeCursorFn = writeCursor,
-} = {}) {
+  labelBudget = DEFAULT_LABEL_BUDGET,} = {}) {
   const counts = emptyCounts();
 
   // ⛔ A MISSING BASELINE + A LIVE CURSOR IS A LOSS, NOT A FIRST RUN
@@ -469,8 +472,27 @@ export function runDiffSweep({
       }
 
       labelCounts.examined = changed.length;
-      if (changed.length > 0) {
-        for (const item of source.issuesByIds(changed)) {
+
+      // ⛔ PER-TICK BUDGET (Codex P2). A label RENAME or a bulk edit changes many
+      // issues at once, and this pass sits outside the issue sweep's `maxBatches`
+      // bound — so it would drain the whole set synchronously on the daemon event
+      // loop. Measured at ~2.4 s for 2,843 changed issues, which is a real stall
+      // for unrelated scheduler work (and compounds with CTL-1903's full-scan).
+      //
+      // The remainder needs no bookkeeping: the sweep recomputes the difference
+      // from the baseline every tick, so anything left over is simply picked up
+      // next tick. Deferral is bounded work, not lost work.
+      const budget = Number.isInteger(labelBudget) && labelBudget > 0 ? labelBudget : DEFAULT_LABEL_BUDGET;
+      const slice = changed.slice(0, budget);
+      // ⚠️ Reported in its own field, NOT in byReason — readiness treats any
+      // byReason entry as disqualifying, and a paced sweep is healthy operation,
+      // not a failure. A sweep that never drains shows up as `deferred` staying
+      // above zero every tick, which is observable without un-arming enforce on
+      // every bulk edit.
+      labelCounts.deferred = Math.max(0, changed.length - slice.length);
+
+      if (slice.length > 0) {
+        for (const item of source.issuesByIds(slice)) {
           const issueId = item?.issue?.id;
           if (!issueId) continue;
           const before = store.get(issueId);
