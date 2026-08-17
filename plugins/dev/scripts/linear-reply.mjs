@@ -76,7 +76,7 @@ const m = await gql(token, `mutation($in:CommentCreateInput!){ commentCreate(inp
 // is posted (not at resolution). Clear any eyes reactions on the comment we replied under, unless --keep-eyes.
 let cleared = 0;
 if (!process.argv.includes("--keep-eyes")) {
-  const target = issue.comments.nodes.filter(n => n.user && !n.botActor).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).slice(-1)[0];
+  const target = issue.comments.nodes.filter(n => n.user && !n.botActor && n.user.id === (process.env.ASK_HUMAN_ID || "c2a8cc92-cab6-4536-9500-0f24abdf702b")).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).slice(-1)[0];
   for (const rx of (target?.reactions ?? []).filter(r => r.emoji === "eyes")) {
     try { await gql(token, `mutation($id:String!){ reactionDelete(id:$id){ success } }`, { id: rx.id }); cleared++; } catch {}
   }
