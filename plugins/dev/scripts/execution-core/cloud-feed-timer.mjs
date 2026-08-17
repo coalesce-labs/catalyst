@@ -33,6 +33,7 @@ import { buildCanonicalEvent } from "./lib/canonical-event.mjs";
 import { planTenants, runOnce } from "./linear-feed-run.mjs";
 import { createShadowSink } from "./linear-feed-shadow.mjs";
 import { isDispatchClass, ticketOf } from "./cloud-feed-gate.mjs";
+import { classifyFeedHealth, readFeedProgress } from "./feed-progress.mjs"; // CTL-1902
 import { getEventName } from "../lib/event-name.mjs";
 
 export const EVENT_WOULD_DISPATCH = "cloud-feed.would-dispatch";
@@ -41,20 +42,41 @@ export const EVENT_WOULD_DISPATCH = "cloud-feed.would-dispatch";
 export const DEFAULT_REPLICA_STALE_MS = 5 * 60 * 1000;
 
 /**
- * defaultReplicaFresh — is the replica still being written?
+ * defaultFeedHealthy — is the FEED still being fed? (CTL-1902)
  *
- * ⛔ Round-6 finding: when cloud-sync stalls while its SQLite file stays
- * readable, every source query returns an EMPTY page — zero rows, zero failures,
- * zero `byReason` entries. A sweep over a frozen replica is indistinguishable
- * from a sweep over a quiet fleet, so readiness stayed armed and enforce went on
- * suppressing webhook copies against a producer that could not produce.
+ * ⛔ THIS REPLACED A WRITER-LIVENESS CHECK, AND THE DIFFERENCE IS THE WHOLE POINT.
  *
- * "No errors" is not "working". The writer heartbeats into
- * `<replica>.writer.lock`, so that file is the positive evidence.
+ * Round 6 required `<replica>.writer.lock`'s heartbeat to be fresh. That file is
+ * written by the SDK's `CatalystReplica` and records that the writer PROCESS is
+ * alive. cloud-sync.mjs calls that heartbeat **feed-independent in its own
+ * comment** (~line 492) and documents the 18.5 h silent freeze where it kept
+ * beating against a frozen cursor. So a half-open feed kept enforce armed while
+ * live webhook copies were suppressed and no replacements were produced — the
+ * exact failure round 6 was trying to close, one level in.
  *
- * Fail-CLOSED: absent, unreadable, malformed, or stale all read as NOT fresh.
- * A host with no writer at all therefore never arms enforce, which is correct —
- * there is nothing there to be authoritative.
+ * The replacement asks about the feed instead: cloud-sync now publishes
+ * `<db>.feed-progress.json` every telemetry tick, and `classifyFeedHealth` reads
+ * inbound-frame recency off it. See feed-progress.mjs for why frame recency —
+ * and NOT cursor movement — is the right signal: a healthy QUIET feed freezes the
+ * cursor identically to a dead socket (reproduced live on mini-2, cursor frozen
+ * at 1146621 across successive ticks with frame staleness of 5–11 s), so gating
+ * on cursor movement would un-arm the producer through every quiet window.
+ *
+ * Fail-CLOSED, with the reason preserved: absent, unreadable, malformed, stale,
+ * frame-silent, and frame-unknown all read as NOT healthy. A host whose writer
+ * predates the publish therefore never arms enforce — correct, and loudly
+ * diagnosable via `lastFeedHealth()` rather than an unexplained un-armed gate.
+ */
+export function defaultFeedHealthy(dbPath, { now = Date.now, readFileFn = readFileSync, ...opts } = {}) {
+  return classifyFeedHealth(readFeedProgress(dbPath, { readFile: readFileFn }), { now: now(), ...opts }).healthy === true;
+}
+
+/**
+ * defaultReplicaFresh — RETAINED as the writer-liveness probe it always was, and
+ * deliberately NOT deleted: `catalyst doctor` and the replica readers still have
+ * legitimate reasons to ask "is the writer process alive?". What changed is that
+ * cloud-feed readiness no longer mistakes that question for "is the feed
+ * arriving?". Do not re-point readiness at this.
  */
 export function defaultReplicaFresh(dbPath, { now = Date.now, staleMs = DEFAULT_REPLICA_STALE_MS, readFileFn = readFileSync } = {}) {
   if (typeof dbPath !== "string" || dbPath === "") return false;
@@ -222,7 +244,11 @@ export function startCloudFeedTimer({
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   onReport = null,
-  replicaFreshFn = defaultReplicaFresh,
+  // ⛔ CTL-1902: this is FEED health, not writer liveness. The parameter was
+  // renamed with the semantics it now carries — a caller still passing
+  // `replicaFreshFn` would otherwise silently re-install the very check this
+  // ticket removed, with no error and no test failure.
+  feedHealthyFn = defaultFeedHealthy,
 } = {}) {
   if (mode !== "shadow" && mode !== "enforce") return null;
 
@@ -307,14 +333,20 @@ export function startCloudFeedTimer({
       // events would be suppressed with no replacement. `mode === "seeded"` is
       // not clean either — a (re)seed emits nothing.
       // A sweep over a FROZEN replica reports zero of everything and looks
-      // perfect. Readiness therefore also requires positive evidence that the
-      // replica is still being written.
+      // perfect. Readiness therefore also requires positive evidence about the
+      // FEED — that this node is still being spoken to (inbound frames, incl.
+      // watchdog pongs), published by cloud-sync into `<db>.feed-progress.json`.
+      // ⛔ CTL-1902: this used to be `replicaFreshFn`, the writer's own heartbeat,
+      // which cloud-sync.mjs documents as feed-INDEPENDENT — it kept beating
+      // through an 18.5 h frozen-cursor incident. "The writer is alive" and "the
+      // feed is arriving" are different questions and only the second one licenses
+      // suppressing smee.
       const planFor = (acct) => resolvedPlans.find((pl) => pl.account === acct);
       const swept = (r) =>
         r &&
         !r.skipped &&
         !r.error &&
-        replicaFreshFn(planFor(r.account)?.dbPath) === true &&
+        feedHealthyFn(planFor(r.account)?.dbPath) === true &&
         r.sweep &&
         r.sweep.mode !== "seeded" &&
         r.sweep.stoppedEarly !== true &&
