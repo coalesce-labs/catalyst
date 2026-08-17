@@ -36,7 +36,7 @@ import { CURSOR_OK, DEFAULT_RESET_LOOKBACK_MS, readCursor, resolveStartPosition,
 /** Bound the work one sweep may do, so a large backlog cannot monopolise a tick. */
 export const DEFAULT_MAX_BATCHES = 20;
 
-const emptyCounts = () => ({ emitted: 0, declined: 0, failed: 0, examined: 0, byReason: {} });
+const emptyCounts = () => ({ emitted: 0, declined: 0, failed: 0, examined: 0, deferred: 0, byReason: {} });
 
 const note = (counts, reason) => {
   counts.byReason[reason] = (counts.byReason[reason] ?? 0) + 1;
@@ -211,6 +211,9 @@ export function runSweep({
 /** Bound one seeding pass so a cold start cannot monopolise a tick indefinitely. */
 export const SEED_MAX_BATCHES = 200;
 
+/** Max issues the label sweep will process in one tick (Codex P2, #3446). */
+export const DEFAULT_LABEL_BUDGET = 200;
+
 /**
  * Establish the baseline WITHOUT emitting anything.
  *
@@ -269,7 +272,7 @@ export function runDiffSweep({
   now = () => Date.now(),
   readCursorFn = readCursor,
   writeCursorFn = writeCursor,
-} = {}) {
+  labelBudget = DEFAULT_LABEL_BUDGET,} = {}) {
   const counts = emptyCounts();
 
   // ⛔ A MISSING BASELINE + A LIVE CURSOR IS A LOSS, NOT A FIRST RUN
@@ -437,5 +440,99 @@ export function runDiffSweep({
     }
   }
 
-  return { mode: start.mode, alarm: start.alarm, batches, stoppedEarly: stopped, position, edges: counts, comments: commentCounts };
+  // ── CTL-1904: the LABEL SWEEP ───────────────────────────────────────────────
+  // Runs AFTER the issue sweep, deliberately. Any issue whose labels changed AND
+  // whose `updated_at` advanced has already been handled above — its snapshot now
+  // holds the new labels, so it produces no difference here and cannot
+  // double-emit. What is left is exactly the case the cursor cannot reach: label
+  // rows that landed after the cursor passed the issue's timestamp.
+  //
+  // Compares the WHOLE label map against the baseline rather than keyseting,
+  // because `issue_labels` has no timestamp and its rowid would catch inserts
+  // while silently missing removals. Cost measured on the live replica: 1.7 ms
+  // warm / 11.9 ms cold for 2,843 labelled issues.
+  const labelCounts = emptyCounts();
+  if (!stopped && typeof source.labelSets === "function" && typeof source.issuesByIds === "function") {
+    try {
+      const current = source.labelSets();
+      const changed = [];
+
+      // (a) issues that HAVE labels now — differing from the baseline?
+      for (const [issueId, labels] of current) {
+        const before = store.get(issueId);
+        if (!before) continue; // not baselined yet; the issue sweep owns first sight
+        const prev = Array.isArray(before.labels) ? [...before.labels].sort() : [];
+        if (prev.join("\u001f") !== labels.join("\u001f")) changed.push(issueId);
+      }
+      // (b) issues whose LAST label was removed — absent from the map entirely,
+      // which is why absence must mean "empty set" and not "unknown". Without
+      // this branch, removing every label from an issue would be undetectable.
+      for (const issueId of store.idsWithLabels ? store.idsWithLabels() : []) {
+        if (!current.has(issueId)) changed.push(issueId);
+      }
+
+      labelCounts.examined = changed.length;
+
+      // ⛔ PER-TICK BUDGET (Codex P2). A label RENAME or a bulk edit changes many
+      // issues at once, and this pass sits outside the issue sweep's `maxBatches`
+      // bound — so it would drain the whole set synchronously on the daemon event
+      // loop. Measured at ~2.4 s for 2,843 changed issues, which is a real stall
+      // for unrelated scheduler work (and compounds with CTL-1903's full-scan).
+      //
+      // The remainder needs no bookkeeping: the sweep recomputes the difference
+      // from the baseline every tick, so anything left over is simply picked up
+      // next tick. Deferral is bounded work, not lost work.
+      const budget = Number.isInteger(labelBudget) && labelBudget > 0 ? labelBudget : DEFAULT_LABEL_BUDGET;
+      const slice = changed.slice(0, budget);
+      // ⚠️ Reported in its own field, NOT in byReason — readiness treats any
+      // byReason entry as disqualifying, and a paced sweep is healthy operation,
+      // not a failure. A sweep that never drains shows up as `deferred` staying
+      // above zero every tick, which is observable without un-arming enforce on
+      // every bulk edit.
+      labelCounts.deferred = Math.max(0, changed.length - slice.length);
+
+      if (slice.length > 0) {
+        for (const item of source.issuesByIds(slice)) {
+          const issueId = item?.issue?.id;
+          if (!issueId) continue;
+          const before = store.get(issueId);
+          const after = snapshotOf(item.issue, item.labels);
+          const diff = diffSnapshots(before, after);
+          if (!diff) {
+            // The issue sweep already caught it in this same tick.
+            store.put(issueId, after, item.issue.updated_at ?? null);
+            continue;
+          }
+          const history = diffToHistoryRow(item.issue, diff, { now });
+          const verdict = classifyEdge({ history, issue: item.issue }, { teams, botUserIds });
+          if (!verdict.emit) {
+            note(labelCounts, verdict.reason);
+            labelCounts.declined += 1;
+            store.put(issueId, after, item.issue.updated_at ?? null);
+            continue;
+          }
+          try {
+            emit(buildIssueEvent({ history, issue: item.issue, labels: item.labels, project: item.project }));
+            labelCounts.emitted += 1;
+            // Snapshot only AFTER a successful emit — same last-contiguous-success
+            // discipline as the issue sweep, so a failed emit is retried next tick
+            // instead of being absorbed into the baseline.
+            store.put(issueId, after, item.issue.updated_at ?? null);
+          } catch (err) {
+            labelCounts.failed += 1;
+            note(labelCounts, `emit-failed:${err?.code ?? err?.message ?? "unknown"}`);
+            break;
+          }
+        }
+      }
+    } catch (err) {
+      // Named, never swallowed: readiness treats any byReason entry as
+      // disqualifying, so a broken label sweep un-arms enforce rather than
+      // quietly reintroducing the blind spot it exists to close.
+      note(labelCounts, `label-sweep-failed:${err?.code ?? err?.message ?? "unknown"}`);
+      labelCounts.failed += 1;
+    }
+  }
+
+  return { mode: start.mode, alarm: start.alarm, batches, stoppedEarly: stopped, position, edges: counts, comments: commentCounts, labels: labelCounts };
 }

@@ -303,7 +303,12 @@ export function startCloudFeedTimer({
         r.sweep.mode !== "seeded" &&
         r.sweep.stoppedEarly !== true &&
         clean(r.sweep.edges) &&
-        clean(r.sweep.comments);
+        clean(r.sweep.comments) &&
+        // CTL-1904: the label sweep counts too. `labels` is absent on a seeding
+        // tick and from runSweep (the superseded history path), and absent is
+        // treated as clean — a sweep that never ran a label pass is not a label
+        // pass that failed. A PRESENT-and-dirty one disqualifies.
+        (r.sweep.labels === undefined || clean(r.sweep.labels));
 
       const wasReady = ready;
       ready = Array.isArray(reports) && reports.length > 0 && reports.every(swept);

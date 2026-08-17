@@ -305,3 +305,210 @@ describe("⛔ refuses to reseed when a durable cursor says we had a baseline", (
     expect(Object.keys(r.edges.byReason).length).toBeGreaterThan(0);
   });
 });
+
+// ── CTL-1904: labels that land AFTER the cursor passed the issue ─────────────
+// `rows` are the file's SHAPED items ({issue, project, labels}); the label map
+// is consulted separately so it can move INDEPENDENTLY of the issue rows —
+// which is the entire race being reproduced.
+const raceSource = (rows, labelMap) => {
+  const withLabels = (r) => ({ ...r, labels: labelMap.get(r.issue.id) ?? [] });
+  return {
+    issuesSince(pos, lim = 100) {
+      const since = pos?.lastCreatedAt ?? 0;
+      return rows
+        .filter((r) => r.issue.updated_at > since || (r.issue.updated_at === since && r.issue.id > (pos?.lastId ?? "")))
+        .sort((a, b) => a.issue.updated_at - b.issue.updated_at || a.issue.id.localeCompare(b.issue.id))
+        .slice(0, lim)
+        .map(withLabels);
+    },
+    positionAfter(items) {
+      if (!items?.length) return null;
+      const last = items[items.length - 1];
+      return { lastCreatedAt: last.issue.updated_at, lastId: last.issue.id };
+    },
+    labelSets() {
+      const m = new Map();
+      for (const [k, v] of labelMap) if (v.length) m.set(k, [...v].sort());
+      return m;
+    },
+    issuesByIds(ids) {
+      return rows.filter((r) => ids.includes(r.issue.id)).map(withLabels);
+    },
+  };
+};
+
+describe("⛔ the label sweep catches what the updated_at cursor cannot", () => {
+  // The live race, 2026-08-16: smee reported `linear.issue.updated
+  // ['updatedAt','labelIds']` for CTL-1894 at 23:23:28Z; the feed emitted no
+  // `labels` key for that ticket EVER, because the replica synced the issue row
+  // and its issue_labels rows at different times and `updated_at` (23:24:51Z)
+  // never advanced again.
+  //
+  // A source with labelSets()/issuesByIds(), where the label map can be changed
+  // INDEPENDENTLY of the issue rows — which is the whole point.
+  test("⭐ THE RACE: labels arrive after the cursor passed the issue — still emitted", () => {
+    const rows = [issue("a", { updated_at: 1000 })];
+    const labels = new Map([["a", []]]);
+    const emitted = [];
+    const emit = (e) => emitted.push(e?.body?.payload?.updatedFromKeys ?? []);
+    const st = makeStore();
+    const src = raceSource(rows, labels);
+
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit }); // seed
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit }); // steady, nothing
+    expect(emitted).toEqual([]);
+
+    // The label lands LATER, and the issue row's updated_at does NOT move — so the
+    // keyset cursor will never return this issue again.
+    labels.set("a", ["refactor"]);
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit });
+
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toContain("labels");
+  });
+
+  test("⛔ CONTROL: without the label sweep this edge is lost forever", () => {
+    // Same fixture against a source with NO labelSets/issuesByIds — i.e. the
+    // pre-CTL-1904 capability set. Proves the fixture is not trivially passing.
+    const rows = [issue("a", { updated_at: 1000 })];
+    const labels = new Map([["a", []]]);
+    const emitted = [];
+    const emit = (e) => emitted.push(e);
+    const st = makeStore();
+    const full = raceSource(rows, labels);
+    const legacy = { issuesSince: (...a) => full.issuesSince(...a), positionAfter: (...a) => full.positionAfter(...a) };
+
+    runDiffSweep({ source: legacy, store: st, cursorPath, teams: TEAMS, emit });
+    runDiffSweep({ source: legacy, store: st, cursorPath, teams: TEAMS, emit });
+    labels.set("a", ["refactor"]);
+    runDiffSweep({ source: legacy, store: st, cursorPath, teams: TEAMS, emit });
+    runDiffSweep({ source: legacy, store: st, cursorPath, teams: TEAMS, emit });
+
+    expect(emitted).toEqual([]); // permanently invisible — the defect
+  });
+
+  test("a REMOVAL of the last label is detected (absence ≠ unknown)", () => {
+    const rows = [issue("a", { updated_at: 1000 })];
+    const labels = new Map([["a", ["refactor"]]]);
+    const emitted = [];
+    const emit = (e) => emitted.push(e?.body?.payload?.updatedFromKeys ?? []);
+    const st = makeStore();
+    const src = raceSource(rows, labels);
+
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit }); // seed w/ label
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit });
+    expect(emitted).toEqual([]);
+
+    labels.set("a", []); // last label removed — the issue vanishes from the map
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit });
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toContain("labels");
+  });
+
+  test("NEGATIVE CONTROL: an unchanged label set emits nothing, repeatedly", () => {
+    const rows = [issue("a", { updated_at: 1000 })];
+    const labels = new Map([["a", ["refactor"]]]);
+    const emitted = [];
+    const st = makeStore();
+    const src = raceSource(rows, labels);
+    for (let i = 0; i < 4; i++) {
+      runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: (e) => emitted.push(e) });
+    }
+    expect(emitted).toEqual([]);
+  });
+
+  test("no DOUBLE emit when the issue sweep already caught the label change", () => {
+    // updated_at moves AND labels change in the same tick: the issue sweep emits
+    // once and the label sweep must find no difference.
+    const rows = [issue("a", { updated_at: 1000 })];
+    const labels = new Map([["a", []]]);
+    const emitted = [];
+    const st = makeStore();
+    const src = raceSource(rows, labels);
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {} });
+
+    rows[0] = issue("a", { updated_at: 2000, state: "Todo" });
+    labels.set("a", ["refactor"]);
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: (e) => emitted.push(e) });
+    expect(emitted).toHaveLength(1);
+  });
+
+  test("the label sweep reports its own counts, so a failure can un-arm enforce", () => {
+    const rows = [issue("a", { updated_at: 1000 })];
+    const src = raceSource(rows, new Map([["a", []]]));
+    const st = makeStore();
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {} });
+    const r = runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {} });
+    expect(r.labels).toBeDefined();
+    expect(r.labels.failed).toBe(0);
+    expect(Object.keys(r.labels.byReason)).toHaveLength(0);
+  });
+});
+
+// ── Codex P2 (#3446): the label sweep is bounded per tick ────────────────────
+describe("⛔ a bulk label change cannot stall the daemon event loop", () => {
+  const mkRows = (n) => Array.from({ length: n }, (_, i) => issue(`i${String(i).padStart(4, "0")}`));
+
+  test("a mass label change is processed in BUDGETED slices, not all at once", () => {
+    // A label rename or bulk edit changes many issues at once, and this pass sits
+    // outside the issue sweep's maxBatches bound. Measured at ~2.4 s for 2,843
+    // changed issues on the daemon event loop.
+    const rows = mkRows(50);
+    const labels = new Map(rows.map((r) => [r.issue.id, []]));
+    const st = makeStore();
+    const src = raceSource(rows, labels);
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {} }); // seed
+
+    for (const id of labels.keys()) labels.set(id, ["refactor"]); // all 50 at once
+
+    const emitted = [];
+    const r1 = runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: (e) => emitted.push(e), labelBudget: 10 });
+    expect(r1.labels.examined).toBe(50);
+    expect(emitted).toHaveLength(10); // budget respected
+    expect(r1.labels.deferred).toBe(40);
+  });
+
+  test("the deferred remainder is picked up on later ticks — bounded, not lost", () => {
+    const rows = mkRows(25);
+    const labels = new Map(rows.map((r) => [r.issue.id, []]));
+    const st = makeStore();
+    const src = raceSource(rows, labels);
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {} });
+    for (const id of labels.keys()) labels.set(id, ["refactor"]);
+
+    const emitted = [];
+    for (let i = 0; i < 5; i++) {
+      runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: (e) => emitted.push(e), labelBudget: 10 });
+    }
+    expect(emitted).toHaveLength(25); // every one eventually emitted
+    const last = runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {}, labelBudget: 10 });
+    expect(last.labels.deferred).toBe(0); // and it drains
+  });
+
+  test("⚠️ deferral does NOT land in byReason — a paced sweep must not un-arm enforce", () => {
+    // readiness treats any byReason entry as disqualifying. Deferral is healthy
+    // operation; only a failure should un-arm.
+    const rows = mkRows(30);
+    const labels = new Map(rows.map((r) => [r.issue.id, []]));
+    const st = makeStore();
+    const src = raceSource(rows, labels);
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {} });
+    for (const id of labels.keys()) labels.set(id, ["refactor"]);
+    const r = runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {}, labelBudget: 5 });
+    expect(r.labels.deferred).toBeGreaterThan(0);
+    expect(Object.keys(r.labels.byReason)).toHaveLength(0);
+    expect(r.labels.failed).toBe(0);
+  });
+
+  test("NEGATIVE CONTROL: a small change set is not deferred at all", () => {
+    const rows = mkRows(3);
+    const labels = new Map(rows.map((r) => [r.issue.id, []]));
+    const st = makeStore();
+    const src = raceSource(rows, labels);
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {} });
+    labels.set(rows[0].issue.id, ["refactor"]);
+    const r = runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {}, labelBudget: 200 });
+    expect(r.labels.deferred).toBe(0);
+    expect(r.labels.emitted).toBe(1);
+  });
+});
