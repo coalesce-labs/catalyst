@@ -272,10 +272,26 @@ export function startCloudFeedTimer({
       // assume; it is one you would have to prove each tick, which is the same
       // thing as not latching.
       //
-      // Flapping is harmless here and that is what makes this safe: with ready
-      // false the gate makes smee authoritative AND still suppresses feed
-      // events, so no posture permits double-dispatch. The worst case is that
-      // dispatch alternates between two sources that both dispatch correctly.
+      // ⛔ "Flapping is harmless" — I wrote that here, and it was FALSE IN BOTH
+      // DIRECTIONS (CTL-1901). With ready false the gate also suppressed feed
+      // events that had ALREADY been stamped authoritative by an armed sweep,
+      // while their webhook twins had already been captured under the older
+      // ready=true — so the posture lost the edge outright rather than merely
+      // alternating sources. Measured on mini-2 2026-08-17: 21 flaps in 3.1 h,
+      // every un-arm exactly ONE tick long (29.8–30.5 s), 5.4% of wall clock
+      // unarmed — routinely hit, not a rare race.
+      //
+      // What makes flapping safe NOW is not this flag being steady; it is that
+      // cloud-feed-gate no longer consults it for feed events at all. The stamp
+      // written below is the feed's whole authority, and it is read from the
+      // value carried INTO this tick — the same value the webhook twin's own
+      // decision was made under — so the two agree and each edge is delivered
+      // exactly once. See the derivation in cloud-feed-gate.mjs's enforce block.
+      //
+      // ⚠️ THAT ORDERING IS LOAD-BEARING: `runOnceFn` (which emits, and whose
+      // sink reads `ready` to stamp) must run BEFORE `ready` is recomputed
+      // below. Sealed by cloud-feed-timer.test.mjs's "authority is sampled
+      // BEFORE readiness is recomputed" block, not by this comment.
       //
       // EVERY tenant must have swept cleanly — not `some`. A healthy tenant must
       // not mask a skipped or failing one, whose events would otherwise be

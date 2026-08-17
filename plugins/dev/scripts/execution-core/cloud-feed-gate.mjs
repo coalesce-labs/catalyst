@@ -163,8 +163,11 @@ export function ticketOf(event) {
  * @param {function} [opts.isEcho]  (ticket, field, value) => boolean — the CTL-1891 ring's probe.
  *                                  Omitted/absent ⇒ nothing is ever an echo.
  * @param {function|boolean} [opts.isReady]  () => boolean — has the producer seeded and
- *                                  begun emitting? Enforce degrades to shadow routing until
- *                                  this is true. Omitted/absent ⇒ NOT ready (safe half).
+ *                                  begun emitting? Consulted for the SMEE side only: while
+ *                                  false, smee keeps dispatching. It is deliberately NOT
+ *                                  consulted for feed events, whose authority is carried by
+ *                                  their own emission-time stamp (CTL-1901).
+ *                                  Omitted/absent ⇒ NOT ready (smee stays authoritative).
  * @returns {{suppress: boolean, reason: string, source: string, name: string}}
  *
  * `suppress: true` means "do not let this event reach monitor.mjs's handlers;
@@ -193,30 +196,6 @@ export function decideDispatch(event, { mode, isEcho = null, isReady = null } = 
   // over to an unproven dispatch source.
   let m = CLOUD_FEED_MODES.has(mode) ? mode : "off";
 
-  // ⛔ ENFORCE IS NOT ARMED UNTIL THE PRODUCER CAN ACTUALLY PRODUCE
-  // (Codex P1, #3439). On a host with a missing or cleared last-seen database,
-  // the gate would start suppressing smee immediately while `runDiffSweep`'s
-  // FIRST tick only seeds the baseline and emits nothing. Issue changes in that
-  // interval get absorbed into the baseline silently; comments are worse — the
-  // seeding tick never reads them and the next tick cold-starts the comment
-  // cursor at the current time, so comments in the gap reach no inbox EVER.
-  //
-  // So enforce degrades to shadow's routing (smee authoritative, feed
-  // suppressed) until the producer reports itself ready. Absent probe ⇒ NOT
-  // ready: a caller that forgets to wire readiness gets the safe half, never
-  // the suppressing one.
-  if (m === "enforce") {
-    let ready = false;
-    try {
-      ready = typeof isReady === "function" ? isReady() === true : isReady === true;
-    } catch {
-      ready = false; // a throwing probe is not a ready producer
-    }
-    if (!ready) {
-      return { suppress: source === SOURCE_CLOUD_FEED, reason: "enforce-not-armed", source, name };
-    }
-  }
-
   if (m !== "enforce") {
     // off / shadow: smee remains authoritative, exactly as today.
     if (source === SOURCE_CLOUD_FEED) {
@@ -229,48 +208,103 @@ export function decideDispatch(event, { mode, isEcho = null, isReady = null } = 
     return { suppress: false, reason: "webhook-authoritative", source, name };
   }
 
-  // enforce: the feed is the dispatch source; everything else is captured.
-  if (source !== SOURCE_CLOUD_FEED) {
-    return { suppress: true, reason: "smee-captured", source, name };
-  }
+  // ───────────────────────────── enforce ─────────────────────────────
+  //
+  // ⛔ THE TWO SIDES ARE DECIDED BY DIFFERENT THINGS, AND THAT ASYMMETRY IS THE
+  // WHOLE FIX (CTL-1901).
+  //
+  //   feed side → the event's OWN STAMP, and nothing else.
+  //   smee side → readiness AS OF NOW.
+  //
+  // Round 6 stamped `feedAuthority` at emission so a later readiness change
+  // could not retroactively GRANT authority to a line already on disk. But the
+  // armed check still ran FIRST, so the same later change could still REVOKE
+  // authority from a line that already had it — and the twin was already
+  // captured, and the sweep's cursor had already advanced past the edge, so
+  // there was no retry. The edge reached NEITHER path.
+  //
+  // ── why the stamp alone is not just safe but exactly right ──
+  // Let ticks be T₁,T₂,… and rₖ be readiness after tick k. An edge E occurring
+  // between Tₖ and Tₖ₊₁:
+  //   • its webhook twin is consumed at ≈E's time  → smee decided under rₖ
+  //   • its feed copy is emitted during Tₖ₊₁, stamped with the value carried
+  //     INTO that tick (cloud-feed-timer stamps before it recomputes) → also rₖ
+  // The two decisions therefore read the SAME rₖ, and deliveries = rₖ + ¬rₖ = 1.
+  // Exactly-once falls out of the stamp; it does NOT survive consulting a third,
+  // later reading of the flag. So this deletes a conjunct rather than adding a
+  // case — the class of change that has held on this feature.
+  //
+  // ── the residual, stated rather than asserted away ──
+  // The equality above holds while BOTH streams are current. It breaks under
+  // lag: if the producer is replaying a backlog, E's feed copy is emitted by
+  // Tₖ₊ₘ (m>1) and stamped rₖ₊ₘ₋₁ ≠ rₖ. Measured on mini-2 2026-08-17: 21
+  // readiness flaps in 3.1 h, EVERY un-arm exactly one tick long (29.8–30.5 s),
+  // 5.4% of wall clock unarmed — so this boundary is hit routinely, not rarely.
+  // ⚠️ cloud-feed-timer.mjs's claim that "flapping is harmless … no posture
+  // permits double-dispatch" was false in both directions and is corrected there.
+  if (source === SOURCE_CLOUD_FEED) {
+    // Checked BEFORE the echo probe on purpose: `isEcho` CONSUMES a ring token
+    // on a hit, and spending one on a line we are about to suppress anyway
+    // would let some other write's real echo through later.
+    //
+    // Absent stamp ⇒ NOT authoritative. Every feed event written by this code
+    // path carries one; a line without it predates the stamp or came from
+    // somewhere else, and neither is something to dispatch on.
+    if (event?.body?.payload?.feedAuthority !== true) {
+      return { suppress: true, reason: "feed-emitted-while-unarmed", source, name };
+    }
 
-  // CTL-1891: a host must not dispatch on its own proxied write coming back.
-  // ⚠️ Inert until the CTC-509 proxy caller (CTL-1889) records into the ring —
-  // with no recorder, every probe misses and this branch never fires. Wired now
-  // and proven by test so that landing the recorder is a one-line change rather
-  // than a second trip through the daemon's dispatch path.
-  if (typeof isEcho === "function") {
-    const ticket = ticketOf(event);
-    if (ticket) {
-      for (const probe of echoProbesFor(event)) {
-        let hit = false;
-        try {
-          hit = isEcho(ticket, probe.field, probe.value) === true;
-        } catch {
-          // A throwing ring must not wedge dispatch, and must not silently
-          // suppress either — fail OPEN (dispatch), which is what the fleet
-          // did before the ring existed.
-          hit = false;
-        }
-        if (hit) {
-          return { suppress: true, reason: "own-write-echo", source, name };
+    // CTL-1891: a host must not dispatch on its own proxied write coming back.
+    // ⚠️ Inert until the CTC-509 proxy caller (CTL-1889) records into the ring —
+    // with no recorder, every probe misses and this branch never fires. Wired now
+    // and proven by test so that landing the recorder is a one-line change rather
+    // than a second trip through the daemon's dispatch path.
+    if (typeof isEcho === "function") {
+      const ticket = ticketOf(event);
+      if (ticket) {
+        for (const probe of echoProbesFor(event)) {
+          let hit = false;
+          try {
+            hit = isEcho(ticket, probe.field, probe.value) === true;
+          } catch {
+            // A throwing ring must not wedge dispatch, and must not silently
+            // suppress either — fail OPEN (dispatch), which is what the fleet
+            // did before the ring existed.
+            hit = false;
+          }
+          if (hit) {
+            return { suppress: true, reason: "own-write-echo", source, name };
+          }
         }
       }
     }
+
+    return { suppress: false, reason: "feed-authoritative", source, name };
   }
 
-  // ⛔ THE EVENT'S OWN STAMP DECIDES, not a flag read now (Codex P1 round 6).
-  // `feedAuthority` is written by the sweep that emitted this line and is
-  // immutable thereafter, so a readiness transition between emission and
-  // consumption cannot retroactively grant authority to a line already on disk —
-  // which is exactly how the same edge got dispatched twice across an arming.
+  // ── smee (and any unknown producer) ──
   //
-  // Absent stamp ⇒ NOT authoritative. Every feed event written by this code path
-  // carries one; a line without it predates the stamp or came from somewhere
-  // else, and neither is something to dispatch on.
-  if (event?.body?.payload?.feedAuthority !== true) {
-    return { suppress: true, reason: "feed-emitted-while-unarmed", source, name };
+  // ⛔ ENFORCE DOES NOT SUPPRESS SMEE UNTIL THE PRODUCER CAN ACTUALLY PRODUCE
+  // (Codex P1, #3439). On a host with a missing or cleared last-seen database,
+  // the gate would start suppressing smee immediately while `runDiffSweep`'s
+  // FIRST tick only seeds the baseline and emits nothing. Issue changes in that
+  // interval get absorbed into the baseline silently; comments are worse — the
+  // seeding tick never reads them and the next tick cold-starts the comment
+  // cursor at the current time, so comments in the gap reach no inbox EVER.
+  //
+  // This is the ONE place current readiness is legitimately consulted, and it is
+  // the gate's own rule applied literally: suppression is only ever legitimate
+  // when a replacement exists. Absent probe ⇒ NOT ready, so a caller that forgets
+  // to wire readiness gets the non-suppressing half.
+  let ready = false;
+  try {
+    ready = typeof isReady === "function" ? isReady() === true : isReady === true;
+  } catch {
+    ready = false; // a throwing probe is not a ready producer
+  }
+  if (!ready) {
+    return { suppress: false, reason: "enforce-not-armed", source, name };
   }
 
-  return { suppress: false, reason: "feed-authoritative", source, name };
+  return { suppress: true, reason: "smee-captured", source, name };
 }
