@@ -206,7 +206,10 @@ describe("assembleJoinBundle", () => {
     expect(assembleJoinBundle().monitorWebhooks).toBeNull();
   });
 
-  test("monitorWebhooks carries non-secret smee channels + per-team webhookId map", () => {
+  // CTL-1928: the GitHub channel still travels (GitHub ingestion is still
+  // smee-fed); the whole Linear block does NOT (retired — the cloud feed
+  // drives Linear dispatch, and the subscriptions no longer deliver).
+  test("monitorWebhooks carries the GitHub smee channel and NOT the retired Linear block", () => {
     writeLayer2({
       ...LAYER2_FIXTURE,
       catalyst: {
@@ -223,17 +226,37 @@ describe("assembleJoinBundle", () => {
     });
     const wh = assembleJoinBundle().monitorWebhooks;
     expect(wh.github).toEqual({ smeeChannel: "https://smee.io/GH" });
-    expect(wh.linear.smeeChannel).toBe("https://smee.io/LIN");
-    expect(wh.linear.ctl).toEqual({
-      webhookId: "wh-ctl",
-      smeeChannel: "https://smee.io/LIN",
-      resourceTypes: ["Issue"],
-    });
-    expect(wh.linear.adv).toEqual({ webhookId: "wh-adv" });
+    expect(wh.linear).toBeUndefined();
+    // Not just "no top-level channel": readLinearSmeeChannel falls back to the
+    // FIRST per-team entry, so a surviving per-team smeeChannel would still
+    // start a tunnel. Assert the URL is nowhere in the payload at all, and
+    // that no webhookId rides along to become a dangling-key doctor FAIL.
+    expect(JSON.stringify(wh)).not.toContain("smee.io/LIN");
+    expect(JSON.stringify(wh)).not.toContain("webhookId");
     // registeredAt is dropped; no secrets ever appear.
     expect(JSON.stringify(wh)).not.toContain("registeredAt");
     expect(JSON.stringify(wh)).not.toContain("Secret");
     expect(JSON.stringify(wh)).not.toContain("secret");
+  });
+
+  // A seed whose ONLY monitor wiring is the retired Linear block has nothing
+  // left to carry — the bundle key must be null, not an empty object (the
+  // consumer's `monitor_wh != "null"` conjunct is what gates the wire/skip
+  // decision, and `{}` would read as "present" and wire nothing).
+  test("monitorWebhooks is null when the seed carries ONLY the retired Linear block", () => {
+    writeLayer2({
+      ...LAYER2_FIXTURE,
+      catalyst: {
+        ...LAYER2_FIXTURE.catalyst,
+        monitor: {
+          linear: {
+            smeeChannel: "https://smee.io/LIN",
+            ctl: { webhookId: "wh-ctl", smeeChannel: "https://smee.io/LIN" },
+          },
+        },
+      },
+    });
+    expect(assembleJoinBundle().monitorWebhooks).toBeNull();
   });
 
   // CTL-1231: allow-listed, secret-free ~/.claude/settings.json slice. The

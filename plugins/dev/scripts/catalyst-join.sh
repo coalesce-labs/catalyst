@@ -886,15 +886,39 @@ merge_shared_config() {
   info "webhook-wiring gate (CTL-1617 PR5): decision=${decision} rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} source=${CATALYST_DEPLOYMENT_MODE_SOURCE} inferred=${CATALYST_DEPLOYMENT_MODE_INFERRED} | heuristic_would=${heuristic_verdict} roster_len=${roster_len:-0} monitorWebhooks=${monitor_wh_state}${note_field}"
 
   if [[ "$decision" == "wire" ]]; then
+    # CTL-1928: strip the LINEAR webhook block before the merge. Linear
+    # ingestion is the cloud feed now, and the workspace's Linear webhook
+    # subscriptions were retired at the cutover — wiring them onto a joining
+    # host would re-create a path that no longer delivers. join-bundle.mjs no
+    # longer EMITS this block, but a bundle is a file that outlives the code
+    # that wrote it (a retained --bundle, or a seed on an older plugin-source),
+    # so the consumer strips it too rather than trusting the producer.
+    #
+    # Both halves must go. orch-monitor's readLinearSmeeChannel falls back to
+    # the first per-team entry's smeeChannel, so deleting only the top-level
+    # `.linear.smeeChannel` still leaves enough to start a tunnel; and a
+    # per-team `webhookId` arriving without its HMAC secret is what doctor
+    # grades as half-wired config residue (webhook-ingestion FAIL).
+    local monitor_wh_stripped stripped_linear="no"
+    monitor_wh_stripped="$(echo "$monitor_wh" | jq -c 'del(.linear)')" || {
+      fail "webhook-wiring: could not strip the retired Linear block from monitorWebhooks"
+      return 1
+    }
+    [[ "$(echo "$monitor_wh" | jq 'has("linear")')" == "true" ]] && stripped_linear="yes"
+    # Everything the bundle offered was Linear — nothing left to write.
+    if [[ "$(echo "$monitor_wh_stripped" | jq 'length')" -eq 0 ]]; then
+      info "webhook ingestion NOT wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0}) | bundle carried ONLY the retired Linear block (CTL-1928)"
+      return 0
+    fi
     local tmp2
     tmp2="$(mktemp "$(dirname "$cfg")/.config.XXXXXX")"
     # Deep-merge ($wh * existing): existing node-local values WIN (non-clobber),
     # new keys from the bundle are added.
-    jq --argjson wh "$monitor_wh" '
+    jq --argjson wh "$monitor_wh_stripped" '
         .catalyst //= {}
         | .catalyst.monitor = ($wh * (.catalyst.monitor // {}))
       ' "$cfg" > "$tmp2" && mv "$tmp2" "$cfg" || { rm -f "$tmp2"; return 1; }
-    info "webhook ingestion wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0})"
+    info "webhook ingestion wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0} github-only=yes linear-stripped=${stripped_linear} CTL-1928)"
   else
     info "webhook ingestion NOT wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0})"
   fi

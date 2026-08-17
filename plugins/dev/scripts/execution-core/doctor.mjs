@@ -1276,16 +1276,24 @@ export function checkWebhookIngestion(deps = {}) {
         ];
       }
       // (b) Declared CLOUD is a WARN, not a PASS: cloud suppresses the smee
-      //     tunnels but its replacement ingestion (the cloud SDK event
-      //     connection) does not exist yet — an otherwise-green doctor must
-      //     not certify a node with zero event ingestion. Flips to PASS only
-      //     when a real cloud ingestion check exists to stand in its place.
+      //     tunnels, and only ONE of the two routes has a replacement.
+      //     CTL-1928: Linear ingestion IS replaced — the cloud feed
+      //     (cloud-feed-timer.mjs, CATALYST_CLOUD_FEED) drives dispatch, and
+      //     the workspace's Linear webhook subscriptions were retired
+      //     fleet-wide. GitHub has NO cloud replacement: the cloud receives no
+      //     GitHub webhooks at all, so a declared-cloud node cannot see the
+      //     `github.*` events monitor-merge, CI waits, and the broker's
+      //     PR-lifecycle routing consume. That gap is what keeps this a WARN;
+      //     it flips to PASS when a real cloud GitHub-ingestion check exists.
+      //     (Saying "no event ingestion at all" here would now be wrong, and
+      //     wrong in the direction that sends an operator hunting a Linear
+      //     outage that isn't there.)
       if (declaredMode.mode === "cloud") {
         return [
           mkCheck(
             "webhook-ingestion",
             STATUS.WARN,
-            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired, but cloud replacement ingestion is NOT yet implemented: this node currently has no event ingestion at all`,
+            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired; Linear ingestion is replaced by the cloud feed (CTL-1928), but GitHub ingestion has NO cloud replacement yet: this node cannot see github.* events (monitor-merge, CI waits, PR-lifecycle routing)`,
           ),
           ...webhookShadow,
         ];
