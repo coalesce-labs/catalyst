@@ -317,9 +317,15 @@ function runTransition({
     if (proxied) {
       // from_state/to_state now carry what `--resolve-only` actually read, rather than
       // the nulls an earlier cut reported: the audit pair is measured on this path too.
+      // `action` deliberately reuses the DIRECT path's vocabulary — "skipped" for an
+      // idempotent no-op, "transitioned" for a performed write — rather than inventing
+      // proxy-specific words. No caller reads it today, but the shadow window's whole
+      // job is comparing these two paths, and a comparison in which the same outcome is
+      // spelled differently on each side is a comparison that manufactures diffs. The
+      // proxy-specific detail rides `skipped`, matching the CTL-758 guard's own shape.
       return {
         ...proxied,
-        action: proxied.skipped ?? (proxied.applied ? "transitioned" : null),
+        action: proxied.applied ? (proxied.skipped ? "skipped" : "transitioned") : null,
         from_state: resolvedCurrent,
         to_state: resolvedTarget,
         via: "cloud-proxy",

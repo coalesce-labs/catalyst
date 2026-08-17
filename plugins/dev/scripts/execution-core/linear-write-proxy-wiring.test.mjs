@@ -242,7 +242,10 @@ describe("enforce — the proxy IS the write and the direct path is NOT taken", 
       proxy,
     });
     expect(r.applied).toBe(true);
-    expect(r.action).toBe("already-in-target-state");
+    // Same vocabulary the DIRECT path uses for this outcome — the shadow window compares
+    // the two, so the idempotent no-op must not be spelled differently on each side.
+    expect(r.action).toBe("skipped");
+    expect(r.skipped).toBe("already-in-target-state");
     expect(proxy.sends).toHaveLength(0);
   });
 
