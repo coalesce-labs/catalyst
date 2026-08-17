@@ -128,6 +128,50 @@ const COMMENT_SELECT = `
 // query — `issues.updated_at` is no more unique than `issue_history.created_at`, so
 // a timestamp-only watermark would skip same-millisecond siblings or re-read them
 // forever. Column names verified against the live replica, not inferred.
+// CTL-1904: the label map, keyed by issue id.
+//
+// ⛔ WHY THIS EXISTS AT ALL. The issue sweep keysets on `issues.updated_at`, and
+// the replica syncs an issue's row and its `issue_labels` rows at DIFFERENT
+// times. When the label rows land after the cursor has already passed that
+// issue's `updated_at`, the issue is never re-examined and the label change is
+// invisible PERMANENTLY — not late. Measured live on CTL-1894 (2026-08-16):
+// smee reported `linear.issue.updated ['updatedAt','labelIds']` at 23:23:28Z,
+// the feed emitted no `labels` key for that ticket ever, and `updated_at` sat
+// unchanged at 23:24:51Z across six checks over 2.5 minutes.
+//
+// `issue_labels` has no timestamp — only `(issue_id, label_id)` — so there is no
+// column to keyset on. Its rowid would catch INSERTS and silently miss REMOVALS,
+// which is the same shape of blind spot one level down. So the whole map is read
+// and diffed against the baseline each tick. Measured on the live replica:
+// 1.7 ms warm / 11.9 ms cold for 2,843 labelled issues, against 7 ms for the
+// existing issue query — cheap enough that correctness wins.
+const LABEL_MAP_SELECT = `
+  SELECT il.issue_id AS id,
+         group_concat(l.name, char(31)) AS labels__joined
+    FROM issue_labels il
+    JOIN labels l ON l.id = il.label_id
+   GROUP BY il.issue_id
+`;
+
+// Fetch specific issues by id — used for the (normally tiny) set whose labels
+// differ from the baseline, so the label sweep pays a full row read only for
+// what actually changed.
+const ISSUES_BY_ID_SELECT = (n) => `
+  SELECT
+    i.id AS id, i.identifier AS identifier, i.team_key AS team_key, i.state AS state,
+    i.assignee_id AS assignee_id, i.priority AS priority, i.estimate AS estimate,
+    i.project_id AS project_id, i.cycle_id AS cycle_id, i.parent_id AS parent_id,
+    i.team_id AS team_id, i.title AS title, i.due_date AS due_date,
+    i.delegate_id AS delegate_id, i.description AS description, i.updated_at AS updated_at,
+    p.name AS project__name,
+    (SELECT group_concat(l.name, char(31))
+       FROM issue_labels il JOIN labels l ON l.id = il.label_id
+      WHERE il.issue_id = i.id) AS labels__joined
+  FROM issues i
+  LEFT JOIN projects p ON p.id = i.project_id
+  WHERE i.id IN (${Array.from({ length: n }, () => "?").join(",")})
+`;
+
 const ISSUE_SELECT = `
   SELECT
     i.id           AS id,
@@ -268,6 +312,40 @@ export function createFeedSource({ dbPath = getReplicaDbPath(), limit = DEFAULT_
       return page(EDGE_SELECT, position, shapeEdgeRow, batchLimit);
     },
     /** Issue rows whose `updated_at` is strictly after `position`, oldest first. */
+    /**
+     * labelSets — every issue that currently has at least one label, as
+     * issueId -> sorted label names. Issues with NO labels are absent, which the
+     * caller must treat as "empty set", not "unknown" — that is how a removal of
+     * the last label is detected.
+     */
+    labelSets() {
+      const out = new Map();
+      for (const row of db.prepare(LABEL_MAP_SELECT).all()) {
+        const joined = row.labels__joined;
+        out.set(
+          row.id,
+          typeof joined === "string" && joined !== "" ? joined.split(LABEL_SEP).sort() : [],
+        );
+      }
+      return out;
+    },
+
+    /** issuesByIds — shaped rows for a specific, normally small, set of ids. */
+    issuesByIds(ids) {
+      const list = Array.isArray(ids) ? ids.filter((x) => typeof x === "string" && x !== "") : [];
+      if (list.length === 0) return [];
+      const out = [];
+      // Chunked so a large differing set cannot exceed SQLite's variable limit.
+      for (let i = 0; i < list.length; i += 400) {
+        const chunk = list.slice(i, i + 400);
+        for (const row of db.prepare(ISSUES_BY_ID_SELECT(chunk.length)).all(...chunk)) {
+          const shaped = shapeIssueRow(row);
+          if (shaped) out.push(shaped);
+        }
+      }
+      return out;
+    },
+
     issuesSince(position, batchLimit) {
       return page(ISSUE_SELECT, position, shapeIssueRow, batchLimit);
     },

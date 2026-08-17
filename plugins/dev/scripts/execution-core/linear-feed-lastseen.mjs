@@ -116,6 +116,37 @@ export function createLastSeenStore({ path } = {}) {
       metaPut.run(SEEDED_KEY, String(at));
     },
 
+    /**
+     * idsWithLabels — issue ids whose stored snapshot carries at least one label.
+     *
+     * CTL-1904 needs this for the one case the label map cannot express: an issue
+     * whose LAST label was removed disappears from the map entirely, so absence
+     * has to be distinguishable from "never had any". Without it, removing every
+     * label from an issue would be undetectable.
+     */
+    idsWithLabels() {
+      const out = [];
+      try {
+        for (const r of db.prepare(
+          "SELECT issue_id FROM seen WHERE json_array_length(json_extract(snapshot, '$.labels')) > 0",
+        ).all()) out.push(r.issue_id);
+        return out;
+      } catch {
+        // JSON1 unavailable — fall back to parsing. Correctness over speed; this
+        // must not silently return [] , which would read as "no issue has labels"
+        // and quietly disable removal detection.
+        for (const r of db.prepare("SELECT issue_id, snapshot FROM seen").all()) {
+          try {
+            const snap = JSON.parse(r.snapshot);
+            if (Array.isArray(snap?.labels) && snap.labels.length > 0) out.push(r.issue_id);
+          } catch {
+            /* unparseable row: skip, the label sweep will re-snapshot it */
+          }
+        }
+        return out;
+      }
+    },
+
     size() {
       return db.prepare("SELECT COUNT(*) n FROM seen").get()?.n ?? 0;
     },
