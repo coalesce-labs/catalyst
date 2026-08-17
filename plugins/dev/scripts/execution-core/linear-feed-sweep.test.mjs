@@ -13,6 +13,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_MAX_BATCHES, processPage, runSweep } from "./linear-feed-sweep.mjs";
 import { defaultCursorPath, readCursor, writeCursor } from "./linear-feed-cursor.mjs";
+// CTL-1909: the readiness predicate is IMPORTED, not restated. A hand-written copy
+// of the gate could agree with these fixtures while disagreeing with the daemon.
+import { countsClean } from "./cloud-feed-timer.mjs";
 
 let dir;
 let cursorPath;
@@ -249,7 +252,11 @@ describe("bounds and failure posture", () => {
       },
     });
     expect(r.edges.emitted).toBe(2); // work still happened
-    expect(Object.keys(r.edges.byReason).some((k) => k.startsWith("cursor-write-failed"))).toBe(true);
+    expect(Object.keys(r.edges.byFailure).some((k) => k.startsWith("cursor-write-failed"))).toBe(true);
+    // CTL-1909: a cursor failure is a FAILURE, so it must also be counted as one
+    // — the readiness gate no longer infers that from the map alone.
+    expect(r.edges.failed).toBeGreaterThan(0);
+    expect(r.edges.byReason).toEqual({}); // ...and never as a decline
   });
 
   test("an empty replica is a clean no-op", () => {
@@ -257,11 +264,43 @@ describe("bounds and failure posture", () => {
     expect(r.edges).toMatchObject({ emitted: 0, declined: 0, failed: 0, examined: 0 });
     expect(r.stoppedEarly).toBe(false);
   });
+
+  // CTL-1909: `runSweep` carries the same team-scope guard as `runDiffSweep`, and
+  // it needs its own test — the diffsweep test cannot reach this function, so the
+  // guard here was live and unkillable. This path is the superseded history sweep,
+  // which is exactly why it would rot unnoticed.
+  test("⛔ CTL-1909: runSweep refuses to sweep with no team scope, and cannot arm", () => {
+    for (const teams of [undefined, new Set()]) {
+      let wroteCursor = false;
+      const r = runSweep({
+        source: fakeSource([edge("h1", 1)]),
+        cursorPath,
+        teams,
+        emit: () => {},
+        writeCursorFn: () => {
+          wroteCursor = true;
+        },
+      });
+      expect(r.mode, String(teams)).toBe("no-team-scope");
+      expect(r.edges.failed, String(teams)).toBe(1);
+      expect(r.edges.byReason, String(teams)).toEqual({}); // never a decline
+      expect(countsClean(r.edges), String(teams)).toBe(false);
+      expect(r.stoppedEarly, String(teams)).toBe(true);
+      expect(wroteCursor, String(teams)).toBe(false); // no cursor past rows it will never emit
+    }
+  });
+
+  test("NEGATIVE CONTROL: runSweep with a real team scope does sweep and can arm", () => {
+    const r = runSweep({ source: fakeSource([edge("h1", 1)]), cursorPath, teams: TEAMS, emit: () => {} });
+    expect(r.mode).not.toBe("no-team-scope");
+    expect(r.edges.failed).toBe(0);
+    expect(countsClean(r.edges)).toBe(true);
+  });
 });
 
 describe("processPage — the unit the loop is built on", () => {
   test("handled includes declines but stops before a failed emit", () => {
-    const counts = { emitted: 0, declined: 0, failed: 0, examined: 0, byReason: {} };
+    const counts = { emitted: 0, declined: 0, failed: 0, examined: 0, byReason: {}, byFailure: {} };
     const items = [{ id: "a" }, { id: "b" }, { id: "c" }];
     const res = processPage(items, {
       classify: (i) => (i.id === "a" ? { emit: false, reason: "foreign-team" } : { emit: true, reason: "ok" }),
@@ -277,7 +316,7 @@ describe("processPage — the unit the loop is built on", () => {
   });
 
   test("a build failure stops the page too, and is named", () => {
-    const counts = { emitted: 0, declined: 0, failed: 0, examined: 0, byReason: {} };
+    const counts = { emitted: 0, declined: 0, failed: 0, examined: 0, byReason: {}, byFailure: {} };
     const res = processPage([{ id: "a" }], {
       classify: () => ({ emit: true, reason: "ok" }),
       build: () => {
@@ -288,7 +327,112 @@ describe("processPage — the unit the loop is built on", () => {
     });
     expect(res.stopped).toBe(true);
     expect(res.handled).toEqual([]);
-    expect(Object.keys(counts.byReason)[0]).toContain("build-failed");
+    expect(Object.keys(counts.byFailure)[0]).toContain("build-failed");
+    expect(counts.byReason).toEqual({});
+  });
+
+  // ── CTL-1909 ──────────────────────────────────────────────────────────────
+  // `verdictIsFailure` is the whole decline/failure split in one predicate, and
+  // each of its three clauses is the sole thing preventing a distinct way for a
+  // NON-decline to be scored as a healthy decline — i.e. to ARM enforce. Every
+  // clause therefore gets a case that fails if the clause is deleted, and a
+  // negative control on the same path so none of them can pass by the predicate
+  // simply always saying "failure".
+  describe("⭐ CTL-1909 — a non-decline must never be scored as a healthy decline", () => {
+    const freshCounts = () => ({ emitted: 0, declined: 0, failed: 0, examined: 0, byReason: {}, byFailure: {} });
+    const run = (verdict) => {
+      const counts = freshCounts();
+      const res = processPage([{ id: "a" }, { id: "b" }], {
+        classify: () => verdict,
+        build: (i) => i,
+        emit: () => {},
+        counts,
+      });
+      return { counts, res };
+    };
+
+    // Clause 1 — `verdict?.fatal === true`. A named reason, so clauses 2 and 3
+    // both pass; only the `fatal` clause can catch this. This is the verdict
+    // `classifyEdge` returns for `no-team-scope-configured`.
+    test("a FATAL verdict fails the sweep even though its reason is well-formed", () => {
+      const { counts, res } = run({ emit: false, reason: "no-team-scope-configured", fatal: true });
+      expect(counts.failed).toBe(1);
+      expect(counts.byFailure).toEqual({ "no-team-scope-configured": 1 });
+      expect(counts.byReason).toEqual({}); // NOT a decline
+      expect(counts.declined).toBe(0);
+      // ...and it stops the page: the cursor must not move past a row the
+      // producer was structurally unable to emit.
+      expect(res.stopped).toBe(true);
+      expect(res.handled).toEqual([]);
+      expect(counts.examined).toBe(1); // stopped at the first, did not grind on
+    });
+
+    // Clause 2 — `typeof verdict?.reason !== "string"`. A decline is only
+    // demonstrated when the producer SAYS why; an unexplained refusal is not
+    // evidence of health.
+    test.each([
+      ["reasonless object", { emit: false }],
+      ["null reason", { emit: false, reason: null }],
+      ["non-string reason", { emit: false, reason: 42 }],
+      ["undefined verdict", undefined],
+      ["null verdict", null],
+    ])("an unexplained refusal (%s) is a failure, named `unclassified`", (_label, verdict) => {
+      const { counts, res } = run(verdict);
+      expect(counts.failed).toBe(1);
+      expect(counts.byFailure).toEqual({ unclassified: 1 });
+      expect(counts.byReason).toEqual({});
+      expect(res.stopped).toBe(true);
+      expect(res.handled).toEqual([]);
+    });
+
+    // Clause 3 — `verdict.reason.length === 0`. `typeof "" === "string"`, so
+    // clause 2 passes an empty reason straight through; without this clause an
+    // empty string would be a perfectly healthy decline whose census entry is
+    // the empty key.
+    test('an EMPTY-string reason is a failure, not a decline keyed ""', () => {
+      const { counts, res } = run({ emit: false, reason: "" });
+      expect(counts.failed).toBe(1);
+      expect(counts.byFailure).toEqual({ unclassified: 1 });
+      expect(counts.byReason).toEqual({});
+      expect(res.stopped).toBe(true);
+    });
+
+    // The NAMING half, which is the same function on purpose. A fatal verdict is
+    // a failure on the strength of the flag alone, so its reason is untrusted for
+    // the census KEY — `verdict.reason || "unclassified"` would key this census on
+    // the number 42. (That was a real defect in this ticket's first cut: the
+    // predicate ruled the reason unusable and the call site used it anyway.)
+    test.each([
+      ["non-string", 42],
+      ["empty string", ""],
+      ["absent", undefined],
+    ])("a FATAL verdict with a %s reason is named `unclassified`, not keyed on the junk", (_label, reason) => {
+      const { counts } = run({ emit: false, reason, fatal: true });
+      expect(counts.failed).toBe(1);
+      expect(counts.byFailure).toEqual({ unclassified: 1 });
+      expect(counts.byReason).toEqual({});
+    });
+
+    test("NEGATIVE CONTROL: a fatal verdict that DID name itself keeps its own name", () => {
+      // Otherwise the assertions above would pass on a function that threw every
+      // fatal reason away, which would make the un-arm unactionable.
+      const { counts } = run({ emit: false, reason: "no-team-scope-configured", fatal: true });
+      expect(counts.byFailure).toEqual({ "no-team-scope-configured": 1 });
+    });
+
+    // NEGATIVE CONTROL on the identical path. Without this, every assertion
+    // above would still pass if `verdictIsFailure` were hard-wired to `true` —
+    // which would restore the CTL-1909 bug in its worst form (every decline
+    // un-arms enforce AND stops the sweep).
+    test("NEGATIVE CONTROL: an ordinary named decline is healthy, settled, and does not stop the page", () => {
+      const { counts, res } = run({ emit: false, reason: "foreign-team" });
+      expect(counts.failed).toBe(0);
+      expect(counts.byFailure).toEqual({});
+      expect(counts.declined).toBe(2);
+      expect(counts.byReason).toEqual({ "foreign-team": 2 });
+      expect(res.stopped).toBe(false);
+      expect(res.handled.map((i) => i.id)).toEqual(["a", "b"]); // cursor MUST advance
+    });
   });
 });
 

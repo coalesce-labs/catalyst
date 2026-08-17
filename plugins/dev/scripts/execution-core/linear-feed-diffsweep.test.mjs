@@ -13,6 +13,10 @@ import { join } from "node:path";
 import { createLastSeenStore } from "./linear-feed-lastseen.mjs";
 import { runDiffSweep, seedBaseline } from "./linear-feed-sweep.mjs";
 import { CURSOR_ABSENT, CURSOR_OK, defaultCursorPath, readCursor } from "./linear-feed-cursor.mjs";
+// CTL-1909: the readiness predicate is IMPORTED, not restated here. A hand-built
+// copy of it in this file could agree with a fixture while disagreeing with the
+// gate the daemon actually runs.
+import { countsClean, sweepUnreadyReason } from "./cloud-feed-timer.mjs";
 
 let dir;
 let store;
@@ -277,7 +281,11 @@ describe("⛔ refuses to reseed when a durable cursor says we had a baseline", (
     expect(freshStore.isSeeded()).toBe(false); // did NOT silently reseed
     expect(r.alarm?.severity).toBe("error");
     expect(r.alarm?.reason).toBe("baseline-lost-with-live-cursor");
-    expect(Object.keys(r.edges.byReason)).toContain("baseline-lost-with-live-cursor");
+    // CTL-1909: a lost baseline is a FAILURE census entry, never a decline —
+    // it is the producer that cannot do its job, not a row it declined.
+    expect(Object.keys(r.edges.byFailure)).toContain("baseline-lost-with-live-cursor");
+    expect(r.edges.failed).toBe(1);
+    expect(r.edges.byReason).toEqual({});
   });
 
   test("NEGATIVE CONTROL: missing baseline + NO cursor is a legitimate first seed", () => {
@@ -298,11 +306,163 @@ describe("⛔ refuses to reseed when a durable cursor says we had a baseline", (
   });
 
   test("a baseline-lost sweep can never arm enforce (it is not a clean sweep)", () => {
-    // Belt and braces with the readiness predicate: mode !== "resume" and a
-    // byReason entry both disqualify it independently.
-    const r = { mode: "baseline-lost", stoppedEarly: true, edges: { failed: 0, byReason: { "baseline-lost-with-live-cursor": 1 } }, comments: { failed: 0, byReason: {} } };
+    // Belt and braces, asserted through the REAL predicate rather than by
+    // restating it: the hand-built shape this used to assert against could drift
+    // from what runDiffSweep actually returns and still pass.
+    const r = runDiffSweep({
+      source: fakeSource([]),
+      store: makeStore(),
+      cursorPath,
+      teams: TEAMS,
+      emit: () => {},
+      readCursorFn: () => ({ state: CURSOR_OK, position: { lastCreatedAt: 1, lastId: "x" } }),
+    });
     expect(r.mode).not.toBe("resume");
-    expect(Object.keys(r.edges.byReason).length).toBeGreaterThan(0);
+    expect(r.stoppedEarly).toBe(true);
+    expect(countsClean(r.edges)).toBe(false);
+    expect(sweepUnreadyReason({ account: "t0", skipped: null, sweep: r }, { healthy: true })).toBe("stopped-early");
+  });
+
+  // ── CTL-1909 ──────────────────────────────────────────────────────────────
+  // The whole point of the decline/failure split: a sweep that declines every
+  // row must ARM. These run the REAL sweep against the REAL readiness predicate
+  // (imported, not restated), so neither side can be satisfied by a fixture
+  // that only agrees with itself.
+  describe("⭐ CTL-1909 — the sweep's own output, judged by the real readiness gate", () => {
+    const ready = (sweep) => sweepUnreadyReason({ account: "t0", skipped: null, sweep }, { healthy: true });
+    const foreign = (id, over = {}) => issue(id, { identifier: `ZZZ-${id}`, team_key: "ZZZ", ...over });
+
+    test("a sweep of nothing but FOREIGN-TEAM rows arms enforce", () => {
+      const st = makeStore();
+      runDiffSweep({ source: fakeSource([foreign("f1"), foreign("f2")]), store: st, cursorPath, teams: TEAMS, emit: () => {} }); // seed
+      const emitted = [];
+      const r = runDiffSweep({
+        // same two issues, each with a real state change the sweep will diff
+        source: fakeSource([foreign("f1", { state: "Todo", updated_at: 2000 }), foreign("f2", { state: "Done", updated_at: 2001 })]),
+        store: st,
+        cursorPath,
+        teams: TEAMS,
+        emit: (e) => emitted.push(e),
+      });
+      expect(emitted).toEqual([]); // it emitted nothing...
+      expect(r.edges.declined).toBe(2);
+      expect(r.edges.byReason["foreign-team"]).toBe(2);
+      expect(r.edges.failed).toBe(0);
+      expect(r.edges.byFailure).toEqual({}); // ...and nothing went wrong
+      expect(countsClean(r.edges)).toBe(true);
+      expect(ready(r)).toBe(null); // ⭐ ARMED — this is the CTL-1909 fix
+    });
+
+    test("POSITIVE CONTROL on the same path: an emit failure does NOT arm", () => {
+      // Same sweep shape, only the emit throws. Without this, the assertion
+      // above could be satisfied by a gate that always says ready.
+      const st = makeStore();
+      runDiffSweep({ source: fakeSource([issue("m1")]), store: st, cursorPath, teams: TEAMS, emit: () => {} }); // seed
+      const r = runDiffSweep({
+        source: fakeSource([issue("m1", { state: "Done", updated_at: 2000 })]),
+        store: st,
+        cursorPath,
+        teams: TEAMS,
+        emit: () => {
+          throw new Error("boom");
+        },
+      });
+      expect(r.edges.failed).toBeGreaterThan(0);
+      expect(Object.keys(r.edges.byFailure)[0]).toContain("emit-failed");
+      expect(countsClean(r.edges)).toBe(false);
+      expect(ready(r)).not.toBe(null); // UN-ARMED
+    });
+
+    test("⛔ a producer with NO team scope refuses to sweep, and cannot arm", () => {
+      // The hole the split would otherwise open: with `teams` EMPTY, classifyEdge
+      // declines every row as `foreign-team` — a healthy decline under the new
+      // rule — so enforce would arm while the feed emitted nothing for anybody.
+      for (const teams of [undefined, new Set()]) {
+        const st = makeStore();
+        let wroteCursor = false;
+        const r = runDiffSweep({
+          source: fakeSource([issue("s1")]),
+          store: st,
+          cursorPath,
+          teams,
+          emit: () => {},
+          writeCursorFn: () => {
+            wroteCursor = true;
+          },
+        });
+        expect(r.edges.failed, String(teams)).toBe(1);
+        expect(countsClean(r.edges), String(teams)).toBe(false);
+        expect(ready(r), String(teams)).not.toBe(null);
+        // ...and it must not have consumed anything on the way out: no baseline,
+        // no cursor movement past rows it will never emit.
+        expect(st.isSeeded()).toBe(false);
+        expect(wroteCursor).toBe(false);
+      }
+    });
+
+    // ── the FATAL branch, at the altitude where it is WIRED ──────────────────
+    // `runDiffSweep` carries a `classifyFn` seam for exactly this: the fatal
+    // branch is unreachable through the real `classifyEdge` (teamScopeFailure
+    // pre-empts the only fatal verdict it can return), and an unreachable guard
+    // is one nothing can prove still works. These do not re-test the predicate —
+    // `linear-feed-sweep.test.mjs` owns that — they test that the sweep ACTS on
+    // it: no baseline absorbed, no cursor advanced, enforce un-armed.
+    const fatalVerdict = { emit: false, reason: "some-future-producer-fault", fatal: true };
+
+    test("⛔ a FATAL verdict mid-sweep does not advance the baseline, the cursor, or readiness", () => {
+      const st = makeStore();
+      runDiffSweep({ source: fakeSource([issue("k1")]), store: st, cursorPath, teams: TEAMS, emit: () => {} }); // seed
+      const seeded = st.get("k1");
+      expect(seeded.state).toBe("Backlog"); // the `before` the retry will need
+
+      let wroteCursor = false;
+      const emitted = [];
+      const r = runDiffSweep({
+        source: fakeSource([issue("k1", { state: "Done", updated_at: 2000 })]),
+        store: st,
+        cursorPath,
+        teams: TEAMS,
+        emit: (e) => emitted.push(e),
+        classifyFn: () => fatalVerdict,
+        writeCursorFn: () => {
+          wroteCursor = true;
+        },
+      });
+
+      expect(emitted).toEqual([]);
+      expect(r.edges.failed).toBe(1);
+      expect(r.edges.byFailure).toEqual({ "some-future-producer-fault": 1 });
+      expect(r.edges.byReason).toEqual({}); // NOT laundered into the decline census
+      expect(r.stoppedEarly).toBe(true);
+      // ⭐ the part a reason-string assertion cannot see: the edge is still
+      // re-derivable, because the baseline was not absorbed.
+      expect(st.get("k1").state).toBe("Backlog");
+      expect(wroteCursor).toBe(false);
+      expect(countsClean(r.edges)).toBe(false);
+      expect(ready(r)).not.toBe(null); // UN-ARMED — smee stays authoritative
+    });
+
+    test("NEGATIVE CONTROL: the same seam returning a NAMED decline arms, and settles the row", () => {
+      // Identical wiring, `fatal` removed. Proves the test above is driven by the
+      // fatal flag rather than by the injected seam declining at all.
+      const st = makeStore();
+      runDiffSweep({ source: fakeSource([issue("k2")]), store: st, cursorPath, teams: TEAMS, emit: () => {} }); // seed
+      const r = runDiffSweep({
+        source: fakeSource([issue("k2", { state: "Done", updated_at: 2000 })]),
+        store: st,
+        cursorPath,
+        teams: TEAMS,
+        emit: () => {},
+        classifyFn: () => ({ emit: false, reason: "some-future-producer-fault" }),
+      });
+      expect(r.edges.failed).toBe(0);
+      expect(r.edges.byReason).toEqual({ "some-future-producer-fault": 1 });
+      expect(r.edges.byFailure).toEqual({});
+      expect(r.stoppedEarly).toBe(false);
+      expect(st.get("k2").state).toBe("Done"); // examined and SETTLED
+      expect(countsClean(r.edges)).toBe(true);
+      expect(ready(r)).toBe(null); // ARMED
+    });
   });
 });
 
@@ -442,6 +602,68 @@ describe("⛔ the label sweep catches what the updated_at cursor cannot", () => 
     expect(r.labels).toBeDefined();
     expect(r.labels.failed).toBe(0);
     expect(Object.keys(r.labels.byReason)).toHaveLength(0);
+  });
+
+  // ── CTL-1909, third call site ────────────────────────────────────────────
+  // The label pass has its OWN `verdictIsFailure` branch and its own counts
+  // block, and `sweepUnreadyReason` gates on that block separately
+  // (`labels:` prefix). A split applied to two of three call sites would leave
+  // this one able to arm enforce on a producer-level fault.
+  test("⛔ CTL-1909: a FATAL verdict in the LABEL pass un-arms, and keeps the row re-derivable", () => {
+    const rows = [issue("a", { updated_at: 1000 })];
+    const labels = new Map([["a", []]]);
+    const src = raceSource(rows, labels);
+    const st = makeStore();
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {} }); // seed
+    labels.set("a", ["refactor"]); // a label-only change: only the label pass sees it
+
+    const emitted = [];
+    const r = runDiffSweep({
+      source: src,
+      store: st,
+      cursorPath,
+      teams: TEAMS,
+      emit: (e) => emitted.push(e),
+      classifyFn: () => ({ emit: false, reason: "some-future-producer-fault", fatal: true }),
+    });
+
+    expect(emitted).toEqual([]);
+    expect(r.labels.failed).toBe(1);
+    expect(r.labels.byFailure).toEqual({ "some-future-producer-fault": 1 });
+    expect(r.labels.byReason).toEqual({}); // not a decline
+    // the label change must survive in re-derivable form for the retry
+    expect(st.get("a").labels ?? []).toEqual([]);
+    expect(countsClean(r.labels)).toBe(false);
+    // `labels:` prefix ⇒ the LABEL block is what disqualified it, and the reason
+    // string names the fault so the un-arm is actionable.
+    expect(sweepUnreadyReason({ account: "t0", skipped: null, sweep: r }, { healthy: true })).toBe(
+      "labels:failed=1,some-future-producer-fault",
+    );
+  });
+
+  test("NEGATIVE CONTROL: a NAMED decline in the label pass arms, and settles the row", () => {
+    const rows = [issue("a", { updated_at: 1000 })];
+    const labels = new Map([["a", []]]);
+    const src = raceSource(rows, labels);
+    const st = makeStore();
+    runDiffSweep({ source: src, store: st, cursorPath, teams: TEAMS, emit: () => {} }); // seed
+    labels.set("a", ["refactor"]);
+
+    const r = runDiffSweep({
+      source: src,
+      store: st,
+      cursorPath,
+      teams: TEAMS,
+      emit: () => {},
+      classifyFn: () => ({ emit: false, reason: "foreign-team" }),
+    });
+
+    expect(r.labels.failed).toBe(0);
+    expect(r.labels.byReason).toEqual({ "foreign-team": 1 });
+    expect(r.labels.byFailure).toEqual({});
+    expect(st.get("a").labels ?? []).toEqual(["refactor"]); // examined and SETTLED
+    expect(countsClean(r.labels)).toBe(true);
+    expect(sweepUnreadyReason({ account: "t0", skipped: null, sweep: r }, { healthy: true })).toBe(null);
   });
 });
 

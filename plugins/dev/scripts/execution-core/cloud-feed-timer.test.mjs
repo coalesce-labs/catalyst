@@ -293,7 +293,9 @@ describe("startCloudFeedTimer", () => {
 
   test("⛔ isReady() is FALSE until a real non-seeding sweep completes (Codex P1)", () => {
     const seeding = [{ account: "tenant-0", skipped: null, sweep: { mode: "seeded", seeded: 4000 } }];
-    const real = [{ account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0 }, comments: { failed: 0 } } }];
+    const real = [
+      { account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0, byFailure: {} }, comments: { failed: 0, byFailure: {} } } },
+    ];
     let reports = seeding;
     const handle = startCloudFeedTimer({
       feedHealthyFn: () => true,
@@ -339,7 +341,15 @@ describe("startCloudFeedTimer", () => {
       mode: "enforce",
       plans: [],
       runOnceFn: () => [
-        { account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0 }, comments: { failed: 0 } } },
+        {
+          account: "tenant-0",
+          skipped: null,
+          // `byFailure: {}` is REQUIRED, not decoration — CTL-1909 made an absent
+          // failure census disqualifying, so this fixture without it would be
+          // asserting the opposite of what its name says. Sealed below by
+          // "a counts block with NO failure census does not arm".
+          sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0, byFailure: {} }, comments: { failed: 0, byFailure: {} } },
+        },
       ],
       setIntervalFn: () => "H",
     });
@@ -370,23 +380,23 @@ describe("startCloudFeedTimer", () => {
   // The bug was never one predicate — it was that each fix enumerated only the
   // failure shapes known at the time. This table is the place a fourth variant
   // gets added, so it cannot re-appear as a silent arming.
-  const OK = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+  const OK = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
   const FAILURE_SHAPES = [
     ["still seeding", { ...OK, mode: "seeded" }],
     ["stopped early", { ...OK, stoppedEarly: true }],
-    ["edge emit failures", { ...OK, edges: { failed: 2, byReason: {} } }],
-    ["comment emit failures", { ...OK, comments: { failed: 1, byReason: {} } }],
-    ["edge cursor unwritable", { ...OK, edges: { failed: 0, byReason: { "cursor-write-failed:EACCES": 1 } } }],
-    ["comment cursor unwritable", { ...OK, comments: { failed: 0, byReason: { "cursor-write-failed:ENOSPC": 1 } } }],
-    ["cursor failure with an unknown errno", { ...OK, edges: { failed: 0, byReason: { "cursor-write-failed:unknown": 1 } } }],
+    ["edge emit failures", { ...OK, edges: { failed: 2, byReason: {}, byFailure: {} } }],
+    ["comment emit failures", { ...OK, comments: { failed: 1, byReason: {}, byFailure: {} } }],
+    ["edge cursor unwritable", { ...OK, edges: { failed: 0, byReason: {}, byFailure: { "cursor-write-failed:EACCES": 1 } } }],
+    ["comment cursor unwritable", { ...OK, comments: { failed: 0, byReason: {}, byFailure: { "cursor-write-failed:ENOSPC": 1 } } }],
+    ["cursor failure with an unknown errno", { ...OK, edges: { failed: 0, byReason: {}, byFailure: { "cursor-write-failed:unknown": 1 } } }],
     // Round 4: a SECOND cursor reason my prefix match missed.
-    ["edge cursor init failed", { ...OK, edges: { failed: 0, byReason: { "cursor-init-failed:EACCES": 1 } } }],
-    ["comment cursor init failed", { ...OK, comments: { failed: 0, byReason: { "cursor-init-failed:EROFS": 1 } } }],
+    ["edge cursor init failed", { ...OK, edges: { failed: 0, byReason: {}, byFailure: { "cursor-init-failed:EACCES": 1 } } }],
+    ["comment cursor init failed", { ...OK, comments: { failed: 0, byReason: {}, byFailure: { "cursor-init-failed:EROFS": 1 } } }],
     // ⭐ The point of deriving readiness positively: a reason nobody has thought
     // of yet must disqualify WITHOUT a code change here. If this row ever needs
     // a new prefix added to make it pass, the enumeration bug is back.
-    ["a completely unknown future reason", { ...OK, edges: { failed: 0, byReason: { "some-reason-invented-in-2027": 1 } } }],
-    ["an unknown reason on the comment side", { ...OK, comments: { failed: 0, byReason: { "totally-new-thing": 4 } } }],
+    ["a completely unknown future reason", { ...OK, edges: { failed: 0, byReason: {}, byFailure: { "some-reason-invented-in-2027": 1 } } }],
+    ["an unknown reason on the comment side", { ...OK, comments: { failed: 0, byReason: {}, byFailure: { "totally-new-thing": 4 } } }],
   ];
 
   test.each(FAILURE_SHAPES)("readiness stays UNARMED: %s", (_label, sweep) => {
@@ -421,7 +431,7 @@ describe("startCloudFeedTimer", () => {
       mode: "enforce",
       plans: [],
       runOnceFn: () => [
-        { account: "tenant-0", skipped: null, sweep: { ...OK, comments: { failed: 0, byReason: { "cursor-write-failed:EROFS": 3 } } } },
+        { account: "tenant-0", skipped: null, sweep: { ...OK, comments: { failed: 0, byReason: {}, byFailure: { "cursor-write-failed:EROFS": 3 } } } },
       ],
       setIntervalFn: () => "H",
     });
@@ -434,7 +444,7 @@ describe("startCloudFeedTimer", () => {
     // is lost after arming, the next tick re-seeds, emits nothing, and absorbs
     // every intervening change — while a latched readiness keeps suppressing
     // smee. Those events would reach nobody.
-    const clean = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+    const clean = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
     let reports = [{ account: "tenant-0", skipped: null, sweep: clean }];
     const handle = startCloudFeedTimer({ feedHealthyFn: () => true, mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
     handle.tick();
@@ -455,12 +465,12 @@ describe("startCloudFeedTimer", () => {
     // to open, runOnce reports an error, emits nothing, and a latched readiness
     // kept enforce suppressing every webhook copy indefinitely. Second time one
     // of my own tests has pinned behaviour that turned out to be the bug.
-    const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+    const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
     const unhealthy = [
       ["tenant error", [{ account: "t0", skipped: null, error: "replica gone" }]],
       ["tenant skipped", [{ account: "t0", skipped: "replica-absent" }]],
       ["re-seed", [{ account: "t0", skipped: null, sweep: { ...OKS, mode: "seeded" } }]],
-      ["emit failures", [{ account: "t0", skipped: null, sweep: { ...OKS, edges: { failed: 1, byReason: {} } } }]],
+      ["emit failures", [{ account: "t0", skipped: null, sweep: { ...OKS, edges: { failed: 1, byReason: {}, byFailure: {} } } }]],
       ["no tenants at all", []],
     ];
     for (const [label, bad] of unhealthy) {
@@ -479,7 +489,7 @@ describe("startCloudFeedTimer", () => {
   });
 
   test("EVERY tenant must be clean — a healthy one cannot mask a failing one", () => {
-    const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+    const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
     const handle = startCloudFeedTimer({
       feedHealthyFn: () => true,
       mode: "enforce",
@@ -512,7 +522,7 @@ describe("startCloudFeedTimer", () => {
 
 // ── CTL-1847 (Codex P1 round 6): a frozen replica must not stay armed ────────
 describe("⛔ CTL-1902 — FEED health (not writer liveness) is required for readiness", () => {
-  const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
+  const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
   const report = [{ account: "tenant-0", skipped: null, sweep: OKS }];
 
   test("an UNHEALTHY feed un-arms even though the sweep looks perfect", () => {
@@ -643,8 +653,8 @@ describe("⛔ tenant scope is not cached at startup", () => {
 // already shipped unverified on this feature three times.
 // ─────────────────────────────────────────────────────────────────────────────
 describe("⛔ CTL-1901 — authority is sampled BEFORE readiness is recomputed", () => {
-  const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {} }, comments: { failed: 0, byReason: {} } };
-  const DIRTY = { ...OKS, edges: { failed: 1, byReason: {} } };
+  const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
+  const DIRTY = { ...OKS, edges: { failed: 1, byReason: {}, byFailure: {} } };
 
   const run = (sweeps) => {
     const sampled = [];
@@ -751,7 +761,7 @@ describe("⛔ CTL-1902 — defaultFeedHealthy reads published ingest evidence", 
 // "unhealthy" without saying why cannot be acted on.
 // ─────────────────────────────────────────────────────────────────────────────
 describe("⛔ CTL-1902 — sweepUnreadyReason names the failing conjunct", () => {
-  const OK = { failed: 0, byReason: {} };
+  const OK = { failed: 0, byReason: {}, byFailure: {} };
   const HEALTHY = { healthy: true };
   const good = { account: "t0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: OK, comments: OK } };
 
@@ -770,9 +780,9 @@ describe("⛔ CTL-1902 — sweepUnreadyReason names the failing conjunct", () =>
       [{ account: "t0" }, HEALTHY, "no-sweep"],
       [{ account: "t0", sweep: { ...good.sweep, mode: "seeded" } }, HEALTHY, "seeding"],
       [{ account: "t0", sweep: { ...good.sweep, stoppedEarly: true } }, HEALTHY, "stopped-early"],
-      [{ account: "t0", sweep: { ...good.sweep, edges: { failed: 3, byReason: {} } } }, HEALTHY, "edges:failed=3"],
-      [{ account: "t0", sweep: { ...good.sweep, comments: { failed: 0, byReason: { "rate-limited": 2 } } } }, HEALTHY, "comments:rate-limited"],
-      [{ account: "t0", sweep: { ...good.sweep, labels: { failed: 1, byReason: { deferred: 1 } } } }, HEALTHY, "labels:failed=1,deferred"],
+      [{ account: "t0", sweep: { ...good.sweep, edges: { failed: 3, byReason: {}, byFailure: {} } } }, HEALTHY, "edges:failed=3"],
+      [{ account: "t0", sweep: { ...good.sweep, comments: { failed: 0, byReason: {}, byFailure: { "rate-limited": 2 } } } }, HEALTHY, "comments:rate-limited"],
+      [{ account: "t0", sweep: { ...good.sweep, labels: { failed: 1, byReason: {}, byFailure: { "label-sweep-failed:EIO": 1 } } } }, HEALTHY, "labels:failed=1,label-sweep-failed:EIO"],
     ];
     const seen = new Set();
     for (const [report, health, expected] of cases) {
@@ -789,7 +799,7 @@ describe("⛔ CTL-1902 — sweepUnreadyReason names the failing conjunct", () =>
     // The seam stays authoritative: an unhealthy verdict disqualifies even a
     // perfect sweep, and a healthy one never rescues a dirty sweep.
     expect(sweepUnreadyReason(good, { healthy: false, reason: "absent" })).toBe("feed-unhealthy:absent");
-    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, edges: { failed: 1, byReason: {} } } }, HEALTHY)).toBe("edges:failed=1");
+    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, edges: { failed: 1, byReason: {}, byFailure: {} } } }, HEALTHY)).toBe("edges:failed=1");
   });
 
   test("an ABSENT health argument is not healthy (fail-closed default)", () => {
@@ -804,12 +814,130 @@ describe("⛔ CTL-1902 — sweepUnreadyReason names the failing conjunct", () =>
     expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, labels: OK } }, HEALTHY)).toBe(null);
   });
 
-  test("countsClean / countsDirtyWhy: any byReason entry disqualifies, and its KEY is reported", () => {
-    expect(countsClean({ failed: 0, byReason: {} })).toBe(true);
+  test("countsClean / countsDirtyWhy: any byFailure entry disqualifies, and its KEY is reported", () => {
+    expect(countsClean({ failed: 0, byReason: {}, byFailure: {} })).toBe(true);
     expect(countsClean(null)).toBe(false);
-    expect(countsClean({ failed: 0, byReason: { "some-future-reason": 1 } })).toBe(false);
-    expect(countsDirtyWhy({ failed: 0, byReason: { "some-future-reason": 1 } })).toBe("some-future-reason");
-    expect(countsDirtyWhy({ failed: 2, byReason: { a: 1, b: 1 } })).toBe("failed=2,a|b");
+    expect(countsClean({ failed: 0, byReason: {}, byFailure: { "some-future-reason": 1 } })).toBe(false);
+    expect(countsDirtyWhy({ failed: 0, byReason: {}, byFailure: { "some-future-reason": 1 } })).toBe("some-future-reason");
+    expect(countsDirtyWhy({ failed: 2, byReason: {}, byFailure: { a: 1, b: 1 } })).toBe("failed=2,a|b");
     expect(countsDirtyWhy(null)).toBe("absent");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⛔ CTL-1909 — READINESS DISTINGUISHES A DECLINE FROM A FAILURE
+//
+// The gate read `byReason`, which is the DECLINE census. A decline is the
+// sweep's most common HEALTHY outcome, so the producer un-armed on working
+// correctly: measured live on BOTH minis 2026-08-17 as
+// `{"unready":[{"account":"tenant-0","reason":"edges:foreign-team"}]}` from
+// ordinary CTC activity, minutes after boot. Because the feed could only arm on
+// a tick that examined ZERO foreign-team rows, `enforce` degraded to "smee, most
+// of the time" and retiring the smee tunnel was unreachable.
+//
+// The controls this block owes (ticket AC): a foreign-team DECLINE must stay
+// ARMED, and a real FAILURE must UN-ARM — proven against the same fixture so
+// neither result can come from a predicate that is stuck.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1909 — a decline is not a failure", () => {
+  const HEALTHY = { healthy: true };
+  const CLEAN = { failed: 0, byReason: {}, byFailure: {} };
+  const base = (edges) => ({
+    account: "t0",
+    skipped: null,
+    sweep: { mode: "resume", stoppedEarly: false, edges, comments: CLEAN },
+  });
+  const armed = (report) => {
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [report],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    return handle.isReady();
+  };
+
+  // ⭐ THE TICKET'S FIRST CONTROL, at the live seam (not just the pure fn).
+  test("a sweep of ONLY declines is READY — the exact live shape that un-armed both minis", () => {
+    const declinesOnly = { emitted: 0, declined: 137, failed: 0, examined: 137, byReason: { "foreign-team": 137 }, byFailure: {} };
+    expect(countsClean(declinesOnly)).toBe(true);
+    expect(sweepUnreadyReason(base(declinesOnly), HEALTHY)).toBe(null);
+    expect(armed(base(declinesOnly))).toBe(true);
+  });
+
+  // ⭐ THE TICKET'S SECOND CONTROL, on the SAME fixture: one failure flips it.
+  // Same declines, same everything else — so a `true` above cannot be a
+  // predicate that always returns true.
+  test("the SAME sweep with one real failure is NOT ready", () => {
+    const withFailure = {
+      emitted: 0,
+      declined: 137,
+      failed: 1,
+      examined: 138,
+      byReason: { "foreign-team": 137 },
+      byFailure: { "build-failed:boom": 1 },
+    };
+    expect(countsClean(withFailure)).toBe(false);
+    expect(sweepUnreadyReason(base(withFailure), HEALTHY)).toBe("edges:failed=1,build-failed:boom");
+    expect(armed(base(withFailure))).toBe(false);
+  });
+
+  test("EVERY decline reason the classifier can produce keeps it armed", () => {
+    // Enumerated from linear-feed-event.mjs `classifyEdge` + the diff sweep's
+    // own `no-tracked-change`, minus the one FATAL verdict, which is asserted
+    // separately below. A future decline reason needs no change here — it is
+    // `decline()` at the emitting site that decides, not this list — but the
+    // list makes the CURRENT set's verdict explicit rather than assumed.
+    const DECLINE_REASONS = [
+      "foreign-team",
+      "bot-authored",
+      "no-tracked-change",
+      "unjoinable-issue",
+      "issue-has-no-team-key",
+      "issue-has-no-identifier",
+      "history-row-has-no-id",
+      "no-history-row",
+    ];
+    for (const reason of DECLINE_REASONS) {
+      const counts = { failed: 0, declined: 1, byReason: { [reason]: 1 }, byFailure: {} };
+      expect(countsClean(counts), reason).toBe(true);
+      expect(armed(base(counts)), reason).toBe(true);
+    }
+  });
+
+  test("a FAILURE reason invented in 2027 still un-arms, with no reader change", () => {
+    // The property the old design had and must not lose: failure disqualification
+    // is not an allow-list. It now comes from the emitting site choosing `fail`.
+    expect(countsClean({ failed: 0, byReason: {}, byFailure: { "something-nobody-has-written-yet": 1 } })).toBe(false);
+    expect(armed(base({ failed: 0, byReason: {}, byFailure: { "something-nobody-has-written-yet": 1 } }))).toBe(false);
+  });
+
+  // ⛔ FAIL-CLOSED ON SHAPE. A counts block from before the split has failure
+  // reasons sitting in `byReason` and no `byFailure` at all. Defaulting the map
+  // would read that as immaculate — "nothing wrong" and "could not look"
+  // byte-identical to the caller, which is the defect class this repo keeps
+  // paying for. Absent ⇒ not clean ⇒ smee stays authoritative.
+  test("a counts block with NO failure census does not arm, and says so", () => {
+    const preSplit = { failed: 0, byReason: { "cursor-write-failed:EACCES": 1 } };
+    expect(countsClean(preSplit)).toBe(false);
+    expect(countsDirtyWhy(preSplit)).toBe("no-failure-census");
+    expect(countsDirtyWhy({ failed: 2, byReason: {} })).toBe("failed=2,no-failure-census");
+    expect(armed(base(preSplit))).toBe(false);
+    // NEGATIVE CONTROL for the assertion above: the same block WITH the census
+    // present and empty does arm — so "not clean" came from the missing map, not
+    // from `byReason` still being consulted.
+    expect(armed(base({ failed: 0, byReason: { "cursor-write-failed:EACCES": 1 }, byFailure: {} }))).toBe(true);
+  });
+
+  test("a non-object failure census is not a census", () => {
+    for (const bogus of [[], "", 0, "none"]) {
+      expect(countsClean({ failed: 0, byReason: {}, byFailure: bogus }), JSON.stringify(bogus)).toBe(
+        // `[]` is an object with zero keys — it would pass a naive
+        // Object.keys().length check, which is why the type is asserted first.
+        false,
+      );
+    }
   });
 });
