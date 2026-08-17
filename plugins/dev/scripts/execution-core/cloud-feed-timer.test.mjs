@@ -10,6 +10,9 @@ import {
   EVENT_WOULD_DISPATCH,
   defaultReplicaFresh,
   defaultFeedHealthy,
+  sweepUnreadyReason,
+  countsClean,
+  countsDirtyWhy,
   buildWouldDispatchEvent,
   createModeSink,
   startCloudFeedTimer,
@@ -736,5 +739,77 @@ describe("⛔ CTL-1902 — defaultFeedHealthy reads published ingest evidence", 
   test("an empty db path is not healthy", () => {
     expect(defaultFeedHealthy("")).toBe(false);
     expect(defaultFeedHealthy(undefined)).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1902 — the un-arm alarm must say WHY.
+//
+// Measured on mini-2 2026-08-17: 21 un-arm episodes in 3.1 h, and NOT ONE of
+// them left recoverable evidence of which conjunct failed — the WARN line
+// carried `{ mode }` and the daemon never wires `onReport`. An alarm that says
+// "unhealthy" without saying why cannot be acted on.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1902 — sweepUnreadyReason names the failing conjunct", () => {
+  const OK = { failed: 0, byReason: {} };
+  const HEALTHY = { healthy: true };
+  const good = { account: "t0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: OK, comments: OK } };
+
+  test("NEGATIVE CONTROL: a clean report returns null (ready)", () => {
+    // Without this, every assertion below would pass against a function that
+    // always returned a string.
+    expect(sweepUnreadyReason(good, HEALTHY)).toBe(null);
+  });
+
+  test("each disqualifying condition is named, and named distinctly", () => {
+    const cases = [
+      [null, HEALTHY, "no-report"],
+      [{ account: "t0", skipped: "replica-absent" }, HEALTHY, "skipped:replica-absent"],
+      [{ account: "t0", error: "replica gone" }, HEALTHY, "error:replica gone"],
+      [good, { healthy: false, reason: "frame-silent" }, "feed-unhealthy:frame-silent"],
+      [{ account: "t0" }, HEALTHY, "no-sweep"],
+      [{ account: "t0", sweep: { ...good.sweep, mode: "seeded" } }, HEALTHY, "seeding"],
+      [{ account: "t0", sweep: { ...good.sweep, stoppedEarly: true } }, HEALTHY, "stopped-early"],
+      [{ account: "t0", sweep: { ...good.sweep, edges: { failed: 3, byReason: {} } } }, HEALTHY, "edges:failed=3"],
+      [{ account: "t0", sweep: { ...good.sweep, comments: { failed: 0, byReason: { "rate-limited": 2 } } } }, HEALTHY, "comments:rate-limited"],
+      [{ account: "t0", sweep: { ...good.sweep, labels: { failed: 1, byReason: { deferred: 1 } } } }, HEALTHY, "labels:failed=1,deferred"],
+    ];
+    const seen = new Set();
+    for (const [report, health, expected] of cases) {
+      const got = sweepUnreadyReason(report, health);
+      expect(got, JSON.stringify(report)).toBe(expected);
+      seen.add(got);
+    }
+    // Distinct: an explanation that collapses two causes to one string is not
+    // an explanation.
+    expect(seen.size).toBe(cases.length);
+  });
+
+  test("the feed-health verdict is passed IN, never re-derived here", () => {
+    // The seam stays authoritative: an unhealthy verdict disqualifies even a
+    // perfect sweep, and a healthy one never rescues a dirty sweep.
+    expect(sweepUnreadyReason(good, { healthy: false, reason: "absent" })).toBe("feed-unhealthy:absent");
+    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, edges: { failed: 1, byReason: {} } } }, HEALTHY)).toBe("edges:failed=1");
+  });
+
+  test("an ABSENT health argument is not healthy (fail-closed default)", () => {
+    expect(sweepUnreadyReason(good)).toBe("feed-unhealthy:unknown");
+    expect(sweepUnreadyReason(good, null)).toBe("feed-unhealthy:unknown");
+  });
+
+  test("a label sweep that never RAN is not a label sweep that FAILED", () => {
+    // CTL-1904: `labels` absent (seeding tick / the superseded runSweep path) is
+    // clean; present-and-dirty disqualifies.
+    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, labels: undefined } }, HEALTHY)).toBe(null);
+    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, labels: OK } }, HEALTHY)).toBe(null);
+  });
+
+  test("countsClean / countsDirtyWhy: any byReason entry disqualifies, and its KEY is reported", () => {
+    expect(countsClean({ failed: 0, byReason: {} })).toBe(true);
+    expect(countsClean(null)).toBe(false);
+    expect(countsClean({ failed: 0, byReason: { "some-future-reason": 1 } })).toBe(false);
+    expect(countsDirtyWhy({ failed: 0, byReason: { "some-future-reason": 1 } })).toBe("some-future-reason");
+    expect(countsDirtyWhy({ failed: 2, byReason: { a: 1, b: 1 } })).toBe("failed=2,a|b");
+    expect(countsDirtyWhy(null)).toBe("absent");
   });
 });

@@ -90,6 +90,69 @@ export function defaultReplicaFresh(dbPath, { now = Date.now, staleMs = DEFAULT_
 }
 
 /**
+ * countsClean — a sweep counts block is clean only by DEMONSTRATING it worked:
+ * no failure counter and NOTHING in byReason. Any reason, known or unknown,
+ * disqualifies — so a future reason string needs no change here.
+ */
+export function countsClean(counts) {
+  return counts != null && (counts.failed ?? 0) === 0 && Object.keys(counts.byReason ?? {}).length === 0;
+}
+
+/**
+ * countsDirtyWhy — why a counts block was NOT clean, as a short log string.
+ * Reports the byReason KEYS rather than a count of them: the reason string is
+ * the actionable part.
+ */
+export function countsDirtyWhy(counts) {
+  if (counts == null) return "absent";
+  const failed = counts.failed ?? 0;
+  const keys = Object.keys(counts.byReason ?? {});
+  if (failed > 0 && keys.length > 0) return `failed=${failed},${keys.join("|")}`;
+  if (failed > 0) return `failed=${failed}`;
+  return keys.join("|") || "unknown";
+}
+
+/**
+ * sweepUnreadyReason — WHY this tenant's report does not arm the producer, or
+ * null when it does. (CTL-1902)
+ *
+ * ⛔ Extracted because the un-arm alarm could not be acted on. The old predicate
+ * was a bare `&&` chain and its WARN line carried `{ mode }` and nothing else;
+ * the daemon also never passes `onReport`, so the reports reached no sink at
+ * all. Measured on mini-2 2026-08-17: 21 un-arm episodes in 3.1 h with ZERO
+ * recoverable evidence of which conjunct failed on any of them. An alarm that
+ * says "unhealthy" without saying why is the same family as a check whose pass
+ * and fail look identical to its caller.
+ *
+ * Pure: the feed-health verdict is passed IN (already computed against the
+ * injectable seam) rather than resolved here. Evaluation order is identical to
+ * the chain it replaces, so the verdict is unchanged — only the explanation is
+ * new.
+ *
+ * @param {object} report            one tenant's runOnce report
+ * @param {object} feedHealth        { healthy: boolean, reason?: string }
+ * @returns {string|null}            null ⇒ this tenant is ready
+ */
+export function sweepUnreadyReason(report, feedHealth = { healthy: false, reason: "unknown" }) {
+  const r = report;
+  if (!r) return "no-report";
+  if (r.skipped) return `skipped:${r.skipped}`;
+  if (r.error) return `error:${r.error}`;
+  if (feedHealth?.healthy !== true) return `feed-unhealthy:${feedHealth?.reason ?? "unknown"}`;
+  if (!r.sweep) return "no-sweep";
+  if (r.sweep.mode === "seeded") return "seeding";
+  if (r.sweep.stoppedEarly === true) return "stopped-early";
+  if (!countsClean(r.sweep.edges)) return `edges:${countsDirtyWhy(r.sweep.edges)}`;
+  if (!countsClean(r.sweep.comments)) return `comments:${countsDirtyWhy(r.sweep.comments)}`;
+  // CTL-1904: the label sweep counts too. `labels` is absent on a seeding tick
+  // and from runSweep (the superseded history path), and absent is treated as
+  // clean — a sweep that never ran a label pass is not a label pass that failed.
+  // A PRESENT-and-dirty one disqualifies.
+  if (r.sweep.labels !== undefined && !countsClean(r.sweep.labels)) return `labels:${countsDirtyWhy(r.sweep.labels)}`;
+  return null;
+}
+
+/**
  * appendEventLine — one line to the unified event log.
  * Fail-open and COUNTED by the caller; a failed append must never wedge the tick.
  */
@@ -325,10 +388,9 @@ export function startCloudFeedTimer({
       // A sweep counts as clean only by DEMONSTRATING it worked: no failure
       // counters and NOTHING in byReason — any reason, known or unknown,
       // disqualifies, so a future reason string needs no change here.
-      const clean = (counts) =>
-        counts != null &&
-        (counts.failed ?? 0) === 0 &&
-        Object.keys(counts.byReason ?? {}).length === 0;
+      // `countsClean` / `countsDirtyWhy` / `sweepUnreadyReason` are module-level
+      // pure functions (above) so the readiness rule is unit-testable without a
+      // replica, a clock, or a daemon.
       // A skipped tenant is NOT clean: the feed produces nothing for it, so its
       // events would be suppressed with no replacement. `mode === "seeded"` is
       // not clean either — a (re)seed emits nothing.
@@ -342,31 +404,57 @@ export function startCloudFeedTimer({
       // feed is arriving" are different questions and only the second one licenses
       // suppressing smee.
       const planFor = (acct) => resolvedPlans.find((pl) => pl.account === acct);
-      const swept = (r) =>
-        r &&
-        !r.skipped &&
-        !r.error &&
-        feedHealthyFn(planFor(r.account)?.dbPath) === true &&
-        r.sweep &&
-        r.sweep.mode !== "seeded" &&
-        r.sweep.stoppedEarly !== true &&
-        clean(r.sweep.edges) &&
-        clean(r.sweep.comments) &&
-        // CTL-1904: the label sweep counts too. `labels` is absent on a seeding
-        // tick and from runSweep (the superseded history path), and absent is
-        // treated as clean — a sweep that never ran a label pass is not a label
-        // pass that failed. A PRESENT-and-dirty one disqualifies.
-        (r.sweep.labels === undefined || clean(r.sweep.labels));
+      // ⛔ THE PREDICATE NAMES ITS OWN FAILING CONJUNCT (CTL-1902).
+      //
+      // This was a bare `&&` chain feeding `reports.every(swept)`, and the
+      // un-arm line it produced carried `{ mode }` and nothing else. The daemon
+      // also never passes `onReport`, so the reports themselves reached no sink
+      // either — measured tonight: 21 un-arm episodes on mini-2 in 3.1 h with
+      // ZERO recoverable evidence of which conjunct failed on any of them. An
+      // alarm that says "unhealthy" without saying why cannot be acted on, and
+      // it is the same family as a check whose pass and fail look identical to
+      // its caller.
+      //
+      // `unreadyReason` returns null when the tenant swept cleanly, else the
+      // FIRST failing conjunct by name. Evaluation order is unchanged, so the
+      // verdict is bit-identical to the old chain — only the explanation is new.
+      const unreadyReason = (r) => {
+        // The VERDICT stays on the injectable seam (so a caller's override is
+        // still authoritative); the classifier is consulted only to LABEL a
+        // failure the seam already returned, and a throwing explanation must
+        // never change the verdict.
+        const dbPath = planFor(r?.account)?.dbPath;
+        const healthy = feedHealthyFn(dbPath) === true;
+        let reason = "unknown";
+        if (!healthy) {
+          try {
+            reason = classifyFeedHealth(readFeedProgress(dbPath), { now: Date.now() }).reason;
+          } catch {
+            /* keep "unknown" */
+          }
+        }
+        return sweepUnreadyReason(r, { healthy, reason });
+      };
 
       const wasReady = ready;
-      ready = Array.isArray(reports) && reports.length > 0 && reports.every(swept);
+      const reasons =
+        Array.isArray(reports) && reports.length > 0
+          ? reports.map((r) => ({ account: r?.account ?? null, reason: unreadyReason(r) })).filter((x) => x.reason)
+          : [{ account: null, reason: "no-tenants" }];
+      ready = reasons.length === 0;
       if (wasReady && !ready) {
         log.warn?.(
-          { mode },
+          { mode, unready: reasons },
           "cloud-feed: producer NO LONGER healthy — un-arming, smee is authoritative again",
         );
       } else if (!wasReady && ready) {
         log.info?.({ mode }, "cloud-feed: producer armed (clean sweep)");
+      } else if (!ready) {
+        // Steady-state unready. Logged at DEBUG so a host that never arms is
+        // diagnosable without a 30 s WARN drumbeat for the whole outage — the
+        // count-every / warn-sparsely discipline used by otel-forward's
+        // sparse-warn gate.
+        log.debug?.({ mode, unready: reasons }, "cloud-feed: producer still not armed");
       }
       if (onReport) onReport(reports);
       return reports;
