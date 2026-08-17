@@ -51,16 +51,61 @@ file_mode() {
 	printf '%s' "$m"
 }
 
+# ── TRANSPORT SEAL (CTL-1913) ────────────────────────────────────────────────
+# setup_cloud_replica now makes a real authenticated call before it writes
+# anything, so every case below needs the network sealed — otherwise this suite
+# either fails offline or, worse, sends fixture tokens to the live hub.
+#
+# ⛔ The seal is a `curl` STUB ON PATH, not an overridden shell function. A
+# function override only intercepts the one call site you thought of; a PATH stub
+# intercepts the transport, so a future call added anywhere in the sourced script
+# is caught too. `stub_calls` is what proves the seal actually held — a case that
+# asserts only on the outcome cannot tell "the stub answered 401" from "real curl
+# reached the internet and got 401".
+#
+# The stub speaks the ONE contract validate_cloud_token relies on: honour
+# `-w '%{http_code}'` by printing the code on stdout, and send the body to -o.
+make_curl_stub() {
+	local bindir="$1" code="$2"
+	mkdir -p "$bindir"
+	cat >"$bindir/curl" <<STUB
+#!/usr/bin/env bash
+# Records every invocation, then answers with a fixed HTTP code.
+echo "\$*" >>"$bindir/stub_calls"
+# validate_cloud_token feeds the auth header on stdin via --config -; drain it so
+# the writer never blocks on a full pipe, and prove the token never hit argv.
+if [[ " \$* " == *" --config - "* ]]; then cat >"$bindir/stub_stdin" 2>/dev/null || true; fi
+for a in "\$@"; do
+  if [[ \$a == "-o" ]]; then next=out; continue; fi
+  if [[ \${next:-} == out ]]; then : >"\$a" 2>/dev/null; next=; fi
+done
+printf '%s' "$code"
+exit 0
+STUB
+	chmod +x "$bindir/curl"
+}
+
 # Run setup_cloud_replica in a subshell with a fake HOME, sourcing the real script.
 # setup-catalyst.sh already guards main() behind a sourced-detection test;
 # CATALYST_SETUP_LIB_ONLY is its explicit belt-and-braces form.
+#
+# HTTP_CODE (4th arg, default 200) is what the sealed transport answers. Cases that
+# only care about the FILE the function writes leave it at 200; the CTL-1913 cases
+# drive it to 401/403/000.
 run_case() {
-	local home="$1" token="$2" account="$3"
+	local home="$1" token="$2" account="$3" code="${4:-200}"
+	local bindir="$home/.stub-bin"
+	make_curl_stub "$bindir" "$code"
 	(
 		export HOME="$home"
+		export PATH="$bindir:$PATH"
 		export CATALYST_SETUP_LIB_ONLY=1
 		export CATALYST_CLOUD_TOKEN="$token"
 		export CATALYST_CLOUD_ACCOUNT="$account"
+		# Deliberately NOT pinned by default: the base URL is left unset so the
+		# cases below exercise the REAL shipped default (CTL-1910's whole subject).
+		# Set CASE_BASE_URL to test the override path.
+		[[ -n ${CASE_BASE_URL:-} ]] && export CATALYST_CLOUD_BASE_URL="$CASE_BASE_URL"
 		# shellcheck disable=SC1090
 		source "$SETUP" >/dev/null 2>&1
 		# setup-catalyst.sh sets -e; re-disable AFTER sourcing so a deliberate
@@ -70,6 +115,9 @@ run_case() {
 		echo "$?"
 	)
 }
+
+# stub_was_called HOME -> 0 when the sealed transport handled the request.
+stub_was_called() { [[ -s "$1/.stub-bin/stub_calls" ]]; }
 
 echo "CTL-1836 — setup-catalyst.sh cloud replica provisioning"
 
@@ -118,16 +166,23 @@ if [[ -f "$ENV_FILE" ]]; then
 		bad "account not pinned explicitly in cloud-sync.env"
 	fi
 
-	# The legacy host is being retired; a new user must not be pointed at it.
 	if grep -q '^export CATALYST_CLOUD_BASE_URL=' "$ENV_FILE"; then
 		ok "base URL pinned explicitly"
 	else
-		bad "base URL not pinned — new install would inherit the LEGACY default"
+		bad "base URL not pinned — new install would inherit the code default"
 	fi
-	if grep -q 'api\.catalyst-cloud\.coalescelabs\.ai' "$ENV_FILE"; then
-		bad "cloud-sync.env pins the LEGACY base URL"
+	# ⛔ CTL-1910: the pinned default must be a host that EXISTS. This function used
+	# to write app.catalystcloud.dev, which is NXDOMAIN, into every customer's
+	# launchd-sourced config — a green install with a permanently empty replica.
+	if grep -q 'app\.catalystcloud\.dev' "$ENV_FILE"; then
+		bad "pins app.catalystcloud.dev — NXDOMAIN; the writer can never reach the hub (CTL-1910)"
 	else
-		ok "cloud-sync.env does not pin the legacy base URL"
+		ok "does not pin the NXDOMAIN host app.catalystcloud.dev"
+	fi
+	if grep -q '^export CATALYST_CLOUD_BASE_URL=https://staging\.catalystcloud\.dev/api/v1$' "$ENV_FILE"; then
+		ok "pins the ruled default staging.catalystcloud.dev (verified 200 with a live token)"
+	else
+		bad "expected the staging.catalystcloud.dev default, got: $(grep '^export CATALYST_CLOUD_BASE_URL=' "$ENV_FILE")"
 	fi
 
 	if grep -q '^export CATALYST_CLOUD_TOKEN=tok_test_abc$' "$ENV_FILE"; then
@@ -142,18 +197,19 @@ rm -rf "$H3"
 
 # ── Case 4: CATALYST_CLOUD_BASE_URL override is honoured ─────────────────────
 H4=$(mktemp -d)
-(
-	export HOME="$H4" CATALYST_SETUP_LIB_ONLY=1 CATALYST_CLOUD_TOKEN="t" CATALYST_CLOUD_ACCOUNT="a"
-	export CATALYST_CLOUD_BASE_URL="https://example.invalid/api/v1"
-	# shellcheck disable=SC1090
-	source "$SETUP" >/dev/null 2>&1
-	set +e
-	setup_cloud_replica >/dev/null 2>&1
-)
+CASE_BASE_URL="https://example.invalid/api/v1" rc=$(CASE_BASE_URL="https://example.invalid/api/v1" run_case "$H4" "t" "a")
 if grep -q '^export CATALYST_CLOUD_BASE_URL=https://example.invalid/api/v1$' "$H4/.config/catalyst/cloud-sync.env" 2>/dev/null; then
 	ok "explicit CATALYST_CLOUD_BASE_URL override is honoured"
 else
 	bad "base URL override ignored"
+fi
+# CTL-1913: the override must also be the host the token is VALIDATED against —
+# validating against the default while pinning an override would verify a hub the
+# writer never talks to.
+if grep -q 'example\.invalid' "$H4/.stub-bin/stub_calls" 2>/dev/null; then
+	ok "the token is validated against the OVERRIDE host, not the default"
+else
+	bad "validation call did not target the override host: $(cat "$H4/.stub-bin/stub_calls" 2>/dev/null)"
 fi
 rm -rf "$H4"
 
@@ -228,8 +284,10 @@ rm -rf "$H6"
 # Writing a fixed name while the writer resolves a custom one produces the same
 # silent idle as case 6.
 H7=$(mktemp -d)
+make_curl_stub "$H7/.stub-bin" 200
 (
 	export HOME="$H7" CATALYST_SETUP_LIB_ONLY=1
+	export PATH="$H7/.stub-bin:$PATH"
 	export CATALYST_CLOUD_TOKEN_ENV="MY_CUSTOM_CLOUD_TOKEN"
 	export MY_CUSTOM_CLOUD_TOKEN="tok_custom_name"
 	export CATALYST_CLOUD_ACCOUNT="tenant-4"
@@ -245,6 +303,120 @@ else
 	bad "configured token name ignored — writer would resolve a name the file never sets"
 fi
 rm -rf "$H7"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CTL-1913 — AN UNUSABLE CLOUD TOKEN MUST FAIL THE INSTALL LOUDLY
+#
+# Before this, setup_cloud_replica made NO network call at all: it accepted a
+# token, wrote it to a 0600 launchd-sourced file, printed two green checkmarks and
+# exited 0. A correct token and `FAKE-TOKEN-NOT-REAL` were byte-identical to the
+# caller. The writer then exits 0 on a bad token, and under
+# KeepAlive={SuccessfulExit:false} that clean exit is PERMANENT — so the customer's
+# only symptom was a replica that never appeared.
+#
+# The load-bearing assertion in each case below is NOT just "rc != 0" — it is that
+# NOTHING WAS WRITTEN. A non-zero exit that still leaves a broken 0600 config on
+# disk (which launchd sources on every boot) is most of the original defect.
+# ═════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "CTL-1913 — token validation"
+
+# The three rejection classes, measured live against the hub 2026-08-17:
+#   401 garbage/expired/revoked token
+#   403 valid token, but not scoped to the requested account (the tenant footgun)
+#   000 curl could not reach the host at all (the CTL-1910 NXDOMAIN shape)
+for spec in "401:a garbage or revoked token" "403:a token not scoped to this account" "000:an unreachable hub"; do
+	code="${spec%%:*}"
+	desc="${spec#*:}"
+	HB=$(mktemp -d)
+	rc=$(run_case "$HB" "FAKE-TOKEN-NOT-REAL" "acme-tenant" "$code")
+	if [[ $rc != "0" ]]; then
+		ok "HTTP $code ($desc) → non-zero exit"
+	else
+		bad "HTTP $code ($desc) → returned 0; a green install with a dead writer"
+	fi
+	# ⭐ the one that matters most: no credential file, so launchd has nothing to
+	# source and no permanently-inert writer is left behind.
+	if [[ ! -e "$HB/.config/catalyst/cloud-sync.env" ]]; then
+		ok "HTTP $code → wrote NO cloud-sync.env (validated BEFORE persisting)"
+	else
+		bad "HTTP $code → wrote a config it had already proven cannot work"
+	fi
+	# Seal proof: this verdict came from the stub, not from the real internet.
+	if stub_was_called "$HB"; then
+		ok "HTTP $code → verdict came from the sealed transport (stub invoked)"
+	else
+		bad "HTTP $code → curl stub was never invoked; the seal did not hold, so this case proves nothing"
+	fi
+	rm -rf "$HB"
+done
+
+# ── POSITIVE CONTROL for all of the above ────────────────────────────────────
+# Identical fixture, only the HTTP code differs. Without this, every assertion
+# above would pass on a function that refused unconditionally — which would break
+# every real install rather than fix it.
+HOK=$(mktemp -d)
+rc=$(run_case "$HOK" "tok_good" "tenant-1" 200)
+if [[ $rc == "0" ]]; then
+	ok "POSITIVE CONTROL: HTTP 200 → returns 0 (the refusal is driven by the CODE, not unconditional)"
+else
+	bad "POSITIVE CONTROL: HTTP 200 → rc $rc; validation rejects even a good token"
+fi
+if [[ -f "$HOK/.config/catalyst/cloud-sync.env" ]]; then
+	ok "POSITIVE CONTROL: HTTP 200 → cloud-sync.env written"
+else
+	bad "POSITIVE CONTROL: HTTP 200 → no env file; a valid install is now blocked"
+fi
+
+# ── The validation must actually be AUTHENTICATED, and must not leak ─────────
+# A probe that omits the token would return 401 for a perfectly good token, and an
+# unauthenticated reachability ping would pass for a garbage one — the exact
+# "correct and garbage are indistinguishable" defect, reintroduced.
+if [[ -f "$HOK/.stub-bin/stub_stdin" ]] && grep -q 'Authorization: Bearer tok_good' "$HOK/.stub-bin/stub_stdin"; then
+	ok "the validation call carries the bearer token (authenticated, not a reachability ping)"
+else
+	bad "no Authorization header reached the transport — validation is unauthenticated"
+fi
+# ⛔ and the token must NOT be on argv: `ps` is world-readable, so a bearer token in
+# the command line is visible to every local user for the life of the call.
+if grep -q 'tok_good' "$HOK/.stub-bin/stub_calls" 2>/dev/null; then
+	bad "the token appears in curl's ARGV — readable by any local user via ps"
+else
+	ok "the token is never on curl's argv (passed via --config on stdin)"
+fi
+# It must query the account it is about to pin, or a 403 mismatch goes undetected.
+if grep -q 'account=tenant-1' "$HOK/.stub-bin/stub_calls" 2>/dev/null; then
+	ok "validation is scoped to the account being pinned"
+else
+	bad "validation did not pass the account: $(cat "$HOK/.stub-bin/stub_calls" 2>/dev/null)"
+fi
+rm -rf "$HOK"
+
+# ── The no-token no-op must remain network-free ──────────────────────────────
+# Case 1 proved it writes nothing. It must also not have PHONED HOME: a validation
+# call on the no-op path would make `setup-catalyst.sh` contact the hub on every
+# ordinary non-cloud install.
+HN=$(mktemp -d)
+rc=$(run_case "$HN" "" "")
+if ! stub_was_called "$HN"; then
+	ok "no token → no validation call at all (ordinary installs stay network-free)"
+else
+	bad "no token → still called out to the hub: $(cat "$HN/.stub-bin/stub_calls")"
+fi
+rm -rf "$HN"
+
+# ── The account refusal must also precede the network ────────────────────────
+# A token without an account is refused syntactically; spending a hub round-trip
+# first would be wasted work and would send the token somewhere before we had
+# decided the input was even usable.
+HA=$(mktemp -d)
+rc=$(run_case "$HA" "tok_test_abc" "" 200)
+if ! stub_was_called "$HA"; then
+	ok "token without account → refused BEFORE any network call"
+else
+	bad "token without account → sent the token to the hub before refusing"
+fi
+rm -rf "$HA"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

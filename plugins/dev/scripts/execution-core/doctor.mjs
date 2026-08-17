@@ -3122,6 +3122,34 @@ export function checkCloudSync(deps = {}) {
     sizeFloorBytes = 65_536,
     isSqliteFile = defaultIsSqliteFile, // CAT-35
     readDbTables = defaultReadDbTables, // CAT-35
+    // CTL-1913: when was the writer ADOPTED? The plist's mtime is the only local
+    // evidence of that, and it is what separates "provisioned minutes ago, still
+    // seeding" from "provisioned and has never once authenticated".
+    agentInstalledAt = defaultAgentInstalledAt,
+    // A writer that has not produced a replica within this window has not lost a
+    // race — it is inert. Generous on purpose: a cold seed of a large workspace is
+    // minutes, not seconds.
+    neverSeededGraceMs = Number(process.env.CATALYST_REPLICA_NEVER_SEEDED_GRACE_MS) || 900_000,
+    // ⛔ CTL-1913 — `strict` GOVERNS ONE BRANCH, AND IS DELIBERATELY UNWIRED.
+    //
+    // CTL-1913 asked for a doctor that CAN fail on a permanently-inert replica,
+    // because every check here was WARN/INFO and so nothing in the install path
+    // ever returned non-zero for one. The capability now exists — but it stays
+    // opt-in, for the reason this file already records twice (checkReaper,
+    // checkHealthResponder): **doctor's exit code IS the catalyst-join activation
+    // gate, and `do_doctor_gate` runs BEFORE `install-services`.** A FAIL here
+    // would block the join that reinstalls the writer — i.e. it would block the
+    // self-heal for the very condition it is reporting.
+    //
+    // Nor does the install profile want it: `installChecksForClass` deliberately
+    // omits the network/operational checks, since failing on a remote dependency
+    // would mis-attribute an operational gap to the install run.
+    //
+    // So this follows the precedent of `checkDeploymentModeConsistency`'s strict
+    // escalation — implemented and tested, wired into no profile yet. The
+    // install-time actuator is the one the ticket itself names:
+    // `catalyst-stack verify-cloud-sync --strict`.
+    strict = false,
   } = deps;
 
   const installed = agentInstalled(label, laDir);
@@ -3154,7 +3182,44 @@ export function checkCloudSync(deps = {}) {
   let size = 0;
   let statOk = false;
   if (!dbPresent) {
-    checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
+    // ⛔ CTL-1913 — THE ONE STATE IN THIS CHECK THAT EARNS A **FAIL**.
+    //
+    // Agent installed + replica never created is not a transient: the writer
+    // `process.exit(0)`s when its token is absent, misnamed, or rejected, and under
+    // `KeepAlive={SuccessfulExit:false}` a CLEAN EXIT IS PERMANENT — launchd never
+    // retries. So this state does not heal, and it is exactly what a green install
+    // with an unvalidated token produces. Every check on this path was WARN/INFO, so
+    // nothing in the install path ever returned non-zero for a completely inert
+    // replica; that is the gap this grade closes.
+    //
+    // Gated on the ADOPTION AGE rather than graded immediately, because a writer
+    // provisioned seconds ago legitimately has no db yet — escalating on that would
+    // be a false alarm on every fresh install. Three-valued, and it never escalates
+    // on an inability to measure: an unreadable plist mtime keeps the plain WARN and
+    // SAYS the grace could not be evaluated, rather than treating "could not look"
+    // as evidence of the terminal state.
+    const adoptedAt = installed ? agentInstalledAt(label, laDir) : null;
+    const measurable = typeof adoptedAt === "number" && Number.isFinite(adoptedAt);
+    if (installed && measurable && now - adoptedAt > neverSeededGraceMs) {
+      const mins = Math.round((now - adoptedAt) / 60_000);
+      checks.push(
+        mkCheck("replica-fresh", strict ? STATUS.FAIL : STATUS.WARN,
+          `writer agent adopted ${mins}m ago and the replica db has NEVER been created (${dbPath}) — ` +
+          `the writer has never authenticated. A token that is absent, misnamed, or rejected makes it exit 0, ` +
+          `and KeepAlive={SuccessfulExit:false} means launchd never retries, so this does NOT self-heal. ` +
+          `Check ~/catalyst/cloud-sync.log, confirm ${tokenEnv.envVar} is set in a 0600 file the launcher sources, ` +
+          `then: catalyst-stack verify-cloud-sync --strict`),
+      );
+    } else if (installed && !measurable) {
+      checks.push(
+        mkCheck("replica-fresh", STATUS.WARN,
+          "replica db not present, and the writer agent's adoption time is unreadable — cannot tell a fresh adoption from a writer that has never seeded (not connected)"),
+      );
+    } else {
+      // Unchanged wording for the ordinary not-yet-seeded case: a fresh adoption,
+      // or no agent at all.
+      checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
+    }
   } else {
     let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
     try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; statOk = true; } catch { /* unreadable → handled below */ }
@@ -4936,6 +5001,22 @@ function defaultLaunchAgentsDir() {
 // defaultAgentInstalled — is the launchd plist for <label> present? Deterministic file probe
 // (mirrors install-lifecycle.mjs defaultProbeWorkerAgents/defaultProbeUpdaterAgent). Honors
 // CATALYST_LAUNCHAGENTS_DIR for sandbox tests.
+// defaultAgentInstalledAt — the launchd plist's mtime in ms, or null. (CTL-1913)
+// This is the only local record of WHEN a writer was adopted, and it is what lets
+// checkCloudSync separate a fresh adoption still seeding from one that has never
+// authenticated. Returns null rather than a sentinel number on any failure: the
+// caller must be able to say "could not measure" instead of computing an age from
+// a fabricated timestamp — a `0` here would read as "adopted in 1970", i.e. an
+// instant FAIL on an unreadable plist.
+function defaultAgentInstalledAt(label, dir = defaultLaunchAgentsDir()) {
+  try {
+    const m = statSync(resolve(dir, `${label}.plist`)).mtimeMs;
+    return Number.isFinite(m) ? m : null;
+  } catch {
+    return null;
+  }
+}
+
 function defaultAgentInstalled(label, dir = defaultLaunchAgentsDir()) {
   try {
     return existsSync(resolve(dir, `${label}.plist`));

@@ -1558,6 +1558,97 @@ EOF
 # URL. Changing either default would repoint or break both running replica writers
 # the moment they restarted. New installs get explicit values written here; the
 # defaults are a separate, evidence-gathering change.
+# validate_cloud_token TOKEN ACCOUNT BASE_URL — ONE authenticated call, and the
+# install refuses to continue unless it comes back 200. (CTL-1913)
+#
+# Endpoint choice is measured, not guessed. There is no /health, /me, /whoami or
+# /accounts on the hub (all 404), and `GET /issues?limit=1` discriminates BOTH
+# failure modes this function exists to catch — verified live 2026-08-17 against
+# staging.catalystcloud.dev:
+#
+#   valid token   + correct account -> 200
+#   garbage token + correct account -> 401 unauthorized
+#   valid token   + WRONG account   -> 403 forbidden
+#
+# That 403 is the tenant-0 footgun the account-required check above guards
+# syntactically; this catches the case where an account was supplied and is simply
+# not the one the key is scoped to — previously an opaque 403 the customer only met
+# hours later, in a log they had no reason to read.
+#
+# ⛔ EVERY NON-200 IS FATAL, INCLUDING "COULD NOT REACH". There is deliberately no
+# skip flag and no soft path. Provisioning a cloud replica REQUIRES reaching the
+# hub, so a host that cannot reach it at install time cannot succeed later either —
+# reporting success would recreate exactly the green-install-dead-writer state this
+# ticket removes. A distinct message per class keeps the failure actionable, and
+# `CATALYST_CLOUD_BASE_URL` remains the supported override for a different hub.
+#
+# The token is passed on stdin via a config file, never on the argv of a command
+# (`ps` is world-readable) and never interpolated into a URL.
+validate_cloud_token() {
+	local token="$1" account="$2" base_url="$3"
+
+	if ! command -v curl >/dev/null 2>&1; then
+		print_error "curl not found — cannot validate the cloud token."
+		echo ""
+		echo "  The install refuses to write a cloud config it could not verify."
+		echo "  Install curl and re-run."
+		return 1
+	fi
+
+	echo "  Validating the cloud token against ${base_url} ..."
+
+	# --max-time bounds a hung hub; -sS keeps the body quiet but lets curl's own
+	# error reach stderr. The header goes in a config file read from stdin so the
+	# bearer token never appears in this process's argv.
+	local code
+	code=$(
+		printf 'header = "Authorization: Bearer %s"\n' "$token" |
+			curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+				--config - \
+				"${base_url}/issues?account=${account}&limit=1" 2>/dev/null
+	) || code=""
+
+	case "$code" in
+	200)
+		print_success "cloud token validated against the hub (HTTP 200, account=${account})"
+		return 0
+		;;
+	401)
+		print_error "The cloud token was REJECTED by the hub (HTTP 401 unauthorized)."
+		echo ""
+		echo "  The token is wrong, expired, or revoked. Nothing has been written."
+		echo "  Re-run with a valid --cloud-token."
+		return 1
+		;;
+	403)
+		print_error "The token is valid but NOT scoped to account '${account}' (HTTP 403 forbidden)."
+		echo ""
+		echo "  The hub forces the account to match the key. Check --cloud-account"
+		echo "  against the tenant the token was issued for. Nothing has been written."
+		return 1
+		;;
+	000 | "")
+		print_error "Could not reach the hub at ${base_url} — the token was NOT validated."
+		echo ""
+		echo "  A cloud replica cannot be provisioned without reaching the hub, so this"
+		echo "  is fatal rather than a warning: reporting success here is what produced"
+		echo "  green installs with a permanently dead writer (CTL-1913)."
+		echo ""
+		echo "  Check the host resolves and is reachable, then re-run:"
+		echo "    curl -sS -o /dev/null -w '%{http_code}\\n' ${base_url}/issues"
+		echo "  (an unauthenticated 401 proves the host serves the API)"
+		return 1
+		;;
+	*)
+		print_error "The hub returned HTTP ${code} — the token was NOT validated."
+		echo ""
+		echo "  Nothing has been written. If the hub is having an outage, re-run once"
+		echo "  it recovers; a 5xx is not evidence the token is good OR bad."
+		return 1
+		;;
+	esac
+}
+
 setup_cloud_replica() {
 	# Flags win over env. Absent → this whole function is a no-op and setup is
 	# byte-identical to before CTL-1836.
@@ -1593,10 +1684,47 @@ setup_cloud_replica() {
 	harden_secrets_dir "$config_dir"
 	ensure_secrets_gitignore "$config_dir"
 
-	# The canonical host. cloud-sync.mjs:124 still defaults to the LEGACY
-	# api.catalyst-cloud.coalescelabs.ai, which is being retired, so a new user who
-	# relies on the default is pointed at a host that is going away. Pin it here.
-	local base_url="${CATALYST_CLOUD_BASE_URL:-https://app.catalystcloud.dev/api/v1}"
+	# ⛔ CTL-1910 — THIS COMMENT USED TO BE BACKWARDS, AND THE VALUE WITH IT.
+	# It called `app.catalystcloud.dev` "the canonical host" and
+	# `api.catalyst-cloud.coalescelabs.ai` "the LEGACY ... being retired". Measured
+	# 2026-08-17 from two hosts, with a control:
+	#
+	#   web.dev                             RESOLVES            <- control: .dev resolves here
+	#   app.catalystcloud.dev               NXDOMAIN (curl rc=6)   the pinned "canonical" host
+	#   catalystcloud.dev                   NXDOMAIN
+	#   staging.catalystcloud.dev           200 with a live token
+	#   api.catalyst-cloud.coalescelabs.ai  200 with a live token  the "retired" one
+	#
+	# The control matters: `web.dev` resolving proves the resolver handles `.dev`, so
+	# the NXDOMAIN is a real absence and not a broken lookup. So the host called
+	# canonical does not exist, and the one called retired is one of the two that
+	# actually answer. This function was writing the dead one into every new
+	# customer's 0600 launchd-sourced config: the writer could never reach the hub,
+	# the replica was never created, and setup exited 0 with two green checkmarks.
+	#
+	# Now pinned to `staging.catalystcloud.dev` (COORD's ruling — the live cloud).
+	# Verified equivalent, not assumed: authenticated `GET /api/v1/issues?limit=1`
+	# against staging and against the legacy host returned 200 with a
+	# BYTE-IDENTICAL first record, so they are the same backend serving the same
+	# tenant.
+	#
+	# ⚠️ `cloud-sync.mjs`'s own DEFAULT_BASE_URL is deliberately NOT changed here.
+	# The three hosts already running pin no base URL at all (measured: mini-2's
+	# cloud-sync.env has no CATALYST_CLOUD_BASE_URL line), so they resolve the code
+	# default — repointing it would repoint every live writer on its next restart.
+	# That is a fleet change, not an installer fix. New installs get an explicit
+	# value written below.
+	local base_url="${CATALYST_CLOUD_BASE_URL:-https://staging.catalystcloud.dev/api/v1}"
+
+	# ⛔ CTL-1913 — VALIDATE BEFORE WRITING ANYTHING.
+	# Ordered first on purpose: a config we have already proven cannot work must
+	# never reach disk. Previously nothing on this path made a single network call,
+	# so a correct token and `FAKE-TOKEN-NOT-REAL` produced byte-identical output —
+	# two green checkmarks and exit 0 — and the customer's only symptom was a
+	# replica that never appeared. (Why it stays silent: a tokenless/rejected writer
+	# `process.exit(0)`s, and under `KeepAlive={SuccessfulExit:false}` a clean exit
+	# is PERMANENT — launchd never retries.)
+	validate_cloud_token "$token" "$account" "$base_url" || return 1
 
 	# ⛔ EVERY LINE MUST BE `export` (Codex P1 on #3365). launch.sh SOURCES this file
 	# and then `exec`s bun. A bare `FOO=bar` in a sourced file is a SHELL-LOCAL
@@ -1644,10 +1772,21 @@ setup_cloud_replica() {
 	local stack
 	stack=$(command -v catalyst-stack 2>/dev/null || true)
 	if [[ -n $stack ]]; then
-		if "$stack" adopt-cloud-sync >/dev/null 2>&1; then
+		# ⛔ CTL-1913: the output is CAPTURED, not discarded. This was
+		# `>/dev/null 2>&1`, so whatever adopt-cloud-sync said about why it was
+		# unhappy was unrecoverable — the operator got one generic warning line for
+		# every possible cause. Kept out of the way on success, shown in full on
+		# failure, which is the only time anyone wants it.
+		local adopt_out adopt_rc=0
+		adopt_out=$("$stack" adopt-cloud-sync 2>&1) || adopt_rc=$?
+		if [[ $adopt_rc -eq 0 ]]; then
 			print_success "cloud-sync writer adopted (launchd agent installed)"
 		else
-			print_warning "catalyst-stack adopt-cloud-sync failed — run it by hand once the stack is installed"
+			print_warning "catalyst-stack adopt-cloud-sync failed (rc=${adopt_rc}) — its output follows"
+			# Indented so it reads as sub-output rather than as this script's own.
+			printf '%s\n' "$adopt_out" | sed 's/^/    /'
+			echo ""
+			echo "  Fix the cause above, then re-run: catalyst-stack adopt-cloud-sync"
 		fi
 	else
 		print_warning "catalyst-stack not on PATH — run 'catalyst-stack adopt-cloud-sync' after installing the stack"
