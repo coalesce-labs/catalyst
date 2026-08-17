@@ -66,6 +66,12 @@
 import { buildCommentEvent, buildIssueEvent, classifyEdge } from "./linear-feed-event.mjs";
 import { diffSnapshots, diffToHistoryRow, snapshotOf } from "./linear-feed-diff.mjs";
 import { CURSOR_OK, DEFAULT_RESET_LOOKBACK_MS, readCursor, resolveStartPosition, writeCursor } from "./linear-feed-cursor.mjs";
+import { classifyLabelMapTear, createTearTracker } from "./linear-feed-torn-read.mjs";
+
+// CTL-1920: process-wide by default so the consecutive-tear count survives across
+// ticks (one `runDiffSweep` call IS one tick). Keyed by cursorPath, so tenants can
+// never borrow each other's suspicion. Injectable per call for tests.
+const defaultTearTracker = createTearTracker();
 
 /** Bound the work one sweep may do, so a large backlog cannot monopolise a tick. */
 export const DEFAULT_MAX_BATCHES = 20;
@@ -403,7 +409,11 @@ export function runDiffSweep({
   // fatal verdict added to `classifyEdge` would otherwise be silently demoted to a
   // healthy decline, which is CTL-1909 all over again.
   classifyFn = classifyEdge,
-  labelBudget = DEFAULT_LABEL_BUDGET,} = {}) {
+  labelBudget = DEFAULT_LABEL_BUDGET,
+  // CTL-1920. Injected so a test can drive the multi-tick overrule deterministically
+  // without a module-global leaking between cases.
+  tornTracker = defaultTearTracker,
+  tornThresholds = null,} = {}) {
   // Checked BEFORE the store or the cursor is touched: a scopeless producer must
   // not seed a baseline it will then decline every row against.
   const scopeFailure = teamScopeFailure(teams);
@@ -608,9 +618,59 @@ export function runDiffSweep({
       // (b) issues whose LAST label was removed — absent from the map entirely,
       // which is why absence must mean "empty set" and not "unknown". Without
       // this branch, removing every label from an issue would be undetectable.
-      for (const issueId of store.idsWithLabels ? store.idsWithLabels() : []) {
-        if (!current.has(issueId)) changed.push(issueId);
+      //
+      // ⛔ CTL-1920: this branch is also exactly what a TORN REPLICA READ looks
+      // like. A writer re-seed truncates `issue_labels` and repopulates it in
+      // batches with no reader isolation, so a tick landing mid-re-seed finds every
+      // baselined issue "absent" and reads it as "all labels removed". Collected
+      // separately from (a) precisely so its magnitude can be judged — (a) cannot
+      // produce this shape, because an issue must still be IN the map to appear
+      // there at all.
+      const vanished = [];
+      const baselinedWithLabels = store.idsWithLabels ? [...store.idsWithLabels()] : [];
+      for (const issueId of baselinedWithLabels) {
+        if (!current.has(issueId)) vanished.push(issueId);
       }
+
+      const tearKey = cursorPath ?? "default";
+      const tear = classifyLabelMapTear({
+        vanished: vanished.length,
+        baselinedWithLabels: baselinedWithLabels.length,
+        consecutiveTorn: tornTracker.get(tearKey),
+        ...(tornThresholds ?? {}),
+      });
+      tornTracker.set(tearKey, tear.torn ? tear.nextConsecutive : 0);
+
+      if (tear.torn && !tear.accept) {
+        // Skip the ENTIRE pass — no emit, and critically no `store.put`, so the
+        // baseline keeps its pre-tear truth. Re-snapshotting here (the first-seed
+        // precedent) would bake the torn state IN and guarantee a second wave when
+        // the replica is restored — that is the other half of the measured 200+200.
+        //
+        // Routed through `fail` so readiness un-arms (a replica mid-rebuild is
+        // genuinely not dispatchable, and smee stays authoritative meanwhile) and so
+        // the reason is NAMED in the census rather than presenting as a
+        // suspiciously quiet clean sweep.
+        fail(labelCounts, tear.reason);
+        labelCounts.tornVanished = vanished.length;
+        return {
+          mode: start.mode,
+          alarm: start.alarm,
+          batches,
+          stoppedEarly: stopped,
+          position,
+          edges: counts,
+          comments: commentCounts,
+          labels: labelCounts,
+        };
+      }
+      // Held for `sustainedTicks` and then overruled as a genuine mass removal, which
+      // is emitted in full. Recorded rather than `fail`ed: a real change must not
+      // un-arm enforce.
+      if (tear.torn && tear.accept) labelCounts.tornOverruled = vanished.length;
+      // The fail-open degradation must not be readable as a clean tick.
+      if (tear.reason === "torn-check-uncomputable") fail(labelCounts, tear.reason);
+      changed.push(...vanished);
 
       labelCounts.examined = changed.length;
 
