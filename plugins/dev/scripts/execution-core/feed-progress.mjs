@@ -52,10 +52,22 @@ export const FEED_PROGRESS_SUFFIX = ".feed-progress.json";
 export const DEFAULT_RECORD_STALE_MS = 3 * 60 * 1000;
 
 /**
- * How long inbound frame silence is tolerated. The SDK pings after ~90 s idle,
- * so 5 min is several missed keepalives — long enough that a healthy-but-idle
- * socket never trips it, short enough to catch a half-open one well inside the
- * 30 s dispatch cadence's tolerance for stale authority.
+ * How long inbound frame silence is tolerated.
+ *
+ * ⛔ SIZED FROM THE FLEET, NOT PICKED. A threshold a healthy node can cross is
+ * not a health check — it is a new source of flapping, and readiness flapping is
+ * what CTL-1901 had to be written to survive. Measured over every
+ * `cloud-sync: freshness` line both minis have written (n=66,822 on mini,
+ * n=66,844 on mini-2, 2026-08-17):
+ *
+ *   p50 30 s · p95 81–82 s · p99 89 s · MAX 220 s (mini) / 243 s (mini-2)
+ *   samples over 300 s: ZERO on both hosts
+ *   samples over 90 s:  0.38% / 0.36%  (the SDK pings after ~90 s idle)
+ *
+ * 300 s therefore sits ~25% above the all-time observed maximum across ~134k
+ * samples, so a healthy-but-idle socket cannot trip it — while a half-open one
+ * freezes `lastFrameAt` indefinitely and crosses it within one dispatch cadence.
+ * Re-take this measurement before changing the constant.
  */
 export const DEFAULT_FRAME_STALE_MS = 5 * 60 * 1000;
 
