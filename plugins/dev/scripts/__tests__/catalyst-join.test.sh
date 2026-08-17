@@ -691,7 +691,8 @@ run "T2.8 multiHost roster + inferred mode FALLS BACK to heuristic and wires (CT
   jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$cfg\" >/dev/null &&
   echo \"\$out\" | grep -qF 'linear-stripped=yes' && \
   jq -e '(.catalyst.monitor | has(\"linear\")) | not' \"\$cfg\" >/dev/null &&
-  ! grep -qF 'smee.io/LIN' \"\$cfg\""
+  ! grep -qF 'smee.io/LIN' \"\$cfg\" &&
+  jq -e '.catalyst.cloudFeed.mode == \"enforce\"' \"\$cfg\" >/dev/null"
 
 # T2.8e (CTL-1928): a bundle whose monitorWebhooks carries ONLY the retired
 # Linear block has nothing left to write once the strip runs. The decision must
@@ -730,7 +731,33 @@ run "T2.8e bundle carrying ONLY the retired Linear block wires nothing (CTL-1928
   cfg=\"\$h/.config/catalyst/config.json\"
   echo \"\$out\" | grep -qF 'ONLY the retired Linear block' && \
   ! grep -qF 'smee.io/LIN' \"\$cfg\" && \
-  jq -e '((.catalyst.monitor // {}) | has(\"linear\")) | not' \"\$cfg\" >/dev/null"
+  jq -e '((.catalyst.monitor // {}) | has(\"linear\")) | not' \"\$cfg\" >/dev/null && \
+  jq -e '.catalyst.cloudFeed.mode == \"enforce\"' \"\$cfg\" >/dev/null"
+
+# T2.8f (CTL-1928, Codex #3485 P1): removing the Linear route must not leave a
+# node with NO Linear ingestion — the join provisions the cloud-feed
+# replacement, since readCloudFeedConfig defaults to "off" and doctor's
+# webhook-ingestion check is satisfied by the GitHub route alone (so the gap
+# would not even look broken). NON-CLOBBER: a node that already declares a mode
+# keeps its own.
+run "T2.8f an already-declared cloudFeed.mode is NOT clobbered by the join (CTL-1928)" bash -c "
+  h='${SCRATCH}/h28f'
+  mkdir -p \"\$h/.config/catalyst\"
+  printf '{\"catalyst\":{\"cloudFeed\":{\"mode\":\"shadow\"}}}' > \"\$h/.config/catalyst/config.json\"
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28f' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
+  cfg=\"\$h/.config/catalyst/config.json\"
+  jq -e '.catalyst.cloudFeed.mode == \"shadow\"' \"\$cfg\" >/dev/null && \
+  echo \"\$out\" | grep -qF 'cloudFeed=shadow'"
 
 # T2.9 (fixture updated for CTL-1617 PR5 — see T2.8's note): same inferred-mode
 # fallback, but SINGLEHOST_WH_BUNDLE's roster=1 makes the heuristic (and hence
