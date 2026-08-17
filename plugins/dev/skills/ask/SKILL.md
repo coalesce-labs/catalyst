@@ -28,9 +28,23 @@ summary as "needs you" **must be an ask ticket** — never a status paragraph.
   cannot create labels, measured CTC-626). `catalyst-ask` is what the "Waiting on me" view and the push
   trigger key on; `ask/decision` is the human-readable class.
 - **Title:** starts with `ASK:` (or names the click/decision itself); one line a phone can show.
-- **Body, in this order:** WHY (one paragraph — what it unblocks) · **OPTIONS** (A/B/C, one line each) ·
-  **DEFAULT IF SILENT** (what happens if the human never answers — never an irreversible action; those
-  wait for an explicit go) · relations: `blocks → <work ticket(s)>`.
+- **Body — the EXACT shape the decision trigger parses** (`apps/mirror/src/do/ask-decision.ts`; a
+  body in any other shape gives the trigger ZERO options and every reply is rejected — CTC-653):
+  ```markdown
+  **Why:** <one paragraph — what it unblocks>
+
+  **Options:**
+  - <option A label>
+  - <option B label>
+  - <option C label>
+
+  **Default if silent:** <what happens if the human never answers>
+  ```
+  The letters are implicit by bullet order (first bullet = A). Exactly one blank line ends the list.
+  Never an irreversible default; those wait for an explicit go. Add relations: `blocks → <work ticket(s)>`.
+- **How the human answers so the trigger recognizes it (today's parser):** a reply that IS the letter
+  (`A`, `A.`, `option A`) or the option's exact text, or `DECIDED: <free text>`. `(A)` inside a sentence
+  is NOT recognized until CTC-653 lands. The trigger is deterministic — no LLM reads the reply (CTC-554).
 - Priority 1 if it blocks a live customer path, else 2.
 
 ```bash
@@ -38,7 +52,7 @@ linearis issues create "ASK: <one line>" --team CTL --priority 2 \
   --assignee c2a8cc92-cab6-4536-9500-0f24abdf702b \
   --labels "catalyst-ask,ask/decision" \
   --blocks CTL-NNNN \
-  --description "WHY: … OPTIONS: (A) … (B) … DEFAULT IF SILENT: …"
+  --description "$(printf '**Why:** …\n\n**Options:**\n- …\n- …\n\n**Default if silent:** …')"
 ```
 
 ## 3. Answering (the human)
