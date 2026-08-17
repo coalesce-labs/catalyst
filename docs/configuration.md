@@ -39,8 +39,11 @@ This file is committed to the repository and contains settings that apply to the
 ### Initializing
 
 ```bash
-# Run the interactive setup script
-plugins/dev/scripts/setup-catalyst.sh
+# Run the interactive setup script (it lives at the repo root)
+./setup-catalyst.sh
+
+# Headless (CI / SSH / no tty):
+./setup-catalyst.sh --non-interactive
 
 # Or copy the template and edit manually
 cp plugins/dev/templates/config.template.json .catalyst/config.json

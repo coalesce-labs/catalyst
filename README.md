@@ -137,8 +137,11 @@ Get started in 5 minutes with the unified setup script:
 curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh
 chmod +x setup-catalyst.sh
 
-# Run it (requires interactive input)
+# Run it (interactive)
 ./setup-catalyst.sh
+
+# ...or headless, for CI / SSH / any host with no tty:
+./setup-catalyst.sh --non-interactive
 ```
 
 This script will guide you through:
@@ -158,6 +161,15 @@ This script will guide you through:
 /plugin install catalyst-dev
 
 # Restart Claude Code
+```
+
+**Install the CLI tools** (this is what puts `catalyst-stack` on your `PATH` — without it the
+next step fails with `command not found`):
+
+```bash
+shopt -s nullglob
+_cli=( ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/install-cli.sh )
+[ ${#_cli[@]} -gt 0 ] && bash "${_cli[0]}" || echo "catalyst-dev plugin not installed — run the plugin step first"
 ```
 
 **Start the stack:**
