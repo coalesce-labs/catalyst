@@ -307,7 +307,7 @@ export function compareStreams({ smee = [], feed = [], since = null, until = nul
     }
   };
 
-  // ⛔ THE SMEE SIDE MUST EXCLUDE THE FEED'S OWN EVENTS (CTL-1906).
+  // ⛔ THE SMEE SIDE MUST EXCLUDE THE FEED'S OWN EVENTS (CTL-1907).
   //
   // The caller builds `smee` by tailing the unified event log. Under `off` and
   // `shadow` that log holds webhook events only, so a name filter was sufficient.

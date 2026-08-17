@@ -753,11 +753,11 @@ describe("⛔ linear-feed-parity-run.mjs is executed, not grepped", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CTL-1906 — under enforce the producer writes into the SAME event log the
+// CTL-1907 — under enforce the producer writes into the SAME event log the
 // harness reads for its smee side. Without a source filter the instrument
 // agrees with itself.
 // ─────────────────────────────────────────────────────────────────────────────
-describe("⛔ CTL-1906 — the smee side excludes the feed's own events", () => {
+describe("⛔ CTL-1907 — the smee side excludes the feed's own events", () => {
   const W = { since: Date.parse("2026-08-16T00:00:00Z"), until: Date.parse("2026-08-16T02:00:00Z") };
   const webhookEv = (name, ticket, keys = [], ts = "2026-08-16T01:00:00Z") => ({
     ts,
