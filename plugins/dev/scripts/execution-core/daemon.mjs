@@ -1440,10 +1440,14 @@ export function startDaemon({
     const cloudFeedCfg = readCloudFeedConfig();
     if (cloudFeedCfg.mode !== "off") {
       const cloudFeedCapture = createCaptureSink({ path: defaultCapturePath(orchDir) });
-      // Timer FIRST, gate second: the gate's enforce branch degrades to shadow
-      // routing until `isReady()` says the producer has completed a real,
-      // non-seeding sweep (Codex P1, #3439). setInterval does not fire
-      // immediately, so nothing is produced between these two statements.
+      // Timer FIRST, gate second: until `isReady()` says the producer has
+      // completed a real, non-seeding sweep over a HEALTHY feed (Codex P1 #3439;
+      // CTL-1902 replaced writer-liveness with feed health), enforce keeps smee
+      // authoritative. setInterval does not fire immediately, so nothing is
+      // produced between these two statements.
+      // ⚠️ Since CTL-1901 `isReady` governs the SMEE side only — a feed event
+      // carries its own emission-time authority stamp and is never re-judged
+      // against a later reading of this flag.
       _cloudFeedTimer = startCloudFeedTimer({
         mode: cloudFeedCfg.mode,
         intervalSec: cloudFeedCfg.intervalSec,

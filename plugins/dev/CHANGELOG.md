@@ -1,5 +1,27 @@
 # Changelog
 
+## [12.57.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.56.0...catalyst-dev-v12.57.0) (2026-08-17)
+
+
+### Features
+
+* **dev:** CTL-1847 — the cloud feed can drive dispatch, behind off/shadow/enforce ([#3439](https://github.com/coalesce-labs/catalyst/issues/3439)) ([9193042](https://github.com/coalesce-labs/catalyst/commit/91930429811d8d12ac15a1690050e9ff3c7d0072))
+* **dev:** CTL-1891 inc 1 — a host recognises its own Linear write without asking who wrote it ([#3437](https://github.com/coalesce-labs/catalyst/issues/3437)) ([1c6f44f](https://github.com/coalesce-labs/catalyst/commit/1c6f44fc99a85156d40f2b42ccd32b4cb484b601))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1847 — restore DEFAULT_SETTLE_SEC; execute the parity CLI in tests ([#3444](https://github.com/coalesce-labs/catalyst/issues/3444)) ([385c9a2](https://github.com/coalesce-labs/catalyst/commit/385c9a28db6d368ffe16eacacd784a6d4b6d7e97))
+* **dev:** CTL-1892 — the fleet has TWO app identities and both rotated; only one was seeded ([#3436](https://github.com/coalesce-labs/catalyst/issues/3436)) ([9ac3e07](https://github.com/coalesce-labs/catalyst/commit/9ac3e07b2e48e1087ac8bf72615edb498dd583ad))
+* **dev:** CTL-1892 — the self-echo guard survives an app-actor rotation ([#3428](https://github.com/coalesce-labs/catalyst/issues/3428)) ([4e601ef](https://github.com/coalesce-labs/catalyst/commit/4e601efe0e9ab72664cbc2037ceb7357dab30cdc))
+* **dev:** CTL-1901 — a mid-sweep readiness drop strands an already-stamped edge ([#3448](https://github.com/coalesce-labs/catalyst/issues/3448)) ([5f84a2b](https://github.com/coalesce-labs/catalyst/commit/5f84a2bebaf78a937ecf1a5e61dcb2e084a62322))
+* **dev:** CTL-1902 — readiness required the writer to be alive, not the feed to be arriving ([#3449](https://github.com/coalesce-labs/catalyst/issues/3449)) ([e530c25](https://github.com/coalesce-labs/catalyst/commit/e530c255fdb11dffcfe4e2e51bbd69e7725c71c8))
+* **dev:** CTL-1904 — the feed sees label changes the updated_at cursor cannot reach ([#3446](https://github.com/coalesce-labs/catalyst/issues/3446)) ([51a7f6a](https://github.com/coalesce-labs/catalyst/commit/51a7f6a3e4fadcea4c6989338e8100b2c7e83fcd))
+* **dev:** pin @catalyst-cloud/sdk 0.8.4, closing the migrator/writer schema skew ([#3426](https://github.com/coalesce-labs/catalyst/issues/3426)) ([4997ebe](https://github.com/coalesce-labs/catalyst/commit/4997ebe0b5ca8744614b973781042d3267756842))
+* **dev:** pin @catalyst-cloud/sdk 0.8.5, ending the pr_* frame loss ([#3432](https://github.com/coalesce-labs/catalyst/issues/3432)) ([88f24c3](https://github.com/coalesce-labs/catalyst/commit/88f24c36575222f356daa0f5cebee405165f67a3))
+* **dev:** pin @catalyst-cloud/sdk 0.8.6 — PRAGMA-accurate columns close the skew class at the root ([#3433](https://github.com/coalesce-labs/catalyst/issues/3433)) ([0be8892](https://github.com/coalesce-labs/catalyst/commit/0be8892073834fbe72d80da20677e9717efa0511))
+* **dev:** pin @catalyst-cloud/sdk 0.8.7 — the replica tenant fence ([#3434](https://github.com/coalesce-labs/catalyst/issues/3434)) ([6dc1ab6](https://github.com/coalesce-labs/catalyst/commit/6dc1ab62221ddd1b62d1fca6dee2130e85dc0bd2))
+
 ## [12.56.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.55.0...catalyst-dev-v12.56.0)
 
 Aug 15, 2026

@@ -75,6 +75,7 @@ import { getCloudSyncDepSkewLedgerPath, getCloudSyncDepsPath, getCloudSyncSelfHe
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { sdkLogRecord } from "./cloud-sync-log.mjs";
+import { buildFeedProgressRecord, writeFeedProgress } from "./feed-progress.mjs"; // CTL-1902
 import { createSchemaReportingWsFactory } from "./cloud-sync-schema-identity.mjs"; // CTL-1869
 import { classifyDepSkew, classifyStall, clearSelfHealBreadcrumb, exitAfterClose, freshnessFields, readReplicaCounts, resolveDepSkewMode, writeSelfHealBreadcrumb } from "./cloud-sync-telemetry.mjs";
 import {
@@ -589,6 +590,33 @@ const emitTelemetry = () => {
       "cloud-sync: freshness",
     );
   } catch { /* best-effort — telemetry must never crash the writer */ }
+  // CTL-1902: publish INGEST EVIDENCE where a separate process can read it.
+  //
+  // Everything below was already computed for the freshness line above, and until
+  // now it only ever reached a LOG. cloud-feed readiness lives in the
+  // execution-core daemon — a different process — and the only cross-process fact
+  // available to it was `<db>.writer.lock`, which the SDK writes and which reports
+  // that this PROCESS is alive. That is the signal this very file calls
+  // feed-independent (see the classifyStall comment above), and it is what kept
+  // enforce armed against a frozen feed.
+  //
+  // `lastFrameAt` is the discriminator and it is deliberately published RAW: a
+  // healthy quiet feed keeps it fresh through watchdog pongs, a half-open socket
+  // freezes it, and the reader applies its own clock. Fail-open — a failed publish
+  // must never take down the writer, and reads it fail-closed on the other side.
+  writeFeedProgress(
+    dbPath,
+    buildFeedProgressRecord({
+      now,
+      cursor,
+      lastFrameAt,
+      status: displayStatus,
+      rows,
+      maxUpdatedMs,
+      genuineStall: genuine,
+      pid: process.pid,
+    }),
+  );
   if (depSkew.skewed && depSkewPosture !== _depSkewAlertedPosture) {
     _depSkewAlertedPosture = depSkewPosture;
     try {
