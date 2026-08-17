@@ -36,6 +36,13 @@ bad() {
 	echo "  FAIL — $1"
 }
 
+# ⚠️ Transient rm failures must not abort the suite. Observed once on macOS:
+# `rm: <tmpdir>: Directory not empty` on a directory that removed cleanly on retry
+# (a filesystem/indexer hiccup, not a test failure). Under `set -e` that aborted the
+# whole run mid-suite, which reads as a red suite for a reason unrelated to anything
+# under test — a cleanup step must never be able to fail the thing it cleans up after.
+scrub() { rm -rf "$@" 2>/dev/null || rm -rf "$@" 2>/dev/null || true; }
+
 # file_mode PATH -> the octal permission bits, portably.
 # ⛔ ORDER MATTERS AND BSD-FIRST IS WRONG. On Linux `stat -f` is --file-system, which
 # SUCCEEDS and prints filesystem info, so a `stat -f ... || stat -c ...` chain never
@@ -119,6 +126,44 @@ run_case() {
 # stub_was_called HOME -> 0 when the sealed transport handled the request.
 stub_was_called() { [[ -s "$1/.stub-bin/stub_calls" ]]; }
 
+# make_stack_stub BINDIR RC MESSAGE — a `catalyst-stack` on PATH that exits RC
+# after printing MESSAGE on stderr. Needed because `adopt-cloud-sync` is the other
+# thing CTL-1913 changed: its output used to go to /dev/null.
+make_stack_stub() {
+	local bindir="$1" rc="$2" msg="$3"
+	mkdir -p "$bindir"
+	cat >"$bindir/catalyst-stack" <<STACKSTUB
+#!/usr/bin/env bash
+echo "$msg" >&2
+exit $rc
+STACKSTUB
+	chmod +x "$bindir/catalyst-stack"
+}
+
+# run_case_capturing — like run_case, but returns the function's OUTPUT rather
+# than its rc, so assertions can be made about what the operator actually sees.
+#
+# ⚠️ CALL IT AS `out=$(run_case_capturing ... || true)`. An assignment takes the
+# exit status of its command substitution, so under `set -euo pipefail` a case that
+# deliberately drives a NON-ZERO return (every rejection case does) aborts the whole
+# suite mid-run instead of asserting. Cost one debugging round.
+run_case_capturing() {
+	local home="$1" token="$2" account="$3" code="${4:-200}"
+	local bindir="$home/.stub-bin"
+	make_curl_stub "$bindir" "$code"
+	(
+		export HOME="$home"
+		export PATH="$bindir:$PATH"
+		export CATALYST_SETUP_LIB_ONLY=1
+		export CATALYST_CLOUD_TOKEN="$token"
+		export CATALYST_CLOUD_ACCOUNT="$account"
+		# shellcheck disable=SC1090
+		source "$SETUP" >/dev/null 2>&1
+		set +e
+		setup_cloud_replica 2>&1
+	)
+}
+
 echo "CTL-1836 — setup-catalyst.sh cloud replica provisioning"
 
 # ── Case 1: no token → complete no-op (existing installs untouched) ──────────
@@ -130,7 +175,7 @@ if [[ ! -e "$H1/.config/catalyst/cloud-sync.env" ]]; then
 else
 	bad "no token → wrote cloud-sync.env, which would change existing-install behaviour"
 fi
-rm -rf "$H1"
+scrub "$H1"
 
 # ── Case 2: token WITHOUT account → loud refusal, nothing written ────────────
 # This is the tenant-0 footgun. It must fail, and it must not leave a half-written
@@ -143,7 +188,7 @@ if [[ ! -e "$H2/.config/catalyst/cloud-sync.env" ]]; then
 else
 	bad "token without account → wrote a credential file despite refusing"
 fi
-rm -rf "$H2"
+scrub "$H2"
 
 # ── Case 3: token + account → env file written, 0600, explicit values ────────
 H3=$(mktemp -d)
@@ -193,7 +238,7 @@ if [[ -f "$ENV_FILE" ]]; then
 else
 	bad "token + account → no cloud-sync.env written"
 fi
-rm -rf "$H3"
+scrub "$H3"
 
 # ── Case 4: CATALYST_CLOUD_BASE_URL override is honoured ─────────────────────
 H4=$(mktemp -d)
@@ -211,7 +256,7 @@ if grep -q 'example\.invalid' "$H4/.stub-bin/stub_calls" 2>/dev/null; then
 else
 	bad "validation call did not target the override host: $(cat "$H4/.stub-bin/stub_calls" 2>/dev/null)"
 fi
-rm -rf "$H4"
+scrub "$H4"
 
 # ── Case 5: a PRE-EXISTING world-readable env file must be tightened ─────────
 # This is the case that makes the permission behaviour real. A 0644 cloud-sync.env
@@ -243,7 +288,7 @@ if [[ $(grep -c '^export CATALYST_CLOUD_TOKEN=' "$H5/.config/catalyst/cloud-sync
 else
 	bad "env file has $(grep -c '^export CATALYST_CLOUD_TOKEN=' "$H5/.config/catalyst/cloud-sync.env" 2>/dev/null) token lines — expected exactly 1"
 fi
-rm -rf "$H5"
+scrub "$H5"
 
 # ── Case 6: EVERY line must be exported (Codex P1 on #3365) ─────────────────
 # launch.sh SOURCES this file and then execs bun. A bare `FOO=bar` in a sourced
@@ -278,7 +323,7 @@ if [[ -f $E6 ]]; then
 else
 	bad "case 6: no env file written"
 fi
-rm -rf "$H6"
+scrub "$H6"
 
 # ── Case 7: the configured token NAME is honoured (CTL-1668, Codex P2) ──────
 # Writing a fixed name while the writer resolves a custom one produces the same
@@ -302,7 +347,7 @@ if grep -q '^export MY_CUSTOM_CLOUD_TOKEN=tok_custom_name$' "$E7" 2>/dev/null; t
 else
 	bad "configured token name ignored — writer would resolve a name the file never sets"
 fi
-rm -rf "$H7"
+scrub "$H7"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CTL-1913 — AN UNUSABLE CLOUD TOKEN MUST FAIL THE INSTALL LOUDLY
@@ -325,9 +370,29 @@ echo "CTL-1913 — token validation"
 #   401 garbage/expired/revoked token
 #   403 valid token, but not scoped to the requested account (the tenant footgun)
 #   000 curl could not reach the host at all (the CTL-1910 NXDOMAIN shape)
-for spec in "401:a garbage or revoked token" "403:a token not scoped to this account" "000:an unreachable hub"; do
+#
+# ⚠️ Each case also asserts the MESSAGE names its own cause. Refusing with the
+# wrong explanation is not equivalent to refusing with the right one: the three
+# classes need three different operator actions (get a new token / fix the
+# account / fix DNS-or-reachability), and the unreachable case is the one that
+# carries the CTL-1910 shape plus the exact curl to re-run. Found by mutation —
+# breaking the `000` branch so it fell through to the generic catch-all SURVIVED a
+# suite that asserted only "non-zero, nothing written".
+for spec in "401:a garbage or revoked token:REJECTED by the hub" \
+	"403:a token not scoped to this account:NOT scoped to account" \
+	"000:an unreachable hub:Could not reach the hub"; do
 	code="${spec%%:*}"
-	desc="${spec#*:}"
+	rest="${spec#*:}"
+	desc="${rest%%:*}"
+	expect_msg="${rest#*:}"
+	HB=$(mktemp -d)
+	out=$(run_case_capturing "$HB" "FAKE-TOKEN-NOT-REAL" "acme-tenant" "$code" || true)
+	if grep -qF "$expect_msg" <<<"$out"; then
+		ok "HTTP $code → the message names its own cause (\"$expect_msg\")"
+	else
+		bad "HTTP $code → wrong or generic diagnostic; expected \"$expect_msg\", got: $(printf '%s' "$out" | tr '\n' '|' | head -c 200)"
+	fi
+	scrub "$HB"
 	HB=$(mktemp -d)
 	rc=$(run_case "$HB" "FAKE-TOKEN-NOT-REAL" "acme-tenant" "$code")
 	if [[ $rc != "0" ]]; then
@@ -348,7 +413,7 @@ for spec in "401:a garbage or revoked token" "403:a token not scoped to this acc
 	else
 		bad "HTTP $code → curl stub was never invoked; the seal did not hold, so this case proves nothing"
 	fi
-	rm -rf "$HB"
+	scrub "$HB"
 done
 
 # ── POSITIVE CONTROL for all of the above ────────────────────────────────────
@@ -390,7 +455,64 @@ if grep -q 'account=tenant-1' "$HOK/.stub-bin/stub_calls" 2>/dev/null; then
 else
 	bad "validation did not pass the account: $(cat "$HOK/.stub-bin/stub_calls" 2>/dev/null)"
 fi
-rm -rf "$HOK"
+scrub "$HOK"
+
+# ── An UNLISTED status code must not be accepted ─────────────────────────────
+# Found by mutation: inserting `return 0` into the catch-all `*)` branch SURVIVED
+# the suite, because every case above drove a code the function names explicitly.
+# A 5xx, a 404 from a reshaped API, or a captive-portal 302 all land here — and
+# none of them is evidence the token works.
+for code in 500 502 404 302 418; do
+	HU=$(mktemp -d)
+	rc=$(run_case "$HU" "tok_unknown_code" "tenant-2" "$code")
+	if [[ $rc != "0" ]]; then
+		ok "HTTP $code (unlisted) → non-zero exit"
+	else
+		bad "HTTP $code (unlisted) → returned 0; an unrecognised response is treated as proof the token works"
+	fi
+	if [[ ! -e "$HU/.config/catalyst/cloud-sync.env" ]]; then
+		ok "HTTP $code (unlisted) → wrote NO cloud-sync.env"
+	else
+		bad "HTTP $code (unlisted) → wrote a config on an unverified token"
+	fi
+	scrub "$HU"
+done
+
+# ── adopt-cloud-sync's diagnostics must SURVIVE (CTL-1913 scenario 3) ────────
+# Also found by mutation: restoring `>/dev/null 2>&1` on the adopt call SURVIVED,
+# because nothing asserted on what the operator is shown. The whole point of that
+# change is that the reason for the failure is recoverable.
+HD=$(mktemp -d)
+mkdir -p "$HD/.stub-bin"
+make_stack_stub "$HD/.stub-bin" 3 "launchctl: Bootstrap failed: 5: Input/output error"
+out=$(run_case_capturing "$HD" "tok_adopt" "tenant-5" 200 || true)
+if grep -q 'Bootstrap failed: 5: Input/output error' <<<"$out"; then
+	ok "adopt-cloud-sync's stderr reaches the operator (not discarded to /dev/null)"
+else
+	bad "adopt-cloud-sync failed and its diagnostics were swallowed — the operator gets a generic warning for every possible cause"
+fi
+if grep -q 'rc=3' <<<"$out"; then
+	ok "the adopt exit code is reported"
+else
+	bad "the adopt exit code is not reported"
+fi
+# ...and a FAILED adopt must not be announced as a success.
+if grep -qi 'writer adopted' <<<"$out"; then
+	bad "printed the adopted success line despite a non-zero adopt"
+else
+	ok "no success line printed for a failed adopt"
+fi
+# NEGATIVE CONTROL: a SUCCEEDING adopt must not dump its output as if it failed.
+HS=$(mktemp -d)
+mkdir -p "$HS/.stub-bin"
+make_stack_stub "$HS/.stub-bin" 0 "some ordinary chatter on stderr"
+out=$(run_case_capturing "$HS" "tok_adopt" "tenant-6" 200 || true)
+if grep -qi 'writer adopted' <<<"$out" && ! grep -q 'ordinary chatter' <<<"$out"; then
+	ok "NEGATIVE CONTROL: a successful adopt prints the success line and stays quiet"
+else
+	bad "successful adopt output is wrong: $(printf '%s' "$out" | tr '\n' '|')"
+fi
+scrub "$HD" "$HS"
 
 # ── The no-token no-op must remain network-free ──────────────────────────────
 # Case 1 proved it writes nothing. It must also not have PHONED HOME: a validation
@@ -403,7 +525,7 @@ if ! stub_was_called "$HN"; then
 else
 	bad "no token → still called out to the hub: $(cat "$HN/.stub-bin/stub_calls")"
 fi
-rm -rf "$HN"
+scrub "$HN"
 
 # ── The account refusal must also precede the network ────────────────────────
 # A token without an account is refused syntactically; spending a hub round-trip
@@ -416,7 +538,7 @@ if ! stub_was_called "$HA"; then
 else
 	bad "token without account → sent the token to the hub before refusing"
 fi
-rm -rf "$HA"
+scrub "$HA"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
