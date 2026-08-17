@@ -53,6 +53,7 @@ import {
   getCatalystRepoDir, // CTL-1093 sticky dir
   readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
   readCloudFeedConfig, // CTL-1847: cloud-feed dispatch-source mode
+  readLinearWriteProxyConfig, // CTL-1889: Linear write-proxy transport mode
   readLinearReplica, // CTL-1340: read-replica tier flag (inert; default off)
   getExecutor, // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
   dispatchModeForExecutor, // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
@@ -158,6 +159,9 @@ import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } fro
 import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
 import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: codex boot gate (auth.json + `codex --version`) that degrades routed codex phases + emits execution-core.executor.codex-fallback
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
+import { setLinearWriteProxy, setLinearWriteProxyResolver } from "./linear-write.mjs"; // CTL-1889: install the cloud write-proxy transport + its replica-backed id resolver
+import { createLinearWriteProxy } from "./linear-write-proxy.mjs"; // CTL-1889
+import { createProxyResolver } from "./linear-write-proxy-resolve.mjs"; // CTL-1889
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
 // so the phantom worker-dir validity sweep is operative in production.
@@ -1475,6 +1479,31 @@ export function startDaemon({
           armed: false,
         },
         "cloud-feed: armed",
+      );
+    }
+    // CTL-1889: the Linear write-proxy transport. Same posture as the cloud-feed
+    // block above — `off` (the default) constructs nothing, so linear-write.mjs's
+    // module-level install stays null and every Linear write in this process is
+    // byte-identical to pre-CTL-1889.
+    const writeProxyCfg = readLinearWriteProxyConfig();
+    if (writeProxyCfg.mode !== "off") {
+      const writeProxy = createLinearWriteProxy({
+        mode: writeProxyCfg.mode,
+        routes: writeProxyCfg.routes,
+      });
+      setLinearWriteProxy(writeProxy);
+      // The resolver is installed only for `enforce`: shadow never builds a payload
+      // (see routeThroughProxy), so opening a replica handle for it would be a handle
+      // held open for a code path that cannot run.
+      if (writeProxyCfg.mode === "enforce") setLinearWriteProxyResolver(createProxyResolver());
+      log.info(
+        {
+          mode: writeProxyCfg.mode,
+          baseUrl: writeProxy?.baseUrl ?? null,
+          account: writeProxy?.account ?? null,
+          routesOverridden: writeProxyCfg.routes ? Object.keys(writeProxyCfg.routes) : [],
+        },
+        "linear-write-proxy: armed",
       );
     }
     monitorFn({

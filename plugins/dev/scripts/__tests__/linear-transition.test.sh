@@ -783,6 +783,56 @@ run "triage transition resolves via the registry's customized eligibleQuery.tria
 run "used the registry's 'Intake' override, not the hardcoded 'Triage' default" \
   expect_contains "$LOG34" "linearis issues update TST-34 --status Intake"
 
+# ─── Test 35-38: --resolve-only (CTL-1889) ────────────────────────────────
+# The cloud write proxy needs the TARGET STATE without performing the write. Re-deriving
+# the four-rung precedence chain in JS would make this script one of two sources of
+# truth, so the proxy calls it in a mode that resolves and stops.
+WORK35="${SCRATCH}/t35"
+BIN35="${SCRATCH}/t35/bin"
+LOG35="${SCRATCH}/t35/log"
+mkdir -p "${WORK35}/.catalyst"
+cat > "${WORK35}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"linear":{"stateMap":{"done":"Done","inProgress":"Implement"}}}}
+EOF
+install_fake_linearis "$BIN35"
+touch "$LOG35"
+
+run "--resolve-only emits the resolved target state as JSON" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG35' PATH='$BIN35:$PATH' \
+    '$TRANSITION' --ticket TST-35 --transition inProgress --config '$WORK35/.catalyst/config.json' \
+    --resolve-only --json | grep -q '\"targetState\":\"Implement\"'"
+
+run "⛔ --resolve-only performs NO write (the whole point — linearis is never called)" \
+  bash -c "! grep -q 'issues update' '$LOG35'"
+
+run "--resolve-only reports action=resolve-only, not a transition" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG35' PATH='$BIN35:$PATH' \
+    '$TRANSITION' --ticket TST-35 --transition done --config '$WORK35/.catalyst/config.json' \
+    --resolve-only --json | grep -q '\"action\":\"resolve-only\"'"
+
+# ⭐ The property the ticket turns on: the END STATE of CTL-1889 is a host with no
+# Linear credential and no reason to have linearis installed. Resolution must still
+# work there — so this runs with a PATH that has no linearis at all. --dry-run is the
+# negative control: it exits at the availability gate with skipped-no-linearis and
+# never resolves, which is exactly why a new mode was needed rather than reusing it.
+WORK36="${SCRATCH}/t36"
+EMPTY36="${SCRATCH}/t36/emptybin"
+mkdir -p "${WORK36}/.catalyst" "$EMPTY36"
+cat > "${WORK36}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"linear":{"stateMap":{"inProgress":"Implement"}}}}
+EOF
+JQ_DIR36="$(dirname "$(command -v jq)")"
+
+run "⭐ --resolve-only still resolves on a host with NO linearis binary" \
+  bash -c "PATH='$EMPTY36:$JQ_DIR36:/usr/bin:/bin' \
+    '$TRANSITION' --ticket TST-36 --transition inProgress --config '$WORK36/.catalyst/config.json' \
+    --resolve-only --json | grep -q '\"targetState\":\"Implement\"'"
+
+run "NEGATIVE CONTROL: --dry-run on the same PATH does NOT resolve (it stops at the linearis gate)" \
+  bash -c "PATH='$EMPTY36:$JQ_DIR36:/usr/bin:/bin' \
+    '$TRANSITION' --ticket TST-36 --transition inProgress --config '$WORK36/.catalyst/config.json' \
+    --dry-run --json | grep -q 'skipped-no-linearis'"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

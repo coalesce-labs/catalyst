@@ -50,6 +50,9 @@ import { ALERT_BOOT_DEPENDENCY_UNUSABLE } from "../execution-core/dispatch-alert
 // re-typed as a literal below, so a rename cannot leave this contract asserting over a name
 // nothing emits (the hand-copied-literal trap the ASSERTED_BY parity suite exists to prevent).
 import { DEP_SKEW_RESTART_EVENT, DEP_SKEW_WOULD_RESTART_EVENT } from "../execution-core/cloud-sync-deps.mjs";
+// CTL-1889 — the Linear write-proxy trio, imported from its owning module so a
+// rename cannot leave a re-typed literal behind that still passes.
+import { PROXY_EVENT_NAMES } from "../execution-core/linear-write-proxy.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -95,6 +98,7 @@ const EXEC_CORE_EVENT_NAMES = [
   ALERT_BOOT_DEPENDENCY_UNUSABLE,
   DEP_SKEW_RESTART_EVENT, // CTL-1659 cloud-sync.mjs — the writer restarting to load an installed dep fix
   DEP_SKEW_WOULD_RESTART_EVENT, // CTL-1659 — sustained skew that did NOT act (shadow / budget / undurable ledger)
+  ...PROXY_EVENT_NAMES, // CTL-1889 linear-write-proxy.mjs — would-write / applied / failed
   ...INLINE_EVENT_NAMES,
 ];
 
