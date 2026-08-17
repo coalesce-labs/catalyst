@@ -28,6 +28,40 @@
 // it forever. Conflating the two is how a producer wedges on the first row it was
 // never going to emit — and on a multi-tenant replica (CTL 4,993 · ADV 3,859 ·
 // CTC 851 · EVR 158 · OTL 114 state edges) most rows are declines.
+//
+// ── TWO COUNTERS, BECAUSE ONE OF THEM GATES ENFORCE (CTL-1909) ──────────────
+// That warning was stated here and then contradicted one module away. Declines and
+// failures both landed in a single `byReason` map, and `cloud-feed-timer`'s
+// readiness gate disqualified the producer on ANY entry in it — so the sweep's most
+// common HEALTHY outcome un-armed enforce. Measured live on both minis 2026-08-17:
+// `{"unready":[{"reason":"edges:foreign-team"}]}` within two minutes of boot, from
+// ordinary CTC activity. The feed could only be armed on a tick that examined zero
+// foreign-team rows, which on a busy multi-team workspace is a minority of ticks —
+// making "turn smee off" structurally unreachable.
+//
+// So the outcome maps are SPLIT, and the split is by MEANING at the call site, not
+// by matching reason strings at the reader:
+//
+//   decline(counts, reason) → counts.declined + counts.byReason
+//       The producer examined a row and deliberately produced nothing. Healthy,
+//       expected, unbounded in volume. Reported, never disqualifying.
+//   fail(counts, reason)    → counts.failed   + counts.byFailure
+//       The producer could not do its job. Always disqualifying, and a reason
+//       string invented in 2027 still disqualifies because the SITE chose `fail`.
+//
+// Adding a new decline reason therefore needs no reader change (the old design's
+// virtue) and adding a new failure reason needs no reader change either (the old
+// design's bug). The one judgement is which helper to call, made where the outcome
+// is actually known.
+//
+// ⛔ The line between them is NOT "is this row unusual". It is: **would un-arming
+// repair it?** A malformed row (`unjoinable-issue`, `issue-has-no-team-key`) is a
+// decline: the feed produces nothing for that row, but neither would smee's copy
+// survive the same downstream team scoping, and un-arming forever over one bad row
+// is the very pathology this ticket removes. A producer that cannot emit for ANY
+// row (`no-team-scope-configured`) is a failure — un-arming is exactly the right
+// response, because the alternative is enforce suppressing every webhook copy while
+// the feed emits nothing at all.
 
 import { buildCommentEvent, buildIssueEvent, classifyEdge } from "./linear-feed-event.mjs";
 import { diffSnapshots, diffToHistoryRow, snapshotOf } from "./linear-feed-diff.mjs";
@@ -36,11 +70,95 @@ import { CURSOR_OK, DEFAULT_RESET_LOOKBACK_MS, readCursor, resolveStartPosition,
 /** Bound the work one sweep may do, so a large backlog cannot monopolise a tick. */
 export const DEFAULT_MAX_BATCHES = 20;
 
-const emptyCounts = () => ({ emitted: 0, declined: 0, failed: 0, examined: 0, deferred: 0, byReason: {} });
+const emptyCounts = () => ({ emitted: 0, declined: 0, failed: 0, examined: 0, deferred: 0, byReason: {}, byFailure: {} });
 
-const note = (counts, reason) => {
-  counts.byReason[reason] = (counts.byReason[reason] ?? 0) + 1;
+const bump = (map, reason) => {
+  map[reason] = (map[reason] ?? 0) + 1;
 };
+
+/** Examined and deliberately not emitted. Counted, reported, NEVER disqualifying. */
+const decline = (counts, reason) => {
+  counts.declined += 1;
+  bump(counts.byReason, reason);
+};
+
+/**
+ * The producer could not do its job. ALWAYS disqualifying.
+ *
+ * ⚠️ This also folds the cursor failures into `counts.failed`, which they were not
+ * in before — they were noted in `byReason` alone and relied on the reader treating
+ * every entry as fatal. That reliance is what CTL-1909 removes, so a failure that
+ * does not increment `failed` would now be a failure the gate cannot see.
+ */
+const fail = (counts, reason) => {
+  counts.failed += 1;
+  bump(counts.byFailure, reason);
+};
+
+/**
+ * failureNameFor — `null` when a non-emitting verdict is a healthy DECLINE,
+ * otherwise the name to record it under as a FAILURE.
+ *
+ * A verdict is a healthy decline only when it NAMED a reason. `classify`
+ * returning `undefined`, `null`, or a reasonless object means the producer cannot
+ * say why it produced nothing — that is not a demonstrated decline, and the whole
+ * point of this gate is positive evidence. `fatal` marks a verdict whose cause is
+ * the producer rather than the row.
+ *
+ * ⛔ Deciding and NAMING are one function on purpose. They were briefly two — a
+ * `verdictIsFailure` predicate here plus `verdict?.reason || "unclassified"`
+ * repeated at each of the three call sites — and the two promptly disagreed: a
+ * non-string reason (`42`) was ruled unusable by the predicate and then used
+ * anyway as the census key, because `42 || "unclassified"` is `42`. That is the
+ * same shape as the bug this ticket fixes (two places holding one meaning, one of
+ * them wrong), one level down, so the naming lives where the decision is made and
+ * a caller cannot supply its own.
+ */
+const failureNameFor = (verdict) => {
+  if (verdict?.fatal === true) {
+    // A fatal verdict is trusted for its NAME only if it also named itself
+    // usably; the flag alone is what makes it a failure.
+    return typeof verdict.reason === "string" && verdict.reason.length > 0 ? verdict.reason : "unclassified";
+  }
+  if (typeof verdict?.reason !== "string" || verdict.reason.length === 0) return "unclassified";
+  return null; // named, non-fatal ⇒ a healthy decline
+};
+
+/**
+ * ⛔ A producer with no team scope declines EVERY row — with `teams` absent as
+ * `no-team-scope-configured`, and with `teams` merely EMPTY as `foreign-team`,
+ * which since the split above is a healthy decline. So an empty scope would arm
+ * enforce while emitting nothing for anybody: smee suppressed, feed silent.
+ *
+ * Production is already covered one layer up (`linear-feed-run.mjs` `planTenants`
+ * returns `skip: "no-registered-teams"`, and a skipped tenant never arms). This
+ * closes the same hole at the module boundary, where the split is made — a public
+ * export must not depend on a caller it cannot see for the invariant its own
+ * counters assert.
+ */
+function teamScopeFailure(teams) {
+  if (!teams || typeof teams.has !== "function") return "no-team-scope-configured";
+  if (typeof teams.size === "number" && teams.size === 0) return "empty-team-scope";
+  return null;
+}
+
+function noTeamScopeResult(reason) {
+  const counts = emptyCounts();
+  fail(counts, reason);
+  return {
+    mode: "no-team-scope",
+    alarm: {
+      severity: "error",
+      reason,
+      message:
+        "the producer has no team scope, so it would decline every row and emit nothing — refusing to sweep rather than advancing the cursor past edges it will never emit",
+    },
+    batches: 0,
+    stoppedEarly: true,
+    edges: counts,
+    comments: emptyCounts(),
+  };
+}
 
 /**
  * Process one page, in order, stopping at the first EMIT FAILURE.
@@ -54,8 +172,14 @@ export function processPage(items, { build, classify, emit, counts }) {
     counts.examined += 1;
     const verdict = classify(item);
     if (!verdict?.emit) {
-      counts.declined += 1;
-      note(counts, verdict?.reason ?? "unclassified");
+      const failureName = failureNameFor(verdict);
+      if (failureName) {
+        // Producer-level, or unexplained. Do NOT settle it: the cursor must not
+        // move past a row we never emitted and cannot account for.
+        fail(counts, failureName);
+        return { handled, stopped: true };
+      }
+      decline(counts, verdict.reason);
       handled.push(item); // examined and settled — the cursor MUST move past it
       continue;
     }
@@ -63,15 +187,13 @@ export function processPage(items, { build, classify, emit, counts }) {
     try {
       event = build(item);
     } catch (err) {
-      counts.failed += 1;
-      note(counts, `build-failed:${err?.message ?? "unknown"}`);
+      fail(counts, `build-failed:${err?.message ?? "unknown"}`);
       return { handled, stopped: true };
     }
     try {
       emit(event, item);
     } catch (err) {
-      counts.failed += 1;
-      note(counts, `emit-failed:${err?.message ?? "unknown"}`);
+      fail(counts, `emit-failed:${err?.message ?? "unknown"}`);
       return { handled, stopped: true }; // do NOT include this item
     }
     counts.emitted += 1;
@@ -99,6 +221,8 @@ export function runSweep({
   readCursorFn = readCursor,
   writeCursorFn = writeCursor,
 } = {}) {
+  const scopeFailure = teamScopeFailure(teams);
+  if (scopeFailure) return noTeamScopeResult(scopeFailure);
   const read = readCursorFn(cursorPath);
   const start = resolveStartPosition(read, { now, resetLookbackMs });
   const counts = emptyCounts();
@@ -122,7 +246,7 @@ export function runSweep({
     try {
       writeCursorFn(cursorPath, position);
     } catch (err) {
-      note(counts, `cursor-init-failed:${err?.code ?? err?.message ?? "unknown"}`);
+      fail(counts, `cursor-init-failed:${err?.code ?? err?.message ?? "unknown"}`);
     }
   }
 
@@ -138,7 +262,7 @@ export function runSweep({
       // A cursor we cannot persist means the next boot re-reads this window. That
       // is survivable (re-emission, bounded) and must not stop the sweep — but it
       // is NOT silent.
-      note(counts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
+      fail(counts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
     }
     return true;
   };
@@ -272,7 +396,18 @@ export function runDiffSweep({
   now = () => Date.now(),
   readCursorFn = readCursor,
   writeCursorFn = writeCursor,
+  // Injected so the FATAL-verdict branch below is reachable from a test. It is
+  // otherwise unreachable by construction — `teamScopeFailure` pre-empts the only
+  // fatal verdict `classifyEdge` can currently return — and an unreachable guard
+  // is one nothing can prove still works. The branch is kept because the next
+  // fatal verdict added to `classifyEdge` would otherwise be silently demoted to a
+  // healthy decline, which is CTL-1909 all over again.
+  classifyFn = classifyEdge,
   labelBudget = DEFAULT_LABEL_BUDGET,} = {}) {
+  // Checked BEFORE the store or the cursor is touched: a scopeless producer must
+  // not seed a baseline it will then decline every row against.
+  const scopeFailure = teamScopeFailure(teams);
+  if (scopeFailure) return noTeamScopeResult(scopeFailure);
   const counts = emptyCounts();
 
   // ⛔ A MISSING BASELINE + A LIVE CURSOR IS A LOSS, NOT A FIRST RUN
@@ -284,7 +419,7 @@ export function runDiffSweep({
   // this from "first seed" into a reportable failure.
   if (!store.isSeeded() && readCursorFn(cursorPath)?.state === CURSOR_OK) {
     const counts = emptyCounts();
-    note(counts, "baseline-lost-with-live-cursor");
+    fail(counts, "baseline-lost-with-live-cursor");
     return {
       mode: "baseline-lost",
       alarm: {
@@ -308,7 +443,7 @@ export function runDiffSweep({
       try {
         writeCursorFn(cursorPath, seed.position);
       } catch (err) {
-        note(counts, `cursor-init-failed:${err?.code ?? err?.message ?? "unknown"}`);
+        fail(counts, `cursor-init-failed:${err?.code ?? err?.message ?? "unknown"}`);
       }
     }
     return { mode: "seeded", alarm: null, seeded: seed.seeded, complete: seed.complete, batches: seed.batches, edges: counts };
@@ -330,7 +465,7 @@ export function runDiffSweep({
     try {
       writeCursorFn(cursorPath, position);
     } catch (err) {
-      note(counts, `cursor-init-failed:${err?.code ?? err?.message ?? "unknown"}`);
+      fail(counts, `cursor-init-failed:${err?.code ?? err?.message ?? "unknown"}`);
     }
   }
 
@@ -350,18 +485,25 @@ export function runDiffSweep({
       if (!diff) {
         // The mirror rewrote the row without changing anything we track. Not an
         // event, and the baseline still advances so we don't re-examine it.
-        counts.declined += 1;
-        note(counts, "no-tracked-change");
+        decline(counts, "no-tracked-change");
         store.put(row.issue.id, after, row.issue.updated_at);
         handled.push(row);
         continue;
       }
       const history = diffToHistoryRow(row.issue, diff, { now });
       const item = { history, issue: row.issue, actor: null, assignee: null, project: row.project, labels: row.labels };
-      const verdict = classifyEdge(item, { teams, botUserIds });
+      const verdict = classifyFn(item, { teams, botUserIds });
       if (!verdict?.emit) {
-        counts.declined += 1;
-        note(counts, verdict?.reason ?? "unclassified");
+        const failureName = failureNameFor(verdict);
+        if (failureName) {
+          // Producer-level or unexplained: do NOT snapshot and do NOT settle.
+          // Absorbing the row into the baseline would destroy the `before` this
+          // edge must be re-derived from once the producer is repaired.
+          fail(counts, failureName);
+          stopped = true;
+          break;
+        }
+        decline(counts, verdict.reason);
         store.put(row.issue.id, after, row.issue.updated_at);
         handled.push(row);
         continue;
@@ -369,8 +511,7 @@ export function runDiffSweep({
       try {
         emit(buildIssueEvent(item), item);
       } catch (err) {
-        counts.failed += 1;
-        note(counts, `emit-failed:${err?.message ?? "unknown"}`);
+        fail(counts, `emit-failed:${err?.message ?? "unknown"}`);
         stopped = true;
         break; // baseline NOT updated — the `before` must survive for the retry
       }
@@ -385,7 +526,7 @@ export function runDiffSweep({
       try {
         writeCursorFn(cursorPath, position);
       } catch (err) {
-        note(counts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
+        fail(counts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
       }
     } else if (handled.length === 0) {
       break;
@@ -415,7 +556,7 @@ export function runDiffSweep({
         // write cannot land, every subsequent tick cold-starts at ITS current
         // time and permanently skips the comments created in between — and the
         // readiness gate, which reads these counts, saw nothing wrong.
-        note(commentCounts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
+        fail(commentCounts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
       }
     }
     const page = source.commentsSince(cPos);
@@ -434,7 +575,7 @@ export function runDiffSweep({
         try {
           writeCursorFn(commentCursorPath, next);
         } catch (err) {
-          note(commentCounts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
+          fail(commentCounts, `cursor-write-failed:${err?.code ?? err?.message ?? "unknown"}`);
         }
       }
     }
@@ -484,9 +625,11 @@ export function runDiffSweep({
       // next tick. Deferral is bounded work, not lost work.
       const budget = Number.isInteger(labelBudget) && labelBudget > 0 ? labelBudget : DEFAULT_LABEL_BUDGET;
       const slice = changed.slice(0, budget);
-      // ⚠️ Reported in its own field, NOT in byReason — readiness treats any
-      // byReason entry as disqualifying, and a paced sweep is healthy operation,
-      // not a failure. A sweep that never drains shows up as `deferred` staying
+      // ⚠️ Reported in its own field, NOT via `fail` — a paced sweep is healthy
+      // operation, not a failure. (Pre-CTL-1909 this said "not in byReason",
+      // because byReason was then the disqualifying map; the field is kept
+      // separate from the decline census too, since nothing was examined.)
+      // A sweep that never drains shows up as `deferred` staying
       // above zero every tick, which is observable without un-arming enforce on
       // every bulk edit.
       labelCounts.deferred = Math.max(0, changed.length - slice.length);
@@ -504,10 +647,14 @@ export function runDiffSweep({
             continue;
           }
           const history = diffToHistoryRow(item.issue, diff, { now });
-          const verdict = classifyEdge({ history, issue: item.issue }, { teams, botUserIds });
-          if (!verdict.emit) {
-            note(labelCounts, verdict.reason);
-            labelCounts.declined += 1;
+          const verdict = classifyFn({ history, issue: item.issue }, { teams, botUserIds });
+          if (!verdict?.emit) {
+            const failureName = failureNameFor(verdict);
+            if (failureName) {
+              fail(labelCounts, failureName);
+              break; // baseline NOT updated — same discipline as a failed emit
+            }
+            decline(labelCounts, verdict.reason);
             store.put(issueId, after, item.issue.updated_at ?? null);
             continue;
           }
@@ -519,18 +666,16 @@ export function runDiffSweep({
             // instead of being absorbed into the baseline.
             store.put(issueId, after, item.issue.updated_at ?? null);
           } catch (err) {
-            labelCounts.failed += 1;
-            note(labelCounts, `emit-failed:${err?.code ?? err?.message ?? "unknown"}`);
+            fail(labelCounts, `emit-failed:${err?.code ?? err?.message ?? "unknown"}`);
             break;
           }
         }
       }
     } catch (err) {
-      // Named, never swallowed: readiness treats any byReason entry as
-      // disqualifying, so a broken label sweep un-arms enforce rather than
-      // quietly reintroducing the blind spot it exists to close.
-      note(labelCounts, `label-sweep-failed:${err?.code ?? err?.message ?? "unknown"}`);
-      labelCounts.failed += 1;
+      // Named, never swallowed: a `byFailure` entry disqualifies readiness, so a
+      // broken label sweep un-arms enforce rather than quietly reintroducing the
+      // blind spot it exists to close.
+      fail(labelCounts, `label-sweep-failed:${err?.code ?? err?.message ?? "unknown"}`);
     }
   }
 

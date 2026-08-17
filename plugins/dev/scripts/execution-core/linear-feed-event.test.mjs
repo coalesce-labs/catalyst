@@ -162,7 +162,29 @@ describe("team scoping comes from config, and an unconfigured producer emits NOT
       expect(classifyEdge({ history: historyRow(), issue: issueRow() }, { teams })).toEqual({
         emit: false,
         reason: "no-team-scope-configured",
+        // ⛔ CTL-1909: `fatal` is asserted, not tolerated. It is the flag that
+        // keeps this verdict disqualifying now that an ordinary decline is
+        // healthy — without it a scopeless producer would ARM enforce while
+        // emitting nothing at all.
+        fatal: true,
       });
+    }
+  });
+
+  test("⛔ CTL-1909: no OTHER verdict is fatal — `fatal` marks the producer, not a row", () => {
+    // If a per-row verdict picked up `fatal`, one malformed row would un-arm the
+    // feed forever, which is the pathology CTL-1909 exists to remove.
+    const cases = [
+      [{ history: null, issue: issueRow() }, { teams: TEAMS }],
+      [{ history: historyRow(), issue: null }, { teams: TEAMS }],
+      [{ history: historyRow(), issue: issueRow({ team_key: "ZZZ" }) }, { teams: TEAMS }],
+      [{ history: historyRow({ actor_id: "bot-1" }), issue: issueRow() }, { teams: TEAMS, botUserIds: new Set(["bot-1"]) }],
+    ];
+    for (const [item, opts] of cases) {
+      const v = classifyEdge(item, opts);
+      expect(v.emit, JSON.stringify(v)).toBe(false);
+      expect(typeof v.reason, JSON.stringify(v)).toBe("string"); // named, so the sweep can decline it
+      expect(v.fatal, JSON.stringify(v)).toBeUndefined();
     }
   });
 });

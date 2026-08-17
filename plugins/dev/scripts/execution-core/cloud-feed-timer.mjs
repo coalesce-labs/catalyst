@@ -91,22 +91,64 @@ export function defaultReplicaFresh(dbPath, { now = Date.now, staleMs = DEFAULT_
 
 /**
  * countsClean — a sweep counts block is clean only by DEMONSTRATING it worked:
- * no failure counter and NOTHING in byReason. Any reason, known or unknown,
- * disqualifies — so a future reason string needs no change here.
+ * no failure counter and NOTHING in `byFailure`. Any FAILURE reason, known or
+ * unknown, disqualifies — so a future failure reason needs no change here.
+ *
+ * ⛔ CTL-1909 — this read `byReason`, which is the DECLINE census, not the
+ * failure one. A decline is the sweep's most common HEALTHY outcome; its own
+ * module header says so ("on a multi-tenant replica ... most rows are
+ * declines"). So the gate un-armed on the producer working exactly correctly —
+ * measured live on both minis 2026-08-17 as
+ * `{"unready":[{"account":"tenant-0","reason":"edges:foreign-team"}]}`,
+ * triggered by ordinary CTC activity within two minutes of boot. The feed could
+ * only arm on a tick that examined ZERO foreign-team rows, so on a busy
+ * multi-team workspace `enforce` degraded to "smee, most of the time" and
+ * retiring the smee tunnel was structurally unreachable.
+ *
+ * The two maps are now split at the emitting site by MEANING, not by matching
+ * reason strings here (`linear-feed-sweep.mjs`: `decline()` → `byReason`,
+ * `fail()` → `byFailure`). Both of the old design's properties are kept: a new
+ * decline reason needs no change here, and a new failure reason needs none
+ * either.
+ *
+ * ⛔ `byFailure` MUST BE PRESENT. Defaulting it (`?? {}`) would score any counts
+ * block that predates the split — or any shape this gate does not recognise —
+ * as perfectly clean: a check whose "nothing wrong" and "could not look" are
+ * byte-identical, which is the exact defect class one level up. Absent ⇒ not
+ * clean ⇒ smee stays authoritative, which is the safe direction.
  */
 export function countsClean(counts) {
-  return counts != null && (counts.failed ?? 0) === 0 && Object.keys(counts.byReason ?? {}).length === 0;
+  if (counts == null) return false;
+  if ((counts.failed ?? 0) !== 0) return false;
+  if (!isFailureCensus(counts.byFailure)) return false;
+  return Object.keys(counts.byFailure).length === 0;
+}
+
+/**
+ * A failure census is a plain reason→count map. ⚠️ The array check is not
+ * pedantry: `typeof [] === "object"` and `Object.keys([]).length === 0`, so an
+ * array would sail through the obvious predicate and read as a perfect sweep.
+ */
+function isFailureCensus(v) {
+  return v != null && typeof v === "object" && !Array.isArray(v);
 }
 
 /**
  * countsDirtyWhy — why a counts block was NOT clean, as a short log string.
- * Reports the byReason KEYS rather than a count of them: the reason string is
- * the actionable part.
+ * Reports the byFailure KEYS rather than a count of them: the reason string is
+ * the actionable part. Declines are deliberately NOT reported here — they never
+ * make a block dirty, so naming them would be naming an innocent bystander.
  */
 export function countsDirtyWhy(counts) {
   if (counts == null) return "absent";
   const failed = counts.failed ?? 0;
-  const keys = Object.keys(counts.byReason ?? {});
+  // Distinguished from "no failure reasons": an absent map means this block came
+  // from a producer that does not report failures separately, so cleanliness was
+  // never demonstrated. Naming it keeps the un-arm actionable.
+  if (!isFailureCensus(counts.byFailure)) {
+    return failed > 0 ? `failed=${failed},no-failure-census` : "no-failure-census";
+  }
+  const keys = Object.keys(counts.byFailure);
   if (failed > 0 && keys.length > 0) return `failed=${failed},${keys.join("|")}`;
   if (failed > 0) return `failed=${failed}`;
   return keys.join("|") || "unknown";
@@ -386,8 +428,10 @@ export function startCloudFeedTimer({
       // not mask a skipped or failing one, whose events would otherwise be
       // suppressed with nothing to replace them.
       // A sweep counts as clean only by DEMONSTRATING it worked: no failure
-      // counters and NOTHING in byReason — any reason, known or unknown,
-      // disqualifies, so a future reason string needs no change here.
+      // counter and NOTHING in `byFailure` — any FAILURE reason, known or
+      // unknown, disqualifies, so a future one needs no change here. A DECLINE
+      // does not disqualify (CTL-1909); see `countsClean` for why that is not a
+      // loosening.
       // `countsClean` / `countsDirtyWhy` / `sweepUnreadyReason` are module-level
       // pure functions (above) so the readiness rule is unit-testable without a
       // replica, a clock, or a daemon.

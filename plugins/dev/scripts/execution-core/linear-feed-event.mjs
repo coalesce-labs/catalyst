@@ -201,7 +201,14 @@ export function classifyEdge({ history, issue } = {}, { teams, botUserIds } = {}
   // `teams` absent is NOT "allow everything" — an unconfigured producer must emit
   // nothing rather than every tenant's edges.
   if (!teams || typeof teams.has !== "function") {
-    return { emit: false, reason: "no-team-scope-configured" };
+    // ⛔ `fatal` (CTL-1909): this is the one non-emitting verdict whose cause is
+    // the PRODUCER, not the row. Every other verdict here declines one row and
+    // the next may still emit; this one declines all of them forever. Since the
+    // readiness split treats an ordinary decline as healthy, a scopeless
+    // producer would otherwise ARM enforce while emitting nothing at all —
+    // smee suppressed, feed silent. Marked at the point the distinction is
+    // known so the sweep needs no list of reason strings to tell them apart.
+    return { emit: false, reason: "no-team-scope-configured", fatal: true };
   }
   if (!teams.has(teamKey)) return { emit: false, reason: "foreign-team" };
 
