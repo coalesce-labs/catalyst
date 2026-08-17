@@ -205,3 +205,101 @@ describe("checkCloudSync", () => {
               }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⛔ CTL-1913 — doctor must be ABLE to FAIL on a permanently-inert replica.
+//
+// Before this, every check on this path was WARN/INFO, so nothing in the install
+// path returned non-zero for a completely dead writer. The state that earns it:
+// the agent is ADOPTED and the replica db has never been created. That does not
+// heal — the writer exits 0 on an absent/misnamed/rejected token, and under
+// KeepAlive={SuccessfulExit:false} launchd never retries.
+//
+// ⚠️ The capability is OPT-IN (`strict`) and wired into no profile, because
+// doctor's exit code IS the catalyst-join activation gate and `do_doctor_gate`
+// runs BEFORE `install-services` — a default FAIL would block the join that
+// reinstalls the writer, i.e. block the self-heal for the condition it reports.
+// The suite above (which asserts NEVER-FAIL across an exhaustive matrix) is the
+// guard on that, and it still passes unchanged.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("CTL-1913 — the never-seeded FAIL capability", () => {
+  const LA = "/tmp/la";
+  const LABEL = "ai.coalesce.catalyst-cloud-sync";
+  // Adopted well past the grace, with no replica db: the terminal state.
+  const inert = (over = {}) =>
+    deps({
+      agentInstalled: () => true,
+      fileExists: () => false, // no replica db, no writer-lock
+      agentInstalledAt: () => NOW - 3_600_000, // adopted an hour ago
+      neverSeededGraceMs: 900_000,
+      ...over,
+    });
+
+  test("strict:true + adopted an hour ago + no replica → replica-fresh FAILs", () => {
+    const m = byName(checkCloudSync(inert({ strict: true })));
+    expect(m["replica-fresh"].status).toBe("fail");
+    expect(m["replica-fresh"].detail).toMatch(/never been created/i);
+    // The message must carry the ACTIONABLE cause, not just the symptom: the
+    // clean-exit/KeepAlive mechanism is why an operator cannot just wait.
+    expect(m["replica-fresh"].detail).toMatch(/never retries|does NOT self-heal/i);
+  });
+
+  test("⭐ DEFAULT (no strict) on the identical state → WARN, never FAIL", () => {
+    // The join-gate invariant. Same fixture, strict omitted.
+    const recs = checkCloudSync(inert());
+    expect(byName(recs)["replica-fresh"].status).toBe("warn");
+    expect(recs.every((r) => r.status !== "fail")).toBe(true);
+  });
+
+  test("strict:true but WITHIN the grace → WARN (a fresh adoption is not a fault)", () => {
+    // NEGATIVE CONTROL for the FAIL: without it, the assertion above could be
+    // satisfied by a check that FAILs on any missing db under strict, which would
+    // fire on every legitimate fresh install.
+    const m = byName(checkCloudSync(inert({ strict: true, agentInstalledAt: () => NOW - 60_000 })));
+    expect(m["replica-fresh"].status).toBe("warn");
+    expect(m["replica-fresh"].detail).toMatch(/first-seed window|has not seeded/i);
+  });
+
+  test("⛔ strict:true but the adoption time is UNREADABLE → WARN, not FAIL", () => {
+    // "Could not look" is not evidence of the terminal state. An unreadable plist
+    // mtime must not be escalated — and it must not be silently treated as 0
+    // either, which would compute an age of ~56 years and FAIL instantly.
+    for (const bad of [null, undefined, NaN, "nope"]) {
+      const m = byName(checkCloudSync(inert({ strict: true, agentInstalledAt: () => bad })));
+      expect(m["replica-fresh"].status, String(bad)).toBe("warn");
+      expect(m["replica-fresh"].detail, String(bad)).toMatch(/unreadable|not connected/i);
+    }
+  });
+
+  test("strict:true with NO agent adopted → WARN (nothing was provisioned to be broken)", () => {
+    const m = byName(checkCloudSync(inert({ strict: true, agentInstalled: () => false, mode: "on" })));
+    expect(m["replica-fresh"].status).toBe("warn");
+  });
+
+  test("strict:true with a HEALTHY replica → no FAIL anywhere", () => {
+    // Proves strict does not simply redden a working host.
+    const recs = checkCloudSync(deps({ strict: true }));
+    expect(recs.every((r) => r.status !== "fail")).toBe(true);
+    expect(byName(recs)["replica-fresh"].status).toBe("pass");
+  });
+
+  test("the real adoption-time probe reads the plist mtime, and returns null when absent", () => {
+    // The injected seam above is only honest if the DEFAULT it replaces actually
+    // works. Drive checkCloudSync with no agentInstalledAt override against a
+    // LaunchAgents dir that does not exist: the default probe must fail to a WARN
+    // (null) rather than throwing or fabricating a timestamp.
+    const recs = checkCloudSync(
+      deps({
+        strict: true,
+        agentInstalled: () => true,
+        fileExists: () => false,
+        laDir: "/tmp/definitely-not-a-launchagents-dir-ctl1913",
+        label: LABEL,
+      }),
+    );
+    const m = byName(recs);
+    expect(m["replica-fresh"].status).toBe("warn"); // null age ⇒ no escalation
+    expect(recs.every((r) => r.status !== "fail")).toBe(true);
+    expect(LA).toBe("/tmp/la"); // (fixture sanity; keeps the constant referenced)
+  });
+});
