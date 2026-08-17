@@ -335,6 +335,70 @@ describe("⛔ the CTL-758 backward-write guard still runs, and runs BEFORE the p
     expect(proxy.sends).toHaveLength(1);
   });
 
+  test("⭐ P1 (Codex #3489): the guard is RE-APPLIED to the state --resolve-only read", () => {
+    // The guard above is fail-OPEN — when its own read cannot answer it returns null and
+    // falls through. `--resolve-only` then reads the real state off the fresh replica. If
+    // that says Done, a backward write must still be refused, or the proxy path reopens a
+    // terminal ticket in exactly the configuration this feature targets: an enforce host
+    // with no linearis, where the first read is MOST likely to fail and the second MOST
+    // likely to succeed.
+    const proxy = fakeProxy("enforce");
+    setLinearWriteProxyResolver(fakeResolver());
+    const r = applyPhaseStatus({
+      ticket: "CTL-6",
+      phase: "pr", // non-terminal key → the guard applies
+      resolveRepoRoot: () => "/repo",
+      // The guard's own read cannot answer — this is the fall-through it is built to allow.
+      cache: { get: () => null, set: () => {}, invalidate: () => {} },
+      exec: (cmd, args) =>
+        args.includes("--resolve-only")
+          ? { code: 0, stdout: JSON.stringify({ action: "resolve-only", currentState: "Done", targetState: "PR" }), stderr: "" }
+          : { code: 0, stdout: "", stderr: "" },
+      proxy,
+    });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBe("resolve:terminal-no-backward");
+    expect(proxy.sends).toHaveLength(0);
+  });
+
+  test("NEGATIVE CONTROL: the same fall-through with a NON-terminal resolved state DOES write", () => {
+    const proxy = fakeProxy("enforce");
+    setLinearWriteProxyResolver(fakeResolver());
+    const r = applyPhaseStatus({
+      ticket: "CTL-6",
+      phase: "pr",
+      resolveRepoRoot: () => "/repo",
+      cache: { get: () => null, set: () => {}, invalidate: () => {} },
+      exec: (cmd, args) =>
+        args.includes("--resolve-only")
+          ? { code: 0, stdout: JSON.stringify({ action: "resolve-only", currentState: "Research", targetState: "PR" }), stderr: "" }
+          : { code: 0, stdout: "", stderr: "" },
+      proxy,
+    });
+    expect(r.applied).toBe(true);
+    expect(proxy.sends).toHaveLength(1);
+  });
+
+  test("the FORWARD terminal write is exempt — Done must remain settable", () => {
+    // Mirrors the guard above: `key === TERMINAL_LINEAR_KEY` is how Done gets written at
+    // all. A re-applied guard that forgot this exemption would deadlock every ticket one
+    // step short of Done.
+    const proxy = fakeProxy("enforce");
+    setLinearWriteProxyResolver(fakeResolver());
+    const r = applyTerminalDone({
+      ticket: "CTL-6",
+      resolveRepoRoot: () => "/repo",
+      cache: { get: () => null, set: () => {}, invalidate: () => {} },
+      exec: (cmd, args) =>
+        args.includes("--resolve-only")
+          ? { code: 0, stdout: JSON.stringify({ action: "resolve-only", currentState: "Canceled", targetState: "Done" }), stderr: "" }
+          : { code: 0, stdout: "", stderr: "" },
+      proxy,
+    });
+    expect(r.applied).toBe(true);
+    expect(proxy.sends).toHaveLength(1);
+  });
+
   test("a missing repoRoot short-circuits before the proxy (unchanged precondition)", () => {
     const proxy = fakeProxy("enforce");
     const r = applyPhaseStatus({ ticket: "CTL-6", phase: "pr", resolveRepoRoot: () => null, exec: () => ({ code: 0 }), proxy });

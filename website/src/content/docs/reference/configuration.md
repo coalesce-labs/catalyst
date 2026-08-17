@@ -1012,6 +1012,13 @@ never degrades quietly.
 The `routes` override is kept anyway: the cloud can move a route without a release of this repo,
 and the override makes that a config change rather than a release.
 
+The CTL-758 backward-write guard is **re-applied** to the state `--resolve-only` reads. The guard
+that runs before it is fail-open — when its own read cannot answer it returns null and falls
+through — and the resolve step then reads the real state off the fresh replica. On an `enforce` host
+with no `linearis` that first read is the *most* likely to fail and the second the *most* likely to
+succeed, so without the second application the proxy could reopen a terminal ticket. The forward
+terminal write stays exempt, exactly as in the original guard.
+
 **Identifiers are resolved to Linear UUIDs off the local replica**, never a live Linear read
 (`linear-write-proxy-resolve.mjs`): ticket identifier → `issues.id`, label name → `labels.id`, and
 the target state name → `workflow_states.id` scoped to the issue's team. The state NAME itself comes
@@ -1020,6 +1027,15 @@ from `linear-transition.sh --resolve-only`, which runs the one four-rung precede
 built-in default) and writes nothing — so this feature does not become a second source of truth for
 what `inProgress` means. That mode deliberately does **not** require the `linearis` binary, because
 the end state of CTL-1889 is a host with neither `linearis` nor a Linear credential.
+
+> **⛔ The resolver is behind the same freshness gate as the read path.** "Read the replica" is only
+> half the rule. Resolution refuses unless the writer heartbeat (`<db>.writer.lock` mtime) is younger
+> than `CATALYST_LINEAR_REPLICA_STALE_MS` (default 300 s) **and** `sync_meta.cursor` is non-empty —
+> the same two conditions `lib/linear-read-replica.sh`'s `replica_fresh` applies, except that this
+> one refuses (`replica-stale` / `replica-reseeding`) where the read path falls back to `linearis`.
+> The seed check runs in the **same read transaction** as the resolution query: during a cold reseed
+> the entity tables repopulate in batches, so a duplicated label can look unique while only one copy
+> is back, and the ambiguity guard below is precisely a row-count judgement.
 
 > **⛔ Resolution failure is a refusal, not a fallback.** Unlike every other replica reader in the
 > tree (which is fail-OPEN and falls through to a live read), this resolver fails **closed**: an

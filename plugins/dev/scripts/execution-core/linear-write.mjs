@@ -281,6 +281,21 @@ function runTransition({
         if (parsed?.action === "skipped") return { ok: true, skip: "already-in-target-state" };
         if (!resolvedTarget) return { ok: false, reason: "target-state-unresolved" };
 
+        // ⛔ CTL-758 GUARD, RE-APPLIED TO THE STATE WE ACTUALLY READ (Codex P1 on #3489).
+        // The guard above runs on `knownCurrentState ?? fetchTicketState`, which is
+        // FAIL-OPEN: when that read cannot answer it returns null and the guard falls
+        // through. `--resolve-only` then reads the current state from the fresh replica
+        // and may well come back "Done" — so the guard's own predicate has to be applied
+        // a second time, to the better evidence, before a payload is built. Without this
+        // the proxy path could reopen a terminal ticket in exactly the configuration this
+        // feature targets: an enforce host with no `linearis` and a cold state cache is
+        // where the first read is MOST likely to fail and the second MOST likely to
+        // succeed. The `key !== TERMINAL_LINEAR_KEY` condition mirrors the guard above
+        // verbatim — the forward terminal write is exempt, or Done could never be set.
+        if (key !== TERMINAL_LINEAR_KEY && isLinearTerminal(resolvedCurrent)) {
+          return { ok: false, reason: "terminal-no-backward", detail: resolvedCurrent };
+        }
+
         const issue = resolver.issue(ticket);
         if (!issue.ok) return issue;
 

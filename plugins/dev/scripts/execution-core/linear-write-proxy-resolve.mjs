@@ -21,6 +21,25 @@
 // replicated (`issues.id`/`team_id`, `workflow_states.id`, `labels.id`), so resolution
 // costs no API budget and works while Linear is rate-limited.
 //
+// ── ⛔ AND THEREFORE BEHIND THE SAME FRESHNESS GATE THE READ PATH USES ──
+// "Read the replica" is only half the rule; the other half is the gate, and an ungated
+// read is the failure this repo has already shipped once. Two conditions, matching
+// `lib/linear-read-replica.sh`'s `replica_fresh` exactly:
+//   1. the writer heartbeat (`<db>.writer.lock` mtime) is younger than
+//      CATALYST_LINEAR_REPLICA_STALE_MS — a DEAD writer leaves a database full of rows
+//      that look perfectly healthy, so an ungated read is a stale read that cannot
+//      announce itself; and
+//   2. `sync_meta.cursor` is non-empty — proof the seed is COMPLETE and not mid-reseed.
+// (2) is asked inside the SAME read transaction as the resolution query, because during
+// a cold reseed the entity tables repopulate in batches: a duplicated label can look
+// unique while only one copy has been restored, and `label-ambiguous` — the guard that
+// stops us sending the wrong UUID — is exactly a row-COUNT judgement. A gate checked
+// outside the transaction can pass and be falsified before the count is taken.
+// Where the bash gate falls back to `linearis`, this one REFUSES: see the fail-closed
+// rule above. `replica-stale` and `replica-reseeding` are named separately from
+// `replica-unreadable` so an operator can tell "the writer is dead" from "the file is
+// broken" from "the ticket is not there".
+//
 // ── ⚠️ LABEL NAMES ARE NOT UNIQUE WORKSPACE-WIDE ──
 // Measured on the live replica: `types`, `schema`, `mobile`, `infra`, `etl`, `dbt` and
 // `api` each resolve to FOUR label rows (same name, different teams) — `labels` carries
@@ -31,7 +50,21 @@
 // ambiguous name is REFUSED by name (`label-ambiguous`), never resolved to a first hit.
 
 import { Database } from "bun:sqlite";
+import { statSync } from "node:fs";
 import { getReplicaDbPath } from "./config.mjs";
+
+/**
+ * Writer-heartbeat staleness ceiling, same knob and same default (300 s) as
+ * `lib/linear-read-replica.sh`'s `replica_fresh`. One contract, two languages — a
+ * resolver that trusted the replica for longer than the read path does would be a second,
+ * looser answer to "is this database safe to read".
+ */
+export const DEFAULT_REPLICA_STALE_MS = 300_000;
+
+function staleCeilingMs(env = process.env) {
+  const raw = Number(env?.CATALYST_LINEAR_REPLICA_STALE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_REPLICA_STALE_MS;
+}
 
 /** A resolution failure, always NAMED — a bare null is not a diagnosis. */
 function miss(reason, detail = null) {
@@ -63,14 +96,33 @@ const LABEL_SELECT = `
  * against a database the replica writer may have re-seeded or migrated underneath us
  * (same handle discipline as replica-read.mjs — only the verdict differs).
  */
-export function createProxyResolver({ dbPath = null } = {}) {
+export function createProxyResolver({ dbPath = null, env = process.env, now = Date.now } = {}) {
   let db = null;
+  const resolvedPath = () => dbPath ?? getReplicaDbPath();
 
   const open = () => {
     if (db) return db;
-    db = new Database(dbPath ?? getReplicaDbPath(), { readonly: true });
+    db = new Database(resolvedPath(), { readonly: true });
     db.run("PRAGMA busy_timeout = 250");
     return db;
+  };
+
+  /**
+   * writerAlive — the writer heartbeat half of the freshness gate.
+   *
+   * A dead writer leaves a database full of rows that LOOK fine, so an ungated read is a
+   * stale read that cannot announce itself. Same lock file and same ceiling as
+   * `replica_fresh`. Filesystem state, so it cannot live inside the SQLite transaction —
+   * but it is a LIVENESS question, not a consistency one, and the consistency half below
+   * is transactional.
+   */
+  const writerAlive = () => {
+    try {
+      const ageMs = now() - statSync(`${resolvedPath()}.writer.lock`).mtimeMs;
+      return ageMs <= staleCeilingMs(env);
+    } catch {
+      return false; // absent lock = no writer = not safe to resolve a WRITE from
+    }
   };
 
   const drop = () => {
@@ -90,13 +142,37 @@ export function createProxyResolver({ dbPath = null } = {}) {
    * two rows are different failures and are named differently.
    */
   const one = (sql, params, { absent, ambiguous }) => {
+    // ⛔ GATE FIRST — see the module header's freshness section. A dead writer is a
+    // filesystem fact, so it is checked before the transaction opens.
+    if (!writerAlive()) return miss("replica-stale");
+
     let rows;
+    let seeded;
     try {
-      rows = open().prepare(sql).all(...params);
+      const handle = open();
+      // ⛔ SEED-COMPLETENESS AND THE RESOLUTION READ SHARE ONE SNAPSHOT (Codex P1 on
+      // #3489). During a cold reseed the writer clears `sync_meta.cursor` and repopulates
+      // the entity tables in batches, so a partly-restored table can make a DUPLICATED
+      // label look unique — and `label-ambiguous`, the guard that stops us sending the
+      // wrong UUID, is precisely a row-COUNT judgement. Checking the cursor outside the
+      // transaction would leave the window where the gate passes and the reseed lands
+      // before the count is taken. In WAL mode a read transaction pins one snapshot, so
+      // asking both questions inside it means the cursor we trusted and the rows we
+      // counted are the same instant of the database.
+      handle.run("BEGIN");
+      try {
+        seeded = handle
+          .prepare("SELECT 1 AS ok FROM sync_meta WHERE key='cursor' AND value<>'' LIMIT 1")
+          .get();
+        rows = seeded ? handle.prepare(sql).all(...params) : null;
+      } finally {
+        handle.run("COMMIT");
+      }
     } catch (err) {
       drop();
       return miss("replica-unreadable", String(err?.message ?? err).slice(0, 200));
     }
+    if (!seeded) return miss("replica-reseeding");
     if (!Array.isArray(rows) || rows.length === 0) return miss(absent);
     if (rows.length > 1) return miss(ambiguous);
     return { ok: true, row: rows[0] };
