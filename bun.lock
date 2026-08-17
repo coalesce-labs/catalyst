@@ -5,7 +5,7 @@
     "": {
       "name": "catalyst",
       "dependencies": {
-        "@catalyst-cloud/schema": "0.1.14",
+        "@catalyst-cloud/schema": "0.1.15",
         "@modelcontextprotocol/sdk": "1.29.0",
       },
       "devDependencies": {
@@ -34,7 +34,7 @@
       "name": "catalyst-execution-core",
       "dependencies": {
         "@catalyst-cloud/read-model": "^0.1.0",
-        "@catalyst-cloud/sdk": "0.8.9",
+        "@catalyst-cloud/sdk": "0.8.10",
         "@modelcontextprotocol/sdk": "1.29.0",
         "@opentelemetry/api": "^1.9.1",
         "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
@@ -210,11 +210,11 @@
 
     "@catalyst-cloud/read-model": ["@catalyst-cloud/read-model@0.1.1", "", {}, "sha512-DFnVumOR8lB4scX3aYyh9aCLc57LmfpRyrR+BX8pVFLmg7sbBNa/4kOevbq9bgXpEJ8nzUY096hoStHbcB8b7w=="],
 
-    "@catalyst-cloud/replicate": ["@catalyst-cloud/replicate@0.1.8", "", { "dependencies": { "@catalyst-cloud/schema": "0.1.14" } }, "sha512-g3FK2FoN+0Xas8w/UCHHFB/T9ohbQlwLlPfcbwfLIvTQjYMrEzbCshqExuGhekdJbALgcOHzBk9w5he8e21h8A=="],
+    "@catalyst-cloud/replicate": ["@catalyst-cloud/replicate@0.1.9", "", { "dependencies": { "@catalyst-cloud/schema": "0.1.15" } }, "sha512-Fp7pcHFgjAdlPD7xLuHhrqTSF2xPEiYnEufz3FRZIbvOfQntWTzCVaKgtLw1/YETs3KOw8E6OFMtK6dwrwA1Rw=="],
 
-    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.14", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-ctURm67uXIHLj/h925ohig8UAyo7rox/AS32w2UucAQ+GpA7Kpam7dDxaSG84X9MjF0Cl+0NX2uF5oBhCnA3Mw=="],
+    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.15", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-cEkcsisF7kqfVmm0dhTsTvj7BuPfFcKAgO0oZ83GZqQG6k3J/699d4A7X8cAI1LtfNAneKHylxuAjJgj93Zd+A=="],
 
-    "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.9", "", { "dependencies": { "@catalyst-cloud/read-model": "^0.1.0", "@catalyst-cloud/replicate": "0.1.8", "@catalyst-cloud/schema": "0.1.14" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <2", "@sqlite.org/sqlite-wasm": "*", "better-sqlite3": "*" }, "optionalPeers": ["@opentelemetry/api", "@sqlite.org/sqlite-wasm", "better-sqlite3"] }, "sha512-1FyXoxlnudX4E9Qi6lC1bBRPHck0qul92mf1HbkV7UhR1nTBYL0mKt0qs4Si9bfld8pdkRUV0ZbkGeLCw36xdw=="],
+    "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.10", "", { "dependencies": { "@catalyst-cloud/read-model": "^0.1.0", "@catalyst-cloud/replicate": "0.1.9", "@catalyst-cloud/schema": "0.1.15" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <2", "@sqlite.org/sqlite-wasm": "*", "better-sqlite3": "*" }, "optionalPeers": ["@opentelemetry/api", "@sqlite.org/sqlite-wasm", "better-sqlite3"] }, "sha512-/84cspI//N9b11omjFtWvUX8u3L0IRCZ+CZVmHaX7qtAc3FN8OXV0mroutY9D8EDEQIJbOeUc+7uLHWBh5OM+w=="],
 
     "@dagrejs/dagre": ["@dagrejs/dagre@3.1.0", "", { "dependencies": { "@dagrejs/graphlib": "4.0.3" } }, "sha512-22SWJOfiQVCSFF0qN43SMiYS7Ch9Z6HZoO8+5PycGzGgmtdXIvHoZ2DoT5BweVGf+wwHxBFZu4eO0do0RIYQaw=="],
 
