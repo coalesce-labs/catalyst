@@ -942,6 +942,122 @@ sustained incident announces once instead of flooding the log every 30 s.
 > first `catalyst doctor` run after deploy legitimately reports `cloud-sync-skew` WARN "skew
 > unknown". It self-clears on the writer's next boot.
 
+### Linear write proxy (`CATALYST_LINEAR_WRITE_PROXY`, CTL-1889)
+
+Routes a host's Linear **writes** through the Catalyst Cloud write proxy under the one Catalyst
+Cloud grant, authenticated with the **per-host key**, instead of writing to Linear directly with
+that host's own "Catalyst Orchestrator" app-actor (ADR-0031 / CTC-486). The host sends **nothing**
+that identifies it — the cloud derives which host wrote from the key it authenticated, so no
+hostname, node name, or actor field appears in the request.
+
+Increment 1 wires the two routes the execution-core write chokepoint owns — **issue-state** and
+**label** (`linear-write.mjs`: `applyPhaseStatus` / `applyTerminalDone` / `applyTriageStatus`,
+`applyLabel`, `removeLabel`). The **comment** route exists in the transport; its call sites
+(`lib/linear-comment-post.sh` and `orch-monitor/lib/linear-comment.mjs`) are a later increment.
+Nothing is retired by this flag: every existing credential, mint path, and `LINEAR_*` secret is
+untouched, and retirement is gated on a shadow window with zero host-originated writes.
+
+Mode resolves from the env var over Layer-2 over the safe default of `off`. The `0` kill-switch and
+any unset/garbage value resolve to `off`.
+
+| Key                                            | Default | Notes                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CATALYST_LINEAR_WRITE_PROXY` _(env var)_      | `off`   | `off` / `0` (kill-switch — the transport is never constructed, no key is resolved, no event is emitted; byte-identical to not setting the flag), `shadow` (emit `linear.write.proxy.would-write.<TICKET>` and still perform the existing direct write — shadow makes NO cloud call, since for a write "observe by doing it too" would double-write the board), `enforce` (the proxy IS the write; the direct path is not taken). Garbage values fall back to `off`. Overrides Layer-2. |
+| `catalyst.linearWriteProxy.mode` _(Layer-2)_   | `off`   | Same three values; honored when the env var is absent or unrecognised.                                                                                                                                                                                                                                                                                    |
+| `catalyst.linearWriteProxy.routes` _(Layer-2)_ | _(none)_ | Per-route path override, `{ "issue-state": "/…", "label": "/…", "comment": "/…" }`. Values must be strings beginning `/`; anything else is dropped. Layer-2 only — a URL path has no business in a daemon env var. Defaults are measured; see below.                                                                                                                 |
+
+The per-host key is resolved through the **secret contract's `cloud-token` row** — the same row and
+the same `resolveCloudTokenName` ladder `cloud-sync` uses, so a host whose operator set
+`CATALYST_CLOUD_TOKEN_ENV` or Layer-2 `catalyst.cloud.tokenEnv` is honored. The endpoint base is
+`CATALYST_CLOUD_BASE_URL` over the shipped cloud default, exactly as `cloud-sync` resolves it.
+`CATALYST_CLOUD_ACCOUNT`, when set, rides the request as `?account=`. It is not required — a correct
+per-host key resolves its own tenant — but sending it turns a mis-provisioned host's generic
+`401 missing account` into the specific `403 … no per-host binding`, which names the actual defect.
+
+**In `enforce`, a failure never falls back to a direct Linear write.** A fall-back would mean the
+host keeps writing under its own app-actor precisely when the proxy is broken, so the shadow window
+that gates retirement would read "zero host-originated writes" while the host was still writing.
+Every failure is a NAMED reason (`no-cloud-token`, `unauthorized`, `not-found`, `rate-limited`,
+`server-error`, `rejected`, `unreadable-outcome`, `transport-error`, `spawn-failed`,
+`body-too-large`, `unknown-route`, `proxy-threw`, plus `cloud:<outcome>` for a refusal the cloud
+itself named and `resolve:<reason>` for one the replica resolver named); callers retry on the next
+tick. The verdict is read from the response body's discriminated `outcome`, **not** from the HTTP
+status alone — a 2xx carrying no parseable outcome is `unreadable-outcome` and is not counted as
+applied, because these routes always answer with one and a bare 2xx means we reached something
+other than the route. A host in `enforce` with **no**
+per-host key fails with `no-cloud-token` plus an ERROR line naming the env var it looked in — it
+never degrades quietly.
+
+> **⛔ `enforce` needs a PER-HOST cloud key, and the tenant-wide one is refused by design.** These
+> routes require an **org-owned WorkOS API key** provisioned per host. The tenant-wide `ADMIN_TOKEN`
+> authenticates (it is a machine principal) but carries no WorkOS key id, so the cloud rejects it by
+> name: `credential has no per-host binding`. That is a deliberate refusal, not a misconfiguration
+> to work around — the key's own id is what attributes a write to a host. Measured 2026-08-17:
+> **mini-2** carries a real per-host key and a proxied write reached Linear end to end; **mini**
+> still carries the `ADMIN_TOKEN` and every write is refused. Probe a host before enabling it:
+>
+> ```bash
+> curl -s -o /dev/stderr -w '%{http_code}\n' -X POST \
+>   "$CATALYST_CLOUD_BASE_URL/agent/issue-state?account=$CATALYST_CLOUD_ACCOUNT" \
+>   -H "Authorization: Bearer $CATALYST_CLOUD_TOKEN" -H 'Content-Type: application/json' \
+>   -d '{"issueId":"00000000-0000-4000-8000-000000000000","stateId":"00000000-0000-4000-8000-000000000001"}'
+> ```
+>
+> `400 {"outcome":"rejected","reason":"Entity not found: Issue"}` = a good key (it reached Linear and
+> the fake id was rejected there). `403 … no per-host binding` = the `ADMIN_TOKEN`; this host is not
+> ready. `401 missing account` = the `ADMIN_TOKEN` with no `?account=`.
+
+**Route paths are measured**, against `catalyst-cloud` `origin/main` — `/agent/issue-state`,
+`/agent/issue-label`, `/agent/issue-comment`, relative to a base that already ends in `/api/v1`.
+The `routes` override is kept anyway: the cloud can move a route without a release of this repo,
+and the override makes that a config change rather than a release.
+
+The CTL-758 backward-write guard is **re-applied** to the state `--resolve-only` reads. The guard
+that runs before it is fail-open — when its own read cannot answer it returns null and falls
+through — and the resolve step then reads the real state off the fresh replica. On an `enforce` host
+with no `linearis` that first read is the *most* likely to fail and the second the *most* likely to
+succeed, so without the second application the proxy could reopen a terminal ticket. The forward
+terminal write stays exempt, exactly as in the original guard.
+
+**Identifiers are resolved to Linear UUIDs off the local replica**, never a live Linear read
+(`linear-write-proxy-resolve.mjs`): ticket identifier → `issues.id`, label name → `labels.id`, and
+the target state name → `workflow_states.id` scoped to the issue's team. The state NAME itself comes
+from `linear-transition.sh --resolve-only`, which runs the one four-rung precedence chain
+(per-project `stateMap` > global `stateMap` > the registry's `eligibleQuery.triageStatus` > a
+built-in default) and writes nothing — so this feature does not become a second source of truth for
+what `inProgress` means. That mode deliberately does **not** require the `linearis` binary, because
+the end state of CTL-1889 is a host with neither `linearis` nor a Linear credential.
+
+> **⛔ The resolver is behind the same freshness gate as the read path.** "Read the replica" is only
+> half the rule. Resolution refuses unless the writer heartbeat (`<db>.writer.lock` mtime) is younger
+> than `CATALYST_LINEAR_REPLICA_STALE_MS` (default 300 s) **and** `sync_meta.cursor` is non-empty —
+> the same two conditions `lib/linear-read-replica.sh`'s `replica_fresh` applies, except that this
+> one refuses (`replica-stale` / `replica-reseeding`) where the read path falls back to `linearis`.
+> The seed check runs in the **same read transaction** as the resolution query: during a cold reseed
+> the entity tables repopulate in batches, so a duplicated label can look unique while only one copy
+> is back, and the ambiguity guard below is precisely a row-count judgement.
+
+> **⛔ Resolution failure is a refusal, not a fallback.** Unlike every other replica reader in the
+> tree (which is fail-OPEN and falls through to a live read), this resolver fails **closed**: an
+> absent ticket, an archived state, an unreadable replica, or a label name matching **more than
+> one** label all refuse the write with a named `resolve:<reason>`. Ambiguity is real — `schema`,
+> `types`, `mobile`, `infra`, `etl`, `dbt` and `api` each match four label rows in the live
+> workspace, and `labels` carries no team id to disambiguate with. The four labels this increment
+> writes (`needs-human`, `needs-input`, `blocked`, `queued`) are each unique today, but a first-hit
+> resolver would be one new team-scoped label away from putting another team's label on a ticket.
+
+> **Verification narrowing in `enforce`.** The CTL-587 label read-back is a live
+> `linearis issues read` — the very host credential this feature retires — so it is **not**
+> performed on the proxied path; the cloud response is the verdict. A replica-backed read-back is
+> tracked with the comment-route call sites.
+
+Observable events (all safe for a LogQL filter
+`{job="catalyst-events"} | json | attributes["event.name"] =~ "linear\\.write\\.proxy\\..*"`):
+
+- `linear.write.proxy.would-write.<TICKET>` — shadow hit; the direct write still happened
+- `linear.write.proxy.applied.<TICKET>` — enforce hit, the cloud accepted the write
+- `linear.write.proxy.failed.<TICKET>` — enforce hit, NOT written (ERROR; `reason` attached)
+
 ## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
 
 `catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from

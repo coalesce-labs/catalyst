@@ -954,6 +954,10 @@ jobs:
             linear-state-write-event.test.mjs \
             linear-write-echo.test.mjs \
             linear-write.test.mjs \
+            linear-write-proxy.test.mjs \
+            linear-write-proxy-wiring.test.mjs \
+            linear-write-proxy-resolve.test.mjs \
+            __tests__/config-linear-write-proxy.test.mjs \
             memory-event.test.mjs \
             memory-sampler-signal.test.mjs \
             memory-sampler.test.mjs \

@@ -2134,6 +2134,52 @@ export function readCloudFeedConfig(envObj = process.env) {
   return { mode, intervalSec };
 }
 
+// CTL-1889: Linear write-proxy mode reader. Same ladder as readCloudFeedConfig —
+// env (CATALYST_LINEAR_WRITE_PROXY) > Layer-2 (.catalyst.linearWriteProxy.mode) > 'off'.
+//
+// Ships OFF, and for the same reason cloud-feed does rather than the daemon
+// watchdog's shadow: this flag sits on the LIVE Linear write path. "Off" has to mean
+// the transport is never constructed, no per-host key is resolved, and no event is
+// emitted — the only default under which merging into the write path is a strict
+// no-op on every host until an operator says otherwise.
+//
+// `routes` is the per-route path override (see linear-write-proxy.mjs's header: the
+// CTC-509 route contract is not verifiable from this repo, so the shipped defaults
+// are an assumption an operator must be able to correct without a release). Layer-2
+// ONLY, deliberately: a URL path is not a thing to smuggle through a daemon env var,
+// and there is no env precedent for a map-valued knob.
+export const LINEAR_WRITE_PROXY_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2LinearWriteProxy() {
+  try {
+    const p = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.linearWriteProxy;
+    return p && typeof p === "object" ? p : {};
+  } catch {
+    return {};
+  }
+}
+
+export function readLinearWriteProxyConfig(envObj = process.env) {
+  const l2 = readLayer2LinearWriteProxy();
+  const env = envObj.CATALYST_LINEAR_WRITE_PROXY;
+  let mode;
+  if (env === "0") mode = "off";
+  else if (typeof env === "string" && LINEAR_WRITE_PROXY_MODES.has(env)) mode = env;
+  else if (typeof l2.mode === "string" && LINEAR_WRITE_PROXY_MODES.has(l2.mode)) mode = l2.mode;
+  else mode = "off";
+  // Only string values survive: a non-string path would reach template concatenation
+  // as "[object Object]" and POST to a fabricated URL. null means "use the defaults".
+  let routes = null;
+  if (l2.routes && typeof l2.routes === "object" && !Array.isArray(l2.routes)) {
+    const clean = {};
+    for (const [k, v] of Object.entries(l2.routes)) {
+      if (typeof v === "string" && v.startsWith("/")) clean[k] = v;
+    }
+    if (Object.keys(clean).length > 0) routes = clean;
+  }
+  return { mode, routes };
+}
+
 // CTL-1245: dead-but-running doc-worker reclaim mode reader. Mirrors
 // readRecoveryPassConfig / readUnstuckSweepConfig exactly: env
 // (CATALYST_DEAD_DOC_WORKER_RECLAIM) overrides Layer-2 config

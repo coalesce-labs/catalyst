@@ -17,6 +17,119 @@ import { withAuthRemint, isAuthError } from "./linear-remint.mjs";
 // backward-write guard below.
 import { isLinearTerminal } from "./terminal-state.mjs";
 
+// ─── CTL-1889: the cloud write-proxy seam ────────────────────────────────────
+//
+// MEASURED SCOPE, not assumed. This module is the chokepoint for Linear ISSUE-FIELD
+// writes (state, labels, estimate, assignee, blocked-by) — and it reaches Linear by
+// spawning `linearis` / `linear-transition.sh`, never by GraphQL. It is NOT the
+// chokepoint for comments or attachments: `commentCreate` has two independent paths
+// (lib/linear-comment-post.sh, spawned from 5 execution-core modules; and
+// orch-monitor/lib/linear-comment.mjs's direct GraphQL) and `attachmentCreate` has
+// two more (cluster-claim.mjs, cluster-heartbeat.mjs) — four credentials in total.
+// Increment 1 routes the two chokepoint-owned routes CTC-509 already serves
+// (issue-state, label); the comment route exists in the transport and its call sites
+// are increment 2. See linear-write-proxy.mjs's header.
+//
+// ⛔ The proxy is a MODULE-LEVEL install, not a per-call default, and defaults to
+// null. With mode `off` nothing installs it, so every function below is byte-identical
+// to pre-CTL-1889: `routeThroughProxy` returns null on the first line without
+// resolving a key, reading config, or emitting anything.
+let _writeProxy = null;
+let _proxyResolver = null;
+
+/** setLinearWriteProxy — install (or clear, with null) the cloud write transport. */
+export function setLinearWriteProxy(proxy) {
+  _writeProxy = proxy ?? null;
+}
+
+/** getLinearWriteProxy — test/diagnostic read of the installed transport. */
+export function getLinearWriteProxy() {
+  return _writeProxy;
+}
+
+/**
+ * setLinearWriteProxyResolver — install the replica-backed identifier/name → UUID
+ * resolver (linear-write-proxy-resolve.mjs). Separate from the transport because the
+ * two fail for unrelated reasons and a test needs to drive them independently: a
+ * healthy transport with an unresolvable ticket must still REFUSE, and that is the
+ * case a single combined seam makes hard to write.
+ */
+export function setLinearWriteProxyResolver(resolver) {
+  _proxyResolver = resolver ?? null;
+}
+
+/** getLinearWriteProxyResolver — test/diagnostic read of the installed resolver. */
+export function getLinearWriteProxyResolver() {
+  return _proxyResolver;
+}
+
+/**
+ * routeThroughProxy — the single interposition point.
+ *
+ * Returns null when the caller should perform its existing direct write (no proxy
+ * installed, or shadow mode — which records the observation and then lets the direct
+ * write proceed unchanged, because for a WRITE "observe by doing it too" would
+ * double-write the board).
+ *
+ * Returns the transport's verdict when the proxy handled it (enforce). ⛔ There is
+ * deliberately NO fall-back to the direct write on a proxy failure: falling back
+ * would mean the host keeps writing under its own app-actor exactly when the proxy
+ * is broken, so the shadow window that gates retirement would read "zero
+ * host-originated writes" while the host was still writing. Every caller below
+ * already retries on the next tick.
+ */
+function routeThroughProxy(proxy, { routeId, ticket, buildPayload }) {
+  const p = proxy ?? _writeProxy;
+  if (!p) return null;
+
+  // SHADOW records the observation and hands the write back to the caller. The payload
+  // is deliberately NOT built here: building it costs a `--resolve-only` subprocess and
+  // up to three replica reads, and shadow makes no cloud call, so paying for a payload
+  // nobody sends would tax every Linear write on every host running the dry run.
+  if (p.mode === "shadow") {
+    try {
+      p.send({ routeId, ticket, payload: {} });
+    } catch (err) {
+      log.warn({ ticket, routeId, err: err.message }, "linear-write: write-proxy threw (shadow)");
+    }
+    return null;
+  }
+
+  // ⛔ ENFORCE — resolution failure is a NAMED REFUSAL, never a direct write. This is
+  // the one branch where the fail-open habit of every other replica reader in this tree
+  // would be a defect: "fall through to live" here means "write to Linear with this
+  // host's own app-actor", i.e. precisely what CTL-1889 retires. A refused write is
+  // retried on the next tick; a fallen-back write is invisible and permanent.
+  const built = buildPayload(_proxyResolver);
+  if (!built.ok) {
+    log.warn(
+      { ticket, routeId, reason: built.reason, detail: built.detail ?? undefined },
+      "linear-write: write-proxy could not resolve the write — REFUSED (no direct-write fallback)"
+    );
+    return { applied: false, reason: `resolve:${built.reason}` };
+  }
+  if (built.skip) return { applied: true, reason: null, skipped: built.skip };
+
+  let res;
+  try {
+    res = p.send({ routeId, ticket, payload: built.payload });
+  } catch (err) {
+    // A throwing transport must not wedge the tick. It also must not silently become
+    // a direct write — that is the one degradation this seam exists to prevent — so
+    // in enforce it is a named failure and in shadow it is a lost observation.
+    log.warn({ ticket, routeId, err: err.message }, "linear-write: write-proxy threw");
+    // Enforce only reaches here, so a throw is always a named refusal — never a
+    // silent handback to the direct path.
+    return { applied: false, reason: "proxy-threw" };
+  }
+  if (!res?.handled) return null;
+  return {
+    applied: res.applied === true,
+    reason: res.reason ?? null,
+    ...(res.detail ? { detail: res.detail } : {}),
+  };
+}
+
 // linear-transition.sh sits one directory up from execution-core/ — mirrors the
 // sibling-bin spawnSync pattern dispatch.mjs uses for orchestrate-dispatch-next.
 const LINEAR_TRANSITION_BIN = fileURLToPath(
@@ -79,6 +192,9 @@ function runTransition({
   // reads from_state before this call) passes it here so the guard reuses it
   // instead of issuing a second read. undefined → the guard reads for itself.
   knownCurrentState,
+  // CTL-1889: injectable write-proxy seam. undefined → the module-level install
+  // (null unless an operator lit the flag), so production behaviour is unchanged.
+  proxy,
 }) {
   try {
     const repoRoot = resolveRepoRoot(ticket);
@@ -118,7 +234,104 @@ function runTransition({
       }
     }
 
+    // CTL-1889 — issue-state route. Placed AFTER the CTL-758 backward-write guard
+    // deliberately: the guard is a correctness rule about what may be written at all,
+    // and it must hold whichever transport carries the write. Placed BEFORE the shell
+    // so enforce mode never spawns linear-transition.sh (which would write to Linear
+    // with this host's own app-actor — the exact thing being retired).
     const config = `${repoRoot}/.catalyst/config.json`;
+
+    let resolvedTarget = null;
+    let resolvedCurrent = null;
+    const proxied = routeThroughProxy(proxy, {
+      routeId: "issue-state",
+      ticket,
+      buildPayload: (resolver) => {
+        if (!resolver) return { ok: false, reason: "no-resolver" };
+
+        // ⛔ THE STATE NAME COMES FROM linear-transition.sh, NOT FROM A SECOND COPY OF
+        // ITS PRECEDENCE CHAIN. That chain is four rungs deep (per-project stateMap >
+        // global stateMap > the execution-core registry's eligibleQuery.triageStatus >
+        // a built-in default) and re-deriving it here would make this file a second
+        // source of truth for what "inProgress" means — the exact drift AGENTS.md's
+        // single-source-of-truth rule exists to prevent. `--resolve-only` runs that one
+        // chain and writes NOTHING; it also does not require the linearis binary,
+        // because the end state of this ticket is a host that has neither linearis nor
+        // a Linear credential.
+        const r = exec(LINEAR_TRANSITION_BIN, [
+          "--ticket", ticket,
+          "--transition", key,
+          "--config", config,
+          "--resolve-only",
+          "--json",
+        ]);
+        if (r.code !== 0) return { ok: false, reason: "resolve-only-failed", detail: `exit-${r.code}` };
+        let parsed;
+        try {
+          parsed = JSON.parse(r.stdout);
+        } catch {
+          return { ok: false, reason: "resolve-only-unparseable" };
+        }
+        resolvedTarget = parsed?.targetState || null;
+        resolvedCurrent = parsed?.currentState || null;
+
+        // Idempotency is inherited, not recomputed: the writing path treats "already in
+        // target state" as applied, and so must this one, or every steady-state tick
+        // would spend a cloud write budget unit re-asserting a state Linear already has.
+        if (parsed?.action === "skipped") return { ok: true, skip: "already-in-target-state" };
+        if (!resolvedTarget) return { ok: false, reason: "target-state-unresolved" };
+
+        // ⛔ CTL-758 GUARD, RE-APPLIED TO THE STATE WE ACTUALLY READ (Codex P1 on #3489).
+        // The guard above runs on `knownCurrentState ?? fetchTicketState`, which is
+        // FAIL-OPEN: when that read cannot answer it returns null and the guard falls
+        // through. `--resolve-only` then reads the current state from the fresh replica
+        // and may well come back "Done" — so the guard's own predicate has to be applied
+        // a second time, to the better evidence, before a payload is built. Without this
+        // the proxy path could reopen a terminal ticket in exactly the configuration this
+        // feature targets: an enforce host with no `linearis` and a cold state cache is
+        // where the first read is MOST likely to fail and the second MOST likely to
+        // succeed. The `key !== TERMINAL_LINEAR_KEY` condition mirrors the guard above
+        // verbatim — the forward terminal write is exempt, or Done could never be set.
+        if (key !== TERMINAL_LINEAR_KEY && isLinearTerminal(resolvedCurrent)) {
+          return { ok: false, reason: "terminal-no-backward", detail: resolvedCurrent };
+        }
+
+        const issue = resolver.issue(ticket);
+        if (!issue.ok) return issue;
+
+        // Replica first (authoritative and current), then the state-id cache
+        // linear-transition.sh already maintains. The second rung is not decoration:
+        // CTL-1919 was a live host whose replica had NO workflow_states table at all
+        // for five hours, which is exactly a replica hit-miss with a healthy cache.
+        const viaReplica = resolver.stateId(issue.teamId, resolvedTarget);
+        const stateId = viaReplica.ok
+          ? viaReplica.stateId
+          : (typeof parsed?.targetStateId === "string" && parsed.targetStateId !== ""
+              ? parsed.targetStateId
+              : null);
+        if (!stateId) return { ok: false, reason: viaReplica.reason ?? "state-unresolved", detail: resolvedTarget };
+
+        return { ok: true, payload: { issueId: issue.issueId, stateId } };
+      },
+    });
+    if (proxied) {
+      // from_state/to_state now carry what `--resolve-only` actually read, rather than
+      // the nulls an earlier cut reported: the audit pair is measured on this path too.
+      // `action` deliberately reuses the DIRECT path's vocabulary — "skipped" for an
+      // idempotent no-op, "transitioned" for a performed write — rather than inventing
+      // proxy-specific words. No caller reads it today, but the shadow window's whole
+      // job is comparing these two paths, and a comparison in which the same outcome is
+      // spelled differently on each side is a comparison that manufactures diffs. The
+      // proxy-specific detail rides `skipped`, matching the CTL-758 guard's own shape.
+      return {
+        ...proxied,
+        action: proxied.applied ? (proxied.skipped ? "skipped" : "transitioned") : null,
+        from_state: resolvedCurrent,
+        to_state: resolvedTarget,
+        via: "cloud-proxy",
+      };
+    }
+
     const { code, stdout } = exec(LINEAR_TRANSITION_BIN, [
       "--ticket",
       ticket,
@@ -160,18 +373,18 @@ function runTransition({
 // CTL-758: `cache` is threaded through to runTransition's backward-write guard
 // so the per-tick shared TTL cache (createTicketStateCache) serves the guard's
 // pre-write read — ≤1 fetchTicketState per ticket per TTL, not a new API storm.
-export function applyPhaseStatus({ ticket, phase, resolveRepoRoot, exec, cache }) {
+export function applyPhaseStatus({ ticket, phase, resolveRepoRoot, exec, cache, proxy }) {
   const key = linearKeyForPhase(phase); // throws PhaseFsmError on an unknown phase
   if (key === null) return { applied: false, skipped: "no-status-key" };
-  return runTransition({ ticket, key, resolveRepoRoot, exec, cache });
+  return runTransition({ ticket, key, resolveRepoRoot, exec, cache, proxy });
 }
 
 // applyTerminalDone — write the terminal Done state on monitor-deploy completion.
 // CTL-758: this is the FORWARD terminal write (key === TERMINAL_LINEAR_KEY) — it
 // is EXEMPT from the backward-write guard, so runTransition does not read state
 // here. `cache` is forwarded for symmetry (unused by the exempt path).
-export function applyTerminalDone({ ticket, resolveRepoRoot, exec, cache }) {
-  return runTransition({ ticket, key: TERMINAL_LINEAR_KEY, resolveRepoRoot, exec, cache });
+export function applyTerminalDone({ ticket, resolveRepoRoot, exec, cache, proxy }) {
+  return runTransition({ ticket, key: TERMINAL_LINEAR_KEY, resolveRepoRoot, exec, cache, proxy });
 }
 
 // applyLabel — additively apply a Linear label (needs-human), classify
@@ -213,8 +426,28 @@ export function applyTerminalDone({ ticket, resolveRepoRoot, exec, cache }) {
 // passes a replica-backed reader instead: that path runs per escalation and its
 // read-back was adding a live, rate-limited single-ticket API call to a shared fleet
 // quota — the read-path rule in AGENTS.md exists precisely for this.
-export function applyLabel({ ticket, label, exec = defaultExec, readLabels = null }) {
+export function applyLabel({ ticket, label, exec = defaultExec, readLabels = null, proxy }) {
   try {
+    // CTL-1889 — label route (additive add). On the proxied path the CTL-587
+    // read-back below is NOT performed: it is a live `linearis issues read`, i.e. the
+    // very host credential this ticket retires, so re-running it would defeat the
+    // change. The cloud response is the verdict instead. ⚠️ That is a real, named
+    // narrowing of the silent-success guard for enforce mode — a replica-backed
+    // read-back is increment 2, tracked with the comment-route call sites.
+    const proxied = routeThroughProxy(proxy, {
+      routeId: "label",
+      ticket,
+      buildPayload: (resolver) => {
+        if (!resolver) return { ok: false, reason: "no-resolver" };
+        const issue = resolver.issue(ticket);
+        if (!issue.ok) return issue;
+        const ids = resolver.labelIds([label]);
+        if (!ids.ok) return ids;
+        return { ok: true, payload: { issueId: issue.issueId, labelIds: ids.labelIds, mode: "add" } };
+      },
+    });
+    if (proxied) return proxied;
+
     const writeRes = exec("linearis", [
       "issues",
       "update",
@@ -281,7 +514,7 @@ export function applyLabel({ ticket, label, exec = defaultExec, readLabels = nul
 export async function removeLabel(
   ticket,
   label,
-  { exec = defaultExec, fetchLabels = null, readLabels = null, readLabelNodes = readTicketLabelNodes } = {}
+  { exec = defaultExec, fetchLabels = null, readLabels = null, readLabelNodes = readTicketLabelNodes, proxy } = {}
 ) {
   // Resolve the reader: prefer readLabels (richer), wrap legacy fetchLabels,
   // or default to readTicketLabels.
@@ -295,6 +528,60 @@ export async function removeLabel(
         }
       : readTicketLabels);
   try {
+    // CTL-1889 — label route, REMOVE. An earlier cut sent `mode:"overwrite"` carrying
+    // the computed `remaining` set, mirroring what the linearis path below has to do.
+    // The cloud has no such mode — it accepts `add` or `remove` only, and would have
+    // 400'd every removal. Native `remove` is also strictly safer than an overwrite:
+    // an overwrite races any label another actor adds between a read and the write,
+    // and silently drops it.
+    //
+    // ⛔ IT RUNS BEFORE THE READ, AND THAT ORDER IS THE WHOLE POINT (Codex #3489
+    // round 2, P1). `reader` defaults to `readTicketLabels`, a bare `linearis issues
+    // read` — the exact host credential this ticket retires. Placed after the read, as
+    // the first cut had it, an enforce host with no `linearis` fails that read and
+    // returns `auth-error` at the guard above WITHOUT EVER SENDING the cloud removal.
+    // The caller of record is the daemon's comment-wake clear, so the visible symptom
+    // is a user answering a question and `needs-input`/`needs-human` staying attached
+    // forever — a silent, permanent park on precisely the deployment `enforce` targets.
+    // The read is a DIRECT-PATH concern (it computes `remaining` for the overwrite);
+    // the proxy needs only the one label's id, so it must not be gated on it.
+    //
+    // ⚠️ TWO NAMED NARROWINGS, both in the safe direction:
+    //
+    // 1. `wrote` — the direct path distinguishes "this call performed the write"
+    //    (`wrote: true`) from "confirmed already absent, no write needed"
+    //    (`wrote: false`); Codex #2970 round 3 added it so the daemon emits ONE
+    //    `worker.transition` clear per genuine removal, not one per duplicate-webhook
+    //    re-check. Without the read the proxied path cannot make that distinction, and
+    //    the cloud's `{outcome}` envelope carries no changed-flag to recover it. We
+    //    report `true`: at worst a repeated wake duplicates an observability event,
+    //    whereas `false` would make the clear unreachable on every enforce host — a
+    //    silent MISSING transition, which is strictly the worse failure. Sending
+    //    unconditionally is safe because the cloud's `remove` is itself idempotent.
+    // 2. shadow accounting — shadow now records an observation for every removeLabel
+    //    call, including ones the direct path resolves as a no-op. That makes this site
+    //    consistent with the other two (both already emit before knowing whether the
+    //    write is a no-op), but read the shadow counts as "write calls that reached the
+    //    seam", never as "writes that would have hit Linear".
+    const proxiedRemove = routeThroughProxy(proxy, {
+      routeId: "label",
+      ticket,
+      buildPayload: (resolver) => {
+        if (!resolver) return { ok: false, reason: "no-resolver" };
+        const issue = resolver.issue(ticket);
+        if (!issue.ok) return issue;
+        const ids = resolver.labelIds([label]);
+        if (!ids.ok) return ids;
+        return { ok: true, payload: { issueId: issue.issueId, labelIds: ids.labelIds, mode: "remove" } };
+      },
+    });
+    if (proxiedRemove) {
+      return proxiedRemove.applied
+        ? { removed: true, wrote: true }
+        : { removed: false, wrote: false, reason: proxiedRemove.reason };
+    }
+
+    // ── direct path (no proxy, or shadow handing the write back) ────────────────
     const readResult = reader(ticket, { exec });
     if (!readResult.ok) {
       const reason = isAuthError(readResult.stderr ?? "") ? "auth-error" : "transient";
@@ -307,6 +594,7 @@ export async function removeLabel(
       return { removed: true, wrote: false };
     }
     const remaining = current.filter((l) => l !== label);
+
     let res;
     if (remaining.length) {
       // CTL-1085: prefer ticket-native UUIDs to avoid cross-team name resolution.
@@ -355,6 +643,7 @@ export function applyTriageStatus({
   resolveRepoRoot = defaultResolveRepoRoot,
   exec = defaultExec,
   fetchState = fetchTicketState,
+  proxy,
 }) {
   let from_state = null;
   try {
@@ -372,6 +661,7 @@ export function applyTriageStatus({
       resolveRepoRoot,
       exec,
       knownCurrentState: from_state,
+      proxy,
     });
     if (!t.applied) {
       return { applied: false, verified: false, from_state, to_state: null, reason: t.reason };
