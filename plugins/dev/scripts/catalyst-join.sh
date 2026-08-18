@@ -938,18 +938,50 @@ merge_shared_config() {
     # Linear dispatch. Note the live minis carry this as an ENV var in
     # execution-core.env rather than in Layer-2, so this fills a genuinely
     # empty key on a joining node rather than fighting an existing one.
-    jq --argjson wh "$monitor_wh_stripped" '
+    #
+    # ⛔ CTL-2004: the GITHUB half of the very same rule, which the Linear half above
+    # has had since CTL-1928 and this leg never got. The write directly above hands a
+    # joining node `monitor.github.smeeChannel` — a tunnel CHANNEL. What decides whether
+    # it OPENS is `.catalyst.githubFeed.mode`: `githubFeedIsAuthoritative()` is
+    # `mode === "enforce"`, orch-monitor suppresses the tunnel only on that, and the mode
+    # resolves env -> Layer-2 -> default "off". Layer-1 does not carry it. So a node
+    # joining a fleet that has already cut over was handed the channel and no mode, read
+    # the "off" default as not-authoritative, and came up on SMEE — healthy, green, and on
+    # the exact transport the cutover retired. Same shape as the Linear comment above:
+    # carrying a route without carrying the posture that governs it is how a node ends up
+    # silently on the wrong one.
+    #
+    # ⚠️ Deliberately the SEED'S value, never a hardcoded "enforce". The Linear leg can
+    # safely default to enforce because its producer's readiness gate fails CLOSED. The
+    # GitHub feed is mid-rollout, so pinning a joining host to "enforce" while the fleet
+    # is still in shadow would shut its tunnel BEFORE the cloud feed is authoritative for
+    # it and drop github.* events wholesale — the CI wait, monitor-merge and the broker's
+    # PR-lifecycle routing. Inheriting the seed's declared posture is the only value that
+    # is correct at every point of the rollout.
+    #
+    # `//=` so it is NON-CLOBBER, matching the line above: an operator's existing value
+    # wins, only an ABSENT key is filled. A bundle with no githubFeed writes nothing at
+    # all — `$gf` is null and the `//=` is guarded — so an older seed degrades to exactly
+    # today's behaviour rather than being pinned to a posture nobody declared.
+    local bundle_gf
+    bundle_gf="$(echo "$BUNDLE_JSON" | jq -c '.githubFeed // null')" || bundle_gf="null"
+    jq --argjson wh "$monitor_wh_stripped" --argjson gf "$bundle_gf" '
         .catalyst //= {}
         | .catalyst.monitor = ($wh * (.catalyst.monitor // {}))
         | .catalyst.cloudFeed //= {}
         | .catalyst.cloudFeed.mode //= "enforce"
+        | if ($gf | type) == "object" and ($gf.mode | type) == "string"
+          then .catalyst.githubFeed //= {} | .catalyst.githubFeed.mode //= $gf.mode
+          else . end
       ' "$cfg" > "$tmp2" && mv "$tmp2" "$cfg" || { rm -f "$tmp2"; return 1; }
     local cf_mode
     cf_mode="$(jq -r '.catalyst.cloudFeed.mode // "unset"' "$cfg" 2>/dev/null)"
+    local gf_mode
+    gf_mode="$(jq -r '.catalyst.githubFeed.mode // "unset"' "$cfg" 2>/dev/null)"
     if [[ "$github_wired" == "no" ]]; then
-      info "webhook ingestion NOT wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0}) | bundle carried ONLY the retired Linear block (CTL-1928); cloudFeed=${cf_mode}"
+      info "webhook ingestion NOT wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0}) | bundle carried ONLY the retired Linear block (CTL-1928); cloudFeed=${cf_mode} githubFeed=${gf_mode}"
     else
-      info "webhook ingestion wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0} github-only=yes linear-stripped=${stripped_linear} cloudFeed=${cf_mode} CTL-1928)"
+      info "webhook ingestion wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0} github-only=yes linear-stripped=${stripped_linear} cloudFeed=${cf_mode} githubFeed=${gf_mode} CTL-1928/CTL-2004)"
     fi
   else
     info "webhook ingestion NOT wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0})"
