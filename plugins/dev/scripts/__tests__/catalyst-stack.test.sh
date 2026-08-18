@@ -73,6 +73,20 @@ EOF
 exit 0
 EOF
   chmod +x "$dir/brew"
+  # ⛔ CTL-1968: `catalyst-stack start` calls start_event_mirror, which bootouts
+  # and bootstraps ai.coalesce.catalyst-event-mirror. HOME here is the REAL home,
+  # so this is not the foreign-HOME case the launchd guard covers — an unstubbed
+  # launchctl reaches the live per-user domain and bounces THIS MACHINE's
+  # event-mirror agent, which on a monitor-class node is the fleet event feed.
+  # Measured on the laptop before this stub: one run of this file issued 7
+  # bootouts and 5 bootstraps against ~/Library/LaunchAgents — an asymmetry that
+  # can leave the agent DOWN, the same way the health-responder was left unloaded
+  # for 3h47m on 2026-08-18.
+  cat > "$dir/launchctl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$dir/launchctl"
 }
 
 STUBDIR="${SCRATCH}/stubs"
