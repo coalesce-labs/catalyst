@@ -78,7 +78,9 @@ const COMPARE_SPEC_DRAFT = {
   // here in advance.
   "github.pr.merged": {
     key: (e) => `${e.attributes?.["vcs.repository.name"]}#${e.attributes?.["vcs.pr.number"]}`,
-    attrs: ["vcs.repository.name", "vcs.pr.number", "event.entity", "event.action", "event.label", "event.stream_class", "vcs.revision"],
+    // ⚠️ `vcs.revision` is deliberately NOT compared and NOT emitted — the webhook
+    // does not set it on this name. It was in both for one round; the ledger caught it.
+    attrs: ["vcs.repository.name", "vcs.pr.number", "event.entity", "event.action", "event.label", "event.stream_class"],
     payload: ["action", "merged", "mergedAt", "mergeCommitSha", "draft", "mergeable"],
   },
   "github.pr_review.submitted": {
@@ -158,6 +160,45 @@ const eq = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
  * Both arrays are the events already filtered to one window by the caller — the
  * windowing is deliberately not done here so the comparator stays pure and testable.
  */
+export const repoOf = (e) => e?.attributes?.["vcs.repository.name"] ?? null;
+
+/**
+ * The repos BOTH producers can see — the only population over which "did the feed
+ * miss this?" is a meaningful question.
+ *
+ * ⛔ WHY THIS EXISTS. The two producers do not cover the same repositories, and the
+ * asymmetry is not a bug on either side: the webhook subscription covers a repo set
+ * an operator configured, while the mirror ingests whatever the cloud is told to
+ * ingest. Measured on mini-2 over one live window:
+ *
+ *   smee delivers : catalyst · catalyst-cloud · ryanrozich/personal-os
+ *   feed produces : catalyst · catalyst-cloud · catalyst-cloud-sdk · thoughts
+ *
+ * ⭐ So the feed is BROADER, and retiring the tunnel EXTENDS coverage rather than
+ * shrinking it — backend's own SDK PR #26, part of tonight's 0.1.17 cascade, was
+ * visible to the feed and never to the tunnel.
+ *
+ * ⛔ But before this scoping, the ledger counted every such event as
+ * `feed-events-without-a-twin`, which forces INCONCLUSIVE. **The cutover gate was
+ * therefore unmeetable for a reason that was not a fault** — 6 unjoined events over
+ * 55 minutes, every one of them from a repo smee cannot deliver. That is the exact
+ * mirror image of the false-clean corrected in CTL-48: the same instrument, wrong in
+ * the other direction, and just as capable of driving a wrong decision.
+ *
+ * ⚠️ The scoping is deliberately derived from the SMEE side only. Taking the
+ * intersection of both would also drop a repo the feed *should* cover and silently
+ * does not — which is a real defect and must keep failing. Feed events outside the
+ * smee repo set are reported as `feedOnlyRepos`, never dropped.
+ */
+export function smeeRepos(smeeEvents) {
+  const repos = new Set();
+  for (const e of smeeEvents) {
+    const r = repoOf(e);
+    if (typeof r === "string" && r !== "") repos.add(r);
+  }
+  return repos;
+}
+
 export function compareGithubStreams(feedEvents, smeeEvents) {
   const feed = Array.isArray(feedEvents) ? feedEvents : [];
   const smee = Array.isArray(smeeEvents) ? smeeEvents : [];
@@ -165,6 +206,24 @@ export function compareGithubStreams(feedEvents, smeeEvents) {
   const inconclusive = [];
   if (feed.length === 0) inconclusive.push("feed-side-empty");
   if (smee.length === 0) inconclusive.push("smee-side-empty");
+
+  // Partition the feed side by whether smee could have produced a twin at all.
+  const comparableRepos = smeeRepos(smee);
+  const feedOnly = [];
+  const feedComparable = [];
+  for (const e of feed) {
+    // ⚠️ An event with NO repo attribute stays COMPARABLE. Treating it as feed-only
+    // would let a malformed envelope excuse itself out of the comparison, which is
+    // the shape of every false-clean in this file's history.
+    const r = repoOf(e);
+    if (typeof r === "string" && r !== "" && !comparableRepos.has(r)) feedOnly.push(e);
+    else feedComparable.push(e);
+  }
+  const feedOnlyRepos = {};
+  for (const e of feedOnly) {
+    const r = repoOf(e);
+    feedOnlyRepos[r] = (feedOnlyRepos[r] ?? 0) + 1;
+  }
 
   // ⛔ MULTIPLICITY, NOT PRESENCE — a single-value map is a false-clean generator.
   // Some join keys are deliberately COARSE (a review keys on repo/pr/reviewer/state
@@ -189,7 +248,7 @@ export function compareGithubStreams(feedEvents, smeeEvents) {
 
   const byName = {};
   let unkeyable = 0;
-  for (const e of feed) {
+  for (const e of feedComparable) {
     const n = nameOf(e);
     const spec = COMPARE_SPEC[n];
     if (!spec) {
@@ -268,6 +327,11 @@ export function compareGithubStreams(feedEvents, smeeEvents) {
     byName,
     unkeyable,
     smeeUnjoined,
+    // ⭐ Reported, never dropped: an operator reading a clean verdict must still see
+    // that the feed covered repos the tunnel did not, because that is a REASON TO
+    // RETIRE rather than a caveat on retiring.
+    feedOnlyRepos,
+    comparableRepos: [...comparableRepos].sort(),
     expectedAbsent: Object.fromEntries(Object.entries(absent).filter(([n]) => n in KNOWN_ABSENT)),
     unexplainedAbsent,
     inconclusive,

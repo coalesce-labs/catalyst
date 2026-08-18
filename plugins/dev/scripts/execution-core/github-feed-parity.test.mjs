@@ -10,6 +10,7 @@ import {
   KNOWN_ABSENT,
   OBSERVED_ONLY_FIELDS,
   compareGithubStreams,
+  smeeRepos,
   parityExitCode,
 } from "./github-feed-parity.mjs";
 
@@ -246,5 +247,81 @@ describe("coverage of the spec itself", () => {
 
   test("a null report is inconclusive, not clean", () => {
     expect(parityExitCode(null)).toBe(3);
+  });
+});
+
+describe("⛔ the comparison is scoped to repos smee can actually deliver", () => {
+  // Measured on mini-2: the two producers cover overlapping but DIFFERENT repo sets.
+  //   smee : catalyst · catalyst-cloud · ryanrozich/personal-os
+  //   feed : catalyst · catalyst-cloud · catalyst-cloud-sdk · thoughts
+  // Before scoping, every feed event from a feed-only repo counted as
+  // `feed-events-without-a-twin` and forced INCONCLUSIVE — so the cutover gate was
+  // unmeetable for a reason that was not a fault (6 such events in 55 minutes).
+  const inRepo = (repo, name, attrs, payload) =>
+    ev(name, { "vcs.repository.name": repo, ...attrs }, payload);
+
+  const smeePush = inRepo("o/shared", "github.push",
+    { "vcs.ref.name": "refs/heads/main", "vcs.revision": "a1" },
+    { baseSha: "b", headSha: "a1", commits: [] });
+  const feedPush = inRepo("o/shared", "github.push",
+    { "vcs.ref.name": "refs/heads/main", "vcs.revision": "a1" },
+    { baseSha: "b", headSha: "a1", commits: [] });
+  const feedOnly = inRepo("o/feed-only", "github.push",
+    { "vcs.ref.name": "refs/heads/main", "vcs.revision": "z9" },
+    { baseSha: "y", headSha: "z9", commits: [] });
+
+  test("⭐ a feed event from a repo smee does not deliver does NOT block clean", () => {
+    const r = compareGithubStreams([feedPush, feedOnly], [smeePush]);
+    expect(r.totals.unjoined).toBe(0);
+    expect(r.clean).toBe(true);
+  });
+
+  test("⛔ but it is REPORTED, never silently dropped", () => {
+    // The feed covering more than the tunnel is a REASON TO RETIRE, not a caveat —
+    // an operator reading a clean verdict has to be able to see it.
+    const r = compareGithubStreams([feedPush, feedOnly], [smeePush]);
+    expect(r.feedOnlyRepos).toEqual({ "o/feed-only": 1 });
+    expect(r.comparableRepos).toEqual(["o/shared"]);
+  });
+
+  test("⛔ a feed event from a SHARED repo with no twin STILL blocks clean", () => {
+    // The control that keeps the scoping honest: it must excuse only the events smee
+    // could never have produced, never a genuine phantom in a repo it covers.
+    const phantom = inRepo("o/shared", "github.push",
+      { "vcs.ref.name": "refs/heads/other", "vcs.revision": "q7" },
+      { baseSha: "p", headSha: "q7", commits: [] });
+    const r = compareGithubStreams([feedPush, phantom], [smeePush]);
+    expect(r.totals.unjoined).toBe(1);
+    expect(r.clean).toBe(false);
+  });
+
+  test("⛔ scoping is derived from the SMEE side only — a repo the feed SHOULD cover still fails", () => {
+    // Taking the intersection of both sides would also drop a repo the feed is
+    // supposed to cover and silently does not, which is a real defect. Here smee
+    // delivers two repos and the feed only one: the missing one must still count.
+    const smeeOther = inRepo("o/smee-only", "github.push",
+      { "vcs.ref.name": "refs/heads/main", "vcs.revision": "m3" },
+      { baseSha: "l", headSha: "m3", commits: [] });
+    const r = compareGithubStreams([feedPush], [smeePush, smeeOther]);
+    expect(r.comparableRepos).toEqual(["o/shared", "o/smee-only"]);
+    expect(r.smeeUnjoined).toBe(1);
+    expect(r.clean).toBe(false);
+  });
+
+  test("⚠️ an event with NO repo attribute stays comparable", () => {
+    // Treating it as feed-only would let a malformed envelope excuse itself out of
+    // the comparison — the shape of every false-clean in this file's history.
+    const noRepo = ev("github.push",
+      { "vcs.ref.name": "refs/heads/main", "vcs.revision": "n0" },
+      { baseSha: "m", headSha: "n0", commits: [] });
+    const r = compareGithubStreams([feedPush, noRepo], [smeePush]);
+    expect(r.feedOnlyRepos).toEqual({});
+    expect(r.totals.unjoined).toBe(1);
+    expect(r.clean).toBe(false);
+  });
+
+  test("smeeRepos collects the delivered set, ignoring blanks", () => {
+    expect([...smeeRepos([smeePush, smeePush])]).toEqual(["o/shared"]);
+    expect([...smeeRepos([ev("github.push", {}, {})])]).toEqual([]);
   });
 });

@@ -340,13 +340,18 @@ describe("⭐ github.pr.merged — the envelope the deploy chain joins on (CTC-6
   };
   const ev = () => buildGithubEvent("prMerged", row);
 
-  test("⛔ mergeCommitSha is carried on BOTH the payload and vcs.revision", () => {
+  test("⛔ mergeCommitSha is on the PAYLOAD, and vcs.revision is deliberately absent", () => {
     // `router.mjs:1513` reads `detail.mergeCommitSha` and writes it via
     // setFilterStateMerged; `github.deployment.created` later matches
-    // `WHERE merge_commit_sha = ?`. This is the join key, not a description.
+    // `WHERE merge_commit_sha = ?`. That is the join key, and it lives in the payload.
+    //
+    // ⚠️ I originally ALSO set `vcs.revision` — it is the obvious attribute for a
+    // merge commit — and the parity ledger caught it on the first live window: the
+    // webhook does not set it on this name, so all 3 events diverged. Reproduce the
+    // webhook, do not improve it. Same rule as `threadId: 0`.
     const e = ev();
     expect(e.body.payload.mergeCommitSha).toBe("deadbeefcafe");
-    expect(e.attributes["vcs.revision"]).toBe("deadbeefcafe");
+    expect(e.attributes["vcs.revision"]).toBeUndefined();
   });
 
   test("⛔ action is `closed` with merged:true — GitHub never sends action `merged`", () => {
@@ -366,8 +371,11 @@ describe("⭐ github.pr.merged — the envelope the deploy chain joins on (CTC-6
     for (const k of ["title", "body", "headRef"]) expect(p[k]).toBeUndefined();
   });
 
-  test("mergedAt renders ISO-8601 UTC from the stored epoch-ms", () => {
-    expect(ev().body.payload.mergedAt).toBe(new Date(1_700_000_000_000).toISOString());
+  test("⛔ mergedAt is SECOND-precision, matching GitHub — not toISOString()'s .000Z", () => {
+    // The divergence the ledger found first, on all 3 live events:
+    //   feed 2026-08-18T08:07:22.000Z  vs  smee 2026-08-18T08:07:22Z
+    expect(ev().body.payload.mergedAt).toBe("2023-11-14T22:13:20Z");
+    expect(ev().body.payload.mergedAt).not.toMatch(/\.\d{3}Z$/);
     // A row with no merged_at yields null rather than "Invalid Date".
     const e = buildGithubEvent("prMerged", { ...row, merged_at: null });
     expect(e.body.payload.mergedAt).toBeNull();
