@@ -38,6 +38,14 @@ import { checkIndexServingRoot } from "./index-serving-root-health.mjs";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
 
+// CTL-1929: the GitHub-feed mode + the consumed/suppressible name lists, from two
+// zero-import leaves. ⛔ `github-feed-gate.mjs` — where the name lists used to live
+// — reaches `bun:sqlite` and this file runs under BARE NODE, so importing it here
+// fails at load (measured: config.mjs LOADS under bare node, github-feed-gate.mjs
+// REJECTS). The alternative was a hand-maintained copy here, which would keep
+// reporting three uncovered names after CTC-691/CTC-667/CTC-704 close.
+import { resolveGithubFeedMode } from "../lib/github-feed-mode.mjs";
+import { GITHUB_CONSUMED_NAMES, GITHUB_SUPPRESSIBLE_NAMES } from "../lib/github-feed-names.mjs";
 import {
   getHostName,
   getClusterHosts,
@@ -1188,6 +1196,11 @@ export function checkWebhookIngestion(deps = {}) {
     // undefined = the pre-alignment FAIL behavior (grading must fail closed,
     // unlike the INFO-only shadow's throw handling).
     resolveDeploymentModeFn = resolveDeploymentMode,
+    // CTL-1929: the GitHub-feed mode, injectable for the same reason
+    // resolveDeploymentModeFn is — the declared-cloud branch's grade now depends on
+    // it, and driving it through the real env would make these tests mutate a
+    // process-wide flag that four readers in three processes consult.
+    resolveGithubFeedModeFn = resolveGithubFeedMode,
   } = deps;
 
   const roster = resolveRoster();
@@ -1318,11 +1331,59 @@ export function checkWebhookIngestion(deps = {}) {
       //     wrong in the direction that sends an operator hunting a Linear
       //     outage that isn't there.)
       if (declaredMode.mode === "cloud") {
+        // CTL-1929: the GitHub half of this WARN is no longer unconditional.
+        //
+        // ⛔ AND IT IS STILL NOT AN UNCONDITIONAL PASS. The GitHub feed at
+        // `enforce` replaces smee for the names it COVERS — 9 of the 12 the broker
+        // router consumes. `github.pr.merged` (CTC-691),
+        // `github.check_suite.completed` (CTC-667 item 4) and `github.push`
+        // (CTC-704) have no faithful replacement, so on a declared-cloud node —
+        // which has no tunnel at all — those three are genuinely unseen. Reporting
+        // PASS here would tell an operator the route is whole at exactly the moment
+        // the merge→deploy join, the CI wait, and rebase detection are the parts
+        // that are missing.
+        //
+        // ⚠️ The residual is read from the gate rather than restated, so this line
+        // stops warning by itself when the gaps close instead of needing an edit
+        // that nobody will remember to make.
+        // ⛔ A THROWING RESOLVER GRADES AS "no cloud replacement", not as a pass.
+        // Same fail-closed direction the deployment-mode resolver above takes: an
+        // unreadable config must never be the reason doctor tells an operator the
+        // GitHub route is whole.
+        let ghFeed;
+        try {
+          ghFeed = resolveGithubFeedModeFn();
+        } catch {
+          ghFeed = { mode: "off", source: "resolver-threw" };
+        }
+        if (ghFeed.mode === "enforce") {
+          const uncovered = GITHUB_CONSUMED_NAMES.filter(
+            (n) => !GITHUB_SUPPRESSIBLE_NAMES.includes(n),
+          );
+          if (uncovered.length === 0) {
+            return [
+              mkCheck(
+                "webhook-ingestion",
+                STATUS.PASS,
+                `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired; Linear ingestion is replaced by the cloud feed (CTL-1928) and GitHub ingestion by the GitHub feed at enforce (CTL-1929), covering all ${GITHUB_CONSUMED_NAMES.length} consumed github.* names`,
+              ),
+              ...webhookShadow,
+            ];
+          }
+          return [
+            mkCheck(
+              "webhook-ingestion",
+              STATUS.WARN,
+              `declared deployment mode "cloud" (source=${declaredMode.source}) — GitHub feed at enforce (source=${ghFeed.source}) covers ${GITHUB_SUPPRESSIBLE_NAMES.length}/${GITHUB_CONSUMED_NAMES.length} consumed github.* names, but ${uncovered.length} have NO source on this node: ${uncovered.join(", ")} — the merge→deploy join, the CI wait and rebase detection degrade`,
+            ),
+            ...webhookShadow,
+          ];
+        }
         return [
           mkCheck(
             "webhook-ingestion",
             STATUS.WARN,
-            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired; Linear ingestion is replaced by the cloud feed (CTL-1928), but GitHub ingestion has NO cloud replacement yet: this node cannot see github.* events (monitor-merge, CI waits, PR-lifecycle routing)`,
+            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired; Linear ingestion is replaced by the cloud feed (CTL-1928), but GitHub ingestion has NO cloud replacement active (CATALYST_GITHUB_FEED=${ghFeed.mode}, source=${ghFeed.source}): this node cannot see github.* events (monitor-merge, CI waits, PR-lifecycle routing)`,
           ),
           ...webhookShadow,
         ];

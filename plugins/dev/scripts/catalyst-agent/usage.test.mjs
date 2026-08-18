@@ -11,7 +11,17 @@
 // Run: cd plugins/dev/scripts/catalyst-agent && bun test usage.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { computePace, pctOf, tickUsage, RATELIMIT_EVENT_SAMPLED } from "./usage.mjs";
+import {
+  computePace,
+  pctOf,
+  tickUsage,
+  RATELIMIT_EVENT_SAMPLED,
+  RATELIMIT_EVENT_UNSAMPLED,
+  UNSAMPLED_NO_TOKEN,
+  UNSAMPLED_EMAIL_UNRESOLVABLE,
+  UNSAMPLED_USAGE_THROTTLED,
+  UNSAMPLED_USAGE_HTTP_ERROR,
+} from "./usage.mjs";
 
 const FIVE_HOUR_MS = 5 * 3600_000;
 const SEVEN_DAY_MS = 7 * 86_400_000;
@@ -43,7 +53,13 @@ function harness({
   now = () => Date.parse("2026-06-06T12:00:00Z"),
   nowIso = undefined,
 } = {}) {
+  // CTL-1947: `emitted` remains the SAMPLED stream, so every assertion written against it keeps
+  // its original meaning — these tests are about ghost rows (never a sampled event without an
+  // email) and about which accounts got measured. The new "could not measure" signal is a
+  // separate stream, asserted separately, rather than folded in here where it would silently
+  // change what 30-odd existing expectations mean.
   const emitted = [];
+  const unsampled = [];
   const fetchCalls = [];
   const resolveCalls = [];
   const promise = tickUsage({
@@ -56,11 +72,14 @@ function harness({
       resolveCalls.push({ token, opts });
       return resolveEmail(token, opts);
     },
-    emit: (name, spec, opts) => emitted.push({ name, spec, opts }),
+    emit: (name, spec, opts) => {
+      if (name === RATELIMIT_EVENT_UNSAMPLED) unsampled.push({ name, spec, opts });
+      else emitted.push({ name, spec, opts });
+    },
     now,
     nowIso,
   });
-  return { promise, emitted, fetchCalls, resolveCalls };
+  return { promise, emitted, unsampled, fetchCalls, resolveCalls };
 }
 
 // ─── computePace — pure unit (the locked fixtures) ───────────────────────────
@@ -499,8 +518,12 @@ describe("tickUsage — unresolvable email skips the account", () => {
       emit: (name, spec) => emitted.push({ name, spec }),
     });
     expect(n).toBe(0);
-    expect(emitted.length).toBe(0);
+    // The ghost-row invariant, stated precisely: no SAMPLED event without an email. CTL-1947 adds
+    // an unsampled event on this same path, so counting ALL emits would no longer test that.
+    expect(emitted.filter((e) => e.name === RATELIMIT_EVENT_SAMPLED).length).toBe(0);
     expect(fetchCalls.length).toBe(0); // skipped BEFORE burning a rate-limited call
+    // ...and the skip is now VISIBLE rather than silent (CTL-1947).
+    expect(emitted.filter((e) => e.name === RATELIMIT_EVENT_UNSAMPLED).length).toBe(1);
   });
 
   test("active account falls back to OTEL_RESOURCE_ATTRIBUTES user.email", async () => {
@@ -531,7 +554,12 @@ describe("tickUsage — unresolvable email skips the account", () => {
         emit: (name, spec) => emitted.push({ name, spec }),
       });
       expect(n).toBe(0);
-      expect(emitted.length).toBe(0);
+      // Same distinction as above: the backup account still produces NO sampled event (it must
+      // not borrow the active account's ambient identity), but the skip is now reported.
+      expect(emitted.filter((e) => e.name === RATELIMIT_EVENT_SAMPLED).length).toBe(0);
+      const un = emitted.filter((e) => e.name === RATELIMIT_EVENT_UNSAMPLED);
+      expect(un.length).toBe(1);
+      expect(un[0].spec.attrs["account.email"]).toBeNull();
     } finally {
       delete process.env.OTEL_RESOURCE_ATTRIBUTES;
     }
@@ -546,5 +574,152 @@ describe("parseOtelEmail", () => {
     expect(parseOtelEmail({})).toBe(null);
     expect(parseOtelEmail({ OTEL_RESOURCE_ATTRIBUTES: "a=b" })).toBe(null);
     expect(parseOtelEmail({ OTEL_RESOURCE_ATTRIBUTES: "user.email=" })).toBe(null);
+  });
+});
+
+
+// ─── CTL-1947: an account that cannot be sampled says so ────────────────────
+//
+// The metric was dark for 7+ days and nothing said a word. Measured on mini 2026-08-18 02:2x CT:
+// the poller ran every 300 s, logged "account email unresolvable; skipping account this run" on
+// EVERY run into a 2.7 MB log nobody reads, emitted zero ratelimit events, and
+// catalyst_account_ratelimit_* simply had no series. An absent series is indistinguishable from
+// an exporter that was never started — which is exactly what CTL-1947 AC 2 forbids.
+//
+// The property under test: every path that cannot produce a sample emits a POSITIVE signal
+// carrying the reason, and that signal never looks like usage data.
+describe("tickUsage — unsampled accounts are VISIBLE (CTL-1947)", () => {
+  const emitsOf = (events, name) => events.filter((e) => e.name === name);
+  const collect = () => {
+    const events = [];
+    return { events, emit: (name, spec, opts) => events.push({ name, spec, opts }) };
+  };
+
+  test("an account with NO TOKEN emits unsampled, not silence", async () => {
+    const { events, emit } = collect();
+    const n = await tickUsage({ accounts: [{ source: "active" }], emit });
+    expect(n).toBe(0);
+    const un = emitsOf(events, RATELIMIT_EVENT_UNSAMPLED);
+    expect(un.length).toBe(1);
+    expect(un[0].spec.attrs["ratelimit.unsampled_reason"]).toBe(UNSAMPLED_NO_TOKEN);
+    expect(emitsOf(events, RATELIMIT_EVENT_SAMPLED).length).toBe(0);
+  });
+
+  // ⛔ THE ONE THAT WENT DARK. /api/oauth/profile answers 401, resolveEmail returns null, and
+  // under launchd there is no OTEL_RESOURCE_ATTRIBUTES fallback either.
+  test("an UNRESOLVABLE EMAIL emits unsampled with the reason", async () => {
+    const { events, emit } = collect();
+    const n = await tickUsage({
+      accounts: [{ source: "active", token: TOKEN_A }],
+      resolveEmail: async () => null, // the live 401 shape
+      fetchUsage: async () => {
+        throw new Error("must not reach the usage endpoint without an email");
+      },
+      emit,
+    });
+    expect(n).toBe(0);
+    const un = emitsOf(events, RATELIMIT_EVENT_UNSAMPLED);
+    expect(un.length).toBe(1);
+    expect(un[0].spec.attrs["ratelimit.unsampled_reason"]).toBe(UNSAMPLED_EMAIL_UNRESOLVABLE);
+    expect(un[0].spec.attrs["account.source"]).toBe("active");
+  });
+
+  test("a 429 emits unsampled for the throttled account before stopping", async () => {
+    const { events, emit } = collect();
+    await tickUsage({
+      accounts: [
+        { source: "active", token: TOKEN_A },
+        { source: "backup", token: TOKEN_B },
+      ],
+      resolveEmail: async () => ({ email: "a@example.com" }),
+      fetchUsage: async () => ({ status: 429, body: null }),
+      emit,
+    });
+    const un = emitsOf(events, RATELIMIT_EVENT_UNSAMPLED);
+    expect(un.length).toBe(1); // the reached account only — the loop stops
+    expect(un[0].spec.attrs["ratelimit.unsampled_reason"]).toBe(UNSAMPLED_USAGE_THROTTLED);
+    expect(un[0].spec.attrs["ratelimit.unsampled_http_status"]).toBe(429);
+  });
+
+  test("a non-200 emits unsampled carrying the status", async () => {
+    const { events, emit } = collect();
+    await tickUsage({
+      accounts: [{ source: "active", token: TOKEN_A }],
+      resolveEmail: async () => ({ email: "a@example.com" }),
+      fetchUsage: async () => ({ status: 503, body: null }),
+      emit,
+    });
+    const un = emitsOf(events, RATELIMIT_EVENT_UNSAMPLED);
+    expect(un.length).toBe(1);
+    expect(un[0].spec.attrs["ratelimit.unsampled_reason"]).toBe(UNSAMPLED_USAGE_HTTP_ERROR);
+    expect(un[0].spec.attrs["ratelimit.unsampled_http_status"]).toBe(503);
+  });
+
+  // ⛔ THE CONFUSION THIS EVENT EXISTS TO REMOVE. "Unsampled" must never be readable as "0% used".
+  test("an unsampled event carries NO utilization fields at all", async () => {
+    const { events, emit } = collect();
+    await tickUsage({
+      accounts: [{ source: "active", token: TOKEN_A }],
+      resolveEmail: async () => null,
+      fetchUsage: async () => ({ status: 200, body: usageBody() }),
+      emit,
+    });
+    const spec = emitsOf(events, RATELIMIT_EVENT_UNSAMPLED)[0].spec;
+    for (const k of Object.keys(spec.attrs)) {
+      expect(k).not.toBe("ratelimit.five_hour_pct");
+      expect(k).not.toBe("ratelimit.seven_day_pct");
+    }
+    expect(spec.payload.fiveHourPct).toBeUndefined();
+    expect(spec.payload.sevenDayPct).toBeUndefined();
+  });
+
+  // ⛔ NEGATIVE CONTROL: a healthy account must NOT emit unsampled — otherwise the new signal is
+  // noise and an alert on it fires forever.
+  test("a healthy account emits sampled ONLY", async () => {
+    const { events, emit } = collect();
+    const n = await tickUsage({
+      accounts: [{ source: "active", token: TOKEN_A }],
+      resolveEmail: async () => ({ email: "a@example.com", rateLimitTier: "t" }),
+      fetchUsage: async () => ({ status: 200, body: usageBody() }),
+      emit,
+    });
+    expect(n).toBe(1);
+    expect(emitsOf(events, RATELIMIT_EVENT_SAMPLED).length).toBe(1);
+    expect(emitsOf(events, RATELIMIT_EVENT_UNSAMPLED).length).toBe(0);
+  });
+
+  // The envelope contract must match the sampled path, or the same consumer cannot read it.
+  test("the unsampled envelope uses the same emit signature as sampled", async () => {
+    const { events, emit } = collect();
+    const nowIso = () => "2026-08-18T07:00:00Z";
+    await tickUsage({
+      accounts: [{ source: "active", token: TOKEN_A }],
+      resolveEmail: async () => null,
+      emit,
+      nowIso,
+    });
+    const un = emitsOf(events, RATELIMIT_EVENT_UNSAMPLED)[0];
+    expect(un.spec.entity).toBe("account");
+    expect(un.opts).toEqual({ now: nowIso });
+  });
+
+  // An observability emit must not be able to break the loop it reports on.
+  test("an emit that throws does not break sampling of later accounts", async () => {
+    const seen = [];
+    const emit = (name, spec, opts) => {
+      if (name === RATELIMIT_EVENT_UNSAMPLED) throw new Error("collector down");
+      seen.push({ name, spec, opts });
+    };
+    const n = await tickUsage({
+      accounts: [
+        { source: "backup" }, // no token -> unsampled -> emit throws
+        { source: "active", token: TOKEN_A },
+      ],
+      resolveEmail: async () => ({ email: "a@example.com" }),
+      fetchUsage: async () => ({ status: 200, body: usageBody() }),
+      emit,
+    });
+    expect(n).toBe(1);
+    expect(seen.filter((e) => e.name === RATELIMIT_EVENT_SAMPLED).length).toBe(1);
   });
 });

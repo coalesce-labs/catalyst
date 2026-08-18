@@ -71,6 +71,10 @@ import { buildFsmDescriptor } from "../lib/fsm-descriptor.mjs";
 // exact direct cross-directory `.mjs` import shape: the fsm-descriptor.mjs
 // import immediately above, and ui/src/board/process-surface.test.ts:5.
 import { getDeploymentMode } from "../lib/deployment-mode.mjs";
+// CTL-1929: whether the GitHub cloud feed is authoritative on this host. Same
+// zero-import-leaf shape and the same direct cross-directory import as the line
+// above, for the same reason (execution-core/config.mjs reaches bun:sqlite).
+import { githubFeedIsAuthoritative } from "../lib/github-feed-mode.mjs";
 // CTL-1100: belief store query functions (pure, db-injected). belief-store-queries.mjs
 // has no static bun:sqlite import — plain static import is safe for Vite/esbuild graph.
 import {
@@ -614,6 +618,16 @@ export interface CreateServerOptions {
    */
   deploymentModeReader?: (() => string) | null;
   /**
+   * CTL-1929: override for the GitHub-feed authority reader that gates the GITHUB
+   * smee tunnel (a host whose cloud feed is at `enforce` must not open it — the
+   * feed drives `github.*` dispatch and the broker's gate suppresses the smee
+   * copy). Production defaults to `githubFeedIsAuthoritative` (env → Layer-2 →
+   * `off`). Injected by tests for the same reason `deploymentModeReader` is:
+   * exercising the gate through the real env would mutate a process-wide flag that
+   * four readers in three processes consult.
+   */
+  githubFeedAuthoritativeReader?: (() => boolean) | null;
+  /**
    * CTL-1653: override for the child-process Claude-account probe runner.
    * Production spawns claude-accounts-usage.mjs in a token-scoped subshell
    * (defaultAccountsProbeExec); tests inject a scripted fake; null disables
@@ -962,6 +976,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     pushSubscriptionsDbPath,
     vapidKeysPath,
     deploymentModeReader: deploymentModeReaderOpt,
+    githubFeedAuthoritativeReader: githubFeedAuthoritativeReaderOpt, // CTL-1929
     accountsProbeExec: accountsProbeExecOpt,
     accountsTtlMs = 5 * 60 * 1000,
     accountsRefreshFloorMs = 30 * 1000,
@@ -5689,8 +5704,34 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const deploymentModeForTunnelGate = resolveDeploymentModeForTunnelGate();
   const cloudModeSuppressesTunnels = deploymentModeForTunnelGate === "cloud";
 
+  // CTL-1929: a SECOND, independent reason to leave the GitHub tunnel closed — the
+  // GitHub cloud feed is authoritative on this host.
+  //
+  // ⛔ IT GATES THE GITHUB TUNNEL ONLY, unlike the deployment-mode gate above which
+  // suppresses both. The two legs have separate knobs and separate rollouts by
+  // design (see execution-core/config.mjs's note on CATALYST_GITHUB_FEED), and the
+  // Linear tunnel's retirement is CTL-1928's, already done on its own terms. A gate
+  // that closed both would couple two cutovers that were deliberately decoupled.
+  //
+  // ⚠️ `enforce` ONLY — never `shadow`. In shadow the producer emits nothing
+  // authoritative and the dispatch gate suppresses nothing, so closing the tunnel
+  // there would take GitHub ingestion to zero on a host that only meant to observe.
+  // That is why this reads `githubFeedIsAuthoritative()` rather than comparing the
+  // mode string here: the next person to look at this line should not be able to
+  // widen it to `!== "off"` without going to the function that names the rule.
+  const resolveGithubFeedAuthority =
+    githubFeedAuthoritativeReaderOpt ?? githubFeedIsAuthoritative;
+  const githubFeedSuppressesTunnel = resolveGithubFeedAuthority() === true;
+
   if (webhookConfig && webhookHandler) {
-    if (cloudModeSuppressesTunnels) {
+    if (githubFeedSuppressesTunnel && !cloudModeSuppressesTunnels) {
+      // Loud, for the same reason the cloud branch below is: a channel IS
+      // configured, so the old gate alone would have started the tunnel, and a
+      // silently-absent tunnel is undiagnosable.
+      console.info(
+        `[server] suppressing GitHub webhook smee tunnel start: CATALYST_GITHUB_FEED is "enforce" — the cloud feed drives github.* dispatch (CTL-1929), and the broker's gate suppresses the smee copy for the names it covers`,
+      );
+    } else if (cloudModeSuppressesTunnels) {
       // Loud on purpose: a declared-cloud node silently not opening the
       // GitHub webhook tunnel would be undiagnosable otherwise (a channel is
       // configured, so the OLD gate at `webhookConfig && webhookHandler`
