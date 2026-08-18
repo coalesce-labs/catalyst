@@ -64,8 +64,10 @@ for await (const e of jsonl(shadowPath)) {
 }
 
 const smee = [];
+const seenDelivery = new Set();
 let smeeSeen = 0;
 let smeeLast = null;
+let smeeDuplicates = 0;
 for await (const e of jsonl(eventsPath)) {
   const n = e?.attributes?.["event.name"];
   if (typeof n !== "string" || !n.startsWith("github.")) continue;
@@ -73,7 +75,25 @@ for await (const e of jsonl(eventsPath)) {
   if (e?.body?.payload?.source === "cloud-feed") continue;
   smeeSeen++;
   if (typeof e?.ts === "string") smeeLast = e.ts;
-  if (inWindow(e)) smee.push(e);
+  if (!inWindow(e)) continue;
+  // ⛔ ONE ROW PER GITHUB DELIVERY. On a worker node this changes nothing — the host's
+  // own log holds one copy. On an OBSERVATION node it is the difference between a
+  // clean verdict and a fabricated gap: event-mirror fans in every worker's log, and
+  // each mini runs its OWN smee tunnel, so every delivery appears once per host.
+  // Measured on the laptop over one 70-minute window: 166 events, 83 distinct delivery
+  // ids, 83 per host — which reported `smee-unjoined 77` against a feed that had
+  // reproduced every single one of them.
+  //
+  // ⚠️ Collapsed on GitHub's OWN delivery id, never on content: two genuinely distinct
+  // deliveries are two events, and a redelivery of one is one. An event with no
+  // delivery id is kept rather than dropped — absence of the key is not evidence of a
+  // duplicate, and dropping it would be the silent direction.
+  const delivery = e?.attributes?.["webhook.delivery.id"];
+  if (typeof delivery === "string" && delivery !== "") {
+    if (seenDelivery.has(delivery)) { smeeDuplicates++; continue; }
+    seenDelivery.add(delivery);
+  }
+  smee.push(e);
 }
 
 const report = compareGithubStreams(feed, smee);
@@ -108,12 +128,16 @@ const instrument = {
   feedLinesTotal: feedLines, feedLastTs: feedLast,
   smeeGithubTotal: smeeSeen, smeeLastTs: smeeLast,
   tornLines: torn,
+  smeeDuplicateDeliveries: smeeDuplicates,
 };
 
 if (asJson) {
   console.log(JSON.stringify({ window: { lo, hi }, instrument, report, exit: code }, null, 2));
 } else {
   console.log(`instrument: shadow lines=${feedLines} last=${feedLast} · smee github=${smeeSeen} last=${smeeLast} · torn=${torn}`);
+  if (smeeDuplicates > 0) {
+    console.log(`            ${smeeDuplicates} duplicate webhook deliveries collapsed (an observation node mirrors every worker's copy — see the source)`);
+  }
   console.log(`WINDOW ${lo} -> ${hi}`);
   console.log(`feed ${feed.length} · smee ${smee.length}`);
   console.log(`joined ${report.totals.joined} / agree ${report.totals.agree} · feed-unjoined ${report.totals.unjoined} · smee-unjoined ${report.smeeUnjoined} · unkeyable ${report.unkeyable}`);
@@ -122,6 +146,7 @@ if (asJson) {
   }
   console.log("comparableRepos  :", JSON.stringify(report.comparableRepos));
   console.log("feedOnlyRepos    :", JSON.stringify(report.feedOnlyRepos), "(superset — never blocks CLEAN)");
+  console.log("mirrorUnstorable :", JSON.stringify(report.mirrorUnstorable), "(CTC-719 — conclusions the mirror drops; self-retires when it stops)");
   console.log("expectedAbsent   :", JSON.stringify(report.expectedAbsent));
   console.log("unexplainedAbsent:", JSON.stringify(report.unexplainedAbsent));
   console.log("inconclusive     :", JSON.stringify(report.inconclusive));
