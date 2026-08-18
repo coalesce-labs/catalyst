@@ -5738,9 +5738,13 @@ describe("checkFleetTokenExport — CTL-1908: a login shell must not spend the F
   // login. Seven hours, and the symptom named the wrong account.
   const fs = (files) => ({
     home: "/h",
-    rcFiles: [".zshenv", ".zprofile"],
+    rcFiles: [".zshenv", ".zprofile", ".bashrc", ".profile"],
     fileExists: (p) => Object.prototype.hasOwnProperty.call(files, p),
-    readText: (p) => files[p],
+    // a `null` entry models a file that EXISTS but cannot be read
+    readText: (p) => {
+      if (files[p] === null) throw new Error("EACCES");
+      return files[p];
+    },
   });
   const one = (files) => checkFleetTokenExport(fs(files))[0];
 
@@ -5766,6 +5770,43 @@ describe("checkFleetTokenExport — CTL-1908: a login shell must not spend the F
     // The vacuous-pass guard: with no rc file present there is no evidence either way, and
     // "I could not look" must not render as "this host is fine".
     expect(checkFleetTokenExport({ home: "/h", rcFiles: [".zshenv"], fileExists: () => false, readText: () => "" })[0].status).toBe("info");
+  });
+
+  // ─── Codex round 1 on #3506 ────────────────────────────────────────────────
+  const REAL_LINE = '[ -f "$HOME/.config/catalyst/claude-accounts.env" ] && . "$HOME/.config/catalyst/claude-accounts.env"';
+
+  it("⛔ matches the form this fleet ACTUALLY had — `. ` after `&&`, not at line start", () => {
+    // check-setup.sh's analogous CTL-869 regex anchors source/. at `^`, which would MISS the
+    // exact line that was live on both minis and stalled the fleet for seven hours.
+    expect(one({ "/h/.zshenv": REAL_LINE }).status).toBe("warn");
+  });
+
+  it("scans .bashrc — a bash operator's interactive shell is the same leak", () => {
+    // ⛔ Deliberately does NOT pass `rcFiles`, so the PRODUCTION DEFAULT list is what is under
+    // test. The first version of this case supplied its own list including ".bashrc" and so
+    // asserted the fixture rather than the code — removing ".bashrc" from the default left it
+    // green. A test that cannot fail on the defect it names is worse than no test.
+    const files = { "/h/.bashrc": "source ~/.config/catalyst/claude-accounts.env" };
+    const v = checkFleetTokenExport({
+      home: "/h",
+      fileExists: (p) => Object.prototype.hasOwnProperty.call(files, p),
+      readText: (p) => files[p],
+    })[0];
+    expect(v.status).toBe("warn");
+    expect(v.detail).toContain(".bashrc:1");
+  });
+
+  it("⛔ an UNREADABLE rc beside a clean one is INCONCLUSIVE, never PASS", () => {
+    // The unreadable file may hold the very export being looked for. Reporting the host clean
+    // off its readable neighbour is a fail-OPEN in a check whose only value is being trusted.
+    expect(one({ "/h/.zshenv": null, "/h/.profile": "export EDITOR=vim" }).status).toBe("info");
+  });
+
+  it("merely NAMING the env file is not sourcing it — no false warning", () => {
+    // `CLAUDE_ACCOUNTS_ENV=<path>` and an alias that cats the file inject nothing. Telling an
+    // operator to comment those out is wrong advice from a check they are meant to trust.
+    expect(one({ "/h/.zshenv": "export CLAUDE_ACCOUNTS_ENV=$HOME/.config/catalyst/claude-accounts.env" }).status).toBe("pass");
+    expect(one({ "/h/.zshenv": 'alias showenv="cat ~/.config/catalyst/claude-accounts.env"' }).status).toBe("pass");
   });
 
   it("POSITIVE CONTROL — the same instrument does return PASS on a genuinely clean rc", () => {

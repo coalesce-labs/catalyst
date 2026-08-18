@@ -3383,12 +3383,17 @@ function defaultProcessCommandForPid(pid) {
 export function checkFleetTokenExport(deps = {}) {
   const {
     home = homedir(),
-    rcFiles = [".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".profile"],
+    // The same six candidates check-setup.sh's CTL-869 proxy-leak scan uses. ⛔ `.bashrc` was
+    // missing here: a bash operator sourcing the env file from it would inherit the fleet
+    // credential in every interactive shell while this check reported PASS off a clean
+    // `.profile` (Codex P2 on #3506).
+    rcFiles = [".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"],
     fileExists = existsSync,
     readText = (p) => readFileSync(p, "utf8"),
   } = deps;
 
   const offenders = [];
+  const unreadable = [];
   let scanned = 0;
   for (const rc of rcFiles) {
     const path = resolve(home, rc);
@@ -3397,8 +3402,12 @@ export function checkFleetTokenExport(deps = {}) {
       if (!fileExists(path)) continue;
       text = readText(path);
     } catch {
-      continue; // unreadable rc: cannot judge it, and saying nothing is not the same as PASS —
-      // the `scanned` counter below is what keeps a zero honest.
+      // ⛔ NOT a `continue` that leaves `scanned > 0`. An unreadable rc may hold the very export
+      // being looked for, and an unreadable `.zshenv` beside a clean `.profile` used to report
+      // this host CLEAN — a fail-OPEN in a check whose only value is being trustworthy
+      // (Codex P2 on #3506). It now suppresses PASS below.
+      unreadable.push(rc);
+      continue;
     }
     scanned += 1;
     const lines = text.split("\n");
@@ -3408,14 +3417,32 @@ export function checkFleetTokenExport(deps = {}) {
       // and (since tonight) the minis carry the fix, so matching the bare text would report
       // every fixed host as broken.
       if (/^\s*#/.test(line)) continue;
-      if (/claude-accounts\.env/.test(line) || /\bCLAUDE_CODE_OAUTH_TOKEN\s*=/.test(line)) {
-        offenders.push(`${rc}:${i + 1}`);
-      }
+      // ⚠️ Only an ACTUAL source of the file counts. Merely naming it — `CLAUDE_ACCOUNTS_ENV=<path>`,
+      // or an alias that cats it — injects nothing, and telling an operator to comment those out is
+      // wrong advice from a check they are meant to trust (Codex P2 on #3506).
+      //
+      // ⛔ And `source`/`.` is NOT anchored to line start, because the form this fleet actually
+      // had is `[ -f "$HOME/…/claude-accounts.env" ] && . "$HOME/…/claude-accounts.env"` — the
+      // `.` sits after `&&`. check-setup.sh's analogous regex anchors at `^` and would miss the
+      // exact line that stalled the fleet for seven hours. Command position is start-of-line or
+      // after a shell separator.
+      const sourcesEnvFile = /(?:^|[;&|{(]|&&|\|\|)\s*(?:source|\.)\s+[^;&|]*claude-accounts\.env/.test(line);
+      const exportsToken = /\bCLAUDE_CODE_OAUTH_TOKEN\s*=/.test(line);
+      if (sourcesEnvFile || exportsToken) offenders.push(`${rc}:${i + 1}`);
     }
   }
 
   if (scanned === 0) {
-    return [mkCheck("fleet-token-export", STATUS.INFO, "no shell rc files found to inspect — nothing measured, which is not the same as clean")];
+    return [mkCheck("fleet-token-export", STATUS.INFO, `no readable shell rc files to inspect${unreadable.length ? ` (${unreadable.length} unreadable: ${unreadable.join(", ")})` : ""} — nothing measured, which is not the same as clean`)];
+  }
+  if (offenders.length === 0 && unreadable.length > 0) {
+    return [
+      mkCheck(
+        "fleet-token-export",
+        STATUS.INFO,
+        `${scanned} rc file(s) are clean, but ${unreadable.join(", ")} could not be read — the export may be in there, so this is UNKNOWN rather than clean`,
+      ),
+    ];
   }
   if (offenders.length > 0) {
     return [
