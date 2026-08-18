@@ -64,9 +64,15 @@ ENVRC
 echo ""
 echo "=== ⛔ the binary being ABSENT is a FAILURE, not a warning ==="
 # A PATH with no direnv on it. This is the mini-2 condition.
-OUT="$(PATH="/usr/bin:/bin" CATALYST_BREW="$SCRATCH/no-such-brew" run --dir "$SCRATCH" 2>&1)"
+# ⛔ An EMPTY bin dir, not "/usr/bin:/bin". On macOS direnv lives in /opt/homebrew/bin so that
+# PATH excluded it, but on Ubuntu the apt package installs to /usr/bin — so the "absent" fixture
+# still found direnv and the case silently tested nothing. Caught by CI, 2026-08-18.
+# The interpreter is named ABSOLUTELY because the PATH below cannot resolve `bash` either —
+# otherwise this case exits 127 (command not found) and "non-zero" passes for the wrong reason.
+mkdir -p "$SCRATCH/emptybin"
+OUT="$(PATH="$SCRATCH/emptybin" CATALYST_BREW="$SCRATCH/no-such-brew" "${BASH:-/bin/bash}" "$SUBJECT" --dir "$SCRATCH" 2>&1)"
 RC=$?
-if [[ $RC -ne 0 ]]; then pass "an absent direnv exits non-zero (rc=$RC)"; else fail "an absent direnv exited 0" "$OUT"; fi
+if [[ $RC -eq 1 ]]; then pass "an absent direnv exits 1 (the script's own failure, not a 127)"; else fail "an absent direnv did not exit 1" "rc=$RC" "$OUT"; fi
 if grep -q 'direnv NOT installed' <<<"$OUT"; then pass "it names direnv as the missing thing"; else fail "the absent binary is not named" "$OUT"; fi
 
 if [[ $HAVE_DIRENV -eq 1 ]]; then
@@ -80,8 +86,15 @@ if [[ $HAVE_DIRENV -eq 1 ]]; then
 	OUT="$(run --dir "$BLOCKED")"
 	RC=$?
 	# control — prove the fixture really is blocked, so a pass here means something
+	# ⛔ BOTH ENCODINGS. direnv 2.32.1 (Ubuntu apt) prints `false` here; 2.37.1 (homebrew) prints
+	# `1`. Pinning the control to one spelling makes this suite pass on one platform and fail on
+	# the other while the subject is correct on both.
 	FOUND="$(cd "$BLOCKED" && direnv status 2>/dev/null | grep -E '^Found RC allowed ' | head -n1)"
-	if [[ "$FOUND" == "Found RC allowed 1" ]]; then pass "control — the fixture really is blocked ($FOUND)"; else fail "the fixture is not in the blocked state" "$FOUND"; fi
+	FOUND_VAL="${FOUND##* }"
+	case "$FOUND_VAL" in
+	1 | 2 | false) pass "control — the fixture really is blocked ($FOUND)" ;;
+	*) fail "the fixture is not in the blocked state" "$FOUND" ;;
+	esac
 	if grep -q 'is BLOCKED' <<<"$OUT"; then pass "the blocked .envrc is reported BLOCKED"; else fail "a blocked .envrc was not reported" "$OUT"; fi
 	if [[ $RC -ne 0 ]]; then pass "a blocked .envrc exits non-zero (rc=$RC)"; else fail "a blocked .envrc exited 0" "$OUT"; fi
 	if ! grep -q 'readiness: PASS' <<<"$OUT"; then pass "it does not report PASS"; else fail "a blocked host reported PASS" "$OUT"; fi
@@ -106,7 +119,7 @@ if [[ $HAVE_DIRENV -eq 1 ]]; then
 	RC=$?
 	if [[ $RC -eq 0 ]]; then pass "a correct host exits 0 — the check is not always-red"; else fail "a correct host failed" "$OUT"; fi
 	if grep -q 'readiness: PASS' <<<"$OUT"; then pass "it reports PASS"; else fail "no PASS line" "$OUT"; fi
-	if grep -q 'ALLOWED (Found RC allowed 0)' <<<"$OUT"; then pass "the allowed state is read positively"; else fail "allowed state not reported" "$OUT"; fi
+	if grep -qE 'ALLOWED \(Found RC allowed (0|true)\)' <<<"$OUT"; then pass "the allowed state is read positively"; else fail "allowed state not reported" "$OUT"; fi
 	if grep -q 'LINEAR_API_TOKEN is set' <<<"$OUT"; then pass "LINEAR_API_TOKEN is seen"; else fail "token not seen" "$OUT"; fi
 
 	echo ""
@@ -164,6 +177,54 @@ if [[ $HAVE_DIRENV -eq 1 ]]; then
 	if grep -q 'probe SKIPPED' <<<"$OUT"; then pass "an unprobeable host says so"; else fail "the probe was silently skipped" "$OUT"; fi
 	if [[ $RC -ne 0 ]]; then pass "and that is a failure, not a pass (rc=$RC)"; else fail "unprobeable host exited 0" "$OUT"; fi
 fi
+
+echo ""
+echo "=== ⛔ REGRESSION GUARD: BOTH direnv allowed-state encodings, on any runner ==="
+# direnv reports this field two ways: 2.32.1 (Ubuntu apt) prints `true`/`false`, 2.37.1 (homebrew)
+# prints `0`/`1`. The ALLOWED sentinel differs in TYPE — `0` and `true` both mean allowed — so a
+# check written against only the numeric form reads `true` as non-zero and reports a correctly
+# allowed host as BLOCKED. A FALSE RED on every host with older direnv.
+#
+# The cases above can only exercise whichever direnv this runner happens to have, so they cannot
+# catch the other encoding — this is how the bug reached CI in the first place. These stub
+# `direnv` itself, so BOTH encodings are covered no matter what is installed.
+mkstub() { # mkstub <dir> <allowed-value>
+	mkdir -p "$1"
+	cat >"$1/direnv" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+version) echo "2.32.1" ;;
+status)  echo "Loaded RC allowed 0"; echo "Found RC path /stub/.envrc"; echo "Found RC allowed $2" ;;
+exec)    shift 2; exec env LINEAR_API_TOKEN=stub GITHUB_TOKEN=stub CLOUDFLARE_API_TOKEN=stub "\$@" ;;
+*) exit 0 ;;
+esac
+STUB
+	chmod +x "$1/direnv"
+}
+
+STUBPROJ="$SCRATCH/stubproj"
+mkproject "$STUBPROJ"
+for p in personal catalyst catalyst-cloud; do : >"$XDG_CONFIG_HOME/direnv/profiles/${p}.env"; done
+
+mkstub "$SCRATCH/bin-true" true
+OUT="$(PATH="$SCRATCH/bin-true:$PATH" bash "$SUBJECT" --dir "$STUBPROJ" 2>&1)"
+RC=$?
+if grep -q 'is ALLOWED (Found RC allowed true)' <<<"$OUT"; then pass "the 'true' encoding reads ALLOWED"; else fail "an older-direnv host reporting 'true' was read as blocked — the false red" "$OUT"; fi
+if [[ $RC -eq 0 ]]; then pass "and it exits 0 (rc=$RC)"; else fail "the 'true' encoding did not pass" "$OUT"; fi
+
+mkstub "$SCRATCH/bin-false" false
+OUT="$(PATH="$SCRATCH/bin-false:$PATH" bash "$SUBJECT" --dir "$STUBPROJ" 2>&1)"
+RC=$?
+if grep -q 'is BLOCKED (Found RC allowed false)' <<<"$OUT"; then pass "the 'false' encoding reads BLOCKED"; else fail "'false' was not read as blocked" "$OUT"; fi
+if [[ $RC -ne 0 ]]; then pass "and it exits non-zero (rc=$RC)"; else fail "'false' exited 0" "$OUT"; fi
+
+echo ""
+echo "=== ⛔ an UNRECOGNIZED allowed-state fails CLOSED rather than guessing ==="
+mkstub "$SCRATCH/bin-weird" maybe
+OUT="$(PATH="$SCRATCH/bin-weird:$PATH" bash "$SUBJECT" --dir "$STUBPROJ" 2>&1)"
+RC=$?
+if grep -q 'UNRECOGNIZED' <<<"$OUT"; then pass "a third encoding is named, not guessed"; else fail "an unknown encoding was not reported" "$OUT"; fi
+if [[ $RC -ne 0 ]]; then pass "and it fails closed (rc=$RC)"; else fail "an unknown encoding exited 0" "$OUT"; fi
 
 echo ""
 echo "=== argument validation ==="

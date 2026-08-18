@@ -112,11 +112,28 @@ if [[ -f "$DIR/.envrc" ]]; then
 		fail ".envrc allowed-state UNREADABLE — direnv status printed no 'Found RC allowed' line"
 	else
 		ALLOWED_VAL="${ALLOWED_LINE##* }"
-		if [[ "$ALLOWED_VAL" == "0" ]]; then
-			pass ".envrc is ALLOWED (Found RC allowed 0)"
-		else
+		# ⛔ TWO ENCODINGS, AND READING ONLY ONE INVERTS THE ANSWER. direnv changed this field's
+		# representation: 2.32.1 (Ubuntu 24.04's apt package) prints `true`/`false`, while 2.37.1
+		# (current homebrew) prints `0`/`1`. Both were measured 2026-08-18 — 2.37.1 on mini,
+		# 2.32.1 on the CI runner, which is how this was caught.
+		#
+		# The trap is that the ALLOWED sentinel differs in TYPE, not just spelling: `0` means
+		# allowed, and so does `true` — so a check written against only the numeric form reads
+		# 2.32's `true` as non-zero and reports a correctly-allowed host as BLOCKED. That is a
+		# FALSE RED on every host running the older direnv, which would have held owners back
+		# from hosts that were fine. Handle both, and fail CLOSED on anything unrecognized rather
+		# than guessing a third encoding right.
+		case "$ALLOWED_VAL" in
+		0 | true)
+			pass ".envrc is ALLOWED (Found RC allowed $ALLOWED_VAL)"
+			;;
+		1 | 2 | false)
 			fail ".envrc is BLOCKED (Found RC allowed $ALLOWED_VAL) — run: direnv allow $DIR"
-		fi
+			;;
+		*)
+			fail ".envrc allowed-state UNRECOGNIZED (Found RC allowed '$ALLOWED_VAL', direnv $(direnv version 2>/dev/null || echo '?')) — refusing to guess"
+			;;
+		esac
 	fi
 else
 	fail "no .envrc in $DIR — direnv loads nothing here"
