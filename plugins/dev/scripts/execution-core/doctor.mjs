@@ -3362,6 +3362,100 @@ function defaultProcessCommandForPid(pid) {
   }
 }
 
+// checkFleetTokenExport — CTL-1908. Does a LOGIN SHELL hand the fleet's Claude subscription
+// token to every process this user starts?
+//
+// THE INCIDENT. 2026-08-17 ~02:00–08:57 CT the entire overnight fleet — three owner sessions
+// plus the coordinator's relaunches — stalled on "You've hit your weekly limit", while Ryan's
+// own account sat at 78%. `~/.zshenv` sourced `claude-accounts.env` in EVERY zsh, interactive
+// or not, exporting CLAUDE_CODE_OAUTH_TOKEN = the fleet's armed account. Claude Code prefers
+// the env token over the keychain login, so every shell-launched `claude` — coordinator,
+// owners, and Ryan's own terminal until he re-ran /login — silently spent the fleet's budget.
+// Seven hours of fleet time, and the symptom named the wrong account.
+//
+// ⭐ WHY THIS IS A CHECK AND NOT A FIX. The daemon does NOT need the login-shell export:
+// `catalyst-execution-core` sources `claude-accounts.env` into its own boot environment
+// unconditionally, and `claude --bg` children inherit it from there. So the export buys
+// nothing and costs the budget. But `~/.zshenv` is an unmanaged machine dotfile that nothing
+// in this repo writes, so the codified form of "keep it off" is a check that SAYS SO on every
+// host — measured 2026-08-17 23:2x CT, the laptop had been hand-fixed and BOTH minis had not,
+// which is exactly the drift an uncodified hand-fix produces.
+export function checkFleetTokenExport(deps = {}) {
+  const {
+    home = homedir(),
+    // The same six candidates check-setup.sh's CTL-869 proxy-leak scan uses. ⛔ `.bashrc` was
+    // missing here: a bash operator sourcing the env file from it would inherit the fleet
+    // credential in every interactive shell while this check reported PASS off a clean
+    // `.profile` (Codex P2 on #3506).
+    rcFiles = [".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"],
+    fileExists = existsSync,
+    readText = (p) => readFileSync(p, "utf8"),
+  } = deps;
+
+  const offenders = [];
+  const unreadable = [];
+  let scanned = 0;
+  for (const rc of rcFiles) {
+    const path = resolve(home, rc);
+    let text;
+    try {
+      if (!fileExists(path)) continue;
+      text = readText(path);
+    } catch {
+      // ⛔ NOT a `continue` that leaves `scanned > 0`. An unreadable rc may hold the very export
+      // being looked for, and an unreadable `.zshenv` beside a clean `.profile` used to report
+      // this host CLEAN — a fail-OPEN in a check whose only value is being trustworthy
+      // (Codex P2 on #3506). It now suppresses PASS below.
+      unreadable.push(rc);
+      continue;
+    }
+    scanned += 1;
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      // A COMMENTED line is the fixed state, not a finding — that is precisely how the laptop
+      // and (since tonight) the minis carry the fix, so matching the bare text would report
+      // every fixed host as broken.
+      if (/^\s*#/.test(line)) continue;
+      // ⚠️ Only an ACTUAL source of the file counts. Merely naming it — `CLAUDE_ACCOUNTS_ENV=<path>`,
+      // or an alias that cats it — injects nothing, and telling an operator to comment those out is
+      // wrong advice from a check they are meant to trust (Codex P2 on #3506).
+      //
+      // ⛔ And `source`/`.` is NOT anchored to line start, because the form this fleet actually
+      // had is `[ -f "$HOME/…/claude-accounts.env" ] && . "$HOME/…/claude-accounts.env"` — the
+      // `.` sits after `&&`. check-setup.sh's analogous regex anchors at `^` and would miss the
+      // exact line that stalled the fleet for seven hours. Command position is start-of-line or
+      // after a shell separator.
+      const sourcesEnvFile = /(?:^|[;&|{(]|&&|\|\|)\s*(?:source|\.)\s+[^;&|]*claude-accounts\.env/.test(line);
+      const exportsToken = /\bCLAUDE_CODE_OAUTH_TOKEN\s*=/.test(line);
+      if (sourcesEnvFile || exportsToken) offenders.push(`${rc}:${i + 1}`);
+    }
+  }
+
+  if (scanned === 0) {
+    return [mkCheck("fleet-token-export", STATUS.INFO, `no readable shell rc files to inspect${unreadable.length ? ` (${unreadable.length} unreadable: ${unreadable.join(", ")})` : ""} — nothing measured, which is not the same as clean`)];
+  }
+  if (offenders.length === 0 && unreadable.length > 0) {
+    return [
+      mkCheck(
+        "fleet-token-export",
+        STATUS.INFO,
+        `${scanned} rc file(s) are clean, but ${unreadable.join(", ")} could not be read — the export may be in there, so this is UNKNOWN rather than clean`,
+      ),
+    ];
+  }
+  if (offenders.length > 0) {
+    return [
+      mkCheck(
+        "fleet-token-export",
+        STATUS.WARN,
+        `a login shell exports the FLEET subscription token (${offenders.join(", ")}) — every shell-launched \`claude\` on this host spends the fleet's budget instead of its own login (CTL-1908). The daemon does not need it: catalyst-execution-core sources claude-accounts.env into its own boot env. Comment the line out.`,
+      ),
+    ];
+  }
+  return [mkCheck("fleet-token-export", STATUS.PASS, `no login-shell export of the fleet token in ${scanned} shell rc file(s)`)];
+}
+
 // checkCloudSyncSkew — CTL-1659. Is the RUNNING cloud-sync writer serving the modules the
 // current lockfile resolves? The measured incident (2026-08-04): a dependency fix landed
 // on main, the updater pulled it, the install succeeded, and the daemon kept serving the
@@ -5730,6 +5824,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
       () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
       () => checkCloudSyncSkew(), // CTL-1659: is the RUNNING writer serving the lockfile's modules? (advisory)
+      () => checkFleetTokenExport(), // CTL-1908: does a login shell spend the FLEET's Claude budget? (advisory)
       () => checkConfigScopeLeak(), // advisory
       () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
       () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
@@ -5799,6 +5894,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)
     () => checkCloudSyncSkew(), // CTL-1659: a merged dependency fix that never reached the running writer (advisory)
+    () => checkFleetTokenExport(), // CTL-1908: the login-shell export that stalled the fleet for 7h (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
