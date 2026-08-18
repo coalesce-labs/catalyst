@@ -114,6 +114,24 @@ on:
       # plugins/dev/scripts/ (not covered by the scripts/** glob), so a change
       # confined to the teardown removal block would skip this workflow and the
       # ordering backstop couldn't catch a destroy-before-salvage regression.
+      # CTL-1998: THE TRIGGER MUST MATCH THE SCAN — the same lesson as the
+      # plugins/dev/scripts/** entry above, on the skills axis. 52 test files in
+      # plugins/dev/scripts/__tests__/ read a SKILL.md, and
+      # skill-plugin-root-assigned.test.sh scans `find plugins -name SKILL.md`
+      # (115 files) — while this list named FIVE skill dirs. So a change confined
+      # to any other skill ran NONE of them. That is how #3654 refactored
+      # _phase-agent-template, skipped this job on its own PR and on the push to
+      # main, and left main failing the CTL-1832 guard for an hour, blocking every
+      # PR in the repo. skills-gate.yml's header already diagnosed this exact
+      # shape: "a filter that excludes the change it guards is a guard on the
+      # wrong axis; it reads as working and never fires."
+      # Two globs because SKILL.md lives at two depths (measured, both present):
+      # plugins/<plugin>/skills/** and plugins/playground/<plugin>/skills/**.
+      - "plugins/*/skills/**"
+      - "plugins/*/*/skills/**"
+      # NOTE: the two globs above SUBSUME every plugins/*/skills path listed
+      # below. They are retained as documentation of WHICH STEP each path feeds,
+      # not as triggers — do not read the list as the trigger set.
       - "plugins/dev/skills/phase-teardown/**"
       # CTL-56: the three merge-worktree guard tests scan skills and templates
       # OUTSIDE plugins/dev/scripts/ for the --delete-branch invariant. A change
@@ -191,6 +209,13 @@ jobs:
               - "package.json"
               - "bun.lock"
               - "turbo.json"
+              # CTL-1998: mirror the two skills globs from on.push.paths — see the
+              # long note there. This mirror had ALSO already drifted: it was
+              # missing plugins/dev/skills/phase-teardown/**, which the push list
+              # carries, so the salvage-before-destroy backstop could not fire on
+              # a PR. The globs close that gap and every future one like it.
+              - "plugins/*/skills/**"
+              - "plugins/*/*/skills/**"
               - "plugins/dev/skills/phase-monitor-merge/**"
               - "plugins/dev/skills/merge-pr/**"
               - "plugins/dev/skills/recovery-pass/**"
