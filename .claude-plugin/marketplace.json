@@ -10,7 +10,7 @@
     {
       "name": "catalyst-dev",
       "source": "./plugins/dev",
-      "description": "Core development workflow: research → plan → implement → validate → ship. Includes 9 research agents, workflow commands, Linear integration, handoff system. Always enabled. ~3.5k context (lightweight MCP: Context7).",
+      "description": "Core development workflow: research \u2192 plan \u2192 implement \u2192 validate \u2192 ship. Includes 9 research agents, workflow commands, Linear integration, handoff system. Always enabled. ~3.5k context (lightweight MCP: Context7).",
       "author": {
         "name": "Coalesce Labs",
         "email": "hello@coalesce.dev"
@@ -31,7 +31,7 @@
     },
     {
       "name": "catalyst-pm",
-      "source": "./plugins/pm",
+      "source": "./plugins/playground/pm",
       "description": "Linear-focused project management: cycle tracking, milestone planning, backlog grooming, daily standups, GitHub-Linear sync. Enable when managing Linear projects. ~5k context when enabled.",
       "author": {
         "name": "Coalesce Labs",
@@ -53,7 +53,7 @@
     },
     {
       "name": "catalyst-analytics",
-      "source": "./plugins/analytics",
+      "source": "./plugins/playground/analytics",
       "description": "Product analytics with PostHog MCP integration. Enable when analyzing user behavior, conversion funnels, and product metrics. ~40k context when enabled.",
       "author": {
         "name": "Coalesce Labs",
@@ -74,7 +74,7 @@
     },
     {
       "name": "catalyst-debugging",
-      "source": "./plugins/debugging",
+      "source": "./plugins/playground/debugging",
       "description": "Production error monitoring with Sentry MCP integration. Enable when debugging errors, analyzing stack traces, and investigating incidents. ~20k context when enabled.",
       "author": {
         "name": "Coalesce Labs",
@@ -114,7 +114,7 @@
     },
     {
       "name": "catalyst-pm-ops",
-      "source": "./plugins/pm-ops",
+      "source": "./plugins/playground/pm-ops",
       "description": "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms",
       "author": {
         "name": "Coalesce Labs",
@@ -135,7 +135,7 @@
     },
     {
       "name": "catalyst-meeting-hygiene",
-      "source": "./plugins/meeting-hygiene",
+      "source": "./plugins/playground/meeting-hygiene",
       "description": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros",
       "author": {
         "name": "Coalesce Labs",
@@ -155,8 +155,8 @@
     },
     {
       "name": "catalyst-discovery",
-      "source": "./plugins/discovery",
-      "description": "User research, metrics, experimentation, and prototyping skills — upstream discovery work for product teams. Enable when running user research, defining metrics, or building prototypes.",
+      "source": "./plugins/playground/discovery",
+      "description": "User research, metrics, experimentation, and prototyping skills \u2014 upstream discovery work for product teams. Enable when running user research, defining metrics, or building prototypes.",
       "author": {
         "name": "Coalesce Labs",
         "email": "hello@coalesce.dev"

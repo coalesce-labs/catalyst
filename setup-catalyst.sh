@@ -1914,6 +1914,48 @@ validate_cloud_token() {
 # reads off: the exact "install finished ≠ system works" gap CTL-1918 exists to close,
 # reintroduced by the fix for it. Flags win over env; the configured name wins over the
 # default (CTL-1668).
+# resolve_cloud_account — CTL-2019. flag > env > THIS HOST'S OWN previously-recorded
+# account, read back out of the cloud-sync.env that setup_cloud_replica itself wrote.
+#
+# ⛔ WHY. The account was WRITTEN here (`export CATALYST_CLOUD_ACCOUNT=...` below) and
+# never READ back: resolution was flag-then-env only. So on any host that already has a
+# discoverable cloud token but no account exported in its shell — which is every host
+# after its first install, because the account lives in a file rather than the
+# environment — `setup_cloud_replica` found a token, found no account, and returned 1.
+# That line is `setup_cloud_replica || exit 1`, so the whole of setup aborted, and with
+# it every step `catalyst install` runs afterwards: set-class, pull-owner, install-cli,
+# install-services, adopt-cloud-sync, start-stack, verify-node, doctor.
+#
+# Measured on mini-2 during the CTL-1975 rehearsal (2026-08-18): a reinstalled node came
+# up with 1 of 8 launchd agents, 0 daemons, `node.class` unset and NO REPLICA WRITER —
+# which silently falls back to live `linearis` and burns the shared, rate-limited Linear
+# quota. Nothing was red. The value that would have prevented all of it was sitting in
+# ~/.config/catalyst/cloud-sync.env, one directory from the code that refused to look.
+#
+# ⚠️ This is a CARRY-FORWARD, not a default, and the distinction is the safety property
+# the original comment was protecting: we re-use the account THIS host already recorded
+# for itself. We still never fall back to "tenant-0" — pointing a host at the
+# maintainer's tenant on a guess is exactly the 403-with-no-explanation this refuses.
+# An absent/unreadable file still yields empty, and the hard error below still fires.
+#
+# Deliberately NOT `source`d: that file also carries the cloud TOKEN, and sourcing it
+# would pull a live credential into this shell (and into every child it spawns) to read
+# a non-secret identifier. One field is extracted by name instead.
+resolve_cloud_account() {
+	local acct="${CLOUD_ACCOUNT:-${CATALYST_CLOUD_ACCOUNT-}}"
+	if [[ -z $acct ]]; then
+		local env_file="$HOME/.config/catalyst/cloud-sync.env"
+		if [[ -r $env_file ]]; then
+			acct="$(sed -n 's/^[[:space:]]*export[[:space:]]\{1,\}CATALYST_CLOUD_ACCOUNT=//p' "$env_file" 2>/dev/null | tail -1)"
+			acct="${acct%\"}"
+			acct="${acct#\"}"
+			acct="${acct%\'}"
+			acct="${acct#\'}"
+		fi
+	fi
+	printf '%s' "$acct"
+}
+
 resolve_cloud_token() {
 	local _tv="${CATALYST_CLOUD_TOKEN_ENV-}"
 	if [[ -z $_tv ]] && [[ -r "$HOME/.config/catalyst/config.json" ]] && command -v jq >/dev/null 2>&1; then
@@ -1933,7 +1975,7 @@ setup_cloud_replica() {
 	# byte-identical to before CTL-1836.
 	local token account
 	token="$(resolve_cloud_token)"
-	account="${CLOUD_ACCOUNT:-${CATALYST_CLOUD_ACCOUNT-}}"
+	account="$(resolve_cloud_account)"
 	[[ -n $token ]] || return 0
 
 	print_header "Provisioning Catalyst Cloud Replica"

@@ -5,7 +5,7 @@ see [Linear read replica](linear-replica.md).
 
 ## Three-Layer System
 
-1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/pm/`, `plugins/legacy/`, …) —
+1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/playground/pm/`, `plugins/legacy/`, …) —
    canonical agent/skill definitions; edit these.
 2. **Installation Layer** — `.claude/` (symlinks Claude Code reads plugins from) + `.catalyst/`
    (workflow state: `config.json`, `.workflow-context.json`).

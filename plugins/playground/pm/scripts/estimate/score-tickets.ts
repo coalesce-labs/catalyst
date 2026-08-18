@@ -49,7 +49,7 @@ import { homedir } from "node:os";
 // secret-contract engine, located via a LAZY, LAYOUT-AWARE import, not an
 // eager relative one — catalyst-pm can run from the versioned marketplace
 // cache, where catalyst-dev is a SEPARATELY-installed directory and
-// ../../../dev/... does not exist (an eager import would kill EVERY score
+// ../../../../dev/... does not exist (an eager import would kill EVERY score
 // operation before main()). Only the --check-labels branch needs the
 // module, so a miss is an actionable error there and harmless everywhere
 // else.
@@ -84,7 +84,7 @@ async function loadCatalystRuntimeRoot(): Promise<CatalystRuntimeRootModule> {
   if (devScripts) candidates.push(resolve(devScripts, "lib/catalyst-runtime-root.mjs"));
   // 1. source-checkout sibling of this plugin; 2. repo-root cwd
   candidates.push(
-    resolve(import.meta.dir, "../../../dev/scripts/lib/catalyst-runtime-root.mjs"),
+    resolve(import.meta.dir, "../../../../dev/scripts/lib/catalyst-runtime-root.mjs"),
     resolve(process.cwd(), "plugins/dev/scripts/lib/catalyst-runtime-root.mjs"),
   );
   if (glob) {
@@ -162,7 +162,7 @@ async function loadResolveSecretPreFold(): Promise<ResolveSecretFn> {
   const devScripts = process.env.CATALYST_DEV_SCRIPTS;
   if (devScripts) candidates.push(resolve(devScripts, "lib/secret-contract.mjs"));
   candidates.push(
-    resolve(import.meta.dir, "../../../dev/scripts/lib/secret-contract.mjs"),
+    resolve(import.meta.dir, "../../../../dev/scripts/lib/secret-contract.mjs"),
     resolve(process.cwd(), "plugins/dev/scripts/lib/secret-contract.mjs"),
   );
   if (glob) {

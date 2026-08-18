@@ -570,6 +570,105 @@ else
 fi
 scrub "$HA"
 
+# ── CTL-2019: the account CARRY-FORWARD ──────────────────────────────────────
+# ⛔ THE DEFECT THIS PINS, MEASURED ON MINI-2 DURING THE CTL-1975 REHEARSAL.
+# setup_cloud_replica WRITES the account into ~/.config/catalyst/cloud-sync.env and,
+# before this, never read it back — resolution was flag-then-env only. The account
+# lives in a FILE, not in the environment, so on every host after its first install
+# the function found a token, found no account, and returned 1. That call site is
+# `setup_cloud_replica || exit 1`, so all of setup aborted — and with it every step
+# `catalyst install` runs afterwards: set-class, pull-owner, install-cli,
+# install-services, adopt-cloud-sync, start-stack, verify-node, doctor.
+#
+# The rebuilt node came up with 1 of 8 launchd agents, 0 daemons, node.class unset
+# and NO REPLICA WRITER — which falls back to live `linearis` and burns the shared,
+# rate-limited Linear quota. Nothing was red.
+#
+# ⚠️ These cases must not weaken Case 2's refusal, which is the load-bearing safety
+# property of this whole file. A carry-forward re-uses what THIS host already recorded
+# for itself; it is not a default, and "tenant-0" is still never guessed.
+echo ""
+echo "── CTL-2019: cloud account carry-forward ──"
+
+# The happy path the defect broke: account absent from flag AND env, but present in
+# the file this function itself wrote on a previous run.
+HCF=$(mktemp -d)
+mkdir -p "$HCF/.config/catalyst"
+cat >"$HCF/.config/catalyst/cloud-sync.env" <<'CFEOF'
+# Written by setup-catalyst.sh (CTL-1836).
+export CATALYST_CLOUD_TOKEN=tok_from_a_previous_run
+export CATALYST_CLOUD_ACCOUNT=tenant-carried
+export CATALYST_CLOUD_BASE_URL=https://staging.catalystcloud.dev/api/v1
+CFEOF
+rc=$(run_case "$HCF" "tok_test_abc" "" 200)
+if [[ $rc == "0" ]]; then
+	ok "⭐ account absent from flag+env but recorded in cloud-sync.env → provisions (rc=0)"
+else
+	bad "account carry-forward → rc=$rc; the recorded account was ignored (this is the CTL-2019 defect)"
+fi
+# and it must have used the CARRIED value, not some other one
+if grep -q '^export CATALYST_CLOUD_ACCOUNT=tenant-carried$' "$HCF/.config/catalyst/cloud-sync.env" 2>/dev/null; then
+	ok "the carried account is the one written back (tenant-carried)"
+else
+	bad "the carried account was not preserved in the rewritten env file"
+fi
+scrub "$HCF"
+
+# ⛔ INVERSION GUARD — the refusal must SURVIVE. Without this, a fix that simply
+# defaulted the account would pass every case above.
+HNF=$(mktemp -d)
+mkdir -p "$HNF/.config/catalyst"
+rc=$(run_case "$HNF" "tok_test_abc" "" 200)
+if [[ $rc != "0" ]]; then
+	ok "⛔ INVERSION GUARD: no flag, no env, NO file → still refuses (rc=$rc), never guesses tenant-0"
+else
+	bad "no account anywhere → returned 0; the carry-forward became a default"
+fi
+scrub "$HNF"
+
+# A file with no account line is the same as no file — not an empty-string account.
+HEL=$(mktemp -d)
+mkdir -p "$HEL/.config/catalyst"
+printf 'export CATALYST_CLOUD_TOKEN=tok_only\nexport CATALYST_CLOUD_BASE_URL=https://x/api/v1\n' \
+	>"$HEL/.config/catalyst/cloud-sync.env"
+rc=$(run_case "$HEL" "tok_test_abc" "" 200)
+if [[ $rc != "0" ]]; then
+	ok "cloud-sync.env present but carrying NO account line → still refuses"
+else
+	bad "an account-less env file was treated as an account"
+fi
+scrub "$HEL"
+
+# Precedence: an explicit env account must still beat the recorded file.
+HPR=$(mktemp -d)
+mkdir -p "$HPR/.config/catalyst"
+printf 'export CATALYST_CLOUD_ACCOUNT=tenant-from-file\n' >"$HPR/.config/catalyst/cloud-sync.env"
+rc=$(run_case "$HPR" "tok_test_abc" "tenant-from-env" 200)
+if [[ $rc == "0" ]] && grep -q '^export CATALYST_CLOUD_ACCOUNT=tenant-from-env$' \
+	"$HPR/.config/catalyst/cloud-sync.env" 2>/dev/null; then
+	ok "precedence holds: env account beats the recorded file"
+else
+	bad "precedence broken: the file overrode an explicitly supplied account"
+fi
+scrub "$HPR"
+
+# ⛔ The carry-forward must not drag the TOKEN out of that file. It reads one named
+# non-secret field; sourcing the file would pull a live credential into this shell and
+# every child it spawns. Proven by giving the file a DIFFERENT token from the caller's
+# and asserting the caller's is the one that survives.
+HTK=$(mktemp -d)
+mkdir -p "$HTK/.config/catalyst"
+printf 'export CATALYST_CLOUD_TOKEN=tok_STALE_from_file\nexport CATALYST_CLOUD_ACCOUNT=tenant-carried\n' \
+	>"$HTK/.config/catalyst/cloud-sync.env"
+rc=$(run_case "$HTK" "tok_CALLER_wins" "" 200)
+if grep -q 'tok_CALLER_wins' "$HTK/.config/catalyst/cloud-sync.env" 2>/dev/null &&
+	! grep -q 'tok_STALE_from_file' "$HTK/.config/catalyst/cloud-sync.env" 2>/dev/null; then
+	ok "⭐ reads the ACCOUNT only — the caller's token wins, the file's stale token is not adopted"
+else
+	bad "the carry-forward pulled the token out of the env file (it must read one named field)"
+fi
+scrub "$HTK"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

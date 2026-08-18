@@ -17,8 +17,17 @@
 // The two sides are the same invariant read from opposite ends — the producer
 // decides what to emit, the gate decides what to suppress, and if they disagree the
 // result is either a double dispatch (feed emits, gate does not suppress smee) or a
-// dropped edge (gate suppresses smee, feed declined to emit). Both sides read
-// `GITHUB_SUPPRESSIBLE_NAMES`, so they cannot disagree.
+// dropped edge (gate suppresses smee, feed declined to emit).
+//
+// ⛔ CTL-2018: THIS COMMENT USED TO END "Both sides read `GITHUB_SUPPRESSIBLE_NAMES`,
+// so they cannot disagree." That was FALSE and it is what shipped the dropped-edge
+// half. Both sides read the same NAME, but the gate calls the runtime FUNCTION
+// `githubSuppressibleNames(coverage)` while this file read the static CONSTANT of the
+// same stem — 12 vs 10 on a 0.1.18 replica, differing by exactly
+// `{github.check_suite.completed, github.push}`. They now share the FUNCTION, resolved
+// per tick from this producer's own replica handle. The invariant is asserted, not
+// asserted-in-a-comment: `github-feed-suppressible-parity.test.mjs` drives both sides
+// off one coverage fixture and fails if they ever differ.
 //
 // An excluded name still goes out as a `would-dispatch` marker under enforce, so
 // the parity ledger keeps observing it and the gap stays measurable while it lasts.
@@ -45,6 +54,7 @@ import { DEFAULT_ACCOUNT } from "./linear-feed-run.mjs";
 import {
   GITHUB_CONSUMED_NAMES,
   GITHUB_SUPPRESSIBLE_NAMES,
+  githubSuppressibleNames,
 } from "./github-feed-gate.mjs";
 import { defaultReadyPath, writeReadyState } from "./github-feed-ready.mjs";
 
@@ -69,10 +79,53 @@ export function resolveAccount(envObj = process.env) {
 export const EVENT_WOULD_DISPATCH = "github-feed.would-dispatch";
 
 /**
- * The names this producer may emit under their REAL name. Derived from the gate's
- * export, never re-typed — see the header's "same invariant from opposite ends".
+ * The names this producer may emit under their REAL name.
+ *
+ * ⛔ CTL-2018: THIS USED TO BE `new Set(GITHUB_SUPPRESSIBLE_NAMES)` — a module-level
+ * constant, frozen at import — and that made `enforce` silently lossy. The BROKER's
+ * dispatch gate resolves the same question at RUNTIME
+ * (`github-feed-gate-install.mjs`'s `resolveSuppressible` → `readGithubCoverage()` →
+ * `githubSuppressibleNames()`, re-probed every `COVERAGE_CACHE_MS`), because both
+ * capabilities arrive when the cloud-sync WRITER restarts and runs its migrations —
+ * an event neither process participates in. The static constant here could not.
+ *
+ * On a schema-0.1.18 replica the two answers differ by exactly
+ * `{github.check_suite.completed, github.push}`: the gate says 12, the constant said
+ * 10. At `enforce` that meant the producer wrote a `would-dispatch` MARKER for those
+ * two while the gate suppressed smee's copy and the tunnel was closed — so nothing
+ * dispatched. Measured on mini-2 over a 46-minute enforce window on 2026-08-18: the
+ * shadow file carried 125 `check_suite.completed` + 28 `push`, the event log's
+ * `cloud-feed` channel carried **0** of each, and 153 markers were written instead.
+ *
+ * ⚠️ AND THE PARITY LEDGER COULD NOT SEE IT — `github-feed-parity-run.mjs` reads the
+ * SHADOW FILE as its feed side, and the shadow file had all 153. It reported
+ * `clean = true · exit 0` throughout the outage. Shadow and enforce take different
+ * branches of the same sink and only the shadow branch is compared, so no soak on
+ * shadow — of any length — can test this path.
+ *
+ * The set is therefore resolved PER TICK from the replica handle this producer
+ * already opens, through the SAME `githubSuppressibleNames` the gate calls. One
+ * derivation, two callers.
  */
-const SUPPRESSIBLE_SET = new Set(GITHUB_SUPPRESSIBLE_NAMES);
+export function resolveSuppressibleForTick(source) {
+  // ⛔ FAILS CLOSED TO THE PRE-CAPABILITY SET, matching `readGithubCoverage`'s posture
+  // exactly: `pushIsLossy: true, checkSuiteHasPrAssociation: false` yields the SMALLEST
+  // suppressible set. For the gate that means "smee keeps authority"; for the producer
+  // it means "emit a marker, not a real event". Both are the non-dispatching direction
+  // — but they are only SAFE TOGETHER when both sides land on the same answer, which is
+  // the whole point of sharing the derivation rather than the constant.
+  let coverage = { pushIsLossy: true, checkSuiteHasPrAssociation: false, ok: false };
+  try {
+    coverage = {
+      pushIsLossy: source.pushIsLossy(),
+      checkSuiteHasPrAssociation: source.checkSuiteHasPrAssociation(),
+      ok: true,
+    };
+  } catch {
+    /* pre-capability answer retained */
+  }
+  return { names: githubSuppressibleNames(coverage), coverage };
+}
 
 export function defaultShadowPath(orchDir, account = resolveAccount()) {
   return join(orchDir, "shadow", `github-feed-${account}.jsonl`);
@@ -110,18 +163,40 @@ export function resolveEffectiveMode(
   { suppressible = GITHUB_SUPPRESSIBLE_NAMES, consumed = GITHUB_CONSUMED_NAMES } = {},
 ) {
   if (requested === "enforce") {
-    // ⚠️ NOT degraded, but not unqualified either — the reason is retained and now
-    // states the residual, because an operator who reads `mode: enforce` and infers
-    // "the tunnel can go" would be wrong until all three gaps close. A mode that is
-    // partially honoured has to say which part.
+    const gaps = consumed.filter((n) => !suppressible.includes(n));
+    // ⛔ CTL-2018: A PARTIAL ENFORCE IS NOT SAFE, and this used to return
+    // `degraded: false` for one. The old reason string said it out loud — "smee stays
+    // authoritative for N ... and the tunnel cannot retire until they close" — and
+    // then returned a fully-honoured verdict anyway, so the sentence had no consumer.
+    // It was true and inert, the same shape as CTL-1659's `restart_needed`.
+    //
+    // Why partial cannot work: the two gates are at DIFFERENT GRANULARITIES. The
+    // broker's dispatch gate is PER NAME, so it can leave smee authoritative for an
+    // uncovered one. The TUNNEL gate in orch-monitor is BINARY — `enforce` means the
+    // smee tunnel never starts at all. So on a host with any gap, `enforce` closes the
+    // only transport those names have and the producer emits markers for them: the
+    // edges are dropped, whether or not the two sides agree about the gap. Agreement
+    // was never the property that made it safe; FULL coverage is.
+    //
+    // Measured 2026-08-18: 153 dropped edges on mini-2 in 46 minutes
+    // (125 check_suite.completed + 28 push) with both sides in perfect agreement.
+    if (gaps.length > 0) {
+      return {
+        requested,
+        effective: "shadow",
+        degraded: true,
+        reason:
+          `enforce refused: this host can emit ${suppressible.length} of ${consumed.length} ` +
+          `consumed names and the smee tunnel is closed for ALL of them at enforce, so ` +
+          `${gaps.join(", ")} would be dropped. Running as shadow. ` +
+          `Coverage arrives with the replica schema pin (CTC-691, CTC-712, CTC-704).`,
+      };
+    }
     return {
       requested,
       effective: "enforce",
       degraded: false,
-      reason:
-        `enforce is authoritative for ${suppressible.length} of ${consumed.length} consumed names; ` +
-        `smee stays authoritative for ${consumed.length - suppressible.length} ` +
-        `(CTC-691, CTC-667 item 4, CTC-704) and the tunnel cannot retire until they close.`,
+      reason: `enforce is authoritative for all ${consumed.length} consumed names.`,
     };
   }
   return { requested, effective: requested, degraded: false, reason: null };
@@ -175,9 +250,14 @@ export function runGithubFeedTick({
   seams,
   logger = null,
 }) {
-  const resolved = resolveEffectiveMode(mode);
-  if (resolved.effective === "off") {
-    return { skipped: "mode-off", mode: resolved, counts: null, ready: false };
+  // ⚠️ TWO RESOLUTIONS, AND THE ORDER MATTERS. `off` has to short-circuit BEFORE the
+  // replica handle is opened (opening it is the one thing `off` promises not to do),
+  // but the honest `enforce` answer needs the runtime coverage that only that handle
+  // can give. So resolve cheaply here to answer `off`, then resolve again below with
+  // the real suppressible set once the source exists. Only the second one is reported.
+  const provisional = resolveEffectiveMode(mode);
+  if (provisional.effective === "off") {
+    return { skipped: "mode-off", mode: provisional, counts: null, ready: false };
   }
 
   // Readiness AS THIS TICK BEGAN. Captured before the sweep runs, so every event
@@ -197,7 +277,7 @@ export function runGithubFeedTick({
     try { source?.close?.(); } catch { /* best effort */ }
     return {
       skipped: null,
-      mode: resolved,
+      mode: provisional,
       error: `open-failed:${err?.code ?? err?.name ?? "unknown"}`,
       counts: null,
       ready: false,
@@ -205,6 +285,15 @@ export function runGithubFeedTick({
   }
 
   try {
+    // ⛔ CTL-2018: the suppressible set comes from THIS REPLICA, right now, through the
+    // same function the broker's gate calls — not from a constant frozen at import.
+    const { names: tickSuppressibleNames, coverage } = resolveSuppressibleForTick(source);
+    const tickSuppressible = new Set(tickSuppressibleNames);
+    // The reported mode is the one resolved against the real set, so `reason`'s
+    // "authoritative for N of M" is a measurement of this host rather than of a
+    // constant. Under-reporting it is how "10 of 12" read as a healthy enforce.
+    const resolved = resolveEffectiveMode(mode, { suppressible: tickSuppressibleNames });
+
     const emitted = [];
     const counts = sweepFn({
       source,
@@ -222,7 +311,7 @@ export function runGithubFeedTick({
         // export so the producer and the gate cannot drift: emitting a real name the
         // gate will not suppress double-dispatches that name, and declining a name
         // the gate DOES suppress drops the edge entirely.
-        if (resolved.effective === "enforce" && SUPPRESSIBLE_SET.has(name)) {
+        if (resolved.effective === "enforce" && tickSuppressible.has(name)) {
           // ⛔ AUTHORITY IS STAMPED AT EMISSION, not read at consumption (CTL-1901).
           // A later readiness change must not retroactively grant OR revoke authority
           // for a line already on disk — the sweep's cursor has advanced past the
@@ -258,7 +347,25 @@ export function runGithubFeedTick({
     });
 
     const report = { counts, stoppedEarly: false };
-    const unready = githubSweepUnreadyReason(report, feedHealth);
+    // ⛔ CTL-2018: A DEGRADED ENFORCE MUST ALSO REPORT UNREADY, and this is a real
+    // safety lever rather than cosmetics. `decideDispatch`'s `isReady` gates the SMEE
+    // side ONLY ("Omitted/absent ⇒ NOT ready, so a wiring mistake keeps smee
+    // authoritative"), so `ready: false` makes the broker STOP suppressing smee's
+    // copies. On a host whose replica cannot cover every consumed name that is exactly
+    // the right outcome: the producer emits markers, and smee keeps carrying the real
+    // edges instead of being switched off underneath them.
+    //
+    // ⚠️ RESIDUAL, NAMED BECAUSE IT IS NOT CLOSED HERE: this lever reaches the BROKER,
+    // not orch-monitor. The tunnel gate resolves `enforce` straight from Layer-2
+    // (`githubFeedIsAuthoritative`) and never starts the tunnel, so on a gapped host
+    // there is nothing for the un-suppressed smee branch to route. Making all three
+    // readers agree about coverage — not just about the flag — is CTL-2011's scope.
+    // Until it lands, the operator rule stands: do not set `enforce` on a host whose
+    // replica is not migrated, and `catalyst doctor` should FAIL it.
+    const sweepUnready = githubSweepUnreadyReason(report, feedHealth);
+    const unready = resolved.degraded
+      ? `mode-degraded:${resolved.effective}`
+      : sweepUnready;
     if (resolved.degraded && logger?.warn) {
       // Once per tick is deliberate here rather than latched: this state is a
       // deliberate operator-visible refusal, not a flapping alarm, and it ends the

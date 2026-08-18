@@ -37,7 +37,7 @@ fatal() { err "$*"; exit 1; }
 note()  { echo "[refresh-corpus] $*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
 COMPOUND_LOG="${REPO_ROOT}/plugins/dev/scripts/compound-log.sh"
 
 TEAM="CTL"

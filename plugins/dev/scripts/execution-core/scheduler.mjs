@@ -76,6 +76,7 @@ import {
   computeAdvanceEdgeKey,
   isAdvanceAlreadyApplied,
   recordAdvanceApplied,
+  retractAdvanceMarkersInto,
 } from "./advance-guard.mjs"; // CTL-1805: durable once-per-edge advancement idempotency guard
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
@@ -4123,13 +4124,26 @@ function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob
 // next phase on the next tick. Mirrors clearDispatchCooldown's best-effort,
 // never-throw discipline.
 //
+// ⛔ CTL-2024: that last sentence has been FALSE since CTL-1805 landed on 2026-08-15
+// (#3404) — three days — and the clear below is where it is made true. The guard and
+// this defect shipped together. deriveAdvancement DID re-derive; CTL-1805's advance
+// guard then suppressed the whole fanout, because its edge key is computed from the
+// PREDECESSOR signal, which the unstick does not touch. A cleared
+// stall could therefore NEVER re-enter its phase: CTC-427 and CTC-55 each re-derived
+// and were re-suppressed 16× (CTC-441, never cleared, 1× — the control). Step 2
+// retracts that marker, alongside the three other durable suppressors this clear
+// already re-arms.
+//
 // The clear, per the CTL-1005 Gherkin:
 //   1. delete the synthetic phase-<phase>.json stalled signal (the unstick);
-//   2. clear the needs-human label + its .linear-label-needs-human.{applied,skipped}
+//   2. retract the CTL-1805 advance marker(s) for the edge INTO <phase> (CTL-2024),
+//      because step 1 undid the very advance that marker records — without this the
+//      re-derived advance is suppressed on an unchanged predecessor key, forever;
+//   3. clear the needs-human label + its .linear-label-needs-human.{applied,skipped}
 //      marker (clearStalledLabel) so a future genuine escalation can re-apply;
-//   3. delete .orphan-detected.applied (CTL-868) so a future stall re-emits the
+//   4. delete .orphan-detected.applied (CTL-868) so a future stall re-emits the
 //      orphan-detected event instead of being silently suppressed;
-//   4. write the .janitor-cleared-<phase>.applied once-marker ON CONFIRMED label
+//   5. write the .janitor-cleared-<phase>.applied once-marker ON CONFIRMED label
 //      removal only (CTL-1045 Bug 4). Scope is the worker-dir lifetime: file-backed,
 //      survives daemon restarts, deleted only when the reaper removes the worker dir
 //      or an operator re-arms via orch-monitor respond-ticket. Storm-prevention is
@@ -4175,13 +4189,26 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
         "stall-janitor: stalled-signal delete failed (CTL-1005)"
       );
     }
-    // 2. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
+    // 2. CTL-2024: retract the advance marker(s) for the edge INTO this phase. Step 1
+    //    deleted the successor signal, which UNDOES the advance those markers record —
+    //    but the guard's key is derived from the PREDECESSOR, which nothing here
+    //    touches, so without this retraction the re-derived advance presents a
+    //    byte-identical key and is suppressed on every subsequent tick, forever.
+    //    Scoped to `-to-<phase>` only: that is the sole edge whose effect was undone.
+    const retractedAdvances = retractAdvanceMarkersInto(orchDir, ticket, phase);
+    if (retractedAdvances.length > 0) {
+      log.debug?.(
+        { ticket, phase, retracted: retractedAdvances },
+        "stall-janitor: retracted advance marker(s) so the cleared phase can re-enter (CTL-2024)"
+      );
+    }
+    // 3. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
     try {
       rmSync(join(workerDir, ".orphan-detected.applied"), { force: true });
     } catch {
       /* best-effort */
     }
-    // 3. CTL-1442: re-arm the escalation ask budget. An operator re-arming a
+    // 4. CTL-1442: re-arm the escalation ask budget. An operator re-arming a
     //    stalled ticket starts a FRESH cycle — without this, a retried phase
     //    that no-progresses again hits the spent ask-cap (askCount >= cap) and
     //    is suppressed without a fresh ask or re-stall (Codex P2 on #2590).
@@ -4190,11 +4217,11 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
     } catch {
       /* best-effort */
     }
-    // 4. CTL-1643: clear the durable escalation record so the next same-episode
+    // 5. CTL-1643: clear the durable escalation record so the next same-episode
     //    gate starts fresh. Without this, the labelAttempts > 0 guard in
     //    escalateOnce suppresses the re-escalation event after the operator re-arms.
     forgetDurableEscalation(orchDir, ticket);
-    // 5. CTL-1045 Bug 3 / CAT-24: never leave a marker-only worker dir after
+    // 6. CTL-1045 Bug 3 / CAT-24: never leave a marker-only worker dir after
     // deleting its last real phase signal. Such residue holds no slot yet excludes
     // the ticket from new-work dispatch. Tombstones are not real signals. Preserve
     // a non-empty operator inbox: the daemon writes the reply before invoking this
@@ -4222,7 +4249,7 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
         }
       }
     };
-    // 6. clear the needs-human label; write the once-marker ONLY on confirmed removal
+    // 7. clear the needs-human label; write the once-marker ONLY on confirmed removal
     //    (CTL-1045 Bug 4 — a failed clear must NOT disarm future escalations).
     //
     //    CAT-24 (Codex P1): this runs LAST, and the empty-dir removal above hangs off

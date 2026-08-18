@@ -18,7 +18,11 @@ import { DEFAULT_ACCOUNT } from "./linear-feed-run.mjs";
 import { defaultSeenPath } from "./github-feed-seen.mjs";
 import { streamCursorPath } from "./github-feed-sweep.mjs";
 import { readGithubFeedConfig } from "./config.mjs";
-import { GITHUB_CONSUMED_NAMES, GITHUB_SUPPRESSIBLE_NAMES } from "./github-feed-gate.mjs";
+import {
+  GITHUB_CONSUMED_NAMES,
+  GITHUB_SUPPRESSIBLE_NAMES,
+  githubSuppressibleNames,
+} from "./github-feed-gate.mjs";
 
 const tmp = mkdtempSync(join(tmpdir(), "gh-feed-timer-"));
 afterAll(() => { try { rmSync(tmp, { recursive: true, force: true }); } catch { /* never fail in cleanup */ } });
@@ -73,42 +77,71 @@ describe("⛔ P2 (Codex #3524): the account is resolved, never hard-coded", () =
   });
 });
 
-describe("enforce is honoured PER NAME, and says which part it cannot honour", () => {
-  // ⚠️ THIS REPLACES "enforce degrades to shadow". That refusal was all-or-nothing:
-  // nine fully-covered names sat behind two uncovered ones. github-feed-gate.mjs
-  // suppresses per NAME, so the gaps now hold back only themselves. The property
-  // being asserted is no longer "enforce is refused" but "enforce is qualified".
-  test("enforce is effective, undegraded, and names the residual", () => {
-    const r = resolveEffectiveMode("enforce");
-    expect(r.effective).toBe("enforce");
-    expect(r.degraded).toBe(false);
+describe("⛔ enforce is REFUSED unless this host can emit every consumed name (CTL-2018)", () => {
+  // ⚠️ THIS REVERSES A DELIBERATE EARLIER DECISION, and the reversal is the ticket.
+  // The block this replaces said: "THIS REPLACES 'enforce degrades to shadow'. That
+  // refusal was all-or-nothing: nine fully-covered names sat behind two uncovered
+  // ones. github-feed-gate.mjs suppresses per NAME, so the gaps now hold back only
+  // themselves." Every sentence of that is true ABOUT THE DISPATCH GATE, and it is
+  // still the wrong conclusion, because there are TWO gates at different
+  // granularities:
+  //
+  //   • the broker's DISPATCH gate is per NAME — it can leave smee authoritative
+  //     for an uncovered one;
+  //   • orch-monitor's TUNNEL gate is BINARY — `enforce` means the smee tunnel never
+  //     starts, for every name at once.
+  //
+  // So "the gaps hold back only themselves" is false in production: at enforce the
+  // gaps hold back nothing, because the transport they were relying on is gone while
+  // the producer emits them as markers. Measured on mini-2, 2026-08-18: 153 dropped
+  // edges in 46 minutes (125 check_suite.completed + 28 push) with BOTH sides in
+  // perfect agreement about the gap. Agreement was never the safety property; full
+  // coverage is.
+  test("a coverage gap makes enforce degraded, effective SHADOW, and names the gaps", () => {
+    const r = resolveEffectiveMode("enforce", {
+      suppressible: ["github.pr.opened"],
+      consumed: ["github.pr.opened", "github.check_suite.completed", "github.push"],
+    });
     expect(r.requested).toBe("enforce");
-    // ⛔ The reason must still name every open gap. An operator who reads
-    // `mode: enforce` and infers "the tunnel can go" is wrong until all three close,
-    // so a partially-honoured mode has to say which part.
-    for (const ticket of ["CTC-691", "CTC-667", "CTC-704"]) {
-      expect(r.reason).toContain(ticket);
-    }
+    expect(r.effective).toBe("shadow");
+    expect(r.degraded).toBe(true);
+    // The gaps are NAMED, not counted — an operator has to know which transport just
+    // became load-bearing again, and "2 names" does not say that.
+    expect(r.reason).toContain("github.check_suite.completed");
+    expect(r.reason).toContain("github.push");
   });
 
-  test("⛔ the counts in the reason are DERIVED — driven with a DIFFERENT name set", () => {
-    // ⚠️ My first version compared the reason against the real constants, and the
-    // mutation (hand-writing "9 of 12") PASSED — the literal and the computed value
-    // are the same string today. It asserted a tautology. The only way to observe a
-    // derivation is to change its inputs, so this drives the post-CTC-704 world:
-    // one more name covered, one fewer excluded.
+  test("FULL coverage is honoured — enforce, undegraded", () => {
     const r = resolveEffectiveMode("enforce", {
-      suppressible: [...GITHUB_SUPPRESSIBLE_NAMES, "github.push"],
+      suppressible: [...GITHUB_CONSUMED_NAMES],
       consumed: GITHUB_CONSUMED_NAMES,
     });
-    expect(r.reason).toContain(`${GITHUB_SUPPRESSIBLE_NAMES.length + 1} of ${GITHUB_CONSUMED_NAMES.length}`);
-    expect(r.reason).toContain(
-      `smee stays authoritative for ${GITHUB_CONSUMED_NAMES.length - GITHUB_SUPPRESSIBLE_NAMES.length - 1}`,
-    );
-    // and the shipped default still reports today's real partition
-    expect(resolveEffectiveMode("enforce").reason).toContain(
-      `${GITHUB_SUPPRESSIBLE_NAMES.length} of ${GITHUB_CONSUMED_NAMES.length}`,
-    );
+    expect(r.effective).toBe("enforce");
+    expect(r.degraded).toBe(false);
+    expect(r.reason).toContain(`all ${GITHUB_CONSUMED_NAMES.length}`);
+  });
+
+  test("⛔ the verdict is DERIVED from the inputs, not from the shipped constants", () => {
+    // Inherited discipline from the block this replaces: comparing against the real
+    // constants asserts a tautology, and the only way to observe a derivation is to
+    // change its inputs. Two synthetic worlds, opposite verdicts, neither matching
+    // today's real partition.
+    const covered = resolveEffectiveMode("enforce", { suppressible: ["a", "b"], consumed: ["a", "b"] });
+    const gapped = resolveEffectiveMode("enforce", { suppressible: ["a"], consumed: ["a", "b"] });
+    expect(covered.effective).toBe("enforce");
+    expect(gapped.effective).toBe("shadow");
+    expect(gapped.reason).toContain("1 of 2");
+    expect(gapped.reason).toContain("b");
+  });
+
+  test("⚠️ the SHIPPED default still refuses — the static constant is short by two", () => {
+    // `GITHUB_SUPPRESSIBLE_NAMES` is the pre-capability partition, so the no-argument
+    // call is the "host with an unmigrated replica" case and must refuse. This is the
+    // assertion that would have failed on 2026-08-18 before the flip.
+    const r = resolveEffectiveMode("enforce");
+    expect(r.effective).toBe("shadow");
+    expect(r.degraded).toBe(true);
+    expect(GITHUB_SUPPRESSIBLE_NAMES.length).toBeLessThan(GITHUB_CONSUMED_NAMES.length);
   });
 
   test("shadow and off are not degraded", () => {
@@ -243,7 +276,24 @@ describe("⛔ under enforce the producer emits a REAL name only for what the gat
     body: { payload: { source: "cloud-feed" } },
   });
 
-  const drive = (mode, names, { authorityAtEntry = true } = {}) => {
+  // ⛔ CTL-2018: THE FIXTURE SOURCE MUST ANSWER THE COVERAGE PROBES, because the
+  // producer now resolves its suppressible set from the replica handle rather than
+  // from a constant. `migrated` is a schema-0.1.18 replica (both capabilities), which
+  // is what the fleet actually runs; `preCapability` is the older one. A fixture that
+  // answers NEITHER (the old `{ close() {} }`) is a third, real case — a replica the
+  // producer cannot probe — and it is covered on its own below.
+  const migrated = () => ({
+    close() {},
+    pushIsLossy: () => false,
+    checkSuiteHasPrAssociation: () => true,
+  });
+  const preCapability = () => ({
+    close() {},
+    pushIsLossy: () => true,
+    checkSuiteHasPrAssociation: () => false,
+  });
+
+  const drive = (mode, names, { authorityAtEntry = true, sourceFactory = migrated } = {}) => {
     const log = [];
     runGithubFeedTick({
       mode,
@@ -252,7 +302,7 @@ describe("⛔ under enforce the producer emits a REAL name only for what the gat
       authorityAtEntry,
       appendEventFn: (e) => log.push(e),
       appendShadowFn: () => {},
-      sourceFactory: () => ({ close() {} }),
+      sourceFactory,
       seenFactory: () => ({ close() {} }),
       sweepFn: ({ sink }) => {
         for (const n of names) sink(ghEvent(n));
@@ -266,15 +316,35 @@ describe("⛔ under enforce the producer emits a REAL name only for what the gat
     expect(drive("enforce", ["github.pr.opened"])).toEqual(["github.pr.opened"]);
   });
 
-  test("⛔ an EXCLUDED name stays a would-dispatch marker even under enforce", () => {
-    // ⚠️ `pr.merged` is NOT in this list any more — CTC-691 landed, so it emits under
-    // its real name and the gate suppresses smee's copy. `check_suite` has no usable
-    // replacement (CTC-712) and `push` a lossy one (CTC-704); emitting either for
-    // real would put two copies on the log, because the gate correctly refuses to
-    // suppress smee for them.
+  test("⭐ ON A MIGRATED REPLICA check_suite and push go out under their REAL names", () => {
+    // ⛔ THIS IS THE REGRESSION TEST FOR THE 2026-08-18 OUTAGE. Before CTL-2018 the
+    // producer read the STATIC suppressible set, so these two were downgraded to
+    // markers on a host whose replica covers them and whose broker gate was
+    // suppressing smee for them — 153 dropped edges in 46 minutes on mini-2.
     for (const n of ["github.check_suite.completed", "github.push"]) {
-      expect(drive("enforce", [n])).toEqual([EVENT_WOULD_DISPATCH]);
+      expect(drive("enforce", [n])).toEqual([n]);
     }
+  });
+
+  test("⛔ a PRE-CAPABILITY replica refuses enforce outright — every name becomes a marker", () => {
+    // Not "these two stay markers while the rest go out". A gap means the whole mode
+    // degrades to shadow, because the TUNNEL gate is binary: at enforce the smee
+    // tunnel never starts, so a name the producer declines to emit has no transport
+    // left at all. See the resolveEffectiveMode block above.
+    const all = ["github.pr.opened", "github.check_suite.completed", "github.push"];
+    expect(drive("enforce", all, { sourceFactory: preCapability })).toEqual(
+      all.map(() => EVENT_WOULD_DISPATCH),
+    );
+  });
+
+  test("⛔ a replica the producer CANNOT PROBE refuses enforce — absent is not covered", () => {
+    // The probe throws (no such method). Failing closed to the pre-capability answer
+    // is what makes "I could not look" behave like "not covered" rather than like
+    // "fine" — the direction every other absent probe in this feature takes.
+    const unprobeable = () => ({ close() {} });
+    expect(drive("enforce", ["github.pr.opened"], { sourceFactory: unprobeable })).toEqual([
+      EVENT_WOULD_DISPATCH,
+    ]);
   });
 
   test("shadow emits would-dispatch for EVERYTHING, including suppressible names", () => {
@@ -282,15 +352,29 @@ describe("⛔ under enforce the producer emits a REAL name only for what the gat
       .toEqual([EVENT_WOULD_DISPATCH, EVENT_WOULD_DISPATCH]);
   });
 
-  test("⭐ the real-name set is exactly the gate's suppressible set — asserted over ALL consumed names", () => {
-    // The control that makes the two tests above non-anecdotal: drive every name the
-    // router consumes through one tick and compare the partition to the gate's.
+  test("⭐ the real-name set is exactly the GATE'S RUNTIME set for the same replica", () => {
+    // The control that makes the tests above non-anecdotal — and the one whose
+    // EXPECTED VALUE is the whole ticket. It used to compare against the static
+    // `GITHUB_SUPPRESSIBLE_NAMES`, which is the very constant the producer was reading,
+    // so it agreed by construction and stayed green while the producer and the gate
+    // diverged by two names in production. The expectation is now computed from the
+    // SAME function the broker's gate calls, on the SAME coverage the fixture reports,
+    // so the two sides are compared against EACH OTHER rather than each against itself.
+    const coverage = { pushIsLossy: false, checkSuiteHasPrAssociation: true };
+    const gateWouldSuppress = githubSuppressibleNames(coverage);
     const emitted = drive("enforce", GITHUB_CONSUMED_NAMES);
     const real = emitted.filter((n) => n !== EVENT_WOULD_DISPATCH);
-    expect(real.sort()).toEqual([...GITHUB_SUPPRESSIBLE_NAMES].sort());
+    expect(real.sort()).toEqual([...gateWouldSuppress].sort());
     expect(emitted.filter((n) => n === EVENT_WOULD_DISPATCH)).toHaveLength(
-      GITHUB_CONSUMED_NAMES.length - GITHUB_SUPPRESSIBLE_NAMES.length,
+      GITHUB_CONSUMED_NAMES.length - gateWouldSuppress.length,
     );
+    // ⚠️ Positive control on the instrument. On a migrated replica the marker count is
+    // ZERO, so the assertions above would also pass for a producer that emitted
+    // everything unconditionally. Pin the other end: the gate's runtime answer must
+    // really be all twelve here, and it must really differ from the static constant —
+    // otherwise this test is back to comparing the producer with itself.
+    expect(gateWouldSuppress.length).toBe(GITHUB_CONSUMED_NAMES.length);
+    expect(gateWouldSuppress.length).toBeGreaterThan(GITHUB_SUPPRESSIBLE_NAMES.length);
   });
 });
 
@@ -308,7 +392,13 @@ describe("⛔ the emission-time authority stamp is what crosses the process boun
       authorityAtEntry,
       appendEventFn: (e) => log.push(e),
       appendShadowFn: () => {},
-      sourceFactory: () => ({ close() {} }),
+      // CTL-2018: a migrated (0.1.18) replica, so enforce is honourable and these
+      // tests keep measuring the STAMP rather than accidentally measuring the refusal.
+      sourceFactory: () => ({
+        close() {},
+        pushIsLossy: () => false,
+        checkSuiteHasPrAssociation: () => true,
+      }),
       seenFactory: () => ({ close() {} }),
       sweepFn: ({ sink }) => {
         sink(ghEvent("github.pr.opened"));
@@ -338,7 +428,13 @@ describe("⛔ the emission-time authority stamp is what crosses the process boun
       dbPath: ":memory:",
       appendEventFn: (e) => log.push(e),
       appendShadowFn: () => {},
-      sourceFactory: () => ({ close() {} }),
+      // CTL-2018: a migrated (0.1.18) replica, so enforce is honourable and these
+      // tests keep measuring the STAMP rather than accidentally measuring the refusal.
+      sourceFactory: () => ({
+        close() {},
+        pushIsLossy: () => false,
+        checkSuiteHasPrAssociation: () => true,
+      }),
       seenFactory: () => ({ close() {} }),
       sweepFn: ({ sink }) => {
         sink(ghEvent("github.pr.opened"));

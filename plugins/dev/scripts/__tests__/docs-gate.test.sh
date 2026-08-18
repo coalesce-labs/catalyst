@@ -55,7 +55,7 @@ run_case "nested website/ file" "docs" "0" $'website/astro.config.mjs\n'
 run_case "dev changelog" "docs" "0" $'plugins/dev/CHANGELOG.md\n'
 
 # 4. Another plugin's changelog → docs, 0
-run_case "pm changelog" "docs" "0" $'plugins/pm/CHANGELOG.md\n'
+run_case "pm changelog" "docs" "0" $'plugins/playground/pm/CHANGELOG.md\n'
 
 # 5. A pure non-docs change → nodocs, 1
 run_case "non-docs scheduler" "nodocs" "1" $'plugins/dev/scripts/scheduler.mjs\n'

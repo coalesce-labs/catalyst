@@ -4,7 +4,8 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS="${SCRIPT_DIR}/.."                              # plugins/dev/scripts
-PMOPS_WC="${SCRIPTS}/../../pm-ops/scripts/workflow-context.sh"
+# CTL-1999: pm-ops moved to plugins/playground/pm-ops.
+PMOPS_WC="${SCRIPTS}/../../playground/pm-ops/scripts/workflow-context.sh"
 
 FAILURES=0; PASSES=0
 ok()   { PASSES=$((PASSES+1));  echo "  PASS: $1"; }

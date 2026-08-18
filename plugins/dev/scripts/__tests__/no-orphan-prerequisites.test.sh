@@ -19,7 +19,7 @@ else
 fi
 
 # pm-ops + meta copies must STILL be present (negative scope check — only the dev copy was orphaned)
-for keep in plugins/pm-ops/scripts/check-prerequisites.sh plugins/meta/scripts/check-prerequisites.sh; do
+for keep in plugins/playground/pm-ops/scripts/check-prerequisites.sh plugins/meta/scripts/check-prerequisites.sh; do
   if [[ -f "$REPO_ROOT/$keep" ]]; then
     PASSES=$((PASSES+1))
     echo "  PASS: $keep is retained"
