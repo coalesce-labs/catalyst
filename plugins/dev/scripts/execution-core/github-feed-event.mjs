@@ -524,11 +524,16 @@ export function buildGithubEvent(streamKey, row, seams) {
         entity: "pr",
         action: "merged",
         label: `PR #${row.number}`,
+        // ⛔ NO `vcs.revision`, THOUGH THE MERGE SHA IS RIGHT THERE. I added it — it is
+        // the obvious attribute for a merge commit — and the parity ledger caught it
+        // on the first live window: the WEBHOOK does not set it on this name, so the
+        // feed's copy diverged on all 3 events. Reproduce the webhook, do not improve
+        // it; the same rule that keeps `threadId: 0` on pr_review_thread.resolved.
+        // The consumer reads `detail.mergeCommitSha` from the payload, which is
+        // populated below.
         attrs: {
           "vcs.repository.name": repo,
           "vcs.pr.number": row.number,
-          // The merge commit, on the attribute the deploy chain scopes by.
-          "vcs.revision": row.merge_commit_sha,
         },
         message: `${name} for ${repo} PR #${row.number}`,
         payload: {
@@ -538,7 +543,14 @@ export function buildGithubEvent(streamKey, row, seams) {
           // read the pair, so inventing an action nobody emits would leave the
           // lifecycle branch unmatched while every count still read "emitted".
           merged: true,
-          mergedAt: typeof row.merged_at === "number" ? new Date(row.merged_at).toISOString() : null,
+          // ⛔ SECOND-PRECISION, NOT MILLISECOND. `toISOString()` always emits `.000Z`;
+          // GitHub's own string omits milliseconds, so the naive form diverged on
+          // every event (`08:07:22.000Z` vs `08:07:22Z`) — caught by the ledger on the
+          // first live window, exactly where #3544's own PR body predicted it would go
+          // first. Trimming is safe because the column is whole seconds from GitHub.
+          mergedAt: typeof row.merged_at === "number"
+            ? new Date(row.merged_at).toISOString().replace(/\.\d{3}Z$/, "Z")
+            : null,
           // The join key. `classifyGithubRow` has already refused the row if it is
           // absent, so this is never null here — the guard is there, not here.
           mergeCommitSha: row.merge_commit_sha,

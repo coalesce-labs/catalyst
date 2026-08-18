@@ -78,7 +78,9 @@ const COMPARE_SPEC_DRAFT = {
   // here in advance.
   "github.pr.merged": {
     key: (e) => `${e.attributes?.["vcs.repository.name"]}#${e.attributes?.["vcs.pr.number"]}`,
-    attrs: ["vcs.repository.name", "vcs.pr.number", "event.entity", "event.action", "event.label", "event.stream_class", "vcs.revision"],
+    // ⚠️ `vcs.revision` is deliberately NOT compared and NOT emitted — the webhook
+    // does not set it on this name. It was in both for one round; the ledger caught it.
+    attrs: ["vcs.repository.name", "vcs.pr.number", "event.entity", "event.action", "event.label", "event.stream_class"],
     payload: ["action", "merged", "mergedAt", "mergeCommitSha", "draft", "mergeable"],
   },
   "github.pr_review.submitted": {
