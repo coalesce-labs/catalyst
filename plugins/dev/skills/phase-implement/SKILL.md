@@ -172,12 +172,16 @@ fi
 
 # 4. Locate the approved plan. The dispatcher already validated this glob;
 #    we re-resolve to capture the actual filename for the delegated skill.
-TICKET_LC="$(printf '%s' "$TICKET" | tr '[:upper:]' '[:lower:]')"
-shopt -s nullglob
-PLAN_MATCHES=( thoughts/shared/plans/*-"${TICKET_LC}".md )
-shopt -u nullglob
-[[ ${#PLAN_MATCHES[@]} -gt 0 ]] || { echo "no plan found for ${TICKET} under thoughts/shared/plans/" >&2; exit 1; }
-PLAN_PATH="${PLAN_MATCHES[0]}"
+# CTL-1998: use the SHARED slug-tolerant matcher (CTL-1081), the same one the
+# dispatcher gates this phase with. The strict glob below it replaced accepted only
+# `*-<ticket>.md`, while phase-agent-dispatch:560 gates on match_thoughts_artifact,
+# which ALSO accepts `*-<ticket>-<slug>.md`. So a slug-named plan passed the gate and
+# then died here with "no plan found" — the dispatcher and the phase disagreeing about
+# the same file. phase-plan and phase-research were converted in CTL-1081; implement
+# was missed.
+source "${PLUGIN_ROOT}/scripts/lib/phase-artifact-gate.sh"
+PLAN_PATH="$(match_thoughts_artifact thoughts/shared/plans "$TICKET" | tail -1 || true)"
+[[ -n "$PLAN_PATH" ]] || { echo "no plan found for ${TICKET} under thoughts/shared/plans/" >&2; exit 1; }
 echo "phase-implement: plan = ${PLAN_PATH}"
 
 # 5. Linear status is written by the coordinator (CTL-558): the execution-core
