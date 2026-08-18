@@ -951,6 +951,7 @@ jobs:
             assertion-evidence-parity.test.mjs \
             cli-header-backtick-guard.test.mjs \
             agent-session-narrator.test.mjs \
+            linear-comment-write.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \

@@ -170,6 +170,7 @@ import { resolvePhaseSessionId } from "./session-resolve.mjs";
 export { resolvePhaseSessionId };
 import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
 
+import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
 // detectSessionRateLimitHit — best-effort: did the dead worker's OWN session
 // immediately hit a Claude account usage/session limit, rather than genuinely
 // failing to make progress on the ticket's actual work?
@@ -788,7 +789,11 @@ export function defaultPostReclaimMirror(
         dirname(fileURLToPath(import.meta.url)),
         "../lib/linear-comment-post.sh"
       );
-      return spawnSync(helperPath, [t, bodyText], { encoding: "utf8" });
+      // CTL-1889 inc 2: cloud write proxy under enforce; this helper otherwise.
+      return postLinearCommentAsSpawnResult(t, bodyText, {
+        caller: "reclaim-mirror",
+        runHelper: (tt, bb) => spawnSync(helperPath, [tt, bb], { encoding: "utf8" }),
+      });
     },
     multiHost = false,
     // CTL-863: threaded through for the Stage-1 projection-first fence read.

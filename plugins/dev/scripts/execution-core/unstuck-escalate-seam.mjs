@@ -19,6 +19,7 @@ import { log as defaultLog } from "./config.mjs";
 import { authorEscalationComment } from "./unstuck-sweep-escalation.mjs";
 import { captureDeepDiveEvidence } from "./unstuck-sweep-evidence.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
+import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
 
 function defaultRunGit(args) {
   return spawnSync("git", args, { encoding: "utf8" });
@@ -140,8 +141,14 @@ export function buildUnstuckEscalateSeam(deps = {}) {
 
   const commentHelper = env.CATALYST_COMMENT_POST_HELPER ?? COMMENT_HELPER_DEFAULT;
   const _post = postComment ?? ((ticket, body) => {
-    const r = spawnSync(commentHelper, [ticket, body], { encoding: "utf8", timeout: 10_000 });
-    return Boolean(r && r.status === 0);
+    // CTL-1889 inc 2: cloud write proxy under enforce; the helper otherwise. The
+    // per-build `commentHelper` (env-overridable, read per-build so it cannot be frozen
+    // to the wrong value at import) stays the helper path.
+    const r = postLinearCommentAsSpawnResult(ticket, body, {
+      caller: "unstuck-escalate",
+      runHelper: (t, b) => spawnSync(commentHelper, [t, b], { encoding: "utf8", timeout: 30_000 }),
+    });
+    return r.status === 0;
   });
 
   return function escalate(candidate, decision) {
