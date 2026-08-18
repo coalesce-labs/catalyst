@@ -868,6 +868,7 @@ jobs:
             abort-worker.test.mjs \
             assertion-evidence.test.mjs \
             assertion-evidence-parity.test.mjs \
+            cli-header-backtick-guard.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
