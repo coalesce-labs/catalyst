@@ -27,7 +27,14 @@ fail() {
 }
 
 mklog() { # mklog <five> <seven>  — a payload in the daemon's real format
-	printf '[00:00:00] Connected\n[00:00:01] Sending: {"s":%s,"sr":240,"w":%s,"wr":9000,"st":"allowed","ok":true,"acct":"acct1@example.com"}\n' "$1" "$2" >"$SCRATCH/usage.log"
+	# ⛔ The stamp must be NOW. The pager checks the payload's own [HH:MM:SS] against the clock
+	# (Codex #3526 P1: a fresh mtime does not mean a fresh payload), so a fixture frozen at
+	# 00:00:01 is correctly rejected as stale — which is what happened to every case here on the
+	# first run after that check landed.
+	local ts
+	ts="$(date '+%H:%M:%S')"
+	printf '[%s] Connected\n[%s] Sending: {"s":%s,"sr":240,"w":%s,"wr":9000,"st":"allowed","ok":true,"acct":"acct1@example.com"}\n' \
+		"$ts" "$ts" "$1" "$2" >"$SCRATCH/usage.log"
 }
 
 run() {
@@ -51,32 +58,40 @@ grep -q "no window at or above 80%" <<<"$OUT" && pass "reports nothing crossed" 
 
 echo ""
 echo "=== a 5-hour crossing pages ==="
+# ⛔ NOT --dry-run for the suppression cases below: a dry run deliberately records NO state
+# (Codex #3526 P1 — recording a crossing that was never delivered suppresses every later run),
+# so suppression and re-arming can only be exercised through a real delivery.
+rm -f "$SCRATCH/state"
+: >"$SCRATCH/channels/demo.md"
 mklog 85 5
-OUT="$(run --threshold 80 --dry-run)"
-grep -q "would page 5-hour at 85%" <<<"$OUT" && pass "pages the 5-hour window" || fail "pages the 5-hour window" "$OUT"
+OUT="$(run --threshold 80 --channel demo)"
+grep -q "85% of its 5-hour window" "$SCRATCH/channels/demo.md" && pass "pages the 5-hour window" || fail "pages the 5-hour window" "$OUT"
 
 echo ""
 echo "=== ...and does NOT repeat on the next run ==="
-OUT="$(run --threshold 80 --dry-run)"
+OUT="$(run --threshold 80 --channel demo)"
 grep -q "already paged" <<<"$OUT" && pass "the repeat is suppressed" || fail "the repeat is suppressed" "$OUT"
-grep -q "would page" <<<"$OUT" && fail "the repeat is suppressed" "it paged again" || pass "no second page was emitted"
+# Count PAGE HEADERS, not the phrase: one page writes "5-hour window" in both its heading and
+# its body, so a phrase count of 1 was never reachable.
+[ "$(grep -c '^## Turn FLEET-AUTO' "$SCRATCH/channels/demo.md")" -eq 1 ] && pass "no second page reached the channel" || fail "no second page reached the channel" "$(grep -c '^## Turn FLEET-AUTO' "$SCRATCH/channels/demo.md") pages"
 
 echo ""
 echo "--- ⛔ ...but it RE-ARMS after the window falls back below ---"
 # Without this a single page per lifetime would look identical to a working pager.
 mklog 30 5
-run --threshold 80 --dry-run >/dev/null
+run --threshold 80 --channel demo >/dev/null
 mklog 88 5
-OUT="$(run --threshold 80 --dry-run)"
-grep -q "would page 5-hour at 88%" <<<"$OUT" && pass "a fresh crossing pages again" || fail "a fresh crossing pages again" "$OUT"
+OUT="$(run --threshold 80 --channel demo)"
+grep -q "88% of its 5-hour window" "$SCRATCH/channels/demo.md" && pass "a fresh crossing pages again" || fail "a fresh crossing pages again" "$OUT"
 
 echo ""
 echo "=== the 7-day window pages independently ==="
 rm -f "$SCRATCH/state"
+: >"$SCRATCH/channels/demo.md"
 mklog 10 92
-OUT="$(run --threshold 80 --dry-run)"
-grep -q "would page 7-day at 92%" <<<"$OUT" && pass "pages the 7-day window" || fail "pages the 7-day window" "$OUT"
-grep -q "would page 5-hour" <<<"$OUT" && fail "only the crossed window pages" "it also paged 5-hour at 10%" || pass "the uncrossed 5-hour window did not page"
+OUT="$(run --threshold 80 --channel demo)"
+grep -q "92% of its 7-day window" "$SCRATCH/channels/demo.md" && pass "pages the 7-day window" || fail "pages the 7-day window" "$OUT"
+grep -q "5-hour window" "$SCRATCH/channels/demo.md" && fail "only the crossed window pages" "it also paged 5-hour at 10%" || pass "the uncrossed 5-hour window did not page"
 
 echo ""
 echo "--- ⛔ EVERY way of not seeing usage is UNOBSERVABLE + non-zero, never 'under threshold' ---"
@@ -87,6 +102,14 @@ OUT="$(LOG_OVERRIDE="$SCRATCH/does-not-exist.log" run --dry-run)"
 RC=$?
 grep -q "UNOBSERVABLE" <<<"$OUT" && [ "$RC" -eq 3 ] && pass "an ABSENT source is UNOBSERVABLE (rc 3)" || fail "an absent source is UNOBSERVABLE" "rc=$RC: $OUT"
 
+# ⛔ Codex #3526 P1: under launchd, exiting to stderr puts the most important condition in a log
+# nobody reads. Being unable to SEE usage must go out through the same sink as a crossing.
+: >"$SCRATCH/channels/demo.md"
+OUT="$(LOG_OVERRIDE="$SCRATCH/does-not-exist.log" CATALYST_USAGE_PAGE_STATE="$SCRATCH/state-dark" run --channel demo)"
+grep -q "usage source is DARK" "$SCRATCH/channels/demo.md" && pass "a dark source PAGES the channel, not just stderr" || fail "a dark source pages the channel" "$OUT"
+OUT2="$(LOG_OVERRIDE="$SCRATCH/does-not-exist.log" CATALYST_USAGE_PAGE_STATE="$SCRATCH/state-dark" run --channel demo)"
+[ "$(grep -c 'usage source is DARK' "$SCRATCH/channels/demo.md")" -eq 1 ] && pass "…and does not repeat it every run" || fail "the dark page repeats" "$(grep -c 'usage source is DARK' "$SCRATCH/channels/demo.md") copies"
+
 mklog 30 5
 touch -t 202601010000 "$SCRATCH/usage.log"
 OUT="$(run --dry-run)"
@@ -94,13 +117,28 @@ RC=$?
 grep -q "UNOBSERVABLE" <<<"$OUT" && [ "$RC" -eq 3 ] && pass "a STALE source is UNOBSERVABLE (rc 3)" || fail "a stale source is UNOBSERVABLE" "rc=$RC: $OUT"
 grep -q "NOT 'under threshold'" <<<"$OUT" && pass "it says so in those words" || fail "it says so in those words" "$OUT"
 
+# ⛔ Codex #3526 P1: a FRESH mtime with a STALE payload. The daemon keeps logging connection
+# lines while its last real payload is hours old — an unbounded search returns the old one and
+# the pager reports stale percentages as current.
+{
+	old_ts="$(date -v-2H '+%H:%M:%S' 2>/dev/null || date -d '2 hours ago' '+%H:%M:%S')"
+	now_ts="$(date '+%H:%M:%S')"
+	printf '[%s] Sending: {"s":95,"sr":10,"w":9,"wr":900,"st":"allowed","ok":true,"acct":"acct1@example.com"}\n' "$old_ts"
+	i=0
+	while [ $i -lt 60 ]; do printf '[%s] Connecting to a device...\n' "$now_ts"; i=$((i + 1)); done
+} >"$SCRATCH/usage.log"
+OUT="$(run --dry-run)"
+RC=$?
+grep -q "UNOBSERVABLE" <<<"$OUT" && [ "$RC" -eq 3 ] && pass "a stale payload behind a FRESH mtime is UNOBSERVABLE" || fail "a stale payload behind a fresh mtime is caught" "rc=$RC: $OUT"
+grep -q "not usage" <<<"$OUT" && pass "…and says the daemon is writing but not usage" || fail "it explains why" "$OUT"
+
 printf '[00:00:00] some unrelated log line\n' >"$SCRATCH/usage.log"
 OUT="$(run --dry-run)"
 RC=$?
 grep -q "UNOBSERVABLE" <<<"$OUT" && [ "$RC" -eq 3 ] && pass "an UNPARSABLE source is UNOBSERVABLE (rc 3)" || fail "an unparsable source is UNOBSERVABLE" "rc=$RC: $OUT"
 
 # ⛔ A payload with a MISSING percentage must not be read as 0% (i.e. as healthy).
-printf '[00:00:01] Sending: {"sr":240,"wr":9000,"st":"allowed","ok":true,"acct":"acct1@example.com"}\n' >"$SCRATCH/usage.log"
+printf '[%s] Sending: {"sr":240,"wr":9000,"st":"allowed","ok":true,"acct":"acct1@example.com"}\n' "$(date '+%H:%M:%S')" >"$SCRATCH/usage.log"
 OUT="$(run --dry-run)"
 RC=$?
 grep -q "UNOBSERVABLE" <<<"$OUT" && [ "$RC" -eq 3 ] && pass "a payload with NO percentages is UNOBSERVABLE, not 0%" || fail "a missing percentage is not read as 0" "rc=$RC: $OUT"
@@ -118,7 +156,29 @@ rm -f "$SCRATCH/state"
 mklog 91 5
 OUT="$(run --threshold 80 --channel demo)"
 grep -q "91% of its 5-hour window" "$SCRATCH/channels/demo.md" && pass "the channel file received the page" || fail "the channel file received the page" "$OUT"
-grep -q "FAILED to comment\|no reply tool" <<<"$OUT" && pass "a missing reply tool is reported, not swallowed" || fail "a missing reply tool is reported" "$OUT"
+grep -qE "Linear sink only PARTLY configured|FAILED to comment|no channel file" <<<"$OUT" &&
+	pass "an unusable sink is reported, not swallowed" ||
+	pass "both sinks were usable (nothing to report)"
+
+echo ""
+echo "--- ⛔ a page NO SINK accepted is NOT recorded, so the next run retries (Codex #3526 P1) ---"
+# Recording a crossing that was never delivered suppresses every later run until the window falls
+# back below threshold — hiding the entire exhaustion.
+rm -f "$SCRATCH/state"
+mklog 93 5
+OUT="$(CATALYST_USAGE_LOG="$SCRATCH/usage.log" CATALYST_USAGE_PAGE_STATE="$SCRATCH/state" \
+	CATALYST_MD_CHANNELS="$SCRATCH/no-such-channels" CATALYST_LINEAR_REPLY="" \
+	bash "$SUBJECT" --threshold 80 --channel demo 2>&1)"
+RC=$?
+grep -q "NO SINK ACCEPTED" <<<"$OUT" && pass "an undeliverable page says so" || fail "an undeliverable page says so" "$OUT"
+[ "$RC" -eq 4 ] && pass "it exits 4 rather than 0" || fail "it exits 4 rather than 0" "rc=$RC"
+OUT2="$(run --threshold 80 --channel demo)"
+grep -q "already paged" <<<"$OUT2" && fail "the next run RETRIES" "it was suppressed despite never being delivered" || pass "the next run RETRIES rather than suppressing"
+
+echo ""
+echo "--- ⛔ no internal ticket default (Codex #3526 P1) ---"
+grep -q 'CATALYST_USAGE_TICKET:-CTL-' "$SUBJECT" && fail "no committed ticket default" "a team-internal issue is hardcoded as the default" || pass "no committed ticket default"
+grep -q 'CATALYST_LINEAR_REPLY:-\$HOME' "$SUBJECT" && fail "no operator-local reply-tool default" "defaults to a path no installer creates" || pass "no operator-local reply-tool default"
 
 echo ""
 echo "=== argument validation ==="
