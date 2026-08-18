@@ -54,6 +54,7 @@ import {
   renderHuman,
   parseArgs,
   runDoctor,
+  checkFleetTokenExport,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
@@ -5728,4 +5729,53 @@ describe("checksForClass — checkConfigProvenance registration (CTL-1793)", () 
       expect(src({ recognized: true, class: cls })).toContain("checkConfigProvenance");
     });
   }
+});
+
+describe("checkFleetTokenExport — CTL-1908: a login shell must not spend the FLEET's budget", () => {
+  // The incident: 2026-08-17 02:00-08:57 CT the whole overnight fleet stalled on "You've hit your
+  // weekly limit" while Ryan's own account sat at 78%, because ~/.zshenv sourced
+  // claude-accounts.env in EVERY zsh and Claude Code prefers the env token over the keychain
+  // login. Seven hours, and the symptom named the wrong account.
+  const fs = (files) => ({
+    home: "/h",
+    rcFiles: [".zshenv", ".zprofile"],
+    fileExists: (p) => Object.prototype.hasOwnProperty.call(files, p),
+    readText: (p) => files[p],
+  });
+  const one = (files) => checkFleetTokenExport(fs(files))[0];
+
+  it("WARNs on an active source of claude-accounts.env, naming the file and line", () => {
+    const v = one({ "/h/.zshenv": '# unrelated\n[ -f "$HOME/.config/catalyst/claude-accounts.env" ] && . "$HOME/.config/catalyst/claude-accounts.env"\n' });
+    expect(v.status).toBe("warn");
+    expect(v.detail, "an operator must be told WHERE, not merely that something is wrong").toContain(".zshenv:2");
+  });
+
+  it("WARNs on a direct export of the token, not only on the file that carries it", () => {
+    expect(one({ "/h/.zprofile": 'export CLAUDE_CODE_OAUTH_TOKEN=sk-whatever\n' }).status).toBe("warn");
+  });
+
+  it("⭐ a COMMENTED line is the FIXED state, not a finding", () => {
+    // This is how the laptop and (since 2026-08-17 23:2x) both minis carry the fix. Matching the
+    // bare text would report every correctly-fixed host as broken, and the check would be
+    // uninstalled within a day.
+    const v = one({ "/h/.zshenv": '# CTL-1908: not exported to every shell\n# [ -f "$HOME/.config/catalyst/claude-accounts.env" ] && . "..."\n' });
+    expect(v.status).toBe("pass");
+  });
+
+  it("nothing to scan is INFO — a zero is not a clean result", () => {
+    // The vacuous-pass guard: with no rc file present there is no evidence either way, and
+    // "I could not look" must not render as "this host is fine".
+    expect(checkFleetTokenExport({ home: "/h", rcFiles: [".zshenv"], fileExists: () => false, readText: () => "" })[0].status).toBe("info");
+  });
+
+  it("POSITIVE CONTROL — the same instrument does return PASS on a genuinely clean rc", () => {
+    // Without this, the pass above would also be satisfied by a check that had stopped matching.
+    expect(one({ "/h/.zshenv": 'export EDITOR=vim\n' }).status).toBe("pass");
+  });
+
+  it("is wired into the doctor suites, not merely exported", () => {
+    // A check nobody runs is the failure mode this repo keeps meeting.
+    const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
+    expect(src.split("checkFleetTokenExport()").length - 1, "registered in BOTH class suites").toBeGreaterThanOrEqual(2);
+  });
 });
