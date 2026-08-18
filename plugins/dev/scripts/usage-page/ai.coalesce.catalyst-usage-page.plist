@@ -22,6 +22,16 @@
   <integer>600</integer>
   <key>RunAtLoad</key>
   <true/>
+  <!--
+    ⛔ Codex #3526 P1 — THE LINEAR SINK IS OFF BY DEFAULT HERE, ON PURPOSE.
+    launchd does not run through the direnv profile, so LINEAR_SYNC_CLIENT_ID /
+    LINEAR_SYNC_CLIENT_SECRET are absent and the repo's reply tool exits 2. Rather than ship an
+    agent whose ticket sink silently fails every run, the pager posts to the CHANNEL (which needs
+    no credentials) and REPORTS that the Linear sink is unconfigured.
+    To enable it, add CATALYST_USAGE_TICKET, CATALYST_LINEAR_REPLY, LINEAR_SYNC_CLIENT_ID and
+    LINEAR_SYNC_CLIENT_SECRET to the dict below — and verify with one manual run, because a
+    credential launchd cannot see fails identically to one that is simply wrong.
+  -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
