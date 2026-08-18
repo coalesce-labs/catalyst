@@ -72,7 +72,6 @@ import {
 import {
   upsertFilterStateOpen,
   setFilterStateMerged,
-  putPrStatus,
   setFilterStateClosed,
   setFilterStateDeploying,
   setFilterStateDeployed,
@@ -103,7 +102,6 @@ import {
 } from "./plugin-refresh.mjs";
 import { handleStackReloadEvent } from "./stack-reload.mjs";
 import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary
-import { classifyPrStatusEvent } from "./pr-status-fold.mjs"; // CTL-2008: PR-status write-through
 import { getLastByteOffset } from "./tailer.mjs";
 import {
   severityNumber,
@@ -2814,39 +2812,6 @@ export function processEvent(event) {
       foldDetail.identifier ??
       null;
     foldLinearIssueDescriptor(name, foldDetail, foldTicket);
-  }
-
-  // CTL-2008: PR-status write-through. MUST run for every `github.pr.*` event
-  // REGARDLESS of registered interests — for exactly the reason the CTL-822 Linear
-  // fold above states, plus one that is stronger here: on an execution-core host the
-  // interest table is PERMANENTLY empty (the daemon runs no `filter.register`
-  // producer), so `if (!interests.size) return` below is not an idle-period edge case
-  // for this fold, it is every single tick. `pr_status_cache` is the primary source
-  // for `getAllPrStatuses()` -> board-health's phantom-merged and orphaned-open-PR
-  // cohorts, and until CTL-1929 retired the GitHub smee tunnel its only writer lived
-  // in orch-monitor's HTTP webhook handler, in another process, on a path that no
-  // longer runs. Measured A/B, 2026-08-18 14:02 CT: the enforce host wrote ZERO rows
-  // after its flip while the still-tunnelled host recorded the same merge correctly.
-  if (typeof name === "string" && name.startsWith("github.pr.")) {
-    // ⛔ `getEventScope` resolves pr/ref/sha/environment and NOT `repo` — passing it
-    // straight through made the classifier decline every event and the fold was a
-    // silent no-op with 13 green classifier tests behind it. `summarizeEvent` already
-    // spells this two-key ladder (attributes-then-legacy-scope) a few hundred lines
-    // above; it is repeated here rather than widening the shared helper, whose other
-    // callers do not want a new key. `pr-status-fold-wiring.test.mjs` is what caught
-    // it, which is the argument for that file existing.
-    const prScope = {
-      repo: event.attributes?.["vcs.repository.name"] ?? event.scope?.repo ?? null,
-      pr: event.attributes?.["vcs.pr.number"] ?? event.scope?.pr ?? null,
-    };
-    const prStatus = classifyPrStatusEvent(name, getEventPayload(event), prScope);
-    if (prStatus) {
-      try {
-        putPrStatus(prStatus.repo, prStatus.prNumber, prStatus.status);
-      } catch {
-        /* DB not opened — same posture as every other fold in this function */
-      }
-    }
   }
 
   if (name === "heartbeat") {

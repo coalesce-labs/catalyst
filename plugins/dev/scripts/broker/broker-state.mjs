@@ -17,7 +17,6 @@
 // one SQLite handle.
 
 import { Database } from "bun:sqlite";
-import { PR_STATUSES } from "./pr-status-fold.mjs";
 import { homedir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
@@ -699,46 +698,6 @@ export function getAllTicketDescriptors({ includeRemoved = false } = {}) {
     ? `SELECT * FROM ticket_state ORDER BY ticket`
     : `SELECT * FROM ticket_state WHERE removed_at IS NULL ORDER BY ticket`;
   return ensure().prepare(sql).all().map(rowToTicketDescriptor);
-}
-
-// putPrStatus — CTL-2008. The WRITE half of `pr_status_cache`, so the table survives
-// the GitHub smee retirement (CTL-1929).
-//
-// ⛔ UNTIL THIS EXISTED, `pr_status_cache` HAD EXACTLY ONE WRITER AND IT WAS IN
-// ANOTHER PROCESS: orch-monitor's HTTP webhook handler (`lib/pr-cache.ts`). Retiring
-// the tunnel on 2026-08-18 stopped that handler being reached and the table froze.
-// The comment above `getAllPrStatuses` still calls this store "webhook-populated";
-// it is now populated by the broker's own tail as well, from either event source.
-//
-// ⛔ THE `merged` LATCH IS THE POINT, not incidental. `getAllPrStatuses` is
-// newest-wins, so one late `open` row for an already-merged PR hides it from
-// `checkPhantomMergedPr` and then presents it to `checkOrphanedOpenPr` as an orphan —
-// the CTL-1606 bug. Events are not delivered in commit order (a boot replay walks the
-// month's log front to back), so "the newest event is the newest truth" is false here
-// and the latch, not the ordering, is what holds. Byte-for-byte the same
-// `WHERE ... status != 'merged'` guard `pr-cache.ts` uses, because BOTH processes
-// write this table whenever the smee path is rolled back and a guard that exists on
-// only one of them is not a guard.
-//
-// Returns true when a row was written or updated, false when the latch declined or
-// the status was unrecognised — a caller that wants to count applied folds can, and
-// a silent no-op is never reported as a write.
-export function putPrStatus(repo, prNumber, status) {
-  // An unrecognised status is REFUSED rather than written. `board-health.mjs` matches
-  // this column with `PR_MERGED_RE` / an === "open" test, so a typo would not throw
-  // anywhere — it would sit in the table reading as neither merged nor open and
-  // quietly remove that PR from both cohorts.
-  if (!PR_STATUSES.includes(status)) return false;
-  if (typeof repo !== "string" || repo.length === 0) return false;
-  if (!Number.isInteger(prNumber) || prNumber <= 0) return false;
-  const result = ensure().run(
-    `INSERT INTO pr_status_cache (repo, pr_number, status, updated_at)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(repo, pr_number) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at
-       WHERE pr_status_cache.status != 'merged'`,
-    [repo, prNumber, status, nowIso()],
-  );
-  return result.changes > 0;
 }
 
 // getAllPrStatuses — CTL-1157: one batch read of the filter_state lifecycle
