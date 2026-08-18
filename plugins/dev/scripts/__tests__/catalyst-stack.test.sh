@@ -527,7 +527,10 @@ run "uninstall-services removes all three plists" bash -c "
     mkdir -p '${SCRATCH}/uninst_bin'
     printf '#!/usr/bin/env bash\nexit 0\n' > '${SCRATCH}/uninst_bin/launchctl'
     chmod +x '${SCRATCH}/uninst_bin/launchctl'
-    PATH='${SCRATCH}/uninst_bin:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' uninstall-services >/dev/null 2>&1 || true
+    # CTL-1968: launchctl is stubbed one line above and HOME is a scratch dir, so
+    # this case deliberately drives the uninstall path. The product now refuses to
+    # touch gui/<uid> from a foreign HOME; declaring the seal opts back in.
+    CATALYST_ALLOW_FOREIGN_HOME_LAUNCHD=1 PATH='${SCRATCH}/uninst_bin:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' uninstall-services >/dev/null 2>&1 || true
     [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist\" ]] && \
     [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\" ]] && \
     [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\" ]]

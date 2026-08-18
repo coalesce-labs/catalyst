@@ -103,6 +103,7 @@ run_case() {
 	local home="$1" token="$2" account="$3" code="${4:-200}"
 	local bindir="$home/.stub-bin"
 	make_curl_stub "$bindir" "$code"
+	seal_stack "$bindir"
 	(
 		export HOME="$home"
 		export PATH="$bindir:$PATH"
@@ -125,6 +126,29 @@ run_case() {
 
 # stub_was_called HOME -> 0 when the sealed transport handled the request.
 stub_was_called() { [[ -s "$1/.stub-bin/stub_calls" ]]; }
+
+# ⛔ seal_stack BINDIR — CTL-1968. THE SINGLE MOST IMPORTANT LINE IN THIS FILE.
+#
+# Every case here sets HOME to a `mktemp -d`, but PATH keeps a trailing ":$PATH",
+# so `setup_cloud_replica`'s `command -v catalyst-stack` resolved the REAL
+# INSTALLED binary and ran its `adopt-cloud-sync`. That renders LaunchAgent
+# plists under the scratch HOME and then bootstraps them into `gui/$(id -u)` —
+# a domain that is per-USER, not per-HOME. On 2026-08-18 two full gates on the
+# primary laptop (04:01, 07:19 CT) thereby re-bound the live
+# `ai.coalesce.catalyst-cloud-sync` label to a temp path and left
+# `ai.coalesce.catalyst-health-responder` UNLOADED for 3h47m.
+#
+# ⚠️ Every one of those cases reported PASS while doing it. A scratch HOME is not
+# a sandbox for launchd, and rc=0 was never evidence that nothing escaped.
+#
+# So a stack stub is planted for EVERY case by default. Cases that want a
+# specific rc/message still call make_stack_stub first — this only fills the gap.
+seal_stack() {
+	local bindir="$1"
+	mkdir -p "$bindir"
+	[[ -x "$bindir/catalyst-stack" ]] && return 0
+	make_stack_stub "$bindir" 0 "stubbed catalyst-stack (CTL-1968: the real one mutates gui/\$(id -u))"
+}
 
 # make_stack_stub BINDIR RC MESSAGE — a `catalyst-stack` on PATH that exits RC
 # after printing MESSAGE on stderr. Needed because `adopt-cloud-sync` is the other
@@ -151,6 +175,7 @@ run_case_capturing() {
 	local home="$1" token="$2" account="$3" code="${4:-200}"
 	local bindir="$home/.stub-bin"
 	make_curl_stub "$bindir" "$code"
+	seal_stack "$bindir"
 	(
 		export HOME="$home"
 		export PATH="$bindir:$PATH"
@@ -330,6 +355,11 @@ scrub "$H6"
 # silent idle as case 6.
 H7=$(mktemp -d)
 make_curl_stub "$H7/.stub-bin" 200
+# CTL-1968: this case rolls its own HOME/PATH instead of going through run_case,
+# so it needs the stack seal explicitly — it was the one case still reaching the
+# real `catalyst-stack adopt-cloud-sync`, and a verification run that only fixed
+# run_case still recorded 4 escaped launchctl calls against gui/$(id -u).
+seal_stack "$H7/.stub-bin"
 (
 	export HOME="$H7" CATALYST_SETUP_LIB_ONLY=1
 	export PATH="$H7/.stub-bin:$PATH"
