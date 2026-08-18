@@ -65,7 +65,7 @@ cmd="$2"
 if [ -f "${T}/runner_dies" ]; then echo "ssh: connect to host: Connection refused" >&2; exit 255; fi
 case "$cmd" in
   *VL_REACHABLE_9f3a*) echo "VL_REACHABLE_9f3a" ;;
-  pgrep*)      cat "${T}/pid" ;;
+  *pgrep*)     cat "${T}/pid" ;;   # must precede the ps case: the probe contains both
   *"-o command="*) cat "${T}/cmd" ;;
   *"test -f"*) p="${cmd#*test -f \'}"; p="${p%%\'*}"; [ -f "$p" ] && echo yes || echo no ;;
   *IMPORT_OK*) if [ -f "${T}/import_fails" ]; then echo "error: Cannot find package"; else echo IMPORT_OK; fi ;;
