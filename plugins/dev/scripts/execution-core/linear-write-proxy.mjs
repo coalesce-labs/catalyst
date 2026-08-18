@@ -103,7 +103,16 @@ export const LINEAR_WRITE_PROXY_MODES = Object.freeze(new Set(["off", "shadow", 
  * shares this module's credential handling, budget ledger, and event names — but it is
  * the ONE route sent through `sendAsync` rather than `send`; see NON_BLOCKING_ROUTE_IDS.
  */
-export const PROXY_ROUTE_IDS = Object.freeze(["issue-state", "label", "comment", "session"]);
+export const PROXY_ROUTE_IDS = Object.freeze([
+  "issue-state",
+  "label",
+  "comment",
+  "session",
+  // CTL-1889 inc 3 / CTC-692 — the cluster serializer's fence + heartbeat record. This is a
+  // WRITE and it is DISPATCH-CRITICAL: `cluster-claim.mjs`'s soft-CAS decides whether this
+  // host may work a ticket at all, so it is emphatically NOT in NON_BLOCKING_ROUTE_IDS.
+  "attachment",
+]);
 
 /**
  * ⛔ THE ASYMMETRY, AS DATA — read this before adding an id.
@@ -141,6 +150,35 @@ export const DEFAULT_ROUTES = Object.freeze({
   // CTL-1943 / CTC-682, read off the merged handler rather than guessed — the earlier
   // cut of this module shipped guessed paths and was wrong on every one of them.
   session: "/agent/session",
+  // CTL-1889 inc 3 / CTC-692, read off the merged handler AND probed live (see
+  // READ_ROUTE_IDS below for the measurements this pair depends on).
+  attachment: "/agent/attachment",
+});
+
+/**
+ * ⛔ THE READ ROUTES — SEPARATE FROM THE WRITES, AND NOT FOR TIDINESS.
+ *
+ * `/agent/attachments` is the soft-CAS READ-BACK. It is a GET, it carries no body, and the
+ * cloud deliberately spends NO write-budget unit on it (`resolveReadOnlyAgentContext`
+ * skips the budget half of `resolveWriteContext` on purpose). This module must mirror
+ * that, and the reason is not symmetry — it is availability:
+ *
+ * ⛔ IF THE READ-BACK SPENT HOST BUDGET, A HOST THAT EXHAUSTED ITS DAILY WRITES COULD NO
+ * LONGER *VERIFY* A CLAIM. `claimTicket` treats an unverifiable claim as a lost race, so
+ * every claim on that host would return `won:false` and the host would stop dispatching
+ * entirely — a total work stoppage caused by a budget designed to bound WRITES. Reads are
+ * bounded by the cloud's own 429 instead.
+ *
+ * ⛔ AND THE READ IS NEVER CONVERGENCE-SUPPRESSED. Convergence means "the desired state is
+ * already reached, skip the call". Applied to a read that would return a CACHED VERDICT
+ * for a live fencing question — the one question whose answer must be current — so
+ * `read()` never consults the ledger at all.
+ */
+export const READ_ROUTE_IDS = Object.freeze(new Set(["attachments"]));
+
+/** Read-route paths. Same Layer-2 override mechanism as DEFAULT_ROUTES. */
+export const DEFAULT_READ_ROUTES = Object.freeze({
+  attachments: "/agent/attachments",
 });
 
 /** Mirrors cloud-sync.mjs:127 — one default, one env override, no third rung. */
@@ -213,10 +251,11 @@ export function resolveHostKey(env = process.env) {
  * caller refuses with `unknown-route` instead of POSTing to a fabricated URL.
  */
 export function resolveRoutePath(routeId, routes = null) {
-  if (!PROXY_ROUTE_IDS.includes(routeId)) return null;
+  const isRead = READ_ROUTE_IDS.has(routeId);
+  if (!isRead && !PROXY_ROUTE_IDS.includes(routeId)) return null;
   const override = routes && typeof routes === "object" ? routes[routeId] : undefined;
   if (typeof override === "string" && override.startsWith("/")) return override;
-  return DEFAULT_ROUTES[routeId];
+  return isRead ? DEFAULT_READ_ROUTES[routeId] : DEFAULT_ROUTES[routeId];
 }
 
 /**
@@ -248,14 +287,36 @@ export function resolveProxyAccount(env = process.env) {
  * because that too is loud, and the account is provisioned from the same bundle as the
  * token it accompanies.
  */
-export function buildProxyRequest({ routeId, payload, baseUrl, routes = null, account = null }) {
+export function buildProxyRequest({
+  routeId,
+  payload,
+  baseUrl,
+  routes = null,
+  account = null,
+  query = null,
+}) {
   const path = resolveRoutePath(routeId, routes);
   if (path === null) return { url: null, method: null, body: null, reason: "unknown-route" };
-  const query = account ? `?account=${encodeURIComponent(account)}` : "";
+  // A READ route is a GET with its arguments in the query string and NO body. Building it
+  // here rather than in a second function keeps ONE place that knows how `?account=` is
+  // appended — a second one would be the obvious place for the two to drift on escaping.
+  const isRead = READ_ROUTE_IDS.has(routeId);
+  const params = new URLSearchParams();
+  if (query && typeof query === "object") {
+    for (const [k, v] of Object.entries(query)) {
+      if (v === undefined || v === null) continue;
+      params.set(k, String(v));
+    }
+  }
+  if (account) params.set("account", account);
+  const qs = params.toString();
   return {
-    url: `${baseUrl}${path}${query}`,
-    method: "POST",
-    body: JSON.stringify(payload ?? {}),
+    url: `${baseUrl}${path}${qs ? `?${qs}` : ""}`,
+    method: isRead ? "GET" : "POST",
+    // ⛔ `null`, not `""`. A GET must carry no body at all: curl's config `data = ""` turns
+    // the request into a POST-with-empty-body regardless of `request = "GET"`, which would
+    // reach the cloud as a method the read route does not serve and 404.
+    body: isRead ? null : JSON.stringify(payload ?? {}),
     reason: null,
   };
 }
@@ -286,7 +347,10 @@ export function buildCurlConfig({ url, method, token, body }) {
       `header = "Authorization: Bearer ${curlConfigEscape(token)}"`,
       'header = "Content-Type: application/json"',
       'header = "Accept: application/json"',
-      `data = "${curlConfigEscape(body)}"`,
+      // ⛔ A null body emits NO `data` line. `data = ""` would make curl send a body, and a
+      // request with a body is a POST to curl no matter what `request` says — so the GET
+      // read-back would arrive at the cloud as a POST and 404 on a route that exists.
+      ...(body === null || body === undefined ? [] : [`data = "${curlConfigEscape(body)}"`]),
       "silent",
       "show-error",
       // Trailing "\n<code>" so the caller can split the status off the body without
@@ -892,6 +956,76 @@ export function createLinearWriteProxy({
       counts.applied += 1;
       emit(EVENT_APPLIED, { ticket, routeId, reason: null, status: verdict.status, applied: true, caller, labels });
       return { handled: true, applied: true, reason: null, status: verdict.status };
+    },
+
+    /**
+     * read — the soft-CAS READ-BACK. CTL-1889 increment 3 / CTC-692.
+     *
+     * ⛔ THE THIRD PEER, AND IT IS A READ. `send`/`sendAsync` spend budget, consult the
+     * convergence ledger and emit write events. This one does NONE of those — see
+     * READ_ROUTE_IDS for why each omission is a correctness requirement rather than an
+     * optimisation. It shares the closure only for the credential, the base url and the
+     * account, which is the whole reason it lives here instead of in the caller.
+     *
+     * ⛔ SHADOW MODE STILL PERFORMS THE READ. This is the one place shadow does reach the
+     * cloud, and the asymmetry is deliberate: shadow refuses to WRITE because writing
+     * twice would double-apply the board, but a read has no such hazard — and a caller
+     * that could not read in shadow could not exercise the read path at all, so the shadow
+     * window would prove nothing about the half of the mechanism most likely to break.
+     *
+     * Returns `{ ok, attachments?, reason, status }`. ⛔ NEVER `{ok:true}` with a
+     * fabricated empty list: every non-2xx, unparseable or non-`succeeded` answer is
+     * `ok:false` with a NAMED reason, because the caller's whole safety argument is that
+     * it can tell "no claim exists" from "I could not find out".
+     */
+    read({ routeId, ticket = null, query = null, caller = null }) {
+      const ctx = { ticket, route: routeId, caller };
+
+      if (!READ_ROUTE_IDS.has(routeId)) {
+        log?.error?.(ctx, "linear-write-proxy: read REFUSED — route is not a declared read route");
+        return { ok: false, reason: "route-not-read-eligible", status: null };
+      }
+
+      const refuse = (reason, status = null, detail = null) => {
+        log?.warn?.(
+          { ...ctx, reason, status, detail: detail ? scrub(detail) : undefined },
+          "linear-write-proxy: read-back NOT answered — the caller must treat this as unverified"
+        );
+        return { ok: false, reason, status };
+      };
+
+      const req = buildProxyRequest({ routeId, payload: null, baseUrl, routes, account, query });
+      if (req.reason) return refuse(req.reason);
+
+      const key = resolveHostKey(env);
+      if (key.value === null) {
+        log?.error?.(
+          { ...ctx, token_env: key.envVar },
+          "linear-write-proxy: no per-host cloud key — read-back REFUSED (reason=no-cloud-token)"
+        );
+        return refuse("no-cloud-token");
+      }
+
+      let raw;
+      try {
+        raw = httpFn({ url: req.url, method: req.method, token: key.value, body: req.body });
+      } catch (err) {
+        log?.warn?.({ ...ctx, err: scrub(err?.message ?? "") }, "linear-write-proxy: read transport threw");
+        return refuse("spawn-failed");
+      }
+
+      const verdict = classifyProxyResponse(raw);
+      if (!verdict.applied) return refuse(verdict.reason, verdict.status, verdict.detail ?? null);
+
+      // A 2xx is necessary and NOT sufficient. The cloud answers `{outcome, attachments}`;
+      // a 200 whose body we cannot read as `succeeded` with a real array is an answer we do
+      // not have, and reporting it as an empty list is precisely the "read a truncated page
+      // as no-claim-exists" failure the cloud's own MAX_ATTACHMENT_PAGES guard exists to stop.
+      const body = parseProxyBody(verdict.body ?? "");
+      if (!body || body.outcome !== "succeeded" || !Array.isArray(body.attachments)) {
+        return refuse("read-unreadable", verdict.status, typeof body?.reason === "string" ? body.reason : null);
+      }
+      return { ok: true, attachments: body.attachments, reason: null, status: verdict.status };
     },
 
     /**
