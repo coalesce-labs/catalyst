@@ -18,6 +18,20 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILLS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# ⚠️ THESE TWO NUMBERS ARE A PROXY, AND THE PROXY IS GAMEABLE. The property we
+# actually want is "SKILL.md alone is sufficient for the common path, and detail
+# is one hop away" — and NO line count can assert that. A skill can satisfy both
+# budgets with longer lines and denser prose and be strictly worse to read.
+#
+# They are kept because a forcing function that is checkable beats an intent that
+# is not: 80 lines is roughly the point at which an author stops appending and
+# starts asking what belongs in references/. That editorial pressure is the
+# product; the number is only how it is applied.
+#
+# So if you are here to raise one of these: raising it is not automatically
+# wrong, but it IS the wrong first move. Defend the intent, not the number —
+# move the detail into references/ first, and change the budget only if the
+# common path genuinely does not fit. (FLEET peer read, CTL-1993.)
 MAX_SKILL_LINES=80
 MAX_REFERENCE_LINES=150
 
@@ -91,16 +105,42 @@ for skill_dir in "${SKILLS[@]}"; do
   done
 done
 
-# 3. No skill may be named `worker` (CTL-1997): `worker` is live execution-core
-#    machinery vocabulary (worker-dir-gc, sdk-worker-registry, worker-label,
-#    worker-transition-event, workers/<ticket>/ …). The ROLE word stays; the
-#    skill name would read as "the worker machinery skill".
+# 3. RESERVED SKILL NAMES (CTL-1997). A skill name that collides with live
+#    machinery vocabulary reads as "the <machinery> skill" and mis-routes both
+#    agents and greps. This is a LIST, not a single hardcoded name, because the
+#    first version of this check tested exactly one name and therefore offered
+#    the next collision no protection at all — someone would have re-litigated
+#    it from scratch without this reasoning (FLEET peer read, CTL-1993).
+#
+#    TO ADD AN ENTRY: one line, and a comment saying WHAT it collides with. The
+#    reason is the load-bearing half — it is what lets a future reader tell a
+#    real collision from a name someone merely disliked.
+#
+#    ⚠️ Only reserve a name NOTHING is currently called: `broker`, `teardown`
+#    and `linear` are all live machinery words that are ALSO existing skills,
+#    so reserving them would go red on arrival and the fix would be to delete
+#    the entry, not to rename 50 call sites.
+RESERVED_SKILL_NAMES=(
+  # execution-core machinery: worker-dir-gc, sdk-worker-registry, worker-label,
+  # worker-transition-event, abort-worker, workers/<ticket>/,
+  # worker.session.started. The ROLE word stays — role and code agree; it is the
+  # SKILL name that collides. Use phase-agent-contract.
+  "worker"
+)
+
 echo "── naming"
-if [[ -d "${SKILLS_DIR}/worker" ]]; then
-  fail "a skill named 'worker' exists — use phase-agent-contract (CTL-1997)"
-else
-  pass "no skill is named 'worker'"
+# An empty list would make this whole section pass vacuously, exactly like the
+# zero-skills case guarded above.
+if [[ ${#RESERVED_SKILL_NAMES[@]} -eq 0 ]]; then
+  fail "RESERVED_SKILL_NAMES is empty — the naming check would pass vacuously"
 fi
+for reserved in "${RESERVED_SKILL_NAMES[@]}"; do
+  if [[ -d "${SKILLS_DIR}/${reserved}" ]]; then
+    fail "a skill named '${reserved}' exists — it is a RESERVED name (see RESERVED_SKILL_NAMES for what it collides with, CTL-1997)"
+  else
+    pass "no skill is named '${reserved}' (reserved)"
+  fi
+done
 
 echo
 echo "skill-shape.test.sh: ${PASSES} passed, ${FAILURES} failed"

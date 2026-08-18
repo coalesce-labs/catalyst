@@ -3,7 +3,9 @@
 # suite, prints one summary line, exits non-zero if any suite failed. (CTL-528)
 #
 # Env overrides (used by the smoke test):
-#   SHELL_TEST_DIR     dir of *.test.sh files     (default: <scripts>/__tests__)
+#   SHELL_TEST_DIR        dir of *.test.sh files  (default: <scripts>/__tests__)
+#   LIB_SHELL_TEST_DIR    dir of lib suites       (default: <scripts>/lib/__tests__)
+#   SKILLS_SHELL_TEST_DIR dir of skill suites     (default: <repo>/plugins/dev/skills/__tests__)
 #   EXTRA_SHELL_TESTS  space-separated extra files (default: test-workflow-context.sh)
 #   SKIP_BUN=1         skip the bun surfaces entirely
 set -uo pipefail
@@ -23,6 +25,19 @@ SHELL_TEST_DIR="${SHELL_TEST_DIR:-${SCRIPT_DIR}/__tests__}"
 # before wiring this in (one, escalate-emitters.test.sh, was fixed alongside —
 # pre-existing shellcheck debt in orphan-sweep.sh unrelated to CTL-1612).
 LIB_SHELL_TEST_DIR="${LIB_SHELL_TEST_DIR:-${SCRIPT_DIR}/lib/__tests__}"
+# CTL-1993 (FLEET peer read): plugins/dev/SKILLS/__tests__ is a THIRD test
+# directory — it is neither SHELL_TEST_DIR (scripts/__tests__) nor
+# LIB_SHELL_TEST_DIR (scripts/lib/__tests__), so skill-shape.test.sh shipped
+# discovered by NOTHING: not this runner, and not CI. That is the same defect as
+# round 7 above and as CTL-1978, now for the third time — and it landed on the
+# one suite whose own subject is "a cap is never silent", which would have made
+# the cap enforcing that principle the silent one.
+#
+# ⚠️ The local glob is HALF the fix. A suite that runs only here still never runs
+# on a PR, so .github/workflows/skills-gate.yml pins it in CI. Neither half is
+# sufficient: the glob alone leaves it outside CI, the pin alone leaves it
+# outside the local gate. If you add another suite here, do BOTH.
+SKILLS_SHELL_TEST_DIR="${SKILLS_SHELL_TEST_DIR:-${REPO_ROOT}/plugins/dev/skills/__tests__}"
 # CTL-1612 round 9 (Codex P2 follow-up): 6 of the 13 lib/__tests__ suites
 # ALREADY run via a one-line SHELL_TEST_DIR wrapper
 # (`exec bash ".../lib/__tests__/<name>.test.sh"`, predating the round-7
@@ -185,6 +200,12 @@ for f in "$LIB_SHELL_TEST_DIR"/*.test.sh; do
 	if _lib_suite_wrapper_present "$_f_basename"; then
 		continue
 	fi
+	run_shell_test "$f"
+done
+# CTL-1993: the skills shape suite (see SKILLS_SHELL_TEST_DIR above). No
+# wrapper-dedup pass is needed the way LIB_SHELL_TEST_DIR needs one — nothing
+# under scripts/__tests__ exec's these, so they cannot be double-discovered.
+for f in "$SKILLS_SHELL_TEST_DIR"/*.test.sh; do
 	run_shell_test "$f"
 done
 for f in $EXTRA_SHELL_TESTS; do
