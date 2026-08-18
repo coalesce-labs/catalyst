@@ -2830,6 +2830,45 @@ run "T633d: a generated searchable/ does NOT pin the tree -> SAFE" bash -c "
   [[ \"\$verdict\" == 'SAFE' ]]
 "
 
+# t5-t7: ⛔ Codex P1 on #3504 — the guard first protected only DIRECTORIES, over a glob that
+# skipped dotfiles. An ignored regular file under thoughts/ contributes nothing to the dirty
+# count, so the worktree graded SAFE and `git worktree remove --force` deleted the only copy.
+rm -rf "$SCRATCH/clf/wt_th1/thoughts"
+mkdir -p "$SCRATCH/clf/wt_th1/thoughts"
+ln -s "$SCRATCH/th/real/shared" "$SCRATCH/clf/wt_th1/thoughts/shared"
+echo "the only copy of this note" > "$SCRATCH/clf/wt_th1/thoughts/note.md"
+find "$SCRATCH/clf/wt_th1" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+run "T633f: a materialised FILE under thoughts/ protects the tree (not only a directory)" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt_th1' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP_THOUGHTS' ]]
+"
+
+rm -f "$SCRATCH/clf/wt_th1/thoughts/note.md"
+mkdir -p "$SCRATCH/clf/wt_th1/thoughts/.private"
+echo "hidden but unique" > "$SCRATCH/clf/wt_th1/thoughts/.private/note.md"
+find "$SCRATCH/clf/wt_th1" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+run "T633g: a DOT-prefixed entry protects the tree (the plain * glob never saw it)" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt_th1' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP_THOUGHTS' ]]
+"
+
+# The counterweight: widening the guard must not make it universal, or the sweep is inert
+# again. `thoughts/CLAUDE.md` is HumanLayer boilerplate — present in 6 of this host's 28
+# thoughts/ directories and byte-identical per repo — so it must NOT pin the tree.
+rm -rf "$SCRATCH/clf/wt_th1/thoughts/.private"
+echo "# Thoughts Directory Structure" > "$SCRATCH/clf/wt_th1/thoughts/CLAUDE.md"
+find "$SCRATCH/clf/wt_th1" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+run "T633h: generated thoughts/CLAUDE.md does NOT pin the tree -> SAFE" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt_th1' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SAFE' ]]
+"
+
 # ─── CTC-633: the sweep reports free disk ──────────────────────────────────
 #
 # On 2026-08-17 10:29 CDT this host hit 365 MiB free and every shell command in every agent

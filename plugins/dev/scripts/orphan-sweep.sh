@@ -650,17 +650,36 @@ _log_disk() {
 # preventive rather than a rescue; the shape is what matters, because the next one will
 # hold a handoff.
 #
-# ⚠️ `searchable/` is EXCLUDED: it is the generated grep mirror of content that lives in
-# the symlinked repo, so it is derived data and never the only copy.
+# ⛔ A FILE IS AS UNIQUE AS A DIRECTORY, and dotfiles are not optional. This first checked
+# only `[[ -d ]]` over a plain `*` glob, so `thoughts/note.md` — an ignored regular file that
+# contributes nothing to the dirty count — left the worktree classified SAFE and
+# `git worktree remove --force` deleted the only copy. Dot-prefixed entries were skipped by
+# the glob outright. (Codex P1 on #3504; the guard was incomplete in the one direction that
+# loses data.) Any non-symlink entry now protects the tree.
+#
+# ⚠️ The generated-artifact exclusions are named, and the default is to PROTECT — an entry
+# this list does not know about keeps the worktree. Both are measured, not guessed:
+#   searchable/  the grep mirror of content that lives in the symlinked repo (derived data)
+#   CLAUDE.md    the HumanLayer thoughts-system boilerplate ("managed by the HumanLayer
+#                thoughts system"), present in 6 of this host's 28 thoughts/ directories and
+#                byte-identical per repo — scaffolding, never authored content
+# Getting this list wrong costs RECLAIM, never data; that asymmetry is deliberate.
+_WT_THOUGHTS_GENERATED="searchable CLAUDE.md"
+
 _wt_thoughts_stranded() {
   local t="$1/thoughts" e b
   [[ -d "$t" && ! -L "$t" ]] || return 1
-  for e in "$t"/*; do
-    [[ -e "$e" ]] || continue
-    b="$(basename "$e")"
-    [[ "$b" == "searchable" ]] && continue
+  # `dotglob` is not portable to plain sh, so dotfiles are enumerated separately.
+  for e in "$t"/* "$t"/.[!.]*; do
+    # -e is false for a DANGLING symlink, which is still a symlink and still safe to remove,
+    # so test -L too rather than letting a broken link fall through as "not present".
+    [[ -e "$e" || -L "$e" ]] || continue
+    b="${e##*/}"
+    case " $_WT_THOUGHTS_GENERATED " in
+    *" $b "*) continue ;;
+    esac
     [[ -L "$e" ]] && continue
-    [[ -d "$e" ]] && return 0
+    return 0
   done
   return 1
 }
