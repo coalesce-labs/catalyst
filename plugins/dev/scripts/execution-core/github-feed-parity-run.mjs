@@ -77,6 +77,26 @@ for await (const e of jsonl(eventsPath)) {
 }
 
 const report = compareGithubStreams(feed, smee);
+
+// ⛔ A WINDOW THAT OUTRUNS THE PRODUCER MANUFACTURES ITS OWN SMEE-UNJOINED COUNT, and
+// it does so at exactly the moment someone is deciding whether a tunnel can be
+// retired. The producer ticks every ~30 s; smee is a webhook and arrives immediately.
+// So every edge between the producer's last tick and `hi` is on the smee side ALONE,
+// with a twin that simply has not been written yet.
+//
+// Measured this morning: 09:00→12:00 reported `github.push` feed 10 / smee 11 and one
+// unjoined event. Re-run with the window closed at 11:45 — before the producer's last
+// tick at 11:51:40 — it was 9/9 and zero. The "gap" was the clock.
+//
+// It is reported rather than auto-corrected: silently clamping `hi` would hide a
+// producer that had genuinely stopped, which looks identical from here. The operator
+// is told which one they are looking at, and the verdict stays INCONCLUSIVE either way.
+const trailingSkew = typeof feedLast === "string" && feedLast < hi;
+if (trailingSkew) {
+  report.inconclusive.push(`window-outruns-producer:feed-last=${feedLast}`);
+  report.clean = false;
+}
+
 const code = parityExitCode(report);
 
 // ⛔ THE INSTRUMENT REPORTS ON ITSELF FIRST. An empty window is the ledger's most
@@ -105,6 +125,13 @@ if (asJson) {
   console.log("expectedAbsent   :", JSON.stringify(report.expectedAbsent));
   console.log("unexplainedAbsent:", JSON.stringify(report.unexplainedAbsent));
   console.log("inconclusive     :", JSON.stringify(report.inconclusive));
+  if (trailingSkew) {
+    console.log(
+      `⚠️  WINDOW OUTRUNS THE PRODUCER — its last emission is ${feedLast}, the window ends ${hi}.\n` +
+      "    Every smee edge in that tail has no twin YET. Re-run with --hi at or before the\n" +
+      "    producer's last emission before reading any smee-unjoined count as a gap.",
+    );
+  }
   console.log(`clean = ${report.clean} · exit ${code}`);
 }
 process.exit(code);
