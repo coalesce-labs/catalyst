@@ -53,49 +53,87 @@ if (db) {
   } catch (e) { say("streams-served", "INCONCLUSIVE", e.message); }
 }
 
-// ── P8: EVERY REPO ON THE TUNNEL, not just the ones that were noisy today.
+// ── P8: EVERY REPO ON THE TUNNEL, compared over a MATCHED WINDOW.
 //
 // ⛔ THIS IS THE GATE THE PARITY LEDGER STRUCTURALLY CANNOT BE. The ledger scopes its
 // comparison to the repos that appear IN THE WINDOW, so a repo with no activity
 // contributes no smee events and can never show up as unjoined. A CLEAN verdict over
 // a morning's traffic therefore says NOTHING about a dormant repo — and the smee
 // channel `smee.io/WDgeZys5ST0uqtL` carries EIGHT webhooks, six of them for
-// fleet-orchestrated teams, of which only two were active enough to measure.
+// fleet-orchestrated teams.
 //
-// Measured 2026-08-18: catalyst (99 push_events / 898 suites) and catalyst-cloud
-// (43 / 71) are covered; `ryanrozich/personal-os` is ACTIVE (82 PRs updated in 48 h)
-// with its PRs and reviews ingested and **0 pushes / 0 suites** — a confirmed partial
-// ingestion gap; Adva, catalyst-otel, slides, evergreen and adva-crm have been dormant
-// for 7–8 days, so their zeroes prove nothing in either direction. → CTL-1965.
+// ⛔⛔ AND THE FIRST CUT OF THIS GATE WAS ITSELF UNSOUND — it inferred coverage from
+// RAW ROW COUNTS, and that inference is wrong. `check_suites` on both replicas begins
+// at 2026-08-18 06:52:49Z and `push_events` is younger still with a DIFFERENT START
+// PER HOST (mini-2 07:04, laptop 11:38). Comparing those counts against a 24-hour
+// smee window measures when the table started filling, not what it covers. It
+// reported `ryanrozich/personal-os` as a partial-ingestion FAIL; on a matched window
+// that repo reads 1 smee suite / 1 replica suite and 1 smee push / 1 replica push —
+// **covered**. A gate that fabricates a FAIL on the eve of a retirement is worse than
+// no gate, so the comparison is now windowed on both sides.
 //
-// ⚠️ A dormant repo is INCONCLUSIVE, never a pass. "No traffic to disprove it" is the
-// oldest false-clean in this repository.
-const DORMANT_MS = 48 * 60 * 60 * 1000;
+// ⚠️ A repo with NO traffic in the window is INCONCLUSIVE and always will be. You
+// cannot measure the coverage of a repo that is not being used; only generating
+// traffic can (CTL-1965 option D). "No traffic to disprove it" is the oldest
+// false-clean in this repository, and the honest gate says so rather than passing.
 
-function repoCoverage(db, repos) {
+/** Rows this replica holds for a repo, strictly inside the window. */
+function replicaCountsInWindow(db, repo, sinceMs) {
+  return db.prepare(`
+    SELECT (SELECT COUNT(*) FROM push_events e  WHERE e.repo_id = $r AND e.updated_at >= $t) AS pushes,
+           (SELECT COUNT(*) FROM check_suites c WHERE c.repo_id = $r AND c.updated_at >= $t AND c.status = 'completed') AS suites
+  `).get({ $r: repo, $t: sinceMs });
+}
+
+/**
+ * The window both sides are measured over.
+ *
+ * ⛔ It starts at the LATEST of the two tables' first rows, not at an arbitrary "last
+ * N hours". A window that reaches back before a table began filling counts smee
+ * events the replica never had the chance to receive, which is precisely the error
+ * this function exists to stop repeating. Per host, because the start differs.
+ */
+function matchedWindowStart(db) {
+  const r = db.prepare(`
+    SELECT (SELECT MIN(updated_at) FROM push_events)  AS p,
+           (SELECT MIN(updated_at) FROM check_suites) AS c
+  `).get();
+  const vals = [r?.p, r?.c].filter((x) => Number.isInteger(x));
+  return vals.length === 2 ? Math.max(...vals) : null;
+}
+
+function repoCoverage(db, repos, sinceMs, smeeCounts) {
   const out = [];
   for (const repo of repos) {
     let r;
     try {
-      r = db.prepare(`
-        SELECT (SELECT COUNT(*) FROM pull_requests p WHERE p.repo_id = $r) AS prs,
-               (SELECT MAX(updated_at) FROM pull_requests p WHERE p.repo_id = $r) AS newest,
-               (SELECT COUNT(*) FROM push_events e WHERE e.repo_id = $r) AS pushes,
-               (SELECT COUNT(*) FROM check_suites c WHERE c.repo_id = $r) AS suites
-      `).get({ $r: repo });
+      r = replicaCountsInWindow(db, repo, sinceMs);
     } catch (e) {
       out.push({ repo, verdict: "INCONCLUSIVE", detail: `cannot query: ${e.message}` });
       continue;
     }
-    const active = Number.isInteger(r?.newest) && Date.now() - r.newest < DORMANT_MS;
-    if (r.pushes > 0 && r.suites > 0) {
-      out.push({ repo, verdict: "PASS", detail: `push_events ${r.pushes} · suites ${r.suites}` });
-    } else if (!active) {
-      // ⛔ The honest verdict. The repo may be perfectly ingested and simply quiet;
-      // nothing here can tell, and a retirement decision must not read this as a pass.
-      out.push({ repo, verdict: "INCONCLUSIVE", detail: `dormant (newest PR activity ${r.newest ? new Date(r.newest).toISOString().slice(0, 10) : "never"}), push_events ${r.pushes} · suites ${r.suites} — quiet, so coverage is UNPROVEN either way` });
+    const smee = smeeCounts?.[repo] ?? null;
+    if (!smee) {
+      // No webhook arm to compare against — either the caller supplied none, or the
+      // repo produced nothing in the window. Either way this is not evidence.
+      const seen = (r.pushes ?? 0) + (r.suites ?? 0);
+      out.push({
+        repo,
+        verdict: seen > 0 ? "PASS" : "INCONCLUSIVE",
+        detail: seen > 0
+          ? `replica has push_events ${r.pushes} · suites ${r.suites} in the window (no smee arm supplied, so this is presence, not parity)`
+          : "no traffic in the matched window — coverage is UNPROVEN, not absent. Only generating traffic can settle it (CTL-1965 option D)",
+      });
+      continue;
+    }
+    const missPush = smee.pushes - r.pushes;
+    const missSuite = smee.suites - r.suites;
+    if (smee.pushes === 0 && smee.suites === 0) {
+      out.push({ repo, verdict: "INCONCLUSIVE", detail: "no smee traffic in the matched window — coverage UNPROVEN (CTL-1965 option D)" });
+    } else if (missPush <= 0 && missSuite <= 0) {
+      out.push({ repo, verdict: "PASS", detail: `matched window: pushes ${r.pushes}/${smee.pushes} · suites ${r.suites}/${smee.suites}` });
     } else {
-      out.push({ repo, verdict: "FAIL", detail: `ACTIVE (${r.prs} PRs, newest ${new Date(r.newest).toISOString().slice(0, 16)}) but push_events ${r.pushes} · suites ${r.suites} — partial ingestion` });
+      out.push({ repo, verdict: "FAIL", detail: `matched window SHORTFALL: pushes ${r.pushes}/${smee.pushes} · suites ${r.suites}/${smee.suites}` });
     }
   }
   return out;
@@ -142,7 +180,20 @@ const TUNNEL_REPOS = Object.freeze([
 ]);
 
 if (db) {
-  for (const c of repoCoverage(db, TUNNEL_REPOS)) say(`P8-repo:${c.repo}`, c.verdict, c.detail);
+  const since = matchedWindowStart(db);
+  if (since === null) {
+    say("P8-repo-coverage", "INCONCLUSIVE", "cannot establish a matched window (push_events/check_suites empty) — no per-repo verdict is derivable");
+  } else {
+    // ⚠️ NO SMEE ARM IS SUPPLIED HERE, and that is stated rather than hidden. Reading
+    // the webhook side means streaming a multi-GB event log, which is the ledger's job
+    // (`github-feed-parity-run.mjs`), not a preflight's. Without it this gate reports
+    // PRESENCE — which repos this replica is receiving push/suite rows for at all —
+    // and INCONCLUSIVE for every repo that is quiet. It can therefore surface a repo
+    // nobody is covering; it cannot certify one as fully covered. Pair it with the
+    // ledger, and with CTL-1965 option D for the dormant ones.
+    say("P8-window", "INCONCLUSIVE", `matched window starts ${new Date(since).toISOString()} (the later of the two tables' first rows) — PRESENCE only, no smee arm; pair with the ledger`);
+    for (const c of repoCoverage(db, TUNNEL_REPOS, since, null)) say(`P8-repo:${c.repo}`, c.verdict, c.detail);
+  }
   say(
     "P8-repo-list-source",
     "INCONCLUSIVE",
