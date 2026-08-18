@@ -1,0 +1,34 @@
+name: skills-gate
+
+# Guards the progressive-disclosure shape of the catalyst skills (CTL-1993):
+# a skill that has a references/ dir keeps SKILL.md within budget, every
+# reference is linked from SKILL.md (an unlinked reference is never read), and
+# no skill takes a RESERVED name that collides with live machinery vocabulary.
+#
+# ⚠️ WHY THIS IS ITS OWN WORKFLOW, AND WHY IT HAS NO `paths:` FILTER.
+# The suite first shipped discovered by nothing at all — run-tests.sh globs only
+# scripts/__tests__ and scripts/lib/__tests__, and no workflow named it. The
+# obvious home, execution-core-tests.yml, would have been NO BETTER: its
+# detect-changes step is an explicit ALLOW-LIST of paths that names five
+# individual skill dirs and does NOT include plugins/dev/skills/** — so the job
+# reports `skipped` on exactly the PRs that change a skill, which is every PR
+# this gate exists for. A filter that excludes the change it guards is a guard on
+# the wrong axis; it reads as working and never fires.
+#
+# So: every PR, no path filter, seconds to run. Same shape as agents-md-gate.
+# The local half of the same fix is SKILLS_SHELL_TEST_DIR in run-tests.sh — both
+# are required, neither is sufficient.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  skills-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check skill progressive-disclosure shape
+        run: bash plugins/dev/skills/__tests__/skill-shape.test.sh

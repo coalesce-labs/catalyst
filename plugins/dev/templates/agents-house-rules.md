@@ -24,6 +24,34 @@ plugin) rather than routing around it. For GitHub state only, a single **bounded
 acceptable last resort while you do; never a poll loop, and never a raw Linear API read (the
 replica-read rule below is absolute).
 
+- **Reporting a negative → run a positive control first, or report inconclusive.** A negative result
+  is only evidence if you can state what a positive one would have looked like **and you ran the same
+  instrument against a case known to be present and saw it come back non-zero.** Before you report
+  "zero", "absent", "unrelated", "clean", or "not owned", ask the question that separates *the thing
+  is not there* from *I could not look* — and if you cannot separate them, say **inconclusive**. The
+  five mechanisms that have actually produced a false clean result here, all of them silent:
+  (1) an unstructured match over structured data — a substring `grep` for an event name counted the
+  name where it appeared inside a commit message, reporting events that did not exist; (2) a
+  malformed call returning a falsy sentinel — an ownership helper invoked with its arguments
+  transposed returned `undefined` for every ticket, which reads as "not owned"; (3) an empty input
+  set feeding a loop, so the body never ran and the trailing all-clear line printed on the strength
+  of zero iterations (`[].every(p)` is `true`); (4) the right question asked of the wrong surface —
+  counting a bot's issue comments returned zero while an unresolved *review thread* was the thing
+  blocking the merge; (5) **the search tool skipping files it never says it skipped** — in the agent
+  shell `grep` is a wrapper around `ugrep --ignore-files`, which honours `.gitignore`, and
+  `~/.config/catalyst/.gitignore` excludes `config*.json`, so **a recursive grep never reads any live
+  Catalyst config** and answers "not configured anywhere" for a value sitting in `config.json`. It is
+  convincing because the `.bak-*` copies do NOT match that pattern, so you get plausible hits from
+  stale backups while the live file is skipped. A recursive-grep zero over config, secrets, or
+  build output is **inconclusive** until re-run with `/usr/bin/grep` or an explicit file list.
+  (Sibling traps in the same family: `find` does not follow symlinks, so it misses what
+  `cat`/`readFileSync` read straight through — e.g. bun's `.bun` store entries; and zsh kills an
+  unquoted `--include=*.mjs` with "no matches found", returning nothing, which also reads as a real
+  zero.) Prefer the verified helpers in `plugins/dev/scripts/lib/verified-checks.mjs`
+  (count events by exact `event.name`, resolve ticket ownership under named rosters, enumerate every
+  merge blocker) — each returns a verdict that can be explicitly **inconclusive** and throws on
+  malformed input rather than degrading to a falsy answer. This rule governs the bullets below: a
+  check that cannot fail loudly is not evidence for any of them.
 - **Waiting on GitHub / CI / Linear state → subscribe to the event log, don't poll.** To block on a
   state change (a PR merged, CI turning green, a review posted, a push to a branch, a ticket
   transition), wait on the unified Catalyst event log instead of re-querying in a loop. Reach for
@@ -78,3 +106,25 @@ replica-read rule below is absolute).
   Scoping applies too: write only inside your own worktree, and chain with `cd <dir> && <cmd>` — a
   bare `cd` on its own line that silently fails will apply your edits to whichever worktree the
   shell happened to be in.
+- **Coordination has THREE roles, and "orchestrator" is not one of them.** Long-running coordination is
+  done by single-threaded owners: a **concierge** (the one agent a human talks to — owns the status board,
+  the ask inbox, routing and project scaffolding, and holds **no authority over stewards**), a **steward**
+  (owns ONE initiative or project end-to-end until it closes; makes work ready and visible, the fleet does
+  it), and **workers** (one phase of one ticket, driven by the pipeline). Invoke the `concierge` and
+  `steward` skills by name; the phase pipeline's shared contract is `phase-agent-contract`. ⚠️ Reserve
+  **"orchestrator"** for the pipeline MACHINERY — never for an agent or a person: this repo already calls
+  the phase runners *workers* in code (`workers/<ticket>/`, `worker.session.started`), so a role by that
+  name reads as the scheduler. Three rules bind you even when you are none of these roles:
+  - **Reply where the message arrived, threaded, and never as the human.** A comment inside a scope is
+    answered by that scope's **steward**, in-thread and tagged. Anything only a human can decide becomes
+    an **ask ticket** (`catalyst-dev:ask`) with Options + a Default if silent — and you **proceed on the
+    default**. Never answer someone else's ask, and never post as the human.
+  - **Escalate inward, never outward:** instrument → steward → concierge → human (as an ask). An agent or
+    instrument that pages a human directly is a defect, and a bare label in a human's queue is a defect.
+  - **Cite an identifier only after `create` returned it.** A guessed ticket number is usually a real,
+    unrelated ticket — worse than no number at all.
+- **Skills here use progressive disclosure — read the reference you need, not all of them.** A skill is a
+  short `SKILL.md` covering the common path, plus `references/*.md` loaded **on demand**; the SKILL.md
+  names which reference answers which situation. Follow that table rather than reading the whole tree.
+  `plugins/dev/skills/__tests__/skill-shape.test.sh` enforces the shape and `skills-gate` runs it on
+  every PR, so the budget is real.

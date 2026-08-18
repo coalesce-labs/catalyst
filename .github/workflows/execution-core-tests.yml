@@ -703,6 +703,20 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test replica-path.test.mjs
 
+      - name: install-lifecycle + join-bundle tests (CTL-2004)
+        # ⛔ PINNED DELIBERATELY, same reason as the archive+uninstall suite above (CTL-1975,
+        # FLEET-37): CI runs an EXPLICIT list — there is no glob runner — so a suite that merely
+        # exists in the tree runs only in the local full gate. Verified before adding this step:
+        # `grep -n join-bundle .github/workflows/` returned NOTHING, and `grep -n install-lifecycle`
+        # returned only the bun-build import-graph check, never a test run. Positive control:
+        # the same grep for `deployment-mode-parity` returns its own `run:` line.
+        #
+        # These two carry CTL-2004, whose whole defect was a posture that travelled nowhere and
+        # failed by looking healthy. Shipping its regression tests unpinned would reproduce the
+        # shape of the bug in its own guard.
+        working-directory: plugins/dev/scripts/execution-core
+        run: bun test install-lifecycle.test.mjs join-bundle.test.mjs
+
       - name: replica-path cross-stack parity test (CTL-1893)
         # bash == node == a hand-written expected value at every fixture cell, including
         # the NAMED FAILURES (account-absent vs account-invalid route to different operator
