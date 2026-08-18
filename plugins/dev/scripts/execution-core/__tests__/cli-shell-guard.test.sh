@@ -120,5 +120,39 @@ else
 fi
 
 echo ""
+echo "=== ⛔ the lint does NOT descend into a nested checkout (Codex #3516 P2) ==="
+# The agent harness parks full scratch checkouts under .claude/worktrees/. A repo-wide `find`
+# walked into them, so the lint failed on another agent's branch and `--fix` would have edited
+# that agent's files. git ls-files cannot leave the current worktree.
+REPO_TOP="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"
+if [[ -n "$REPO_TOP" ]]; then
+	NESTED="$REPO_TOP/.claude/worktrees/fleet-scope-probe/cli"
+	mkdir -p "$NESTED"
+	# A nested REPOSITORY, exactly like a parked worktree — and an UNGUARDED module inside it.
+	git -C "$REPO_TOP/.claude/worktrees/fleet-scope-probe" init -q 2>/dev/null
+	printf '// cli/intruder.mjs — no guard on line 1\n' >"$NESTED/intruder.mjs"
+
+	# ⛔ Positive control FIRST: a plain `find` DOES see it, so the case is real and the check
+	# below is not passing because the fixture failed to create anything.
+	if find "$REPO_TOP" -type f -path '*/cli/*.mjs' 2>/dev/null | grep -q 'fleet-scope-probe'; then
+		pass "control — a repo-wide find DOES reach the nested checkout (the bug was real)"
+	else
+		fail "control — a repo-wide find reaches the nested checkout" \
+			"the fixture did not create a discoverable nested module; the scope check below proves nothing"
+	fi
+
+	if bash "$SCRIPT_DIR/../../lint-cli-shell-guard.sh" >/dev/null 2>&1; then
+		pass "the lint stays green — it did not descend into the nested checkout"
+	else
+		fail "the lint stays green with a nested checkout present" \
+			"it is still scanning outside the current worktree; --fix would edit another agent's files"
+	fi
+	rm -rf "$REPO_TOP/.claude/worktrees/fleet-scope-probe"
+	rmdir "$REPO_TOP/.claude/worktrees" 2>/dev/null || true
+else
+	echo "  SKIP: not inside a git worktree"
+fi
+
+echo ""
 echo "  PASSED: $PASSES   FAILED: $FAILURES"
 [[ $FAILURES -eq 0 ]]

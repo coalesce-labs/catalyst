@@ -40,18 +40,26 @@ GUARD_LINE='//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is execut
 FIX=0
 [[ "${1:-}" == "--fix" ]] && FIX=1
 
+# ⛔ Codex #3516 P2: this used a repo-wide `find`, which descends into the full scratch checkouts
+# the agent harness parks under .claude/worktrees/ (create-worktree.sh:346-354). In a primary
+# checkout that means the lint FAILS because some other agent's branch lacks the guard, and
+# `--fix` EDITS FILES BELONGING TO ANOTHER AGENT. `git ls-files` is scoped to the current
+# worktree by construction and does not descend into nested checkouts; --others picks up a
+# brand-new module before it is committed, --exclude-standard keeps ignored files out.
+#
 # NOT `mapfile`: macOS ships /bin/bash 3.2, which does not have it. A lint that dies on the
 # operator's own shell is a lint nobody runs.
 FILES=()
 while IFS= read -r f; do
-	[ -n "$f" ] && FILES+=("$f")
-done < <(find "$REPO_ROOT" -type d -name node_modules -prune -o -type f -path '*/cli/*.mjs' -print | sort)
+	[ -n "$f" ] && FILES+=("$REPO_ROOT/$f")
+done < <(git -C "$REPO_ROOT" ls-files --cached --others --exclude-standard -- '*/cli/*.mjs' 'cli/*.mjs' 2>/dev/null | sort -u)
 
 # ⛔ A lint whose glob matches nothing reports a clean pass. Refuse instead: if the tree ever
 # moves, this must go red rather than quietly stop guarding anything.
 if [[ "${#FILES[@]}" -eq 0 ]]; then
 	echo "lint-cli-shell-guard: FAIL — matched ZERO cli/*.mjs files under $REPO_ROOT." >&2
-	echo "  Either the tree moved or the glob is wrong. A lint that checks nothing is not a pass." >&2
+	echo "  Either the tree moved, the glob is wrong, or this is not a git worktree." >&2
+	echo "  A lint that checks nothing is not a pass." >&2
 	exit 2
 fi
 
