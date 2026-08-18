@@ -166,6 +166,93 @@ describe("AC3 — a converged removal is not re-issued", () => {
   });
 });
 
+describe("⛔ Codex #3505 P1 — convergence goes stale when the label is re-added", () => {
+  const allAbsent = okBody([{ labelId: "lab-1", outcome: "already-absent", attempts: 1 }]);
+
+  test("an ADD of the same label clears the stale remove-convergence, so the next removal is SENT", () => {
+    // Without this, `clearConvergence` had no production caller at all: a converged
+    // removal + a later re-add left the stale key in place, the next legitimate removal
+    // was refused locally as `budget:already-converged`, and the label stayed STRANDED on
+    // the ticket until the UTC day rolled — worse than the wasted call it saves.
+    const h = harness({ stdout: allAbsent });
+    h.proxy.send({ routeId: "label", ticket: "CTL-1805", payload: labelPayload(["lab-1"]) });
+    expect(h.calls.length).toBe(1);
+
+    // control: while converged, the removal really is suppressed
+    h.proxy.send({ routeId: "label", ticket: "CTL-1805", payload: labelPayload(["lab-1"]) });
+    expect(h.calls.length).toBe(1);
+
+    // the label is re-added — the desired state recorded above is now FALSE
+    const added = h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-1805",
+      payload: labelPayload(["lab-1"], "add"),
+    });
+    expect(added.applied).toBe(true);
+
+    // …so the next removal must reach the cloud
+    const removal = h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-1805",
+      payload: labelPayload(["lab-1"]),
+    });
+    expect(removal.applied).toBe(true);
+    expect(h.calls.length).toBe(3);
+  });
+
+  test("⛔ CONTROL: adding a DIFFERENT label does not clear the convergence", () => {
+    const h = harness({ stdout: allAbsent });
+    h.proxy.send({ routeId: "label", ticket: "CTL-1805", payload: labelPayload(["lab-1"]) });
+    h.proxy.send({ routeId: "label", ticket: "CTL-1805", payload: labelPayload(["lab-2"], "add") });
+    const removal = h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-1805",
+      payload: labelPayload(["lab-1"]),
+    });
+    expect(removal.reason).toBe("budget:already-converged");
+  });
+});
+
+describe("⛔ Codex #3505 P2 — a nonsense cap is refused, not obeyed", () => {
+  test("a negative cap does NOT refuse every write", () => {
+    // `Number("-1") || DEFAULT` is -1, and `spent >= -1` is true before anything is
+    // spent — one character turning enforce mode into a total write outage.
+    const h = harness({ env: { CATALYST_LINEAR_WRITE_TICKET_CAP: "-1" } });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-7",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(r.applied).toBe(true);
+  });
+
+  test("Infinity does not silently disable the bound", () => {
+    let l = emptyLedger(DAY);
+    for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-1805");
+    const h = harness({ ledger: l, env: { CATALYST_LINEAR_WRITE_TICKET_CAP: "Infinity" } });
+    const r = h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-1805",
+      payload: labelPayload(["lab-1"]),
+    });
+    expect(r.reason).toBe("budget:ticket-cap");
+  });
+
+  test("⛔ CONTROL: a VALID override is still honoured", () => {
+    // Otherwise the two assertions above would pass against a resolver that ignores the
+    // env var entirely.
+    let l = emptyLedger(DAY);
+    for (let i = 0; i < 3; i++) l = recordWrite(l, "CTL-1805");
+    const h = harness({ ledger: l, env: { CATALYST_LINEAR_WRITE_TICKET_CAP: "3" } });
+    const r = h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-1805",
+      payload: labelPayload(["lab-1"]),
+    });
+    expect(r.reason).toBe("budget:ticket-cap");
+  });
+});
+
 describe("AC4 — a write is attributable", () => {
   test("caller and labels reach BOTH the attributes and the payload", () => {
     // Attributes matter because otel-forward strips body.payload off-machine: a field

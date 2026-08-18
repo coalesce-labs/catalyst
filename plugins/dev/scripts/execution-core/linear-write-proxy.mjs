@@ -82,6 +82,7 @@ import {
   convergenceKeyFor,
   emptyLedger,
   markExhaustionAnnounced,
+  clearConvergence,
   noteConvergence,
   readLedger,
   recordWrite,
@@ -505,8 +506,28 @@ export function createLinearWriteProxy({
   // worst case is the cloud answering `already-absent` again, which is a wasted call, not
   // a wrong board state.
   const ledgerPath = budgetPath ?? defaultBudgetPath(env);
-  const dailyBudget = Number(env.CATALYST_LINEAR_WRITE_DAILY_BUDGET) || DEFAULT_DAILY_BUDGET;
-  const perTicketCap = Number(env.CATALYST_LINEAR_WRITE_TICKET_CAP) || DEFAULT_PER_TICKET_CAP;
+  // ⛔ Codex #3505 P2: `Number(x) || DEFAULT` accepts anything truthy and numeric. `-1`
+  // makes every `>= cap` test true before the host has spent anything, so enforce mode
+  // refuses EVERY Linear write — a one-character typo becomes a total write outage.
+  // `Infinity` silently disables the bound, which is the opposite failure and just as
+  // quiet. A limit is only accepted when it is a finite positive integer; anything else
+  // falls back to the default and SAYS so, because a silently-ignored limit is how an
+  // operator ends up believing a cap is in force that never was.
+  const resolveCap = (name, fallback) => {
+    const raw = env[name];
+    if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+      log?.warn?.(
+        { env_var: name, value: String(raw), using: fallback },
+        "linear-write-proxy: write-budget limit must be a finite positive integer — IGNORING the configured value"
+      );
+      return fallback;
+    }
+    return n;
+  };
+  const dailyBudget = resolveCap("CATALYST_LINEAR_WRITE_DAILY_BUDGET", DEFAULT_DAILY_BUDGET);
+  const perTicketCap = resolveCap("CATALYST_LINEAR_WRITE_TICKET_CAP", DEFAULT_PER_TICKET_CAP);
 
   /**
    * loadLedger — read, then roll to today.
@@ -649,6 +670,22 @@ export function createLinearWriteProxy({
       // shape of the incident before CTC-674 changed the status code.
       let ledgerAfter = recordWrite(ledgerBefore, ticket);
       if (verdict.converged) ledgerAfter = noteConvergence(ledgerAfter, convergenceKey);
+      // ⛔ Codex #3505 P1: convergence records "the desired state is already reached", so a
+      // successful write in the OPPOSITE direction makes it FALSE. Without this, an
+      // `applyLabel` re-adding a label after a converged removal left the stale `remove`
+      // key in place, the next legitimate removal was refused locally as
+      // `budget:already-converged`, and the label stayed STRANDED on the ticket until the
+      // UTC day rolled — a worse outcome than the wasted call this suppression saves.
+      // `clearConvergence` existed and was referenced only by its own unit test; this is
+      // the production caller it was missing.
+      if (verdict.applied && routeId === "label") {
+        const opposite = convergenceKeyFor({
+          routeId,
+          ticket,
+          payload: { ...payload, mode: payload?.mode === "add" ? "remove" : "add" },
+        });
+        if (opposite) ledgerAfter = clearConvergence(ledgerAfter, opposite);
+      }
       const exhaustion = classifyExhaustion(ledgerAfter, { dailyBudget });
       if (exhaustion.announce) {
         ledgerAfter = markExhaustionAnnounced(ledgerAfter);
