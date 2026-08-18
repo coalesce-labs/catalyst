@@ -18,3 +18,40 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check AGENTS.md / CLAUDE.md bridge invariant
         run: bash scripts/ci/check-agents-md-bridge.sh
+
+      # CTL-1996: the house-rules block is seeded from plugins/dev/templates/
+      # agents-house-rules.md by ensure-agent-house-rules.sh. Nothing re-ran that
+      # seeder after the template changed, so BOTH repos silently fell behind —
+      # measured 2026-08-18, catalyst-cloud was 82 lines short, including the whole
+      # background-process rule written from a real incident (4 CPU cores, 16.5 h).
+      #
+      # ⛔ WORSE, AND THE REASON THIS GATE IS A DRY RUN AND NOT AN AUTO-FIX: the
+      # seeder is a one-way sync. It overwrites the block with the template and says
+      # nothing about what it removed. This repo's AGENTS.md carried a 28-line
+      # "run a positive control before reporting a negative" rule that existed in NO
+      # other copy, and `--fix` deleted it silently. The rule has been promoted into
+      # the template so that can no longer happen here — but the general hazard is
+      # why CI reports drift for a human to resolve rather than rewriting the doc.
+      #
+      # Exit codes: 0 = already current, 10 = drifted, anything else = broken setup.
+      - name: Check the agent house-rules block is current
+        run: |
+          set +e
+          bash plugins/dev/scripts/ensure-agent-house-rules.sh --repo . --quiet
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "house-rules block is current."
+            exit 0
+          fi
+          if [ "$rc" -eq 10 ]; then
+            echo "::error::The agent house-rules block has drifted from plugins/dev/templates/agents-house-rules.md."
+            echo "Re-run:  bash plugins/dev/scripts/ensure-agent-house-rules.sh --repo . --fix"
+            echo "⚠️  DIFF THE RESULT BEFORE COMMITTING — the seeder overwrites the block with the"
+            echo "    template and does not report what it removed. Repo-local rules worth keeping"
+            echo "    belong in the template, not only in AGENTS.md."
+            bash plugins/dev/scripts/ensure-agent-house-rules.sh --repo .
+            exit 1
+          fi
+          echo "::error::ensure-agent-house-rules.sh exited ${rc} (broken template or setup)."
+          exit 1
