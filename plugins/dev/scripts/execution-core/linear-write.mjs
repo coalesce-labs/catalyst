@@ -16,6 +16,7 @@ import { withAuthRemint, isAuthError } from "./linear-remint.mjs";
 // set, NOT TERMINAL_LINEAR_KEY which is the transition KEY "done"). Gates the
 // backward-write guard below.
 import { isLinearTerminal } from "./terminal-state.mjs";
+import { getLinearWriteProxy as _getProxy, getLinearWriteProxyResolver as _getResolver } from "./linear-write-proxy-install.mjs";
 
 // ─── CTL-1889: the cloud write-proxy seam ────────────────────────────────────
 //
@@ -34,34 +35,20 @@ import { isLinearTerminal } from "./terminal-state.mjs";
 // null. With mode `off` nothing installs it, so every function below is byte-identical
 // to pre-CTL-1889: `routeThroughProxy` returns null on the first line without
 // resolving a key, reading config, or emitting anything.
-let _writeProxy = null;
-let _proxyResolver = null;
-
-/** setLinearWriteProxy — install (or clear, with null) the cloud write transport. */
-export function setLinearWriteProxy(proxy) {
-  _writeProxy = proxy ?? null;
-}
-
-/** getLinearWriteProxy — test/diagnostic read of the installed transport. */
-export function getLinearWriteProxy() {
-  return _writeProxy;
-}
-
-/**
- * setLinearWriteProxyResolver — install the replica-backed identifier/name → UUID
- * resolver (linear-write-proxy-resolve.mjs). Separate from the transport because the
- * two fail for unrelated reasons and a test needs to drive them independently: a
- * healthy transport with an unresolvable ticket must still REFUSE, and that is the
- * case a single combined seam makes hard to write.
- */
-export function setLinearWriteProxyResolver(resolver) {
-  _proxyResolver = resolver ?? null;
-}
-
-/** getLinearWriteProxyResolver — test/diagnostic read of the installed resolver. */
-export function getLinearWriteProxyResolver() {
-  return _proxyResolver;
-}
+// ⛔ The install slots live in a LEAF module (linear-write-proxy-install.mjs) and are
+// RE-EXPORTED here, not re-declared. Increment 2 routes comments, which are posted from
+// six modules including linear-query.mjs — which this file imports FROM — so a seam
+// declared here would close an import cycle. Re-exporting keeps every existing importer
+// of these four names working unchanged while guaranteeing ONE storage location: a second
+// `let` would give the daemon and the comment path two different proxies, and the one the
+// daemon installed would look correctly installed from every call site here while the
+// comment path silently used none.
+export {
+  setLinearWriteProxy,
+  getLinearWriteProxy,
+  setLinearWriteProxyResolver,
+  getLinearWriteProxyResolver,
+} from "./linear-write-proxy-install.mjs";
 
 /**
  * routeThroughProxy — the single interposition point.
@@ -84,7 +71,7 @@ export function getLinearWriteProxyResolver() {
 // rather than derived here, because a stack-derived name changes with every refactor
 // while the semantic caller does not.
 function routeThroughProxy(proxy, { routeId, ticket, buildPayload, caller = null }) {
-  const p = proxy ?? _writeProxy;
+  const p = proxy ?? _getProxy();
   if (!p) return null;
 
   // SHADOW records the observation and hands the write back to the caller. The payload
@@ -105,7 +92,7 @@ function routeThroughProxy(proxy, { routeId, ticket, buildPayload, caller = null
   // would be a defect: "fall through to live" here means "write to Linear with this
   // host's own app-actor", i.e. precisely what CTL-1889 retires. A refused write is
   // retried on the next tick; a fallen-back write is invisible and permanent.
-  const built = buildPayload(_proxyResolver);
+  const built = buildPayload(_getResolver());
   if (!built.ok) {
     log.warn(
       { ticket, routeId, reason: built.reason, detail: built.detail ?? undefined },

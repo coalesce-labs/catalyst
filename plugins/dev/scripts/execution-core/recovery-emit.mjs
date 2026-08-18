@@ -202,6 +202,7 @@ function resolveOrchDir() {
 // --no-comment, and best-effort (a comment failure never fails the emit — the
 // ledger + event verdicts have already landed by the time this runs).
 const RECOVERY_MODE = process.env.CATALYST_RECOVERY_PASS ?? "enforce";
+import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
 const COMMENT_HELPER =
   process.env.CATALYST_COMMENT_POST_HELPER ??
   fileURLToPath(new URL("../lib/linear-comment-post.sh", import.meta.url));
@@ -210,9 +211,11 @@ function postTicketComment(ticket, body) {
   if (argv.includes("--no-comment")) return false;
   if (RECOVERY_MODE !== "enforce") return false;
   try {
-    const res = spawnSync(COMMENT_HELPER, [ticket, body], {
-      encoding: "utf8",
-      maxBuffer: 10 * 1024 * 1024,
+    // CTL-1889 inc 2: routed through the cloud write proxy under enforce. Under `off`
+    // (the default) and `shadow` this still runs COMMENT_HELPER, byte-identical.
+    const res = postLinearCommentAsSpawnResult(ticket, body, {
+      caller: "recovery-emit",
+      runHelper: (t, b) => spawnSync(COMMENT_HELPER, [t, b], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 }),
     });
     if (res.status === 0) return true;
     // Codex P3: surface the helper's own diagnostic (its last stderr line names

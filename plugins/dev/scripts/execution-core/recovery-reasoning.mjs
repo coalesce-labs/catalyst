@@ -82,6 +82,7 @@ const defaultLogFn = typeof defaultLog === "function" ? defaultLog : (msg) => {
 const LINEAR_COMMENT_POST_BIN = fileURLToPath(
   new URL("../lib/linear-comment-post.sh", import.meta.url),
 );
+import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
 
 // phase-agent-emit-complete — the canonical wake/synthetic-complete emitter, used
 // by the CTL-1186 phase-pr re-dispatch to nudge the scheduler after re-arming.
@@ -1611,11 +1612,17 @@ export function defaultEmitEvent(event, { logPath = getEventLogPath(), now } = {
 function defaultPostComment(ticket, markdown, opts = {}) {
   const log = opts.log ?? defaultLogFn;
   try {
-    const res = spawnSync(LINEAR_COMMENT_POST_BIN, [ticket, markdown], {
-      cwd: opts.cwd ?? process.cwd(), // must resolve projectKey from cwd ancestry
-      env: { ...process.env, ...(opts.env ?? {}) },
-      encoding: "utf8",
-      maxBuffer: 10 * 1024 * 1024,
+    // CTL-1889 inc 2: cloud write proxy under enforce; the helper otherwise, with its
+    // cwd/env preserved verbatim (it resolves projectKey from cwd ancestry).
+    const res = postLinearCommentAsSpawnResult(ticket, markdown, {
+      caller: "recovery-reasoning",
+      runHelper: (t, b) =>
+        spawnSync(LINEAR_COMMENT_POST_BIN, [t, b], {
+          cwd: opts.cwd ?? process.cwd(),
+          env: { ...process.env, ...(opts.env ?? {}) },
+          encoding: "utf8",
+          maxBuffer: 10 * 1024 * 1024,
+        }),
     });
     if (res.status === 0) {
       return { ok: true, via: "app-actor" };
