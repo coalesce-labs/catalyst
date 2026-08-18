@@ -2219,8 +2219,16 @@ cmd_uninstall_services() {
   # three hosts. `catalyst uninstall`'s verify-clean probes the plist dir with a PREFIX regex
   # (^ai\.coalesce\.catalyst-.*\.plist$), so the orphan it left behind failed the teardown at its
   # last phase with no code path anywhere able to clear it.
+  # ⚠️ rc is LOGGED rather than swallowed (FLEET-37 note 1 on #3606). The overall path stays
+  # fail-closed either way — verify-clean's prefix regex catches a residual plist — but without this
+  # line the operator sees "residual plist found" at the FINAL phase and has to reconstruct which
+  # teardown failed and why. `|| true` is kept: one agent's teardown must not abort the other eight.
   if [[ -x "${SCRIPT_DIR}/install-usage-page.sh" ]]; then
-    bash "${SCRIPT_DIR}/install-usage-page.sh" --uninstall 2>&1 | sed 's/^/  /' || true
+    # The `|| true` wraps the GROUP, not the pipeline: `pipeline || true` would run `true` whenever
+    # the pipeline failed, and `true` resets PIPESTATUS — under-reporting the very rc being captured.
+    local up_rc=0
+    { bash "${SCRIPT_DIR}/install-usage-page.sh" --uninstall 2>&1 | sed 's/^/  /'; up_rc=${PIPESTATUS[0]}; } || true
+    [[ $up_rc -eq 0 ]] || warn "install-usage-page.sh --uninstall exited $up_rc — ai.coalesce.catalyst-usage-page may remain (verify-clean will refuse the teardown)"
   fi
   # CTL-1975: event-mirror (monitor/developer nodes). stop_event_mirror already boots out, removes
   # the plist, is idempotent and carries the CTL-1968 domain guard — it was simply never called from

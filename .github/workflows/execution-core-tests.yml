@@ -281,6 +281,27 @@ jobs:
         working-directory: .
         run: bash plugins/dev/scripts/__tests__/catalyst-account-usage-page.test.sh
 
+      - name: archive + uninstall test (CTL-1975)
+        # ⛔ PINNED DELIBERATELY, and the reason is the PR that added it. CI runs an EXPLICIT list
+        # of shell suites — there is no glob runner and no run-tests.sh here — so a suite that is
+        # merely present in __tests__/ runs only in the local full gate, which is banned on the
+        # primary laptop. This suite certifies that `catalyst uninstall` can actually remove every
+        # ai.coalesce.* agent; shipping it unpinned would make the next such regression exactly as
+        # invisible as the one it was written for (usage-page + event-mirror, unremovable on all
+        # three hosts, failing verify-clean at its final phase with no code path able to clear it).
+        #
+        # It mocks launchctl via a PATH stub and never touches the runner's real launchd domain.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/catalyst-archive-uninstall.test.sh
+
+      - name: catalyst-backup capture/restore test (CTL-1369 PR2)
+        # Pinned alongside the suite above: CTL-1975 changed ~300 lines of catalyst-backup (the
+        # replica capture, the tarball, the manifest, rel_to_dest), and its own regression suite
+        # was likewise present-but-unpinned. A capture path whose only coverage runs on one laptop
+        # is a capture path with no coverage.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/catalyst-backup.test.sh
+
       - name: direnv fleet readiness test (CTL-1944)
         # The property under test is not "is direnv installed" — it is that every way of being
         # NOT-owner-ready renders RED. Two regression guards carry the weight: a BLOCKED .envrc

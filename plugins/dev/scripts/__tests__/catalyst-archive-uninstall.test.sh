@@ -217,6 +217,11 @@ expect_eq "⭐ pos. ctrl — the extractor really reads the body" "yes" \
   "$([[ "$BODY" == *'CLOUD_SYNC_AGENT_PLIST'* ]] && echo yes || echo no)"
 expect_contains "delegates the usage-page teardown" "$BODY" 'install-usage-page.sh" --uninstall' 
 expect_contains "calls the event-mirror teardown"   "$BODY" "stop_event_mirror"
+# FLEET-37 note 1: the delegation keeps `|| true` (one agent's teardown must not abort the other
+# eight), so the rc has to be captured and warned about or the operator sees only "residual plist
+# found" at the final phase and reconstructs which teardown failed.
+expect_contains "captures the usage-page teardown rc"  "$BODY" "PIPESTATUS"
+expect_contains "and warns when it is non-zero"        "$BODY" "may remain"
 
 echo
 echo "  ${PASSES} passed, ${FAILURES} failed"
