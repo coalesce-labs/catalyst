@@ -256,6 +256,22 @@ linearis issues update ENG-123 --project-milestone "Milestone Name"
 
 ### Comment on a ticket
 
+> ⛔ **`linearis issues discuss` posts AS THE HUMAN.** It authenticates with the personal
+> `lin_api_…` token, so the comment carries Ryan's identity — and the ask-resolution gate
+> (CTL-1567) reads a human-identity comment as *the human deciding* and clears
+> `needs-human`. An agent commenting this way can silently look like his decision.
+>
+> **Every machine reply goes through the app actor instead** — `Catalyst Cloud`, tagged
+> with the agent via `createAsUser`:
+>
+> ```bash
+> direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-123 --as <AGENT> --body "…"
+> ```
+>
+> Use `linearis issues discuss` only when you genuinely intend the comment to be the
+> human's. See the `catalyst-dev:ask` skill for the full SOP, and `scripts/ask.mjs` for the
+> `create` / `accept` verbs (CTL-1922).
+
 Commenting is a **thread model** under `issues` (the old flat `comments` domain is a deprecated
 compatibility facade as of v2026.4.x — `linearis comments --help` itself says "prefer the `issues`
 discussion commands").
