@@ -15,7 +15,7 @@
 // for a short window. The cache is bounded far below the staleness window it feeds,
 // so it can delay an un-arm by at most `READY_CACHE_MS` — not defeat it.
 
-import { readGithubFeedConfig } from "./config.mjs";
+import { getExecutionCoreDir, readGithubFeedConfig } from "./config.mjs";
 import { createCaptureSink } from "./cloud-feed-capture.mjs";
 import { defaultReadyPath, readReadyState } from "./github-feed-ready.mjs";
 import { resolveAccount } from "./github-feed-timer.mjs";
@@ -84,6 +84,34 @@ export function defaultGithubCapturePath(orchDir, account = "tenant-0") {
 }
 
 /**
+ * producerReadyPath — where the PRODUCER writes its readiness file.
+ *
+ * ⛔ CTL-1976: RESOLVED FROM THE PRODUCER'S DIRECTORY, NEVER THE CALLER'S. This
+ * gate's other artifact — the capture sink — is owned by whichever process installs
+ * the gate, so `orchDir` is the right root for it. The readiness file is NOT: it is
+ * written by `github-feed-timer` inside the daemon, under `getExecutionCoreDir()`,
+ * and this side only ever READS it. Deriving it from the installer's `orchDir` meant
+ * the broker (whose `orchDir` is `CATALYST_DIR`, one level up) read
+ * `~/catalyst/shadow/...` while the daemon wrote `~/catalyst/execution-core/shadow/...`.
+ *
+ * ⚠️ AND THAT MISS IS NOT SYMMETRIC, WHICH IS WHY IT IS A `readFileSync` AWAY FROM
+ * SILENT. `readReadyState` answers `ready:false` for an absent file, and in
+ * `decideDispatch` readiness gates ONLY the smee branch — the feed branch is gated on
+ * the `feedAuthority` stamp, which the producer computes from ITS OWN (correct) path.
+ * So a mismatched path does not fail closed on both sides: smee keeps routing AND the
+ * feed routes, i.e. every covered name dispatches TWICE, while every log line on both
+ * processes reads healthy. The readiness lever exists to make `enforce` refusable; a
+ * lever wired to a file nobody writes is a check that cannot fire.
+ *
+ * Measured on mini-2 (2026-08-18 11:15 CT) with the gate armed in shadow: broker
+ * `readyFile` `/Users/ryan/catalyst/shadow/github-feed-ready-tenant-0.json` — absent;
+ * daemon's, under `execution-core/`, fresh on every 30 s tick.
+ */
+export function producerReadyPath(account = resolveAccount(), executionCoreDir = getExecutionCoreDir()) {
+  return defaultReadyPath(executionCoreDir, account);
+}
+
+/**
  * createGithubFeedGate — the object `decideDispatch` takes as its second argument.
  *
  * Returns `null` when the mode is `off`, so the caller can skip the gate entirely
@@ -104,7 +132,8 @@ export function createGithubFeedGate({
 } = {}) {
   if (config.mode === "off") return null;
 
-  const readyFile = readyPath ?? defaultReadyPath(orchDir, account);
+  // ⛔ producerReadyPath, NOT defaultReadyPath(orchDir, ...) — see its header (CTL-1976).
+  const readyFile = readyPath ?? producerReadyPath(account);
   const capture = captureFactory({ path: capturePath ?? defaultGithubCapturePath(orchDir, account) });
 
   let cachedAt = -Infinity;
