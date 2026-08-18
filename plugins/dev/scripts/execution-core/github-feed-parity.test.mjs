@@ -1,0 +1,225 @@
+// Run: cd plugins/dev/scripts/execution-core && bun test github-feed-parity.test.mjs
+//
+// Most of these test the ways a ledger LIES — an empty side, nothing joined, a name
+// that vanished. A parity harness that can only report agreement is the instrument
+// failure this repo has shipped before, so every "clean" here has to be earned.
+
+import { describe, expect, test } from "bun:test";
+import {
+  COMPARE_SPEC,
+  KNOWN_ABSENT,
+  OBSERVED_ONLY_FIELDS,
+  compareGithubStreams,
+  parityExitCode,
+} from "./github-feed-parity.mjs";
+
+const ev = (name, attrs, payload, extra = {}) => ({
+  ts: "2026-08-18T00:00:00Z", id: "x", attributes: { "event.name": name, ...attrs },
+  body: { message: name, payload }, ...extra,
+});
+
+const comment = (id, over = {}) =>
+  ev("github.pr_review_comment.created",
+    { "vcs.repository.name": "o/r", "vcs.pr.number": 7, "event.entity": "pr_review_comment",
+      "event.action": "created", "event.label": "PR #7", "event.stream_class": "coordination" },
+    { commentId: id, body: "b", htmlUrl: `https://github.com/o/r/pull/7#discussion_r${id}`,
+      author: { login: "alice", type: "User" }, ...over });
+
+describe("a clean ledger has to be earned", () => {
+  test("identical streams are clean", () => {
+    const r = compareGithubStreams([comment(1), comment(2)], [comment(1), comment(2)]);
+    expect(r.totals).toEqual({ joined: 2, agree: 2, unjoined: 0, smeeUnjoined: 0 });
+    expect(r.clean).toBe(true);
+    expect(parityExitCode(r)).toBe(0);
+  });
+
+  test("⛔ an empty feed side is INCONCLUSIVE, never clean", () => {
+    // [].every() is true. A ledger that reports agreement because it compared
+    // nothing is the exact false-clean this module exists to refuse.
+    const r = compareGithubStreams([], [comment(1)]);
+    expect(r.clean).toBe(false);
+    expect(r.inconclusive).toContain("feed-side-empty");
+    expect(parityExitCode(r)).toBe(3);
+  });
+
+  test("⛔ an empty smee side is INCONCLUSIVE, never clean", () => {
+    const r = compareGithubStreams([comment(1)], []);
+    expect(r.clean).toBe(false);
+    expect(r.inconclusive).toContain("smee-side-empty");
+    expect(parityExitCode(r)).toBe(3);
+  });
+
+  test("⛔ two non-empty streams that share no key are INCONCLUSIVE, not clean", () => {
+    // Nothing was actually compared. Reporting 0 divergences here would be a lie.
+    const r = compareGithubStreams([comment(1)], [comment(999)]);
+    expect(r.totals.joined).toBe(0);
+    expect(r.inconclusive).toContain("no-events-joined");
+    expect(r.clean).toBe(false);
+    expect(parityExitCode(r)).toBe(3);
+  });
+
+  test("an unjoined feed event is counted, never folded into agreement", () => {
+    const r = compareGithubStreams([comment(1), comment(2)], [comment(1)]);
+    expect(r.byName["github.pr_review_comment.created"].unjoined).toBe(1);
+    expect(r.totals.agree).toBe(1);
+  });
+});
+
+describe("⛔ P1 (Codex #3520): the ledger must compare MULTIPLICITY, not presence", () => {
+  // Codex built exactly these two controls and both returned clean:true before the
+  // fix — the ledger certifying parity across a dropped or duplicated dispatch.
+  test("2 feed vs 1 smee under one key is NOT clean", () => {
+    const r = compareGithubStreams([comment(1), comment(1)], [comment(1)]);
+    expect(r.clean).toBe(false);
+    expect(r.totals.unjoined).toBe(1);
+    expect(parityExitCode(r)).toBe(3);
+  });
+
+  test("1 feed vs 2 smee under one key is NOT clean", () => {
+    const r = compareGithubStreams([comment(1)], [comment(1), comment(1)]);
+    expect(r.clean).toBe(false);
+    expect(r.smeeUnjoined).toBe(1);
+    expect(r.inconclusive).toContain("smee-events-without-a-twin:1");
+  });
+
+  test("a twin is CONSUMED — it cannot serve two feed events", () => {
+    const r = compareGithubStreams([comment(1), comment(1), comment(1)], [comment(1), comment(1)]);
+    expect(r.totals.joined).toBe(2);
+    expect(r.totals.unjoined).toBe(1);
+    expect(r.clean).toBe(false);
+  });
+
+  test("balanced repeats under one key ARE clean — the fix must not forbid legitimate duplicates", () => {
+    // The positive control. Coarse keys (review keys on repo/pr/reviewer/state) make
+    // repeats expected, so a rule that called all repetition dirty would be useless.
+    const r = compareGithubStreams([comment(1), comment(1)], [comment(1), comment(1)]);
+    expect(r.totals).toEqual({ joined: 2, agree: 2, unjoined: 0, smeeUnjoined: 0 });
+    expect(r.clean).toBe(true);
+  });
+});
+
+describe("⛔ P1 (Codex #3520): an unmatched event cannot certify parity", () => {
+  test("feed [1,2] vs smee [1] is INCONCLUSIVE, not clean", () => {
+    // Before the fix this returned clean:true — one pair joined and agreed, and the
+    // predicate only looked at `joined - agree`. The extra event may be a duplicate
+    // or a spurious dispatch; either way it is not evidence of parity.
+    const r = compareGithubStreams([comment(1), comment(2)], [comment(1)]);
+    expect(r.totals.joined).toBe(1);
+    expect(r.totals.agree).toBe(1);
+    expect(r.clean).toBe(false);
+    expect(r.inconclusive).toContain("feed-events-without-a-twin:1");
+    expect(parityExitCode(r)).toBe(3);
+  });
+
+  test("smee [1,2] vs feed [1] is INCONCLUSIVE too — the rule is symmetric", () => {
+    const r = compareGithubStreams([comment(1)], [comment(1), comment(2)]);
+    expect(r.clean).toBe(false);
+    expect(r.inconclusive).toContain("smee-events-without-a-twin:1");
+  });
+});
+
+describe("field-level divergence", () => {
+  test("a payload diff is caught and NAMED with both values", () => {
+    const r = compareGithubStreams([comment(1, { body: "changed" })], [comment(1)]);
+    expect(r.clean).toBe(false);
+    const d = r.byName["github.pr_review_comment.created"].diffs["body.payload.body"];
+    expect(d[0]).toEqual({ feed: "changed", smee: "b" });
+    expect(parityExitCode(r)).toBe(2);
+  });
+
+  test("an attribute diff is caught", () => {
+    const bad = comment(1); bad.attributes["vcs.pr.number"] = 9;
+    const r = compareGithubStreams([bad], [comment(1)]);
+    expect(r.clean).toBe(false);
+    expect(r.byName["github.pr_review_comment.created"].diffs["attributes.vcs.pr.number"]).toBeDefined();
+  });
+
+  test("⭐ the fields that MUST differ do not count as divergence", () => {
+    // Otherwise the ledger reports a permanent diff on every run and stops meaning
+    // anything — the two producers legitimately differ in id/ts/channel/source.
+    const f = comment(1); f.id = "feed-id"; f.ts = "2026-08-18T09:99:99Z";
+    f.attributes["event.channel"] = "cloud-feed"; f.body.payload.source = "cloud-feed";
+    const s = comment(1); s.id = "smee-id"; s.attributes["event.channel"] = "webhook";
+    s.attributes["webhook.delivery.id"] = "abc";
+    expect(compareGithubStreams([f], [s]).clean).toBe(true);
+  });
+});
+
+describe("⚠️ observed-only fields: equal today, not guaranteed", () => {
+  const pr = (draft) => ev("github.pr.opened",
+    { "vcs.repository.name": "o/r", "vcs.pr.number": 7, "event.entity": "pr", "event.action": "opened",
+      "event.label": "PR #7", "event.stream_class": "coordination" },
+    { action: "opened", merged: false, mergedAt: null, draft, mergeable: null });
+
+  test("a draft divergence is REPORTED but does not break clean", () => {
+    // The replica holds current state; the webhook held the value at the edge. This
+    // is the one real diff the live 3h ledger found, and it is inherent.
+    const r = compareGithubStreams([pr(false)], [pr(true)]);
+    expect(r.clean).toBe(true);
+    expect(r.byName["github.pr.opened"].observedOnly["body.payload.draft"][0])
+      .toEqual({ feed: false, smee: true });
+  });
+
+  test("the observed-only list is explicit, so nothing hides inside a prefix rule", () => {
+    expect(OBSERVED_ONLY_FIELDS).toEqual(["body.payload.draft", "body.payload.mergeable"]);
+  });
+});
+
+describe("⛔ a consumed name that vanishes must not read as agreement", () => {
+  const merged = ev("github.pr.merged",
+    { "vcs.repository.name": "o/r", "vcs.pr.number": 7 },
+    { action: "closed", merged: true, mergeCommitSha: "abc" });
+  const suite = ev("github.check_suite.completed",
+    { "vcs.repository.name": "o/r", "vcs.revision": "abc" },
+    { conclusion: "success", status: "completed", prNumbers: [7] });
+
+  test("a DECLARED gap is reported as expected and stays clean", () => {
+    const r = compareGithubStreams([comment(1)], [comment(1), merged, suite]);
+    expect(r.expectedAbsent["github.pr.merged"]).toBe(1);
+    expect(r.unexplainedAbsent).toEqual({});
+    expect(r.clean).toBe(true);
+  });
+
+  test("an UNDECLARED absence breaks clean", () => {
+    // A name smee delivers, that we claim to produce, and produced none of.
+    const push = ev("github.push",
+      { "vcs.repository.name": "o/r", "vcs.ref.name": "refs/heads/main", "vcs.revision": "a1" },
+      { baseSha: "b", headSha: "a1", commits: [] });
+    const r = compareGithubStreams([comment(1)], [comment(1), push]);
+    expect(r.unexplainedAbsent["github.push"]).toBe(1);
+    expect(r.clean).toBe(false);
+    // ⚠️ INCONCLUSIVE (3), not diverged (2). The push has no twin on the feed side,
+    // and from the ledger alone a missing name is indistinguishable from window skew.
+    // Both are non-clean and both refuse a cutover; "I cannot tell" is the honest
+    // label, and `unexplainedAbsent` still names the specific hole to investigate.
+    expect(parityExitCode(r)).toBe(3);
+    expect(r.inconclusive).toContain("smee-events-without-a-twin:1");
+  });
+
+  test("both declared gaps name the ticket that closes them", () => {
+    expect(KNOWN_ABSENT["github.pr.merged"]).toContain("CTC-691");
+    expect(KNOWN_ABSENT["github.check_suite.completed"]).toContain("CTC-667");
+  });
+});
+
+describe("coverage of the spec itself", () => {
+  test("every name the producer emits has a compare spec", async () => {
+    // A name with no spec is counted `unkeyable` and would otherwise quietly never
+    // be compared at all.
+    const { GITHUB_DISPATCH_CLASS_NAMES } = await import("./github-feed-event.mjs");
+    const missing = GITHUB_DISPATCH_CLASS_NAMES.filter((n) => !(n in COMPARE_SPEC));
+    expect(missing).toEqual([]);
+  });
+
+  test("an unspecced name is counted unkeyable and forces INCONCLUSIVE", () => {
+    const weird = ev("github.workflow_run.completed", { "vcs.repository.name": "o/r" }, {});
+    const r = compareGithubStreams([comment(1), weird], [comment(1)]);
+    expect(r.unkeyable).toBe(1);
+    expect(r.inconclusive).toContain("feed-unkeyable-events:1");
+    expect(r.clean).toBe(false);
+  });
+
+  test("a null report is inconclusive, not clean", () => {
+    expect(parityExitCode(null)).toBe(3);
+  });
+});
