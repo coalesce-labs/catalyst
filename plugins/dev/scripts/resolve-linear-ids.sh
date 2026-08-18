@@ -93,6 +93,58 @@ if [ "$FORCE" -eq 0 ]; then
   fi
 fi
 
+# ── CTC-403: resolve from the REPLICA first ──────────────────────────────────
+#
+# The API path below needs `linear.apiToken` in the per-project secrets file and hard-
+# exits without it. On a host installed with a Catalyst Cloud token and nothing else —
+# the documented "one command, one key" install — that exit is the whole reason team
+# and state ids ended up hand-written on 21 config files.
+#
+# The replica already carries both: the account's issues give team key → team id, and
+# `workflow_states` gives every live state for that team. So ask it first. The API stays
+# as the fallback for a host with no replica yet, and the source is REPORTED either way —
+# an operator must be able to tell which answer they got.
+#
+# ⛔ No stale fallback. lib/linear-identity.sh gates freshness (writer-lock recency AND a
+# non-empty sync_meta cursor) and returns a NAMED failure — replica-absent, replica-stale,
+# team-not-resolvable, state-not-found — rather than a last-known-good id. An
+# empty-but-fresh replica is a failure there, not an empty answer: that exact shape once
+# produced a fleet-wide admission freeze with every signal green (CTL-1420).
+RESOLVE_SOURCE=""
+FALLBACK_REASON=""
+IDENTITY_LIB="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib/linear-identity.sh"
+if [ "${CATALYST_RESOLVE_IDS_SOURCE:-auto}" != "api" ] && [ -r "$IDENTITY_LIB" ]; then
+  # shellcheck disable=SC1090
+  . "$IDENTITY_LIB"
+  # Direct calls + LINEAR_IDENTITY_VALUE, NOT `$(…)`: command substitution is a
+  # subshell, so the named reason would be discarded and the note below would print
+  # "(unknown)" for every failure — a diagnosis that diagnoses nothing.
+  if linear_identity_team_id "$TEAM_KEY" >/dev/null 2>&1; then
+    TEAM_ID="$LINEAR_IDENTITY_VALUE"
+  fi
+  if [ -n "${TEAM_ID:-}" ] && linear_identity_states_json "$TEAM_KEY" >/dev/null 2>&1; then
+    STATE_IDS="$LINEAR_IDENTITY_VALUE"
+    STATE_COUNT=$(echo "$STATE_IDS" | jq 'length')
+    RESOLVE_SOURCE="replica"
+  fi
+  if [ "$RESOLVE_SOURCE" = "replica" ]; then
+    :
+  fi
+  if [ -z "$RESOLVE_SOURCE" ]; then
+    # Loud, not silent: falling through to the API is a replica gap worth seeing. But
+    # `--json` callers merge stderr into stdout and pipe the result to jq, so a bare
+    # stderr line there is not "extra diagnostics" — it makes the document unparseable
+    # and every field unreadable. Carry the reason IN the document for those callers and
+    # print it for humans. Suppressing it in --json mode was the other option and is
+    # worse: the machine-readable path is exactly where a silent degradation hides.
+    FALLBACK_REASON="${LINEAR_IDENTITY_REASON:-unknown}"
+    if [ "$JSON_OUT" -eq 0 ]; then
+      echo "note: replica identity unavailable (${FALLBACK_REASON}) — falling back to the Linear API" >&2
+    fi
+  fi
+fi
+
+if [ -z "$RESOLVE_SOURCE" ]; then
 PROJECT_KEY=$(jq -r '.catalyst.projectKey // empty' "$CONFIG_PATH" 2>/dev/null)
 if [ -z "$PROJECT_KEY" ]; then
   echo "ERROR: catalyst.projectKey not set in $CONFIG_PATH — needed to locate secrets" >&2
@@ -137,11 +189,15 @@ fi
 TEAM_ID=$(echo "$TEAM_NODE" | jq -r '.id')
 STATE_IDS=$(echo "$TEAM_NODE" | jq '.states.nodes | map({(.name): .id}) | add')
 STATE_COUNT=$(echo "$TEAM_NODE" | jq '.states.nodes | length')
+  RESOLVE_SOURCE="api"
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   if [ "$JSON_OUT" -eq 1 ]; then
     jq -nc --arg tid "$TEAM_ID" --argjson sids "$STATE_IDS" --argjson count "$STATE_COUNT" \
-      '{action:"dry-run",teamId:$tid,stateIds:$sids,stateCount:$count}'
+      --arg src "$RESOLVE_SOURCE" --arg fb "${FALLBACK_REASON:-}" \
+      '{action:"dry-run",teamId:$tid,stateIds:$sids,stateCount:$count,source:$src}
+       + (if $fb == "" then {} else {replicaFallbackReason:$fb} end)'
   else
     echo "Would write teamId to $CONFIG_PATH:"
     echo "  teamId: $TEAM_ID"
@@ -176,10 +232,11 @@ fi
 
 if [ "$JSON_OUT" -eq 1 ]; then
   jq -nc --arg tid "$TEAM_ID" --argjson sids "$STATE_IDS" --argjson count "$STATE_COUNT" \
-    --arg reg "$REGISTRY_PATH" \
-    '{action:"resolved",teamId:$tid,stateIds:$sids,stateCount:$count,registry:$reg}'
+    --arg reg "$REGISTRY_PATH" --arg src "$RESOLVE_SOURCE" --arg fb "${FALLBACK_REASON:-}" \
+    '{action:"resolved",teamId:$tid,stateIds:$sids,stateCount:$count,registry:$reg,source:$src}
+     + (if $fb == "" then {} else {replicaFallbackReason:$fb} end)'
 else
-  echo "Resolved and cached $STATE_COUNT workflow states for team $TEAM_KEY"
+  echo "Resolved and cached $STATE_COUNT workflow states for team $TEAM_KEY (source: $RESOLVE_SOURCE)"
   echo "  teamId:   $TEAM_ID  ($CONFIG_PATH)"
   echo "  stateIds: $REGISTRY_PATH"
 fi

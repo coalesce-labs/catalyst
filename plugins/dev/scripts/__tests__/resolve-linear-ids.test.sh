@@ -303,6 +303,40 @@ REG13_AFTER=$(cat "$REG13")
 run "--dry-run does not modify the existing registry" \
   bash -c "[ '$REG13_BEFORE' = '$REG13_AFTER' ]"
 
+# ─── Test 14 (CTC-403): replica-first resolution, and the --json stream contract ──
+#
+# ⛔ Test 3 above runs the script with `> "$OUT3" 2>&1` — stderr MERGED into stdout,
+# then piped to jq. So in --json mode a bare stderr line is not "extra diagnostics": it
+# makes the whole document unparseable and every field unreadable. The replica-fallback
+# note shipped as a stderr echo first and broke exactly those three assertions. The
+# reason now rides the DOCUMENT instead; suppressing it in --json mode was the other
+# option and is worse, because the machine-readable path is precisely where a silent
+# degradation hides.
+WORK14="${SCRATCH}/t14"; HOME14="${WORK14}/home"; BIN14="${WORK14}/bin"
+OUT14="${WORK14}/stdout"
+build_config "$WORK14"
+build_secrets "$HOME14" "test-project"
+install_fake_curl "$BIN14"
+
+# No replica on this path → the API fallback, with the reason carried structurally.
+HOME="$HOME14" PATH="$BIN14:$PATH" CATALYST_REPLICA_DB="${WORK14}/absent-replica.db" \
+  "$RESOLVE" --config "$WORK14/.catalyst/config.json" --json > "$OUT14" 2>&1 || true
+
+run "--json stays parseable with stderr merged, even on the fallback path" \
+  bash -c "jq -e '.action == \"resolved\"' '$OUT14'"
+
+run "the fallback names its reason in the document" \
+  bash -c "jq -e '.replicaFallbackReason == \"replica-absent\"' '$OUT14'"
+
+run "the fallback reports which source actually answered" \
+  bash -c "jq -e '.source == \"api\"' '$OUT14'"
+
+# Human mode keeps the loud note — the diagnosis is not lost, it is routed.
+run "non-json mode still prints the note to stderr" \
+  bash -c "HOME='$HOME14' PATH='$BIN14:$PATH' CATALYST_REPLICA_DB='${WORK14}/absent-replica.db' \
+    '$RESOLVE' --config '$WORK14/.catalyst/config.json' --dry-run --force 2>&1 \
+    | grep -q 'replica identity unavailable (replica-absent)'"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]
