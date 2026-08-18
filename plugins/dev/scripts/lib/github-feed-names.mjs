@@ -56,7 +56,8 @@ export const GITHUB_CONSUMED_NAMES = Object.freeze([
 /**
  * Consumed names with NO replica stream behind them at all.
  *
- * `github.pr.merged` — `pull_requests` has no `merge_commit_sha` column, and
+ * (Historical, kept because the argument still applies to the entry below.)
+ * `github.pr.merged` — before CTC-691, `pull_requests` had no `merge_commit_sha`, and
  * `body.payload.mergeCommitSha` is a JOIN KEY: `router.mjs:1513` writes it via
  * `setFilterStateMerged` and `github.deployment.created` later matches
  * `WHERE merge_commit_sha = ?`. A twin without it routes and wakes `monitor-merge`
@@ -68,7 +69,18 @@ export const GITHUB_CONSUMED_NAMES = Object.freeze([
  * the merge gate. → CTC-667 item 4
  */
 export const GITHUB_UNCOVERED_NAMES = Object.freeze([
-  "github.pr.merged",
+  // ⛔ `github.pr.merged` LEFT THIS LIST when CTC-691 landed in schema 0.1.17 —
+  // `pull_requests.merge_commit_sha` is a real column and the producer emits the name.
+  // A row whose sha is NULL (a merge predating the pin, never backfilled) still
+  // declines, but per ROW in `classifyGithubRow`, which is the correct granularity.
+  //
+  // ⛔ `check_suite.completed` STAYS, and NOT for the reason the old entry gave. The
+  // mirror stores a suite row now. What it does not store is the association the
+  // CONSUMER keys on: `router.mjs:1497` reaches an interest only through
+  // `detail.prNumbers`, from `check_suite.pull_requests[].number`, which the mirror
+  // drops and `check_runs` cannot supply. The only derivation is a LAST-STATE join
+  // through `pull_requests.head_sha` — measured 93/202 (46%) on mini-2, misses
+  // dominated by active PR branches whose head moved after the suite ran. → CTC-712
   "github.check_suite.completed",
 ]);
 

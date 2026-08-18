@@ -255,3 +255,28 @@ describe("the producer's own emit-list stays the source of truth for coverage", 
     }
   });
 });
+
+describe("⛔ ONE source of truth for the name lists — CI caught the half-done move", () => {
+  test("the gate, the producer and doctor all read the same lists", async () => {
+    // ⚠️ THE BUG THIS OWNS, and it shipped: #3540 moved the lists to
+    // `lib/github-feed-names.mjs` and pointed the GATE at the leaf, but left
+    // `github-feed-event.mjs`'s own copies in place. #3544 then removed `pr.merged`
+    // (CTC-691) from the copy the gate no longer read. Both branches passed locally —
+    // each predated the other's change — and on main the two lists disagreed: the
+    // gate kept excluding a name the producer had started emitting under its real
+    // name, which is a dropped edge under enforce. Identity, not deep-equality: a
+    // second array with equal contents is exactly the drift this asserts against.
+    const leaf = await import("../lib/github-feed-names.mjs");
+    const event = await import("./github-feed-event.mjs");
+    const gate = await import("./github-feed-gate.mjs");
+    expect(event.GITHUB_UNCOVERED_NAMES).toBe(leaf.GITHUB_UNCOVERED_NAMES);
+    expect(gate.GITHUB_UNCOVERED_NAMES).toBe(leaf.GITHUB_UNCOVERED_NAMES);
+    expect(gate.GITHUB_CONSUMED_NAMES).toBe(leaf.GITHUB_CONSUMED_NAMES);
+  });
+
+  test("⭐ every uncovered name is excluded from suppression, and pr.merged is not one", () => {
+    const excluded = GITHUB_CONSUMED_NAMES.filter((n) => !GITHUB_SUPPRESSIBLE_NAMES.includes(n));
+    for (const n of GITHUB_UNCOVERED_NAMES) expect(excluded).toContain(n);
+    expect(GITHUB_UNCOVERED_NAMES).not.toContain("github.pr.merged");
+  });
+});

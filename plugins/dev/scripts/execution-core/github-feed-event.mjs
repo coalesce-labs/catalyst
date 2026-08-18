@@ -76,6 +76,10 @@
 
 import { buildCanonicalEvent } from "./lib/canonical-event.mjs";
 import { STREAM_BY_KEY } from "./github-feed-source.mjs";
+import {
+  GITHUB_CONSUMED_NAMES,
+  GITHUB_UNCOVERED_NAMES as LEAF_UNCOVERED_NAMES,
+} from "../lib/github-feed-names.mjs";
 
 /** The service identity every `github.*` event must carry. See the header. */
 export const GITHUB_SERVICE_NAME = "catalyst.github";
@@ -100,37 +104,26 @@ export const SOURCE_CLOUD_FEED = "cloud-feed";
  * Exported so the parity ledger accounts for them as EXPECTED absences rather than
  * as unexplained diffs, and so nothing can claim coverage this producer lacks.
  */
-export const GITHUB_DISPATCH_CLASS_NAMES = Object.freeze([
-  "github.pr.opened",
-  "github.pr.closed",
-  // ⭐ CTC-691 landed in schema 0.1.17 — `merge_commit_sha` is a real column now.
-  "github.pr.merged",
-  "github.pr_review.submitted",
-  "github.pr_review_comment.created",
-  "github.pr_review_thread.resolved",
-  "github.deployment.created",
-  "github.deployment_status.success",
-  "github.deployment_status.failure",
-  "github.deployment_status.error",
-  "github.push",
-]);
+export const GITHUB_DISPATCH_CLASS_NAMES = Object.freeze(
+  GITHUB_CONSUMED_NAMES.filter((n) => !LEAF_UNCOVERED_NAMES.includes(n)),
+);
 
-/** Names the orchestrator consumes that this producer cannot yet emit. */
-export const GITHUB_UNCOVERED_NAMES = Object.freeze([
-  // ⛔ STILL UNCOVERED ON 0.1.17, AND NOT FOR THE REASON THE TABLE SUGGESTS.
-  // `check_suites` exists now, but the association the CONSUMER keys on does not:
-  // `router.mjs:1497` reaches an interest only through `detail.prNumbers`, which the
-  // webhook fills from `check_suite.pull_requests[].number` — a field the mirror does
-  // not store, and `check_runs` cannot supply (it is PR-less too).
-  //
-  // The only derivation is `check_suites.head_sha` → `pull_requests.head_sha`, and
-  // that is a LAST-STATE join: measured on mini-2, 93 of 202 suites (46%) resolve,
-  // and the misses are dominated by ACTIVE PR BRANCHES whose head moved after the
-  // suite ran — `ctc-pin-sdk-0.8.13` appears 10 times in the hits and 10 in the
-  // misses. Emitting on a 46% join would hang the CI wait silently, with no smee copy
-  // under `enforce`. → CTC-712
-  "github.check_suite.completed",
-]);
+/**
+ * ⛔ RE-EXPORTED FROM `lib/github-feed-names.mjs`, NOT DECLARED HERE.
+ *
+ * These lists used to live in this file, which was right while the producer and the
+ * gate were the only readers. `catalyst doctor` became a third reader (it must name
+ * which github.* events a declared-cloud node cannot see) and runs under bare Node,
+ * which cannot load this module at all — so the lists moved to a zero-import leaf.
+ *
+ * ⚠️ CI CAUGHT THE HALF-DONE VERSION OF EXACTLY THIS. The move (#3540) pointed the
+ * GATE at the leaf but left this file's own copies in place, and the next change
+ * (#3544, removing `pr.merged` on CTC-691) edited the copy the gate no longer reads.
+ * Locally both passed, because that branch predated the move; on main the two lists
+ * disagreed and the gate kept excluding a name the producer had started emitting.
+ * One source or it drifts — this file now derives.
+ */
+export const GITHUB_UNCOVERED_NAMES = LEAF_UNCOVERED_NAMES;
 
 /**
  * Streams the source can PAGE but this file cannot turn into a faithful event, keyed
