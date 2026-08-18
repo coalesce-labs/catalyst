@@ -116,13 +116,29 @@ fi
 # ── link 1: the daemon process, and which root its argv names ───────────────────────
 # Read from the live process table, never from a pid FILE: a pid file is a claim written
 # at some past moment, and a recycled pid makes it a confident lie.
-# ⛔ EXCLUDE THE PROBE SHELL (Codex #3496 P1). `pgrep -f` matches the FULL command line,
-# and the shell running this very probe has the pattern in its own argv — so locally (and
-# through any `sh -c` runner) pgrep returns the probe's own pid and every host looks like
-# it is running the daemon. Codex reproduced it with a pattern matching nothing at all:
-# `--role monitor` still reported a daemon on a correctly configured host.
-# `$$`/`$PPID` expand in the REMOTE shell, which is the one whose argv carries the pattern.
-PID="$(_vl_run "pgrep -f '${VL_PROC_PAT}' 2>/dev/null | grep -vx \"\$\$\" | grep -vx \"\$PPID\" | head -1" 2>/dev/null | tr -d '[:space:]')"
+# ⛔ THE PROBE MUST NOT MATCH ITSELF (Codex #3496 P1). `pgrep -f` matches the FULL command
+# line, and the shell running this probe carries the pattern in its own argv — so an
+# unguarded probe returns its own pid and every host looks like it is running the daemon.
+#
+# ⚠️ EXCLUDING `$$`/`$PPID` IS NOT ENOUGH, and CI proved it: a pipeline runs in a SUBSHELL
+# whose pid is neither, while its argv is still the whole command string. That attempt
+# passed on macOS (whose pgrep does not self-match at all) and failed on ubuntu with
+# `monitor node is running an execution-core daemon (pid 2805)` — a fix verified only on
+# the platform where the bug cannot occur.
+#
+# So the pattern is made STRUCTURALLY unable to match its own command line, with the
+# standard bracket idiom: the first character is wrapped in a class, so the regex still
+# matches `execution-core/daemon.mjs` while the literal text in our argv reads
+# `[e]xecution-core/daemon.mjs`, which the regex does not match. It needs no pid list and
+# cannot be defeated by a subshell. Applied only when the first character is alphanumeric
+# (bracketing a regex metacharacter would change the pattern's meaning); otherwise the
+# older pid exclusion is kept as the fallback, and it is retained alongside in both cases
+# as belt-and-braces.
+VL_PROC_RE="$VL_PROC_PAT"
+case "$VL_PROC_PAT" in
+  [A-Za-z0-9]*) VL_PROC_RE="[${VL_PROC_PAT:0:1}]${VL_PROC_PAT:1}" ;;
+esac
+PID="$(_vl_run "pgrep -f '${VL_PROC_RE}' 2>/dev/null | grep -vx \"\$\$\" | grep -vx \"\$PPID\" | head -1" 2>/dev/null | tr -d '[:space:]')"
 
 if [[ "$VL_ROLE" == "monitor" ]]; then
   # ⭐ The monitor role ASSERTS AN ABSENCE rather than skipping. A skipped link reports the
