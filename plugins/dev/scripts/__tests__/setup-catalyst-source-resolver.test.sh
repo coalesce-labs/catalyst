@@ -234,7 +234,9 @@ exit 0
 EOF
 	chmod +x "$SCRATCH/bin/$b"
 done
-OUT=$(run_fn 'TICKET_PREFIX=WIDGET; CLOUD_TOKEN=tok; NON_INTERACTIVE=1; finalize_install; print_deferred_steps' \
+# CLOUD_REPLICA_PROVISIONED=1 is what setup_cloud_replica sets at its success exit.
+# Activation keys on that OUTCOME, not on "a token was supplied" — see the case below.
+OUT=$(run_fn 'TICKET_PREFIX=WIDGET; CLOUD_TOKEN=tok; CLOUD_REPLICA_PROVISIONED=1; NON_INTERACTIVE=1; finalize_install; print_deferred_steps' \
 	CATALYST_SOURCE_DIR="$SCRATCH/tree" CATALYST_BIN_DIR="$SCRATCH/bin")
 FIN="$(cat "$LOG" 2>/dev/null)"
 assert_grep "install-cli.sh ran" "$FIN" "INVOKED install-cli.sh"
@@ -242,6 +244,27 @@ assert_grep "setup-plugin-source.sh ran" "$FIN" "INVOKED setup-plugin-source.sh"
 assert_grep "replica reads were activated" "$FIN" "INVOKED catalyst-stack args=activate-replica"
 assert_grep "the project was enrolled" "$FIN" "INVOKED catalyst-execution-core args=register --team WIDGET"
 assert_grep "nothing was left deferred" "$OUT" "No steps were deferred"
+
+echo ""
+echo "--- ⛔ Codex #3500 P1: a token supplied but NOT provisioned must DEFER, not go quiet ---"
+# The token can arrive through the documented env var, where the global CLOUD_TOKEN stays
+# empty — so gating activation on that global skipped activate-replica AND recorded
+# nothing, letting setup report a fully provisioned node with replica reads off.
+fresh_prefix
+LOG="$SCRATCH/unprov.log"
+plant_tree "$SCRATCH/tree" "$LOG"
+mkdir -p "$SCRATCH/bin"
+for b in catalyst-stack catalyst-execution-core; do
+	printf '#!/usr/bin/env bash\necho "INVOKED %s args=$*" >> "%s"\nexit 0\n' "$b" "$LOG" >"$SCRATCH/bin/$b"
+	chmod +x "$SCRATCH/bin/$b"
+done
+# CLOUD_TOKEN empty, but the documented env var carries the token — the exact gap.
+OUT=$(run_fn 'TICKET_PREFIX=WIDGET; NON_INTERACTIVE=1; finalize_install; print_deferred_steps' \
+	CATALYST_SOURCE_DIR="$SCRATCH/tree" CATALYST_BIN_DIR="$SCRATCH/bin" CATALYST_CLOUD_TOKEN=tok-from-env)
+assert_grep "an env-supplied token is SEEN" "$OUT" "replica READS"
+assert_not_grep "and the run does not claim completeness" "$OUT" "No steps were deferred"
+assert_not_grep "activate-replica is NOT run against a replica that was never provisioned" \
+	"$(cat "$LOG" 2>/dev/null)" "activate-replica"
 
 echo ""
 echo "--- control: the same call with NO source tree defers every step, loudly ---"

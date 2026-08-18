@@ -88,6 +88,22 @@ done
 exec /bin/bash "\$@"
 STUB
 
+	# ⛔ Codex #3500 P2: CATALYST_FORCE_OS is read by setup_sweep_config ONLY.
+	# check_prerequisites calls `uname -s` directly, so on a non-Darwin host it answered
+	# the unsupported-platform prompt with the non-interactive default and exited 0
+	# BEFORE any measured step — making both columns read all `did-not`, i.e. "the fix
+	# changes nothing", which is the same output a working baseline produces. Stub the
+	# platform so the documented path is actually walked.
+	cat >"$root/stubs/uname" <<STUB
+#!/bin/bash
+case "\$1" in
+  -s) echo "Darwin" ;;
+  -m) echo "arm64" ;;
+  -r) echo "26.6.2" ;;
+  *)  /usr/bin/uname "\$@" ;;
+esac
+STUB
+
 	for c in launchctl humanlayer linearis claude curl gh sqlite3 bun node npm brew; do
 		cat >"$root/stubs/$c" <<STUB
 #!/bin/bash
@@ -140,6 +156,25 @@ for pair in "BASELINE (${BASELINE_REF}):$BASE_ROOT" "WORKING TREE:$HEAD_ROOT"; d
 	probe "$root" "catalyst-* CLIs installed" "HELPER install-cli.sh"
 	probe "$root" "a source tree was obtained (clone)" "CLONE-PLANTED"
 done
+
+# ⛔ A rehearsal whose working column fires NOTHING is indistinguishable from a baseline,
+# and that is exactly what a run aborting before provisioning looks like. Treat it as
+# INCONCLUSIVE — "I could not look" is not "there is no difference".
+# ⚠️ `grep -c` prints "0" AND exits 1 when there are no matches, so the obvious
+# `$(grep -c … || echo 0)` captures BOTH zeros — "0\n0" — and the integer test below
+# then errors out and the guard never fires. Verified by mutation: with setup stubbed to
+# exit before provisioning, that form returned 0 instead of 2. `|| true` keeps grep's own
+# "0" and discards only its exit status.
+WORKING_FIRED=$(grep -c "^HELPER " "$HEAD_ROOT/invocations.log" 2>/dev/null || true)
+[ -n "$WORKING_FIRED" ] || WORKING_FIRED=0
+if [ "$WORKING_FIRED" -eq 0 ]; then
+	echo ""
+	echo "⛔ INCONCLUSIVE — the working-tree run fired ZERO provisioning probes."
+	echo "   That is what an abort BEFORE provisioning looks like, not a null result."
+	echo "   Transcript: $HEAD_ROOT/transcript.txt (re-run with REHEARSAL_KEEP=1 to keep it)"
+	sed -n '1,40p' "$HEAD_ROOT/transcript.txt" 2>/dev/null | sed 's/^/   | /'
+	exit 2
+fi
 
 echo ""
 echo "── deferred-step ledger, working tree ──"

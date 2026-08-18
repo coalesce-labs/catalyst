@@ -758,7 +758,21 @@ setup_execution_core_states() {
 
 	echo ""
 	echo "🔗 Ensuring execution-core Linear-state contract..."
-	bash "$states_script" --config "$config_file" || true
+	# ⛔ Codex #3500 P1: this was `|| true`, which swallowed a nonzero exit — Linear
+	# refusing to create a state, registry setup failing — with no deferral. The new
+	# ledger would then print its all-clear on a node whose state contract never landed,
+	# which is a worse failure than the silent skip this PR removed: it is a silent skip
+	# with a green receipt attached. The `|| true` stays (a failed contract must not
+	# abort setup), but the status is now CAPTURED and recorded.
+	local states_rc=0
+	bash "$states_script" --config "$config_file" || states_rc=$?
+	if [[ $states_rc -ne 0 ]]; then
+		print_warning "Linear state contract did NOT land (setup-execution-core-states.sh exited ${states_rc})"
+		catalyst_defer_step \
+			"Provision the Linear workflow-state contract (its installer ran and exited ${states_rc})" \
+			"bash ${states_script} --config ${config_file}" \
+			"catalyst doctor"
+	fi
 }
 
 # Discover existing Sentry auth token
@@ -1890,19 +1904,36 @@ validate_cloud_token() {
 	esac
 }
 
-setup_cloud_replica() {
-	# Flags win over env. Absent → this whole function is a no-op and setup is
-	# byte-identical to before CTL-1836.
-	# CTL-1668: also LOOK UP the token under the configured name, not just the
-	# default — otherwise a host using a custom name has its valid token treated as
-	# absent and provisioning is silently skipped (Codex P2 on #3365).
+# resolve_cloud_token — the ONE answer to "did this run get a cloud token".
+#
+# ⛔ Codex #3500 P1: this resolution used to live only inside setup_cloud_replica, as a
+# `local`. So a token supplied through the DOCUMENTED env var (or a custom name via
+# CATALYST_CLOUD_TOKEN_ENV) provisioned the writer while the global CLOUD_TOKEN stayed
+# empty — and finalize_install, which gated on that global, skipped `activate-replica`
+# AND recorded no deferral. Setup could report a fully provisioned node with replica
+# reads off: the exact "install finished ≠ system works" gap CTL-1918 exists to close,
+# reintroduced by the fix for it. Flags win over env; the configured name wins over the
+# default (CTL-1668).
+resolve_cloud_token() {
 	local _tv="${CATALYST_CLOUD_TOKEN_ENV-}"
 	if [[ -z $_tv ]] && [[ -r "$HOME/.config/catalyst/config.json" ]] && command -v jq >/dev/null 2>&1; then
 		_tv="$(jq -r '.catalyst.cloud.tokenEnv // empty' "$HOME/.config/catalyst/config.json" 2>/dev/null || true)"
 	fi
 	[[ -n $_tv ]] || _tv="CATALYST_CLOUD_TOKEN"
-	local token="${CLOUD_TOKEN:-${!_tv-}}"
-	local account="${CLOUD_ACCOUNT:-${CATALYST_CLOUD_ACCOUNT-}}"
+	printf '%s' "${CLOUD_TOKEN:-${!_tv-}}"
+}
+
+# Set only when the replica was actually provisioned. finalize_install keys activation
+# on the OUTCOME, not on a re-derived precondition — activating reads against a replica
+# that was never provisioned is meaningless, and re-deriving is how the two drifted.
+CLOUD_REPLICA_PROVISIONED=0
+
+setup_cloud_replica() {
+	# Flags win over env. Absent → this whole function is a no-op and setup is
+	# byte-identical to before CTL-1836.
+	local token account
+	token="$(resolve_cloud_token)"
+	account="${CLOUD_ACCOUNT:-${CATALYST_CLOUD_ACCOUNT-}}"
 	[[ -n $token ]] || return 0
 
 	print_header "Provisioning Catalyst Cloud Replica"
@@ -2039,6 +2070,11 @@ setup_cloud_replica() {
 	# performs both (and defers them with a verify command if it cannot), so printing
 	# them here would tell an operator to redo work that is already done.
 
+	# Reaching here means the writer env was written and the account was accepted, so
+	# there IS a replica for reads to be turned on against. Set at the single success
+	# exit rather than at the top: a function that announces provisioning before doing
+	# it hands finalize_install a precondition that was never met.
+	CLOUD_REPLICA_PROVISIONED=1
 	return 0
 }
 
@@ -3160,9 +3196,15 @@ finalize_install() {
 	# reader to clone the repo, i.e. the work the resolver above has already done.
 	if catalyst_helper_path setup-plugin-source.sh >/dev/null; then
 		pss="$CATALYST_HELPER_PATH"
-		local pss_args=()
-		[[ $NON_INTERACTIVE -eq 1 ]] && pss_args+=(--no-interactive-wrapper)
-		if bash "$pss" "${pss_args[@]+"${pss_args[@]}"}" >/dev/null 2>&1; then
+		# ⛔ Codex #3500 P1: this used to pass --no-interactive-wrapper whenever prompts
+		# were suppressed. That flag is NOT "the quiet variant" — its own header reserves
+		# it for the install-lifecycle acquire/pre-backup step, and it SKIPS the
+		# marketplace and shell-wrapper retirement. The result is skills links plus the
+		# two legacy load paths still live, which checkSkillsDirPlugins treats as
+		# precedence-blocking / double-loading, while setup reports plugin-source as
+		# provisioned. Prompt suppression is not a request for a partial workflow, so a
+		# headless install runs the SAME full cutover an interactive one does.
+		if bash "$pss" >/dev/null 2>&1; then
 			print_success "plugin-source provisioned (pluginDirs registered)"
 		else
 			print_warning "setup-plugin-source.sh failed"
@@ -3179,7 +3221,12 @@ finalize_install() {
 	# itself on `verify-cloud-sync --json` reporting ok, so a broken replica is REFUSED
 	# here rather than switched on — which is the behaviour we want, and is why this
 	# calls the existing verb instead of writing the config key directly.
-	if [[ -n $CLOUD_TOKEN ]]; then
+	if [[ -n "$(resolve_cloud_token)" ]] && [[ $CLOUD_REPLICA_PROVISIONED -eq 0 ]]; then
+		# A token was supplied but the replica never provisioned. Activating reads would
+		# be meaningless; saying nothing would let the all-clear stand.
+		catalyst_defer_step "Turn on replica READS (the replica was not provisioned this run)" \
+			"catalyst-stack activate-replica" "catalyst-stack verify-cloud-sync --json"
+	elif [[ $CLOUD_REPLICA_PROVISIONED -eq 1 ]]; then
 		if [[ -n $stack_bin && -x $stack_bin ]]; then
 			if "$stack_bin" activate-replica >/dev/null 2>&1; then
 				print_success "replica reads activated (catalyst.linearReplica.mode = on)"
