@@ -1,9 +1,13 @@
-# Runbook — the Linear smee retirement, and how to undo it
+# Runbook — the smee retirement, and how to undo it
 
-**Status:** the Linear half of smee ingestion was retired on the live fleet
-**2026-08-17 ~16:50–17:02 CT** (CTL-1928). The GitHub half is deliberately still
-running. Read the scope section before touching anything — the two halves rode
-the *same* smee channel, so "turn smee back on" is not one switch.
+**Status: smee is fully retired.** The **Linear** half went first,
+**2026-08-17 ~16:50–17:02 CT** (CTL-1928). The **GitHub** half followed
+**2026-08-18 13:58–14:16 CT** (CTL-1929, scope decided as CTL-1965 = B: *all eight*
+webhooks, not just `coalesce-labs/catalyst`).
+
+⚠️ Read the scope section before touching anything. The two halves rode the *same*
+smee channel, so "turn smee back on" is not one switch — and the two halves have
+**separate** flags, **separate** rollback levers, and **different** consequences.
 
 ---
 
@@ -23,9 +27,44 @@ only the producer did.
 | 7 Linear webhook subscriptions (SLI/OTL/EVR/CTL/CTC/CRM/ADV) | **`enabled: false`**, not deleted |
 | `catalyst.monitor.linear.smeeChannel` + the 7 per-team copies | `""` on both minis |
 | Linear HMAC secret files, `webhookId` records, `/api/webhook/linear` route | **untouched** — rollback needs them |
-| GitHub smee tunnel + repo webhook `616654741` | **RUNNING — deliberately kept** |
+| GitHub smee tunnel (orch-monitor, `→ /api/webhook`) | **not started** on either mini (suppressed at `enforce`) |
+| 8 GitHub webhook subscriptions (see the table in §2.3) | **`active: false`**, not deleted |
+| `catalyst.githubFeed.mode` (Layer-2) | `"enforce"` on both minis |
+| `CATALYST_GITHUB_FEED` in `execution-core.env` | **deliberately unset** on both — see the ⛔ box in §2.3 |
+| GitHub HMAC secret, `/api/webhook` route, `catalyst.monitor.github.smeeChannel` | **untouched** — rollback needs them |
 
-### ⛔ Why the GitHub half stayed
+### Why the GitHub half stayed until 2026-08-18 — and what changed
+
+Everything below this heading was true when CTL-1928 shipped and is kept because it
+explains the shape of the GitHub leg. **Three things changed, and each was measured
+rather than assumed:**
+
+1. **A GitHub producer now exists** — `execution-core/github-feed-timer.mjs`, gated by
+   `catalyst.githubFeed.mode`, reading the same local replica the Linear leg reads.
+2. **The last two coverage gaps closed with schema 0.1.18** (CTC-712 `check_suites.
+   pull_request_numbers` + migration 0028; CTC-704 for `pushes`). Both were *statically*
+   excluded in `lib/github-feed-names.mjs` and are resolved **per host at runtime** by
+   `githubUncoveredNames(db)`, because the pin rolls as a canary. With 0.1.18 on both
+   minis the runtime probe reports `pushIsLossy:false, checkSuiteHasPrAssociation:true`
+   and **12 of 12** consumed names suppressible.
+3. **Parity was measured on live traffic, not argued.**
+   `execution-core/github-feed-parity-run.mjs` compares the two streams by
+   multiplicity over a window. mini-2: `clean = true · exit 0` over 65 min, 60/60
+   agreeing. mini: 38/38 post-coverage, and 160/160 over 42 min.
+
+⚠️ **Two instrument traps the ledger will hand you, both self-reported:**
+
+- **A window whose `hi` lands at or after the producer's last tick manufactures its own
+  gap.** The producer ticks every ~30 s; smee is immediate. The runner prints
+  `window-outruns-producer` when this happens — believe it, and re-run with `hi` at
+  least 3 min inside the producer's coverage before reading any `smee-unjoined` count.
+- **A host reads dirty for every window that predates its own coverage.** mini emitted
+  its first `check_suite.completed` at 18:16:25Z, ~15 min after its 0.1.18 writer
+  kickstart; every such event before that instant is legitimately smee-only, because
+  the gate correctly declined a name the host could not serve. Start the window after
+  the host's first emission of the name you care about.
+
+### ⛔ Why the GitHub half stayed (historical — the CTL-1928 reasoning)
 
 The cloud feed replaces **Linear only**. `DISPATCH_CLASS_NAMES` in
 `cloud-feed-gate.mjs` is three `linear.*` names; there is no GitHub producer, and
@@ -122,6 +161,146 @@ sed -i "" "s/^export CATALYST_CLOUD_FEED=enforce$/export CATALYST_CLOUD_FEED=sha
 cutover, flipping to `shadow` was safe because smee was still authoritative
 underneath. It no longer is: `shadow` with the Linear subscriptions disabled
 means **nothing** drives Linear dispatch. Order matters — A then B, never B alone.
+
+### 2.3 GitHub — Lever C (put the webhooks back) and Lever D (stop the feed)
+
+Same shape as A/B, same ordering rule: **C then D, never D alone.** At `enforce` the
+broker suppresses the smee copy for 12 names *and* orch-monitor never starts the
+tunnel, so flipping the mode back without re-enabling the webhooks leaves nothing
+driving `github.*` dispatch.
+
+**Lever C — re-enable the eight webhooks (≈10 s).** They were disabled, never deleted,
+so the secret and the 12-event subscription survive and this is one `PATCH` each.
+
+| repo | hook id |
+| --- | --- |
+| `coalesce-labs/catalyst` | `616654741` |
+| `coalesce-labs/catalyst-cloud` | `657402518` |
+| `coalesce-labs/catalyst-otel` | `657402515` |
+| `coalesce-labs/evergreen` | `657402511` |
+| `ryanrozich/personal-os` | `661338344` |
+| `ryanrozich/slides` | `616654742` |
+| `rightsite-cloud/Adva` | `616654744` |
+| `rightsite-cloud/adva-crm` | `657251876` |
+
+```bash
+# ⛔ Guard on the channel URL before mutating: `rightsite-cloud/Adva` also carries an
+# UNRELATED active hook (`605884530` → api.gitkraken.dev). Never PATCH by id alone.
+for h in coalesce-labs/catalyst:616654741 coalesce-labs/catalyst-cloud:657402518 \
+         coalesce-labs/catalyst-otel:657402515 coalesce-labs/evergreen:657402511 \
+         ryanrozich/personal-os:661338344 ryanrozich/slides:616654742 \
+         rightsite-cloud/Adva:616654744 rightsite-cloud/adva-crm:657251876; do
+  r="${h%%:*}"; i="${h##*:}"
+  gh api "repos/$r/hooks/$i" --jq '.config.url' | grep -q WDgeZys5ST0uqtL || {
+    echo "REFUSED $r/$i"; continue; }
+  gh api -X PATCH "repos/$r/hooks/$i" -F active=true >/dev/null    # ROLLBACK. Use false to re-retire.
+done
+```
+
+⚠️ The block above is written **as the rollback** (`active=true`). The retirement ran the
+identical loop with `active=false`; do not copy it from here and change one word in a hurry.
+
+Re-read every hook back from GitHub afterwards; do not trust the PATCH's own output.
+The **positive control** for the sweep is that unrelated GitKraken hook: a query for
+"any still-active hook" that returns *it* and nothing else is a query that still works.
+
+**Lever D — stop the feed driving dispatch.**
+
+```bash
+# per host: enforce -> shadow, then restart ALL THREE readers
+node -e '
+  const fs=require("fs"),os=require("os"),p=os.homedir()+"/.config/catalyst/config.json";
+  const c=JSON.parse(fs.readFileSync(p,"utf8"));
+  c.catalyst.githubFeed.mode="shadow";
+  const out=JSON.stringify(c,null,2); JSON.parse(out);   // fail closed before writing
+  fs.writeFileSync(p+".tmp",out); fs.renameSync(p+".tmp",p);'
+~/.catalyst/bin/catalyst-stack restart --yes
+```
+
+⛔ **`catalyst-stack restart`, not a single-daemon restart.** `CATALYST_GITHUB_FEED` has
+**four readers in three processes** — the producer (execution-core), the dispatch gate
+(broker), and the tunnel gate (orch-monitor), plus doctor. All three resolve it at
+**boot**, so restarting one leaves the host split.
+
+⛔⛔ **AND `execution-core.env` MUST NOT PIN THIS FLAG.** `resolveGithubFeedMode` puts
+**env above Layer-2**, and `~/.config/catalyst/execution-core.env` is read by
+**execution-core alone**. A pin there splits the host in the worst direction — measured
+live on `mini`, 2026-08-18 14:09:47–14:13:21 CT:
+
+| reader | resolved from | mode |
+| --- | --- | --- |
+| tunnel gate (orch-monitor) | Layer-2 | `enforce` → tunnel closed |
+| dispatch gate (broker) | Layer-2 | `enforce` → smee suppressed for 12 names |
+| **producer (execution-core)** | **`execution-core.env`** | ⛔ `shadow` → emits `would-dispatch` MARKERS |
+
+Smee closed **and** the producer emitting markers = **nothing dispatches** for any of
+the 12 covered names, for 3m34s. Every instrument an operator would check read green:
+`github-feed gate: armed mode:"enforce"`, `suppressing GitHub webhook smee tunnel
+start`, `catalyst-stack status` all-running, Layer-2 `"enforce"`. Set the mode in
+Layer-2; leave the env var unset. → CTL-2011 makes `catalyst doctor` FAIL on the
+disagreement.
+
+### 2.4 Verify a GitHub flip by content — four checks, and only one of them catches the split
+
+Run all four **per host**. Checks 2 and 3 passed throughout the incident above.
+
+```bash
+# 1. the PRODUCER's own readiness record — mode AND freshness
+cat ~/catalyst/execution-core/shadow/github-feed-ready-tenant-0.json
+#    want: {"ready":true,"unready":null,"mode":"enforce", "at":<within ~60s>}
+#    ⛔ a FRESH file with the WRONG mode is the split. Freshness alone is not the check.
+
+# 2. the broker's dispatch gate
+grep -a "github-feed gate: armed" ~/catalyst/broker.log | tail -1
+#    want: "mode":"enforce" AND readyFile under execution-core/shadow/ (CTL-1976)
+
+# 3. the tunnel gate
+grep -ac "suppressing GitHub webhook smee tunnel start" ~/catalyst/monitor.log   # >= 1
+grep -ac "webhook-tunnel" ~/catalyst/monitor.log                                 # must be 0
+
+# 4. a REAL dispatch-class event on the feed, plus the negative half
+grep '"event.channel":"cloud-feed"' <(tail -c 3000000 ~/catalyst/events/$(date -u +%Y-%m).jsonl) | tail -3
+#    want >= 1 github.* with "feedAuthority":true, and ZERO "event.channel":"webhook"
+#    github.* events after the flip.
+```
+
+### 2.5 ⚠️ What a rollback re-adopts
+
+Rolling back is correct if dispatch breaks, but it is not a return to a *better* leg.
+Two smee weaknesses were measured on the way out, both with positive controls:
+
+- **A dropped delivery.** For `coalesce-labs/catalyst@5d842e7e`, GitHub's API reports 4
+  completed-`success` check suites. The feed emitted **4**; smee delivered **3** to
+  `mini`. The missing delivery id appears **zero** times in mini's whole 1.57 GB event
+  log, while a control delivery id from the same window appears once — so the event is
+  genuinely absent, not missed by the search.
+- **~5% rejected at the door.** In the 13 min after a restart, mini's monitor logged
+  **7 × `401`** against **132 × `200`** on `/api/webhook`. A 401'd delivery never
+  reaches the event log at all. (Cause unattributed; it is *not* a per-repo secret gap.)
+  Note the direction — a 401 hides an event from the **smee** side, which makes the
+  parity ledger report `feed-unjoined`. It biases the instrument **against** a cutover,
+  so it can never manufacture a false CLEAN.
+
+### 2.6 ⛔ What the GitHub cutover cost — the PR caches
+
+`pr_status_cache` and `pr_cache` (`~/catalyst/filter-state.db`) are written **only** by
+orch-monitor's webhook handler (`orch-monitor/lib/pr-cache.ts`). Nothing on the feed
+path writes them, and `lib/pr-status-backfill.ts` is **one-shot by design** ("skipped
+entirely when the table already has rows … a migration step, not a poll"). **They froze
+at the cutover.**
+
+Measured A/B at 14:02 CT, one variable, the same merge (`catalyst-cloud#882`): `mini`
+(tunnel open) recorded it `merged` at 18:59:42Z; `mini-2` (tunnel closed) still read
+`open` from 18:42:27Z, with **0** rows written to either table after its flip.
+
+`getAllPrStatuses()` reads `pr_status_cache` as its **primary** source (`filter_state`
+is empty on every execution-core host) and feeds `scheduler.mjs` and `board-health.mjs`.
+Both guard on `map.size === 0 → observable:false` — a **frozen non-empty** map defeats
+that guard: it looks observable and answers wrong, and it rots with time.
+`checkPhantomMergedPr` goes blind; `checkOrphanedOpenPr` accumulates false positives.
+
+**This is not dispatch loss** — the feed carries `github.pr.merged` with its
+`mergeCommitSha`. It is detector rot. → **CTL-2008**. Lever C restores the caches.
 
 ---
 

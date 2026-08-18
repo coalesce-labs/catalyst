@@ -334,8 +334,10 @@ Read these on demand:
 - **Decision records (ADRs)** — `docs/adrs.md`
 - **Specs & mockups** — `docs/specs/` (durable `draft → accepted` home for specs, requirements,
   and mockups; distinct from ADRs and `thoughts/` — see `docs/specs/README.md`)
-- **Linear smee retirement + rollback** — `docs/runbooks/cloud-feed-cutover.md` (CTL-1928: Linear
-  ingestion is the cloud feed; the GitHub smee half is deliberately still running)
+- **smee retirement + rollback** — `docs/runbooks/cloud-feed-cutover.md` (CTL-1928 retired the
+  Linear half 2026-08-17; CTL-1929 retired the **GitHub** half 2026-08-18 — both ingestion legs
+  are now the cloud feed, all 15 webhooks are disabled-not-deleted, and the runbook holds the
+  four per-host verify-by-content checks and both rollback lever pairs)
 - **Release process** — `docs/releases.md`
 - **Observability signal catalog** — `catalyst-otel/docs/data-dictionary.md` (sister repo: every
   metric, log/event, trace, and alert; see the Observability section above)
