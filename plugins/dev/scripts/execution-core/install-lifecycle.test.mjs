@@ -147,6 +147,8 @@ describe("parseArgs", () => {
   test("--print is an alias for --dry-run; --force/--json/-h flags", () => {
     expect(parseArgs(["install", "--print"]).dryRun).toBe(true);
     expect(parseArgs(["uninstall", "--force"]).force).toBe(true);
+    expect(parseArgs(["uninstall", "--archive"]).archive).toBe(true);
+    expect(parseArgs(["uninstall"]).archive).toBe(false);
     expect(parseArgs(["install", "--json"]).json).toBe(true);
     expect(parseArgs(["-h"]).help).toBe(true);
   });
@@ -269,6 +271,27 @@ describe("planPhases — per-class correctness (pure)", () => {
   test("uninstall / reinstall phase orders match their exported enums", () => {
     expect(phaseNames(planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS }))).toEqual([...UNINSTALL_PHASES]);
     expect(phaseNames(planPhases({ operation: "reinstall", nodeClass: "developer", scripts: SCRIPTS }))).toEqual([...REINSTALL_PHASES]);
+  });
+  // CTL-1975 — `catalyst uninstall --archive`. Both directions are asserted: the flag must ADD the
+  // two capture flags, and its ABSENCE must leave the lean restore point byte-identical, because a
+  // default that silently started copying a ~200 MB replica on every install is the regression this
+  // opt-in exists to avoid.
+  test("--archive upgrades the backup step to a teardown-grade capture", () => {
+    const plan = planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS, opts: { archive: true } });
+    const step = plan.find((p) => p.phase === "backup").steps[0];
+    expect(step.argv).toContain("--with-replica");
+    expect(step.argv).toContain("--tar");
+    // ⛔ NOT the `archive` verb: this step's stdout tail is read into ctx.bundlePath and handed to
+    // `catalyst-backup restore <path>`, which needs the bundle DIRECTORY. `archive` prints the
+    // tarball last, so routing through it would break rollback at the one moment it is all that is
+    // left. Pinned here so a later "simplification" to the archive verb fails loudly.
+    expect(step.argv).toContain("backup");
+    expect(step.argv).not.toContain("archive");
+  });
+  test("without --archive the backup step is unchanged (no replica, no tarball)", () => {
+    const step = planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS }).find((p) => p.phase === "backup").steps[0];
+    expect(step.argv).not.toContain("--with-replica");
+    expect(step.argv).not.toContain("--tar");
   });
   test("reinstall backs up exactly ONCE (one top-of-run snapshot covers teardown+provision)", () => {
     const plan = planPhases({ operation: "reinstall", nodeClass: "worker", scripts: SCRIPTS });

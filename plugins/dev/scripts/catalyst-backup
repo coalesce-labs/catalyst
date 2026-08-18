@@ -3,6 +3,9 @@
 #
 # Usage:
 #   catalyst-backup backup [--out <dir>] [--label <name>]   capture a timestamped bundle
+#         [--with-replica] [--tar]                          ... incl. the replica DB / a tarball
+#   catalyst-backup archive [--label <name>]                teardown-grade (CTL-1975)
+#   catalyst-backup state                                   observable host state as JSON
 #   catalyst-backup restore <bundle> [--force] [--dry-run]   restore a bundle's files
 #   catalyst-backup list [--json]                            list available bundles
 #
@@ -42,6 +45,12 @@ launchagents_dir()  { printf '%s' "${CATALYST_LAUNCHAGENTS_DIR:-$HOME/Library/La
 humanlayer_config() { printf '%s' "${CATALYST_HUMANLAYER_CONFIG:-$HOME/.config/humanlayer/humanlayer.json}"; }
 db_file()           { printf '%s' "${CATALYST_DB_FILE:-$(catalyst_dir)/catalyst.db}"; }
 backups_root()      { printf '%s' "${CATALYST_BACKUPS_DIR:-$(catalyst_dir)/backups}"; }
+# CTL-1975. Resolved IDENTICALLY to lib/linear-read-replica.sh (and config.mjs getReplicaDbPath):
+# CATALYST_REPLICA_DB overrides, else $CATALYST_DIR/catalyst-replica.db. Two resolvers disagreeing
+# here would archive one tenant's replica while the host reads another's.
+replica_db()        { printf '%s' "${CATALYST_REPLICA_DB:-$(catalyst_dir)/catalyst-replica.db}"; }
+worktrees_dir()     { printf '%s' "${CATALYST_WT_DIR:-$(catalyst_dir)/wt}"; }
+logs_dir()          { printf '%s' "${CATALYST_LOGS_DIR:-$(catalyst_dir)/logs}"; }
 
 err() { printf 'catalyst-backup: %s\n' "$*" >&2; }
 log() { printf '  %s\n' "$*"; }
@@ -59,16 +68,135 @@ plugin_version() {
 node_host()  { if declare -F catalyst_host_name >/dev/null 2>&1; then catalyst_host_name; else hostname -s 2>/dev/null || echo node; fi; }
 node_class() { if declare -F catalyst_node_class >/dev/null 2>&1; then catalyst_node_class; else echo unknown; fi; }
 
+# ── observable host state (CTL-1975) ─────────────────────────────────────────
+#
+# emit_state_json — a snapshot of what an operator can OBSERVE about this node's install, on stdout.
+# This is the pre/post diff instrument for an archive+uninstall: run it before, run it after, `diff`
+# the two, and every agent that survived a teardown is a line in that diff.
+#
+# ⛔ NO SECRET VALUES, structurally rather than by filtering. The config section emits jq
+# `paths(scalars)` — leaf key PATHS only — so a value cannot reach the output even if a new secret
+# key appears tomorrow. The per-project config-<key>.json files (which hold API/webhook tokens) are
+# listed by BASENAME only; their key paths are never walked.
+#
+# Every probe degrades to a named empty/absent rather than to silence: a section that could not be
+# read reports `"unreadable"`, never `[]`, because an empty list and a failed probe are the same
+# bytes to a diff and that is exactly how a teardown gets certified clean by an instrument that was
+# never able to look.
+emit_state_json() {
+  local la ldir cfg
+  la="$(launchagents_dir)"; ldir="$(logs_dir)"; cfg="$(layer2_config)"
+
+  # 1. plists on disk — the fleet's two prefixes, matched by NAME not by any hardcoded label list.
+  #    A registry-driven probe cannot see an agent the registry forgot; a prefix probe can.
+  local plists="[]"
+  if [[ -d "$la" ]]; then
+    plists="$(cd "$la" 2>/dev/null && ls -1 2>/dev/null \
+      | grep -E '^(ai\.coalesce\.catalyst-.*|com\.catalyst\.agent)\.plist$' \
+      | sort | jq -R . | jq -s . 2>/dev/null)" || plists='"unreadable"'
+    [[ -z "$plists" ]] && plists="[]"
+  fi
+
+  # 2. what launchd has LOADED. Disk and launchd disagree in both directions — a booted-out label
+  #    with its plist still on disk, and a squatted label whose plist is long gone — so both are
+  #    recorded and neither is inferred from the other.
+  local loaded='"unavailable"'
+  if command -v launchctl >/dev/null 2>&1; then
+    loaded="$(launchctl list 2>/dev/null \
+      | awk '$3 ~ /^(ai\.coalesce\.catalyst-|com\.catalyst\.agent)/ {print $3"\t"$1"\t"$2}' \
+      | sort | jq -R 'split("\t") | {label:.[0], pid:.[1], status:.[2]}' | jq -s . 2>/dev/null)" \
+      || loaded='"unreadable"'
+    [[ -z "$loaded" ]] && loaded="[]"
+  fi
+
+  # 3. Layer-2 config — key PATHS only (see the no-secrets note above), plus the basenames of the
+  #    per-project secret files so their presence/absence is diffable without reading them.
+  local cfgkeys='"absent"' cfgfiles="[]"
+  if [[ -r "$cfg" ]]; then
+    cfgkeys="$(jq -c '[paths(scalars) | join(".")] | sort' "$cfg" 2>/dev/null)" || cfgkeys='"unreadable"'
+    [[ -z "$cfgkeys" ]] && cfgkeys='"unreadable"'
+  fi
+  local l2dir; l2dir="$(layer2_dir)"
+  if [[ -d "$l2dir" ]]; then
+    cfgfiles="$(cd "$l2dir" 2>/dev/null && ls -1 2>/dev/null | sort | jq -R . | jq -s . 2>/dev/null)" || cfgfiles='"unreadable"'
+    [[ -z "$cfgfiles" ]] && cfgfiles="[]"
+  fi
+
+  # 4. databases — presence + byte size (a reinstall that rebuilds an empty replica is visible here).
+  local dbs; dbs="$(
+    { for pair in "catalyst.db:$(db_file)" "catalyst-replica.db:$(replica_db)"; do
+        nm="${pair%%:*}"; p="${pair#*:}"; sz=0
+        if [[ -r "$p" ]]; then sz="$(wc -c <"$p" 2>/dev/null | tr -d ' ')"; fi
+        [[ "$sz" =~ ^[0-9]+$ ]] || sz=0
+        jq -n --arg n "$nm" --argjson present "$([[ -e $p ]] && echo true || echo false)" \
+              --argjson bytes "${sz:-0}" '{name:$n, present:$present, bytes:$bytes}'
+      done; } | jq -s . 2>/dev/null)" || dbs='"unreadable"'
+  [[ -z "$dbs" ]] && dbs='"unreadable"'
+
+  # 5. worktrees — the INVENTORY (name, HEAD, branch, dirty), never the trees themselves. An
+  #    uncommitted worktree is unrecoverable work, so "dirty" is the field that matters here: it is
+  #    what tells an operator a teardown is about to destroy something not pushed anywhere.
+  local wts="[]" wtd; wtd="$(worktrees_dir)"
+  if [[ -d "$wtd" ]]; then
+    wts="$(
+      { for d in "$wtd"/*/; do
+          [[ -d "$d" ]] || continue
+          dirty=false
+          nm="$(basename "$d")"
+          head="$(git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+          br="$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+          [[ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ]] && dirty=true
+          jq -n --arg n "$nm" --arg h "$head" --arg b "$br" --argjson d "$dirty" \
+                '{name:$n, head:$h, branch:$b, dirty:$d}'
+        done; } | jq -s . 2>/dev/null)" || wts='"unreadable"'
+    [[ -z "$wts" ]] && wts="[]"
+  fi
+
+  # 6. logs — inventory only (name + bytes). The bytes themselves are deliberately NOT archived:
+  #    they are large, transient, and already shipped to Loki by Alloy.
+  local logs='"absent"'
+  if [[ -d "$ldir" ]]; then
+    logs="$(
+      { for f in "$ldir"/*; do
+          [[ -f "$f" ]] || continue
+          jq -n --arg n "$(basename "$f")" --argjson b "$(wc -c <"$f" 2>/dev/null | tr -d ' ')" '{name:$n, bytes:$b}'
+        done; } | jq -s . 2>/dev/null)" || logs='"unreadable"'
+    [[ -z "$logs" ]] && logs="[]"
+  fi
+
+  jq -n --arg host "$(node_host)" --arg nc "$(node_class)" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson plists "$plists" --argjson loaded "$loaded" --argjson cfgkeys "$cfgkeys" \
+        --argjson cfgfiles "$cfgfiles" --argjson dbs "$dbs" --argjson wts "$wts" --argjson logs "$logs" \
+        '{probedAt:$at, host:$host, nodeClass:$nc,
+          launchAgents:{plists:$plists, loaded:$loaded},
+          config:{keys:$cfgkeys, files:$cfgfiles},
+          databases:$dbs, worktrees:$wts, logs:$logs}'
+}
+
+# cmd_state — the same probe as a standalone command, so `catalyst-backup state > pre.json`,
+# uninstall, `catalyst-backup state > post.json`, `diff pre.json post.json` is the whole ritual.
+cmd_state() {
+  command -v jq >/dev/null 2>&1 || { err "jq is required"; return 3; }
+  emit_state_json
+}
+
 # cmd_backup — capture a bundle. Prints progress; LAST stdout line is the bundle path so a
 # caller (the install command) can `bundle="$(catalyst-backup backup ... | tail -1)"`. Exits
 # NON-ZERO if any PRESENT source failed to capture — so the install lifecycle aborts before it
 # overwrites a node it couldn't back up (an absent source is a legitimate, silent skip).
 cmd_backup() {
-  local out="" label="node"
+  local out="" label="node" with_replica=0 do_tar=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --out)   out="$2"; shift 2 ;;
       --label) label="$2"; shift 2 ;;
+      # CTL-1975: the replica is ~200 MB on a live node (measured 204 MB), so it is opt-in rather
+      # than a cost every install-lifecycle backup pays. `archive` turns it on; `backup` (the
+      # inline restore point install/uninstall/reinstall take) stays lean. Either way the manifest
+      # records which happened, so an archive can never LOOK like it holds a replica it does not.
+      --with-replica) with_replica=1; shift ;;
+      --no-replica)   with_replica=0; shift ;;
+      --tar)   do_tar=1; shift ;;
       -h|--help) usage; return 0 ;;
       *) err "backup: unknown flag: $1"; return 2 ;;
     esac
@@ -83,6 +211,10 @@ cmd_backup() {
   if [[ -z "$out" && -e "$bundle" ]]; then n=1; while [[ -e "${bundle}-${n}" ]]; do n=$((n+1)); done; bundle="${bundle}-${n}"; fi
   mkdir -p "$bundle"/config "$bundle"/humanlayer "$bundle"/launchagents "$bundle"/runtime \
     || { err "cannot create bundle dir: $bundle"; return 1; }
+  # The tarball name is DERIVED from the bundle dir (which already carries host + UTC timestamp and
+  # is collision-resolved above), so "dated" is a property of the bundle naming rather than a second
+  # clock read that could disagree with the manifest's `created`.
+  local tarball=""; [[ $do_tar -eq 1 ]] && tarball="${bundle}.tar.gz"
 
   local -a captured=() failed=() degraded=()
   local f l2dir l2base la db cdir plist sx
@@ -126,32 +258,42 @@ cmd_backup() {
     if [[ -s "$bundle/launchagents/launchctl-snapshot.txt" ]]; then captured+=("launchagents/launchctl-snapshot.txt"); else rm -f "$bundle/launchagents/launchctl-snapshot.txt"; fi
   fi
 
-  # 4. catalyst.db — WAL-safe snapshot via `.backup` (one consistent file, no sidecars). If that
-  # is unavailable/fails, DEGRADE to a plain copy of the db PLUS its -wal/-shm sidecars (a live
+  # 4. SQLite databases — WAL-safe snapshot via `.backup` (one consistent file, no sidecars). If
+  # that is unavailable/fails, DEGRADE to a plain copy of the db PLUS its -wal/-shm sidecars (a live
   # WAL db copied without them loses un-checkpointed commits) and mark it degraded. If BOTH fail,
   # record it as failed (the both-fail path is real: a full disk dooms .backup and cp alike).
-  db="$(db_file)"
-  if [[ -e "$db" && ! -r "$db" ]]; then
-    failed+=("runtime/catalyst.db"); err "FAILED — present but unreadable: $db"
-  elif [[ -r "$db" ]]; then
-    if command -v sqlite3 >/dev/null 2>&1 && sqlite3 "$db" ".backup '$bundle/runtime/catalyst.db'" 2>/dev/null; then
-      captured+=("runtime/catalyst.db")
-    else
-      local db_ok=true
-      cp -p "$db" "$bundle/runtime/catalyst.db" 2>/dev/null || db_ok=false
-      for sx in -wal -shm; do
-        if [[ -r "${db}${sx}" ]]; then cp -p "${db}${sx}" "$bundle/runtime/catalyst.db${sx}" 2>/dev/null || db_ok=false; fi
-      done
-      if $db_ok; then
-        captured+=("runtime/catalyst.db"); degraded+=("runtime/catalyst.db")
-        [[ -r "${db}-wal" ]] && captured+=("runtime/catalyst.db-wal")
-        [[ -r "${db}-shm" ]] && captured+=("runtime/catalyst.db-shm")
-        err "WARN: sqlite3 .backup unavailable/failed — copied catalyst.db + WAL sidecars (DEGRADED snapshot)"
-      else
-        rm -f "$bundle/runtime/catalyst.db" "$bundle/runtime/catalyst.db-wal" "$bundle/runtime/catalyst.db-shm"
-        failed+=("runtime/catalyst.db"); err "FAILED to capture catalyst.db (sqlite3 .backup AND cp both failed)"
-      fi
+  #
+  # CTL-1975: extracted from the catalyst.db-only body so the replica gets the IDENTICAL treatment.
+  # The replica is a live WAL database with a writer holding it open, so a plain `cp` of it is the
+  # exact un-checkpointed-commit loss this degrade path was written for — a second hand-rolled
+  # copy would have re-introduced the bug the first one already solved.
+  capture_sqlite() {
+    local src="$1" rel="$2" base ok=true sx
+    base="$(basename "$rel")"
+    if [[ -e "$src" && ! -r "$src" ]]; then
+      failed+=("$rel"); err "FAILED — present but unreadable: $src"; return 0
     fi
+    [[ -r "$src" ]] || return 0
+    if command -v sqlite3 >/dev/null 2>&1 && sqlite3 "$src" ".backup '$bundle/$rel'" 2>/dev/null; then
+      captured+=("$rel"); return 0
+    fi
+    cp -p "$src" "$bundle/$rel" 2>/dev/null || ok=false
+    for sx in -wal -shm; do
+      if [[ -r "${src}${sx}" ]]; then cp -p "${src}${sx}" "$bundle/${rel}${sx}" 2>/dev/null || ok=false; fi
+    done
+    if $ok; then
+      captured+=("$rel"); degraded+=("$rel")
+      [[ -r "${src}-wal" ]] && captured+=("${rel}-wal")
+      [[ -r "${src}-shm" ]] && captured+=("${rel}-shm")
+      err "WARN: sqlite3 .backup unavailable/failed — copied ${base} + WAL sidecars (DEGRADED snapshot)"
+    else
+      rm -f "$bundle/$rel" "$bundle/${rel}-wal" "$bundle/${rel}-shm"
+      failed+=("$rel"); err "FAILED to capture ${base} (sqlite3 .backup AND cp both failed)"
+    fi
+  }
+  capture_sqlite "$(db_file)" "runtime/catalyst.db"
+  if [[ $with_replica -eq 1 ]]; then
+    capture_sqlite "$(replica_db)" "runtime/catalyst-replica.db"
   fi
 
   # 5. runtime pointers (small, denormalized — NOT the events log)
@@ -159,16 +301,64 @@ cmd_backup() {
   capture "$cdir/state.json" "runtime/state.json"
   capture "$cdir/execution-core/registry.json" "runtime/registry.json"
 
+  # 6. host-state snapshot (CTL-1975) — the pre/post DIFF instrument, and the reason this bundle can
+  # certify a teardown rather than merely precede one. Produced by the SAME emit_state_json the
+  # standalone `catalyst-backup state` prints, so
+  #   diff <(jq -S . <bundle>/host-state.json) <(catalyst-backup state | jq -S .)
+  # after an uninstall is a real differential and not two probes that merely resemble each other.
+  #
+  # Deliberately NOT `runtime/state.json` — that name is already the orchestrator registry captured
+  # two lines above, and colliding them would overwrite a restorable artifact with a diagnostic one.
+  # Deliberately NOT added to `captured` either: `captured` is the RESTORABLE set that cmd_restore
+  # iterates, and a diagnostic in that list would make every restore print "unknown artifact".
+  local host_state=false
+  if emit_state_json > "$bundle/host-state.json" 2>/dev/null && jq -e . "$bundle/host-state.json" >/dev/null 2>&1; then
+    host_state=true
+  else
+    rm -f "$bundle/host-state.json"
+    err "FAILED to capture host-state.json — without it this bundle cannot certify a teardown"
+    failed+=("host-state.json")
+  fi
+
   # manifest (validated) — entries are recorded ONLY for successful copies, so it never overstates.
   local cap_json deg_json
   cap_json="[]"; [[ ${#captured[@]} -gt 0 ]] && cap_json="$(printf '%s\n' "${captured[@]}" | jq -R . | jq -s .)"
   deg_json="[]"; [[ ${#degraded[@]} -gt 0 ]] && deg_json="$(printf '%s\n' "${degraded[@]}" | jq -R . | jq -s .)"
-  jq -n --argjson sv 1 --arg ts "$ts" --arg host "$host" --arg nc "$(node_class)" \
+  # CTL-1975 adds three self-describing fields so a bundle can never LOOK like it holds something it
+  # does not: withReplica (the ~200 MB opt-in), hostState (the diff instrument), tarball (or null).
+  # `tarball` names the path this run INTENDED — the archive is written below and a failure there is
+  # a hard rc=1, so a manifest naming an absent tarball only ever accompanies a run that said so.
+  jq -n --argjson sv 2 --arg ts "$ts" --arg host "$host" --arg nc "$(node_class)" \
         --arg label "$label" --arg ver "$(plugin_version)" --argjson cap "$cap_json" --argjson deg "$deg_json" \
-        '{schemaVersion:$sv, created:$ts, host:$host, nodeClass:$nc, label:$label, pluginVersion:$ver, captured:$cap, degraded:$deg}' \
+        --argjson wr "$([[ $with_replica -eq 1 ]] && echo true || echo false)" \
+        --argjson hs "$host_state" --arg tarball "$tarball" \
+        '{schemaVersion:$sv, created:$ts, host:$host, nodeClass:$nc, label:$label, pluginVersion:$ver,
+          captured:$cap, degraded:$deg, withReplica:$wr, hostState:$hs,
+          tarball:(if $tarball == "" then null else $tarball end)}' \
         > "$bundle/manifest.json" 2>/dev/null
   if ! jq -e . "$bundle/manifest.json" >/dev/null 2>&1; then err "FAILED to write a valid manifest.json"; return 1; fi
   chmod -R go-rwx "$bundle" 2>/dev/null || true
+
+  # 7. the dated tarball (--tar; what `archive` turns on). One file to move off-host, which a
+  # directory bundle is not. The staging directory is KEPT: cmd_restore reads a directory, and
+  # deleting the only readable copy to save disk is the wrong trade on a teardown.
+  #
+  # VERIFIED by listing manifest.json back OUT of the archive. `tar` exiting 0 does not prove the
+  # member is readable — a truncated or empty-membered tarball is the failure that looks exactly
+  # like success to the caller, and it would be discovered at restore time, which is the worst
+  # possible moment. On any failure the partial tarball is REMOVED (a half-written archive on disk
+  # is worse than none, because `list` would offer it) and the run reports rc=1.
+  if [[ $do_tar -eq 1 ]]; then
+    if tar -czf "$tarball" -C "$(dirname "$bundle")" "$(basename "$bundle")" 2>/dev/null \
+       && tar -tzf "$tarball" 2>/dev/null | grep -q '/manifest\.json$'; then
+      chmod go-rwx "$tarball" 2>/dev/null || true
+      log "tarball → $tarball"
+    else
+      rm -f "$tarball"
+      err "FAILED to create or verify tarball: $tarball"
+      failed+=("$(basename "$tarball")")
+    fi
+  fi
 
   if [[ ${#failed[@]} -gt 0 ]]; then
     err "backup INCOMPLETE — ${#failed[@]} present artifact(s) could not be captured: ${failed[*]}"
@@ -178,6 +368,37 @@ cmd_backup() {
   [[ ${#captured[@]} -eq 0 ]] && err "WARN: backup captured 0 artifacts — nothing present to back up at this node"
   log "backup complete — ${#captured[@]} artifact(s)$([[ ${#degraded[@]} -gt 0 ]] && printf ' (%s degraded)' "${#degraded[@]}") → $bundle"
   printf '%s\n' "$bundle"
+}
+
+# cmd_archive — the teardown-grade capture: replica included, dated tarball, host-state snapshot.
+# This is what an operator takes BEFORE `catalyst uninstall`, and it is `backup` with the two
+# expensive options turned on rather than a second implementation — a parallel capture path is
+# exactly how one of the two ends up missing a WAL sidecar the other has.
+#
+# Output contract: cmd_backup's own last stdout line is the BUNDLE dir (install-lifecycle reads it
+# with `tail -1`, so that invariant is not negotiable). archive therefore replays cmd_backup's
+# output verbatim and then prints the TARBALL as its own last line — so `archive | tail -1` is the
+# tarball and `backup | tail -1` is still the bundle. Progress is buffered for the duration
+# (stderr — every err/WARN — still streams live).
+cmd_archive() {
+  local -a pass=(); local labelled=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --label)   labelled=1; pass+=("$1" "$2"); shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *)         pass+=("$1"); shift ;;
+    esac
+  done
+  [[ $labelled -eq 1 ]] || pass+=(--label "archive-$(node_class)")
+
+  # Separate declaration + assignment: `local out="$(cmd)"` would make rc the rc of `local`, which
+  # is always 0 — a failed capture would be reported as a successful archive (house rule).
+  local out rc=0
+  out="$(cmd_backup --with-replica --tar "${pass[@]}")" || rc=$?
+  [[ -n "$out" ]] && printf '%s\n' "$out"
+  [[ $rc -eq 0 ]] || return $rc
+  local bundle; bundle="$(printf '%s\n' "$out" | tail -1)"
+  printf '%s.tar.gz\n' "$bundle"
 }
 
 # ── restore ──────────────────────────────────────────────────────────────────
@@ -204,6 +425,14 @@ rel_to_dest() {
     runtime/catalyst.db)        printf '%s' "$(db_file)" ;;
     runtime/catalyst.db-wal)    printf '%s-wal' "$(db_file)" ;;
     runtime/catalyst.db-shm)    printf '%s-shm' "$(db_file)" ;;
+    # CTL-1975: the replica restores to the SAME resolver the live readers use (replica_db), so a
+    # bundle captured here cannot be replayed into a path nothing reads. Its WAL sidecars are mapped
+    # too — the degraded capture path emits them, and an unmapped sidecar would be reported by
+    # restore as "unknown artifact, skipping" while the db it belongs to restored, which is the
+    # silent half-restore this table exists to prevent.
+    runtime/catalyst-replica.db)     printf '%s' "$(replica_db)" ;;
+    runtime/catalyst-replica.db-wal) printf '%s-wal' "$(replica_db)" ;;
+    runtime/catalyst-replica.db-shm) printf '%s-shm' "$(replica_db)" ;;
     runtime/state.json)         printf '%s/state.json' "$(catalyst_dir)" ;;
     runtime/registry.json)      printf '%s/execution-core/registry.json' "$(catalyst_dir)" ;;
     launchagents/*.plist)       printf '%s/%s' "$(launchagents_dir)" "$(basename "$1")" ;;
@@ -265,7 +494,12 @@ cmd_restore() {
         # unclean shutdown. (Doing this before the no-clobber decision would drop live WAL data
         # on a skipped restore — Codex P1.) Bundle-carried sidecars, if any, restore in later
         # iterations and overwrite these.
-        [[ "$rel" == "runtime/catalyst.db" ]] && rm -f "${dest}-wal" "${dest}-shm" 2>/dev/null
+        # CTL-1975: BOTH sqlite databases, not just catalyst.db. A replica restored from a clean
+        # .backup snapshot with the node's stale -wal left beside it is a corrupt read, and the
+        # replica is the one an operator restores precisely because it is expensive to rebuild.
+        case "$rel" in
+          runtime/catalyst.db|runtime/catalyst-replica.db) rm -f "${dest}-wal" "${dest}-shm" 2>/dev/null ;;
+        esac
         ;;
       11) skipped=$((skipped+1)) ;;
       10) failures=$((failures+1)); err "manifest lists $rel but it is missing/unreadable in the bundle" ;;
@@ -316,6 +550,9 @@ catalyst-backup — capture / restore a Catalyst node's restorable state.
 
 Usage (direct, or via the router as 'catalyst backup …'):
   catalyst-backup [backup] [--out <dir>] [--label <name>]   capture a timestamped bundle (default)
+        [--with-replica] [--tar]                            ... incl. the replica DB / a tarball
+  catalyst-backup archive [--label <name>]                  teardown-grade: backup --with-replica --tar
+  catalyst-backup state                                     print observable host state as JSON
   catalyst-backup restore <bundle> [--force] [--dry-run]    restore a bundle's files
   catalyst-backup list [--json]                             list available bundles
 
@@ -326,6 +563,21 @@ Captures: Layer-2 config (secrets), thoughts creds (secrets), launchd agents,
 catalyst.db (WAL-safe), and runtime pointers (state.json, registry.json).
 Bundles are 0700/0600 (they hold secrets). restore refuses to clobber without --force
 and refuses a live node (running daemons) without --force.
+
+archive (CTL-1975) additionally captures ~/catalyst/catalyst-replica.db (WAL-safe, same
+degrade path as catalyst.db), a worktree + log INVENTORY, and host-state.json — then emits a
+dated .tar.gz beside the bundle and VERIFIES it by reading manifest.json back out. `archive`
+prints the tarball as its last line; `backup` still prints the bundle dir.
+
+The pre/post ritual around a teardown:
+  catalyst-backup archive                       # -> <bundle>.tar.gz, holds host-state.json
+  catalyst uninstall
+  catalyst-backup state > /tmp/post.json
+  diff <(jq -S . <bundle>/host-state.json) <(jq -S . /tmp/post.json)
+Every launchd label, plist, database and worktree that survived the teardown is a line in that
+diff. host-state.json carries NO secret VALUES — the config section emits jq `paths(scalars)`,
+i.e. leaf key paths only, so a value cannot reach the output even if a new secret key is added
+later; the per-project config-<key>.json secret files are listed by BASENAME only.
 EOF
 }
 
@@ -337,10 +589,12 @@ EOF
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   case "${1:-}" in
     backup)        shift; cmd_backup "$@" ;;
+    archive)       shift; cmd_archive "$@" ;;
+    state)         shift; cmd_state "$@" ;;
     restore)       shift; cmd_restore "$@" ;;
     list)          shift; cmd_list "$@" ;;
     -h|--help)     usage ;;
     ""|--*)        cmd_backup "$@" ;;
-    *) err "unknown command: $1 (try: backup | restore | list)"; usage >&2; exit 2 ;;
+    *) err "unknown command: $1 (try: backup | archive | state | restore | list)"; usage >&2; exit 2 ;;
   esac
 fi

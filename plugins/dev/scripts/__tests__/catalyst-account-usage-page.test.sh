@@ -215,11 +215,20 @@ FAKE="$SCRATCH/fake-scripts"
 mkdir -p "$FAKE/usage-page"
 cp "$SCRIPT_DIR/../catalyst-account-usage-page.sh" "$FAKE/"
 cp "$INSTALLER" "$FAKE/"
+# CTL-1975: the installer now loads lib/launchd-domain-guard.sh (CTL-1968 family), so the fake
+# scripts dir has to carry it or the script refuses before it ever renders the template — and this
+# control would then "pass" on the WRONG refusal.
+mkdir -p "$FAKE/lib"
+cp "$SCRIPT_DIR/../lib/launchd-domain-guard.sh" "$FAKE/lib/"
 sed 's|__SCRIPT__|__NEVER_SUBSTITUTED__|' "$SCRIPT_DIR/../usage-page/ai.coalesce.catalyst-usage-page.plist" \
 	>"$FAKE/usage-page/ai.coalesce.catalyst-usage-page.plist"
 OUT="$(bash "$FAKE/install-usage-page.sh" --print-only 2>&1)"
 RC=$?
-[ "$RC" -ne 0 ] && grep -q "REFUSING" <<<"$OUT" && pass "an unsubstituted token is refused" || fail "an unsubstituted token is refused" "rc=$RC: $OUT"
+# ⛔ Matched on the TOKEN-SPECIFIC line, not a bare "REFUSING": this script now has a second refusal
+# (the launchd domain guard), so the loose needle would let a run that never reached the template
+# check certify the template check. That is not hypothetical — it is exactly what a missing
+# lib/launchd-domain-guard.sh produced here before the copy above was added.
+[ "$RC" -ne 0 ] && grep -q "unsubstituted token(s) remain" <<<"$OUT" && pass "an unsubstituted token is refused" || fail "an unsubstituted token is refused" "rc=$RC: $OUT"
 
 echo ""
 echo "  PASSED: $PASSES   FAILED: $FAILURES"
