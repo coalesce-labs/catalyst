@@ -47,6 +47,30 @@ summary as "needs you" **must be an ask ticket** — never a status paragraph.
   is NOT recognized until CTC-653 lands. The trigger is deterministic — no LLM reads the reply (CTC-554).
 - Priority 1 if it blocks a live customer path, else 2.
 
+**Use the verb** (CTL-1922 inc 2) — it builds the exact shape, files the ticket, then reads it
+BACK out of Linear and proves the decision trigger can parse the options:
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
+  --team CTL --priority 2 \
+  --title "ASK: <one line>" \
+  --why "<what it unblocks>" \
+  --option "<option A>" --option "<option B>" \
+  --default "<what happens if silent>" \
+  --blocks CTL-NNNN
+#   --dry-run   print the body and the parsed options without writing
+```
+
+⛔ **Why a verb and not the snippet below:** documenting the shape was not enough. CTC-653
+measured that EVERY ask a human filed on 2026-08-17 (CTC-648/649/650/651, CTL-1919,
+CTL-1923..1927) wrote the options inline instead of as a bulleted block. Those parsed to
+**zero** options, so no reply could ever match — the asks were *structurally undecidable*
+while looking perfectly normal on the board and in "what needs me". `create` exits **2** and
+says so if the stored body does not parse, rather than leaving you a ticket that can never
+be answered.
+
+The raw form, for reference (or when you must hand-build):
+
 ```bash
 linearis issues create "ASK: <one line>" --team CTL --priority 2 \
   --assignee c2a8cc92-cab6-4536-9500-0f24abdf702b \
@@ -95,8 +119,23 @@ The human is looking at the LAST message they wrote, not the top of the thread. 
 ## 5. Closing (the raising agent)
 
 When the answer satisfies the ask: **verify** that it does (e.g. a token really carries the permission),
-reply threaded **"accepted — has what it needs"** (or state exactly what is still missing), and **move
-the ticket to Done yourself** (`linearis issues update <ID> --status Done`). Downstream work continues
+then:
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" accept CTL-NNNN --as <AGENT> --body "accepted — …"
+#   --body -     read the reply from stdin
+#   --dry-run    show what it would reply and close, without writing
+```
+
+`accept` replies in-thread as the app actor and moves the ticket to Done. Two refusals are
+deliberate: it **refuses a ticket without the `catalyst-ask` label** (closing a work ticket
+because an id was mistyped is not recoverable by the person who typed it), and if the reply
+fails it leaves the ticket **OPEN** rather than closing it — a Done ask with no recorded
+answer is worse than an open one, because it clears the human's view while the decision goes
+unrecorded.
+
+The manual equivalent: reply threaded **"accepted — has what it needs"** (or state exactly what
+is still missing), and **move the ticket to Done yourself** (`linearis issues update <ID> --status Done`). Downstream work continues
 on the work tickets. If the human's action surfaces a defect (CTC-649 → CTC-652), file the defect,
 `blocks →` the ask, keep the ask open, say so in the thread.
 
