@@ -603,10 +603,75 @@ _wt_idle_secs_ge() {
   [[ $(( now - newest )) -ge $threshold_secs ]]
 }
 
+# ─── free disk (CTC-633) ────────────────────────────────────────────────────
+#
+# The sweep never reported free space. On 2026-08-17 10:29 CDT this host reached
+# 365 MiB free and EVERY shell command in every agent session failed with ENOSPC —
+# including the harness's own task-output files, so agents could not read the output
+# of the command that had just failed. The fleet hard-stopped and the symptom did not
+# name its cause. A sweep that reclaims disk without ever saying how much is left
+# cannot be the thing that warns you.
+#
+# ⚠️ `df`, never `du`. These worktrees are APFS clones: a clone reports its own inode,
+# so `du` "confirms" duplication that does not exist and would overstate a reclaim by
+# ~40x (measured on CTL-1921). Only a df delta across a real delete is evidence.
+_disk_free_mib() {
+  df -k / 2>/dev/null | awk 'NR==2 {print int($4/1024)}'
+}
+
+# _log_disk PHASE — log one line naming free space, and publish the value in the global
+# `_DISK_MIB` for the caller.
+#
+# ⛔ The value is NOT printed. `log` writes to STDOUT, so a `$(_log_disk before)` would
+# capture the log LINE as well as the number: the disk report would vanish from the log it
+# was added to, and the captured string would poison the MiB arithmetic at the other end.
+# Caught by the dry run before this shipped — a reporting change whose report does not
+# appear is indistinguishable from not having made it.
+_DISK_MIB=""
+_log_disk() {
+  _DISK_MIB="$(_disk_free_mib)"
+  if [[ -z "$_DISK_MIB" ]]; then
+    log "disk: free space UNREADABLE ($1) — df returned nothing"
+    return 0
+  fi
+  log "disk: $(( _DISK_MIB / 1024 )) GiB free ($1)"
+}
+
+# _wt_thoughts_stranded — does this worktree hold thoughts content that removing it
+# would DESTROY?
+#
+# ⛔ WHY THIS GUARD EXISTS AT ALL. `thoughts/` is normally a directory of SYMLINKS into
+# the separate thoughts repo, so deleting a worktree loses nothing. But it is sometimes
+# materialised as a PLAIN directory, and then the worktree is the only copy. Measured
+# 2026-08-17 across 28 worktrees on this host: 26 symlink-only, 2 with a plain
+# `thoughts/shared` — and one of those two (evergreen/evr-storage-quick-wins) is a tree
+# whose only other change is harness scratch, i.e. exactly the population this sweep is
+# being taught to reclaim. Today those two hold only `.gitkeep` scaffolding, so this is
+# preventive rather than a rescue; the shape is what matters, because the next one will
+# hold a handoff.
+#
+# ⚠️ `searchable/` is EXCLUDED: it is the generated grep mirror of content that lives in
+# the symlinked repo, so it is derived data and never the only copy.
+_wt_thoughts_stranded() {
+  local t="$1/thoughts" e b
+  [[ -d "$t" && ! -L "$t" ]] || return 1
+  for e in "$t"/*; do
+    [[ -e "$e" ]] || continue
+    b="$(basename "$e")"
+    [[ "$b" == "searchable" ]] && continue
+    [[ -L "$e" ]] && continue
+    [[ -d "$e" ]] && return 0
+  done
+  return 1
+}
+
 classify_worktree() {
   local wt="$1" trunk="${2:-origin/main}" dirty unpushed
   [[ -d "$wt" ]] || { printf 'KEEP'; return 0; }
   _wt_active_session "$wt" 2>/dev/null && { printf 'KEEP'; return 0; }
+  # CTC-633: a materialised thoughts/ makes this worktree the only copy of that content.
+  # Checked BEFORE every other signal so no later branch can reach a removing verdict.
+  _wt_thoughts_stranded "$wt" && { printf 'KEEP_THOUGHTS'; return 0; }
   if _is_orphan_gitfile_dir "$wt" 2>/dev/null; then
     _wt_is_idle "$wt" && { printf 'ORPHAN_GITFILE'; return 0; }
     printf 'KEEP'; return 0
@@ -1568,6 +1633,21 @@ sweep_worktrees() {
         KEEP)
           _sweep_count keep
           ;;
+        KEEP_THOUGHTS)
+          # CTC-633: thoughts/ is materialised here rather than symlinked, so this tree is
+          # the only copy of that content. Reported by NAME so the operator can move it out
+          # and let the next sweep reclaim the worktree, rather than it being kept forever
+          # by a signal nobody can see.
+          log "skip KEEP_THOUGHTS (materialised thoughts/ — this worktree is the only copy): $wt"
+          _sweep_count keep
+          ;;
+        *)
+          # ⛔ There was no default arm: an unrecognised verdict fell through in SILENCE.
+          # That direction is safe (nothing is removed) but invisible, so a typo'd or newly
+          # added verdict would simply stop being counted. Fail LOUD and keep the tree.
+          log "skip UNKNOWN verdict '$verdict' (keeping tree — this is a bug, not a classification): $wt"
+          _sweep_count keep
+          ;;
       esac
     done < <(enumerate_worktree_dirs "$root")
   done < <(discover_worktree_roots)
@@ -1831,12 +1911,18 @@ main() {
   log "starting sweep (vectors: trunk_cache, signals, procs[widen=${SWEEP_PROC_WIDEN}], worktrees, agent_browser)"
 
   _SWEEP_START_EPOCH="$(date -u +%s)"
+  _log_disk "before"; _SWEEP_DISK_START="$_DISK_MIB"
   sweep_trunk_cache
   sweep_procs
   sweep_signals
   sweep_worktrees
   sweep_agent_browser
   emit_sweep_completed
+
+  _log_disk "after"; _SWEEP_DISK_END="$_DISK_MIB"
+  if [[ -n "${_SWEEP_DISK_START:-}" && -n "${_SWEEP_DISK_END:-}" ]]; then
+    log "disk: reclaimed $(( _SWEEP_DISK_END - _SWEEP_DISK_START )) MiB this run (df delta, not du)"
+  fi
 
   log "sweep complete"
   exit 0
