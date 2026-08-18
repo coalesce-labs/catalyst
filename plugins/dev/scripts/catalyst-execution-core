@@ -479,6 +479,13 @@ _source_daemon_env_for_read() {
 	return 0 # fail-open: absent file is a no-op success, never a non-zero return
 }
 
+# CTL-1937: how many times this seam may be entered in one process ancestry before it
+# refuses. Legitimate use is depth 1 — the CLI shells out to exactly one module and
+# `exec`s, so no correct path ever re-enters. 3 leaves headroom for a future
+# module-calls-module case while still bounding a runaway at three processes instead of
+# 7,592.
+: "${CATALYST_EXEC_RUNTIME_MAX_DEPTH:=3}"
+
 exec_runtime_module() {
 	local module="$1"
 	shift
@@ -487,8 +494,53 @@ exec_runtime_module() {
 		echo "error: execution-core module not found: $module_path" >&2
 		return 1
 	fi
+
+	# ── CTL-1937: THE RECURSION GUARD ──
+	#
+	# Measured 2026-08-17 22:42–23:08 CT: a chain of **7,592 `bash` processes**, each the
+	# parent of the next, all running `bash …/cli/drain.mjs [--off] [--json]`. It reached
+	# 87% of `kern.maxprocperuid` (9,313 / 10,666) and `fork()` began failing for EVERY
+	# agent on the machine — including for the agent trying to report it.
+	#
+	# The mechanism: `cli/*.mjs` have no shebang, and the house style puts a backticked
+	# command example on the first line —
+	#     // cli/drain.mjs — CTL-1095. `catalyst-execution-core drain [--off] [--json]`
+	# Under bash `//` is not a comment and backticks are COMMAND SUBSTITUTION, so executing
+	# the file with a shell runs the wrapper, which runs the file again. The literal
+	# `[--off] [--json]` in every `ps` line was the doc comment's own words arriving as argv.
+	#
+	# ⛔ This guard is on DEPTH, not on identifying the runtime, and that is deliberate:
+	# `resolve_runtime` returns a NAME (`bun`) resolved through PATH, so a stub named `bun`
+	# that is really a shell script passes any is-it-a-JS-runtime test we could write here.
+	# Depth bounds the blast radius of EVERY cause, including ones nobody has thought of.
+	# The env var survives `exec` because it is exported, which is exactly what makes it
+	# able to see a chain the process table already forgot the shape of.
+	local depth="${CATALYST_EXEC_RUNTIME_DEPTH:-0}"
+	if [[ ! $depth =~ ^[0-9]+$ ]]; then depth=0; fi
+	if ((depth >= CATALYST_EXEC_RUNTIME_MAX_DEPTH)); then
+		echo "error: execution-core module re-entered ${depth} deep (module=${module}) — REFUSING." >&2
+		echo "  This is the CTL-1937 guard. A correct path never re-enters; a chain here once" >&2
+		echo "  reached 7,592 processes and took the machine's fork() down. Check whether a" >&2
+		echo "  shell is being used as the JS runtime (a PATH stub for bun/node, or" >&2
+		echo "  EXECUTION_CORE_RUNTIME set to one)." >&2
+		return 1
+	fi
+	export CATALYST_EXEC_RUNTIME_DEPTH=$((depth + 1))
+
 	local runtime
 	runtime="$(resolve_runtime)" || return 1
+
+	# Defence in depth, NOT the fix: refuse an obvious shell by name. It cannot catch a
+	# shell masquerading as `bun` on PATH — the depth guard above is what covers that —
+	# but it turns the common, honest misconfiguration into one clear line.
+	case "$(basename -- "$runtime")" in
+	sh | bash | zsh | dash | ksh | fish)
+		echo "error: resolved JS runtime is a shell (${runtime}) — refusing to execute ${module_path}." >&2
+		echo "  A cli/*.mjs run under a shell evaluates its own doc comment (CTL-1937)." >&2
+		return 1
+		;;
+	esac
+
 	exec "$runtime" "$module_path" "$@"
 }
 
