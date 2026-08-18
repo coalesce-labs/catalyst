@@ -17,13 +17,29 @@ The page you were sent here from presents step 1 as interactive. It does not hav
 `setup-catalyst.sh` has a full headless contract, so the entire install over SSH is:
 
 ```bash
+cd /path/to/your/repo   # ⛔ required — see below
 curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh \
   | bash -s -- --non-interactive \
       --cloud-token "$CATALYST_CLOUD_TOKEN" --cloud-account "$CATALYST_CLOUD_ACCOUNT"
 ```
 
+**Run it from inside the repo you are enrolling.** Setup configures Catalyst *for a project*, so a
+non-interactive run refuses rather than guessing which one:
+
+```
+✗ Not in a git repository. Run setup from inside the target repo when using --non-interactive.
+```
+
+This page previously showed the `curl` line alone and called it "the entire install", which is why
+this note exists: run from `$HOME` on a fresh host — the most natural thing to do over SSH — and the
+install stops there. Clone the repo first if the host does not have it yet.
+
 `-s --` is required — without it `bash` eats the flags and the script tries to open `/dev/tty` on a
 host that has none. `CATALYST_AUTONOMOUS=1` is an equivalent env-var form.
+
+`--cloud-account` is required the first time a cloud token is supplied, and there is deliberately no
+default (guessing would point the host at another tenant's workspace). **On later runs you can omit
+it** — setup records the account in `~/.config/catalyst/cloud-sync.env` and reads it back from there.
 
 Setup finishes the job rather than printing a list: it installs the `catalyst-*` CLIs, provisions
 `plugin-source`, turns on replica reads, and enrols the project. Anything it could not do is printed
