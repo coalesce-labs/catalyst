@@ -1045,6 +1045,7 @@ jobs:
             worker-dir-gc.test.mjs \
             in-flight-supersede.test.mjs \
             advance-idempotency.test.mjs \
+            clear-stall-advance-reentry.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
             claim.test.mjs \
