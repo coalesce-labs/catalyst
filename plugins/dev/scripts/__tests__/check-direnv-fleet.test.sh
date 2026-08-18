@@ -17,7 +17,10 @@ FAILURES=0
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "${SCRATCH:?}"' EXIT
 
-pass() { PASSES=$((PASSES + 1)); echo "  PASS: $1"; }
+pass() {
+	PASSES=$((PASSES + 1))
+	echo "  PASS: $1"
+}
 fail() {
 	FAILURES=$((FAILURES + 1))
 	echo "  FAIL: $1"
@@ -30,7 +33,7 @@ if ! command -v direnv >/dev/null 2>&1; then
 	# and still reports green — the two guards that carry the weight (blocked-.envrc, ambient-token)
 	# would never execute, and the suite would ship INERT while looking installed. That is the exact
 	# class CTL-1919/CTL-1935 are about, so CI must go red rather than quietly cover less.
-	if [[ -n "${CI:-}" ]]; then
+	if [[ -n ${CI-} ]]; then
 		echo "  FAIL: direnv is absent on a CI runner — this suite would skip its two core guards."
 		echo "        The workflow step is responsible for installing it (apt-get install direnv)."
 		echo ""
@@ -47,7 +50,16 @@ fi
 # Isolate direnv's allow-store so the test never reads or writes the operator's real one.
 export XDG_DATA_HOME="$SCRATCH/xdg-data"
 export XDG_CONFIG_HOME="$SCRATCH/xdg-config"
-mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME/direnv/profiles"
+mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME/direnv/profiles" "$XDG_CONFIG_HOME/direnv/lib"
+
+# CTL-1956: the lib/ helpers are part of a READY host, so the baseline scratch config carries them
+# — otherwise every "a correct host passes" case would be red for the wrong reason. The cases that
+# test their ABSENCE remove them explicitly and put them back, so ordering cannot leak.
+seed_libs() {
+	: >"$XDG_CONFIG_HOME/direnv/lib/profiles.sh"
+	: >"$XDG_CONFIG_HOME/direnv/lib/otel.sh"
+}
+seed_libs
 
 run() { bash "$SUBJECT" "$@" 2>&1; }
 
@@ -146,7 +158,7 @@ if [[ $HAVE_DIRENV -eq 1 ]]; then
 	if [[ $RC -ne 0 ]]; then pass "the unprovisioned host still FAILS (rc=$RC)"; else fail "an unprovisioned host passed on inherited credentials" "$OUT"; fi
 	# control — prove the leak was actually present in the caller's environment
 	LEAKCHK="$(LINEAR_API_TOKEN=lin_api_leaked_from_the_caller sh -c 'printf %s "${LINEAR_API_TOKEN:+present}"')"
-	if [[ "$LEAKCHK" == "present" ]]; then pass "control — the ambient token really was set for that run"; else fail "the leak fixture did not set the variable"; fi
+	if [[ $LEAKCHK == "present" ]]; then pass "control — the ambient token really was set for that run"; else fail "the leak fixture did not set the variable"; fi
 
 	echo ""
 	echo "=== ⛔ a MISSING PROFILE is a failure ==="
@@ -225,6 +237,54 @@ OUT="$(PATH="$SCRATCH/bin-weird:$PATH" bash "$SUBJECT" --dir "$STUBPROJ" 2>&1)"
 RC=$?
 if grep -q 'UNRECOGNIZED' <<<"$OUT"; then pass "a third encoding is named, not guessed"; else fail "an unknown encoding was not reported" "$OUT"; fi
 if [[ $RC -ne 0 ]]; then pass "and it fails closed (rc=$RC)"; else fail "an unknown encoding exited 0" "$OUT"; fi
+
+# ── CTL-1956: a missing direnv lib/ helper is RED, and named ────────────────
+# THE PROPERTY: `use_profile` is not a builtin. Without lib/profiles.sh every .envrc dies on an
+# undefined function, so a host in this state cannot materialize one token — and mini-2 was in
+# exactly this state while the check reported only "direnv NOT installed". Each helper is asserted
+# INDIVIDUALLY: a check that goes red when both are gone but stays green when one is would have
+# passed mini-2's laptop-shaped sibling.
+if [[ $HAVE_DIRENV -eq 1 ]]; then
+	for missing in profiles otel; do
+		echo ""
+		echo "=== ⛔ lib/${missing}.sh absent → RED, naming ${missing}.sh ==="
+		rm -f "$XDG_CONFIG_HOME/direnv/lib/${missing}.sh"
+		OUT="$(run --dir "$ALLOWED")"
+		RC=$?
+		if printf '%s' "$OUT" | grep -q "❌.*${missing}.sh MISSING"; then
+			pass "lib/${missing}.sh absence is named"
+		else
+			fail "lib/${missing}.sh absence was NOT named" "$OUT"
+		fi
+		if [[ $RC -ne 0 ]]; then
+			pass "and it exits non-zero (rc=$RC)"
+		else
+			fail "a host missing lib/${missing}.sh exited 0 — this is the inert-check failure"
+		fi
+		# ⭐ THE OTHER HALF, and the one that catches a lazy implementation: the helper that is
+		# still present must still read PASS. A check that reds both rows whenever either is gone
+		# tells you nothing about which one to fix.
+		other=$([[ $missing == profiles ]] && echo otel || echo profiles)
+		if printf '%s' "$OUT" | grep -q "✅.*${other}.sh present"; then
+			pass "and lib/${other}.sh is still reported present"
+		else
+			fail "lib/${other}.sh was not reported present while only ${missing}.sh was removed" "$OUT"
+		fi
+		seed_libs
+	done
+
+	# Negative control for the two cases above: with both helpers restored the same invocation must
+	# go GREEN again. Without this, a check hard-wired to fail would pass every assertion above.
+	echo ""
+	echo "=== negative control — both helpers restored → the same call is GREEN ==="
+	OUT="$(run --dir "$ALLOWED")"
+	RC=$?
+	if [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "direnv fleet readiness: PASS"; then
+		pass "restoring the helpers restores the PASS (the reds above were caused by the removal)"
+	else
+		fail "the control did not fire — the check is red for some OTHER reason, so the cases above prove nothing" "$OUT"
+	fi
+fi
 
 echo ""
 echo "=== argument validation ==="
