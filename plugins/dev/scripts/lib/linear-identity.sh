@@ -91,14 +91,69 @@ _lid_ready() {
 		_lid_fail "replica-absent"
 		return 1
 	}
+	# NOTE: replica_fresh also checks the sync_meta cursor. That check is KEPT here as a
+	# cheap early-out, but it is no longer the one that matters — the authoritative cursor
+	# gate now runs inside the same snapshot as the read (_lid_query_gated), because a
+	# gate that passes in one connection says nothing about what a later one observes.
 	replica_fresh "$db" || {
-		_lid_fail "replica-stale"
+		# replica_fresh folds two different conditions into one rc: a stale writer
+		# heartbeat, and an absent/empty seed cursor. They need different repairs — "the
+		# writer is behind" vs "the seed never finished / is mid-reseed" — so name them
+		# apart here rather than reporting both as stale.
+		if [[ -z "$(sqlite3 "$db" "SELECT 1 FROM sync_meta WHERE key='cursor' AND value<>'' LIMIT 1;" 2>/dev/null)" ]]; then
+			_lid_fail "replica-reseeding"
+		else
+			_lid_fail "replica-stale"
+		fi
 		return 1
 	}
 	LINEAR_IDENTITY_REASON=""
 }
 
-_lid_q() { sqlite3 "$1" "$2" 2>/dev/null; }
+# The sentinel a gated query returns when the seed cursor is absent. Deliberately not a
+# value any column can hold, so it can never be mistaken for a resolved id.
+_LID_NO_CURSOR="__LID_NO_CURSOR__"
+
+# _lid_query_gated <db> <scalar-select> — run the cursor gate and the read in ONE
+# statement, i.e. ONE snapshot.
+#
+# ⛔ Codex #3501 P1: these used to be two separate `sqlite3` invocations. A cold reseed
+# beginning after the cursor check but before the read lets the read observe partially
+# restored tables — a nonempty but INCOMPLETE state map, or a duplicated label
+# transiently looking unique. Both are confident wrong answers, which is the one outcome
+# this module exists to prevent. `linear-write-proxy-resolve.mjs` already resolves this
+# the same way (gate + resolution in one transaction); this now matches it.
+#
+# ⛔ Codex #3501 P2: the old helper sent sqlite's stderr to /dev/null, so an unreadable
+# or MISSING table — the recorded live condition where `workflow_states` was absent —
+# produced empty output that callers then read as `team-not-resolvable` /
+# `state-not-found` / `label-not-found`. "Could not query" became "the entity is not
+# there". The query status is now preserved and reported as its own named failure.
+_lid_query_gated() {
+	local db="$1" inner="$2" out rc=0
+	out=$(sqlite3 "$db" "SELECT CASE
+	      WHEN NOT EXISTS(SELECT 1 FROM sync_meta WHERE key='cursor' AND value<>'')
+	      THEN '${_LID_NO_CURSOR}'
+	      ELSE COALESCE((${inner}), '')
+	    END;" 2>/dev/null) || rc=$?
+	if [[ $rc -ne 0 ]]; then
+		_lid_fail "replica-unreadable"
+		return 1
+	fi
+	if [[ "$out" == "$_LID_NO_CURSOR" ]]; then
+		# Seed incomplete / mid-reseed. Same class as stale, distinct name so an operator
+		# can tell "the writer is behind" from "the seed never finished".
+		_lid_fail "replica-reseeding"
+		return 1
+	fi
+	# ⛔ Result via a GLOBAL, not stdout. Every caller below would otherwise capture this
+	# with `$( )` — a subshell — and the reason set by the two _lid_fail calls above would
+	# be discarded, exactly as it was for the nested team lookup Codex flagged. That is
+	# the FOURTH time this defect appeared tonight, and the third inside a fix for it:
+	# in bash, "returns a value" and "returns a diagnosis" cannot both go through stdout.
+	_LID_QUERY_OUT="$out"
+}
+_LID_QUERY_OUT=""
 
 # linear_identity_team_id <TEAM_KEY> [db] — echo the team UUID.
 #
@@ -109,7 +164,8 @@ _lid_q() { sqlite3 "$1" "$2" 2>/dev/null; }
 linear_identity_team_id() {
 	local key="$1" db="${2:-$CATALYST_REPLICA_DB}" id
 	_lid_ready "$db" || return 1
-	id=$(_lid_q "$db" "SELECT team_id FROM issues WHERE team_key='${key//\'/\'\'}' AND team_id IS NOT NULL AND removed_at IS NULL LIMIT 1;")
+	_lid_query_gated "$db" "SELECT team_id FROM issues WHERE team_key='${key//\'/\'\'}' AND team_id IS NOT NULL AND removed_at IS NULL LIMIT 1" || return 1
+	id="$_LID_QUERY_OUT"
 	[[ -n "$id" ]] || {
 		_lid_fail "team-not-resolvable"
 		return 1
@@ -123,8 +179,18 @@ linear_identity_team_id() {
 # board nobody sees.
 linear_identity_state_id() {
 	local key="$1" name="$2" db="${3:-$CATALYST_REPLICA_DB}" team id
-	team=$(linear_identity_team_id "$key" "$db") || return 1
-	id=$(_lid_q "$db" "SELECT id FROM workflow_states WHERE team_id='${team//\'/\'\'}' AND name='${name//\'/\'\'}' AND archived_at IS NULL LIMIT 1;")
+	# ⛔ Codex #3501 P2: this nested call used to be `team=$(linear_identity_team_id …)`.
+	# Command substitution is a SUBSHELL, so a replica-absent / replica-stale /
+	# team-not-resolvable reason set inside it was discarded, and a direct caller got
+	# rc=1 with an EMPTY reason — defeating this module's whole named-failure contract at
+	# the two helpers most callers actually use. Third occurrence of this defect in one
+	# night, the other two in setup-catalyst.sh and resolve-linear-ids.sh: in bash, a
+	# function returning a value on stdout cannot also return a diagnosis, so nested
+	# calls read LINEAR_IDENTITY_VALUE instead of capturing.
+	linear_identity_team_id "$key" "$db" >/dev/null || return 1
+	team="$LINEAR_IDENTITY_VALUE"
+	_lid_query_gated "$db" "SELECT id FROM workflow_states WHERE team_id='${team//\'/\'\'}' AND name='${name//\'/\'\'}' AND archived_at IS NULL LIMIT 1" || return 1
+	id="$_LID_QUERY_OUT"
 	[[ -n "$id" ]] || {
 		_lid_fail "state-not-found"
 		return 1
@@ -142,8 +208,11 @@ linear_identity_state_id() {
 # silent fleet-wide freeze. Returning `{}` here would hand a caller a confident nothing.
 linear_identity_states_json() {
 	local key="$1" db="${2:-$CATALYST_REPLICA_DB}" team json
-	team=$(linear_identity_team_id "$key" "$db") || return 1
-	json=$(_lid_q "$db" "SELECT COALESCE(json_group_object(name, id), '{}') FROM workflow_states WHERE team_id='${team//\'/\'\'}' AND archived_at IS NULL;")
+	# Same subshell trap as linear_identity_state_id above — read the global, do not capture.
+	linear_identity_team_id "$key" "$db" >/dev/null || return 1
+	team="$LINEAR_IDENTITY_VALUE"
+	_lid_query_gated "$db" "SELECT json_group_object(name, id) FROM workflow_states WHERE team_id='${team//\'/\'\'}' AND archived_at IS NULL" || return 1
+	json="$_LID_QUERY_OUT"
 	[[ -n "$json" && "$json" != "{}" ]] || {
 		_lid_fail "state-not-found"
 		return 1
@@ -161,12 +230,15 @@ linear_identity_states_json() {
 linear_identity_label_id() {
 	local name="$1" db="${2:-$CATALYST_REPLICA_DB}" ids n
 	_lid_ready "$db" || return 1
-	ids=$(_lid_q "$db" "SELECT id FROM labels WHERE name='${name//\'/\'\'}' AND removed_at IS NULL;")
+	# group_concat keeps this a SCALAR select so it fits the single-statement snapshot;
+	# the ambiguity count is derived from the separator, not from a second query.
+	_lid_query_gated "$db" "SELECT group_concat(id, ',') FROM labels WHERE name='${name//\'/\'\'}' AND removed_at IS NULL" || return 1
+	ids="$_LID_QUERY_OUT"
 	[[ -n "$ids" ]] || {
 		_lid_fail "label-not-found"
 		return 1
 	}
-	n=$(printf '%s\n' "$ids" | /usr/bin/grep -c .)
+	n=$(awk -F',' '{print NF}' <<<"$ids")
 	if [[ "$n" -gt 1 ]]; then
 		_lid_fail "label-ambiguous"
 		return 1

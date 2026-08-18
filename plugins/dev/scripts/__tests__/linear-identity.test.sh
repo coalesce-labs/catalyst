@@ -154,6 +154,65 @@ assert_eq "a failed call leaves no stale value behind" \
 	"$(run "$ABSENT" 'linear_identity_team_id CTL >/dev/null 2>&1; printf "%s" "$LINEAR_IDENTITY_VALUE"')" ""
 
 echo ""
+echo "=== ⛔ Codex #3501 P1: the cursor gate and the read share ONE snapshot ==="
+# Two separate sqlite3 invocations let a cold reseed start between them, so the read
+# observes partially restored tables — a nonempty but INCOMPLETE state map, or a
+# duplicated label transiently looking unique. Both are confident WRONG answers, the one
+# outcome this module exists to prevent. Simulated here by the observable end state: a
+# fresh writer lock with the cursor gone (mid-reseed), which the in-snapshot gate must
+# catch even though replica_fresh's own cheap check already ran.
+RESEED="$SCRATCH/reseed.db"
+make_db "$RESEED" 1 1
+sqlite3 "$RESEED" "DELETE FROM sync_meta;" 2>/dev/null
+touch "$RESEED.writer.lock"
+assert_eq "a mid-reseed replica is named, not answered" \
+	"$(reason "$RESEED" 'linear_identity_team_id CTL')" "replica-reseeding"
+assert_eq "…and yields no id" "$(run "$RESEED" 'linear_identity_team_id CTL')" ""
+
+# ⚠️ The assertion above exercises the CHEAP early-out, not the race the P1 fix targets.
+# The race — a reseed starting AFTER the gate and BEFORE the read — cannot be reproduced
+# deterministically from a shell test. What CAN be tested is that the in-snapshot gate
+# stands on its own: stub replica_fresh to pass (i.e. pretend the early-out saw a healthy
+# replica) and confirm the read still refuses. Without this, the `_LID_NO_CURSOR` branch
+# would be a protection nobody has ever seen fire.
+assert_eq "the IN-SNAPSHOT gate refuses even when the early-out passes" \
+	"$(CATALYST_REPLICA_DB="$RESEED" bash -c "set -uo pipefail; . '$LIB' >/dev/null 2>&1
+	   replica_fresh() { return 0; }
+	   linear_identity_team_id CTL >/dev/null 2>&1; printf '%s' \"\$LINEAR_IDENTITY_REASON\"" 2>/dev/null)" \
+	"replica-reseeding"
+
+echo ""
+echo "=== ⛔ Codex #3501 P2: a SQLite failure is not an entity miss ==="
+# The recorded live condition: workflow_states absent on a replica whose gate is open.
+# The old helper sent sqlite's stderr to /dev/null, so the empty output was reinterpreted
+# as state-not-found — "could not query" became "the entity is not there".
+NOTABLE="$SCRATCH/notable.db"
+make_db "$NOTABLE" 1 1
+sqlite3 "$NOTABLE" "DROP TABLE workflow_states;" 2>/dev/null
+assert_eq "a missing table is 'unreadable', NOT 'state-not-found'" \
+	"$(reason "$NOTABLE" 'linear_identity_state_id CTL Done')" "replica-unreadable"
+assert_eq "…and the map helper agrees" \
+	"$(reason "$NOTABLE" 'linear_identity_states_json CTL')" "replica-unreadable"
+# Control on the same db: the team read, whose table still exists, still answers — so the
+# failure above is the dropped table and not a globally broken fixture.
+assert_eq "control — the surviving table still resolves" \
+	"$(run "$NOTABLE" 'linear_identity_team_id CTL')" "$TEAM"
+
+echo ""
+echo "=== ⛔ Codex #3501 P2: a NESTED failure keeps its reason ==="
+# state_id/states_json call team_id. Capturing that with $( ) ran it in a subshell and
+# discarded the reason, so a direct caller got rc=1 with an EMPTY reason — the module's
+# named-failure contract defeated at the two helpers most callers use.
+assert_eq "state_id surfaces the nested absent-replica reason" \
+	"$(reason "$ABSENT" 'linear_identity_state_id CTL Done')" "replica-absent"
+assert_eq "states_json surfaces it too" \
+	"$(reason "$ABSENT" 'linear_identity_states_json CTL')" "replica-absent"
+assert_eq "state_id surfaces a nested stale reason" \
+	"$(reason "$STALE" 'linear_identity_state_id CTL Done')" "replica-stale"
+assert_eq "state_id surfaces a nested unknown-team reason" \
+	"$(reason "$DB" 'linear_identity_state_id NOPE Done')" "team-not-resolvable"
+
+echo ""
 echo "════════════════════════════════════════════"
 echo "  PASSED: $PASSES   FAILED: $FAILURES"
 echo "════════════════════════════════════════════"
