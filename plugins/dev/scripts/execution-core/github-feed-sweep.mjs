@@ -235,14 +235,19 @@ export function runGithubSweep({
   settleMs = DEFAULT_SETTLE_MS,
   batchLimit = DEFAULT_BATCH_LIMIT,
   maxBatches = DEFAULT_MAX_BATCHES,
-  streams = STREAMS.map((s) => s.key),
+  // ⛔ ASK THE SOURCE, don't enumerate STREAMS. The replica decides which of the two
+  // `github.push` producers is served (CTC-704 / `availableStreams`), and a default
+  // taken from the module would run both on a pinned host — the same push twice, with
+  // identities the seen-set cannot collapse. Tests still pass an explicit list.
+  streams = null,
   seams,
   cursorPathFn = streamCursorPath,
   readCursorFn = readCursor,
   writeCursorFn = writeCursor,
 }) {
   const counts = emptyCounts();
-  for (const streamKey of streams) {
+  const streamKeys = streams ?? source.streamKeys();
+  for (const streamKey of streamKeys) {
     try {
       sweepStream({
         source,

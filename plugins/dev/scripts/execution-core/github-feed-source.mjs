@@ -127,8 +127,6 @@ export const DEFAULT_SETTLE_MS = 600_000;
  */
 export const UNBACKED_EVENT_NAMES = Object.freeze(["github.check_suite.completed"]);
 
-/** `github.push` cannot be replayed faithfully. See gap (1) in the header. */
-export const PUSH_IS_LOSSY = true;
 
 /**
  * The streams, in the order a sweep should read them.
@@ -223,6 +221,30 @@ export const STREAMS = Object.freeze([
     where: null,
   },
   {
+    // ⭐ CTC-704 — one row per DELIVERY, which is what makes `github.push` faithful.
+    //
+    // `push_events` is keyed on GitHub's own `x-github-delivery` id, so the PK is a
+    // complete EDGE identity (unlike `pushes`, whose PK identifies the REF). That
+    // makes this an ordinary append-only stream: no `mutableRow`, no folded
+    // coordinate, and the seen-set dedups a redelivery for free because GitHub
+    // reuses the delivery id.
+    //
+    // ⚠️ IT IS NOT SNAPSHOT-SEEDED (CTC-136b §4). A fresh replica reads ref-latest
+    // from `pushes` and per-push edges forward from its cursor only, so a re-seed has
+    // a push blind spot with no rebroadcast behind it. That is CTL-1941's scenario
+    // and is measured there, not papered over here.
+    key: "pushEvent",
+    event: "github.push",
+    table: "push_events",
+    tsCol: "updated_at",
+    idExpr: "delivery_id",
+    where: null,
+    // The schema that introduced it. A host on an older pin does not have this table;
+    // `availableStreams` resolves that, rather than every caller guessing.
+    requiresTable: true,
+    supersedes: "push",
+  },
+  {
     key: "push",
     event: "github.push",
     table: "pushes",
@@ -232,6 +254,11 @@ export const STREAMS = Object.freeze([
     idExpr: "repo_id || '@' || ref",
     where: null,
     lossy: true,
+    // ⛔ SUPERSEDED BY `pushEvent` WHEREVER `push_events` EXISTS. Kept, not deleted,
+    // because a host on a pre-0.1.17 pin has no `push_events` table and would
+    // otherwise have NO push stream at all — which is worse than a lossy one while
+    // smee is still underneath. `availableStreams` picks exactly one of the two.
+    supersededBy: "pushEvent",
     // ⛔ THE ROW IS MUTATED PER PUSH, so this PK identifies the REF, not the edge.
     // Every other stream inserts a row per edge, which makes its PK a complete edge
     // identity. Here `repo_id@ref` is CONSTANT across every push to that branch — so
@@ -243,6 +270,73 @@ export const STREAMS = Object.freeze([
     mutableRow: true,
   },
 ]);
+
+/**
+ * tableExists — does this replica carry the table a stream reads?
+ *
+ * ⛔ EXISTS BECAUSE THE FLEET IS NOT ON ONE PIN AT ONCE. The 0.1.17 rollout is a
+ * canary: mini-2 first, mini after a soak, and by design a bad canary leaves the
+ * other host on the old pin indefinitely. A producer that assumed `push_events`
+ * exists would throw `no such table` on every tick of the un-pinned host — and the
+ * sweep's error path un-arms readiness, so under `enforce` that host would hand
+ * dispatch back to a smee tunnel we are trying to retire. Detected, not assumed.
+ */
+export function tableExists(db, table) {
+  try {
+    const row = db
+      .query("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = $t LIMIT 1")
+      .get({ $t: table });
+    return row?.ok === 1;
+  } catch {
+    // A database that cannot answer this question is not one to read optimistically.
+    return false;
+  }
+}
+
+/**
+ * availableStreams — the streams this replica can actually serve, with the
+ * supersession between `pushEvent` and `push` resolved to exactly ONE.
+ *
+ * ⛔ EXACTLY ONE IS THE WHOLE POINT. Both carry the name `github.push`. Running both
+ * on a pinned host emits every push twice — and the two have different identities
+ * (`delivery_id` vs the folded `repo_id@ref`), so the seen-set cannot collapse them:
+ * the duplicate reaches the router as a second, genuine-looking base-branch move and
+ * wakes every waiter again. Running neither on an un-pinned host silently drops
+ * rebase detection. The choice has to be made once, here, from the replica itself.
+ */
+export function availableStreams(db, streams = STREAMS) {
+  const present = new Map();
+  for (const s of streams) {
+    present.set(s.key, s.requiresTable ? tableExists(db, s.table) : true);
+  }
+  return streams.filter((s) => {
+    if (!present.get(s.key)) return false;
+    // A superseded stream yields only when its successor is actually available.
+    if (s.supersededBy && present.get(s.supersededBy)) return false;
+    return true;
+  });
+}
+
+/**
+ * pushIsLossy — whether `github.push` coverage is still collapse-prone on THIS replica.
+ *
+ * ⚠️ A FUNCTION OF THE REPLICA, NOT A CONSTANT, and that is the change CTC-704 makes.
+ * It was `export const PUSH_IS_LOSSY = true` — correct while every host read `pushes`,
+ * and wrong the moment one host is pinned and another is not. The dispatch gate reads
+ * this to decide whether `github.push` may suppress smee, so a constant would have the
+ * un-pinned host suppressing smee for a name it can only emit lossily.
+ */
+export function pushIsLossy(db) {
+  return !tableExists(db, "push_events");
+}
+
+/**
+ * ⚠️ DEPRECATED — the static answer, kept only for callers that have no db handle.
+ * It reports the PRE-CTC-704 world, which is the safe direction (lossy ⇒ smee keeps
+ * authority for `github.push`), so a caller that cannot ask the replica errs toward
+ * not suppressing. Prefer `pushIsLossy(db)`.
+ */
+export const PUSH_IS_LOSSY = true;
 
 /** Stream lookup by key, so callers name a stream instead of indexing an array. */
 export const STREAM_BY_KEY = Object.freeze(
@@ -419,8 +513,18 @@ export function createGithubFeedSource({ dbPath = getReplicaDbPath(), limit = DE
   return {
     /** Rows of a named stream strictly after `position`, oldest first. */
     rowsSince: (streamKey, position, batchLimit) => page(streamKey, position, batchLimit),
-    /** Every stream key, in sweep order. */
-    streamKeys: () => STREAMS.map((s) => s.key),
+    /**
+     * The stream keys this replica can actually serve, in sweep order.
+     *
+     * ⛔ RESOLVED FROM THE DATABASE, not from `STREAMS` directly. On a fleet
+     * mid-canary one host has `push_events` and the other does not, and the two push
+     * streams carry the SAME event name — so the choice between them is a property of
+     * the replica in front of us, never of this file. Serving both double-dispatches
+     * every push; serving neither kills rebase detection. See `availableStreams`.
+     */
+    streamKeys: () => availableStreams(open()).map((s) => s.key),
+    /** Whether `github.push` is still collapse-prone on THIS replica (CTC-704). */
+    pushIsLossy: () => pushIsLossy(open()),
     positionAfter,
     /**
      * `PRAGMA table_info` for a table, so a caller can verify REQUIRED_COLUMNS

@@ -81,13 +81,12 @@ describe("⛔ suppression is per NAME, and the excluded set is COMPUTED from the
     for (const n of GITHUB_UNCOVERED_NAMES) expect(after).not.toContain(n);
   });
 
-  test("⭐ the post-CTC-691 world: emptying the uncovered list makes those names suppressible", () => {
+  test("⭐ the post-CTC-712 world: emptying the uncovered list makes those names suppressible", () => {
     const after = computeSuppressible({
       consumed: GITHUB_CONSUMED_NAMES,
       uncovered: [],
       lossy: GITHUB_LOSSY_NAMES,
     });
-    expect(after).toContain("github.pr.merged");
     expect(after).toContain("github.check_suite.completed");
     expect(after).not.toContain("github.push"); // still lossy until CTC-704
   });
@@ -111,10 +110,12 @@ describe("⛔ enforce must NOT suppress smee for a name with no faithful replace
     expect(v.reason).toBe("smee-captured");
   });
 
-  test("github.pr.merged survives — no merge_commit_sha (CTC-691)", () => {
+  test("⭐ github.pr.merged is now SUPPRESSIBLE — CTC-691 landed in schema 0.1.17", () => {
+    // This asserted the opposite until the pin. `merge_commit_sha` is a real column,
+    // the producer emits the name, and the gate may therefore suppress smee's copy.
     const v = decideDispatch(smee("github.pr.merged"), armed);
-    expect(v.suppress).toBe(false);
-    expect(v.reason).toBe("no-replacement:no-merge-commit-sha:CTC-691");
+    expect(v.suppress).toBe(true);
+    expect(v.reason).toBe("smee-captured");
   });
 
   test("github.check_suite.completed survives — no suite row (CTC-667 item 4)", () => {
@@ -147,9 +148,9 @@ describe("⛔ enforce must NOT suppress smee for a name with no faithful replace
     //    from "because this name has no replacement" (permanent until CTC-691 lands).
     //    Under the wrong order every excluded name reports `enforce-not-armed`
     //    whenever the producer happens to be un-armed, and the two collapse.
-    const v = decideDispatch(smee("github.pr.merged"), { mode: "enforce", isReady: () => false });
+    const v = decideDispatch(smee("github.check_suite.completed"), { mode: "enforce", isReady: () => false });
     expect(v.suppress).toBe(false);
-    expect(v.reason).toBe("no-replacement:no-merge-commit-sha:CTC-691");
+    expect(v.reason).toBe("no-replacement:no-suite-row:CTC-667-item-4");
     expect(v.reason).not.toMatch(/^enforce-not-armed/);
   });
 });
@@ -200,9 +201,9 @@ describe("the feed side is decided by its OWN stamp (CTL-1901's asymmetry), neve
     // Both halves of the exclusion must agree by construction. If the feed side
     // allowed it while the smee side (correctly) declines to suppress, BOTH copies
     // dispatch — the double-dispatch the gate exists to prevent.
-    const v = decideDispatch(feed("github.pr.merged"), { mode: "enforce", isReady: () => true });
+    const v = decideDispatch(feed("github.check_suite.completed"), { mode: "enforce", isReady: () => true });
     expect(v.suppress).toBe(true);
-    expect(v.reason).toBe("feed-excluded:no-replacement:no-merge-commit-sha:CTC-691");
+    expect(v.reason).toBe("feed-excluded:no-replacement:no-suite-row:CTC-667-item-4");
   });
 });
 
@@ -252,5 +253,30 @@ describe("the producer's own emit-list stays the source of truth for coverage", 
       const lossy = GITHUB_LOSSY_NAMES.includes(n);
       expect(suppressible || lossy).toBe(true);
     }
+  });
+});
+
+describe("⛔ ONE source of truth for the name lists — CI caught the half-done move", () => {
+  test("the gate, the producer and doctor all read the same lists", async () => {
+    // ⚠️ THE BUG THIS OWNS, and it shipped: #3540 moved the lists to
+    // `lib/github-feed-names.mjs` and pointed the GATE at the leaf, but left
+    // `github-feed-event.mjs`'s own copies in place. #3544 then removed `pr.merged`
+    // (CTC-691) from the copy the gate no longer read. Both branches passed locally —
+    // each predated the other's change — and on main the two lists disagreed: the
+    // gate kept excluding a name the producer had started emitting under its real
+    // name, which is a dropped edge under enforce. Identity, not deep-equality: a
+    // second array with equal contents is exactly the drift this asserts against.
+    const leaf = await import("../lib/github-feed-names.mjs");
+    const event = await import("./github-feed-event.mjs");
+    const gate = await import("./github-feed-gate.mjs");
+    expect(event.GITHUB_UNCOVERED_NAMES).toBe(leaf.GITHUB_UNCOVERED_NAMES);
+    expect(gate.GITHUB_UNCOVERED_NAMES).toBe(leaf.GITHUB_UNCOVERED_NAMES);
+    expect(gate.GITHUB_CONSUMED_NAMES).toBe(leaf.GITHUB_CONSUMED_NAMES);
+  });
+
+  test("⭐ every uncovered name is excluded from suppression, and pr.merged is not one", () => {
+    const excluded = GITHUB_CONSUMED_NAMES.filter((n) => !GITHUB_SUPPRESSIBLE_NAMES.includes(n));
+    for (const n of GITHUB_UNCOVERED_NAMES) expect(excluded).toContain(n);
+    expect(GITHUB_UNCOVERED_NAMES).not.toContain("github.pr.merged");
   });
 });

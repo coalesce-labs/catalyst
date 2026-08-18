@@ -198,7 +198,12 @@ describe("⛔ P1 regression (Codex #3513): consecutive pushes to one ref both re
 });
 
 describe("⛔ declines never reach byFailure — this is the CTL-1909 property", () => {
-  test("an uncovered stream declines and readiness stays armed", () => {
+  test("a row that cannot be built declines, and readiness stays armed", () => {
+    // ⚠️ The example moved. `prMerged` was the whole-stream decline until CTC-691
+    // landed; now the decline is per ROW — a merge that predates the column and was
+    // never backfilled (COORD-124's ~4,230 rows). Same property, finer granularity,
+    // and it is still a DECLINE rather than a failure: un-arming the producer cannot
+    // repair a row that has no sha to begin with.
     const NOW = 10_000_000;
     const w = world((db) => {
       db.prepare("INSERT INTO pull_requests (repo_id,number,merged,merged_at,created_at) VALUES (?,?,?,?,?)")
@@ -208,7 +213,7 @@ describe("⛔ declines never reach byFailure — this is the CTL-1909 property",
       const c = sweep(w, NOW, { streams: ["prMerged"] });
       expect(c.declined).toBe(1);
       expect(c.failed).toBe(0);
-      expect(Object.keys(c.byReason)[0]).toContain("CTC-691");
+      expect(Object.keys(c.byReason)[0]).toContain("no-merge-commit-sha");
       // The gate the daemon actually runs, imported rather than restated — a
       // hand-built copy could agree with this fixture and disagree with production.
       expect(countsClean(c)).toBe(true);
@@ -462,5 +467,52 @@ describe("readiness reads these counts the way the daemon does", () => {
       expect(githubSweepUnreadyReason({ counts }, { healthy: false, reason: "stall" }))
         .toBe("feed-unhealthy:stall");
     } finally { w.close(); }
+  });
+});
+
+describe("⛔ the sweep asks the REPLICA which push stream to run (CTC-704)", () => {
+  test("with no explicit list it uses source.streamKeys(), not the STREAMS module", () => {
+    // The mutation this owns: defaulting to `STREAMS.map(...)` runs BOTH push streams
+    // on a pinned host — the same push emitted twice, with identities
+    // (`delivery_id` vs `repo_id@ref`) the seen-set cannot collapse, so the duplicate
+    // reaches the router as a second genuine base-branch move.
+    const asked = [];
+    const source = {
+      streamKeys: () => { asked.push("asked"); return ["prOpened"]; },
+      rowsSince: () => [],
+      positionAfter: () => null,
+    };
+    runGithubSweep({
+      source,
+      seen: { has: () => false, add: () => {}, prune: () => {}, close: () => {} },
+      sink: () => {},
+      orchDir: tmp,
+      account: "tenant-0",
+      now: 10_000_000,
+      cursorPathFn: (d, a, k) => join(tmp, `cur-ask-${k}.json`),
+      readCursorFn: () => null,
+      writeCursorFn: () => {},
+    });
+    expect(asked).toEqual(["asked"]);
+  });
+
+  test("an explicit list still wins, so tests can drive one stream", () => {
+    const source = {
+      streamKeys: () => { throw new Error("must not be consulted"); },
+      rowsSince: () => [],
+      positionAfter: () => null,
+    };
+    expect(() => runGithubSweep({
+      source,
+      seen: { has: () => false, add: () => {}, prune: () => {}, close: () => {} },
+      sink: () => {},
+      orchDir: tmp,
+      account: "tenant-0",
+      now: 10_000_000,
+      streams: ["prOpened"],
+      cursorPathFn: (d, a, k) => join(tmp, `cur-exp-${k}.json`),
+      readCursorFn: () => null,
+      writeCursorFn: () => {},
+    })).not.toThrow();
   });
 });

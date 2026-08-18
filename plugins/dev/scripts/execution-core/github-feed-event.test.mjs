@@ -184,18 +184,47 @@ describe("author identity — derived from the login, not joined", () => {
 });
 
 describe("⛔ uncovered names decline with a reason — they never return a silent null", () => {
-  test("prMerged declines, naming the ticket that closes it", () => {
-    const v = classifyGithubRow("prMerged", { __ts: 1, __id: "k", repo_id: "o/r", number: 7 });
-    expect(v.emit).toBe(false);
-    expect(v.reason).toBe(UNCOVERED_STREAM_REASONS.prMerged);
-    expect(v.reason).toContain("CTC-691");
-    // A decline, NOT a failure: un-arming the producer would not repair it, and
-    // readiness must not un-arm on a gap we have already declared.
-    expect(v.fatal).toBeUndefined();
+  test("⭐ prMerged EMITS now that CTC-691 landed — the stream-level decline is gone", () => {
+    // This test asserted the opposite until schema 0.1.17. `merge_commit_sha` is a
+    // real column, so the whole-stream refusal is deleted and the guard moved to the
+    // ROW (see the next test) — which is the finer, and only correct, granularity.
+    const v = classifyGithubRow("prMerged", {
+      __ts: 1, __id: "k", repo_id: "o/r", number: 7, merge_commit_sha: "abc123",
+    });
+    expect(v.emit).toBe(true);
+    expect(UNCOVERED_STREAM_REASONS.prMerged).toBeUndefined();
+  });
+
+  test("⛔ a prMerged row with NO merge_commit_sha declines — the un-backfilled rows", () => {
+    // ⚠️ Not hypothetical: CTC-691 added the column without backfilling the ~4,230
+    // pre-existing PR rows (COORD-124), so every merge predating the pin has it NULL.
+    // A twin without the join key routes and wakes monitor-merge normally while
+    // monitor-deploy stops firing — it LOOKS like success, which is why it declines.
+    for (const sha of [undefined, null, "", 12345]) {
+      const v = classifyGithubRow("prMerged", {
+        __ts: 1, __id: "k", repo_id: "o/r", number: 7, merge_commit_sha: sha,
+      });
+      expect(v.emit).toBe(false);
+      expect(v.reason).toBe("no-merge-commit-sha:not-backfilled");
+      // A decline, NOT a failure: un-arming the producer would not repair a row that
+      // predates the column, and readiness must not drop on a declared gap.
+      expect(v.fatal).toBeUndefined();
+    }
+    // ⭐ Control: the SAME row with a sha emits. Without this the test above passes
+    // if classify refuses every prMerged row for some unrelated reason.
+    const ok = classifyGithubRow("prMerged", {
+      __ts: 1, __id: "k", repo_id: "o/r", number: 7, merge_commit_sha: "abc123",
+    });
+    expect(ok.emit).toBe(true);
   });
   test("no uncovered name is reachable through the dispatch-class set", () => {
     for (const n of GITHUB_UNCOVERED_NAMES) expect(GITHUB_DISPATCH_CLASS_NAMES).not.toContain(n);
-    expect(GITHUB_UNCOVERED_NAMES).toContain("github.pr.merged");
+    // ⭐ pr.merged moved OUT of uncovered (CTC-691, schema 0.1.17) and INTO the
+    // emit-list. check_suite.completed did not — the table landed but the PR
+    // association the consumer keys on did not (CTC-712).
+    expect(GITHUB_DISPATCH_CLASS_NAMES).toContain("github.pr.merged");
+    expect(GITHUB_UNCOVERED_NAMES).not.toContain("github.pr.merged");
+    expect(GITHUB_UNCOVERED_NAMES).toContain("github.check_suite.completed");
     expect(GITHUB_UNCOVERED_NAMES).toContain("github.check_suite.completed");
   });
   test("buildGithubEvent refuses an uncovered stream", () => {
@@ -300,5 +329,84 @@ describe("deployment_status name and severity are per-row", () => {
     expect(mk("failure").severityText).toBe("ERROR");
     expect(mk("error").severityNumber).toBe(17);
     expect(mk("success").severityText).toBe("INFO");
+  });
+});
+
+describe("⭐ github.pr.merged — the envelope the deploy chain joins on (CTC-691)", () => {
+  const row = {
+    __ts: 1, __id: "o/r#7", repo_id: "o/r", number: 7,
+    merge_commit_sha: "deadbeefcafe", merged_at: 1_700_000_000_000,
+    draft: 0, mergeable: 1,
+  };
+  const ev = () => buildGithubEvent("prMerged", row);
+
+  test("⛔ mergeCommitSha is carried on BOTH the payload and vcs.revision", () => {
+    // `router.mjs:1513` reads `detail.mergeCommitSha` and writes it via
+    // setFilterStateMerged; `github.deployment.created` later matches
+    // `WHERE merge_commit_sha = ?`. This is the join key, not a description.
+    const e = ev();
+    expect(e.body.payload.mergeCommitSha).toBe("deadbeefcafe");
+    expect(e.attributes["vcs.revision"]).toBe("deadbeefcafe");
+  });
+
+  test("⛔ action is `closed` with merged:true — GitHub never sends action `merged`", () => {
+    // Inventing an action nobody emits leaves tryPrLifecycleRoute unmatched while
+    // every count still reads "emitted".
+    const e = ev();
+    expect(e.body.payload.action).toBe("closed");
+    expect(e.body.payload.merged).toBe(true);
+    expect(e.attributes["event.action"]).toBe("merged"); // the OTel action, not the payload's
+  });
+
+  test("⚠️ it does NOT carry title/body/headRef — the dormant lifecycle scraper", () => {
+    // `tryTicketLifecycleRoute` (router.mjs:1856) scrapes exactly those three for
+    // ticket ids and is dormant on this fleet (1,208/1,208 live payloads lack them).
+    // Including them switches `_autoPrLifecycleFromTicket` on fleet-wide.
+    const p = ev().body.payload;
+    for (const k of ["title", "body", "headRef"]) expect(p[k]).toBeUndefined();
+  });
+
+  test("mergedAt renders ISO-8601 UTC from the stored epoch-ms", () => {
+    expect(ev().body.payload.mergedAt).toBe(new Date(1_700_000_000_000).toISOString());
+    // A row with no merged_at yields null rather than "Invalid Date".
+    const e = buildGithubEvent("prMerged", { ...row, merged_at: null });
+    expect(e.body.payload.mergedAt).toBeNull();
+  });
+
+  test("the envelope keeps this feature's three invariants", () => {
+    const e = ev();
+    expect(e.resource["service.name"]).toBe("catalyst.github"); // CTL-1122 recency map
+    expect(e.attributes["event.channel"]).toBe("cloud-feed");
+    expect(e.body.payload.source).toBe("cloud-feed");
+  });
+
+  test("⛔ a row with no sha builds NOTHING — the guard is upstream of the builder", () => {
+    expect(buildGithubEvent("prMerged", { ...row, merge_commit_sha: null })).toBeNull();
+  });
+});
+
+describe("⭐ github.push from push_events is byte-identical to the pushes copy (CTC-704)", () => {
+  // The two streams differ in WHICH ROWS they yield, never in what an event looks
+  // like. A second builder is how the feed copy and its own replacement drift apart
+  // on a field the consumer reads.
+  const shared = { __ts: 5, repo_id: "o/r", ref: "refs/heads/main", before: "aaa", after: "bbb" };
+
+  test("both streams produce the same envelope for the same row", () => {
+    const fromPushes = buildGithubEvent("push", { ...shared, __id: "o/r@refs/heads/main" });
+    const fromEvents = buildGithubEvent("pushEvent", { ...shared, __id: "d1", delivery_id: "d1" });
+    // ids/timestamps are per-emission; compare everything the consumer reads.
+    expect(fromEvents.attributes).toEqual(fromPushes.attributes);
+    expect(fromEvents.body.payload).toEqual(fromPushes.body.payload);
+    expect(fromEvents.body.message).toBe(fromPushes.body.message);
+  });
+
+  test("⛔ the FULL ref is carried, not a stripped branch", () => {
+    // router.mjs:1582 strips `refs/heads/` itself; a pre-stripped value fails its match.
+    expect(buildGithubEvent("pushEvent", { ...shared, __id: "d1" }).attributes["vcs.ref.name"])
+      .toBe("refs/heads/main");
+  });
+
+  test("a row with no ref declines", () => {
+    expect(classifyGithubRow("pushEvent", { __ts: 5, __id: "d1", repo_id: "o/r", ref: "" }).emit).toBe(false);
   });
 });

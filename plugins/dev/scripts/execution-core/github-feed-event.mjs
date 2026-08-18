@@ -76,6 +76,10 @@
 
 import { buildCanonicalEvent } from "./lib/canonical-event.mjs";
 import { STREAM_BY_KEY } from "./github-feed-source.mjs";
+import {
+  GITHUB_CONSUMED_NAMES,
+  GITHUB_UNCOVERED_NAMES as LEAF_UNCOVERED_NAMES,
+} from "../lib/github-feed-names.mjs";
 
 /** The service identity every `github.*` event must carry. See the header. */
 export const GITHUB_SERVICE_NAME = "catalyst.github";
@@ -100,24 +104,26 @@ export const SOURCE_CLOUD_FEED = "cloud-feed";
  * Exported so the parity ledger accounts for them as EXPECTED absences rather than
  * as unexplained diffs, and so nothing can claim coverage this producer lacks.
  */
-export const GITHUB_DISPATCH_CLASS_NAMES = Object.freeze([
-  "github.pr.opened",
-  "github.pr.closed",
-  "github.pr_review.submitted",
-  "github.pr_review_comment.created",
-  "github.pr_review_thread.resolved",
-  "github.deployment.created",
-  "github.deployment_status.success",
-  "github.deployment_status.failure",
-  "github.deployment_status.error",
-  "github.push",
-]);
+export const GITHUB_DISPATCH_CLASS_NAMES = Object.freeze(
+  GITHUB_CONSUMED_NAMES.filter((n) => !LEAF_UNCOVERED_NAMES.includes(n)),
+);
 
-/** Names the orchestrator consumes that this producer cannot yet emit. */
-export const GITHUB_UNCOVERED_NAMES = Object.freeze([
-  "github.pr.merged",
-  "github.check_suite.completed",
-]);
+/**
+ * ⛔ RE-EXPORTED FROM `lib/github-feed-names.mjs`, NOT DECLARED HERE.
+ *
+ * These lists used to live in this file, which was right while the producer and the
+ * gate were the only readers. `catalyst doctor` became a third reader (it must name
+ * which github.* events a declared-cloud node cannot see) and runs under bare Node,
+ * which cannot load this module at all — so the lists moved to a zero-import leaf.
+ *
+ * ⚠️ CI CAUGHT THE HALF-DONE VERSION OF EXACTLY THIS. The move (#3540) pointed the
+ * GATE at the leaf but left this file's own copies in place, and the next change
+ * (#3544, removing `pr.merged` on CTC-691) edited the copy the gate no longer reads.
+ * Locally both passed, because that branch predated the move; on main the two lists
+ * disagreed and the gate kept excluding a name the producer had started emitting.
+ * One source or it drifts — this file now derives.
+ */
+export const GITHUB_UNCOVERED_NAMES = LEAF_UNCOVERED_NAMES;
 
 /**
  * Streams the source can PAGE but this file cannot turn into a faithful event, keyed
@@ -129,7 +135,14 @@ export const GITHUB_UNCOVERED_NAMES = Object.freeze([
  * line deletion here rather than as new read-layer code.
  */
 export const UNCOVERED_STREAM_REASONS = Object.freeze({
-  prMerged: "uncovered:no-merge-commit-sha:CTC-691",
+  // ⭐ EMPTY SINCE CTC-691 LANDED (schema 0.1.17). `pull_requests.merge_commit_sha`
+  // exists and is populated, so `prMerged` emits — the stream was deliberately kept
+  // paging all along so this would be a deletion here rather than new read-layer code,
+  // and it was.
+  //
+  // ⛔ A row whose `merge_commit_sha` is NULL still declines, but per ROW rather than
+  // per STREAM — see `classifyGithubRow`. Pre-0.1.17 merges were never backfilled, so
+  // those rows exist and must not emit a twin without the join key.
 });
 
 /**
@@ -231,11 +244,30 @@ export function classifyGithubRow(streamKey, row) {
   // PR-scoped streams are useless to the consumer without a PR number: every one of
   // their router branches gates on `prList.includes(scope.pr)` first.
   const prScoped = new Set([
-    "prOpened", "prClosed", "reviewSubmitted", "reviewCommentCreated", "threadResolved",
+    "prOpened", "prClosed", "prMerged", "reviewSubmitted", "reviewCommentCreated", "threadResolved",
   ]);
   if (prScoped.has(streamKey)) {
-    const n = streamKey === "prOpened" || streamKey === "prClosed" ? row.number : row.pr_number;
+    const n = streamKey === "prOpened" || streamKey === "prClosed" || streamKey === "prMerged"
+      ? row.number
+      : row.pr_number;
     if (!Number.isInteger(n) || n <= 0) return { emit: false, reason: "no-pr-number" };
+  }
+  // ⛔ `mergeCommitSha` IS THE JOIN KEY, and a merged twin without it is worse than no
+  // twin at all. `router.mjs:1513` writes it via `setFilterStateMerged` and
+  // `github.deployment.created` later matches `WHERE merge_commit_sha = ?`. An event
+  // missing it still routes and still wakes `monitor-merge` normally, so it LOOKS
+  // like success — while `monitor-deploy` stops firing for that PR, permanently,
+  // with no smee copy under `enforce`.
+  //
+  // ⚠️ These rows are real, not hypothetical: CTC-691 added the column without a
+  // backfill (COORD-124 names the 4,230 pre-existing PR rows), so every merge that
+  // predates the 0.1.17 pin has it NULL. They decline, visibly, in `byReason` —
+  // exactly the posture `deploymentCreated` takes for its own sha below.
+  if (streamKey === "prMerged" && (typeof row.merge_commit_sha !== "string" || row.merge_commit_sha === "")) {
+    return { emit: false, reason: "no-merge-commit-sha:not-backfilled" };
+  }
+  if (streamKey === "pushEvent" && (typeof row.ref !== "string" || row.ref === "")) {
+    return { emit: false, reason: "no-ref" };
   }
   if (streamKey === "deploymentStatus" && (typeof row.state !== "string" || row.state === "")) {
     return { emit: false, reason: "no-deployment-state" };
@@ -450,6 +482,11 @@ export function buildGithubEvent(streamKey, row, seams) {
       }, seams);
     }
 
+    // ⭐ CTC-704: identical envelope to `push`, from a per-DELIVERY row. Sharing the
+    // case is deliberate — the two streams differ in WHICH ROWS they yield, never in
+    // what an event looks like, and a second copy of this builder is how the feed
+    // copy and its own replacement would drift apart on a field the consumer reads.
+    case "pushEvent":
     case "push": {
       const headSha = typeof row.after === "string" ? row.after : "";
       return envelope({
@@ -468,11 +505,47 @@ export function buildGithubEvent(streamKey, row, seams) {
         payload: {
           baseSha: typeof row.before === "string" ? row.before : "",
           headSha,
-          // ⚠️ Always empty. The replica stores one row per ref and no commit list,
-          // so the commits array cannot be reconstructed. No consumer reads it
-          // (`router.mjs:1582` reads only `vcs.ref.name`), which is the measured
-          // reason this stream is shippable despite being lossy.
+          // ⚠️ Always empty, on BOTH streams. Neither `pushes` nor `push_events`
+          // stores a commit list, so the array cannot be reconstructed. No consumer
+          // reads it (`router.mjs:1582` reads only `vcs.ref.name`) — which is what
+          // makes the absence survivable, and is measured rather than assumed.
           commits: [],
+        },
+      }, seams);
+    }
+
+    case "prMerged": {
+      // ⭐ Unblocked by CTC-691 (schema 0.1.17). Deliberately NOT folded into the
+      // prOpened/prClosed case: those two hard-code `merged: false` and
+      // `mergeCommitSha: null` because `router.mjs:1525` tests `detail.merged === false`
+      // STRICTLY, and this name is the exact inverse on both fields.
+      return envelope({
+        name,
+        entity: "pr",
+        action: "merged",
+        label: `PR #${row.number}`,
+        attrs: {
+          "vcs.repository.name": repo,
+          "vcs.pr.number": row.number,
+          // The merge commit, on the attribute the deploy chain scopes by.
+          "vcs.revision": row.merge_commit_sha,
+        },
+        message: `${name} for ${repo} PR #${row.number}`,
+        payload: {
+          action: "closed",
+          // ⛔ GitHub sends `action: "closed"` with `merged: true` for a merge — the
+          // action is NOT "merged". `tryPrLifecycleRoute` and the webhook builder both
+          // read the pair, so inventing an action nobody emits would leave the
+          // lifecycle branch unmatched while every count still read "emitted".
+          merged: true,
+          mergedAt: typeof row.merged_at === "number" ? new Date(row.merged_at).toISOString() : null,
+          // The join key. `classifyGithubRow` has already refused the row if it is
+          // absent, so this is never null here — the guard is there, not here.
+          mergeCommitSha: row.merge_commit_sha,
+          draft: row.draft === 1 || row.draft === true,
+          mergeable: row.mergeable === null || row.mergeable === undefined
+            ? null
+            : row.mergeable === 1 || row.mergeable === true,
         },
       }, seams);
     }

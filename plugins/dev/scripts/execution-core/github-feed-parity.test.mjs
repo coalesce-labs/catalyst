@@ -174,8 +174,30 @@ describe("⛔ a consumed name that vanishes must not read as agreement", () => {
     { conclusion: "success", status: "completed", prNumbers: [7] });
 
   test("a DECLARED gap is reported as expected and stays clean", () => {
-    const r = compareGithubStreams([comment(1)], [comment(1), merged, suite]);
-    expect(r.expectedAbsent["github.pr.merged"]).toBe(1);
+    // ⚠️ The example is `check_suite.completed` alone now. `pr.merged` used to be
+    // here too and is not a declared gap any more (CTC-691 landed in schema 0.1.17),
+    // which the next test asserts from the other side.
+    const r = compareGithubStreams([comment(1)], [comment(1), suite]);
+    expect(r.expectedAbsent["github.check_suite.completed"]).toBe(1);
+    expect(r.unexplainedAbsent).toEqual({});
+    expect(r.clean).toBe(true);
+  });
+
+  test("⭐ pr.merged is NO LONGER a declared gap — a missing one now breaks clean", () => {
+    // ⛔ The inverse control, and the whole reason CTC-691 mattered: while pr.merged
+    // was declared uncovered, the ledger EXCUSED its absence, so the one name whose
+    // loss silently kills the merge→deploy chain was the one the instrument was
+    // configured not to notice. Now its absence is a finding.
+    const r = compareGithubStreams([comment(1)], [comment(1), merged]);
+    expect(r.expectedAbsent["github.pr.merged"]).toBeUndefined();
+    expect(r.unexplainedAbsent["github.pr.merged"]).toBe(1);
+    expect(r.clean).toBe(false);
+  });
+
+  test("⭐ and a MATCHED pr.merged compares clean, including the join key", () => {
+    // The positive control: without it, the test above passes for a ledger that
+    // simply refuses every pr.merged.
+    const r = compareGithubStreams([comment(1), merged], [comment(1), merged]);
     expect(r.unexplainedAbsent).toEqual({});
     expect(r.clean).toBe(true);
   });
@@ -196,9 +218,12 @@ describe("⛔ a consumed name that vanishes must not read as agreement", () => {
     expect(r.inconclusive).toContain("smee-events-without-a-twin:1");
   });
 
-  test("both declared gaps name the ticket that closes them", () => {
-    expect(KNOWN_ABSENT["github.pr.merged"]).toContain("CTC-691");
-    expect(KNOWN_ABSENT["github.check_suite.completed"]).toContain("CTC-667");
+  test("the remaining declared gap names the ticket that closes it", () => {
+    // ⭐ One entry, not two. `pr.merged` left when CTC-691 landed.
+    expect(Object.keys(KNOWN_ABSENT)).toEqual(["github.check_suite.completed"]);
+    // ⚠️ And the ticket is CTC-712, not CTC-667: the suite TABLE exists now: what is
+    // missing is the pull_requests association the consumer keys on.
+    expect(KNOWN_ABSENT["github.check_suite.completed"]).toContain("CTC-712");
   });
 });
 
