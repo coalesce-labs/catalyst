@@ -40,8 +40,26 @@ CHANNEL_FILE="$CHANNEL_DIR/$CHANNEL.md"
 # genuine contention silently took the OTHER lock and proceeded — two drains appending the same
 # turns, which is precisely the guarantee this lock exists to provide. Decide which mechanism is
 # available FIRST, then interpret its failure as contention and nothing else.
+# CATALYST_DRAIN_LOCK: auto (default) | flock | mkdir. The knob exists because the mkdir branch
+# is the STOCK-MACOS path — the hosts this actually runs on — and it is unreachable for testing on
+# any box that has flock, which includes every CI runner (/usr/bin/flock). Stripping PATH does not
+# work there. Without a way to select it, the portable branch would ship untested; the first
+# attempt to test it silently exercised the flock branch instead, and only a control caught that.
+LOCK_MODE="${CATALYST_DRAIN_LOCK:-auto}"
+case "$LOCK_MODE" in
+auto | flock | mkdir) ;;
+*)
+  echo "drain: CATALYST_DRAIN_LOCK must be auto, flock or mkdir (got '$LOCK_MODE')" >&2
+  exit 2
+  ;;
+esac
+if [[ "$LOCK_MODE" == "flock" ]] && ! command -v flock >/dev/null 2>&1; then
+  echo "drain: CATALYST_DRAIN_LOCK=flock but flock is not installed" >&2
+  exit 2
+fi
+
 LOCK="$CHANNEL_FILE.drain.lock"
-if command -v flock >/dev/null 2>&1; then
+if [[ "$LOCK_MODE" != "mkdir" ]] && command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK"
   if ! flock -n 9; then
     echo "drain: another drain holds $LOCK — skipping this pass" >&2

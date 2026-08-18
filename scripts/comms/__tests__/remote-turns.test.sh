@@ -57,8 +57,12 @@ drain() { CATALYST_SSH="$SCRATCH/fake-ssh" CATALYST_MD_CHANNELS="$CHANNELS" bash
 # has flock (this laptop does, via homebrew) the stale-lock cases would silently exercise the
 # flock branch and assert nothing; the live-holder control below is what caught that. A PATH of
 # /usr/bin:/bin covers everything the drainer uses (ls, sort, sed, cat, mkdir, grep, kill).
+# ⛔ PATH-stripping does NOT work here: every CI runner has /usr/bin/flock, so the first version
+# of this helper (PATH=/usr/bin:/bin) still found it and both stale-lock cases silently tested the
+# flock branch. CI caught it via the control below, exactly as intended. CATALYST_DRAIN_LOCK=mkdir
+# selects the stock-macOS branch explicitly, on any host.
 drain_no_flock() {
-	PATH="/usr/bin:/bin" CATALYST_SSH="$SCRATCH/fake-ssh" CATALYST_MD_CHANNELS="$CHANNELS" \
+	CATALYST_DRAIN_LOCK=mkdir CATALYST_SSH="$SCRATCH/fake-ssh" CATALYST_MD_CHANNELS="$CHANNELS" \
 		bash "$DRAIN" --channel demo --hosts "${1:-mini}" 2>&1
 }
 
@@ -170,10 +174,12 @@ printf 'AFTER STALE LOCK\n' | queue FLEET
 mkdir -p "$CHANNEL_FILE.drain.lockdir"
 echo "999999" >"$CHANNEL_FILE.drain.lockdir/pid" # a pid that is not running
 OUT_STALE="$(drain_no_flock)"
-if command -v flock >/dev/null 2>&1 && PATH="/usr/bin:/bin" command -v flock >/dev/null 2>&1; then
-	fail "the fixture removed flock from PATH" "flock is still reachable; these cases would test the wrong branch"
+# Control: the mkdir branch really is the one running. Its stale-lock message is unique to it,
+# so seeing it proves the selection took effect rather than assuming it did.
+if grep -qE "STALE lock|another drain \(pid" <<<"$OUT_STALE" || [ ! -d "$CHANNEL_FILE.drain.lockdir" ]; then
+	pass "control — CATALYST_DRAIN_LOCK=mkdir selected the portable branch"
 else
-	pass "control — flock is out of PATH, so the mkdir branch is the one under test"
+	fail "control — the mkdir branch is the one under test" "no mkdir-branch output; the flock branch probably ran"
 fi
 if grep -q "STALE lock" <<<"$OUT_STALE"; then pass "the stale lock is identified as stale"; else fail "the stale lock is identified" "$OUT_STALE"; fi
 if grep -qF "AFTER STALE LOCK" "$CHANNEL_FILE"; then pass "the turn was delivered despite the orphaned lock"; else fail "the turn was delivered despite the orphaned lock" "$OUT_STALE"; fi
