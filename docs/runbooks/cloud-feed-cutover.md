@@ -186,3 +186,56 @@ after the cutover it reports
 Its declared-`cloud` WARN text was corrected, though — it used to say such a node
 had "no event ingestion at all", which is now wrong in the direction that sends an
 operator hunting a Linear outage that does not exist.
+
+## 6. Proving a host is actually running the code — `verify-loaded.sh` (CTL-1916)
+
+```bash
+plugins/dev/scripts/verify-loaded.sh --root ~/catalyst/plugin-source --host mini-2 --mode enforce
+plugins/dev/scripts/verify-loaded.sh --root ~/catalyst/plugin-source --host laptop --role monitor
+```
+
+⛔ **A git sha on disk is not evidence.** It proves the bytes arrived; it says nothing
+about what the running process is executing. Every link below is anchored on the **live
+pid**, and the fourth is the one that makes the difference explicit — a daemon that
+started *before* the file changed is serving the previous bytes no matter how current the
+checkout looks. That is not a hypothetical: it is the whole content of CTL-1919 (a writer
+serving a checkout three schema versions stale while every git-level check on the host
+read clean), and of CTL-1659 before it.
+
+| link | question | why it is not covered by the others |
+| --- | --- | --- |
+| `serving-root` | does the live pid's argv name the root it is required to serve? | read from the process table, never a pid **file** — a pid file is a claim written at some past moment, and a recycled pid makes it a confident lie |
+| `gate-module` | is the module present **and importable** from that root? | present-but-unimportable is the CTL-1831 shape (a broken transitive resolution) and reads as "installed" to every git-level check |
+| `armed-line` | did **this pid** write the mode line? | anchored on the pid, because a log is append-only across restarts — an unanchored grep happily matches the line a *previous* process wrote before the rollback you are checking for |
+| `started-after` | did the pid start after the module's mtime? | links 1–3 all pass for a daemon that booted before the pull landed |
+
+Every link **fails closed**: "I could not measure it" exits non-zero and names the link.
+`--role monitor` **asserts the absence** of an execution-core daemon rather than skipping —
+a skipped link reports the same "no complaint" as a verified one.
+
+⚠️ The declared **mode** and the runtime **`armed`** flag are different facts and the tool
+prints both. Measured on the fleet 2026-08-17, mini-2 reports `mode=enforce` with
+`armed=false`: enforce is configured, the feed is not currently armed (CTL-1909). That is
+a runtime condition, not a load failure, so it is surfaced rather than failed — failing it
+would make a correctly-loaded host report FAIL and train operators to ignore the tool.
+
+Tests: `plugins/dev/scripts/__tests__/verify-loaded.test.sh`, gated in CI. Both controls
+are present — a correctly-loaded fixture PASSES, and each failure case changes exactly one
+fact, so a green result is evidence about that fact rather than about the harness.
+
+### Parity sampling — a one-liner, not a script
+
+The overnight sampler that lived at `~/catalyst/parity-hourly.sh` on mini-2 is **retired**
+(CTL-1916). It was hand-placed and untracked, it was never scheduled, and since the Linear
+smee retirement (CTL-1928) the parity run has only one stream left to look at, so it can
+report agreement but no longer a *comparison*. Run the CLI directly when you want a sample:
+
+```bash
+cd ~/catalyst/plugin-source && \
+  bun plugins/dev/scripts/execution-core/linear-feed-parity-run.mjs --since-min 60
+```
+
+⚠️ If you ever need it on a loop again, put the deadline **inside** the loop and make it
+sleep, never spin — `end=$((SECONDS+N)); while [ $SECONDS -lt $end ]; do sleep 60; done`.
+Cleanup must never be load-bearing (AGENTS.md); four spinners once leaked out of one test
+run here and burned ~4 CPU-cores for 16.5 h while the script reported `cleanup verified`.
