@@ -471,14 +471,23 @@ export function dispatchTicket(
   // 20 s ceiling. A blocking narration here would add up to 20 s per dispatch to a tick
   // CTL-1524 already records as blocking the event loop.
   //
-  // Placed BEFORE `dispatch(args)` so the session exists by the time the worker starts
-  // emitting, and so a narration that somehow costs time is visible in the tick timing
-  // rather than hidden behind the launch. It cannot delay the dispatch: no await, no
-  // promise, and `narrate` swallows its own failures by contract.
+  // ⛔ Placed AFTER `dispatch(args)`, and only on a CONFIRMED launch (Codex #3529
+  // round-1 P2). An earlier cut narrated first, so a dispatch that FAILED — a missing
+  // registry entry, failed worktree provisioning, a nonzero phase-agent launch — still
+  // posted a plan marking the phase `inProgress` with no worker in existence to correct
+  // it. Linear then showed active work until a later retry or the 30-minute staleness
+  // timeout, which is exactly the "the agent didn't start" misreading this feature exists
+  // to prevent, manufactured by the feature itself.
+  //
+  // "Confirmed" follows this module's own rule: a THENABLE means the SDK path, whose
+  // synchronous prelaunch has already written the status:"dispatched" signal before the
+  // promise is returned (see settleDispatchSync) — the launch happened. A plain result is
+  // confirmed by `code === 0`, the same field every dispatch consumer reads.
   const n = narrator !== undefined ? narrator : _sessionNarrator;
-  if (n) n.narrate(ticket, phase);
+  const result = dispatch(args);
+  if (n && (isThenable(result) || result?.code === 0)) n.narrate(ticket, phase);
 
-  return dispatch(args);
+  return result;
 }
 
 // ── CTL-1367 P1: async-dispatch settlement seam ─────────────────────────────

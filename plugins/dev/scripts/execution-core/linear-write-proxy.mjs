@@ -418,8 +418,24 @@ export function defaultHttpFn({ url, method, token, body }) {
  */
 export const ASYNC_MAX_TIME_SEC = 10;
 
-/** One retry, and only for a transport-level failure — never for a 4xx the cloud meant. */
-export const ASYNC_MAX_ATTEMPTS = 2;
+/**
+ * ⛔ EXACTLY ONE ATTEMPT. Codex #3529 round-1 P2 — an earlier cut retried once on a
+ * transport failure, and the retry was wrong in two independent ways:
+ *
+ *  1. `sendAsync` charges the ledger ONCE, synchronously, before the transport is
+ *     invoked (that is what keeps the ledger single-writer). A retry therefore made a
+ *     second cloud call the budget never saw, so repeated timeouts could spend close to
+ *     twice the configured daily and per-ticket limits while reporting the configured
+ *     number. Charging the retry instead would mean writing the ledger from the async
+ *     callback — which breaks the very invariant the synchronous charge exists to hold.
+ *  2. `POST /agent/session` APPENDS an activity; it is not idempotent. A timeout AFTER
+ *     the cloud accepted the first request would append the same activity twice.
+ *
+ * A narration is worth neither. It is emitted once per phase, and a lost one self-heals
+ * on the next dispatch — which is the same property that made this route eligible for the
+ * non-blocking path at all. So the retry is deleted rather than accounted for.
+ */
+export const ASYNC_MAX_ATTEMPTS = 1;
 
 export function defaultAsyncHttpFn({ url, method, token, body, onDone = null, spawnFn = spawn }) {
   const config = buildCurlConfig({ url, method, token, body });
@@ -432,46 +448,57 @@ export function defaultAsyncHttpFn({ url, method, token, body, onDone = null, sp
     String(ASYNC_MAX_TIME_SEC),
   ];
 
-  const attempt = (n) => {
-    let child;
-    try {
-      child = spawnFn(CURL_BIN, args, { stdio: ["pipe", "pipe", "pipe"] });
-    } catch (err) {
-      // A spawn that throws synchronously never produces a `close`, so report here or
-      // the outcome is lost.
-      onDone?.({ code: 127, stdout: "", stderr: String(err?.message ?? err), args, attempts: n });
-      return;
-    }
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    child.stdout?.on("data", (d) => { stdout += d; });
-    child.stderr?.on("data", (d) => { stderr += d; });
-    // A child that fails to spawn ASYNCHRONOUSLY emits `error` and may emit no `close`.
-    // Both paths funnel through `settle` so exactly one outcome is reported.
-    const settle = (code) => {
-      if (settled) return;
-      settled = true;
-      // Retry ONLY a transport failure (curl could not complete the exchange). A cloud
-      // that answered — even with a 4xx — has said something, and repeating the call
-      // would spend another unit of the host's daily write budget to be told the same
-      // thing.
-      if (code !== 0 && n < ASYNC_MAX_ATTEMPTS) return attempt(n + 1);
-      onDone?.({ code, stdout, stderr, args, attempts: n });
-    };
-    child.on("error", (err) => { stderr += String(err?.message ?? err); settle(127); });
-    child.on("close", (code) => settle(code ?? 0));
-    try {
-      child.stdin?.end(config);
-    } catch (err) {
-      stderr += String(err?.message ?? err);
-      settle(127);
-      return;
-    }
-    child.unref?.();
+  let child;
+  try {
+    child = spawnFn(CURL_BIN, args, { stdio: ["pipe", "pipe", "pipe"] });
+  } catch (err) {
+    // A spawn that throws synchronously never produces a `close`, so report here or the
+    // outcome is lost.
+    onDone?.({ code: 127, stdout: "", stderr: String(err?.message ?? err), args, attempts: 1 });
+    return { dispatched: false };
+  }
+
+  let stdout = "";
+  let stderr = "";
+  let settled = false;
+  const settle = (code) => {
+    if (settled) return;
+    settled = true;
+    onDone?.({ code, stdout, stderr, args, attempts: 1 });
   };
 
-  attempt(1);
+  child.stdout?.on("data", (d) => { stdout += d; });
+  child.stderr?.on("data", (d) => { stderr += d; });
+  child.stdout?.on("error", () => {});
+  child.stderr?.on("error", () => {});
+  child.on("error", (err) => { stderr += String(err?.message ?? err); settle(127); });
+  child.on("close", (code) => settle(code ?? 0));
+
+  // ⛔ Codex #3529 round-1 P1. `end()` writes ASYNCHRONOUSLY. If curl has already exited
+  // — a connect timeout, a killed child, a closed pipe — the write fails with an
+  // ASYNCHRONOUS `EPIPE` on the stdin stream. A `try/catch` catches only the synchronous
+  // throw, and an 'error' event with NO listener is re-thrown by Node as an uncaught
+  // exception, which terminates the whole execution-core daemon. That would let an
+  // OPTIONAL narration transport kill all dispatching — the precise outcome this route
+  // was made non-blocking to avoid. The listener is attached BEFORE `end()` is called,
+  // because the failure can be delivered on the very next turn.
+  child.stdin?.on("error", (err) => {
+    stderr += String(err?.message ?? err);
+    // Do NOT settle here: curl may still be alive and about to answer, and `settle` is
+    // once-only, so settling on a broken stdin would discard the real verdict. The
+    // child's own `close`/`error` remains the verdict; if it never arrives, `--max-time`
+    // bounds the wait.
+    child.kill?.();
+  });
+  try {
+    child.stdin?.end(config);
+  } catch (err) {
+    stderr += String(err?.message ?? err);
+    settle(127);
+    return { dispatched: false };
+  }
+  child.unref?.();
+
   // The synchronous return value: the request has LEFT, its verdict is not yet known.
   return { dispatched: true };
 }
