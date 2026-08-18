@@ -989,6 +989,9 @@ jobs:
             checkout-sync.test.mjs \
             cluster-claim-sync.test.mjs \
             cluster-claim.test.mjs \
+            cluster-attachment-transport.test.mjs \
+            cluster-heartbeat.test.mjs \
+            cluster-heartbeat-capacity.test.mjs \
             comms-drain.test.mjs \
             codex-run-phase-agent.test.mjs \
             daemon-watchdog-alert.test.mjs \

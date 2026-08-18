@@ -23,6 +23,15 @@
 // cluster-sync.mjs and doctor.mjs already set, to fold this file's own
 // LINEAR_API_TOKEN/LINEAR_API_KEY ladder onto the shared contract.
 import { resolveSecret } from "../lib/secret-contract.mjs";
+// CTL-1889 increment 3 — the shared attachment transport (see its header). Heartbeat is
+// single-writer-per-host, so it has no CAS to protect; what it shares with cluster-claim is
+// the VERB (attachmentCreate + read-back) and therefore the credential this ticket retires.
+import {
+  createGraphqlAttachmentTransport,
+  resolveAttachmentTransport,
+} from "./cluster-attachment-transport.mjs";
+import { createLinearWriteProxy } from "./linear-write-proxy.mjs";
+import { readLinearWriteProxyConfig } from "./config.mjs";
 
 const HEARTBEAT_URL_PREFIX = "catalyst://heartbeat/";
 const HEARTBEAT_ATTACHMENT_TITLE = "catalyst-liveness";
@@ -96,20 +105,33 @@ async function defaultPost(query, variables) {
 // issue found". This is why cross-host liveness never published (CTL-1251).
 // READ_ATTACHMENTS_QUERY below already uses `issue(id:)`, which is why reads
 // worked while writes silently failed.
-const RESOLVE_ISSUE_QUERY = `query ResolveIssueId($id: String!) {
-  issue(id: $id) { id }
-}`;
+/** See cluster-claim.mjs's transportFor — same contract, same default-is-the-old-path rule. */
+function transportFor({ post = defaultPost, transport = null } = {}) {
+  return transport ?? createGraphqlAttachmentTransport({ post });
+}
 
-export async function resolveIssueId(ticket, { post = defaultPost } = {}) {
-  const data = await post(RESOLVE_ISSUE_QUERY, { id: ticket });
-  return data?.issue?.id ?? null;
+/**
+ * defaultTransport — this PROCESS's transport. Constructed from the inherited env for the
+ * same reason cluster-claim.mjs does it: `cluster-heartbeat-sync.mjs` drives this module by
+ * `spawnSync("node cluster-heartbeat.mjs …")`, so the daemon's process-wide install slot is
+ * always empty in this child and reading it would silently keep the app-actor path alive.
+ */
+export function defaultTransport({ env = process.env, post = defaultPost } = {}) {
+  const { mode, routes } = readLinearWriteProxyConfig(env);
+  const proxy = mode === "enforce" ? createLinearWriteProxy({ mode, env, routes }) : null;
+  return resolveAttachmentTransport({ mode, post, proxy, caller: "cluster-heartbeat" });
+}
+
+export async function resolveIssueId(ticket, { post = defaultPost, transport = null } = {}) {
+  return transportFor({ post, transport }).resolveIssueId(ticket);
 }
 
 // ─── read ────────────────────────────────────────────────────────────────────
 
-const READ_ATTACHMENTS_QUERY = `query ReadFence($id: String!) {
-  issue(id: $id) { attachments { nodes { id url metadata } } }
-}`;
+// ⚠️ The GraphQL document that used to live here now lives in
+// cluster-attachment-transport.mjs, which is the ONE place both cluster modules and
+// both transports agree on the wire format. The history above is kept because it is
+// the reason the document reads the way it does, not because the text is still here.
 
 // parseHeartbeatMetadata — normalise an attachment's metadata into the flat
 // liveness record callers consume. `in_flight_tickets` is normalised to a
@@ -154,14 +176,22 @@ export function parseHeartbeatMetadata(metadata, { now = Date.now() } = {}) {
 // max_parallel, in_flight_count } } (the full parseHeartbeatMetadata record).
 // Best-effort: a missing/erroring anchor yields {}. The caller filters out
 // `self` to avoid treating its own attachment as a peer.
-export async function readPeerHeartbeats({ anchorIssue }, { post = defaultPost } = {}) {
-  let data;
+export async function readPeerHeartbeats(
+  { anchorIssue },
+  { post = defaultPost, transport = null } = {},
+) {
+  let nodes;
   try {
-    data = await post(READ_ATTACHMENTS_QUERY, { id: anchorIssue });
+    nodes = await transportFor({ post, transport }).readAttachments(anchorIssue);
   } catch {
+    // ⚠️ BEST-EFFORT, PRESERVED VERBATIM — and deliberately NOT changed by CTL-1889 inc 3.
+    // Unlike `readClaim`, a failed read here returns `{}` (no peers) rather than throwing.
+    // That asymmetry is pre-existing and is a real hazard worth its own ticket (an empty
+    // peer map reads as "every peer is dead", which is the permissive direction for
+    // dead-host takeover) — but this increment changes the TRANSPORT, not the failure
+    // policy, so the proxy path fails exactly the way the app-actor path already did.
     return {};
   }
-  const nodes = data?.issue?.attachments?.nodes ?? [];
   const out = {};
   for (const n of nodes) {
     if (typeof n?.url !== "string" || !n.url.startsWith(HEARTBEAT_URL_PREFIX)) continue;
@@ -173,9 +203,10 @@ export async function readPeerHeartbeats({ anchorIssue }, { post = defaultPost }
 
 // ─── write / upsert ──────────────────────────────────────────────────────────
 
-const WRITE_ATTACHMENT_MUTATION = `mutation UpsertFence($input: AttachmentCreateInput!) {
-  attachmentCreate(input: $input) { success attachment { id url metadata } }
-}`;
+// ⚠️ The GraphQL document that used to live here now lives in
+// cluster-attachment-transport.mjs, which is the ONE place both cluster modules and
+// both transports agree on the wire format. The history above is kept because it is
+// the reason the document reads the way it does, not because the text is still here.
 
 // publishHeartbeat — upsert THIS host's `catalyst://heartbeat/<host>` attachment
 // on the anchor issue. Single-writer-per-host ⇒ no CAS. Mirrors writeClaim
@@ -193,10 +224,9 @@ const WRITE_ATTACHMENT_MUTATION = `mutation UpsertFence($input: AttachmentCreate
 // is supplied — this is purely additive.
 export async function publishHeartbeat(
   { anchorIssue, host, inFlightTickets = [], maxParallel = null, lastAdvanceAt = null },
-  { post = defaultPost, now, issueId: issueIdOverride = null } = {},
+  { post = defaultPost, transport = null, now, issueId: issueIdOverride = null } = {},
 ) {
-  const issueId = issueIdOverride || (await resolveIssueId(anchorIssue, { post }));
-  if (!issueId) throw new Error(`cluster-heartbeat: no issue found for anchor ${anchorIssue}`);
+  const t = transportFor({ post, transport });
   const last_seen = now ? now() : new Date().toISOString();
   const metadata = {
     host,
@@ -206,17 +236,15 @@ export async function publishHeartbeat(
     in_flight_count: inFlightTickets.length,
   };
   if (lastAdvanceAt != null) metadata.last_advance_at = lastAdvanceAt;
-  const data = await post(WRITE_ATTACHMENT_MUTATION, {
-    input: {
-      issueId,
-      title: HEARTBEAT_ATTACHMENT_TITLE,
-      url: heartbeatUrl(host),
-      metadata,
-    },
+  // Throws on a resolution miss or any non-success, exactly as before — the transport owns
+  // both cases now, so the two callers cannot drift on what "the publish failed" means.
+  await t.upsertAttachment({
+    ticket: anchorIssue,
+    issueId: issueIdOverride,
+    title: HEARTBEAT_ATTACHMENT_TITLE,
+    url: heartbeatUrl(host),
+    metadata,
   });
-  if (!data?.attachmentCreate?.success) {
-    throw new Error(`cluster-heartbeat: attachmentCreate success=false for ${host}`);
-  }
   return parseHeartbeatMetadata(metadata);
 }
 
@@ -235,7 +263,8 @@ export async function publishHeartbeat(
 // with ONE small subprocess call (instead of the resolution being buried inside every
 // `publish`), then pass the resolved UUID back into `publish`'s optional 5th arg on every
 // subsequent call — skipping that call's own ResolveIssueId round-trip.
-export async function runCli(argv, { post = defaultPost, now } = {}) {
+export async function runCli(argv, { post = defaultPost, transport = null, now } = {}) {
+  const t = transport ?? defaultTransport({ post });
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "publish": {
@@ -262,20 +291,20 @@ export async function runCli(argv, { post = defaultPost, now } = {}) {
       const issueId = issueIdRaw != null && issueIdRaw !== "" ? issueIdRaw : null;
       const rec = await publishHeartbeat(
         { anchorIssue: anchor, host, inFlightTickets, maxParallel, lastAdvanceAt },
-        { post, now, issueId },
+        { post, transport: t, now, issueId },
       );
       process.stdout.write(JSON.stringify(rec) + "\n");
       return 0;
     }
     case "read": {
       const [anchor] = rest;
-      const map = await readPeerHeartbeats({ anchorIssue: anchor }, { post });
+      const map = await readPeerHeartbeats({ anchorIssue: anchor }, { post, transport: t });
       process.stdout.write(JSON.stringify(map) + "\n");
       return 0;
     }
     case "resolve-anchor": {
       const [anchor] = rest;
-      const issueId = await resolveIssueId(anchor, { post });
+      const issueId = await resolveIssueId(anchor, { post, transport: t });
       process.stdout.write(JSON.stringify({ issueId }) + "\n");
       return 0;
     }

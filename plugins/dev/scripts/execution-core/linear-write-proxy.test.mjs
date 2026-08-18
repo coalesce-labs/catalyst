@@ -20,6 +20,7 @@ import {
   PROXY_EVENT_NAMES,
   NON_BLOCKING_ROUTE_IDS,
   PROXY_ROUTE_IDS,
+  READ_ROUTE_IDS,
   buildCurlConfig,
   buildProxyRequest,
   classifyProxyResponse,
@@ -125,12 +126,16 @@ describe("resolveHostKey — through the secret contract, not a hand-rolled ladd
 
 describe("routes", () => {
   test("the supported routes are exactly the set below — fails in both directions", () => {
-    // CTL-1943 added `session` (CTC-682). The exact-equality shape is deliberate: a new
-    // route must be argued for HERE, because every id in this set is a path the daemon
-    // will send a Linear write to.
-    const expected = ["comment", "issue-state", "label", "session"];
+    // CTL-1943 added `session` (CTC-682); CTL-1889 inc 3 added `attachment` (CTC-692) — the
+    // cluster fence + heartbeat record. The exact-equality shape is deliberate: a new route
+    // must be argued for HERE, because every id in this set is a path the daemon will send a
+    // Linear write to.
+    const expected = ["attachment", "comment", "issue-state", "label", "session"];
     expect([...PROXY_ROUTE_IDS].sort()).toEqual(expected);
     expect(Object.keys(DEFAULT_ROUTES).sort()).toEqual(expected);
+    // The READ routes are a SEPARATE set on purpose (they spend no write budget), and they
+    // must not leak into the write set — asserted in both directions.
+    expect([...READ_ROUTE_IDS].sort()).toEqual(["attachments"]);
   });
 
   test("⛔ exactly ONE route is non-blocking, and it is not a dispatch-critical one", () => {
@@ -154,9 +159,20 @@ describe("routes", () => {
   });
 
   test("an unknown route id yields null → buildProxyRequest refuses with a named reason", () => {
-    expect(resolveRoutePath("attachment")).toBeNull();
-    const r = buildProxyRequest({ routeId: "attachment", payload: {}, baseUrl: "http://h" });
+    // ⚠️ This test used to use "attachment" as its example of an unknown route. CTL-1889
+    // inc 3 made that a REAL route, and the assertion inverted — so the id here is now a
+    // deliberately unimplementable one. A plausible-sounding placeholder is a trap: it
+    // turns "we added the route you asked for" into a red test in an unrelated file.
+    expect(resolveRoutePath("not-a-route-and-never-will-be")).toBeNull();
+    const r = buildProxyRequest({
+      routeId: "not-a-route-and-never-will-be",
+      payload: {},
+      baseUrl: "http://h",
+    });
     expect(r).toMatchObject({ url: null, reason: "unknown-route" });
+    // NEGATIVE CONTROL — a real id resolves, so this is measuring the refusal and not a
+    // resolver that returns null for everything.
+    expect(resolveRoutePath("comment")).toBe(DEFAULT_ROUTES.comment);
   });
 });
 
@@ -381,7 +397,7 @@ describe("enforce — the proxy IS the write", () => {
   test("an unusable route id refuses before resolving the key", () => {
     const http = recorder();
     const p = createLinearWriteProxy({ mode: "enforce", env: {}, httpFn: http, appendEvent: eventSink(), log: silentLog });
-    expect(p.send({ routeId: "attachment", ticket: "CTL-8", payload: {} })).toEqual({
+    expect(p.send({ routeId: "not-a-route-and-never-will-be", ticket: "CTL-8", payload: {} })).toEqual({
       handled: true,
       applied: false,
       reason: "unknown-route",
@@ -557,5 +573,150 @@ describe("defaultHttpFn round-trip against a real server", () => {
     const req = buildProxyRequest({ routeId: "label", payload: {}, baseUrl: `http://127.0.0.1:${port}/api/v1` });
     const res = defaultHttpFn({ url: req.url, method: req.method, token: TOKEN, body: req.body });
     expect(classifyProxyResponse(res)).toMatchObject({ applied: false, reason: "unauthorized", status: 401 });
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════
+// CTL-1889 increment 3 / CTC-692 — the attachment write route and the GET read-back.
+// ══════════════════════════════════════════════════════════════════════════════════════
+
+describe("the attachment pair (CTL-1889 inc 3)", () => {
+  test("`attachment` is a WRITE route and is NOT async-eligible — the claim is dispatch-critical", () => {
+    expect(PROXY_ROUTE_IDS).toContain("attachment");
+    // ⛔ The asymmetry that matters: a lost narration costs an observation, a lost claim
+    // costs the mutex. If someone adds "attachment" to the non-blocking set to make dispatch
+    // feel faster, this fails.
+    expect(NON_BLOCKING_ROUTE_IDS.has("attachment")).toBe(false);
+    expect(resolveRoutePath("attachment")).toBe("/agent/attachment");
+  });
+
+  test("`attachments` is a READ route and is NOT in the write route ids", () => {
+    expect(READ_ROUTE_IDS.has("attachments")).toBe(true);
+    // A read must never be reachable through `send`, which would spend a write-budget unit
+    // on it and let an exhausted host stop being able to VERIFY a claim.
+    expect(PROXY_ROUTE_IDS).not.toContain("attachments");
+    expect(resolveRoutePath("attachments")).toBe("/agent/attachments");
+  });
+
+  test("the read route builds a GET with issueId in the query string and NO body", () => {
+    const req = buildProxyRequest({
+      routeId: "attachments",
+      baseUrl: "https://c/api/v1",
+      query: { issueId: "CTL-1889" },
+      account: "acct-1",
+    });
+    expect(req.method).toBe("GET");
+    expect(req.body).toBeNull();
+    expect(req.url).toBe("https://c/api/v1/agent/attachments?issueId=CTL-1889&account=acct-1");
+  });
+
+  test("⛔ the GET's curl config emits NO `data` line — a body would make curl send a POST", () => {
+    const cfg = buildCurlConfig({ url: "https://c/x", method: "GET", token: TOKEN, body: null });
+    // Asserting the ABSENCE, positively: curl treats any request carrying a body as a POST
+    // regardless of `request = "GET"`, so a stray `data = ""` would 404 on a live route.
+    expect(cfg).not.toContain("data =");
+    expect(cfg).toContain('request = "GET"');
+    // NEGATIVE CONTROL — the same builder DOES emit `data` for a write, so the assertion
+    // above is measuring the branch and not a broken matcher.
+    expect(buildCurlConfig({ url: "https://c/x", method: "POST", token: TOKEN, body: "{}" })).toContain(
+      'data = "{}"',
+    );
+  });
+
+  test("the write route still POSTs a body, unchanged", () => {
+    const req = buildProxyRequest({
+      routeId: "attachment",
+      payload: { issueId: "CTL-1", url: "catalyst://fence/CTL-1" },
+      baseUrl: "https://c/api/v1",
+    });
+    expect(req.method).toBe("POST");
+    expect(JSON.parse(req.body).issueId).toBe("CTL-1");
+  });
+
+  test("read() returns the attachments on a succeeded body", () => {
+    const rec = recorder({
+      code: 0,
+      stdout: JSON.stringify({ outcome: "succeeded", attachments: [{ id: "a", url: "u" }] }) + "\n200",
+      stderr: "",
+    });
+    const p = createLinearWriteProxy({ mode: "enforce", env: envWithKey(), httpFn: rec });
+    const res = p.read({ routeId: "attachments", ticket: "CTL-1", query: { issueId: "CTL-1" } });
+    expect(res.ok).toBe(true);
+    expect(res.attachments).toEqual([{ id: "a", url: "u" }]);
+    expect(rec.calls[0].method).toBe("GET");
+  });
+
+  test("⛔ read() NEVER fabricates an empty list — a 200 with an unreadable body is ok:false", () => {
+    // The specific way a read can lie: HTTP 200, but the body is not the answer we asked for
+    // (a proxy error page, a truncated write, a route that moved). Reporting `[]` here would
+    // tell the soft-CAS that nobody holds the ticket.
+    for (const stdout of ["<html>oops</html>\n200", '{"outcome":"succeeded"}\n200', "\n200"]) {
+      const p = createLinearWriteProxy({
+        mode: "enforce",
+        env: envWithKey(),
+        httpFn: recorder({ code: 0, stdout, stderr: "" }),
+      });
+      const res = p.read({ routeId: "attachments", query: { issueId: "CTL-1" } });
+      expect(res.ok).toBe(false);
+      expect(res.attachments).toBeUndefined();
+    }
+  });
+
+  test("read() refuses a non-read route BY NAME rather than quietly performing a write", () => {
+    const p = createLinearWriteProxy({ mode: "enforce", env: envWithKey(), httpFn: recorder() });
+    expect(p.read({ routeId: "comment", query: {} })).toMatchObject({
+      ok: false,
+      reason: "route-not-read-eligible",
+    });
+  });
+
+  test("read() with no per-host key refuses LOUDLY — the negative control, same as the writes", () => {
+    const p = createLinearWriteProxy({ mode: "enforce", env: {}, httpFn: recorder() });
+    expect(p.read({ routeId: "attachments", query: { issueId: "X" } })).toMatchObject({
+      ok: false,
+      reason: "no-cloud-token",
+    });
+  });
+
+  test("⛔ read() spends NO write budget — an exhausted host must still be able to VERIFY a claim", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wp-read-budget-"));
+    const ledgerPath = join(dir, "budget.json");
+    try {
+      const rec = recorder({
+        code: 0,
+        stdout: JSON.stringify({ outcome: "succeeded", attachments: [] }) + "\n200",
+        stderr: "",
+      });
+      const p = createLinearWriteProxy({
+        mode: "enforce",
+        env: envWithKey(),
+        httpFn: rec,
+        budgetPath: ledgerPath,
+      });
+      for (let i = 0; i < 5; i++) p.read({ routeId: "attachments", ticket: "CTL-1", query: { issueId: "CTL-1" } });
+      // Five reads, and the ledger was never even created — reads do not touch it.
+      expect(existsSync(ledgerPath)).toBe(false);
+
+      // NEGATIVE CONTROL — one WRITE through the same proxy does create and spend it, so the
+      // assertion above is about reads and not about a ledger that never works.
+      p.send({ routeId: "attachment", ticket: "CTL-1", payload: { issueId: "CTL-1" } });
+      expect(JSON.parse(readFileSync(ledgerPath, "utf8")).total).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("SHADOW still performs the read — a read has no double-apply hazard, and a shadow window that cannot read proves nothing", () => {
+    const rec = recorder({
+      code: 0,
+      stdout: JSON.stringify({ outcome: "succeeded", attachments: [] }) + "\n200",
+      stderr: "",
+    });
+    const p = createLinearWriteProxy({ mode: "shadow", env: envWithKey(), httpFn: rec });
+    expect(p.read({ routeId: "attachments", query: { issueId: "CTL-1" } }).ok).toBe(true);
+    expect(rec.calls).toHaveLength(1);
+    // NEGATIVE CONTROL — the same proxy in shadow makes NO call for a write.
+    p.send({ routeId: "attachment", ticket: "CTL-1", payload: {} });
+    expect(rec.calls).toHaveLength(1);
   });
 });

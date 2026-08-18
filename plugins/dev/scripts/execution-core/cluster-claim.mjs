@@ -15,6 +15,15 @@
 // leaf; cluster-sync.mjs and doctor.mjs already set this precedent). Folds
 // defaultPost's own LINEAR_API_TOKEN/LINEAR_API_KEY ladder below.
 import { resolveSecret } from "../lib/secret-contract.mjs";
+// CTL-1889 increment 3 — the transport seam. Read its header before changing anything
+// here: it is the file that re-establishes "every failure throws" on the proxy path, and
+// both the soft-CAS below and the stale-preemption branch depend on that and on nothing else.
+import {
+  createGraphqlAttachmentTransport,
+  resolveAttachmentTransport,
+} from "./cluster-attachment-transport.mjs";
+import { createLinearWriteProxy } from "./linear-write-proxy.mjs";
+import { readLinearWriteProxyConfig } from "./config.mjs";
 //
 // ─── The storage mechanism (VERIFIED via live Linear API probe, 2026-06-08) ──
 // Linear has no custom fields and labels can't model a counter, so the claim +
@@ -28,6 +37,10 @@ import { resolveSecret } from "../lib/secret-contract.mjs";
 //   • attachmentCreate with the SAME url is an UPSERT — it returns the same
 //     attachment id with new metadata. (attachmentUpdate requires `title` and
 //     does NOT accept `metadata`, so create is the only upsert path.)
+//     ⭐ RE-VERIFIED 2026-08-18 through the CTC-692 cloud route: a second POST to
+//     the same url returned the SAME attachment id with the metadata replaced,
+//     and the read-back showed exactly ONE node. This is the measurement the
+//     whole soft-CAS rests on, so it is re-checked whenever the path changes.
 //   • The write produces ZERO issue.history entries → invisible to the human
 //     activity feed (no notification spam).
 //   • READ via issue.attachments and pick the node whose url starts with
@@ -105,6 +118,18 @@ async function defaultPost(query, variables) {
   return json?.data ?? {};
 }
 
+/**
+ * transportFor — the attachment transport for one call. CTL-1889 increment 3.
+ *
+ * ⚠️ THE DEFAULT IS THE PRE-EXISTING PATH, BY CONSTRUCTION. When no `transport` is
+ * injected this wraps whatever `post` the caller supplied — so every existing test that
+ * injects `post` keeps exercising the direct GraphQL path with the same documents and the
+ * same assertions, and "the app-actor path is unchanged" is checkable rather than claimed.
+ */
+function transportFor({ post = defaultPost, transport = null } = {}) {
+  return transport ?? createGraphqlAttachmentTransport({ post });
+}
+
 // ─── identifier → issue UUID ─────────────────────────────────────────────────
 
 // CTL-1363: resolve via the `issue(id:)` query, which accepts the human
@@ -118,23 +143,35 @@ async function defaultPost(query, variables) {
 // invisible at INFO). Same bug + fix as cluster-heartbeat.mjs (CTL-1255).
 // READ_ATTACHMENTS_QUERY below already uses `issue(id:)` — which is why reads
 // worked while writes silently 400'd.
-const RESOLVE_ISSUE_QUERY = `query ResolveIssueId($id: String!) {
-  issue(id: $id) { id }
-}`;
+// ⚠️ The GraphQL document that used to live here now lives in
+// cluster-attachment-transport.mjs, which is the ONE place both cluster modules and
+// both transports agree on the wire format. The history above is kept because it is
+// the reason the document reads the way it does, not because the text is still here.
 
-// resolveIssueId — a ticket identifier (e.g. "CTL-842") → its issue UUID, or
-// null when no issue matches. attachmentCreate needs the UUID, not the
-// identifier. Exported for unit coverage + reuse.
-export async function resolveIssueId(ticket, { post = defaultPost } = {}) {
-  const data = await post(RESOLVE_ISSUE_QUERY, { id: ticket });
-  return data?.issue?.id ?? null;
+// resolveIssueId — a ticket identifier (e.g. "CTL-842") → its issue UUID, or null when no
+// issue matches. Exported for unit coverage + reuse.
+//
+// ⚠️ THE CLAIM THIS FUNCTION WAS WRITTEN FOR — "attachmentCreate needs the UUID, not the
+// identifier" — IS NOT TRUE OF THE PROXY PATH, measured 2026-08-18 against the live CTC-692
+// route: a POST carrying `issueId: "CTL-1889"` returned `succeeded`, and the cloud passes
+// that value STRAIGHT to `attachmentCreate` without resolving it. So on the proxy transport
+// this is the identity function and no resolution happens at all.
+//
+// ⚠️ It is left in place, and still resolves, for the DIRECT app-actor path — where the
+// original claim has not been re-measured and where `cluster-claim-sync.mjs`'s permanent
+// UUID cache (CTL-863) calls the `resolve-issue-id` CLI verb expecting a real answer. Do
+// not "simplify" it away on the strength of the proxy measurement: those are two different
+// call paths and only one of them has been checked.
+export async function resolveIssueId(ticket, { post = defaultPost, transport = null } = {}) {
+  return transportFor({ post, transport }).resolveIssueId(ticket);
 }
 
 // ─── read ────────────────────────────────────────────────────────────────────
 
-const READ_ATTACHMENTS_QUERY = `query ReadFence($id: String!) {
-  issue(id: $id) { attachments { nodes { id url metadata } } }
-}`;
+// ⚠️ The GraphQL document that used to live here now lives in
+// cluster-attachment-transport.mjs, which is the ONE place both cluster modules and
+// both transports agree on the wire format. The history above is kept because it is
+// the reason the document reads the way it does, not because the text is still here.
 
 // parseClaimMetadata — normalise an attachment's metadata into the flat claim
 // record callers consume. `catalyst_generation` is coerced to a Number; a
@@ -163,9 +200,13 @@ export function parseClaimMetadata(metadata) {
 // issue UUID when the caller already resolved it; a bare identifier is resolved
 // transparently is NOT done here (Linear's `issue(id:)` accepts an identifier
 // like "CTL-842" directly), so we pass `ticket` straight through.
-export async function readClaim(ticket, { post = defaultPost } = {}) {
-  const data = await post(READ_ATTACHMENTS_QUERY, { id: ticket });
-  const nodes = data?.issue?.attachments?.nodes ?? [];
+export async function readClaim(ticket, { post = defaultPost, transport = null } = {}) {
+  // ⛔ A THROWN read must stay thrown. `null` here means "there is no fence on this
+  // ticket", which `claimTicket` reads as "nobody holds it, claim at generation 1" — so
+  // swallowing a transport failure into `null` would reset the fencing token on a ticket
+  // another host owns. The transport's contract is that only a SUCCESSFUL read returns;
+  // this function must not add a catch. See cluster-attachment-transport.mjs's header.
+  const nodes = await transportFor({ post, transport }).readAttachments(ticket);
   const node = nodes.find((n) => typeof n?.url === "string" && n.url.startsWith(FENCE_URL_PREFIX));
   if (!node) return null;
   return parseClaimMetadata(node.metadata);
@@ -173,9 +214,10 @@ export async function readClaim(ticket, { post = defaultPost } = {}) {
 
 // ─── write / upsert ──────────────────────────────────────────────────────────
 
-const WRITE_ATTACHMENT_MUTATION = `mutation UpsertFence($input: AttachmentCreateInput!) {
-  attachmentCreate(input: $input) { success attachment { id url metadata } }
-}`;
+// ⚠️ The GraphQL document that used to live here now lives in
+// cluster-attachment-transport.mjs, which is the ONE place both cluster modules and
+// both transports agree on the wire format. The history above is kept because it is
+// the reason the document reads the way it does, not because the text is still here.
 
 // writeClaim — upsert the claim/fence attachment for a ticket. Always uses
 // attachmentCreate (the VERIFIED upsert path — the same url returns the same
@@ -197,12 +239,8 @@ const WRITE_ATTACHMENT_MUTATION = `mutation UpsertFence($input: AttachmentCreate
 export async function writeClaim(
   ticket,
   { owner_host, generation, phase, triage_attempt_count = 0 },
-  { post = defaultPost, issueId: issueIdOverride = null, preserveClaimedAt = null } = {},
+  { post = defaultPost, transport = null, issueId: issueIdOverride = null, preserveClaimedAt = null } = {},
 ) {
-  const issueId = issueIdOverride || (await resolveIssueId(ticket, { post }));
-  if (!issueId) {
-    throw new Error(`cluster-claim: no issue found for identifier ${ticket}`);
-  }
   // preserveClaimedAt allows a count-only bump to avoid resetting the CTL-1297
   // staleness clock — a mere triage_attempt_count increment is not a takeover.
   const claimed_at = preserveClaimedAt ?? new Date().toISOString();
@@ -213,17 +251,19 @@ export async function writeClaim(
     claimed_at,
     triage_attempt_count,
   };
-  const data = await post(WRITE_ATTACHMENT_MUTATION, {
-    input: {
-      issueId,
-      title: FENCE_ATTACHMENT_TITLE,
-      url: fenceUrl(ticket),
-      metadata,
-    },
+  // ⛔ MUST THROW ON ANY NON-SUCCESS, and this is the single most important line in the
+  // file. `claimTicket`'s stale-preemption branch returns `{won:true}` with NO read-back
+  // — the throw from here is the ONLY thing between a refused write and a host that
+  // believes it owns a ticket it never wrote to. The transport guarantees the throw for
+  // both paths (`success:false` on GraphQL, `applied:false` on the proxy); do not wrap
+  // this call in a try/catch that returns a value.
+  await transportFor({ post, transport }).upsertAttachment({
+    ticket,
+    issueId: issueIdOverride,
+    title: FENCE_ATTACHMENT_TITLE,
+    url: fenceUrl(ticket),
+    metadata,
   });
-  if (!data?.attachmentCreate?.success) {
-    throw new Error(`cluster-claim: attachmentCreate returned success=false for ${ticket}`);
-  }
   return parseClaimMetadata(metadata);
 }
 
@@ -234,8 +274,8 @@ export async function writeClaim(
 // catalyst://fence/ attachment is found (fence-absent → caller fails open to
 // host-local counting). A zero count is a valid result (fence exists but no
 // attempts have been bumped yet, e.g. immediately after a fresh claim).
-export async function readTriageAttemptCount(ticket, { post = defaultPost } = {}) {
-  const c = await readClaim(ticket, { post });
+export async function readTriageAttemptCount(ticket, { post = defaultPost, transport = null } = {}) {
+  const c = await readClaim(ticket, { post, transport });
   return c ? (c.triage_attempt_count ?? 0) : null;
 }
 
@@ -243,8 +283,11 @@ export async function readTriageAttemptCount(ticket, { post = defaultPost } = {}
 // fence attachment. Preserves owner_host, catalyst_generation, phase, and
 // claimed_at (does NOT bump the generation — this is not a takeover). Returns
 // the new count on success, or null when no fence exists (best-effort no-op).
-export async function bumpTriageAttemptCount(ticket, { post = defaultPost, issueId = null } = {}) {
-  const current = await readClaim(ticket, { post });
+export async function bumpTriageAttemptCount(
+  ticket,
+  { post = defaultPost, transport = null, issueId = null } = {},
+) {
+  const current = await readClaim(ticket, { post, transport });
   if (!current) return null; // no fence — no-op, fail-open
   const newCount = (current.triage_attempt_count ?? 0) + 1;
   await writeClaim(
@@ -255,7 +298,7 @@ export async function bumpTriageAttemptCount(ticket, { post = defaultPost, issue
       phase: current.phase,
       triage_attempt_count: newCount,
     },
-    { post, issueId, preserveClaimedAt: current.claimed_at },
+    { post, transport, issueId, preserveClaimedAt: current.claimed_at },
   );
   return newCount;
 }
@@ -284,9 +327,15 @@ export async function claimTicket(
   ticket,
   hostName,
   phase,
-  { post = defaultPost, staleMs = CLAIM_STALE_MS_DEFAULT, now = () => Date.now(), issueId = null } = {},
+  {
+    post = defaultPost,
+    transport = null,
+    staleMs = CLAIM_STALE_MS_DEFAULT,
+    now = () => Date.now(),
+    issueId = null,
+  } = {},
 ) {
-  const current = await readClaim(ticket, { post });
+  const current = await readClaim(ticket, { post, transport });
   const nextGen = (current?.generation ?? 0) + 1;
 
   // CTL-1297: stale cross-host preemption. If a claim is held by a DIFFERENT host
@@ -298,15 +347,23 @@ export async function claimTicket(
   if (current && current.owner_host && current.owner_host !== hostName) {
     const claimedAtMs = current.claimed_at ? Date.parse(current.claimed_at) : NaN;
     if (Number.isFinite(claimedAtMs) && now() - claimedAtMs > staleMs) {
-      await writeClaim(ticket, { owner_host: hostName, generation: nextGen, phase }, { post, issueId });
+      await writeClaim(
+        ticket,
+        { owner_host: hostName, generation: nextGen, phase },
+        { post, transport, issueId },
+      );
       return { won: true, generation: nextGen };
     }
   }
 
   // Normal soft-CAS (unchanged): write then read-back; a concurrent host that
   // wrote last wins the read-back and we back off.
-  await writeClaim(ticket, { owner_host: hostName, generation: nextGen, phase }, { post, issueId });
-  const readback = await readClaim(ticket, { post });
+  await writeClaim(
+    ticket,
+    { owner_host: hostName, generation: nextGen, phase },
+    { post, transport, issueId },
+  );
+  const readback = await readClaim(ticket, { post, transport });
   const won = readback?.owner_host === hostName && readback?.generation === nextGen;
   return { won, generation: nextGen };
 }
@@ -319,8 +376,8 @@ export async function claimTicket(
 // false ⇒ a takeover bumped the generation past us (we're a stale zombie) →
 // abort the side-effect. A missing claim (null) yields false — there is nothing
 // authorising our generation, so the conservative answer is "not current".
-export async function isFenceCurrent(ticket, generation, { post = defaultPost } = {}) {
-  const current = await readClaim(ticket, { post });
+export async function isFenceCurrent(ticket, generation, { post = defaultPost, transport = null } = {}) {
+  const current = await readClaim(ticket, { post, transport });
   return current?.generation === generation;
 }
 
@@ -351,37 +408,61 @@ export async function isFenceCurrent(ticket, generation, { post = defaultPost } 
 //                                    every `claim`.
 const FENCE_STALE_EXIT = 10;
 
-export async function runCli(argv, { post = defaultPost } = {}) {
+/**
+ * defaultTransport — build the transport this PROCESS should use. CTL-1889 increment 3.
+ *
+ * ⛔ WHY THE PROXY IS CONSTRUCTED HERE AND NOT READ FROM THE INSTALL SLOT.
+ * `linear-write-proxy-install.mjs` holds a PROCESS-WIDE slot the daemon fills at startup.
+ * This module is not run in the daemon's process — `cluster-claim-sync.mjs` drives it by
+ * `spawnSync("node cluster-claim.mjs …")`, so the slot in this child is always empty.
+ * Reaching for `getLinearWriteProxy()` here would therefore find `null` on every real
+ * invocation and silently fall through to the app-actor path, which would look exactly
+ * like a working migration while retiring nothing. The child re-reads the mode from its
+ * inherited env instead.
+ *
+ * ⚠️ A mode of `enforce` with no constructible proxy yields the app-actor transport, and
+ * that is NOT a silent fall-back of the kind increments 1-2 forbid: `createLinearWriteProxy`
+ * returns null only for a mode that is not shadow/enforce, so this branch is unreachable
+ * under enforce. It is here so a future mode cannot produce an undefined transport.
+ */
+export function defaultTransport({ env = process.env, post = defaultPost } = {}) {
+  const { mode, routes } = readLinearWriteProxyConfig(env);
+  const proxy = mode === "enforce" ? createLinearWriteProxy({ mode, env, routes }) : null;
+  return resolveAttachmentTransport({ mode, post, proxy, caller: "cluster-claim" });
+}
+
+export async function runCli(argv, { post = defaultPost, transport = null } = {}) {
+  const t = transport ?? defaultTransport({ post });
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "claim": {
       const [ticket, hostName, phase, issueIdRaw] = rest;
       const issueId = issueIdRaw != null && issueIdRaw !== "" ? issueIdRaw : null;
-      const res = await claimTicket(ticket, hostName, phase, { post, issueId });
+      const res = await claimTicket(ticket, hostName, phase, { post, transport: t, issueId });
       process.stdout.write(JSON.stringify(res) + "\n");
       return 0;
     }
     case "fence-check": {
       const [ticket, gen] = rest;
-      const current = await isFenceCurrent(ticket, Number(gen), { post });
+      const current = await isFenceCurrent(ticket, Number(gen), { post, transport: t });
       process.stdout.write(JSON.stringify({ current }) + "\n");
       return current ? 0 : FENCE_STALE_EXIT;
     }
     case "resolve-issue-id": {
       const [ticket] = rest;
-      const issueId = await resolveIssueId(ticket, { post });
+      const issueId = await resolveIssueId(ticket, { post, transport: t });
       process.stdout.write(JSON.stringify({ issueId }) + "\n");
       return 0;
     }
     case "read-triage-attempt": {
       const [ticket] = rest;
-      const count = await readTriageAttemptCount(ticket, { post });
+      const count = await readTriageAttemptCount(ticket, { post, transport: t });
       process.stdout.write(JSON.stringify({ count }) + "\n");
       return 0;
     }
     case "bump-triage-attempt": {
       const [ticket] = rest;
-      const count = await bumpTriageAttemptCount(ticket, { post });
+      const count = await bumpTriageAttemptCount(ticket, { post, transport: t });
       process.stdout.write(JSON.stringify({ count }) + "\n");
       return 0;
     }
