@@ -31,7 +31,22 @@ describe("cloud-sync.mjs dep-skew wiring", () => {
     expect(SRC).toContain("writeDepsBreadcrumb");
     // Resolution goes through the real module resolver, so the record describes what was
     // ACTUALLY loaded rather than what the lockfile claims (the CTL-1646 trap).
-    expect(SRC).toMatch(/resolveModule:\s*\(specifier\)\s*=>\s*depsRequire\.resolve\(specifier\)/);
+    //
+    // ⚠️ Asserted as the PROPERTY, not as one spelling of it. This was pinned to the exact
+    // literal `(specifier) => depsRequire.resolve(specifier)` and went red on CTL-1931 —
+    // which added a second parameter while keeping the property completely intact. A test
+    // that fails on a signature it does not care about reports a regression that did not
+    // happen, and the next person's instinct is to loosen it rather than read it.
+    // The whole resolveModule expression, so the assertions below describe what it DOES
+    // rather than how it is spelled.
+    const resolver = /resolveModule:\s*\(([\s\S]*?)\n/.exec(SRC)?.[0] ?? "";
+    expect(resolver, "POSITIVE CONTROL — the extraction found the resolveModule expression at all").toContain("resolveModule:");
+    expect(resolver, "resolution must go through the module resolver, never a version read off a lockfile").toContain(".resolve(specifier)");
+    expect(resolver, "the daemon's own require is the DEFAULT base").toContain("depsRequire");
+    // CTL-1931: a `from` dep re-bases onto ANOTHER package's location, because under bun's
+    // isolated linker the copy the SDK loads and the copy the root links are independently
+    // determined — and the one that decides what the writer knows is the SDK's.
+    expect(resolver, "the from-rebase builds a require AT the base path rather than reusing the daemon's").toMatch(/createRequire\(\s*opts\??\.?fromPath\s*\)/);
   });
 
   test("the predicate is EVALUATED on the heartbeat tick, against a re-read lockfile digest", () => {
