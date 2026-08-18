@@ -934,6 +934,10 @@ jobs:
             linear-feed-diff.test.mjs \
             linear-feed-diffsweep.test.mjs \
             linear-feed-parity.test.mjs \
+            github-feed-source.test.mjs \
+            github-feed-event.test.mjs \
+            github-feed-sweep.test.mjs \
+            github-feed-parity.test.mjs \
             cloud-feed-gate.test.mjs \
             cloud-feed-capture.test.mjs \
             cloud-feed-timer.test.mjs \
