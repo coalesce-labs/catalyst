@@ -3375,6 +3375,9 @@ export function checkCloudSyncSkew(deps = {}) {
     readText = (p) => readFileSync(p, "utf8"),
     readJson = (p) => JSON.parse(readFileSync(p, "utf8")),
     processCommandForPid = defaultProcessCommandForPid,
+    // CTL-1931: the SAME resolver the real pull path and checkPluginSourceFreshness use, so
+    // "the root this node maintains" cannot drift from "the root this check expects".
+    resolveExpectedRoots = () => resolvePluginCheckoutRoots({}),
   } = deps;
 
   // Wrapped whole: this check reads files and spawns `ps`, and a throw here would abort
@@ -3408,7 +3411,17 @@ export function checkCloudSyncSkew(deps = {}) {
       ];
     }
 
-    const result = evaluate({ breadcrumb: record, readText, readJson, processCommandForPid });
+    // The guard sits at the CALL SITE, not inside the default: an INJECTED resolver can
+    // throw too, and putting the try/catch in the default would let that escape to the
+    // outer catch and be reported as a generic check failure instead of the specific
+    // inconclusive serving-root verdict. null degrades to INCONCLUSIVE, never to a pass.
+    let expectedRoots = null;
+    try {
+      expectedRoots = resolveExpectedRoots();
+    } catch {
+      expectedRoots = null;
+    }
+    const result = evaluate({ breadcrumb: record, readText, readJson, processCommandForPid, expectedRoots });
     const bad = result.verdicts.filter((v) => v.status !== "ok");
     if (bad.length === 0) {
       return [mkCheck("cloud-sync-skew", STATUS.PASS, `loaded modules match the lockfile — ${result.verdicts.map((v) => v.link).join(", ")} all verified`)];

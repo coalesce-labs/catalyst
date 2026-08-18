@@ -35,7 +35,7 @@
 // doctor.mjs's other leaf imports honor.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 // The packages whose loaded identity is recorded. A REGISTRY rather than an inline
@@ -324,7 +324,17 @@ export function lockedVersionForKey(lockText, key, id) {
 //                          catches what a restart does NOT fix (the partial install from
 //                          the 180s SIGKILL ceiling, and the CTL-1646 shadowed install).
 
-export const SKEW_LINKS = ["record-identity", "boot-record-complete", "loaded-vs-locked", "installed-vs-locked"];
+//   serving-root         — is the writer serving from a root this node is CONFIGURED to
+//                          serve from? CTL-1931: the three links above are all
+//                          SELF-REFERENTIAL to whatever root the process happens to have
+//                          loaded from — they compare that root's modules against THAT
+//                          root's lockfile. A writer running out of an entirely different
+//                          checkout is internally consistent and grades clean on every one
+//                          of them. That is not hypothetical: it is CTL-1919 exactly (the
+//                          laptop's writer served a dev checkout pinned three schema
+//                          versions back, so the replica had no `workflow_states` table and
+//                          sat 5.5 h stale) — found by hand, while this detector said ok.
+export const SKEW_LINKS = ["record-identity", "boot-record-complete", "serving-root", "loaded-vs-locked", "installed-vs-locked"];
 
 const ok = (link, detail) => ({ link, status: "ok", detail });
 const skew = (link, detail) => ({ link, status: "skew", detail });
@@ -344,6 +354,12 @@ export function evaluateDepSkew({
   readJson = (p) => JSON.parse(readFileSync(p, "utf8")),
   processCommandForPid = () => null,
   writerPattern = "cloud-sync.mjs",
+  // CTL-1931. Injected, not imported: the resolver lives in broker/plugin-refresh.mjs and
+  // this module is loaded by the bare-Node doctor path as well as the bun writer. null (the
+  // default) means "the caller did not establish expectations", which reports INCONCLUSIVE
+  // — so an un-wired caller degrades loudly instead of silently passing the link.
+  expectedRoots = null,
+  realpath = realpathSync,
 } = {}) {
   if (!breadcrumb || typeof breadcrumb !== "object") {
     return summarize(SKEW_LINKS.map((l) => unknown(l, "no boot record — the writer has not booted since dep-skew capture shipped, or the write failed")));
@@ -381,6 +397,60 @@ export function evaluateDepSkew({
       ? unknown("boot-record-complete", `boot record is degraded: ${(breadcrumb.degradedReasons ?? []).join("; ") || "reason not recorded"}`)
       : ok("boot-record-complete", `${(breadcrumb.packages ?? []).length} package(s) recorded at boot`),
   );
+
+  // Link 3 — serving root (CTL-1931). The ONE question none of the others can ask.
+  //
+  // ⛔ WHY IT CANNOT BE DERIVED FROM THE RECORD. `captureLoadedDeps` anchors `root` on the
+  // first module it actually resolved, i.e. the root that served the bytes. Every other
+  // link then compares that root against ITS OWN lockfile, so a writer launched from the
+  // wrong checkout is perfectly self-consistent. The expected roots therefore have to come
+  // from OUTSIDE the record — injected by the caller (doctor passes
+  // `resolvePluginCheckoutRoots()`, the same resolver the real pull path and the
+  // plugin-source freshness check use, so this cannot drift from what the node actually
+  // maintains).
+  //
+  // ⚠️ Absent/empty expectations are INCONCLUSIVE, never ok. `[].includes(x)` is false, so
+  // a naive implementation would report *skew* on a node with nothing configured, and
+  // inverting that to `ok` would be a check that passes because it never looked. Both
+  // failure directions are wrong here, so the third value carries it.
+  const expected = Array.isArray(expectedRoots) ? expectedRoots.filter((r) => typeof r === "string" && r.length > 0) : null;
+  const servingRoot = typeof breadcrumb.root === "string" && breadcrumb.root.length > 0 ? breadcrumb.root : null;
+  if (servingRoot === null) {
+    verdicts.push(unknown("serving-root", "boot record names no serving root — cannot tell which checkout served the modules"));
+  } else if (expected === null || expected.length === 0) {
+    verdicts.push(
+      unknown(
+        "serving-root",
+        `no configured plugin-checkout root to compare against (writer is serving ${servingRoot}) — zero expectations is not a clean result`,
+      ),
+    );
+  } else {
+    // Compared through realpath so a symlinked home or /System/Volumes/Data prefix cannot
+    // manufacture a skew out of two spellings of one directory. realpath failures fall back
+    // to the literal string rather than throwing — an unresolvable path still compares, it
+    // just compares less generously.
+    const norm = (x) => {
+      const trimmed = x.endsWith("/") && x.length > 1 ? x.slice(0, -1) : x;
+      try {
+        return realpath(trimmed);
+      } catch {
+        return trimmed;
+      }
+    };
+    const got = norm(servingRoot);
+    const want = expected.map(norm);
+    if (want.includes(got)) {
+      verdicts.push(ok("serving-root", `writer is serving from a configured checkout (${servingRoot})`));
+    } else {
+      verdicts.push(
+        skew(
+          "serving-root",
+          `writer is serving from ${servingRoot}, which is NOT a configured plugin-checkout root (${expected.join(", ")}) — ` +
+            "every other link below compares that checkout against its OWN lockfile, so they can all read clean while the daemon runs entirely the wrong code (CTL-1919)",
+        ),
+      );
+    }
+  }
 
   const packages = Array.isArray(breadcrumb.packages) ? breadcrumb.packages : [];
 

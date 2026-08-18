@@ -76,6 +76,10 @@ function deps(over = {}) {
       return JSON.parse(files[p]);
     },
     processCommandForPid: (pid) => (pid === 4242 ? "bun /opt/plugin-source/plugins/dev/scripts/execution-core/cloud-sync.mjs" : null),
+    // CTL-1931: injected, because the production default calls the REAL
+    // resolvePluginCheckoutRoots() — which on a developer machine returns that machine's
+    // own checkout and would make every fixture here read as a serving-root skew.
+    resolveExpectedRoots: () => [ROOT],
     ...over,
   };
 }
@@ -152,5 +156,44 @@ describe("checkCloudSyncSkew", () => {
   test("a throwing dependency degrades to WARN instead of crashing the whole doctor run", () => {
     const r = one(checkCloudSyncSkew(deps({ readBreadcrumb: () => { throw new Error("boom"); } })));
     expect(r.status).toBe("warn");
+  });
+});
+
+
+// ─── CTL-1931: the serving-root link, at the doctor boundary ────────────────
+describe("checkCloudSyncSkew — serving root (CTL-1931)", () => {
+  // ⭐ The CTL-1919 shape, end to end: a writer running out of a checkout this node is not
+  // configured to serve from. Everything else about the record is perfectly healthy, which
+  // is precisely why the other links never caught it.
+  test("⭐ a writer serving an UNCONFIGURED checkout → WARN naming DEPENDENCY SKEW", () => {
+    const r = one(checkCloudSyncSkew(deps({ resolveExpectedRoots: () => ["/Users/x/catalyst/plugin-source"] })));
+    expect(r.status).toBe("warn");
+    expect(r.detail).toContain("DEPENDENCY SKEW");
+    expect(r.detail).toContain("serving-root");
+    expect(noFail([r])).toBe(true); // advisory by construction — WARN, never FAIL
+  });
+
+  // ⚠️ The resolver runs on every doctor invocation, including on hosts where plugin dirs
+  // are unconfigured or the broker module is unhappy. A throw must not abort the run, and
+  // must not silently become a pass.
+  test("⚠️ a THROWING root resolver degrades to inconclusive, not to a pass", () => {
+    const r = one(checkCloudSyncSkew(deps({
+      resolveExpectedRoots: () => { throw new Error("pluginDirs unreadable"); },
+    })));
+    expect(r.status).toBe("warn");
+    expect(r.detail).toContain("UNKNOWN");
+    expect(r.detail).toContain("serving-root");
+  });
+
+  test("no configured roots → inconclusive, never a pass and never a skew", () => {
+    const r = one(checkCloudSyncSkew(deps({ resolveExpectedRoots: () => [] })));
+    expect(r.status).toBe("warn");
+    expect(r.detail).toContain("UNKNOWN");
+  });
+
+  // Positive control for the three above: the SAME harness still PASSes when the writer is
+  // where it belongs — so a WARN here is evidence about the root, not about the fixture.
+  test("POSITIVE CONTROL: the same harness passes when the serving root is configured", () => {
+    expect(one(checkCloudSyncSkew(deps())).status).toBe("pass");
   });
 });

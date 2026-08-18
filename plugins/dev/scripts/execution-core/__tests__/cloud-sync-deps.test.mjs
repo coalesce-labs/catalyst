@@ -28,6 +28,7 @@ import {
   lockedVersionsFor,
   readDepsBreadcrumb,
   readRestartLedger,
+  SKEW_LINKS,
   recordRestartAttempt,
   sha256File,
   writeDepsBreadcrumb,
@@ -232,6 +233,10 @@ function evalDeps(files, over = {}) {
       return JSON.parse(files[p]);
     },
     processCommandForPid: (pid) => (pid === 4242 ? "bun /opt/plugin-source/plugins/dev/scripts/execution-core/cloud-sync.mjs" : null),
+    // CTL-1931: the healthy default — this node is configured to serve from the root the
+    // fixture writer actually loaded from. Tests for the OTHER links keep their meaning;
+    // the serving-root link gets its own block below, which overrides this.
+    expectedRoots: [ROOT],
     ...over,
   };
 }
@@ -894,5 +899,86 @@ describe("depSkewEventEnvelope (the unified event-log surface)", () => {
       expect(n.startsWith("filter.")).toBe(false);
       expect(n.startsWith("broker.daemon")).toBe(false);
     }
+  });
+});
+
+
+// ─── CTL-1931: link 3 — serving root ────────────────────────────────────────
+//
+// The other links are all SELF-REFERENTIAL: they compare the modules under whatever root
+// the process loaded from against THAT root's lockfile. A writer running out of a
+// different checkout entirely is internally consistent and grades clean on every one of
+// them. This block is the negative control the ticket demands.
+describe("evaluateDepSkew — link 3: serving root (CTL-1931)", () => {
+  test("the writer is serving a configured checkout → ok", () => {
+    expect(linkOf(evaluateDepSkew(evalDeps(fs())), "serving-root").status).toBe("ok");
+  });
+
+  // ⭐ THE NEGATIVE CONTROL THE TICKET REQUIRES: reconstruct CTL-1919. The laptop's writer
+  // ran from the dev checkout — three schema versions stale, so the replica had no
+  // `workflow_states` table and sat 5.5 h behind — and was found BY HAND while this
+  // detector reported nothing.
+  test("⭐ CTL-1919: a writer serving an UNCONFIGURED checkout → skew", () => {
+    const r = evaluateDepSkew(evalDeps(fs(), {
+      expectedRoots: ["/Users/ryan/catalyst/plugin-source"],
+    }));
+    const v = linkOf(r, "serving-root");
+    expect(v.status).toBe("skew");
+    expect(r.skew).toBe(true);
+    expect(v.detail).toContain(ROOT);                              // where it IS serving
+    expect(v.detail).toContain("/Users/ryan/catalyst/plugin-source"); // where it SHOULD
+  });
+
+  // ⛔ The point of the whole link, asserted directly: in that same CTL-1919 state every
+  // other link still reads ok. Without this, a reader could reasonably assume one of the
+  // existing links would have caught it eventually.
+  test("⛔ and in that state EVERY OTHER LINK still reads ok — which is why this link exists", () => {
+    const r = evaluateDepSkew(evalDeps(fs(), { expectedRoots: ["/somewhere/else"] }));
+    for (const link of SKEW_LINKS.filter((l) => l !== "serving-root")) {
+      expect(linkOf(r, link).status).toBe("ok");
+    }
+  });
+
+  test("no expectations configured → INCONCLUSIVE, never ok and never skew", () => {
+    for (const expectedRoots of [null, undefined, [], ["", "  "].slice(0, 1)]) {
+      const v = linkOf(evaluateDepSkew(evalDeps(fs(), { expectedRoots })), "serving-root");
+      expect(v.status).toBe("inconclusive");
+    }
+  });
+
+  // ⚠️ `[].includes(x)` is false, so the naive implementation reports SKEW here — a false
+  // alarm on every node with nothing configured. Inverting it to ok would be a check that
+  // passes because it never looked. Pinning the third value keeps both mistakes out.
+  test("⚠️ an empty expectation list is not a skew (the [].includes trap)", () => {
+    expect(evaluateDepSkew(evalDeps(fs(), { expectedRoots: [] })).skew).toBe(false);
+  });
+
+  test("a boot record with no root → INCONCLUSIVE", () => {
+    const args = evalDeps(fs());
+    const v = linkOf(evaluateDepSkew({ ...args, breadcrumb: { ...args.breadcrumb, root: null } }), "serving-root");
+    expect(v.status).toBe("inconclusive");
+  });
+
+  // Two spellings of one directory (a symlinked home, /System/Volumes/Data/...) must not
+  // manufacture a skew. The fixture paths do not exist on disk, so realpath is injected.
+  test("realpath-equal roots spelled differently are NOT a skew", () => {
+    const v = linkOf(evaluateDepSkew(evalDeps(fs(), {
+      expectedRoots: ["/System/Volumes/Data/opt/plugin-source"],
+      realpath: (x) => x.replace("/System/Volumes/Data", ""),
+    })), "serving-root");
+    expect(v.status).toBe("ok");
+  });
+
+  test("a trailing slash is not a skew", () => {
+    expect(linkOf(evaluateDepSkew(evalDeps(fs(), { expectedRoots: [`${ROOT}/`] })), "serving-root").status).toBe("ok");
+  });
+
+  // A throwing realpath must degrade to a literal comparison, not abort the evaluation —
+  // this is the path every unit test above actually takes (the fixture roots are fictional).
+  test("a throwing realpath falls back to the literal string", () => {
+    const v = linkOf(evaluateDepSkew(evalDeps(fs(), {
+      realpath: () => { throw new Error("ENOENT"); },
+    })), "serving-root");
+    expect(v.status).toBe("ok");
   });
 });
