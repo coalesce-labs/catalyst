@@ -334,6 +334,8 @@ Read these on demand:
 - **Decision records (ADRs)** — `docs/adrs.md`
 - **Specs & mockups** — `docs/specs/` (durable `draft → accepted` home for specs, requirements,
   and mockups; distinct from ADRs and `thoughts/` — see `docs/specs/README.md`)
+- **Linear smee retirement + rollback** — `docs/runbooks/cloud-feed-cutover.md` (CTL-1928: Linear
+  ingestion is the cloud feed; the GitHub smee half is deliberately still running)
 - **Release process** — `docs/releases.md`
 - **Observability signal catalog** — `catalyst-otel/docs/data-dictionary.md` (sister repo: every
   metric, log/event, trace, and alert; see the Observability section above)

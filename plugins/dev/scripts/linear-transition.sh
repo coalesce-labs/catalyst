@@ -19,6 +19,17 @@
 #   --force              Skip idempotency check (always call update even if
 #                        ticket is already in target state)
 #   --dry-run            Print what would happen without calling linearis
+#   --resolve-only       CTL-1889. Resolve the target state and STOP — emit
+#                        {targetState, targetStateId, currentState, action} and exit 0,
+#                        writing nothing. Unlike --dry-run it does NOT require the
+#                        linearis binary, because its caller is the cloud write proxy,
+#                        which reaches Linear under the cloud's grant rather than this
+#                        host's. That distinction is the point: the end state of
+#                        CTL-1889 is a host with NO Linear credential and no reason to
+#                        have linearis installed, and the state-resolution chain below
+#                        (per-project stateMap > global stateMap > registry triageStatus
+#                        > built-in default) must keep working there. Duplicating that
+#                        chain in JS would make this script one of two sources of truth.
 #   --json               Emit a JSON result to stdout (default: human-readable)
 #
 # Exit codes:
@@ -61,6 +72,7 @@ CONFIG=""
 FORCE=0
 DRY_RUN=0
 JSON_OUT=0
+RESOLVE_ONLY=0
 
 usage() {
   sed -n '2,24p' "$0" >&2
@@ -75,6 +87,7 @@ while [[ $# -gt 0 ]]; do
     --config)      CONFIG="$2"; shift 2 ;;
     --force)       FORCE=1; shift ;;
     --dry-run)     DRY_RUN=1; shift ;;
+    --resolve-only) RESOLVE_ONLY=1; shift ;;
     --json)        JSON_OUT=1; shift ;;
     -h|--help)     usage 0 ;;
     *)             echo "unknown arg: $1" >&2; usage ;;
@@ -165,7 +178,7 @@ TARGET_STATE_ID="$(lookup_state_id)"
 
 # Cache miss → resolve once, then re-read. Skipped under --dry-run (no side
 # effects) and when there is no teamKey (the resolver requires one).
-if [ -z "$TARGET_STATE_ID" ] && [ -n "$TEAM_KEY" ] && [ "$DRY_RUN" -ne 1 ]; then
+if [ -z "$TARGET_STATE_ID" ] && [ -n "$TEAM_KEY" ] && [ "$DRY_RUN" -ne 1 ] && [ "$RESOLVE_ONLY" -ne 1 ]; then
   RESOLVER="${SCRIPT_DIR}/resolve-linear-ids.sh"
   if [ -x "$RESOLVER" ] && [ -n "$CONFIG_PATH" ]; then
     bash "$RESOLVER" --config "$CONFIG_PATH" --force >/dev/null 2>&1 || true
@@ -185,8 +198,10 @@ emit() {
       --arg transition "$TRANSITION" \
       --arg action "$action" \
       --arg message "$message" \
+      --arg targetStateId "$TARGET_STATE_ID" \
       '{ticket:$ticket, targetState:$targetState, currentState:$currentState,
-        transition:$transition, action:$action, message:$message}'
+        transition:$transition, action:$action, message:$message,
+        targetStateId:$targetStateId}'
   else
     printf '%s — %s (target=%s)' "$TICKET" "$action" "$TARGET_STATE"
     [ -n "$current" ] && printf ' (current=%s)' "$current"
@@ -194,6 +209,28 @@ emit() {
     printf '\n'
   fi
 }
+
+# ─── --resolve-only short-circuit (CTL-1889) ───────────────────────────────
+# Deliberately ABOVE the linearis gate: the cloud write proxy is the caller, and the
+# end state of CTL-1889 is a host with neither linearis nor a Linear credential. The
+# idempotency read below is replica-first (linear_read_ticket) and best-effort, so the
+# proxy caller inherits the SAME "already in target state" answer the writing path
+# would have produced, rather than re-deriving it and risking a different one.
+if [ "$RESOLVE_ONLY" -eq 1 ]; then
+  RO_CURRENT=""
+  if command -v jq >/dev/null 2>&1; then
+    RO_JSON=$(linear_read_ticket "$TICKET" 2>/dev/null || echo "")
+    if [ -n "$RO_JSON" ]; then
+      RO_CURRENT=$(echo "$RO_JSON" | jq -r '.state.name // empty' 2>/dev/null || echo "")
+    fi
+  fi
+  if [ -n "$RO_CURRENT" ] && [ "$RO_CURRENT" = "$TARGET_STATE" ] && [ "$FORCE" -ne 1 ]; then
+    emit "skipped" "$RO_CURRENT" "already in target state"
+  else
+    emit "resolve-only" "$RO_CURRENT" "resolved target state; no write performed"
+  fi
+  exit 0
+fi
 
 # ─── Check linearis availability ───────────────────────────────────────────
 if ! command -v linearis >/dev/null 2>&1; then

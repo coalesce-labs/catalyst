@@ -96,6 +96,20 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
+
+// CTL-1931: doctor.mjs lives at <repo>/plugins/dev/scripts/execution-core/, so the repo's
+// `.catalyst/config.json` is four levels up — the same module-relative derivation
+// broker/router.mjs uses for its own `__REPO_CONFIG_PATH`. Exported so a test can assert
+// the production default actually supplies this rung rather than passing null.
+export const DOCTOR_REPO_CONFIG_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  "..",
+  ".catalyst",
+  "config.json"
+);
 import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 import { listProjects } from "./registry.mjs";
@@ -1276,16 +1290,24 @@ export function checkWebhookIngestion(deps = {}) {
         ];
       }
       // (b) Declared CLOUD is a WARN, not a PASS: cloud suppresses the smee
-      //     tunnels but its replacement ingestion (the cloud SDK event
-      //     connection) does not exist yet — an otherwise-green doctor must
-      //     not certify a node with zero event ingestion. Flips to PASS only
-      //     when a real cloud ingestion check exists to stand in its place.
+      //     tunnels, and only ONE of the two routes has a replacement.
+      //     CTL-1928: Linear ingestion IS replaced — the cloud feed
+      //     (cloud-feed-timer.mjs, CATALYST_CLOUD_FEED) drives dispatch, and
+      //     the workspace's Linear webhook subscriptions were retired
+      //     fleet-wide. GitHub has NO cloud replacement: the cloud receives no
+      //     GitHub webhooks at all, so a declared-cloud node cannot see the
+      //     `github.*` events monitor-merge, CI waits, and the broker's
+      //     PR-lifecycle routing consume. That gap is what keeps this a WARN;
+      //     it flips to PASS when a real cloud GitHub-ingestion check exists.
+      //     (Saying "no event ingestion at all" here would now be wrong, and
+      //     wrong in the direction that sends an operator hunting a Linear
+      //     outage that isn't there.)
       if (declaredMode.mode === "cloud") {
         return [
           mkCheck(
             "webhook-ingestion",
             STATUS.WARN,
-            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired, but cloud replacement ingestion is NOT yet implemented: this node currently has no event ingestion at all`,
+            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired; Linear ingestion is replaced by the cloud feed (CTL-1928), but GitHub ingestion has NO cloud replacement yet: this node cannot see github.* events (monitor-merge, CI waits, PR-lifecycle routing)`,
           ),
           ...webhookShadow,
         ];
@@ -3367,6 +3389,18 @@ export function checkCloudSyncSkew(deps = {}) {
     readText = (p) => readFileSync(p, "utf8"),
     readJson = (p) => JSON.parse(readFileSync(p, "utf8")),
     processCommandForPid = defaultProcessCommandForPid,
+    // CTL-1931: the SAME resolver the real pull path and checkPluginSourceFreshness use, so
+    // "the root this node maintains" cannot drift from "the root this check expects".
+    //
+    // ⚠️ `repoConfigPath` is passed explicitly (Codex #3493 P2). The resolver's precedence is
+    // env > REPO `.catalyst/config.json` > machine config, and the parameter defaults to
+    // null — so `resolvePluginCheckoutRoots({})` silently skips the repo rung the broker and
+    // updater pull paths both supply. That matters here in a way it does not for a purely
+    // advisory reader: this check is GRADE-CHANGING, so on a node whose `pluginDirs` lives
+    // only in Layer 1 it would resolve no roots and sit inconclusive forever, and on a node
+    // whose machine config holds an OLDER value it would compare against a root the node no
+    // longer maintains and report a false DEPENDENCY SKEW on a healthy host.
+    resolveExpectedRoots = () => resolvePluginCheckoutRoots({ repoConfigPath: DOCTOR_REPO_CONFIG_PATH }),
   } = deps;
 
   // Wrapped whole: this check reads files and spawns `ps`, and a throw here would abort
@@ -3400,7 +3434,17 @@ export function checkCloudSyncSkew(deps = {}) {
       ];
     }
 
-    const result = evaluate({ breadcrumb: record, readText, readJson, processCommandForPid });
+    // The guard sits at the CALL SITE, not inside the default: an INJECTED resolver can
+    // throw too, and putting the try/catch in the default would let that escape to the
+    // outer catch and be reported as a generic check failure instead of the specific
+    // inconclusive serving-root verdict. null degrades to INCONCLUSIVE, never to a pass.
+    let expectedRoots = null;
+    try {
+      expectedRoots = resolveExpectedRoots();
+    } catch {
+      expectedRoots = null;
+    }
+    const result = evaluate({ breadcrumb: record, readText, readJson, processCommandForPid, expectedRoots });
     const bad = result.verdicts.filter((v) => v.status !== "ok");
     if (bad.length === 0) {
       return [mkCheck("cloud-sync-skew", STATUS.PASS, `loaded modules match the lockfile — ${result.verdicts.map((v) => v.link).join(", ")} all verified`)];

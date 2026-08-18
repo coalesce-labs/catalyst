@@ -2938,11 +2938,19 @@ describe("checkWebhookIngestion — deployment-mode alignment (CTL-1617, #2913 C
     expect(primary.detail).toContain("intentionally not wired");
   });
 
-  it("declared cloud: WARN, not PASS — cloud replacement ingestion does not exist yet (#2918 follow-up)", () => {
+  // CTL-1928 narrowed WHY this is a WARN: Linear ingestion now HAS a cloud
+  // replacement (the cloud feed), GitHub still does not. The status is
+  // unchanged — the remaining GitHub gap is what keeps it off PASS.
+  it("declared cloud: WARN, not PASS — GitHub has no cloud replacement ingestion yet (#2918 follow-up, narrowed by CTL-1928)", () => {
     const checks = checkWebhookIngestion({ ...NO_ROUTE_DEPS, resolveDeploymentModeFn: () => mode("cloud") });
     const primary = checks.find((c) => c.name === "webhook-ingestion");
     expect(primary.status).toBe(STATUS.WARN);
-    expect(primary.detail).toContain("no event ingestion at all");
+    expect(primary.detail).toContain("GitHub ingestion has NO cloud replacement");
+    expect(primary.detail).toContain("cloud feed");
+    // The superseded claim must not come back: a cloud node is NOT blind to
+    // Linear, and telling an operator it has "no event ingestion at all"
+    // sends them hunting a Linear outage that does not exist.
+    expect(primary.detail).not.toContain("no event ingestion at all");
   });
 
   it("declared non-cluster with a DANGLING Linear key: half-wired FAIL fires before the aligned grant (#2918 follow-up ordering)", () => {
