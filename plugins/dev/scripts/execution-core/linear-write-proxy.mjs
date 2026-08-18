@@ -363,6 +363,60 @@ export function classifyProxyResponse({ code, stdout, stderr } = {}) {
 }
 
 /** parseProxyBody — JSON.parse or null. Never throws; a non-object is not an outcome. */
+/**
+ * ⛔ THE SESSION ROUTE ANSWERS IN A DIFFERENT SHAPE, MEASURED ON THE LIVE CLOUD.
+ *
+ * `classifyProxyResponse` reads a TOP-LEVEL `outcome`, which is the CTC-509 contract the
+ * three dispatch-critical routes use. CTC-682's `/agent/session` does not have one — it
+ * reports PER PART, because one request can create a session, replace a plan, and append
+ * an activity independently. Measured against production from mini-2 on 2026-08-18, HTTP
+ * 200:
+ *
+ *   {"session":{"outcome":"reused","sessionId":"8fd311c5-…","attempts":1},
+ *    "plan":{"outcome":"succeeded","attempts":1},
+ *    "activity":{"outcome":"succeeded","attempts":1}}
+ *
+ * Run through the generic classifier that reads as `unreadable-outcome` — so every
+ * narration that FULLY SUCCEEDED was counted and logged as a FAILURE. That is the worst
+ * class of defect for an observability feature: the instrument reporting the opposite of
+ * what happened, which would have had an operator chasing a broken narration route that
+ * was working perfectly.
+ *
+ * ── THE FAIL DIRECTION IS DELIBERATE ──
+ * Only outcomes KNOWN to mean success count as success. The vocabulary was measured, not
+ * documented, so an unrecognised value must be reported with its part and its literal
+ * value rather than assumed benign — the reverse would let a future `"deferred"` or
+ * `"partial"` read as applied. A body with no recognised parts at all stays
+ * `unreadable-outcome`, unchanged.
+ */
+export const SESSION_PART_SUCCESS = Object.freeze(new Set(["succeeded", "created", "reused", "unchanged"]));
+
+/** The parts one /agent/session response can report on. Absent parts are not judged. */
+export const SESSION_PARTS = Object.freeze(["session", "plan", "activity"]);
+
+export function classifySessionResponse(raw) {
+  // Transport-level questions are identical for every route, so reuse that judgement
+  // rather than re-deriving it — only the BODY reading differs.
+  const base = classifyProxyResponse(raw);
+  if (base.reason !== "unreadable-outcome") return base; // spawn/transport/status verdicts stand
+
+  const parsed = parseProxyBody(base.body ?? "");
+  if (!parsed || typeof parsed !== "object") return base;
+
+  const present = SESSION_PARTS.filter((k) => parsed[k] && typeof parsed[k].outcome === "string");
+  // No recognised part means we are not talking to the route we think we are — the same
+  // reading the generic classifier takes, and for the same reason.
+  if (present.length === 0) return base;
+
+  const bad = present
+    .filter((k) => !SESSION_PART_SUCCESS.has(parsed[k].outcome))
+    .map((k) => `${k}:${parsed[k].outcome}`);
+  if (bad.length > 0) {
+    return { applied: false, reason: "cloud:session-part-failed", detail: bad.join(","), status: base.status, body: base.body };
+  }
+  return { applied: true, reason: null, status: base.status, body: base.body, converged: false };
+}
+
 export function parseProxyBody(bodyText) {
   if (typeof bodyText !== "string" || bodyText.trim() === "") return null;
   try {
@@ -933,7 +987,11 @@ export function createLinearWriteProxy({
         // ⛔ Runs on a LATER event-loop turn. It must never throw into the daemon loop,
         // and it must never touch the ledger (see the single-writer note above).
         try {
-          const verdict = classifyProxyResponse(raw);
+          // Route-aware: the session route reports per part and has no top-level
+          // `outcome`. See classifySessionResponse — a generic read called every
+          // successful narration a failure.
+          const verdict =
+            routeId === "session" ? classifySessionResponse(raw) : classifyProxyResponse(raw);
           if (verdict.applied) {
             counts.applied += 1;
             emit(EVENT_APPLIED, { ticket, routeId, reason: null, status: verdict.status, applied: true, caller, labels });
