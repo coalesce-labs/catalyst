@@ -17,6 +17,9 @@ function deps(over = {}) {
     laDir: "/tmp/la",
     agentInstalled: () => true,
     processAlive: () => true,
+    // CTL-1963: the launchd label-binding seam. Injected here for the reason this file's header
+    // states — the suite must touch no launchctl. Healthy default = bound to the expected plist.
+    labelPath: () => "/tmp/la/ai.coalesce.catalyst-cloud-sync.plist",
     dbPath: DB,
     fileExists: (p) => p === DB || p === `${DB}.writer.lock`,
     statFile: () => ({ size: 64_000_000, mtimeMs: NOW - 5_000 }),
@@ -301,5 +304,75 @@ describe("CTL-1913 — the never-seeded FAIL capability", () => {
     expect(m["replica-fresh"].status).toBe("warn"); // null age ⇒ no escalation
     expect(recs.every((r) => r.status !== "fail")).toBe(true);
     expect(LA).toBe("/tmp/la"); // (fixture sanity; keeps the constant referenced)
+  });
+});
+
+// ── CTL-1963: the launchd label BINDING ────────────────────────────────────────────────────────
+//
+// The incident these cover, measured twice on the laptop 2026-08-18 (04:01 and 07:19): a
+// sealed-prefix install run bootstraps the REAL gui/$UID domain from a scratch HOME, rebinding
+// `ai.coalesce.catalyst-cloud-sync` to /var/folders/…/T/tmp.XXXX/…, then exits and lets its temp
+// dir be reaped. The writer dies; ~/Library/LaunchAgents/<label>.plist is still present and
+// unchanged, so every pre-existing signal reads normal while the replica silently freezes.
+describe("checkCloudSync — launchd label binding (CTL-1963)", () => {
+  const EXPECTED = "/tmp/la/ai.coalesce.catalyst-cloud-sync.plist";
+  const SQUAT = "/private/var/folders/h6/xxxx/T/tmp.dOCLr1E2bn/Library/LaunchAgents/ai.coalesce.catalyst-cloud-sync.plist";
+
+  test("bound to the expected plist → PASS", () => {
+    const m = byName(checkCloudSync(deps()));
+    expect(m["cloud-sync-label"].status).toBe("pass");
+    expect(m["cloud-sync-label"].detail).toContain(EXPECTED);
+  });
+
+  test("⛔ squatted by a temp path → WARN, and names the actual binding", () => {
+    const recs = checkCloudSync(deps({ labelPath: () => SQUAT }));
+    const m = byName(recs);
+    expect(m["cloud-sync-label"].status).toBe("warn");
+    expect(m["cloud-sync-label"].detail).toContain(SQUAT);
+    expect(m["cloud-sync-label"].detail).toContain(EXPECTED);
+    // The load-bearing invariant of this whole check: never FAIL, or doctor's exit code blocks
+    // the catalyst-join that would re-bootstrap the label — blocking the self-heal.
+    expect(noFail(recs)).toBe(true);
+  });
+
+  test("⛔ THE 07:19 SHAPE — squatting plist is GONE ⇒ says it cannot be restarted, only rebound", () => {
+    const m = byName(checkCloudSync(deps({
+      labelPath: () => SQUAT,
+      // the squat path is absent from the fs; the CORRECT plist is still present
+      fileExists: (p) => p === DB || p === `${DB}.writer.lock`,
+    })));
+    expect(m["cloud-sync-label"].status).toBe("warn");
+    expect(m["cloud-sync-label"].detail).toContain("NO LONGER EXISTS");
+    expect(m["cloud-sync-label"].detail).toContain("bootstrap");
+  });
+
+  test("squatted but the squatting file still exists ⇒ WARN without the unrecoverable wording", () => {
+    const m = byName(checkCloudSync(deps({
+      labelPath: () => SQUAT,
+      fileExists: (p) => p === DB || p === `${DB}.writer.lock` || p === SQUAT,
+    })));
+    expect(m["cloud-sync-label"].status).toBe("warn");
+    expect(m["cloud-sync-label"].detail).not.toContain("NO LONGER EXISTS");
+  });
+
+  test("⛔ unmeasurable binding is INFO, NOT pass — 'could not measure' must never read as healthy", () => {
+    const m = byName(checkCloudSync(deps({ labelPath: () => null })));
+    expect(m["cloud-sync-label"].status).toBe("info");
+    expect(m["cloud-sync-label"].detail).toContain("UNVERIFIED");
+    expect(m["cloud-sync-label"].status).not.toBe("pass");
+  });
+
+  test("⛔ the regression this check exists for: plist present + writer alive still WARNs when squatted", () => {
+    // Precisely the state both incidents presented: agentInstalled() true (the correct plist is
+    // on disk, untouched) — the pre-CTL-1963 doctor had nothing to say here.
+    const recs = checkCloudSync(deps({ agentInstalled: () => true, processAlive: () => true, labelPath: () => SQUAT }));
+    const m = byName(recs);
+    expect(m["cloud-sync"].status).toBe("pass"); // branch (a) is still happy — that is the point
+    expect(m["cloud-sync-label"].status).toBe("warn"); // ...and (a2) is the only one that objects
+  });
+
+  test("no agent installed ⇒ the binding check does not run at all", () => {
+    const m = byName(checkCloudSync(deps({ agentInstalled: () => false, labelPath: () => SQUAT })));
+    expect(m["cloud-sync-label"]).toBeUndefined();
   });
 });

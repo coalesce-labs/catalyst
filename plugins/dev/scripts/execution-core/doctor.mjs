@@ -3204,6 +3204,8 @@ export function checkCloudSync(deps = {}) {
     laDir = defaultLaunchAgentsDir(),
     agentInstalled = defaultAgentInstalled,
     processAlive = defaultCloudSyncProcessAlive,
+    // CTL-1963: which plist the live label is actually bound to. Injectable so tests touch no launchctl.
+    labelPath = defaultLaunchdLabelPath,
     dbPath = getReplicaDbPath(),
     fileExists = (p) => existsSync(p),
     statFile = (p) => statSync(p),
@@ -3269,6 +3271,41 @@ export function checkCloudSync(deps = {}) {
     checks.push(mkCheck("cloud-sync", STATUS.PASS, `agent installed + running${lockHeld ? " (writer-lock held)" : ""}`));
   } else {
     checks.push(mkCheck("cloud-sync", STATUS.WARN, "agent installed but no writer process found — KeepAlive may be retrying; check ~/catalyst/cloud-sync.log"));
+  }
+
+  // (a2) launchd LABEL BINDING — CTL-1963. Does `ai.coalesce.catalyst-cloud-sync` in the live
+  // per-user domain resolve to ~/Library/LaunchAgents/<label>.plist, or to somebody else's file?
+  //
+  // Branch (a) above proves the CORRECT plist exists and whether A writer process is running. It
+  // cannot see that launchd is bound to a DIFFERENT plist — which is exactly the observed failure:
+  // a sealed-prefix install run bootstraps the real gui/$UID domain from a temp HOME, rebinds the
+  // label to /var/folders/…/T/tmp.XXXX/…, then exits and lets its temp dir be reaped. The writer
+  // dies, the correct plist is still sitting there untouched, and every other signal reads normal.
+  //
+  // ⚠️ WARN, never FAIL — deliberately, and for the reason this function documents at length above:
+  // doctor's exit code IS the catalyst-join activation gate, and `do_doctor_gate` runs BEFORE
+  // `install-services`. Failing here would block the very join that would re-bootstrap the label,
+  // i.e. it would block the self-heal for the condition it is reporting.
+  if (installed) {
+    const bound = labelPath(label);
+    const expected = resolve(laDir, `${label}.plist`);
+    if (bound === null) {
+      // ⛔ Not a pass. "Could not measure" and "measured, correct" must never render the same —
+      // an unmeasurable binding is precisely the state the squat produces on a host where the
+      // label was booted out entirely.
+      checks.push(mkCheck("cloud-sync-label", STATUS.INFO,
+        `could not resolve launchd label ${label} (launchctl unavailable or label not bootstrapped) — binding UNVERIFIED, not confirmed healthy`));
+    } else if (bound === expected) {
+      checks.push(mkCheck("cloud-sync-label", STATUS.PASS, `launchd label resolves to ${expected}`));
+    } else {
+      // Name whether the squatting file still exists: if it does not, no kickstart/bootstrap/reboot
+      // can revive the writer, which changes the remedy from "restart it" to "rebind it".
+      const gone = !fileExists(bound);
+      checks.push(mkCheck("cloud-sync-label", STATUS.WARN,
+        `launchd label ${label} is bound to ${bound}${gone ? " (WHICH NO LONGER EXISTS — the writer cannot be restarted, only rebound)" : ""}, ` +
+        `not ${expected} — a sealed-prefix install run squatted the per-user domain (gui/$UID is per-user, not per-HOME). ` +
+        `Rebind: launchctl bootout gui/$(id -u)/${label}; launchctl bootstrap gui/$(id -u) ${expected}`));
+    }
   }
 
   // (b) replica freshness + writer liveness. KEY INSIGHT: the DB + -wal mtime only advance
@@ -5261,6 +5298,45 @@ function defaultCloudSyncProcessAlive() {
   // not the launcher (`.../cloud-sync/launch.sh` has no `.mjs`).
   const r = spawnSync("pgrep", ["-f", "cloud-sync\\.mjs"], { timeout: 5_000 });
   return !r.error && r.status === 0;
+}
+
+// defaultLaunchdLabelPath — which plist is the RUNNING launchd label actually bound to? (CTL-1963)
+//
+// ⛔ THE DEFECT THIS EXISTS FOR: `gui/$UID` is a PER-USER domain, not a per-HOME one. A sealed-prefix
+// install run under a scratch HOME still bootstraps into the REAL user domain, so the label
+// `ai.coalesce.catalyst-cloud-sync` gets rebound to a plist under /var/folders/…/T/tmp.XXXX/. The
+// squatting run then exits and its temp dir is reaped — leaving the label pointing at a path that NO
+// LONGER EXISTS. Measured twice on the laptop 2026-08-18: 04:01 (tmp.p3Tb3ig3kS) and 07:19
+// (tmp.dOCLr1E2bn), ~3h18m apart.
+//
+// ⛔ WHY plist-on-disk IS NOT THE SAME QUESTION. `defaultAgentInstalled` answers "is
+// ~/Library/LaunchAgents/<label>.plist present?" — and in BOTH incidents it was, unchanged. The
+// correct file existed the whole time; launchd was simply bound to a different one. So the existing
+// check reads PASS while the writer is dead. Only the resolved binding distinguishes them.
+//
+// ⛔ AND WHY THE EXIT-CODE FIX DOES NOT COVER IT. The 04:01 instance was diagnosed as launchd's
+// `KeepAlive={SuccessfulExit:false}` contract keeping a cleanly-exited writer down. The 07:19 instance
+// is NOT an exit-code problem: the bound path is gone, so no kickstart, bootstrap, or reboot can
+// revive it. The invariant that catches both shapes is "the label resolves to ~/Library/LaunchAgents".
+//
+// Returns the resolved path string, or null when it cannot be measured (launchctl absent, label not
+// bootstrapped, unparseable output). ⛔ null means UNKNOWN, never "fine" — the caller must not grade a
+// failure to measure as a pass. Honors CATALYST_ASSUME_NO_DAEMONS so tests touch no launchctl.
+function defaultLaunchdLabelPath(label) {
+  if (process.env.CATALYST_ASSUME_NO_DAEMONS === "1") return null;
+  try {
+    const r = spawnSync("launchctl", ["print", `gui/${process.getuid()}/${label}`], {
+      timeout: 5_000,
+      encoding: "utf8",
+    });
+    if (r.error || r.status !== 0 || typeof r.stdout !== "string") return null;
+    // `launchctl print` emits a tab-indented `path = /abs/path.plist` line. Anchor on the field name
+    // so the many other `... path = ...` keys in that output (stdout path, stderr path) cannot match.
+    const m = r.stdout.match(/^\s*path\s*=\s*(\S.*?)\s*$/m);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
 }
 
 // checkAgentsForClass — assert the correct launchd agent SET for the class. The two discriminators
