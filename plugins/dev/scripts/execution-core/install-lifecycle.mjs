@@ -251,9 +251,23 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
     steps: [{ label: "plugin-source", kind: "run", argv: [scripts.pluginSrc, "--no-interactive-wrapper"] }],
   });
 
+  // CTL-1975 --archive: the SAME `backup` verb with two flags, deliberately NOT catalyst-backup's
+  // `archive` verb. `archive` prints the TARBALL as its last stdout line; this step's result is read
+  // with `tail -1` into ctx.bundlePath and handed to `catalyst-backup restore <path>`, which needs a
+  // DIRECTORY. Routing --archive through the archive verb would therefore produce a rollback that
+  // fails with "not a backup bundle" at exactly the moment a rollback is what is left — so the
+  // tarball is a side artifact here and the bundle dir stays the step's answer.
   const backup = (label) => ({
     phase: "backup",
-    steps: [{ label: "backup", kind: "backup", argv: [scripts.backup, "backup", "--label", label] }],
+    steps: [
+      {
+        label: "backup",
+        kind: "backup",
+        argv: opts.archive
+          ? [scripts.backup, "backup", "--label", label, "--with-replica", "--tar"]
+          : [scripts.backup, "backup", "--label", label],
+      },
+    ],
   });
 
   const writeConfig = () => {
@@ -1244,7 +1258,7 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 export function parseArgs(argv) {
-  const a = { operation: null, class: null, readReplica: null, executor: null, force: false, dryRun: false, json: false, help: false, errors: [] };
+  const a = { operation: null, class: null, readReplica: null, executor: null, force: false, archive: false, dryRun: false, json: false, help: false, errors: [] };
   const rest = [...argv];
   // takeValue — consume the next token as FLAG's value; a missing value (end of args, or the next
   // token is itself a flag) is an error, not a silent null — otherwise `catalyst install --class`
@@ -1267,6 +1281,13 @@ export function parseArgs(argv) {
         break;
       case "--force":
         a.force = true;
+        break;
+      // CTL-1975: promote the lifecycle's inline restore point to a teardown-grade ARCHIVE —
+      // the replica DB, the worktree/log inventory, host-state.json, and a dated tarball. Opt-in
+      // because the replica is ~200 MB: an install that pays that on every run is an install
+      // operators start skipping.
+      case "--archive":
+        a.archive = true;
         break;
       case "--dry-run":
       case "--print":
@@ -1312,7 +1333,7 @@ export function usage() {
 
 Usage (normally via the router: 'catalyst install|uninstall|reinstall …'):
   catalyst-install install   [--class developer|worker|monitor] [--read-replica <url>] [--executor bg|sdk|oneshot-legacy] [--dry-run]
-  catalyst-install uninstall [--force] [--dry-run]
+  catalyst-install uninstall [--force] [--archive] [--dry-run]
   catalyst-install reinstall [--class …] [--read-replica <url>] [--executor bg|sdk|oneshot-legacy] [--force] [--dry-run]
 
 Options:
@@ -1321,6 +1342,9 @@ Options:
   --executor <e>       durably provision the daemon executor (bg|sdk|oneshot-legacy) into
                        execution-core.env; omit to leave the node's existing executor untouched
   --force              teardown a live, non-drained node (uninstall/reinstall guard override)
+  --archive            take a teardown-grade archive instead of the lean restore point:
+                       + the replica DB, a worktree/log inventory, host-state.json (the pre/post
+                       diff instrument), and a dated .tar.gz beside the bundle
   --dry-run, --print   resolve + print the per-class step plan; run NOTHING (no side effects)
   --json               machine-readable output (with --dry-run, prints the plan as JSON)
   -h, --help           this help
@@ -1402,7 +1426,7 @@ export async function main(argv, depsOverride) {
     errOut(`catalyst-install: --executor must be one of ${VALID_EXECUTORS.join(" | ")} (got '${args.executor}')`);
     return 2;
   }
-  const opts = { force: args.force, readReplica, executor: args.executor, execCoreEnv: execCoreEnvPath(env) };
+  const opts = { force: args.force, archive: args.archive, readReplica, executor: args.executor, execCoreEnv: execCoreEnvPath(env) };
 
   if (args.dryRun) {
     const plan = planPhases({ operation: args.operation, nodeClass, scripts: deps.scripts, opts });
