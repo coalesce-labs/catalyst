@@ -110,7 +110,62 @@ echo ""
 echo "=== an unreachable host does not abort the other hosts' turns ==="
 printf 'AFTER UNREACHABLE\n' | queue FLEET
 OUT="$(drain "unreachable,mini")"
+RC=$?
 if grep -qF "AFTER UNREACHABLE" "$CHANNEL_FILE"; then pass "mini's turn was delivered despite a dead host in the list"; else fail "mini's turn was delivered despite a dead host" "$OUT"; fi
+
+echo ""
+echo "--- ⛔ ...but an unreachable host must be REPORTED, not read as an empty queue (Codex #3517 P1) ---"
+# The first cut swallowed the listing rc with `|| true`, printed "nothing queued", and exited 0.
+if grep -q "COULD NOT LIST" <<<"$OUT"; then pass "the drain says it could not list the outbox"; else fail "the drain says it could not list the outbox" "$OUT"; fi
+if grep -q "NOT an empty queue" <<<"$OUT"; then pass "it distinguishes that from an empty queue"; else fail "it distinguishes that from an empty queue" "$OUT"; fi
+if [ "$RC" -ne 0 ]; then pass "the drain exits NON-ZERO when a host could not be inspected (rc=$RC)"; else fail "the drain exits non-zero on a failed listing" "rc=0 — a caller cannot tell anything went wrong"; fi
+# ⛔ Positive control: a REACHABLE host with a genuinely empty outbox must NOT be reported as a
+# failure, or the check above would pass against a drain that always complains.
+OUT_EMPTY="$(drain mini)"
+RC_EMPTY=$?
+if grep -q "reachable, nothing queued" <<<"$OUT_EMPTY" && [ "$RC_EMPTY" -eq 0 ]; then
+	pass "control — a reachable-but-empty host is NOT reported as a failure (rc=0)"
+else
+	fail "control — a reachable-but-empty host is not a failure" "rc=$RC_EMPTY: $OUT_EMPTY"
+fi
+
+echo ""
+echo "--- ⛔ a second concurrent drain must SKIP, not append alongside the first (Codex #3517 P1) ---"
+# Simulate the lock already being held. On a host with flock this is the flock branch; without
+# it (stock macOS) it is the mkdir branch — the bug was conflating the two.
+printf 'CONCURRENT TURN\n' | queue FLEET
+if command -v flock >/dev/null 2>&1; then
+	exec 8>"$CHANNEL_FILE.drain.lock"
+	flock -n 8
+	OUT_LOCK="$(drain mini)"
+	RC_LOCK=$?
+	exec 8>&-
+else
+	mkdir "$CHANNEL_FILE.drain.lockdir"
+	OUT_LOCK="$(drain mini)"
+	RC_LOCK=$?
+	rmdir "$CHANNEL_FILE.drain.lockdir"
+fi
+if grep -q "another drain holds" <<<"$OUT_LOCK"; then pass "the second drain skipped because the lock was held"; else fail "the second drain skipped" "$OUT_LOCK"; fi
+if grep -qF "CONCURRENT TURN" "$CHANNEL_FILE"; then fail "the locked-out drain appended anyway" "the single-appender guarantee does not hold"; else pass "it appended NOTHING while locked out"; fi
+# ⛔ Positive control: once the lock is released the same turn IS delivered — otherwise the check
+# above would pass against a drain that is simply broken.
+OUT_AFTER="$(drain mini)"
+if grep -qF "CONCURRENT TURN" "$CHANNEL_FILE"; then pass "control — after the lock is released the turn is delivered"; else fail "control — the turn is delivered once unlocked" "$OUT_AFTER"; fi
+
+echo ""
+echo "--- ⛔ '..' as a channel slug is refused (Codex #3517 P2) ---"
+# The original traversal case used ../../etc, which is rejected merely for containing a slash —
+# it never exercised the form that actually escapes.
+printf 'x\n' | HOME="$REMOTE_HOME" bash "$POST" --channel .. --owner FLEET >/dev/null 2>&1
+[ $? -eq 2 ] && pass "--channel .. is refused (rc 2)" || fail "--channel .. is refused (rc 2)"
+printf 'x\n' | HOME="$REMOTE_HOME" bash "$POST" --channel . --owner FLEET >/dev/null 2>&1
+[ $? -eq 2 ] && pass "--channel . is refused (rc 2)" || fail "--channel . is refused (rc 2)"
+if [ -n "$(find "$REMOTE_HOME/catalyst/comms/outbox" -name '*.md' -not -path '*/demo/*' 2>/dev/null)" ]; then
+	fail "no turn landed outside the channel directory" "$(find "$REMOTE_HOME/catalyst/comms/outbox" -name '*.md' -not -path '*/demo/*')"
+else
+	pass "no turn landed outside the channel directory"
+fi
 
 echo ""
 echo "  PASSED: $PASSES   FAILED: $FAILURES"

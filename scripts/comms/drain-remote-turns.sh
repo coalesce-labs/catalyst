@@ -35,13 +35,23 @@ CHANNEL_FILE="$CHANNEL_DIR/$CHANNEL.md"
 [[ -f "$CHANNEL_FILE" ]] || { echo "drain: no such channel file: $CHANNEL_FILE" >&2; exit 2; }
 
 # One appender at a time: two concurrent drains would interleave turns mid-line.
+# ⛔ Codex #3517 P1: the first cut ran `flock -n 9` and, on ANY nonzero exit, fell through to the
+# mkdir lock. But "flock is absent" and "flock says another drain holds it" both exit nonzero, so
+# genuine contention silently took the OTHER lock and proceeded — two drains appending the same
+# turns, which is precisely the guarantee this lock exists to provide. Decide which mechanism is
+# available FIRST, then interpret its failure as contention and nothing else.
 LOCK="$CHANNEL_FILE.drain.lock"
-exec 9>"$LOCK"
-if ! /usr/bin/env flock -n 9 2>/dev/null; then
-  # macOS has no flock(1) by default; fall back to an atomic mkdir lock.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  if ! flock -n 9; then
+    echo "drain: another drain holds $LOCK — skipping this pass" >&2
+    exit 0
+  fi
+else
+  # macOS ships no flock(1); mkdir is atomic and is the portable stand-in.
   LOCKDIR="$CHANNEL_FILE.drain.lockdir"
   if ! mkdir "$LOCKDIR" 2>/dev/null; then
-    echo "drain: another drain holds the lock ($LOCKDIR) — skipping this pass" >&2
+    echo "drain: another drain holds $LOCKDIR — skipping this pass" >&2
     exit 0
   fi
   trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
@@ -54,10 +64,23 @@ for host in "${HOST_LIST[@]}"; do
   [[ -n "$host" ]] || continue
   remote_dir="$REMOTE_OUTBOX_ROOT/$CHANNEL/pending"
 
-  # `|| true`: an unreachable or outbox-less host must not abort the other hosts' turns.
-  files="$($SSH_CMD -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-            "ls -1 '$remote_dir'/*.md 2>/dev/null | sort" 2>/dev/null || true)"
-  [[ -n "$files" ]] || { echo "drain: $host — nothing queued"; continue; }
+  # ⛔ Codex #3517 P1: the first cut swallowed the listing's exit status with `|| true`, so an
+  # unreachable host, an auth failure or an errored listing all produced empty output and printed
+  # "nothing queued" — with `failed` still 0 and the drain exiting 0. An owner's turns could sit
+  # undelivered indefinitely and every signal said fine. The remote command now ECHOES A SENTINEL
+  # on success, so "reachable with an empty outbox" is distinguishable from "could not look".
+  # A dead host still must not abort the other hosts, so this continues rather than exiting.
+  listing="$($SSH_CMD -o BatchMode=yes -o ConnectTimeout=10 "$host" \
+            "ls -1 '$remote_dir'/*.md 2>/dev/null | sort; echo '__DRAIN_LIST_OK__'" 2>/dev/null || true)"
+  if [[ "$listing" != *"__DRAIN_LIST_OK__"* ]]; then
+    echo "drain: $host — COULD NOT LIST the outbox (unreachable, auth, or a remote error)." >&2
+    echo "drain: $host — this is NOT an empty queue; turns may be waiting there." >&2
+    failed=$((failed + 1))
+    continue
+  fi
+  files="${listing%__DRAIN_LIST_OK__*}"
+  files="$(printf '%s' "$files" | sed '/^$/d')"
+  [[ -n "$files" ]] || { echo "drain: $host — reachable, nothing queued"; continue; }
 
   while IFS= read -r rf; do
     [[ -n "$rf" ]] || continue

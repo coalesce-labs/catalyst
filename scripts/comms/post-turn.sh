@@ -32,8 +32,18 @@ done
 [[ -n "$CHANNEL" ]] || { echo "post-turn: --channel is required" >&2; exit 2; }
 [[ -n "$OWNER"   ]] || { echo "post-turn: --owner is required" >&2; exit 2; }
 # The channel name becomes a directory name; keep it a plain slug so it cannot escape the outbox.
-[[ "$CHANNEL" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "post-turn: --channel must match [A-Za-z0-9._-]+ (got '$CHANNEL')" >&2; exit 2; }
-[[ "$OWNER"   =~ ^[A-Za-z0-9._-]+$ ]] || { echo "post-turn: --owner must match [A-Za-z0-9._-]+ (got '$OWNER')" >&2; exit 2; }
+#
+# ⛔ Codex #3517 P2: the character class alone is NOT enough, and the test that "proved" it was
+# asserting the neighbour. `..` matches ^[A-Za-z0-9._-]+$ perfectly — no slash required — so
+# `--channel ..` resolved DEST_DIR to $OUTBOX_ROOT/../pending and reported success while putting
+# the turn where no drainer looks. The original test used `../../etc`, which is rejected for
+# containing a slash, so it never exercised the case that actually escapes.
+reject_slug() { echo "post-turn: --$1 must be a plain slug matching [A-Za-z0-9._-]+ and not '.' or '..' (got '$2')" >&2; exit 2; }
+for pair in "channel:$CHANNEL" "owner:$OWNER"; do
+  _name="${pair%%:*}"; _val="${pair#*:}"
+  [[ "$_val" =~ ^[A-Za-z0-9._-]+$ ]] || reject_slug "$_name" "$_val"
+  [[ "$_val" == "." || "$_val" == ".." ]] && reject_slug "$_name" "$_val"
+done
 
 DEST_DIR="$OUTBOX_ROOT/$CHANNEL/pending"
 mkdir -p "$DEST_DIR"
