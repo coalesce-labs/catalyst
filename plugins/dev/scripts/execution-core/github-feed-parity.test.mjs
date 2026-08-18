@@ -352,26 +352,43 @@ describe("CTC-712 — the check_suite compare spec can join, and can DIVERGE", (
     expect(r.totals.smeeUnjoined).toBe(0);
   });
 
-  test("⛔ a disagreeing PR association is a DIVERGENCE, not a pass", () => {
-    // The positive control that matters most: `vcs.pr.number` IS the route, so a
-    // ledger that could not fail on it would certify the exact defect CTC-712 fixed.
-    const feed = suiteEv();
-    const smeeSide = suiteEv({ payload: { prNumbers: [7, 9] } });
-    const r = compareGithubStreams([feed], [smeeSide]);
-    expect(r.byName["github.check_suite.completed"].joined).toBe(1);
-    expect(r.byName["github.check_suite.completed"].agree).toBe(0);
+  test("⛔ a disagreeing PAYLOAD association is never clean — that field IS the route", () => {
+    // `router.mjs:1497` routes on `detail.prNumbers`, so a ledger that could not fail
+    // on it would certify the exact defect CTC-712 exists to close. The key includes it
+    // (see the spec), so a disagreement surfaces as unjoined rather than as a
+    // disagreeing pair — either way, never as clean.
+    const r = compareGithubStreams([suiteEv()], [suiteEv({ payload: { prNumbers: [7, 9] } })]);
     expect(r.clean).toBe(false);
+    expect(r.totals.smeeUnjoined).toBe(1);
   });
 
-  test("⛔ a conclusion disagreement is caught", () => {
+  test("⭐ a vcs.pr.number-only difference JOINS and AGREES — it changes no dispatch", () => {
+    // The measured case: the webhook decorates an empty-association suite from its
+    // SHA→PR cache (355 of 983 live events) and the replica cannot reproduce that
+    // historical map. Comparing it would leave 27% of the smee side permanently
+    // unjoinable for a difference nothing routes on — a false BLOCKER, the same shape
+    // as the repo-scoping one #3551 fixed.
+    const feed = suiteEv({ attrs: { "vcs.pr.number": undefined, "event.label": undefined },
+                           payload: { prNumbers: [] } });
+    const smeeSide = suiteEv({ attrs: { "vcs.pr.number": 3468, "event.label": "PR #3468" },
+                               payload: { prNumbers: [] } });
+    const r = compareGithubStreams([feed], [smeeSide]);
+    expect(r.byName["github.check_suite.completed"].joined).toBe(1);
+    expect(r.byName["github.check_suite.completed"].agree).toBe(1);
+    expect(r.totals.smeeUnjoined).toBe(0);
+  });
+
+  test("⛔ but a CONCLUSION difference still breaks clean — the exclusion is narrow", () => {
+    // The control on the test above: excluding one display field must not have
+    // loosened the comparison generally.
     const r = compareGithubStreams(
       [suiteEv()],
       [suiteEv({ attrs: { "cicd.pipeline.run.conclusion": "failure" }, payload: { conclusion: "failure" } })],
     );
-    // A different conclusion changes the KEY as well, so this surfaces as two
-    // unjoined events rather than a disagreeing pair — either way, never as clean.
     expect(r.clean).toBe(false);
   });
+
+
 
   test("⚠️ the coarse key still counts MULTIPLICITY — a dropped suite cannot hide", () => {
     // Two real suites bucket under one key (no suite id is on either side). If the

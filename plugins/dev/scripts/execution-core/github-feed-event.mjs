@@ -275,6 +275,29 @@ export function parseCheckSuitePrNumbers(raw) {
 }
 
 /**
+ * The PR number GitHub encodes in a suite's `head_branch`, or null.
+ *
+ * ⭐ MEASURED, NOT ASSUMED. A suite whose `pull_requests` array is empty often ran on
+ * the pull-request ref, whose branch is literally `refs/pull/<N>/head`. Checked against
+ * every case where the WEBHOOK attached a PR to an empty-association suite from its
+ * SHA→PR cache (CTL-396) and the replica had the suite row: **66 agreed, 0 disagreed.**
+ * Where this fires it is exact.
+ *
+ * ⛔ IT FEEDS THE ATTRIBUTE ONLY, NEVER THE PAYLOAD — see the emitter. The webhook's
+ * cache does the same, and the asymmetry is load-bearing: `router.mjs:1497` routes on
+ * `detail.prNumbers` (the payload array), so writing a derived number there would make
+ * the feed WAKE waiters the webhook does not. That is a behavioural change wearing the
+ * costume of better coverage.
+ */
+export function checkSuitePrFromHeadBranch(headBranch) {
+  if (typeof headBranch !== "string") return null;
+  const m = /^refs\/pull\/(\d+)\/head$/.exec(headBranch);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
  * Decide whether a row is emittable, and say why when it is not.
  *
  * The decline/fail split follows the Linear leg's rule verbatim, because readiness
@@ -339,8 +362,27 @@ export function classifyGithubRow(streamKey, row) {
   // (`requiresColumn`), and the ROW is gated on that column being populated. They
   // decline visibly in `byReason` rather than emitting a twin that cannot route.
   if (streamKey === "checkSuiteCompleted") {
-    const prs = parseCheckSuitePrNumbers(row.pull_request_numbers);
-    if (prs.length === 0) return { emit: false, reason: "no-pr-association:not-backfilled" };
+    // ⛔ ONLY AN ABSENT COLUMN DECLINES — an EMPTY array emits. This distinction was
+    // wrong in the first cut and the measurement is what corrected it.
+    //
+    // `NULL` means the writer never wrote the column: a row predating migration 0028,
+    // about which we know nothing. `[]` means GitHub SAID there are no pull requests —
+    // a fact, and the commonest one on this fleet: **983 of 3,654** live suite events
+    // since 2026-08-17 (26.9%) carry `prNumbers: []`, dominated by `main`-branch runs.
+    //
+    // ⚠️ AND DECLINING THOSE COSTS NO DISPATCH, which is why it is safe to emit them.
+    // `router.mjs:1497` reaches an interest through `eventPrs.find(...)` over
+    // `detail.prNumbers` — `getEventPayload` = `body.payload`, never the attributes —
+    // so an event with an empty array wakes NOTHING on the webhook side either. The
+    // 355 of those the webhook decorates with a cache-derived `vcs.pr.number` are
+    // routing-inert too: that attribute is bridged only into `scope`, and this name's
+    // branch never reads `scope`. Verified in the router source, not inferred.
+    //
+    // So declining them bought nothing and cost parity: 27% of the smee side would be
+    // permanently unjoinable and the ledger could never read CLEAN.
+    if (row.pull_request_numbers === null || row.pull_request_numbers === undefined) {
+      return { emit: false, reason: "no-pr-association:not-backfilled" };
+    }
   }
   if (streamKey === "pushEvent" && (typeof row.ref !== "string" || row.ref === "")) {
     return { emit: false, reason: "no-ref" };
@@ -597,7 +639,16 @@ export function buildGithubEvent(streamKey, row, seams) {
       // ⛔ `prNumbers[0]`, NOT the whole list. The webhook picks the FIRST entry for
       // the attribute and carries the full array in the payload; reproducing only one
       // half of that would diverge on whichever field the ledger compares.
-      const effectivePr = prs[0];
+      //
+      // ⭐ The fallback mirrors the webhook's own: when the array is empty it reaches
+      // for its SHA→PR cache (`cachedPrNumber`, CTL-396). We cannot reproduce that
+      // cache — it is an in-memory HISTORICAL map of sha→PR, and the replica's
+      // `pull_requests` is a LAST-STATE projection that forgets a PR's old heads
+      // (measured: only 18 of 88 empty-association suites still match a current head).
+      // What we can read exactly is the pull-request ref GitHub put in `head_branch`.
+      const effectivePr = prs.length > 0
+        ? prs[0]
+        : checkSuitePrFromHeadBranch(row.head_branch);
       const conclusion = typeof row.conclusion === "string" && row.conclusion !== "" ? row.conclusion : null;
       const status = typeof row.status === "string" ? row.status : "";
       const headSha = typeof row.head_sha === "string" ? row.head_sha : "";
@@ -611,7 +662,9 @@ export function buildGithubEvent(streamKey, row, seams) {
         // value. They coincide for the one name we emit, and reading it from the row
         // keeps that a fact rather than a coincidence.
         action: status,
-        label: `PR #${effectivePr}`,
+        // The webhook passes `undefined` (no label) when it has no PR, and the
+        // envelope builder omits the key entirely for `undefined`.
+        label: effectivePr !== null && effectivePr !== undefined ? `PR #${effectivePr}` : undefined,
         attrs: {
           "vcs.repository.name": repo,
           "cicd.pipeline.run.status": status,
@@ -621,7 +674,11 @@ export function buildGithubEvent(streamKey, row, seams) {
           // every event carrying neither — the `pr.merged` `vcs.revision` mistake in
           // the other direction.
           ...(headSha ? { "vcs.revision": headSha } : {}),
-          "vcs.pr.number": effectivePr,
+          // ⛔ CONDITIONAL, like the webhook: it omits the attribute entirely when it
+          // has no PR from either the payload or its cache. A `main`-branch suite
+          // legitimately has none (56 of 88 empty-association rows measured), and
+          // emitting `null` there would diverge on every one of them.
+          ...(effectivePr !== null && effectivePr !== undefined ? { "vcs.pr.number": effectivePr } : {}),
           ...(conclusion !== null ? { "cicd.pipeline.run.conclusion": conclusion } : {}),
         },
         message: `${name} for ${repo}${conclusion ? ` (${conclusion})` : ""}`,
@@ -633,6 +690,12 @@ export function buildGithubEvent(streamKey, row, seams) {
           // ⚠️ `head_branch` IS stored and is NOT emitted. The webhook parses it into
           // `headRef` and then drops it — no attribute, no payload key. Adding it
           // would be an improvement, and an improvement is a divergence.
+          //
+          // ⛔ GITHUB'S ARRAY, VERBATIM — `effectivePr` is deliberately NOT folded in.
+          // THIS FIELD IS THE ROUTE (`router.mjs:1497` reads `detail.prNumbers`), so a
+          // derived entry here would wake waiters the webhook never wakes. The derived
+          // number belongs in the attribute, where the webhook's own cache puts it and
+          // where nothing routes on it.
           prNumbers: prs,
         },
       }, seams);

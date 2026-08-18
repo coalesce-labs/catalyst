@@ -17,6 +17,7 @@ import {
   buildGithubEvent,
   classifyGithubRow,
   githubEdgeId,
+  checkSuitePrFromHeadBranch,
   githubEventName,
   loginOf,
   parseCheckSuitePrNumbers,
@@ -507,18 +508,30 @@ describe("CTC-712 — a suite with no PR association DECLINES, visibly", () => {
     status: "completed", conclusion: "success",
   };
 
-  test("⛔ the 760 un-backfilled rows decline by name, they do not emit unroutable events", () => {
-    // Migration 0028 is an additive ADD COLUMN with no backfill, so every suite row
-    // predating the 0.1.18 pin has this NULL. An event without a PR number still
-    // LOOKS emitted and reaches no interest — worse than a decline, which is counted.
-    for (const v of [null, undefined, "", "[]", "null", "not json", "{}", "[0]", '["7"]']) {
+  test("⛔ ONLY an ABSENT column declines — a row predating migration 0028", () => {
+    // 0028 is an additive ADD COLUMN with no backfill, so a row from before the pin has
+    // NULL here and we know NOTHING about its association. Emitting it would assert
+    // "no PR" on a row we cannot read.
+    for (const v of [null, undefined]) {
       const c = classifyGithubRow("checkSuiteCompleted", { ...base, pull_request_numbers: v });
       expect(c.emit).toBe(false);
       expect(c.reason).toBe("no-pr-association:not-backfilled");
     }
   });
 
-  test("a populated association emits — the positive control on the decline above", () => {
+  test("⭐ an EMPTY association EMITS — GitHub saying 'no PRs' is a fact, not a gap", () => {
+    // The correction that measurement forced. `[]` is the commonest case on this fleet
+    // (983 of 3,654 live suite events, 26.9%, dominated by main-branch runs), and
+    // declining it costs no dispatch — the router routes on `detail.prNumbers`, so an
+    // empty array wakes nothing on the WEBHOOK side either — while making 27% of the
+    // smee side permanently unjoinable, so the ledger could never read CLEAN.
+    for (const v of ["[]", "[0]", '["7"]', "{}", "not json"]) {
+      const c = classifyGithubRow("checkSuiteCompleted", { ...base, pull_request_numbers: v });
+      expect(c.emit).toBe(true);
+    }
+  });
+
+  test("a populated association emits — the positive control", () => {
     const c = classifyGithubRow("checkSuiteCompleted", { ...base, pull_request_numbers: "[7]" });
     expect(c.emit).toBe(true);
     expect(c.reason).toBeNull();
@@ -588,5 +601,60 @@ describe("CTC-712 — the edge identity survives a re-read and distinguishes a r
     // collapse push identity back to the ref and kill github.push after one push.
     const push = { __ts: 1000, __id: "o/r@refs/heads/main", repo_id: "o/r", ref: "refs/heads/main", after: "sha-a" };
     expect(githubEdgeId("push", push)).toBe("gh:push:o/r@refs/heads/main:1000:sha-a");
+  });
+});
+
+describe("CTC-712 — an empty association reproduces the webhook, including its silence", () => {
+  const row = (over = {}) => ({
+    __ts: 1000, __id: "cs1", repo_id: "o/r", check_suite_id: "cs1", head_sha: "abc",
+    status: "completed", conclusion: "success", pull_request_numbers: "[]",
+    head_branch: "main", ...over,
+  });
+  const ev = (over) => buildGithubEvent("checkSuiteCompleted", row(over), SEAMS);
+
+  test("⛔ a main-branch suite emits with NO vcs.pr.number and NO label", () => {
+    // 56 of 88 empty-association rows measured are `main`. The webhook omits both keys
+    // for these; emitting null would diverge on every one.
+    const e = ev();
+    expect(e).not.toBeNull();
+    expect("vcs.pr.number" in e.attributes).toBe(false);
+    expect("event.label" in e.attributes).toBe(false);
+    expect(e.body.payload.prNumbers).toEqual([]);
+  });
+
+  test("⭐ a refs/pull/<N>/head suite recovers the PR into the ATTRIBUTE", () => {
+    const e = ev({ head_branch: "refs/pull/3468/head" });
+    expect(e.attributes["vcs.pr.number"]).toBe(3468);
+    expect(e.attributes["event.label"]).toBe("PR #3468");
+  });
+
+  test("⛔⛔ the recovered PR NEVER reaches the payload — the payload is the ROUTE", () => {
+    // `router.mjs:1497` routes on `detail.prNumbers`. Folding a derived number in there
+    // would make the feed WAKE waiters the webhook does not — a behavioural change
+    // wearing the costume of better coverage. The attribute is where the webhook's own
+    // SHA→PR cache puts its answer, and nothing routes on it.
+    const e = ev({ head_branch: "refs/pull/3468/head" });
+    expect(e.body.payload.prNumbers).toEqual([]);
+  });
+
+  test("a real association always WINS over the head_branch derivation", () => {
+    const e = ev({ pull_request_numbers: "[99]", head_branch: "refs/pull/3468/head" });
+    expect(e.attributes["vcs.pr.number"]).toBe(99);
+    expect(e.body.payload.prNumbers).toEqual([99]);
+  });
+
+  test("checkSuitePrFromHeadBranch is exact — it matches the ref form and nothing else", () => {
+    expect(checkSuitePrFromHeadBranch("refs/pull/3468/head")).toBe(3468);
+    expect(checkSuitePrFromHeadBranch("refs/pull/1/head")).toBe(1);
+    // ⛔ Anything else is null rather than a guess. A wrong PR number on a CI-completion
+    // event is worse than an absent one: absent routes nowhere, wrong routes somewhere.
+    expect(checkSuitePrFromHeadBranch("main")).toBeNull();
+    expect(checkSuitePrFromHeadBranch("refs/pull/3468/merge")).toBeNull();
+    expect(checkSuitePrFromHeadBranch("refs/heads/refs/pull/9/head")).toBeNull();
+    expect(checkSuitePrFromHeadBranch("refs/pull/abc/head")).toBeNull();
+    expect(checkSuitePrFromHeadBranch("refs/pull/0/head")).toBeNull();
+    expect(checkSuitePrFromHeadBranch("ryan/ctl-1929")).toBeNull();
+    expect(checkSuitePrFromHeadBranch(null)).toBeNull();
+    expect(checkSuitePrFromHeadBranch(undefined)).toBeNull();
   });
 });
