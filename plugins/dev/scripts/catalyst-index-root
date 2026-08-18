@@ -85,16 +85,22 @@ cmd_verify() {
     _pass "standalone" "$ROOT is a standalone checkout"
   fi
 
+  # ⛔ Codex #3525 P1: EQUALITY, not ancestry. The first cut accepted any DESCENDANT of the pin,
+  # on the reasoning that "the fleet advances the root". That is backwards — advancing the fleet
+  # means BUMPING THE PIN, and a root sitting on post-pin commits is running code nobody pinned
+  # while `verify` calls it pinned. A pin that only sets a floor is not a pin.
   local head
   head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)"
   if [ -z "$head" ]; then
-    _fail "ancestry" "could not read HEAD in $ROOT — the pin is UNPROVEN"
+    _fail "pinned-head" "could not read HEAD in $ROOT — the pin is UNPROVEN"
   elif ! git -C "$ROOT" cat-file -e "${PIN_SHA}^{commit}" 2>/dev/null; then
-    _fail "ancestry" "pinned sha ${PIN_SHA:0:9} is not present in $ROOT — fetch it (run setup)"
+    _fail "pinned-head" "pinned sha ${PIN_SHA:0:9} is not present in $ROOT — fetch it (run setup)"
+  elif [ "$head" = "$PIN_SHA" ]; then
+    _pass "pinned-head" "HEAD is exactly the pinned ${PIN_SHA:0:9}"
   elif git -C "$ROOT" merge-base --is-ancestor "$PIN_SHA" "$head" 2>/dev/null; then
-    _pass "ancestry" "HEAD ${head:0:9} contains the pinned ${PIN_SHA:0:9}"
+    _fail "pinned-head" "HEAD ${head:0:9} is AHEAD of pinned ${PIN_SHA:0:9} — it would run post-pin code nobody pinned (bump the pin, do not drift the root)"
   else
-    _fail "ancestry" "HEAD ${head:0:9} does NOT contain pinned ${PIN_SHA:0:9} — the root is stale or diverged"
+    _fail "pinned-head" "HEAD ${head:0:9} does NOT contain pinned ${PIN_SHA:0:9} — the root is stale or diverged"
   fi
 
   # ⛔ THE CONTENT HALF. Ancestry says the commit is reachable in history; it says nothing about
@@ -108,14 +114,21 @@ cmd_verify() {
     _fail "content" "$PROBE_SYMBOL is ABSENT from $PROBE_FILE — the code on disk is not the pinned release"
   fi
 
-  # ⛔ ...and neither half proves the working tree is CLEAN at that path. A local edit to the probe
-  # file passes ancestry and content while running something nobody reviewed.
-  local dirty
-  dirty="$(git -C "$ROOT" status --porcelain -- "$PROBE_FILE" 2>/dev/null)"
-  if [ -n "$dirty" ]; then
-    _fail "clean" "$PROBE_FILE is locally modified in $ROOT: $dirty"
+  # ⛔ Codex #3525 P1 (twice over). The first cut scoped this to the PROBE FILE, so a local edit
+  # anywhere else in the tree — say under apps/index-host, the code the indexer actually runs —
+  # printed "PASS clean" and `run` proceeded. The whole tree has to be pristine for a serving root
+  # to mean anything.
+  # ⛔ And the exit status was discarded: a corrupt index makes `git status` fail, the substitution
+  # yields "", and an empty string read as CLEAN. "I could not measure it" must fail closed.
+  local dirty dirty_rc
+  dirty="$(git -C "$ROOT" status --porcelain 2>/dev/null)"
+  dirty_rc=$?
+  if [ "$dirty_rc" -ne 0 ]; then
+    _fail "clean" "git status failed in $ROOT (rc ${dirty_rc}) — cleanliness is UNMEASURED, which is not clean"
+  elif [ -n "$dirty" ]; then
+    _fail "clean" "$ROOT has local modifications — it would run code nobody reviewed: $(printf '%s' "$dirty" | head -3 | tr '\n' ';')"
   else
-    _pass "clean" "$PROBE_FILE is unmodified"
+    _pass "clean" "the serving tree is pristine"
   fi
 
   echo

@@ -47,37 +47,54 @@ describe("checkIndexServingRoot", () => {
   test("a root at the pin, clean, with the probe symbol present -> pass", () => {
     const c = checkIndexServingRoot(deps());
     expect(c.status).toBe("pass");
-    expect(c.detail).toContain("carries the pinned");
+    expect(c.detail).toContain("is exactly the pinned");
   });
 
   // ⛔ The case the ticket is about. Measured on mini-2: 332 commits behind, and the run looked
   // completely normal.
-  test("a STALE root (pin not an ancestor of HEAD) -> warn, naming it", () => {
+  test("a STALE root (HEAD is not the pin) -> warn, naming it", () => {
     const c = checkIndexServingRoot(deps({ git: gitStub({ head: OTHER, ancestor: false }) }));
     expect(c.status).toBe("warn");
-    expect(c.detail).toContain("does NOT contain pinned");
+    expect(c.detail).toContain("is not the pinned");
+  });
+
+  // ⛔ Codex #3525 P1: the first cut accepted any DESCENDANT of the pin, so a root that had
+  // drifted ahead ran post-pin code while this reported it pinned. A pin that only sets a floor
+  // is not a pin.
+  test("a DESCENDANT of the pin -> warn, named as AHEAD", () => {
+    const c = checkIndexServingRoot(deps({ git: gitStub({ head: OTHER, ancestor: true }) }));
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("is AHEAD of pinned");
   });
 
   // ⭐ Measured on the dev laptop: 18 commits behind the pin FAILED ancestry while the content
   // probe PASSED, because the symbol had merged before that HEAD. Content alone clears this root.
-  test("ancestry catches a root whose content probe passes", () => {
+  test("the pinned-head check catches a root whose content probe passes", () => {
     const c = checkIndexServingRoot(deps({ git: gitStub({ head: OTHER, ancestor: false }) }));
     expect(c.status).toBe("warn");
-    expect(c.detail).toContain("does NOT contain pinned");
+    expect(c.detail).toContain("is not the pinned");
     expect(c.detail).not.toContain("SKIP_CACHE_HEADER is absent");
   });
 
   // ...and the converse, so neither half is decorative.
-  test("content catches a root whose ancestry passes", () => {
+  test("content catches a root whose HEAD is exactly the pin", () => {
     const c = checkIndexServingRoot(deps({ readText: () => "export const SOMETHING_ELSE = 1;" }));
     expect(c.status).toBe("warn");
     expect(c.detail).toContain("SKIP_CACHE_HEADER is absent");
   });
 
-  test("a locally modified probe file -> warn, though ancestry and content both pass", () => {
+  test("a locally modified probe file -> warn, though HEAD and content both pass", () => {
     const c = checkIndexServingRoot(deps({ git: gitStub({ dirty: " M apps/context-engine/src/wiki/llm.ts" }) }));
     expect(c.status).toBe("warn");
-    expect(c.detail).toContain("locally modified");
+    expect(c.detail).toContain("local modifications");
+  });
+
+  // ⛔ Codex #3525 P1: cleanliness scoped to the probe file let an edit under apps/index-host —
+  // the code the indexer actually RUNS — read as clean.
+  test("a modification OUTSIDE the probe file is caught too", () => {
+    const c = checkIndexServingRoot(deps({ git: gitStub({ dirty: " M apps/index-host/src/cli.ts" }) }));
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("local modifications");
   });
 
   // ⛔ Every "I could not look" must render as something other than a pass.
@@ -99,9 +116,11 @@ describe("checkIndexServingRoot", () => {
     expect(c.detail).toContain("UNPROVEN");
   });
 
-  test("git status unreadable -> warn, never pass", () => {
+  // ⛔ Codex #3525 P1: a failing `git status` yielded an empty string that read as CLEAN.
+  test("git status unreadable -> warn saying cleanliness is UNMEASURED, never pass", () => {
     const c = checkIndexServingRoot(deps({ git: gitStub({ statusFails: true }) }));
     expect(c.status).toBe("warn");
+    expect(c.detail).toContain("UNMEASURED");
   });
 
   test("an unreadable pin file -> info naming the reason, never pass", () => {
@@ -134,6 +153,8 @@ describe("checkIndexServingRoot", () => {
     const cases = [
       deps(),
       deps({ git: gitStub({ head: OTHER, ancestor: false }) }),
+      deps({ git: gitStub({ head: OTHER, ancestor: true }) }),
+      deps({ git: gitStub({ dirty: " M apps/index-host/src/cli.ts" }) }),
       deps({ exists: () => false }),
       deps({ git: gitStub({ hasPin: false }) }),
       deps({ git: gitStub({ head: "" }) }),

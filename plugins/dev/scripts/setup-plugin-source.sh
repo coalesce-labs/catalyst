@@ -421,6 +421,35 @@ fi
 HEAD_SHA="$(git -C "$CHECKOUT_PATH" rev-parse HEAD)"
 TARGET_DIR="${CHECKOUT_PATH}/plugins/dev"
 
+# ─── 1b. Advance the catalyst-index serving root to the pin this checkout now carries ──────
+#
+# CTL-1935 (Codex #3525 P1). Distributing the pin file is NOT the same as applying it: without
+# this hook the config lands and every serving root stays absent or on the PREVIOUS sha until
+# someone runs a command by hand — recreating the stale-root behaviour the ticket exists to kill,
+# while the pin file makes it look solved.
+#
+# ⚠️ NON-FATAL BY DESIGN, BUT LOUD. The plugin reload is the more critical operation; failing it
+# because an indexer root could not be advanced would trade a stale indexer for a stale fleet.
+# A failure prints the consequence in full rather than a bare non-zero.
+# Skip with CATALYST_SKIP_INDEX_ROOT=1 on nodes that never index.
+INDEX_ROOT_SCRIPT="${CHECKOUT_PATH}/plugins/dev/scripts/catalyst-index-root"
+INDEX_ROOT_PIN="${CHECKOUT_PATH}/plugins/dev/config/index-serving-root.json"
+if [[ "${CATALYST_SKIP_INDEX_ROOT:-0}" == "1" ]]; then
+	echo "catalyst-index serving root: SKIPPED (CATALYST_SKIP_INDEX_ROOT=1)"
+elif [[ ! -f "$INDEX_ROOT_SCRIPT" || ! -f "$INDEX_ROOT_PIN" ]]; then
+	# An older checkout predates the pin — say so rather than passing silently.
+	echo "catalyst-index serving root: no pin in this checkout (predates CTL-1935) — not advanced"
+else
+	echo "catalyst-index serving root: advancing to the pin in ${INDEX_ROOT_PIN}…"
+	if bash "$INDEX_ROOT_SCRIPT" setup; then
+		echo "catalyst-index serving root: at the pin"
+	else
+		echo "WARNING: catalyst-index serving root could NOT be advanced to the pin." >&2
+		echo "WARNING: a cold index on this node would run stale or unpinned code (CTL-1935)." >&2
+		echo "WARNING: the plugin reload itself succeeded; fix with 'catalyst-index-root setup'." >&2
+	fi
+fi
+
 # ─── 2. Register pluginDirs in the machine config ───────────────────────────
 MACHINE_CFG="$(plugin_dirs_machine_config_path)"
 mkdir -p "$(dirname "$MACHINE_CFG")"

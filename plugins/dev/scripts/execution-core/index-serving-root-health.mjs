@@ -78,8 +78,11 @@ export function checkIndexServingRoot(deps = {}) {
   if (hasPin.status !== 0) {
     return mkCheck(NAME, STATUS.WARN, `pinned ${sha.slice(0, 9)} is not present in ${root} — the root has never fetched the pinned release (run: catalyst-index-root setup)`);
   }
-  const ancestor = git(root, ["merge-base", "--is-ancestor", sha, head.stdout]);
-  const ancestryOk = ancestor.status === 0;
+  // ⛔ Codex #3525 P1: EQUALITY, not ancestry — the shell tool had the same bug. Accepting any
+  // descendant means a root that has drifted ahead runs post-pin code while this reports it
+  // pinned. Advancing the fleet is a pin BUMP, never a root drift.
+  const atPin = head.stdout === sha;
+  const ahead = !atPin && git(root, ["merge-base", "--is-ancestor", sha, head.stdout]).status === 0;
 
   let contentOk = false;
   let contentWhy = "";
@@ -95,17 +98,27 @@ export function checkIndexServingRoot(deps = {}) {
     }
   }
 
-  const dirty = git(root, ["status", "--porcelain", "--", probeFile]);
-  const cleanOk = dirty.status === 0 && dirty.stdout === "";
+  // ⛔ Codex #3525 P1, twice: scoped to the probe file, an edit anywhere else in the tree (say
+  // under apps/index-host, the code the indexer runs) still read clean. And a failing `git status`
+  // must not read as clean — "could not measure" is not "measured clean".
+  const dirty = git(root, ["status", "--porcelain"]);
+  const cleanMeasured = dirty.status === 0;
+  const cleanOk = cleanMeasured && dirty.stdout === "";
 
-  if (ancestryOk && contentOk && cleanOk) {
-    return mkCheck(NAME, STATUS.PASS, `index serving root ${root} carries the pinned ${sha.slice(0, 9)} (ancestry + ${probeSymbol} present + tree clean)`);
+  if (atPin && contentOk && cleanOk) {
+    return mkCheck(NAME, STATUS.PASS, `index serving root ${root} is exactly the pinned ${sha.slice(0, 9)} (${probeSymbol} present + tree pristine)`);
   }
 
   const why = [];
-  if (!ancestryOk) why.push(`HEAD ${head.stdout.slice(0, 9)} does NOT contain pinned ${sha.slice(0, 9)}`);
+  if (!atPin) {
+    why.push(
+      ahead
+        ? `HEAD ${head.stdout.slice(0, 9)} is AHEAD of pinned ${sha.slice(0, 9)} — it would run post-pin code nobody pinned`
+        : `HEAD ${head.stdout.slice(0, 9)} is not the pinned ${sha.slice(0, 9)}`,
+    );
+  }
   if (!contentOk) why.push(contentWhy);
-  if (!cleanOk) why.push(dirty.status !== 0 ? `could not read git status for ${probeFile}` : `${probeFile} is locally modified`);
+  if (!cleanOk) why.push(!cleanMeasured ? "git status failed — cleanliness is UNMEASURED, which is not clean" : "the serving tree has local modifications");
   return mkCheck(
     NAME,
     STATUS.WARN,
