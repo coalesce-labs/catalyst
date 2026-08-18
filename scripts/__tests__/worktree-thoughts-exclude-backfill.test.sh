@@ -106,6 +106,98 @@ AFTER="$(md5 -q "$SCRATCH/repoA/.git/info/exclude" 2>/dev/null || md5sum "$SCRAT
 grep -q "already ignored" <<<"$OUT2" && pass "the re-run says 'already ignored'" || fail "the re-run says 'already ignored'" "$OUT2"
 
 echo ""
+echo "--- ⛔ a worktree path containing a SPACE is not truncated (Codex #3521 P2) ---"
+# `awk '/^worktree /{print $2}'` returned only the first component, so a spaced path became a
+# nonexistent one, was skipped, and the run reported still-untracked=0 and exited 0.
+R="$SCRATCH/repoD"
+mkdir -p "$R"
+git_q "$R" init -b main
+echo hi >"$R/f.txt"
+git_q "$R" add -A
+git_q "$R" commit -m init
+git_q "$R" worktree add "$SCRATCH/wt/repoD/with space" -b w1
+mkdir -p "$SCRATCH/wt/repoD/with space/thoughts"
+echo n >"$SCRATCH/wt/repoD/with space/thoughts/n.md"
+# ⛔ Positive control: the defect really is there before the run.
+if git -C "$SCRATCH/wt/repoD/with space" status --porcelain | grep -q '^?? *thoughts/'; then
+	pass "control — the spaced-path worktree really has the defect"
+else
+	fail "control — the spaced-path worktree has the defect" "fixture wrong; the check below proves nothing"
+fi
+OUT_SP="$(run_backfill)"
+if grep -qxF "thoughts/" "$R/.git/info/exclude" 2>/dev/null; then
+	pass "the spaced-path worktree's repo was found and fixed"
+else
+	fail "the spaced-path worktree's repo was found and fixed" "$OUT_SP"
+fi
+
+echo ""
+echo "--- ⛔ an UNREADABLE worktree is not counted as clean (Codex #3521 P2) ---"
+# git status failing was discarded and the empty output read as a clean tree — a false zero.
+R="$SCRATCH/repoE"
+mkdir -p "$R"
+git_q "$R" init -b main
+echo hi >"$R/f.txt"
+git_q "$R" add -A
+git_q "$R" commit -m init
+git_q "$R" worktree add "$SCRATCH/wt/repoE/w1" -b w1
+git_q "$R" worktree add "$SCRATCH/wt/repoE/healthy" -b healthy
+mkdir -p "$SCRATCH/wt/repoE/healthy/thoughts"
+echo n >"$SCRATCH/wt/repoE/healthy/thoughts/n.md"
+# Break ONLY w1's metadata. The healthy sibling keeps the repo discoverable — Codex's exact
+# scenario, and without it the broken worktree is simply never discovered and the case is moot.
+echo "gitdir: /nonexistent/definitely/not/here" >"$SCRATCH/wt/repoE/w1/.git"
+if git -C "$SCRATCH/wt/repoE/w1" status --porcelain >/dev/null 2>&1; then
+	fail "control — w1's status really is unreadable" "the fixture did not break it"
+else
+	pass "control — w1's status really is unreadable"
+fi
+OUT_UR="$(run_backfill)"
+RC_UR=$?
+if grep -q "UNREADABLE" <<<"$OUT_UR"; then pass "the unreadable worktree is reported"; else fail "the unreadable worktree is reported" "$OUT_UR"; fi
+if [ "$RC_UR" -ne 0 ]; then pass "the run exits NON-ZERO on an unreadable worktree (rc=$RC_UR)"; else fail "the run exits non-zero on an unreadable worktree" "rc=0 — an unknown was reported as a pass"; fi
+rm -rf "$SCRATCH/wt/repoE"
+
+echo ""
+echo "--- ⛔ detection survives a status stream larger than the pipe buffer (Codex #3521 P2) ---"
+# `git status --porcelain | grep -q` let grep exit on first match, git took SIGPIPE, and under
+# `set -o pipefail` the pipeline returned nonzero — so a repo that DID have the defect was
+# counted as skipped. Needs enough output to fill the ~64 KiB pipe buffer.
+R="$SCRATCH/repoF"
+mkdir -p "$R"
+git_q "$R" init -b main
+echo hi >"$R/f.txt"
+git_q "$R" add -A
+git_q "$R" commit -m init
+git_q "$R" worktree add "$SCRATCH/wt/repoF/w1" -b w1
+mkdir -p "$SCRATCH/wt/repoF/w1/thoughts"
+echo n >"$SCRATCH/wt/repoF/w1/thoughts/n.md"
+# ⛔ TWO fixture mistakes had to be fixed before this case tested anything, and both were caught
+# by running a mutation rather than by reading:
+#  1. Files in a subdirectory collapse to one "?? pad/" line in porcelain — 6000 of them produced
+#     21 bytes of status. Hence top-level files. (The byte-count control caught this.)
+#  2. They must sort AFTER "thoughts/", or grep matches on the LAST line, git has already written
+#     everything, and there is no SIGPIPE at all — the mutation below passed happily. Hence the
+#     zzz_ prefix: thoughts/ matches early, git still has ~145 KB to write, and the pipe breaks.
+i=0
+while [ "$i" -lt 6000 ]; do
+	: >"$SCRATCH/wt/repoF/w1/zzz_padding_$i.txt"
+	i=$((i + 1))
+done
+BYTES="$(git -C "$SCRATCH/wt/repoF/w1" status --porcelain | wc -c | tr -d ' ')"
+if [ "$BYTES" -gt 65536 ]; then
+	pass "control — the status stream is ${BYTES} bytes, past the 64 KiB pipe buffer"
+else
+	fail "control — the status stream exceeds the pipe buffer" "only ${BYTES} bytes; the case is not exercised"
+fi
+OUT_BIG="$(run_backfill)"
+if grep -qxF "thoughts/" "$R/.git/info/exclude" 2>/dev/null; then
+	pass "the large-status repo was still detected and fixed"
+else
+	fail "the large-status repo was still detected and fixed" "$(tail -5 <<<"$OUT_BIG")"
+fi
+
+echo ""
 echo "--- ⛔ discovering ZERO repos must FAIL, not report success ---"
 OUT3="$(CATALYST_WT_ROOT="$SCRATCH/nonexistent" bash "$SUBJECT" 2>&1)"
 RC3=$?

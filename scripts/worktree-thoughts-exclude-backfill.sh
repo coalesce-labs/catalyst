@@ -92,12 +92,44 @@ printf '%s' "$COMMON_DIRS" | tr '|' '\n' | grep -v '^$' | sort -u >"$LIST"
 # ignore into all of them would be scope creep on someone's machine — one of the discovered
 # repos is literally named "thoughts", where ignoring thoughts/ would be actively wrong.
 # The predicate is: at least one worktree of this repo shows an UNTRACKED thoughts/ entry.
+# ── Reading a worktree's status, the three ways it silently lied (Codex #3521) ──
+#
+# P2a: `awk '/^worktree /{print $2}'` returns only the FIRST whitespace-delimited component, so a
+#      checkout path containing a space was truncated to a nonexistent path and skipped — the
+#      script then reported still-untracked=0 and exited 0 with the defect untouched.
+# P2b: a worktree with temporarily unreadable git metadata made `git status` fail; the error was
+#      discarded and the empty output read as a CLEAN tree. Same false zero.
+# P2c: `git status --porcelain | grep -q` lets grep exit on first match, git takes SIGPIPE, and
+#      under `set -o pipefail` the pipeline returns nonzero — so a repo that DID have the defect
+#      was counted as skipped. Reproducible with thoughts/ plus ~20k untracked files.
+#
+# All three collapse into: read the status ONCE into a variable, check the exit status, and never
+# pipe git into an early-exiting consumer.
+list_worktrees() {
+	# Everything after the "worktree " prefix, spaces included.
+	git --git-dir="$1" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p'
+}
+
+WT_STATUS=""
+read_worktree_status() {
+	WT_STATUS="$(git -C "$1" status --porcelain 2>/dev/null)"
+	return $?
+}
+
 repo_has_untracked_thoughts() {
 	local gcd="$1" wt
 	while IFS= read -r wt; do
 		[ -d "$wt" ] || continue
-		if git -C "$wt" status --porcelain 2>/dev/null | grep -q '^?? *thoughts/'; then return 0; fi
-	done < <(git --git-dir="$gcd" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+		if ! read_worktree_status "$wt"; then
+			echo "  ⛔ could not read git status in $wt — NOT treating that as clean" >&2
+			UNREADABLE=$((UNREADABLE + 1))
+			continue
+		fi
+		case "$WT_STATUS" in
+		*'?? thoughts/'*) return 0 ;;
+		esac
+		printf '%s\n' "$WT_STATUS" | grep -q '^?? *thoughts/' && return 0
+	done < <(list_worktrees "$gcd")
 	return 1
 }
 
@@ -105,6 +137,7 @@ echo "== 1. repos with an UNTRACKED thoughts/ in at least one worktree"
 CHANGED=0
 ALREADY=0
 SKIPPED=0
+UNREADABLE=0
 while IFS= read -r gcd; do
 	name="$(basename "$(dirname "$gcd")")"
 	excl="$gcd/info/exclude"
@@ -147,7 +180,12 @@ TRACKED=0
 while IFS= read -r gcd; do
 	while IFS= read -r wt; do
 		[ -d "$wt" ] || continue
-		st="$(git -C "$wt" status --porcelain 2>/dev/null | grep 'thoughts/')"
+		if ! read_worktree_status "$wt"; then
+			echo "  ⛔ UNREADABLE: $wt — git status failed; this is NOT a clean worktree"
+			UNREADABLE=$((UNREADABLE + 1))
+			continue
+		fi
+		st="$(printf '%s\n' "$WT_STATUS" | grep 'thoughts/')"
 		[ -z "$st" ] && continue
 		u="$(printf '%s\n' "$st" | grep -c '^?? *thoughts/')"
 		t="$(printf '%s\n' "$st" | grep -cE '^ ?[MADRU].*thoughts/')"
@@ -159,11 +197,11 @@ while IFS= read -r gcd; do
 			echo "  ⚠️  TRACKED-MODIFIED ($t): $wt"
 			TRACKED=$((TRACKED + 1))
 		fi
-	done < <(git --git-dir="$gcd" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+	done < <(list_worktrees "$gcd")
 done <"$LIST"
 
 echo ""
-echo "backfill: repos changed=$CHANGED already=$ALREADY | worktrees still-untracked=$STILL tracked-modified=$TRACKED (dry-run=$DRY_RUN)"
+echo "backfill: repos changed=$CHANGED already=$ALREADY | worktrees still-untracked=$STILL tracked-modified=$TRACKED unreadable=$UNREADABLE (dry-run=$DRY_RUN)"
 if [ "$TRACKED" -gt 0 ]; then
 	echo ""
 	echo "⚠️  $TRACKED worktree(s) show TRACKED-MODIFIED thoughts/ paths. No ignore rule of any kind"
@@ -171,5 +209,6 @@ if [ "$TRACKED" -gt 0 ]; then
 	echo "    They need 'git update-index --skip-worktree' or a sweeper-side rule."
 fi
 # A non-dry run that left untracked cases behind did not do its job.
-if [ "$DRY_RUN" -eq 0 ] && [ "$STILL" -gt 0 ]; then exit 1; fi
+# An unreadable worktree is an UNKNOWN, not a pass: exiting 0 there is the false zero Codex named.
+if [ "$DRY_RUN" -eq 0 ] && { [ "$STILL" -gt 0 ] || [ "$UNREADABLE" -gt 0 ]; }; then exit 1; fi
 exit 0
