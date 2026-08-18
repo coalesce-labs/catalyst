@@ -608,6 +608,20 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test deployment-mode.test.mjs
 
+      - name: ask-verb unit tests (bun, CTL-1922 / CTL-1944)
+        # ⛔ `ask-verbs.test.mjs` shipped with #3509 and was registered in NO workflow —
+        # 20 tests that had never run in CI. Verified with the instrument note above:
+        # parsing this workflow's YAML and searching every `run:` step for the filename
+        # returned zero, while the same search for `assertion-evidence.test.mjs`
+        # (known-present) returned its step. That is the same omission Codex raised as a
+        # round-1 P1 on #3519, now found a third time — so it is registered here rather
+        # than left for the next person.
+        #
+        # Its own step because the "Run stable unit tests" step's working-directory is
+        # execution-core/ and ask.mjs is a sibling of that tree, not inside it.
+        working-directory: plugins/dev/scripts/__tests__
+        run: bun test ask-verbs.test.mjs
+
       - name: event-name boundary unit tests (bun, CTL-1834)
         # `grep -rn event-name .github/workflows/` returned NOTHING before this
         # step. NOTE THE INSTRUMENT: a `run:`-anchored grep is NOT valid here —
