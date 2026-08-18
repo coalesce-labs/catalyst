@@ -32,6 +32,8 @@ import { homedir } from "node:os";
 // drags a ~1,100-line reformat into the diff — extracting keeps this change reviewable.
 import { STATUS, mkCheck } from "./doctor-status.mjs";
 import { checkInstallCompleteness } from "./install-completeness.mjs";
+// CTL-1936 AC5: the standing answer to "is this host write-exhausted".
+import { checkLinearWriteBudget } from "./write-budget-health.mjs";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
 
@@ -165,6 +167,8 @@ function readLinearBotUserIds(l1Path, l2Path) {
 export { STATUS, mkCheck } from "./doctor-status.mjs";
 
 export { checkInstallCompleteness };
+
+export { checkLinearWriteBudget };
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
 //
@@ -5904,6 +5908,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
     () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
     () => checkInstallCompleteness(), // CTL-1918: did the install FINISH — CLIs, plugin-source, sweep, enrolment — advisory only (never FAIL)
+    () => checkLinearWriteBudget(), // CTL-1936: host cloud-write spend / exhaustion — advisory only (never FAIL)
     () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
   ];
 }

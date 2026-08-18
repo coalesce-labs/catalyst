@@ -78,7 +78,12 @@ export function getLinearWriteProxyResolver() {
  * host-originated writes" while the host was still writing. Every caller below
  * already retries on the next tick.
  */
-function routeThroughProxy(proxy, { routeId, ticket, buildPayload }) {
+// CTL-1936 / AC4: `caller` names the site that issued the write. The incident could not
+// be attributed from the event stream — 302 writes on one ticket with no record of what
+// produced them, and the daemon log had rotated. It is threaded from each call site
+// rather than derived here, because a stack-derived name changes with every refactor
+// while the semantic caller does not.
+function routeThroughProxy(proxy, { routeId, ticket, buildPayload, caller = null }) {
   const p = proxy ?? _writeProxy;
   if (!p) return null;
 
@@ -88,7 +93,7 @@ function routeThroughProxy(proxy, { routeId, ticket, buildPayload }) {
   // nobody sends would tax every Linear write on every host running the dry run.
   if (p.mode === "shadow") {
     try {
-      p.send({ routeId, ticket, payload: {} });
+      p.send({ routeId, ticket, payload: {}, caller });
     } catch (err) {
       log.warn({ ticket, routeId, err: err.message }, "linear-write: write-proxy threw (shadow)");
     }
@@ -112,7 +117,7 @@ function routeThroughProxy(proxy, { routeId, ticket, buildPayload }) {
 
   let res;
   try {
-    res = p.send({ routeId, ticket, payload: built.payload });
+    res = p.send({ routeId, ticket, payload: built.payload, caller });
   } catch (err) {
     // A throwing transport must not wedge the tick. It also must not silently become
     // a direct write — that is the one degradation this seam exists to prevent — so
@@ -246,6 +251,7 @@ function runTransition({
     const proxied = routeThroughProxy(proxy, {
       routeId: "issue-state",
       ticket,
+      caller: "runTransition",
       buildPayload: (resolver) => {
         if (!resolver) return { ok: false, reason: "no-resolver" };
 
@@ -437,6 +443,7 @@ export function applyLabel({ ticket, label, exec = defaultExec, readLabels = nul
     const proxied = routeThroughProxy(proxy, {
       routeId: "label",
       ticket,
+      caller: "applyLabel",
       buildPayload: (resolver) => {
         if (!resolver) return { ok: false, reason: "no-resolver" };
         const issue = resolver.issue(ticket);
@@ -566,6 +573,7 @@ export async function removeLabel(
     const proxiedRemove = routeThroughProxy(proxy, {
       routeId: "label",
       ticket,
+      caller: "removeLabel",
       buildPayload: (resolver) => {
         if (!resolver) return { ok: false, reason: "no-resolver" };
         const issue = resolver.issue(ticket);
