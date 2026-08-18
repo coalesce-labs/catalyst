@@ -32,7 +32,7 @@
 // advance-idempotency.test.mjs both import it without dragging in config.mjs's
 // bun:sqlite graph — same discipline as assertion-evidence.mjs / secret-contract.mjs.
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 // A field rendered explicitly so a missing value NEVER silently equals another.
@@ -60,17 +60,26 @@ export function computeAdvanceEdgeKey({ ticket, from, to, predRaw }) {
   ].join("|");
 }
 
+// The marker's name lives in ONE place, because CTL-2024 added a SECOND reader of
+// it (the janitor's retraction). A name built independently in two spots is a
+// rename away from a retraction that silently matches nothing — which is the exact
+// failure mode CTL-2024 is about, one level up.
+const MARKER_PREFIX = ".advance-";
+const MARKER_SUFFIX = ".applied";
+
+// advanceMarkerName — `.advance-<from>-to-<to>.applied`. The `-to-` infix is an
+// ANCHOR, not decoration: it is what stops a retraction for `merge` from matching
+// `...-to-monitor-merge.applied` (see the near-miss control in the CTL-2024 test).
+export function advanceMarkerName(from, to) {
+  return `${MARKER_PREFIX}${renderField(from)}-to-${renderField(to)}${MARKER_SUFFIX}`;
+}
+
 // advanceMarkerPath — one dotfile per (from,to) edge under the worker dir. The
 // name matches NONE of the tree's phase-*.json signal globs, so it is never read
 // as a phase signal (verified: no isPhaseSignalName / workerDirHasPhaseSignals
 // change needed).
 export function advanceMarkerPath(orchDir, ticket, from, to) {
-  return join(
-    orchDir,
-    "workers",
-    ticket,
-    `.advance-${renderField(from)}-to-${renderField(to)}.applied`
-  );
+  return join(orchDir, "workers", ticket, advanceMarkerName(from, to));
 }
 
 // isAdvanceAlreadyApplied — true IFF the marker exists AND its stored key is
@@ -117,4 +126,64 @@ export function recordAdvanceApplied(orchDir, ticket, from, to, key, deps = {}) 
   } catch {
     return false;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// retractAdvanceMarkersInto — CTL-2024. THE MARKER IS A CLAIM ABOUT A FACT ON
+// DISK, AND ONE ACTOR CAN UNDO THAT FACT WITHOUT TOUCHING THE MARKER.
+//
+// THE BUG THIS CLOSES. The stall-janitor's unstick (defaultClearStall step 1)
+// DELETES the successor's `phase-<to>.json`, and its own header comment states the
+// intent: "lets deriveAdvancement re-derive the next phase on the next tick." That
+// sentence was FALSE. deriveAdvancement does re-derive — and the guard above then
+// suppresses the entire fanout, because the edge key is computed from the
+// PREDECESSOR (`phase-<from>.json`), which the unstick never touches. Byte-identical
+// key → byte-identical marker → suppressed. FOREVER. Measured on mini 2026-08-18:
+// CTC-427 (plan→implement) and CTC-55 (research→plan) each emitted 16 suppressed-
+// duplicate advances after a janitor clear; CTC-441, never cleared, emitted 1 — the
+// control that says 16 is not the normal idempotent case.
+//
+// ⚠️ THE ASYMMETRY THAT HID IT. The janitor already re-arms every OTHER durable
+// suppressor it can defeat — `.orphan-detected.applied` (CTL-868), the escalation
+// cooldown (CTL-1442), the durable escalation record (CTL-1643). The advance marker
+// is the one it never learned about, because CTL-1805 added it AFTER those, and it
+// is keyed on a file the janitor has no reason to think about.
+//
+// SCOPE IS DELIBERATELY NARROW. Only edges INTO the cleared phase are retracted:
+// that is the only advance whose effect the unstick actually undid. Retracting
+// anything wider would re-open the CTL-1805 replay storm on edges that are still
+// legitimately applied.
+//
+// FAIL DIRECTION, and note it INVERTS the guard's. Every read/unlink here is
+// best-effort and never throws, but the failure here is toward LEAVING a marker —
+// i.e. toward the CTL-2024 stall, not toward a storm. That is the correct direction
+// for a retraction: the pre-CTL-2024 status quo is a stuck ticket an operator can
+// see and re-arm by hand, whereas an over-eager retraction is a silent replay storm.
+//
+// Returns the list of retracted marker names (possibly empty) so the caller can log
+// what it actually did rather than what it hoped to do.
+export function retractAdvanceMarkersInto(orchDir, ticket, to, deps = {}) {
+  const readdir = deps.readdirSync ?? readdirSync;
+  const remove = deps.rmSync ?? rmSync;
+  const dir = join(orchDir, "workers", renderField(ticket));
+  // Anchored on `-to-<phase>.applied` — see advanceMarkerName.
+  const suffix = `-to-${renderField(to)}${MARKER_SUFFIX}`;
+  let names;
+  try {
+    names = readdir(dir);
+  } catch {
+    return []; // no worker dir / unreadable — nothing to retract
+  }
+  const retracted = [];
+  for (const name of names) {
+    if (!name.startsWith(MARKER_PREFIX) || !name.endsWith(suffix)) continue;
+    try {
+      remove(join(dir, name), { force: true });
+      retracted.push(name);
+    } catch {
+      /* best-effort: a marker we could not remove stays, and the ticket stays
+         stuck — visible, re-armable by hand, and never a storm. */
+    }
+  }
+  return retracted;
 }
