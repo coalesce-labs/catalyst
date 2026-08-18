@@ -58,6 +58,11 @@ function stageScratch() {
   // module graph resolves identically to production (same rationale as deployment-mode.mjs
   // above).
   cpSync(resolve(__dirname, "../lib/secret-contract.mjs"), join(libDir, "secret-contract.mjs"));
+  // CTL-1929: readGithubFeedConfig now delegates to the zero-import github-feed-mode
+  // leaf, so it is part of config.mjs's relative-import graph too. ⭐ This test caught
+  // the omission on the first full run rather than letting a host discover it — which
+  // is exactly the contract the comment above states, working.
+  cpSync(resolve(__dirname, "../lib/github-feed-mode.mjs"), join(libDir, "github-feed-mode.mjs"));
   // type:module + no deps -> pino unresolvable from this directory tree.
   writeFileSync(
     join(scratch, "package.json"),

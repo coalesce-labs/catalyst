@@ -85,6 +85,10 @@ export {
   resolveDeploymentMode,
   getDeploymentMode,
 } from "../lib/deployment-mode.mjs";
+// CTL-1929: the canonical github-feed resolver. Zero-import leaf for the same reason
+// deployment-mode.mjs above is one — doctor.mjs runs under bare Node and cannot load
+// this file (its chain reaches bun:sqlite via linear-query.mjs).
+import { resolveGithubFeedMode } from "../lib/github-feed-mode.mjs";
 
 // --- Paths ---
 // Re-resolved per call so tests can redirect by setting CATALYST_DIR;
@@ -2146,30 +2150,25 @@ export function readCloudFeedConfig(envObj = process.env) {
 // `github.pr.merged` and `github.check_suite.completed` (CTC-691 / CTC-667 item 4),
 // so that merge would blind the CI wait and the deploy chain fleet-wide. The two
 // legs cut over independently or they cut over recklessly.
-const GITHUB_FEED_MODES = new Set(["off", "shadow", "enforce"]);
-
-function readLayer2GithubFeed() {
-  try {
-    const gf = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.githubFeed;
-    return gf && typeof gf === "object" ? gf : {};
-  } catch {
-    return {};
-  }
-}
-
+// ⛔ THIS READER NOW DELEGATES TO `lib/github-feed-mode.mjs` AND KEEPS NO COPY.
+//
+// Four readers in three processes ask this question — the producer (daemon), the
+// dispatch gate (broker), the smee-tunnel gate (orch-monitor) and doctor — and
+// doctor runs under bare Node, which cannot load this file at all (the import chain
+// reaches `bun:sqlite` via linear-query.mjs). So the resolution had to move to a
+// zero-import leaf regardless; leaving a second copy here is what would turn a
+// config question into a dispatch bug. A producer that read `enforce` while the
+// tunnel gate read something else is a double dispatch on every covered name, and
+// it would present as a parity failure rather than as the config drift it is.
+//
+// ⚠️ Delegating also CHANGES ONE BEHAVIOUR, deliberately: a set-but-invalid env
+// value now falls back to `off` **and overrides Layer-2**, per CAT-57's contract
+// (see `config.test.mjs`'s "a SET-but-invalid env value ... overrides Layer-2
+// enforce"). The version this replaces fell through to Layer-2 on a typo, which is
+// the wrong direction for a containment knob — an operator reaching for the env var
+// to REDUCE actuation would have silently left a Layer-2 `enforce` live.
 export function readGithubFeedConfig(envObj = process.env) {
-  const l2 = readLayer2GithubFeed();
-  const env = envObj.CATALYST_GITHUB_FEED;
-  let mode;
-  if (env === "0") mode = "off";
-  else if (typeof env === "string" && GITHUB_FEED_MODES.has(env)) mode = env;
-  else if (typeof l2.mode === "string" && GITHUB_FEED_MODES.has(l2.mode)) mode = l2.mode;
-  else mode = "off";
-  const rawInterval = envObj.CATALYST_GITHUB_FEED_INTERVAL_SEC ?? l2.intervalSeconds;
-  const parsed = Number(rawInterval);
-  // Number("") and Number(null) are both 0, which would read as a valid "0 seconds"
-  // and busy-spin the tick. Require a finite value >= 5.
-  const intervalSec = Number.isFinite(parsed) && parsed >= 5 ? Math.floor(parsed) : 30;
+  const { mode, intervalSec } = resolveGithubFeedMode({ env: envObj });
   return { mode, intervalSec };
 }
 

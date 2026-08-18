@@ -41,12 +41,19 @@
 // Pure: no I/O, no clock, no env. Every dependency is an argument.
 
 import { getEventName } from "../lib/event-name.mjs";
-import {
-  GITHUB_DISPATCH_CLASS_NAMES,
-  GITHUB_UNCOVERED_NAMES,
-  SOURCE_CLOUD_FEED,
-} from "./github-feed-event.mjs";
+import { SOURCE_CLOUD_FEED } from "./github-feed-event.mjs";
 import { PUSH_IS_LOSSY } from "./github-feed-source.mjs";
+// ⛔ THE NAME LISTS MOVED TO A ZERO-IMPORT LEAF and this file no longer owns them.
+// `catalyst doctor` is now a consumer — it must report WHICH names a declared-cloud
+// node cannot see — and doctor runs under bare Node, which cannot load this file at
+// all (it reaches `bun:sqlite` via github-feed-source.mjs). A second copy in doctor
+// would keep reporting three uncovered names after CTC-691/667/704 close.
+import {
+  EXCLUSION_REASONS as LEAF_EXCLUSION_REASONS,
+  GITHUB_CONSUMED_NAMES as LEAF_CONSUMED_NAMES,
+  GITHUB_UNCOVERED_NAMES as LEAF_UNCOVERED_NAMES,
+  computeSuppressible as leafComputeSuppressible,
+} from "../lib/github-feed-names.mjs";
 
 /** The three modes, house convention. */
 export const GITHUB_FEED_MODES = Object.freeze(new Set(["off", "shadow", "enforce"]));
@@ -82,51 +89,11 @@ export function githubLossyNames(pushIsLossy = PUSH_IS_LOSSY) {
 
 export const GITHUB_LOSSY_NAMES = githubLossyNames();
 
-/**
- * Names `enforce` may suppress smee for: the dispatch class, minus everything this
- * producer cannot faithfully replace.
- *
- * ⭐ COMPUTED, NEVER LITERAL. Every input is the producer's own export, so coverage
- * and suppression cannot drift apart — the failure mode a hand-written list has is
- * that it keeps suppressing a name after that name stops being covered, and nothing
- * reads differently until the signal is already gone.
- */
-/**
- * computeSuppressible — the derivation, as a pure function of its three inputs.
- *
- * ⚠️ EXTRACTED SO THE DERIVATION IS OBSERVABLE. Applied to today's real constants
- * it returns the same list a hand-written literal would, so a test that only
- * compares the exported constant against `["github.push"]` passes whether the set
- * is derived or typed — it asserts a tautology and would keep passing after CTC-704
- * lands and the set is supposed to EMPTY itself. Taking the inputs as arguments is
- * what lets a test drive the post-CTC-704 world today.
- */
-export function computeSuppressible({ consumed, uncovered, lossy }) {
-  const excluded = new Set([...uncovered, ...lossy]);
-  return Object.freeze(consumed.filter((n) => !excluded.has(n)));
-}
-
-/**
- * ⛔ THE GATE'S UNIVERSE IS WHAT THE ROUTER CONSUMES, NOT WHAT THE PRODUCER EMITS.
- *
- * `GITHUB_DISPATCH_CLASS_NAMES` is the producer's export and means "names I emit"
- * — it deliberately excludes `github.pr.merged` and `github.check_suite.completed`,
- * which is why they live in `GITHUB_UNCOVERED_NAMES`. But the ROUTER acts on both:
- * `router.mjs:1497` (check_suite → the CI wait), `:1513` (pr.merged →
- * `setFilterStateMerged`, the merge→deploy join key), plus `:1856`, `:1871`, `:1941`.
- *
- * ⚠️ Taking the producer's list as the universe made this gate answer
- * `not-dispatch-class` for `github.pr.merged` — "the gate has no opinion" about the
- * single most dangerous name in this feature. That happens to be SAFE today, since
- * both readings end in `suppress: false`. It is safe by accident, and an accident
- * is not a property: the capture record would have said the gate never looked,
- * rather than that it looked and refused, and the difference is the whole audit
- * trail during a cutover. Caught by running the decision table, not by reading it.
- */
-export const GITHUB_CONSUMED_NAMES = Object.freeze([
-  ...GITHUB_DISPATCH_CLASS_NAMES,
-  ...GITHUB_UNCOVERED_NAMES,
-]);
+/** Re-exported from the leaf so producer, gate and doctor read ONE source. */
+export const GITHUB_CONSUMED_NAMES = LEAF_CONSUMED_NAMES;
+export const GITHUB_UNCOVERED_NAMES = LEAF_UNCOVERED_NAMES;
+export const computeSuppressible = leafComputeSuppressible;
+export const EXCLUSION_REASONS = LEAF_EXCLUSION_REASONS;
 
 export const GITHUB_SUPPRESSIBLE_NAMES = computeSuppressible({
   consumed: GITHUB_CONSUMED_NAMES,
@@ -136,19 +103,6 @@ export const GITHUB_SUPPRESSIBLE_NAMES = computeSuppressible({
 
 const DISPATCH_CLASS_SET = new Set(GITHUB_CONSUMED_NAMES);
 const SUPPRESSIBLE_SET = new Set(GITHUB_SUPPRESSIBLE_NAMES);
-
-/**
- * Why a dispatch-class name is excluded, for the capture record.
- *
- * An excluded name is the normal, expected state today, so the capture file must be
- * able to say WHICH gap kept smee authoritative — otherwise "enforce is on and smee
- * still dispatched" is indistinguishable from a broken gate.
- */
-export const EXCLUSION_REASONS = Object.freeze({
-  "github.pr.merged": "no-replacement:no-merge-commit-sha:CTC-691",
-  "github.check_suite.completed": "no-replacement:no-suite-row:CTC-667-item-4",
-  "github.push": "lossy-replacement:pushes-keyed-per-ref:CTC-704",
-});
 
 export const SOURCE_WEBHOOK = "webhook";
 export const SOURCE_OTHER = "other";
