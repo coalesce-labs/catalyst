@@ -9,7 +9,9 @@
 //   3. every deps is injected, so this suite touches no fs/ps/launchctl.
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor-cloud-sync-skew
 import { describe, test, expect } from "bun:test";
-import { checkCloudSyncSkew } from "../doctor.mjs";
+import { checkCloudSyncSkew, DOCTOR_REPO_CONFIG_PATH } from "../doctor.mjs";
+import { resolvePluginCheckoutRoots } from "../../broker/plugin-refresh.mjs";
+import { existsSync } from "node:fs";
 
 const ROOT = "/opt/plugin-source";
 const LOCK = `${ROOT}/bun.lock`;
@@ -195,5 +197,54 @@ describe("checkCloudSyncSkew — serving root (CTL-1931)", () => {
   // where it belongs — so a WARN here is evidence about the root, not about the fixture.
   test("POSITIVE CONTROL: the same harness passes when the serving root is configured", () => {
     expect(one(checkCloudSyncSkew(deps())).status).toBe("pass");
+  });
+});
+
+
+// ─── CTL-1931 / Codex #3493 P2: the PRODUCTION default, not the injected seam ───────
+//
+// Every test above injects `resolveExpectedRoots`, so none of them exercises what the
+// check actually does on a real node. That is precisely how the defect below survived
+// review the first time: `resolvePluginCheckoutRoots({})` leaves `repoConfigPath` null,
+// silently dropping the repo rung that the broker and updater pull paths both supply.
+describe("the production expected-root default (Codex #3493 P2)", () => {
+  test("DOCTOR_REPO_CONFIG_PATH points at THIS repo's .catalyst/config.json, and it exists", () => {
+    expect(DOCTOR_REPO_CONFIG_PATH.endsWith("/.catalyst/config.json")).toBe(true);
+    // Not a tautology: doctor.mjs sits four levels under the repo root, so a wrong number
+    // of `..` hops yields a path that does not exist. This asserts the derivation.
+    expect(existsSync(DOCTOR_REPO_CONFIG_PATH)).toBe(true);
+  });
+
+  // The contract the call site depends on: the repo rung OUTRANKS the machine rung. If a
+  // node's machine config carries a stale pluginDirs, passing null would compare against a
+  // root the node no longer maintains and report a false DEPENDENCY SKEW on a healthy host.
+  test("⛔ the repo config OUTRANKS the machine config — the rung passing null would skip", () => {
+    const files = {
+      "/repo/.catalyst/config.json": JSON.stringify({ catalyst: { orchestration: { pluginDirs: "/current" } } }),
+      "/machine/config.json": JSON.stringify({ catalyst: { orchestration: { pluginDirs: "/stale" } } }),
+    };
+    const args = {
+      env: {},
+      machineConfigPath: "/machine/config.json",
+      readFileFn: (p) => { if (!(p in files)) throw new Error(`ENOENT ${p}`); return files[p]; },
+      gitToplevelFn: (d) => d,
+    };
+    expect(resolvePluginCheckoutRoots({ ...args, repoConfigPath: "/repo/.catalyst/config.json" })).toEqual(["/current"]);
+    // POSITIVE CONTROL for the claim above: with repoConfigPath null — what the first cut
+    // of this check passed — the same inputs resolve the STALE root instead.
+    expect(resolvePluginCheckoutRoots({ ...args, repoConfigPath: null })).toEqual(["/stale"]);
+  });
+
+  // …and the Layer-1-only node Codex named: machine config absent entirely.
+  test("a node whose pluginDirs exists ONLY in the repo config still resolves a root", () => {
+    const files = { "/repo/.catalyst/config.json": JSON.stringify({ catalyst: { orchestration: { pluginDirs: "/only-here" } } }) };
+    const args = {
+      env: {},
+      machineConfigPath: "/machine/absent.json",
+      readFileFn: (p) => { if (!(p in files)) throw new Error(`ENOENT ${p}`); return files[p]; },
+      gitToplevelFn: (d) => d,
+    };
+    expect(resolvePluginCheckoutRoots({ ...args, repoConfigPath: "/repo/.catalyst/config.json" })).toEqual(["/only-here"]);
+    expect(resolvePluginCheckoutRoots({ ...args, repoConfigPath: null })).toEqual([]); // would sit inconclusive forever
   });
 });

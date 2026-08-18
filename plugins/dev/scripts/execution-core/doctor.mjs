@@ -96,6 +96,20 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
+
+// CTL-1931: doctor.mjs lives at <repo>/plugins/dev/scripts/execution-core/, so the repo's
+// `.catalyst/config.json` is four levels up — the same module-relative derivation
+// broker/router.mjs uses for its own `__REPO_CONFIG_PATH`. Exported so a test can assert
+// the production default actually supplies this rung rather than passing null.
+export const DOCTOR_REPO_CONFIG_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  "..",
+  ".catalyst",
+  "config.json"
+);
 import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 import { listProjects } from "./registry.mjs";
@@ -3377,7 +3391,16 @@ export function checkCloudSyncSkew(deps = {}) {
     processCommandForPid = defaultProcessCommandForPid,
     // CTL-1931: the SAME resolver the real pull path and checkPluginSourceFreshness use, so
     // "the root this node maintains" cannot drift from "the root this check expects".
-    resolveExpectedRoots = () => resolvePluginCheckoutRoots({}),
+    //
+    // ⚠️ `repoConfigPath` is passed explicitly (Codex #3493 P2). The resolver's precedence is
+    // env > REPO `.catalyst/config.json` > machine config, and the parameter defaults to
+    // null — so `resolvePluginCheckoutRoots({})` silently skips the repo rung the broker and
+    // updater pull paths both supply. That matters here in a way it does not for a purely
+    // advisory reader: this check is GRADE-CHANGING, so on a node whose `pluginDirs` lives
+    // only in Layer 1 it would resolve no roots and sit inconclusive forever, and on a node
+    // whose machine config holds an OLDER value it would compare against a root the node no
+    // longer maintains and report a false DEPENDENCY SKEW on a healthy host.
+    resolveExpectedRoots = () => resolvePluginCheckoutRoots({ repoConfigPath: DOCTOR_REPO_CONFIG_PATH }),
   } = deps;
 
   // Wrapped whole: this check reads files and spawns `ps`, and a throw here would abort
