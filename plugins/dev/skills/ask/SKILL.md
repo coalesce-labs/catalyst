@@ -1,54 +1,27 @@
 ---
 name: ask
 description:
-  Ask/decision tickets ("what needs me") — the Catalyst-wide SOP for raising a human decision or action
-  as a Linear ticket, replying in-thread as the app actor, and closing it when the answer lands. Use
-  whenever an agent needs a human (Ryan) to decide or click something, whenever a human comments on an
-  ask ticket, and for any ticket labelled `catalyst-ask` / `ask/decision`.
+  Ask/decision tickets ("what needs me") — the Catalyst-wide SOP for raising a human decision as a Linear
+  ticket, replying in-thread as the app actor, and closing it when the answer lands. Use whenever an agent
+  needs a human to decide or click something, or for any ticket labelled `catalyst-ask` / `ask/decision`.
 ---
 
 # Ask / decision tickets — SOP (Catalyst-wide)
 
-> Source of the rules: Ryan, 2026-08-15 → 2026-08-17 (rule v3 + the 08-17 additions). Applies to every
-> Catalyst-managed Linear project (catalyst, catalyst-cloud, personal-os, …) and to every worker /
-> orchestrator / coordinator agent, Claude or Codex. Ticket for the full plugin verb: **CTL-1922**.
+> Rules v3 (Ryan, 2026-08-15 → 08-17). Applies to every Catalyst-managed Linear project and every agent,
+> Claude or Codex. Full plugin verb: **CTL-1922**.
 
 ## 1. What an ask ticket is
 
-A ticket that exists ONLY to obtain one human decision or one human action. It is **not** the work: the
-work lives on its own tickets, which the ask `blocks →`. Anything that reaches the human's board or
-summary as "needs you" **must be an ask ticket** — never a status paragraph.
+A ticket that exists ONLY to obtain one human decision or action. It is **not** the work — that lives on
+its own tickets, which the ask `blocks →`. Anything reaching the human as "needs you" **must be an ask**,
+never a status paragraph.
 
 ## 2. Creating one (the raising agent)
 
-- **Team:** the team the decision belongs to. **Assignee = the human** (Ryan:
-  `c2a8cc92-cab6-4536-9500-0f24abdf702b`); no delegate.
-- **Labels — both, exact names:** `catalyst-ask` + `ask/decision`. Linear labels are **team-scoped**:
-  if a team lacks them, create them once (`issueLabelCreate` with the personal token — the app actor
-  cannot create labels, measured CTC-626). `catalyst-ask` is what the "Waiting on me" view and the push
-  trigger key on; `ask/decision` is the human-readable class.
-- **Title:** starts with `ASK:` (or names the click/decision itself); one line a phone can show.
-- **Body — the EXACT shape the decision trigger parses** (`apps/mirror/src/do/ask-decision.ts`; a
-  body in any other shape gives the trigger ZERO options and every reply is rejected — CTC-653):
-  ```markdown
-  **Why:** <one paragraph — what it unblocks>
-
-  **Options:**
-  - <option A label>
-  - <option B label>
-  - <option C label>
-
-  **Default if silent:** <what happens if the human never answers>
-  ```
-  The letters are implicit by bullet order (first bullet = A). Exactly one blank line ends the list.
-  Never an irreversible default; those wait for an explicit go. Add relations: `blocks → <work ticket(s)>`.
-- **How the human answers so the trigger recognizes it (today's parser):** a reply that IS the letter
-  (`A`, `A.`, `option A`) or the option's exact text, or `DECIDED: <free text>`. `(A)` inside a sentence
-  is NOT recognized until CTC-653 lands. The trigger is deterministic — no LLM reads the reply (CTC-554).
-- Priority 1 if it blocks a live customer path, else 2.
-
-**Use the verb** (CTL-1922 inc 2) — it builds the exact shape, files the ticket, then reads it
-BACK out of Linear and proves the decision trigger can parse the options:
+**Use the verb** — it builds the exact body, files the ticket, reads it BACK out of Linear, and proves
+the decision trigger can parse the options. It exits **2** rather than leaving you a ticket that can
+never be answered:
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
@@ -61,23 +34,12 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
 #   --dry-run   print the body and the parsed options without writing
 ```
 
-⛔ **Why a verb and not the snippet below:** documenting the shape was not enough. CTC-653
-measured that EVERY ask a human filed on 2026-08-17 (CTC-648/649/650/651, CTL-1919,
-CTL-1923..1927) wrote the options inline instead of as a bulleted block. Those parsed to
-**zero** options, so no reply could ever match — the asks were *structurally undecidable*
-while looking perfectly normal on the board and in "what needs me". `create` exits **2** and
-says so if the stored body does not parse, rather than leaving you a ticket that can never
-be answered.
+⛔ **Why a verb, not a documented snippet:** documenting the shape was not enough. CTC-653 measured that
+EVERY ask filed by hand on 2026-08-17 wrote its options inline rather than bulleted. Those parsed to
+**zero** options, so no reply could ever match — structurally undecidable, while looking normal.
 
-The raw form, for reference (or when you must hand-build):
-
-```bash
-linearis issues create "ASK: <one line>" --team CTL --priority 2 \
-  --assignee c2a8cc92-cab6-4536-9500-0f24abdf702b \
-  --labels "catalyst-ask,ask/decision" \
-  --blocks CTL-NNNN \
-  --description "$(printf '**Why:** …\n\n**Options:**\n- …\n- …\n\n**Default if silent:** …')"
-```
+Full field-by-field detail, the raw `linearis` form, and the exact body grammar:
+**[`references/creating.md`](references/creating.md)**.
 
 ## 3. Answering (the human)
 
@@ -86,71 +48,32 @@ A comment on the ticket — top-level or a threaded reply — reaches the monito
 
 ## 4. Replying (any agent) — the form
 
-- **Threaded under the human's comment.** Linear threads are **one level deep** (measured CTL-1891):
-  `parentId` must be the ROOT of the thread, so a reply-to-a-reply targets the root; new topic → the
-  human posts a new top-level comment.
-- **Authored as the app actor ("Catalyst Cloud"), tagged with the agent** (`createAsUser=<AGENT>`).
-  Never under the human's identity: `linearis issues discuss` with the personal token posts AS the
-  human, and a human-identity comment is what the fleet reads as "the human decided" (it clears
-  `needs-human`, CTL-1567).
-- **Helper (this plugin):**
-  ```bash
-  direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <AGENT> --body "<markdown>"
-  #   --body -          read the body from stdin
-  #   --parent <id>     thread under a specific comment (its root is used)
-  #   --top             start a new top-level comment
-  ```
-  Needs `LINEAR_SYNC_CLIENT_ID` / `LINEAR_SYNC_CLIENT_SECRET` (the app's client credentials — the
-  catalyst-cloud direnv profile has them); it mints the app-actor token itself.
-- Content: what was done in response · the outcome **as applied** (not proposed) · where the artifact
-  lives (PR / file / route).
+⛔ **The threading, identity and 👀 rules are not repeated here.** They are shared by every role and live
+in one place: **[`references/threading.md`](references/threading.md)** — one-level threads, the app actor
++ `createAsUser` tag grammar, why `linearis issues discuss` corrupts state, the newest-first sort, and
+what a reply must contain. Read it before your first reply.
 
-## 4b. Acknowledging (👀) — Ryan, 2026-08-17
-
-The human is looking at the LAST message they wrote, not the top of the thread. So:
-- **On pickup** (the moment an agent starts reading a human comment on an ask): add an `eyes` reaction to
-  the human's **latest** comment — `node "$CLAUDE_PLUGIN_ROOT/scripts/linear-ack.mjs" <ISSUE>` (app actor).
-  It means "read, working on it".
-- **On reply:** `linear-reply.mjs` removes the eyes from that comment automatically when the reply posts
-  (`--keep-eyes` to leave it). The reaction is a "reply in progress" signal, not a "resolved" signal.
-- Linear returns comments **newest-first**; both helpers sort explicitly. Only the human's own comments
-  count (`ASK_HUMAN_ID`, default Ryan) — the decision trigger's replies carry a `user` too.
+```bash
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body "<markdown>"
+```
 
 ## 5. Closing (the raising agent)
 
-When the answer satisfies the ask: **verify** that it does (e.g. a token really carries the permission),
-then:
+When the answer satisfies the ask, **verify that it does** (e.g. the token really carries the
+permission), then:
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" accept CTL-NNNN --as <AGENT> --body "accepted — …"
-#   --body -     read the reply from stdin
-#   --dry-run    show what it would reply and close, without writing
+node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" accept CTL-NNNN --as <ROLE> --body "accepted — …"
 ```
 
-`accept` replies in-thread as the app actor and moves the ticket to Done. Two refusals are
-deliberate: it **refuses a ticket without the `catalyst-ask` label** (closing a work ticket
-because an id was mistyped is not recoverable by the person who typed it), and if the reply
-fails it leaves the ticket **OPEN** rather than closing it — a Done ask with no recorded
-answer is worse than an open one, because it clears the human's view while the decision goes
-unrecorded.
-
-The manual equivalent: reply threaded **"accepted — has what it needs"** (or state exactly what
-is still missing), and **move the ticket to Done yourself** (`linearis issues update <ID> --status Done`). Downstream work continues
-on the work tickets. If the human's action surfaces a defect (CTC-649 → CTC-652), file the defect,
-`blocks →` the ask, keep the ask open, say so in the thread.
+It replies in-thread as the app actor and moves the ticket to Done. Two deliberate refusals, the manual
+equivalent, and what to do when the human's action surfaces a defect:
+**[`references/closing.md`](references/closing.md)**.
 
 ## 6. Where things live
 
-- Ask view: **My decisions — what needs me** — a decided item leaves it.
-- Board (summary, not the record): the "Catalyst on Linear — status board" Linear doc.
-- Skills: `linearis` (reads via the replica, writes via the CLI), `create-handoff`, `create-worktree`.
-- Measured Linear facts this SOP relies on: threads one level deep (CTL-1891); the app actor cannot
-  create states / labels / own views (CTC-626); `createAsUser` requires the app-actor token.
-
-## Gotchas
-
-- `linearis issues update --labels` fails with *"LabelIds for incorrect team"* when the label exists on
-  another team only — create it on this team first.
-- A `--relates-to` / `--blocks` list keeps only the LAST flag in some linearis versions — read the
-  ticket back after a multi-relation write.
-- File the ticket BEFORE citing its number anywhere; read the identifier back.
+- Ask view **My decisions — what needs me** (a decided item leaves it); the board is a summary, not the record.
+- Related skills: `catalyst-dev:linearis`, `catalyst-dev:create-handoff`, `catalyst-dev:steward`.
+- Measured Linear facts this SOP rests on: threads are one level deep (CTL-1891) and the app actor cannot
+  create states/labels/views (CTC-626) — see [`references/threading.md`](references/threading.md) and
+  [`references/creating.md`](references/creating.md) (which also carries the write-path gotchas).
