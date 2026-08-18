@@ -65,6 +65,22 @@ const COMPARE_SPEC_DRAFT = {
     attrs: ["vcs.repository.name", "vcs.pr.number", "event.entity", "event.action", "event.label", "event.stream_class"],
     payload: ["action", "merged", "draft"],
   },
+  // ⭐ Comparable since CTC-691 (schema 0.1.17). ⛔ `mergeCommitSha` is compared and
+  // must never move to OBSERVED_ONLY: it is the JOIN KEY the deploy chain matches on
+  // (`setFilterStateMerged` → `github.deployment.created`'s
+  // `WHERE merge_commit_sha = ?`). A ledger that read `clean` while the two producers
+  // disagreed on it would be certifying the exact failure this name exists to prevent.
+  //
+  // ⚠️ `mergedAt` IS compared, and it is the field most likely to diverge first: the
+  // feed reads `pull_requests.merged_at` and renders ISO-8601, while the webhook
+  // copies GitHub's own string. Both are UTC ISO — asserted rather than assumed, and
+  // if it ever diverges the ledger should say so loudly rather than have it excluded
+  // here in advance.
+  "github.pr.merged": {
+    key: (e) => `${e.attributes?.["vcs.repository.name"]}#${e.attributes?.["vcs.pr.number"]}`,
+    attrs: ["vcs.repository.name", "vcs.pr.number", "event.entity", "event.action", "event.label", "event.stream_class", "vcs.revision"],
+    payload: ["action", "merged", "mergedAt", "mergeCommitSha", "draft", "mergeable"],
+  },
   "github.pr_review.submitted": {
     // `reviews.review_id` is not on the webhook side, so the key is the tuple the
     // consumer itself keys on plus the reviewer — coarser, and honest about it.
@@ -116,8 +132,21 @@ export const COMPARE_SPEC = Object.freeze(COMPARE_SPEC_DRAFT);
  * not silently ignored either.
  */
 export const KNOWN_ABSENT = Object.freeze({
-  "github.pr.merged": "CTC-691: pull_requests has no merge_commit_sha",
-  "github.check_suite.completed": "CTC-667 item 4: the mirror stores no suite row",
+  // ⭐ `github.pr.merged` LEFT THIS TABLE when CTC-691 landed (schema 0.1.17), and
+  // that removal is the point of the ticket rather than a side effect. While it was
+  // here the ledger EXCUSED its absence — so the one name whose loss silently kills
+  // the merge→deploy chain was precisely the one this instrument was configured not
+  // to notice. A ledger that cannot fail on a name is not measuring it.
+  //
+  // ⛔ `check_suite.completed` STAYS, and NOT for the reason the entry used to give.
+  // The mirror does store a suite row now. What it does not store is the association
+  // the consumer keys on — `router.mjs:1497` reaches an interest only through
+  // `detail.prNumbers`, from `check_suite.pull_requests[].number`, which the mirror
+  // drops and `check_runs` cannot supply. The only derivation is a LAST-STATE join
+  // through `pull_requests.head_sha`, measured at 93/202 (46%) on mini-2 with the
+  // misses dominated by active PR branches whose head moved after the suite ran.
+  "github.check_suite.completed":
+    "CTC-712: check_suites carries no pull_requests association; the head_sha join resolves 46%",
 });
 
 const nameOf = (e) => e?.attributes?.["event.name"];

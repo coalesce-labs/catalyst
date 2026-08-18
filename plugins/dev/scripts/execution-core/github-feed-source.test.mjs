@@ -18,8 +18,11 @@ import {
   STREAMS,
   STREAM_BY_KEY,
   UNBACKED_EVENT_NAMES,
+  availableStreams,
   buildStreamQuery,
   createGithubFeedSource,
+  pushIsLossy,
+  tableExists,
   positionAfter,
   settleCursor,
 } from "./github-feed-source.mjs";
@@ -64,7 +67,16 @@ CREATE TABLE pushes (
   repo_id text NOT NULL, ref text NOT NULL, before text, after text, forced integer,
   created integer, deleted integer, base_ref text, pusher_id text, head_commit_sha text,
   updated_at integer, PRIMARY KEY(repo_id, ref));
+-- CTC-704 (schema 0.1.17): one row per DELIVERY, PK = GitHub's x-github-delivery id.
+-- Verbatim from mini-2 after the pin.
+CREATE TABLE push_events (
+  delivery_id text PRIMARY KEY, repo_id text NOT NULL, ref text NOT NULL, before text,
+  after text, forced integer, created integer, deleted integer, base_ref text,
+  pusher_id text, head_commit_sha text, updated_at integer);
 `;
+
+/** The pre-0.1.17 DDL — every table EXCEPT push_events, for the un-pinned-host tests. */
+const DDL_PRE_0_1_17 = DDL.slice(0, DDL.indexOf("-- CTC-704"));
 
 let dbSeq = 0;
 function freshDb(seed = () => {}) {
@@ -229,10 +241,15 @@ describe("declared gaps are exported, not implied by a comment", () => {
     const produced = new Set(STREAMS.map((s) => s.event).filter(Boolean));
     for (const n of UNBACKED_EVENT_NAMES) expect(produced.has(n)).toBe(false);
   });
-  test("push is declared lossy, and is the only stream keyed on a mutable column", () => {
-    expect(PUSH_IS_LOSSY).toBe(true);
+  test("the two push streams are the only ones keyed on a mutable column", () => {
+    // ⚠️ `pushEvent` shares `updated_at` with `push` but is NOT lossy for it: its PK
+    // is the delivery id, so the mutable timestamp is only the keyset's major
+    // coordinate, never part of the row's identity. That distinction is what makes
+    // one of them collapse and the other not.
     const mutable = STREAMS.filter((s) => s.tsCol === "updated_at").map((s) => s.key);
-    expect(mutable).toEqual(["push"]);
+    expect(mutable.sort()).toEqual(["push", "pushEvent"]);
+    expect(STREAM_BY_KEY.push.mutableRow).toBe(true);
+    expect(STREAM_BY_KEY.pushEvent.mutableRow).toBeUndefined();
   });
 });
 
@@ -294,5 +311,100 @@ describe("buildStreamQuery", () => {
   });
   test("STREAM_BY_KEY covers every stream", () => {
     expect(Object.keys(STREAM_BY_KEY).sort()).toEqual(STREAMS.map((s) => s.key).sort());
+  });
+});
+
+describe("⛔ exactly ONE push stream is served, chosen from the replica (CTC-704)", () => {
+  // Both streams carry the name `github.push`. Running both on a pinned host emits
+  // every push TWICE — and their identities differ (`delivery_id` vs the folded
+  // `repo_id@ref`), so the seen-set cannot collapse them: the duplicate reaches the
+  // router as a second genuine-looking base-branch move and wakes every waiter again.
+  // Running neither on an un-pinned host silently kills rebase detection.
+  const pinned = () => { const db = new Database(":memory:"); db.exec(DDL); return db; };
+  const unpinned = () => { const db = new Database(":memory:"); db.exec(DDL_PRE_0_1_17); return db; };
+
+  test("tableExists answers from the replica, not from a version guess", () => {
+    expect(tableExists(pinned(), "push_events")).toBe(true);
+    expect(tableExists(unpinned(), "push_events")).toBe(false);
+    expect(tableExists(pinned(), "pushes")).toBe(true);
+    expect(tableExists(pinned(), "no_such_table")).toBe(false);
+  });
+
+  test("⭐ a PINNED replica (0.1.17) serves pushEvent and NOT push", () => {
+    const keys = availableStreams(pinned()).map((s) => s.key);
+    expect(keys).toContain("pushEvent");
+    expect(keys).not.toContain("push");
+  });
+
+  test("⛔ an UN-PINNED replica serves push and NOT pushEvent — it is not left with neither", () => {
+    // The canary leaves one host on the old pin by design (COORD-128 condition 2).
+    // A lossy push stream is worse than a faithful one and much better than none,
+    // while smee is still underneath.
+    const keys = availableStreams(unpinned()).map((s) => s.key);
+    expect(keys).toContain("push");
+    expect(keys).not.toContain("pushEvent");
+  });
+
+  test("⛔ exactly one `github.push` producer in EITHER world — asserted as a count", () => {
+    for (const mk of [pinned, unpinned]) {
+      const pushers = availableStreams(mk()).filter((s) => s.event === "github.push");
+      expect(pushers).toHaveLength(1);
+    }
+  });
+
+  test("every other stream is unaffected by the pin", () => {
+    const a = availableStreams(pinned()).map((s) => s.key).filter((k) => !k.startsWith("push"));
+    const b = availableStreams(unpinned()).map((s) => s.key).filter((k) => !k.startsWith("push"));
+    expect(a).toEqual(b);
+    expect(a.length).toBeGreaterThan(5);
+  });
+
+  test("⚠️ pushIsLossy tracks the REPLICA, so a mixed fleet cannot share one answer", () => {
+    // It was a module constant. With one host pinned and one not, a constant is
+    // wrong on exactly one of them — and the dispatch gate reads this to decide
+    // whether `github.push` may suppress smee.
+    expect(pushIsLossy(pinned())).toBe(false);
+    expect(pushIsLossy(unpinned())).toBe(true);
+  });
+
+  test("the pushEvent keyset query runs against the real 0.1.17 DDL", () => {
+    const db = pinned();
+    db.prepare(`INSERT INTO push_events
+        (delivery_id,repo_id,ref,before,after,forced,created,deleted,base_ref,pusher_id,head_commit_sha,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run("d1", "o/r", "refs/heads/main", "aaa", "bbb", 0, 0, 0, null, "github:x", "bbb", 1000);
+    const rows = db.query(buildStreamQuery("pushEvent")).all({ $sinceMs: 0, $sinceId: "", $limit: 10 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].__id).toBe("d1");
+    expect(rows[0].__ts).toBe(1000);
+  });
+
+  test("⭐ two pushes to ONE ref both survive — the defect CTC-704 exists to fix", () => {
+    const db = pinned();
+    const ins = db.prepare(`INSERT INTO push_events
+        (delivery_id,repo_id,ref,before,after,updated_at) VALUES (?,?,?,?,?,?)`);
+    ins.run("d1", "o/r", "refs/heads/main", "aaa", "bbb", 1000);
+    ins.run("d2", "o/r", "refs/heads/main", "bbb", "ccc", 1001);
+    const rows = db.query(buildStreamQuery("pushEvent")).all({ $sinceMs: 0, $sinceId: "", $limit: 10 });
+    expect(rows).toHaveLength(2);
+    // ⛔ The control against the old table: the SAME two pushes in `pushes` leave one row.
+    const up = db.prepare(`INSERT INTO pushes (repo_id,ref,before,after,updated_at) VALUES (?,?,?,?,?)
+                           ON CONFLICT(repo_id,ref) DO UPDATE SET after=excluded.after, updated_at=excluded.updated_at`);
+    up.run("o/r", "refs/heads/main", "aaa", "bbb", 1000);
+    up.run("o/r", "refs/heads/main", "bbb", "ccc", 1001);
+    expect(db.query("SELECT COUNT(*) c FROM pushes").get().c).toBe(1);
+  });
+
+  test("⚠️ a force-push BACK to a previous sha is still its own row", () => {
+    // The case that collapses under COORD-127's proposed `(repo_id, ref, after)` key,
+    // and the reason backend took the delivery id instead (CTC-704 §4.1).
+    const db = pinned();
+    const ins = db.prepare(`INSERT INTO push_events
+        (delivery_id,repo_id,ref,before,after,forced,updated_at) VALUES (?,?,?,?,?,?,?)`);
+    ins.run("d1", "o/r", "refs/heads/f", "000", "X", 0, 1000);
+    ins.run("d2", "o/r", "refs/heads/f", "X", "Y", 0, 1001);
+    ins.run("d3", "o/r", "refs/heads/f", "Y", "X", 1, 1002);
+    const rows = db.query(buildStreamQuery("pushEvent")).all({ $sinceMs: 0, $sinceId: "", $limit: 10 });
+    expect(rows).toHaveLength(3);
   });
 });

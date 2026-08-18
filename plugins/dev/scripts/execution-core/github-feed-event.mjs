@@ -103,6 +103,8 @@ export const SOURCE_CLOUD_FEED = "cloud-feed";
 export const GITHUB_DISPATCH_CLASS_NAMES = Object.freeze([
   "github.pr.opened",
   "github.pr.closed",
+  // ⭐ CTC-691 landed in schema 0.1.17 — `merge_commit_sha` is a real column now.
+  "github.pr.merged",
   "github.pr_review.submitted",
   "github.pr_review_comment.created",
   "github.pr_review_thread.resolved",
@@ -115,7 +117,18 @@ export const GITHUB_DISPATCH_CLASS_NAMES = Object.freeze([
 
 /** Names the orchestrator consumes that this producer cannot yet emit. */
 export const GITHUB_UNCOVERED_NAMES = Object.freeze([
-  "github.pr.merged",
+  // ⛔ STILL UNCOVERED ON 0.1.17, AND NOT FOR THE REASON THE TABLE SUGGESTS.
+  // `check_suites` exists now, but the association the CONSUMER keys on does not:
+  // `router.mjs:1497` reaches an interest only through `detail.prNumbers`, which the
+  // webhook fills from `check_suite.pull_requests[].number` — a field the mirror does
+  // not store, and `check_runs` cannot supply (it is PR-less too).
+  //
+  // The only derivation is `check_suites.head_sha` → `pull_requests.head_sha`, and
+  // that is a LAST-STATE join: measured on mini-2, 93 of 202 suites (46%) resolve,
+  // and the misses are dominated by ACTIVE PR BRANCHES whose head moved after the
+  // suite ran — `ctc-pin-sdk-0.8.13` appears 10 times in the hits and 10 in the
+  // misses. Emitting on a 46% join would hang the CI wait silently, with no smee copy
+  // under `enforce`. → CTC-712
   "github.check_suite.completed",
 ]);
 
@@ -129,7 +142,14 @@ export const GITHUB_UNCOVERED_NAMES = Object.freeze([
  * line deletion here rather than as new read-layer code.
  */
 export const UNCOVERED_STREAM_REASONS = Object.freeze({
-  prMerged: "uncovered:no-merge-commit-sha:CTC-691",
+  // ⭐ EMPTY SINCE CTC-691 LANDED (schema 0.1.17). `pull_requests.merge_commit_sha`
+  // exists and is populated, so `prMerged` emits — the stream was deliberately kept
+  // paging all along so this would be a deletion here rather than new read-layer code,
+  // and it was.
+  //
+  // ⛔ A row whose `merge_commit_sha` is NULL still declines, but per ROW rather than
+  // per STREAM — see `classifyGithubRow`. Pre-0.1.17 merges were never backfilled, so
+  // those rows exist and must not emit a twin without the join key.
 });
 
 /**
@@ -231,11 +251,30 @@ export function classifyGithubRow(streamKey, row) {
   // PR-scoped streams are useless to the consumer without a PR number: every one of
   // their router branches gates on `prList.includes(scope.pr)` first.
   const prScoped = new Set([
-    "prOpened", "prClosed", "reviewSubmitted", "reviewCommentCreated", "threadResolved",
+    "prOpened", "prClosed", "prMerged", "reviewSubmitted", "reviewCommentCreated", "threadResolved",
   ]);
   if (prScoped.has(streamKey)) {
-    const n = streamKey === "prOpened" || streamKey === "prClosed" ? row.number : row.pr_number;
+    const n = streamKey === "prOpened" || streamKey === "prClosed" || streamKey === "prMerged"
+      ? row.number
+      : row.pr_number;
     if (!Number.isInteger(n) || n <= 0) return { emit: false, reason: "no-pr-number" };
+  }
+  // ⛔ `mergeCommitSha` IS THE JOIN KEY, and a merged twin without it is worse than no
+  // twin at all. `router.mjs:1513` writes it via `setFilterStateMerged` and
+  // `github.deployment.created` later matches `WHERE merge_commit_sha = ?`. An event
+  // missing it still routes and still wakes `monitor-merge` normally, so it LOOKS
+  // like success — while `monitor-deploy` stops firing for that PR, permanently,
+  // with no smee copy under `enforce`.
+  //
+  // ⚠️ These rows are real, not hypothetical: CTC-691 added the column without a
+  // backfill (COORD-124 names the 4,230 pre-existing PR rows), so every merge that
+  // predates the 0.1.17 pin has it NULL. They decline, visibly, in `byReason` —
+  // exactly the posture `deploymentCreated` takes for its own sha below.
+  if (streamKey === "prMerged" && (typeof row.merge_commit_sha !== "string" || row.merge_commit_sha === "")) {
+    return { emit: false, reason: "no-merge-commit-sha:not-backfilled" };
+  }
+  if (streamKey === "pushEvent" && (typeof row.ref !== "string" || row.ref === "")) {
+    return { emit: false, reason: "no-ref" };
   }
   if (streamKey === "deploymentStatus" && (typeof row.state !== "string" || row.state === "")) {
     return { emit: false, reason: "no-deployment-state" };
@@ -450,6 +489,11 @@ export function buildGithubEvent(streamKey, row, seams) {
       }, seams);
     }
 
+    // ⭐ CTC-704: identical envelope to `push`, from a per-DELIVERY row. Sharing the
+    // case is deliberate — the two streams differ in WHICH ROWS they yield, never in
+    // what an event looks like, and a second copy of this builder is how the feed
+    // copy and its own replacement would drift apart on a field the consumer reads.
+    case "pushEvent":
     case "push": {
       const headSha = typeof row.after === "string" ? row.after : "";
       return envelope({
@@ -468,11 +512,47 @@ export function buildGithubEvent(streamKey, row, seams) {
         payload: {
           baseSha: typeof row.before === "string" ? row.before : "",
           headSha,
-          // ⚠️ Always empty. The replica stores one row per ref and no commit list,
-          // so the commits array cannot be reconstructed. No consumer reads it
-          // (`router.mjs:1582` reads only `vcs.ref.name`), which is the measured
-          // reason this stream is shippable despite being lossy.
+          // ⚠️ Always empty, on BOTH streams. Neither `pushes` nor `push_events`
+          // stores a commit list, so the array cannot be reconstructed. No consumer
+          // reads it (`router.mjs:1582` reads only `vcs.ref.name`) — which is what
+          // makes the absence survivable, and is measured rather than assumed.
           commits: [],
+        },
+      }, seams);
+    }
+
+    case "prMerged": {
+      // ⭐ Unblocked by CTC-691 (schema 0.1.17). Deliberately NOT folded into the
+      // prOpened/prClosed case: those two hard-code `merged: false` and
+      // `mergeCommitSha: null` because `router.mjs:1525` tests `detail.merged === false`
+      // STRICTLY, and this name is the exact inverse on both fields.
+      return envelope({
+        name,
+        entity: "pr",
+        action: "merged",
+        label: `PR #${row.number}`,
+        attrs: {
+          "vcs.repository.name": repo,
+          "vcs.pr.number": row.number,
+          // The merge commit, on the attribute the deploy chain scopes by.
+          "vcs.revision": row.merge_commit_sha,
+        },
+        message: `${name} for ${repo} PR #${row.number}`,
+        payload: {
+          action: "closed",
+          // ⛔ GitHub sends `action: "closed"` with `merged: true` for a merge — the
+          // action is NOT "merged". `tryPrLifecycleRoute` and the webhook builder both
+          // read the pair, so inventing an action nobody emits would leave the
+          // lifecycle branch unmatched while every count still read "emitted".
+          merged: true,
+          mergedAt: typeof row.merged_at === "number" ? new Date(row.merged_at).toISOString() : null,
+          // The join key. `classifyGithubRow` has already refused the row if it is
+          // absent, so this is never null here — the guard is there, not here.
+          mergeCommitSha: row.merge_commit_sha,
+          draft: row.draft === 1 || row.draft === true,
+          mergeable: row.mergeable === null || row.mergeable === undefined
+            ? null
+            : row.mergeable === 1 || row.mergeable === true,
         },
       }, seams);
     }

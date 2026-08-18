@@ -130,11 +130,13 @@ describe("the installed gate composes with decideDispatch as one decision", () =
   });
 
   test("⛔ ready producer still does NOT suppress an uncovered name", () => {
-    // The whole-system statement of the per-name rule: a healthy producer cannot
-    // earn the right to suppress the merge→deploy join key.
-    const v = decideDispatch(smee("github.pr.merged"), gateWith({ ready: true, reason: "producer-ready" }));
+    // The whole-system statement of the per-name rule: a healthy producer cannot earn
+    // the right to suppress a name whose consumer it cannot reach. ⚠️ The example
+    // moved from pr.merged to check_suite when CTC-691 landed — pr.merged is covered
+    // now; check_suite's TABLE landed but the PR association did not (CTC-712).
+    const v = decideDispatch(smee("github.check_suite.completed"), gateWith({ ready: true, reason: "producer-ready" }));
     expect(v.suppress).toBe(false);
-    expect(v.reason).toContain("CTC-691");
+    expect(v.reason).toContain("CTC-667");
   });
 });
 

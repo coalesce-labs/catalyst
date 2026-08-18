@@ -267,10 +267,12 @@ describe("⛔ under enforce the producer emits a REAL name only for what the gat
   });
 
   test("⛔ an EXCLUDED name stays a would-dispatch marker even under enforce", () => {
-    // pr.merged / check_suite have no replacement (CTC-691, CTC-667 item 4) and push
-    // has a lossy one (CTC-704). Emitting these for real would put two copies on the
-    // log, because the gate correctly refuses to suppress smee for them.
-    for (const n of ["github.pr.merged", "github.check_suite.completed", "github.push"]) {
+    // ⚠️ `pr.merged` is NOT in this list any more — CTC-691 landed, so it emits under
+    // its real name and the gate suppresses smee's copy. `check_suite` has no usable
+    // replacement (CTC-712) and `push` a lossy one (CTC-704); emitting either for
+    // real would put two copies on the log, because the gate correctly refuses to
+    // suppress smee for them.
+    for (const n of ["github.check_suite.completed", "github.push"]) {
       expect(drive("enforce", [n])).toEqual([EVENT_WOULD_DISPATCH]);
     }
   });
