@@ -35,7 +35,7 @@
 // doctor.mjs's other leaf imports honor.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 // The packages whose loaded identity is recorded. A REGISTRY rather than an inline
@@ -46,8 +46,18 @@ import { dirname, join } from "node:path";
 // `specifier` is what cloud-sync.mjs actually imports (`@catalyst-cloud/sdk/node`), so
 // the resolve below follows the SAME export map the running daemon followed; `id` is the
 // package name used to look the resolution up in the lockfile.
+//
+// ⛔ `from` — WHOSE COPY IS BEING RECORDED. Under bun's isolated linker every package gets
+// its OWN link for a transitive dependency, so "the schema the root links" and "the schema
+// the SDK loads" are independently determined and can differ. CTL-1919 is precisely that
+// divergence: the writer served schema 0.1.12 while the pin said 0.1.15, so its replica had
+// no `workflow_states` table. The copy that decides whether the writer knows about a table is
+// the one the SDK resolves — so `from` re-bases the resolution onto the named dep's location
+// instead of the daemon's, and the record describes the module the writer actually runs.
+// Resolution order follows this array, so a `from` must appear AFTER what it names.
 export const CRITICAL_DEPS = [
   { id: "@catalyst-cloud/sdk", specifier: "@catalyst-cloud/sdk/node" },
+  { id: "@catalyst-cloud/schema", specifier: "@catalyst-cloud/schema", from: "@catalyst-cloud/sdk/node" },
 ];
 
 // The discriminator stamped into the CTL-1508 self-heal breadcrumb when the writer exits
@@ -148,9 +158,22 @@ export function captureLoadedDeps({
   for (const dep of Array.isArray(deps) ? deps : []) {
     const id = dep?.id;
     const specifier = dep?.specifier ?? id;
+    // A `from` dep is resolved from ANOTHER recorded package's location, so a failure to
+    // resolve that base is recorded and the dependent is skipped — never silently re-based
+    // onto the daemon's own directory, which would record a different copy than the one the
+    // writer loads and is the exact substitution this field exists to prevent.
+    let fromPath;
+    if (dep?.from) {
+      const base = packages.find((q) => q.specifier === dep.from && q.resolvedPath);
+      if (!base) {
+        degradedReasons.push(`${id}: base dependency ${dep.from} did not resolve — cannot record the copy it loads`);
+        continue;
+      }
+      fromPath = base.resolvedPath;
+    }
     let resolvedPath = null;
     try {
-      resolvedPath = resolveModule(specifier);
+      resolvedPath = resolveModule(specifier, fromPath ? { fromPath } : undefined);
     } catch (err) {
       degradedReasons.push(`${id}: unresolvable (${err?.message ?? String(err)})`);
       continue;
@@ -290,6 +313,188 @@ export function lockKeyForPackageJsonPath(root, packageJsonPath) {
   return chain.length > 0 ? chain.join("/") : null;
 }
 
+
+// ─── bun isolated-linker store paths (CTL-1931) ─────────────────────────────
+//
+// THE DEFECT THIS CLOSES. `require.resolve()` returns a REALPATH, and under bun's isolated
+// linker a realpath is a CONTENT address rather than an install location:
+//
+//   <root>/node_modules/.bun/@catalyst-cloud+sdk@0.8.11+a0473b45aab9bf33/node_modules/@catalyst-cloud/sdk
+//
+// The ladder walk above needs repeated `node_modules/<pkg>` hops, and this path carries a
+// store directory in the middle, so it returns null for EVERY package the writer loads.
+// That is why `installed-vs-locked` has answered "could not compare" since CTL-1659
+// shipped — measured 2026-08-17 as the SAME message on laptop, mini and mini-2. A link
+// that can only ever say "I could not look" provides no coverage, which is the incident
+// CTL-1919 walked through untouched.
+//
+// ⛔ WHY THE STORE DIRECTORY'S OWN VERSION CANNOT BE THE ANSWER. The directory name encodes
+// `<id>@<version>+<peer-hash>`, so reading the version out of it and matching that against
+// the lockfile is the obvious fix and it is CIRCULAR: the installed version is *defined* by
+// the store name, so it would satisfy its own lock entry by construction and grade every
+// host clean forever. That converts a fail-CLOSED inconclusive into a fail-OPEN pass, which
+// the ticket names explicitly as worse than the current state.
+//
+// ⭐ SO THE LOCATION IS RECOVERED BY PROOF RATHER THAN BY PATTERN. The symlink the resolver
+// actually traversed is still on disk — only `realpath` erased it from the path. The search
+// below re-derives the association by testing the places bun can link a package FROM, and
+// accepts a candidate only when that candidate's realpath IS the recorded package
+// directory. It re-establishes the same edge the resolver walked; it does not guess one.
+// Nothing proven → null → INCONCLUSIVE, exactly as before.
+
+// decodeBunStoreDir — the identity bun encodes in a `.bun` store directory name.
+// `@catalyst-cloud+sdk@0.8.11+a0473b45aab9bf33` → { id: "@catalyst-cloud/sdk", version: "0.8.11" }.
+// A package name cannot contain `+`, so every `+` in the name half is unambiguously the
+// scope separator bun substituted for `/`. `version` is DIAGNOSTIC ONLY — see the circularity
+// note above; no comparator may grade on it.
+export function decodeBunStoreDir(name) {
+  if (typeof name !== "string" || name.length === 0) return null;
+  const at = name.lastIndexOf("@");
+  if (at <= 0) return null; // no version segment, or a bare scope with nothing after it
+  const rest = name.slice(at + 1);
+  if (rest.length === 0) return null;
+  const id = name.slice(0, at).replace(/\+/g, "/");
+  const plus = rest.indexOf("+");
+  return { id, version: plus === -1 ? rest : rest.slice(0, plus), storeName: name };
+}
+
+// splitBunStorePath — the (store, id) of a `.bun` store PACKAGE DIRECTORY, or null when the
+// directory is not one. Purely structural; touches no filesystem. The length check rejects a
+// path *inside* the package (`.../sdk/dist`), which would otherwise decode to a plausible id.
+export function splitBunStorePath(root, packageDir) {
+  if (typeof root !== "string" || root.length === 0) return null;
+  if (typeof packageDir !== "string" || packageDir.length === 0) return null;
+  const prefix = root.endsWith("/") ? root : `${root}/`;
+  if (!packageDir.startsWith(prefix)) return null;
+  const segs = packageDir.slice(prefix.length).split("/").filter((x) => x.length > 0);
+  if (segs.length < 5) return null;
+  if (segs[0] !== "node_modules" || segs[1] !== ".bun" || segs[3] !== "node_modules") return null;
+  const store = decodeBunStoreDir(segs[2]);
+  if (!store) return null;
+  const tail = segs.slice(4);
+  const scoped = tail[0].startsWith("@");
+  if (tail.length !== (scoped ? 2 : 1)) return null;
+  return { store, id: scoped ? `${tail[0]}/${tail[1]}` : tail[0] };
+}
+
+// workspaceDirsFromLock — the workspace directories bun records at the head of the lockfile.
+// Needed because a workspace is the THIRD place a package can be linked from, and it is the
+// one this fleet actually uses: `@catalyst-cloud/sdk` is a dependency of the
+// `plugins/dev/scripts/execution-core` workspace, not of the repo root, so its symlink lives
+// under that workspace and nowhere else. Scanned with a brace-depth walk rather than
+// JSON.parse because bun.lock is JSONC (trailing commas) and will not parse.
+export function workspaceDirsFromLock(lockText) {
+  if (typeof lockText !== "string") return [];
+  const m = /"workspaces"\s*:\s*\{/.exec(lockText);
+  if (!m) return [];
+  const dirs = [];
+  let depth = 0;
+  let i = m.index + m[0].length - 1; // sit on the opening brace
+  for (; i < lockText.length; i += 1) {
+    const c = lockText[i];
+    if (c === "{") {
+      depth += 1;
+      continue;
+    }
+    if (c === "}") {
+      depth -= 1;
+      if (depth === 0) break;
+      continue;
+    }
+    if (c === '"' && depth === 1) {
+      const end = lockText.indexOf('"', i + 1);
+      if (end === -1) break;
+      const key = lockText.slice(i + 1, end);
+      // Only a key — the next non-space character must be the ':' introducing its object.
+      const after = /^\s*:/.test(lockText.slice(end + 1));
+      i = end;
+      if (after && key.length > 0) dirs.push(key); // "" is the root workspace
+    }
+  }
+  return dirs;
+}
+
+// provenLockKey — the lockfile install-location key for a package whose recorded path is a
+// `.bun` store realpath, established by finding the symlink that points AT it.
+//
+// Candidates, in the order bun can create them:
+//   1. the root's own `node_modules/<id>`                    → key `<id>`
+//   2. a workspace's `node_modules/<id>`                     → key `<id>` (or `<ws>/<id>`)
+//   3. another store dir's `node_modules/<id>` (transitive)  → key `<parent>/<id>` (or `<id>`)
+//
+// ⚠️ The `lockText` argument chooses only the SPELLING of an already-proven location — bun
+// writes the bare `<id>` when a tree holds one version of it and the chained `<parent>/<id>`
+// when it does not (measured: 48 of this lockfile's 745 keys are chained). It never selects
+// *which* location to believe, so it cannot make a mismatch disappear: the version compared
+// is still the one recorded at the single proven site.
+export function provenLockKey({
+  root,
+  packageDir,
+  id,
+  lockText = "",
+  realpath = realpathSync,
+  listDir = readdirSync,
+  hasKey = (key) => new RegExp(`"${escapeRe(key)}"\\s*:\\s*\\[`).test(lockText),
+} = {}) {
+  const parts = splitBunStorePath(root, packageDir);
+  if (!parts || parts.id !== id) return null;
+  const target = norm(packageDir, realpath);
+  const linksHere = (dir) => {
+    const candidate = join(dir, "node_modules", id);
+    const resolved = norm(candidate, realpath);
+    return resolved !== null && resolved === target;
+  };
+
+  if (linksHere(root)) return id;
+
+  for (const ws of workspaceDirsFromLock(lockText)) {
+    if (ws.length === 0) continue; // the root workspace, already tried above
+    if (!linksHere(join(root, ws))) continue;
+    // A workspace dep is keyed bare unless bun had to disambiguate it.
+    const wsName = ws.split("/").pop();
+    return hasKey(`${wsName}/${id}`) ? `${wsName}/${id}` : id;
+  }
+
+  const storeRoot = join(root, "node_modules", ".bun");
+  let entries = [];
+  try {
+    entries = listDir(storeRoot);
+  } catch {
+    return null; // no store to scan → unproven → INCONCLUSIVE
+  }
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (entry === parts.store.storeName) continue; // a package does not import itself
+    const parent = decodeBunStoreDir(entry);
+    if (!parent) continue;
+    if (!linksHere(join(storeRoot, entry))) continue;
+    const chained = `${parent.id}/${id}`;
+    return hasKey(chained) ? chained : id;
+  }
+  return null;
+}
+
+// norm — realpath, falling back to the literal path. A path that cannot be resolved still
+// compares (it just compares less generously) and NEVER throws into a comparator.
+function norm(path, realpath) {
+  if (typeof path !== "string" || path.length === 0) return null;
+  try {
+    return realpath(path);
+  } catch {
+    return null;
+  }
+}
+
+// lockLocationKeyFor — the install-location key for a recorded package: the structural ladder
+// first (cheap, filesystem-free, correct for a hoisted/nested layout), then the isolated-linker
+// proof above. Null from BOTH remains INCONCLUSIVE — the permissive any-occurrence match is
+// still never a fallback.
+export function lockLocationKeyFor({ root, packageJsonPath, id, lockText = "", realpath = realpathSync, listDir = readdirSync } = {}) {
+  const structural = lockKeyForPackageJsonPath(root, packageJsonPath);
+  if (structural !== null) return structural;
+  if (typeof packageJsonPath !== "string" || packageJsonPath.length === 0) return null;
+  return provenLockKey({ root, packageDir: dirname(packageJsonPath), id, lockText, realpath, listDir });
+}
+
 // lockedVersionForKey — the ONE resolution bun records at a specific install location.
 // Anchored on the exact key AND the value's `name@` prefix (the same structured-match
 // discipline `lockedVersionsFor` uses, minus the `(?:[^"]*/)?` wildcard that made it accept
@@ -360,6 +565,10 @@ export function evaluateDepSkew({
   // — so an un-wired caller degrades loudly instead of silently passing the link.
   expectedRoots = null,
   realpath = realpathSync,
+  // CTL-1931. The `.bun` store scan that recovers an install LOCATION from a content-addressed
+  // realpath (see provenLockKey). Injected so a test can prove the association against a
+  // fixture instead of a 600-entry store on disk.
+  listDir = readdirSync,
 } = {}) {
   if (!breadcrumb || typeof breadcrumb !== "object") {
     return summarize(SKEW_LINKS.map((l) => unknown(l, "no boot record — the writer has not booted since dep-skew capture shipped, or the write failed")));
@@ -552,7 +761,7 @@ export function evaluateDepSkew({
       }
       // The installed package is matched to ITS OWN lock entry, keyed by the install
       // location, rather than to "any occurrence of this id anywhere in the lockfile".
-      const key = lockKeyForPackageJsonPath(root, p.packageJsonPath);
+      const key = lockLocationKeyFor({ root, packageJsonPath: p.packageJsonPath, id: p.id, lockText, realpath, listDir });
       const locked = lockedVersionForKey(lockText, key, p.id);
       if (!locked.conclusive) {
         // Deliberately NOT a fallback onto `lockedVersionsFor`'s any-occurrence match —

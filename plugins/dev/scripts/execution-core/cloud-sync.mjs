@@ -425,7 +425,10 @@ if (DEP_SKEW_MODE !== "off") {
   try {
     _bootDeps = captureLoadedDeps({
       startDir: dirname(fileURLToPath(import.meta.url)),
-      resolveModule: (specifier) => depsRequire.resolve(specifier),
+      // `fromPath` re-bases onto another package's location so a transitive dep is recorded
+      // as the copy THAT package loads (CTL-1931); without it, bun's isolated linker can hand
+      // back the root's separate copy and the record describes a module the writer never ran.
+      resolveModule: (specifier, opts) => (opts?.fromPath ? createRequire(opts.fromPath) : depsRequire).resolve(specifier),
     });
     writeDepsBreadcrumb(getCloudSyncDepsPath(), _bootDeps);
     hlog.info(
