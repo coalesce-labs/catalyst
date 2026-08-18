@@ -19,7 +19,7 @@ import {
   verifyAskBody,
 } from "../ask.mjs";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, symlinkSync } from "node:fs";
+import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -197,15 +197,55 @@ describe("trap (a) — the documented path must not silently no-op", () => {
   });
 
   test("END TO END: `create` through a symlink actually runs", () => {
+    // ⛔ HERMETIC BY CONSTRUCTION. `--dry-run` deliberately resolves the team's labels
+    // (a dry run that skips the step which fails is not a rehearsal), so this would
+    // otherwise need a real `linearis` and a real credential — and it FAILED on the CI
+    // runner, which has neither. Stubbing the binary on PATH seals the transport instead
+    // of weakening the assertion to "produced some output", which would also pass for a
+    // crash. The stub returns the shape `linearis labels list` really returns.
     const dir = mkdtempSync(join(tmpdir(), "ask-e2e-"));
     const link = join(dir, "ask.mjs");
     symlinkSync(ASK_MJS, link);
+
+    const bin = mkdtempSync(join(tmpdir(), "ask-bin-"));
+    const stub = join(bin, "linearis");
+    writeFileSync(
+      stub,
+      '#!/bin/sh\necho \'{"nodes":[{"name":"catalyst-ask","id":"L1"},{"name":"ask/decision","id":"L2"}]}\'\n'
+    );
+    chmodSync(stub, 0o755);
+
     const r = spawnSync("node", [link, "create", "--team", "CTL", "--title", "t", "--why", "w", "--dry-run"], {
       encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
     });
-    // The property that failed: output existed at all. Before the fix this was "".
+    // The property that failed before the fix: there was no output AT ALL, and exit 0.
     expect(r.stdout.length).toBeGreaterThan(0);
-    expect(JSON.parse(r.stdout).action).toBe("dry-run");
+    const out = JSON.parse(r.stdout);
+    expect(out.action).toBe("dry-run");
+    // And it really went through the team-scoped resolution rather than a hardcoded list.
+    expect(out.labelIds).toEqual(["L1", "L2"]);
+  });
+
+  test("⛔ without linearis on PATH, `create` REFUSES loudly — it does not file a label-less ask", () => {
+    // The other half of the same property: the credential-free environment that broke
+    // this test in CI must produce a NAMED refusal and a non-zero exit, never a silent
+    // success. An ask without catalyst-ask is invisible to every view that selects on it.
+    const dir = mkdtempSync(join(tmpdir(), "ask-nolin-"));
+    const link = join(dir, "ask.mjs");
+    symlinkSync(ASK_MJS, link);
+    const emptyBin = mkdtempSync(join(tmpdir(), "ask-empty-"));
+    // ⛔ process.execPath, not "node": an empty PATH hides the INTERPRETER too, so
+    // spawnSync fails with ENOENT and returns status null — the test would then "pass"
+    // on a process that never ran. That is the failure mode this whole ticket is about,
+    // reproduced inside its own test, so the assertion below pins status to 1.
+    const r = spawnSync(process.execPath, [link, "create", "--team", "CTL", "--title", "t", "--why", "w", "--dry-run"], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: emptyBin },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("could not resolve the ask labels");
   });
 
   test("⛔ a no-op is LOUD: a real verb that does not reach the entry point exits non-zero", () => {
