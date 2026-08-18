@@ -69,16 +69,87 @@ if (parentArg) {
   const last = humans[humans.length - 1];
   if (last) parentId = last.parent?.id ?? last.id;
 }
+// ── CTL-1961: construct the write proxy once, for the eyes-clear below ──────────────
+// Constructed, NOT fetched via getLinearWriteProxy(): that accessor returns an installed
+// singleton nothing installs in a standalone script, so it answers null every time and the
+// routing would silently never engage. `unavailable` is kept as a REASON rather than
+// collapsed into "off" — see lib/linear-write-path.mjs on why those must never be one answer.
+const { decideWritePath } = await import("./lib/linear-write-path.mjs");
+let proxyMode = "off";
+let proxy = null;
+let proxyUnavailable = null;
+try {
+  const [{ createLinearWriteProxy }, { readLinearWriteProxyConfig }] = await Promise.all([
+    import("./execution-core/linear-write-proxy.mjs"),
+    import("./execution-core/config.mjs"),
+  ]);
+  const cfg = readLinearWriteProxyConfig(process.env);
+  proxyMode = cfg.mode ?? "off";
+  if (proxyMode === "shadow" || proxyMode === "enforce") {
+    proxy = createLinearWriteProxy({ mode: proxyMode, env: process.env, routes: cfg.routes });
+    if (!proxy) proxyUnavailable = `createLinearWriteProxy returned null for mode=${proxyMode}`;
+  }
+} catch (err) {
+  proxyUnavailable = `proxy modules unreachable: ${err?.message ?? err}`;
+}
+
 const m = await gql(token, `mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success comment{ id url } } }`, {
   in: { issueId: issue.id, body, createAsUser: asAgent, ...(parentId ? { parentId } : {}) },
 });
 // Ryan (2026-08-17): 👀 on the human's LATEST comment means "read, working on it"; it comes OFF once the reply
 // is posted (not at resolution). Clear any eyes reactions on the comment we replied under, unless --keep-eyes.
+//
+// ⛔ CTL-1961 — WHY ONLY THIS WRITE IS ROUTED AND THE COMMENT ABOVE IS NOT.
+// The eyes-clear goes through the CTC-724 `reaction` route. The commentCreate above stays
+// DIRECT, and that is a declared exception with a named blocker, not an oversight: this
+// tool passes `createAsUser: asAgent` — the `--as <AGENT>` flag that makes a reply show as
+// "CTL-INSTALL"/"FLEET" rather than an undifferentiated app actor — and the cloud route
+// `POST /api/v1/agent/issue-comment` accepts only {issueId, body, parentId?, hostId}. It
+// carries no display name (measured: 0 occurrences of createAsUser/displayName/agentName
+// in agent-write-routes.ts at ba3a722; positive control — `parentId` returns 7 in the same
+// file). Routing it today would post the right comment in the right thread with the AUTHOR
+// STRIPPED, on the busiest surface we have, and would look fine while doing it.
+// Tracked as CTC-762; until it lands, doctor must report this path as a NAMED EXCEPTION
+// rather than passing — a gate that quietly excuses the busiest write path is not a gate.
 let cleared = 0;
 if (!process.argv.includes("--keep-eyes")) {
   const target = issue.comments.nodes.filter(n => n.user && !n.botActor && n.user.id === (process.env.ASK_HUMAN_ID || "c2a8cc92-cab6-4536-9500-0f24abdf702b")).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).slice(-1)[0];
-  for (const rx of (target?.reactions ?? []).filter(r => r.emoji === "eyes")) {
-    try { await gql(token, `mutation($id:String!){ reactionDelete(id:$id){ success } }`, { id: rx.id }); cleared++; } catch {}
+  const eyes = (target?.reactions ?? []).filter(r => r.emoji === "eyes");
+  if (eyes.length > 0) {
+    // The route's remove mode deletes EVERY matching reaction on the target and reports the
+    // count, which is exactly what the loop below does — so the two paths agree rather than
+    // merely coexisting.
+    const plan = decideWritePath({ mode: proxyMode, proxyReady: proxy != null, unavailableReason: proxyUnavailable });
+    if (plan.action === "refuse") {
+      console.error(`linear-reply: eyes-clear REFUSED — mode=${proxyMode} but the proxy is unavailable (${plan.reason})`);
+      process.exit(1);
+    }
+    if (plan.action === "proxy") {
+      const res = proxy.send({
+        routeId: "reaction",
+        ticket: issueKey,
+        payload: { commentId: target.id, emoji: "eyes", mode: "remove" },
+        caller: "linear-reply",
+      });
+      if (!res?.handled) {
+        console.error(`linear-reply: eyes-clear REFUSED — proxy did not handle it (${res?.reason ?? "unknown"})`);
+        process.exit(1);
+      }
+      cleared = eyes.length;
+    } else {
+      if (plan.observe) {
+        try {
+          proxy.send({ routeId: "reaction", ticket: issueKey, payload: {}, caller: "linear-reply" });
+        } catch (err) {
+          console.error(`linear-reply: proxy threw in shadow (the direct clear still happens): ${err?.message}`);
+        }
+      } else if (plan.reason) {
+        console.error(`linear-reply: ${plan.reason} — clearing 👀 direct`);
+      }
+      for (const rx of eyes) {
+        try { await gql(token, `mutation($id:String!){ reactionDelete(id:$id){ success } }`, { id: rx.id }); cleared++; } catch {}
+      }
+    }
   }
 }
 console.log(JSON.stringify({ ok: m.commentCreate.success, commentId: m.commentCreate.comment.id, parentId, url: m.commentCreate.comment.url, eyesCleared: cleared }));
