@@ -25,6 +25,31 @@ chmod +x setup-catalyst.sh
 
 It checks your platform, installs the prerequisites, creates your project config, sets up a shared thoughts repository, and asks for any API tokens (like Linear).
 
+### On a headless or SSH-only host
+
+There are no prompts to answer, so the whole install is one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh \
+  | bash -s -- --non-interactive \
+      --cloud-token "$CATALYST_CLOUD_TOKEN" --cloud-account "$CATALYST_CLOUD_ACCOUNT"
+```
+
+`-s --` is required: without it `bash` consumes the flags instead of passing them to the
+script, and the install runs interactive on a host with no terminal to be interactive with.
+`CATALYST_AUTONOMOUS=1` is equivalent to `--non-interactive` if you prefer an env var.
+
+### What to have ready
+
+| What | How to supply it | Notes |
+| ---- | ---------------- | ----- |
+| Catalyst Cloud token | `--cloud-token` or `CATALYST_CLOUD_TOKEN` | Validated with one authenticated call before anything is written. A bad token fails the install loudly rather than leaving green checkmarks over a broken system. |
+| Catalyst Cloud account | `--cloud-account` or `CATALYST_CLOUD_ACCOUNT` | Required whenever a token is supplied — there is deliberately no default. |
+| Linear API token | `LINEAR_API_TOKEN`, or a `~/.linear_api_token` file | Must be a **personal** API key, beginning `lin_api_`. An OAuth token (`lin_oauth_…`) is rejected. |
+| Sentry, PostHog, Exa | Prompted, or their usual env vars | All optional. |
+
+Both cloud flags are optional. Omit them and setup behaves exactly as it did before they existed.
+
 ## 2. Install the plugin
 
 In Claude Code:
@@ -45,12 +70,16 @@ claude plugin install catalyst-dev@catalyst
 
 ## 3. Install the command-line tools
 
-Several Catalyst features call shell tools by name (`catalyst-monitor`, `catalyst-hud`, `catalyst-events`, and more — see the full [CLI command reference](/reference/catalyst-cli/)). Install them onto your PATH:
+Several Catalyst features call shell tools by name (`catalyst-monitor`, `catalyst-hud`, `catalyst-events`, and more — see the full [CLI command reference](/reference/catalyst-cli/)).
+
+**Setup already installed these.** Its last act is to put the `catalyst-*` commands on your
+PATH, provision `plugin-source`, turn on replica reads, and enrol the project. If the run
+ended with "No steps were deferred", skip to the check below.
+
+If setup listed this as a deferred step, run it by hand:
 
 ```bash
-shopt -s nullglob
-_cli=( ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/install-cli.sh )
-[ ${#_cli[@]} -gt 0 ] && bash "${_cli[0]}" || echo "catalyst-dev plugin not installed — run step 2 first"
+bash ~/catalyst/plugin-source/plugins/dev/scripts/install-cli.sh
 ```
 
 They install to `$HOME/.catalyst/bin`. If that folder isn't on your PATH, the installer adds it to your shell's startup file. Open a new terminal to pick up the change, then check it worked:

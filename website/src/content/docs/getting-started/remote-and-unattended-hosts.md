@@ -10,6 +10,25 @@ common setup is a **headless Mac** (for example, a Mac mini) that you reach over
 leave running. This page covers the parts of setup that differ from the
 [interactive install](/getting-started/).
 
+## Install in one command
+
+The page you were sent here from presents step 1 as interactive. It does not have to be —
+`setup-catalyst.sh` has a full headless contract, so the entire install over SSH is:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh \
+  | bash -s -- --non-interactive \
+      --cloud-token "$CATALYST_CLOUD_TOKEN" --cloud-account "$CATALYST_CLOUD_ACCOUNT"
+```
+
+`-s --` is required — without it `bash` eats the flags and the script tries to open
+`/dev/tty` on a host that has none. `CATALYST_AUTONOMOUS=1` is an equivalent env-var form.
+
+Setup finishes the job rather than printing a list: it installs the `catalyst-*` CLIs,
+provisions `plugin-source`, turns on replica reads, and enrols the project. Anything it
+could not do is printed at the end as a deferred step with a `run:` and a `verify:` line.
+See [what to have ready](/getting-started/#what-to-have-ready) for the credentials.
+
 ## Install the plugin over SSH
 
 The in-app `/plugin` commands need an interactive Claude Code session. From a shell, use

@@ -98,8 +98,12 @@ Reads `.catalyst/config.json` (safe to commit) and `~/.config/catalyst/config-{p
 Quick setup:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
+curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh \
+  | bash -s -- --non-interactive
 ```
+
+`-s --` is what passes the flags to the script rather than to `bash`. Omit it and the piped
+install runs interactive, which on a host with no tty degrades to defaults.
 
 ## Requirements
 

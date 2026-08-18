@@ -60,6 +60,188 @@ can_open_tty() {
 	(: </dev/tty) 2>/dev/null
 }
 
+#
+# ── CTL-1914 / CTL-1918: ONE resolver for the Catalyst source tree ──
+#
+# Four separate steps below need a helper script that lives in `plugins/dev/scripts`
+# of a Catalyst checkout: the orphan-sweep launchd installer, the Linear state
+# contract, `setup-plugin-source.sh`, and `install-cli.sh`. Each used to resolve it
+# relative to THIS script's own directory — which, in the install path every
+# user-facing doc gives (`curl -O … && ./setup-catalyst.sh`), contains nothing but
+# setup-catalyst.sh. So each degraded to a silent skip, and the documented install
+# produced a materially more-broken machine than a repo clone.
+#
+# ⛔ The resolution is CENTRAL rather than per-call-site on purpose: four copies of a
+# lookup are four chances for the next one to skip silently, and the reason the
+# original defect survived is that each site failed in its own private way.
+#
+# Resolution order (first usable tree wins):
+#   1. $CATALYST_SOURCE_DIR / --source-dir   — an operator override
+#   2. next to this script                   — the repo-clone layout
+#   3. $PROJECT_DIR                          — setup was run inside a Catalyst checkout
+#   4. the plugin-source checkout            — what the daemons already run from
+#   5. clone one                             — the documented-curl bootstrap
+#
+# Step 5 clones to the SAME default path `setup-plugin-source.sh` uses
+# (`~/catalyst/plugin-source`), so the bootstrap clone IS the plugin-source checkout
+# and that script then reuses it rather than cloning a second copy.
+CATALYST_SOURCE_DIR_RESOLVED=""
+CATALYST_SOURCE_ORIGIN=""
+CATALYST_SOURCE_REASON=""
+NO_CLONE_SOURCE=0
+
+# The marker for "this is a Catalyst source tree". Deliberately a directory rather
+# than any single helper: a tree that exists but is missing ONE script must report
+# that specific script as missing (`catalyst_helper_path`), not read as "no tree".
+catalyst_is_source_tree() {
+	[[ -n ${1:-} && -d "$1/plugins/dev/scripts" ]]
+}
+
+catalyst_source_clone_target() {
+	echo "${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}"
+}
+
+# resolve_catalyst_source — echo a usable source tree, or fail with a NAMED reason.
+#
+# ⛔ Never echoes a path it has not just validated, and never returns 0 without one.
+# "Could not look" and "there is nothing to find" are both failures here, but they are
+# DIFFERENT failures and the caller gets to see which: an empty clone that exits 0 is
+# the exact success-that-installed-nothing shape this whole ticket is about.
+resolve_catalyst_source() {
+	if [[ -n $CATALYST_SOURCE_DIR_RESOLVED ]]; then
+		echo "$CATALYST_SOURCE_DIR_RESOLVED"
+		return 0
+	fi
+	CATALYST_SOURCE_REASON=""
+
+	local candidate script_dir
+	if [[ -n ${CATALYST_SOURCE_DIR:-} ]] && catalyst_is_source_tree "${CATALYST_SOURCE_DIR}"; then
+		CATALYST_SOURCE_DIR_RESOLVED="$(cd "${CATALYST_SOURCE_DIR}" && pwd)"
+		CATALYST_SOURCE_ORIGIN="env"
+		echo "$CATALYST_SOURCE_DIR_RESOLVED"
+		return 0
+	fi
+
+	# `BASH_SOURCE[0]` is empty under `curl … | bash` (the script arrives on stdin), so
+	# this candidate simply does not apply there — which is correct, not a bug to work
+	# around: there is genuinely no adjacent tree in that layout.
+	script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || script_dir=""
+	if catalyst_is_source_tree "$script_dir"; then
+		CATALYST_SOURCE_DIR_RESOLVED="$script_dir"
+		CATALYST_SOURCE_ORIGIN="script-dir"
+		echo "$CATALYST_SOURCE_DIR_RESOLVED"
+		return 0
+	fi
+
+	if catalyst_is_source_tree "${PROJECT_DIR:-}"; then
+		CATALYST_SOURCE_DIR_RESOLVED="$(cd "${PROJECT_DIR}" && pwd)"
+		CATALYST_SOURCE_ORIGIN="project-dir"
+		echo "$CATALYST_SOURCE_DIR_RESOLVED"
+		return 0
+	fi
+
+	candidate="$(catalyst_source_clone_target)"
+	if catalyst_is_source_tree "$candidate"; then
+		CATALYST_SOURCE_DIR_RESOLVED="$(cd "$candidate" && pwd)"
+		CATALYST_SOURCE_ORIGIN="plugin-source"
+		echo "$CATALYST_SOURCE_DIR_RESOLVED"
+		return 0
+	fi
+
+	if [[ $NO_CLONE_SOURCE -eq 1 || -n ${CATALYST_NO_CLONE_SOURCE:-} ]]; then
+		CATALYST_SOURCE_REASON="no-source-tree"
+		return 1
+	fi
+
+	# ── the bootstrap clone ──
+	# Same shape as setup-plugin-source.sh's own clone (main, single-branch) so the
+	# tree it later reuses is the tree it would have made. NOT --depth 1: the fleet's
+	# updater and `git merge-base --is-ancestor` checks need real history.
+	echo "" >&2
+	echo "📦 No Catalyst source tree found — cloning one to $(catalyst_source_clone_target)" >&2
+	mkdir -p "$(dirname "$(catalyst_source_clone_target)")" 2>/dev/null || true
+	if ! GIT_TERMINAL_PROMPT=0 git clone --branch main --single-branch \
+		"${CATALYST_SOURCE_REPO:-https://github.com/coalesce-labs/catalyst.git}" \
+		"$(catalyst_source_clone_target)" >/dev/null 2>&1; then
+		CATALYST_SOURCE_REASON="clone-failed"
+		return 1
+	fi
+	# ⛔ Validate the RESULT, not the exit code. A clone that exits 0 having produced
+	# nothing usable is precisely the failure mode this ticket exists to remove, and
+	# trusting rc=0 here would rebuild it one layer up.
+	candidate="$(catalyst_source_clone_target)"
+	if ! catalyst_is_source_tree "$candidate"; then
+		CATALYST_SOURCE_REASON="clone-produced-no-tree"
+		return 1
+	fi
+	CATALYST_SOURCE_DIR_RESOLVED="$(cd "$candidate" && pwd)"
+	CATALYST_SOURCE_ORIGIN="cloned"
+	echo "$CATALYST_SOURCE_DIR_RESOLVED"
+	return 0
+}
+
+# catalyst_helper_path <relative-path-under-plugins/dev/scripts>
+#
+# Echo the absolute path to a helper script, or fail. Sets CATALYST_SOURCE_REASON to
+# `missing-helper:<name>` when the tree resolved but this particular script is absent —
+# a different fact from "no tree", and one a caller must be able to report distinctly.
+#
+# ⛔ The resolver is invoked DIRECTLY, never as `$(resolve_catalyst_source)`. Command
+# substitution runs in a subshell, so every global the resolver sets — including
+# CATALYST_SOURCE_REASON, which is the entire point of failing with a NAMED reason —
+# is discarded when the subshell exits, and the caller's deferral prints an empty
+# "()" where the diagnosis should be. That is this ticket's own defect one level down:
+# a failure that still reports, but reports nothing usable. Callers read
+# CATALYST_HELPER_PATH rather than capturing stdout, for the same reason.
+CATALYST_HELPER_PATH=""
+catalyst_helper_path() {
+	local rel="$1"
+	CATALYST_HELPER_PATH=""
+	resolve_catalyst_source >/dev/null || return 1
+	if [[ ! -f "${CATALYST_SOURCE_DIR_RESOLVED}/plugins/dev/scripts/${rel}" ]]; then
+		CATALYST_SOURCE_REASON="missing-helper:${rel}"
+		return 1
+	fi
+	CATALYST_HELPER_PATH="${CATALYST_SOURCE_DIR_RESOLVED}/plugins/dev/scripts/${rel}"
+	echo "$CATALYST_HELPER_PATH"
+}
+
+#
+# ── CTL-1918: the deferred-step ledger ──
+#
+# Setup used to end by PRINTING instructions for steps it could have performed, so
+# "install finished" and "the system works" were different states with nothing
+# enforcing the gap was closed. Every step now either RUNS or is recorded here — and a
+# recorded step carries both the command that completes it AND the command that
+# verifies it later, so a deferral is checkable rather than advisory.
+CATALYST_DEFERRED_STEPS=()
+
+catalyst_defer_step() {
+	# title <TAB> complete-command <TAB> verify-command
+	CATALYST_DEFERRED_STEPS+=("${1}"$'\t'"${2}"$'\t'"${3}")
+}
+
+print_deferred_steps() {
+	local n=${#CATALYST_DEFERRED_STEPS[@]}
+	if [[ $n -eq 0 ]]; then
+		# Stated positively: an empty section and a section that was never reached read
+		# identically, and only one of them means the install is complete.
+		echo "✅ No steps were deferred — this node was fully provisioned."
+		return 0
+	fi
+	echo ""
+	echo "⚠️  ${n} step(s) were DEFERRED. This node is not fully provisioned until they are done:"
+	local entry title complete verify
+	for entry in "${CATALYST_DEFERRED_STEPS[@]}"; do
+		IFS=$'\t' read -r title complete verify <<<"$entry"
+		echo ""
+		echo "  • ${title}"
+		echo "      run:    ${complete}"
+		echo "      verify: ${verify}"
+	done
+	echo ""
+}
+
 print_usage() {
 	cat <<'USAGE'
 Usage: setup-catalyst.sh [--non-interactive|--defaults]
@@ -74,7 +256,25 @@ Usage: setup-catalyst.sh [--non-interactive|--defaults]
                             deliberately NO default here — see below.
                             Env: CATALYST_CLOUD_ACCOUNT
 
+  --source-dir <path>       Use an existing Catalyst checkout for the helper scripts
+                            setup needs (orphan-sweep installer, Linear state contract,
+                            plugin-source, CLI installer).
+                            Env: CATALYST_SOURCE_DIR
+  --no-clone-source         Never clone a Catalyst checkout. Any step that needs one is
+                            DEFERRED with the command to complete and verify it, rather
+                            than skipped.
+                            Env: CATALYST_NO_CLONE_SOURCE=1
+
 Omit the cloud flags and setup behaves exactly as it always has.
+
+Headless install (SSH-only / CI hosts), one command and one key:
+
+  curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh \
+    | bash -s -- --non-interactive \
+        --cloud-token "$CATALYST_CLOUD_TOKEN" --cloud-account "$CATALYST_CLOUD_ACCOUNT"
+
+  `-s --` is required for the piped form: without it the flags are consumed by bash
+  itself, not by this script, and the install silently runs interactive.
 USAGE
 }
 
@@ -108,6 +308,20 @@ parse_args() {
 			}
 			CLOUD_ACCOUNT="$2"
 			shift 2
+			;;
+		# CTL-1914: where setup finds the helper scripts it needs. Absent → the
+		# resolver's own ordered search, ending in a bootstrap clone.
+		--source-dir)
+			[[ $# -ge 2 ]] || {
+				print_error "--source-dir requires a value"
+				exit 1
+			}
+			CATALYST_SOURCE_DIR="$2"
+			shift 2
+			;;
+		--no-clone-source)
+			NO_CLONE_SOURCE=1
+			shift
 			;;
 		-h | --help)
 			print_usage
@@ -509,15 +723,27 @@ setup_execution_core_states() {
 	# states + registry entry. The stateMap write is idempotent (the states
 	# script preserves a template-default or user-customised map).
 
-	# Locate the standalone script — installed plugin root or the repo checkout.
+	# Locate the standalone script — installed plugin root, else the central resolver.
+	# CTL-1914: the second branch was the RELATIVE path `plugins/dev/scripts/…`, i.e.
+	# resolved against CWD, which for the documented curl install holds only the setup
+	# script. The Linear workflow-state contract and the `worker-status` label group
+	# were therefore never provisioned, behind a warning that read as informational.
 	local states_script=""
 	if [[ -n ${CLAUDE_PLUGIN_ROOT:-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/setup-execution-core-states.sh" ]]; then
 		states_script="${CLAUDE_PLUGIN_ROOT}/scripts/setup-execution-core-states.sh"
-	elif [[ -f "plugins/dev/scripts/setup-execution-core-states.sh" ]]; then
-		states_script="plugins/dev/scripts/setup-execution-core-states.sh"
+	else
+		if catalyst_helper_path setup-execution-core-states.sh >/dev/null; then
+			states_script="$CATALYST_HELPER_PATH"
+		else
+			states_script=""
+		fi
 	fi
 	if [[ -z $states_script ]]; then
-		print_warning "execution-core repo, but setup-execution-core-states.sh not found — skipping state contract"
+		print_warning "Linear state contract NOT provisioned (${CATALYST_SOURCE_REASON})"
+		catalyst_defer_step \
+			"Provision the Linear workflow-state contract and worker-status labels (${CATALYST_SOURCE_REASON})" \
+			"git clone https://github.com/coalesce-labs/catalyst.git ~/catalyst/plugin-source && bash ~/catalyst/plugin-source/plugins/dev/scripts/setup-execution-core-states.sh --config ${config_file}" \
+			"catalyst doctor"
 		return 0
 	fi
 
@@ -1792,22 +2018,11 @@ setup_cloud_replica() {
 		print_warning "catalyst-stack not on PATH — run 'catalyst-stack adopt-cloud-sync' after installing the stack"
 	fi
 
-	# A populated replica that nothing reads is the failure this step exists to
-	# avoid: reads are opt-in (CATALYST_LINEAR_REPLICA=on) and off by default.
-	print_warning "Replica READS are opt-in. Add to your shell env and restart execution-core:"
-	echo "    export CATALYST_LINEAR_REPLICA=on"
-
-	# Without a registry entry the daemon dispatches nothing — a running stack that
-	# does literally nothing, which looks identical to a broken one.
-	if [[ -n ${TICKET_PREFIX:-} ]]; then
-		echo ""
-		echo "  Enroll this project so the daemon has work to find:"
-		echo "    catalyst-execution-core register --team ${TICKET_PREFIX}"
-	else
-		echo ""
-		echo "  Enroll this project so the daemon has work to find:"
-		echo "    catalyst-execution-core register --team <TEAM_KEY>"
-	fi
+	# CTL-1918: replica READS and registry enrolment used to be PRINTED here as
+	# advisory text — a populated replica that nothing reads, and a daemon with no
+	# work to find, both looking identical to a healthy install. finalize_install now
+	# performs both (and defers them with a verify command if it cannot), so printing
+	# them here would tell an operator to redo work that is already done.
 
 	return 0
 }
@@ -2688,37 +2903,20 @@ print_summary() {
 	print_header "Next Steps"
 	echo ""
 
-	# Resolve setup-plugin-source.sh next to THIS script. Via the `curl … | bash`
-	# flow (or when run from a non-catalyst target repo) BASH_SOURCE is empty/stdin
-	# and no such script exists locally, so print a runnable clone+run command
-	# instead of a relative path that would fail.
-	local _pss_dir _pss_script
-	_pss_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _pss_dir=""
-	_pss_script="${_pss_dir}/plugins/dev/scripts/setup-plugin-source.sh"
+	# CTL-1918: this used to be "1. Provision plugin-source …" — an instruction whose
+	# own fallback branch told the reader to clone the repo, which is exactly the work
+	# resolve_catalyst_source now does. finalize_install performs it; what remains is
+	# whatever genuinely could not be done, stated with its verify command.
+	print_deferred_steps
 
-	echo "1. Provision plugin-source (live plugin loading — NOT the marketplace cache,"
-	echo "   which lags releases and drifts per node):"
-	if [ -n "$_pss_dir" ] && [ -f "$_pss_script" ]; then
-		echo "   bash ${_pss_script}"
-	else
-		echo "   # Run from a catalyst checkout (this setup script was not run from one):"
-		echo "   git clone https://github.com/coalesce-labs/catalyst.git ~/catalyst-src \\"
-		echo "     && bash ~/catalyst-src/plugins/dev/scripts/setup-plugin-source.sh"
-	fi
-	echo "   → sets the pluginDirs machine-config key (workers load plugin-source via"
-	echo "     phase-agent-dispatch --plugin-dir) AND installs the interactive \`claude\`"
-	echo "     --plugin-dir wrapper in your shell rc (~/.zshrc or ~/.bashrc). Open a new"
-	echo "     shell to pick it up."
+	echo "1. Restart Claude Code to load configuration"
 	echo ""
 
-	echo "2. Restart Claude Code to load configuration"
-	echo ""
-
-	echo "3. Try your first workflow command:"
+	echo "2. Try your first workflow command:"
 	echo "   /research-codebase"
 	echo ""
 
-	echo "4. Create a worktree for parallel work:"
+	echo "3. Create a worktree for parallel work:"
 	echo "   /create-worktree PROJ-123 main"
 	echo ""
 
@@ -2868,12 +3066,142 @@ setup_sweep_config() {
 	fi
 	local _os="${CATALYST_FORCE_OS:-$(uname -s 2>/dev/null || echo unknown)}"
 	if [[ "$_os" == "Darwin" ]]; then
-		local installer="${SCRIPT_DIR}/install-orphan-sweep.sh"
-		if [[ -x "$installer" ]]; then
-			"$installer" >/dev/null 2>&1 || echo "setup: warning: launchd installer failed (non-fatal)" >&2
+		# CTL-1914: was `${SCRIPT_DIR}/install-orphan-sweep.sh` guarded by `[[ -x ]]`,
+		# which in the documented curl layout is a directory containing only
+		# setup-catalyst.sh — so the sweep scheduler was NEVER installed and nothing
+		# said so. Resolve centrally, and when it cannot be resolved, DEFER LOUDLY.
+		local installer
+		if catalyst_helper_path install-orphan-sweep.sh >/dev/null; then
+			installer="$CATALYST_HELPER_PATH"
+			if "$installer" >/dev/null 2>&1; then
+				print_success "orphan-sweep scheduler installed" 2>/dev/null || true
+			else
+				print_warning "orphan-sweep launchd installer failed" 2>/dev/null || true
+				catalyst_defer_step \
+					"Install the orphan-sweep scheduler (its installer ran but failed)" \
+					"bash ${installer}" \
+					"launchctl list | grep catalyst.orphan-sweep"
+			fi
+		else
+			print_warning "orphan-sweep scheduler NOT installed (${CATALYST_SOURCE_REASON})" 2>/dev/null || true
+			catalyst_defer_step \
+				"Install the orphan-sweep scheduler (no Catalyst source tree: ${CATALYST_SOURCE_REASON})" \
+				"git clone https://github.com/coalesce-labs/catalyst.git ~/catalyst/plugin-source && bash ~/catalyst/plugin-source/plugins/dev/scripts/install-orphan-sweep.sh" \
+				"launchctl list | grep catalyst.orphan-sweep"
 		fi
 	else
 		echo "setup: note: Linux scheduling is a follow-up (CTL-1030). Config written." >&2
+	fi
+}
+
+#
+# ── CTL-1918: finish the install instead of printing a list of hand-steps ──
+#
+# Setup used to end by printing three instructions it was perfectly able to perform,
+# so "setup completed successfully" and "this node works" were different states with
+# nothing enforcing the gap was closed. Each step below RUNS; a step that cannot run
+# is recorded in the deferred ledger with the command that completes it AND the
+# command that verifies it, so what is left is checkable rather than advisory.
+#
+# ⛔ Ordering is load-bearing: install-cli.sh is what puts `catalyst-stack` and
+# `catalyst-execution-core` on PATH, and the two steps after it are those binaries.
+# Running them first would produce two "command not found" deferrals on a node where
+# nothing was actually wrong.
+finalize_install() {
+	echo ""
+	print_header "Finishing the install"
+
+	local bin_dir="${CATALYST_BIN_DIR:-${HOME}/.catalyst/bin}"
+	local cli_script stack_bin core_bin pss
+
+	# ── 1. the CLIs on PATH ──
+	# README's "Quick Setup" never runs this, so a README-only reader reaches
+	# `command not found: catalyst-stack` at the last step of a "5 minute" install.
+	if catalyst_helper_path install-cli.sh >/dev/null; then
+		cli_script="$CATALYST_HELPER_PATH"
+		if bash "$cli_script" >/dev/null 2>&1; then
+			print_success "Catalyst CLIs installed to ${bin_dir}"
+		else
+			print_warning "install-cli.sh failed"
+			catalyst_defer_step "Put the Catalyst CLIs on PATH" \
+				"bash ${cli_script}" "command -v catalyst-stack"
+		fi
+	else
+		print_warning "Catalyst CLIs NOT installed (${CATALYST_SOURCE_REASON})"
+		catalyst_defer_step "Put the Catalyst CLIs on PATH (${CATALYST_SOURCE_REASON})" \
+			"bash <catalyst-checkout>/plugins/dev/scripts/install-cli.sh" "command -v catalyst-stack"
+	fi
+
+	# The freshly-installed symlinks are not on this process's PATH yet, and the steps
+	# below are those binaries. Resolve them by absolute path rather than hoping.
+	stack_bin="${bin_dir}/catalyst-stack"
+	core_bin="${bin_dir}/catalyst-execution-core"
+	[[ -x $stack_bin ]] || stack_bin="$(command -v catalyst-stack 2>/dev/null || echo "")"
+	[[ -x $core_bin ]] || core_bin="$(command -v catalyst-execution-core 2>/dev/null || echo "")"
+
+	# ── 2. plugin-source (live plugin loading) ──
+	# Was "Next Steps" item 1 — a printed instruction whose own fallback branch told the
+	# reader to clone the repo, i.e. the work the resolver above has already done.
+	if catalyst_helper_path setup-plugin-source.sh >/dev/null; then
+		pss="$CATALYST_HELPER_PATH"
+		local pss_args=()
+		[[ $NON_INTERACTIVE -eq 1 ]] && pss_args+=(--no-interactive-wrapper)
+		if bash "$pss" "${pss_args[@]+"${pss_args[@]}"}" >/dev/null 2>&1; then
+			print_success "plugin-source provisioned (pluginDirs registered)"
+		else
+			print_warning "setup-plugin-source.sh failed"
+			catalyst_defer_step "Provision plugin-source (live plugin loading)" \
+				"bash ${pss}" "catalyst doctor"
+		fi
+	else
+		catalyst_defer_step "Provision plugin-source (${CATALYST_SOURCE_REASON})" \
+			"bash <catalyst-checkout>/plugins/dev/scripts/setup-plugin-source.sh" "catalyst doctor"
+	fi
+
+	# ── 3. replica reads ──
+	# Only meaningful when a replica was actually provisioned; `activate-replica` gates
+	# itself on `verify-cloud-sync --json` reporting ok, so a broken replica is REFUSED
+	# here rather than switched on — which is the behaviour we want, and is why this
+	# calls the existing verb instead of writing the config key directly.
+	if [[ -n $CLOUD_TOKEN ]]; then
+		if [[ -n $stack_bin && -x $stack_bin ]]; then
+			if "$stack_bin" activate-replica >/dev/null 2>&1; then
+				print_success "replica reads activated (catalyst.linearReplica.mode = on)"
+			else
+				print_warning "activate-replica declined — the replica is not verifiably healthy yet"
+				catalyst_defer_step "Turn on replica READS once the replica verifies healthy" \
+					"catalyst-stack activate-replica" "catalyst-stack verify-cloud-sync --json"
+			fi
+		else
+			catalyst_defer_step "Turn on replica READS (catalyst-stack not on PATH)" \
+				"catalyst-stack activate-replica" "catalyst-stack verify-cloud-sync --json"
+		fi
+	fi
+
+	# ── 4. enrol the project ──
+	# Without a registry entry the daemon dispatches nothing — a running stack that does
+	# literally nothing, which looks identical to a broken one.
+	if [[ -n ${TICKET_PREFIX:-} ]]; then
+		if [[ -n $core_bin && -x $core_bin ]]; then
+			if "$core_bin" register --team "${TICKET_PREFIX}" >/dev/null 2>&1; then
+				print_success "project enrolled in the execution-core registry (team ${TICKET_PREFIX})"
+			else
+				print_warning "registry enrolment failed for team ${TICKET_PREFIX}"
+				catalyst_defer_step "Enrol this project so the daemon has work to find" \
+					"catalyst-execution-core register --team ${TICKET_PREFIX}" \
+					"catalyst-execution-core list-projects"
+			fi
+		else
+			catalyst_defer_step "Enrol this project so the daemon has work to find" \
+				"catalyst-execution-core register --team ${TICKET_PREFIX}" \
+				"catalyst-execution-core list-projects"
+		fi
+	else
+		# No team key discovered — the command cannot be spelled for the operator, so say
+		# exactly that rather than emitting a placeholder they must decode.
+		catalyst_defer_step "Enrol this project (no Linear team key was discovered during setup)" \
+			"catalyst-execution-core register --team <TEAM_KEY>" \
+			"catalyst-execution-core list-projects"
 	fi
 }
 
@@ -2921,6 +3249,9 @@ main() {
 	setup_sweep_config
 	init_humanlayer_thoughts
 	sync_thoughts
+	# CTL-1918: perform the steps setup used to print. Runs last so every input it
+	# needs (team key, cloud token, config) has been established.
+	finalize_install
 
 	# Validate
 	if validate_setup; then
@@ -2928,6 +3259,11 @@ main() {
 		exit 0
 	else
 		echo ""
+		# ⛔ The deferred ledger prints on BOTH paths. It lived only in print_summary,
+		# i.e. only on the success path — so an operator whose install FAILED, who is
+		# precisely the one who needs to know which provisioning steps did not happen,
+		# was the one person who never saw the list.
+		print_deferred_steps
 		print_error "Setup completed with errors. Please review and re-run if needed."
 		exit 1
 	fi
