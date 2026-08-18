@@ -8,12 +8,23 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  ASK_LABEL_NAMES,
+  VERBS,
   buildAskBody,
+  isEntryPoint,
   missingBlocksFrom,
   parseAskOptions,
+  resolveTeamLabelIds,
   teamPrefixMismatch,
   verifyAskBody,
 } from "../ask.mjs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ASK_MJS = join(dirname(fileURLToPath(import.meta.url)), "..", "ask.mjs");
 
 describe("buildAskBody renders the shape the trigger parses", () => {
   test("a full ask round-trips through the parser", () => {
@@ -157,5 +168,117 @@ describe("⛔ Codex #3509 P2 — every requested blocking relation is verified",
   test("an unreadable read-back reports them all missing rather than none", () => {
     // Fail toward "say something is wrong", not toward a silent all-clear.
     expect(missingBlocksFrom(["CTL-1"], null)).toEqual(["CTL-1"]);
+  });
+});
+
+
+// ── CTL-1944: the two traps CTC(ux-b) found in this verb (CTCB-6) ──────────────────────
+
+describe("trap (a) — the documented path must not silently no-op", () => {
+  // ⛔ The skill says to run `$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs`, which is a SYMLINK.
+  // The old guard compared `import.meta.url` (the RESOLVED real path) to `argv[1]` (the
+  // symlink path) as raw strings, so it was false and the script EXITED 0 HAVING DONE
+  // NOTHING — no ticket, no error, no output. A careless reader takes exit 0 for "filed".
+
+  test("isEntryPoint resolves through a symlink", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ask-link-"));
+    const link = join(dir, "ask.mjs");
+    symlinkSync(ASK_MJS, link);
+    expect(isEntryPoint(`file://${ASK_MJS}`, link)).toBe(true);
+    // ⛔ MUTATION CONTROL: the OLD comparison on the same inputs. If this ever starts
+    // passing, the fixture is no longer a symlink and the test above proves nothing.
+    expect(`file://${ASK_MJS}` === `file://${link}`).toBe(false);
+  });
+
+  test("isEntryPoint is false for an unrelated file, and never throws", () => {
+    expect(isEntryPoint(`file://${ASK_MJS}`, "/definitely/not/here.mjs")).toBe(false);
+    expect(isEntryPoint(`file://${ASK_MJS}`, undefined)).toBe(false);
+    expect(isEntryPoint(`file://${ASK_MJS}`, "")).toBe(false);
+  });
+
+  test("END TO END: `create` through a symlink actually runs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ask-e2e-"));
+    const link = join(dir, "ask.mjs");
+    symlinkSync(ASK_MJS, link);
+    const r = spawnSync("node", [link, "create", "--team", "CTL", "--title", "t", "--why", "w", "--dry-run"], {
+      encoding: "utf8",
+    });
+    // The property that failed: output existed at all. Before the fix this was "".
+    expect(r.stdout.length).toBeGreaterThan(0);
+    expect(JSON.parse(r.stdout).action).toBe("dry-run");
+  });
+
+  test("⛔ a no-op is LOUD: a real verb that does not reach the entry point exits non-zero", () => {
+    // The class, not just the symlink instance. Simulated by importing the module in a
+    // process whose argv[1] is something else entirely but whose argv[2] is a real verb.
+    const r = spawnSync("node", ["-e", `process.argv[2]=${JSON.stringify(VERBS[0])};import(${JSON.stringify(ASK_MJS)})`], {
+      encoding: "utf8",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("NOTHING WAS FILED");
+  });
+
+  test("a genuine import (no verb in argv) stays silent — that is how CTC-694 was filed", () => {
+    const r = spawnSync("node", ["-e", `import(${JSON.stringify(ASK_MJS)}).then(m=>console.log(typeof m.buildAskBody))`], {
+      encoding: "utf8",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("function");
+    expect(r.stderr).not.toContain("NOTHING WAS FILED");
+  });
+});
+
+describe("trap (b) — the label set follows the TARGET TEAM", () => {
+  // Linear issue labels are team-scoped and both names exist on BOTH teams with different
+  // ids, so passing NAMES let linearis resolve them against whichever team it picked.
+  // Measured 2026-08-18 (linearis labels list --team, one call per team):
+  const CTL_IDS = ["54179639-c850-4d3a-91da-f3d9288e68b0", "b23229ae-1d2b-4fa0-9987-091875e2b2a8"];
+  const CTC_IDS = ["e1b5ef97-4f8b-43fc-8e11-f6286a12a415", "752b5560-068c-42e5-87af-e8cadbfd4ae3"];
+  const fakeList = (byTeam) => (_cmd, args) => {
+    const team = args[args.indexOf("--team") + 1];
+    const nodes = (byTeam[team] ?? []).map(([name, id]) => ({ name, id }));
+    return { code: 0, stdout: JSON.stringify({ nodes }), stderr: "" };
+  };
+  const BOTH = {
+    CTL: [["catalyst-ask", CTL_IDS[0]], ["ask/decision", CTL_IDS[1]], ["website", "x"]],
+    CTC: [["catalyst-ask", CTC_IDS[0]], ["ask/decision", CTC_IDS[1]]],
+  };
+
+  test("each team resolves to ITS OWN ids — and the two sets are disjoint", () => {
+    const ctl = resolveTeamLabelIds("CTL", { runFn: fakeList(BOTH) });
+    const ctc = resolveTeamLabelIds("CTC", { runFn: fakeList(BOTH) });
+    expect(ctl).toEqual({ ok: true, labelIds: CTL_IDS });
+    expect(ctc).toEqual({ ok: true, labelIds: CTC_IDS });
+    // ⛔ The control that makes the two assertions above mean something: if the ids were
+    // the same, a team-blind implementation would pass both.
+    expect(CTL_IDS.some((id) => CTC_IDS.includes(id))).toBe(false);
+  });
+
+  test("order follows ASK_LABEL_NAMES regardless of the order the API returns", () => {
+    const shuffled = { CTC: [["ask/decision", CTC_IDS[1]], ["catalyst-ask", CTC_IDS[0]]] };
+    expect(resolveTeamLabelIds("CTC", { runFn: fakeList(shuffled) })).toEqual({ ok: true, labelIds: CTC_IDS });
+    expect(ASK_LABEL_NAMES).toEqual(["catalyst-ask", "ask/decision"]);
+  });
+
+  test("ALL-OR-NOTHING: one missing label refuses the whole set by name", () => {
+    const partial = { CTC: [["catalyst-ask", CTC_IDS[0]]] };
+    const r = resolveTeamLabelIds("CTC", { runFn: fakeList(partial) });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("label-not-on-team");
+    expect(r.detail).toContain("ask/decision");
+  });
+
+  test("a duplicate name is AMBIGUOUS, never silently first-wins", () => {
+    const dupe = { CTC: [["catalyst-ask", "a"], ["catalyst-ask", "b"], ["ask/decision", "c"]] };
+    expect(resolveTeamLabelIds("CTC", { runFn: fakeList(dupe) }).reason).toBe("label-ambiguous");
+  });
+
+  test("a failed or unparseable list is a NAMED refusal, never an empty label set", () => {
+    expect(resolveTeamLabelIds("CTC", { runFn: () => ({ code: 1, stdout: "", stderr: "boom" }) }).reason)
+      .toBe("label-list-failed");
+    expect(resolveTeamLabelIds("CTC", { runFn: () => ({ code: 0, stdout: "not json", stderr: "" }) }).reason)
+      .toBe("label-list-unparseable");
+    expect(resolveTeamLabelIds("CTC", { runFn: () => ({ code: 0, stdout: "{}", stderr: "" }) }).reason)
+      .toBe("label-list-unparseable");
   });
 });

@@ -29,7 +29,8 @@
 import { spawnSync } from "node:child_process";
 // ⛔ Codex #3509 P2: `--body -` used CommonJS `require`, which is undefined in an ESM
 // module — the documented form threw a ReferenceError before reading anything.
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // ⚠️ ONE alternation-free pattern, deliberately: JS alternation prefers the earliest MATCH
 // POSITION, so a bare `Options:` branch matches at the preceding newline and consumes
@@ -167,6 +168,60 @@ export function missingBlocksFrom(blocks, readBackText) {
   return blocks.filter((b) => !text.includes(b));
 }
 
+/**
+ * ⛔ THE LABEL SET FOLLOWS THE TARGET TEAM (CTCB-6 trap b).
+ *
+ * Linear issue labels are TEAM-SCOPED, and both of these names exist on BOTH teams with
+ * DIFFERENT ids. Measured 2026-08-18:
+ *
+ *   catalyst-ask   CTL 54179639-c850-4d3a-91da-f3d9288e68b0   CTC e1b5ef97-4f8b-43fc-8e11-f6286a12a415
+ *   ask/decision   CTL b23229ae-1d2b-4fa0-9987-091875e2b2a8   CTC 752b5560-068c-42e5-87af-e8cadbfd4ae3
+ *
+ * Passing the NAMES let `linearis` resolve them against whichever team it picked — CTL's —
+ * so filing a CTC ask failed with "The label 'catalyst-ask' is not associated with the same
+ * team as the issue." That one at least failed loudly; the danger is the other direction,
+ * where a name happens to resolve to the right team by luck and the tool looks correct
+ * until someone files across teams.
+ *
+ * ⚠️ The local replica CANNOT answer this question: its `labels` table has no team column,
+ * so both rows are visible and indistinguishable — exactly the `label-ambiguous` case the
+ * write-proxy resolver names. The team scoping lives only in the API, so this is one of the
+ * few reads that legitimately goes there.
+ */
+export const ASK_LABEL_NAMES = Object.freeze(["catalyst-ask", "ask/decision"]);
+
+/**
+ * resolveTeamLabelIds — map ASK_LABEL_NAMES to ids ON THIS TEAM.
+ *
+ * ALL-OR-NOTHING and three-valued. A partial set would file an ask carrying some of its
+ * labels and silently dropping the rest, which reads as success at the call site and makes
+ * the ask invisible to the very views that select on `catalyst-ask`.
+ */
+export function resolveTeamLabelIds(team, { runFn = run, names = ASK_LABEL_NAMES } = {}) {
+  const r = runFn("linearis", ["labels", "list", "--team", team, "--limit", "250"]);
+  if (r.code !== 0) {
+    return { ok: false, reason: "label-list-failed", detail: r.stderr.slice(0, 200) };
+  }
+  let nodes;
+  try {
+    nodes = JSON.parse(r.stdout)?.nodes;
+  } catch (err) {
+    return { ok: false, reason: "label-list-unparseable", detail: String(err?.message ?? err).slice(0, 200) };
+  }
+  if (!Array.isArray(nodes)) return { ok: false, reason: "label-list-unparseable", detail: "no nodes array" };
+
+  const ids = [];
+  for (const name of names) {
+    // A `LIMIT 2`-style count, for the same reason the write-proxy resolver uses one:
+    // ambiguity must be DETECTED, not silently resolved to whichever row came first.
+    const hits = nodes.filter((n) => n?.name === name && typeof n?.id === "string");
+    if (hits.length === 0) return { ok: false, reason: "label-not-on-team", detail: `${name} @ ${team}` };
+    if (hits.length > 1) return { ok: false, reason: "label-ambiguous", detail: `${name} @ ${team}` };
+    ids.push(hits[0].id);
+  }
+  return { ok: true, labelIds: ids };
+}
+
 // ── CLI ────────────────────────────────────────────────────────────────────────────────
 
 const RYAN = process.env.ASK_HUMAN_ID || "c2a8cc92-cab6-4536-9500-0f24abdf702b";
@@ -245,9 +300,28 @@ function cmdCreate(argv) {
     );
     return 1;
   }
+  // ⛔ Resolve the labels ON THE TARGET TEAM before the dry-run returns, not after. A dry
+  // run that skips the step which actually fails is not a rehearsal — it is the shape of
+  // check that cannot fail, and it would have passed cleanly for the exact defect CTCB-6
+  // hit. See resolveTeamLabelIds.
+  const lbl = resolveTeamLabelIds(team);
+  if (!lbl.ok) {
+    console.error(
+      `ask create: REFUSING — could not resolve the ask labels on team ${team} ` +
+        `(${lbl.reason}: ${lbl.detail}). Labels are TEAM-SCOPED; filing without them would ` +
+        "hide the ask from every view that selects on catalyst-ask."
+    );
+    return 1;
+  }
+  const labelIds = lbl.labelIds;
+
   if (dryRun) {
     console.log(
-      JSON.stringify({ action: "dry-run", team, title, body, parsedOptions: pre.parsed }, null, 2)
+      JSON.stringify(
+        { action: "dry-run", team, title, body, parsedOptions: pre.parsed, labelIds },
+        null,
+        2
+      )
     );
     return 0;
   }
@@ -263,7 +337,7 @@ function cmdCreate(argv) {
     "--assignee",
     RYAN,
     "--labels",
-    "catalyst-ask,ask/decision",
+    labelIds.join(","),
     "--description",
     body,
   ];
@@ -413,8 +487,34 @@ function cmdAccept(argv) {
   return 0;
 }
 
+export const VERBS = Object.freeze(["create", "accept"]);
+
+/**
+ * isEntryPoint — was this module RUN, or imported?
+ *
+ * ⛔ CTCB-6 trap (a). The old test was `import.meta.url === "file://" + process.argv[1]`,
+ * a raw string compare. The skill documents invoking this through
+ * `$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs`, which is a SYMLINK — so `import.meta.url` (the
+ * resolved real path) never equalled `argv[1]` (the symlink path), the guard was false,
+ * and the script EXITED 0 HAVING DONE NOTHING. No ticket, no error, no output. A careless
+ * reader takes exit 0 for "filed", which is the worst possible failure for a tool whose
+ * entire job is to prove an ask exists.
+ *
+ * Both sides are now resolved through `realpathSync`, so any path that reaches the same
+ * file — symlink, relative, or `..`-laden — is recognised.
+ */
+export function isEntryPoint(metaUrl = import.meta.url, argv1 = process.argv[1]) {
+  if (typeof argv1 !== "string" || argv1 === "") return false;
+  try {
+    return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1);
+  } catch {
+    // Cannot resolve one of them — say NO here, and let the loud guard below decide.
+    return false;
+  }
+}
+
 const argv = process.argv.slice(2);
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isEntryPoint()) {
   const verb = argv[0];
   if (verb === "create") process.exit(cmdCreate(argv.slice(1)));
   else if (verb === "accept") process.exit(cmdAccept(argv.slice(1)));
@@ -422,4 +522,18 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     usage();
     process.exit(1);
   }
+} else if (VERBS.includes(argv[0])) {
+  // ⛔ A NO-OP MUST BE LOUD. `realpathSync` fixes the symlink case specifically; this
+  // catches the CLASS. If anything else ever makes the entry-point test false while the
+  // user is plainly driving the CLI — a future bundler, a copied file, an exotic loader —
+  // it exits NON-ZERO with the reason instead of exiting 0 having filed nothing.
+  //
+  // Gated on a real verb so a legitimate `import` of buildAskBody/verifyAskBody (which is
+  // how CTC-694 was actually filed) stays silent: an importing process has its own argv.
+  console.error(
+    `ask.mjs: ⛔ invoked with the verb "${argv[0]}" but this module is not the entry point ` +
+      `(argv[1]=${process.argv[1] ?? "<none>"}, module=${fileURLToPath(import.meta.url)}). ` +
+      "NOTHING WAS FILED. Run the real path: ~/catalyst/plugin-source/plugins/dev/scripts/ask.mjs"
+  );
+  process.exit(3);
 }
