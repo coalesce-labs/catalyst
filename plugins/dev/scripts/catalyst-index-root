@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# catalyst-index-root — CTL-1935. Make "which code does a cold index run?" a fleet decision
+# recorded in git, not a consequence of where an operator happened to `cd`.
+#
+# THE DEFECT (measured on mini-2, 2026-08-17 19:5x CT): `which catalyst-index` -> not found. The
+# only catalyst-cloud checkout on the host sat on a feature branch 332 commits behind main, so a
+# cold index started from that session would have run WITHOUT CTC-661's resample fix — confirmed
+# two independent ways, by ancestry (`merge-base --is-ancestor` said NO) and by content
+# (SKIP_CACHE_HEADER absent). The run would have looked completely normal while replaying the AI
+# Gateway's cached body on every parse retry.
+#
+# WHY A GIT SHA AND NOT AN NPM PIN (COORD decision 2): @catalyst-cloud/index-host is
+# `private: true` at `0.0.0`. There is no published version to pin, and publishing it is out of
+# scope. So the pin is a SHA in plugins/dev/config/index-serving-root.json — a file the fleet
+# reload already distributes with the plugin.
+#
+#   catalyst-index-root setup    provision/advance the serving root to the pinned sha
+#   catalyst-index-root verify   prove the root IS the pin (ancestry AND content AND clean)
+#   catalyst-index-root run …    verify, then run catalyst-index FROM that root
+#
+# ⛔ EVERY CHECK FAILS CLOSED. "I could not measure it" is a non-zero exit naming the check, never
+# a silent pass — the false-clean shape this repo has shipped repeatedly.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PIN_FILE="${CATALYST_INDEX_PIN:-$SCRIPT_DIR/../config/index-serving-root.json}"
+
+_json() { # _json <key-path>  — read a scalar out of the pin file, failing closed.
+  python3 -c "
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+except Exception as e:
+    sys.stderr.write('catalyst-index-root: cannot read pin file %s: %s\n'%(sys.argv[1],e)); sys.exit(1)
+cur=d
+for k in sys.argv[2].split('.'):
+    if not isinstance(cur,dict) or k not in cur:
+        sys.stderr.write('catalyst-index-root: pin file is missing %s\n'%sys.argv[2]); sys.exit(1)
+    cur=cur[k]
+print(cur)
+" "$PIN_FILE" "$1"
+}
+
+[ -f "$PIN_FILE" ] || { echo "catalyst-index-root: no pin file at $PIN_FILE" >&2; exit 2; }
+PIN_REPO="$(_json repo)" || exit 2
+PIN_PATH_RAW="$(_json path)" || exit 2
+PIN_SHA="$(_json sha)" || exit 2
+PROBE_FILE="$(_json probe.file)" || exit 2
+PROBE_SYMBOL="$(_json probe.symbol)" || exit 2
+ROOT="${CATALYST_INDEX_ROOT:-${PIN_PATH_RAW/#\~/$HOME}}"
+
+# A pin that is not a full 40-hex sha is not a pin — an abbreviation or a branch name reintroduces
+# exactly the ambiguity this file exists to remove.
+case "$PIN_SHA" in
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+*)
+  echo "catalyst-index-root: pinned sha must be a full 40-char hex sha (got '$PIN_SHA')" >&2
+  exit 2
+  ;;
+esac
+
+FAILURES=0
+_pass() { printf '  PASS  %-14s %s\n' "$1" "$2"; }
+_fail() { printf '  FAIL  %-14s %s\n' "$1" "$2"; FAILURES=$((FAILURES + 1)); }
+
+cmd_verify() {
+  echo "catalyst-index-root: verifying $ROOT against pin ${PIN_SHA:0:9}"
+
+  # A checkout's .git is a DIRECTORY in a standalone clone and a FILE in a linked worktree. Both
+  # are checkouts; only the standalone one is an acceptable serving root. Testing for the
+  # directory alone misdiagnosed a linked worktree as "not a git checkout — run setup", which
+  # sends the operator to the wrong fix and never reaches the standalone check below.
+  if [ ! -e "$ROOT/.git" ]; then
+    _fail "root-present" "$ROOT is not a git checkout — run 'catalyst-index-root setup'"
+    echo; echo "catalyst-index-root: $FAILURES check(s) FAILED"; return 1
+  fi
+  _pass "root-present" "$ROOT is a git checkout"
+
+  # ⛔ A LINKED WORKTREE IS NOT A SERVING ROOT. It shares its common dir with someone's working
+  # repo, so another agent's `git checkout` silently moves the code the indexer runs.
+  if [ -f "$ROOT/.git" ]; then
+    _fail "standalone" "$ROOT is a LINKED WORKTREE — its HEAD can be moved by whoever owns the parent repo"
+  else
+    _pass "standalone" "$ROOT is a standalone checkout"
+  fi
+
+  local head
+  head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)"
+  if [ -z "$head" ]; then
+    _fail "ancestry" "could not read HEAD in $ROOT — the pin is UNPROVEN"
+  elif ! git -C "$ROOT" cat-file -e "${PIN_SHA}^{commit}" 2>/dev/null; then
+    _fail "ancestry" "pinned sha ${PIN_SHA:0:9} is not present in $ROOT — fetch it (run setup)"
+  elif git -C "$ROOT" merge-base --is-ancestor "$PIN_SHA" "$head" 2>/dev/null; then
+    _pass "ancestry" "HEAD ${head:0:9} contains the pinned ${PIN_SHA:0:9}"
+  else
+    _fail "ancestry" "HEAD ${head:0:9} does NOT contain pinned ${PIN_SHA:0:9} — the root is stale or diverged"
+  fi
+
+  # ⛔ THE CONTENT HALF. Ancestry says the commit is reachable in history; it says nothing about
+  # what is on disk at that path right now. Both halves are required — this is the exact pair the
+  # mini-2 measurement used.
+  if [ ! -f "$ROOT/$PROBE_FILE" ]; then
+    _fail "content" "$PROBE_FILE is absent from $ROOT — the tree is not materialised"
+  elif grep -q -- "$PROBE_SYMBOL" "$ROOT/$PROBE_FILE" 2>/dev/null; then
+    _pass "content" "$PROBE_SYMBOL is present in $PROBE_FILE"
+  else
+    _fail "content" "$PROBE_SYMBOL is ABSENT from $PROBE_FILE — the code on disk is not the pinned release"
+  fi
+
+  # ⛔ ...and neither half proves the working tree is CLEAN at that path. A local edit to the probe
+  # file passes ancestry and content while running something nobody reviewed.
+  local dirty
+  dirty="$(git -C "$ROOT" status --porcelain -- "$PROBE_FILE" 2>/dev/null)"
+  if [ -n "$dirty" ]; then
+    _fail "clean" "$PROBE_FILE is locally modified in $ROOT: $dirty"
+  else
+    _pass "clean" "$PROBE_FILE is unmodified"
+  fi
+
+  echo
+  if [ "$FAILURES" -eq 0 ]; then
+    echo "catalyst-index-root: OK — the serving root is the pinned release"
+    return 0
+  fi
+  echo "catalyst-index-root: $FAILURES check(s) FAILED — do NOT start an index from this root"
+  return 1
+}
+
+cmd_setup() {
+  echo "catalyst-index-root: setting up $ROOT at ${PIN_SHA:0:9}"
+  if [ ! -d "$ROOT/.git" ]; then
+    mkdir -p "$(dirname "$ROOT")"
+    git clone --quiet "$PIN_REPO" "$ROOT" || { echo "catalyst-index-root: clone failed" >&2; return 1; }
+  fi
+  if [ -f "$ROOT/.git" ]; then
+    echo "catalyst-index-root: REFUSING — $ROOT is a linked worktree, not a standalone checkout" >&2
+    return 1
+  fi
+  git -C "$ROOT" fetch --quiet origin || { echo "catalyst-index-root: fetch failed" >&2; return 1; }
+  if ! git -C "$ROOT" cat-file -e "${PIN_SHA}^{commit}" 2>/dev/null; then
+    echo "catalyst-index-root: pinned sha ${PIN_SHA:0:9} not found after fetch — is the pin wrong?" >&2
+    return 1
+  fi
+  # Detached at the pin: the root carries exactly the recorded release, and advancing the fleet
+  # means editing the pin file, not pulling whatever main happens to be.
+  git -C "$ROOT" checkout --quiet --detach "$PIN_SHA" || { echo "catalyst-index-root: checkout failed" >&2; return 1; }
+  echo "catalyst-index-root: $ROOT is at $(git -C "$ROOT" rev-parse --short HEAD)"
+  cmd_verify
+}
+
+cmd_run() {
+  # ⛔ Verify BEFORE running, and refuse on failure. A wrapper that warns and runs anyway is the
+  # thing that let a 332-commits-stale root serve a cold index in the first place.
+  if ! cmd_verify; then
+    echo "catalyst-index-root: refusing to run catalyst-index from an unverified root" >&2
+    return 1
+  fi
+  echo "catalyst-index-root: running catalyst-index from $ROOT"
+  (cd "$ROOT" && bun run --cwd apps/index-host catalyst-index "$@")
+}
+
+case "${1:-}" in
+setup) shift; cmd_setup "$@" ;;
+verify) shift; cmd_verify "$@" ;;
+run) shift; cmd_run "$@" ;;
+-h | --help | "") sed -n '2,28p' "$0"; exit 0 ;;
+*) echo "catalyst-index-root: unknown subcommand '$1' (setup|verify|run)" >&2; exit 2 ;;
+esac

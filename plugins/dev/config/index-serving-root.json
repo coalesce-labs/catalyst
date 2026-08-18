@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "CTL-1935: the PINNED serving root for catalyst-index. @catalyst-cloud/index-host is",
+    "private:true at 0.0.0, so there is no npm version to pin (COORD decision 2) — the pin is a",
+    "git SHA, recorded here, in the catalyst repo the fleet reload already distributes.",
+    "",
+    "Advancing the fleet's indexer = bumping `sha` here and letting the reload run setup. It is",
+    "NOT an operator's `cd`, which is the whole defect: on mini-2 a cold index would have run",
+    "from a checkout 332 commits stale, missing CTC-661's resample fix, and looked normal.",
+    "",
+    "`probe` is the CONTENT half of the check. Ancestry alone proves a commit is reachable, not",
+    "that the working tree at that path actually holds it — `git show <sha>` proves reachability,",
+    "not ancestry, and neither proves the file on disk is clean."
+  ],
+  "repo": "https://github.com/coalesce-labs/catalyst-cloud.git",
+  "path": "~/catalyst/index-source",
+  "sha": "4a84cd463606583ad73a5728871029dfbf9409c6",
+  "probe": {
+    "file": "apps/context-engine/src/wiki/llm.ts",
+    "symbol": "SKIP_CACHE_HEADER"
+  }
+}

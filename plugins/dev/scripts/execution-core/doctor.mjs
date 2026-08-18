@@ -34,6 +34,7 @@ import { STATUS, mkCheck } from "./doctor-status.mjs";
 import { checkInstallCompleteness } from "./install-completeness.mjs";
 // CTL-1936 AC5: the standing answer to "is this host write-exhausted".
 import { checkLinearWriteBudget } from "./write-budget-health.mjs";
+import { checkIndexServingRoot } from "./index-serving-root-health.mjs";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
 
@@ -169,6 +170,7 @@ export { STATUS, mkCheck } from "./doctor-status.mjs";
 export { checkInstallCompleteness };
 
 export { checkLinearWriteBudget };
+export { checkIndexServingRoot };
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
 //
@@ -5832,6 +5834,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkConfigScopeLeak(), // advisory
       () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
       () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
+      () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
     ];
   }
 
@@ -5910,6 +5913,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkInstallCompleteness(), // CTL-1918: did the install FINISH — CLIs, plugin-source, sweep, enrolment — advisory only (never FAIL)
     () => checkLinearWriteBudget(), // CTL-1936: host cloud-write spend / exhaustion — advisory only (never FAIL)
     () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
+    () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
   ];
 }
 
