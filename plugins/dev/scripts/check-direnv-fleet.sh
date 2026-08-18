@@ -42,16 +42,40 @@ BREW="${CATALYST_BREW:-brew}"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--dir) DIR="${2-}"; shift 2 ;;
-	--install) DO_INSTALL=1; shift ;;
-	--probe) DO_PROBE=1; shift ;;
-	--require-token) REQUIRED_TOKENS="${2-}"; shift 2 ;;
-	-h | --help) sed -n '2,28p' "$0"; exit 0 ;;
-	*) echo "check-direnv-fleet: unknown argument '$1'" >&2; exit 2 ;;
+	--dir)
+		DIR="${2-}"
+		shift 2
+		;;
+	--install)
+		DO_INSTALL=1
+		shift
+		;;
+	--probe)
+		DO_PROBE=1
+		shift
+		;;
+	--require-token)
+		REQUIRED_TOKENS="${2-}"
+		shift 2
+		;;
+	-h | --help)
+		sed -n '2,28p' "$0"
+		exit 0
+		;;
+	*)
+		echo "check-direnv-fleet: unknown argument '$1'" >&2
+		exit 2
+		;;
 	esac
 done
-[[ -n "$DIR" ]] || { echo "check-direnv-fleet: --dir requires a path" >&2; exit 2; }
-[[ -d "$DIR" ]] || { echo "check-direnv-fleet: no such directory '$DIR'" >&2; exit 2; }
+[[ -n $DIR ]] || {
+	echo "check-direnv-fleet: --dir requires a path" >&2
+	exit 2
+}
+[[ -d $DIR ]] || {
+	echo "check-direnv-fleet: no such directory '$DIR'" >&2
+	exit 2
+}
 # ⛔ Resolve to the PHYSICAL path. direnv's allow-record is keyed by a hash of the .envrc's path,
 # and it stores the resolved one. Hand it a path that traverses a symlink (/tmp, or a symlinked
 # home — an agent worktree under ~/catalyst/wt can be either) and the hash misses, so a correctly
@@ -62,22 +86,34 @@ DIR="$(cd "$DIR" && pwd -P)"
 
 FAILURES=0
 pass() { echo "  ✅  $1"; }
-fail() { echo "  ❌  $1"; FAILURES=$((FAILURES + 1)); }
+fail() {
+	echo "  ❌  $1"
+	FAILURES=$((FAILURES + 1))
+}
 info() { echo "  ℹ   $1"; }
 
 echo "direnv fleet readiness — host $(hostname -s 2>/dev/null || echo unknown), dir $DIR"
 
-# ─── 1. the binary ──────────────────────────────────────────────────────────
-if ! command -v direnv >/dev/null 2>&1 && [[ $DO_INSTALL -eq 1 ]]; then
-	info "direnv absent — installing via $BREW"
-	if command -v "$BREW" >/dev/null 2>&1; then
-		"$BREW" install direnv >/dev/null 2>&1 || true
-		# brew installs to a prefix that may not be on this non-interactive PATH yet.
+# ─── 1. the binary, and (with --install) the whole runtime ──────────────────
+# ⛔ CTL-1956: --install used to be `brew install direnv` inline, which remediated NOTHING on the
+# two fleet minis (neither has brew) and could not have fixed the other three missing pieces
+# anyway. It now delegates to the SAME library install-cli.sh uses, so the narrow remediation and
+# the join stage cannot drift apart — and so `--install` on a bare host is a real fix rather than
+# a message telling a human to type one.
+if [[ $DO_INSTALL -eq 1 ]]; then
+	PROVISION_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/direnv-provision.sh"
+	if [[ -f $PROVISION_LIB ]]; then
+		# shellcheck source=lib/direnv-provision.sh
+		# shellcheck disable=SC1091
+		source "$PROVISION_LIB"
+		ensure_direnv || true
+		ensure_direnv_runtime || true
 		for p in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
 			[[ -x "$p/direnv" ]] && PATH="$p:$PATH" && export PATH && break
 		done
+		hash -r 2>/dev/null || true
 	else
-		info "$BREW not available — cannot auto-install"
+		info "lib/direnv-provision.sh not found next to this script — cannot auto-install"
 	fi
 fi
 
@@ -91,6 +127,24 @@ else
 	echo "FAILED: $FAILURES"
 	exit 1
 fi
+
+# ─── 1b. the direnv LIBRARY helpers ─────────────────────────────────────────
+# ⛔ CTL-1956: the check was blind to these, and they are what actually break first. `use_profile`
+# is not a direnv builtin — it is defined by ~/.config/direnv/lib/profiles.sh, and
+# `use_otel_context` by lib/otel.sh. On mini-2 BOTH were absent, so every .envrc died on an
+# undefined function and the token dump came back empty. Section 4 then reported three EMPTY
+# tokens: red, correctly, but naming the symptom. A reader installs the binary, sees the same
+# three reds, and has no idea the cause is a missing 60-line shell helper that is in no repo.
+#
+# So these are checked BEFORE the tokens and named individually. Their absence is a FAIL, not a
+# warn: a host missing them cannot materialize a single token no matter what the profiles hold.
+for lib in profiles otel; do
+	if [[ -f "$DIRENV_CONFIG/lib/${lib}.sh" ]]; then
+		pass "direnv lib ${lib}.sh present"
+	else
+		fail "direnv lib ${lib}.sh MISSING from $DIRENV_CONFIG/lib/ — $([[ $lib == profiles ]] && echo 'use_profile' || echo 'use_otel_context') is undefined, so EVERY .envrc here fails and every token reads empty (install: catalyst install-cli, which runs ensure_direnv_runtime)"
+	fi
+done
 
 # ─── 2. the profiles ────────────────────────────────────────────────────────
 for p in $REQUIRED_PROFILES; do
@@ -108,7 +162,7 @@ if [[ -f "$DIR/.envrc" ]]; then
 	# Read the allowed-state POSITIVELY, from the "Found RC" block only (see header).
 	STATUS_OUT="$(cd "$DIR" && direnv status 2>/dev/null)"
 	ALLOWED_LINE="$(printf '%s\n' "$STATUS_OUT" | grep -E '^Found RC allowed ' | head -n1)"
-	if [[ -z "$ALLOWED_LINE" ]]; then
+	if [[ -z $ALLOWED_LINE ]]; then
 		fail ".envrc allowed-state UNREADABLE — direnv status printed no 'Found RC allowed' line"
 	else
 		ALLOWED_VAL="${ALLOWED_LINE##* }"
@@ -128,7 +182,22 @@ if [[ -f "$DIR/.envrc" ]]; then
 			pass ".envrc is ALLOWED (Found RC allowed $ALLOWED_VAL)"
 			;;
 		1 | 2 | false)
-			fail ".envrc is BLOCKED (Found RC allowed $ALLOWED_VAL) — run: direnv allow $DIR"
+			# CTL-1956: with --install this is remediable here — `direnv allow` is a local,
+			# reversible act on a repo the operator already checked out. Re-read the state
+			# AFTERWARDS rather than assuming the allow worked; an allow that silently fails
+			# must still render RED.
+			if [[ $DO_INSTALL -eq 1 ]]; then
+				info ".envrc BLOCKED — running: direnv allow $DIR"
+				(cd "$DIR" && direnv allow . >/dev/null 2>&1) || true
+				RECHECK="$(cd "$DIR" && direnv status 2>/dev/null | grep -E '^Found RC allowed ' | head -n1)"
+				RECHECK_VAL="${RECHECK##* }"
+				case "$RECHECK_VAL" in
+				0 | true) pass ".envrc is ALLOWED (Found RC allowed $RECHECK_VAL, after --install)" ;;
+				*) fail ".envrc still BLOCKED after direnv allow (Found RC allowed '$RECHECK_VAL')" ;;
+				esac
+			else
+				fail ".envrc is BLOCKED (Found RC allowed $ALLOWED_VAL) — run: direnv allow $DIR"
+			fi
 			;;
 		*)
 			fail ".envrc allowed-state UNRECOGNIZED (Found RC allowed '$ALLOWED_VAL', direnv $(direnv version 2>/dev/null || echo '?')) — refusing to guess"
@@ -166,7 +235,7 @@ if [[ -f "$DIR/.envrc" ]]; then
 	for t in $REQUIRED_TOKENS; do
 		VAL="$(printf '%s\n' "$ENV_DUMP" | grep -E "^${t}=" | head -n1)"
 		VAL="${VAL#*=}"
-		if [[ -n "$VAL" ]]; then
+		if [[ -n $VAL ]]; then
 			pass "$t is set (${#VAL} chars)"
 		else
 			fail "$t is EMPTY — an owner launched here cannot use it"
@@ -179,7 +248,7 @@ if [[ $DO_PROBE -eq 1 ]]; then
 	# Same scrub as section 4 — probe the token THIS HOST produces, not the caller's.
 	TOKEN="$(printf '%s\n' "$(direnv_dump "$DIR")" | grep -E '^LINEAR_API_TOKEN=' | head -n1)"
 	TOKEN="${TOKEN#*=}"
-	if [[ -z "$TOKEN" ]]; then
+	if [[ -z $TOKEN ]]; then
 		fail "live Linear probe SKIPPED — no LINEAR_API_TOKEN to probe with"
 	else
 		VIEWER="$(curl -sS --max-time 20 -X POST https://api.linear.app/graphql \

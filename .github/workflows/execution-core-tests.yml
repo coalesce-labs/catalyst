@@ -298,6 +298,17 @@ jobs:
           sudo apt-get install -y -qq direnv
           direnv version
           bash plugins/dev/scripts/__tests__/check-direnv-fleet.test.sh
+          # CTL-1956: the provisioning half. The check
+          # above proves a host is judged correctly; this
+          # proves the remediation installs from the
+          # VENDORED copy and never clobbers an existing
+          # profile. Extracting these functions into lib/
+          # silently re-pointed the vendored lookup one
+          # level too high — the step would have "run" and
+          # installed nothing. Wired here because a suite
+          # that is not in CI ships inert, which is the
+          # very failure this ticket is about.
+          bash plugins/dev/scripts/__tests__/direnv-provision.test.sh
 
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
@@ -403,7 +414,9 @@ jobs:
         # two assertions SKIP (not fail) when zsh is absent, and this workflow's other
         # zsh install lands hundreds of lines later — so without this step the required
         # check could pass without ever exercising the shell that caused the regression.
-        run: command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zsh)
+        run:
+          command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y
+          --no-install-recommends zsh)
 
       - name: cloud-sync token probe test
         working-directory: plugins/dev/scripts
