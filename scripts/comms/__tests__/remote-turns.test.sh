@@ -53,6 +53,14 @@ chmod +x "$SCRATCH/fake-ssh"
 
 queue() { HOME="$REMOTE_HOME" bash "$POST" --channel demo --owner "$1" >/dev/null 2>&1; }
 drain() { CATALYST_SSH="$SCRATCH/fake-ssh" CATALYST_MD_CHANNELS="$CHANNELS" bash "$DRAIN" --channel demo --hosts "${1:-mini}" 2>&1; }
+# ⛔ The mkdir-lock branch only runs when flock is ABSENT — the stock macOS shape. On a host that
+# has flock (this laptop does, via homebrew) the stale-lock cases would silently exercise the
+# flock branch and assert nothing; the live-holder control below is what caught that. A PATH of
+# /usr/bin:/bin covers everything the drainer uses (ls, sort, sed, cat, mkdir, grep, kill).
+drain_no_flock() {
+	PATH="/usr/bin:/bin" CATALYST_SSH="$SCRATCH/fake-ssh" CATALYST_MD_CHANNELS="$CHANNELS" \
+		bash "$DRAIN" --channel demo --hosts "${1:-mini}" 2>&1
+}
 
 echo ""
 echo "=== a queued turn is delivered to the channel ==="
@@ -152,6 +160,39 @@ if grep -qF "CONCURRENT TURN" "$CHANNEL_FILE"; then fail "the locked-out drain a
 # above would pass against a drain that is simply broken.
 OUT_AFTER="$(drain mini)"
 if grep -qF "CONCURRENT TURN" "$CHANNEL_FILE"; then pass "control — after the lock is released the turn is delivered"; else fail "control — the turn is delivered once unlocked" "$OUT_AFTER"; fi
+
+echo ""
+echo "--- ⛔ a STALE mkdir lock is taken over, not obeyed forever (Codex #3517 P2) ---"
+# A kill -9 / crash / reboot skips the EXIT trap. Before the fix every later drain read the
+# orphaned directory as a live owner and exited 0 — the transport wedged while reporting success.
+# Exercised directly (the mkdir branch is what runs on stock macOS, flock or not here).
+printf 'AFTER STALE LOCK\n' | queue FLEET
+mkdir -p "$CHANNEL_FILE.drain.lockdir"
+echo "999999" >"$CHANNEL_FILE.drain.lockdir/pid" # a pid that is not running
+OUT_STALE="$(drain_no_flock)"
+if command -v flock >/dev/null 2>&1 && PATH="/usr/bin:/bin" command -v flock >/dev/null 2>&1; then
+	fail "the fixture removed flock from PATH" "flock is still reachable; these cases would test the wrong branch"
+else
+	pass "control — flock is out of PATH, so the mkdir branch is the one under test"
+fi
+if grep -q "STALE lock" <<<"$OUT_STALE"; then pass "the stale lock is identified as stale"; else fail "the stale lock is identified" "$OUT_STALE"; fi
+if grep -qF "AFTER STALE LOCK" "$CHANNEL_FILE"; then pass "the turn was delivered despite the orphaned lock"; else fail "the turn was delivered despite the orphaned lock" "$OUT_STALE"; fi
+rm -rf "$CHANNEL_FILE.drain.lockdir"
+# ⛔ Positive control: a lock held by a LIVE process must still be obeyed, or the takeover above
+# would just be "the lock never works".
+printf 'MUST NOT DELIVER\n' | queue FLEET
+mkdir -p "$CHANNEL_FILE.drain.lockdir"
+sleep 30 &
+LIVE=$!
+echo "$LIVE" >"$CHANNEL_FILE.drain.lockdir/pid"
+OUT_LIVE="$(drain_no_flock)"
+kill "$LIVE" 2>/dev/null
+if grep -qF "MUST NOT DELIVER" "$CHANNEL_FILE"; then
+	fail "control — a LIVE lock is still obeyed" "the takeover ignores a running holder; the lock is useless"
+else
+	pass "control — a lock held by a LIVE pid is still obeyed"
+fi
+rm -rf "$CHANNEL_FILE.drain.lockdir"
 
 echo ""
 echo "--- ⛔ '..' as a channel slug is refused (Codex #3517 P2) ---"

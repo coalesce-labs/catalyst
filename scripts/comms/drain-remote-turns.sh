@@ -49,12 +49,28 @@ if command -v flock >/dev/null 2>&1; then
   fi
 else
   # macOS ships no flock(1); mkdir is atomic and is the portable stand-in.
+  #
+  # ⛔ Codex #3517 P2: a kill -9, a crash or a reboot skips the EXIT trap and leaves the lock
+  # directory on disk. Every later drain then read it as a live owner and exited 0 — the channel
+  # would quietly stop receiving remote turns forever, with a SUCCESSFUL exit status every pass.
+  # The holder's PID is recorded so a lock whose owner is gone can be identified as STALE and
+  # taken over, loudly, instead of wedging the transport.
   LOCKDIR="$CHANNEL_FILE.drain.lockdir"
   if ! mkdir "$LOCKDIR" 2>/dev/null; then
-    echo "drain: another drain holds $LOCKDIR — skipping this pass" >&2
-    exit 0
+    holder="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+      echo "drain: another drain (pid $holder) holds $LOCKDIR — skipping this pass" >&2
+      exit 0
+    fi
+    echo "drain: STALE lock $LOCKDIR (holder '${holder:-unknown}' is not running) — taking it over" >&2
+    rm -rf "$LOCKDIR"
+    if ! mkdir "$LOCKDIR" 2>/dev/null; then
+      echo "drain: could not take over $LOCKDIR — skipping this pass" >&2
+      exit 0
+    fi
   fi
-  trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
+  echo "$$" >"$LOCKDIR/pid"
+  trap 'rm -rf "$LOCKDIR" 2>/dev/null || true' EXIT
 fi
 
 drained=0 failed=0
