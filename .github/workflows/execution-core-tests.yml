@@ -255,6 +255,14 @@ jobs:
         working-directory: .
         run: bash scripts/comms/__tests__/remote-turns.test.sh
 
+      - name: account-usage pager test (CTL-1908)
+        # Pages before an armed Claude account exhausts its 5-hour / 7-day window. The property
+        # under test is not "does it page at 80%" — it is that every way of being unable to SEE
+        # usage (absent, stale, unparsable, or a payload with no percentages) renders as
+        # UNOBSERVABLE and a non-zero exit, never as "under threshold".
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/catalyst-account-usage-page.test.sh
+
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
         # named export (the CTL-1093 outage: getCatalystRepoDir added to daemon.mjs
