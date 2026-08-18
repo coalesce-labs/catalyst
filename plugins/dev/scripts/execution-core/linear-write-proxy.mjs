@@ -129,6 +129,17 @@ export const PROXY_ROUTE_IDS = Object.freeze([
   // WRITE and it is DISPATCH-CRITICAL: `cluster-claim.mjs`'s soft-CAS decides whether this
   // host may work a ticket at all, so it is emphatically NOT in NON_BLOCKING_ROUTE_IDS.
   "attachment",
+  // CTL-1961 / CTC-724 — the 👀 read-receipt every lane's brief tells it to leave on a
+  // human's comment (`linear-ack.mjs`), plus the clear `linear-reply.mjs` issues once it
+  // has replied. Measured off catalyst-cloud `origin/main` (ba3a722) at the DISPATCHER,
+  // not from the doc comment above the handler:
+  //   index.ts:986  url.pathname === "/api/v1/agent/reaction"
+  "reaction",
+  // CTL-1961 / CTC-725 — filing a ticket. The route returns the `identifier`, so the
+  // house rule "file the ticket before citing its number" is served by the call itself
+  // rather than by a follow-up read.
+  //   index.ts:989  url.pathname === "/api/v1/agent/issue-create"
+  "issue-create",
 ]);
 
 /**
@@ -152,6 +163,33 @@ export const PROXY_ROUTE_IDS = Object.freeze([
  * fleet-wide stall traded for a status line. So do NOT add an id here to make something
  * faster. Add one only when its failure costs nothing but a missing observation.
  */
+/**
+ * ⛔ CTL-1961 — WHY `reaction` IS NOT IN THIS SET, since the obvious reason is wrong.
+ *
+ * CTC-724 argued it as "a claim decides whether a host may work a ticket, so
+ * fire-and-forget lets two owners both believe they hold it". That rationale does NOT
+ * hold: the 👀 is not a claim. Ryan defined its meaning in `linear-reply.mjs` — "👀 on
+ * the human's LATEST comment means 'read, working on it'; it comes OFF once the reply is
+ * posted (not at resolution)" — a read-receipt on ONE comment. `linear-ack.mjs` reacts to
+ * a comment rather than the issue and never reads before it writes, and nothing in this
+ * repo gates work admission on a Linear reaction. The exclusion primitive is
+ * `cluster-claim.mjs`'s `catalyst://fence/<TICKET>` soft-CAS, which is the `attachment`
+ * route above.
+ *
+ * ⛔ Recording that matters, because the next reader who discovers the 👀 is not a claim
+ * would otherwise conclude the constraint rested on a mistake and move it here.
+ *
+ * The reason that DOES survive is an ordering race, and it is independent of what the
+ * reaction means: add and remove are a matched pair on the SAME object issued by TWO
+ * different tools — `linear-ack.mjs` adds, `linear-reply.mjs` removes (default-on unless
+ * `--keep-eyes`) — and the normal path issues add → remove within seconds. Make the add
+ * fire-and-forget while the remove blocks, and the remove runs against a comment where
+ * the add has not landed, finds nothing, and the add lands after it. The result is a
+ * PERMANENT stale 👀 on an already-answered comment, which nothing ever clears: the clear
+ * only runs on the NEXT reply under that same comment, which may never come.
+ *
+ * `issue-create` is likewise absent: its whole value is the `identifier` it returns.
+ */
 export const NON_BLOCKING_ROUTE_IDS = Object.freeze(new Set(["session"]));
 
 /**
@@ -170,6 +208,11 @@ export const DEFAULT_ROUTES = Object.freeze({
   // CTL-1889 inc 3 / CTC-692, read off the merged handler AND probed live (see
   // READ_ROUTE_IDS below for the measurements this pair depends on).
   attachment: "/agent/attachment",
+  // CTL-1961, read off catalyst-cloud index.ts:986/989 (the pathname the server actually
+  // compares), not off the handler's doc comment — this file's header records that an
+  // earlier cut shipped DEFAULT_ROUTES as a declared ASSUMPTION and was wrong on every one.
+  reaction: "/agent/reaction",
+  "issue-create": "/agent/issue-create",
 });
 
 /**
