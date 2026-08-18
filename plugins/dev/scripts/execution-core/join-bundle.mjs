@@ -115,6 +115,18 @@ function extractMonitorWebhooks(l2) {
   return Object.keys(out).length > 0 ? out : null;
 }
 
+// CTL-2004: the seed's declared GitHub-ingestion mode, or null. Read as a plain value with a
+// vocabulary check rather than through resolveGithubFeedMode(): that resolver consults the SEED
+// PROCESS's own env and defaults to "off", and neither belongs in a bundle describing the cluster
+// — a seed running with a one-off CATALYST_GITHUB_FEED in its shell must not pin every future
+// member to it, and "the seed declares nothing" must stay distinguishable from "the seed declares
+// off". Kept import-free for the same reason the rest of this module is.
+const GITHUB_FEED_BUNDLE_MODES = ["off", "shadow", "enforce"];
+function extractGithubFeed(l2) {
+  const mode = l2?.catalyst?.githubFeed?.mode;
+  return typeof mode === "string" && GITHUB_FEED_BUNDLE_MODES.includes(mode) ? { mode } : null;
+}
+
 // CTL-1231: carry a SHARED-only, secret-free slice of the seed's
 // ~/.claude/settings.json so a member's interactive `claude` sessions inherit
 // the cluster's telemetry posture + autonomy defaults. Built from an EXPLICIT
@@ -234,6 +246,17 @@ export function assembleJoinBundle() {
     // posture + autonomy defaults). null when the seed has no settings. Optional
     // (existence-only) — an older seed degrades gracefully.
     claudeSettings: extractClaudeSettings(),
+    // ⛔ CTL-2004: the seed's GitHub-ingestion posture. This bundle already propagates
+    // `monitor.github.smeeChannel` above (deliberately — the GitHub leg is still smee-fed per
+    // CTL-1928), so a member was handed a TUNNEL CHANNEL and no mode. The mode resolves
+    // env -> Layer-2 -> default "off", `githubFeedIsAuthoritative()` is `mode === "enforce"`, and
+    // orch-monitor suppresses the tunnel only on that — so every host joining after the fleet's
+    // cutover silently came up on smee while looking perfectly healthy. Carrying the seed's mode
+    // makes a member inherit the fleet's declared posture instead of the off default.
+    //
+    // null when the seed declares nothing — the member then behaves exactly as before rather than
+    // being pinned to a posture the seed never held.
+    githubFeed: extractGithubFeed(l2),
   };
 }
 

@@ -201,6 +201,59 @@ describe("assembleJoinBundle", () => {
     expect(b.otlpEndpointHint).toBe("http://from-l2:4318");
   });
 
+  // ⛔ CTL-2004: the bundle hands a joiner monitor.github.smeeChannel — a tunnel CHANNEL.
+  // What decides whether it OPENS is catalyst.githubFeed.mode, which nothing carried:
+  // githubFeedIsAuthoritative() is mode==="enforce", orch-monitor suppresses the tunnel only
+  // on that, and the mode resolves env -> Layer-2 -> default "off". So a host joining after
+  // the cutover came up on SMEE, healthy and green, on the transport v1 retires.
+  test("⭐ githubFeed carries the seed's declared mode, so a member inherits the fleet's posture", () => {
+    writeLayer2({
+      ...LAYER2_FIXTURE,
+      catalyst: { ...LAYER2_FIXTURE.catalyst, githubFeed: { mode: "enforce" } },
+    });
+    expect(assembleJoinBundle().githubFeed).toEqual({ mode: "enforce" });
+  });
+
+  test("⛔ INVERSION GUARD — a seed declaring nothing carries null, NOT a manufactured 'off'", () => {
+    // "the seed declares nothing" must stay distinguishable from "the seed declares off":
+    // the consumer writes non-clobber, and a fabricated posture would pin every future member.
+    expect(assembleJoinBundle().githubFeed).toBeNull();
+  });
+
+  test("⛔ a junk mode is refused rather than travelling to every member", () => {
+    for (const bad of ["banana", "", 7, null, {}]) {
+      writeLayer2({
+        ...LAYER2_FIXTURE,
+        catalyst: { ...LAYER2_FIXTURE.catalyst, githubFeed: { mode: bad } },
+      });
+      expect(assembleJoinBundle().githubFeed).toBeNull();
+    }
+  });
+
+  test("all three modes travel", () => {
+    for (const mode of ["off", "shadow", "enforce"]) {
+      writeLayer2({
+        ...LAYER2_FIXTURE,
+        catalyst: { ...LAYER2_FIXTURE.catalyst, githubFeed: { mode } },
+      });
+      expect(assembleJoinBundle().githubFeed).toEqual({ mode });
+    }
+  });
+
+  test("⛔ the CHANNEL and the MODE travel together — the pairing whose absence was the defect", () => {
+    writeLayer2({
+      ...LAYER2_FIXTURE,
+      catalyst: {
+        ...LAYER2_FIXTURE.catalyst,
+        githubFeed: { mode: "enforce" },
+        monitor: { github: { smeeChannel: "https://smee.io/GH" } },
+      },
+    });
+    const b = assembleJoinBundle();
+    expect(b.monitorWebhooks.github).toEqual({ smeeChannel: "https://smee.io/GH" });
+    expect(b.githubFeed).toEqual({ mode: "enforce" });
+  });
+
   // CTL-1284: non-secret webhook wiring (smee channels + per-team webhookId map).
   test("monitorWebhooks is null when the seed has no monitor block", () => {
     expect(assembleJoinBundle().monitorWebhooks).toBeNull();
