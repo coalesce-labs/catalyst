@@ -28,7 +28,7 @@ or update the issue. CLI syntax lives in `/catalyst-dev:linearis`.
 Auto-invoked whenever a ticket is being born or rewritten — you do **not** need to say "gherkin":
 
 - "file a ticket for X", "create tickets for A and B", "open an issue", "log this bug"
-- breaking a PRD/plan into tickets (pair with `/catalyst-pm:create-tickets`)
+- breaking a PRD/plan into tickets (pair with `/catalyst-pm-ops:create-tickets`)
 - "rewrite this ticket", "clean up these ticket titles", "this backlog is unreadable"
 
 If the user is mid-creation in another skill (`linear`, `create-tickets`, `phase-triage`), apply
@@ -327,7 +327,7 @@ conventions.
 
 - `/catalyst-dev:linear` — does the actual Linear create/update. This skill produces the title +
   body it consumes.
-- `/catalyst-pm:create-tickets` — when exploding a PRD into many tickets, apply these title/body
+- `/catalyst-pm-ops:create-tickets` — when exploding a PRD into many tickets, apply these title/body
   rules to each. (Its legacy `[Component] Action:` title format is superseded by outcome titles +
   component labels.)
 - `/catalyst-dev:phase-triage` — triage reads tickets; a ticket authored to this standard makes
