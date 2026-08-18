@@ -9,6 +9,8 @@ import {
   computeSuppressible,
   decideDispatch,
   githubLossyNames,
+  githubSuppressibleNames,
+  githubUncoveredNames,
   isGithubDispatchClass,
   sourceOf,
 } from "./github-feed-gate.mjs";
@@ -118,10 +120,10 @@ describe("⛔ enforce must NOT suppress smee for a name with no faithful replace
     expect(v.reason).toBe("smee-captured");
   });
 
-  test("github.check_suite.completed survives — no suite row (CTC-667 item 4)", () => {
+  test("github.check_suite.completed survives — no PR association until 0.1.18 (CTC-712)", () => {
     const v = decideDispatch(smee("github.check_suite.completed"), armed);
     expect(v.suppress).toBe(false);
-    expect(v.reason).toBe("no-replacement:no-suite-row:CTC-667-item-4");
+    expect(v.reason).toBe("no-replacement:no-pr-association-until-0.1.18:CTC-712");
   });
 
   test("⛔ github.push survives — the collapse loses an ARRIVAL, not a value (CTC-704)", () => {
@@ -150,7 +152,7 @@ describe("⛔ enforce must NOT suppress smee for a name with no faithful replace
     //    whenever the producer happens to be un-armed, and the two collapse.
     const v = decideDispatch(smee("github.check_suite.completed"), { mode: "enforce", isReady: () => false });
     expect(v.suppress).toBe(false);
-    expect(v.reason).toBe("no-replacement:no-suite-row:CTC-667-item-4");
+    expect(v.reason).toBe("no-replacement:no-pr-association-until-0.1.18:CTC-712");
     expect(v.reason).not.toMatch(/^enforce-not-armed/);
   });
 });
@@ -203,7 +205,7 @@ describe("the feed side is decided by its OWN stamp (CTL-1901's asymmetry), neve
     // dispatch — the double-dispatch the gate exists to prevent.
     const v = decideDispatch(feed("github.check_suite.completed"), { mode: "enforce", isReady: () => true });
     expect(v.suppress).toBe(true);
-    expect(v.reason).toBe("feed-excluded:no-replacement:no-suite-row:CTC-667-item-4");
+    expect(v.reason).toBe("feed-excluded:no-replacement:no-pr-association-until-0.1.18:CTC-712");
   });
 });
 
@@ -278,5 +280,77 @@ describe("⛔ ONE source of truth for the name lists — CI caught the half-done
     const excluded = GITHUB_CONSUMED_NAMES.filter((n) => !GITHUB_SUPPRESSIBLE_NAMES.includes(n));
     for (const n of GITHUB_UNCOVERED_NAMES) expect(excluded).toContain(n);
     expect(GITHUB_UNCOVERED_NAMES).not.toContain("github.pr.merged");
+  });
+});
+
+describe("CTC-712 / CTC-704 — coverage is a property of the HOST, not of this file", () => {
+  test("⛔ both defaults are the PRE-capability answer, so an un-wired caller is safe", () => {
+    // The single most important property of this seam: adding it changed nothing.
+    // A caller with no replica handle gets exactly today's static set.
+    expect(githubSuppressibleNames()).toEqual(GITHUB_SUPPRESSIBLE_NAMES);
+    expect(githubUncoveredNames()).toEqual(["github.check_suite.completed"]);
+    expect(githubLossyNames()).toEqual(["github.push"]);
+  });
+
+  test("⭐ a 0.1.18 replica with push_events covers ALL TWELVE consumed names", () => {
+    // This is the retirement gate stated as an assertion: the smee tunnel can only be
+    // switched off when nothing is left for it to carry.
+    const full = githubSuppressibleNames({ pushIsLossy: false, checkSuiteHasPrAssociation: true });
+    expect([...full].sort()).toEqual([...GITHUB_CONSUMED_NAMES].sort());
+    expect(full.length).toBe(12);
+  });
+
+  test("each capability independently un-blocks exactly its own name", () => {
+    const onlyPush = githubSuppressibleNames({ pushIsLossy: false, checkSuiteHasPrAssociation: false });
+    expect(onlyPush).toContain("github.push");
+    expect(onlyPush).not.toContain("github.check_suite.completed");
+
+    const onlySuite = githubSuppressibleNames({ pushIsLossy: true, checkSuiteHasPrAssociation: true });
+    expect(onlySuite).toContain("github.check_suite.completed");
+    expect(onlySuite).not.toContain("github.push");
+  });
+
+  test("⛔ a host WITHOUT the capability keeps smee authoritative for that name", () => {
+    // The mixed-pin case, which is a live condition during the canary. Suppressing
+    // here would leave the CI wait with no producer and no tunnel.
+    const set = githubSuppressibleNames({ pushIsLossy: false, checkSuiteHasPrAssociation: false });
+    const v = decideDispatch(smee("github.check_suite.completed"), {
+      mode: "enforce", isReady: () => true, suppressible: set,
+    });
+    expect(v.suppress).toBe(false);
+    expect(v.reason).toContain("CTC-712");
+  });
+
+  test("⭐ and WITH it, the same event on the same host is suppressed", () => {
+    // The positive control on the test above — otherwise "not suppressed" could be
+    // coming from anywhere in the gate.
+    const set = githubSuppressibleNames({ pushIsLossy: false, checkSuiteHasPrAssociation: true });
+    const v = decideDispatch(smee("github.check_suite.completed"), {
+      mode: "enforce", isReady: () => true, suppressible: set,
+    });
+    expect(v.suppress).toBe(true);
+    expect(v.reason).toBe("smee-captured");
+  });
+
+  test("⛔ a malformed suppressible argument falls back to the SAFE set, never to empty", () => {
+    // An empty set suppresses nothing on the smee side AND refuses every feed event —
+    // survivable. A caller passing junk that got coerced to `new Set()` on the FEED
+    // side while smee also dispatched would be the double-dispatch. Falling back to
+    // the module constant keeps both halves agreeing.
+    for (const junk of [undefined, null, 0, "github.push", {}]) {
+      const v = decideDispatch(smee("github.pr.opened"), {
+        mode: "enforce", isReady: () => true, suppressible: junk,
+      });
+      expect(v.suppress).toBe(true);
+    }
+  });
+
+  test("an ARRAY is accepted as well as a Set — the source of truth is a frozen array", () => {
+    expect(Array.isArray(githubSuppressibleNames({ pushIsLossy: false, checkSuiteHasPrAssociation: true }))).toBe(true);
+    const v = decideDispatch(smee("github.push"), {
+      mode: "enforce", isReady: () => true,
+      suppressible: githubSuppressibleNames({ pushIsLossy: false, checkSuiteHasPrAssociation: true }),
+    });
+    expect(v.suppress).toBe(true);
   });
 });

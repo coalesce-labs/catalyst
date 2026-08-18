@@ -74,13 +74,17 @@ export const GITHUB_UNCOVERED_NAMES = Object.freeze([
   // A row whose sha is NULL (a merge predating the pin, never backfilled) still
   // declines, but per ROW in `classifyGithubRow`, which is the correct granularity.
   //
-  // ⛔ `check_suite.completed` STAYS, and NOT for the reason the old entry gave. The
-  // mirror stores a suite row now. What it does not store is the association the
-  // CONSUMER keys on: `router.mjs:1497` reaches an interest only through
-  // `detail.prNumbers`, from `check_suite.pull_requests[].number`, which the mirror
-  // drops and `check_runs` cannot supply. The only derivation is a LAST-STATE join
-  // through `pull_requests.head_sha` — measured 93/202 (46%) on mini-2, misses
-  // dominated by active PR branches whose head moved after the suite ran. → CTC-712
+  // ⛔ `check_suite.completed` STAYS IN THE STATIC LIST — and that is now a statement
+  // about THIS FILE's ignorance, not about the schema. CTC-712 landed the association
+  // (`check_suites.pull_request_numbers`, migration 0028, schema 0.1.18), so on a
+  // migrated replica the name IS covered.
+  //
+  // This leaf is zero-import and has no database handle, so it cannot know whether the
+  // host in front of it has run that migration — and the 0.1.18 pin rolls as a CANARY,
+  // so at any moment one host has it and another does not. The static answer therefore
+  // stays the SAFE one (uncovered ⇒ smee keeps authority) and the real answer comes
+  // from `githubUncoveredNames(db)` in `github-feed-gate.mjs`. Deleting this entry
+  // would suppress smee on a host that cannot emit the name.
   "github.check_suite.completed",
 ]);
 
@@ -121,6 +125,12 @@ export const GITHUB_SUPPRESSIBLE_NAMES = computeSuppressible({
 /** Why an excluded name is excluded — for capture records and doctor output. */
 export const EXCLUSION_REASONS = Object.freeze({
   "github.pr.merged": "no-replacement:no-merge-commit-sha:CTC-691",
-  "github.check_suite.completed": "no-replacement:no-suite-row:CTC-667-item-4",
+  // ⚠️ THE REASON CHANGED WITH THE SCHEMA, twice. It was "no suite row" (CTC-667
+  // item 4), then "a suite row with no PR association" (CTC-712). On schema 0.1.18
+  // neither is true and the name is covered — but only on a host whose replica has
+  // actually run migration 0028, which is why coverage is resolved per host by
+  // `githubUncoveredNames(db)` and this string is only ever read for a host where it
+  // still IS excluded.
+  "github.check_suite.completed": "no-replacement:no-pr-association-until-0.1.18:CTC-712",
   "github.push": "lossy-replacement:pushes-keyed-per-ref:CTC-704",
 });

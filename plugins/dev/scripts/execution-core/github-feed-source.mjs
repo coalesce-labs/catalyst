@@ -95,15 +95,29 @@
 //    "did this ref move", not "how many times" — so the collapse is survivable.
 //    It is declared here rather than discovered later, and `PUSH_IS_LOSSY` exists
 //    so a caller can assert on the fact rather than on a comment.
-// 2. `github.check_suite.completed` HAS NO STREAM AT ALL. The mirror accepts the
-//    `check_suite` payload and deliberately stores no row (`return []`), so there
-//    is nothing to page over. `check_runs` holds the constituent data (60,249 rows)
-//    but a suite is not reconstructable from it safely: one head sha carried **10
-//    distinct `check_suite_id`s** on mini-2, several with runs still incomplete, so
-//    "every run I can see has completed" fires early and green on a partial view —
-//    a false CI-pass on the merge gate. The derivation is CTC-667 item 4 and is
-//    theirs to declare; this module exports the gap as `UNBACKED_EVENT_NAMES`
-//    rather than inventing a second answer.
+// 2. `github.check_suite.completed` IS BACKED ONLY ON A 0.1.18 REPLICA, and the
+//    discriminator is a COLUMN, not a table. CTC-667 item 4 gave the suite a row
+//    (`check_suites`, 760 on mini-2) but not the association the consumer keys on;
+//    CTC-712 added `pull_request_numbers` in migration `0028_burly_nemesis`, an
+//    additive `ALTER TABLE ... ADD`.
+//
+//    ⛔ SO A HOST CAN HAVE THE TABLE AND STILL NOT BE ABLE TO EMIT. `tableExists`
+//    cannot see that: `buildStreamQuery` uses `SELECT *`, so on a 0.1.17 replica the
+//    query SUCCEEDS and every row simply lacks the column — the producer would emit
+//    suite events carrying no `vcs.pr.number`, which `router.mjs:1497` can reach no
+//    interest with. Those route-looking-but-unroutable events are worse than an
+//    absence, because an absence is counted. `requiresColumn` + `columnExists`
+//    resolve it from the replica, exactly as `requiresTable` does one level up.
+//
+//    ⚠️ AND THE MIGRATION DOES NOT BACKFILL. The 760 rows that predate it keep a
+//    NULL association forever, so a row-level decline is owed on top of the stream-
+//    level gate — the same two-level posture `prMerged` took for CTC-691's 4,230
+//    un-backfilled PR rows. See `classifyGithubRow`.
+//
+//    ⚠️ `check_runs` is still NOT a fallback: one head sha carried **10 distinct
+//    `check_suite_id`s** on mini-2, several with runs incomplete, so "every run I can
+//    see has completed" fires early and GREEN on a partial view — a false CI-pass on
+//    the merge gate.
 
 import { Database } from "bun:sqlite";
 import { getReplicaDbPath } from "./config.mjs";
@@ -126,6 +140,39 @@ export const DEFAULT_SETTLE_MS = 600_000;
  * can account for them as EXPECTED absences instead of as unexplained diffs.
  */
 export const UNBACKED_EVENT_NAMES = Object.freeze(["github.check_suite.completed"]);
+
+/**
+ * The same list, resolved against a REPLICA rather than asserted statically.
+ *
+ * ⛔ THE STATIC ANSWER IS WRONG ON A MIXED-PIN FLEET, and the fleet is mixed by
+ * design: the 0.1.18 rollout is a canary (mini-2, then mini), so between the two
+ * writer restarts one host can emit `github.check_suite.completed` and the other
+ * cannot. A constant would be wrong on exactly one of them — the identical failure
+ * `PUSH_IS_LOSSY` had before CTC-704 made it `pushIsLossy(db)`.
+ *
+ * ⭐ The default (no handle ⇒ UNBACKED) is the safe direction: a caller that cannot
+ * ask the replica reports less coverage than it may have, and less coverage means
+ * smee keeps authority. Over-reporting coverage is the one that silently drops
+ * dispatch.
+ */
+export function unbackedEventNames(db = null) {
+  if (!db) return UNBACKED_EVENT_NAMES;
+  return Object.freeze(checkSuiteHasPrAssociation(db) ? [] : ["github.check_suite.completed"]);
+}
+
+/**
+ * Can THIS replica carry the PR association a `check_suite` event needs to route?
+ *
+ * `router.mjs:1497` reaches an interest only through `detail.prNumbers`, which the
+ * webhook fills from `check_suite.pull_requests[].number`. Before CTC-712 the mirror
+ * dropped it; the only derivation was a last-state join through
+ * `pull_requests.head_sha`, measured at **93/202 (46%)** on mini-2 with the misses
+ * dominated by active branches whose head moved after the suite ran — a race that,
+ * under `enforce` with no smee copy, hangs the CI wait.
+ */
+export function checkSuiteHasPrAssociation(db) {
+  return columnExists(db, "check_suites", "pull_request_numbers");
+}
 
 
 /**
@@ -221,6 +268,46 @@ export const STREAMS = Object.freeze([
     where: null,
   },
   {
+    // ⭐ CTC-712 — the suite row plus the association the CONSUMER keys on.
+    //
+    // ⚠️ `updated_at` IS A MUTABLE COORDINATE — `check_suites` has no once-set
+    // `completed_at`, because the row IS the suite's current state (queued →
+    // in_progress → completed, rewritten in place). That is survivable here in a way
+    // it is not for `pushes`, and the difference is the PRIMARY KEY: `check_suite_id`
+    // identifies the SUITE, and a suite completes once, so the PK is very nearly an
+    // edge identity already.
+    //
+    // ⛔ "Very nearly" is not "is". A `rerequested` suite REUSES its id and completes
+    // AGAIN — a second genuine edge the webhook delivers twice. Keyed on the PK alone
+    // the seen-set would suppress the re-run's completion as a re-read, and under
+    // `enforce` the merge gate would wait forever on a CI pass that had already
+    // happened. `mutableRow` folds the COORDINATE in (see `githubEdgeId`), so a
+    // re-read is byte-identical and a re-run is not.
+    //
+    // ⚠️ AND THE COORDINATE ALONE IS SUFFICIENT HERE — no `edgeIdCols`. `push` also
+    // folds `after`, because its PK is the REF and two pushes can share a millisecond
+    // while carrying different shas. A suite is ONE ROW IN ONE STATE: it cannot
+    // complete twice at the same `updated_at`, so there is no same-timestamp pair to
+    // separate. An earlier cut folded `conclusion` in "so the two edges are
+    // distinguishable" — a mutation proved that claim empty (the ids already differed
+    // by timestamp, and dropping the column changed nothing that any test could see).
+    // Removed rather than kept as harmless: an unused discriminator reads as a
+    // load-bearing one to the next person.
+    key: "checkSuiteCompleted",
+    event: "github.check_suite.completed",
+    table: "check_suites",
+    tsCol: "updated_at",
+    idExpr: "check_suite_id",
+    // Only the terminal edge is consumed. `github.check_suite.<status>` is a real
+    // family on the webhook side (the name is built from `status`), but `completed`
+    // is the only member any consumer reads.
+    where: "status = 'completed'",
+    // ⛔ THE COLUMN, NOT THE TABLE — see gap (2) in the header. `check_suites` exists
+    // on 0.1.17 without this; serving the stream there emits unroutable events.
+    requiresColumn: "pull_request_numbers",
+    mutableRow: true,
+  },
+  {
     // ⭐ CTC-704 — one row per DELIVERY, which is what makes `github.push` faithful.
     //
     // `push_events` is keyed on GitHub's own `x-github-delivery` id, so the PK is a
@@ -268,6 +355,9 @@ export const STREAMS = Object.freeze([
     // base-branch rebase detection and plugin-refresh's auto-pull with it.
     // `githubEdgeId` therefore folds the mutable coordinate in for this stream.
     mutableRow: true,
+    // Stated explicitly rather than left to a default, now that a second `mutableRow`
+    // stream exists. The id this produces is byte-identical to what it was before.
+    edgeIdCols: ["after"],
   },
 ]);
 
@@ -294,6 +384,33 @@ export function tableExists(db, table) {
 }
 
 /**
+ * columnExists — does this replica's table carry the column a stream needs?
+ *
+ * ⛔ THE SIBLING `tableExists` CANNOT ANSWER FOR, and the distinction is not academic.
+ * `buildStreamQuery` selects `*`, so a stream whose table exists but whose column does
+ * not runs WITHOUT ERROR and yields rows with the field simply `undefined`. There is no
+ * `no such column` to catch — the failure is silent and shaped like data. That is how
+ * `check_suites` on a 0.1.17 replica would have produced suite events carrying no PR
+ * association: emitted, counted as emitted, and unroutable.
+ *
+ * ⚠️ `PRAGMA table_info` cannot be parameterised, so the table name is interpolated.
+ * Every caller passes a name from the frozen `STREAMS` list in this file — never
+ * caller input — which is what makes that safe here and would not make it safe
+ * elsewhere.
+ */
+export function columnExists(db, table, column) {
+  try {
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all();
+    // An absent table yields zero rows rather than throwing, so this fails closed for
+    // the missing-table case too without needing to ask twice.
+    return rows.some((r) => r?.name === column);
+  } catch {
+    // A replica that cannot answer this question is not one to read optimistically.
+    return false;
+  }
+}
+
+/**
  * availableStreams — the streams this replica can actually serve, with the
  * supersession between `pushEvent` and `push` resolved to exactly ONE.
  *
@@ -307,7 +424,12 @@ export function tableExists(db, table) {
 export function availableStreams(db, streams = STREAMS) {
   const present = new Map();
   for (const s of streams) {
-    present.set(s.key, s.requiresTable ? tableExists(db, s.table) : true);
+    // ⛔ BOTH gates, and a stream may declare either or both. `requiresTable` catches a
+    // schema that predates the table; `requiresColumn` catches one that has the table
+    // and not the association — a distinction `SELECT *` erases (see `columnExists`).
+    const hasTable = s.requiresTable ? tableExists(db, s.table) : true;
+    const hasColumn = s.requiresColumn ? columnExists(db, s.table, s.requiresColumn) : true;
+    present.set(s.key, hasTable && hasColumn);
   }
   return streams.filter((s) => {
     if (!present.get(s.key)) return false;
@@ -371,6 +493,16 @@ export const REQUIRED_COLUMNS = Object.freeze({
   deployment_statuses: [
     "id", "repo_id", "deployment_id", "state", "environment", "target_url",
     "environment_url", "description", "creator_id", "created_at",
+  ],
+  // ⚠️ BASE COLUMNS ONLY — `pull_request_numbers` is deliberately NOT here. This list
+  // is asserted unconditionally against the live replica, and the association column
+  // is precisely the one whose absence is EXPECTED on a pre-0.1.18 host. Listing it
+  // would turn a correctly-detected capability gap into a failing conformance test on
+  // every host until the pin rolls. Its presence is the `requiresColumn` gate's job,
+  // and `checkSuiteHasPrAssociation` is where a caller asks.
+  check_suites: [
+    "repo_id", "check_suite_id", "head_sha", "head_branch", "status", "conclusion",
+    "app_slug", "latest_check_runs_count", "updated_at",
   ],
   pushes: [
     "repo_id", "ref", "before", "after", "forced", "created", "deleted",
@@ -525,6 +657,10 @@ export function createGithubFeedSource({ dbPath = getReplicaDbPath(), limit = DE
     streamKeys: () => availableStreams(open()).map((s) => s.key),
     /** Whether `github.push` is still collapse-prone on THIS replica (CTC-704). */
     pushIsLossy: () => pushIsLossy(open()),
+    /** Whether `check_suite.completed` can carry its PR association here (CTC-712). */
+    checkSuiteHasPrAssociation: () => checkSuiteHasPrAssociation(open()),
+    /** Consumed names with no usable stream on THIS replica. See `unbackedEventNames`. */
+    unbackedEventNames: () => unbackedEventNames(open()),
     positionAfter,
     /**
      * `PRAGMA table_info` for a table, so a caller can verify REQUIRED_COLUMNS
