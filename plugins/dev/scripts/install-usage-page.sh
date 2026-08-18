@@ -21,6 +21,11 @@ unset _SRC
 # so a caller under a scratch HOME either squats the real label or boots the real agent OUT. The
 # uninstall branch is guarded too, deliberately: booting out the fleet's live pager from a sealed
 # test is the same incident as squatting it.
+# Same shape as install-orphan-sweep.sh / install-health-responder.sh / install-dependabot-escalate.sh:
+# a MISSING guard library is a NAMED hard refusal, never a silent continue. An unguarded bootstrap is
+# invisible to its caller by construction, so "the guard could not be loaded" has to fail closed.
+[[ -f "${SCRIPT_DIR}/lib/launchd-domain-guard.sh" ]] || {
+  echo "install-usage-page.sh: missing lib/launchd-domain-guard.sh next to this script" >&2; exit 1; }
 # shellcheck source=lib/launchd-domain-guard.sh
 . "${SCRIPT_DIR}/lib/launchd-domain-guard.sh"
 launchd_agent_guard() {
