@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cli/governance.mjs — CTL-1062. Operator-facing readout of which governance
 // modes the local daemon is actually running, sourced from the latest
 // node.heartbeat the daemon wrote (heartbeat carries the snapshot, CTL-1062 Phase 2).

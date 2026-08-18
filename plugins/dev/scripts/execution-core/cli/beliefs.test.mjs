@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cli/beliefs.test.mjs — CTL-935 remediate: cover the beliefs CLI noun
 // dispatcher (cli/beliefs.mjs). This file did not exist, which is exactly why
 // the high-severity async-dispatch crash shipped undetected: `beliefs-status`

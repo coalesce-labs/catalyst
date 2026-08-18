@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // repo.test.mjs — CTL-675. Hermetic coverage for the shared repo-root resolver
 // and the throwing, stderr-capturing git runner. Every external dependency
 // (git, fs, registry) is injected — no real git is invoked.

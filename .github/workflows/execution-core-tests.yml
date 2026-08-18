@@ -218,6 +218,22 @@ jobs:
         working-directory: .
         run: bun install --frozen-lockfile
 
+      - name: cli/*.mjs shell-guard lint (CTL-1937)
+        # THE CLASS GUARD. cli/*.mjs have no shebang and their line-1 doc comment carries a
+        # runnable command in BACKTICKS. Run by a shell instead of a JS runtime, that backtick
+        # executes and re-invokes the CLI: on 2026-08-17 that reached 7,592 nested bash
+        # processes and fork() failed machine-wide. This fails CI on any cli/*.mjs that does
+        # not open with the guard line, so a NEW module cannot reintroduce the class.
+        working-directory: .
+        run: bash plugins/dev/scripts/lint-cli-shell-guard.sh
+
+      - name: cli/*.mjs shell-guard regression test (CTL-1937)
+        # The lint proves the line is present; this proves the line WORKS — a real cli module
+        # run under bash/zsh/sh refuses by name, exits 97, and spawns nothing. Carries its own
+        # negative control (the same file with the guard stripped DOES fire the backtick), so
+        # a green result cannot come from a module that merely has nothing to detonate.
+        run: bash __tests__/cli-shell-guard.test.sh
+
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
         # named export (the CTL-1093 outage: getCatalystRepoDir added to daemon.mjs

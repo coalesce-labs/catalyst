@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // worktrees.test.mjs — Phase 6 of CTL-649. `catalyst-execution-core worktrees
 // {list,prune}`. Classifier + prune-ordering are the tested surface; all I/O
 // (git, gh, sessions, fs) is injected.

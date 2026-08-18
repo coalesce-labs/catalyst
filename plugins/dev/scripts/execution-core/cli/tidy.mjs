@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // tidy.mjs — `catalyst-execution-core tidy` (CTL-649 Phase 8).
 //
 // Composes the three resource prunes in the ONLY safe order and finishes with

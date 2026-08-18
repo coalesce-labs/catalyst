@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // branches.test.mjs — Phase 7 of CTL-649. `catalyst-execution-core branches
 // {list,prune}`. Bare git refs — no claude-session aspect — so prune deletes
 // directly (git branch -D / git push origin --delete), NOT through the reaper.
