@@ -137,12 +137,25 @@ export function compareGithubStreams(feedEvents, smeeEvents) {
   if (feed.length === 0) inconclusive.push("feed-side-empty");
   if (smee.length === 0) inconclusive.push("smee-side-empty");
 
+  // ⛔ MULTIPLICITY, NOT PRESENCE — a single-value map is a false-clean generator.
+  // Some join keys are deliberately COARSE (a review keys on repo/pr/reviewer/state
+  // because `review_id` is not on the webhook side), so repeats under one key are
+  // expected, not pathological. With a `Map<key, event>` a second webhook event
+  // OVERWRITES the first and every feed event under that key re-uses the one
+  // surviving twin — so 2 feed vs 1 smee, and 1 feed vs 2 smee, both report agreement.
+  // That is the ledger licensing a cutover across dropped or duplicated dispatches,
+  // which is the single worst thing this file could do. `linear-feed-parity.mjs`
+  // already compares by multiplicity for exactly this reason; that lesson is carried
+  // here rather than re-learned.
   const index = new Map();
   for (const e of smee) {
     const n = nameOf(e);
     const spec = COMPARE_SPEC[n];
     if (!spec) continue;
-    index.set(`${n}|${spec.key(e)}`, e);
+    const k = `${n}|${spec.key(e)}`;
+    const bucket = index.get(k);
+    if (bucket) bucket.push(e);
+    else index.set(k, [e]);
   }
 
   const byName = {};
@@ -155,11 +168,14 @@ export function compareGithubStreams(feedEvents, smeeEvents) {
       continue;
     }
     const row = (byName[n] ??= { joined: 0, unjoined: 0, agree: 0, diffs: {}, observedOnly: {} });
-    const twin = index.get(`${n}|${spec.key(e)}`);
+    const bucket = index.get(`${n}|${spec.key(e)}`);
+    // CONSUMED, so one twin can serve exactly one feed event.
+    const twin = bucket && bucket.length > 0 ? bucket.shift() : null;
     if (!twin) {
-      // NOT a divergence: the two windows have different edges, so a feed event whose
-      // twin fell outside the sample is unjoinable, not disagreeing. Counted, never
-      // folded into `agree`.
+      // Ambiguous rather than disagreeing: it may be a window-skew artefact, or it may
+      // be a spurious dispatch. ⛔ It is NOT evidence of parity either way, so it
+      // forces INCONCLUSIVE below — never a silent pass. It is counted here and
+      // deliberately never folded into `agree`.
       row.unjoined += 1;
       continue;
     }
@@ -197,18 +213,32 @@ export function compareGithubStreams(feedEvents, smeeEvents) {
     Object.entries(absent).filter(([n]) => !(n in KNOWN_ABSENT) && n in COMPARE_SPEC),
   );
 
+  // Twins nobody consumed: a webhook event the feed produced no counterpart for.
+  // Symmetric to `unjoined` and equally not-evidence — an unconsumed twin is either
+  // window skew or a MISSING dispatch, and a ledger that ignores it certifies a feed
+  // that silently drops events.
+  let smeeUnjoined = 0;
+  for (const bucket of index.values()) smeeUnjoined += bucket.length;
+
   const totals = Object.values(byName).reduce(
     (a, r) => ({ joined: a.joined + r.joined, agree: a.agree + r.agree, unjoined: a.unjoined + r.unjoined }),
     { joined: 0, agree: 0, unjoined: 0 },
   );
+  totals.smeeUnjoined = smeeUnjoined;
   if (totals.joined === 0) inconclusive.push("no-events-joined");
   if (unkeyable > 0) inconclusive.push(`feed-unkeyable-events:${unkeyable}`);
+  // ⛔ Both directions force INCONCLUSIVE. `[1,2]` vs `[1]` used to return clean:true
+  // because the predicate only looked at `joined - agree`; the extra event may be a
+  // duplicate or a spurious dispatch, and "I cannot tell" is not "they match".
+  if (totals.unjoined > 0) inconclusive.push(`feed-events-without-a-twin:${totals.unjoined}`);
+  if (smeeUnjoined > 0) inconclusive.push(`smee-events-without-a-twin:${smeeUnjoined}`);
 
   const diverged = totals.joined - totals.agree;
   return {
     totals,
     byName,
     unkeyable,
+    smeeUnjoined,
     expectedAbsent: Object.fromEntries(Object.entries(absent).filter(([n]) => n in KNOWN_ABSENT)),
     unexplainedAbsent,
     inconclusive,

@@ -55,8 +55,18 @@ export function createSeenStore({ path } = {}) {
   const db = new Database(path);
   db.run("PRAGMA journal_mode = WAL");
   db.run("PRAGMA busy_timeout = 250");
-  db.run("CREATE TABLE IF NOT EXISTS seen (edge_id TEXT PRIMARY KEY, ts INTEGER NOT NULL)");
-  db.run("CREATE INDEX IF NOT EXISTS idx_seen_ts ON seen (ts)");
+  // ⛔ `stream` IS NOT DECORATION — IT SCOPES THE PRUNE.
+  // The table is shared by every stream, but each stream has its OWN durable cursor
+  // and they advance independently (a repo can be quiet on deployments for days
+  // while reviews stream). An unscoped `DELETE WHERE ts < ?` therefore lets a stream
+  // with a NEWER cursor delete the suppression entries of a stream with an OLDER one
+  // — entries that stream can still re-read, so its next sweep re-emits them with
+  // fresh envelope ids and the broker (which dedups on that id) wakes twice.
+  // The trigger does not need anything exotic: one stream's cursor write failing
+  // while the others succeed is enough, and the per-stream catch is designed to let
+  // exactly that happen.
+  db.run("CREATE TABLE IF NOT EXISTS seen (edge_id TEXT PRIMARY KEY, stream TEXT NOT NULL, ts INTEGER NOT NULL)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_seen_stream_ts ON seen (stream, ts)");
   // `meta` carries the durable "this producer has run before" flag. It is deliberately
   // independent of the cursor file, so losing the cursor cannot ALSO lose the knowledge
   // that we had one — that distinction is what stops a lost cursor from cold-starting
@@ -64,8 +74,8 @@ export function createSeenStore({ path } = {}) {
   db.run("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
 
   const qHas = db.query("SELECT 1 FROM seen WHERE edge_id = $id LIMIT 1");
-  const qAdd = db.query("INSERT OR IGNORE INTO seen (edge_id, ts) VALUES ($id, $ts)");
-  const qPrune = db.query("DELETE FROM seen WHERE ts < $before");
+  const qAdd = db.query("INSERT OR IGNORE INTO seen (edge_id, stream, ts) VALUES ($id, $stream, $ts)");
+  const qPrune = db.query("DELETE FROM seen WHERE stream = $stream AND ts < $before");
   const qCount = db.query("SELECT count(*) AS n FROM seen");
   const qGetMeta = db.query("SELECT value FROM meta WHERE key = $k");
   const qSetMeta = db.query("INSERT INTO meta (key, value) VALUES ($k, $v) ON CONFLICT(key) DO UPDATE SET value = $v");
@@ -79,15 +89,21 @@ export function createSeenStore({ path } = {}) {
      * ORIGINAL emission timestamp is kept — refreshing it on every re-read would
      * push the entry forward and defeat the cursor-based prune.
      */
-    add(edgeId, ts) {
+    add(edgeId, ts, streamKey) {
       if (typeof edgeId !== "string" || edgeId === "") return false;
-      qAdd.run({ $id: edgeId, $ts: Number.isInteger(ts) ? ts : 0 });
+      if (typeof streamKey !== "string" || streamKey === "") {
+        // Fail closed: an unscoped row could never be pruned by its own stream and
+        // would be silently eligible for another stream's prune. Refusing is louder.
+        throw new Error("seen.add: streamKey is required (the prune is scoped by it)");
+      }
+      qAdd.run({ $id: edgeId, $stream: streamKey, $ts: Number.isInteger(ts) ? ts : 0 });
       return true;
     },
 
     /**
-     * Drop entries the source can no longer return. Pass the DURABLE cursor position,
-     * after it has been written — see the header for why the order matters.
+     * Drop entries THIS STREAM can no longer return. Pass the stream's own DURABLE
+     * cursor position, after it has been written — see the header for why the order
+     * matters, and the table comment for why the scope does.
      *
      * ⚠️ Strictly `<`, never `<=`. A row sharing the cursor's exact millisecond but
      * carrying a HIGHER id is still re-readable — the keyset's tie-break is
@@ -97,12 +113,18 @@ export function createSeenStore({ path } = {}) {
      * back, which is a duplicate. The residue is bounded by one millisecond's worth
      * of edges, so the retention argument in the header is unaffected.
      */
-    pruneBefore(cursorTs) {
+    pruneBefore(cursorTs, streamKey) {
       if (!Number.isInteger(cursorTs)) return 0;
-      return qPrune.run({ $before: cursorTs }).changes ?? 0;
+      if (typeof streamKey !== "string" || streamKey === "") {
+        throw new Error("seen.pruneBefore: streamKey is required — an unscoped prune deletes other streams' entries");
+      }
+      return qPrune.run({ $stream: streamKey, $before: cursorTs }).changes ?? 0;
     },
 
-    size: () => qCount.get().n,
+    size: (streamKey) =>
+      streamKey === undefined
+        ? qCount.get().n
+        : db.query("SELECT count(*) AS n FROM seen WHERE stream = $s").get({ $s: streamKey }).n,
 
     /**
      * Durable "this STREAM has emitted before", for `resolveStartPosition`.

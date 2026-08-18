@@ -28,7 +28,7 @@ const comment = (id, over = {}) =>
 describe("a clean ledger has to be earned", () => {
   test("identical streams are clean", () => {
     const r = compareGithubStreams([comment(1), comment(2)], [comment(1), comment(2)]);
-    expect(r.totals).toEqual({ joined: 2, agree: 2, unjoined: 0 });
+    expect(r.totals).toEqual({ joined: 2, agree: 2, unjoined: 0, smeeUnjoined: 0 });
     expect(r.clean).toBe(true);
     expect(parityExitCode(r)).toBe(0);
   });
@@ -62,6 +62,59 @@ describe("a clean ledger has to be earned", () => {
     const r = compareGithubStreams([comment(1), comment(2)], [comment(1)]);
     expect(r.byName["github.pr_review_comment.created"].unjoined).toBe(1);
     expect(r.totals.agree).toBe(1);
+  });
+});
+
+describe("⛔ P1 (Codex #3520): the ledger must compare MULTIPLICITY, not presence", () => {
+  // Codex built exactly these two controls and both returned clean:true before the
+  // fix — the ledger certifying parity across a dropped or duplicated dispatch.
+  test("2 feed vs 1 smee under one key is NOT clean", () => {
+    const r = compareGithubStreams([comment(1), comment(1)], [comment(1)]);
+    expect(r.clean).toBe(false);
+    expect(r.totals.unjoined).toBe(1);
+    expect(parityExitCode(r)).toBe(3);
+  });
+
+  test("1 feed vs 2 smee under one key is NOT clean", () => {
+    const r = compareGithubStreams([comment(1)], [comment(1), comment(1)]);
+    expect(r.clean).toBe(false);
+    expect(r.smeeUnjoined).toBe(1);
+    expect(r.inconclusive).toContain("smee-events-without-a-twin:1");
+  });
+
+  test("a twin is CONSUMED — it cannot serve two feed events", () => {
+    const r = compareGithubStreams([comment(1), comment(1), comment(1)], [comment(1), comment(1)]);
+    expect(r.totals.joined).toBe(2);
+    expect(r.totals.unjoined).toBe(1);
+    expect(r.clean).toBe(false);
+  });
+
+  test("balanced repeats under one key ARE clean — the fix must not forbid legitimate duplicates", () => {
+    // The positive control. Coarse keys (review keys on repo/pr/reviewer/state) make
+    // repeats expected, so a rule that called all repetition dirty would be useless.
+    const r = compareGithubStreams([comment(1), comment(1)], [comment(1), comment(1)]);
+    expect(r.totals).toEqual({ joined: 2, agree: 2, unjoined: 0, smeeUnjoined: 0 });
+    expect(r.clean).toBe(true);
+  });
+});
+
+describe("⛔ P1 (Codex #3520): an unmatched event cannot certify parity", () => {
+  test("feed [1,2] vs smee [1] is INCONCLUSIVE, not clean", () => {
+    // Before the fix this returned clean:true — one pair joined and agreed, and the
+    // predicate only looked at `joined - agree`. The extra event may be a duplicate
+    // or a spurious dispatch; either way it is not evidence of parity.
+    const r = compareGithubStreams([comment(1), comment(2)], [comment(1)]);
+    expect(r.totals.joined).toBe(1);
+    expect(r.totals.agree).toBe(1);
+    expect(r.clean).toBe(false);
+    expect(r.inconclusive).toContain("feed-events-without-a-twin:1");
+    expect(parityExitCode(r)).toBe(3);
+  });
+
+  test("smee [1,2] vs feed [1] is INCONCLUSIVE too — the rule is symmetric", () => {
+    const r = compareGithubStreams([comment(1)], [comment(1), comment(2)]);
+    expect(r.clean).toBe(false);
+    expect(r.inconclusive).toContain("smee-events-without-a-twin:1");
   });
 });
 
@@ -135,7 +188,12 @@ describe("⛔ a consumed name that vanishes must not read as agreement", () => {
     const r = compareGithubStreams([comment(1)], [comment(1), push]);
     expect(r.unexplainedAbsent["github.push"]).toBe(1);
     expect(r.clean).toBe(false);
-    expect(parityExitCode(r)).toBe(2);
+    // ⚠️ INCONCLUSIVE (3), not diverged (2). The push has no twin on the feed side,
+    // and from the ledger alone a missing name is indistinguishable from window skew.
+    // Both are non-clean and both refuse a cutover; "I cannot tell" is the honest
+    // label, and `unexplainedAbsent` still names the specific hole to investigate.
+    expect(parityExitCode(r)).toBe(3);
+    expect(r.inconclusive).toContain("smee-events-without-a-twin:1");
   });
 
   test("both declared gaps name the ticket that closes them", () => {

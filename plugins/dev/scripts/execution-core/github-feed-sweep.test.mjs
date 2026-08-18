@@ -302,6 +302,100 @@ describe("⛔ first-run detection is PER STREAM, not per producer", () => {
   });
 });
 
+describe("⛔ P1 (Codex #3520): the prune is scoped to its own stream", () => {
+  test("a stream with a NEWER cursor does not delete a slower stream's entries", () => {
+    // The seen table is shared; the cursors are not. An unscoped prune let the
+    // faster stream delete entries the slower one can still re-read, so its next
+    // sweep re-emitted them with fresh envelope ids — and the broker dedups on that
+    // id, so it wakes twice.
+    const NOW = 10_000_000;
+    const w = world((db) => {
+      addReview(db, "old", NOW - 900);
+      db.prepare("INSERT INTO pushes (repo_id,ref,before,after,updated_at) VALUES (?,?,?,?,?)")
+        .run("o/r", "refs/heads/main", "b1", "a1", NOW - 100);
+    });
+    try {
+      const opts = { source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir,
+        settleMs: 1000, seams: SEAMS };
+      // BOTH streams sweep at NOW so each lands an entry AND a durable cursor. The
+      // push stream must actually acquire one here — without it, its later sweep
+      // reads nothing, writes no cursor and prunes nothing, and this test passes
+      // whether or not the prune is scoped. (That is exactly how the first cut of
+      // this test failed to catch the bug it was written for.)
+      runGithubSweep({ ...opts, now: NOW, streams: ["reviewSubmitted", "push"] });
+      expect(w.seen.size("reviewSubmitted")).toBe(1);
+      expect(w.seen.size("push")).toBe(1);
+
+      // Push alone now sweeps far in the future. It reads nothing new, so its cursor
+      // advances to the horizon — way past the review entry at NOW-900 — and it
+      // prunes. An UNSCOPED prune deletes the review entry here.
+      runGithubSweep({ ...opts, now: NOW + 1_000_000, streams: ["push"] });
+
+      // ⛔ The review entry must survive: reviews' own cursor has not passed it, so
+      // that row is still re-readable and re-emitting it would double-wake.
+      expect(w.seen.size("reviewSubmitted")).toBe(1);
+
+      // ⭐ CONTROL — the precondition for the bug must actually hold, or this test
+      // proves nothing. Push's durable cursor has to be PAST the review entry's
+      // timestamp, because that is exactly what makes an unscoped
+      // `DELETE ... WHERE ts < cursor` delete it. Assert that rather than assuming it:
+      // the first cut of this test let push read nothing, so it wrote no cursor,
+      // pruned nothing, and passed under the mutant.
+      const pushCursor = JSON.parse(readFileSync(streamCursorPath(w.dir, "push"), "utf8"));
+      expect(pushCursor.lastCreatedAt).toBeGreaterThan(NOW - 900);
+    } finally { w.close(); }
+  });
+
+  test("a stream still prunes its OWN entries — the scoping must not disable pruning", () => {
+    const NOW = 10_000_000;
+    const w = world((db) => { addReview(db, "a", NOW - 900); addReview(db, "b", NOW - 500); });
+    try {
+      sweep(w, NOW);
+      expect(w.seen.size("reviewSubmitted")).toBe(2);
+      sweep(w, NOW + 1_000_000);
+      expect(w.seen.size("reviewSubmitted")).toBe(1);
+    } finally { w.close(); }
+  });
+
+  test("an unscoped add or prune is REFUSED rather than silently mis-scoped", () => {
+    const w = world();
+    try {
+      expect(() => w.seen.add("gh:x:1", 1)).toThrow();
+      expect(() => w.seen.pruneBefore(1)).toThrow();
+    } finally { w.close(); }
+  });
+});
+
+describe("⛔ P2 (Codex #3520): a stream that only DECLINES has still run", () => {
+  test("everRan is set from the durable cursor, not from an emission", () => {
+    // A decline-only stream advances its cursor, and that advance IS proof it ran.
+    // Keyed on `emitted > 0` it stayed flagged first-run, so a later cursor loss
+    // cold-started it and permanently skipped the reset lookback window.
+    const NOW = 10_000_000;
+    const w = world((db) => {
+      db.prepare("INSERT INTO pull_requests (repo_id,number,merged,merged_at,created_at) VALUES (?,?,?,?,?)")
+        .run("o/r", 7, 1, NOW - 500, NOW - 900);
+    });
+    try {
+      const c = sweep(w, NOW, { streams: ["prMerged"] });
+      expect(c.emitted).toBe(0);
+      expect(c.declined).toBe(1);
+      expect(w.seen.everRan("prMerged")).toBe(true);
+    } finally { w.close(); }
+  });
+
+  test("a stream that read nothing at all is still first-run", () => {
+    // The control: the flag must not become "always true", or a genuine first run
+    // takes the bounded-lookback reset path forever.
+    const NOW = 10_000_000;
+    const w = world();
+    try {
+      sweep(w, NOW, { streams: ["prMerged"] });
+      expect(w.seen.everRan("prMerged")).toBe(false);
+    } finally { w.close(); }
+  });
+});
+
 describe("cursor ordering and durability", () => {
   test("the durable cursor is held BEHIND the emitted position", () => {
     const NOW = 10_000_000;

@@ -174,7 +174,7 @@ export function sweepStream({
       sink(event);
       // Marked only AFTER the sink returns. Marking first would suppress an edge
       // that never reached the log.
-      seen.add(edgeId, row.__ts);
+      seen.add(edgeId, row.__ts, streamKey);
       counts.emitted += 1;
       streamCounts.emitted += 1;
     }
@@ -191,10 +191,19 @@ export function sweepStream({
   const durable = settleCursor(emittedPosition, { now, settleMs, previous });
   if (durable && (!previous || durable.lastCreatedAt !== previous.lastCreatedAt || durable.lastId !== previous.lastId)) {
     writeCursorFn(cursorPath, durable);
-    // Only now, with the cursor durable, can the suppression set forget anything.
-    seen.pruneBefore(durable.lastCreatedAt);
+    // Only now, with the cursor durable, can the suppression set forget anything —
+    // and only THIS stream's entries. The table is shared; the cursors are not, and
+    // an unscoped prune lets a stream with a newer cursor delete a slower stream's
+    // still-re-readable entries (`github-feed-seen.mjs`).
+    seen.pruneBefore(durable.lastCreatedAt, streamKey);
+    // ⛔ MARK ON A DURABLE CURSOR, NOT ON AN EMISSION. A stream whose rows all
+    // DECLINE still advances its cursor, and that advance is itself proof the stream
+    // has run. Keying `everRan` on `emitted > 0` left such a stream flagged as
+    // first-run, so a later cursor loss cold-starts it at `now - settleMs` instead of
+    // replaying the stated lookback — permanently skipping anything that happened
+    // during the downtime outside the settle window but inside that lookback.
+    seen.markRan(streamKey);
   }
-  if (streamCounts.emitted > 0) seen.markRan(streamKey);
 
   counts.byStream[streamKey] = streamCounts;
   return streamCounts;
