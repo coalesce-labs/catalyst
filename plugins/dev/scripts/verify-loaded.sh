@@ -82,16 +82,47 @@ _vl_run() {
   fi
 }
 
+# ⛔ REACHABILITY IS A POSITIVE CONTROL, RUN FIRST (Codex #3496 P1). Every probe below
+# reads a command's STDOUT, and an unreachable host, a failed ssh auth, or a missing
+# binary all produce the same empty string as "the thing genuinely is not there". Codex
+# reproduced it: an injected runner exiting 255 printed "no execution-core daemon" and
+# "verify-loaded: OK" — the tool certifying a host it could not inspect, which is the exact
+# false-clean class it exists to catch, in the tool that exists to catch it.
+#
+# So the transport is proved to carry a KNOWN answer before any absence is believed. The
+# token is matched exactly: a runner that echoes something else, or nothing, is not
+# reachable. Note this cannot be folded into the individual probes — the discriminator is
+# "did the transport work", and only a command whose correct output is known in advance
+# can answer that.
+_vl_probe_reachable() {
+  local out
+  out="$(_vl_run 'echo VL_REACHABLE_9f3a' 2>/dev/null)"
+  [[ "$(printf '%s' "$out" | tr -d '[:space:]')" == "VL_REACHABLE_9f3a" ]]
+}
+
 VL_FAILURES=0
 _pass() { printf '  \033[32mPASS\033[0m  %-16s %s\n' "$1" "$2"; }
 _fail() { printf '  \033[31mFAIL\033[0m  %-16s %s\n' "$1" "$2"; VL_FAILURES=$((VL_FAILURES+1)); }
 
 echo "verify-loaded: host=${VL_HOST} root=${VL_ROOT} role=${VL_ROLE}${VL_MODE:+ mode=${VL_MODE}}"
 
+if _vl_probe_reachable; then
+  _pass "reachable" "the host answered a known-value probe — absences below are real absences"
+else
+  _fail "reachable" "could not run a command on ${VL_HOST} (ssh/auth/shell) — NOTHING below can be measured, so nothing is verified"
+  echo; echo "verify-loaded: ${VL_FAILURES} link(s) FAILED on ${VL_HOST}"; exit 1
+fi
+
 # ── link 1: the daemon process, and which root its argv names ───────────────────────
 # Read from the live process table, never from a pid FILE: a pid file is a claim written
 # at some past moment, and a recycled pid makes it a confident lie.
-PID="$(_vl_run "pgrep -f '${VL_PROC_PAT}' 2>/dev/null | head -1" 2>/dev/null | tr -d '[:space:]')"
+# ⛔ EXCLUDE THE PROBE SHELL (Codex #3496 P1). `pgrep -f` matches the FULL command line,
+# and the shell running this very probe has the pattern in its own argv — so locally (and
+# through any `sh -c` runner) pgrep returns the probe's own pid and every host looks like
+# it is running the daemon. Codex reproduced it with a pattern matching nothing at all:
+# `--role monitor` still reported a daemon on a correctly configured host.
+# `$$`/`$PPID` expand in the REMOTE shell, which is the one whose argv carries the pattern.
+PID="$(_vl_run "pgrep -f '${VL_PROC_PAT}' 2>/dev/null | grep -vx \"\$\$\" | grep -vx \"\$PPID\" | head -1" 2>/dev/null | tr -d '[:space:]')"
 
 if [[ "$VL_ROLE" == "monitor" ]]; then
   # ⭐ The monitor role ASSERTS AN ABSENCE rather than skipping. A skipped link reports the
@@ -142,7 +173,11 @@ fi
 # ⛔ Matched against this pid, not merely "somewhere in the log". A log is append-only
 # across restarts, so an unanchored grep happily matches the line a PREVIOUS process wrote
 # before the very rollback you are checking for.
-ARMED="$(_vl_run "grep -h '\"pid\":${PID}' ${VL_LOG} 2>/dev/null | grep -E '${VL_ARMED_RE}' | tail -1" 2>/dev/null)"
+# ⛔ DELIMITED, NOT A PREFIX (Codex #3496 P1). `"pid":999` also matches `"pid":9991`, so a
+# DIFFERENT process's line could satisfy this pid's link — defeating the very earlier-pid
+# protection this link is here for. pino always writes a field after `pid`, so the closing
+# delimiter is `,` or `}`.
+ARMED="$(_vl_run "grep -hE '\"pid\":${PID}[,}]' ${VL_LOG} 2>/dev/null | grep -E '${VL_ARMED_RE}' | tail -1" 2>/dev/null)"
 if [[ -z "$ARMED" ]]; then
   _fail "armed-line" "pid ${PID} never wrote a line matching '${VL_ARMED_RE}' — the mode is UNPROVEN (a log line from an earlier pid does not count)"
 elif [[ "$ARMED" == *"${VL_MODE}"* ]]; then
@@ -172,7 +207,11 @@ fi
 # Links 1–3 all pass for a daemon that booted before the pull landed. Compare the process
 # start time to the module's mtime; an unreadable either side FAILS, because "I could not
 # compare" is exactly the answer a stale daemon produces for free.
-EPOCHS="$(_vl_run "s=\$(ps -p ${PID} -o lstart= 2>/dev/null); m=\$(stat -f %m '${MOD_PATH}' 2>/dev/null); ps_e=\$(date -j -f '%a %b %d %T %Y' \"\$s\" +%s 2>/dev/null); echo \"\${ps_e:-NA} \${m:-NA}\"" 2>/dev/null)"
+# Portable on both stat dialects (Codex #3496 P1): BSD/macOS `stat -f %m` vs GNU
+# `stat -c %Y`. The fleet is macOS, but this script is repo tooling and CI is Linux, so a
+# BSD-only spelling is a latent break rather than a safe assumption. Same for the start
+# time: BSD `date -j -f`, GNU `ps -o lstart=` → `date -d`.
+EPOCHS="$(_vl_run "m=\$(stat -f %m '${MOD_PATH}' 2>/dev/null || stat -c %Y '${MOD_PATH}' 2>/dev/null); s=\$(ps -p ${PID} -o lstart= 2>/dev/null); ps_e=\$(date -j -f '%a %b %d %T %Y' \"\$s\" +%s 2>/dev/null || date -d \"\$s\" +%s 2>/dev/null); echo \"\${ps_e:-NA} \${m:-NA}\"" 2>/dev/null)"
 PS_EPOCH="${EPOCHS%% *}"; MOD_EPOCH="${EPOCHS##* }"
 if [[ "$PS_EPOCH" == "NA" || "$MOD_EPOCH" == "NA" || -z "$PS_EPOCH" || -z "$MOD_EPOCH" ]]; then
   _fail "started-after" "could not read process start time and/or module mtime (got '${EPOCHS}') — freshness is UNPROVEN"
