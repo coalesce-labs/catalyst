@@ -24,7 +24,14 @@ import {
   planFor,
 } from "./agent-session-narrator.mjs";
 import { dispatchTicket, getAgentSessionNarrator, setAgentSessionNarrator } from "./dispatch.mjs";
-import { ASYNC_MAX_ATTEMPTS, NON_BLOCKING_ROUTE_IDS, createLinearWriteProxy, defaultAsyncHttpFn } from "./linear-write-proxy.mjs";
+import {
+  ASYNC_MAX_ATTEMPTS,
+  NON_BLOCKING_ROUTE_IDS,
+  SESSION_PART_SUCCESS,
+  classifySessionResponse,
+  createLinearWriteProxy,
+  defaultAsyncHttpFn,
+} from "./linear-write-proxy.mjs";
 import { PHASES } from "../lib/workflow-descriptor.mjs";
 
 /** The route the ticket says is hung: it accepts the send and never answers. */
@@ -383,5 +390,77 @@ describe("round-1 P2 — the budget must not be under-charged by a retry", () =>
     });
     proxy.sendAsync({ routeId: SESSION_ROUTE_ID, ticket: "CTL-6", phase: "plan", payload: { issueId: "x" } });
     expect(order).toEqual(["ledger", "spawn"]);
+  });
+});
+
+
+// ── CTL-1951: the session route's verdict, measured on the live cloud ──────────────────
+
+describe("the session route's per-part outcome is read correctly", () => {
+  // ⛔ THE FIXTURE IS THE REAL RESPONSE, captured from production on mini-2 2026-08-18 at
+  // HTTP 200 — not an invented one. The generic classifier read it as `unreadable-outcome`,
+  // so a narration that FULLY SUCCEEDED was counted and logged as a FAILURE: the
+  // instrument reporting the opposite of what happened.
+  const LIVE_BODY =
+    '{"session":{"outcome":"reused","sessionId":"8fd311c5-9394-4eff-811a-ae3f121c239c","attempts":1},' +
+    '"plan":{"outcome":"succeeded","attempts":1},"activity":{"outcome":"succeeded","attempts":1}}';
+  const resp = (body, status = 200, code = 0) => ({ code, stdout: `${body}\n${status}`, stderr: "" });
+
+  test("⛔ the REAL production body is applied, not `unreadable-outcome`", () => {
+    const v = classifySessionResponse(resp(LIVE_BODY));
+    expect(v.applied).toBe(true);
+    expect(v.reason).toBeNull();
+    expect(v.status).toBe(200);
+  });
+
+  test("a failing part is named with its part AND its literal value", () => {
+    const v = classifySessionResponse(
+      resp('{"session":{"outcome":"reused"},"plan":{"outcome":"rejected"},"activity":{"outcome":"succeeded"}}')
+    );
+    expect(v.applied).toBe(false);
+    expect(v.reason).toBe("cloud:session-part-failed");
+    expect(v.detail).toBe("plan:rejected");
+  });
+
+  test("⛔ an UNRECOGNISED outcome is not assumed benign", () => {
+    // The vocabulary was measured, not documented. A future "deferred"/"partial" must not
+    // read as applied just because it is not a word we know means failure.
+    const v = classifySessionResponse(resp('{"activity":{"outcome":"deferred"}}'));
+    expect(v.applied).toBe(false);
+    expect(v.detail).toBe("activity:deferred");
+    expect(SESSION_PART_SUCCESS.has("deferred")).toBe(false);
+  });
+
+  test("a body with no recognised part stays `unreadable-outcome`", () => {
+    // Not talking to the route we think we are — a proxy or an HTML error page. "Assume
+    // it worked" is the one reading a write path may never take.
+    expect(classifySessionResponse(resp("<html>gateway</html>")).reason).toBe("unreadable-outcome");
+    expect(classifySessionResponse(resp('{"hello":"world"}')).reason).toBe("unreadable-outcome");
+  });
+
+  test("transport and status verdicts are unchanged — only the BODY reading differs", () => {
+    expect(classifySessionResponse({ code: 127 }).reason).toBe("spawn-failed");
+    expect(classifySessionResponse(resp("{}", 401)).reason).toBe("unauthorized");
+    expect(classifySessionResponse(resp("{}", 429)).reason).toBe("rate-limited");
+    expect(classifySessionResponse(resp("{}", 503)).reason).toBe("server-error");
+    expect(classifySessionResponse({ code: 28, stdout: "", stderr: "timeout" }).reason).toBe("transport-error");
+  });
+
+  test("END TO END: a live-shaped 200 counts as APPLIED, not FAILED, through sendAsync", () => {
+    const proxy = proxyWith({
+      asyncHttpFn: ({ onDone }) => { onDone({ code: 0, stdout: `${LIVE_BODY}\n200`, stderr: "" }); return { dispatched: true }; },
+    });
+    proxy.sendAsync({ routeId: SESSION_ROUTE_ID, ticket: "CTL-1943", phase: "implement", payload: { issueId: "x" } });
+    expect(proxy.counts()).toMatchObject({ applied: 1, failed: 0 });
+  });
+
+  test("⛔ CONTROL: the three CTC-509 routes still use the generic classifier", () => {
+    // They answer with a TOP-LEVEL outcome, and routing them through the session reader
+    // would be the same defect in the other direction.
+    const proxy = proxyWith({
+      httpFn: () => ({ code: 0, stdout: '{"outcome":"succeeded"}\n200', stderr: "" }),
+    });
+    proxy.send({ routeId: "comment", ticket: "CTL-1", payload: { issueId: "x", body: "b" } });
+    expect(proxy.counts()).toMatchObject({ applied: 1, failed: 0 });
   });
 });
