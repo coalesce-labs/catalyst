@@ -94,6 +94,9 @@ on:
       - "plugins/dev/scripts/__tests__/**"
       # CTL-1387: the CLI-reference generator + the page it drives are guarded by
       # cli-reference-drift.test.sh below; a change to either must run this suite.
+      # FLEET: the remote-owner channel transport ships its own bash test; without this
+      # path a PR touching only scripts/comms/ would skip the job that runs it.
+      - "scripts/comms/**"
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
       # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
@@ -165,6 +168,9 @@ jobs:
               - "plugins/dev/scripts/orphan-sweep.sh"
               - "plugins/dev/scripts/install-orphan-sweep.sh"
               - "plugins/dev/scripts/__tests__/**"
+              # FLEET: the remote-owner channel transport ships its own bash test; without this
+              # path a PR touching only scripts/comms/ would skip the job that runs it.
+              - "scripts/comms/**"
               - "plugins/dev/scripts/gen-cli-reference.sh"
               - "website/src/content/docs/reference/catalyst-cli.md"
               - "plugins/dev/scripts/migrate-dual-harness.sh"
@@ -240,6 +246,14 @@ jobs:
         # that catches a case the others clear.
         working-directory: .
         run: bash plugins/dev/scripts/__tests__/catalyst-index-root.test.sh
+
+      - name: remote-owner channel transport test (scripts/comms)
+        # post-turn.sh / drain-remote-turns.sh move channel turns from a remote owner host
+        # (mini) to the channel file on the laptop. Hermetic: the test injects a fake ssh via
+        # $CATALYST_SSH. Covers the atomic .part handoff, idempotence, and the deliberate
+        # at-least-once ordering (append first, ack second).
+        working-directory: .
+        run: bash scripts/comms/__tests__/remote-turns.test.sh
 
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
@@ -890,6 +904,7 @@ jobs:
             assertion-evidence.test.mjs \
             assertion-evidence-parity.test.mjs \
             cli-header-backtick-guard.test.mjs \
+            agent-session-narrator.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
