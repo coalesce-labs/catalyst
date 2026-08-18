@@ -20,7 +20,21 @@
 // an operator gets sent to repair something that was never broken.
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+
+/**
+ * ⛔ DEFINED HERE, NOT IMPORTED FROM doctor.mjs — doctor.mjs imports THIS module, so an
+ * import back would be circular. When this check was extracted from doctor.mjs it kept
+ * calling doctor's `layer2Path()` as a default parameter, which crashed
+ * `catalyst-doctor` outright with `ReferenceError: layer2Path is not defined` on every
+ * host. Kept byte-identical to doctor.mjs's own resolver, including the env override.
+ */
+function layer2Path() {
+  return (
+    process.env.CATALYST_LAYER2_CONFIG_FILE ||
+    resolve(homedir(), ".config", "catalyst", "config.json")
+  );
+}
 
 import { STATUS, mkCheck } from "./doctor-status.mjs";
 
