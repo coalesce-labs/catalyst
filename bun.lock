@@ -5,7 +5,7 @@
     "": {
       "name": "catalyst",
       "dependencies": {
-        "@catalyst-cloud/schema": "0.1.17",
+        "@catalyst-cloud/schema": "0.1.18",
         "@modelcontextprotocol/sdk": "1.29.0",
       },
       "devDependencies": {
@@ -212,7 +212,7 @@
 
     "@catalyst-cloud/replicate": ["@catalyst-cloud/replicate@0.1.12", "", { "dependencies": { "@catalyst-cloud/schema": "0.1.18" } }, "sha512-6MGQWMdWukD/fA1Ivu6dIvXj8tRzMMjv3wUvhzTgdNhLdY17YrIILQDNS0ALStcDIsZUbBhYwwdfjYnYWxGKZg=="],
 
-    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.17", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-/e23/wXxZ4Ko7wttMpDQCWOYFfqMZtDjCSUz1BjHi2pvJo546PX/J2Qq75vGf0es1UKVNxrkVyegubIVUm56AQ=="],
+    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.18", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-w3lr2z21SLAfRb1QhFCxv+1v9JCM2epLNvvAi73tXN/ClsqV0wxCgQ+07cK/Jx+BehRXwQu3G+z+iAvqHHOdTg=="],
 
     "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.14", "", { "dependencies": { "@catalyst-cloud/read-model": "^0.1.0", "@catalyst-cloud/replicate": "0.1.12", "@catalyst-cloud/schema": "0.1.18" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <2", "@sqlite.org/sqlite-wasm": "*", "better-sqlite3": "*" }, "optionalPeers": ["@opentelemetry/api", "@sqlite.org/sqlite-wasm", "better-sqlite3"] }, "sha512-ulJNniSQFDDxWBdq1e7cOnDRZjgFqkI9HYodQvi9pqNcKQxLcyhHCyhh+K/Km7INUrRlFizewF7kgK1lLpD5Vw=="],
 
@@ -1543,10 +1543,6 @@
     "@babel/core/semver": ["semver@6.3.1", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
 
     "@babel/helper-compilation-targets/semver": ["semver@6.3.1", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
-
-    "@catalyst-cloud/replicate/@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.18", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-w3lr2z21SLAfRb1QhFCxv+1v9JCM2epLNvvAi73tXN/ClsqV0wxCgQ+07cK/Jx+BehRXwQu3G+z+iAvqHHOdTg=="],
-
-    "@catalyst-cloud/sdk/@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.18", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-w3lr2z21SLAfRb1QhFCxv+1v9JCM2epLNvvAi73tXN/ClsqV0wxCgQ+07cK/Jx+BehRXwQu3G+z+iAvqHHOdTg=="],
 
     "@eslint-community/eslint-utils/eslint-visitor-keys": ["eslint-visitor-keys@3.4.3", "", {}, "sha512-wpc+LXeiyiisxPlEkUzU6svyS1frIO3Mgxj1fdy7Pm8Ygzguax2N3Fa/D/ag1WqbOprdI+uY6wMUl8/a2G+iag=="],
 
