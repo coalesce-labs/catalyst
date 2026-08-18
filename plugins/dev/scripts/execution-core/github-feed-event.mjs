@@ -171,6 +171,19 @@ export function githubEdgeId(streamKey, row) {
   if (!s || !row) return null;
   const id = row.__id;
   if (id === undefined || id === null || id === "") return null;
+  // ⛔ A STREAM WHOSE ROW IS MUTATED IN PLACE HAS NO PER-EDGE PRIMARY KEY.
+  // `pushes` is keyed `(repo_id, ref)` and rewritten on every push, so `__id` is the
+  // same string for every push to a branch, forever. Keying the seen-set on it alone
+  // suppressed the second and all later pushes to a ref as re-reads — `github.push`
+  // dead after the first one, silently, taking rebase detection with it. Folding in
+  // the row's own coordinate plus the sha it landed on restores a per-edge identity:
+  // both change on a real push, and BOTH are stable across re-reads of the same push,
+  // which is what the settle-window re-read requires.
+  if (s.mutableRow) {
+    const ts = Number.isInteger(row.__ts) ? row.__ts : "?";
+    const at = typeof row.after === "string" && row.after !== "" ? row.after : "?";
+    return `gh:${streamKey}:${String(id)}:${ts}:${at}`;
+  }
   return `gh:${streamKey}:${String(id)}`;
 }
 
@@ -215,6 +228,14 @@ export function classifyGithubRow(streamKey, row) {
   }
   if (streamKey === "push" && (typeof row.ref !== "string" || row.ref === "")) {
     return { emit: false, reason: "no-ref" };
+  }
+  // ⛔ `vcs.revision` on this name is the JOIN KEY `setFilterStateDeploying` matches
+  // against `filter_state.merge_commit_sha`. Emitting `""` produces an event that is
+  // counted as emitted, routes to no interest, and leaves the deployment lifecycle
+  // parked forever — an unroutable event is worse than a declined row, because the
+  // decline is visible in `byReason` and the emission looks like success.
+  if (streamKey === "deploymentCreated" && (typeof row.sha !== "string" || row.sha === "")) {
+    return { emit: false, reason: "no-deployment-sha" };
   }
   return { emit: true, reason: null };
 }

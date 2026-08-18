@@ -226,6 +226,54 @@ describe("classification declines a row the consumer could not use", () => {
   });
 });
 
+describe("⛔ P1 (Codex #3513): a mutated row has no per-edge PK, so push folds in its coordinate", () => {
+  const push = (ts, after) => ({ __ts: ts, __id: "o/r@refs/heads/main", repo_id: "o/r", ref: "refs/heads/main", after });
+
+  test("two pushes to ONE ref get DIFFERENT identities", () => {
+    // The defect: `pushes` is keyed (repo_id, ref) and rewritten per push, so the
+    // bare PK is the same string forever. The seen-set then suppressed every push
+    // after the first as a re-read — github.push dead per ref, silently.
+    const a = githubEdgeId("push", push(1000, "sha-a"));
+    const b = githubEdgeId("push", push(2000, "sha-b"));
+    expect(a).not.toBe(b);
+  });
+
+  test("but the identity is STABLE across re-reads of the SAME push", () => {
+    // The settle window re-reads deliberately; suppression depends on the identity
+    // being byte-identical for an unchanged row.
+    expect(githubEdgeId("push", push(1000, "sha-a"))).toBe(githubEdgeId("push", push(1000, "sha-a")));
+  });
+
+  test("a same-millisecond force-push to a different sha is still distinct", () => {
+    expect(githubEdgeId("push", push(1000, "sha-a"))).not.toBe(githubEdgeId("push", push(1000, "sha-b")));
+  });
+
+  test("only push folds in the coordinate — insert-per-edge streams keep the bare PK", () => {
+    const row = { __ts: 5, __id: "r-1" };
+    expect(githubEdgeId("reviewSubmitted", row)).toBe(githubEdgeId("reviewSubmitted", { ...row, __ts: 9 }));
+  });
+});
+
+describe("⛔ P2 (Codex #3513): a row that would emit an unroutable event is declined", () => {
+  test("a deployment with no sha is declined, not emitted with an empty join key", () => {
+    // vcs.revision is what setFilterStateDeploying matches on. "" routes nowhere and
+    // parks the deployment lifecycle, while counting as a successful emit.
+    for (const sha of [undefined, null, "", 12345]) {
+      const v = classifyGithubRow("deploymentCreated", {
+        __ts: 1, __id: "d1", repo_id: "o/r", id: "d1", sha, environment: "production",
+      });
+      expect(v.emit).toBe(false);
+      expect(v.reason).toBe("no-deployment-sha");
+    }
+  });
+  test("a deployment WITH a sha still emits (the control — the rule can pass)", () => {
+    const v = classifyGithubRow("deploymentCreated", {
+      __ts: 1, __id: "d1", repo_id: "o/r", id: "d1", sha: "c671cd9c", environment: "production",
+    });
+    expect(v.emit).toBe(true);
+  });
+});
+
 describe("edge identity is stable and PK-derived", () => {
   test("the same row yields the same id across reads (the seen-set depends on it)", () => {
     const row = { __ts: 5, __id: "o/r#7", number: 7, repo_id: "o/r" };

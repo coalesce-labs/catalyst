@@ -232,6 +232,15 @@ export const STREAMS = Object.freeze([
     idExpr: "repo_id || '@' || ref",
     where: null,
     lossy: true,
+    // ⛔ THE ROW IS MUTATED PER PUSH, so this PK identifies the REF, not the edge.
+    // Every other stream inserts a row per edge, which makes its PK a complete edge
+    // identity. Here `repo_id@ref` is CONSTANT across every push to that branch — so
+    // an identity built from it alone is the same string forever, and the seen-set
+    // would suppress the second and every later push to a branch as a re-read. That
+    // is not "lossy": it is `github.push` DEAD after the first push per ref, taking
+    // base-branch rebase detection and plugin-refresh's auto-pull with it.
+    // `githubEdgeId` therefore folds the mutable coordinate in for this stream.
+    mutableRow: true,
   },
 ]);
 
@@ -358,9 +367,13 @@ export function settleCursor(emitted, { now, settleMs = DEFAULT_SETTLE_MS, previ
 
   let claim;
   if (!emitted || !Number.isInteger(emitted.lastCreatedAt)) {
-    // No usable page. The cursor may still advance to the horizon if we are already
-    // past it — but only when we HAVE a previous position, because a producer that
-    // has never read anything must not claim a window it never looked at.
+    // ⭐ No usable page — and on THIS coordinate an empty read is itself evidence.
+    // Nothing exists past the cursor right now, and the settle bound says anything
+    // stamped at or before the horizon has already arrived; so the horizon is safe to
+    // claim, and the suppression set drains at rest instead of holding a residue for
+    // the life of the process.
+    // ⛔ Only when we HAVE a previous position, though: a producer that has never read
+    // anything must not claim a window it never looked at.
     claim = prev && prev.lastCreatedAt < horizon ? { lastCreatedAt: horizon, lastId: "" } : null;
   } else if (emitted.lastCreatedAt <= horizon) {
     claim = { lastCreatedAt: emitted.lastCreatedAt, lastId: typeof emitted.lastId === "string" ? emitted.lastId : "" };
