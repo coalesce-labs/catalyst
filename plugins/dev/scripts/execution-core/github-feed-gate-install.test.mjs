@@ -12,6 +12,8 @@ import {
   readGithubCoverage,
 } from "./github-feed-gate-install.mjs";
 import { staleWindowMs } from "./github-feed-ready.mjs";
+import { startGithubFeedTimer } from "./github-feed-timer.mjs"; // CTL-1976
+import { getExecutionCoreDir } from "./config.mjs"; // CTL-1976
 import { decideDispatch } from "./github-feed-gate.mjs";
 
 const tmp = mkdtempSync(join(tmpdir(), "gh-gate-install-"));
@@ -266,5 +268,125 @@ describe("CTC-712 — the gate's coverage tracks the replica, and re-reads it", 
     }
     // A replica IS present and was opened by the default factory: that is the claim.
     expect(r.ok).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1976 — the readiness file is written by the PRODUCER and read by the GATE,
+// in two different processes. Every test above injects `readState`, so until this
+// block the DEFAULT `readyPath` — the only one production uses — was never
+// asserted, and it pointed at a file nothing writes.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1976: the gate reads the file the PRODUCER writes, not one under the caller's dir", () => {
+  const withCatalystDir = (dir, fn) => {
+    const prev = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try { return fn(); } finally {
+      if (prev === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prev;
+    }
+  };
+
+  test("⭐ the default readyPath is the producer's, and does NOT follow the installer's orchDir", () => {
+    const root = mkdtempSync(join(tmpdir(), "gh-ready-path-"));
+    try {
+      withCatalystDir(root, () => {
+        // The broker's REAL call shape (broker/tailer.mjs:52): orchDir = CATALYST_DIR.
+        const g = createGithubFeedGate({
+          orchDir: root,
+          account: "tenant-0",
+          config: { mode: "enforce", intervalSec: 30 },
+          captureFactory: stubCapture,
+        });
+        // The producer writes under execution-core/, one level DOWN from CATALYST_DIR.
+        expect(g.readyPath).toBe(join(root, "execution-core", "shadow", "github-feed-ready-tenant-0.json"));
+        // ⛔ The mutation this block owns: the pre-CTL-1976 code produced exactly the
+        // path below, which nothing ever writes. Asserted as a NON-match so the test
+        // fails if the derivation is ever put back on the caller's dir.
+        expect(g.readyPath).not.toBe(join(root, "shadow", "github-feed-ready-tenant-0.json"));
+      });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("⭐ equal BY CONSTRUCTION to what the producer's own timer writes — not to a second string literal", () => {
+    const root = mkdtempSync(join(tmpdir(), "gh-ready-parity-"));
+    try {
+      // ⚠️ SYNCHRONOUS ON PURPOSE. An `async` body here would return a promise to
+      // withCatalystDir, whose `finally` then restores CATALYST_DIR *before* the body
+      // runs — so both sides would resolve the ambient hermetic dir and agree for a
+      // reason the test does not name. Caught by running this block under the mutation.
+      withCatalystDir(root, () => {
+        const noopClock = { setInterval: () => ({ unref() {} }), clearInterval: () => {} };
+        // daemon.mjs's own argument shape: orchDir = getExecutionCoreDir().
+        const timer = startGithubFeedTimer({
+          mode: "shadow",
+          orchDir: getExecutionCoreDir(),
+          account: "tenant-0",
+          eventLogPath: join(root, "events.jsonl"),
+          appendFn: () => {},
+          clock: noopClock,
+        });
+        const gate = createGithubFeedGate({
+          orchDir: root, // the BROKER's dir — deliberately different from the producer's
+          account: "tenant-0",
+          config: { mode: "enforce", intervalSec: 30 },
+          captureFactory: stubCapture,
+        });
+        // Positive control: the two dirs really are different, so an accidental
+        // pass-because-both-are-the-same-root is not possible here.
+        expect(getExecutionCoreDir()).not.toBe(root);
+        expect(gate.readyPath).toBe(timer.readyPath);
+        timer.stop();
+      });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("the CAPTURE sink still follows the installer's orchDir — it is the broker's artifact, not the producer's", () => {
+    const root = mkdtempSync(join(tmpdir(), "gh-capture-path-"));
+    try {
+      withCatalystDir(root, () => {
+        let seen = null;
+        createGithubFeedGate({
+          orchDir: root,
+          account: "tenant-0",
+          config: { mode: "enforce", intervalSec: 30 },
+          captureFactory: ({ path }) => { seen = path; return stubCapture(); },
+        });
+        expect(seen).toBe(defaultGithubCapturePath(root, "tenant-0"));
+      });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("an explicit readyPath still wins — the seam the existing tests depend on is untouched", () => {
+    const g = createGithubFeedGate({
+      orchDir: tmp,
+      readyPath: "/explicit/ready.json",
+      config: { mode: "enforce", intervalSec: 30 },
+      captureFactory: stubCapture,
+    });
+    expect(g.readyPath).toBe("/explicit/ready.json");
+  });
+
+  test("⛔ a missing ready file leaves smee AUTHORITATIVE — the failure mode this bug hid", () => {
+    const root = mkdtempSync(join(tmpdir(), "gh-ready-absent-"));
+    try {
+      withCatalystDir(root, () => {
+        const g = createGithubFeedGate({
+          orchDir: root,
+          account: "tenant-0",
+          config: { mode: "enforce", intervalSec: 30 },
+          captureFactory: stubCapture,
+        });
+        // Nothing has written the producer's file, so the probe must decline.
+        const verdict = g.isReady();
+        expect(verdict.ready).toBe(false);
+        expect(verdict.reason).toBe("ready-file-absent");
+        // …and the smee copy therefore keeps routing rather than being suppressed.
+        const smee = { attributes: { "event.name": "github.pr.merged" }, resource: {} };
+        const d = decideDispatch(smee, g);
+        expect(d.suppress).toBe(false);
+        expect(d.reason).toContain("enforce-not-armed");
+      });
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
