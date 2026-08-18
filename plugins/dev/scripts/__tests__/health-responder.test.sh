@@ -29,6 +29,13 @@ mkdir -p "$HOME"
 MOCKBIN="${SCRATCH}/bin"
 mkdir -p "$MOCKBIN"
 export PATH="${MOCKBIN}:${PATH}"
+
+# CTL-1968: launchctl above is a PATH-shadowed mock and HOME is a scratch dir, so
+# this suite deliberately exercises the bootstrap path. The product now refuses to
+# mutate gui/<uid> from a foreign HOME (a scratch HOME does NOT sandbox launchd —
+# two full gates re-bound the live cloud-sync label on 2026-08-18). Declaring the
+# seal is how a test opts back in; a suite that FORGOT to seal is what refuses.
+export CATALYST_ALLOW_FOREIGN_HOME_LAUNCHD=1
 export RESPONDER_RUN_ID="testrun"
 
 # All responder inputs live in scratch — nothing on the real host is probed.

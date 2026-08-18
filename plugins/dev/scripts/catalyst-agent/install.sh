@@ -9,6 +9,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1968: `gui/$(id -u)` is a PER-USER launchd domain — a scratch HOME does not
+# sandbox it. Refuse rather than re-bind the REAL label to a temporary path.
+[[ -f "${SCRIPT_DIR}/../lib/launchd-domain-guard.sh" ]] || {
+  echo "catalyst-agent/install.sh: missing ../lib/launchd-domain-guard.sh" >&2; exit 1; }
+# shellcheck source=../lib/launchd-domain-guard.sh
+. "${SCRIPT_DIR}/../lib/launchd-domain-guard.sh"
+launchd_agent_guard() {
+  launchd_guard_ok "the catalyst-agent LaunchAgent" && return 0
+  launchd_guard_message "the catalyst-agent LaunchAgent" >&2
+  echo "catalyst-agent/install.sh: REFUSED (${CATALYST_LAUNCHD_GUARD_REASON})" >&2
+  exit 1
+}
 TEMPLATE="${SCRIPT_DIR}/com.catalyst.agent.plist"
 AGENT="${SCRIPT_DIR}/catalyst-agent.mjs"
 LABEL="com.catalyst.agent"
@@ -89,6 +102,7 @@ echo "install.sh: wrote ${DEST}"
 # Reload idempotently: bootout any existing instance (ignore failure when not
 # loaded), then bootstrap the fresh plist.
 DOMAIN="gui/$(id -u)"
+launchd_agent_guard
 launchctl bootout "${DOMAIN}/${LABEL}" 2>/dev/null || true
 launchctl bootstrap "${DOMAIN}" "${DEST}"
 echo "install.sh: loaded ${LABEL} into ${DOMAIN}"

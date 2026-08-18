@@ -12,6 +12,19 @@ set -uo pipefail
 _SRC="${BASH_SOURCE[0]}"
 while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
+
+# CTL-1968: `gui/$(id -u)` is a PER-USER launchd domain — a scratch HOME does not
+# sandbox it. Refuse rather than re-bind the REAL label to a temporary path.
+[[ -f "${SCRIPT_DIR}/../lib/launchd-domain-guard.sh" ]] || {
+  echo "channel-watcher/install.sh: missing ../lib/launchd-domain-guard.sh" >&2; exit 1; }
+# shellcheck source=../lib/launchd-domain-guard.sh
+. "${SCRIPT_DIR}/../lib/launchd-domain-guard.sh"
+launchd_agent_guard() {
+  launchd_guard_ok "the channel-watcher LaunchAgent" && return 0
+  launchd_guard_message "the channel-watcher LaunchAgent" >&2
+  echo "channel-watcher/install.sh: REFUSED (${CATALYST_LAUNCHD_GUARD_REASON})" >&2
+  exit 1
+}
 unset _SRC
 
 LABEL="ai.coalesce.catalyst-channel-watcher"
@@ -52,6 +65,7 @@ case "${1:-}" in
 
   --uninstall)
     if launchctl list "$LABEL" >/dev/null 2>&1; then
+      launchd_agent_guard
       launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || \
         launchctl unload "$PLIST_DST" 2>/dev/null || true
       log "unloaded $LABEL"
@@ -73,6 +87,7 @@ case "${1:-}" in
     # launchd domain) the job never registers, so verify it actually loaded rather
     # than telling the operator "loaded" while no supervised watcher — and thus no
     # heartbeat / dead-man coverage — is running.
+    launchd_agent_guard
     launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>/dev/null || \
       launchctl load -w "$PLIST_DST" 2>/dev/null || true
     if launchctl list "$LABEL" >/dev/null 2>&1; then
