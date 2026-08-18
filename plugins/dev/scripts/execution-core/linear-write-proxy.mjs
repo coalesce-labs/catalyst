@@ -74,6 +74,21 @@ import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { resolveSecret } from "../lib/secret-contract.mjs";
+import {
+  DEFAULT_DAILY_BUDGET,
+  DEFAULT_PER_TICKET_CAP,
+  classifyExhaustion,
+  classifyWrite,
+  convergenceKeyFor,
+  emptyLedger,
+  markExhaustionAnnounced,
+  noteConvergence,
+  readLedger,
+  recordWrite,
+  rollToDay,
+  utcDayOf,
+  writeLedger,
+} from "./linear-write-budget.mjs";
 import { getEventLogPath, log as defaultLog } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
@@ -284,7 +299,18 @@ export function classifyProxyResponse({ code, stdout, stderr } = {}) {
   // one, so it is carried through verbatim (scrubbed) rather than replaced.
   const parsed = parseProxyBody(bodyText);
   if (parsed && typeof parsed.outcome === "string") {
-    if (parsed.outcome === "succeeded") return { applied: true, reason: null, status, body: bodyText };
+    if (parsed.outcome === "succeeded") {
+      // CTL-1936 / AC3: CTC-674 made an already-absent label removal answer 200
+      // `already-absent` instead of 400. That is correct — and it silently removed the
+      // only brake the host had, because the CTL-1078 back-off counts FAILURES and this
+      // is a success. Surface convergence as its own fact so the caller can stop
+      // re-issuing, WITHOUT calling it a failure: folding it into the failure counter
+      // would restore the throttle by re-introducing a lie.
+      const results = Array.isArray(parsed.results) ? parsed.results : null;
+      const converged =
+        results !== null && results.length > 0 && results.every((r) => r?.outcome === "already-absent");
+      return { applied: true, reason: null, status, body: bodyText, converged };
+    }
     const named = typeof parsed.reason === "string" && parsed.reason.trim() !== ""
       ? scrub(parsed.reason).slice(0, 300)
       : parsed.outcome;
@@ -350,14 +376,42 @@ export function defaultHttpFn({ url, method, token, body }) {
 export const EVENT_WOULD_WRITE = "linear.write.proxy.would-write";
 export const EVENT_APPLIED = "linear.write.proxy.applied";
 export const EVENT_FAILED = "linear.write.proxy.failed";
-export const PROXY_EVENT_NAMES = Object.freeze([EVENT_WOULD_WRITE, EVENT_APPLIED, EVENT_FAILED]);
+/** CTL-1936 / AC5 — raised ONCE per exhaustion episode, never once per refused write. */
+export const EVENT_EXHAUSTED = "linear.write.proxy.budget-exhausted";
+export const PROXY_EVENT_NAMES = Object.freeze([EVENT_WOULD_WRITE, EVENT_APPLIED, EVENT_FAILED, EVENT_EXHAUSTED]);
+
+/** Default ledger location. One file per host; the daemon and any CLI share it. */
+export function defaultBudgetPath(env = process.env) {
+  const home = env.HOME || "";
+  return `${env.CATALYST_DIR || `${home}/catalyst`}/linear-write-budget.json`;
+}
 
 /**
  * buildProxyEvent — a v2 envelope for one proxy decision. Cloned from
  * linear-state-write-event.mjs (CTL-757) so the two audit families agree on
  * channel / actor / stream_class rather than each inventing their own.
  */
-export function buildProxyEvent({ name, ticket, routeId, mode, reason = null, status = null, applied = false }) {
+/**
+ * CTL-1936 / AC4 — `caller` and `labels`.
+ *
+ * The incident could not be attributed from the event stream: the payload carried
+ * `{ticket, route, mode, applied}` and NOT the label name or the calling site, so 302
+ * writes on one ticket could not be traced to what issued them. `daemon.log` had rotated
+ * and retained one line. Both fields are also promoted to attributes, because
+ * otel-forward strips `body.payload` off-machine — a field only in the payload is
+ * invisible to exactly the operator asking this question from Loki.
+ */
+export function buildProxyEvent({
+  name,
+  ticket,
+  routeId,
+  mode,
+  reason = null,
+  status = null,
+  applied = false,
+  caller = null,
+  labels = null,
+}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   return (
     JSON.stringify({
@@ -382,8 +436,21 @@ export function buildProxyEvent({ name, ticket, routeId, mode, reason = null, st
         "catalyst.linear_write_proxy.mode": mode,
         "catalyst.linear_write_proxy.reason": reason ?? undefined,
         "catalyst.linear_write_proxy.status": status ?? undefined,
+        "catalyst.linear_write_proxy.caller": caller ?? undefined,
+        "catalyst.linear_write_proxy.labels": Array.isArray(labels) ? labels.join(",") : (labels ?? undefined),
       },
-      body: { payload: { ticket: ticket ?? null, route: routeId, mode, applied, reason, status } },
+      body: {
+        payload: {
+          ticket: ticket ?? null,
+          route: routeId,
+          mode,
+          applied,
+          reason,
+          status,
+          caller: caller ?? null,
+          labels: labels ?? null,
+        },
+      },
     }) + "\n"
   );
 }
@@ -410,12 +477,53 @@ export function createLinearWriteProxy({
   httpFn = defaultHttpFn,
   appendEvent = defaultAppendEvent,
   log = defaultLog,
+  // CTL-1936. Seams, so the throttle is testable without a filesystem.
+  budgetPath = null,
+  nowFn = () => Date.now(),
+  readLedgerFn = readLedger,
+  writeLedgerFn = writeLedger,
 } = {}) {
   if (mode !== "shadow" && mode !== "enforce") return null;
 
   const baseUrl = resolveProxyBaseUrl(env);
   const account = resolveProxyAccount(env);
-  const counts = { wouldWrite: 0, applied: 0, failed: 0 };
+  const counts = { wouldWrite: 0, applied: 0, failed: 0, refused: 0 };
+
+  // ── CTL-1936: the host's own spend ledger ──
+  const ledgerPath = budgetPath ?? defaultBudgetPath(env);
+  const dailyBudget = Number(env.CATALYST_LINEAR_WRITE_DAILY_BUDGET) || DEFAULT_DAILY_BUDGET;
+  const perTicketCap = Number(env.CATALYST_LINEAR_WRITE_TICKET_CAP) || DEFAULT_PER_TICKET_CAP;
+
+  /**
+   * loadLedger — read, then roll to today.
+   *
+   * ⛔ An UNUSABLE ledger (present but unreadable/corrupt) fails OPEN — the write is
+   * allowed — and says so loudly. That direction is deliberate and is the opposite of
+   * the restart-budget case: failing closed here would turn one corrupt file into a
+   * TOTAL Linear-write outage for the host, which is strictly worse than the runaway
+   * this guard exists to bound (the cloud's own 429 still backstops that). What must not
+   * happen is failing open SILENTLY, so the degradation is named every time.
+   */
+  const loadLedger = () => {
+    const day = utcDayOf(nowFn());
+    const r = readLedgerFn(ledgerPath);
+    if (r.state === "loaded") return { ledger: rollToDay(r.ledger, day), degraded: false };
+    if (r.state === "fresh") return { ledger: emptyLedger(day), degraded: false };
+    log?.warn?.(
+      { path: ledgerPath, reason: r.reason },
+      "linear-write-proxy: write-budget ledger unusable — allowing the write, but this host's spend is NOT being bounded"
+    );
+    return { ledger: emptyLedger(day), degraded: true };
+  };
+
+  const persist = (ledger) => {
+    try {
+      writeLedgerFn(ledgerPath, ledger);
+    } catch (err) {
+      // Never let bookkeeping fail a write that already happened.
+      log?.warn?.({ err: scrub(err?.message ?? "") }, "linear-write-proxy: budget ledger write failed");
+    }
+  };
 
   const emit = (name, fields) => {
     try {
@@ -445,16 +553,21 @@ export function createLinearWriteProxy({
      * i.e. the shadow window would read "zero host-originated writes" while the host
      * was still writing. Every caller here already retries on the next tick.
      */
-    send({ routeId, ticket = null, payload = {} }) {
+    send({ routeId, ticket = null, payload = {}, caller = null }) {
+      // CTL-1936 / AC4: what the operator needs to attribute a write. Derived here so
+      // every emit below carries it without each call site remembering to.
+      const labels = Array.isArray(payload?.labelIds) ? payload.labelIds : null;
+      const convergenceKey = convergenceKeyFor({ routeId, ticket, payload });
+
       if (mode === "shadow") {
         counts.wouldWrite += 1;
-        emit(EVENT_WOULD_WRITE, { ticket, routeId, reason: "shadow", applied: false });
+        emit(EVENT_WOULD_WRITE, { ticket, routeId, reason: "shadow", applied: false, caller, labels });
         return { handled: false, applied: false, reason: "shadow" };
       }
 
       const fail = (reason, status = null, detail = null) => {
         counts.failed += 1;
-        emit(EVENT_FAILED, { ticket, routeId, reason, status, applied: false });
+        emit(EVENT_FAILED, { ticket, routeId, reason, status, applied: false, caller, labels });
         log?.warn?.(
           { ticket, route: routeId, reason, status, detail: detail ? scrub(detail) : undefined },
           "linear-write-proxy: write NOT applied — refusing to fall back to a direct Linear write"
@@ -464,6 +577,25 @@ export function createLinearWriteProxy({
         // asserting it with toEqual instead of toMatchObject.
         return { handled: true, applied: false, reason, ...(detail ? { detail } : {}) };
       };
+
+      // ── CTL-1936 / AC2 + AC3: refuse LOCALLY, before any cloud call ──
+      // The runaway spent 302 of 307 writes on one ticket. A refusal here costs nothing,
+      // where a refusal at the cloud costs a budget unit — which is how the whole day's
+      // budget went in 13 minutes. `refused` is its own counter: it is not a failed
+      // write, and it is not an applied one.
+      const { ledger: ledgerBefore, degraded: ledgerDegraded } = loadLedger();
+      if (!ledgerDegraded) {
+        const gate = classifyWrite({ ledger: ledgerBefore, ticket, convergenceKey, dailyBudget, perTicketCap });
+        if (!gate.allow) {
+          counts.refused += 1;
+          emit(EVENT_FAILED, { ticket, routeId, reason: gate.reason, status: null, applied: false, caller, labels });
+          log?.warn?.(
+            { ticket, route: routeId, caller, labels, reason: gate.reason, spentForTicket: gate.spentForTicket, total: gate.total },
+            "linear-write-proxy: write refused by the HOST budget — not sent to the cloud"
+          );
+          return { handled: true, applied: false, reason: gate.reason };
+        }
+      }
 
       const req = buildProxyRequest({ routeId, payload, baseUrl, routes, account });
       if (req.reason) return fail(req.reason);
@@ -497,9 +629,26 @@ export function createLinearWriteProxy({
       }
 
       const verdict = classifyProxyResponse(raw);
+
+      // The write LEFT this host, so it spent budget — success or not. Counting only
+      // successes would let a failing loop spend the day invisibly, which is the exact
+      // shape of the incident before CTC-674 changed the status code.
+      let ledgerAfter = recordWrite(ledgerBefore, ticket);
+      if (verdict.converged) ledgerAfter = noteConvergence(ledgerAfter, convergenceKey);
+      const exhaustion = classifyExhaustion(ledgerAfter, { dailyBudget });
+      if (exhaustion.announce) {
+        ledgerAfter = markExhaustionAnnounced(ledgerAfter);
+        emit(EVENT_EXHAUSTED, { ticket, routeId, reason: "budget:day-exhausted", status: null, applied: false, caller, labels });
+        log?.error?.(
+          { total: ledgerAfter.total, dailyBudget, day: ledgerAfter.day },
+          "linear-write-proxy: host daily cloud write budget EXHAUSTED — every further Linear write is refused until the UTC day rolls"
+        );
+      }
+      if (!ledgerDegraded) persist(ledgerAfter);
+
       if (!verdict.applied) return fail(verdict.reason, verdict.status, verdict.detail ?? null);
       counts.applied += 1;
-      emit(EVENT_APPLIED, { ticket, routeId, reason: null, status: verdict.status, applied: true });
+      emit(EVENT_APPLIED, { ticket, routeId, reason: null, status: verdict.status, applied: true, caller, labels });
       return { handled: true, applied: true, reason: null, status: verdict.status };
     },
   };

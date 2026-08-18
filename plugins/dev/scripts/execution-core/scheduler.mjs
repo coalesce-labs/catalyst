@@ -4139,6 +4139,33 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
   return ({ ticket, phase }) => {
     if (!ticket || !phase) return false;
     const workerDir = join(orchDir, "workers", ticket);
+
+    // ── CTL-1936: NOTHING TO CLEAR IS NOT A CLEAR ──
+    // This used to run unconditionally, so a ticket with no stalled signal and no
+    // needs-human still issued a label REMOVAL to Linear on every tick, forever. That
+    // is the measured runaway: CTL-1805 — Done in Linear, carrying only `orchestrator`,
+    // holding a worker directory untouched since Aug 15 — spent 302 of one host's 307
+    // daily cloud writes in ~13 minutes, and every unrelated ticket on that host lost
+    // its writes as collateral.
+    //
+    // ⚠️ The gate is deliberately a CONJUNCTION, not just "is the stalled signal gone".
+    // A previous clear can delete the signal and then FAIL to remove the label; that
+    // ticket must still retry, or the label is stranded forever. So the skip requires
+    // BOTH to be absent: no stall to clear, and no local record that a label was ever
+    // applied. Either one present → proceed exactly as before.
+    const stalledSignal = join(workerDir, `phase-${phase}.json`);
+    const labelMarkerBase = join(workerDir, ".linear-label-needs-human");
+    const nothingToClear =
+      !existsSync(stalledSignal) &&
+      !existsSync(`${labelMarkerBase}.applied`) &&
+      !existsSync(`${labelMarkerBase}.skipped`);
+    if (nothingToClear) {
+      log.debug?.(
+        { ticket, phase },
+        "stall-janitor: no stalled signal and no needs-human marker — nothing to clear (CTL-1936)"
+      );
+      return false;
+    }
     // 1. delete the synthetic stalled signal (the actual unstick).
     try {
       rmSync(join(workerDir, `phase-${phase}.json`), { force: true });

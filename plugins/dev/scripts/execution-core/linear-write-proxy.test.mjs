@@ -388,8 +388,13 @@ describe("enforce — the proxy IS the write", () => {
 });
 
 describe("event names", () => {
-  test("the three names are distinct and shadow's is not the applied one", () => {
-    expect(new Set(PROXY_EVENT_NAMES).size).toBe(3);
+  test("the names are distinct and shadow's is not the applied one", () => {
+    // CTL-1936 added a fourth: the budget-exhausted alarm. The assertion is on
+    // DISTINCTNESS and the shared prefix (which the broker's namespace contract keys
+    // on), not on a hard-coded count — a count makes every new event a test failure
+    // without saying anything about correctness.
+    expect(new Set(PROXY_EVENT_NAMES).size).toBe(PROXY_EVENT_NAMES.length);
+    expect(PROXY_EVENT_NAMES.length).toBeGreaterThanOrEqual(4);
     expect(EVENT_WOULD_WRITE).not.toBe(EVENT_APPLIED);
     expect(PROXY_EVENT_NAMES.every((n) => n.startsWith("linear.write.proxy."))).toBe(true);
   });
