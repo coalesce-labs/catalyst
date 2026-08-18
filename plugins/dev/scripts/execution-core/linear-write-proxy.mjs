@@ -63,11 +63,28 @@
 // ── ⚠️ THE CREDENTIAL CLASS IS PART OF THE CONTRACT ──
 // These routes require a PER-HOST, ORG-OWNED WorkOS API key. The tenant-wide
 // ADMIN_TOKEN authenticates (it is a machine principal) but carries no WorkOS key id,
-// so the cloud refuses it by name: "credential has no per-host binding". Measured
-// 2026-08-17 — mini-2 carries a real per-host key and a proxied write reached Linear;
-// mini still carries the ADMIN_TOKEN and is refused. A host is therefore not made
-// ready by lighting this flag alone; see the `no-cloud-token` / `unauthorized`
-// refusals below, both of which are LOUD and NAMED rather than a silent fallback.
+// so the cloud refuses it by name: "credential has no per-host binding". A host is
+// therefore not made ready by lighting this flag alone; see the `no-cloud-token` /
+// `unauthorized` refusals below, both of which are LOUD and NAMED rather than a silent
+// fallback.
+//
+// FLEET STATE, measured 2026-08-18 07:15-07:20 CT — BOTH minis carry a per-host key:
+//
+//     mini    claim CTL-1956 -> {"won":true,"generation":1}   read-back {"current":true}
+//     mini-2  claim CTL-1956 -> {"won":true,"generation":2}
+//
+// run from each daemon's own live process env under `mode=enforce`, against a Done
+// ticket so the fence could not influence a dispatch decision. A proxied write cannot
+// succeed without the per-host binding, so this supersedes the 2026-08-17 line that used
+// to sit here: "mini still carries the ADMIN_TOKEN and is refused". THAT IS NO LONGER
+// TRUE, and it was the sentence an operator would read to plan a rollout — it said half
+// the fleet could not be armed. Corrected the day the rollout ran.
+//
+// ⚠️ The GET read-back is NOT a weaker check than a write, and it is easy to assume it is:
+// `resolveReadOnlyAgentContext` calls the SAME `resolveAgentPrincipal` as
+// `resolveWriteContext`, including `hostId = authz.keyId` and the `if (!hostId) -> 403`
+// refusal. Only the BUDGET half differs. So `GET /agent/attachments` -> 200 already proves
+// a per-host binding, and it is the right preflight before arming a host.
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
