@@ -105,12 +105,37 @@ const COMPARE_SPEC_DRAFT = {
     attrs: ["vcs.repository.name", "vcs.revision", "vcs.ref.name", "deployment.environment", "deployment.id", "event.label"],
     payload: ["deploymentId"],
   },
-  // ⭐ CTC-712 (schema 0.1.18). ⛔ `vcs.pr.number` is compared and must never move to
-  // OBSERVED_ONLY: it IS the route. `router.mjs:1497` reaches an interest only through
-  // `detail.prNumbers`, and a suite event whose PR association disagrees with the
-  // webhook's is one that wakes the wrong waiter or none — while every count still
-  // reads "emitted". That is the whole failure CTC-712 exists to close, so the ledger
-  // has to be able to see it.
+  // ⭐ CTC-712 (schema 0.1.18).
+  //
+  // ⛔ `body.payload.prNumbers` IS THE ROUTE and is compared. `router.mjs:1497` reaches
+  // an interest through `eventPrs.find(...)` over `detail.prNumbers`, and
+  // `getEventPayload` resolves that to `body.payload` — never to the attributes. A
+  // suite event whose payload association disagrees with the webhook's wakes the wrong
+  // waiter or none, while every count still reads "emitted". That is the failure
+  // CTC-712 exists to close, so the ledger must be able to see it.
+  //
+  // ⚠️ `attributes["vcs.pr.number"]` is NOT compared, and an earlier version of this
+  // comment asserted the opposite — that it "IS the route and must never move to
+  // OBSERVED_ONLY". **That was wrong**, and reading the router rather than repeating
+  // the claim is what corrected it: the attribute is bridged only into `getEventScope`,
+  // and this name's branch never reads `scope`. It is display and observability.
+  //
+  // It is excluded because the two producers fill it from sources that cannot be made
+  // to agree, on a measured population. When GitHub sends an empty `pull_requests`
+  // array — **983 of 3,654 live suite events since 2026-08-17, 26.9%** — the webhook
+  // falls back to an in-memory SHA→PR cache (CTL-396) and resolves **355** of them.
+  // That cache is a HISTORICAL sha→PR map; the replica's `pull_requests` is a
+  // LAST-STATE projection that forgets a PR's earlier heads, so only 18 of 88 such
+  // suites still match a current head. The producer therefore reproduces the exact
+  // subset it can read exactly — `refs/pull/<N>/head`, measured 66 agreements and 0
+  // disagreements — and leaves the attribute absent otherwise, as the webhook does for
+  // a `main`-branch suite (56 of those 88).
+  //
+  // ⛔ Comparing it anyway would leave ~27% of the smee side permanently unjoinable and
+  // the ledger unable to reach CLEAN for a difference that changes no dispatch. That is
+  // a false BLOCKER, the same shape as the repo-scoping one #3551 fixed — and excluding
+  // a field that DID route would be the false-clean in the other direction, which is
+  // why the routing question was settled in the router's source before this line moved.
   //
   // ⚠️ THE KEY IS COARSE, AND DELIBERATELY SO. Neither side carries `check_suite_id`
   // (the webhook payload has no suite id in the envelope), and one head sha carried
@@ -121,13 +146,21 @@ const COMPARE_SPEC_DRAFT = {
   // duplicated suite still surfaces as an unjoined count rather than being absorbed.
   // With a single-value index this key would be a false-clean generator.
   "github.check_suite.completed": {
+    // ⛔ THE KEY CANNOT USE `vcs.pr.number` EITHER. It is exactly the field the two
+    // producers may legitimately differ on, so keying with it would split an agreeing
+    // pair into two unjoined singletons — a divergence reported as an ABSENCE, which is
+    // the harder failure to diagnose. Keyed on what both sides derive identically.
     key: (e) =>
-      `cs:${e.attributes?.["vcs.repository.name"]}#${e.attributes?.["vcs.pr.number"]}` +
-      `|${e.attributes?.["vcs.revision"] ?? ""}|${e.attributes?.["cicd.pipeline.run.conclusion"] ?? ""}`,
+      `cs:${e.attributes?.["vcs.repository.name"]}|${e.attributes?.["vcs.revision"] ?? ""}` +
+      `|${e.attributes?.["cicd.pipeline.run.conclusion"] ?? ""}` +
+      `|${JSON.stringify(e.body?.payload?.prNumbers ?? [])}`,
     attrs: [
-      "vcs.repository.name", "vcs.pr.number", "vcs.revision",
+      // ⚠️ `vcs.pr.number` and `event.label` are absent BY DESIGN — see above. The label
+      // is `PR #<n>` built from the same value, so comparing it would re-introduce the
+      // divergence through the back door.
+      "vcs.repository.name", "vcs.revision",
       "cicd.pipeline.run.status", "cicd.pipeline.run.conclusion",
-      "event.entity", "event.action", "event.label", "event.stream_class",
+      "event.entity", "event.action", "event.stream_class",
     ],
     // `prNumbers` is compared as a whole array, not just its head: the attribute
     // carries only `[0]`, so a disagreement in the tail would otherwise be invisible.
