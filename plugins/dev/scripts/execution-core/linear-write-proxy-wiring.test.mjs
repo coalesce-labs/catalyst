@@ -410,7 +410,7 @@ describe("⛔ the CTL-758 backward-write guard still runs, and runs BEFORE the p
   });
 });
 
-describe("removeLabel — the read still runs, only the write is re-routed", () => {
+describe("removeLabel — the proxied removal runs BEFORE the credentialed read", () => {
   test("⭐ enforce: a NATIVE remove of the one label — not an overwrite of the remaining set", async () => {
     const proxy = fakeProxy("enforce");
     setLinearWriteProxyResolver(fakeResolver());
@@ -454,26 +454,91 @@ describe("removeLabel — the read still runs, only the write is re-routed", () 
     expect(calls).toHaveLength(0);
   });
 
-  test("the idempotent already-absent path never reaches the proxy (it is not a write)", async () => {
+  // ⛔ THE REGRESSION THIS BLOCK EXISTS FOR (Codex #3489 round 2, P1). Both tests below
+  // replace earlier ones that PINNED THE DEFECT — they asserted the read short-circuits
+  // ahead of the proxy, which is exactly what strands an enforce host. A test can hold a
+  // bug in place as firmly as it holds a fix, so they are inverted here, not deleted.
+  test("⭐ enforce: a read that fails the way a MISSING linearis fails still removes via the proxy", async () => {
     const proxy = fakeProxy("enforce");
+    setLinearWriteProxyResolver(fakeResolver());
+    const calls = [];
+    const r = await removeLabel("CTL-7", "needs-human", {
+      exec: recordingExec(calls),
+      // 127 = spawn failure, the shape rawExec reports for an absent binary. This is the
+      // target deployment of enforce mode: a host with NO linearis and no host Linear
+      // credential. Before the fix this returned {removed:false, reason:"transient"} and
+      // never sent, so the daemon's comment-wake clear could never remove needs-input /
+      // needs-human — the worker stayed parked after the user had already answered.
+      readLabels: () => ({ ok: false, labels: null, code: 127, stderr: "spawn linearis ENOENT" }),
+      proxy,
+    });
+    expect(r).toEqual({ removed: true, wrote: true });
+    expect(proxy.sends).toEqual([
+      { routeId: "label", ticket: "CTL-7", payload: { issueId: ISSUE_ID, labelIds: [LABEL_ID], mode: "remove" } },
+    ]);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("an AUTH read failure is equally no longer fatal under enforce", async () => {
+    const proxy = fakeProxy("enforce");
+    setLinearWriteProxyResolver(fakeResolver());
+    const r = await removeLabel("CTL-7", "needs-human", {
+      exec: () => { throw new Error("must not exec"); },
+      readLabels: () => ({ ok: false, labels: null, code: 1, stderr: "401 Unauthorized" }),
+      proxy,
+    });
+    expect(r).toEqual({ removed: true, wrote: true });
+    expect(proxy.sends).toHaveLength(1);
+  });
+
+  // ⚠️ NEGATIVE CONTROL — without the proxy the read is still load-bearing and still
+  // fatal. Without this, the two tests above would also pass if the read had simply been
+  // deleted outright, which would silently drop the direct path's label-preserving
+  // read-modify-write.
+  test("no proxy: a failed read is STILL a named non-removal (direct path unchanged)", async () => {
+    const r = await removeLabel("CTL-7", "x", {
+      exec: () => ({ code: 0 }),
+      readLabels: () => ({ ok: false, labels: null, code: 1, stderr: "nope" }),
+    });
+    expect(r).toMatchObject({ removed: false, wrote: false, reason: "transient" });
+  });
+
+  test("shadow: a failed read is still fatal, because shadow performs the DIRECT write", async () => {
+    const proxy = fakeProxy("shadow");
+    const r = await removeLabel("CTL-7", "x", {
+      exec: () => ({ code: 0 }),
+      readLabels: () => ({ ok: false, labels: null, code: 1, stderr: "401 Unauthorized" }),
+      proxy,
+    });
+    expect(r).toMatchObject({ removed: false, wrote: false, reason: "auth-error" });
+  });
+
+  // ⚠️ THE NAMED NARROWING, pinned so it is a decision and not a drift. Under enforce the
+  // already-absent case can no longer be detected (detecting it costs the very credential
+  // being retired), so it sends an idempotent cloud remove and reports wrote:true. The
+  // direct path below still reports wrote:false for the same case — the asymmetry is
+  // deliberate: a spurious `worker.transition` clear on a duplicate wake is recoverable,
+  // a permanently MISSING clear on every enforce host is not.
+  test("enforce: an already-absent label is sent anyway and reports wrote:true", async () => {
+    const proxy = fakeProxy("enforce");
+    setLinearWriteProxyResolver(fakeResolver());
     const r = await removeLabel("CTL-7", "gone", {
       exec: () => { throw new Error("must not exec"); },
       readLabels: () => ({ ok: true, labels: ["bug"] }),
       proxy,
     });
-    expect(r).toEqual({ removed: true, wrote: false });
-    expect(proxy.sends).toHaveLength(0);
+    expect(r).toEqual({ removed: true, wrote: true });
+    expect(proxy.sends).toHaveLength(1);
   });
 
-  test("a failed READ still short-circuits before the proxy", async () => {
-    const proxy = fakeProxy("enforce");
-    const r = await removeLabel("CTL-7", "x", {
-      exec: () => ({ code: 0 }),
-      readLabels: () => ({ ok: false, labels: null, code: 1, stderr: "nope" }),
-      proxy,
+  test("no proxy: the already-absent label is still a no-op write (wrote:false)", async () => {
+    const calls = [];
+    const r = await removeLabel("CTL-7", "gone", {
+      exec: recordingExec(calls),
+      readLabels: () => ({ ok: true, labels: ["bug"] }),
     });
-    expect(r).toMatchObject({ removed: false, wrote: false, reason: "transient" });
-    expect(proxy.sends).toHaveLength(0);
+    expect(r).toEqual({ removed: true, wrote: false });
+    expect(calls).toHaveLength(0);
   });
 
   test("shadow: the proxy observes AND linearis still performs the overwrite", async () => {

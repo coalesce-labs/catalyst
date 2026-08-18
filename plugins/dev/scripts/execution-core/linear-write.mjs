@@ -528,26 +528,41 @@ export async function removeLabel(
         }
       : readTicketLabels);
   try {
-    const readResult = reader(ticket, { exec });
-    if (!readResult.ok) {
-      const reason = isAuthError(readResult.stderr ?? "") ? "auth-error" : "transient";
-      log.warn({ ticket, label, reason, stderr: readResult.stderr }, "removeLabel: read failed");
-      return { removed: false, wrote: false, reason };
-    }
-    const current = readResult.labels;
-    if (!current.includes(label)) {
-      // Idempotent: the label is already gone, no write needed.
-      return { removed: true, wrote: false };
-    }
-    const remaining = current.filter((l) => l !== label);
-
     // CTL-1889 — label route, REMOVE. An earlier cut sent `mode:"overwrite"` carrying
     // the computed `remaining` set, mirroring what the linearis path below has to do.
     // The cloud has no such mode — it accepts `add` or `remove` only, and would have
     // 400'd every removal. Native `remove` is also strictly safer than an overwrite:
-    // an overwrite races any label another actor adds between the read above and the
-    // write, and silently drops it. `remaining` is still computed because the direct
-    // path below needs it.
+    // an overwrite races any label another actor adds between a read and the write,
+    // and silently drops it.
+    //
+    // ⛔ IT RUNS BEFORE THE READ, AND THAT ORDER IS THE WHOLE POINT (Codex #3489
+    // round 2, P1). `reader` defaults to `readTicketLabels`, a bare `linearis issues
+    // read` — the exact host credential this ticket retires. Placed after the read, as
+    // the first cut had it, an enforce host with no `linearis` fails that read and
+    // returns `auth-error` at the guard above WITHOUT EVER SENDING the cloud removal.
+    // The caller of record is the daemon's comment-wake clear, so the visible symptom
+    // is a user answering a question and `needs-input`/`needs-human` staying attached
+    // forever — a silent, permanent park on precisely the deployment `enforce` targets.
+    // The read is a DIRECT-PATH concern (it computes `remaining` for the overwrite);
+    // the proxy needs only the one label's id, so it must not be gated on it.
+    //
+    // ⚠️ TWO NAMED NARROWINGS, both in the safe direction:
+    //
+    // 1. `wrote` — the direct path distinguishes "this call performed the write"
+    //    (`wrote: true`) from "confirmed already absent, no write needed"
+    //    (`wrote: false`); Codex #2970 round 3 added it so the daemon emits ONE
+    //    `worker.transition` clear per genuine removal, not one per duplicate-webhook
+    //    re-check. Without the read the proxied path cannot make that distinction, and
+    //    the cloud's `{outcome}` envelope carries no changed-flag to recover it. We
+    //    report `true`: at worst a repeated wake duplicates an observability event,
+    //    whereas `false` would make the clear unreachable on every enforce host — a
+    //    silent MISSING transition, which is strictly the worse failure. Sending
+    //    unconditionally is safe because the cloud's `remove` is itself idempotent.
+    // 2. shadow accounting — shadow now records an observation for every removeLabel
+    //    call, including ones the direct path resolves as a no-op. That makes this site
+    //    consistent with the other two (both already emit before knowing whether the
+    //    write is a no-op), but read the shadow counts as "write calls that reached the
+    //    seam", never as "writes that would have hit Linear".
     const proxiedRemove = routeThroughProxy(proxy, {
       routeId: "label",
       ticket,
@@ -565,6 +580,20 @@ export async function removeLabel(
         ? { removed: true, wrote: true }
         : { removed: false, wrote: false, reason: proxiedRemove.reason };
     }
+
+    // ── direct path (no proxy, or shadow handing the write back) ────────────────
+    const readResult = reader(ticket, { exec });
+    if (!readResult.ok) {
+      const reason = isAuthError(readResult.stderr ?? "") ? "auth-error" : "transient";
+      log.warn({ ticket, label, reason, stderr: readResult.stderr }, "removeLabel: read failed");
+      return { removed: false, wrote: false, reason };
+    }
+    const current = readResult.labels;
+    if (!current.includes(label)) {
+      // Idempotent: the label is already gone, no write needed.
+      return { removed: true, wrote: false };
+    }
+    const remaining = current.filter((l) => l !== label);
 
     let res;
     if (remaining.length) {

@@ -447,6 +447,44 @@ describe("defaultHttpFn round-trip against a real server", () => {
     tmp = null;
   });
 
+  // ⛔ THE CHILD'S DEADLINE, PROVEN TO FIRE (Codex #3489 round 2, P1). A watchdog that is
+  // merely PRESENT in the source is the shape of guardrail this repo has shipped broken
+  // before, so this asserts the behaviour: a server that boots, serves, and then ends
+  // itself while the parent does nothing at all.
+  test("⭐ the fixture server self-terminates on its own deadline, with NO kill from the parent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1889-deadline-"));
+    const rec = join(dir, "requests.jsonl");
+    writeFileSync(rec, "");
+    // ⚠️ Deliberately NOT assigned to the suite's `proc`, so `afterEach` cannot reach it.
+    // The ONLY thing able to end this process is its own timer — which is precisely the
+    // property under test, and it would be untestable if cleanup could do it instead.
+    const child = Bun.spawn(
+      [process.execPath, join(import.meta.dir, "__fixtures__", "http-echo-server.mjs"), rec, "200", "700"],
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    // Positive control: read the readiness line first, so a process that died at startup
+    // (a typo in the fixture, a missing arg) cannot be mistaken for one that timed out.
+    const reader = child.stdout.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (!buf.includes("\n")) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`fixture exited before listening: ${buf}`);
+      buf += dec.decode(value, { stream: true });
+    }
+    reader.releaseLock();
+    expect(/PORT \d+/.test(buf)).toBe(true);
+
+    const started = Date.now();
+    const code = await child.exited;
+    const elapsed = Date.now() - started;
+    expect(code).toBe(0);
+    // It waited for the deadline rather than falling over, and it needed nobody's help.
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(elapsed).toBeLessThan(20_000);
+    rmSync(dir, { recursive: true, force: true });
+  }, 30_000);
+
   test("curl is present at the absolute path the transport uses", () => {
     // Not a skip: curl IS a dependency of this transport, so its absence is a failure
     // of the environment the feature would run in, and must be loud.
