@@ -490,6 +490,20 @@ export function createLinearWriteProxy({
   const counts = { wouldWrite: 0, applied: 0, failed: 0, refused: 0 };
 
   // ── CTL-1936: the host's own spend ledger ──
+  //
+  // ⚠️ SINGLE-WRITER BY CONSTRUCTION, and that is an assumption worth stating rather
+  // than a lock worth building. The ledger is a read-modify-write with no file lock, so
+  // two concurrent writers would lose counts. `createLinearWriteProxy` has exactly ONE
+  // non-test call site — daemon.mjs — and the daemon's scheduler tick is synchronous, so
+  // there is one writer per host today. If a second call site ever appears (a CLI, a
+  // second daemon), this needs a lock, and losing counts fails toward UNDER-counting,
+  // i.e. toward the pre-CTL-1936 behaviour rather than toward wrongly throttling a
+  // healthy host.
+  //
+  // ⚠️ A degraded (unusable) ledger also disables CONVERGENCE suppression, not just the
+  // cap — `classifyWrite` is skipped entirely. That is the same fail-open direction: the
+  // worst case is the cloud answering `already-absent` again, which is a wasted call, not
+  // a wrong board state.
   const ledgerPath = budgetPath ?? defaultBudgetPath(env);
   const dailyBudget = Number(env.CATALYST_LINEAR_WRITE_DAILY_BUDGET) || DEFAULT_DAILY_BUDGET;
   const perTicketCap = Number(env.CATALYST_LINEAR_WRITE_TICKET_CAP) || DEFAULT_PER_TICKET_CAP;
