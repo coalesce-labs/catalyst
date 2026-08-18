@@ -1488,17 +1488,20 @@ export function startDaemon({
     }
     // CTL-1929: the GitHub leg's producer tick.
     //
-    // ⛔ READ FROM ITS OWN KNOB, AND NO GATE IS INSTALLED. Both of those are the
-    // safety argument, not style:
-    //   * `CATALYST_GITHUB_FEED` is separate from `CATALYST_CLOUD_FEED`, which every
-    //     worker already runs at `enforce` — sharing the value would have enforced
-    //     the GitHub leg on every host the moment this merged.
-    //   * There is deliberately NO `setGithubFeedGate` call. A gate is what
-    //     suppresses smee's copy, and suppressing it for `github.pr.merged` /
-    //     `github.check_suite.completed` — which this producer cannot emit until
-    //     CTC-691 and CTC-667 item 4 land — would take out the CI wait and the
-    //     deploy chain with nothing behind them. `enforce` therefore degrades to
-    //     shadow inside the timer and says so.
+    // ⛔ READS FROM ITS OWN KNOB. `CATALYST_GITHUB_FEED` is separate from
+    // `CATALYST_CLOUD_FEED`, which every worker already runs at `enforce` — sharing
+    // the value would have enforced the GitHub leg on every host the moment this
+    // merged. The two legs cut over independently or they cut over recklessly.
+    //
+    // ⚠️ AND THERE IS STILL NO `setGithubFeedGate` CALL HERE, WHICH IS NOT AN
+    // OVERSIGHT. The Linear gate lives in this process because `monitor.mjs` — its
+    // consumer — is in this process. The `github.*` consumer is `broker/tailer.mjs`
+    // → `broker/router.mjs`, a SEPARATE process, so the GitHub gate is installed
+    // there (`broker/index.mjs`, via `github-feed-gate-install.mjs`) and readiness
+    // reaches it through the file `github-feed-ready.mjs` defines rather than through
+    // a closure. Installing a second gate here would be a second authority path the
+    // real consumer does not share.
+    //
     // So on every host until an operator sets the flag, this block constructs
     // nothing and routing is byte-identical to pre-CTL-1929.
     const githubFeedCfg = readGithubFeedConfig();
@@ -1518,9 +1521,11 @@ export function startDaemon({
           effective: _githubFeedTimer?.mode?.effective ?? null,
           degraded: _githubFeedTimer?.mode?.degraded ?? false,
           intervalSec: githubFeedCfg.intervalSec,
-          gate: "none — the github leg suppresses nothing (CTC-691 / CTC-667 item 4)",
+          gate: "installed in the BROKER process (github-feed-gate-install.mjs), not here",
+          readyPath: _githubFeedTimer?.readyPath ?? null,
+          residual: _githubFeedTimer?.mode?.reason ?? null,
         },
-        "github-feed: armed (shadow only)",
+        "github-feed: armed",
       );
     }
 
