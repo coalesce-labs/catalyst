@@ -89,6 +89,15 @@ const LABEL_SELECT = `
   LIMIT 2
 `;
 
+// CTL-1933 — is this label currently ON this issue? The join table is keyed
+// (issue_id, label_id), so this is one indexed primary-key lookup against ids the
+// caller has ALREADY resolved on the same path — not a second resolution chain.
+const ISSUE_LABEL_SELECT = `
+  SELECT 1 AS present FROM issue_labels
+  WHERE issue_id = ? AND label_id = ?
+  LIMIT 1
+`;
+
 /**
  * createProxyResolver — identifier/name → Linear UUID, off the local replica.
  *
@@ -237,6 +246,45 @@ export function createProxyResolver({ dbPath = null, env = process.env, now = Da
         out.push(id);
       }
       return { ok: true, labelIds: out };
+    },
+
+    /**
+     * hasLabel(issueId, labelId) → {ok:true, present:boolean} | {ok:false, reason}
+     *
+     * CTL-1933. The cloud's label `remove` is NOT idempotent — measured against the live
+     * mirror on 2026-08-17 with the control firing first: `add` on an absent label 200s,
+     * `remove` on a PRESENT label 200s, and `remove` on an ABSENT label returns
+     * **400 `{"outcome":"failed"}`**. CTL-1889 inc 1 assumed the opposite in a code
+     * comment and shipped it, so every already-absent clear on an enforce host burned
+     * three cloud calls and then a CTL-1078 back-off, while reporting the label still
+     * attached when Linear said it was gone.
+     *
+     * ⛔ THE ANSWER IS THREE-VALUED AND ONLY ONE VALUE MAY SUPPRESS A WRITE. A caller
+     * may skip the removal on `{ok:true, present:false}` and on nothing else. Every
+     * inability to answer — dead writer, mid-reseed, unreadable database, a throwing
+     * query — comes back `{ok:false}` so the caller SENDS. Sending an unnecessary
+     * removal costs one 400; silently skipping a real one re-creates the permanent
+     * `needs-human` park that CTL-1889's own P1 existed to fix. The doubt has to fall
+     * on the side of doing the work.
+     *
+     * Runs through the same `one`-style gate as every resolver above, so the freshness
+     * check and the presence read share ONE snapshot: a mid-reseed `issue_labels` can be
+     * legitimately empty, which would read as "already absent" and suppress a real
+     * removal — the same class of trap the seed check was added for.
+     */
+    hasLabel(issueId, labelId) {
+      if (typeof issueId !== "string" || issueId === "") return miss("issue-id-invalid");
+      if (typeof labelId !== "string" || labelId === "") return miss("label-id-invalid");
+      const r = one(ISSUE_LABEL_SELECT, [issueId, labelId], {
+        // A zero-row answer here is a REAL answer, not a miss: the pair is simply not
+        // in the join table. `one` reports zero rows as `absent`, so that verdict is
+        // translated back into present:false rather than treated as a failure.
+        absent: "issue-label-absent",
+        ambiguous: "issue-label-ambiguous",
+      });
+      if (r.ok) return { ok: true, present: true };
+      if (r.reason === "issue-label-absent") return { ok: true, present: false };
+      return r;
     },
 
     close: drop,

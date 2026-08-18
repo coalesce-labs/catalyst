@@ -36,6 +36,10 @@ function seed({ issues = true, states = true, labels = true, seeded = true, writ
   db.run("CREATE TABLE issues (id TEXT, identifier TEXT, team_id TEXT, removed_at INTEGER)");
   db.run("CREATE TABLE workflow_states (id TEXT, team_id TEXT, name TEXT, archived_at INTEGER)");
   db.run("CREATE TABLE labels (id TEXT, name TEXT, removed_at INTEGER)");
+  // CTL-1933: the join the presence check reads. Seeded EMPTY by default and filled
+  // per-test, so a test that forgets to attach the label gets "absent" — the verdict
+  // that suppresses a write — rather than silently inheriting one.
+  db.run("CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT)");
   if (issues) {
     db.run("INSERT INTO issues VALUES (?,?,?,NULL)", [ISSUE, "CTL-1889", TEAM]);
     db.run("INSERT INTO issues VALUES (?,?,?,?)", ["dead", "CTL-DEAD", TEAM, 1]);
@@ -288,5 +292,87 @@ describe("handle discipline", () => {
     rmSync(dbPath);
     seed();
     expect(r.issue("CTL-1889")).toEqual({ ok: true, issueId: ISSUE, teamId: TEAM });
+  });
+});
+
+
+// ─── CTL-1933: the presence check that stops a no-op removal becoming a 400 ──────────
+//
+// The cloud's label `remove` is NOT idempotent (measured against the live mirror:
+// add-on-absent 200, remove-on-present 200, remove-on-absent **400**). CTL-1889 inc 1
+// asserted the opposite in a comment and shipped it. This resolver answers the presence
+// question off the replica so no host credential is needed — and it is three-valued,
+// because only a CONFIDENT absent may suppress a write.
+describe("⛔ hasLabel — three-valued, and only one value may suppress a write", () => {
+  const attach = (issueId, labelId) => {
+    const db = new Database(dbPath);
+    db.run("INSERT INTO issue_labels VALUES (?,?)", [issueId, labelId]);
+    db.close();
+  };
+
+  test("the label IS on the issue → {ok:true, present:true}", () => {
+    seed();
+    attach(ISSUE, LABEL);
+    expect(createProxyResolver({ dbPath }).hasLabel(ISSUE, LABEL)).toEqual({ ok: true, present: true });
+  });
+
+  // ⭐ The row this ticket exists for: a real zero, reported as a VALUE, not a failure.
+  test("⭐ the label is NOT on the issue → {ok:true, present:false} (a real answer)", () => {
+    seed();
+    expect(createProxyResolver({ dbPath }).hasLabel(ISSUE, LABEL)).toEqual({ ok: true, present: false });
+  });
+
+  // ⛔ NEGATIVE CONTROL for the one above: same query, same empty-looking result, but the
+  // replica cannot be trusted. present:false here would suppress a REAL removal and
+  // re-create the permanent needs-human park. It must be ok:false instead — proving the
+  // instrument distinguishes "not attached" from "could not look".
+  test("⛔ a STALE writer is ok:false — never present:false", () => {
+    seed({ writerAgeMs: 10 * 60 * 1000 });
+    const r = createProxyResolver({ dbPath }).hasLabel(ISSUE, LABEL);
+    expect(r.ok).toBe(false);
+    expect(r.present).toBeUndefined();
+    expect(r.reason).toBe("replica-stale");
+  });
+
+  test("⛔ a MID-RESEED replica is ok:false — an emptied join table is not an absence", () => {
+    seed({ seeded: false });
+    const r = createProxyResolver({ dbPath }).hasLabel(ISSUE, LABEL);
+    expect(r.ok).toBe(false);
+    expect(r.present).toBeUndefined();
+    expect(r.reason).toBe("replica-reseeding");
+  });
+
+  test("⛔ an UNREADABLE replica is ok:false", () => {
+    seed();
+    const db = new Database(dbPath);
+    db.run("DROP TABLE issue_labels");
+    db.close();
+    const r = createProxyResolver({ dbPath }).hasLabel(ISSUE, LABEL);
+    expect(r.ok).toBe(false);
+    expect(r.present).toBeUndefined();
+  });
+
+  test("malformed ids are named refusals, not a false absence", () => {
+    seed();
+    const rv = createProxyResolver({ dbPath });
+    expect(rv.hasLabel("", LABEL)).toMatchObject({ ok: false, reason: "issue-id-invalid" });
+    expect(rv.hasLabel(ISSUE, null)).toMatchObject({ ok: false, reason: "label-id-invalid" });
+  });
+
+  // The presence check must not answer about a DIFFERENT issue's label — the join is
+  // keyed on both ids and a one-sided match would report a neighbour's label as ours.
+  test("a label attached to ANOTHER issue does not count as present", () => {
+    seed();
+    attach("dead", LABEL);
+    expect(createProxyResolver({ dbPath }).hasLabel(ISSUE, LABEL)).toEqual({ ok: true, present: false });
+  });
+
+  // Duplicate join rows are a replica artefact, not ambiguity: the answer to "is it
+  // attached" is yes either way. LIMIT 1 keeps it from becoming a spurious refusal.
+  test("a duplicated join row still reports present:true", () => {
+    seed();
+    attach(ISSUE, LABEL);
+    attach(ISSUE, LABEL);
+    expect(createProxyResolver({ dbPath }).hasLabel(ISSUE, LABEL)).toEqual({ ok: true, present: true });
   });
 });

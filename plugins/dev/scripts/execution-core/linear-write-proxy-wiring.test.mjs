@@ -30,6 +30,9 @@ function fakeResolver(overrides = {}) {
     issue: () => ({ ok: true, issueId: ISSUE_ID, teamId: "team-1" }),
     stateId: () => ({ ok: true, stateId: STATE_ID }),
     labelIds: (names) => ({ ok: true, labelIds: names.map(() => LABEL_ID) }),
+    // CTL-1933. Defaults to PRESENT so every pre-existing removal test still sends —
+    // the skip is opt-in per test, which keeps this change from silently muting them.
+    hasLabel: () => ({ ok: true, present: true }),
     ...overrides,
   };
 }
@@ -513,23 +516,60 @@ describe("removeLabel — the proxied removal runs BEFORE the credentialed read"
     expect(r).toMatchObject({ removed: false, wrote: false, reason: "auth-error" });
   });
 
-  // ⚠️ THE NAMED NARROWING, pinned so it is a decision and not a drift. Under enforce the
-  // already-absent case can no longer be detected (detecting it costs the very credential
-  // being retired), so it sends an idempotent cloud remove and reports wrote:true. The
-  // direct path below still reports wrote:false for the same case — the asymmetry is
-  // deliberate: a spurious `worker.transition` clear on a duplicate wake is recoverable,
-  // a permanently MISSING clear on every enforce host is not.
-  test("enforce: an already-absent label is sent anyway and reports wrote:true", async () => {
+  // ⛔ CTL-1933 — THE NARROWING IS GONE, and this test is the inverse of the one that
+  // pinned it. The first cut reported wrote:true here and SENT, on a code comment
+  // asserting the cloud's remove was idempotent. Measured against the live mirror it is
+  // not: remove-on-absent returns 400. The replica now answers the presence question, so
+  // the proxied path recovers both the no-op AND the wrote:false the direct path reports.
+  test("⭐ enforce: an already-absent label is NOT sent, and reports wrote:false", async () => {
     const proxy = fakeProxy("enforce");
-    setLinearWriteProxyResolver(fakeResolver());
+    setLinearWriteProxyResolver(fakeResolver({ hasLabel: () => ({ ok: true, present: false }) }));
     const r = await removeLabel("CTL-7", "gone", {
       exec: () => { throw new Error("must not exec"); },
-      readLabels: () => ({ ok: true, labels: ["bug"] }),
+      readLabels: () => { throw new Error("must not read — the credential is the thing being retired"); },
+      proxy,
+    });
+    expect(r).toEqual({ removed: true, wrote: false });
+    expect(proxy.sends).toHaveLength(0);
+  });
+
+  test("enforce: a PRESENT label is still sent and reports wrote:true", async () => {
+    const proxy = fakeProxy("enforce");
+    setLinearWriteProxyResolver(fakeResolver({ hasLabel: () => ({ ok: true, present: true }) }));
+    const r = await removeLabel("CTL-7", "needs-human", {
+      exec: () => { throw new Error("must not exec"); },
+      readLabels: () => ({ ok: false, labels: null, code: 127, stderr: "spawn linearis ENOENT" }),
       proxy,
     });
     expect(r).toEqual({ removed: true, wrote: true });
-    expect(proxy.sends).toHaveLength(1);
+    expect(proxy.sends[0].payload).toEqual({ issueId: ISSUE_ID, labelIds: [LABEL_ID], mode: "remove" });
   });
+
+  // ⛔ THE FAIL DIRECTION, asserted case by case. Doubt must never suppress a removal:
+  // an unnecessary remove costs one 400, a skipped real one is a permanent needs-human
+  // park. Each row is a DIFFERENT way of not knowing, because a single "unhappy" case
+  // would not prove the others are handled.
+  for (const [name, hasLabel] of [
+    ["a stale replica (gate refused)", () => ({ ok: false, reason: "replica-stale" })],
+    ["a mid-reseed replica", () => ({ ok: false, reason: "replica-reseeding" })],
+    ["an unreadable replica", () => ({ ok: false, reason: "replica-unreadable" })],
+    ["a resolver that throws", () => { throw new Error("boom"); }],
+    ["an OLDER resolver with no hasLabel at all", undefined],
+  ]) {
+    test(`enforce: ${name} → the removal IS sent (doubt never suppresses)`, async () => {
+      const proxy = fakeProxy("enforce");
+      const base = fakeResolver();
+      if (hasLabel === undefined) delete base.hasLabel; else base.hasLabel = hasLabel;
+      setLinearWriteProxyResolver(base);
+      const r = await removeLabel("CTL-7", "needs-human", {
+        exec: () => { throw new Error("must not exec"); },
+        readLabels: () => ({ ok: false, labels: null, code: 127, stderr: "spawn linearis ENOENT" }),
+        proxy,
+      });
+      expect(proxy.sends).toHaveLength(1);
+      expect(r.removed).toBe(true);
+    });
+  }
 
   test("no proxy: the already-absent label is still a no-op write (wrote:false)", async () => {
     const calls = [];

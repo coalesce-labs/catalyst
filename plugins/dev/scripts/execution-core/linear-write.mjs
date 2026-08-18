@@ -546,23 +546,31 @@ export async function removeLabel(
     // The read is a DIRECT-PATH concern (it computes `remaining` for the overwrite);
     // the proxy needs only the one label's id, so it must not be gated on it.
     //
-    // ⚠️ TWO NAMED NARROWINGS, both in the safe direction:
+    // ⛔ CTL-1933 — THE CLOUD'S `remove` IS NOT IDEMPOTENT, so the idempotency check
+    // cannot simply be dropped along with the credentialed read. Measured against the
+    // live mirror with the control firing first: `add` on an absent label 200s,
+    // `remove` on a PRESENT label 200s, `remove` on an ABSENT label returns
+    // **400 `{"outcome":"failed"}`**. The first cut of this block asserted the opposite
+    // in a comment ("the cloud's remove is itself idempotent, so sending unconditionally
+    // is safe") and shipped it unverified; on the first enforce host it turned every
+    // no-op clear into three failed cloud calls plus a CTL-1078 back-off, and reported
+    // the label still attached when Linear said it was gone.
     //
-    // 1. `wrote` — the direct path distinguishes "this call performed the write"
-    //    (`wrote: true`) from "confirmed already absent, no write needed"
-    //    (`wrote: false`); Codex #2970 round 3 added it so the daemon emits ONE
-    //    `worker.transition` clear per genuine removal, not one per duplicate-webhook
-    //    re-check. Without the read the proxied path cannot make that distinction, and
-    //    the cloud's `{outcome}` envelope carries no changed-flag to recover it. We
-    //    report `true`: at worst a repeated wake duplicates an observability event,
-    //    whereas `false` would make the clear unreachable on every enforce host — a
-    //    silent MISSING transition, which is strictly the worse failure. Sending
-    //    unconditionally is safe because the cloud's `remove` is itself idempotent.
-    // 2. shadow accounting — shadow now records an observation for every removeLabel
-    //    call, including ones the direct path resolves as a no-op. That makes this site
-    //    consistent with the other two (both already emit before knowing whether the
-    //    write is a no-op), but read the shadow counts as "write calls that reached the
-    //    seam", never as "writes that would have hit Linear".
+    // The presence question is therefore asked of the REPLICA, not of `linearis` — the
+    // resolver is already open on this path with both ids in hand, so it is one indexed
+    // lookup and it needs no host Linear credential, which is what lets the removal stay
+    // ahead of the read.
+    //
+    // ⚠️ ONLY A CONFIDENT "absent" MAY SUPPRESS THE WRITE. `hasLabel` is three-valued;
+    // any inability to answer (dead writer, mid-reseed, unreadable db) returns ok:false
+    // and we SEND. An unnecessary removal costs one 400; a silently skipped real removal
+    // re-creates the permanent needs-human park this whole path exists to fix.
+    //
+    // ⚠️ shadow accounting — shadow records an observation for every removeLabel call,
+    // including ones the direct path resolves as a no-op. That makes this site consistent
+    // with the other two (both already emit before knowing whether the write is a no-op),
+    // but read the shadow counts as "write calls that reached the seam", never as "writes
+    // that would have hit Linear".
     const proxiedRemove = routeThroughProxy(proxy, {
       routeId: "label",
       ticket,
@@ -572,10 +580,35 @@ export async function removeLabel(
         if (!issue.ok) return issue;
         const ids = resolver.labelIds([label]);
         if (!ids.ok) return ids;
+        // Skip ONLY on a positive absent. A resolver without `hasLabel`, one that
+        // cannot answer, or one that THROWS all fall through to the send by design.
+        // The try/catch is not defensive padding: this check is an OPTIMISATION, so its
+        // failure must cost a redundant cloud call, never the removal itself. Left
+        // unguarded it escapes to removeLabel's outer catch and returns
+        // `{removed:false, reason:"transient"}` — i.e. a broken presence probe would
+        // suppress the very write it exists to make cheaper. (`issue`/`labelIds` are
+        // deliberately NOT wrapped: without them there is no payload to send at all.)
+        let presence = null;
+        if (typeof resolver.hasLabel === "function") {
+          try {
+            presence = resolver.hasLabel(issue.issueId, ids.labelIds[0]);
+          } catch {
+            presence = null;
+          }
+        }
+        if (presence && presence.ok === true && presence.present === false) {
+          return { ok: true, skip: "label-already-absent" };
+        }
         return { ok: true, payload: { issueId: issue.issueId, labelIds: ids.labelIds, mode: "remove" } };
       },
     });
     if (proxiedRemove) {
+      // A skipped removal is a confirmed no-op, so it restores the `wrote: false` the
+      // direct path reports for the same case — which is what stops the daemon emitting a
+      // `worker.transition` clear for a duplicate-webhook re-check (Codex #2970 round 3).
+      if (proxiedRemove.skipped === "label-already-absent") {
+        return { removed: true, wrote: false };
+      }
       return proxiedRemove.applied
         ? { removed: true, wrote: true }
         : { removed: false, wrote: false, reason: proxiedRemove.reason };
