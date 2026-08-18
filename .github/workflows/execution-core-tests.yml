@@ -272,6 +272,7 @@ jobs:
         # touched) and a zero-discovery case that must exit 2, not report a clean pass.
         working-directory: .
         run: bash scripts/__tests__/worktree-thoughts-exclude-backfill.test.sh
+
       - name: account-usage pager test (CTL-1908)
         # Pages before an armed Claude account exhausts its 5-hour / 7-day window. The property
         # under test is not "does it page at 80%" — it is that every way of being unable to SEE
@@ -279,6 +280,24 @@ jobs:
         # UNOBSERVABLE and a non-zero exit, never as "under threshold".
         working-directory: .
         run: bash plugins/dev/scripts/__tests__/catalyst-account-usage-page.test.sh
+
+      - name: direnv fleet readiness test (CTL-1944)
+        # The property under test is not "is direnv installed" — it is that every way of being
+        # NOT-owner-ready renders RED. Two regression guards carry the weight: a BLOCKED .envrc
+        # must not read as a clean host (the allowed-state is read positively from `Found RC
+        # allowed`, never inferred from absent output), and the CALLER's ambient token must not
+        # make an unprovisioned host pass (`direnv exec` inherits, so the dump runs scrubbed).
+        #
+        # ⛔ direnv is INSTALLED here on purpose. Without it the suite skips exactly the two
+        # guards above and still reports green — a test that ships inert, which is the
+        # CTL-1919/CTL-1935 class. The test itself also refuses to skip when CI is set, so
+        # this step failing to provision direnv is a RED result rather than a quiet pass.
+        working-directory: .
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq direnv
+          direnv version
+          bash plugins/dev/scripts/__tests__/check-direnv-fleet.test.sh
 
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing

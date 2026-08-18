@@ -244,6 +244,40 @@ _ab_version_ge() {
   [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
 
+# ensure_direnv — install direnv when absent (CTL-1944). Every fleet host must be able to
+# materialize the direnv-backed tokens (LINEAR_API_TOKEN / GITHUB_TOKEN / CLOUDFLARE_API_TOKEN)
+# that a remote owner needs; mini-2 had no direnv at all and every Linear read on it failed,
+# discovered mid-run rather than at provisioning time.
+#
+# ⛔ Why this INSTALLS instead of only reporting: `brew install direnv` typed on one host is the
+# uncodified machine edit CTL-1908 proved drifts — that fix lived on the laptop for nine hours
+# while both minis still carried the incident condition. The codified installer is the fix.
+#
+# Same warn+continue contract as ensure_alloy/ensure_agent_browser: install-cli must not exit
+# non-zero here. The RED signal is check-direnv-fleet.sh, which fails the host loudly.
+ensure_direnv() {
+  if command -v direnv >/dev/null 2>&1; then
+    echo "  direnv $(direnv version 2>/dev/null || echo '?') present ($(command -v direnv))"
+    return 0
+  fi
+
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "  warning: direnv absent and brew unavailable — install manually (brew install direnv); this host cannot materialize fleet tokens until then" >&2
+    return 0
+  fi
+
+  echo "  Installing direnv via brew (CTL-1944)…"
+  brew install direnv >/dev/null 2>&1 || true
+  hash -r 2>/dev/null || true
+
+  if command -v direnv >/dev/null 2>&1; then
+    echo "  Installed direnv $(direnv version 2>/dev/null || echo '?') ($(command -v direnv))"
+  else
+    echo "  warning: direnv install via brew failed — this host cannot materialize fleet tokens, and a remote owner launched here will not be able to read Linear" >&2
+  fi
+  return 0
+}
+
 # ensure_agent_browser — install/upgrade agent-browser to >= AGENT_BROWSER_MIN_VERSION
 # and provision its Chrome-for-Testing browser (CTL-1500). agent-browser is a
 # homebrew-core formula (`brew install agent-browser` — no tap); after install/
@@ -594,6 +628,10 @@ ensure_alloy || true
 # warn+continue contract as ensure_alloy — optional browser-testing infra must
 # never make install-cli exit non-zero.
 ensure_agent_browser || true
+
+# Provision direnv (CTL-1944). Same warn+continue contract — the loud failure is
+# check-direnv-fleet.sh, which fails a host that still cannot materialize fleet tokens.
+ensure_direnv || true
 
 # PATH bootstrap — if BIN_DIR is not on PATH, append an export line to the
 # user's shell rc file. Idempotent: a marker comment guards against duplicate
