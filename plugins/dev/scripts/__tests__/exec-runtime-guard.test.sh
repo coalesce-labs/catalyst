@@ -68,9 +68,23 @@ mkdir -p "$SCRATCH/bin" "$SCRATCH/scripts/execution-core/cli"
 cp "$CLI" "$SCRATCH/scripts/catalyst-execution-core"
 COUNTER="$SCRATCH/levels"
 : >"$COUNTER"
+# ⛔ THE FIXTURE SELF-TERMINATES, and that is the point (Codex #3511 P1).
+#
+# My first cut relied on an external watchdog killing `$runner`. That is exactly the
+# antipattern AGENTS.md forbids: when the guard is broken — the case this test exists to
+# contain — every level has ALREADY spawned its child, so killing the first ancestor leaves
+# the descendants reparented and still recursing. Cleanup was load-bearing, in a test about
+# a fork bomb.
+#
+# The chain now carries its own deadline. The bound sits WELL ABOVE the guard's cap, so it
+# never decides the assertion: a working guard stops at 3 and the hard stop is never
+# reached; a broken guard stops at 10 instead of at the process table, and the level count
+# fails the test loudly.
+FIXTURE_HARD_STOP=10
 cat >"$SCRATCH/scripts/execution-core/cli/drain.mjs" <<EOF
 // drain.mjs — the bomb in miniature: a backticked command example on line 1.
 echo x >> "$COUNTER"
+if [ "\$(wc -l < "$COUNTER" | tr -d ' ')" -ge $FIXTURE_HARD_STOP ]; then exit 0; fi
 sleep 0.2
 \`bash "$SCRATCH/scripts/catalyst-execution-core" drain --status-read\`
 EOF
@@ -80,21 +94,39 @@ exec /bin/bash "$@"
 EOF
 chmod +x "$SCRATCH/bin/bun"
 
-# The watchdog is the safety net, not the assertion: it must NOT be what stops the chain.
+# The chain's own hard stop (above) is what bounds it. This watchdog is a THIRD line of
+# defence and it kills the whole PROCESS GROUP — killing `$runner` alone leaves reparented
+# descendants running, which is what made the first version of this test unsafe.
+set -m
 (PATH="$SCRATCH/bin:/usr/bin:/bin" CATALYST_EXEC_RUNTIME_MAX_DEPTH=3 \
 	bash "$SCRATCH/scripts/catalyst-execution-core" drain --status-read >/dev/null 2>&1) &
 runner=$!
 (
-	sleep 8
+	sleep 12
+	kill -9 -"$runner" 2>/dev/null
 	kill -9 "$runner" 2>/dev/null
 ) &
 watchdog=$!
 wait "$runner" 2>/dev/null
 kill "$watchdog" 2>/dev/null
+set +m
+
+# ⛔ Fail closed on residue: a passing level-count must not hide a leak.
+if pgrep -f "$SCRATCH/scripts/catalyst-execution-core" >/dev/null 2>&1; then
+	pkill -9 -f "$SCRATCH/scripts/catalyst-execution-core" 2>/dev/null
+	fail "the fixture left processes behind" "residue found and killed — the chain is not self-limiting"
+else
+	pass "no fixture processes survived the run"
+fi
 
 LEVELS=$(wc -l <"$COUNTER" | tr -d ' ')
 if [[ $LEVELS -ge 1 && $LEVELS -le 4 ]]; then
 	pass "the chain ran but STOPPED — ${LEVELS} level(s), cap 3"
+elif [[ $LEVELS -ge $FIXTURE_HARD_STOP ]]; then
+	# The fixture's own deadline stopped it, which means the GUARD did not. Telling these
+	# two apart is the whole reason the hard stop sits well above the cap.
+	fail "the GUARD did not bound the chain — the fixture's hard stop did" \
+		"levels reached: ${LEVELS} (hard stop ${FIXTURE_HARD_STOP}, guard cap 3)"
 else
 	fail "the chain was not bounded by the guard" "levels reached: ${LEVELS} (expected 1..4)"
 fi
