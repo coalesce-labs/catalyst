@@ -1082,8 +1082,30 @@ if command -v direnv &>/dev/null; then
 		warn "No .envrc in current project — direnv not active here"
 	fi
 else
-	warn "direnv not installed (recommended for multi-repo API key isolation)"
-	info "Install: brew install direnv"
+	# ⛔ CTL-1944: this was a warn, and a warn is what let mini-2 sit un-provisioned. direnv is not
+	# "recommended" on a host that hosts owners — without it the host materializes no tokens and
+	# every Linear read by an owner launched here fails.
+	fail "direnv NOT installed — this host cannot materialize fleet tokens (owners launched here cannot read Linear)"
+	info "Install: brew install direnv  (or re-run install-cli.sh, which now provisions it)"
+fi
+
+# ─── 8b. direnv fleet readiness (CTL-1944) ──────────────────────────────────
+# Delegated to check-direnv-fleet.sh rather than reimplemented here: the allowed-state read is
+# subtle enough (the Loaded-vs-Found distinction, the physical-path resolution, the env scrub)
+# that a second copy is guaranteed drift. This is the same script the host setup path runs.
+DIRENV_FLEET_CHECK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-direnv-fleet.sh"
+if [[ -x "$DIRENV_FLEET_CHECK" ]]; then
+	if FLEET_OUT="$(bash "$DIRENV_FLEET_CHECK" --dir "$PWD" 2>&1)"; then
+		pass "direnv fleet readiness: this host can materialize owner tokens"
+	else
+		fail "direnv fleet readiness FAILED — an owner launched here may not be able to read Linear"
+		while IFS= read -r line; do
+			[[ "$line" == *"❌"* ]] && info "${line#"${line%%[![:space:]]*}"}"
+		done <<<"$FLEET_OUT"
+		info "Detail: bash $DIRENV_FLEET_CHECK --dir '$PWD'"
+	fi
+else
+	warn "check-direnv-fleet.sh not found next to check-setup.sh — fleet readiness unverified"
 fi
 
 # ─── 9. Thoughts System ─────────────────────────────────────────────────────
