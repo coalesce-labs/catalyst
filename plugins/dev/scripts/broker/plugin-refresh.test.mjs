@@ -40,6 +40,9 @@ import {
   __clearThrottleForTest,
   CHECKOUT_LAG_FAILURE_THRESHOLD,
   __clearLagStateForTest,
+  advanceIndexServingRoot,
+  INDEX_ROOT_THROTTLE_MS,
+  __clearIndexRootStateForTest,
 } from "./plugin-refresh.mjs";
 
 // ─── resolvePluginCheckoutRoots ──────────────────────────────────────────────
@@ -2613,5 +2616,171 @@ describe("refreshPluginCheckout — post-install resolution audit (CTL-1831)", (
     expect(audits).toBe(0);
     expect(emitted.some((e) => e.event === "plugin.checkout.deps_install_failed")).toBe(true);
     expect(emitted.some((e) => e.event === "plugin.checkout.deps_install_noop")).toBe(false);
+  });
+});
+
+
+// ─── CTL-1951: the ROUTINE reload advances the pinned indexer serving root ───
+//
+// CTL-1935 pinned the root and hooked the JOIN path. The routine reload — this module, many
+// times a day — never advanced it, so a pin bump never reached a worker node. Measured on all
+// three hosts after the pin had already been distributed: index-source absent everywhere.
+//
+// The property under test is NOT "does it run setup". It is that the heavy half NEVER runs in
+// the broker's event loop, and that a detached job — whose exit code is unobservable by
+// definition — is never reported as success.
+describe("advanceIndexServingRoot (CTL-1951)", () => {
+  beforeEach(() => __clearIndexRootStateForTest());
+
+  const ROOT = "/checkout";
+  const SCRIPT = "/checkout/plugins/dev/scripts/catalyst-index-root";
+  const existsAll = () => true;
+
+  test("a root already at the pin does nothing and spawns nothing", () => {
+    const spawns = [];
+    const events = [];
+    const r = advanceIndexServingRoot({
+      root: ROOT, now: 1000, env: {}, emitFn: (e) => events.push(e),
+      verifyFn: () => true,
+      spawnFn: (s) => { spawns.push(s); return 42; },
+      existsFn: existsAll,
+    });
+    expect(r).toEqual({ atPin: true });
+    expect(spawns).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  test("a root NOT at the pin spawns setup DETACHED and says so", () => {
+    const spawns = [];
+    const events = [];
+    const r = advanceIndexServingRoot({
+      root: ROOT, now: 1000, env: {}, emitFn: (e) => events.push(e),
+      verifyFn: () => { throw new Error("not at pin"); },
+      spawnFn: (s) => { spawns.push(s); return 4242; },
+      existsFn: existsAll,
+    });
+    expect(r.spawned).toBe(true);
+    expect(r.pid).toBe(4242);
+    expect(spawns).toEqual([SCRIPT]);
+    expect(events.map((e) => e.event)).toEqual(["plugin.index_root.advancing"]);
+  });
+
+  // ⛔ THE CORE GUARD. The reason setup is spawned rather than called is that a full clone in the
+  // broker's event loop wedges the daemon. If the spawn seam were ever swapped for a synchronous
+  // call this test would still pass on behaviour — so it asserts the seam directly: the default
+  // path must not be execFileSync-shaped, i.e. advanceIndexServingRoot must return WITHOUT the
+  // child's exit status, and must return promptly even when the child never finishes.
+  test("the event loop is never blocked on setup — it returns without the child's exit status", () => {
+    let released = false;
+    const r = advanceIndexServingRoot({
+      root: ROOT, now: 1000, env: {}, emitFn: () => {},
+      verifyFn: () => false,
+      // A spawn that models a job still running: it returns a pid and nothing else. If the
+      // implementation waited on completion, it could not return here at all.
+      spawnFn: () => { released = true; return 7; },
+      existsFn: existsAll,
+    });
+    expect(released).toBe(true);
+    expect(r.spawned).toBe(true);
+    // The result carries NO exit code / success flag — "dispatched" is all that is knowable.
+    expect(r.exitCode).toBeUndefined();
+    expect(r.succeeded).toBeUndefined();
+  });
+
+  // ⛔ THE NAMED FAILURE SIGNAL (AC 2). A detached job that never succeeds must not look identical
+  // to one that was never needed.
+  test("still not at the pin AFTER a prior attempt emits a named WARN", () => {
+    const events = [];
+    const opts = {
+      root: ROOT, env: {}, emitFn: (e) => events.push(e),
+      verifyFn: () => false,
+      spawnFn: () => 1,
+      existsFn: existsAll,
+    };
+    advanceIndexServingRoot({ ...opts, now: 1000 });
+    events.length = 0;
+    // Past the throttle window, still not at the pin.
+    const r = advanceIndexServingRoot({ ...opts, now: 1000 + INDEX_ROOT_THROTTLE_MS + 1 });
+    const stale = events.find((e) => e.event === "plugin.index_root.stale");
+    expect(stale).toBeDefined();
+    expect(stale.severity).toBe("WARN");
+    expect(stale.detail.remedy).toContain("catalyst-index-root");
+    expect(r.spawned).toBe(true); // and it retries
+  });
+
+  test("a root that reaches the pin after an attempt does NOT keep warning", () => {
+    const events = [];
+    const base = {
+      root: ROOT, env: {}, emitFn: (e) => events.push(e),
+      spawnFn: () => 1, existsFn: existsAll,
+    };
+    advanceIndexServingRoot({ ...base, now: 1000, verifyFn: () => false });
+    events.length = 0;
+    const r = advanceIndexServingRoot({
+      ...base, now: 1000 + INDEX_ROOT_THROTTLE_MS + 1, verifyFn: () => true,
+    });
+    expect(r).toEqual({ atPin: true });
+    expect(events).toEqual([]);
+    // and a later miss is a FIRST attempt again, not an immediate stale WARN
+    events.length = 0;
+    advanceIndexServingRoot({
+      ...base, now: 1000 + 2 * INDEX_ROOT_THROTTLE_MS + 2, verifyFn: () => false,
+    });
+    expect(events.some((e) => e.event === "plugin.index_root.stale")).toBe(false);
+  });
+
+  // ⛔ AC 3: a node that never indexes does NO catalyst-cloud clone at all.
+  test("CATALYST_SKIP_INDEX_ROOT=1 spawns nothing and does not even stat the checkout", () => {
+    const spawns = [];
+    let statted = false;
+    const r = advanceIndexServingRoot({
+      root: ROOT, now: 1000, env: { CATALYST_SKIP_INDEX_ROOT: "1" }, emitFn: () => {},
+      verifyFn: () => { throw new Error("must not verify"); },
+      spawnFn: (s) => { spawns.push(s); return 1; },
+      existsFn: () => { statted = true; return true; },
+    });
+    expect(r).toEqual({ skipped: true, reason: "opt-out" });
+    expect(spawns).toEqual([]);
+    expect(statted).toBe(false);
+  });
+
+  test("a checkout predating the pin is NAMED, not silently skipped", () => {
+    const events = [];
+    const r = advanceIndexServingRoot({
+      root: ROOT, now: 1000, env: {}, emitFn: (e) => events.push(e),
+      verifyFn: () => true, spawnFn: () => 1,
+      existsFn: () => false,
+    });
+    expect(r).toEqual({ skipped: true, reason: "no-pin" });
+    expect(events.map((e) => e.event)).toEqual(["plugin.index_root.unavailable"]);
+  });
+
+  test("throttled: a second reload inside the window does not respawn", () => {
+    const spawns = [];
+    const opts = {
+      root: ROOT, env: {}, emitFn: () => {},
+      verifyFn: () => false,
+      spawnFn: (s) => { spawns.push(s); return 1; },
+      existsFn: existsAll,
+    };
+    advanceIndexServingRoot({ ...opts, now: 1000 });
+    const r = advanceIndexServingRoot({ ...opts, now: 1000 + INDEX_ROOT_THROTTLE_MS - 1 });
+    expect(r).toEqual({ skipped: true, reason: "throttled" });
+    expect(spawns.length).toBe(1);
+  });
+
+  test("a spawn that throws is a named WARN, not a silent skip", () => {
+    const events = [];
+    const r = advanceIndexServingRoot({
+      root: ROOT, now: 1000, env: {}, emitFn: (e) => events.push(e),
+      verifyFn: () => false,
+      spawnFn: () => { throw new Error("EAGAIN"); },
+      existsFn: existsAll,
+    });
+    expect(r).toEqual({ failed: true });
+    const ev = events.find((e) => e.event === "plugin.index_root.refresh_failed");
+    expect(ev).toBeDefined();
+    expect(ev.severity).toBe("WARN");
+    expect(ev.detail.error).toContain("EAGAIN");
   });
 });

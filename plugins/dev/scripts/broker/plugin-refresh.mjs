@@ -38,7 +38,7 @@
 // Mirrors the gc-liveness.mjs / autotune.mjs seam-injection convention.
 
 import { readFileSync, existsSync, rmSync, realpathSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { resolve, join, dirname } from "node:path";
 import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary (still a leaf)
@@ -1060,6 +1060,177 @@ export function refreshPluginCheckout({
   return { pulled: true, throttled: false, changed: true, failed: false, root, oldSha, newSha, restartNeeded };
 }
 
+
+// ─── CTL-1951: advancing the pinned catalyst-index serving root ─────────────
+//
+// CTL-1935 pinned the serving root and hooked `setup-plugin-source.sh` to apply it. That covers
+// the JOIN path. It does NOT cover the path that actually runs many times a day — THIS module —
+// so a pin bump never reached a worker node. Measured on all three hosts at 01:27 CT after the
+// pin had already been distributed: `index-source present: NO` everywhere.
+//
+// ⛔ WHY THIS IS NOT A `catalyst-index-root setup` CALL INLINE. This module runs in the broker's
+// event loop via execFileSync. `setup` is heavier than the `reset --hard` around it — on a node
+// that has never indexed, its first run is a FULL CLONE of catalyst-cloud. Dropping that into
+// the hot path trades a stale indexer for a WEDGED BROKER, which is strictly worse (the CTL-990
+// class the 20 s git ceiling above exists to prevent).
+//
+// So the work is split by cost:
+//   VERIFY  — cheap, local-only git (no network, no clone), run INLINE under a short ceiling.
+//   SETUP   — heavy and network-bound, SPAWNED DETACHED and unref'd. The broker never waits on
+//             it and cannot be wedged by it.
+//
+// ⛔ AND THE HALF THAT MAKES IT HONEST: a detached job's exit code is unobservable by definition,
+// so "spawned" must never be reported as "advanced". The NEXT reload verifies again, and a root
+// that is still not at the pin AFTER an attempt emits a named WARN. That is the difference
+// between a fire-and-forget that silently never works and one that tells you it didn't.
+
+export const INDEX_ROOT_THROTTLE_MS =
+  Number(process.env.CATALYST_INDEX_ROOT_THROTTLE_MS) || 10 * 60 * 1000;
+
+// Verify is local-only git; it must still be bounded, because "local" is not "instant" on a
+// machine under load, and this one runs inline.
+const INDEX_ROOT_VERIFY_TIMEOUT_MS =
+  Number(process.env.CATALYST_INDEX_ROOT_VERIFY_TIMEOUT_MS) || 15_000;
+
+const _lastIndexRootAttemptByRoot = new Map();
+const _indexRootAttemptedByRoot = new Map();
+
+export function __clearIndexRootStateForTest() {
+  _lastIndexRootAttemptByRoot.clear();
+  _indexRootAttemptedByRoot.clear();
+}
+
+function defaultIndexRootVerifyFn(script) {
+  execFileSync("bash", [script, "verify"], {
+    encoding: "utf8",
+    timeout: INDEX_ROOT_VERIFY_TIMEOUT_MS,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return true;
+}
+
+// Detached + unref'd + stdio ignored: the broker does not wait on it, does not hold its pipes,
+// and survives its own restart without orphaning a half-written checkout in the loop.
+function defaultIndexRootSpawnFn(script) {
+  const child = spawn("bash", [script, "setup"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  return child.pid ?? null;
+}
+
+/**
+ * advanceIndexServingRoot — bring this node's catalyst-index serving root to the pinned sha,
+ * without doing the heavy half in the broker's event loop.
+ *
+ * Returns one of:
+ *   { skipped:true, reason:"opt-out" | "no-pin" | "throttled" }
+ *   { atPin:true }                                  — verify passed, nothing to do
+ *   { spawned:true, pid }                           — setup dispatched detached
+ *   { stale:true }                                  — still not at the pin AFTER a prior attempt
+ */
+export function advanceIndexServingRoot({
+  root,
+  now = Date.now(),
+  env = process.env,
+  emitFn,
+  verifyFn = defaultIndexRootVerifyFn,
+  spawnFn = defaultIndexRootSpawnFn,
+  existsFn = existsSync,
+}) {
+  const emit = typeof emitFn === "function" ? emitFn : () => {};
+  if (!root) return { skipped: true, reason: "no-root" };
+
+  // AC 3: a node that never indexes does NO catalyst-cloud clone at all. Checked first, so the
+  // opt-out costs nothing — not even a stat.
+  if (String(env.CATALYST_SKIP_INDEX_ROOT ?? "") === "1") {
+    return { skipped: true, reason: "opt-out" };
+  }
+
+  const script = `${root}/plugins/dev/scripts/catalyst-index-root`;
+  const pin = `${root}/plugins/dev/config/index-serving-root.json`;
+  if (!existsFn(script) || !existsFn(pin)) {
+    // An older checkout predates the pin. Named, not silent — but INFO, because on a node that
+    // has simply not pulled the pin yet this is expected and self-correcting.
+    emit({
+      event: "plugin.index_root.unavailable",
+      orchestrator: null,
+      worker: null,
+      severity: "INFO",
+      detail: { checkout: root, reason: "checkout predates the CTL-1935 pin" },
+    });
+    return { skipped: true, reason: "no-pin" };
+  }
+
+  const last = _lastIndexRootAttemptByRoot.get(root);
+  if (last !== undefined && now - last < INDEX_ROOT_THROTTLE_MS) {
+    return { skipped: true, reason: "throttled" };
+  }
+
+  // VERIFY first — cheap, local, and it is also what makes a repeat reload a no-op instead of
+  // respawning setup on every merge event.
+  let atPin = false;
+  try {
+    atPin = verifyFn(script) !== false;
+  } catch {
+    atPin = false;
+  }
+  if (atPin) {
+    _indexRootAttemptedByRoot.delete(root);
+    return { atPin: true };
+  }
+
+  // Not at the pin. If we ALREADY dispatched setup for this root and it is still not there, the
+  // detached job failed — network, auth, or a bad pin. This is the named failure signal: without
+  // it, a setup that never succeeds looks identical to one that was never needed.
+  const attemptedAt = _indexRootAttemptedByRoot.get(root);
+  if (attemptedAt !== undefined) {
+    emit({
+      event: "plugin.index_root.stale",
+      orchestrator: null,
+      worker: null,
+      severity: "WARN",
+      detail: {
+        checkout: root,
+        attempted_at: attemptedAt,
+        reason:
+          "catalyst-index-root setup was dispatched on an earlier reload and the serving root is STILL not at the pin",
+        consequence: "a cold index on this node would run stale or unpinned code (CTL-1935)",
+        remedy: `bash ${script} setup`,
+      },
+    });
+  }
+
+  _lastIndexRootAttemptByRoot.set(root, now);
+  let pid = null;
+  try {
+    pid = spawnFn(script);
+  } catch (err) {
+    emit({
+      event: "plugin.index_root.refresh_failed",
+      orchestrator: null,
+      worker: null,
+      severity: "WARN",
+      detail: { checkout: root, error: String(err?.message ?? err) },
+    });
+    return { failed: true };
+  }
+  _indexRootAttemptedByRoot.set(root, now);
+  emit({
+    event: "plugin.index_root.advancing",
+    orchestrator: null,
+    worker: null,
+    severity: "INFO",
+    detail: {
+      checkout: root,
+      pid,
+      note: "dispatched DETACHED — the exit code is not observable here; the next reload verifies and WARNs if it did not land",
+    },
+  });
+  return { spawned: true, pid };
+}
+
 /**
  * handlePluginRefreshEvent — top-level wiring the router calls for every event.
  * No-op unless the event is a merge-to-main of the configured repo. Resolves
@@ -1096,6 +1267,16 @@ export function handlePluginRefreshEvent({
     const results = [];
     for (const root of roots) {
       results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot, pull }));
+      // CTL-1951: the ROUTINE reload advances the pinned indexer serving root too. Runs
+      // unconditionally rather than only when the checkout `changed`, because a node whose
+      // serving root is ABSENT must converge even on a reload that pulled nothing new — the
+      // measured state on all three hosts was "pin distributed, root absent". Cheap when already
+      // at the pin (one local verify) and throttled otherwise. Never throws.
+      try {
+        advanceIndexServingRoot({ root, now, env, emitFn });
+      } catch {
+        /* the indexer root must never break the plugin reload or event routing */
+      }
     }
     return results;
   } catch {
@@ -1138,6 +1319,13 @@ export function refreshAllPluginCheckouts({
     const results = [];
     for (const root of roots) {
       results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot, pull }));
+      // CTL-1951: same as the event-driven path. This is the periodic backstop, so it is also
+      // what converges a node whose merge webhook never arrived.
+      try {
+        advanceIndexServingRoot({ root, now, env, emitFn });
+      } catch {
+        /* never break the drift-check tick */
+      }
     }
     return results;
   } catch {
