@@ -27,6 +27,11 @@
 import { readFileSync, statSync, existsSync, lstatSync, realpathSync, readdirSync, openSync, readSync, closeSync } from "node:fs";
 import { resolve, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
+// CTL-1918: install-completeness lives in its own module. doctor.mjs is NOT
+// prettier-formatted on main (verified against a pristine checkout), so any edit here
+// drags a ~1,100-line reformat into the diff — extracting keeps this change reviewable.
+import { STATUS, mkCheck } from "./doctor-status.mjs";
+import { checkInstallCompleteness } from "./install-completeness.mjs";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
 
@@ -153,9 +158,13 @@ function readLinearBotUserIds(l1Path, l2Path) {
 
 // ─── Check model ─────────────────────────────────────────────────────────────
 
-export const STATUS = { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" };
+// CTL-1918: STATUS/mkCheck moved to the zero-import leaf doctor-status.mjs so a check
+// can live in its own module without importing this one (which would be circular).
+// Re-exported here, so every existing `import { STATUS, mkCheck } from "./doctor.mjs"`
+// keeps working unchanged.
+export { STATUS, mkCheck } from "./doctor-status.mjs";
 
-export const mkCheck = (name, status, detail) => ({ name, status, detail });
+export { checkInstallCompleteness };
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
 //
@@ -5798,6 +5807,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
     () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
     () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
+    () => checkInstallCompleteness(), // CTL-1918: did the install FINISH — CLIs, plugin-source, sweep, enrolment — advisory only (never FAIL)
     () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
   ];
 }
