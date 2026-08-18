@@ -7,6 +7,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+// CTL-1929: the consumed/suppressible name lists, from the zero-import leaf that
+// doctor.mjs itself reads — so this test cannot drift from the grade it asserts on.
+import { GITHUB_CONSUMED_NAMES, GITHUB_SUPPRESSIBLE_NAMES } from "../lib/github-feed-names.mjs";
 import {
   STATUS,
   mkCheck,
@@ -728,6 +731,85 @@ describe("checkWebhookIngestion", () => {
     expect(checks[0].name).toBe("webhook-ingestion");
     expect(checks[0].status).toBe(STATUS.PASS);
     expect(checks[0].detail).toContain("single-host");
+  });
+
+  // ─── CTL-1929: the declared-cloud grade now depends on the GitHub feed ──────
+  describe("declared cloud + the GitHub feed (CTL-1929)", () => {
+    const cloud = () => ({ mode: "cloud", source: "layer2", inferred: false, recognized: true });
+    const run = (ghFeed) =>
+      checkWebhookIngestion({
+        resolveDeploymentModeFn: cloud,
+        resolveRoster: multiHost,
+        monitor: { github: { smeeChannel: "" }, linear: {} },
+        secretFileNonEmpty: noSecrets,
+        resolveSecretContract: agreeingSecretContract(false),
+        resolveGithubFeedModeFn: () => ghFeed,
+      })[0];
+
+    it("feed OFF → WARN naming the mode, because github.* has no source at all", () => {
+      const c = run({ mode: "off", source: "default" });
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("NO cloud replacement active");
+      expect(c.detail).toContain("CATALYST_GITHUB_FEED=off");
+    });
+
+    it("⚠️ feed SHADOW is still a WARN — shadow replaces nothing", () => {
+      // The trap: shadow looks healthy (a producer is running, events are being
+      // observed) and grades identically to off, because nothing it emits is
+      // authoritative and the dispatch gate suppresses nothing.
+      const c = run({ mode: "shadow", source: "env" });
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("NO cloud replacement active");
+    });
+
+    it("⛔ feed ENFORCE with gaps open is a WARN that NAMES the uncovered names", () => {
+      // Not a PASS. On a declared-cloud node there is no tunnel, so the three
+      // uncovered names are genuinely unseen — reporting the route whole here would
+      // say "fine" at exactly the moment the merge→deploy join, the CI wait and
+      // rebase detection are the parts that are missing.
+      const c = run({ mode: "enforce", source: "env" });
+      expect(c.status).toBe(STATUS.WARN);
+      for (const n of GITHUB_CONSUMED_NAMES.filter((x) => !GITHUB_SUPPRESSIBLE_NAMES.includes(x))) {
+        expect(c.detail).toContain(n);
+      }
+      expect(c.detail).toContain(`${GITHUB_SUPPRESSIBLE_NAMES.length}/${GITHUB_CONSUMED_NAMES.length}`);
+    });
+
+    it("⭐ the counts and names are DERIVED — the WARN stops warning by itself when the gaps close", () => {
+      // Drives the post-CTC-691/667/704 world through the same code path. A
+      // hand-written detail string passes every test above and keeps reporting three
+      // uncovered names forever.
+      const uncovered = GITHUB_CONSUMED_NAMES.filter((x) => !GITHUB_SUPPRESSIBLE_NAMES.includes(x));
+      expect(uncovered.length).toBeGreaterThan(0); // precondition: gaps are open today
+      expect(GITHUB_SUPPRESSIBLE_NAMES.length).toBeLessThan(GITHUB_CONSUMED_NAMES.length);
+      const c = run({ mode: "enforce", source: "env" });
+      expect(c.detail).toContain(`${uncovered.length} have NO source`);
+    });
+
+    it("⛔ a THROWING feed resolver grades as NO REPLACEMENT, not as a degraded enforce", () => {
+      // ⚠️ My first version of this asserted only `status === WARN` plus the string
+      // "resolver-threw", and the mutation (fail OPEN to enforce) PASSED — because
+      // while the three gaps are open BOTH branches grade WARN and both print the
+      // source. The assertion could not tell the two apart, and would have started
+      // being wrong precisely when the gaps closed and fail-open became a PASS.
+      //
+      // The distinguishing fact is WHICH branch answered, so assert on that: an
+      // unreadable config must land in the same place as `mode: off`.
+      const c = checkWebhookIngestion({
+        resolveDeploymentModeFn: cloud,
+        resolveRoster: multiHost,
+        monitor: { github: { smeeChannel: "" }, linear: {} },
+        secretFileNonEmpty: noSecrets,
+        resolveSecretContract: agreeingSecretContract(false),
+        resolveGithubFeedModeFn: () => { throw new Error("unreadable config"); },
+      })[0];
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("NO cloud replacement active");
+      expect(c.detail).toContain("resolver-threw");
+      // ⛔ and NOT the enforce branch's language, which would claim partial coverage
+      // this node has no basis to claim.
+      expect(c.detail).not.toContain("covers");
+    });
   });
 
   it("FAILs a multiHost node with no webhook route enabled", () => {
