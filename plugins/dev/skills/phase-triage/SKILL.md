@@ -369,8 +369,8 @@ exponential / linear — whatever `issueEstimation.type` the team has set in Lin
 **Step 1 (preferred): reference-class lookup.** Run:
 
 ```bash
-bun "${REPO_ROOT}/plugins/pm/scripts/estimate/reference-class-lookup.ts" \
-  --corpus "${REPO_ROOT}/plugins/pm/scripts/estimate/reference-class-corpus.json" \
+bun "${REPO_ROOT}/plugins/playground/pm/scripts/estimate/reference-class-lookup.ts" \
+  --corpus "${REPO_ROOT}/plugins/playground/pm/scripts/estimate/reference-class-corpus.json" \
   --title "<ticket title>" --json
 ```
 

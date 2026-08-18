@@ -16,7 +16,7 @@ export const collections = {
       {
         provider: "keep-a-changelog",
         base: "changelog/catalyst-pm",
-        changelog: "../plugins/pm/CHANGELOG.md",
+        changelog: "../plugins/playground/pm/CHANGELOG.md",
         title: "Catalyst PM — Change Log",
       },
       {
@@ -28,13 +28,13 @@ export const collections = {
       {
         provider: "keep-a-changelog",
         base: "changelog/catalyst-analytics",
-        changelog: "../plugins/analytics/CHANGELOG.md",
+        changelog: "../plugins/playground/analytics/CHANGELOG.md",
         title: "Catalyst Analytics — Change Log",
       },
       {
         provider: "keep-a-changelog",
         base: "changelog/catalyst-debugging",
-        changelog: "../plugins/debugging/CHANGELOG.md",
+        changelog: "../plugins/playground/debugging/CHANGELOG.md",
         title: "Catalyst Debugging — Change Log",
       },
     ]),

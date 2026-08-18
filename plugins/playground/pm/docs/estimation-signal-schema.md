@@ -10,7 +10,7 @@ exporter, and planning tools that gate orchestration mode on structural signals.
 (JSON Schema draft 2020-12).
 
 **Linked research:** see
-[`thoughts/shared/research/2026-04-24-CTL-184-estimation-signal-schema.md`](../../../thoughts/shared/research/2026-04-24-CTL-184-estimation-signal-schema.md)
+[`thoughts/shared/research/2026-04-24-CTL-184-estimation-signal-schema.md`](../../../../thoughts/shared/research/2026-04-24-CTL-184-estimation-signal-schema.md)
 for the carrier-decision matrix, the heuristic-table inputs, and the published-research
 landscape.
 
@@ -204,7 +204,7 @@ npx ajv-cli validate \
 
 ## See also
 
-- Research: [`thoughts/shared/research/2026-04-24-CTL-184-estimation-signal-schema.md`](../../../thoughts/shared/research/2026-04-24-CTL-184-estimation-signal-schema.md)
+- Research: [`thoughts/shared/research/2026-04-24-CTL-184-estimation-signal-schema.md`](../../../../thoughts/shared/research/2026-04-24-CTL-184-estimation-signal-schema.md)
 - Framework: `2026-04-22-weekly-cycles-and-ai-native-estimation.md` (dimensions, maturity ladder)
 - Landscape: `2026-04-22-ai-native-estimation-landscape.md` (no public framework exists)
 - Heuristic table inputs: `2026-04-23-v0-estimate-pass.md`

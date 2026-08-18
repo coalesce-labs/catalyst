@@ -158,9 +158,9 @@ rc_files_for_interactive_shell() {
 # plugin-source checkout via user-scope skills-directory symlinks. A folder under
 # ~/.claude/skills/ that carries a .claude-plugin/plugin.json loads in-place as
 # `<name>@skills-dir` for every project/session — no marketplace, no version cache.
-# We symlink EVERY plugin in the checkout (mirroring the old wrapper's `for d in
-# plugins/*/` behaviour), keyed by the plugin's own manifest `name` (so the symlink
-# basename is e.g. `catalyst-dev`, not the dir `dev`).
+# We symlink EVERY plugin in the checkout — at plugins/<name>/ AND at
+# plugins/<group>/<name>/ (CTL-1999's playground grouping) — keyed by the plugin's
+# own manifest `name` (so the symlink basename is e.g. `catalyst-dev`, not `dev`).
 #
 # Idempotent + reversible + safe under --no-interactive-wrapper: a symlink is
 # (re)pointed only when missing or pointing elsewhere; an existing non-symlink at
@@ -177,7 +177,13 @@ create_skills_dir_symlinks() {
 		return 0
 	fi
 	mkdir -p "$skills_dir" || { echo "WARN: could not create ${skills_dir} — skipping skills-dir symlinks." >&2; return 0; }
-	for d in "$base"/*/; do
+	# CTL-1999: plugins may sit one level deeper under a GROUPING folder
+	# (plugins/playground/<name>) that is not itself a plugin. A single-level glob
+	# silently skips those — the six moved plugins would stop loading altogether,
+	# with no error, because a dir without a plugin.json is `continue`d either way.
+	# So scan both depths and key on the manifest, not on the path shape.
+	for d in "$base"/*/ "$base"/*/*/; do
+		[[ -d "$d" ]] || continue
 		[[ -f "${d}.claude-plugin/plugin.json" ]] || continue
 		pname="$(jq -r '.name // empty' "${d}.claude-plugin/plugin.json" 2>/dev/null || true)"
 		if [[ -z "$pname" ]]; then
@@ -284,7 +290,13 @@ remove_managed_claude_wrapper() {
 catalog_plugin_names() {
 	local checkout="$1" base="${1}/plugins" d pname
 	[[ -d "$base" ]] || return 0
-	for d in "$base"/*/; do
+	# CTL-1999: both depths — plugins/<name>/ and plugins/<group>/<name>/. This is
+	# the SECOND place the single-level glob under-counted; the comment above
+	# records the first (a hardcoded two-plugin list missed the other eight). A
+	# miss here is silent and asymmetric: retirement skips those plugins, so the
+	# stale marketplace copy keeps loading next to the skills-dir one.
+	for d in "$base"/*/ "$base"/*/*/; do
+		[[ -d "$d" ]] || continue
 		[[ -f "${d}.claude-plugin/plugin.json" ]] || continue
 		pname="$(jq -r '.name // empty' "${d}.claude-plugin/plugin.json" 2>/dev/null || true)"
 		[[ -n "$pname" ]] && printf '%s\n' "$pname"
