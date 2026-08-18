@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import {
   COMPARE_SPEC,
   KNOWN_ABSENT,
+  MIRROR_UNSTORED_SUITE_CONCLUSIONS,
   OBSERVED_ONLY_FIELDS,
   compareGithubStreams,
   smeeRepos,
@@ -397,5 +398,89 @@ describe("CTC-712 — the check_suite compare spec can join, and can DIVERGE", (
     expect(r.totals.smeeUnjoined).toBe(1);
     expect(r.clean).toBe(false);
     expect(r.inconclusive.join("|")).toContain("smee-events-without-a-twin");
+  });
+});
+
+describe("CTC-719 — the conclusions the mirror drops are SET ASIDE, reported, and self-retiring", () => {
+  const suite = (conclusion, extra = {}) => ev(
+    "github.check_suite.completed",
+    {
+      "vcs.repository.name": "o/r", "vcs.revision": "abc",
+      "cicd.pipeline.run.status": "completed",
+      ...(conclusion === null ? {} : { "cicd.pipeline.run.conclusion": conclusion }),
+      "event.entity": "check_suite", "event.action": "completed",
+      "event.stream_class": "coordination",
+    },
+    { conclusion, status: "completed", prNumbers: [7] },
+    extra,
+  );
+
+  test("a neutral smee suite does NOT count as unjoined, and IS reported", () => {
+    // 6.6% of the smee side. Counted as unjoined it makes CLEAN unreachable forever,
+    // for a gap the producer provably cannot close (CTC-719).
+    const r = compareGithubStreams([suite("success")], [suite("success"), suite("neutral"), suite("skipped")]);
+    expect(r.totals.smeeUnjoined).toBe(0);
+    expect(r.mirrorUnstorable).toEqual({ neutral: 1, skipped: 1 });
+    expect(r.clean).toBe(true);
+  });
+
+  test("⭐ SELF-RETIRING — once the FEED emits one, the exclusion switches off entirely", () => {
+    // The property that makes this safe to add: when CTC-719 lands and the producer
+    // starts emitting neutral suites, they are compared normally again, with no line
+    // for anyone to remember to delete and no window in which a fixed mirror is still
+    // being excused. Here the feed emits a neutral one that smee did NOT — which must
+    // now surface rather than be waved through.
+    const r = compareGithubStreams([suite("success"), suite("neutral")], [suite("success"), suite("neutral")]);
+    expect(r.mirrorUnstorable).toEqual({});
+    expect(r.byName["github.check_suite.completed"].joined).toBe(2);
+  });
+
+  test("⛔ with the feed emitting neutral, a MISSING smee neutral is a finding again", () => {
+    const r = compareGithubStreams([suite("success"), suite("neutral")], [suite("success")]);
+    expect(r.mirrorUnstorable).toEqual({});
+    expect(r.totals.unjoined).toBe(1);
+    expect(r.clean).toBe(false);
+  });
+
+  test("⛔ the exclusion is NARROW — it touches only this name and only these conclusions", () => {
+    // A cancelled suite is stored by the mirror and must keep blocking; and the
+    // conclusion set is exactly two entries, not a category.
+    const r = compareGithubStreams([suite("success")], [suite("success"), suite("cancelled")]);
+    expect(r.totals.smeeUnjoined).toBe(1);
+    expect(r.clean).toBe(false);
+    expect(MIRROR_UNSTORED_SUITE_CONCLUSIONS).toEqual(["neutral", "skipped"]);
+  });
+
+  test("⛔ it does not leak to other names — a missing pr.merged still blocks", () => {
+    const merged = ev("github.pr.merged",
+      { "vcs.repository.name": "o/r", "vcs.pr.number": 7 },
+      { action: "closed", merged: true, mergeCommitSha: "abc" });
+    const r = compareGithubStreams([suite("success")], [suite("success"), merged]);
+    expect(r.clean).toBe(false);
+  });
+
+  test("⛔ the NAME guard is load-bearing — another compared name carrying the same attribute is NOT excluded", () => {
+    // ⚠️ SYNTHETIC BY NECESSITY, and deliberately so. The test above cannot reach this
+    // branch: `github.pr.merged` carries no `cicd.pipeline.run.conclusion`, so deleting
+    // the name check changes nothing for it and a mutation of that check SURVIVED. The
+    // guard matters because `github.check_suite.completed` is one member of a
+    // `github.check_suite.<status>` family the webhook really emits — if a sibling ever
+    // joins COMPARE_SPEC, the exclusion must not silently widen onto it.
+    //
+    // So this drives the predicate directly, with a compared name that carries the
+    // attribute. It is not a claim that the fleet emits this event.
+    const ds = (extra) => ev(
+      "github.deployment_status.success",
+      { "vcs.repository.name": "o/r", "deployment.environment": "prod", "deployment.id": 5,
+        "event.entity": "deployment_status", "event.action": "success",
+        "cicd.pipeline.run.conclusion": "neutral" },
+      { deploymentId: 5, state: "success", targetUrl: null, environmentUrl: null },
+      extra,
+    );
+    const r = compareGithubStreams([suite("success")], [suite("success"), ds()]);
+    // Not swallowed by the suite exclusion: it is a different name, so it stays a finding.
+    expect(r.mirrorUnstorable).toEqual({});
+    expect(r.totals.smeeUnjoined).toBe(1);
+    expect(r.clean).toBe(false);
   });
 });
