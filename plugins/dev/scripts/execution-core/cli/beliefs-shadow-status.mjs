@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cli/beliefs-shadow-status.mjs — CTL-935 Phase 6: flag-live verification helper.
 // Computes a shadow-collection health verdict from injected inputs (testable without
 // disk or process access).

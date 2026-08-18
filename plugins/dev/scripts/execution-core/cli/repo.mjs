@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cli/repo.mjs — repo-root resolution + a throwing, stderr-capturing git runner
 // shared by the audit nouns (CTL-675).
 //

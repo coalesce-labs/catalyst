@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 import { describe, it, expect } from "bun:test";
 import { parseArgs, ArgError } from "./args.mjs";
 

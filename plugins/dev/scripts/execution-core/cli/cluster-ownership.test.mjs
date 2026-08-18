@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cluster-ownership.test.mjs — CTL-1211. The HRW no-contention proof: every
 // ticket is owned by exactly one host, deterministically.
 import { describe, test, expect } from "bun:test";
