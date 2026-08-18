@@ -1239,6 +1239,24 @@ function dispatchTriage(
         { identifier, self },
         "ctl-862: lost cross-host claim — another host owns this triage dispatch, deferring"
       );
+      // CTL-879: the SIXTH blind gate, and the one the first instrument missed.
+      // It is the ONLY silent exit left after drain/HRW, so it is where a ticket
+      // its OWNER has already accepted still fails to launch — measured on
+      // 2026-08-18: 44 held tickets, a perfect 22/22 HRW split with ZERO declined
+      // by both hosts, every held ticket owned by the host holding it, and not one
+      // `ctl-879` line from the owner. The owner passes drain and HRW and then
+      // exits here, invisibly.
+      //
+      // ⚠️ A lost claim is NOT inherently a fault — it is the normal outcome when a
+      // peer legitimately holds the fence. What makes the silence expensive is that
+      // "a peer won it" and "our claim WRITE never landed" are the same log line at
+      // a level that does not ship, and the second is a real stall (mini's Linear
+      // write budget measured 300/300 spent with 674 refusals the same day). The
+      // reason string keeps them distinguishable at the surface.
+      noteTriageSkip(identifier, "lost-cross-host-claim", {
+        self,
+        claim_reason: claim?.reason ?? null,
+      });
       return false;
     }
     clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)
