@@ -135,7 +135,17 @@ RC=$?
 [ "$RC" -eq 0 ] && pass "--print-only succeeds" || fail "--print-only succeeds" "$OUT"
 grep -q "__[A-Z_]*__" <<<"$OUT" && fail "every token is substituted" "tokens remain: $(grep -o '__[A-Z_]*__' <<<"$OUT" | sort -u | tr '\n' ' ')" || pass "every token is substituted"
 printf '%s\n' "$OUT" >"$SCRATCH/rendered.plist"
-plutil -lint "$SCRATCH/rendered.plist" >/dev/null 2>&1 && pass "the rendered plist lints" || fail "the rendered plist lints"
+# ⛔ `plutil` is macOS-only and CI is ubuntu, where it simply does not exist — the first cut of
+# this case failed on CI for that reason alone. Skipping there would leave the assertion absent
+# on the platform that actually runs it in CI, so fall back to a real XML well-formedness parse:
+# a different check, but still a check, and it catches the malformed-render case either way.
+if command -v plutil >/dev/null 2>&1; then
+	plutil -lint "$SCRATCH/rendered.plist" >/dev/null 2>&1 && pass "the rendered plist lints (plutil)" || fail "the rendered plist lints (plutil)"
+else
+	python3 -c "import sys,xml.dom.minidom as m; m.parse(sys.argv[1])" "$SCRATCH/rendered.plist" >/dev/null 2>&1 &&
+		pass "the rendered plist is well-formed XML (no plutil on this platform)" ||
+		fail "the rendered plist is well-formed XML"
+fi
 
 echo ""
 echo "--- ⛔ CONTROL: the installer REFUSES a template whose tokens did not substitute ---"
