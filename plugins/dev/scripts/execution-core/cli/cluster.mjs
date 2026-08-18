@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cli/cluster.mjs — CTL-1188. `catalyst cluster <verb>` data verbs.
 // Pure functions (buildStatus, addHost, removeHost, renameHost, setAnchor, tune)
 // take injectable deps for unit testing; runX() wires real config/heartbeat/git;

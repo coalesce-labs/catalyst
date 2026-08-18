@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // tidy.regression.test.mjs — CTL-675 end-to-end regression. Drives the REAL
 // tidy.mjs in a child process against a temp NON-repo dir with an empty
 // registry — the exact ticket scenario — and asserts the fixed behavior: exit

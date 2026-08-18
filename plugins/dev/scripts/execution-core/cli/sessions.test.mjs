@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // sessions.test.mjs — Phase 5 of CTL-649. Unit tests for the operator-facing
 // `catalyst-execution-core sessions {list,show,prune}` audit CLI.
 //

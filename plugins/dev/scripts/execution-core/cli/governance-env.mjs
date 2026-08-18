@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cli/governance-env.mjs — CTL-1084. Emits `export CATALYST_*=...` lines for the
 // four beliefs-family flags resolved from the durable three-layer config, so the
 // launcher can inject the durable value into the daemon's env (no env-export

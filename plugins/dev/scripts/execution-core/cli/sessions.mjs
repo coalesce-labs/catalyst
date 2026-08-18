@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // sessions.mjs — `catalyst-execution-core sessions {list,show,prune}` (CTL-649
 // Phase 5). The first operator-facing audit surface.
 //
