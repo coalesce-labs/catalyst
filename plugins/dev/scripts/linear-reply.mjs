@@ -120,22 +120,38 @@ if (!process.argv.includes("--keep-eyes")) {
     // count, which is exactly what the loop below does — so the two paths agree rather than
     // merely coexisting.
     const plan = decideWritePath({ mode: proxyMode, proxyReady: proxy != null, unavailableReason: proxyUnavailable });
-    if (plan.action === "refuse") {
-      console.error(`linear-reply: eyes-clear REFUSED — mode=${proxyMode} but the proxy is unavailable (${plan.reason})`);
-      process.exit(1);
-    }
-    if (plan.action === "proxy") {
-      const res = proxy.send({
-        routeId: "reaction",
-        ticket: issueKey,
-        payload: { commentId: target.id, emoji: "eyes", mode: "remove" },
-        caller: "linear-reply",
-      });
-      if (!res?.handled) {
-        console.error(`linear-reply: eyes-clear REFUSED — proxy did not handle it (${res?.reason ?? "unknown"})`);
-        process.exit(1);
+    // ⛔ THE EYES-CLEAR IS BEST-EFFORT AND MUST STAY THAT WAY, INCLUDING UNDER ENFORCE.
+    // It runs AFTER the comment above has already been posted. `refuse` here — exiting
+    // non-zero the way linear-ack correctly does — would report FAILURE for a reply that
+    // actually succeeded, and the caller (`ask.mjs:469` invokes this script) could retry
+    // into a DOUBLE-POSTED comment. Both minis run CATALYST_LINEAR_WRITE_PROXY=enforce, so
+    // this is the live path, not a hypothetical one.
+    //
+    // The house rule this restores is already written down elsewhere in this repo: a
+    // cleanup step must never be able to fail the thing it cleans up after. The original
+    // code said the same thing with `try { … } catch {}`; routing must not quietly
+    // upgrade a swallowed cleanup into a fatal one.
+    //
+    // linear-ack is deliberately DIFFERENT: there the reaction IS the whole operation, so
+    // refusing is the correct answer and nothing has been written yet to contradict.
+    if (plan.action === "proxy" || plan.action === "refuse") {
+      if (plan.action === "refuse") {
+        console.error(`linear-reply: 👀 NOT cleared — mode=${proxyMode} and the proxy is unavailable (${plan.reason}). The reply itself was posted.`);
+      } else {
+        let res = null;
+        try {
+          res = proxy.send({
+            routeId: "reaction",
+            ticket: issueKey,
+            payload: { commentId: target.id, emoji: "eyes", mode: "remove" },
+            caller: "linear-reply",
+          });
+        } catch (err) {
+          console.error(`linear-reply: 👀 NOT cleared — proxy threw (${err?.message}). The reply itself was posted.`);
+        }
+        if (res?.handled) cleared = eyes.length;
+        else if (res) console.error(`linear-reply: 👀 NOT cleared — proxy did not handle it (${res?.reason ?? "unknown"}). The reply itself was posted.`);
       }
-      cleared = eyes.length;
     } else {
       if (plan.observe) {
         try {

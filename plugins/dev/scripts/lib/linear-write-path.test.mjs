@@ -106,3 +106,56 @@ describe("⛔ unknown / hostile modes degrade to off, never to enforce", () => {
     expect([...WRITE_PROXY_MODES].sort()).toEqual(["enforce", "off", "shadow"]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1961 — a SOURCE-LEVEL guard, because the property lives in a script that
+// cannot be imported (top-level await + it writes to Linear on import).
+//
+// The property: `linear-reply.mjs`'s eyes-clear is BEST-EFFORT. It runs after the
+// comment has already been posted, so exiting non-zero there would report failure for
+// a reply that succeeded — and `ask.mjs` invokes this script, so a retry could
+// double-post. Both minis run CATALYST_LINEAR_WRITE_PROXY=enforce, so this is the live
+// path. The original code expressed it as `try { … } catch {}`; routing must not quietly
+// upgrade a swallowed cleanup into a fatal one.
+//
+// `linear-ack.mjs` is deliberately the OPPOSITE — there the reaction IS the operation, so
+// refusing is correct — and that asymmetry is what makes this test discriminating rather
+// than a tautology.
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const SCRIPTS = dirname(dirname(fileURLToPath(import.meta.url))) === ""
+  ? "."
+  : join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** The eyes-clear block of linear-reply.mjs, sliced by its own anchors. */
+function eyesClearBlock() {
+  const src = readFileSync(join(SCRIPTS, "linear-reply.mjs"), "utf8");
+  const start = src.indexOf("CTL-1961 — WHY ONLY THIS WRITE IS ROUTED");
+  const end = src.indexOf("console.log(JSON.stringify({ ok:");
+  if (start < 0 || end < 0 || end <= start) {
+    throw new Error("anchors not found — the guard cannot report a clean pass it did not earn");
+  }
+  return src.slice(start, end);
+}
+
+describe("⛔ the eyes-clear must never fail a reply that already posted", () => {
+  test("linear-reply.mjs's eyes-clear block contains NO process.exit", () => {
+    expect(eyesClearBlock()).not.toContain("process.exit");
+  });
+
+  test("⭐ POSITIVE CONTROL: the same scan DOES find linear-ack's deliberate refusal", () => {
+    // Without this, the test above would pass just as happily against a file it failed to
+    // read, or a scan that matches nothing. linear-ack SHOULD exit — the reaction is its
+    // whole operation — so finding it proves the instrument works.
+    const ack = readFileSync(join(SCRIPTS, "linear-ack.mjs"), "utf8");
+    expect(ack).toContain("process.exit(1)");
+  });
+
+  test("⛔ the anchors themselves are asserted — a silent slice failure must throw, not pass", () => {
+    // If either anchor is renamed the slice would be empty, and an empty string trivially
+    // "contains no process.exit". eyesClearBlock throws instead; this pins that.
+    expect(eyesClearBlock().length).toBeGreaterThan(200);
+  });
+});
