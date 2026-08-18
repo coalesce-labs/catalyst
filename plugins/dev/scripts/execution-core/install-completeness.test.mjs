@@ -41,6 +41,32 @@ function completeDeps(over = {}) {
   };
 }
 
+describe("⛔ THE DEFAULTS RUN — every test below this injects them, which is how the bug shipped", () => {
+  test("calling with NO deps at all does not throw", () => {
+    // `catalyst-doctor` calls this with no arguments. When the check was extracted from
+    // doctor.mjs it kept using doctor's `layer2Path()` as a DEFAULT PARAMETER, which is
+    // not in scope here — so the real entry point died with
+    // `ReferenceError: layer2Path is not defined` on every host, while every test in this
+    // file passed. They all injected `layer2`, so the default was never evaluated.
+    //
+    // This is the only assertion in the file that exercises the production call shape.
+    // Its value is not the returned status — it is that the function RUNS.
+    expect(() => checkInstallCompleteness()).not.toThrow();
+  });
+
+  test("the no-deps call returns a well-formed check", () => {
+    const r = checkInstallCompleteness();
+    expect(r.name).toBe("install-completeness");
+    expect(["pass", "warn", "info"]).toContain(r.status);
+    expect(typeof r.detail).toBe("string");
+  });
+
+  test("an env-only override still resolves every other default", () => {
+    // Half-injected is the shape most likely to hide a missing default.
+    expect(() => checkInstallCompleteness({ env: { CATALYST_BIN_DIR: "/nope" } })).not.toThrow();
+  });
+});
+
 describe("checkInstallCompleteness", () => {
   test("a finished install PASSes", () => {
     const r = checkInstallCompleteness(completeDeps());
