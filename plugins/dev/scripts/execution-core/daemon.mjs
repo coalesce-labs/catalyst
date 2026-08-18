@@ -155,12 +155,13 @@ import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dep
 import { getReconcileHealth } from "./reconcile-health.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
-import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
+import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn, setAgentSessionNarrator } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
 import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
 import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: codex boot gate (auth.json + `codex --version`) that degrades routed codex phases + emits execution-core.executor.codex-fallback
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 import { setLinearWriteProxy, setLinearWriteProxyResolver } from "./linear-write.mjs"; // CTL-1889: install the cloud write-proxy transport + its replica-backed id resolver
 import { createLinearWriteProxy } from "./linear-write-proxy.mjs"; // CTL-1889
+import { createAgentSessionNarrator } from "./agent-session-narrator.mjs"; // CTL-1943
 import { createProxyResolver } from "./linear-write-proxy-resolve.mjs"; // CTL-1889
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
@@ -1496,6 +1497,27 @@ export function startDaemon({
       // (see routeThroughProxy), so opening a replica handle for it would be a handle
       // held open for a code path that cannot run.
       if (writeProxyCfg.mode === "enforce") setLinearWriteProxyResolver(createProxyResolver());
+
+      // ── CTL-1943: narrate each dispatched phase as a Linear agent session ──
+      //
+      // Only in ENFORCE, and for the same reason the resolver above is: the narrator
+      // needs a resolved issue UUID, and shadow deliberately builds no payload and makes
+      // no cloud call. Installing it in shadow would open a replica handle for a path
+      // that cannot run.
+      //
+      // ⚠️ It gets its OWN resolver handle rather than sharing the write path's. They are
+      // read-only SQLite handles onto the same replica, and `createProxyResolver` closes
+      // over one lazily-opened connection; sharing would couple this route's lifetime to
+      // the write path's `close()`.
+      if (writeProxyCfg.mode === "enforce") {
+        setAgentSessionNarrator(
+          createAgentSessionNarrator({
+            proxy: writeProxy,
+            resolver: createProxyResolver(),
+            log,
+          }),
+        );
+      }
       log.info(
         {
           mode: writeProxyCfg.mode,

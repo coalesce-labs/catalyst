@@ -18,6 +18,7 @@ import {
   LINEAR_WRITE_PROXY_MODES,
   MAX_BODY_BYTES,
   PROXY_EVENT_NAMES,
+  NON_BLOCKING_ROUTE_IDS,
   PROXY_ROUTE_IDS,
   buildCurlConfig,
   buildProxyRequest,
@@ -123,9 +124,24 @@ describe("resolveHostKey — through the secret contract, not a hand-rolled ladd
 });
 
 describe("routes", () => {
-  test("the three CTC-509 routes are exactly the supported set", () => {
-    expect([...PROXY_ROUTE_IDS].sort()).toEqual(["comment", "issue-state", "label"]);
-    expect(Object.keys(DEFAULT_ROUTES).sort()).toEqual(["comment", "issue-state", "label"]);
+  test("the supported routes are exactly the set below — fails in both directions", () => {
+    // CTL-1943 added `session` (CTC-682). The exact-equality shape is deliberate: a new
+    // route must be argued for HERE, because every id in this set is a path the daemon
+    // will send a Linear write to.
+    const expected = ["comment", "issue-state", "label", "session"];
+    expect([...PROXY_ROUTE_IDS].sort()).toEqual(expected);
+    expect(Object.keys(DEFAULT_ROUTES).sort()).toEqual(expected);
+  });
+
+  test("⛔ exactly ONE route is non-blocking, and it is not a dispatch-critical one", () => {
+    // The asymmetry COORD-122 decided. Asserted as an exact set so a future id cannot be
+    // added to the fast path without this failing — the three routes below each carry a
+    // decision the daemon reads back, so "sent and forgotten" would mean believing a
+    // board state that was never achieved.
+    expect([...NON_BLOCKING_ROUTE_IDS]).toEqual(["session"]);
+    for (const id of ["issue-state", "label", "comment"]) {
+      expect(NON_BLOCKING_ROUTE_IDS.has(id)).toBe(false);
+    }
   });
 
   test("a Layer-2 override wins over the shipped default", () => {

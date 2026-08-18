@@ -69,7 +69,7 @@
 // ready by lighting this flag alone; see the `no-cloud-token` / `unauthorized`
 // refusals below, both of which are LOUD and NAMED rather than a silent fallback.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -96,8 +96,37 @@ import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 /** The three modes, house convention (cf. CLOUD_FEED_MODES / DELEGATE_FIRST_MODES). */
 export const LINEAR_WRITE_PROXY_MODES = Object.freeze(new Set(["off", "shadow", "enforce"]));
 
-/** The route ids CTC-509 inc 2 already serves. Frozen — this is DATA. */
-export const PROXY_ROUTE_IDS = Object.freeze(["issue-state", "label", "comment"]);
+/**
+ * The route ids the cloud serves. Frozen — this is DATA.
+ *
+ * `session` (CTL-1943) is the CTC-682 agent-session route. It is listed here so it
+ * shares this module's credential handling, budget ledger, and event names — but it is
+ * the ONE route sent through `sendAsync` rather than `send`; see NON_BLOCKING_ROUTE_IDS.
+ */
+export const PROXY_ROUTE_IDS = Object.freeze(["issue-state", "label", "comment", "session"]);
+
+/**
+ * ⛔ THE ASYMMETRY, AS DATA — read this before adding an id.
+ *
+ * Every route in this set is sent WITHOUT waiting for the response. That is safe for
+ * exactly one reason, and it is a property of the route, not a preference: a failed
+ * `session` write degrades OBSERVABILITY and nothing else. Nothing downstream reads its
+ * result, no dispatch decision depends on it, and a lost narration self-heals on the
+ * next phase.
+ *
+ * The other three are dispatch-critical and MUST stay synchronous. `issue-state` decides
+ * whether a ticket advances; `label` carries the worker-disposition contract the
+ * scheduler reads back; `comment` is the durable record a human replies to. For those,
+ * "sent and forgotten" would mean the daemon believing a board state it never achieved.
+ *
+ * The reason this set exists at all: `dispatchTicket` is called from inside the
+ * synchronous `schedulerTick`, and this module's transport is a `spawnSync` of curl with
+ * a 20 s ceiling. Narrating from that seam on the synchronous path would add up to 20 s
+ * per dispatch to a tick that CTL-1524 already records as blocking the event loop — a
+ * fleet-wide stall traded for a status line. So do NOT add an id here to make something
+ * faster. Add one only when its failure costs nothing but a missing observation.
+ */
+export const NON_BLOCKING_ROUTE_IDS = Object.freeze(new Set(["session"]));
 
 /**
  * Measured against catalyst-cloud `origin/main` (5e852bd) — see the header. Paths are
@@ -109,6 +138,9 @@ export const DEFAULT_ROUTES = Object.freeze({
   "issue-state": "/agent/issue-state",
   label: "/agent/issue-label",
   comment: "/agent/issue-comment",
+  // CTL-1943 / CTC-682, read off the merged handler rather than guessed — the earlier
+  // cut of this module shipped guessed paths and was wrong on every one of them.
+  session: "/agent/session",
 });
 
 /** Mirrors cloud-sync.mjs:127 — one default, one env override, no third rung. */
@@ -367,6 +399,83 @@ export function defaultHttpFn({ url, method, token, body }) {
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "", args };
 }
 
+/**
+ * ── THE NON-BLOCKING TRANSPORT (CTL-1943) ──
+ *
+ * Same curl, same stdin `--config -` document, same credential discipline — the token
+ * still never enters argv and never touches disk. The ONE difference is `spawn` instead
+ * of `spawnSync`: this returns the moment the child is launched, so the caller's
+ * synchronous frame (and therefore `schedulerTick`) is never held by a network write.
+ *
+ * ⚠️ It is non-blocking, NOT fire-and-forget. The child's outcome is still collected and
+ * still reported through `onDone` — dropping it would make a permanently-broken
+ * narration route indistinguishable from a working one, which is the "check that cannot
+ * fail" this repo keeps rediscovering. What is given up is only the ABILITY TO ACT on
+ * the result, which is exactly what makes the route eligible for this path.
+ *
+ * `unref()` so a pending narration can never hold the process open at shutdown; the
+ * daemon is long-lived, so `close` still fires in every normal case.
+ */
+export const ASYNC_MAX_TIME_SEC = 10;
+
+/** One retry, and only for a transport-level failure — never for a 4xx the cloud meant. */
+export const ASYNC_MAX_ATTEMPTS = 2;
+
+export function defaultAsyncHttpFn({ url, method, token, body, onDone = null, spawnFn = spawn }) {
+  const config = buildCurlConfig({ url, method, token, body });
+  const args = [
+    "--config",
+    "-",
+    "--connect-timeout",
+    String(CONNECT_TIMEOUT_SEC),
+    "--max-time",
+    String(ASYNC_MAX_TIME_SEC),
+  ];
+
+  const attempt = (n) => {
+    let child;
+    try {
+      child = spawnFn(CURL_BIN, args, { stdio: ["pipe", "pipe", "pipe"] });
+    } catch (err) {
+      // A spawn that throws synchronously never produces a `close`, so report here or
+      // the outcome is lost.
+      onDone?.({ code: 127, stdout: "", stderr: String(err?.message ?? err), args, attempts: n });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    child.stdout?.on("data", (d) => { stdout += d; });
+    child.stderr?.on("data", (d) => { stderr += d; });
+    // A child that fails to spawn ASYNCHRONOUSLY emits `error` and may emit no `close`.
+    // Both paths funnel through `settle` so exactly one outcome is reported.
+    const settle = (code) => {
+      if (settled) return;
+      settled = true;
+      // Retry ONLY a transport failure (curl could not complete the exchange). A cloud
+      // that answered — even with a 4xx — has said something, and repeating the call
+      // would spend another unit of the host's daily write budget to be told the same
+      // thing.
+      if (code !== 0 && n < ASYNC_MAX_ATTEMPTS) return attempt(n + 1);
+      onDone?.({ code, stdout, stderr, args, attempts: n });
+    };
+    child.on("error", (err) => { stderr += String(err?.message ?? err); settle(127); });
+    child.on("close", (code) => settle(code ?? 0));
+    try {
+      child.stdin?.end(config);
+    } catch (err) {
+      stderr += String(err?.message ?? err);
+      settle(127);
+      return;
+    }
+    child.unref?.();
+  };
+
+  attempt(1);
+  // The synchronous return value: the request has LEFT, its verdict is not yet known.
+  return { dispatched: true };
+}
+
 // ─── Observability ───────────────────────────────────────────────────────────
 //
 // Three names, not one name plus a payload flag — the CTL-1659 rule: otel-forward
@@ -476,6 +585,7 @@ export function createLinearWriteProxy({
   env = process.env,
   routes = null,
   httpFn = defaultHttpFn,
+  asyncHttpFn = defaultAsyncHttpFn, // CTL-1943 — the non-blocking peer, see NON_BLOCKING_ROUTE_IDS
   appendEvent = defaultAppendEvent,
   log = defaultLog,
   // CTL-1936. Seams, so the throttle is testable without a filesystem.
@@ -701,6 +811,127 @@ export function createLinearWriteProxy({
       counts.applied += 1;
       emit(EVENT_APPLIED, { ticket, routeId, reason: null, status: verdict.status, applied: true, caller, labels });
       return { handled: true, applied: true, reason: null, status: verdict.status };
+    },
+
+    /**
+     * sendAsync — route one write WITHOUT waiting for its response. CTL-1943.
+     *
+     * ⛔ Only for a route in NON_BLOCKING_ROUTE_IDS. Read that comment before calling
+     * this: the eligibility is a property of the route (its failure costs nothing but an
+     * observation), not a way to make a slow write feel faster. An ineligible route is
+     * refused BY NAME rather than quietly downgraded, so a future caller that reaches for
+     * this to speed up `issue-state` gets an error instead of a daemon that believes
+     * board states it never achieved.
+     *
+     * ── WHY THIS IS A PEER OF `send` AND NOT A FLAG ON IT ──
+     * `send` is on the dispatch-critical path for three routes. Threading a mode through
+     * its body would put a branch inside the function whose synchronous verdict the
+     * scheduler's convergers depend on. As a peer, `send` is byte-identical to before
+     * this ticket and the two share only the closure — one ledger, one emitter, one set
+     * of counters.
+     *
+     * ── WHY THE LEDGER IS STILL SINGLE-WRITER ──
+     * The module header warns that the ledger is an unlocked read-modify-write and is
+     * safe only because there is one writer. That still holds: every ledger read and
+     * write below happens SYNCHRONOUSLY, before the child is spawned, on the same
+     * single-threaded daemon loop as `send`. The asynchronous half only EMITS — it never
+     * touches the ledger — so no two RMW cycles can interleave.
+     */
+    sendAsync({ routeId, ticket = null, payload = {}, caller = null, phase = null }) {
+      const labels = Array.isArray(payload?.labelIds) ? payload.labelIds : null;
+      const convergenceKey = convergenceKeyFor({ routeId, ticket, payload });
+      const ctx = { ticket, route: routeId, phase, caller };
+
+      if (!NON_BLOCKING_ROUTE_IDS.has(routeId)) {
+        log?.error?.(ctx, "linear-write-proxy: sendAsync REFUSED — route is not declared non-blocking");
+        return { handled: true, dispatched: false, reason: "route-not-async-eligible" };
+      }
+
+      if (mode === "shadow") {
+        counts.wouldWrite += 1;
+        emit(EVENT_WOULD_WRITE, { ticket, routeId, reason: "shadow", applied: false, caller, labels });
+        return { handled: false, dispatched: false, reason: "shadow" };
+      }
+
+      const refuse = (reason, status = null) => {
+        counts.failed += 1;
+        emit(EVENT_FAILED, { ticket, routeId, reason, status, applied: false, caller, labels });
+        log?.warn?.({ ...ctx, reason, status }, "linear-write-proxy: narration NOT sent");
+        return { handled: true, dispatched: false, reason };
+      };
+
+      // Same local budget gate as `send`, and for the same reason: a refusal here costs
+      // nothing, where a refusal at the cloud costs a budget unit.
+      const { ledger: ledgerBefore, degraded: ledgerDegraded } = loadLedger();
+      if (!ledgerDegraded) {
+        const gate = classifyWrite({ ledger: ledgerBefore, ticket, convergenceKey, dailyBudget, perTicketCap });
+        if (!gate.allow) {
+          counts.refused += 1;
+          emit(EVENT_FAILED, { ticket, routeId, reason: gate.reason, status: null, applied: false, caller, labels });
+          log?.warn?.({ ...ctx, reason: gate.reason, total: gate.total },
+            "linear-write-proxy: narration refused by the HOST budget — not sent to the cloud");
+          return { handled: true, dispatched: false, reason: gate.reason };
+        }
+      }
+
+      const req = buildProxyRequest({ routeId, payload, baseUrl, routes, account });
+      if (req.reason) return refuse(req.reason);
+
+      const key = resolveHostKey(env);
+      if (key.value === null) {
+        log?.error?.({ ...ctx, token_env: key.envVar },
+          "linear-write-proxy: no per-host cloud key — narration REFUSED (reason=no-cloud-token)");
+        return refuse("no-cloud-token");
+      }
+
+      const bytes = Buffer.byteLength(req.body, "utf8");
+      if (bytes > MAX_BODY_BYTES) return refuse("body-too-large");
+
+      // The write is leaving the host, so it spends budget — recorded NOW, synchronously,
+      // because that is what keeps this a single-writer ledger. Counting it only on
+      // success would let a failing narration loop spend the day invisibly.
+      if (!ledgerDegraded) {
+        let after = recordWrite(ledgerBefore, ticket);
+        const exhaustion = classifyExhaustion(after, { dailyBudget });
+        if (exhaustion.announce) {
+          after = markExhaustionAnnounced(after);
+          emit(EVENT_EXHAUSTED, { ticket, routeId, reason: "budget:day-exhausted", status: null, applied: false, caller, labels });
+          log?.error?.({ total: after.total, dailyBudget, day: after.day },
+            "linear-write-proxy: host daily cloud write budget EXHAUSTED — every further Linear write is refused until the UTC day rolls");
+        }
+        persist(after);
+      }
+
+      const onDone = (raw) => {
+        // ⛔ Runs on a LATER event-loop turn. It must never throw into the daemon loop,
+        // and it must never touch the ledger (see the single-writer note above).
+        try {
+          const verdict = classifyProxyResponse(raw);
+          if (verdict.applied) {
+            counts.applied += 1;
+            emit(EVENT_APPLIED, { ticket, routeId, reason: null, status: verdict.status, applied: true, caller, labels });
+            return;
+          }
+          counts.failed += 1;
+          emit(EVENT_FAILED, { ticket, routeId, reason: verdict.reason, status: verdict.status, applied: false, caller, labels });
+          // The ticket AND the phase, because "narration failed" with neither is an
+          // alert nobody can act on.
+          log?.warn?.(
+            { ...ctx, reason: verdict.reason, status: verdict.status, attempts: raw?.attempts ?? null },
+            "linear-write-proxy: narration failed (non-blocking route — the dispatch was NOT affected)"
+          );
+        } catch (err) {
+          log?.warn?.({ ...ctx, err: scrub(err?.message ?? "") }, "linear-write-proxy: narration settle threw");
+        }
+      };
+
+      try {
+        asyncHttpFn({ url: req.url, method: req.method, token: key.value, body: req.body, onDone });
+      } catch (err) {
+        log?.warn?.({ ...ctx, err: scrub(err?.message ?? "") }, "linear-write-proxy: async transport threw");
+        return refuse("spawn-failed");
+      }
+      return { handled: true, dispatched: true, reason: null };
     },
   };
 }
