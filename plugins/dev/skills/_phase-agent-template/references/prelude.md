@@ -141,5 +141,9 @@ jq --arg ts "$TS" --arg sid "${CATALYST_SESSION_ID:-}" '
   | if $sid != "" then .catalystSessionId = $sid else . end
 ' "$SIGNAL_FILE" > "$TMP" \
   && mv "$TMP" "$SIGNAL_FILE"
+
+# 4. The SHARED thoughts-artifact matcher the dispatcher gates on (CTL-1081). Hand-rolling a glob instead is the CTL-1998 "no plan found" bug, so a miss WARNS rather than falling through silently.
+ARTIFACT_GATE="${PLUGIN_ROOT}/scripts/lib/phase-artifact-gate.sh"
+[[ -r "$ARTIFACT_GATE" ]] && source "$ARTIFACT_GATE" || echo "phase-${PHASE}: WARNING — no ${ARTIFACT_GATE}; do NOT hand-roll a glob (CTL-1998)" >&2
 ```
 

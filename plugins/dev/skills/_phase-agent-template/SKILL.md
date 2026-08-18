@@ -52,8 +52,8 @@ Every phase agent:
   resolves in any shell. ⚠️ `linear_read_ticket` is a plugin **shell function**: without
   `source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"` it is "command not found" and you
   fall through to the bare CLI silently. Writes and `issues list`/`search` stay on `linearis`.
-- **Resolve thoughts artifacts with the SHARED matcher**, not a hand-written glob:
-  `source "${PLUGIN_ROOT}/scripts/lib/phase-artifact-gate.sh"` then
+- **Resolve thoughts artifacts with the SHARED matcher**, not a hand-written glob. The prelude
+  sources `scripts/lib/phase-artifact-gate.sh` from the root it resolved, so just call
   `match_thoughts_artifact <dir> "$TICKET"`. It accepts `*-<ticket>.md` **and** `*-<ticket>-<slug>.md`,
   which is what the dispatcher gates on. ⛔ A stricter glob here means the dispatcher green-lights a
   plan the phase then rejects with "no plan found" — that was a live bug in `phase-implement` (CTL-1998).
