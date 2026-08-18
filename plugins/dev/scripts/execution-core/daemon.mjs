@@ -35,6 +35,7 @@ import {
   writeDaemonRuntimeEnv, // CTL-1678: boot-time env snapshot for read-only surfaces
   getRegistryPath,
   getEventLogPath,
+  getReplicaDbPath, // CTL-1929: the github-feed producer reads the replica
   getJobsRoot, // CTL-1165 D3: job-dir GC root
   log,
   EVENT_DEBOUNCE_MS,
@@ -53,6 +54,7 @@ import {
   getCatalystRepoDir, // CTL-1093 sticky dir
   readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
   readCloudFeedConfig, // CTL-1847: cloud-feed dispatch-source mode
+  readGithubFeedConfig, // CTL-1929: github-feed dispatch-source mode (SEPARATE knob)
   readLinearWriteProxyConfig, // CTL-1889: Linear write-proxy transport mode
   readLinearReplica, // CTL-1340: read-replica tier flag (inert; default off)
   getExecutor, // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
@@ -109,6 +111,7 @@ import { sweepWtCleanupQueue } from "./wt-cleanup-drain.mjs"; // CTL-1218: wt-cl
 import { ProcReaper } from "./proc-reaper.mjs"; // CTL-1165 D2: orphan child-process reaper (default shadow)
 import { startWorktreeRefreshTimer, readWorktreeRefreshConfig } from "./worktree-refresh-timer.mjs";
 import { startCloudFeedTimer } from "./cloud-feed-timer.mjs"; // CTL-1847
+import { startGithubFeedTimer } from "./github-feed-timer.mjs"; // CTL-1929
 import { createCaptureSink, defaultCapturePath } from "./cloud-feed-capture.mjs"; // CTL-1847
 // CTL-1331: the async board-health delegate runner timer (kicks the DETACHED
 // drainer that does the heavy worktree-provision + `claude --bg` off the daemon
@@ -233,6 +236,7 @@ let _stalledPrTimer = null;
 // CAT-40: periodic GitHub core REST quota snapshot sampler.
 let _githubQuotaTimer = null;
 let _cloudFeedTimer = null; // CTL-1847: cloud-feed producer tick
+let _githubFeedTimer = null; // CTL-1929: github-feed producer tick
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
@@ -1482,6 +1486,44 @@ export function startDaemon({
         "cloud-feed: armed",
       );
     }
+    // CTL-1929: the GitHub leg's producer tick.
+    //
+    // ⛔ READ FROM ITS OWN KNOB, AND NO GATE IS INSTALLED. Both of those are the
+    // safety argument, not style:
+    //   * `CATALYST_GITHUB_FEED` is separate from `CATALYST_CLOUD_FEED`, which every
+    //     worker already runs at `enforce` — sharing the value would have enforced
+    //     the GitHub leg on every host the moment this merged.
+    //   * There is deliberately NO `setGithubFeedGate` call. A gate is what
+    //     suppresses smee's copy, and suppressing it for `github.pr.merged` /
+    //     `github.check_suite.completed` — which this producer cannot emit until
+    //     CTC-691 and CTC-667 item 4 land — would take out the CI wait and the
+    //     deploy chain with nothing behind them. `enforce` therefore degrades to
+    //     shadow inside the timer and says so.
+    // So on every host until an operator sets the flag, this block constructs
+    // nothing and routing is byte-identical to pre-CTL-1929.
+    const githubFeedCfg = readGithubFeedConfig();
+    if (githubFeedCfg.mode !== "off") {
+      _githubFeedTimer = startGithubFeedTimer({
+        mode: githubFeedCfg.mode,
+        intervalSec: githubFeedCfg.intervalSec,
+        orchDir,
+        dbPath: getReplicaDbPath(),
+        eventLogPath: getEventLogPath(),
+        appendFn: (path, line) => appendFileSync(path, line),
+        logger: log,
+      });
+      log.info(
+        {
+          requested: _githubFeedTimer?.mode?.requested ?? githubFeedCfg.mode,
+          effective: _githubFeedTimer?.mode?.effective ?? null,
+          degraded: _githubFeedTimer?.mode?.degraded ?? false,
+          intervalSec: githubFeedCfg.intervalSec,
+          gate: "none — the github leg suppresses nothing (CTC-691 / CTC-667 item 4)",
+        },
+        "github-feed: armed (shadow only)",
+      );
+    }
+
     // CTL-1889: the Linear write-proxy transport. Same posture as the cloud-feed
     // block above — `off` (the default) constructs nothing, so linear-write.mjs's
     // module-level install stays null and every Linear write in this process is
@@ -2439,6 +2481,14 @@ export function stopDaemon() {
   // not just the timer: a live gate with a dead producer would keep suppressing
   // smee in enforce mode while nothing replaced it — a silent total dispatch
   // outage, which is strictly worse than either half alone.
+  if (_githubFeedTimer) {
+    try {
+      _githubFeedTimer.stop();
+    } catch {
+      /* best effort */
+    }
+    _githubFeedTimer = null;
+  }
   if (_cloudFeedTimer) {
     try {
       _cloudFeedTimer.stop();

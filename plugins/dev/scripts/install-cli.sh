@@ -45,6 +45,9 @@ CLI_ENTRIES=(
   "catalyst-otel-forward:catalyst-otel-forward"
   "catalyst-transitions:catalyst-transitions"
   "catalyst-verify:catalyst-verify"
+  # CTL-1935: without this entry the documented `catalyst-index-root setup` — which the doctor
+  # check tells the operator to run — is command-not-found on a normal install.
+  "catalyst-index-root:catalyst-index-root"
   "catalyst-why:catalyst-why"
   "catalyst-session.sh:catalyst-session"
   "catalyst-state.sh:catalyst-state"

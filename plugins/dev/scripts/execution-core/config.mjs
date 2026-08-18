@@ -2134,6 +2134,45 @@ export function readCloudFeedConfig(envObj = process.env) {
   return { mode, intervalSec };
 }
 
+// CTL-1929: GitHub-feed dispatch-source mode reader. Same ladder as
+// readCloudFeedConfig — env (CATALYST_GITHUB_FEED) > Layer-2
+// (.catalyst.githubFeed.mode) > 'off'.
+//
+// ⛔ A SEPARATE KNOB FROM `CATALYST_CLOUD_FEED`, AND THAT IS A SAFETY PROPERTY,
+// NOT TIDINESS. Every worker in this fleet already runs the Linear leg at
+// `enforce`. If the GitHub leg read the same value, then merely MERGING its wiring
+// would put it into enforce on every host at once — with no operator action, no
+// rollout, and no per-leg rollback. The GitHub tunnel is still the ONLY source of
+// `github.pr.merged` and `github.check_suite.completed` (CTC-691 / CTC-667 item 4),
+// so that merge would blind the CI wait and the deploy chain fleet-wide. The two
+// legs cut over independently or they cut over recklessly.
+const GITHUB_FEED_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2GithubFeed() {
+  try {
+    const gf = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.githubFeed;
+    return gf && typeof gf === "object" ? gf : {};
+  } catch {
+    return {};
+  }
+}
+
+export function readGithubFeedConfig(envObj = process.env) {
+  const l2 = readLayer2GithubFeed();
+  const env = envObj.CATALYST_GITHUB_FEED;
+  let mode;
+  if (env === "0") mode = "off";
+  else if (typeof env === "string" && GITHUB_FEED_MODES.has(env)) mode = env;
+  else if (typeof l2.mode === "string" && GITHUB_FEED_MODES.has(l2.mode)) mode = l2.mode;
+  else mode = "off";
+  const rawInterval = envObj.CATALYST_GITHUB_FEED_INTERVAL_SEC ?? l2.intervalSeconds;
+  const parsed = Number(rawInterval);
+  // Number("") and Number(null) are both 0, which would read as a valid "0 seconds"
+  // and busy-spin the tick. Require a finite value >= 5.
+  const intervalSec = Number.isFinite(parsed) && parsed >= 5 ? Math.floor(parsed) : 30;
+  return { mode, intervalSec };
+}
+
 // CTL-1889: Linear write-proxy mode reader. Same ladder as readCloudFeedConfig —
 // env (CATALYST_LINEAR_WRITE_PROXY) > Layer-2 (.catalyst.linearWriteProxy.mode) > 'off'.
 //

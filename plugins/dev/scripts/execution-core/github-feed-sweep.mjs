@@ -90,7 +90,10 @@ export function fail(counts, reason) {
 }
 
 /** Per-stream cursor file. One file per stream, deliberately — see `runGithubSweep`. */
-export function streamCursorPath(orchDir, streamKey, account = "tenant-0") {
+export function streamCursorPath(orchDir, streamKey, account) {
+  if (typeof account !== "string" || account === "") {
+    throw new Error("streamCursorPath: account is required — an unlabelled cursor files producer state under the wrong tenant");
+  }
   return `${orchDir}/github-feed-cursor-${account}-${streamKey}.json`;
 }
 
@@ -223,7 +226,11 @@ export function runGithubSweep({
   seen,
   sink,
   orchDir,
-  account = "tenant-0",
+  // ⛔ No default. The account NAMES every per-tenant artifact (cursor files, the
+  // suppression store, the marker attribute); defaulting it means a host configured
+  // for another account silently files its state under `tenant-0` and still looks
+  // complete. `github-feed-timer.resolveAccount` is the one resolver.
+  account,
   now = Date.now(),
   settleMs = DEFAULT_SETTLE_MS,
   batchLimit = DEFAULT_BATCH_LIMIT,
