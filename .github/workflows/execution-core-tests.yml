@@ -97,6 +97,11 @@ on:
       # FLEET: the remote-owner channel transport ships its own bash test; without this
       # path a PR touching only scripts/comms/ would skip the job that runs it.
       - "scripts/comms/**"
+
+      # CTC-633: the worktree thoughts/ back-fill ships its own bash test; without this path a
+      # PR touching only scripts/ would skip the job that runs it.
+      - "scripts/__tests__/**"
+      - "scripts/worktree-thoughts-exclude-backfill.sh"
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
       # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
@@ -171,6 +176,11 @@ jobs:
               # FLEET: the remote-owner channel transport ships its own bash test; without this
               # path a PR touching only scripts/comms/ would skip the job that runs it.
               - "scripts/comms/**"
+
+              # CTC-633: the worktree thoughts/ back-fill ships its own bash test; without this path a
+              # PR touching only scripts/ would skip the job that runs it.
+              - "scripts/__tests__/**"
+              - "scripts/worktree-thoughts-exclude-backfill.sh"
               - "plugins/dev/scripts/gen-cli-reference.sh"
               - "website/src/content/docs/reference/catalyst-cli.md"
               - "plugins/dev/scripts/migrate-dual-harness.sh"
@@ -254,6 +264,14 @@ jobs:
         # at-least-once ordering (append first, ack second).
         working-directory: .
         run: bash scripts/comms/__tests__/remote-turns.test.sh
+
+      - name: worktree thoughts/ back-fill test (CTC-633)
+        # info/exclude only silences UNTRACKED paths, so this test pins BOTH halves: the
+        # untracked case being fixed, and the tracked-modified case being reported rather than
+        # counted as fixed. Includes a negative control (a repo without the defect is not
+        # touched) and a zero-discovery case that must exit 2, not report a clean pass.
+        working-directory: .
+        run: bash scripts/__tests__/worktree-thoughts-exclude-backfill.test.sh
 
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
