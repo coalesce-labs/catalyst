@@ -123,7 +123,7 @@ describe("shadow — the direct write STILL happens, and the observation is reco
     // cloud call at all — so a shadow run would tax every Linear write on the host to
     // construct a body nobody sends. The observation is that the write HAPPENED and on
     // which route; the contents are proven by the enforce cases below.
-    expect(proxy.sends).toEqual([{ routeId: "label", ticket: "CTL-2", payload: {} }]);
+    expect(proxy.sends).toEqual([{ routeId: "label", ticket: "CTL-2", payload: {}, caller: "applyLabel" }]);
     expect(calls.map((c) => c.cmd)).toContain("linearis");
   });
 
@@ -131,7 +131,7 @@ describe("shadow — the direct write STILL happens, and the observation is reco
     const proxy = fakeProxy("shadow");
     const calls = [];
     applyTerminalDone({ ticket: "CTL-2", resolveRepoRoot: () => "/repo", exec: recordingExec(calls), proxy });
-    expect(proxy.sends).toEqual([{ routeId: "issue-state", ticket: "CTL-2", payload: {} }]);
+    expect(proxy.sends).toEqual([{ routeId: "issue-state", ticket: "CTL-2", payload: {}, caller: "runTransition" }]);
     expect(calls.some((c) => c.cmd.endsWith("linear-transition.sh"))).toBe(true);
   });
 });
@@ -148,7 +148,7 @@ describe("enforce — the proxy IS the write and the direct path is NOT taken", 
     // `mode` of add|remove. Asserted here because the earlier cut of this file locked
     // in `{ticket, mode, labels}`, which the cloud would have rejected with a 400.
     expect(proxy.sends).toEqual([
-      { routeId: "label", ticket: "CTL-3", payload: { issueId: ISSUE_ID, labelIds: [LABEL_ID], mode: "add" } },
+      { routeId: "label", ticket: "CTL-3", payload: { issueId: ISSUE_ID, labelIds: [LABEL_ID], mode: "add" }, caller: "applyLabel" },
     ]);
   });
 
@@ -212,7 +212,7 @@ describe("enforce — the proxy IS the write and the direct path is NOT taken", 
     expect(calls.filter(isWritingTransition)).toHaveLength(0);
     expect(calls.filter((c) => c.args.includes("--resolve-only"))).toHaveLength(1);
     expect(proxy.sends).toEqual([
-      { routeId: "issue-state", ticket: "CTL-3", payload: { issueId: ISSUE_ID, stateId: STATE_ID } },
+      { routeId: "issue-state", ticket: "CTL-3", payload: { issueId: ISSUE_ID, stateId: STATE_ID }, caller: "runTransition" },
     ]);
   });
 
@@ -426,7 +426,7 @@ describe("removeLabel — the proxied removal runs BEFORE the credentialed read"
     // an overwrite races any label another actor adds between the read and the write
     // and silently drops it, which a remove cannot do.
     expect(proxy.sends).toEqual([
-      { routeId: "label", ticket: "CTL-7", payload: { issueId: ISSUE_ID, labelIds: [LABEL_ID], mode: "remove" } },
+      { routeId: "label", ticket: "CTL-7", payload: { issueId: ISSUE_ID, labelIds: [LABEL_ID], mode: "remove" }, caller: "removeLabel" },
     ]);
     expect(calls).toHaveLength(0);
   });
@@ -474,7 +474,7 @@ describe("removeLabel — the proxied removal runs BEFORE the credentialed read"
     });
     expect(r).toEqual({ removed: true, wrote: true });
     expect(proxy.sends).toEqual([
-      { routeId: "label", ticket: "CTL-7", payload: { issueId: ISSUE_ID, labelIds: [LABEL_ID], mode: "remove" } },
+      { routeId: "label", ticket: "CTL-7", payload: { issueId: ISSUE_ID, labelIds: [LABEL_ID], mode: "remove" }, caller: "removeLabel" },
     ]);
     expect(calls).toHaveLength(0);
   });
@@ -551,7 +551,7 @@ describe("removeLabel — the proxied removal runs BEFORE the credentialed read"
       proxy,
     });
     expect(r).toEqual({ removed: true, wrote: true });
-    expect(proxy.sends).toEqual([{ routeId: "label", ticket: "CTL-8", payload: {} }]);
+    expect(proxy.sends).toEqual([{ routeId: "label", ticket: "CTL-8", payload: {}, caller: "removeLabel" }]);
     expect(calls[0].args).toEqual(["issues", "update", "CTL-8", "--labels", "bug", "--label-mode", "overwrite"]);
   });
 });
