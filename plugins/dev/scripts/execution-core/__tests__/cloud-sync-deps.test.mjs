@@ -29,7 +29,7 @@ import {
   lockedVersionForKey,
   provenLockKey,
   splitBunStorePath,
-  workspaceDirsFromLock,
+  workspacesFromLock,
   lockedVersionsFor,
   readDepsBreadcrumb,
   readRestartLedger,
@@ -1051,18 +1051,25 @@ describe("CTL-1931 — decoding what bun encodes in a store directory name", () 
   });
 });
 
-describe("CTL-1931 — the lockfile's workspace directories", () => {
-  test("every workspace dir is listed, including the root's empty key", () => {
-    expect(workspaceDirsFromLock(LOCK_TEXT_ISOLATED)).toContain("plugins/dev/scripts/execution-core");
-    expect(workspaceDirsFromLock("{}"), "no workspaces block → no dirs, not a throw").toEqual([]);
-    expect(workspaceDirsFromLock(null)).toEqual([]);
+describe("CTL-1931 — the lockfile's workspaces", () => {
+  test("every workspace is listed with BOTH its directory and its package name", () => {
+    const ws = workspacesFromLock(LOCK_TEXT_ISOLATED);
+    expect(ws.map((w) => w.dir)).toContain("plugins/dev/scripts/execution-core");
+    // ⛔ The name is a DIFFERENT string from the directory basename, and bun keys chained lock
+    // entries by the NAME. Measured in this repo's own bun.lock: the workspace at
+    // `plugins/dev/scripts/orch-monitor/ui` is named `orch-monitor-ui` and its keys read
+    // `orch-monitor-ui/react` — never `ui/react`. Deriving the prefix from the basename probes
+    // a key that cannot exist and falls back to the unrelated bare resolution (Codex P2, #3499).
+    expect(ws.find((w) => w.dir === "plugins/dev/scripts/execution-core")?.name).toBe("catalyst-execution-core");
+    expect(workspacesFromLock("{}"), "no workspaces block → none, not a throw").toEqual([]);
+    expect(workspacesFromLock(null)).toEqual([]);
   });
 
   test("keys NESTED inside a workspace's own object are not mistaken for directories", () => {
     // "dependencies" / "@catalyst-cloud/sdk" sit one level deeper and must not be read as
     // workspace paths — the walk that produced them would send the importer search to
     // `<root>/dependencies/node_modules/...`, a directory that cannot exist.
-    const dirs = workspaceDirsFromLock(LOCK_TEXT_ISOLATED);
+    const dirs = workspacesFromLock(LOCK_TEXT_ISOLATED).map((w) => w.dir);
     expect(dirs).not.toContain("dependencies");
     expect(dirs).not.toContain("@catalyst-cloud/sdk");
     expect(dirs).not.toContain("name");
@@ -1240,5 +1247,65 @@ describe("CTL-1931 — CRITICAL_DEPS covers the package that CAUSED CTL-1919", (
     expect(record.degraded).toBe(true);
     expect(record.degradedReasons.join(" ")).toMatch(/base dependency @catalyst-cloud\/sdk\/node did not resolve/);
     expect(record.packages.some((p) => p.id === "@catalyst-cloud/schema"), "the dependent is SKIPPED, not recorded against the wrong base").toBe(false);
+  });
+});
+
+describe("CTL-1931 — the two review findings, pinned (#3499 round 1)", () => {
+  // A lockfile that resolves the SAME id at TWO locations with DIFFERENT versions: the root
+  // pins 0.1.15, the SDK's nested entry pins 0.1.12. This is the shape that makes a first-match
+  // importer search unsafe.
+  const LOCK_TWO_LOCATIONS = `{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "catalyst", "dependencies": { "@catalyst-cloud/schema": "0.1.15" } },
+    "plugins/dev/scripts/execution-core": { "name": "catalyst-execution-core", "dependencies": { "@catalyst-cloud/sdk": "0.8.11" } },
+  },
+  "packages": {
+    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.15", "", {}, "sha512-aaa=="],
+    "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.11", "", {}, "sha512-bbb=="],
+    "@catalyst-cloud/sdk/@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.12", "", {}, "sha512-ccc=="],
+    "catalyst-execution-core/@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.11", "", {}, "sha512-ddd=="],
+  }
+}`;
+
+  test("⛔ P1 — two importers sharing ONE store dir is AMBIGUOUS, not the first match", () => {
+    // The root and the SDK both link the same copy, while the lockfile demands 0.1.15 at one
+    // location and 0.1.12 at the other. That disk state cannot satisfy both, so it IS a
+    // partial/shadowed install. Taking the root's bare key first would grade the shared copy
+    // against 0.1.15 and report `ok` — the exact miss this link exists to prevent.
+    const shared = SCHEMA_PKG_DIR("0.1.15");
+    const io = linkFs({
+      [`${ROOT}/node_modules/@catalyst-cloud/schema`]: shared,
+      [`${SDK_STORE}/node_modules/@catalyst-cloud/schema`]: shared,
+    });
+    expect(
+      provenLockKey({ root: ROOT, packageDir: shared, id: "@catalyst-cloud/schema", lockText: LOCK_TWO_LOCATIONS, ...io }),
+      "two proven importers disagreeing on the key must fail CLOSED",
+    ).toBeNull();
+  });
+
+  test("POSITIVE CONTROL — ONE importer against the SAME lockfile still resolves", () => {
+    // Without this, the null above would also be satisfied by a function that had simply
+    // started returning null for this lockfile.
+    const shared = SCHEMA_PKG_DIR("0.1.15");
+    const io = linkFs({ [`${ROOT}/node_modules/@catalyst-cloud/schema`]: shared });
+    expect(provenLockKey({ root: ROOT, packageDir: shared, id: "@catalyst-cloud/schema", lockText: LOCK_TWO_LOCATIONS, ...io })).toBe("@catalyst-cloud/schema");
+  });
+
+  test("⛔ P2 — a workspace's chained key uses its NAME, never its directory basename", () => {
+    // `plugins/dev/scripts/execution-core` is named `catalyst-execution-core`, so the key is
+    // `catalyst-execution-core/@catalyst-cloud/sdk`. Probing `execution-core/@catalyst-cloud/sdk`
+    // misses and silently falls back to the unrelated bare resolution.
+    const sdkDir = `${SDK_STORE}/node_modules/@catalyst-cloud/sdk`;
+    const io = linkFs({ [`${ROOT}/plugins/dev/scripts/execution-core/node_modules/@catalyst-cloud/sdk`]: sdkDir });
+    expect(provenLockKey({ root: ROOT, packageDir: sdkDir, id: "@catalyst-cloud/sdk", lockText: LOCK_TWO_LOCATIONS, ...io })).toBe("catalyst-execution-core/@catalyst-cloud/sdk");
+  });
+
+  test("a workspace with NO chained key in the lockfile still keys bare", () => {
+    // The common case: bun writes the bare key when a tree holds one version. The name-based
+    // probe must not turn a correct bare association into a miss.
+    const sdkDir = `${SDK_STORE}/node_modules/@catalyst-cloud/sdk`;
+    const io = linkFs({ [`${ROOT}/plugins/dev/scripts/execution-core/node_modules/@catalyst-cloud/sdk`]: sdkDir });
+    expect(provenLockKey({ root: ROOT, packageDir: sdkDir, id: "@catalyst-cloud/sdk", lockText: LOCK_TEXT_ISOLATED, ...io })).toBe("@catalyst-cloud/sdk");
   });
 });

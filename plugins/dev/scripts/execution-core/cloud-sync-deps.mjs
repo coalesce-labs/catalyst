@@ -377,18 +377,30 @@ export function splitBunStorePath(root, packageDir) {
   return { store, id: scoped ? `${tail[0]}/${tail[1]}` : tail[0] };
 }
 
-// workspaceDirsFromLock — the workspace directories bun records at the head of the lockfile.
-// Needed because a workspace is the THIRD place a package can be linked from, and it is the
+// workspacesFromLock — the workspaces bun records at the head of the lockfile, each as
+// `{ dir, name }`. A workspace is the THIRD place a package can be linked from, and it is the
 // one this fleet actually uses: `@catalyst-cloud/sdk` is a dependency of the
 // `plugins/dev/scripts/execution-core` workspace, not of the repo root, so its symlink lives
-// under that workspace and nowhere else. Scanned with a brace-depth walk rather than
-// JSON.parse because bun.lock is JSONC (trailing commas) and will not parse.
-export function workspaceDirsFromLock(lockText) {
+// under that workspace and nowhere else.
+//
+// ⛔ BOTH FIELDS ARE LOAD-BEARING, AND THEY ARE DIFFERENT STRINGS. The directory is where the
+// symlink lives; the NAME is what bun prefixes a chained lock key with. Measured in this
+// repository's own bun.lock: the workspace at `plugins/dev/scripts/orch-monitor/ui` is named
+// `orch-monitor-ui`, and its keys read `orch-monitor-ui/react`, NOT `ui/react`. Deriving the
+// prefix from the directory basename — as this did — probes a key that cannot exist, misses,
+// and silently falls back to the unrelated bare resolution. (Codex P2 on #3499; verified against
+// the lockfile before accepting it.) `plugins/dev/scripts/execution-core` is named
+// `catalyst-execution-core`, so this fleet's own primary dependency was affected.
+//
+// Scanned with a brace-depth walk rather than JSON.parse because bun.lock is JSONC (trailing
+// commas) and will not parse.
+export function workspacesFromLock(lockText) {
   if (typeof lockText !== "string") return [];
   const m = /"workspaces"\s*:\s*\{/.exec(lockText);
   if (!m) return [];
-  const dirs = [];
+  const out = [];
   let depth = 0;
+  let dir = null;
   let i = m.index + m[0].length - 1; // sit on the opening brace
   for (; i < lockText.length; i += 1) {
     const c = lockText[i];
@@ -399,19 +411,24 @@ export function workspaceDirsFromLock(lockText) {
     if (c === "}") {
       depth -= 1;
       if (depth === 0) break;
+      if (depth === 1) dir = null; // left a workspace's object
       continue;
     }
-    if (c === '"' && depth === 1) {
-      const end = lockText.indexOf('"', i + 1);
-      if (end === -1) break;
-      const key = lockText.slice(i + 1, end);
-      // Only a key — the next non-space character must be the ':' introducing its object.
-      const after = /^\s*:/.test(lockText.slice(end + 1));
-      i = end;
-      if (after && key.length > 0) dirs.push(key); // "" is the root workspace
+    if (c !== '"') continue;
+    const end = lockText.indexOf('"', i + 1);
+    if (end === -1) break;
+    const key = lockText.slice(i + 1, end);
+    const isKey = /^\s*:/.test(lockText.slice(end + 1));
+    if (depth === 1 && isKey) {
+      dir = key; // "" is the root workspace
+      out.push({ dir, name: null });
+    } else if (depth === 2 && isKey && key === "name" && out.length > 0 && dir !== null) {
+      const v = /^\s*:\s*"([^"]*)"/.exec(lockText.slice(end + 1));
+      if (v) out[out.length - 1].name = v[1];
     }
+    i = end;
   }
-  return dirs;
+  return out;
 }
 
 // provenLockKey — the lockfile install-location key for a package whose recorded path is a
@@ -445,14 +462,25 @@ export function provenLockKey({
     return resolved !== null && resolved === target;
   };
 
-  if (linksHere(root)) return id;
+  // ⛔ EVERY importer is collected before any key is chosen — the first match is NOT taken.
+  // Several importers can link the SAME store directory while the lockfile carries DISTINCT
+  // resolutions for them (a bare `<id>` and a nested `<parent>/<id>` at different versions).
+  // Returning on the first match would then grade the recorded package against whichever
+  // association happened to be tried first: if the shared copy satisfies the bare entry but not
+  // the nested one, that is a partial/shadowed install — precisely what this link exists to
+  // catch — reported as `ok`. (Codex P1 on #3499.) When the proven importers disagree about the
+  // key, the association is genuinely ambiguous and the answer is INCONCLUSIVE, never a pick.
+  const keys = new Set();
 
-  for (const ws of workspaceDirsFromLock(lockText)) {
-    if (ws.length === 0) continue; // the root workspace, already tried above
-    if (!linksHere(join(root, ws))) continue;
-    // A workspace dep is keyed bare unless bun had to disambiguate it.
-    const wsName = ws.split("/").pop();
-    return hasKey(`${wsName}/${id}`) ? `${wsName}/${id}` : id;
+  if (linksHere(root)) keys.add(id);
+
+  for (const ws of workspacesFromLock(lockText)) {
+    if (typeof ws.dir !== "string" || ws.dir.length === 0) continue; // root, tried above
+    if (!linksHere(join(root, ws.dir))) continue;
+    // A workspace dep is keyed bare unless bun had to disambiguate it — and when it does, the
+    // prefix is the workspace's NAME, not its directory basename.
+    const chained = ws.name ? `${ws.name}/${id}` : null;
+    keys.add(chained && hasKey(chained) ? chained : id);
   }
 
   const storeRoot = join(root, "node_modules", ".bun");
@@ -460,7 +488,7 @@ export function provenLockKey({
   try {
     entries = listDir(storeRoot);
   } catch {
-    return null; // no store to scan → unproven → INCONCLUSIVE
+    entries = []; // no store to scan; a root/workspace proof above may still stand
   }
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (entry === parts.store.storeName) continue; // a package does not import itself
@@ -468,9 +496,12 @@ export function provenLockKey({
     if (!parent) continue;
     if (!linksHere(join(storeRoot, entry))) continue;
     const chained = `${parent.id}/${id}`;
-    return hasKey(chained) ? chained : id;
+    keys.add(hasKey(chained) ? chained : id);
   }
-  return null;
+
+  // Exactly one association → that is the location. Zero → unproven. More than one → the
+  // importers disagree and no evidence here can settle it; fail CLOSED.
+  return keys.size === 1 ? [...keys][0] : null;
 }
 
 // norm — realpath, falling back to the literal path. A path that cannot be resolved still
