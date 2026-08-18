@@ -12,7 +12,7 @@ sidebar:
 
 Every `catalyst-*` CLI is installed onto your `PATH` by
 [`install-cli.sh`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/install-cli.sh) (into
-`~/.catalyst/bin` by default). This page lists all 32 of them — one line of
+`~/.catalyst/bin` by default). This page lists all 33 of them — one line of
 purpose plus the key subcommands — grouped by area. Run any tool with `--help`
 for full syntax. The richer tools have their own reference pages (e.g.
 [catalyst-stack](/reference/catalyst-stack/)).
@@ -268,3 +268,13 @@ Wrapper that registers a Catalyst session around claude, then execs the interact
 Claude Code Stop/SubagentStop hook — fallback agent.checkout emitter for the broker.
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/hooks/emit-lifecycle-event.sh)
+
+## Fleet & install
+
+### catalyst-index-root
+
+CTL-1935: prove (and provision) the PINNED serving root a cold catalyst-index run must execute from — HEAD exactly at the recorded sha, the release symbol present on disk, and the tree pristine. Refuses to `run` from an unverified root.
+
+**Key subcommands:** _(run `catalyst-index-root --help`)_
+
+[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-index-root)
