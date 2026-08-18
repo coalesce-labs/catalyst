@@ -26,7 +26,18 @@ bad()  { FAILURES=$((FAILURES+1)); echo "  FAIL: $1"; echo "    $2"; }
 # `stat -f %m` means "file SYSTEM status" and aborts. The first cut used the macOS spelling
 # and every CI run of this workflow died at line 39 before a single case executed —
 # a test file that cannot start is indistinguishable from one with nothing to say.
-_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null; }
+# ⛔ PROBE THE DIALECT; DO NOT RELY ON THE WRONG ONE FAILING. The obvious
+# `stat -f %m "$f" || stat -c %Y "$f"` is broken on GNU in the silent direction: `-f` there
+# means "file SYSTEM status", so GNU stat treats BOTH `%m` and the filename as files,
+# errors on `%m`, SUCCEEDS on the real file, and prints a multi-line block starting
+# `  File: …` — exit 0, so the `||` never fires and that text flows into `$(( ))`, which
+# under `set -u` dies with `File: unbound variable`. That is exactly what CI reported on
+# the first fix attempt: a fallback that cannot detect its own failure.
+if stat -c %Y . >/dev/null 2>&1; then
+  _mtime() { stat -c %Y "$1"; }        # GNU/coreutils (ubuntu-latest)
+else
+  _mtime() { stat -f %m "$1"; }        # BSD/macOS
+fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

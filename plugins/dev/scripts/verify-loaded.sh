@@ -211,7 +211,7 @@ fi
 # `stat -c %Y`. The fleet is macOS, but this script is repo tooling and CI is Linux, so a
 # BSD-only spelling is a latent break rather than a safe assumption. Same for the start
 # time: BSD `date -j -f`, GNU `ps -o lstart=` → `date -d`.
-EPOCHS="$(_vl_run "m=\$(stat -f %m '${MOD_PATH}' 2>/dev/null || stat -c %Y '${MOD_PATH}' 2>/dev/null); s=\$(ps -p ${PID} -o lstart= 2>/dev/null); ps_e=\$(date -j -f '%a %b %d %T %Y' \"\$s\" +%s 2>/dev/null || date -d \"\$s\" +%s 2>/dev/null); echo \"\${ps_e:-NA} \${m:-NA}\"" 2>/dev/null)"
+EPOCHS="$(_vl_run "m=\$(if stat -c %Y . >/dev/null 2>&1; then stat -c %Y '${MOD_PATH}' 2>/dev/null; else stat -f %m '${MOD_PATH}' 2>/dev/null; fi); s=\$(ps -p ${PID} -o lstart= 2>/dev/null); ps_e=\$(date -j -f '%a %b %d %T %Y' \"\$s\" +%s 2>/dev/null || date -d \"\$s\" +%s 2>/dev/null); echo \"\${ps_e:-NA} \${m:-NA}\"" 2>/dev/null)"
 PS_EPOCH="${EPOCHS%% *}"; MOD_EPOCH="${EPOCHS##* }"
 if [[ "$PS_EPOCH" == "NA" || "$MOD_EPOCH" == "NA" || -z "$PS_EPOCH" || -z "$MOD_EPOCH" ]]; then
   _fail "started-after" "could not read process start time and/or module mtime (got '${EPOCHS}') — freshness is UNPROVEN"
