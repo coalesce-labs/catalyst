@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent TEMPLATE for one supervised coordination role — CTL-1994.
+
+  One label per role: com.catalyst.role.<role>. install.sh substitutes every
+  REPLACE_WITH_* token and copies it into ~/Library/LaunchAgents/.
+
+  Do not edit the installed copy: re-running install.sh overwrites it.
+
+    bash install.sh --role steward-p13 --scope "P13 · Coordination SOP"
+    bash install.sh --role steward-p13 --uninstall
+
+  KeepAlive is the point of this file. The supervisor restarts a role's SDK
+  SESSION; launchd restarts the SUPERVISOR. On 2026-08-18 a provider 529 killed
+  seven agent lanes at once and a human had to notice — launchd is the one part
+  of this stack a 529 cannot kill, so it is what the human is replaced by.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>REPLACE_WITH_LABEL</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_NODE</string>
+    <string>REPLACE_WITH_CLI</string>
+    <string>run</string>
+    <string>REPLACE_WITH_ROLE</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart the supervisor itself if it ever exits, for any reason. The
+       supervisor's own `stop` verb is honoured INSIDE the process (it writes a
+       handoff and returns), so a deliberate stop still ends with launchd
+       relaunching a process that immediately sees the stop marker and idles —
+       which is what makes `stop` reversible with `run` and nothing else. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Do not let a crash-looping role spin the box. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <!-- launchd's default PATH omits /opt/homebrew/bin — without it the role
+       cannot resolve node, git, gh or linearis, and every turn fails in a way
+       that looks like an agent problem rather than a PATH problem. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>REPLACE_WITH_PATH</string>
+    <!-- launchd does NOT inherit the installing shell's environment. A node
+         using a non-default CATALYST_DIR must have it persisted here, or the
+         supervisor watches $HOME/catalyst — the wrong heartbeat, lease and
+         manifest dir. -->
+    <key>CATALYST_DIR</key>
+    <string>REPLACE_WITH_CATALYST_DIR</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>REPLACE_WITH_CWD</string>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_WITH_LOG</string>
+
+  <key>StandardErrorPath</key>
+  <string>REPLACE_WITH_LOG</string>
+</dict>
+</plist>

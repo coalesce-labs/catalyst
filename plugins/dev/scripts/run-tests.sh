@@ -248,6 +248,21 @@ else
 		failed_suites+=("lib bun suite")
 		echo "  FAIL lib bun suite"
 	fi
+	# role-supervisor surface (CTL-1994). Its own directory, so the lib glob
+	# above does NOT reach it. Adding this at the same time as the code is
+	# deliberate: CTL-1993's peer read caught skill-shape.test.sh shipping
+	# discovered by nothing, and contract-doc-lint.test.sh had been dead in the
+	# same way for 65 days. A new test DIRECTORY is the recurring shape of that
+	# bug in this repo (CTL-1612 rounds 7 and 9, CTL-1978), so a new one gets its
+	# runner line in the same commit or it does not land.
+	if (cd "$BROKER_DIR" && bun test ../role-supervisor/*.test.mjs); then
+		bun_pass=$((bun_pass + 1))
+		echo "  PASS role-supervisor bun suite"
+	else
+		bun_fail=$((bun_fail + 1))
+		failed_suites+=("role-supervisor bun suite")
+		echo "  FAIL role-supervisor bun suite"
+	fi
 fi
 
 total_fail=$((shell_fail + bun_fail))
