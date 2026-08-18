@@ -83,7 +83,7 @@ import {
   clearDebounceTimers,
   seedLastSeenByService,
 } from "./router.mjs";
-import { seedTailer, startTailing, stopTailing, loadExistingRegistrations } from "./tailer.mjs";
+import { seedTailer, startTailing, stopTailing, loadExistingRegistrations, initGithubFeedGate } from "./tailer.mjs";
 import { startCacheReconcileTimer } from "./cache-reconcile.mjs";
 import { gcStaleInterests } from "./gc-startup.mjs";
 import { getExecutionCoreDir, getRunsRoot } from "../execution-core/config.mjs";
@@ -531,6 +531,13 @@ function main() {
     },
   });
 
+  // CTL-1929: install the `github.*` dispatch gate BEFORE the tail starts.
+  //
+  // ⛔ ORDER IS LOAD-BEARING, same as the Linear gate's placement before monitorFn
+  // (daemon.mjs:1448). Arming it after `startTailing()` leaves a window in which
+  // enforce-mode smee events route normally — exactly the double-dispatch the gate
+  // exists to prevent, for however many events land in that window.
+  initGithubFeedGate();
   startTailing();
   const watchdogId = startWatchdog();
   const driftCheckId = startDriftCheckWatcher();
