@@ -664,6 +664,38 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-deployment-mode.test.sh
 
+      - name: replica-path resolver unit tests (bun, CTL-1893)
+        # lib/replica-path.mjs derives the replica database path from the cloud ACCOUNT
+        # (today `cloud-sync.mjs` resolves account and dbPath independently, so a second
+        # account on one host targets the same file). Own step, not the "Run stable unit
+        # tests" allowlist below, for the same reason the deployment-mode /
+        # catalyst-runtime-root / event-name steps carry: that step's working-directory is
+        # execution-core/ and this is a deliberately ZERO-IMPORT leaf outside that tree.
+        #
+        # ⛔ Registered in the SAME change that adds the suite. This workflow's suite list
+        # is hand-enumerated, and an unlisted suite ships inert — the trap the ask-verb and
+        # event-name steps above each document after finding it the hard way. Verified with
+        # the instrument note on the event-name step (a `run:`-anchored grep is invalid for
+        # the multi-line allowlist block): `grep -n replica-path .github/workflows/`
+        # returned nothing before this step, against a positive control of
+        # `deployment-mode-parity`, which returns its `run:` line.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test replica-path.test.mjs
+
+      - name: replica-path cross-stack parity test (CTL-1893)
+        # bash == node == a hand-written expected value at every fixture cell, including
+        # the NAMED FAILURES (account-absent vs account-invalid route to different operator
+        # actions, so failing for the wrong reason is a failure), plus an assertion that the
+        # DEFAULT_ACCOUNT constant agrees across all three files that carry it
+        # (replica-path.mjs, catalyst-replica-path.sh, cloud-sync.mjs).
+        #
+        # Mutation-verified before landing, since a parity suite that passes first try is
+        # exactly the kind that can be vacuous: breaking the bash derivation for the default
+        # account failed 3 cells, removing the JS named-failure guard failed 2, and removing
+        # the bash account-name validation failed 6. Restored, it is 35/35.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/replica-path-parity.test.sh
+
       - name: deployment-mode cross-stack parity test (CTL-1617)
         # The fixture-matrix parity test asserting bash == node == the
         # design-spec-computed expected value at every cell (168 fixture
