@@ -112,18 +112,25 @@ describe("CTL-879 wiring: every blind triage-admission gate records a reason", (
     return hits[0];
   }
 
+  // [label, anchor, recorder, windowLines]. The window is per site because the
+  // claim gate carries a long explanatory comment between its `log.debug` and
+  // its recorder; a single global window would silently stop covering it.
   const SITES = [
-    ["drain gate", "drain: skipping triage dispatch — node draining", "noteTriageSkip"],
-    ["HRW ownership gate", "ctl-1091: ticket not owned by this host under HRW", "noteTriageSkip"],
-    ["sweep budget gate", "readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP", "noteTriageSkip"],
-    ["sweep already-triaged exit", "if (hasTriageArtifact(orchDir, t.identifier))", "clearTriageSkip"],
-    ["sweep in-flight gate", "if (t.fromTriageBoard && isTriageInFlight(", "noteTriageSkip"],
+    ["drain gate", "drain: skipping triage dispatch — node draining", "noteTriageSkip", 8],
+    ["HRW ownership gate", "ctl-1091: ticket not owned by this host under HRW", "noteTriageSkip", 8],
+    ["sweep budget gate", "readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP", "noteTriageSkip", 8],
+    ["sweep already-triaged exit", "if (hasTriageArtifact(orchDir, t.identifier))", "clearTriageSkip", 8],
+    ["sweep in-flight gate", "if (t.fromTriageBoard && isTriageInFlight(", "noteTriageSkip", 8],
+    // CTL-879 follow-up: the sixth gate. The first instrument missed it, and it
+    // is the only silent exit left after drain/HRW — so it is where a ticket its
+    // OWNER accepted still fails to launch.
+    ["cross-host claim gate", "ctl-862: lost cross-host claim", "noteTriageSkip", 24],
   ];
 
-  for (const [label, anchor, recorder] of SITES) {
+  for (const [label, anchor, recorder, windowLines] of SITES) {
     test(`${label} records its outcome`, () => {
       const at = lineOf(anchor);
-      const window = LINES.slice(at, at + 8).join("\n");
+      const window = LINES.slice(at, at + windowLines).join("\n");
       expect(window).toContain(recorder);
     });
   }
