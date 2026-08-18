@@ -7,7 +7,13 @@
 // match and the ask was structurally undecidable while looking well-formed on the board.
 
 import { describe, expect, test } from "bun:test";
-import { buildAskBody, parseAskOptions, verifyAskBody } from "../ask.mjs";
+import {
+  buildAskBody,
+  missingBlocksFrom,
+  parseAskOptions,
+  teamPrefixMismatch,
+  verifyAskBody,
+} from "../ask.mjs";
 
 describe("buildAskBody renders the shape the trigger parses", () => {
   test("a full ask round-trips through the parser", () => {
@@ -112,5 +118,44 @@ describe("verifyAskBody — the round trip, and why [] is never quietly accepted
     const good = buildAskBody({ why: "w", options: ["a", "b"], defaultIfSilent: "a" });
     expect(verifyAskBody({ intendedOptions: ["a", "b"], storedBody: good }).ok).toBe(true);
     expect(verifyAskBody({ intendedOptions: ["a", "b"], storedBody: good }).reason).toBe(null);
+  });
+});
+
+describe("⛔ Codex #3509 P1 — the ask must be on the team we asked for", () => {
+  test("a matching prefix is not a mismatch", () => {
+    expect(teamPrefixMismatch("CTL", "CTL-1940")).toBe(false);
+    expect(teamPrefixMismatch("ctl", "CTL-1940")).toBe(false);
+  });
+
+  test("a default-team fallback IS caught", () => {
+    // `--team CTL` silently filing on ENG is the czottmann/linearis#56 shape: it reports
+    // success, and the ask sits on a board nobody watching CTL will ever open.
+    expect(teamPrefixMismatch("CTL", "ENG-12")).toBe(true);
+  });
+
+  test("⛔ a UUID team is NOT checked — it carries no prefix to compare", () => {
+    // Guessing one would reject every correct UUID-scoped create.
+    expect(teamPrefixMismatch("f317bf00-653d-48d8-8a8b-1656b3534d7a", "CTL-1")).toBe(false);
+  });
+});
+
+describe("⛔ Codex #3509 P2 — every requested blocking relation is verified", () => {
+  test("relations present in the read-back are not reported missing", () => {
+    expect(missingBlocksFrom(["CTL-1", "CTL-2"], '{"relations":["CTL-1","CTL-2"]}')).toEqual([]);
+  });
+
+  test("the dropped-all-but-last shape is caught and NAMED", () => {
+    // linearis keeps only the LAST --blocks on some versions, so the command would exit 0
+    // while CTL-1 remained formally unblocked.
+    expect(missingBlocksFrom(["CTL-1", "CTL-2"], '{"relations":["CTL-2"]}')).toEqual(["CTL-1"]);
+  });
+
+  test("no blocks requested is not a failure", () => {
+    expect(missingBlocksFrom([], "{}")).toEqual([]);
+  });
+
+  test("an unreadable read-back reports them all missing rather than none", () => {
+    // Fail toward "say something is wrong", not toward a silent all-clear.
+    expect(missingBlocksFrom(["CTL-1"], null)).toEqual(["CTL-1"]);
   });
 });

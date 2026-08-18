@@ -27,6 +27,9 @@
 // Ported from catalyst-cloud `apps/mirror/src/do/ask-decision.ts` (read 2026-08-17).
 
 import { spawnSync } from "node:child_process";
+// ⛔ Codex #3509 P2: `--body -` used CommonJS `require`, which is undefined in an ESM
+// module — the documented form threw a ReferenceError before reading anything.
+import { readFileSync } from "node:fs";
 
 // ⚠️ ONE alternation-free pattern, deliberately: JS alternation prefers the earliest MATCH
 // POSITION, so a bare `Options:` branch matches at the preceding newline and consumes
@@ -135,6 +138,35 @@ export function verifyAskBody({ intendedOptions = [], storedBody }) {
   return { ok: true, reason: null, parsed, note: null };
 }
 
+/**
+ * teamPrefixMismatch — did Linear file this on the team we asked for?
+ *
+ * `issues create --team CTL` has historically fallen back to the workspace's DEFAULT team
+ * when given a key rather than a UUID (czottmann/linearis#56). An ask on the wrong board
+ * still reports success while its team-scoped labels and blocking relations serve a team
+ * nobody is watching. Only checked when `team` LOOKS like a key — a UUID carries no prefix
+ * to compare, and guessing one would reject every correct UUID-scoped create.
+ */
+export function teamPrefixMismatch(team, identifier) {
+  if (typeof team !== "string" || typeof identifier !== "string") return false;
+  const looksLikeKey = /^[A-Za-z][A-Za-z0-9]*$/.test(team) && team.length <= 8;
+  if (!looksLikeKey) return false;
+  return !identifier.toUpperCase().startsWith(`${team.toUpperCase()}-`);
+}
+
+/**
+ * missingBlocksFrom — which requested `--blocks` relations are not on the created ticket.
+ *
+ * "A `--relates-to` / `--blocks` list keeps only the LAST flag in some linearis versions"
+ * (the ask skill's own gotcha). Without this the command exits 0 while every earlier work
+ * ticket remains formally unblocked.
+ */
+export function missingBlocksFrom(blocks, readBackText) {
+  if (!Array.isArray(blocks) || blocks.length === 0) return [];
+  const text = typeof readBackText === "string" ? readBackText : "";
+  return blocks.filter((b) => !text.includes(b));
+}
+
 // ── CLI ────────────────────────────────────────────────────────────────────────────────
 
 const RYAN = process.env.ASK_HUMAN_ID || "c2a8cc92-cab6-4536-9500-0f24abdf702b";
@@ -142,6 +174,31 @@ const RYAN = process.env.ASK_HUMAN_ID || "c2a8cc92-cab6-4536-9500-0f24abdf702b";
 function run(cmd, args) {
   const r = spawnSync(cmd, args, { encoding: "utf8" });
   return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+/**
+ * readTicketViaReplica — the house read path (AGENTS.md "Linear reads → local replica").
+ *
+ * ⛔ Codex #3509 P1: a bare `linearis issues read` bypasses the freshness gate and spends
+ * the fleet's shared, rate-limited API quota — and under fleet-wide 429 pressure it is
+ * precisely the read that fails. `linear_read_ticket` is the sanctioned helper: it gates on
+ * writer-lock recency plus a non-empty sync cursor and falls back LOUDLY.
+ *
+ * ⚠️ It is bash, so this shells out. That is the seam the house rule names; re-deriving the
+ * freshness gate in JS would be a second gate to keep in step with the first.
+ */
+function readTicketViaReplica(id) {
+  const helper = new URL("./lib/linear-read-replica.sh", import.meta.url).pathname;
+  const r = run("bash", [
+    "-c",
+    `. ${JSON.stringify(helper)} >/dev/null 2>&1; linear_read_ticket ${JSON.stringify(id)}`,
+  ]);
+  if (r.code !== 0 || r.stdout.trim() === "") return null;
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    return null;
+  }
 }
 
 function usage() {
@@ -224,7 +281,24 @@ function cmdCreate(argv) {
     return 1;
   }
 
+  // ⛔ Codex #3509 P1: `issues create --team CTL` has historically fallen back to the
+  // workspace's DEFAULT team when given a key rather than a UUID (czottmann/linearis#56;
+  // the linearis skill says to verify scope by the returned identifier's prefix). An ask
+  // filed on the wrong board still reports success, while its team-scoped labels and
+  // blocking relations serve a team nobody is watching.
+  if (teamPrefixMismatch(team, id)) {
+    console.error(
+      `ask create: ⛔ asked for team ${team} but Linear returned ${id} — the ask is on the WRONG BOARD ` +
+        "(key-based --team can fall back to the default team). Move or re-file it before citing it."
+    );
+    return 2;
+  }
+
   // ── the round trip ──
+  // ⚠️ This ONE read goes to the API rather than the replica, deliberately: the ticket was
+  // created milliseconds ago, so a replica read cannot yet see it — it would answer
+  // "absent" every time and the verifier would report a well-formed ask as unreadable.
+  // Every OTHER read in this file uses the replica.
   const readBack = run("linearis", ["issues", "read", id]);
   if (readBack.code !== 0) {
     console.error(
@@ -242,6 +316,13 @@ function cmdCreate(argv) {
     return 1;
   }
   const post = verifyAskBody({ intendedOptions: options, storedBody: stored });
+
+  // ⛔ Codex #3509 P2: "a `--relates-to` / `--blocks` list keeps only the LAST flag in some
+  // linearis versions" — the ask skill's own gotcha. The round trip validated the body and
+  // said nothing about relations, so this could exit 0 while every earlier work ticket
+  // remained formally unblocked. Read them back and NAME the missing ones.
+  const missingBlocks = missingBlocksFrom(blocks, readBack.stdout);
+
   console.log(
     JSON.stringify({
       action: "created",
@@ -249,8 +330,15 @@ function cmdCreate(argv) {
       decidable: post.ok,
       reason: post.reason,
       parsedOptions: post.parsed,
+      missingBlocks,
     })
   );
+  if (missingBlocks.length > 0) {
+    console.error(
+      `ask create: ⚠️ ${id} filed, but these --blocks relations are NOT on it: ${missingBlocks.join(", ")} — ` +
+        "add them by hand (linearis keeps only the last --blocks on some versions)."
+    );
+  }
   if (!post.ok) {
     console.error(
       `ask create: ⛔ ${id} exists but is NOT decidable (${post.reason}: ${post.note}) — fix the body before relying on it`
@@ -269,20 +357,19 @@ function cmdAccept(argv) {
     console.error("ask accept: <ISSUE> --as <AGENT> --body <markdown|-> are required");
     return 1;
   }
-  if (body === "-") body = require("node:fs").readFileSync(0, "utf8");
+  if (body === "-") body = readFileSync(0, "utf8");
 
   // Refuse on a non-ask: `accept` moves a ticket to Done, and doing that to a work ticket
   // because someone mistyped an id is not recoverable by the person who typed it.
-  const read = run("linearis", ["issues", "read", id]);
-  if (read.code !== 0) {
-    console.error(`ask accept: cannot read ${id}`);
-    return 1;
-  }
-  let issue = null;
-  try {
-    issue = JSON.parse(read.stdout);
-  } catch {
-    console.error(`ask accept: ${id} read was unparseable — refusing rather than guessing`);
+  // House read path (Codex #3509 P1): the replica behind its freshness gate, not the
+  // rate-limited API. Unlike create's round trip, this ticket is not brand new, so the
+  // replica can legitimately answer.
+  const issue = readTicketViaReplica(id);
+  if (issue == null) {
+    console.error(
+      `ask accept: could not read ${id} from the replica (absent, stale, or unparseable) — ` +
+        "refusing rather than closing a ticket I cannot identify"
+    );
     return 1;
   }
   const labels = (issue?.labels?.nodes ?? []).map((l) => l?.name).filter(Boolean);
