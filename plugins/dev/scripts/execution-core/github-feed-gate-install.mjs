@@ -19,6 +19,8 @@ import { readGithubFeedConfig } from "./config.mjs";
 import { createCaptureSink } from "./cloud-feed-capture.mjs";
 import { defaultReadyPath, readReadyState } from "./github-feed-ready.mjs";
 import { resolveAccount } from "./github-feed-timer.mjs";
+import { githubSuppressibleNames, GITHUB_SUPPRESSIBLE_NAMES } from "./github-feed-gate.mjs";
+import { createGithubFeedSource } from "./github-feed-source.mjs";
 import { join } from "node:path";
 
 /**
@@ -30,6 +32,52 @@ import { join } from "node:path";
  * longer latch on top of the one the staleness bound exists to break.
  */
 export const READY_CACHE_MS = 1000;
+
+/**
+ * How long this host's COVERAGE answer is reused.
+ *
+ * ⛔ IT MUST BE RE-READ, NOT RESOLVED ONCE AT BOOT, and the rollout is exactly why.
+ * Both capabilities appear when the cloud-sync WRITER restarts and runs its
+ * migrations — an event this process does not participate in and is not notified of.
+ * A boot-only read would leave a broker that started before the 0.1.18 restart
+ * believing `check_suite.completed` is uncovered for the rest of its life, and the
+ * operator would have to know to restart a second daemon to collect a capability
+ * that had already arrived.
+ *
+ * 30 s: two orders of magnitude cheaper than the readiness read it sits beside (a
+ * `PRAGMA table_info` on an open handle, not a file read), and it bounds how long a
+ * newly-migrated host keeps under-reporting its own coverage.
+ */
+export const COVERAGE_CACHE_MS = 30_000;
+
+/**
+ * Probe this replica for the two capabilities the suppressible set depends on.
+ *
+ * ⛔ FAILS CLOSED, AND "CLOSED" HERE MEANS THE PRE-CAPABILITY ANSWER — `pushIsLossy:
+ * true`, `checkSuiteHasPrAssociation: false` — which yields the smallest suppressible
+ * set and therefore leaves smee authoritative for both names. Every failure mode
+ * (no replica file, a locked or corrupt database, a throwing PRAGMA) lands there.
+ * The opposite default would let an unreadable database silently license suppression.
+ */
+export function readGithubCoverage({ sourceFactory = createGithubFeedSource } = {}) {
+  let src = null;
+  try {
+    // ⛔ THROUGH THE SOURCE HANDLE, not a hand-rolled `new Database(...)`. The handle
+    // already owns the read-only open, the busy timeout and the two capability
+    // predicates, and it is the object the producer's own tests drive — so the gate
+    // and the producer cannot come to different conclusions about the same replica.
+    src = sourceFactory();
+    return {
+      pushIsLossy: src.pushIsLossy(),
+      checkSuiteHasPrAssociation: src.checkSuiteHasPrAssociation(),
+      ok: true,
+    };
+  } catch {
+    return { pushIsLossy: true, checkSuiteHasPrAssociation: false, ok: false };
+  } finally {
+    try { src?.close(); } catch { /* best effort */ }
+  }
+}
 
 export function defaultGithubCapturePath(orchDir, account = "tenant-0") {
   return join(orchDir, "capture", `github-suppressed-${account}.jsonl`);
@@ -51,6 +99,7 @@ export function createGithubFeedGate({
   now = () => Date.now(),
   readState = readReadyState,
   captureFactory = createCaptureSink,
+  readCoverage = readGithubCoverage,
   logger = null,
 } = {}) {
   if (config.mode === "off") return null;
@@ -73,10 +122,56 @@ export function createGithubFeedGate({
     return cached;
   };
 
+  let coverageAt = -Infinity;
+  let coverageSet = GITHUB_SUPPRESSIBLE_NAMES;
+  let coverageState = { pushIsLossy: true, checkSuiteHasPrAssociation: false, ok: false };
+
+  const resolveSuppressible = () => {
+    const t = now();
+    if (t - coverageAt < COVERAGE_CACHE_MS) return coverageSet;
+    // ⛔ THIS RUNS ON THE BROKER'S TAIL, WHICH SEES EVERY EVENT THE FLEET APPENDS.
+    // `readGithubCoverage` catches internally, but this seam is injectable and the
+    // caller's implementation is not this module's to trust — an escaping throw here
+    // would take down routing for the whole fleet to answer a question whose safe
+    // answer is already known. Caught, and degraded to the pre-capability set: the
+    // same verdict an unreadable replica produces.
+    let next;
+    try {
+      next = readCoverage();
+    } catch {
+      next = { pushIsLossy: true, checkSuiteHasPrAssociation: false, ok: false };
+    }
+    coverageAt = t;
+    // Announce only on CHANGE. This runs on the broker's hot tail; a line per event —
+    // or even per cache miss — is the flood, and the thing an operator needs to see is
+    // the moment a host's coverage moved, which is rare and load-bearing.
+    if (
+      next.pushIsLossy !== coverageState.pushIsLossy ||
+      next.checkSuiteHasPrAssociation !== coverageState.checkSuiteHasPrAssociation ||
+      next.ok !== coverageState.ok
+    ) {
+      coverageSet = githubSuppressibleNames(next);
+      logger?.info?.(
+        { ...next, suppressible: coverageSet.length, names: coverageSet },
+        "github-feed gate: coverage changed",
+      );
+      coverageState = next;
+    }
+    return coverageSet;
+  };
+
   logger?.info?.(
     { mode: config.mode, readyFile, capture: capture.path, cacheMs: READY_CACHE_MS },
     "github-feed gate: armed",
   );
 
-  return { mode: config.mode, isReady, capture, readyPath: readyFile };
+  const gate = { mode: config.mode, isReady, capture, readyPath: readyFile };
+  // ⭐ A GETTER, so `decideDispatch`'s destructure re-resolves it. A plain property
+  // would freeze this host's coverage at gate-construction time, which is boot — and
+  // both capabilities arrive later, at a writer restart this process never sees.
+  Object.defineProperty(gate, "suppressible", {
+    enumerable: true,
+    get: resolveSuppressible,
+  });
+  return gate;
 }

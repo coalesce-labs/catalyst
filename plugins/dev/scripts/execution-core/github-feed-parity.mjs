@@ -105,6 +105,34 @@ const COMPARE_SPEC_DRAFT = {
     attrs: ["vcs.repository.name", "vcs.revision", "vcs.ref.name", "deployment.environment", "deployment.id", "event.label"],
     payload: ["deploymentId"],
   },
+  // ⭐ CTC-712 (schema 0.1.18). ⛔ `vcs.pr.number` is compared and must never move to
+  // OBSERVED_ONLY: it IS the route. `router.mjs:1497` reaches an interest only through
+  // `detail.prNumbers`, and a suite event whose PR association disagrees with the
+  // webhook's is one that wakes the wrong waiter or none — while every count still
+  // reads "emitted". That is the whole failure CTC-712 exists to close, so the ledger
+  // has to be able to see it.
+  //
+  // ⚠️ THE KEY IS COARSE, AND DELIBERATELY SO. Neither side carries `check_suite_id`
+  // (the webhook payload has no suite id in the envelope), and one head sha carried
+  // **10 distinct suite ids** on mini-2 — so no exact per-suite key is constructible
+  // from what both producers emit. The tuple below can therefore bucket several real
+  // suites together. That is safe ONLY because the index compares by MULTIPLICITY:
+  // N feed events under a key must meet N smee events under it, so a dropped or
+  // duplicated suite still surfaces as an unjoined count rather than being absorbed.
+  // With a single-value index this key would be a false-clean generator.
+  "github.check_suite.completed": {
+    key: (e) =>
+      `cs:${e.attributes?.["vcs.repository.name"]}#${e.attributes?.["vcs.pr.number"]}` +
+      `|${e.attributes?.["vcs.revision"] ?? ""}|${e.attributes?.["cicd.pipeline.run.conclusion"] ?? ""}`,
+    attrs: [
+      "vcs.repository.name", "vcs.pr.number", "vcs.revision",
+      "cicd.pipeline.run.status", "cicd.pipeline.run.conclusion",
+      "event.entity", "event.action", "event.label", "event.stream_class",
+    ],
+    // `prNumbers` is compared as a whole array, not just its head: the attribute
+    // carries only `[0]`, so a disagreement in the tail would otherwise be invisible.
+    payload: ["conclusion", "status", "prNumbers"],
+  },
   "github.push": {
     key: (e) => `p:${e.attributes?.["vcs.repository.name"]}|${e.attributes?.["vcs.ref.name"]}|${e.body?.payload?.headSha}`,
     attrs: ["vcs.repository.name", "vcs.ref.name", "vcs.revision", "event.entity", "event.action", "event.label"],
@@ -140,15 +168,18 @@ export const KNOWN_ABSENT = Object.freeze({
   // the merge→deploy chain was precisely the one this instrument was configured not
   // to notice. A ledger that cannot fail on a name is not measuring it.
   //
-  // ⛔ `check_suite.completed` STAYS, and NOT for the reason the entry used to give.
-  // The mirror does store a suite row now. What it does not store is the association
-  // the consumer keys on — `router.mjs:1497` reaches an interest only through
-  // `detail.prNumbers`, from `check_suite.pull_requests[].number`, which the mirror
-  // drops and `check_runs` cannot supply. The only derivation is a LAST-STATE join
-  // through `pull_requests.head_sha`, measured at 93/202 (46%) on mini-2 with the
-  // misses dominated by active PR branches whose head moved after the suite ran.
-  "github.check_suite.completed":
-    "CTC-712: check_suites carries no pull_requests association; the head_sha join resolves 46%",
+  // ⭐ `github.check_suite.completed` LEFT THIS TABLE when CTC-712 landed (schema
+  // 0.1.18, migration `0028_burly_nemesis`), and — exactly as with `pr.merged` before
+  // it — the removal IS the point rather than a side effect. While it sat here the
+  // ledger EXCUSED its absence, so the last name still keeping the smee tunnel alive
+  // was the one name the instrument was configured not to be able to fail on. A
+  // ledger that cannot fail on a name is not measuring it.
+  //
+  // ⚠️ THE TABLE IS NOW EMPTY, AND THAT IS LOAD-BEARING, not tidiness. `unexplained
+  // Absent` is computed as `absent − KNOWN_ABSENT`, so every consumed name that goes
+  // missing from the feed now blocks CLEAN. Adding an entry here is therefore a
+  // deliberate act of blinding the instrument, and should be argued for on those
+  // terms.
 });
 
 const nameOf = (e) => e?.attributes?.["event.name"];

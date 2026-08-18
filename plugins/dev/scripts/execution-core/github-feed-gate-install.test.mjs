@@ -4,7 +4,13 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { READY_CACHE_MS, createGithubFeedGate, defaultGithubCapturePath } from "./github-feed-gate-install.mjs";
+import {
+  COVERAGE_CACHE_MS,
+  READY_CACHE_MS,
+  createGithubFeedGate,
+  defaultGithubCapturePath,
+  readGithubCoverage,
+} from "./github-feed-gate-install.mjs";
 import { staleWindowMs } from "./github-feed-ready.mjs";
 import { decideDispatch } from "./github-feed-gate.mjs";
 
@@ -111,12 +117,19 @@ describe("the installed gate composes with decideDispatch as one decision", () =
     body: { payload: {} },
   });
 
-  const gateWith = (ready) =>
+  // ⛔ `readCoverage` IS INJECTED, and it must be. Without it the factory falls back
+  // to the real `readGithubCoverage`, which opens THIS MACHINE's replica — so the
+  // suite's verdict would depend on which schema the host running CI happens to be
+  // pinned to, and every assertion below would silently change meaning the day
+  // 0.1.18 rolled. The default path is exercised deliberately, once, further down.
+  const COVERAGE_0117 = () => ({ pushIsLossy: false, checkSuiteHasPrAssociation: false, ok: true });
+  const gateWith = (ready, readCoverage = COVERAGE_0117) =>
     createGithubFeedGate({
       orchDir: tmp,
       config: { mode: "enforce", intervalSec: 30 },
       captureFactory: stubCapture,
       readState: () => ready,
+      readCoverage,
     });
 
   test("ready producer → a covered name is suppressed", () => {
@@ -136,7 +149,7 @@ describe("the installed gate composes with decideDispatch as one decision", () =
     // now; check_suite's TABLE landed but the PR association did not (CTC-712).
     const v = decideDispatch(smee("github.check_suite.completed"), gateWith({ ready: true, reason: "producer-ready" }));
     expect(v.suppress).toBe(false);
-    expect(v.reason).toContain("CTC-667");
+    expect(v.reason).toContain("CTC-712");
   });
 });
 
@@ -156,5 +169,102 @@ describe("the capture path is per account and is not the event log", () => {
         capturePath: join(tmp, "events", "2026-08.jsonl"),
       }),
     ).toThrow();
+  });
+});
+
+describe("CTC-712 — the gate's coverage tracks the replica, and re-reads it", () => {
+  const stubCapture2 = () => ({ path: join(tmp, "cap2.jsonl"), append: () => {} });
+  const smee2 = (name) => ({
+    attributes: { "event.name": name, "webhook.delivery.id": "d1" },
+    body: { payload: {} },
+  });
+
+  const at = (checkSuiteHasPrAssociation, pushIsLossy = false) =>
+    () => ({ pushIsLossy, checkSuiteHasPrAssociation, ok: true });
+
+  const mk = (readCoverage, now = () => 0) =>
+    createGithubFeedGate({
+      orchDir: tmp,
+      config: { mode: "enforce", intervalSec: 30 },
+      captureFactory: stubCapture2,
+      readState: () => ({ ready: true, reason: "producer-ready" }),
+      readCoverage,
+      now,
+    });
+
+  test("a 0.1.18 host suppresses check_suite; a 0.1.17 host does not", () => {
+    expect(decideDispatch(smee2("github.check_suite.completed"), mk(at(true))).suppress).toBe(true);
+    expect(decideDispatch(smee2("github.check_suite.completed"), mk(at(false))).suppress).toBe(false);
+  });
+
+  test("⛔ the coverage is RE-READ after the TTL — a writer restart is invisible to this process", () => {
+    // Both capabilities appear when the cloud-sync writer restarts and migrates. This
+    // process is never told. A boot-only read would leave a broker that started before
+    // the 0.1.18 restart under-reporting its own coverage for the rest of its life,
+    // and an operator would have to know to bounce a second daemon to collect it.
+    let assoc = false;
+    let t = 0;
+    const gate = mk(() => ({ pushIsLossy: false, checkSuiteHasPrAssociation: assoc, ok: true }), () => t);
+
+    expect(decideDispatch(smee2("github.check_suite.completed"), gate).suppress).toBe(false);
+    assoc = true;                       // the migration lands
+    t = COVERAGE_CACHE_MS - 1;          // still inside the cache window
+    expect(decideDispatch(smee2("github.check_suite.completed"), gate).suppress).toBe(false);
+    t = COVERAGE_CACHE_MS + 1;          // past it
+    expect(decideDispatch(smee2("github.check_suite.completed"), gate).suppress).toBe(true);
+  });
+
+  test("⚠️ and it re-reads in the LOSING direction too — a rollback is picked up", () => {
+    let assoc = true;
+    let t = 0;
+    const gate = mk(() => ({ pushIsLossy: false, checkSuiteHasPrAssociation: assoc, ok: true }), () => t);
+    expect(decideDispatch(smee2("github.check_suite.completed"), gate).suppress).toBe(true);
+    assoc = false;
+    t = COVERAGE_CACHE_MS + 1;
+    expect(decideDispatch(smee2("github.check_suite.completed"), gate).suppress).toBe(false);
+  });
+
+  test("⛔ a throwing coverage probe leaves smee authoritative for BOTH gated names", () => {
+    const gate = mk(() => { throw new Error("replica locked"); });
+    // The whole point of failing closed: an unreadable database must not license
+    // suppression. It must also not take the gate down for names that are covered
+    // regardless — pr.opened still suppresses.
+    expect(() => decideDispatch(smee2("github.check_suite.completed"), gate)).not.toThrow();
+    expect(decideDispatch(smee2("github.check_suite.completed"), gate).suppress).toBe(false);
+    expect(decideDispatch(smee2("github.push"), gate).suppress).toBe(false);
+    expect(decideDispatch(smee2("github.pr.opened"), gate).suppress).toBe(true);
+  });
+
+  test("⛔ readGithubCoverage FAILS CLOSED on an unusable replica — and says ok:false", () => {
+    const bad = readGithubCoverage({ sourceFactory: () => { throw new Error("no replica"); } });
+    expect(bad).toEqual({ pushIsLossy: true, checkSuiteHasPrAssociation: false, ok: false });
+    // ⚠️ `ok` is what separates "measured as uncovered" from "could not look". Without
+    // it the two are byte-identical to every caller, which is the defect class this
+    // repo keeps re-learning.
+    const good = readGithubCoverage({
+      sourceFactory: () => ({
+        pushIsLossy: () => false, checkSuiteHasPrAssociation: () => true, close: () => {},
+      }),
+    });
+    expect(good).toEqual({ pushIsLossy: false, checkSuiteHasPrAssociation: true, ok: true });
+  });
+
+  test("⭐ THE DEFAULT PATH RUNS — readGithubCoverage() with no arguments at all", () => {
+    // ⛔ Every test above injects `sourceFactory`, so none of them would notice if the
+    // real default could not execute. It could not: the first cut reached for
+    // `require("bun:sqlite")` inside an ESM module, which throws on every call and is
+    // caught by the same handler that catches a missing replica — so the probe would
+    // have returned ok:false forever, on every host, and the gate would have silently
+    // refused to ever suppress either name. Nothing else here can see that.
+    const r = readGithubCoverage();
+    expect(typeof r.ok).toBe("boolean");
+    expect(typeof r.pushIsLossy).toBe("boolean");
+    expect(typeof r.checkSuiteHasPrAssociation).toBe("boolean");
+    if (!r.ok) {
+      console.log("INCONCLUSIVE: no readable replica on this host — the default path could not be proven to reach one.");
+      return;
+    }
+    // A replica IS present and was opened by the default factory: that is the claim.
+    expect(r.ok).toBe(true);
   });
 });

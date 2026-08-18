@@ -174,14 +174,22 @@ describe("⛔ a consumed name that vanishes must not read as agreement", () => {
     { "vcs.repository.name": "o/r", "vcs.revision": "abc" },
     { conclusion: "success", status: "completed", prNumbers: [7] });
 
-  test("a DECLARED gap is reported as expected and stays clean", () => {
-    // ⚠️ The example is `check_suite.completed` alone now. `pr.merged` used to be
-    // here too and is not a declared gap any more (CTC-691 landed in schema 0.1.17),
-    // which the next test asserts from the other side.
+  test("⭐ check_suite.completed is NO LONGER a declared gap — a missing one breaks clean", () => {
+    // ⛔ THE LAST EXCUSED NAME. While it sat in KNOWN_ABSENT the ledger could not fail
+    // on the one name still keeping the smee tunnel alive, so a CLEAN verdict was
+    // silent about exactly the thing the cutover turns on. CTC-712 removed the reason
+    // for the excuse; this asserts the excuse went with it.
     const r = compareGithubStreams([comment(1)], [comment(1), suite]);
-    expect(r.expectedAbsent["github.check_suite.completed"]).toBe(1);
-    expect(r.unexplainedAbsent).toEqual({});
-    expect(r.clean).toBe(true);
+    expect(r.expectedAbsent["github.check_suite.completed"]).toBeUndefined();
+    expect(r.unexplainedAbsent["github.check_suite.completed"]).toBe(1);
+    expect(r.clean).toBe(false);
+  });
+
+  test("⛔ KNOWN_ABSENT is EMPTY, and that is the invariant — not a tidy-up", () => {
+    // `unexplainedAbsent` is `absent − KNOWN_ABSENT`, so every entry here is a name
+    // the ledger is configured to be unable to fail on. An empty table means every
+    // consumed name that goes missing now blocks CLEAN.
+    expect(Object.keys(KNOWN_ABSENT)).toEqual([]);
   });
 
   test("⭐ pr.merged is NO LONGER a declared gap — a missing one now breaks clean", () => {
@@ -219,12 +227,10 @@ describe("⛔ a consumed name that vanishes must not read as agreement", () => {
     expect(r.inconclusive).toContain("smee-events-without-a-twin:1");
   });
 
-  test("the remaining declared gap names the ticket that closes it", () => {
-    // ⭐ One entry, not two. `pr.merged` left when CTC-691 landed.
-    expect(Object.keys(KNOWN_ABSENT)).toEqual(["github.check_suite.completed"]);
-    // ⚠️ And the ticket is CTC-712, not CTC-667: the suite TABLE exists now: what is
-    // missing is the pull_requests association the consumer keys on.
-    expect(KNOWN_ABSENT["github.check_suite.completed"]).toContain("CTC-712");
+  test("⛔ every consumed name is now failable — none is excused", () => {
+    // The general form of the two tests above, so a future re-added excuse has to be
+    // argued for against an assertion rather than slipped into a frozen object.
+    for (const n of Object.keys(COMPARE_SPEC)) expect(KNOWN_ABSENT[n]).toBeUndefined();
   });
 });
 
@@ -323,5 +329,56 @@ describe("⛔ the comparison is scoped to repos smee can actually deliver", () =
   test("smeeRepos collects the delivered set, ignoring blanks", () => {
     expect([...smeeRepos([smeePush, smeePush])]).toEqual(["o/shared"]);
     expect([...smeeRepos([ev("github.push", {}, {})])]).toEqual([]);
+  });
+});
+
+describe("CTC-712 — the check_suite compare spec can join, and can DIVERGE", () => {
+  const suiteEv = (over = {}) => ev(
+    "github.check_suite.completed",
+    {
+      "vcs.repository.name": "o/r", "vcs.pr.number": 7, "vcs.revision": "abc",
+      "cicd.pipeline.run.status": "completed", "cicd.pipeline.run.conclusion": "success",
+      "event.entity": "check_suite", "event.action": "completed",
+      "event.label": "PR #7", "event.stream_class": "coordination",
+      ...(over.attrs ?? {}),
+    },
+    { conclusion: "success", status: "completed", prNumbers: [7], ...(over.payload ?? {}) },
+  );
+
+  test("a matched pair joins and agrees", () => {
+    const r = compareGithubStreams([suiteEv()], [suiteEv()]);
+    expect(r.byName["github.check_suite.completed"].joined).toBe(1);
+    expect(r.byName["github.check_suite.completed"].agree).toBe(1);
+    expect(r.totals.smeeUnjoined).toBe(0);
+  });
+
+  test("⛔ a disagreeing PR association is a DIVERGENCE, not a pass", () => {
+    // The positive control that matters most: `vcs.pr.number` IS the route, so a
+    // ledger that could not fail on it would certify the exact defect CTC-712 fixed.
+    const feed = suiteEv();
+    const smeeSide = suiteEv({ payload: { prNumbers: [7, 9] } });
+    const r = compareGithubStreams([feed], [smeeSide]);
+    expect(r.byName["github.check_suite.completed"].joined).toBe(1);
+    expect(r.byName["github.check_suite.completed"].agree).toBe(0);
+    expect(r.clean).toBe(false);
+  });
+
+  test("⛔ a conclusion disagreement is caught", () => {
+    const r = compareGithubStreams(
+      [suiteEv()],
+      [suiteEv({ attrs: { "cicd.pipeline.run.conclusion": "failure" }, payload: { conclusion: "failure" } })],
+    );
+    // A different conclusion changes the KEY as well, so this surfaces as two
+    // unjoined events rather than a disagreeing pair — either way, never as clean.
+    expect(r.clean).toBe(false);
+  });
+
+  test("⚠️ the coarse key still counts MULTIPLICITY — a dropped suite cannot hide", () => {
+    // Two real suites bucket under one key (no suite id is on either side). If the
+    // feed emits one where smee emitted two, that must surface, not be absorbed.
+    const r = compareGithubStreams([suiteEv()], [suiteEv(), suiteEv()]);
+    expect(r.totals.smeeUnjoined).toBe(1);
+    expect(r.clean).toBe(false);
+    expect(r.inconclusive.join("|")).toContain("smee-events-without-a-twin");
   });
 });

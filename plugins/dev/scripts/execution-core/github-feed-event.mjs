@@ -75,7 +75,7 @@
 // quiet at the exact moment we became its only producer.
 
 import { buildCanonicalEvent } from "./lib/canonical-event.mjs";
-import { STREAM_BY_KEY } from "./github-feed-source.mjs";
+import { STREAM_BY_KEY, unbackedEventNames } from "./github-feed-source.mjs";
 import {
   GITHUB_CONSUMED_NAMES,
   GITHUB_UNCOVERED_NAMES as LEAF_UNCOVERED_NAMES,
@@ -96,17 +96,31 @@ export const SOURCE_CLOUD_FEED = "cloud-feed";
  *                            The sha is a join key for the whole deploy chain, so a
  *                            twin without it routes and wakes while silently
  *                            breaking `monitor-deploy`. A named gap beats that.
- *   `check_suite.completed`— the mirror stores no suite row (CTC-667 item 4), and
- *                            `check_runs` cannot stand in: one head sha carried 10
- *                            distinct suite ids, several incomplete, so "every run
- *                            I can see finished" fires early and GREEN on the merge
- *                            gate.
+ *   `check_suite.completed`— ⭐ UNBLOCKED BY CTC-712 (schema 0.1.18) on a replica that
+ *                            has `check_suites.pull_request_numbers`. It is the one
+ *                            name whose coverage is a property of the HOST rather than
+ *                            of this file, because the pin rolls as a canary — so the
+ *                            static list here keeps naming it (the safe direction) and
+ *                            `githubDispatchClassNames(db)` is what a caller with a
+ *                            replica handle should ask.
  * Exported so the parity ledger accounts for them as EXPECTED absences rather than
  * as unexplained diffs, and so nothing can claim coverage this producer lacks.
  */
 export const GITHUB_DISPATCH_CLASS_NAMES = Object.freeze(
   GITHUB_CONSUMED_NAMES.filter((n) => !LEAF_UNCOVERED_NAMES.includes(n)),
 );
+
+/**
+ * The same list, resolved against a replica. See `unbackedEventNames`.
+ *
+ * ⭐ Default (no handle) is the STATIC list, which reports LESS coverage than a
+ * 0.1.18 host has — the safe direction, since under-reporting coverage leaves smee
+ * authoritative and over-reporting silently drops dispatch.
+ */
+export function githubDispatchClassNames(db = null) {
+  const unbacked = unbackedEventNames(db);
+  return Object.freeze(GITHUB_CONSUMED_NAMES.filter((n) => !unbacked.includes(n)));
+}
 
 /**
  * ⛔ RE-EXPORTED FROM `lib/github-feed-names.mjs`, NOT DECLARED HERE.
@@ -124,6 +138,12 @@ export const GITHUB_DISPATCH_CLASS_NAMES = Object.freeze(
  * One source or it drifts — this file now derives.
  */
 export const GITHUB_UNCOVERED_NAMES = LEAF_UNCOVERED_NAMES;
+
+/**
+ * Re-exported for the same one-source reason as the list above: a caller asking "does
+ * the router consume this name" must not be answered from a second copy.
+ */
+export { GITHUB_CONSUMED_NAMES };
 
 /**
  * Streams the source can PAGE but this file cannot turn into a faithful event, keyed
@@ -208,10 +228,50 @@ export function githubEdgeId(streamKey, row) {
   // which is what the settle-window re-read requires.
   if (s.mutableRow) {
     const ts = Number.isInteger(row.__ts) ? row.__ts : "?";
-    const at = typeof row.after === "string" && row.after !== "" ? row.after : "?";
-    return `gh:${streamKey}:${String(id)}:${ts}:${at}`;
+    // ⛔ THE COLUMNS COME FROM THE STREAM, not from this function. `push` folds in
+    // `after` and `checkSuiteCompleted` folds in `conclusion`, and hard-coding
+    // `after` here — as this did while `push` was the only mutable stream — silently
+    // yields `?` for every other one, collapsing its identity back to the PK and
+    // re-introducing the exact suppression bug the fold exists to prevent.
+    const extra = (Array.isArray(s.edgeIdCols) ? s.edgeIdCols : [])
+      .map((c) => {
+        const v = row[c];
+        return typeof v === "string" && v !== "" ? v : "?";
+      })
+      .join(":");
+    return `gh:${streamKey}:${String(id)}:${ts}:${extra}`;
   }
   return `gh:${streamKey}:${String(id)}`;
+}
+
+/**
+ * `check_suites.pull_request_numbers` → the number array the webhook carries.
+ *
+ * The column is TEXT (`0028_burly_nemesis`), so the wire form is a serialised list
+ * rather than a typed column, and this is the one place that shape is interpreted.
+ *
+ * ⛔ EVERY UNUSABLE FORM YIELDS `[]`, WHICH IS A DECLINE — never a partial or a
+ * guess. A malformed association is indistinguishable, to the consumer, from a
+ * fabricated one: both produce an event that routes to the wrong interest or to
+ * none, and only the decline is counted. Positive filtering (`Number.isInteger`,
+ * `> 0`) mirrors the webhook parser's own `getNum(entry, "number") > 0` guard, so a
+ * `0`, a `null`, or a string entry is dropped on both sides identically.
+ */
+export function parseCheckSuitePrNumbers(raw) {
+  if (Array.isArray(raw)) return raw.filter((n) => Number.isInteger(n) && n > 0);
+  if (typeof raw !== "string" || raw === "") return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  // The mirror may serialise either bare numbers or the webhook's `{number}` objects;
+  // both are accepted, anything else is not.
+  return parsed
+    .map((e) => (e && typeof e === "object" ? e.number : e))
+    .filter((n) => Number.isInteger(n) && n > 0);
 }
 
 /**
@@ -265,6 +325,22 @@ export function classifyGithubRow(streamKey, row) {
   // exactly the posture `deploymentCreated` takes for its own sha below.
   if (streamKey === "prMerged" && (typeof row.merge_commit_sha !== "string" || row.merge_commit_sha === "")) {
     return { emit: false, reason: "no-merge-commit-sha:not-backfilled" };
+  }
+  // ⛔ THE PR ASSOCIATION IS THE ROUTE, and a suite event without it is unroutable
+  // while still counting as emitted. `router.mjs:1497` reaches an interest ONLY
+  // through `detail.prNumbers`; an empty array matches nothing, so the event lands
+  // in the log, wakes no waiter, and the merge gate keeps waiting for a CI pass that
+  // has already happened — with no smee copy under `enforce`.
+  //
+  // ⚠️ These rows are real, not hypothetical, and they are the majority today:
+  // migration `0028_burly_nemesis` is an additive `ADD COLUMN` with NO backfill, so
+  // all 760 suite rows that predate the 0.1.18 pin carry NULL. Same two-level posture
+  // as `prMerged`: the STREAM is gated on the column existing at all
+  // (`requiresColumn`), and the ROW is gated on that column being populated. They
+  // decline visibly in `byReason` rather than emitting a twin that cannot route.
+  if (streamKey === "checkSuiteCompleted") {
+    const prs = parseCheckSuitePrNumbers(row.pull_request_numbers);
+    if (prs.length === 0) return { emit: false, reason: "no-pr-association:not-backfilled" };
   }
   if (streamKey === "pushEvent" && (typeof row.ref !== "string" || row.ref === "")) {
     return { emit: false, reason: "no-ref" };
@@ -510,6 +586,54 @@ export function buildGithubEvent(streamKey, row, seams) {
           // reads it (`router.mjs:1582` reads only `vcs.ref.name`) — which is what
           // makes the absence survivable, and is measured rather than assumed.
           commits: [],
+        },
+      }, seams);
+    }
+
+    case "checkSuiteCompleted": {
+      // ⭐ CTC-712. The row-level guard in `classifyGithubRow` has already refused a
+      // suite with no association, so `prs` is non-empty here.
+      const prs = parseCheckSuitePrNumbers(row.pull_request_numbers);
+      // ⛔ `prNumbers[0]`, NOT the whole list. The webhook picks the FIRST entry for
+      // the attribute and carries the full array in the payload; reproducing only one
+      // half of that would diverge on whichever field the ledger compares.
+      const effectivePr = prs[0];
+      const conclusion = typeof row.conclusion === "string" && row.conclusion !== "" ? row.conclusion : null;
+      const status = typeof row.status === "string" ? row.status : "";
+      const headSha = typeof row.head_sha === "string" ? row.head_sha : "";
+      // The webhook's `conclusionSeverity`: only these two are WARN.
+      const warn = conclusion === "failure" || conclusion === "timed_out";
+      return envelope({
+        name,
+        entity: "check_suite",
+        // ⚠️ The webhook's action is the STATUS, not the literal "completed" — the
+        // name is built as `github.check_suite.${status}` and `action` is the same
+        // value. They coincide for the one name we emit, and reading it from the row
+        // keeps that a fact rather than a coincidence.
+        action: status,
+        label: `PR #${effectivePr}`,
+        attrs: {
+          "vcs.repository.name": repo,
+          "cicd.pipeline.run.status": status,
+          // ⛔ CONDITIONAL, exactly as the webhook is: it sets `vcs.revision` only for
+          // a truthy sha and `cicd.pipeline.run.conclusion` only for a non-null
+          // conclusion. Emitting `""`/`null` unconditionally would be a divergence on
+          // every event carrying neither — the `pr.merged` `vcs.revision` mistake in
+          // the other direction.
+          ...(headSha ? { "vcs.revision": headSha } : {}),
+          "vcs.pr.number": effectivePr,
+          ...(conclusion !== null ? { "cicd.pipeline.run.conclusion": conclusion } : {}),
+        },
+        message: `${name} for ${repo}${conclusion ? ` (${conclusion})` : ""}`,
+        severityText: warn ? "WARN" : "INFO",
+        severityNumber: warn ? 13 : 9,
+        payload: {
+          conclusion,
+          status,
+          // ⚠️ `head_branch` IS stored and is NOT emitted. The webhook parses it into
+          // `headRef` and then drops it — no attribute, no payload key. Adding it
+          // would be an improvement, and an improvement is a divergence.
+          prNumbers: prs,
         },
       }, seams);
     }
