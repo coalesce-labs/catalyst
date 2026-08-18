@@ -33,6 +33,20 @@
 //    instrument that changes shape at the moment of cutover cannot judge the
 //    cutover. The improvement is filed separately, to land after.
 //
+// ── ⚠️ ONLY IMMUTABLE-AFTER-THE-EDGE FIELDS REPLAY FAITHFULLY ──────────────
+// The row's mutable columns hold the value NOW; the webhook held the value AT the
+// moment of the edge. Measured against 3 h of real traffic (151 events joined on a
+// stable key, 150 agreeing on every compared field), the single divergence was
+// exactly this: one `pr.opened` carried `draft: false` from the replica where smee
+// had said `draft: true` — a PR opened as a draft and later marked ready.
+//
+// `draft` and `mergeable` are therefore NOT faithfully replayable, and no field with
+// that property should be added here without the same note. They are kept rather
+// than dropped because removing them would itself be a payload-shape divergence, and
+// because nothing reads them: `router.mjs` has no `pr.opened` branch at all, and
+// `summarizeEvent`'s PAYLOAD_EXCERPT_KEYS are state/stateType/conclusion/title/
+// merged/action. Everything else this file emits is written once and never moves.
+//
 // ── ⚠️ THE ONE VALUE THAT NEEDS NORMALISING ────────────────────────────────
 // `reviews.state` is stored UPPERCASE (`COMMENTED`), the webhook emits GitHub's
 // REST lowercase (`commented`), and the consumer compares with `===` against
