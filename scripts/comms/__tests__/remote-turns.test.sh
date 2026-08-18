@@ -215,5 +215,43 @@ else
 fi
 
 echo ""
+echo "=== the drain LaunchAgent installer renders cleanly ==="
+# ⛔ Without a periodic drain the transport is only half a delivery path: a mini queues turns
+# correctly and nothing ever pulls them, so it LOOKS installed and delivers nothing.
+INSTALLER="$SCRIPT_DIR/../install-comms-drain.sh"
+OUT="$(bash "$INSTALLER" --print-only 2>&1)"
+RC=$?
+[ "$RC" -eq 0 ] && pass "--print-only succeeds" || fail "--print-only succeeds" "$OUT"
+grep -q "__[A-Z_]*__" <<<"$OUT" && fail "every token is substituted" "tokens remain" || pass "every token is substituted"
+grep -q "drain-remote-turns.sh" <<<"$OUT" && pass "it points at the drain script" || fail "it points at the drain script" "$OUT"
+printf '%s\n' "$OUT" >"$SCRATCH/drain.plist"
+if command -v plutil >/dev/null 2>&1; then
+	plutil -lint "$SCRATCH/drain.plist" >/dev/null 2>&1 && pass "the rendered plist lints (plutil)" || fail "the rendered plist lints"
+else
+	python3 -c "import sys,xml.dom.minidom as m; m.parse(sys.argv[1])" "$SCRATCH/drain.plist" >/dev/null 2>&1 &&
+		pass "the rendered plist is well-formed XML (no plutil here)" || fail "the rendered plist is well-formed XML"
+fi
+# The channel/hosts actually reach the agent's argv — a plist that lints but drains the wrong
+# channel is the same inert-install failure in a politer form.
+grep -q "custom-chan" <<<"$(bash "$INSTALLER" --print-only --channel custom-chan --hosts only-mini 2>&1)" &&
+	pass "--channel reaches the rendered argv" || fail "--channel reaches the rendered argv"
+grep -q "only-mini" <<<"$(bash "$INSTALLER" --print-only --channel custom-chan --hosts only-mini 2>&1)" &&
+	pass "--hosts reaches the rendered argv" || fail "--hosts reaches the rendered argv"
+bash "$INSTALLER" --print-only --channel "" >/dev/null 2>&1
+[ $? -eq 2 ] && pass "an empty --channel is refused (rc 2)" || fail "an empty --channel is refused (rc 2)"
+
+echo ""
+echo "--- ⛔ CONTROL: the installer refuses an unsubstituted template ---"
+FAKE2="$SCRATCH/fake-drain"
+mkdir -p "$FAKE2/agent"
+cp "$INSTALLER" "$FAKE2/"
+cp "$SCRIPT_DIR/../drain-remote-turns.sh" "$FAKE2/"
+sed 's|__CHANNEL__|__NEVER_SUBSTITUTED__|' "$SCRIPT_DIR/../agent/ai.coalesce.catalyst-comms-drain.plist" \
+	>"$FAKE2/agent/ai.coalesce.catalyst-comms-drain.plist"
+OUT="$(bash "$FAKE2/install-comms-drain.sh" --print-only 2>&1)"
+RC=$?
+[ "$RC" -ne 0 ] && grep -q "REFUSING" <<<"$OUT" && pass "an unsubstituted token is refused" || fail "an unsubstituted token is refused" "rc=$RC: $OUT"
+
+echo ""
 echo "  PASSED: $PASSES   FAILED: $FAILURES"
 [[ $FAILURES -eq 0 ]]
