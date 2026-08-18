@@ -36,11 +36,29 @@ import { createGithubFeedSource } from "./github-feed-source.mjs";
 import { createSeenStore, defaultSeenPath } from "./github-feed-seen.mjs";
 import { githubSweepUnreadyReason, runGithubSweep } from "./github-feed-sweep.mjs";
 import { buildCanonicalEvent } from "./lib/canonical-event.mjs";
+import { DEFAULT_ACCOUNT } from "./linear-feed-run.mjs";
+
+/**
+ * Which account this host is.
+ *
+ * ⛔ Imported from the Linear leg rather than re-typed, and resolved from the same
+ * env var, because every per-account artifact this timer writes — the shadow file,
+ * the suppression DB, nine cursor files, and the `catalyst.account` attribute on
+ * every would-dispatch marker — is NAMED by it. A hard-coded `tenant-0` on a host
+ * configured for another account does not fail: it silently files that host's parity
+ * evidence and producer state under the wrong tenant, which is worse than an error
+ * because the artifacts still look complete. `linear-feed-run.mjs`'s own comment
+ * gives the rule: this must match `cloud-sync.mjs`'s resolution "so the two cannot
+ * disagree about which account this host is".
+ */
+export function resolveAccount(envObj = process.env) {
+  return envObj.CATALYST_CLOUD_ACCOUNT || DEFAULT_ACCOUNT;
+}
 
 /** The shadow-only marker name. Deliberately NOT a `github.*` name — see the header. */
 export const EVENT_WOULD_DISPATCH = "github-feed.would-dispatch";
 
-export function defaultShadowPath(orchDir, account = "tenant-0") {
+export function defaultShadowPath(orchDir, account = resolveAccount()) {
   return join(orchDir, "shadow", `github-feed-${account}.jsonl`);
 }
 
@@ -82,7 +100,7 @@ export function resolveEffectiveMode(requested) {
 }
 
 /** One would-dispatch marker for an event the producer would have emitted. */
-export function buildWouldDispatchEvent(event, { account = "tenant-0" } = {}, seams) {
+export function buildWouldDispatchEvent(event, { account = resolveAccount() } = {}, seams) {
   return buildCanonicalEvent(
     {
       name: EVENT_WOULD_DISPATCH,
@@ -113,7 +131,7 @@ export function buildWouldDispatchEvent(event, { account = "tenant-0" } = {}, se
 export function runGithubFeedTick({
   mode,
   orchDir,
-  account = "tenant-0",
+  account = resolveAccount(),
   dbPath,
   now = Date.now(),
   appendEventFn,
@@ -191,7 +209,7 @@ export function startGithubFeedTimer({
   mode,
   intervalSec = 30,
   orchDir,
-  account = "tenant-0",
+  account = resolveAccount(),
   dbPath,
   eventLogPath,
   shadowPath,

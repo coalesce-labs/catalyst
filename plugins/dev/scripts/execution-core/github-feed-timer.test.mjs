@@ -8,10 +8,15 @@ import {
   EVENT_WOULD_DISPATCH,
   assertNotEventLog,
   buildWouldDispatchEvent,
+  defaultShadowPath,
+  resolveAccount,
   resolveEffectiveMode,
   runGithubFeedTick,
   startGithubFeedTimer,
 } from "./github-feed-timer.mjs";
+import { DEFAULT_ACCOUNT } from "./linear-feed-run.mjs";
+import { defaultSeenPath } from "./github-feed-seen.mjs";
+import { streamCursorPath } from "./github-feed-sweep.mjs";
 import { readGithubFeedConfig } from "./config.mjs";
 
 const tmp = mkdtempSync(join(tmpdir(), "gh-feed-timer-"));
@@ -39,6 +44,31 @@ describe("⛔ the knob is SEPARATE from the Linear leg's — a merge must not fl
       expect(readGithubFeedConfig({ CATALYST_GITHUB_FEED_INTERVAL_SEC: v, HOME: tmp }).intervalSec).toBe(30);
     }
     expect(readGithubFeedConfig({ CATALYST_GITHUB_FEED_INTERVAL_SEC: "60", HOME: tmp }).intervalSec).toBe(60);
+  });
+});
+
+describe("⛔ P2 (Codex #3524): the account is resolved, never hard-coded", () => {
+  test("a host on another tenant labels its artifacts with THAT tenant", () => {
+    // A hard-coded default does not fail here — it silently files this host's parity
+    // evidence, suppression store and nine cursor files under `tenant-0` while the
+    // artifacts still look complete. That is worse than an error.
+    expect(resolveAccount({ CATALYST_CLOUD_ACCOUNT: "tenant-7" })).toBe("tenant-7");
+    expect(defaultShadowPath("/o", resolveAccount({ CATALYST_CLOUD_ACCOUNT: "tenant-7" })))
+      .toContain("github-feed-tenant-7.jsonl");
+    expect(buildWouldDispatchEvent({ attributes: {} }, { account: "tenant-7" }).body.payload.account)
+      .toBe("tenant-7");
+  });
+
+  test("it falls back to the SAME default the Linear leg uses, imported not re-typed", () => {
+    expect(resolveAccount({})).toBe(DEFAULT_ACCOUNT);
+    expect(DEFAULT_ACCOUNT).toBe("tenant-0");
+  });
+
+  test("⛔ per-tenant artifact builders REFUSE an absent account", () => {
+    // Fail closed rather than defaulting: an unlabelled artifact is indistinguishable
+    // from a correctly-labelled one after the fact.
+    expect(() => defaultSeenPath("/o")).toThrow();
+    expect(() => streamCursorPath("/o", "push")).toThrow();
   });
 });
 

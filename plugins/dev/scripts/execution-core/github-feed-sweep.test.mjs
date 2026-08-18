@@ -15,6 +15,7 @@ import { emptyCounts, runGithubSweep, streamCursorPath } from "./github-feed-swe
 import { countsClean } from "./cloud-feed-timer.mjs";
 import { githubSweepUnreadyReason } from "./github-feed-sweep.mjs";
 
+const ACCT = "tenant-0";
 const tmp = mkdtempSync(join(tmpdir(), "gh-feed-sweep-"));
 afterAll(() => {
   try { rmSync(tmp, { recursive: true, force: true }); } catch { /* never fail in cleanup */ }
@@ -76,7 +77,7 @@ const addReview = (db, id, ts) =>
 
 const sweep = (w, now, extra = {}) =>
   runGithubSweep({
-    source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir,
+    source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir, account: ACCT,
     now, settleMs: 1000, streams: ["reviewSubmitted"], seams: SEAMS, ...extra,
   });
 
@@ -159,7 +160,7 @@ describe("⛔ P1 regression (Codex #3513): consecutive pushes to one ref both re
         .run("o/r", "refs/heads/main", "sha0", "sha1", NOW - 500);
     });
     try {
-      const opts = { source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir,
+      const opts = { source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir, account: ACCT,
         settleMs: 1000, streams: ["push"], seams: SEAMS };
       expect(runGithubSweep({ ...opts, now: NOW }).emitted).toBe(1);
 
@@ -186,7 +187,7 @@ describe("⛔ P1 regression (Codex #3513): consecutive pushes to one ref both re
         .run("o/r", "refs/heads/main", "sha0", "sha1", NOW - 500);
     });
     try {
-      const opts = { source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir,
+      const opts = { source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir, account: ACCT,
         settleMs: 1000, streams: ["push"], seams: SEAMS };
       expect(runGithubSweep({ ...opts, now: NOW }).emitted).toBe(1);
       const c2 = runGithubSweep({ ...opts, now: NOW + 1 });
@@ -243,7 +244,7 @@ describe("⛔ declines never reach byFailure — this is the CTL-1909 property",
         positionAfter: w.source.positionAfter,
       };
       const c = runGithubSweep({
-        source: exploding, seen: w.seen, sink: w.sink, orchDir: w.dir, now: NOW,
+        source: exploding, seen: w.seen, sink: w.sink, orchDir: w.dir, account: ACCT, now: NOW,
         settleMs: 1000, streams: ["push", "reviewSubmitted"], seams: SEAMS,
       });
       expect(c.failed).toBe(1);
@@ -281,7 +282,7 @@ describe("⛔ first-run detection is PER STREAM, not per producer", () => {
     });
     try {
       const c = runGithubSweep({
-        source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir, now: NOW,
+        source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir, account: ACCT, now: NOW,
         settleMs: 1000, streams: ["reviewSubmitted", "push", "reviewCommentCreated"], seams: SEAMS,
       });
       expect(c.emitted).toBe(3);
@@ -315,7 +316,7 @@ describe("⛔ P1 (Codex #3520): the prune is scoped to its own stream", () => {
         .run("o/r", "refs/heads/main", "b1", "a1", NOW - 100);
     });
     try {
-      const opts = { source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir,
+      const opts = { source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir, account: ACCT,
         settleMs: 1000, seams: SEAMS };
       // BOTH streams sweep at NOW so each lands an entry AND a durable cursor. The
       // push stream must actually acquire one here — without it, its later sweep
@@ -341,7 +342,7 @@ describe("⛔ P1 (Codex #3520): the prune is scoped to its own stream", () => {
       // `DELETE ... WHERE ts < cursor` delete it. Assert that rather than assuming it:
       // the first cut of this test let push read nothing, so it wrote no cursor,
       // pruned nothing, and passed under the mutant.
-      const pushCursor = JSON.parse(readFileSync(streamCursorPath(w.dir, "push"), "utf8"));
+      const pushCursor = JSON.parse(readFileSync(streamCursorPath(w.dir, "push", ACCT), "utf8"));
       expect(pushCursor.lastCreatedAt).toBeGreaterThan(NOW - 900);
     } finally { w.close(); }
   });
@@ -402,7 +403,7 @@ describe("cursor ordering and durability", () => {
     const w = world((db) => addReview(db, "a", NOW - 100));
     try {
       sweep(w, NOW);
-      const p = streamCursorPath(w.dir, "reviewSubmitted");
+      const p = streamCursorPath(w.dir, "reviewSubmitted", ACCT);
       expect(existsSync(p)).toBe(true);
       const cur = JSON.parse(readFileSync(p, "utf8"));
       // Held at the horizon (NOW-1000), NOT at the emitted row (NOW-100).
@@ -418,11 +419,11 @@ describe("cursor ordering and durability", () => {
       expect(() => runGithubSweep({
         source: w.source, seen: w.seen,
         sink: () => { throw new Error("log unavailable"); },
-        orchDir: w.dir, now: NOW, settleMs: 1000, streams: ["reviewSubmitted"], seams: SEAMS,
+        orchDir: w.dir, account: ACCT, now: NOW, settleMs: 1000, streams: ["reviewSubmitted"], seams: SEAMS,
       })).not.toThrow();
       // No cursor was written, and nothing was marked seen — so a healthy next tick
       // re-emits. Losing progress is recoverable; advancing past an unemitted row is not.
-      expect(existsSync(streamCursorPath(w.dir, "reviewSubmitted"))).toBe(false);
+      expect(existsSync(streamCursorPath(w.dir, "reviewSubmitted", ACCT))).toBe(false);
       expect(w.seen.size()).toBe(0);
       expect(sweep(w, NOW).emitted).toBe(1);
     } finally { w.close(); }
@@ -437,12 +438,12 @@ describe("cursor ordering and durability", () => {
     });
     try {
       runGithubSweep({
-        source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir, now: NOW,
+        source: w.source, seen: w.seen, sink: w.sink, orchDir: w.dir, account: ACCT, now: NOW,
         settleMs: 1000, streams: ["reviewSubmitted", "push"], seams: SEAMS,
       });
-      expect(existsSync(streamCursorPath(w.dir, "reviewSubmitted"))).toBe(true);
-      expect(existsSync(streamCursorPath(w.dir, "push"))).toBe(true);
-      expect(streamCursorPath(w.dir, "push")).not.toBe(streamCursorPath(w.dir, "reviewSubmitted"));
+      expect(existsSync(streamCursorPath(w.dir, "reviewSubmitted", ACCT))).toBe(true);
+      expect(existsSync(streamCursorPath(w.dir, "push", ACCT))).toBe(true);
+      expect(streamCursorPath(w.dir, "push", ACCT)).not.toBe(streamCursorPath(w.dir, "reviewSubmitted", ACCT));
     } finally { w.close(); }
   });
 });
