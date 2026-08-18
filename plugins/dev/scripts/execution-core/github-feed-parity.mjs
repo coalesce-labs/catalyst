@@ -263,6 +263,47 @@ export function smeeRepos(smeeEvents) {
   return repos;
 }
 
+/**
+ * Suite conclusions the MIRROR does not store, so the producer cannot emit them.
+ *
+ * ⛔ MEASURED, AND IT IS A REAL GAP — CTC-719, not a quirk. The replica's
+ * `check_suites` holds only `success` / `cancelled` / `failure`; it has never held a
+ * `neutral` or `skipped` one. Live counts (deduped by webhook delivery id, since
+ * 2026-08-17): smee `success 3298 · neutral 245 · failure 114 · cancelled 84 ·
+ * skipped 3` against a replica of `success 858 · cancelled 13 · failure 3`.
+ * **248 of 3,748 (6.6%)** are structurally invisible. The control that makes it a
+ * `check_suites` bug rather than a replica limitation is `check_runs` in the SAME
+ * database, which stores `neutral 2366` and `skipped 1152` happily.
+ *
+ * ⚠️ Excluded here so the retirement gate is reachable, NOT because the gap is
+ * closed. `router.mjs:1497` treats `neutral` as non-failing, so those events DO wake
+ * a waiter today. Measured blast radius: 234 of the 245 carry a PR, across 62 PRs —
+ * but **0 of 227 PRs had ONLY neutral conclusions**, so every one of them also got a
+ * replicable suite and no PR would actually hang. That is a statistical property of
+ * this fleet's CI configuration, not a structural guarantee, and it is why CTC-719 is
+ * open rather than closed-as-acceptable.
+ */
+export const MIRROR_UNSTORED_SUITE_CONCLUSIONS = Object.freeze(["neutral", "skipped"]);
+
+const suiteConclusionOf = (e) => e?.attributes?.["cicd.pipeline.run.conclusion"] ?? null;
+
+/**
+ * Is this a smee event the mirror provably cannot carry?
+ *
+ * ⭐ SELF-RETIRING, and that is the design's whole point. The exclusion applies only
+ * while the FEED side produced none of these conclusions. The moment CTC-719 lands and
+ * the producer emits its first `neutral` suite, this returns false for every event and
+ * the two sides are compared normally again — with no line for anyone to remember to
+ * delete, and no window in which a fixed mirror is still being excused. An exclusion
+ * that cannot switch itself off is the shape of every stale `KNOWN_ABSENT` entry this
+ * file has had to remove.
+ */
+function mirrorCannotCarry(e, feedHasThoseConclusions) {
+  if (feedHasThoseConclusions) return false;
+  if (nameOf(e) !== "github.check_suite.completed") return false;
+  return MIRROR_UNSTORED_SUITE_CONCLUSIONS.includes(suiteConclusionOf(e));
+}
+
 export function compareGithubStreams(feedEvents, smeeEvents) {
   const feed = Array.isArray(feedEvents) ? feedEvents : [];
   const smee = Array.isArray(smeeEvents) ? smeeEvents : [];
@@ -299,8 +340,24 @@ export function compareGithubStreams(feedEvents, smeeEvents) {
   // which is the single worst thing this file could do. `linear-feed-parity.mjs`
   // already compares by multiplicity for exactly this reason; that lesson is carried
   // here rather than re-learned.
-  const index = new Map();
+  // ⛔ NARROW, ENUMERATED, AND REPORTED — never a silent drop. See `mirrorCannotCarry`.
+  const feedHasThoseConclusions = feed.some(
+    (e) => nameOf(e) === "github.check_suite.completed"
+      && MIRROR_UNSTORED_SUITE_CONCLUSIONS.includes(suiteConclusionOf(e)),
+  );
+  const mirrorUnstorable = {};
+  const smeeComparable = [];
   for (const e of smee) {
+    if (mirrorCannotCarry(e, feedHasThoseConclusions)) {
+      const c = suiteConclusionOf(e);
+      mirrorUnstorable[c] = (mirrorUnstorable[c] ?? 0) + 1;
+      continue;
+    }
+    smeeComparable.push(e);
+  }
+
+  const index = new Map();
+  for (const e of smeeComparable) {
     const n = nameOf(e);
     const spec = COMPARE_SPEC[n];
     if (!spec) continue;
@@ -395,6 +452,10 @@ export function compareGithubStreams(feedEvents, smeeEvents) {
     // that the feed covered repos the tunnel did not, because that is a REASON TO
     // RETIRE rather than a caveat on retiring.
     feedOnlyRepos,
+    // ⭐ Reported on every run, never dropped: an operator reading a clean verdict must
+    // see that a measured slice of the webhook side was set aside, and which ticket
+    // closes it. Symmetric with `feedOnlyRepos` — the count that explains itself.
+    mirrorUnstorable,
     comparableRepos: [...comparableRepos].sort(),
     expectedAbsent: Object.fromEntries(Object.entries(absent).filter(([n]) => n in KNOWN_ABSENT)),
     unexplainedAbsent,
