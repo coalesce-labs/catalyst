@@ -89,6 +89,42 @@ export function githubLossyNames(pushIsLossy = PUSH_IS_LOSSY) {
 
 export const GITHUB_LOSSY_NAMES = githubLossyNames();
 
+/**
+ * ⛔ THE UNCOVERED LIST IS A PROPERTY OF THE REPLICA, NOT OF THIS FILE — the same
+ * correction CTC-704 forced on `PUSH_IS_LOSSY`, owed again one name over.
+ *
+ * `github.check_suite.completed` is emittable exactly when this host's replica has
+ * `check_suites.pull_request_numbers` (CTC-712, schema 0.1.18). The pin rolls as a
+ * CANARY — mini-2, then mini — so between the two writer restarts one host can emit
+ * it and the other cannot, and a constant is necessarily wrong on one of them. Wrong
+ * in the dangerous direction it means: smee suppressed for a name this host produces
+ * nothing for, so the CI wait hangs with no second copy.
+ *
+ * ⭐ Default `false` ⇒ UNCOVERED. A caller with no replica handle reports less
+ * coverage than it may have, which leaves smee authoritative — the recoverable error.
+ */
+export function githubUncoveredNames(checkSuiteHasPrAssociation = false) {
+  return Object.freeze(checkSuiteHasPrAssociation ? [] : ["github.check_suite.completed"]);
+}
+
+/**
+ * The suppressible set for ONE host, derived from that host's two capabilities.
+ *
+ * ⚠️ BOTH DEFAULTS ARE THE PRE-CAPABILITY ANSWER, so calling this with no arguments
+ * reproduces today's static set exactly. That is what makes the injection safe to add
+ * before anything is wired to it: the wiring changes behaviour, the seam does not.
+ */
+export function githubSuppressibleNames({
+  pushIsLossy = PUSH_IS_LOSSY,
+  checkSuiteHasPrAssociation = false,
+} = {}) {
+  return leafComputeSuppressible({
+    consumed: LEAF_CONSUMED_NAMES,
+    uncovered: githubUncoveredNames(checkSuiteHasPrAssociation),
+    lossy: githubLossyNames(pushIsLossy),
+  });
+}
+
 /** Re-exported from the leaf so producer, gate and doctor read ONE source. */
 export const GITHUB_CONSUMED_NAMES = LEAF_CONSUMED_NAMES;
 export const GITHUB_UNCOVERED_NAMES = LEAF_UNCOVERED_NAMES;
@@ -151,9 +187,21 @@ export function sourceOf(event) {
  * `suppress: true` means "do not route this event; write it to the capture sink
  * instead". It never means "discard".
  */
-export function decideDispatch(event, { mode, isReady = null } = {}) {
+export function decideDispatch(event, { mode, isReady = null, suppressible = null } = {}) {
   const name = getEventName(event);
   const source = sourceOf(event);
+  // ⛔ THE HOST'S SET, OR THE STATIC ONE — never a merge of the two. `suppressible`
+  // is this replica's answer (see `githubSuppressibleNames`); omitting it keeps the
+  // module constant, which under-reports coverage and therefore leaves smee
+  // authoritative. Falling back on ANY non-Set value is deliberate: a caller that
+  // passes something malformed gets the safe set rather than a crash in the tailer's
+  // hot path or, worse, an empty set that suppresses nothing and dispatches both.
+  const suppressibleSet =
+    suppressible instanceof Set
+      ? suppressible
+      : Array.isArray(suppressible)
+        ? new Set(suppressible)
+        : SUPPRESSIBLE_SET;
 
   if (!DISPATCH_CLASS_SET.has(name)) {
     return { suppress: false, reason: "not-dispatch-class", source, name };
@@ -183,7 +231,7 @@ export function decideDispatch(event, { mode, isReady = null } = {}) {
     // dispatching (smee is unsuppressed for excluded names by the branch below).
     // Refusing on both sides makes the two halves of the exclusion agree by
     // construction rather than by everyone remembering to change them together.
-    if (!SUPPRESSIBLE_SET.has(name)) {
+    if (!suppressibleSet.has(name)) {
       return {
         suppress: true,
         reason: `feed-excluded:${EXCLUSION_REASONS[name] ?? "unknown"}`,
@@ -207,7 +255,7 @@ export function decideDispatch(event, { mode, isReady = null } = {}) {
   // producer ready" first would imply that a ready producer could earn the right to
   // suppress `github.pr.merged` — which is the single worst outcome this feature
   // has (the merge→deploy chain, fleet-wide, with no second copy).
-  if (!SUPPRESSIBLE_SET.has(name)) {
+  if (!suppressibleSet.has(name)) {
     return {
       suppress: false,
       reason: EXCLUSION_REASONS[name] ?? "no-replacement:unknown",

@@ -157,11 +157,15 @@ export function readNewEvents() {
       // log; the gate picks one per event and the loser is CAPTURED, not dropped, so
       // "did the feed miss this edge?" stays answerable after the fact.
       //
-      // ⛔ SUPPRESSION IS PER NAME. Nine of the twelve names the router consumes have
-      // a faithful feed replacement; `github.pr.merged` (CTC-691),
-      // `github.check_suite.completed` (CTC-667 item 4) and `github.push` (CTC-704)
-      // do not, and for those the gate never suppresses smee no matter how healthy
-      // the producer is. See github-feed-gate.mjs.
+      // ⛔ SUPPRESSION IS PER NAME, AND HOW MANY NAMES IS A PROPERTY OF THIS HOST.
+      // `github.pr.merged` joined the suppressible set when CTC-691 shipped (0.1.17);
+      // `github.push` and `github.check_suite.completed` join it only on a replica
+      // that has `push_events` (CTC-704) and `check_suites.pull_request_numbers`
+      // (CTC-712, 0.1.18) respectively. The gate resolves both from the replica and
+      // re-reads them on a TTL, because they arrive at a cloud-sync writer restart
+      // this process never observes. A host missing either keeps smee authoritative
+      // for that name no matter how healthy the producer is. See github-feed-gate.mjs
+      // and github-feed-gate-install.mjs.
       //
       // ⚠️ Placed BEFORE processEvent and before the timing block, so a suppressed
       // event is neither routed nor counted as a route — a suppressed event that

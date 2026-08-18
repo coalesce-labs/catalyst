@@ -19,6 +19,9 @@ import {
   STREAM_BY_KEY,
   UNBACKED_EVENT_NAMES,
   availableStreams,
+  columnExists,
+  checkSuiteHasPrAssociation,
+  unbackedEventNames,
   buildStreamQuery,
   createGithubFeedSource,
   pushIsLossy,
@@ -73,10 +76,30 @@ CREATE TABLE push_events (
   delivery_id text PRIMARY KEY, repo_id text NOT NULL, ref text NOT NULL, before text,
   after text, forced integer, created integer, deleted integer, base_ref text,
   pusher_id text, head_commit_sha text, updated_at integer);
+-- CTC-712 (schema 0.1.18): the suite row plus pull_request_numbers, migration
+-- 0028_burly_nemesis. Verbatim from mini-2's DDL plus the additive column.
+-- (No backticks in here: this block lives inside a template literal.)
+CREATE TABLE check_suites (
+  repo_id text NOT NULL, check_suite_id text PRIMARY KEY NOT NULL, head_sha text,
+  head_branch text, status text, conclusion text, app_slug text,
+  latest_check_runs_count integer, updated_at integer, pull_request_numbers text);
 `;
 
 /** The pre-0.1.17 DDL — every table EXCEPT push_events, for the un-pinned-host tests. */
 const DDL_PRE_0_1_17 = DDL.slice(0, DDL.indexOf("-- CTC-704"));
+
+/**
+ * The 0.1.17 shape: `check_suites` EXISTS but has no `pull_request_numbers`.
+ *
+ * ⛔ THIS IS THE CASE `tableExists` CANNOT SEE, and it is the one every mini was in
+ * this morning. Derived by deleting exactly the one column from the real DDL — not by
+ * hand-writing a second table, which would drift from the first and could agree with
+ * a broken `columnExists` for the wrong reason.
+ */
+const DDL_PRE_0118 = DDL.replace(", pull_request_numbers text)", ")");
+// ⛔ Positive control on the FIXTURE: a derivation that silently matched nothing would
+// make every "pre-0.1.18" test below run against a 0.1.18 replica and pass vacuously.
+if (DDL_PRE_0118 === DDL) throw new Error("DDL_PRE_0118 derivation matched nothing");
 
 let dbSeq = 0;
 function freshDb(seed = () => {}) {
@@ -237,9 +260,36 @@ describe("declared gaps are exported, not implied by a comment", () => {
   test("check_suite.completed is named as unbacked", () => {
     expect(UNBACKED_EVENT_NAMES).toContain("github.check_suite.completed");
   });
-  test("no stream claims to produce an unbacked name", () => {
-    const produced = new Set(STREAMS.map((s) => s.event).filter(Boolean));
-    for (const n of UNBACKED_EVENT_NAMES) expect(produced.has(n)).toBe(false);
+  test("⛔ an unbacked name is unbacked ON A REPLICA, not in the abstract", () => {
+    // ⚠️ THIS INVARIANT CHANGED SHAPE WITH CTC-712 AND THE OLD FORM WOULD NOW BE
+    // WRONG IN THE DANGEROUS DIRECTION. It read "no stream produces a name in
+    // UNBACKED_EVENT_NAMES" — true only while an unbacked name had no stream at all.
+    // `checkSuiteCompleted` produces `github.check_suite.completed` AND that name is
+    // still in the STATIC list, because the static list is the answer for a caller
+    // with no replica handle and the safe answer there is "uncovered". Keeping the
+    // old assertion would have forced deleting the name from the static list, which
+    // is exactly what suppresses smee on a host that cannot emit it.
+    //
+    // The real invariant is per replica: a name is unbacked here iff no stream this
+    // replica SERVES produces it.
+    const withCol = new Database(":memory:");
+    withCol.run(DDL);
+    const servedNames = new Set(availableStreams(withCol).map((x) => x.event).filter(Boolean));
+    for (const n of unbackedEventNames(withCol)) expect(servedNames.has(n)).toBe(false);
+    // Positive control: the resolution is not vacuous — this replica DOES serve it.
+    expect(servedNames.has("github.check_suite.completed")).toBe(true);
+    expect(unbackedEventNames(withCol)).toEqual([]);
+
+    const noCol = new Database(":memory:");
+    noCol.run(DDL_PRE_0118);
+    const servedPre = new Set(availableStreams(noCol).map((x) => x.event).filter(Boolean));
+    for (const n of unbackedEventNames(noCol)) expect(servedPre.has(n)).toBe(false);
+    expect(servedPre.has("github.check_suite.completed")).toBe(false);
+    expect(unbackedEventNames(noCol)).toEqual(["github.check_suite.completed"]);
+
+    // ⛔ And with NO handle the answer is the SAFE one, not the optimistic one.
+    expect(unbackedEventNames()).toEqual(["github.check_suite.completed"]);
+    expect(UNBACKED_EVENT_NAMES).toEqual(["github.check_suite.completed"]);
   });
   test("the two push streams are the only ones keyed on a mutable column", () => {
     // ⚠️ `pushEvent` shares `updated_at` with `push` but is NOT lossy for it: its PK
@@ -247,9 +297,88 @@ describe("declared gaps are exported, not implied by a comment", () => {
     // coordinate, never part of the row's identity. That distinction is what makes
     // one of them collapse and the other not.
     const mutable = STREAMS.filter((s) => s.tsCol === "updated_at").map((s) => s.key);
-    expect(mutable.sort()).toEqual(["push", "pushEvent"]);
+    expect(mutable.sort()).toEqual(["checkSuiteCompleted", "push", "pushEvent"]);
+    // ⛔ SHARING THE COORDINATE IS NOT SHARING THE HAZARD, and the split is by PK.
+    // `push` is keyed on the REF, so its PK is constant across every push and the
+    // identity MUST fold the coordinate in. `checkSuiteCompleted` is keyed on the
+    // SUITE, which is nearly per-edge — but a `rerequested` suite reuses its id and
+    // completes twice, so it folds too. `pushEvent` is keyed on the DELIVERY, a
+    // complete edge identity, so it must NOT fold: doing so would make a redelivery
+    // of the same push look like a new one.
     expect(STREAM_BY_KEY.push.mutableRow).toBe(true);
+    expect(STREAM_BY_KEY.checkSuiteCompleted.mutableRow).toBe(true);
     expect(STREAM_BY_KEY.pushEvent.mutableRow).toBeUndefined();
+    // ⚠️ `edgeIdCols` is declared by `push` ALONE, and the asymmetry is the point.
+    // Folding the coordinate is what both need; folding an extra COLUMN is needed only
+    // where two distinct edges can share a millisecond. Two pushes to one ref can;
+    // one suite cannot complete twice at one `updated_at`. A mutation showed the
+    // conclusion-fold this stream briefly carried was unobservable, so it is gone.
+    expect(STREAM_BY_KEY.push.edgeIdCols).toEqual(["after"]);
+    expect(STREAM_BY_KEY.checkSuiteCompleted.edgeIdCols).toBeUndefined();
+  });
+});
+
+describe("CTC-712 — a COLUMN is a capability, and its absence is not a table's absence", () => {
+  const mk = (ddl) => { const db = new Database(":memory:"); db.run(ddl); return db; };
+
+  test("columnExists distinguishes present / absent / no-such-table", () => {
+    const at0118 = mk(DDL);
+    const at0117 = mk(DDL_PRE_0118);
+    expect(columnExists(at0118, "check_suites", "pull_request_numbers")).toBe(true);
+    expect(columnExists(at0117, "check_suites", "pull_request_numbers")).toBe(false);
+    // Positive control: the 0.1.17 fixture still HAS the table and its other columns,
+    // so a `false` above is about the column and not about a missing fixture.
+    expect(columnExists(at0117, "check_suites", "head_sha")).toBe(true);
+    // A table that does not exist yields false rather than throwing.
+    expect(columnExists(at0118, "no_such_table", "anything")).toBe(false);
+  });
+
+  test("⛔ a broken column probe would be INVISIBLE without this: SELECT * does not throw", () => {
+    // The reason `tableExists` cannot stand in. On a 0.1.17 replica the stream's own
+    // query runs happily and simply yields rows with the field undefined — there is no
+    // `no such column` for anything to catch, so the producer would emit suite events
+    // with no PR association and every count would read "emitted".
+    const at0117 = mk(DDL_PRE_0118);
+    at0117.run(
+      "INSERT INTO check_suites (repo_id, check_suite_id, head_sha, status, conclusion, updated_at) VALUES ('o/r','s1','abc','completed','success',1000)",
+    );
+    const rows = at0117.prepare(buildStreamQuery("checkSuiteCompleted")).all({ $sinceMs: 0, $sinceId: "", $limit: 10 });
+    expect(rows.length).toBe(1);                       // the query SUCCEEDED
+    expect(rows[0].pull_request_numbers).toBeUndefined(); // and the association is simply gone
+  });
+
+  test("availableStreams serves checkSuiteCompleted only where the column exists", () => {
+    expect(availableStreams(mk(DDL)).map((x) => x.key)).toContain("checkSuiteCompleted");
+    expect(availableStreams(mk(DDL_PRE_0118)).map((x) => x.key)).not.toContain("checkSuiteCompleted");
+    // ⚠️ And the rest of the streams are UNAFFECTED — a capability gate that quietly
+    // shed its neighbours would look identical in the assertion above.
+    const a = availableStreams(mk(DDL)).map((x) => x.key).filter((k) => k !== "checkSuiteCompleted");
+    const b = availableStreams(mk(DDL_PRE_0118)).map((x) => x.key);
+    expect(b).toEqual(a);
+  });
+
+  test("checkSuiteHasPrAssociation answers per replica", () => {
+    expect(checkSuiteHasPrAssociation(mk(DDL))).toBe(true);
+    expect(checkSuiteHasPrAssociation(mk(DDL_PRE_0118))).toBe(false);
+    // A replica with no check_suites table at all is also "cannot", not a throw.
+    expect(checkSuiteHasPrAssociation(mk(DDL_PRE_0_1_17))).toBe(false);
+  });
+
+  test("the keyset query pages completed suites in order and skips other statuses", () => {
+    const db = mk(DDL);
+    const ins = (id, ts, status) => db.run(
+      `INSERT INTO check_suites (repo_id, check_suite_id, head_sha, status, conclusion, updated_at, pull_request_numbers)
+       VALUES ('o/r','${id}','sha','${status}','success',${ts},'[7]')`,
+    );
+    ins("s1", 1000, "completed");
+    ins("s2", 2000, "in_progress");   // must never page
+    ins("s3", 3000, "completed");
+    const rows = db.prepare(buildStreamQuery("checkSuiteCompleted")).all({ $sinceMs: 0, $sinceId: "", $limit: 10 });
+    expect(rows.map((r) => r.__id)).toEqual(["s1", "s3"]);
+    expect(rows.map((r) => r.__ts)).toEqual([1000, 3000]);
+    // and the keyset advances past what it read
+    const after = db.prepare(buildStreamQuery("checkSuiteCompleted")).all({ $sinceMs: 1000, $sinceId: "s1", $limit: 10 });
+    expect(after.map((r) => r.__id)).toEqual(["s3"]);
   });
 });
 
@@ -353,8 +482,14 @@ describe("⛔ exactly ONE push stream is served, chosen from the replica (CTC-70
   });
 
   test("every other stream is unaffected by the pin", () => {
-    const a = availableStreams(pinned()).map((s) => s.key).filter((k) => !k.startsWith("push"));
-    const b = availableStreams(unpinned()).map((s) => s.key).filter((k) => !k.startsWith("push"));
+    // ⚠️ `checkSuiteCompleted` is excluded alongside the push pair, and for the SAME
+    // reason rather than as a convenience: the "unpinned" fixture is pre-0.1.17, which
+    // has no `check_suites` table at all, so that stream is legitimately capability-
+    // gated between these two replicas too. What this test asserts is the narrower and
+    // still-important claim — that the push supersession disturbs nothing ELSE.
+    const gated = (k) => k.startsWith("push") || k === "checkSuiteCompleted";
+    const a = availableStreams(pinned()).map((s) => s.key).filter((k) => !gated(k));
+    const b = availableStreams(unpinned()).map((s) => s.key).filter((k) => !gated(k));
     expect(a).toEqual(b);
     expect(a.length).toBeGreaterThan(5);
   });

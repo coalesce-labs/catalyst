@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  GITHUB_CONSUMED_NAMES,
   GITHUB_DISPATCH_CLASS_NAMES,
   GITHUB_SERVICE_NAME,
   GITHUB_UNCOVERED_NAMES,
@@ -18,6 +19,7 @@ import {
   githubEdgeId,
   githubEventName,
   loginOf,
+  parseCheckSuitePrNumbers,
 } from "./github-feed-event.mjs";
 
 // Deterministic seams so the envelope is byte-stable across runs.
@@ -39,6 +41,10 @@ describe("envelope invariants shared by every name", () => {
     deploymentCreated: { repo_id: "o/r", id: "55", sha: "abc", ref: "main", environment: "production" },
     deploymentStatus: { repo_id: "o/r", id: "9", deployment_id: "55", state: "success", environment: "production" },
     push: { repo_id: "o/r", ref: "refs/heads/main", before: "b1", after: "a1" },
+    checkSuiteCompleted: {
+      repo_id: "o/r", check_suite_id: "cs1", head_sha: "abc", head_branch: "topic",
+      status: "completed", conclusion: "success", pull_request_numbers: "[7]",
+    },
   };
 
   for (const [key, row] of Object.entries(rows)) {
@@ -70,8 +76,17 @@ describe("envelope invariants shared by every name", () => {
       // summarizeEvent puts body.message into every wake an agent reads, so it must
       // not collapse to the bare name the way the generic builder leaves it.
       expect(ev.body.message).toContain("o/r");
-      expect(ev.attributes["event.name"]).toBe(ev.attributes["event.name"]);
-      expect(GITHUB_DISPATCH_CLASS_NAMES).toContain(ev.attributes["event.name"]);
+      // ⚠️ WAS `expect(x).toBe(x)` — a tautology that could not fail. It intended to
+      // pin the name onto the envelope, so it now compares against the stream's own
+      // declared name.
+      expect(ev.attributes["event.name"]).toBe(githubEventName(key, { __ts: 1, __id: "k", ...row }));
+      // ⛔ CONSUMED, not DISPATCH-CLASS. This asserted `GITHUB_DISPATCH_CLASS_NAMES`,
+      // which is `consumed − uncovered` evaluated with NO replica handle — the safe
+      // static answer. `check_suite.completed` is deliberately absent from it while
+      // still being a name this producer builds on a 0.1.18 host, so the old form
+      // would force the static list to over-claim coverage in order to stay green.
+      // What every built envelope must satisfy is that the ROUTER consumes its name.
+      expect(GITHUB_CONSUMED_NAMES).toContain(ev.attributes["event.name"]);
     });
   }
 });
@@ -416,5 +431,162 @@ describe("⭐ github.push from push_events is byte-identical to the pushes copy 
 
   test("a row with no ref declines", () => {
     expect(classifyGithubRow("pushEvent", { __ts: 5, __id: "d1", repo_id: "o/r", ref: "" }).emit).toBe(false);
+  });
+});
+
+describe("CTC-712 — github.check_suite.completed reproduces the webhook, and routes", () => {
+  const row = (over = {}) => ({
+    __ts: 1000, __id: "cs1",
+    repo_id: "o/r", check_suite_id: "cs1", head_sha: "abc", head_branch: "topic",
+    status: "completed", conclusion: "success", pull_request_numbers: "[7]",
+    ...over,
+  });
+  const ev = (over) => buildGithubEvent("checkSuiteCompleted", row(over), SEAMS);
+
+  test("the attributes the consumer and the ledger read", () => {
+    const a = ev().attributes;
+    expect(a["event.name"]).toBe("github.check_suite.completed");
+    expect(a["vcs.repository.name"]).toBe("o/r");
+    // ⛔ THE ROUTE. router.mjs:1497 reaches an interest only through the PR number.
+    expect(a["vcs.pr.number"]).toBe(7);
+    expect(a["cicd.pipeline.run.status"]).toBe("completed");
+    expect(a["cicd.pipeline.run.conclusion"]).toBe("success");
+    expect(a["vcs.revision"]).toBe("abc");
+    expect(a["event.entity"]).toBe("check_suite");
+    expect(a["event.action"]).toBe("completed");
+    expect(a["event.label"]).toBe("PR #7");
+  });
+
+  test("the payload the webhook carries — and nothing it does not", () => {
+    const p = ev().body.payload;
+    expect(p.conclusion).toBe("success");
+    expect(p.status).toBe("completed");
+    expect(p.prNumbers).toEqual([7]);
+    // ⛔ `head_branch` IS in the row and the webhook parses it into `headRef` and then
+    // DROPS it. Emitting it would be an improvement, and an improvement is a
+    // divergence the ledger would report on every event. Same rule as threadId: 0.
+    expect(p.headRef).toBeUndefined();
+    expect(p.headBranch).toBeUndefined();
+  });
+
+  test("⛔ vcs.pr.number is the FIRST entry, and the payload keeps the whole list", () => {
+    // The webhook sets the attribute from prNumbers[0] and carries the full array in
+    // the payload. Reproducing only one half diverges on whichever the ledger compares.
+    const e = ev({ pull_request_numbers: "[11,12]" });
+    expect(e.attributes["vcs.pr.number"]).toBe(11);
+    expect(e.body.payload.prNumbers).toEqual([11, 12]);
+    expect(e.attributes["event.label"]).toBe("PR #11");
+  });
+
+  test("⚠️ conditional attributes are ABSENT, not empty, when their source is", () => {
+    // The webhook sets vcs.revision only for a truthy sha and the conclusion attribute
+    // only for a non-null conclusion. Emitting "" / null unconditionally is the
+    // `pr.merged` vcs.revision mistake pointing the other way.
+    const e = ev({ head_sha: "", conclusion: null });
+    expect("vcs.revision" in e.attributes).toBe(false);
+    expect("cicd.pipeline.run.conclusion" in e.attributes).toBe(false);
+    expect(e.body.payload.conclusion).toBeNull();
+    expect(e.body.message).toBe("github.check_suite.completed for o/r");
+  });
+
+  test("severity follows the webhook's conclusionSeverity — only failure/timed_out WARN", () => {
+    expect(ev({ conclusion: "success" }).severityText).toBe("INFO");
+    expect(ev({ conclusion: "cancelled" }).severityText).toBe("INFO");
+    expect(ev({ conclusion: "failure" }).severityText).toBe("WARN");
+    expect(ev({ conclusion: "timed_out" }).severityText).toBe("WARN");
+  });
+
+  test("the message reproduces the webhook's template, conclusion in parentheses", () => {
+    expect(ev().body.message).toBe("github.check_suite.completed for o/r (success)");
+  });
+});
+
+describe("CTC-712 — a suite with no PR association DECLINES, visibly", () => {
+  const base = {
+    __ts: 1000, __id: "cs1", repo_id: "o/r", check_suite_id: "cs1", head_sha: "abc",
+    status: "completed", conclusion: "success",
+  };
+
+  test("⛔ the 760 un-backfilled rows decline by name, they do not emit unroutable events", () => {
+    // Migration 0028 is an additive ADD COLUMN with no backfill, so every suite row
+    // predating the 0.1.18 pin has this NULL. An event without a PR number still
+    // LOOKS emitted and reaches no interest — worse than a decline, which is counted.
+    for (const v of [null, undefined, "", "[]", "null", "not json", "{}", "[0]", '["7"]']) {
+      const c = classifyGithubRow("checkSuiteCompleted", { ...base, pull_request_numbers: v });
+      expect(c.emit).toBe(false);
+      expect(c.reason).toBe("no-pr-association:not-backfilled");
+    }
+  });
+
+  test("a populated association emits — the positive control on the decline above", () => {
+    const c = classifyGithubRow("checkSuiteCompleted", { ...base, pull_request_numbers: "[7]" });
+    expect(c.emit).toBe(true);
+    expect(c.reason).toBeNull();
+  });
+
+  test("the decline is a DECLINE, never fatal — un-arming the producer would not fix a row", () => {
+    const c = classifyGithubRow("checkSuiteCompleted", { ...base, pull_request_numbers: null });
+    expect(c.fatal).toBeUndefined();
+  });
+
+  test("parseCheckSuitePrNumbers accepts both serialisations and rejects everything else", () => {
+    expect(parseCheckSuitePrNumbers("[7]")).toEqual([7]);
+    expect(parseCheckSuitePrNumbers("[7,9]")).toEqual([7, 9]);
+    // the webhook's own object form, in case the mirror serialises it verbatim
+    expect(parseCheckSuitePrNumbers('[{"number":7},{"number":9}]')).toEqual([7, 9]);
+    expect(parseCheckSuitePrNumbers([7, 9])).toEqual([7, 9]);
+    // ⛔ every unusable form is [], which is a decline — never a partial or a guess
+    expect(parseCheckSuitePrNumbers("[0]")).toEqual([]);
+    expect(parseCheckSuitePrNumbers('["7"]')).toEqual([]);
+    expect(parseCheckSuitePrNumbers("{}")).toEqual([]);
+    expect(parseCheckSuitePrNumbers("nonsense")).toEqual([]);
+    expect(parseCheckSuitePrNumbers(null)).toEqual([]);
+    // a mixed list keeps only the usable entries rather than failing whole
+    expect(parseCheckSuitePrNumbers('[7,"x",0,9]')).toEqual([7, 9]);
+  });
+});
+
+describe("CTC-712 — the edge identity survives a re-read and distinguishes a re-run", () => {
+  const row = (ts, conclusion) => ({
+    __ts: ts, __id: "cs1", repo_id: "o/r", check_suite_id: "cs1",
+    status: "completed", conclusion, pull_request_numbers: "[7]",
+  });
+
+  test("a re-read of the same completion is byte-identical", () => {
+    // The settle window re-reads every row each tick; an unstable id would make the
+    // seen-set useless and every suite would emit once per tick.
+    expect(githubEdgeId("checkSuiteCompleted", row(1000, "success")))
+      .toBe(githubEdgeId("checkSuiteCompleted", row(1000, "success")));
+  });
+
+  test("⛔ a rerequested suite REUSES its id and must still be a distinct edge", () => {
+    // GitHub's `rerequested` reuses check_suite_id, so the PK alone would suppress the
+    // re-run's completion as a re-read — and under enforce the merge gate would wait
+    // forever on a CI pass that already happened. The COORDINATE is what separates
+    // them, which is what `mutableRow` folds in.
+    const first = githubEdgeId("checkSuiteCompleted", row(1000, "failure"));
+    const rerun = githubEdgeId("checkSuiteCompleted", row(2000, "success"));
+    expect(rerun).not.toBe(first);
+    // ⛔ PINNED EXACTLY. `not.toBe` alone passed even with the fold hard-coded back to
+    // `row.after` — the timestamps differed, so the assertion was satisfied by
+    // something other than the mechanism it named. A mutation caught that; the exact
+    // string is what closes it.
+    expect(first).toBe("gh:checkSuiteCompleted:cs1:1000:");
+    expect(rerun).toBe("gh:checkSuiteCompleted:cs1:2000:");
+  });
+
+  test("⛔ WITHOUT the coordinate fold, a re-run would be suppressed — the control", () => {
+    // Proves the previous test is about `mutableRow` and not about the id happening to
+    // vary: a stream with no fold yields the SAME id for both completions.
+    const bare = (ts) => githubEdgeId("prOpened", { __ts: ts, __id: "o/r#7", repo_id: "o/r", number: 7 });
+    expect(bare(1000)).toBe(bare(2000));
+  });
+
+  test("⛔ the fold reads the STREAM's columns — a push id is unchanged by this change", () => {
+    // Regression guard on the generalisation: `githubEdgeId` used to hard-code
+    // `row.after`, and a stream-driven version that dropped push's column would
+    // collapse push identity back to the ref and kill github.push after one push.
+    const push = { __ts: 1000, __id: "o/r@refs/heads/main", repo_id: "o/r", ref: "refs/heads/main", after: "sha-a" };
+    expect(githubEdgeId("push", push)).toBe("gh:push:o/r@refs/heads/main:1000:sha-a");
   });
 });
