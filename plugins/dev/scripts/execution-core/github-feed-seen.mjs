@@ -36,7 +36,15 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export function defaultSeenPath(orchDir, account = "tenant-0") {
+/**
+ * ⚠️ No account default here on purpose — the caller resolves it once
+ * (`github-feed-timer.resolveAccount`) and threads it, so there is exactly one
+ * answer per process to which tenant this host is.
+ */
+export function defaultSeenPath(orchDir, account) {
+  if (typeof account !== "string" || account === "") {
+    throw new Error("defaultSeenPath: account is required — an unlabelled store files evidence under the wrong tenant");
+  }
   return join(orchDir, `github-feed-seen-${account}.db`);
 }
 

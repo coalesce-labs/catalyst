@@ -875,6 +875,7 @@ jobs:
             abort-worker.test.mjs \
             assertion-evidence.test.mjs \
             assertion-evidence-parity.test.mjs \
+            cli-header-backtick-guard.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
@@ -960,6 +961,7 @@ jobs:
             github-feed-event.test.mjs \
             github-feed-sweep.test.mjs \
             github-feed-parity.test.mjs \
+            github-feed-timer.test.mjs \
             cloud-feed-gate.test.mjs \
             cloud-feed-capture.test.mjs \
             cloud-feed-timer.test.mjs \
