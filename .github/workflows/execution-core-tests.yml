@@ -1002,6 +1002,10 @@ jobs:
             github-feed-sweep.test.mjs \
             github-feed-parity.test.mjs \
             github-feed-timer.test.mjs \
+            github-feed-gate.test.mjs \
+            github-feed-ready.test.mjs \
+            github-feed-gate-install.test.mjs \
+            github-feed-gate-wiring.test.mjs \
             cloud-feed-gate.test.mjs \
             cloud-feed-capture.test.mjs \
             cloud-feed-timer.test.mjs \

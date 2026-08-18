@@ -1,22 +1,27 @@
 // github-feed-timer.mjs — CTL-1929. The daemon-hosted tick for the GitHub leg.
 //
-// ── ⛔ `enforce` IS NOT REACHABLE YET, BY DESIGN ────────────────────────────
-// On the Linear leg, `enforce` means two things at once: the producer emits the
-// real event AND `cloud-feed-gate` suppresses smee's copy. Those halves are not
-// separable — emitting real `github.*` events while the tunnel is still delivering
-// its own would put BOTH on the log, and every consumer would route twice: two
-// `monitor-merge` wakes, two CI-wait resolutions, two `filter_state` transitions.
+// ── `enforce` IS REACHABLE, AND IT IS REACHABLE PER NAME ───────────────────
+// It was not, until `github-feed-gate.mjs` landed. The blocker was never the
+// producer: `enforce` means the producer emits the real event AND the gate
+// suppresses smee's copy, and those halves are not separable — emitting real
+// `github.*` names while the tunnel still delivers its own puts BOTH on the log and
+// every consumer routes twice.
 //
-// The gate is not wired for `github.*` (`DISPATCH_CLASS_NAMES` is three `linear.*`
-// names), and it MUST NOT be until `github.pr.merged` and
-// `github.check_suite.completed` exist — CTC-691 and CTC-667 item 4 — because
-// suppressing smee for names this producer cannot emit is a total loss of the CI
-// wait and the deploy chain.
+// ⛔ WHAT CHANGED IS THE GRANULARITY, NOT THE RULE. The earlier refusal was
+// all-or-nothing: because this producer cannot emit `github.pr.merged` (CTC-691) or
+// `github.check_suite.completed` (CTC-667 item 4), enforce was refused ENTIRELY, so
+// nine fully-covered names sat behind two uncovered ones. The gate now suppresses
+// smee per NAME, so the two gaps hold back only themselves.
 //
-// So `enforce` here DEGRADES TO SHADOW and says so, loudly, once per process. It
-// does not silently do nothing (an operator would read the flag as active), and it
-// does not half-activate (which is the double-dispatch above). A mode that cannot
-// be honoured is refused by name.
+// ⚠️ THIS FILE MUST THEREFORE EMIT REAL NAMES ONLY FOR WHAT THE GATE CAN SUPPRESS.
+// The two sides are the same invariant read from opposite ends — the producer
+// decides what to emit, the gate decides what to suppress, and if they disagree the
+// result is either a double dispatch (feed emits, gate does not suppress smee) or a
+// dropped edge (gate suppresses smee, feed declined to emit). Both sides read
+// `GITHUB_SUPPRESSIBLE_NAMES`, so they cannot disagree.
+//
+// An excluded name still goes out as a `would-dispatch` marker under enforce, so
+// the parity ledger keeps observing it and the gap stays measurable while it lasts.
 //
 // ── WHAT SHADOW EMITS, AND WHY IT IS A DIFFERENT NAME ──────────────────────
 // `github-feed.would-dispatch`, never the real `github.*` name. Re-emitting
@@ -37,6 +42,11 @@ import { createSeenStore, defaultSeenPath } from "./github-feed-seen.mjs";
 import { githubSweepUnreadyReason, runGithubSweep } from "./github-feed-sweep.mjs";
 import { buildCanonicalEvent } from "./lib/canonical-event.mjs";
 import { DEFAULT_ACCOUNT } from "./linear-feed-run.mjs";
+import {
+  GITHUB_CONSUMED_NAMES,
+  GITHUB_SUPPRESSIBLE_NAMES,
+} from "./github-feed-gate.mjs";
+import { defaultReadyPath, writeReadyState } from "./github-feed-ready.mjs";
 
 /**
  * Which account this host is.
@@ -57,6 +67,12 @@ export function resolveAccount(envObj = process.env) {
 
 /** The shadow-only marker name. Deliberately NOT a `github.*` name — see the header. */
 export const EVENT_WOULD_DISPATCH = "github-feed.would-dispatch";
+
+/**
+ * The names this producer may emit under their REAL name. Derived from the gate's
+ * export, never re-typed — see the header's "same invariant from opposite ends".
+ */
+const SUPPRESSIBLE_SET = new Set(GITHUB_SUPPRESSIBLE_NAMES);
 
 export function defaultShadowPath(orchDir, account = resolveAccount()) {
   return join(orchDir, "shadow", `github-feed-${account}.jsonl`);
@@ -84,16 +100,28 @@ export function assertNotEventLog(path) {
  * the point: a caller must be able to log what the operator asked for AND what is
  * running, or a degraded node is indistinguishable from a configured one.
  */
-export function resolveEffectiveMode(requested) {
+export function resolveEffectiveMode(
+  requested,
+  // ⚠️ INJECTABLE SO THE DERIVATION IS OBSERVABLE. With the real constants baked
+  // in, a hand-written "9 of 12" in the reason string is indistinguishable from the
+  // computed one — the test that claims to own that mutation passes with it applied,
+  // and would keep passing after a gap closes and the true number becomes 10. That
+  // sentence is what an operator reads to decide the tunnel can retire.
+  { suppressible = GITHUB_SUPPRESSIBLE_NAMES, consumed = GITHUB_CONSUMED_NAMES } = {},
+) {
   if (requested === "enforce") {
+    // ⚠️ NOT degraded, but not unqualified either — the reason is retained and now
+    // states the residual, because an operator who reads `mode: enforce` and infers
+    // "the tunnel can go" would be wrong until all three gaps close. A mode that is
+    // partially honoured has to say which part.
     return {
       requested,
-      effective: "shadow",
-      degraded: true,
+      effective: "enforce",
+      degraded: false,
       reason:
-        "enforce requires the dispatch gate to suppress the smee copy; the gate carries no github.* names " +
-        "(and must not until CTC-691 and CTC-667 item 4 land, or the CI wait and deploy chain lose their only source). " +
-        "Running as shadow.",
+        `enforce is authoritative for ${suppressible.length} of ${consumed.length} consumed names; ` +
+        `smee stays authoritative for ${consumed.length - suppressible.length} ` +
+        `(CTC-691, CTC-667 item 4, CTC-704) and the tunnel cannot retire until they close.`,
     };
   }
   return { requested, effective: requested, degraded: false, reason: null };
@@ -134,6 +162,10 @@ export function runGithubFeedTick({
   account = resolveAccount(),
   dbPath,
   now = Date.now(),
+  // Readiness as of the END of the PREVIOUS tick. Defaults false so a caller that
+  // forgets to thread it emits unstamped events, which the gate refuses — the
+  // non-dispatching half, same direction as every other absent probe here.
+  authorityAtEntry = false,
   appendEventFn,
   appendShadowFn,
   sourceFactory = createGithubFeedSource,
@@ -147,6 +179,12 @@ export function runGithubFeedTick({
   if (resolved.effective === "off") {
     return { skipped: "mode-off", mode: resolved, counts: null, ready: false };
   }
+
+  // Readiness AS THIS TICK BEGAN. Captured before the sweep runs, so every event
+  // this sweep emits is stamped with one value that cannot change underneath it —
+  // see the stamp comment in the sink. `authorityAtEntry` is recomputed at the end
+  // of the tick for the NEXT one; that is the value written to the ready file.
+  const authorityNow = () => authorityAtEntry;
 
   let source = null;
   let seen = null;
@@ -173,11 +211,45 @@ export function runGithubFeedTick({
       seen,
       sink: (event) => {
         emitted.push(event);
-        // The FULL envelope goes to the shadow file — that is the ledger's input.
+        // The FULL envelope goes to the shadow file — that is the ledger's input,
+        // in EVERY mode. An instrument that changes shape at the moment of cutover
+        // cannot judge the cutover.
         appendShadowFn?.(event);
-        // A marker, under its own name, goes to the event log so the tick is
-        // observable without the ledger.
-        if (appendEventFn) appendEventFn(buildWouldDispatchEvent(event, { account }, seams));
+        if (!appendEventFn) return;
+
+        const name = event?.attributes?.["event.name"];
+        // ⛔ REAL NAME ONLY FOR WHAT THE GATE CAN SUPPRESS. Read from the gate's own
+        // export so the producer and the gate cannot drift: emitting a real name the
+        // gate will not suppress double-dispatches that name, and declining a name
+        // the gate DOES suppress drops the edge entirely.
+        if (resolved.effective === "enforce" && SUPPRESSIBLE_SET.has(name)) {
+          // ⛔ AUTHORITY IS STAMPED AT EMISSION, not read at consumption (CTL-1901).
+          // A later readiness change must not retroactively grant OR revoke authority
+          // for a line already on disk — the sweep's cursor has advanced past the
+          // edge, so a revoked line reaches neither path.
+          //
+          // ⚠️ And here the stamp is doing MORE work than on the Linear leg, because
+          // the consumer is a different process: the broker cannot see this timer's
+          // state at all, so the stamp is the only authority signal that crosses.
+          const stamped = {
+            ...event,
+            body: {
+              ...event.body,
+              payload: { ...(event.body?.payload ?? {}), feedAuthority: authorityNow() === true },
+            },
+          };
+          // ⛔ NO try/catch. In enforce this append IS the dispatch: swallowing a
+          // failure would let the sweep settle the emission and advance its cursor
+          // past the edge while the gate suppresses smee's copy — the edge would
+          // reach nothing, permanently, with a counter as the only trace. Letting it
+          // throw engages the sweep's last-contiguous-success rule so the next tick
+          // re-emits. Opposite posture to the shadow sink above, which is evidence.
+          appendEventFn(stamped);
+          return;
+        }
+        // Shadow, or an excluded name under enforce: a marker under its OWN name, so
+        // nothing actuates and the ledger keeps observing the gap while it lasts.
+        appendEventFn(buildWouldDispatchEvent(event, { account }, seams));
       },
       orchDir,
       account,
@@ -213,6 +285,7 @@ export function startGithubFeedTimer({
   dbPath,
   eventLogPath,
   shadowPath,
+  readyPath,
   appendFn,
   logger = null,
   clock = { setInterval, clearInterval },
@@ -240,14 +313,46 @@ export function startGithubFeedTimer({
     }
   };
 
+  const readyFile = readyPath ?? defaultReadyPath(orchDir, account);
+
   let last = null;
+  // Readiness carried BETWEEN ticks. The sweep stamps every event it emits with the
+  // value that was true when the tick began (see runGithubFeedTick), so a flip
+  // during a tick cannot split that tick's output across two authority regimes.
+  let authority = false;
+
+  const publishReady = (state) => {
+    // ⛔ WRITTEN EVERY TICK, INCLUDING THE UNREADY ONES. A heartbeat that is only
+    // written while healthy is indistinguishable from a dead process — which is the
+    // same failure the staleness bound exists for, arriving one step earlier. The
+    // un-ready ticks are the ones whose REASON an operator most needs.
+    writeReadyState(readyFile, { ...state, at: Date.now(), intervalSec }, { logger });
+  };
+
   const tick = () => {
     try {
-      last = runGithubFeedTick({ mode, orchDir, account, dbPath, appendEventFn, appendShadowFn, logger });
+      last = runGithubFeedTick({
+        mode,
+        orchDir,
+        account,
+        dbPath,
+        appendEventFn,
+        appendShadowFn,
+        logger,
+        authorityAtEntry: authority,
+      });
+      authority = last?.ready === true;
+      publishReady({ ready: authority, unready: last?.unready ?? null, mode: last?.mode?.effective ?? null });
     } catch (err) {
       // A guardrail that can wedge the daemon tick is not a guardrail.
       logger?.error?.({ err: err?.message }, "github-feed: tick threw");
       last = { error: `tick-threw:${err?.name ?? "unknown"}`, ready: false };
+      // ⛔ A THROWN TICK MUST UN-ARM, and must say so rather than simply stop
+      // writing. If it only stopped writing, the previous `ready: true` would sit
+      // there until the staleness window expired and the gate would keep suppressing
+      // smee for up to 90 s on the authority of a tick that crashed.
+      authority = false;
+      publishReady({ ready: false, unready: `tick-threw:${err?.name ?? "unknown"}`, mode: null });
     }
   };
 
@@ -257,9 +362,14 @@ export function startGithubFeedTimer({
     stop: () => clock.clearInterval(handle),
     tickNow: tick,
     lastReport: () => last,
-    // Always false today — `enforce` degrades to shadow, so nothing this producer
-    // emits is ever authoritative. Exposed so a future gate reads one answer.
-    isReady: () => false,
+    // ⚠️ THE IN-PROCESS ANSWER, AND IT IS NOT THE ONE THE GATE USES. The `github.*`
+    // consumer is the broker, a separate process, which reads the ready FILE instead
+    // (github-feed-ready.mjs). This is exposed for the daemon's own logging and for
+    // tests; wiring it into a gate that lives in this process would work and would
+    // also be a second, in-memory authority path that the real consumer does not
+    // share — two answers to one question.
+    isReady: () => last?.ready === true,
+    readyPath: readyFile,
     mode: resolved,
   };
 }

@@ -18,6 +18,7 @@ import { DEFAULT_ACCOUNT } from "./linear-feed-run.mjs";
 import { defaultSeenPath } from "./github-feed-seen.mjs";
 import { streamCursorPath } from "./github-feed-sweep.mjs";
 import { readGithubFeedConfig } from "./config.mjs";
+import { GITHUB_CONSUMED_NAMES, GITHUB_SUPPRESSIBLE_NAMES } from "./github-feed-gate.mjs";
 
 const tmp = mkdtempSync(join(tmpdir(), "gh-feed-timer-"));
 afterAll(() => { try { rmSync(tmp, { recursive: true, force: true }); } catch { /* never fail in cleanup */ } });
@@ -72,15 +73,42 @@ describe("⛔ P2 (Codex #3524): the account is resolved, never hard-coded", () =
   });
 });
 
-describe("⛔ enforce is refused BY NAME, not silently", () => {
-  test("enforce degrades to shadow and carries a reason", () => {
+describe("enforce is honoured PER NAME, and says which part it cannot honour", () => {
+  // ⚠️ THIS REPLACES "enforce degrades to shadow". That refusal was all-or-nothing:
+  // nine fully-covered names sat behind two uncovered ones. github-feed-gate.mjs
+  // suppresses per NAME, so the gaps now hold back only themselves. The property
+  // being asserted is no longer "enforce is refused" but "enforce is qualified".
+  test("enforce is effective, undegraded, and names the residual", () => {
     const r = resolveEffectiveMode("enforce");
-    expect(r.effective).toBe("shadow");
-    expect(r.degraded).toBe(true);
-    expect(r.reason).toContain("CTC-691");
-    // requested and effective stay distinct — a degraded node must not be
-    // indistinguishable from a configured one.
+    expect(r.effective).toBe("enforce");
+    expect(r.degraded).toBe(false);
     expect(r.requested).toBe("enforce");
+    // ⛔ The reason must still name every open gap. An operator who reads
+    // `mode: enforce` and infers "the tunnel can go" is wrong until all three close,
+    // so a partially-honoured mode has to say which part.
+    for (const ticket of ["CTC-691", "CTC-667", "CTC-704"]) {
+      expect(r.reason).toContain(ticket);
+    }
+  });
+
+  test("⛔ the counts in the reason are DERIVED — driven with a DIFFERENT name set", () => {
+    // ⚠️ My first version compared the reason against the real constants, and the
+    // mutation (hand-writing "9 of 12") PASSED — the literal and the computed value
+    // are the same string today. It asserted a tautology. The only way to observe a
+    // derivation is to change its inputs, so this drives the post-CTC-704 world:
+    // one more name covered, one fewer excluded.
+    const r = resolveEffectiveMode("enforce", {
+      suppressible: [...GITHUB_SUPPRESSIBLE_NAMES, "github.push"],
+      consumed: GITHUB_CONSUMED_NAMES,
+    });
+    expect(r.reason).toContain(`${GITHUB_SUPPRESSIBLE_NAMES.length + 1} of ${GITHUB_CONSUMED_NAMES.length}`);
+    expect(r.reason).toContain(
+      `smee stays authoritative for ${GITHUB_CONSUMED_NAMES.length - GITHUB_SUPPRESSIBLE_NAMES.length - 1}`,
+    );
+    // and the shipped default still reports today's real partition
+    expect(resolveEffectiveMode("enforce").reason).toContain(
+      `${GITHUB_SUPPRESSIBLE_NAMES.length} of ${GITHUB_CONSUMED_NAMES.length}`,
+    );
   });
 
   test("shadow and off are not degraded", () => {
@@ -88,12 +116,14 @@ describe("⛔ enforce is refused BY NAME, not silently", () => {
     expect(resolveEffectiveMode("off").effective).toBe("off");
   });
 
-  test("nothing this producer emits is ever authoritative today", () => {
+  test("a producer that has not completed a sweep is NOT ready", () => {
     const t = startGithubFeedTimer({
       mode: "enforce", orchDir: join(tmp, "auth"), dbPath: ":memory:",
       eventLogPath: join(tmp, "auth", "ev.jsonl"), appendFn: () => {},
       clock: { setInterval: () => ({ unref() {} }), clearInterval: () => {} },
     });
+    // setInterval is stubbed, so no tick has run — readiness must be false rather
+    // than defaulting to "armed because the mode says enforce".
     expect(t.isReady()).toBe(false);
     t.stop();
   });
@@ -200,5 +230,119 @@ describe("the tick", () => {
     expect(() => handle()).not.toThrow();
     expect(t.lastReport()).not.toBeNull();
     t.stop();
+  });
+});
+
+describe("⛔ under enforce the producer emits a REAL name only for what the gate can suppress", () => {
+  // The producer and the gate are the same invariant read from opposite ends. If
+  // they disagree the result is a double dispatch (feed emits, gate does not
+  // suppress smee) or a dropped edge (gate suppresses smee, feed declined). These
+  // drive the sink directly through the injected sweep seam — no replica needed.
+  const ghEvent = (name) => ({
+    attributes: { "event.name": name, "vcs.repository.name": "r" },
+    body: { payload: { source: "cloud-feed" } },
+  });
+
+  const drive = (mode, names, { authorityAtEntry = true } = {}) => {
+    const log = [];
+    runGithubFeedTick({
+      mode,
+      orchDir: join(tmp, "emit"),
+      dbPath: ":memory:",
+      authorityAtEntry,
+      appendEventFn: (e) => log.push(e),
+      appendShadowFn: () => {},
+      sourceFactory: () => ({ close() {} }),
+      seenFactory: () => ({ close() {} }),
+      sweepFn: ({ sink }) => {
+        for (const n of names) sink(ghEvent(n));
+        return { emitted: names.length, suppressed: 0, declined: 0, failures: 0, byReason: {} };
+      },
+    });
+    return log.map((e) => e?.attributes?.["event.name"]);
+  };
+
+  test("a suppressible name goes out under its REAL name", () => {
+    expect(drive("enforce", ["github.pr.opened"])).toEqual(["github.pr.opened"]);
+  });
+
+  test("⛔ an EXCLUDED name stays a would-dispatch marker even under enforce", () => {
+    // pr.merged / check_suite have no replacement (CTC-691, CTC-667 item 4) and push
+    // has a lossy one (CTC-704). Emitting these for real would put two copies on the
+    // log, because the gate correctly refuses to suppress smee for them.
+    for (const n of ["github.pr.merged", "github.check_suite.completed", "github.push"]) {
+      expect(drive("enforce", [n])).toEqual([EVENT_WOULD_DISPATCH]);
+    }
+  });
+
+  test("shadow emits would-dispatch for EVERYTHING, including suppressible names", () => {
+    expect(drive("shadow", ["github.pr.opened", "github.pr.merged"]))
+      .toEqual([EVENT_WOULD_DISPATCH, EVENT_WOULD_DISPATCH]);
+  });
+
+  test("⭐ the real-name set is exactly the gate's suppressible set — asserted over ALL consumed names", () => {
+    // The control that makes the two tests above non-anecdotal: drive every name the
+    // router consumes through one tick and compare the partition to the gate's.
+    const emitted = drive("enforce", GITHUB_CONSUMED_NAMES);
+    const real = emitted.filter((n) => n !== EVENT_WOULD_DISPATCH);
+    expect(real.sort()).toEqual([...GITHUB_SUPPRESSIBLE_NAMES].sort());
+    expect(emitted.filter((n) => n === EVENT_WOULD_DISPATCH)).toHaveLength(
+      GITHUB_CONSUMED_NAMES.length - GITHUB_SUPPRESSIBLE_NAMES.length,
+    );
+  });
+});
+
+describe("⛔ the emission-time authority stamp is what crosses the process boundary", () => {
+  const ghEvent = (name) => ({
+    attributes: { "event.name": name },
+    body: { payload: { source: "cloud-feed" } },
+  });
+  const stampFor = (authorityAtEntry) => {
+    const log = [];
+    runGithubFeedTick({
+      mode: "enforce",
+      orchDir: join(tmp, "stamp"),
+      dbPath: ":memory:",
+      authorityAtEntry,
+      appendEventFn: (e) => log.push(e),
+      appendShadowFn: () => {},
+      sourceFactory: () => ({ close() {} }),
+      seenFactory: () => ({ close() {} }),
+      sweepFn: ({ sink }) => {
+        sink(ghEvent("github.pr.opened"));
+        return { emitted: 1, suppressed: 0, declined: 0, failures: 0, byReason: {} };
+      },
+    });
+    return log[0]?.body?.payload?.feedAuthority;
+  };
+
+  test("an armed tick stamps true", () => {
+    expect(stampFor(true)).toBe(true);
+  });
+
+  test("⛔ an UN-armed tick stamps false, and the gate then refuses the line", () => {
+    // The broker cannot see this timer's state, so the stamp is the only authority
+    // signal that crosses. An unstamped/false line must not dispatch.
+    expect(stampFor(false)).toBe(false);
+  });
+
+  test("⚠️ the stamp defaults to FALSE when a caller forgets to thread readiness", () => {
+    // Same direction as every other absent probe in this feature: the non-dispatching
+    // half. A default of `true` would make a wiring mistake authoritative.
+    const log = [];
+    runGithubFeedTick({
+      mode: "enforce",
+      orchDir: join(tmp, "stamp2"),
+      dbPath: ":memory:",
+      appendEventFn: (e) => log.push(e),
+      appendShadowFn: () => {},
+      sourceFactory: () => ({ close() {} }),
+      seenFactory: () => ({ close() {} }),
+      sweepFn: ({ sink }) => {
+        sink(ghEvent("github.pr.opened"));
+        return { emitted: 1, suppressed: 0, declined: 0, failures: 0, byReason: {} };
+      },
+    });
+    expect(log[0]?.body?.payload?.feedAuthority).toBe(false);
   });
 });
