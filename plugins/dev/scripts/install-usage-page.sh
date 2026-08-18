@@ -16,6 +16,20 @@ while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 
+# CTL-1975 / CTL-1968: this was the one install path #3576 did not cover — verified against that
+# PR's own file list. Both branches below mutate gui/$(id -u), which is PER-USER and not per-HOME,
+# so a caller under a scratch HOME either squats the real label or boots the real agent OUT. The
+# uninstall branch is guarded too, deliberately: booting out the fleet's live pager from a sealed
+# test is the same incident as squatting it.
+# shellcheck source=lib/launchd-domain-guard.sh
+. "${SCRIPT_DIR}/lib/launchd-domain-guard.sh"
+launchd_agent_guard() {
+  launchd_guard_ok "the account-usage pager agent" && return 0
+  launchd_guard_message "the account-usage pager agent" >&2
+  echo "install-usage-page: REFUSED (${CATALYST_LAUNCHD_GUARD_REASON})" >&2
+  exit 1
+}
+
 LABEL="ai.coalesce.catalyst-usage-page"
 DEST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 TEMPLATE="${SCRIPT_DIR}/usage-page/${LABEL}.plist"
@@ -37,6 +51,7 @@ case "${1:-}" in
 esac
 
 if [[ "$MODE" == "uninstall" ]]; then
+  launchd_agent_guard
   launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
   rm -f "$DEST"
   echo "install-usage-page: uninstalled ${LABEL}"
@@ -74,6 +89,7 @@ plutil -lint "$DEST" >/dev/null || {
   exit 1
 }
 
+launchd_agent_guard
 launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$DEST"
 echo "install-usage-page: installed and loaded ${LABEL} (every 600s, threshold 80%)"
