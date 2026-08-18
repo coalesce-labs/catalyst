@@ -222,7 +222,7 @@ many broad `Grep`s, getting up to speed with far fewer tool calls and tokens.
 **How release-please routes version bumps (monorepo):**
 
 - Routing is by **file paths changed**, NOT by commit message scope. A commit touching files in both
-  `plugins/dev/` and `plugins/pm/` bumps both plugins regardless of scope.
+  `plugins/dev/` and `plugins/playground/pm/` bumps both plugins regardless of scope.
 - The `(scope)` in `fix(dev):` controls **changelog grouping**, not which plugin gets bumped.
 - Squash merges work correctly — the GitHub API provides the file list to release-please.
 - Use the scope that best describes the primary intent. Both plugins still get their version bumps.

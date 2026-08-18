@@ -57,7 +57,9 @@ check() {
 
 GITC="git -c user.email=t@t -c user.name=t -c commit.gpgsign=false -c init.defaultBranch=main"
 
-# make_origin NAME → bare origin.git with plugins/dev + plugins/pm seeded (each
+# make_origin NAME → bare origin.git with plugins/dev + plugins/playground/pm seeded
+# (the latter deliberately one level deep, so the enumeration is proven to reach a
+# GROUPED plugin and not just a top-level one — CTL-1999). Each
 # with a .claude-plugin/plugin.json carrying its own `name`); sets ORIGIN, SEED.
 # Two plugins so the skills-dir cases can assert EVERY plugin is symlinked (keyed
 # by manifest name, not dir name — catalyst-dev/catalyst-pm, not dev/pm).
@@ -65,11 +67,11 @@ make_origin() {
   local base="${SCRATCH}/orig_$1"
   mkdir -p "${base}/seed"
   $GITC -C "${base}/seed" init -q
-  mkdir -p "${base}/seed/plugins/dev/.claude-plugin" "${base}/seed/plugins/pm/.claude-plugin"
+  mkdir -p "${base}/seed/plugins/dev/.claude-plugin" "${base}/seed/plugins/playground/pm/.claude-plugin"
   echo '{"name":"catalyst-dev","version":"1.0.0"}' \
     > "${base}/seed/plugins/dev/.claude-plugin/plugin.json"
   echo '{"name":"catalyst-pm","version":"1.0.0"}' \
-    > "${base}/seed/plugins/pm/.claude-plugin/plugin.json"
+    > "${base}/seed/plugins/playground/pm/.claude-plugin/plugin.json"
   echo "v1" > "${base}/seed/plugins/dev/marker.txt"
   $GITC -C "${base}/seed" add -A
   $GITC -C "${base}/seed" commit -qm "initial"
@@ -258,7 +260,7 @@ t9() {
   [[ -L "${HOME9}/.claude/skills/catalyst-dev" ]] || return 1
   [[ -L "${HOME9}/.claude/skills/catalyst-pm" ]] || return 1
   [[ "$(readlink "${HOME9}/.claude/skills/catalyst-dev")" == "${CO9}/plugins/dev" ]] || return 1
-  [[ "$(readlink "${HOME9}/.claude/skills/catalyst-pm")" == "${CO9}/plugins/pm" ]] || return 1
+  [[ "$(readlink "${HOME9}/.claude/skills/catalyst-pm")" == "${CO9}/plugins/playground/pm" ]] || return 1
   # the script no longer installs the interactive --plugin-dir wrapper
   ! { [[ -f "${HOME9}/.zshrc" ]] && grep -q ">>> catalyst plugin-source" "${HOME9}/.zshrc"; }
 }

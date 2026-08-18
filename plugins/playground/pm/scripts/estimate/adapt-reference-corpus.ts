@@ -70,7 +70,7 @@ async function main() {
     return i !== -1 && i + 1 < args.length ? args[i + 1] : null;
   };
 
-  const repoRoot = resolve(import.meta.dir, "../../../..");
+  const repoRoot = resolve(import.meta.dir, "../../../../..");
   const inPath = resolve(
     getFlag("--in") ?? `${repoRoot}/thoughts/shared/pm/analyses/reference-corpus.json`
   );
