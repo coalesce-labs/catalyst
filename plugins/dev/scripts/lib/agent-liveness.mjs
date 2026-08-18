@@ -14,12 +14,22 @@
 // one copy here is the alternative to a second, drifting copy — and
 // execution-core's own `config.mjs` chain reaches `bun:sqlite`, so a role
 // runner cannot simply import from there. Everything in this file is pure and
-// imports nothing but `node:*` (nothing at all, in fact), so both callers can
-// load it under bare `node` with no node_modules.
+// imports nothing but `node:*` (just `node:crypto`, for the jitter source), so
+// both callers can load it under bare `node` with no node_modules.
 //
 // Every function is total and injectable: no clock, no randomness, and no env
 // is read unless it is passed in. That is what makes the restart policy
 // testable rather than something you find out about during an outage.
+
+import { randomInt } from "node:crypto";
+
+// The jitter source. This is backoff jitter, NOT a credential — but the value
+// flows into the heartbeat record alongside the session id, and CodeQL reads a
+// non-crypto RNG reaching that sink as js/insecure-randomness (high). It is
+// right to complain and cheap to satisfy: jitter is computed only on failure
+// paths, so a CSPRNG costs nothing measurable, and using one removes the SOURCE
+// rather than suppressing the warning. Injectable, so tests stay deterministic.
+const cryptoRandom = () => randomInt(0, 2 ** 30) / 2 ** 30;
 
 /** HTTP statuses that mean "the provider is overloaded, try again later". */
 export const OVERLOADED_STATUSES = new Set([429, 529]);
@@ -54,7 +64,7 @@ export function isOverloadedError(err) {
  * Returns 50%-100% of the ceiling — jitter is what stops N restarted roles from
  * retrying in lockstep and re-creating the thundering herd that killed them.
  */
-export function backoffMs(i, { baseMs = 1000, capMs = 30000, random = Math.random } = {}) {
+export function backoffMs(i, { baseMs = 1000, capMs = 30000, random = cryptoRandom } = {}) {
   const ceil = Math.min(capMs, baseMs * 2 ** i);
   return Math.floor(ceil * (0.5 + 0.5 * random()));
 }
@@ -126,7 +136,7 @@ export function decideRestart({
   attempt = 0,
   restartsLastHour = 0,
   reentriesLastHour = 0,
-  random = Math.random,
+  random = cryptoRandom,
 } = {}) {
   if (stopRequested) {
     return { action: "stop", waitMs: 0, sameSession: false, reason: "stop requested — the role wrote its handoff and exited; it stays down until `start`" };
