@@ -234,6 +234,13 @@ jobs:
         # a green result cannot come from a module that merely has nothing to detonate.
         run: bash __tests__/cli-shell-guard.test.sh
 
+      - name: catalyst-index pinned serving-root test (CTL-1935)
+        # The indexer is an on-demand CLI with no boot record, so evaluateDepSkew cannot grade it.
+        # This covers the pin itself: ancestry AND content AND clean, each proven to be the half
+        # that catches a case the others clear.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/catalyst-index-root.test.sh
+
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
         # named export (the CTL-1093 outage: getCatalystRepoDir added to daemon.mjs
