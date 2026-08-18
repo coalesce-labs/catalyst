@@ -9,6 +9,26 @@
 // cutover is judged by stopped working, mid-cutover, for a reason unrelated to the
 // thing it measures — so the fix is committed rather than left in /tmp.
 //
+// ⛔ CTL-2022: WHICH FILE IS "THE FEED SIDE" DEPENDS ON THE MODE, and reading the wrong
+// one is how this instrument certified the 2026-08-18 outage as clean.
+//
+// The producer's sink has two branches. In `shadow` it writes raw output to the shadow
+// file and a `would-dispatch` MARKER to the event log. In `enforce` it writes the REAL
+// event to the event log — a different branch, a different file. This runner read the
+// SHADOW FILE unconditionally, so at enforce it was measuring a stream that enforce
+// does not dispatch from.
+//
+// Measured on mini-2 across the enforce window 18:58:16Z-19:44:15Z: the shadow file
+// carried 125 `check_suite.completed` + 28 `push`; the event log's `cloud-feed` channel
+// carried ZERO of each, because the producer had downgraded both to markers. The ledger
+// reported `clean = true · exit 0` throughout — and had reported the same for the 65
+// minutes before the flip, which is what the flip was authorised on.
+//
+// So the feed side is now SELECTED FROM THE RESOLVED MODE: `event-log` at enforce,
+// `shadow` otherwise, overridable with `--feed-source` for forensics on a past window.
+// The selection is PRINTED, because an instrument that silently picks a side is the
+// defect one level up.
+//
 // ⚠️ THE WINDOW IS THE CALLER'S, deliberately. `compareGithubStreams` is pure and
 // takes two already-windowed arrays; keeping the windowing out here is what lets the
 // comparator be unit-tested without a filesystem.
@@ -21,13 +41,40 @@ import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { compareGithubStreams, parityExitCode } from "./github-feed-parity.mjs";
+import { GITHUB_CONSUMED_NAMES } from "./github-feed-gate.mjs";
+import { resolveGithubFeedMode } from "../lib/github-feed-mode.mjs";
+// ⛔ IMPORTED, never re-typed. A hand-written copy of the marker name that drifts would
+// make every dropped dispatch class invisible again — silently, and in the instrument.
+import { EVENT_WOULD_DISPATCH as MARKER_NAME } from "./github-feed-timer.mjs";
+import { selectFeedSource, isCloudFeedEvent, markerEventName } from "./github-feed-parity-source.mjs";
 
 const [lo, hi, ...rest] = process.argv.slice(2);
 const asJson = rest.includes("--json");
 if (!lo || !hi) {
-  console.error("usage: github-feed-parity-run.mjs <ISO-lo> <ISO-hi> [--json]");
+  console.error(
+    "usage: github-feed-parity-run.mjs <ISO-lo> <ISO-hi> [--json] [--feed-source=shadow|event-log]",
+  );
   process.exit(3);
 }
+
+const sourceFlag = rest.find((a) => a.startsWith("--feed-source="));
+const requestedSource = sourceFlag ? sourceFlag.slice("--feed-source=".length) : null;
+
+let modeInfo = null;
+try {
+  modeInfo = resolveGithubFeedMode();
+} catch {
+  /* selectFeedSource turns an unresolved mode into a NAMED refusal — see its header */
+}
+const selected = selectFeedSource({ requestedSource, mode: modeInfo?.mode ?? null });
+if (!selected.ok) {
+  console.error(
+    `cannot choose the feed side (${selected.reason}) — refusing to guess. ` +
+    "Re-run with --feed-source=shadow|event-log.",
+  );
+  process.exit(3);
+}
+const feedSource = selected.source;
 
 const CATALYST = process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
 const account = process.env.CATALYST_GITHUB_FEED_ACCOUNT ?? "tenant-0";
@@ -57,10 +104,35 @@ async function* jsonl(path) {
 const feed = [];
 let feedLines = 0;
 let feedLast = null;
-for await (const e of jsonl(shadowPath)) {
-  feedLines++;
-  if (typeof e?.ts === "string") feedLast = e.ts;
-  if (inWindow(e)) feed.push(e);
+// ⛔ MARKERS ARE EVIDENCE OF A GAP, NOT SILENCE. At enforce, a covered name the producer
+// downgraded to `github-feed.would-dispatch` leaves NOTHING under its real name on the
+// event log — so without counting the markers a dropped name is indistinguishable from
+// a quiet one, which is exactly how 153 dropped edges read as agreement.
+const markersByName = {};
+let markerTotal = 0;
+
+if (feedSource === "shadow") {
+  for await (const e of jsonl(shadowPath)) {
+    feedLines++;
+    if (typeof e?.ts === "string") feedLast = e.ts;
+    if (inWindow(e)) feed.push(e);
+  }
+} else {
+  // The feed's own copies on the unified log, identified by their POSITIVE provenance
+  // stamp — never by elimination, the same rule the smee reader below follows.
+  for await (const e of jsonl(eventsPath)) {
+    const marker = markerEventName(e, MARKER_NAME);
+    if (marker !== null) {
+      if (!inWindow(e)) continue;
+      markerTotal++;
+      markersByName[marker] = (markersByName[marker] ?? 0) + 1;
+      continue;
+    }
+    if (!isCloudFeedEvent(e)) continue;
+    feedLines++;
+    if (typeof e?.ts === "string") feedLast = e.ts;
+    if (inWindow(e)) feed.push(e);
+  }
 }
 
 const smee = [];
@@ -111,6 +183,28 @@ const report = compareGithubStreams(feed, smee);
 // It is reported rather than auto-corrected: silently clamping `hi` would hide a
 // producer that had genuinely stopped, which looks identical from here. The operator
 // is told which one they are looking at, and the verdict stays INCONCLUSIVE either way.
+// ⛔ CTL-2022: A MARKER UNDER A CONSUMED NAME MOVES THE VERDICT, it is not just printed.
+// Reporting a gap while returning `clean = true` is the same defect one level up — the
+// operator reads the exit code, and the whole reason this window was authorised was an
+// `exit 0`. At `enforce` a `would-dispatch` marker for a name the router CONSUMES means
+// that dispatch class produced nothing under its real name while the tunnel was closed,
+// which is precisely the 2026-08-18 failure. Only consumed names count: a marker for
+// some other name is the producer correctly declining something nobody routes.
+//
+// It is INCONCLUSIVE rather than a hard divergence for the same reason `smee-unjoined`
+// is: the ledger cannot prove from here whether smee also carried the edge. What it can
+// prove is that the feed did not, and that is enough to withhold a clean bill.
+const droppedClasses = Object.entries(markersByName)
+  .filter(([n]) => GITHUB_CONSUMED_NAMES.includes(n))
+  .sort((a, b) => b[1] - a[1]);
+if (feedSource === "event-log" && droppedClasses.length > 0) {
+  const total = droppedClasses.reduce((a, [, c]) => a + c, 0);
+  report.inconclusive.push(
+    `dispatch-classes-downgraded-to-markers:${total}:${droppedClasses.map(([n, c]) => `${n}=${c}`).join(",")}`,
+  );
+  report.clean = false;
+}
+
 const trailingSkew = typeof feedLast === "string" && feedLast < hi;
 if (trailingSkew) {
   report.inconclusive.push(`window-outruns-producer:feed-last=${feedLast}`);
@@ -124,6 +218,10 @@ const code = parityExitCode(report);
 // distinguishable from "I read the wrong file" without these lines. `*Last` is the
 // positive control: it should track real GitHub activity.
 const instrument = {
+  feedSource,
+  feedSourcePath: feedSource === "shadow" ? shadowPath : eventsPath,
+  modeResolved: modeInfo ? { mode: modeInfo.mode, source: modeInfo.source } : null,
+  markersByName, markerTotal,
   shadowPath, eventsPath,
   feedLinesTotal: feedLines, feedLastTs: feedLast,
   smeeGithubTotal: smeeSeen, smeeLastTs: smeeLast,
@@ -134,7 +232,21 @@ const instrument = {
 if (asJson) {
   console.log(JSON.stringify({ window: { lo, hi }, instrument, report, exit: code }, null, 2));
 } else {
-  console.log(`instrument: shadow lines=${feedLines} last=${feedLast} · smee github=${smeeSeen} last=${smeeLast} · torn=${torn}`);
+  console.log(
+    `instrument: feed-source=${feedSource}` +
+    `${modeInfo ? ` (mode=${modeInfo.mode} via ${modeInfo.source})` : " (mode unresolved — --feed-source override)"}` +
+    ` · feed lines=${feedLines} last=${feedLast} · smee github=${smeeSeen} last=${smeeLast} · torn=${torn}`,
+  );
+  if (markerTotal > 0) {
+    console.log(
+      `⛔ ${markerTotal} would-dispatch MARKER(s) on the event log in this window — the producer ` +
+      "declined to emit these under their real names:",
+    );
+    for (const [n, c] of Object.entries(markersByName).sort((a, b) => b[1] - a[1])) {
+      const consumed = GITHUB_CONSUMED_NAMES.includes(n);
+      console.log(`     ${String(n).padEnd(38)} ${String(c).padStart(5)}${consumed ? "   ⛔ CONSUMED — this is a DROPPED dispatch class" : "   (not routed — declining is correct)"}`);
+    }
+  }
   if (smeeDuplicates > 0) {
     console.log(`            ${smeeDuplicates} duplicate webhook deliveries collapsed (an observation node mirrors every worker's copy — see the source)`);
   }
