@@ -742,6 +742,19 @@ jobs:
         working-directory: plugins/dev/scripts/execution-core
         run: bun test install-lifecycle.test.mjs join-bundle.test.mjs
 
+      - name: linear write-path decision test (CTL-1961)
+        # ⛔ PINNED AT THE SAME TIME THE SUITE WAS WRITTEN. Verified before adding this step:
+        # `grep -c linear-write-path .github/workflows/` returned 0, so without this the suite
+        # runs only in a local full gate. That is the third time in two days a new suite would
+        # have shipped inert here (CTL-1975/FLEET-37, CTL-2004, now this) — CI runs an EXPLICIT
+        # list and nothing tells an author their file joined nothing.
+        #
+        # What it guards is a distinction, not a value: "the proxy is off" and "I could not
+        # reach the proxy" must never collapse to one answer. Collapsing them writes direct
+        # forever while reporting as a routed tool, which is what the first cut of CTL-1961 did.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test linear-write-path.test.mjs
+
       - name: replica-path cross-stack parity test (CTL-1893)
         # bash == node == a hand-written expected value at every fixture cell, including
         # the NAMED FAILURES (account-absent vs account-invalid route to different operator
