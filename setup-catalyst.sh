@@ -86,15 +86,18 @@ can_open_tty() {
 # (`~/catalyst/plugin-source`), so the bootstrap clone IS the plugin-source checkout
 # and that script then reuses it rather than cloning a second copy.
 CATALYST_SOURCE_DIR_RESOLVED=""
-CATALYST_SOURCE_ORIGIN=""
-CATALYST_SOURCE_REASON=""
+# Which candidate won, and why a resolution failed. Both are read by callers and by
+# __tests__/setup-catalyst-source-resolver.test.sh; exported so the answer is visible
+# to a child process (and to shellcheck, which cannot see the test's use).
+export CATALYST_SOURCE_ORIGIN=""
+export CATALYST_SOURCE_REASON=""
 NO_CLONE_SOURCE=0
 
 # The marker for "this is a Catalyst source tree". Deliberately a directory rather
 # than any single helper: a tree that exists but is missing ONE script must report
 # that specific script as missing (`catalyst_helper_path`), not read as "no tree".
 catalyst_is_source_tree() {
-	[[ -n ${1:-} && -d "$1/plugins/dev/scripts" ]]
+	[[ -n ${1-} && -d "$1/plugins/dev/scripts" ]]
 }
 
 catalyst_source_clone_target() {
@@ -115,7 +118,7 @@ resolve_catalyst_source() {
 	CATALYST_SOURCE_REASON=""
 
 	local candidate script_dir
-	if [[ -n ${CATALYST_SOURCE_DIR:-} ]] && catalyst_is_source_tree "${CATALYST_SOURCE_DIR}"; then
+	if [[ -n ${CATALYST_SOURCE_DIR-} ]] && catalyst_is_source_tree "${CATALYST_SOURCE_DIR}"; then
 		CATALYST_SOURCE_DIR_RESOLVED="$(cd "${CATALYST_SOURCE_DIR}" && pwd)"
 		CATALYST_SOURCE_ORIGIN="env"
 		echo "$CATALYST_SOURCE_DIR_RESOLVED"
@@ -133,7 +136,7 @@ resolve_catalyst_source() {
 		return 0
 	fi
 
-	if catalyst_is_source_tree "${PROJECT_DIR:-}"; then
+	if catalyst_is_source_tree "${PROJECT_DIR-}"; then
 		CATALYST_SOURCE_DIR_RESOLVED="$(cd "${PROJECT_DIR}" && pwd)"
 		CATALYST_SOURCE_ORIGIN="project-dir"
 		echo "$CATALYST_SOURCE_DIR_RESOLVED"
@@ -148,7 +151,7 @@ resolve_catalyst_source() {
 		return 0
 	fi
 
-	if [[ $NO_CLONE_SOURCE -eq 1 || -n ${CATALYST_NO_CLONE_SOURCE:-} ]]; then
+	if [[ $NO_CLONE_SOURCE -eq 1 || -n ${CATALYST_NO_CLONE_SOURCE-} ]]; then
 		CATALYST_SOURCE_REASON="no-source-tree"
 		return 1
 	fi
@@ -281,7 +284,7 @@ USAGE
 # Parse CLI flags. CATALYST_AUTONOMOUS is the project-wide headless signal
 # (same contract as plugins/dev/scripts/check-project-setup.sh).
 parse_args() {
-	if [[ -n ${CATALYST_AUTONOMOUS:-} ]]; then
+	if [[ -n ${CATALYST_AUTONOMOUS-} ]]; then
 		NON_INTERACTIVE=1
 	fi
 	while [[ $# -gt 0 ]]; do
@@ -375,7 +378,7 @@ ask_yes_no() {
 # (or on EOF) echo the default without consuming stdin.
 prompt_value() {
 	local prompt="$1"
-	local default="${2:-}"
+	local default="${2-}"
 	local reply=""
 	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
 		echo "$prompt [${default}] → ${default} (non-interactive)" >&2
@@ -409,7 +412,7 @@ merge_catalyst_section() {
 # harden_secrets_dir <dir> — mkdir -p then chmod 700. Idempotent.
 harden_secrets_dir() {
 	local dir="$1"
-	[[ -n "$dir" ]] || return 1
+	[[ -n $dir ]] || return 1
 	mkdir -p "$dir" || return 1
 	chmod 700 "$dir"
 }
@@ -419,9 +422,9 @@ ensure_secrets_gitignore() {
 	local dir="$1" gi line
 	gi="${dir}/.gitignore"
 	mkdir -p "$dir" || return 1
-	[[ -f "$gi" ]] || : > "$gi"
+	[[ -f $gi ]] || : >"$gi"
 	for line in 'config*.json' '*.env'; do
-		grep -qxF "$line" "$gi" 2>/dev/null || printf '%s\n' "$line" >> "$gi"
+		grep -qxF "$line" "$gi" 2>/dev/null || printf '%s\n' "$line" >>"$gi"
 	done
 }
 
@@ -429,7 +432,13 @@ ensure_secrets_gitignore() {
 write_secret_file() {
 	local content="$1" path="$2" tmp
 	tmp="$(mktemp)" || return 1
-	( umask 077; printf '%s' "$content" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+	(
+		umask 077
+		printf '%s' "$content" >"$tmp"
+	) || {
+		rm -f "$tmp"
+		return 1
+	}
 	chmod 600 "$tmp"
 	mv "$tmp" "$path"
 }
@@ -729,7 +738,7 @@ setup_execution_core_states() {
 	# script. The Linear workflow-state contract and the `worker-status` label group
 	# were therefore never provisioned, behind a warning that read as informational.
 	local states_script=""
-	if [[ -n ${CLAUDE_PLUGIN_ROOT:-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/setup-execution-core-states.sh" ]]; then
+	if [[ -n ${CLAUDE_PLUGIN_ROOT-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/setup-execution-core-states.sh" ]]; then
 		states_script="${CLAUDE_PLUGIN_ROOT}/scripts/setup-execution-core-states.sh"
 	else
 		if catalyst_helper_path setup-execution-core-states.sh >/dev/null; then
@@ -856,7 +865,7 @@ detect_os() {
 # unknown → all three. Fresh Linux machines default to bash, so writing only
 # ~/.zshenv left installed tools invisible in new shells (CTL-844 remediate).
 path_rc_files() {
-	case "${SHELL:-}" in
+	case "${SHELL-}" in
 	*zsh) echo "$HOME/.zshenv" ;;
 	*bash) printf '%s\n' "$HOME/.bashrc" "$HOME/.profile" ;;
 	*) printf '%s\n' "$HOME/.zshenv" "$HOME/.bashrc" "$HOME/.profile" ;;
@@ -1049,7 +1058,7 @@ offer_install_node() {
 	arch=$([[ "$(detect_arch)" == "arm64" ]] && echo "arm64" || echo "x64")
 	version="${CATALYST_NODE_VERSION:-$(curl -fsSL https://nodejs.org/dist/index.json |
 		jq -r '[.[] | select(.lts != false)][0].version')}"
-	[[ -n "$version" && "$version" != "null" ]] || {
+	[[ -n $version && $version != "null" ]] || {
 		print_error "Could not resolve Node LTS version"
 		return 1
 	}
@@ -1138,12 +1147,18 @@ offer_install_gh_cli() {
 	local ver os arch ext dir tmp
 	ver=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest |
 		jq -r '.tag_name' | sed 's/^v//')
-	[[ -n "$ver" && "$ver" != "null" ]] || {
+	[[ -n $ver && $ver != "null" ]] || {
 		print_error "Could not resolve gh version. Manual: https://cli.github.com/"
 		return 1
 	}
-	if [[ "$(uname -s)" == "Darwin" ]]; then os="macOS"; ext="zip"; else os="linux"; ext="tar.gz"; fi
-	if [[ "$ext" == "zip" ]] && ! command -v unzip &>/dev/null; then
+	if [[ "$(uname -s)" == "Darwin" ]]; then
+		os="macOS"
+		ext="zip"
+	else
+		os="linux"
+		ext="tar.gz"
+	fi
+	if [[ $ext == "zip" ]] && ! command -v unzip &>/dev/null; then
 		print_error "unzip not found — cannot extract gh archive. Manual: https://cli.github.com/"
 		return 1
 	fi
@@ -1152,7 +1167,7 @@ offer_install_gh_cli() {
 	tmp=$(mktemp -d)
 	if curl -fsSL -o "$tmp/gh.$ext" \
 		"https://github.com/cli/cli/releases/download/v${ver}/${dir}.${ext}"; then
-		if [[ "$ext" == "zip" ]]; then
+		if [[ $ext == "zip" ]]; then
 			unzip -q "$tmp/gh.$ext" -d "$tmp"
 		else
 			tar -xzf "$tmp/gh.$ext" -C "$tmp"
@@ -1603,12 +1618,12 @@ setup_project_config() {
 	# "catalyst"; regenerating the config must not clobber it and fragment the
 	# node's thoughts subtree away from the fleet's.
 	local thoughts_directory="${REPO_NAME}" thoughts_profile="${ORG_NAME}"
-	if [[ -f "$config_file" ]]; then
+	if [[ -f $config_file ]]; then
 		local _existing_dir _existing_prof
 		_existing_dir=$(jq -r '.catalyst.thoughts.directory // empty' "$config_file" 2>/dev/null)
 		_existing_prof=$(jq -r '.catalyst.thoughts.profile // empty' "$config_file" 2>/dev/null)
-		[[ -n "$_existing_dir" ]] && thoughts_directory="$_existing_dir"
-		[[ -n "$_existing_prof" ]] && thoughts_profile="$_existing_prof"
+		[[ -n $_existing_dir ]] && thoughts_directory="$_existing_dir"
+		[[ -n $_existing_prof ]] && thoughts_profile="$_existing_prof"
 	fi
 
 	# Deployment mode (CTL-1622): default single-host, but PRESERVE an existing
@@ -1617,7 +1632,7 @@ setup_project_config() {
 	# single-host. Validation is deferred to the resolver + `catalyst doctor`
 	# (same as ticket prefix), so accept any value here.
 	local deployment_mode="single-host"
-	if [[ -f "$config_file" ]]; then
+	if [[ -f $config_file ]]; then
 		local _existing_mode
 		# Preserve the value whenever the key is PRESENT and NON-NULL — including an
 		# explicit `false`/number/garbage — rather than `// empty` (which jq treats
@@ -1629,7 +1644,7 @@ setup_project_config() {
 		# "null", an unrecognized value that flips doctor to FAIL after regeneration.
 		# Deferred validation (resolver + doctor) is what surfaces a genuinely bad value.
 		_existing_mode=$(jq -r 'if (.catalyst.deployment | objects | has("mode")) and (.catalyst.deployment.mode != null) then (.catalyst.deployment.mode | tostring) else empty end' "$config_file" 2>/dev/null)
-		[[ -n "$_existing_mode" ]] && deployment_mode="$_existing_mode"
+		[[ -n $_existing_mode ]] && deployment_mode="$_existing_mode"
 	fi
 
 	echo ""
@@ -1881,13 +1896,13 @@ setup_cloud_replica() {
 	# CTL-1668: also LOOK UP the token under the configured name, not just the
 	# default — otherwise a host using a custom name has its valid token treated as
 	# absent and provisioning is silently skipped (Codex P2 on #3365).
-	local _tv="${CATALYST_CLOUD_TOKEN_ENV:-}"
+	local _tv="${CATALYST_CLOUD_TOKEN_ENV-}"
 	if [[ -z $_tv ]] && [[ -r "$HOME/.config/catalyst/config.json" ]] && command -v jq >/dev/null 2>&1; then
 		_tv="$(jq -r '.catalyst.cloud.tokenEnv // empty' "$HOME/.config/catalyst/config.json" 2>/dev/null || true)"
 	fi
 	[[ -n $_tv ]] || _tv="CATALYST_CLOUD_TOKEN"
-	local token="${CLOUD_TOKEN:-${!_tv:-}}"
-	local account="${CLOUD_ACCOUNT:-${CATALYST_CLOUD_ACCOUNT:-}}"
+	local token="${CLOUD_TOKEN:-${!_tv-}}"
+	local account="${CLOUD_ACCOUNT:-${CATALYST_CLOUD_ACCOUNT-}}"
 	[[ -n $token ]] || return 0
 
 	print_header "Provisioning Catalyst Cloud Replica"
@@ -1965,7 +1980,7 @@ setup_cloud_replica() {
 	# precedence the writer resolves with — env override → Layer-2
 	# catalyst.cloud.tokenEnv → default. Writing a fixed name while the writer looks
 	# up a custom one produces the identical silent idle.
-	local token_var="${CATALYST_CLOUD_TOKEN_ENV:-}"
+	local token_var="${CATALYST_CLOUD_TOKEN_ENV-}"
 	if [[ -z $token_var ]]; then
 		local l2_cfg="$HOME/.config/catalyst/config.json"
 		if [[ -r $l2_cfg ]] && command -v jq >/dev/null 2>&1; then
@@ -3026,7 +3041,7 @@ init_session_database() {
 	local db_script=""
 	if [ -f "${PROJECT_DIR}/plugins/dev/scripts/catalyst-db.sh" ]; then
 		db_script="${PROJECT_DIR}/plugins/dev/scripts/catalyst-db.sh"
-	elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-db.sh" ]; then
+	elif [ -n "${CLAUDE_PLUGIN_ROOT-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-db.sh" ]; then
 		db_script="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-db.sh"
 	fi
 
@@ -3049,23 +3064,24 @@ setup_sweep_config() {
 	# Resolve REPO_ROOT and SCRIPT_DIR for this function. setup-catalyst.sh
 	# sits at the repo root; PROJECT_DIR is set by detect_git_repo() for
 	# interactive runs, but may be empty if sourced in lib-only mode.
+	# CTL-1914: the old script-relative SCRIPT_DIR is gone — helper resolution is
+	# catalyst_helper_path's job now, and keeping a second, private copy of that logic
+	# here is exactly how the silent skip survived four separate call sites.
 	local REPO_ROOT="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "$PWD")}"
-	local SCRIPT_DIR
-	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "$PWD")/plugins/dev/scripts"
 	local config_file="${REPO_ROOT}/.catalyst/config.json"
-	[[ -f "$config_file" ]] || return 0
+	[[ -f $config_file ]] || return 0
 	local patch tmp
 	patch='{"idleHours":48,"intervalHours":1,"salvagePush":false,"maxRemovalsPerRun":10}'
 	tmp="${config_file}.tmp.$$"
 	# patch first so user overrides win
-	if jq --argjson p "$patch" '.catalyst.sweep = ($p + (.catalyst.sweep // {}))' "$config_file" > "$tmp" && mv "$tmp" "$config_file"; then
+	if jq --argjson p "$patch" '.catalyst.sweep = ($p + (.catalyst.sweep // {}))' "$config_file" >"$tmp" && mv "$tmp" "$config_file"; then
 		print_success "wrote catalyst.sweep defaults" 2>/dev/null || echo "setup: wrote catalyst.sweep defaults"
 	else
 		rm -f "$tmp"
 		echo "setup: warning: could not write catalyst.sweep defaults" >&2
 	fi
 	local _os="${CATALYST_FORCE_OS:-$(uname -s 2>/dev/null || echo unknown)}"
-	if [[ "$_os" == "Darwin" ]]; then
+	if [[ $_os == "Darwin" ]]; then
 		# CTL-1914: was `${SCRIPT_DIR}/install-orphan-sweep.sh` guarded by `[[ -x ]]`,
 		# which in the documented curl layout is a directory containing only
 		# setup-catalyst.sh — so the sweep scheduler was NEVER installed and nothing
@@ -3181,7 +3197,7 @@ finalize_install() {
 	# ── 4. enrol the project ──
 	# Without a registry entry the daemon dispatches nothing — a running stack that does
 	# literally nothing, which looks identical to a broken one.
-	if [[ -n ${TICKET_PREFIX:-} ]]; then
+	if [[ -n ${TICKET_PREFIX-} ]]; then
 		if [[ -n $core_bin && -x $core_bin ]]; then
 			if "$core_bin" register --team "${TICKET_PREFIX}" >/dev/null 2>&1; then
 				print_success "project enrolled in the execution-core registry (team ${TICKET_PREFIX})"
@@ -3278,7 +3294,7 @@ main() {
 #      function library without running setup even from contexts where the
 #      return-probe would succeed/fail unexpectedly (curl | bash runs from
 #      stdin where BASH_SOURCE is empty, so an env guard is the reliable signal).
-if (return 0 2>/dev/null) || [[ -n ${CATALYST_SETUP_LIB_ONLY:-} ]]; then
+if (return 0 2>/dev/null) || [[ -n ${CATALYST_SETUP_LIB_ONLY-} ]]; then
 	:
 else
 	main "$@"

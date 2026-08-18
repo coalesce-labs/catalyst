@@ -29,7 +29,12 @@ function completeDeps(over = {}) {
     exists: (p) => present.has(p),
     readJson: (p) =>
       p === "/seal/layer2.json"
-        ? { ok: true, value: { catalyst: { orchestration: { pluginDirs: ["/seal/plugin-source/plugins/dev"] } } } }
+        ? {
+            ok: true,
+            value: {
+              catalyst: { orchestration: { pluginDirs: ["/seal/plugin-source/plugins/dev"] } },
+            },
+          }
         : { ok: true, value: { projects: [{ team: "WIDGET" }] } },
     _present: present,
     ...over,
@@ -48,7 +53,7 @@ describe("checkInstallCompleteness", () => {
       completeDeps({
         exists: () => false,
         readJson: () => ({ ok: false, value: null }),
-      }),
+      })
     );
     expect(r.status).not.toBe("fail");
   });
@@ -69,7 +74,7 @@ describe("checkInstallCompleteness", () => {
           p === "/seal/layer2.json"
             ? { ok: true, value: { catalyst: { orchestration: {} } } }
             : { ok: true, value: { projects: [{ team: "W" }] } },
-      }),
+      })
     );
     expect(r.status).toBe("warn");
     expect(r.detail).toContain("plugin-source");
@@ -82,7 +87,7 @@ describe("checkInstallCompleteness", () => {
           p === "/seal/layer2.json"
             ? { ok: false, value: null }
             : { ok: true, value: { projects: [{ team: "W" }] } },
-      }),
+      })
     );
     // Nothing is actually absent, so this must not accuse the operator of a missing step.
     expect(r.status).toBe("info");
@@ -105,7 +110,7 @@ describe("checkInstallCompleteness", () => {
           p === "/seal/layer2.json"
             ? { ok: true, value: { catalyst: { orchestration: { pluginDirs: ["/x"] } } } }
             : { ok: true, value: { projects: [] } },
-      }),
+      })
     );
     expect(r.status).toBe("warn");
     expect(r.detail).toContain("registry");
@@ -119,7 +124,7 @@ describe("checkInstallCompleteness", () => {
           p === "/seal/layer2.json"
             ? { ok: true, value: { catalyst: { orchestration: { pluginDirs: ["/x"] } } } }
             : { ok: false, value: null },
-      }),
+      })
     );
     expect(r.status).toBe("info");
     expect(r.detail).toContain("unreadable");
@@ -140,7 +145,7 @@ describe("checkInstallCompleteness", () => {
       "/seal/home/catalyst/execution-core/registry.json",
     ]);
     const r = checkInstallCompleteness(
-      completeDeps({ env: { CATALYST_BIN_DIR: "/custom/bin" }, exists: (p) => present.has(p) }),
+      completeDeps({ env: { CATALYST_BIN_DIR: "/custom/bin" }, exists: (p) => present.has(p) })
     );
     expect(r.status).toBe("pass");
   });

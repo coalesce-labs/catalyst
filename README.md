@@ -22,7 +22,8 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
   [Linearis](https://www.npmjs.com/package/linearis))
   - `catalyst-dev`: Core research agents and workflow commands
   - `catalyst-pm`: Advanced PM workflows (PRDs, strategy, priorities)
-  - `catalyst-pm-ops`: Operational PM workflows (cycle analysis, milestone tracking, backlog grooming, cadence, comms)
+  - `catalyst-pm-ops`: Operational PM workflows (cycle analysis, milestone tracking, backlog
+    grooming, cadence, comms)
 
 ### Version Control & Code Hosting
 
@@ -140,9 +141,9 @@ curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-c
       --cloud-token "$CATALYST_CLOUD_TOKEN" --cloud-account "$CATALYST_CLOUD_ACCOUNT"
 ```
 
-> `-s --` is required for the piped form. Without it the flags are consumed by `bash`
-> itself rather than by the script, and the install silently runs interactive — which on
-> a host with no tty then falls back to defaults.
+> `-s --` is required for the piped form. Without it the flags are consumed by `bash` itself rather
+> than by the script, and the install silently runs interactive — which on a host with no tty then
+> falls back to defaults.
 
 Prefer to read the script first, or want the prompts?
 
@@ -155,15 +156,15 @@ chmod +x setup-catalyst.sh
 
 ### Have these ready
 
-| What | Where it goes | Format |
-| ---- | ------------- | ------ |
-| Catalyst Cloud token | `--cloud-token` / `CATALYST_CLOUD_TOKEN` | validated with one authenticated call before anything is written — a bad token fails the install loudly |
-| Catalyst Cloud account | `--cloud-account` / `CATALYST_CLOUD_ACCOUNT` | required whenever a token is supplied; there is deliberately no default |
-| Linear API token | `LINEAR_API_TOKEN`, or `~/.linear_api_token` | must be a **personal** key (`lin_api_…`). An OAuth token (`lin_oauth_…`) is rejected |
-| Sentry / PostHog / Exa | prompted, or their usual env vars | all optional |
+| What                   | Where it goes                                | Format                                                                                                  |
+| ---------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Catalyst Cloud token   | `--cloud-token` / `CATALYST_CLOUD_TOKEN`     | validated with one authenticated call before anything is written — a bad token fails the install loudly |
+| Catalyst Cloud account | `--cloud-account` / `CATALYST_CLOUD_ACCOUNT` | required whenever a token is supplied; there is deliberately no default                                 |
+| Linear API token       | `LINEAR_API_TOKEN`, or `~/.linear_api_token` | must be a **personal** key (`lin_api_…`). An OAuth token (`lin_oauth_…`) is rejected                    |
+| Sentry / PostHog / Exa | prompted, or their usual env vars            | all optional                                                                                            |
 
-Nothing above is required to get a working node — omit the cloud flags and setup behaves
-exactly as it always has.
+Nothing above is required to get a working node — omit the cloud flags and setup behaves exactly as
+it always has.
 
 This script will guide you through:
 
@@ -184,11 +185,11 @@ This script will guide you through:
 # Restart Claude Code
 ```
 
-**Install the CLI tools** — *setup now does this for you.* It puts `catalyst-stack` and the
-other `catalyst-*` commands in `$HOME/.catalyst/bin`, provisions `plugin-source`, turns on
-replica reads, and enrols the project. Anything it could not finish is printed at the end of
-the run as a **deferred step**, with the command that completes it and the command that
-verifies it — so if that list says "No steps were deferred", these are already done.
+**Install the CLI tools** — _setup now does this for you._ It puts `catalyst-stack` and the other
+`catalyst-*` commands in `$HOME/.catalyst/bin`, provisions `plugin-source`, turns on replica reads,
+and enrols the project. Anything it could not finish is printed at the end of the run as a
+**deferred step**, with the command that completes it and the command that verifies it — so if that
+list says "No steps were deferred", these are already done.
 
 To run it by hand anyway (or to complete a deferred step):
 
