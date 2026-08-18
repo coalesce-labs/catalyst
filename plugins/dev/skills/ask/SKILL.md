@@ -81,6 +81,17 @@ A comment on the ticket — top-level or a threaded reply — reaches the monito
 - Content: what was done in response · the outcome **as applied** (not proposed) · where the artifact
   lives (PR / file / route).
 
+## 4b. Acknowledging (👀) — Ryan, 2026-08-17
+
+The human is looking at the LAST message they wrote, not the top of the thread. So:
+- **On pickup** (the moment an agent starts reading a human comment on an ask): add an `eyes` reaction to
+  the human's **latest** comment — `node "$CLAUDE_PLUGIN_ROOT/scripts/linear-ack.mjs" <ISSUE>` (app actor).
+  It means "read, working on it".
+- **On reply:** `linear-reply.mjs` removes the eyes from that comment automatically when the reply posts
+  (`--keep-eyes` to leave it). The reaction is a "reply in progress" signal, not a "resolved" signal.
+- Linear returns comments **newest-first**; both helpers sort explicitly. Only the human's own comments
+  count (`ASK_HUMAN_ID`, default Ryan) — the decision trigger's replies carry a `user` too.
+
 ## 5. Closing (the raising agent)
 
 When the answer satisfies the ask: **verify** that it does (e.g. a token really carries the permission),
