@@ -1220,6 +1220,7 @@ jobs:
             terminal-state.test.mjs \
             test-setup.test.mjs \
             transcript-tail.test.mjs \
+            triage-admission-observability.test.mjs \
             triage-transition-event.test.mjs \
             worker-disposition.test.mjs \
             worker-transition-event.test.mjs \

@@ -831,6 +831,89 @@ export function computeTriageBudget({
   return { remaining: computeFreeSlots(maxParallel, live + sdkInflight + y.count) };
 }
 
+// ── CTL-879: triage-admission observability ──────────────────────────────────
+// A ready ticket that lacks triage.json is HELD by the scheduler's CTL-1150 gate
+// (scheduler.mjs), and the ONLY producer of that artifact is the triage
+// admission path below. When this path declined a candidate it recorded
+// NOTHING: three bare `continue`s in sweepMissingTriage and two `log.debug`
+// returns in dispatchTriage. So a fleet-wide triage stall presented as "the
+// sweep counts N candidates every tick, dispatches none, and emits no
+// per-ticket outcome at any level that ships".
+//
+// Measured 2026-08-18: triage output stopped fleet-wide at 15:00 CT. Over the
+// next three hours both hosts logged 315 "triage sweep: Triage-state source"
+// lines (latest counts CTC=16, CTL=4), ~4,000 ctl-1150 hold lines and 411
+// "board appears frozen" warnings — and ZERO dispatchTriage lines at ANY
+// severity. Three candidate mechanisms were refuted from the logs alone
+// (computeTriageBudget's yielded-occupancy scan failure, a dead host in the HRW
+// roster, a post-boot drain flag). The rest could not be told apart, because
+// the decision was never written down. Two operators spent hours on it.
+//
+// Sparse, never silent: COUNT every skip, LOG the first, every Nth, and the
+// escalation edge — the same count-every/warn-sparsely discipline as
+// scheduler.mjs's lastHoldLogged and otel-forward's sparse-warn — so a
+// 20-candidate sweep every 60s cannot flood the log it exists to make readable.
+const TRIAGE_SKIP_RELOG_EVERY = 10;
+const TRIAGE_SKIP_ESCALATE_AFTER = 15;
+const _triageSkipStreaks = new Map();
+
+// noteTriageSkip — record that `identifier` was declined by `reason` this sweep.
+// Returns the streak so callers/tests can assert on it. A streak that reaches
+// TRIAGE_SKIP_ESCALATE_AFTER is no longer a transient miss: nothing will produce
+// this ticket's triage.json while it holds, so it escalates INFO → WARN and says
+// so. Never throws — an observability helper that can break admission is worse
+// than the blindness it replaces.
+export function noteTriageSkip(identifier, reason, detail = {}) {
+  try {
+    const prev = _triageSkipStreaks.get(identifier);
+    const streak = prev?.reason === reason ? prev.streak + 1 : 1;
+    _triageSkipStreaks.set(identifier, { reason, streak });
+    const isFirst = streak === 1;
+    const isPeriodic = streak % TRIAGE_SKIP_RELOG_EVERY === 0;
+    // The escalation edge is logged explicitly: with RELOG_EVERY=10 and
+    // ESCALATE_AFTER=15 the crossing sweep is neither first nor periodic, so
+    // without this the WARN would not appear until streak 20.
+    const isEscalationEdge = streak === TRIAGE_SKIP_ESCALATE_AFTER;
+    if (!isFirst && !isPeriodic && !isEscalationEdge) return streak;
+    const context = { ticket: identifier, reason, held_sweeps: streak, ...detail };
+    if (streak >= TRIAGE_SKIP_ESCALATE_AFTER) {
+      log.warn(
+        context,
+        "ctl-879: triage admission blocked persistently — no triage.json can be produced for this ticket while this reason holds, so the scheduler's ctl-1150 gate will hold it indefinitely"
+      );
+    } else {
+      log.info(context, "ctl-879: triage admission skipped this sweep");
+    }
+    return streak;
+  } catch {
+    return 0;
+  }
+}
+
+// clearTriageSkip — the ticket got in (or no longer needs to). Drops its streak
+// so a later block starts a fresh episode rather than resuming an obsolete one.
+export function clearTriageSkip(identifier) {
+  _triageSkipStreaks.delete(identifier);
+}
+
+// pruneTriageSkips — CAT-36's lesson, applied before it bites here: the streak
+// map is only self-cleaning on the cleared path, so a candidate that leaves the
+// sweep entirely (triaged elsewhere, reassigned, ticket closed) would keep its
+// entry for the daemon's lifetime and a later reappearance would resume the
+// stale streak — suppressing the FIRST diagnostic of the new episode, which is
+// the one that matters. Prune to exactly the identifiers this sweep considered.
+export function pruneTriageSkips(consideredIdentifiers) {
+  if (!(consideredIdentifiers instanceof Set)) return;
+  for (const id of _triageSkipStreaks.keys()) {
+    if (!consideredIdentifiers.has(id)) _triageSkipStreaks.delete(id);
+  }
+}
+
+// Test seam — unit tests need a deterministic streak table per case.
+export function _resetTriageSkipStreaks() {
+  _triageSkipStreaks.clear();
+}
+
 // dispatchTriage — fire the triage phase agent for a →Triage transition. Guards
 // a missing orchDir (a standalone monitor with no daemon wiring) and logs —
 // never throws — a non-zero dispatch. CTL-704: after a successful dispatch,
@@ -929,6 +1012,7 @@ function dispatchTriage(
   // CTL-1095: drain gate — refuse new triage dispatch before HRW filter.
   if (isDraining(orchDir)) {
     log.debug({ identifier }, "drain: skipping triage dispatch — node draining (CTL-1095)");
+    noteTriageSkip(identifier, "node-draining"); // CTL-879
     return false;
   }
   // CTL-862/CTL-1057: HRW ownership filter. Resolve roster/self lazily per call
@@ -972,6 +1056,11 @@ function dispatchTriage(
       { identifier, self, roster, dispatchRoster },
       "ctl-1091: ticket not owned by this host under HRW over the live roster — skipping triage dispatch"
     );
+    // CTL-879: this is the ONE reason that is healthy at the fleet level — the
+    // peer that owns the ticket dispatches it. Recorded per-host anyway, because
+    // "nobody owns it" and "the owner is wedged" are indistinguishable from a
+    // single host's logs, and that ambiguity is what cost hours on 2026-08-18.
+    noteTriageSkip(identifier, "not-owned-by-this-host", { self, dispatchRoster });
     return false;
   }
   // CTL-1441 guard (b) — placed BEFORE the capacity gate (Codex R4: parking is
@@ -991,7 +1080,10 @@ function dispatchTriage(
   ) {
     // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
     // naturally absent until it finishes. Defer the park while in flight.
-    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
+    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) {
+      noteTriageSkip(identifier, "triage-worker-in-flight"); // CTL-879
+      return false;
+    }
     try {
       labelNeedsHuman(orchDir, identifier);
     } catch (err) {
@@ -1147,6 +1239,24 @@ function dispatchTriage(
         { identifier, self },
         "ctl-862: lost cross-host claim — another host owns this triage dispatch, deferring"
       );
+      // CTL-879: the SIXTH blind gate, and the one the first instrument missed.
+      // It is the ONLY silent exit left after drain/HRW, so it is where a ticket
+      // its OWNER has already accepted still fails to launch — measured on
+      // 2026-08-18: 44 held tickets, a perfect 22/22 HRW split with ZERO declined
+      // by both hosts, every held ticket owned by the host holding it, and not one
+      // `ctl-879` line from the owner. The owner passes drain and HRW and then
+      // exits here, invisibly.
+      //
+      // ⚠️ A lost claim is NOT inherently a fault — it is the normal outcome when a
+      // peer legitimately holds the fence. What makes the silence expensive is that
+      // "a peer won it" and "our claim WRITE never landed" are the same log line at
+      // a level that does not ship, and the second is a real stall (mini's Linear
+      // write budget measured 300/300 spent with 674 refusals the same day). The
+      // reason string keeps them distinguishable at the surface.
+      noteTriageSkip(identifier, "lost-cross-host-claim", {
+        self,
+        claim_reason: claim?.reason ?? null,
+      });
       return false;
     }
     clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)
@@ -1294,6 +1404,7 @@ function dispatchTriage(
       log.warn({ identifier, err: err.message }, "monitor: stampWorkerLabel threw — continuing");
     }
   }
+  clearTriageSkip(identifier); // CTL-879: dispatched — end this block episode
   return true;
 }
 
@@ -1581,6 +1692,12 @@ export function sweepMissingTriage({
     countYieldedOccupancy, // CTL-1854: charge yields to the triage budget too
     hasInProcessRoute, // CTL-1457 (N1)
   });
+  // CTL-879: the streak table is keyed by ticket across ALL projects, so the
+  // prune set must be accumulated across the whole sweep and applied ONCE at the
+  // end. Pruning per project would drop every OTHER project's streaks on each
+  // iteration, resetting them to 1 forever — the escalation would then never
+  // fire and the guard would look present while being unable to trigger.
+  const consideredThisSweep = new Set();
   for (const p of listProjects()) {
     const triageStatusName = resolveEligibleQuery(p)?.triageStatus ?? null;
     // CTL-1589: Triage-state board ∪ eligible set, deduped by ticket id. The
@@ -1615,16 +1732,28 @@ export function sweepMissingTriage({
       if (
         budget.remaining <= 0 &&
         readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP
-      )
+      ) {
+        // CTL-879: was a bare `continue`. This is the gate that makes a busy
+        // fleet look identical to a broken one — dispatchTriage is never called,
+        // so its own info-level budget line never fires either.
+        noteTriageSkip(t.identifier, "sweep-budget-exhausted", {
+          budget_remaining: budget.remaining,
+        });
         continue;
-      if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      }
+      if (hasTriageArtifact(orchDir, t.identifier)) {
+        clearTriageSkip(t.identifier); // CTL-879: triaged — this is the healthy exit
+        continue;
+      }
       // CTL-1589 (Codex R4): a Triage-STATE ticket whose triage worker is
       // in-flight right now has no artifact yet and would route to an
       // idempotent no-op launch — which still decrements the sweep budget
       // (code 0) and would pay a pointless live revalidation read. Skip it
       // here; the eligible half keeps its pre-existing behavior.
-      if (t.fromTriageBoard && isTriageInFlight(readTriageSignalStatus(orchDir, t.identifier)))
+      if (t.fromTriageBoard && isTriageInFlight(readTriageSignalStatus(orchDir, t.identifier))) {
+        noteTriageSkip(t.identifier, "triage-worker-in-flight"); // CTL-879
         continue;
+      }
       // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
       // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
       // where the stale completion signal is retired immediately before a real
@@ -1656,7 +1785,12 @@ export function sweepMissingTriage({
         stampWorkerLabel, // CTL-1481
       });
     }
+    for (const id of seen) consideredThisSweep.add(id);
   }
+  // CTL-879: prune to exactly the identifiers this sweep considered, so the
+  // streak table cannot grow for the daemon's lifetime (CAT-36's bug, avoided
+  // rather than repeated).
+  pruneTriageSkips(consideredThisSweep);
 }
 
 // CTL-681 removed scheduleDirtyReconcile + its dirtyTimers Map. The
