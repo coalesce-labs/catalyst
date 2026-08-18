@@ -3,10 +3,12 @@ name: _phase-agent-template
 description: |
   Reference template every phase-agent skill copies (CTL-448). The leading
   underscore on the directory name prevents the skill loader from picking this
-  up — it is NOT a runnable skill, only a structural template the nine real
+  up — it is NOT a runnable skill, only a structural template the eleven real
   phase agents (phase-triage, phase-research, phase-plan, phase-implement,
-  phase-verify, phase-review, phase-pr, phase-monitor-merge, phase-monitor-deploy)
-  clone and specialize. The real phase skills MUST set `user-invocable: true`
+  phase-verify, phase-remediate, phase-review, phase-pr, phase-monitor-merge,
+  phase-monitor-deploy, phase-teardown) clone and specialize. The count and the
+  list are both load-bearing: a phase agent authored from a template that does
+  not know phase-remediate exists will not wire the verify -> remediate cycle. The real phase skills MUST set `user-invocable: true`
   so `phase-agent-dispatch`'s `claude --bg "/catalyst-dev:phase-X ..."` slash
   command resolves (CTL-490).
 user-invocable: true
