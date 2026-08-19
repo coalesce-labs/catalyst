@@ -5,11 +5,18 @@
 //   doctor [--json]  one row per role: liveness, status-doc age, restarts
 //   stop <role>      ask a role to write its handoff and exit; it stays down
 //   list             the configured roles
+//   quiet-fleet [--once] [--dry-run]   page the concierge when a role goes quiet
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { superviseRole } from "./supervisor.mjs";
 import { runSdkSession } from "./sdk-session.mjs";
 import { report, formatReport, listRoles } from "./doctor.mjs";
+import { runQuietFleetOnce } from "./quiet-fleet.mjs";
 import { roleFiles } from "./paths.mjs";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// One tick a minute, matching the plist's ThrottleInterval — the alarm never
+// touches the daemon hot path or Linear/GitHub.
+const QUIET_FLEET_INTERVAL_MS = 60_000;
 
 const [verb, arg] = process.argv.slice(2);
 
@@ -41,8 +48,34 @@ async function main() {
       console.log(roles.length ? roles.join("\n") : "(no roles configured)");
       return 0;
     }
+    case "quiet-fleet": {
+      // The launchd-supervised alarm. `--once` runs a single tick (what the
+      // plist's StartInterval fires); with no flags it loops in the foreground.
+      // `--dry-run` prints the pages it WOULD send and mutates nothing.
+      const once = process.argv.includes("--once");
+      const dryRun = process.argv.includes("--dry-run");
+      const tick = () => {
+        const r = runQuietFleetOnce({ dryRun });
+        console.log(JSON.stringify(r));
+        return r;
+      };
+      if (once) {
+        tick();
+        return 0;
+      }
+      // Foreground loop. launchd's KeepAlive restarts this if it ever exits.
+      for (;;) {
+        try {
+          tick();
+        } catch (e) {
+          // Fail-open: a bad tick must not stop the alarm.
+          console.error(`role-supervisor: quiet-fleet tick error — ${e.message}`);
+        }
+        await sleep(QUIET_FLEET_INTERVAL_MS);
+      }
+    }
     default:
-      die("usage: role-supervisor run <role> | doctor [--json] | stop <role> | list");
+      die("usage: role-supervisor run <role> | doctor [--json] | stop <role> | list | quiet-fleet [--once] [--dry-run]");
   }
 }
 
