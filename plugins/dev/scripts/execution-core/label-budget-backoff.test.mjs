@@ -76,7 +76,11 @@ describe("COORD-236 classification: 'never' and 'not right now' are different an
   test("every budget refusal the proxy can emit is THROTTLED, not terminal", () => {
     // The proxy's classifyWrite gate has grown twice; matching by prefix is what
     // keeps a NEW budget reason from silently reading as "retryable next tick".
-    for (const r of ["budget:day-exhausted", "budget:per-ticket-cap", "budget:already-converged", "budget:something-nobody-has-written-yet"]) {
+    // The real constants are linear-write-budget.mjs's frozen REASONS. The last entry
+    // is deliberately NOT one of them: an unknown budget reason must still classify,
+    // which is the whole argument for matching by prefix. (FLEET's #3667 P3: this
+    // list used to say `budget:per-ticket-cap`, a string that does not exist.)
+    for (const r of ["budget:day-exhausted", "budget:ticket-cap", "budget:already-converged", "budget:something-nobody-has-written-yet"]) {
       expect(r.startsWith(BUDGET_REASON_PREFIX)).toBe(true);
       expect(isThrottledLabelReason(r)).toBe(true);
       expect(isTerminalLabelReason(r)).toBe(false);
@@ -88,6 +92,28 @@ describe("COORD-236 classification: 'never' and 'not right now' are different an
     expect(THROTTLED_LABEL_REASONS.has("rate-limited")).toBe(true);
     expect(shouldCoolDownLabel("rate-limited")).toBe(true);
     expect(isTerminalLabelReason("rate-limited")).toBe(false);
+  });
+
+  test("⛔ a 403 `unauthorized` is THROTTLED, never TERMINAL — the marker would outlive the re-mint", () => {
+    // FLEET's #3667 P2-b. It was in NEITHER class, so a 403 retried every tick and
+    // each attempt spent a host budget unit. Terminal would be worse than the storm:
+    // `.skipped` lives under workers/<ticket>/ and survives a restart, so it would
+    // outlive the credential fix that clears the 403.
+    expect(shouldCoolDownLabel("unauthorized")).toBe(true);
+    expect(isThrottledLabelReason("unauthorized")).toBe(true);
+    expect(isTerminalLabelReason("unauthorized")).toBe(false);
+    expect(TERMINAL_LABEL_REASONS.has("unauthorized")).toBe(false);
+  });
+
+  test("⚠️ Object.freeze does not seal a Set — the exact-contents assertions are what pin these", () => {
+    // Stated as a test rather than only as a comment, so the reassurance the
+    // `Object.freeze` wrapper gives a reader is calibrated: it seals the object's own
+    // properties, not the Set's contents. The two exact-contents cases above are the
+    // real guard.
+    expect(Object.isFrozen(TERMINAL_LABEL_REASONS)).toBe(true);
+    const probe = new Set(TERMINAL_LABEL_REASONS);
+    probe.add("x");
+    expect(probe.has("x")).toBe(true); // a frozen Set would still have accepted this
   });
 
   test("a genuinely transient reason is NEITHER — it must keep retrying next tick", () => {

@@ -71,11 +71,26 @@ export const BUDGET_REASON_PREFIX = "budget:";
 
 /**
  * THROTTLED_LABEL_REASONS — the non-budget reasons that also need a cool-down.
- * `rate-limited` is the cloud's own 429 (`classifyProxyResponse`) and the
- * linearis rate-cap (`classifyLabelFailure`); re-issuing into a 429 next tick is
- * the same storm by another name.
+ *
+ * `rate-limited` is the cloud's own 429 (`classifyProxyResponse`) and the linearis
+ * rate-cap (`classifyLabelFailure`); re-issuing into a 429 next tick is the same
+ * storm by another name.
+ *
+ * `unauthorized` is the cloud's 403 (`linear-write-proxy.mjs`'s
+ * `classifyProxyResponse`). ⛔ IT BELONGS HERE AND NOT IN THE TERMINAL SET, and the
+ * reason is the marker's lifetime: `labelOnce`'s `.skipped` lives under
+ * `workers/<ticket>/` and SURVIVES A RESTART, so a terminal classification would
+ * outlive the very re-mint that clears the 403 — the label would stay unwritten
+ * after the credential was fixed. "Not right now" is the honest reading of an auth
+ * failure a human is about to repair. Found by FLEET's peer read on #3667; it was in
+ * NEITHER class, so a 403 retried every tick and each attempt spent a budget unit.
+ *
+ * ⚠️ `Object.freeze` on a Set does NOT prevent `.add()`/`.delete()` — it only seals
+ * the object's own properties. It is kept as a statement of intent; the thing that
+ * actually pins these contents is the exact-contents test in
+ * `label-budget-backoff.test.mjs`. Same caveat applies to TERMINAL_LABEL_REASONS.
  */
-export const THROTTLED_LABEL_REASONS = Object.freeze(new Set(["rate-limited"]));
+export const THROTTLED_LABEL_REASONS = Object.freeze(new Set(["rate-limited", "unauthorized"]));
 
 /** isTerminalLabelReason — may never land this run; stop retrying entirely. */
 export function isTerminalLabelReason(reason) {
