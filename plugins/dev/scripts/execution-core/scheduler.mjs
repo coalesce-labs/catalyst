@@ -443,7 +443,9 @@ import {
   buildExplanation,
   buildRemediateCapExplanation,
   coerceExplanation,
-} from "./escalation-explanation.mjs"; // CTL-1130
+  describeSignalReason,
+  resolveSignalReason,
+} from "./escalation-explanation.mjs"; // CTL-1130, CTL-1754
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -8839,16 +8841,21 @@ export function schedulerTick(
             )
           ) {
             const stalledSig = signalByTicket.get(ticket);
+            // CTL-1754: resolve the reason across every key the pipeline
+            // actually writes. This line used to read `stalledSig?.stalledReason`
+            // alone — a key present on 0 of 44 live failed/stalled signals — so
+            // every card said "(no reason)" while the reason sat in the same file.
+            const stalledReason = resolveSignalReason(stalledSig);
             const tsResult = routeStuckTicketToDelegate(orchDir, ticket, {
               site: "terminal-sweep",
-              reason: stalledSig?.stalledReason ?? "stalled",
+              reason: stalledReason.reason ?? "stalled",
               boardContext: { status: stalledSig?.status, phase: stalledSig?.phase },
               applyLabel: writeStatus,
               env,
               log,
               appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: ticket }), // CTL-1774
               explanation: {
-                problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${stalledSig?.stalledReason ?? "no reason"}) and is not terminal`,
+                problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${describeSignalReason(stalledSig)}) and is not terminal`,
                 call_to_action: `decide whether to retry ${ticket} or close it`,
               },
               // CTL-1609 (Codex P1): thread the tick's resolved ceiling so a large
