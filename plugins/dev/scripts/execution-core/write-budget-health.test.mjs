@@ -27,13 +27,15 @@ const check = (ledger, over = {}) =>
     readLedgerFn: () =>
       ledger === null ? { state: "unusable", reason: "unparseable" } : { state: "loaded", ledger },
     // CTL-2073: hermetic by default — a bare `exists`/readLedgerFn stub above is for
-    // the LEDGER path only. Without an explicit envFileExists override here, every
-    // test below would fall through to the real existsSync/readFileSync against
-    // whatever ~/.config/catalyst/execution-core.env happens to be on the machine
-    // running the suite (a real file on a fleet host) — deterministically false
-    // regardless of host, so dailyBudget/perTicketCap always resolve to the
-    // DEFAULT_* constants unless a test below deliberately overrides this.
+    // the LEDGER path only. Without explicit overrides here, every test below would
+    // fall through to the real existsSync/readFileSync against whatever
+    // ~/.config/catalyst/execution-core.env and daemon.pid happen to be on the
+    // machine running the suite (real files on a fleet host) — deterministically
+    // absent regardless of host, so dailyBudget/perTicketCap resolve to the
+    // DEFAULT_* constants AND are treated as the legitimate "no daemon at all"
+    // case (pidFileExists false) unless a test below deliberately overrides this.
     envFileExists: () => false,
+    pidFileExists: () => false,
     ...over,
   });
 
@@ -148,5 +150,52 @@ describe("checkLinearWriteBudget", () => {
       envFileRead: () => "CATALYST_LINEAR_WRITE_DAILY_BUDGET=2000\n",
     });
     expect(r.detail).toContain("4/2000");
+  });
+
+  // CTL-2073 AC2 — the load-bearing block: "it never asserts exhaustion off an
+  // unverified default." A daemon pid-file existing means some daemon is (or was)
+  // configured with its OWN real budget this check could not read — so the
+  // DEFAULT_DAILY_BUDGET fallback is a GUESS, not a confirmed limit, and must not
+  // be reported as WRITE-EXHAUSTED.
+  test("⭐ AC2: a daemon pid-file present + unresolved budget → UNKNOWN, not WRITE-EXHAUSTED", () => {
+    const r = check(spendSpread(emptyLedger(DAY), 300), {
+      pidFileExists: () => true, // a daemon is/was running — its real budget is unknown to us
+    });
+    expect(r.status).toBe("info");
+    expect(r.detail).not.toContain("WRITE-EXHAUSTED");
+    expect(r.detail).toContain("cannot verify");
+    expect(r.detail).toContain("UNCONFIRMED");
+  });
+
+  test("⭐ AC2 NEGATIVE CONTROL: same unresolved spend with NO daemon pid-file IS WRITE-EXHAUSTED", () => {
+    // No pid-file at all → there is no daemon to disagree with the default, so
+    // DEFAULT_DAILY_BUDGET (300) is the legitimately correct limit for this host —
+    // proves the AC2 branch isn't just "always downgrade to INFO".
+    const r = check(spendSpread(emptyLedger(DAY), 300), {
+      pidFileExists: () => false,
+    });
+    expect(r.status).toBe("warn");
+    expect(r.detail).toContain("WRITE-EXHAUSTED");
+  });
+
+  test("AC2 does not fire once the budget IS confirmed, even with a daemon pid-file present", () => {
+    // A confirmed 2000-write budget at 300 spent is nowhere near exhausted — this
+    // proves AC2's INFO branch is gated on non-confirmation, not on pid-file alone.
+    const r = check(spendSpread(emptyLedger(DAY), 300), {
+      pidFileExists: () => true,
+      envFileExists: () => true,
+      envFileRead: () => "CATALYST_LINEAR_WRITE_DAILY_BUDGET=2000\n",
+    });
+    expect(r.status).toBe("pass");
+    expect(r.detail).toContain("300/2000");
+  });
+
+  test("AC2 per-ticket-cap variant: unresolved cap + daemon pid-file → UNKNOWN, not a cap-breach WARN", () => {
+    const r = check(spend(emptyLedger(DAY), "CTL-1805", 60), {
+      pidFileExists: () => true,
+    });
+    expect(r.status).toBe("info");
+    expect(r.detail).not.toContain("per-ticket cap");
+    expect(r.detail).toContain("cannot verify");
   });
 });
