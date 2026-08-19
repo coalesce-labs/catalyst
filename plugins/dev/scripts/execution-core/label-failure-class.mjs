@@ -49,9 +49,18 @@ export const TERMINAL_LABEL_REASONS = Object.freeze(
 );
 
 /**
- * BUDGET_REASON_PREFIX — every host-budget refusal the write proxy emits shares
- * this prefix (`linear-write-proxy.mjs`'s `classifyWrite` gate:
- * `budget:day-exhausted`, `budget:per-ticket-cap`, `budget:already-converged`).
+ * BUDGET_REASON_PREFIX — every host-budget refusal shares this prefix. The real
+ * members are `linear-write-budget.mjs`'s frozen `REASONS`: `budget:day-exhausted`,
+ * `budget:ticket-cap`, `budget:already-converged`.
+ *
+ * ⚠️ A `budget:*` refusal is raised by THIS HOST'S OWN LEDGER before the request
+ * is sent — it does NOT mean the cloud refused anything. The ledger counts writes
+ * that LEFT the host and gates them against `DEFAULT_DAILY_BUDGET`, a constant its
+ * own doc-comment calls "the cloud-side daily cap this MIRRORS". Attempts, not
+ * arrivals. On 2026-08-18 the host ledger read 300 with 674 refusals while the
+ * cloud's `/admin/write-budget` for the same key read 3 of 300, and a P1 to raise
+ * the cloud cap was issued on that misreading and then refused after measurement.
+ * Read `~/catalyst/linear-write-budget.json` on the HOST. Defect: CTL-2035.
  *
  * Matched by PREFIX rather than enumerated, deliberately: the gate's reason set
  * has grown twice, and an enumeration that falls behind fails in the SILENT
