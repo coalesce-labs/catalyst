@@ -1123,6 +1123,7 @@ jobs:
             doctor-cloud-sync-skew.test.mjs \
             dispatch.test.mjs \
             doctor.test.mjs \
+            agent-tools-write-path-health.test.mjs \
             doctor-replica.test.mjs \
             __tests__/replica-health.test.mjs \
             __tests__/replica-health-event.test.mjs \

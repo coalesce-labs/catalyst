@@ -2863,6 +2863,36 @@ describe("checksForClass — checkSdkDaemonEnv registration (CTL-1396)", () => {
   });
 });
 
+describe("checksForClass — checkAgentToolsWritePath registration (CTL-2026)", () => {
+  // ⛔ THE DEFECT THIS PINS (Codex P2 on #3679): the row was first registered only on the
+  // worker arm. `developer` and `monitor` return from their own branches ABOVE it, so it
+  // never ran there — and a `developer` is defined a few lines away as a node whose
+  // "operator's skills write transitions/comments to Linear", i.e. exactly the class that
+  // HOLDS the live out-of-tree copies. Measured: the laptop carrying the drifted
+  // linear-reply.mjs this row exists to name is node class `developer`.
+  //
+  // ⭐ And this asserts BEHAVIOUR, not a source match. The sibling suites above check that
+  // a function NAME appears in the stringified thunks; that passes on a mention inside a
+  // comment, and it cannot tell a registered thunk from a renamed one. Here the matching
+  // thunks are INVOKED and the returned row's `name` is pinned — the only form of the
+  // assertion that a mis-wired registration can fail.
+  const rowsFor = (cls) =>
+    checksForClass(nodeClassOf({ class: cls, raw: cls }))
+      .filter((f) => f.toString().includes("checkAgentToolsWritePath"))
+      .map((f) => f());
+
+  for (const cls of ["worker", "developer", "monitor"]) {
+    it(`${cls} suite registers exactly one agent-tools-write-path row, and it grades`, () => {
+      const rows = rowsFor(cls);
+      expect(rows.length).toBe(1);
+      expect(rows[0].name).toBe("agent-tools-write-path");
+      // Advisory: doctor's FAIL count gates worker activation and every host
+      // legitimately holds a copy during the CTL-2026(b) interim.
+      expect(rows[0].status).not.toBe("fail");
+    });
+  }
+});
+
 describe("checksForClass — checkDeploymentModeConsistency registration (CTL-1617)", () => {
   const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
 
