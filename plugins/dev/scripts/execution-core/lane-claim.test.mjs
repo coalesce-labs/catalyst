@@ -6,6 +6,7 @@ import {
   buildKeyRank,
   classifyLaneClaimWrite,
   buildLaneClaimGuard,
+  resolveStateMap,
   VERDICT,
   REASON,
 } from "./lane-claim.mjs";
@@ -405,5 +406,210 @@ describe("⛔ the STALE-HISTORY decline (Codex P1) — the 18× latency gap betw
       rank: RANK,
     });
     expect(v.verdict).toBe(VERDICT.REFUSE);
+  });
+});
+
+describe("⛔ resolveStateMap — the ladder, written after this guard shipped INERT on half the fleet", () => {
+  // Measured on the fleet right after CTL-2068 first merged:
+  //   mini-2  ranked_states: 12   (armed)
+  //   mini    ranked_states: 0    (INSTALLED AND INERT — it could never refuse)
+  // The two hosts resolve `configPath` differently: mini-2 pins CATALYST_CONFIG_FILE at the
+  // plugin-source config, mini does not and its daemon's cwd is HOME, where a
+  // `.catalyst/config.json` exists carrying no `catalyst.linear` at all.
+  const reader = (files) => (path) => {
+    if (!(path in files)) throw new Error(`ENOENT ${path}`);
+    return files[path];
+  };
+  const MAP = { research: "Research", inProgress: "Implement" };
+
+  test("returns the first candidate that yields a map, and names its source", () => {
+    const r = resolveStateMap(
+      [
+        ["registry:CTL", "/repo/.catalyst/config.json"],
+        ["configPath", "/other.json"],
+      ],
+      reader({
+        "/repo/.catalyst/config.json": JSON.stringify({ catalyst: { linear: { stateMap: MAP } } }),
+      })
+    );
+    expect(r.stateMap).toEqual(MAP);
+    expect(r.source).toBe("registry:CTL");
+  });
+
+  test("⭐⭐ THE MINI CASE — a file that PARSES but has no catalyst.linear is skipped, not accepted", () => {
+    // This is the whole reason the ladder exists. The read SUCCEEDED and returned nothing,
+    // which is worse than failing: a throw would have been visible.
+    const r = resolveStateMap(
+      [
+        ["configPath", "/home/.catalyst/config.json"], // parses, no catalyst.linear — mini
+        ["registry:CTL", "/repo/.catalyst/config.json"],
+      ],
+      reader({
+        "/home/.catalyst/config.json": JSON.stringify({ catalyst: { orchestration: {} } }),
+        "/repo/.catalyst/config.json": JSON.stringify({ catalyst: { linear: { stateMap: MAP } } }),
+      })
+    );
+    expect(r.stateMap).toEqual(MAP);
+    expect(r.source).toBe("registry:CTL");
+  });
+
+  test("an EMPTY stateMap object is not an answer either — the walk continues", () => {
+    const r = resolveStateMap(
+      [
+        ["configPath", "/a.json"],
+        ["layer2", "/b.json"],
+      ],
+      reader({
+        "/a.json": JSON.stringify({ catalyst: { linear: { stateMap: {} } } }),
+        "/b.json": JSON.stringify({ catalyst: { linear: { stateMap: MAP } } }),
+      })
+    );
+    expect(r.source).toBe("layer2");
+  });
+
+  test("unreadable and malformed candidates are skipped without throwing", () => {
+    const r = resolveStateMap(
+      [
+        ["missing", "/nope.json"],
+        ["malformed", "/bad.json"],
+        ["good", "/g.json"],
+      ],
+      reader({
+        "/bad.json": "{not json",
+        "/g.json": JSON.stringify({ catalyst: { linear: { stateMap: MAP } } }),
+      })
+    );
+    expect(r.source).toBe("good");
+  });
+
+  test("nothing resolves → { null, 'none' }, which the install line reports as INERT", () => {
+    const r = resolveStateMap([["a", "/x.json"]], reader({}));
+    expect(r).toEqual({ stateMap: null, source: "none" });
+  });
+
+  test("⛔ null/empty/omitted candidate lists do not throw", () => {
+    expect(() => resolveStateMap()).not.toThrow();
+    expect(resolveStateMap().source).toBe("none");
+    expect(
+      resolveStateMap(
+        [
+          [null, null],
+          ["x", ""],
+        ],
+        reader({})
+      ).source
+    ).toBe("none");
+  });
+});
+
+describe("⛔⛔ the FLEET-IDENTITY positive control — measured live, botUserIds named nobody who writes", () => {
+  // Measured on the replica right after this guard armed, CTL tickets, recent window:
+  //     c2a8cc92…  Ryan Rozich     103 state changes
+  //     78f8f491…  Catalyst Cloud   11 state changes
+  //     botUserIds = { 6dd38c1a…, ba2989f1… }   ← NEITHER of the two that actually write.
+  // Those two are the host's legacy DIRECT-write app-actors; since CTL-1889 the hosts write
+  // THROUGH the cloud proxy, which presents a different identity. So every actor read as a
+  // lane, and the guard would have refused the fleet's own legitimate backward moves.
+  const args = (fleetSeen) => ({
+    currentState: "Implement",
+    targetRank: tr("research"),
+    lastChange: { actorId: LANE, toState: "Implement" },
+    botUserIds: BOTS,
+    rank: RANK,
+    fleetSeen,
+  });
+
+  test("⭐⭐ fleetSeen=false → ABSTAIN. A discriminator that cannot discriminate must not act.", () => {
+    const v = classifyLaneClaimWrite(args(false));
+    expect(v.verdict).toBe(VERDICT.INCONCLUSIVE);
+    expect(v.reason).toBe(REASON.FLEET_IDENTITY_UNRECOGNIZED);
+  });
+
+  test("fleetSeen=true → the guard arms and refuses as before", () => {
+    expect(classifyLaneClaimWrite(args(true)).verdict).toBe(VERDICT.REFUSE);
+  });
+
+  test("⛔ fleetSeen=undefined ('could not look') is NOT conflated with false", () => {
+    // A replica that cannot answer must not silently disarm the guard everywhere.
+    expect(classifyLaneClaimWrite(args(undefined)).verdict).toBe(VERDICT.REFUSE);
+  });
+
+  test("the control is checked BEFORE the actor branch, so it guards the ALLOW side too", () => {
+    // Otherwise a fleet-authored row returns LAST_CHANGE_BY_FLEET on evidence we have just
+    // established we cannot trust.
+    const v = classifyLaneClaimWrite({
+      ...args(false),
+      lastChange: { actorId: FLEET, toState: "Implement" },
+    });
+    expect(v.reason).toBe(REASON.FLEET_IDENTITY_UNRECOGNIZED);
+  });
+});
+
+describe("⛔ per-TICKET state maps (Codex P1) — a fleet registry holds several teams", () => {
+  const CTL_MAP = { research: "Research", inProgress: "Implement", inReview: "PR" };
+  // A second team that reuses a NAME at a DIFFERENT phase — the case that can VETO a valid
+  // transition rather than merely go inconclusive.
+  const ADV_MAP = { research: "Implement", inProgress: "Building", inReview: "PR" };
+
+  const guard = () =>
+    buildLaneClaimGuard({
+      stateMap: CTL_MAP,
+      stateMapForTicket: (ticket) =>
+        ticket.startsWith("ADV-")
+          ? { stateMap: ADV_MAP, source: "registry:ADV" }
+          : { stateMap: CTL_MAP, source: "registry:CTL" },
+      botUserIds: BOTS,
+      readLastStateChange: () => ({ actorId: LANE, toState: "Implement" }),
+      readFleetSeen: () => true,
+    });
+
+  test("⭐ the SAME (state, phase) pair is judged differently per team, as their writers do", () => {
+    // CTL: Implement=3, research=1 → a regression, refused.
+    expect(
+      guard().evaluate({ ticket: "CTL-1", currentState: "Implement", targetKey: "research" })
+        .verdict
+    ).toBe(VERDICT.REFUSE);
+    // ADV: `research` writes "Implement", so Implement ranks 1 — moving there is NOT backwards.
+    expect(
+      guard().evaluate({ ticket: "ADV-1", currentState: "Implement", targetKey: "research" })
+        .verdict
+    ).toBe(VERDICT.ALLOW);
+  });
+
+  test("a ticket whose team is not in the resolver falls back to the default map", () => {
+    const g = buildLaneClaimGuard({
+      stateMap: CTL_MAP,
+      stateMapForTicket: () => ({ stateMap: null, source: "none" }),
+      botUserIds: BOTS,
+      readLastStateChange: () => ({ actorId: LANE, toState: "Implement" }),
+      readFleetSeen: () => true,
+    });
+    // Resolver yields nothing → empty rank → unranked current → inconclusive, never a refusal.
+    expect(
+      g.evaluate({ ticket: "ZZZ-1", currentState: "Implement", targetKey: "research" }).verdict
+    ).toBe(VERDICT.INCONCLUSIVE);
+  });
+
+  test("a THROWING per-ticket resolver falls back to the default rank rather than wedging a write", () => {
+    const g = buildLaneClaimGuard({
+      stateMap: CTL_MAP,
+      stateMapForTicket: () => {
+        throw new Error("registry gone");
+      },
+      botUserIds: BOTS,
+      readLastStateChange: () => ({ actorId: LANE, toState: "Implement" }),
+      readFleetSeen: () => true,
+    });
+    expect(
+      g.evaluate({ ticket: "CTL-1", currentState: "Implement", targetKey: "research" }).verdict
+    ).toBe(VERDICT.REFUSE);
+  });
+
+  test("⭐ `rank` reports what the guard can RANK, not the raw map's key count (Codex P2)", () => {
+    // A map of only unrankable keys: nonzero keys, EMPTY rank. Reporting Object.keys().length
+    // would print the healthy INFO line over a guard that can never refuse.
+    const g = buildLaneClaimGuard({ stateMap: { todo: "Todo", done: "Done", backlog: "Backlog" } });
+    expect(Object.keys({ todo: "Todo", done: "Done", backlog: "Backlog" }).length).toBe(3);
+    expect(g.rank.size).toBe(0);
   });
 });

@@ -61,6 +61,7 @@ export const REASON = Object.freeze({
   UNRANKED_TARGET: "target-state-not-in-pipeline",
   BAD_INPUT: "malformed-input",
   STALE_HISTORY: "history-row-does-not-match-current-state",
+  FLEET_IDENTITY_UNRECOGNIZED: "fleet-identity-not-observed-on-this-ticket",
   DISPATCH_VETO_DISABLED: "dispatch-veto-disabled",
   NO_CURRENT_STATE: "current-state-unreadable",
   PHASE_WRITES_NO_STATUS: "phase-writes-no-status",
@@ -134,6 +135,42 @@ export function buildKeyRank() {
 }
 
 /**
+ * resolveStateMap — pure. Walks an ordered list of `[label, path]` candidates and returns the
+ * FIRST that yields a non-empty `catalyst.linear.stateMap`, with the label that produced it.
+ *
+ * ⛔ Exists because the first cut of this guard read ONE path and shipped INERT on half the
+ * fleet. Measured after that ship: `ranked_states: 0` on `mini`, meaning the guard could never
+ * refuse anything. `configPath` is `CATALYST_CONFIG_FILE || <cwd>/.catalyst/config.json`, and
+ * the two hosts differ — mini-2 pins the env var, mini does not and its daemon's cwd is HOME,
+ * where a `.catalyst/config.json` exists carrying no `catalyst.linear` at all. The read
+ * SUCCEEDED and returned nothing, which is worse than failing: a throw would have been visible.
+ *
+ * ⚠️ So an empty or absent map is treated as NO ANSWER and the walk continues. A file that
+ * parses is not evidence it is the right file.
+ *
+ * @param {Array<[string, string|null]>} candidates ordered [label, path] pairs
+ * @param {(path: string) => string} readFile throwing reader (node:fs readFileSync)
+ * @returns {{ stateMap: object|null, source: string }} source is "none" when nothing resolved
+ */
+export function resolveStateMap(candidates, readFile) {
+  for (const entry of candidates ?? []) {
+    const label = entry?.[0];
+    const path = entry?.[1];
+    if (typeof path !== "string" || path.length === 0) continue;
+    let map = null;
+    try {
+      map = JSON.parse(readFile(path))?.catalyst?.linear?.stateMap ?? null;
+    } catch {
+      continue; // unreadable/malformed → not an answer, keep walking
+    }
+    if (map && typeof map === "object" && !Array.isArray(map) && Object.keys(map).length > 0) {
+      return { stateMap: map, source: String(label ?? "?") };
+    }
+  }
+  return { stateMap: null, source: "none" };
+}
+
+/**
  * classifyLaneClaimWrite — pure. Decides whether the pipeline may write `targetState` over
  * `currentState`, given who last changed the ticket's state.
  *
@@ -159,6 +196,10 @@ export function buildKeyRank() {
  *   somebody can count and a silent false negative.
  * @param {Set<string>} o.botUserIds    known fleet actor ids
  * @param {Map<string,number>} o.rank   from buildStateRank
+ * @param {boolean|undefined} o.fleetSeen POSITIVE CONTROL — has any KNOWN fleet id authored a
+ *   state change on this ticket? `false` makes the guard abstain (it cannot tell the fleet
+ *   from a lane here). `undefined` means the caller did not check, and is treated as "no
+ *   objection" so existing callers are unaffected.
  * @returns {{verdict: string, reason: string, currentRank?: number, targetRank?: number,
  *            actorId?: string|null}}
  */
@@ -168,6 +209,7 @@ export function classifyLaneClaimWrite({
   lastChange,
   botUserIds,
   rank,
+  fleetSeen,
 } = {}) {
   if (!(rank instanceof Map)) return { verdict: VERDICT.INCONCLUSIVE, reason: REASON.BAD_INPUT };
 
@@ -183,6 +225,31 @@ export function classifyLaneClaimWrite({
   if (typeof actorId !== "string" || actorId.length === 0) {
     return { verdict: VERDICT.INCONCLUSIVE, reason: REASON.NO_ACTOR, actorId: null };
   }
+  // ⛔⛔ POSITIVE CONTROL — can this guard tell the fleet from a lane ON THIS TICKET AT ALL?
+  //
+  // The whole verdict rests on "actorId ∈ botUserIds means the fleet". If the fleet's real
+  // writing identity is not IN that set, every actor reads as a lane and the guard refuses
+  // the fleet's own legitimate backward moves. That is not hypothetical — it was the live
+  // state of the fleet when this guard first shipped. Measured on the replica, CTL tickets,
+  // recent window:
+  //
+  //     c2a8cc92…  Ryan Rozich      103 state changes
+  //     78f8f491…  Catalyst Cloud    11 state changes
+  //     botUserIds = { 6dd38c1a…, ba2989f1… }   ← NEITHER of the two that actually write
+  //
+  // Those two ids are the host's legacy DIRECT-write app-actors; since CTL-1889 the hosts
+  // write THROUGH the cloud proxy, which presents the cloud's app-actor instead. So the set
+  // named two identities that never write and omitted the one that does.
+  //
+  // A guard whose discriminator cannot discriminate must not act. `fleetSeen` is the caller's
+  // answer to "has any KNOWN fleet id authored a state change on this ticket?" — when it is
+  // false the guard has no evidence it can tell the two apart here, and abstains. When the
+  // set is correct this is true for any ticket the pipeline has touched, so the guard arms
+  // itself exactly where it has the evidence to be right.
+  if (fleetSeen === false) {
+    return { verdict: VERDICT.INCONCLUSIVE, reason: REASON.FLEET_IDENTITY_UNRECOGNIZED, actorId };
+  }
+
   // ⛔ The row must DESCRIBE the state we are judging. See the `lastChange` doc above: the
   // history table lags the state table by ~18×, so a row whose toState is not the current
   // state is a row from before whatever put the ticket where it is now.
@@ -251,12 +318,29 @@ export function classifyLaneClaimWrite({
  *   throw — a replica outage may not wedge the pipeline's writes.
  */
 export function buildLaneClaimGuard({
+  // The DEFAULT map, used when no per-ticket resolver is supplied (tests, and any host with
+  // a single project).
   stateMap,
+  // ⛔ CTL-2068 (Codex P1): the per-TICKET map. A fleet registry holds several teams, each
+  // with its own repoRoot and its own `.catalyst/config.json` — and `linear-write.mjs`
+  // resolves repoRoot PER TICKET and hands that project's config to linear-transition.sh,
+  // including its higher-precedence per-project overrides. Installing one map process-wide
+  // therefore judged every team but the first against the wrong names: usually the current
+  // state is simply unranked and the guard goes inconclusive, but where two teams reuse a
+  // name at DIFFERENT phases it could veto a valid transition. The guard must rank a ticket
+  // against the same map the writer will use for it.
+  //
+  // (ticket) => { stateMap, source } — ranks are cached per resolved source below, so a
+  // registry read happens once per team, not once per evaluation.
+  stateMapForTicket,
   botUserIds,
   readLastStateChange,
   // CTL-2068: the ticket's CURRENT state, for the dispatch veto (the write path already
   // holds this and passes it in; the dispatch path does not).
   readCurrentState,
+  // CTL-2068 positive control: (ticket, botUserIds) => boolean|undefined — has a KNOWN
+  // fleet id ever authored a state change on this ticket? See classifyLaneClaimWrite.
+  readFleetSeen,
   // ⛔ The operator kill switch, and it covers the DISPATCH veto only. Refusing a state
   // write is benign — the write simply does not happen and the pipeline retries. Refusing
   // a DISPATCH is not: this rides the single choke point every phase dispatch passes
@@ -266,8 +350,33 @@ export function buildLaneClaimGuard({
   // CATALYST_LANE_CLAIM_DISPATCH_GUARD=off without giving up the write-side protection.
   dispatchVeto = true,
 } = {}) {
-  const rank = buildStateRank(stateMap);
+  const defaultRank = buildStateRank(stateMap);
   const keyRank = buildKeyRank();
+
+  // source label -> rank map. The label, not the ticket, is the cache key: many tickets share
+  // one project, and a project's map does not change within a daemon lifetime.
+  const rankCache = new Map();
+  const rankFor = (ticket) => {
+    if (typeof stateMapForTicket !== "function" || !ticket) return defaultRank;
+    let resolved;
+    try {
+      resolved = stateMapForTicket(ticket);
+    } catch {
+      return defaultRank; // a throwing resolver must not wedge a write
+    }
+    const label = resolved?.source ?? "none";
+    if (!rankCache.has(label)) rankCache.set(label, buildStateRank(resolved?.stateMap));
+    return rankCache.get(label);
+  };
+
+  const readFleet = (ticket) => {
+    if (typeof readFleetSeen !== "function" || !ticket) return undefined;
+    try {
+      return readFleetSeen(ticket, botUserIds);
+    } catch {
+      return undefined; // "could not look" — never an objection, never a licence
+    }
+  };
 
   const readLast = (ticket) => {
     if (typeof readLastStateChange !== "function" || !ticket) return null;
@@ -280,8 +389,14 @@ export function buildLaneClaimGuard({
   };
 
   return {
-    rank,
+    // `rank` is the DEFAULT map's rank. ⛔ Callers reporting how many states the guard can
+    // actually rank must read THIS, never the raw stateMap's key count — buildStateRank
+    // deliberately drops todo/backlog/triage/done, so a map of only those keys is nonzero
+    // while the rank is empty. That is the false-healthy this whole PR exists to expose
+    // (Codex P2).
+    rank: defaultRank,
     keyRank,
+    rankFor,
     dispatchVeto,
 
     // evaluate — the WRITE-path question: may the pipeline write `targetKey`'s state over
@@ -292,7 +407,8 @@ export function buildLaneClaimGuard({
         targetRank: keyRank.get(targetKey),
         lastChange: readLast(ticket),
         botUserIds,
-        rank,
+        rank: rankFor(ticket),
+        fleetSeen: readFleet(ticket),
       });
     },
 
@@ -329,7 +445,8 @@ export function buildLaneClaimGuard({
         targetRank: keyRank.get(targetKey),
         lastChange: readLast(ticket),
         botUserIds,
-        rank,
+        rank: rankFor(ticket),
+        fleetSeen: readFleet(ticket),
       });
     },
   };
