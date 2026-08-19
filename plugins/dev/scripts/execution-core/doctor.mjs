@@ -33,6 +33,7 @@ import { homedir } from "node:os";
 import { STATUS, mkCheck } from "./doctor-status.mjs";
 import { checkInstallCompleteness } from "./install-completeness.mjs";
 // CTL-1936 AC5: the standing answer to "is this host write-exhausted".
+import { checkHostWriteCredentialClass } from "./host-credential-health.mjs";
 import { checkLinearWriteBudget } from "./write-budget-health.mjs";
 import { checkAgentToolsWritePath } from "./agent-tools-write-path-health.mjs";
 import { checkExecutionCoreEnvDrift } from "./execution-core-env-drift-health.mjs";
@@ -186,6 +187,7 @@ export { STATUS, mkCheck } from "./doctor-status.mjs";
 
 export { checkInstallCompleteness };
 
+export { checkHostWriteCredentialClass };
 export { checkLinearWriteBudget };
 export { checkAgentToolsWritePath };
 export { checkExecutionCoreEnvDrift };
@@ -6241,6 +6243,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
     () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
     () => checkInstallCompleteness(), // CTL-1918: did the install FINISH — CLIs, plugin-source, sweep, enrolment — advisory only (never FAIL)
+    () => checkHostWriteCredentialClass(), // CTL-2045: is this host's cloud WRITE credential a per-host org key, or the admin bearer that froze the board for 4h? — advisory only (never FAIL)
     () => checkLinearWriteBudget(), // CTL-1936: host cloud-write spend / exhaustion — advisory only (never FAIL)
     () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
     () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)

@@ -1904,6 +1904,151 @@ validate_cloud_token() {
 	esac
 }
 
+# ── CTL-2045 §1: refuse the wrong credential CLASS before anything reaches disk ──
+#
+# assert_host_write_credential_shape TOKEN — 0 when TOKEN is a per-host org key.
+#
+# ⛔ THE INCIDENT. mini-2's 2026-08-18 reinstall provisioned the tenant-wide ADMIN_TOKEN
+# as this host's write credential. The cloud's agent routes correctly refuse an admin
+# bearer for writes, so every cross-host claim 403'd and the board froze from ~15:00 CT
+# — and `catalyst doctor` passed, the daemons ran, the heartbeat stayed fresh, and the
+# local write ledger read `2` with ZERO refusals the whole time, because nothing ever got
+# far enough to be refused locally.
+#
+# The classification itself lives in ONE place (lib/host-write-credential.mjs, mirrored
+# for bash in lib/catalyst-host-write-credential.sh, held honest over a shared fixture
+# table by __tests__/host-write-credential-parity.test.sh). Read that header for why this
+# is a positive ALLOW-LIST rather than a blacklist of admin-bearer shapes, and why it does
+# not gate on the token's LENGTH.
+#
+# ⚠️ FAILS CLOSED WHEN THE CLASSIFIER CANNOT BE LOADED. A guard that silently skips itself
+# when its helper is missing is worse than no guard: it reports the same green install as
+# a passing check, which is the precise shape of the bug being fixed here.
+assert_host_write_credential_shape() {
+	local token="$1"
+
+	catalyst_helper_path "lib/catalyst-host-write-credential.sh" >/dev/null || {
+		print_error "Cannot verify the cloud credential's class — the classifier is unavailable."
+		echo ""
+		echo "  Reason: ${CATALYST_SOURCE_REASON:-unknown}"
+		echo ""
+		echo "  This check refuses rather than skips. Provisioning a host write credential"
+		echo "  without classifying it is what put mini-2 into a silent dispatch deadlock"
+		echo "  for four hours on 2026-08-18 (CTL-2045) — every existing check stayed green."
+		return 1
+	}
+	# shellcheck disable=SC1090
+	source "$CATALYST_HELPER_PATH"
+
+	# ⛔ Called DIRECTLY, never as `$(…)`. The verdict rides globals; a command
+	# substitution runs the function in a subshell and discards all of them.
+	if catalyst_classify_host_write_credential "$token"; then
+		print_success "cloud credential is a per-host organization key (${CATALYST_CREDENTIAL_SHAPE})"
+		return 0
+	fi
+
+	print_error "The cloud token is NOT a per-host write credential — got ${CATALYST_CREDENTIAL_SHAPE}."
+	echo ""
+	echo "  Class:  ${CATALYST_CREDENTIAL_VERDICT}"
+	echo "  Detail: ${CATALYST_CREDENTIAL_DETAIL}"
+	echo ""
+	echo "  A host write credential must be a per-host ORGANIZATION key — it begins"
+	echo "  '${CATALYST_HOST_WRITE_CREDENTIAL_PREFIX}'. The cloud derives this host's identity from that key;"
+	echo "  a credential it cannot bind to a host is refused on every claim write, so the"
+	echo "  host installs green and then claims NOTHING, on any phase, forever."
+	echo ""
+	echo "  Mint a per-host key for this host and re-run with it. Nothing has been written."
+	return 1
+}
+
+# ── CTL-2045 §2: prove this host can actually take a fence ──────────────────────────
+#
+# validate_cloud_agent_binding TOKEN ACCOUNT BASE_URL
+#
+# ⭐ THE HALF THAT ACTUALLY CLOSES THE HOLE, and it is NOT what validate_cloud_token does.
+# That function calls `GET /issues` — the GENERIC read route, which never goes through the
+# cloud's `resolveAgentPrincipal`. mini-2's admin bearer sailed through it with a 200 and
+# then 403'd on every single claim. ⛔ A shape check plus a generic read is still two
+# checks that both pass on the broken credential.
+#
+# The `/agent/*` family is the one the claim actually uses, and the cloud's own code
+# settles which call is sufficient — plugins/dev/scripts/execution-core/linear-write-proxy.mjs:83:
+#
+#     "The GET read-back is NOT a weaker check than a write … resolveReadOnlyAgentContext
+#      calls the SAME resolveAgentPrincipal as resolveWriteContext, including
+#      hostId = authz.keyId and the `if (!hostId) -> 403` refusal. Only the BUDGET half
+#      differs. So `GET /agent/attachments` -> 200 already proves a per-host binding, and
+#      it is the right preflight before arming a host."
+#
+# ⭐ So the preflight is a GET, and that is a strictly better install-time probe than the
+# real write the ticket's AC2 describes: it exercises the identical per-host binding
+# refusal, while creating nothing, needing no scratch ticket, requiring no release step
+# that could fail and leave residue, and spending ZERO of the host's daily write budget.
+#
+# ⚠️ THE VERDICT IS THREE-VALUED, and the pass arm is deliberately wide.
+#   401/403 → REFUSE. This is the incident's exact signature: the credential is rejected
+#             at the agent route family. Nothing else here is evidence of anything.
+#   2xx/404/400 → PASS. The request got PAST authorization to issue resolution, which is
+#             all this probe claims. A 404 on a probe issue id is the AUTHORIZED answer
+#             (measured 2026-08-18: a per-host key against its own account returns 404 on
+#             an absent issue; the admin bearer returned 403 for the same request), so
+#             pinning the pass arm to "200 only" would refuse every correct install.
+#   anything else (000, 5xx) → REFUSE as UNVERIFIED, not as broken. Same posture
+#             validate_cloud_token already takes for an unreachable hub (CTL-1913):
+#             reporting success on a check that did not run is what produced green
+#             installs with permanently dead writers.
+validate_cloud_agent_binding() {
+	local token="$1" account="$2" base_url="$3"
+
+	# A deliberately absent issue: this probe must never touch a real ticket, and the
+	# authorization verdict it reads is decided before issue resolution either way.
+	local probe_issue="CATALYST-INSTALL-PROBE"
+
+	echo "  Verifying this host's per-host binding on the agent write path ..."
+
+	local code
+	code=$(
+		printf 'header = "Authorization: Bearer %s"\n' "$token" |
+			curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+				--config - \
+				"${base_url}/agent/attachments?issueId=${probe_issue}&account=${account}" 2>/dev/null
+	) || code=""
+
+	case "$code" in
+	401 | 403)
+		print_error "This credential is REFUSED on the agent write path (HTTP ${code})."
+		echo ""
+		echo "  It authenticated for generic reads but the cloud derives NO per-host"
+		echo "  binding from it, so every cross-host claim this host attempts will be"
+		echo "  refused. That is a silent dispatch deadlock: the daemons run, the"
+		echo "  heartbeat stays fresh, doctor passes, and the host claims no ticket on"
+		echo "  any phase. It cost the fleet four hours on 2026-08-18 (CTL-2045)."
+		echo ""
+		echo "  Use a per-host organization key minted for THIS host and account"
+		echo "  '${account}'. Nothing has been written."
+		return 1
+		;;
+	2?? | 404 | 400)
+		print_success "per-host binding proven on the agent write path (HTTP ${code})"
+		return 0
+		;;
+	000 | "")
+		print_error "Could not reach ${base_url}/agent/attachments — the binding was NOT verified."
+		echo ""
+		echo "  Refusing rather than assuming: an unverified binding is exactly the state"
+		echo "  this check exists to make impossible. Re-run once the hub is reachable."
+		return 1
+		;;
+	*)
+		print_error "The hub returned HTTP ${code} on the agent write path — binding NOT verified."
+		echo ""
+		echo "  Nothing has been written. A 5xx is not evidence the credential is good OR"
+		echo "  bad; re-run once the hub recovers."
+		return 1
+		;;
+	esac
+}
+
 # resolve_cloud_token — the ONE answer to "did this run get a cloud token".
 #
 # ⛔ Codex #3500 P1: this resolution used to live only inside setup_cloud_replica, as a
@@ -2038,7 +2183,21 @@ setup_cloud_replica() {
 	# replica that never appeared. (Why it stays silent: a tokenless/rejected writer
 	# `process.exit(0)`s, and under `KeepAlive={SuccessfulExit:false}` a clean exit
 	# is PERMANENT — launchd never retries.)
+	# ⛔ CTL-2045 — THREE GATES, CHEAPEST FIRST, AND NONE OF THEM WRITES.
+	#
+	# §1 the credential's CLASS (local, no network): refuses the admin bearer / a user key
+	#    / a bare sk_ issuer key before a single packet leaves the host.
+	# §2 the credential AUTHENTICATES at all (CTL-1913's generic read).
+	# §3 the credential is PER-HOST BOUND on the agent write path (CTL-2045).
+	#
+	# ⚠️ The order is load-bearing and §3 is not redundant with §2. A well-SHAPED key can
+	# still carry the wrong grants, the wrong tenant, or the wrong endpoint — all three were
+	# live hypotheses during the 2026-08-18 incident — and a generic read cannot see any of
+	# them. Conversely §1 catches the mis-provisioned class with no round trip at all, and
+	# names it precisely, rather than leaving the operator to interpret a bare 403.
+	assert_host_write_credential_shape "$token" || return 1
 	validate_cloud_token "$token" "$account" "$base_url" || return 1
+	validate_cloud_agent_binding "$token" "$account" "$base_url" || return 1
 
 	# ⛔ EVERY LINE MUST BE `export` (Codex P1 on #3365). launch.sh SOURCES this file
 	# and then `exec`s bun. A bare `FOO=bar` in a sourced file is a SHELL-LOCAL
