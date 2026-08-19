@@ -28,10 +28,10 @@
 //
 // Hence two rules, with very different epistemics, and both say so:
 //
-//   Rule 1 — DISPATCH PREDATES BOOT (proof). `dispatched|running`, no bg id, and
-//            the dispatch instant precedes this daemon's boot. Applies to
-//            `running` too, because the proof does not care what the agent had
-//            got around to writing.
+//   Rule 1 — DISPATCH PREDATES BOOT (proof). `dispatched|running`, no bg id,
+//            executor `sdk`, and the dispatch instant precedes this daemon's
+//            boot. Applies to `running` too, because the proof does not care what
+//            the agent had got around to writing.
 //
 //   Rule 2 — NEVER STARTED (timer). `dispatched`, no bg id, this boot, older
 //            than the ceiling. The skill flips `dispatched`→`running` on its
@@ -51,14 +51,53 @@
 // ── ⛔ THE FALSE-POSITIVE THIS MUST NOT PRODUCE ─────────────────────────────
 // The BASH executor also writes `bg_job_id: null` in its prelaunch and only
 // fills it in after the spawn returns (phase-agent-dispatch:1591; the window is
-// documented at :1435). A `claude --bg` worker DOES survive a daemon restart, so
-// a real bg worker caught inside that window would be misjudged by Rule 1. The
-// window is seconds wide and Rule 1 carries an age floor (`minAgeMs`) that is
-// orders of magnitude larger, so a signal that young is never judged at all.
+// documented at :1435). A `claude --bg` worker DOES survive a daemon restart.
+// ⛔ The age floor is NOT the guard for this — see IN_PROCESS_EXECUTOR_ID below;
+// a daemon that died inside that window leaves a PERMANENTLY bg-less signal, so
+// waiting longer makes it look more dead rather than less. The executor gate is
+// the guard. The age floor remains, for the narrower case it is actually good
+// for: a dispatch racing a boot-marker read.
 //
 // Zero-import leaf, like phase-yield.mjs: bare-Node loadable, pure, callable
 // from the daemon, the scheduler and tests alike. Every reader is injected by
 // the caller — this module does no I/O and cannot read a clock it was not given.
+
+/**
+ * ⛔ THE EXECUTOR THE RESTART PROOF IS VALID FOR — Codex #3694 P1, and the
+ * correction to my own age-floor argument.
+ *
+ * I originally gated nothing on the executor and claimed the 5-minute age floor
+ * covered the bash path's prelaunch window. ⛔ IT DOES NOT, and the reason is
+ * that the floor is the wrong instrument for the hazard. The floor assumes the
+ * dispatcher is still alive and about to write the job id a moment later. The
+ * case that matters is the one where **the daemon exited inside that window**:
+ * `phase-agent-dispatch` spawned `claude --bg`, the daemon died before
+ * persisting the returned id, and the signal is now bg-less **permanently** —
+ * nothing will ever fill it in. Five minutes later it is not "young"; it is a
+ * bg-less record of a worker that is very much alive, because a `claude --bg`
+ * job is detached and supervisor-managed and SURVIVES the restart. Rule 1 would
+ * have declared it dead and the reclaim could dispatch a duplicate alongside it.
+ *
+ * The proof is not "no bg id" — it is "this worker ran INSIDE the daemon
+ * process". Only one executor does:
+ *
+ *   `sdk`         in-process Agent SDK `query()` → dies with the daemon. ✅
+ *   `codex-exec`  spawns `codex exec` as a child → MAY outlive it. ✋
+ *   `bg`          detached `claude --bg`, supervisor-managed → survives. ✋
+ *
+ * The signal already records which (`executor`, written at prelaunch since
+ * CTL-1457), so this costs one field read. An ABSENT executor holds: a
+ * pre-CTL-1457 signal cannot prove it was in-process, and the cost of guessing
+ * wrong is a duplicate worker.
+ *
+ * ⚠️ The literal is mirrored from `sdk-run-phase-agent.mjs`'s prelaunch
+ * (`{ spawn, executorId: "sdk" }`) and held to it by `executor-id-parity` in
+ * phase-dispatch-deadline.test.mjs — this is a zero-import leaf and cannot
+ * import the constant, so the mirror is checked mechanically rather than
+ * trusted. That test also asserts `CODEX_EXECUTOR_ID !== "sdk"`, so a future
+ * rename cannot silently widen the proof to a spawned executor.
+ */
+export const IN_PROCESS_EXECUTOR_ID = "sdk";
 
 /** Statuses a bg-less worker can be in while it still holds a slot. */
 export const DISPATCH_PENDING_STATUS = "dispatched";
@@ -91,6 +130,8 @@ export const DISPATCH_DEADLINE_REASONS = Object.freeze([
   "dispatch-start-unreadable", // ⚠️ cannot date the dispatch — cannot judge it
   "too-young", // inside the age floor; no rule may fire yet
   "boot-unreadable", // ⚠️ no boot instant — NEITHER rule can be evaluated
+  "executor-not-in-process", // ⛔ a `bg`/`codex-exec` worker can OUTLIVE the daemon
+  "executor-unknown", // ⚠️ pre-CTL-1457 signal — cannot prove it ran in-process
   "within-deadline", // dated, same boot, and not past the ceiling
 ]);
 
@@ -148,6 +189,20 @@ export function classifyDispatchDeadline(
   const bg = sig.bg_job_id;
   if (typeof bg === "string" && bg !== "") {
     return { expired: false, reason: "has-bg-job", ageMs: null };
+  }
+
+  // ⛔ BOTH rules are gated on the executor, not just Rule 1. Rule 2's input — a
+  // bg-less signal still at `dispatched` — is the SAME on-disk shape the
+  // died-mid-launch bash case produces, so applying the timer to it would
+  // reintroduce the duplicate by the other door. A `bg` launch that never
+  // recorded its id already has its own machinery (`mark_launch_failed`,
+  // CTL-511); this module deliberately does not compete with it.
+  const executor = sig.executor;
+  if (typeof executor !== "string" || executor === "") {
+    return { expired: false, reason: "executor-unknown", ageMs: null };
+  }
+  if (executor !== IN_PROCESS_EXECUTOR_ID) {
+    return { expired: false, reason: "executor-not-in-process", ageMs: null };
   }
 
   // ⚠️ UNREADABLE START HOLDS — the opposite of CTL-1854's yield, on purpose.

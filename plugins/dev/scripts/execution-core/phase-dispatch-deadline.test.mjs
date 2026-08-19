@@ -34,7 +34,9 @@ import {
   DISPATCH_DEADLINE_REASONS,
   MAX_DISPATCHED_MS,
   MIN_DISPATCH_AGE_MS,
+  IN_PROCESS_EXECUTOR_ID,
 } from "../lib/phase-dispatch-deadline.mjs";
+import { readFileSync } from "node:fs";
 import { classifyWorker, reclaimDeadWorkIfPossible } from "./recovery.mjs";
 
 const BOOT = Date.parse("2026-08-18T23:10:00Z");
@@ -47,6 +49,8 @@ const sdk = (over = {}) => ({
   phase: "implement",
   status: "dispatched",
   bg_job_id: null,
+  executor: "sdk", // CTL-1457 writes this at prelaunch; Codex #3694 P1 gates on it
+
   startedAt: iso(BOOT - 6 * 60 * 60 * 1000), // 6 h before boot — the measured ghost
   ...over,
 });
@@ -183,7 +187,7 @@ describe("the controls that protect a live worker", () => {
 
   test("startedAt absent falls back to updatedAt rather than giving up", () => {
     const v = classifyDispatchDeadline(
-      { status: "dispatched", bg_job_id: null, updatedAt: iso(BOOT - 60 * 60 * 1000) },
+      { status: "dispatched", bg_job_id: null, executor: "sdk", updatedAt: iso(BOOT - 60 * 60 * 1000) },
       { nowMs: at(60_000), bootedMs: BOOT }
     );
     expect(v.expired).toBe(true);
@@ -241,6 +245,90 @@ describe("the controls that protect a live worker", () => {
     expect(v.expired).toBe(false);
     expect(v.reason).toBe("too-young");
     expect(v.ageMs).toBeLessThan(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⛔ Codex #3694 P1 — the correction to my own age-floor argument.
+//
+// I had claimed the 5-minute floor covered the bash prelaunch window. It does
+// not: if the DAEMON dies inside that window, `phase-agent-dispatch` never
+// persists the job id and the signal is bg-less PERMANENTLY — so waiting longer
+// makes a live, detached `claude --bg` worker look MORE dead, not less. Rule 1
+// would then declare it dead and the reclaim could dispatch a duplicate
+// alongside it. The proof is not "no bg id", it is "ran inside the daemon".
+describe("the executor gate — the restart proof is only valid in-process", () => {
+  const wouldOtherwiseExpire = { nowMs: at(60_000), bootedMs: BOOT };
+
+  test.each([["bg"], ["codex-exec"], ["worker"], ["SDK"], ["sdk-exec"]])(
+    "⛔ executor %p is NOT declared dead by a restart, even pre-boot and past the ceiling",
+    (executor) => {
+      for (const status of ["dispatched", "running"]) {
+        const v = classifyDispatchDeadline(sdk({ executor, status }), wouldOtherwiseExpire);
+        expect(v.expired).toBe(false);
+        expect(v.reason).toBe("executor-not-in-process");
+      }
+    }
+  );
+
+  // ⭐ THE MEASURED CASE, stated as a scenario rather than as a field value: a
+  // `claude --bg` worker whose id was never persisted because the daemon died
+  // mid-launch. It is bg-less forever, it is old, its dispatch predates the boot
+  // — and it is ALIVE.
+  test("⭐ a bash worker whose job id was never persisted survives the restart", () => {
+    const v = classifyDispatchDeadline(
+      sdk({ executor: "bg", status: "running", startedAt: iso(BOOT - 6 * 60 * 60 * 1000) }),
+      wouldOtherwiseExpire
+    );
+    expect(v.expired).toBe(false);
+    expect(v.reason).toBe("executor-not-in-process");
+  });
+
+  test.each([[undefined], [null], [""], [42], [{}]])(
+    "an absent/unusable executor (%p) HOLDS — it cannot prove it ran in-process",
+    (executor) => {
+      const v = classifyDispatchDeadline(sdk({ executor }), wouldOtherwiseExpire);
+      expect(v.expired).toBe(false);
+      expect(v.reason).toBe("executor-unknown");
+      // ⚠️ and NOT the other executor reason — "I have no evidence" and "I have
+      // evidence it is the wrong executor" are different facts.
+      expect(v.reason).not.toBe("executor-not-in-process");
+    }
+  );
+
+  // ⛔ Rule 2 is gated too, not just Rule 1. Its input — a bg-less signal still
+  // at `dispatched` — is the SAME on-disk shape the died-mid-launch bash case
+  // produces, so leaving the timer ungated would reintroduce the duplicate by
+  // the other door.
+  test("⛔ the TIMER is gated on the executor too, not only the restart proof", () => {
+    const sameBootPastCeiling = {
+      nowMs: BOOT + 1000 + MAX_DISPATCHED_MS + 60_000,
+      bootedMs: BOOT,
+    };
+    const v = classifyDispatchDeadline(
+      sdk({ executor: "bg", startedAt: iso(BOOT + 1000) }),
+      sameBootPastCeiling
+    );
+    expect(v.expired).toBe(false);
+    expect(v.reason).toBe("executor-not-in-process");
+  });
+
+  // ⭐ PARITY. This is a zero-import leaf, so the literal is a MIRROR of the
+  // production prelaunch and has to be checked mechanically rather than trusted
+  // — the same discipline as ASSERTED_BY's two bash mirrors. It also fails
+  // CLOSED: if either anchor disappears, the test errors rather than passing on
+  // a vacuous match.
+  test("⭐ executor-id-parity: the literal matches the SDK prelaunch and excludes codex", () => {
+    const sdkSrc = readFileSync("./sdk-run-phase-agent.mjs", "utf8");
+    const m = sdkSrc.match(/executorId:\s*"([^"]+)"/);
+    expect(m).not.toBeNull(); // fails closed if the anchor is renamed
+    expect(m[1]).toBe(IN_PROCESS_EXECUTOR_ID);
+
+    const codexSrc = readFileSync("./codex-run-phase-agent.mjs", "utf8");
+    const c = codexSrc.match(/CODEX_EXECUTOR_ID\s*=\s*"([^"]+)"/);
+    expect(c).not.toBeNull();
+    // ⛔ A future rename must not silently widen the proof to a SPAWNED executor.
+    expect(c[1]).not.toBe(IN_PROCESS_EXECUTOR_ID);
   });
 });
 
@@ -376,6 +464,7 @@ describe("reclaimDeadWorkIfPossible — the ghost reaches the reclaim path", () 
       orchestrator: "CTL-GHOST",
       status,
       bg_job_id: null,
+      executor: "sdk",
       startedAt: iso(dispatchedAtMs),
       catalystSessionId: "sess_ghost",
     };
