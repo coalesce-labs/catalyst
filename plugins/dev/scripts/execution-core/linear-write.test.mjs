@@ -295,6 +295,55 @@ describe("CTL-757: runTransition from_state/to_state propagation", () => {
     expect(r.from_state).toBe(r.to_state);
   });
 
+  // CTL-1889: the negative control. linear-transition.sh's own header names the
+  // TARGET state as "a host with NO Linear credential and no reason to have
+  // linearis installed" — exactly the host this action fires on. The OLD
+  // denylist (`action !== "update-failed"`) read a zero exit + this action as
+  // applied:true — a fabricated success on the one host that must fail loudly.
+  test("CTL-1889: linearis not installed (skipped-no-linearis) ⇒ applied:false, NAMED reason, not a fabricated success", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "verify",
+      resolveRepoRoot,
+      exec: transitionExec({ action: "skipped-no-linearis", currentState: "", targetState: "" }),
+    });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBe("not-applied-skipped-no-linearis");
+  });
+
+  test("CTL-1889: a caller's deliberate --resolve-only is NOT read as applied", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "verify",
+      resolveRepoRoot,
+      exec: transitionExec({ action: "resolve-only", currentState: "PR", targetState: "" }),
+    });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBe("not-applied-resolve-only");
+  });
+
+  test("CTL-1889: dry-run is NOT read as applied", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "verify",
+      resolveRepoRoot,
+      exec: transitionExec({ action: "dry-run", currentState: "PR", targetState: "Validate" }),
+    });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBe("not-applied-dry-run");
+  });
+
+  test("CTL-1889: an unrecognized future action defaults to NOT applied (fail-safe allowlist)", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "verify",
+      resolveRepoRoot,
+      exec: transitionExec({ action: "some-new-action-nobody-allowlisted-yet", currentState: "PR", targetState: "Validate" }),
+    });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBe("not-applied-some-new-action-nobody-allowlisted-yet");
+  });
+
   test("failure path (exit non-zero, update-failed) still returns from_state + reason", () => {
     const r = applyPhaseStatus({
       ticket: "CTL-1",
