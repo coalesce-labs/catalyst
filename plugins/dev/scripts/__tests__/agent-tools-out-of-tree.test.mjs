@@ -41,6 +41,25 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPTS = dirname(fileURLToPath(new URL("../linear-ack.mjs", import.meta.url)));
+/**
+ * ⛔ INERT STAND-INS FOR THE CREDENTIALS linear-reply.mjs GATES ON, AND WHY THEY ARE HERE.
+ * That tool exits 2 when LINEAR_SYNC_CLIENT_ID/SECRET are unset — BEFORE it reaches any of
+ * the behaviour under test. Those are exported in a developer's shell and absent on CI, so
+ * the first cut of this suite was 7/7 locally and 2 pass / 5 fail on the Linux runner:
+ * every linear-reply case failed with exit 2 while every linear-ack case passed (that tool
+ * has no such gate). It was measuring the machine, not the code — the "a test driven
+ * through the ambient environment is a test of the environment" trap, already on this
+ * repo's record and repeated here.
+ *
+ * Reproduce the CI failure locally with:
+ *   env -u LINEAR_SYNC_CLIENT_ID -u LINEAR_SYNC_CLIENT_SECRET bun test agent-tools-out-of-tree.test.mjs
+ *
+ * The values are never used: `fetch` is stubbed in the child, so nothing is minted or sent.
+ */
+const STUB_CREDS = Object.freeze({
+  LINEAR_SYNC_CLIENT_ID: "stub-client-id",
+  LINEAR_SYNC_CLIENT_SECRET: "stub-client-secret",
+});
 const HUMAN = "c2a8cc92-cab6-4536-9500-0f24abdf702b";
 
 /** A fetch stub covering every call these two tools make: the OAuth mint, the issue
@@ -76,8 +95,9 @@ function runIsolated(tool, args, env = {}) {
   const r = spawnSync(process.execPath, ["--import", "./stub.mjs", tool, ...args], {
     cwd: dir,
     encoding: "utf8",
-    // Strip an ambient mode so the developer's own shell cannot decide the verdict.
-    env: { ...process.env, CATALYST_LINEAR_WRITE_PROXY: undefined, ...env },
+    // Strip an ambient mode, and PIN the credentials, so neither the developer's shell nor
+    // CI's lack of one can decide the verdict. See STUB_CREDS.
+    env: { ...process.env, ...STUB_CREDS, CATALYST_LINEAR_WRITE_PROXY: undefined, ...env },
   });
   // ⛔ bun COLOURS child stderr, so a raw `startsWith`/`grep` against it silently matches
   // nothing — the repo's standing ANSI trap, which here would have read as "the tool said
@@ -197,7 +217,7 @@ globalThis.fetch = async (url, opts) => {
       {
         cwd: dir,
         encoding: "utf8",
-        env: { ...process.env, CATALYST_LINEAR_WRITE_PROXY: undefined },
+        env: { ...process.env, ...STUB_CREDS, CATALYST_LINEAR_WRITE_PROXY: undefined },
       }
     );
     const line = strip(r.stderr ?? "")
@@ -228,6 +248,7 @@ globalThis.fetch = async (url, opts) => {
         encoding: "utf8",
         env: {
           ...process.env,
+          ...STUB_CREDS,
           CATALYST_LINEAR_WRITE_PROXY: undefined,
           CATALYST_AVATAR_URL_TEMPLATE: "https://example.invalid/{slug}.png",
         },
