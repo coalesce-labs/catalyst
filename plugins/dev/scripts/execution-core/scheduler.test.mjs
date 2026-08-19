@@ -3184,6 +3184,135 @@ describe("schedulerTick — new-work pull", () => {
     });
   });
 
+  // CTL-1783: GATE 4 — a deliberate reopen (drifted state === the project's
+  // admission-eligible status) archives the stale worker dir instead of
+  // re-Done'ing over it, so the ticket becomes admission-eligible again.
+  describe("CTL-1783: reconcile backstop — deliberate reopen archives instead of re-Done", () => {
+    function mdDoneWithPr(ticket, prNumber) {
+      writeSignalRaw(ticket, "teardown", {
+        ticket,
+        phase: "teardown",
+        status: "done",
+        pr: { number: prNumber, repo: "o/r" },
+      });
+    }
+    function markerPath(ticket) {
+      return join(orchDir, "workers", ticket, ".terminal-done.applied");
+    }
+
+    test("drifted state === eligible status ⇒ archives the worker dir, does NOT re-Done", () => {
+      mdDoneWithPr("CTL-40", 40);
+      writeFileSync(markerPath("CTL-40"), "");
+      const doneCalls = [];
+      const stateWrites = [];
+      const renameCalls = [];
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: fakeDispatch(),
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: ({ ticket }) => {
+            doneCalls.push(ticket);
+            return { applied: true, from_state: "Todo", to_state: "Done" };
+          },
+          applyLabel: () => ({ applied: true }),
+        },
+        prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "2026-06-04T00:00:00Z" }) },
+        cache: { get: () => "Todo", set: () => {}, stats: () => ({}) }, // deliberate reopen to Todo
+        appendStateWriteEvent: (ev) => stateWrites.push(ev),
+        resolveEligibleStatus: () => "Todo",
+        renameWorkerDir: (from, to) => renameCalls.push([from, to]),
+        now: () => 1_700_000_000_000,
+      });
+      expect(doneCalls).not.toContain("CTL-40");
+      expect(renameCalls).toHaveLength(1);
+      expect(renameCalls[0][0]).toBe(join(orchDir, "workers", "CTL-40"));
+      expect(renameCalls[0][1]).toBe(join(orchDir, "workers", ".gc-CTL-40-1700000000000"));
+      const archived = stateWrites.filter((e) => e.source === "reconcile-backstop-reopen-archive");
+      expect(archived).toHaveLength(1);
+      expect(archived[0].applied).toBe(false);
+      expect(archived[0].from_state).toBe("Todo");
+      expect(stateWrites.filter((e) => e.source === "reconcile-backstop")).toHaveLength(0);
+    });
+
+    test("drifted state !== eligible status ⇒ unchanged: still force-Dones (no archive)", () => {
+      mdDoneWithPr("CTL-41", 41);
+      writeFileSync(markerPath("CTL-41"), "");
+      const doneCalls = [];
+      const renameCalls = [];
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: fakeDispatch(),
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: ({ ticket }) => {
+            doneCalls.push(ticket);
+            return { applied: true, from_state: "In Review", to_state: "Done" };
+          },
+          applyLabel: () => ({ applied: true }),
+        },
+        prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "x" }) },
+        cache: { get: () => "In Review", set: () => {}, stats: () => ({}) }, // an echo, not a reopen
+        resolveEligibleStatus: () => "Todo",
+        renameWorkerDir: (from, to) => renameCalls.push([from, to]),
+      });
+      expect(doneCalls).toContain("CTL-41");
+      expect(renameCalls).toHaveLength(0);
+    });
+
+    test("resolveEligibleStatus throws ⇒ fails safe to the pre-existing force-Done behavior", () => {
+      mdDoneWithPr("CTL-42", 42);
+      writeFileSync(markerPath("CTL-42"), "");
+      const doneCalls = [];
+      const renameCalls = [];
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: fakeDispatch(),
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: ({ ticket }) => {
+            doneCalls.push(ticket);
+            return { applied: true, from_state: "Todo", to_state: "Done" };
+          },
+          applyLabel: () => ({ applied: true }),
+        },
+        prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "x" }) },
+        cache: { get: () => "Todo", set: () => {}, stats: () => ({}) },
+        resolveEligibleStatus: () => {
+          throw new Error("registry unreadable");
+        },
+        renameWorkerDir: (from, to) => renameCalls.push([from, to]),
+      });
+      expect(doneCalls).toContain("CTL-42");
+      expect(renameCalls).toHaveLength(0);
+    });
+
+    test("a failed archive rename does NOT fall through to force-Done", () => {
+      mdDoneWithPr("CTL-43", 43);
+      writeFileSync(markerPath("CTL-43"), "");
+      const doneCalls = [];
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: fakeDispatch(),
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: ({ ticket }) => {
+            doneCalls.push(ticket);
+            return { applied: true };
+          },
+          applyLabel: () => ({ applied: true }),
+        },
+        prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "x" }) },
+        cache: { get: () => "Todo", set: () => {}, stats: () => ({}) },
+        resolveEligibleStatus: () => "Todo",
+        renameWorkerDir: () => {
+          throw new Error("ENOENT: raced by a concurrent sweep");
+        },
+      });
+      expect(doneCalls).toEqual([]);
+    });
+  });
+
   test("a failed-dispatch (non-zero exit) is a soft skip, not a throw", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 1 });

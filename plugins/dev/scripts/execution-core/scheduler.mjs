@@ -108,7 +108,7 @@ import {
   GATEWAY_EXISTS_FRESH_MS,
 } from "./linear-query.mjs";
 import { gatewayLabelsHit, descriptorAgeMs } from "./gateway-read.mjs"; // CTL-1079 / CTL-1570
-import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup
+import { getProjectConfig, listProjects, ownerRepoFromRepoRoot, resolveEligibleQuery } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup; resolveEligibleQuery (CTL-1783) — the reopen-to-eligible-status check
 // CTL-703: worktree teardown is now handled by the dedicated phase-teardown
 // phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
 // The gatedTeardownWorktree import is removed; the teardown phase agent
@@ -4142,6 +4142,14 @@ export function terminalDoneOnce(
   return null;
 }
 
+// CTL-1783: worker-dir archive prefix for a genuine reopen — literally the
+// worker-dir-gc.mjs QUARANTINE_PREFIX convention (".gc-<ticket>-<ts>", not
+// exported there, so mirrored here rather than imported). Reusing the exact
+// prefix is deliberate: worker-dir-gc.mjs's own leftover-purge sweep already
+// treats ANY ".gc-"-prefixed dir under workers/ as GC-owned and eventually
+// deletes it — this path needs no cleanup code of its own.
+const REOPEN_ARCHIVE_PREFIX = ".gc-";
+
 // reconcileTerminalBackstop — CTL-758 defense-in-depth (the reconcile backstop).
 // A ticket whose pipeline already reached terminal Done (the .terminal-done.applied
 // marker exists) but whose LIVE Linear state has drifted BACK to a non-terminal
@@ -4151,6 +4159,19 @@ export function terminalDoneOnce(
 // (a webhook echo, an operator, a sibling process) and forces the forward Done
 // write (which the guard explicitly permits: key === TERMINAL_LINEAR_KEY).
 //
+// ⛔ CTL-1783: "ANY source" used to include a HUMAN'S deliberate reopen, and
+// re-Done'ing over that is exactly the bug Ryan reported — "partially completed
+// tickets were being reported as done and then they were in a state where they
+// couldn't be picked up again later." GATE 4 below narrows the force-Done path:
+// when the drifted state is the ticket's project-configured admission-eligible
+// status (resolveEligibleQuery's `status`, default "Todo") — a state nothing in
+// this pipeline ever writes backward to, so its presence is itself the signal of
+// a deliberate reset — the backstop abstains and archives the stale worker dir
+// instead, so the ticket falls out of listStartedTickets and is admission-eligible
+// again on the very next new-work-pull. A drift to any OTHER non-terminal state
+// (the ambiguous echo/webhook-lag case GATE 3 already handled) still force-Dones,
+// unchanged — this is a narrow carve-out, not a redesign of the whole backstop.
+//
 // Heavily rate-limited so it is cheap on the hot loop:
 //   - GATE 1: only tickets with the .terminal-done.applied marker (pipeline
 //     provably reached terminal) are even considered.
@@ -4159,6 +4180,8 @@ export function terminalDoneOnce(
 //     merge, so it stays conservative and does nothing).
 //   - GATE 3: the cached live Linear read must be NON-terminal (else there is
 //     nothing to fix — the common case is a no-op).
+//   - GATE 4: the drifted state is NOT the project's admission-eligible status
+//     (else it is a deliberate reopen — archive, don't re-Done).
 // The applyTerminalDone write itself rides the shared linearBreaker (defaultExec).
 function reconcileTerminalBackstop(
   orchDir,
@@ -4173,6 +4196,12 @@ function reconcileTerminalBackstop(
     multiHost = false,
     gateway = undefined,
     self = undefined,
+    // CTL-1783 seams — injectable for hermetic tests, matching this function's
+    // existing DI-object convention rather than importing registry.mjs/node:fs
+    // bare into the function body.
+    resolveEligibleStatus = defaultResolveEligibleStatus,
+    renameWorkerDir = renameSync,
+    now = Date.now,
   } = {}
 ) {
   // GATE 1 — pipeline reached terminal (marker present).
@@ -4205,6 +4234,48 @@ function reconcileTerminalBackstop(
     );
     return;
   }
+  // GATE 4 — a deliberate reopen (drifted state === the admission-eligible
+  // status) archives the worker dir instead of re-Done'ing over it.
+  let eligibleStatus;
+  try {
+    eligibleStatus = resolveEligibleStatus(ticket);
+  } catch {
+    eligibleStatus = null; // unreadable registry → fall through to the pre-existing force-Done behavior
+  }
+  if (eligibleStatus && state === eligibleStatus) {
+    const workerDir = join(orchDir, "workers", ticket);
+    const archived = join(orchDir, "workers", `${REOPEN_ARCHIVE_PREFIX}${ticket}-${now()}`);
+    try {
+      renameWorkerDir(workerDir, archived);
+      log.warn(
+        { ticket, eligibleStatus },
+        "ctl-1783: reconcile backstop archived a stale worker dir instead of re-Done'ing a deliberate reopen"
+      );
+    } catch (err) {
+      // fail-soft — the dir may already be gone (a concurrent sweep beat us to
+      // it) or the rename may have failed; either way we do NOT fall through to
+      // force-Done, since state === eligibleStatus is still evidence of a
+      // deliberate reopen even if the archive itself couldn't complete.
+      log.warn(
+        { ticket, err: err.message },
+        "scheduler: reconcile-backstop reopen-archive threw — continuing tick"
+      );
+    }
+    if (typeof emitStateWrite === "function") {
+      // No Linear write happened on this path (that is the whole point), so
+      // there is no real writerResult — a synthetic applied:false one keeps
+      // this in the same linear.state.write audit stream as the sibling
+      // "reconcile-backstop" source rather than inventing a second one.
+      emitStateWrite({
+        writerResult: { applied: false, reason: "reopen-archive", from_state: state, to_state: null },
+        ticket,
+        phase: TERMINAL_PHASE,
+        source: "reconcile-backstop-reopen-archive",
+        orchId: ticket,
+      });
+    }
+    return;
+  }
   // Drift detected: force the forward Done write (the CTL-758 guard permits it).
   try {
     const res = writeStatus.applyTerminalDone({ ticket, cache });
@@ -4227,6 +4298,19 @@ function reconcileTerminalBackstop(
       "scheduler: reconcile-backstop Done write threw — continuing tick"
     );
   }
+}
+
+// defaultResolveEligibleStatus — CTL-1783. "CTL-1783" -> its project's
+// registry-configured admission-eligible Linear status (resolveEligibleQuery's
+// `status`, default "Todo"). Mirrors the teamOf(ticket) + getProjectConfig(team)
+// chain already used elsewhere in this file (e.g. the watchdog/reclaim sweeps);
+// no memoization here deliberately matches that existing convention.
+function defaultResolveEligibleStatus(ticket) {
+  const team = teamOf(ticket);
+  if (!team) return null;
+  const entry = getProjectConfig(team);
+  if (!entry) return null;
+  return resolveEligibleQuery(entry).status;
 }
 
 // emitOrphanDetectedOnce — CTL-868 route (B) of the orphan-reconcile sweep. A
@@ -4879,6 +4963,11 @@ export function schedulerTick(
     // runningOpts.prAdapter → runTick, so both paths fire live. Injectable so
     // tests can exercise the pr-merged branch without shelling out to `gh`.
     prAdapter = undefined,
+    // CTL-1783: reconcileTerminalBackstop's GATE 4 seams — injectable so a unit
+    // tick can pin "what's the eligible status" / observe the archive rename
+    // without touching the real registry or filesystem defaults.
+    resolveEligibleStatus = defaultResolveEligibleStatus,
+    renameWorkerDir = renameSync,
     // CTL-1157 (ALARM-NOT-BLOCK): the open-PR ENUMERATOR the terminal sweep's DIRECT
     // Done write (terminalDoneOnce) consults — it no longer refuses the write, it
     // only decides whether to fire the recovery.done-applied-with-open-pr alarm. The
@@ -8783,6 +8872,9 @@ export function schedulerTick(
         multiHost,
         gateway,
         self,
+        resolveEligibleStatus,
+        renameWorkerDir,
+        now,
       }
     );
     // CTL-1660 P1 round 2 (Codex #3081): evaluate failures through the SAME
