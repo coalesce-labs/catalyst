@@ -73,6 +73,7 @@ import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary
 import {
   claimDispatchSync,
+  isClaimFailure,
   readTriageAttemptCountSync,
   bumpTriageAttemptCountSync,
 } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS; CTL-1649: fleet-wide triage attempt count
@@ -863,7 +864,7 @@ const _triageSkipStreaks = new Map();
 // this ticket's triage.json while it holds, so it escalates INFO → WARN and says
 // so. Never throws — an observability helper that can break admission is worse
 // than the blindness it replaces.
-export function noteTriageSkip(identifier, reason, detail = {}) {
+export function noteTriageSkip(identifier, reason, detail = {}, { alwaysWarn = false } = {}) {
   try {
     const prev = _triageSkipStreaks.get(identifier);
     const streak = prev?.reason === reason ? prev.streak + 1 : 1;
@@ -876,10 +877,23 @@ export function noteTriageSkip(identifier, reason, detail = {}) {
     const isEscalationEdge = streak === TRIAGE_SKIP_ESCALATE_AFTER;
     if (!isFirst && !isPeriodic && !isEscalationEdge) return streak;
     const context = { ticket: identifier, reason, held_sweeps: streak, ...detail };
+    // CTL-2033: `alwaysWarn` raises the SEVERITY, never the frequency. A skip that
+    // is a FAILURE (the claim write never landed) is abnormal on its very first
+    // sweep — waiting TRIAGE_SKIP_ESCALATE_AFTER sweeps to say so is 75-150 minutes
+    // at the measured 5-10 min sweep cadence. The sparse gate above still bounds
+    // how often it is written, so a 20-candidate sweep cannot flood.
     if (streak >= TRIAGE_SKIP_ESCALATE_AFTER) {
       log.warn(
         context,
         "ctl-879: triage admission blocked persistently — no triage.json can be produced for this ticket while this reason holds, so the scheduler's ctl-1150 gate will hold it indefinitely"
+      );
+    } else if (alwaysWarn) {
+      // A different sentence, not the persistence one: "persistently" would be a
+      // false statement on sweep 1, and `held_sweeps: 1` beside it reads as a bug
+      // in the counter rather than as the alarm it is.
+      log.warn(
+        context,
+        "ctl-879: triage admission FAILED (not a lost race) — the cross-host claim never landed, so no host will produce this ticket's triage.json; read claim_reason"
       );
     } else {
       log.info(context, "ctl-879: triage admission skipped this sweep");
@@ -1235,8 +1249,13 @@ function dispatchTriage(
   if (multiHost) {
     const claim = claimDispatch({ ticket: identifier, hostName: self, phase: "triage" });
     if (!claim.won) {
+      // CTL-2033: the claim now says WHICH of its outcomes this was. `failed` is
+      // fail-loud on the unknown — only an explicit `peer-won` counts as the normal
+      // race (see isClaimFailure).
+      const claimReason = claim?.reason ?? null;
+      const failed = isClaimFailure(claimReason);
       log.debug(
-        { identifier, self },
+        { identifier, self, claim_reason: claimReason },
         "ctl-862: lost cross-host claim — another host owns this triage dispatch, deferring"
       );
       // CTL-879: the SIXTH blind gate, and the one the first instrument missed.
@@ -1253,10 +1272,18 @@ function dispatchTriage(
       // a level that does not ship, and the second is a real stall (mini's Linear
       // write budget measured 300/300 spent with 674 refusals the same day). The
       // reason string keeps them distinguishable at the surface.
-      noteTriageSkip(identifier, "lost-cross-host-claim", {
-        self,
-        claim_reason: claim?.reason ?? null,
-      });
+      //
+      // ⭐ CTL-2033 measured the answer to that question: 36 of 36 held tickets were
+      // FAILED claims, not lost ones — so the two get DIFFERENT gate reasons here.
+      // `claim-write-failed` is a stall and warns on sweep 1; `lost-cross-host-claim`
+      // keeps its name and its INFO-until-persistent ladder, because a peer winning
+      // is a normal outcome that only becomes interesting if it never stops.
+      noteTriageSkip(
+        identifier,
+        failed ? "claim-write-failed" : "lost-cross-host-claim",
+        { self, claim_reason: claimReason, claim_detail: claim?.detail ?? null },
+        { alwaysWarn: failed },
+      );
       return false;
     }
     clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)

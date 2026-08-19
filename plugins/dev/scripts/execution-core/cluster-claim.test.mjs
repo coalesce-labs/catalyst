@@ -39,6 +39,31 @@ async function captureStdout(fn) {
   }
 }
 
+// captureStdio — captureStdout's sibling for CTL-2033: the claim failure path
+// writes a JSON line to stdout AND a human line to stderr, and both are part of
+// the contract. Capturing stderr also keeps the suite's output clean.
+async function captureStdio(fn) {
+  const outChunks = [];
+  const errChunks = [];
+  const origOut = process.stdout.write;
+  const origErr = process.stderr.write;
+  process.stdout.write = (s) => {
+    outChunks.push(typeof s === "string" ? s : s.toString());
+    return true;
+  };
+  process.stderr.write = (s) => {
+    errChunks.push(typeof s === "string" ? s : s.toString());
+    return true;
+  };
+  try {
+    const code = await fn();
+    return { code, out: outChunks.join(""), err: errChunks.join("") };
+  } finally {
+    process.stdout.write = origOut;
+    process.stderr.write = origErr;
+  }
+}
+
 // makeFakeLinear — an in-memory Linear that honours the three operations
 // cluster-claim issues: identifier→id resolution, attachment read, and the
 // upsert-on-url attachmentCreate. State is a Map<ticket, metadata>. Returns
@@ -513,6 +538,88 @@ describe("runCli — the spawnSync CLI surface (CTL-850)", () => {
     );
     expect(code).toBe(0);
     expect(JSON.parse(out)).toEqual({ won: false, generation: 1 });
+  });
+
+  // ─── CTL-2033 ───────────────────────────────────────────────────────────────
+  // The `claim` subcommand's THIRD outcome. Before this, a throw inside
+  // claimTicket (a refused proxy write, a 401, a GraphQL errors[] body) fell to
+  // the module's top-level catch: stderr prose + exit 1, and NOTHING on stdout.
+  // The sync wrapper therefore saw the same `{won:false, generation:null}` it saw
+  // for a peer legitimately winning the fence. These cases pin the separation.
+  it("claim: a THROWN claim exits CLAIM_FAILED (11) with a machine-readable error on stdout", async () => {
+    async function post(query) {
+      if (query.includes("ResolveIssueId")) return { issue: { id: "uuid-CTL-842" } };
+      if (query.includes("ReadFence")) return { issue: { attachments: { nodes: [] } } };
+      if (query.includes("UpsertFence")) return { attachmentCreate: { success: false } };
+      throw new Error("unexpected");
+    }
+    const { code, out, err } = await captureStdio(() =>
+      runCli(["claim", "CTL-842", "mini", "triage"], { post }),
+    );
+    expect(code).toBe(11);
+    const parsed = JSON.parse(out);
+    expect(parsed.won).toBe(false);
+    expect(parsed.generation).toBeNull();
+    // The transport's OWN reason word survives to the caller — not a message scrape.
+    expect(parsed.error.reason).toBe("write-not-succeeded");
+    expect(parsed.error.message).toContain("success=false");
+    // stderr keeps a human line for an operator grep.
+    expect(err).toContain("reason=write-not-succeeded");
+  });
+
+  it("claim: exit 11 is DISTINCT from exit 0 — a failed claim and a lost race are not the same value", async () => {
+    // Lost race: the operation ran, a rival won the read-back.
+    let writes = 0;
+    async function lostPost(query) {
+      if (query.includes("ResolveIssueId")) return { issue: { id: "uuid-CTL-842" } };
+      if (query.includes("UpsertFence")) {
+        writes += 1;
+        return { attachmentCreate: { success: true, attachment: {} } };
+      }
+      if (query.includes("ReadFence")) {
+        const metadata =
+          writes === 0 ? null : { owner_host: "rival", catalyst_generation: 1, phase: "triage", claimed_at: "x" };
+        return { issue: { attachments: { nodes: metadata ? [{ id: "f", url: fenceUrl("CTL-842"), metadata }] : [] } } };
+      }
+      throw new Error("unexpected");
+    }
+    // Failed claim: the write itself is refused.
+    async function failedPost(query) {
+      if (query.includes("ResolveIssueId")) return { issue: { id: "uuid-CTL-842" } };
+      if (query.includes("ReadFence")) return { issue: { attachments: { nodes: [] } } };
+      if (query.includes("UpsertFence")) throw new Error("linear graphql http 429");
+      throw new Error("unexpected");
+    }
+    const lost = await captureStdio(() => runCli(["claim", "CTL-842", "mini", "triage"], { post: lostPost }));
+    const failed = await captureStdio(() => runCli(["claim", "CTL-842", "mini", "triage"], { post: failedPost }));
+    expect(lost.code).toBe(0);
+    expect(failed.code).toBe(11);
+    expect(lost.code).not.toBe(failed.code);
+    expect(JSON.parse(lost.out).error).toBeUndefined();
+    expect(JSON.parse(failed.out).error.reason).toBe("claim-threw");
+  });
+
+  it("claim: a non-AttachmentTransportError throw is named `claim-threw`, never guessed from its message", async () => {
+    async function post(query) {
+      if (query.includes("ResolveIssueId")) throw new Error("budget:day-exhausted looking string in a bare Error");
+      throw new Error("unexpected");
+    }
+    const { code, out } = await captureStdio(() => runCli(["claim", "CTL-842", "mini", "triage"], { post }));
+    expect(code).toBe(11);
+    // The MESSAGE contains "budget:" but the structured reason does not claim to
+    // be one — the reason comes from `err.reason`, which a bare Error lacks.
+    expect(JSON.parse(out).error.reason).toBe("claim-threw");
+  });
+
+  it("claim: stdout stays exactly ONE JSON line on the failure path (the wrapper's last-line parse is unchanged)", async () => {
+    async function post(query) {
+      if (query.includes("ResolveIssueId")) return { issue: { id: "uuid-CTL-842" } };
+      if (query.includes("ReadFence")) return { issue: { attachments: { nodes: [] } } };
+      if (query.includes("UpsertFence")) throw new Error("boom");
+      throw new Error("unexpected");
+    }
+    const { out } = await captureStdio(() => runCli(["claim", "CTL-842", "mini", "triage"], { post }));
+    expect(out.trim().split("\n").filter(Boolean).length).toBe(1);
   });
 
   it("fence-check: exits 0 and prints {current:true} when the generation matches", async () => {

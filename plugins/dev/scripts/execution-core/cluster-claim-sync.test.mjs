@@ -6,6 +6,8 @@ import { describe, it, expect, beforeEach } from "bun:test";
 
 import {
   claimDispatchSync,
+  CLAIM_REASON,
+  isClaimFailure,
   fenceCheckSync,
   fenceCheckSyncCached,
   clearFenceReadCache,
@@ -43,6 +45,8 @@ describe("claimDispatchSync — argv + parsing", () => {
     expect(claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn })).toEqual({
       won: true,
       generation: 3,
+      reason: CLAIM_REASON.WON,
+      detail: null,
     });
   });
 
@@ -51,6 +55,8 @@ describe("claimDispatchSync — argv + parsing", () => {
     expect(claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn })).toEqual({
       won: false,
       generation: 2,
+      reason: CLAIM_REASON.PEER_WON,
+      detail: null,
     });
   });
 });
@@ -58,36 +64,32 @@ describe("claimDispatchSync — argv + parsing", () => {
 describe("claimDispatchSync — FAIL-CLOSED on every failure mode", () => {
   it("non-zero exit → won:false", () => {
     const spawn = () => ({ status: 1, stdout: "" });
-    expect(claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn })).toEqual({
-      won: false,
-      generation: null,
-    });
+    const r = claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn });
+    expect(r.won).toBe(false);
+    expect(r.generation).toBeNull();
   });
 
   it("unparseable stdout → won:false", () => {
     const spawn = () => ({ status: 0, stdout: "not json at all" });
-    expect(claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn })).toEqual({
-      won: false,
-      generation: null,
-    });
+    const r = claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn });
+    expect(r.won).toBe(false);
+    expect(r.generation).toBeNull();
   });
 
   it("timeout / spawn error (status null) → won:false", () => {
     const spawn = () => ({ status: null, error: new Error("ETIMEDOUT"), stdout: null });
-    expect(claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn })).toEqual({
-      won: false,
-      generation: null,
-    });
+    const r = claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn });
+    expect(r.won).toBe(false);
+    expect(r.generation).toBeNull();
   });
 
   it("spawn throws → won:false (never propagates)", () => {
     const spawn = () => {
       throw new Error("EACCES");
     };
-    expect(claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn })).toEqual({
-      won: false,
-      generation: null,
-    });
+    const r = claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn });
+    expect(r.won).toBe(false);
+    expect(r.generation).toBeNull();
   });
 
   it("missing/garbage generation in stdout → generation null but won honoured", () => {
@@ -95,7 +97,137 @@ describe("claimDispatchSync — FAIL-CLOSED on every failure mode", () => {
     expect(claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "research" }, { spawn })).toEqual({
       won: true,
       generation: null,
+      reason: CLAIM_REASON.WON,
+      detail: null,
     });
+  });
+});
+
+// ─── CTL-2033 ────────────────────────────────────────────────────────────────
+// The whole point of this suite is that NO TWO of these outcomes may share a
+// value. Every case below asserts the exact `reason`, so collapsing any pair
+// (the pre-CTL-2033 behaviour — one `{won:false, generation:null}` for all of
+// them) fails HERE rather than three hours into an operator's evening.
+//
+// ⚠️ Mutation-verified: reverting `claimDispatchSync`'s body to the single
+// `return { won:false, generation:null }` fails 6 of these; making
+// `classifyCliReason` return CLI_FAILED unconditionally fails the budget case;
+// making `isClaimFailure` return `false` on an unknown reason fails the
+// fail-loud case.
+describe("claimDispatchSync — CTL-2033: the four outcomes are DISTINGUISHABLE", () => {
+  const claim = (spawn) => claimDispatchSync({ ticket: "CTL-1", hostName: "mini", phase: "triage" }, { spawn });
+
+  it("a peer legitimately winning the fence is `peer-won` — and is NOT a failure", () => {
+    const r = claim(() => ({ status: 0, stdout: JSON.stringify({ won: false, generation: 7 }) + "\n" }));
+    expect(r.reason).toBe(CLAIM_REASON.PEER_WON);
+    expect(isClaimFailure(r.reason)).toBe(false);
+    expect(r.detail).toBeNull();
+  });
+
+  it("a HOST-BUDGET refusal is `budget-refused`, distinct from every other failure", () => {
+    const r = claim(() => ({
+      status: 11,
+      stdout:
+        JSON.stringify({
+          won: false,
+          generation: null,
+          error: { reason: "budget:day-exhausted", message: "cluster-attachment: budget:day-exhausted (route=attachment ticket=CTL-1)" },
+        }) + "\n",
+    }));
+    expect(r.reason).toBe(CLAIM_REASON.BUDGET_REFUSED);
+    expect(r.reason).not.toBe(CLAIM_REASON.PEER_WON);
+    expect(r.reason).not.toBe(CLAIM_REASON.CLI_FAILED);
+    expect(isClaimFailure(r.reason)).toBe(true);
+    expect(r.detail).toContain("budget:day-exhausted");
+  });
+
+  it("a NON-budget CLI failure is `cli-failed`, and carries the CLI's own reason word", () => {
+    const r = claim(() => ({
+      status: 11,
+      stdout: JSON.stringify({ won: false, generation: null, error: { reason: "no-cloud-token", message: "cluster-attachment: no-cloud-token" } }) + "\n",
+    }));
+    expect(r.reason).toBe(CLAIM_REASON.CLI_FAILED);
+    expect(r.reason).not.toBe(CLAIM_REASON.BUDGET_REFUSED);
+    expect(r.detail).toContain("no-cloud-token");
+    expect(isClaimFailure(r.reason)).toBe(true);
+  });
+
+  it("a non-zero exit with NO structured error is `cli-failed` and keeps exit + stderr as evidence", () => {
+    const r = claim(() => ({ status: 1, stdout: "", stderr: "cluster-claim.mjs: linear graphql http 401\n" }));
+    expect(r.reason).toBe(CLAIM_REASON.CLI_FAILED);
+    expect(r.detail).toContain("exit=1");
+    expect(r.detail).toContain("401");
+  });
+
+  it("stdout that does not parse is its OWN outcome — never folded into cli-failed or peer-won", () => {
+    const r = claim(() => ({ status: 0, stdout: "not json at all" }));
+    expect(r.reason).toBe(CLAIM_REASON.UNPARSEABLE);
+    expect(r.reason).not.toBe(CLAIM_REASON.CLI_FAILED);
+    expect(r.reason).not.toBe(CLAIM_REASON.PEER_WON);
+    expect(r.detail).toContain("not json at all");
+  });
+
+  it("a spawn that throws is `spawn-threw`, not a lost race", () => {
+    const r = claim(() => {
+      throw new Error("EAGAIN");
+    });
+    expect(r.reason).toBe(CLAIM_REASON.SPAWN_THREW);
+    expect(isClaimFailure(r.reason)).toBe(true);
+    expect(r.detail).toContain("EAGAIN");
+  });
+
+  it("a timeout (status null, no stdout) is a failure, never `peer-won`", () => {
+    const r = claim(() => ({ status: null, error: new Error("ETIMEDOUT"), stdout: null }));
+    expect(isClaimFailure(r.reason)).toBe(true);
+    expect(r.reason).not.toBe(CLAIM_REASON.PEER_WON);
+  });
+
+  it("EVERY outcome carries a non-null reason — the field can never be null again", () => {
+    const spawns = [
+      () => ({ status: 0, stdout: JSON.stringify({ won: true, generation: 1 }) + "\n" }),
+      () => ({ status: 0, stdout: JSON.stringify({ won: false, generation: 1 }) + "\n" }),
+      () => ({ status: 11, stdout: JSON.stringify({ won: false, error: { reason: "budget:day-exhausted" } }) + "\n" }),
+      () => ({ status: 11, stdout: JSON.stringify({ won: false, error: { reason: "write-not-succeeded" } }) + "\n" }),
+      () => ({ status: 1, stdout: "" }),
+      () => ({ status: 0, stdout: "garbage" }),
+      () => {
+        throw new Error("boom");
+      },
+    ];
+    const reasons = spawns.map((sp) => claim(sp).reason);
+    expect(reasons.every((r) => typeof r === "string" && r.length > 0)).toBe(true);
+    // ...and they are not all the same value, which a `reason: "unknown"` constant
+    // would satisfy while telling an operator nothing.
+    expect(new Set(reasons).size).toBeGreaterThanOrEqual(5);
+  });
+
+  it("a structured error is authoritative even at exit 0 — an exit-code change cannot reclassify a failure as a race", () => {
+    const r = claim(() => ({ status: 0, stdout: JSON.stringify({ won: false, error: { reason: "budget:day-exhausted" } }) + "\n" }));
+    expect(r.reason).toBe(CLAIM_REASON.BUDGET_REFUSED);
+  });
+
+  it("detail is bounded and token-shaped text is masked before it reaches a log line", () => {
+    const long = "x".repeat(4000);
+    const r = claim(() => ({ status: 1, stdout: "", stderr: `token lin_api_abc123DEF456 ${long}` }));
+    expect(r.detail.length).toBeLessThanOrEqual(241);
+    expect(r.detail).toContain("[redacted]");
+    expect(r.detail).not.toContain("lin_api_abc123DEF456");
+  });
+});
+
+describe("isClaimFailure — CTL-2033: fail-loud on the unknown", () => {
+  it("only `won` and `peer-won` are non-failures", () => {
+    expect(isClaimFailure(CLAIM_REASON.WON)).toBe(false);
+    expect(isClaimFailure(CLAIM_REASON.PEER_WON)).toBe(false);
+    for (const r of [CLAIM_REASON.BUDGET_REFUSED, CLAIM_REASON.CLI_FAILED, CLAIM_REASON.UNPARSEABLE, CLAIM_REASON.SPAWN_THREW]) {
+      expect(isClaimFailure(r)).toBe(true);
+    }
+  });
+
+  it("a null reason (a pre-CTL-2033 shape, or an old injected double) reads as a FAILURE, not as normal", () => {
+    expect(isClaimFailure(null)).toBe(true);
+    expect(isClaimFailure(undefined)).toBe(true);
+    expect(isClaimFailure("something-nobody-has-written-yet")).toBe(true);
   });
 });
 

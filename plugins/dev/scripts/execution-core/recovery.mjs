@@ -119,7 +119,7 @@ import {
 } from "./work-done-probes.mjs";
 import { STAGE_RANK, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
 import { ownerForTicket } from "./hrw.mjs";
-import { claimDispatchSync } from "./cluster-claim-sync.mjs";
+import { claimDispatchSync, isClaimFailure } from "./cluster-claim-sync.mjs"; // CTL-2033: + the outcome discriminator
 import { dispatchTicket, defaultDispatch, settleDispatchSync, sdkSignalRunnable, backstopOnRejection } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) revive dispatch synchronously + backstop a rejected async dispatch
 import { createWorktree } from "./worktree.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
@@ -4894,7 +4894,24 @@ export async function reclaimDeadHostWork(
 
       // Soft-CAS claim: bump generation to take ownership.
       const claimRes = claim(ticket, NEW_WORK_ENTRY_PHASE);
-      if (!claimRes?.won) continue;
+      if (!claimRes?.won) {
+        // CTL-2033: this was a BARE `continue` — the most silent of the three claim
+        // gates. Reclaiming a dead host's work is the path with no second actor, so
+        // a failed takeover claim strands that ticket until the next reclaim sweep
+        // with nothing written down anywhere. A lost race here is genuinely normal
+        // (a surviving peer took it) and stays at debug.
+        const claimReason = claimRes?.reason ?? null;
+        const ctx = { ticket, host: self, deadHost, claim_reason: claimReason, claim_detail: claimRes?.detail ?? null };
+        if (isClaimFailure(claimReason)) {
+          log.warn(
+            ctx,
+            "ctl-850: cross-host takeover claim FAILED (the soft-CAS never ran) — a dead host's ticket is NOT being reclaimed this sweep"
+          );
+        } else {
+          log.debug(ctx, "ctl-850: lost cross-host takeover claim — a surviving peer took it, deferring");
+        }
+        continue;
+      }
 
       // CTL-863: emit fence.claimed for the TAKEOVER bump AS SOON AS THE CLAIM
       // WINS — NOT gated on a successful redispatch (Codex P2, recovery.mjs:3358).

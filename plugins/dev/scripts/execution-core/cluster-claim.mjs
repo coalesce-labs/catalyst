@@ -391,12 +391,17 @@ export async function isFenceCurrent(ticket, generation, { post = defaultPost, t
 // runCli is exported (with an injectable `post`) so the CLI surface is unit
 // tested without the network; the main-guard below calls it with the real post.
 //
-//   claim <ticket> <host> <phase> [issueId]  → stdout JSON {won, generation}; exit 0 iff
-//                                    the soft-CAS ran (read `won` from stdout —
-//                                    a non-zero exit means the operation threw,
-//                                    which the wrapper treats as won:false). The
-//                                    optional 4th arg is a pre-resolved ticket UUID
-//                                    (CTL-863 follow-up — see claimTicket/writeClaim).
+//   claim <ticket> <host> <phase> [issueId]  → stdout JSON; the optional 4th arg is a
+//                                    pre-resolved ticket UUID (CTL-863 follow-up —
+//                                    see claimTicket/writeClaim). THREE outcomes,
+//                                    each separable by the caller (CTL-2033):
+//                                      exit 0  + {won:true,  generation}  → we hold the fence
+//                                      exit 0  + {won:false, generation}  → the soft-CAS RAN
+//                                                    and a peer won the read-back (normal)
+//                                      exit 11 + {won:false, error:{reason,message}}
+//                                                  → the soft-CAS NEVER RAN (refused write,
+//                                                    auth failure, GraphQL error) — a stall,
+//                                                    not a race.
 //   fence-check <ticket> <gen>     → stdout JSON {current}; exit 0 when current,
 //                                    FENCE_STALE_EXIT (10) when stale — mirrors
 //                                    claim.mjs's host-local fence-check contract.
@@ -407,6 +412,24 @@ export async function isFenceCurrent(ticket, generation, { post = defaultPost, t
 //                                    instead of the resolution being buried inside
 //                                    every `claim`.
 const FENCE_STALE_EXIT = 10;
+
+// CLAIM_FAILED_EXIT — CTL-2033. The `claim` subcommand's THIRD outcome, and the
+// one that had no representation at all: the soft-CAS never ran. Before this,
+// `claimTicket` throwing (a refused proxy write, a 401, a GraphQL error) fell to
+// the module's top-level catch, which printed the message to stderr and exited 1
+// — while a peer legitimately winning the fence exited 0 with `{won:false}`. The
+// synchronous wrapper collapsed BOTH into `{won:false, generation:null}`, so
+// "another host owns this" and "our claim write never landed" were the same
+// value. Measured 2026-08-18: 36 held tickets across both minis reported a lost
+// claim on tickets they OWN under HRW — impossible as a race, and invisible as a
+// failure.
+//
+// A distinct exit code (mirroring FENCE_STALE_EXIT's convention) plus a
+// machine-readable `error.reason` on STDOUT is what makes the two separable
+// WITHOUT scraping stderr prose. The reason string is the transport's own
+// (`budget:day-exhausted`, `no-cloud-token`, `write-not-succeeded`, …), passed
+// through unchanged so the operator reads the same word the proxy logged.
+const CLAIM_FAILED_EXIT = 11;
 
 /**
  * defaultTransport — build the transport this PROCESS should use. CTL-1889 increment 3.
@@ -438,9 +461,27 @@ export async function runCli(argv, { post = defaultPost, transport = null } = {}
     case "claim": {
       const [ticket, hostName, phase, issueIdRaw] = rest;
       const issueId = issueIdRaw != null && issueIdRaw !== "" ? issueIdRaw : null;
-      const res = await claimTicket(ticket, hostName, phase, { post, transport: t, issueId });
-      process.stdout.write(JSON.stringify(res) + "\n");
-      return 0;
+      // CTL-2033: REPORT the failure instead of only throwing it. The catch is
+      // scoped to `claim` alone — every other subcommand keeps the module's
+      // top-level catch (stderr + exit 1) byte-for-byte. stdout stays exactly one
+      // JSON line either way, so the wrapper's "take the last non-empty line"
+      // parse is unchanged; stderr keeps a human line for an operator grep.
+      try {
+        const res = await claimTicket(ticket, hostName, phase, { post, transport: t, issueId });
+        process.stdout.write(JSON.stringify(res) + "\n");
+        return 0;
+      } catch (err) {
+        // `err.reason` is AttachmentTransportError's structured field (the proxy's
+        // own refusal word). Anything else — a bare Error from `post`, a
+        // programming mistake — has no reason, and is named `claim-threw` rather
+        // than guessed at from its message.
+        const reason = typeof err?.reason === "string" && err.reason ? err.reason : "claim-threw";
+        process.stdout.write(
+          JSON.stringify({ won: false, generation: null, error: { reason, message: String(err?.message ?? err) } }) + "\n",
+        );
+        process.stderr.write(`cluster-claim.mjs: claim failed for ${ticket}: reason=${reason}: ${err?.message ?? err}\n`);
+        return CLAIM_FAILED_EXIT;
+      }
     }
     case "fence-check": {
       const [ticket, gen] = rest;
