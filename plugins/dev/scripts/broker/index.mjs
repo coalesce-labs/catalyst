@@ -16,6 +16,13 @@
 // index.mjs is the thin daemon entrypoint (main/shutdown, PID + key-health)
 // plus the re-export barrel that preserves the public import surface.
 
+// CTL-2028: a pid file may only be written over, or removed, by a process that can
+// prove it is not pointing at a LIVE peer.
+import {
+  classifyPidFile,
+  shouldRemovePidFile,
+  duplicateDaemonAlarm,
+} from "../lib/pid-file-identity.mjs";
 import { writeFileSync, unlinkSync, mkdirSync, openSync, fstatSync, closeSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -313,8 +320,44 @@ function parsePidFilePath() {
 
 const PID_FILE_PATH = parsePidFilePath();
 
+// BROKER_IDENTITY_MARKER — the substring that identifies a broker in a command
+// line. Deliberately the ENTRYPOINT PATH, not the word "broker": the bare word
+// appears in `catalyst-broker`, in log paths, and in any shell that merely
+// mentions it, so matching on it would classify unrelated processes as live peers
+// and make the pid file permanently un-writable.
+const BROKER_IDENTITY_MARKER = "broker/index.mjs";
+
 function writePidFile() {
   if (!PID_FILE_PATH) return;
+  // ⛔ CTL-2028: LOOK BEFORE CLOBBERING. This used to be an unconditional
+  // writeFileSync, and on mini-2 that made a live second broker invisible for 85
+  // minutes while `catalyst-stack status` reported one healthy broker — because
+  // status reads this file, and this file had just been overwritten.
+  //
+  // ⚠️ It still WRITES. Refusing to start on a live-peer verdict would let a
+  // mis-read identity check (an unreadable `ps`, an unexpected launcher) wedge a
+  // host whose pid file is merely stale — and a daemon that refuses to write its
+  // pid file at all is unmanaged, which is the state this whole change exists to
+  // prevent. So the fail direction is: write, and be LOUD.
+  try {
+    const verdict = classifyPidFile(PID_FILE_PATH, BROKER_IDENTITY_MARKER);
+    const alarm = duplicateDaemonAlarm(verdict, { name: "broker" });
+    if (alarm) {
+      log.error(
+        { pid_file: PID_FILE_PATH, existing_pid: verdict.pid, existing_command: verdict.command, self_pid: process.pid },
+        alarm
+      );
+    } else if (verdict.kind === "stale" || verdict.kind === "unknown") {
+      log.warn(
+        { pid_file: PID_FILE_PATH, existing_pid: verdict.pid, kind: verdict.kind },
+        "broker: overwriting a pid file that names another pid (not a live broker)"
+      );
+    }
+  } catch (err) {
+    // A guardrail that can stop the daemon from writing its pid file is worse
+    // than the gap it guards.
+    log.warn({ err: err.message }, "broker: pid-file identity check threw — writing anyway");
+  }
   try {
     mkdirSync(dirname(PID_FILE_PATH), { recursive: true });
     writeFileSync(PID_FILE_PATH, `${process.pid}\n`);
@@ -325,6 +368,31 @@ function writePidFile() {
 
 function removePidFile() {
   if (!PID_FILE_PATH) return;
+  // ⛔ CTL-2028: UNLINK ONLY OUR OWN. This used to be an unconditional unlinkSync,
+  // and it is step 3 of the measured failure: when the orphaned broker finally
+  // exited it deleted the SURVIVOR's pid file, leaving a healthy broker that every
+  // status check reported as DOWN and that the next supervisor pass would have
+  // duplicated again. Reproduced, not theorised.
+  //
+  // ⚠️ Opposite fail direction to writePidFile, on purpose: anything other than a
+  // confirmed "this file names me" leaves the file alone. A wrongly-kept stale file
+  // is cleared by the next start; a wrongly-deleted live one orphans a daemon.
+  let verdict;
+  try {
+    verdict = classifyPidFile(PID_FILE_PATH, BROKER_IDENTITY_MARKER);
+  } catch (err) {
+    log.warn({ err: err.message }, "broker: pid-file identity check threw on shutdown — leaving the pid file");
+    return;
+  }
+  if (!shouldRemovePidFile(verdict)) {
+    if (verdict.kind !== "absent") {
+      log.warn(
+        { pid_file: PID_FILE_PATH, names_pid: verdict.pid, kind: verdict.kind, self_pid: process.pid },
+        "broker: pid file names another process — leaving it in place rather than orphaning whoever owns it"
+      );
+    }
+    return;
+  }
   try {
     unlinkSync(PID_FILE_PATH);
   } catch {

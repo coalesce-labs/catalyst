@@ -899,6 +899,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/orphan-sweep.test.sh
 
+      - name: broker pid-file identity test (CTL-2028)
+        # ⚠️ NOT hermetic in the orphan-sweep sense: this suite STARTS REAL
+        # `node` processes, because the defect is that a pid-file-derived status
+        # cannot see a second process — and a mocked `ps` would let the detector
+        # pass while counting nothing. Every fixture is short-lived, killed in a
+        # trap, and the trap ASSERTS they are gone (fail-closed) rather than
+        # probing with something that fails open.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/broker-pid-identity.test.sh
+
       - name: orphan-sweep LaunchAgent plist test (CTL-1531)
         working-directory: plugins/dev/scripts
         run: bash __tests__/orphan-sweep-plist.test.sh
@@ -1201,6 +1211,7 @@ jobs:
             reaper.test.mjs \
             reconcile-health-event.test.mjs \
             recovery.test.mjs \
+            pid-file-identity.test.mjs \
             registry.test.mjs \
             replica-read.test.mjs \
             replica-supplemental-reads.test.mjs \
