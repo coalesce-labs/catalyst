@@ -317,6 +317,7 @@ describe("CTL-1110: escalationExplanationFor", () => {
       whyYou: FULL_EXPL.why_you,
       whyNotAuto: FULL_EXPL.why_not_auto,
       whatToDo: FULL_EXPL.what_to_do,
+      defaultIfSilent: null,
     });
   });
 
