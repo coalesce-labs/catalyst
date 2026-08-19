@@ -92,6 +92,14 @@ on:
       - "plugins/dev/scripts/install-orphan-sweep.sh"
       - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/__tests__/**"
+      # CTL-2026: the two agent tools are guarded by
+      # agent-tools-out-of-tree.test.mjs below. `__tests__/**` above catches
+      # an edit to the SUITE; without these two paths an edit to the TOOLS
+      # themselves — the thing that regresses — skips the job entirely.
+      # Verified: neither file appears elsewhere in the filter list (positive
+      # control — install-orphan-sweep.sh above is the same one-file shape).
+      - "plugins/dev/scripts/linear-ack.mjs"
+      - "plugins/dev/scripts/linear-reply.mjs"
       # CTL-1387: the CLI-reference generator + the page it drives are guarded by
       # cli-reference-drift.test.sh below; a change to either must run this suite.
       # FLEET: the remote-owner channel transport ships its own bash test; without this
@@ -759,6 +767,41 @@ jobs:
         # shape of the bug in its own guard.
         working-directory: plugins/dev/scripts/execution-core
         run: bun test install-lifecycle.test.mjs join-bundle.test.mjs
+
+      - name: linear write-path decision test (CTL-1961)
+        # ⛔ PINNED AT THE SAME TIME THE SUITE WAS WRITTEN. Verified before
+        # adding this step: `grep -c linear-write-path .github/workflows/`
+        # returned 0, so without this the suite runs only in a local full
+        # gate. That is the third time in two days a new suite would have
+        # shipped inert here (CTL-1975/FLEET-37, CTL-2004, now this) — CI
+        # runs an EXPLICIT list and nothing tells an author their file
+        # joined nothing.
+        #
+        # What it guards is a distinction, not a value: "the proxy is off"
+        # and "I could not reach the proxy" must never collapse to one
+        # answer. Collapsing them writes direct forever while reporting as
+        # a routed tool, which is what the first cut of CTL-1961 did.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test linear-write-path.test.mjs
+
+      - name: agent tools survive being out-of-tree (CTL-2026)
+        # ⛔ PINNED WITH THE SUITE, verified the way the two steps above were:
+        # `grep -rc agent-tools-out-of-tree .github/workflows/` returned
+        # NOTHING before this step existed, while the same grep for
+        # `linear-write-path` returned 2. That is the FOURTH suite in three
+        # days that would otherwise have shipped inert.
+        #
+        # What it guards: linear-ack.mjs / linear-reply.mjs carry a try/catch
+        # whose own comment says it exists because an out-of-tree copy cannot
+        # resolve their imports — and then consumed the decision leaf on a
+        # line OUTSIDE that try, so such a copy died on module resolution
+        # before reaching the branch written for it. The suite copies each
+        # tool ALONE into an empty directory and runs it against a stubbed
+        # fetch: the deployment shape of ~/catalyst/comms/tools/. Every
+        # assertion fails on the pre-fix tools (measured 7 fail / 0 pass) and
+        # passes on the fixed ones.
+        working-directory: plugins/dev/scripts/__tests__
+        run: bun test agent-tools-out-of-tree.test.mjs
 
       - name: replica-path cross-stack parity test (CTL-1893)
         # bash == node == a hand-written expected value at every fixture cell, including

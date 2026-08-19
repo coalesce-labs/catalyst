@@ -130,12 +130,55 @@ describe("routes", () => {
     // cluster fence + heartbeat record. The exact-equality shape is deliberate: a new route
     // must be argued for HERE, because every id in this set is a path the daemon will send a
     // Linear write to.
-    const expected = ["attachment", "comment", "issue-state", "label", "session"];
+    //
+    // CTL-1961 adds two, and the argument for each:
+    //   `reaction`     (CTC-724) — the 👀 read-receipt `linear-ack.mjs` leaves on a human's
+    //                  comment and `linear-reply.mjs` clears once it has replied. Today both
+    //                  tools POST `reactionCreate`/`reactionDelete` straight to
+    //                  api.linear.app with a host-held credential; routing them is the
+    //                  point of the skinny-install gate.
+    //   `issue-create` (CTC-725) — filing a ticket, which every lane does. Returns the
+    //                  `identifier`, so "file the ticket before citing its number" is served
+    //                  by the call rather than a follow-up read.
+    // Both paths were read off catalyst-cloud's DISPATCHER (index.ts:986/989 — the pathname
+    // the server compares), not the handler doc comments, per this module's own header.
+    const expected = ["attachment", "comment", "issue-create", "issue-state", "label", "reaction", "session"];
     expect([...PROXY_ROUTE_IDS].sort()).toEqual(expected);
     expect(Object.keys(DEFAULT_ROUTES).sort()).toEqual(expected);
     // The READ routes are a SEPARATE set on purpose (they spend no write budget), and they
     // must not leak into the write set — asserted in both directions.
     expect([...READ_ROUTE_IDS].sort()).toEqual(["attachments"]);
+  });
+
+  // ── CTL-1961: the two routes that let a credential-free host ack and file ──────────
+  test("reaction + issue-create resolve to the paths the SERVER matches on", () => {
+    // Measured at catalyst-cloud origin/main (ba3a722) index.ts:986/989 —
+    //   url.pathname === "/api/v1/agent/reaction"
+    //   url.pathname === "/api/v1/agent/issue-create"
+    // The client's base already ends in /api/v1, so these are the remainders. Pinned
+    // because this module's header records an earlier cut that shipped GUESSED paths and
+    // was wrong on every one of them.
+    expect(resolveRoutePath("reaction")).toBe("/agent/reaction");
+    expect(resolveRoutePath("issue-create")).toBe("/agent/issue-create");
+  });
+
+  test("⛔ reaction is BLOCKING — the add/remove pair would otherwise strand a stale 👀", () => {
+    // The reason is NOT "a claim decides whether a host may work a ticket" (CTC-724's
+    // wording): the 👀 is a read-receipt on one comment, not a claim — the exclusion
+    // primitive is the `attachment` fence. The reason that survives is an ordering race:
+    // `linear-ack.mjs` ADDS and `linear-reply.mjs` REMOVES, on the same object, seconds
+    // apart. Fire-and-forget on the add lets the remove run first, find nothing, and the
+    // add land after it — a permanent stale 👀 on an already-answered comment that
+    // nothing ever clears.
+    expect(NON_BLOCKING_ROUTE_IDS.has("reaction")).toBe(false);
+    expect(NON_BLOCKING_ROUTE_IDS.has("issue-create")).toBe(false);
+  });
+
+  test("both are WRITE routes — they spend budget and must not leak into the read set", () => {
+    expect(READ_ROUTE_IDS.has("reaction")).toBe(false);
+    expect(READ_ROUTE_IDS.has("issue-create")).toBe(false);
+    expect(PROXY_ROUTE_IDS).toContain("reaction");
+    expect(PROXY_ROUTE_IDS).toContain("issue-create");
   });
 
   test("⛔ exactly ONE route is non-blocking, and it is not a dispatch-critical one", () => {
