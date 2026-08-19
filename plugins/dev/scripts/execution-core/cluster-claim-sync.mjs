@@ -204,10 +204,25 @@ function parseClaimLine(stdout) {
 }
 
 // classifyCliReason — map the CLI's own refusal word onto this module's outcome.
-// A `budget:*` reason (linear-write-proxy's `classifyWrite` gate: `budget:day-exhausted`,
-// `budget:per-ticket-cap`, `budget:already-converged`) is named separately because
-// it is HOST-WIDE and self-clearing on the UTC day roll — an operator reading it
-// needs to lift a limit, not debug a claim.
+// A `budget:*` reason is named separately because it is raised by THIS HOST'S OWN
+// LEDGER before the request is ever sent, and self-clears on the UTC day roll.
+//
+// ⚠️ IT DOES NOT MEAN THE CLOUD REFUSED ANYTHING — and reading it that way cost a
+// lane an hour on 2026-08-18 (FLEET's peer read on #3664). The host ledger counts
+// writes that LEFT the host, success or not (`linear-write-proxy.mjs`), and gates
+// them against `DEFAULT_DAILY_BUDGET`, a constant whose own doc-comment calls it
+// "the cloud-side daily cap this MIRRORS". Attempts, not arrivals. Measured that
+// day: the host ledger read 300 with 674 refusals while the cloud's own
+// `/admin/write-budget` for the same key read **3** of 300 — it had declined
+// nothing. A P1 was issued to raise the cloud cap on the strength of the wrong
+// reading and was refused after measurement. **Read
+// `~/catalyst/linear-write-budget.json` ON THE HOST, not the cloud's limit.**
+// The underlying defect is CTL-2035.
+//
+// The real reason strings are `linear-write-budget.mjs`'s frozen `REASONS`:
+// `budget:day-exhausted`, `budget:ticket-cap`, `budget:already-converged`.
+// (Matched by prefix, so the exact members do not gate behaviour — but a comment
+// naming a string that does not exist sends the next grep nowhere.)
 function classifyCliReason(cliReason) {
   if (typeof cliReason === "string" && cliReason.startsWith("budget:")) return CLAIM_REASON.BUDGET_REFUSED;
   return CLAIM_REASON.CLI_FAILED;
