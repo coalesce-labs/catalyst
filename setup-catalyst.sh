@@ -1615,7 +1615,18 @@ setup_project_config() {
 	echo "  - PR titles (e.g., [${PROJECT_KEY}-123] Add new feature)"
 	echo "  - Commit messages and documentation"
 	echo ""
-	ticket_prefix=$(prompt_value "Enter ticket prefix (e.g., ENG, PROJ) [PROJ]:" "PROJ")
+	# Ticket prefix: default PROJ, but PRESERVE an existing committed value across a
+	# regeneration (CTL-2076) so a non-interactive re-run over a real config (e.g. the
+	# CTL checkout) does not clobber ticketPrefix back to PROJ. Mirrors the thoughts.*
+	# (CTL-1214) and deployment.mode (CTL-1622) preservation blocks below; identical
+	# preload+prompt shape to the deployment_mode block.
+	local ticket_prefix_default="PROJ"
+	if [[ -f $config_file ]]; then
+		local _existing_prefix
+		_existing_prefix=$(jq -r '.catalyst.project.ticketPrefix // empty' "$config_file" 2>/dev/null)
+		[[ -n $_existing_prefix ]] && ticket_prefix_default="$_existing_prefix"
+	fi
+	ticket_prefix=$(prompt_value "Enter ticket prefix (e.g., ENG, PROJ) [${ticket_prefix_default}]:" "${ticket_prefix_default}")
 
 	# Prompt for project name
 	echo ""
@@ -1680,6 +1691,30 @@ setup_project_config() {
 	local deployment_mode_json
 	deployment_mode_json=$(jq -Rn --arg v "$deployment_mode" '$v')
 
+	# teamKey: default to the ticket prefix (preserving today's teamKey := ticketPrefix
+	# coupling for fresh installs), but PRESERVE an existing committed linear.teamKey
+	# INDEPENDENTLY across a regeneration (CTL-2076) — a config can legitimately carry a
+	# teamKey distinct from its prefix, and clobbering it to the prefix is the exact bug
+	# that rewrote mini-2's CTL checkout to team PROJ.
+	local team_key="${ticket_prefix}"
+	if [[ -f $config_file ]]; then
+		local _existing_team
+		_existing_team=$(jq -r '.catalyst.linear.teamKey // empty' "$config_file" 2>/dev/null)
+		[[ -n $_existing_team ]] && team_key="$_existing_team"
+	fi
+
+	# stateMap: PRESERVE an existing NON-EMPTY committed linear.stateMap verbatim across a
+	# regeneration (CTL-2076); otherwise use today's generic 8-key default. Injected as a
+	# pre-encoded JSON blob the same way deployment_mode_json is, so a preserved map lands
+	# byte-for-byte and a fresh install keeps the exact current default.
+	local state_map_json
+	if [[ -f $config_file ]] &&
+		[[ $(jq -r '(.catalyst.linear.stateMap | objects | length) // 0' "$config_file" 2>/dev/null) -gt 0 ]]; then
+		state_map_json=$(jq -c '.catalyst.linear.stateMap' "$config_file")
+	else
+		state_map_json=$(jq -cn '{backlog:"Backlog",todo:"Todo",research:"In Progress",planning:"In Progress",inProgress:"In Progress",inReview:"In Review",done:"Done",canceled:"Canceled"}')
+	fi
+
 	# Create/update config
 	cat >"$config_file" <<EOF
 {
@@ -1697,17 +1732,8 @@ setup_project_config() {
       "mode": ${deployment_mode_json}
     },
     "linear": {
-      "teamKey": "${ticket_prefix}",
-      "stateMap": {
-        "backlog": "Backlog",
-        "todo": "Todo",
-        "research": "In Progress",
-        "planning": "In Progress",
-        "inProgress": "In Progress",
-        "inReview": "In Review",
-        "done": "Done",
-        "canceled": "Canceled"
-      }
+      "teamKey": "${team_key}",
+      "stateMap": ${state_map_json}
     },
     "thoughts": {
       "user": null,
@@ -1723,8 +1749,8 @@ EOF
 	echo "✓ projectKey: ${PROJECT_KEY}"
 	echo "✓ org/repo: ${ORG_NAME}/${REPO_NAME}"
 	echo "✓ ticketPrefix: ${ticket_prefix}"
-	echo "✓ linear.teamKey: ${ticket_prefix}"
-	echo "✓ linear.stateMap: defaults (will be updated with actual Linear states after API setup)"
+	echo "✓ linear.teamKey: ${team_key}"
+	echo "✓ linear.stateMap: ${state_map_json}"
 	echo "✓ deployment.mode: ${deployment_mode}"
 	echo ""
 }
