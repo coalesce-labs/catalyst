@@ -404,11 +404,27 @@ function runTransition({
     } catch {
       /* non-JSON stdout — leave action/from_state/to_state null */
     }
-    const applied = code === 0 && action !== "update-failed";
+    // CTL-1889: an ALLOWLIST, not a denylist. linear-transition.sh's `skipped`
+    // (already in target — a real success) and `transitioned` (a real write)
+    // are the only two actions that mean the ticket's Linear state is now
+    // correct. Everything else that can exit 0 — `resolve-only` (a caller
+    // deliberately asked for no write), `dry-run`, and, critically,
+    // `skipped-no-linearis` (linearis isn't installed — exactly the
+    // no-Linear-credential host CTL-1889 is migrating TOWARD) — used to fall
+    // through the OLD `action !== "update-failed"` denylist as applied:true, a
+    // fabricated success on the one host this write was supposed to prove
+    // works without a token. An allowlist also fails safe for any FUTURE
+    // action linear-transition.sh adds: unlisted defaults to not-applied
+    // rather than silently defaulting to applied.
+    const applied = code === 0 && (action === "transitioned" || action === "skipped");
     if (!applied) {
       log.warn({ ticket, key, code, action }, "linear-write: status write not applied");
     }
-    return { applied, reason: applied ? null : `exit-${code}`, action, from_state, to_state };
+    // A non-zero exit still names itself by code; a zero exit that didn't
+    // apply names the actual action so "no-linearis" is never confused with
+    // "resolve-only" or "dry-run" in the audit trail.
+    const reason = applied ? null : code === 0 ? `not-applied-${action ?? "unknown"}` : `exit-${code}`;
+    return { applied, reason, action, from_state, to_state };
   } catch (err) {
     log.warn(
       { ticket, key, err: err.message },
