@@ -317,6 +317,78 @@ describe("⚠️ every admission budget charges the yield, not just the schedule
     });
     expect(out.remaining).toBe(0);
   });
+
+  // ── CTL-879 / INIT-34: the two zero paths must be TELLABLE APART ───────────────
+  //
+  // ⛔ `remaining: 0` had two producers with OPPOSITE prognoses and one observable.
+  // Capacity is recomputed every sweep and frees itself as soon as a worker finishes;
+  // the fail-closed scan hold NEVER clears on its own. Both printed the identical
+  // `sweep-budget-exhausted / budget_remaining: 0`, so an operator reading the log could
+  // not tell a busy fleet from a host that will produce no triage.json for the rest of the
+  // night. Third instrument in one evening with that shape, after the cross-host claim
+  // (CTL-2033) and doctor's webhook row (CTL-2030).
+  //
+  // These pin the DISCRIMINATOR, not the gate. The fail-closed behaviour above is correct
+  // and unchanged — `remaining` is still 0 on both paths.
+  test("⭐ a failed scan reports held:true WITH a reason; capacity-zero reports held:false", async () => {
+    const { computeTriageBudget } = await import("./monitor.mjs");
+    const base = {
+      orchDir: "/orch",
+      readMaxParallelFn: () => 1,
+      liveBackgroundCount: () => 0,
+      dispatchMode: "phase-agents",
+      countSdkInflight: () => 0,
+    };
+
+    const held = computeTriageBudget({
+      ...base,
+      countYieldedOccupancy: () => ({ count: 0, ok: false, reason: "workers/ unreadable: EACCES" }),
+    });
+    expect(held.remaining).toBe(0);
+    expect(held.held).toBe(true);
+    // The reason must survive — a hold with no diagnostic is the failure this replaces.
+    expect(held.heldReason).toBe("workers/ unreadable: EACCES");
+
+    // ⛔ THE HALF THAT IS EASY TO GET WRONG: genuinely at capacity is ALSO zero, and must
+    // NOT be held. Deriving `held` from `remaining === 0` would re-merge the branches.
+    const full = computeTriageBudget({
+      ...base,
+      countYieldedOccupancy: () => ({ count: 1, ok: true }),
+    });
+    expect(full.remaining).toBe(0);
+    expect(full.held).toBe(false);
+    expect(full.heldReason).toBe(null);
+  });
+
+  test("a healthy budget with free slots is not held either", async () => {
+    const { computeTriageBudget } = await import("./monitor.mjs");
+    const out = computeTriageBudget({
+      orchDir: "/orch",
+      readMaxParallelFn: () => 4,
+      liveBackgroundCount: () => 0,
+      dispatchMode: "phase-agents",
+      countSdkInflight: () => 0,
+      countYieldedOccupancy: () => ({ count: 0, ok: true }),
+    });
+    expect(out.remaining).toBe(4);
+    expect(out.held).toBe(false);
+  });
+
+  test("a THROWING reader is held too, and names that it threw rather than reporting no reason", async () => {
+    const { computeTriageBudget } = await import("./monitor.mjs");
+    const out = computeTriageBudget({
+      orchDir: "/orch",
+      readMaxParallelFn: () => 2,
+      liveBackgroundCount: () => 0,
+      dispatchMode: "phase-agents",
+      countSdkInflight: () => 0,
+      countYieldedOccupancy: () => { throw new Error("scan failed"); },
+    });
+    expect(out.remaining).toBe(0);
+    expect(out.held).toBe(true);
+    expect(typeof out.heldReason).toBe("string");
+    expect(out.heldReason.length).toBeGreaterThan(0);
+  });
 });
 
 describe("⚠️ expiry EXECUTES — not merely appears in the right place", () => {
