@@ -227,6 +227,13 @@ function buildEligibleSelect({ project, label } = {}) {
 // a caller must never TRUST a null delegate from the replica — fetchTicketAssignee
 // live-confirms every null delegate and trusts only a non-null (actor-set) one,
 // matching the gateway path (see linear-query.mjs).
+// CTL-2068 — the most recent STATE change on a ticket, with the actor who made it.
+// `to_state IS NOT NULL` is what makes this a state change: issue_history carries a row
+// for every field edit (title, estimate, labels…), and those rows leave to_state null.
+// Without that predicate the newest row is usually an unrelated edit, and the guard would
+// read whoever last renamed the ticket as the actor who set its state.
+const LAST_STATE_CHANGE_SELECT = `SELECT h.actor_id AS actorId, h.to_state AS toState, h.created_at AS atMs FROM issue_history h JOIN issues i ON i.id = h.issue_id WHERE i.identifier = ? AND h.to_state IS NOT NULL ORDER BY h.created_at DESC LIMIT 1`;
+
 const OWNERSHIP_SELECT = `SELECT assignee_id, delegate_id, delegate_name FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
 // Relation enrichment, mirroring normalizeDetail in linear-cli.mjs. forward:
 // edges this issue OWNS (relatedIssue is the target); inverse: edges that point
@@ -943,9 +950,26 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
+  // lastStateChange(identifier) → { actorId, toState, atMs } | undefined
+  //   HIT  → the newest row whose to_state is set
+  //   no row / no db / any throw → undefined (fail-open; the CTL-2068 guard reads an
+  //   undefined here as "could not look" and ALLOWS the write, never refuses on it)
+  const lastStateChange = (identifier) => {
+    if (!identifier) return undefined;
+    try {
+      const row = open().prepare(LAST_STATE_CHANGE_SELECT).get(identifier);
+      if (!row) return undefined;
+      return { actorId: row.actorId ?? null, toState: row.toState ?? null, atMs: coerceMs(row.atMs) };
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
   return {
     lookup,
     freshness,
+    lastStateChange, // CTL-2068
     titles,
     estimates, // CTL-1806
     relations, // CTL-1806

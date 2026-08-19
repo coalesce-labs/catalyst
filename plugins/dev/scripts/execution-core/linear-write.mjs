@@ -17,6 +17,8 @@ import { withAuthRemint, isAuthError } from "./linear-remint.mjs";
 // backward-write guard below.
 import { isLinearTerminal } from "./terminal-state.mjs";
 import { getLinearWriteProxy as _getProxy, getLinearWriteProxyResolver as _getResolver } from "./linear-write-proxy-install.mjs";
+import { getLaneClaimGuard as _getLaneClaimGuard } from "./lane-claim-install.mjs"; // CTL-2068
+import { VERDICT as LANE_CLAIM_VERDICT } from "./lane-claim.mjs"; // CTL-2068
 
 // ─── CTL-1889: the cloud write-proxy seam ────────────────────────────────────
 //
@@ -187,6 +189,9 @@ function runTransition({
   // CTL-1889: injectable write-proxy seam. undefined → the module-level install
   // (null unless an operator lit the flag), so production behaviour is unchanged.
   proxy,
+  // CTL-2068: injectable lane-claim guard. undefined → the module-level install that
+  // daemon.mjs sets at boot. Injectable so tests never touch the replica.
+  laneClaim,
 }) {
   try {
     const repoRoot = resolveRepoRoot(ticket);
@@ -211,6 +216,40 @@ function runTransition({
     if (key !== TERMINAL_LINEAR_KEY) {
       const current =
         knownCurrentState !== undefined ? knownCurrentState : fetchState(ticket, { exec, cache });
+
+      // ⛔ CTL-2068 — LANE-CLAIM GUARD, on the state read this function already performs.
+      // CTL-758 below refuses a backward write only out of a TERMINAL state, so
+      // Implement -> Research walks straight through it. That is the exact write that
+      // collided twice in two nights (CTC-776, CTC-787): a lane claimed the ticket, the
+      // pipeline dragged it back 74 seconds later, and a worker then dispatched it.
+      //
+      // This rung covers EVERY transport (shadow proxy, proxy off, plain shell write); the
+      // second rung inside buildPayload re-applies it to the fresher `--resolve-only` state
+      // on the enforce path. A guard wired only to the enforce path would be live on both
+      // minis today purely because that is how they happen to be configured — the "held by
+      // an accident" shape this ticket exists to remove.
+      //
+      // It needs no target state NAME: the target is ranked from `key`, this function's own
+      // argument (buildKeyRank). So this rung costs ZERO extra work — it reuses the read
+      // CTL-758 already made.
+      const laneClaimGuard = laneClaim ?? _getLaneClaimGuard();
+      if (laneClaimGuard) {
+        const lc = laneClaimGuard.evaluate({ ticket, currentState: current, targetKey: key });
+        if (lc?.verdict === LANE_CLAIM_VERDICT.REFUSE) {
+          log.warn(
+            { ticket, key, current, actor_id: lc.actorId, reason: lc.reason },
+            "ctl-2068: refusing backward write — a lane holds this ticket"
+          );
+          return {
+            applied: false,
+            skipped: "lane-claimed-no-regression",
+            reason: "skipped-lane-claimed-no-regression",
+            from_state: current,
+            to_state: null,
+          };
+        }
+      }
+
       if (isLinearTerminal(current)) {
         log.warn(
           { ticket, key, current },
@@ -287,6 +326,24 @@ function runTransition({
         // verbatim — the forward terminal write is exempt, or Done could never be set.
         if (key !== TERMINAL_LINEAR_KEY && isLinearTerminal(resolvedCurrent)) {
           return { ok: false, reason: "terminal-no-backward", detail: resolvedCurrent };
+        }
+
+        // ⛔ CTL-2068 — the guard RE-APPLIED to the state we actually read, for exactly the
+        // reason the CTL-758 clause above is re-applied here: the first rung runs on a
+        // FAIL-OPEN read that returns null when it cannot answer, and `--resolve-only` then
+        // reads the state from the fresh replica and may well come back `Implement`. An
+        // enforce host with no `linearis` and a cold cache is where the first read is MOST
+        // likely to fail and the second MOST likely to succeed — i.e. both minis.
+        const laneClaimGuard = laneClaim ?? _getLaneClaimGuard();
+        if (laneClaimGuard && key !== TERMINAL_LINEAR_KEY) {
+          const lc = laneClaimGuard.evaluate({ ticket, currentState: resolvedCurrent, targetKey: key });
+          if (lc?.verdict === LANE_CLAIM_VERDICT.REFUSE) {
+            log.warn(
+              { ticket, key, current: resolvedCurrent, actor_id: lc.actorId, reason: lc.reason },
+              "ctl-2068: refusing backward write — a lane holds this ticket"
+            );
+            return { ok: false, reason: "lane-claimed-no-regression", detail: resolvedCurrent };
+          }
         }
 
         const issue = resolver.issue(ticket);
@@ -366,10 +423,37 @@ function runTransition({
 // CTL-758: `cache` is threaded through to runTransition's backward-write guard
 // so the per-tick shared TTL cache (createTicketStateCache) serves the guard's
 // pre-write read — ≤1 fetchTicketState per ticket per TTL, not a new API storm.
-export function applyPhaseStatus({ ticket, phase, resolveRepoRoot, exec, cache, proxy }) {
+// CTL-2068: `fetchState` and `laneClaim` are forwarded. They were NOT before — this
+// function accepted six named options and passed five on, so a caller supplying either was
+// silently ignored and runTransition fell back to its own defaults. That was invisible in
+// production (the defaults ARE the production values) and fatal to any test that injected
+// them: the injection appeared to work while actually measuring the default path. Caught by
+// lane-claim-wiring.test.mjs, which asserts the shell is never spawned rather than only
+// inspecting the returned shape.
+export function applyPhaseStatus({
+  ticket,
+  phase,
+  resolveRepoRoot,
+  exec,
+  cache,
+  proxy,
+  fetchState,
+  laneClaim,
+}) {
   const key = linearKeyForPhase(phase); // throws PhaseFsmError on an unknown phase
   if (key === null) return { applied: false, skipped: "no-status-key" };
-  return runTransition({ ticket, key, resolveRepoRoot, exec, cache, proxy });
+  return runTransition({
+    ticket,
+    key,
+    resolveRepoRoot,
+    exec,
+    cache,
+    proxy,
+    laneClaim,
+    // Only override runTransition's default when the caller actually supplied one, so the
+    // production path keeps its `fetchState = fetchTicketState` default.
+    ...(fetchState ? { fetchState } : {}),
+  });
 }
 
 // applyTerminalDone — write the terminal Done state on monitor-deploy completion.

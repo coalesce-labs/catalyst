@@ -1276,6 +1276,8 @@ jobs:
             linear-state-write-event.test.mjs \
             linear-write-echo.test.mjs \
             linear-write.test.mjs \
+            lane-claim.test.mjs \
+            lane-claim-wiring.test.mjs \
             linear-write-proxy.test.mjs \
             linear-write-proxy-wiring.test.mjs \
             linear-write-proxy-resolve.test.mjs \
