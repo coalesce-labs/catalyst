@@ -34,6 +34,7 @@ import { STATUS, mkCheck } from "./doctor-status.mjs";
 import { checkInstallCompleteness } from "./install-completeness.mjs";
 // CTL-1936 AC5: the standing answer to "is this host write-exhausted".
 import { checkLinearWriteBudget } from "./write-budget-health.mjs";
+import { checkAgentToolsWritePath } from "./agent-tools-write-path-health.mjs";
 import { checkIndexServingRoot } from "./index-serving-root-health.mjs";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -185,6 +186,7 @@ export { STATUS, mkCheck } from "./doctor-status.mjs";
 export { checkInstallCompleteness };
 
 export { checkLinearWriteBudget };
+export { checkAgentToolsWritePath };
 export { checkIndexServingRoot };
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
@@ -6223,6 +6225,13 @@ export function checksForClass(nc, opts = {}) {
     () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
     () => checkInstallCompleteness(), // CTL-1918: did the install FINISH — CLIs, plugin-source, sweep, enrolment — advisory only (never FAIL)
     () => checkLinearWriteBudget(), // CTL-1936: host cloud-write spend / exhaustion — advisory only (never FAIL)
+    // CTL-2026: the two agent tools every lane invokes live OUTSIDE this repo
+    // (~/catalyst/comms/tools/), so a rubric that walks only the checkout would certify a
+    // host that is still writing around the proxy. This row makes that directory visible
+    // and can never PASS by not looking. Advisory only (never FAIL) — during the CTL-2026(b)
+    // interim EVERY host legitimately holds a copy, and doctor's FAIL count gates worker
+    // activation.
+    () => checkAgentToolsWritePath(),
     () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
     () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
   ];
