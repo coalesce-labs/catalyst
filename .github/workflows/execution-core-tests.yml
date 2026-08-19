@@ -1172,6 +1172,7 @@ jobs:
             integration-ctl-1240.test.mjs \
             integration.test.mjs \
             job-dir-gc.test.mjs \
+            label-budget-backoff.test.mjs \
             label-guard.test.mjs \
             linear-breaker.test.mjs \
             linear-ratelimit-event.test.mjs \

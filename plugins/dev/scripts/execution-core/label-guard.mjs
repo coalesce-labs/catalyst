@@ -22,6 +22,7 @@ import { log } from "./config.mjs";
 import { coerceExplanation } from "./escalation-explanation.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs";
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
+import { TERMINAL_LABEL_REASONS } from "./label-failure-class.mjs"; // COORD-236: one owner for the terminal set
 
 // ─── labelOnce — moved from scheduler.mjs (CTL-585, then CTL-638 re-home) ───
 //
@@ -49,16 +50,21 @@ export function labelMarkerBase(orchDir, ticket, label) {
   return join(orchDir, "workers", ticket, `.linear-label-${label}`);
 }
 
-// UNRECOVERABLE_LABEL_REASONS — applyLabel reasons that can never land this
-// daemon lifetime (CTL-834); labelOnce writes its .skipped marker for these to
-// stop the per-tick retry storm. "missing-label": the workspace lacks the label;
-// "exclusive-conflict": the label's exclusive-group sibling is already present;
-// "team-mismatch": name resolution used the wrong team's UUID context (CTL-1085).
-const UNRECOVERABLE_LABEL_REASONS = new Set([
-  "missing-label",
-  "exclusive-conflict",
-  "team-mismatch",
-]);
+// UNRECOVERABLE_LABEL_REASONS — the TERMINAL class, now owned by
+// label-failure-class.mjs (scheduler.mjs carried a byte-identical hand-written
+// copy of this set; one owner, two readers). Kept under its original name so
+// every existing reader here still resolves.
+//
+// ⛔ COORD-236 — READ THIS BEFORE WIDENING THE SET. `.skipped` is a PERMANENT
+// marker: labelOnce early-returns for the rest of the daemon's life once it
+// exists. So this predicate must stay TERMINAL-only. Adding the budget/rate-limit
+// class here — the tempting "fix" for the same incident that motivated the
+// converger's cool-down — would permanently abandon a `needs-human` label refused
+// during one exhausted minute, and the operator it exists to page would never be
+// paged. The converger uses the WIDER `shouldCoolDownLabel` because its cool-down
+// is time-boxed and self-healing; this marker is not. There is a test pinning the
+// asymmetry.
+const UNRECOVERABLE_LABEL_REASONS = TERMINAL_LABEL_REASONS;
 
 // CTL-936: labelOnce now accepts an optional `appendEvent` seam. When provided
 // AND CATALYST_INTENTS_ENFORCE=1, an unrecoverable label-write failure emits an
