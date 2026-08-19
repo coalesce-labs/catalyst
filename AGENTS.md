@@ -287,15 +287,11 @@ clean-pass result may arrive as a reaction or a plain comment rather than a stru
 object, so detect it via reactions/comments, not only the reviews API. A re-review after a fix
 push may need to be requested explicitly rather than firing automatically.
 
-**Deferring lower-priority findings after round one.** Fix every P0/P1 finding immediately, on
-every review round — that severity is never deferred. On a PR's *first* round of review-driven
-fixes, use judgment on P2-and-lower findings: fix the ones that are real, cheap, and clearly
-correct; defer the rest. On any later round (a re-review after a remediation push), P2-and-lower is
-always deferred, no exceptions — even a trivial one-liner goes to a follow-up ticket, not an inline
-fix: file the ticket, reply on the thread linking it, and resolve the thread. This still satisfies
-"every review thread resolved" above — deferral resolves the thread via that reply, it does not
-leave it open. The point is to stop chasing progressively finer findings across many review↔fix
-rounds; see `catalyst-dev:review-comments` for the mechanism.
+**Code review convergence.** Rounds 1-5 (per reviewer) fix everything reasonable. Rounds 6-15 fix
+P1 inline, ticket new P2-or-lower. Rounds 16-25 ticket P1 too unless critical/blocking. Round 25 is
+a hard stop — escalate to a human. Run a local review pass before each push; check for a
+concurrent session working the same PR (broker_claim_pr) before starting a round. Full policy:
+docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md.
 
 ## Reference Docs
 

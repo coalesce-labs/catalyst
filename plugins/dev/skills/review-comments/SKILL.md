@@ -70,9 +70,11 @@ FINDING_BOT_LOGIN="…"   # the .user.login on the review/review-comment this fi
 REVIEW_ROUND=$(review_round_for_bot "$FINDING_BOT_LOGIN")
 ```
 
-**Round-based escalation schedule** (current default as of 2026-08-19 — see
-`docs/DECISIONS/2026-08-19-review-convergence-policy-update.md` for the full history this
-supersedes):
+**Round-based escalation schedule** (current default as of 2026-08-19 — canonical fleet-wide
+record: `docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md`, filename shared with the
+other 6 HagaleTechnologies repos on this policy; this repo's own incident history behind the
+schedule — VAN-292/326/351 — lives in
+`docs/DECISIONS/2026-08-19-review-convergence-policy-update.md`):
 
 - **Rounds 1-5**: fix everything reasonable, P0/P1 and P2/P3 alike. No ticket filing yet.
 - **Rounds 6-15**: P0/P1 stays mandatory-fix. For genuinely new (or reopened) P2/P3 findings,
@@ -114,6 +116,53 @@ iterate until clean. This doesn't replace the remote review round — it's still
 round counter — it just means the remote round should usually come back clean, so a round that
 DOES find something is genuinely new signal, not something a first local look would have caught
 for free.
+
+## Step 1.6: Claim the PR Before Starting a Round (Collision Awareness)
+
+Round-based reasoning (Step 1.5) assumes one worker driving one PR through its review loop. That
+breaks down the moment a second session is independently active on the same PR — "round N" stops
+meaning anything coherent once two threads push fixes and re-trigger reviews out of sync with each
+other. Before starting work on ANY round (including round 1), claim the PR:
+
+```bash
+# Preferred: broker daemon present (see [[broker]] and [[wait-for-github]] for the primitive).
+if command -v catalyst-broker >/dev/null 2>&1 && catalyst-broker status 2>/dev/null | grep -q "^running"; then
+  PR_BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "main")
+  broker_claim_pr "$PR_NUMBER" "${CATALYST_TICKET:-$PR_NUMBER}" "$(git branch --show-current)" \
+    "$REPO" "$PR_BASE_BRANCH" || true
+
+  # A claim is a check-in, not an exclusive lock — detect a competing session by querying for
+  # OTHER active agents already claiming this same PR (see [[broker]] §8, Querying Agent State).
+  OTHER_CLAIMS=$(sqlite3 ~/catalyst/filter-state.db \
+    "SELECT agent_name, ticket FROM agents
+     WHERE claimed_pr = ${PR_NUMBER} AND status = 'active'
+       AND session_id != '${CATALYST_SESSION_ID:-__none__}';" 2>/dev/null || true)
+
+  if [ -n "$OTHER_CLAIMS" ]; then
+    echo "PR #${PR_NUMBER} is already claimed by another active session: ${OTHER_CLAIMS}" >&2
+    echo "PAUSING — not starting a competing fix round. Surface this rather than racing it." >&2
+    exit 0
+  fi
+else
+  # Fallback: no broker daemon. Heuristic — has the remote branch moved since we last looked, in a
+  # way we didn't cause? (very recent commits/pushes we didn't make)
+  BRANCH="$(git branch --show-current)"
+  LOCAL_SHA="$(git rev-parse HEAD)"
+  git fetch origin "$BRANCH" --quiet 2>/dev/null || true
+  REMOTE_SHA="$(git rev-parse "origin/${BRANCH}" 2>/dev/null || echo "")"
+  if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" != "$LOCAL_SHA" ]; then
+    RECENT_AUTHOR="$(git log -1 --format='%an <%ae> at %ad' "$REMOTE_SHA" 2>/dev/null || echo "unknown")"
+    echo "origin/${BRANCH} has moved since our last known commit (${RECENT_AUTHOR}) and we did not push it." >&2
+    echo "Possible concurrent session on this PR. PAUSING — do not race it." >&2
+    exit 0
+  fi
+fi
+```
+
+**If you detect a collision, do not race it.** Pause and surface it (hand off, split scope
+explicitly, or stand down) rather than pushing a competing fix round — never assume the other
+session will notice and back off first. See "Collision awareness" in
+`docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md`.
 
 ## Step 2: Categorize Comments
 

@@ -130,6 +130,8 @@ source of truth. Treat each verify finding as a candidate review item. This
 phase runs once (it is not part of the iterative round loop the fleet's PR
 review convergence policy governs — see [[review-comments]]'s Step 1.5 for
 that policy's current round schedule, canonical as of
+`docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md`; this repo's own
+incident history behind the schedule lives in
 `docs/DECISIONS/2026-08-19-review-convergence-policy-update.md`), so it
 applies the simplest end of that same policy unconditionally:
 

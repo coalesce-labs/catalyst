@@ -1,5 +1,13 @@
 # 2026-08-19: Round-based PR review convergence policy, refined and consolidated
 
+> **Superseded as the canonical reference**: `docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md`
+> is now the canonical policy doc, using the filename shared with the other 6 HagaleTechnologies
+> repos that adopted this policy, for fleet-wide grep consistency. This document and that one
+> converged on the same four-tier schedule independently (this one from live incidents below, the
+> other from the fleet-wide rollout) on the same day. This document is retained for the
+> incident-specific history (VAN-292/326/351) that motivated the update — `review-comments/SKILL.md`
+> and `phase-review/SKILL.md` now point at the canonical doc for the schedule itself.
+
 ## Context
 
 The fleet's PR/CR review-convergence policy — how an iterative bot or human reviewer's findings
