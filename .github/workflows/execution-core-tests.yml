@@ -1191,6 +1191,7 @@ jobs:
             config-node-class.test.mjs \
             config-cloud-token-env.test.mjs \
             config.test.mjs \
+            delegate-first.test.mjs \
             delegate-config-event.test.mjs \
             delegate-queue.test.mjs \
             delegate-runner.test.mjs \
@@ -1330,6 +1331,8 @@ jobs:
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
             recovery-fix-backoff.test.mjs \
+            infra-class-reasons.test.mjs \
+            infra-class-backoff.test.mjs \
             recovery-orphan-stale-e2e.test.mjs \
             pr-block-probe.test.mjs \
             recovery-emit.test.mjs \
