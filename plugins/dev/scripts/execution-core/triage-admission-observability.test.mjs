@@ -24,6 +24,7 @@ import {
   clearTriageSkip,
   pruneTriageSkips,
   _resetTriageSkipStreaks,
+  triageSkipSeverity,
 } from "./monitor.mjs";
 import { CLAIM_REASON, isClaimFailure } from "./cluster-claim-sync.mjs";
 
@@ -143,6 +144,8 @@ describe("CTL-879 wiring: every blind triage-admission gate records a reason", (
     ["claim gate keeps the FAILURE reason", "ctl-862: lost cross-host claim", '"claim-write-failed"', 36, 8],
     ["claim gate keeps the RACE reason", "ctl-862: lost cross-host claim", '"lost-cross-host-claim"', 36, 8],
     ["claim gate raises severity only for the failure", "ctl-862: lost cross-host claim", "alwaysWarn: failed", 36, 8],
+    // The pure rule is only worth testing if the recorder actually consults it.
+    ["noteTriageSkip routes through the pure severity rule", "const context = { ticket: identifier, reason, held_sweeps: streak", "triageSkipSeverity(streak", 4, 6],
   ];
 
   for (const [label, anchor, recorder, after, before = 0] of SITES) {
@@ -177,35 +180,14 @@ describe("CTL-879 wiring: every blind triage-admission gate records a reason", (
 // tickets logged `lost-cross-host-claim` on tickets their own host OWNS under
 // HRW — a race that cannot happen — with `claim_reason: null` on every line.
 
-/**
- * captureLogLevels — read the LEVEL a log line was written at.
- *
- * ⚠️ This depends on config.mjs's console shim, which prefixes each line with
- * `[execution-core:<level>]`. pino is not a dependency of this repo, so the shim
- * is what runs under `bun test`. The suite does NOT silently degrade if that ever
- * changes: the info case below asserts a POSITIVE marker, so a world where no
- * marker is emitted fails loudly instead of passing on an unobserved branch.
- */
-function captureLogLevels(fn) {
-  const chunks = [];
-  const origOut = process.stdout.write;
-  const origErr = process.stderr.write;
-  process.stdout.write = (x) => {
-    chunks.push(typeof x === "string" ? x : x.toString());
-    return true;
-  };
-  process.stderr.write = (x) => {
-    chunks.push(typeof x === "string" ? x : x.toString());
-    return true;
-  };
-  try {
-    fn();
-  } finally {
-    process.stdout.write = origOut;
-    process.stderr.write = origErr;
-  }
-  return chunks.join("");
-}
+// ⛔ THE SEVERITY IS TESTED THROUGH A PURE FUNCTION, NOT THROUGH THE LOGGER.
+// The first version of these cases captured `process.stdout/stderr.write` and
+// matched config.mjs's console-shim prefix `[execution-core:<level>]`. That
+// passed locally — pino is not a dependency of this repo — and FAILED in CI,
+// where pino IS installed and emits `{"level":40,...}` JSON through a
+// destination it captured at construction, so the monkeypatch saw nothing.
+// A severity rule asserted through whichever logger happens to be installed is
+// a test of the environment. `triageSkipSeverity` is the rule itself.
 
 describe("CTL-2033: a FAILED claim and a LOST race are different outcomes", () => {
   test("the claim result's reasons are all distinct values — none may collapse into another", () => {
@@ -221,38 +203,41 @@ describe("CTL-2033: a FAILED claim and a LOST race are different outcomes", () =
     expect(isClaimFailure(null)).toBe(true);
   });
 
-  test("POSITIVE CONTROL: a normal skip is written at INFO on its first sweep", () => {
-    const text = captureLogLevels(() => noteTriageSkip("CTL-A", "lost-cross-host-claim", { claim_reason: CLAIM_REASON.PEER_WON }));
-    // If this marker is absent the capture (or the shim) is not working, and
-    // every other assertion in this describe would be vacuous.
-    expect(text).toContain("[execution-core:info]");
-    expect(text).not.toContain("[execution-core:warn]");
+  test("a normal skip is INFO on its first sweep", () => {
+    expect(triageSkipSeverity(1, { alwaysWarn: false })).toBe("info");
   });
 
   test("a FAILED claim warns on sweep ONE — not after TRIAGE_SKIP_ESCALATE_AFTER sweeps", () => {
     // At the measured 5-10 min sweep cadence, waiting for the streak escalation
     // is 75-150 minutes of silence on a condition that is abnormal immediately.
-    const text = captureLogLevels(() =>
-      noteTriageSkip(
-        "CTL-B",
-        "claim-write-failed",
-        { claim_reason: CLAIM_REASON.BUDGET_REFUSED, claim_detail: "budget:day-exhausted" },
-        { alwaysWarn: true },
-      ),
-    );
-    expect(text).toContain("[execution-core:warn]");
-    expect(text).toContain("claim-write-failed");
-    expect(text).toContain("budget:day-exhausted");
+    expect(triageSkipSeverity(1, { alwaysWarn: true })).toBe("warn");
   });
 
   test("alwaysWarn raises SEVERITY, never FREQUENCY — the sparse gate still bounds the write", () => {
     // Sweeps 2..9 are neither first, periodic, nor the escalation edge, so a
     // 20-candidate sweep on a budget-exhausted host cannot flood the log.
-    noteTriageSkip("CTL-C", "claim-write-failed", {}, { alwaysWarn: true }); // sweep 1 — logs
-    const text = captureLogLevels(() => {
-      for (let i = 2; i <= 9; i++) noteTriageSkip("CTL-C", "claim-write-failed", {}, { alwaysWarn: true });
-    });
-    expect(text).toBe("");
+    for (let streak = 2; streak <= 9; streak++) {
+      expect(triageSkipSeverity(streak, { alwaysWarn: true })).toBeNull();
+      expect(triageSkipSeverity(streak, { alwaysWarn: false })).toBeNull();
+    }
+    // ...and the sweeps that ARE written are written for both.
+    for (const streak of [1, 10, 15, 20]) {
+      expect(triageSkipSeverity(streak, { alwaysWarn: true })).not.toBeNull();
+    }
+  });
+
+  test("the persistence escalation still wins on its own, with or without alwaysWarn", () => {
+    // A long streak is a WARN even for a normal lost race — the pre-existing
+    // CTL-879 ladder, which this change must not have removed.
+    expect(triageSkipSeverity(15, { alwaysWarn: false })).toBe("warn");
+    expect(triageSkipSeverity(20, { alwaysWarn: false })).toBe("warn");
+  });
+
+  test("noteTriageSkip still returns the streak and still never throws", () => {
+    expect(noteTriageSkip("CTL-A", "lost-cross-host-claim", { claim_reason: CLAIM_REASON.PEER_WON })).toBe(1);
+    expect(() =>
+      noteTriageSkip("CTL-B", "claim-write-failed", { claim_reason: CLAIM_REASON.BUDGET_REFUSED }, { alwaysWarn: true }),
+    ).not.toThrow();
   });
 
   test("the two outcomes use DIFFERENT gate reasons, so a streak of one never masquerades as the other", () => {

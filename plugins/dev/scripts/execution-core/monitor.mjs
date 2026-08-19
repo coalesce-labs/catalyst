@@ -858,6 +858,33 @@ const TRIAGE_SKIP_RELOG_EVERY = 10;
 const TRIAGE_SKIP_ESCALATE_AFTER = 15;
 const _triageSkipStreaks = new Map();
 
+// triageSkipSeverity — the PURE severity decision, extracted so it is testable
+// without the logger (CTL-2033).
+//
+// ⚠️ It was NOT extracted for tidiness. The first version of this guard asserted
+// the level by capturing `process.stdout/stderr.write` and matching the
+// `[execution-core:<level>]` prefix of config.mjs's console shim. That passes
+// locally, where pino is absent — and FAILS in CI, where pino IS installed and
+// emits `{"level":40,...}` JSON through a destination it captured at
+// construction. A severity rule tested through whichever logger happens to be
+// installed is a test of the environment, not of the rule.
+//
+// Returns "warn" | "info" | null, where null means THIS SWEEP IS NOT LOGGED —
+// the sparse gate. Callers must treat null as "count it, say nothing".
+export function triageSkipSeverity(streak, { alwaysWarn = false } = {}) {
+  const isFirst = streak === 1;
+  const isPeriodic = streak % TRIAGE_SKIP_RELOG_EVERY === 0;
+  // The escalation edge is logged explicitly: with RELOG_EVERY=10 and
+  // ESCALATE_AFTER=15 the crossing sweep is neither first nor periodic, so
+  // without this the WARN would not appear until streak 20.
+  const isEscalationEdge = streak === TRIAGE_SKIP_ESCALATE_AFTER;
+  if (!isFirst && !isPeriodic && !isEscalationEdge) return null;
+  if (streak >= TRIAGE_SKIP_ESCALATE_AFTER) return "warn";
+  // `alwaysWarn` raises SEVERITY, never FREQUENCY: it is read only AFTER the
+  // sparse gate above has already decided this sweep is written at all.
+  return alwaysWarn ? "warn" : "info";
+}
+
 // noteTriageSkip — record that `identifier` was declined by `reason` this sweep.
 // Returns the streak so callers/tests can assert on it. A streak that reaches
 // TRIAGE_SKIP_ESCALATE_AFTER is no longer a transient miss: nothing will produce
@@ -869,25 +896,21 @@ export function noteTriageSkip(identifier, reason, detail = {}, { alwaysWarn = f
     const prev = _triageSkipStreaks.get(identifier);
     const streak = prev?.reason === reason ? prev.streak + 1 : 1;
     _triageSkipStreaks.set(identifier, { reason, streak });
-    const isFirst = streak === 1;
-    const isPeriodic = streak % TRIAGE_SKIP_RELOG_EVERY === 0;
-    // The escalation edge is logged explicitly: with RELOG_EVERY=10 and
-    // ESCALATE_AFTER=15 the crossing sweep is neither first nor periodic, so
-    // without this the WARN would not appear until streak 20.
-    const isEscalationEdge = streak === TRIAGE_SKIP_ESCALATE_AFTER;
-    if (!isFirst && !isPeriodic && !isEscalationEdge) return streak;
-    const context = { ticket: identifier, reason, held_sweeps: streak, ...detail };
     // CTL-2033: `alwaysWarn` raises the SEVERITY, never the frequency. A skip that
     // is a FAILURE (the claim write never landed) is abnormal on its very first
     // sweep — waiting TRIAGE_SKIP_ESCALATE_AFTER sweeps to say so is 75-150 minutes
-    // at the measured 5-10 min sweep cadence. The sparse gate above still bounds
-    // how often it is written, so a 20-candidate sweep cannot flood.
+    // at the measured 5-10 min sweep cadence. The sparse gate inside
+    // triageSkipSeverity still bounds how often it is written, so a 20-candidate
+    // sweep cannot flood the log it exists to make readable.
+    const severity = triageSkipSeverity(streak, { alwaysWarn });
+    if (severity === null) return streak;
+    const context = { ticket: identifier, reason, held_sweeps: streak, ...detail };
     if (streak >= TRIAGE_SKIP_ESCALATE_AFTER) {
       log.warn(
         context,
         "ctl-879: triage admission blocked persistently — no triage.json can be produced for this ticket while this reason holds, so the scheduler's ctl-1150 gate will hold it indefinitely"
       );
-    } else if (alwaysWarn) {
+    } else if (severity === "warn") {
       // A different sentence, not the persistence one: "persistently" would be a
       // false statement on sweep 1, and `held_sweeps: 1` beside it reads as a bug
       // in the counter rather than as the alarm it is.
