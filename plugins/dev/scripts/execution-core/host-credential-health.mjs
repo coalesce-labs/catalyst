@@ -26,6 +26,20 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import { classifyHostWriteCredential } from "../lib/host-write-credential.mjs";
+// ⛔ Codex P2 on #3706. The token's env-var NAME is CONFIGURABLE, and the installer
+// resolves it through env → Layer-2 `catalyst.cloud.tokenEnv` → default before writing
+// the file. Hardcoding the default here meant that on a host using a custom name this
+// check read a variable the file does not set and reported "the writer would receive no
+// token" — grading the wrong variable instead of the credential actually in use, and
+// reporting a WARN that says the opposite of what is wrong.
+//
+// ⚠️ It is also precisely the "every test injects, so the DEFAULT is untested" trap: the
+// suite covered `tokenVar` injection and therefore never exercised the default path.
+//
+// resolveCloudTokenName is the canonical resolver (config.mjs's resolveNodeCloudTokenEnv
+// is a thin delegate onto it) and lives in the ZERO-IMPORT secret-contract leaf, so
+// importing it here keeps this module loadable under doctor's bare-Node runtime.
+import { resolveCloudTokenName } from "../lib/secret-contract.mjs";
 import { STATUS, mkCheck } from "./doctor-status.mjs";
 
 const CHECK = "host-write-credential-class";
@@ -66,7 +80,8 @@ export function checkHostWriteCredentialClass(deps = {}) {
       resolve(homedir(), ".config", "catalyst", "cloud-sync.env"),
     exists = existsSync,
     readFile = (p) => readFileSync(p, "utf8"),
-    tokenVar = process.env.CATALYST_CLOUD_TOKEN_ENV || "CATALYST_CLOUD_TOKEN",
+    // NAME-only resolution — never reads the secret VALUE, so it is safe to render.
+    tokenVar = resolveCloudTokenName(process.env).envVar,
     classify = classifyHostWriteCredential,
   } = deps;
 

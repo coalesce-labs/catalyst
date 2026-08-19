@@ -75,6 +75,80 @@ describe("checkHostWriteCredentialClass", () => {
     expect(noLine.detail).toContain("no 'export CATALYST_CLOUD_TOKEN=' line");
   });
 
+  // ══════════════════════════════════════════════════════════════════════════════════
+  // Codex P2 on #3706 — the DEFAULT token-name resolution, exercised with NO injection.
+  // ══════════════════════════════════════════════════════════════════════════════════
+  //
+  // ⛔ The injected-`tokenVar` test below passed the whole time the default was a
+  // hardcoded "CATALYST_CLOUD_TOKEN". On a host that sets `catalyst.cloud.tokenEnv` in
+  // Layer-2, the installer writes the credential under THAT name, and this check read a
+  // variable the file does not set — reporting "the writer would receive no token" while
+  // the real credential sat unread one line away. Every test injected the seam, so the
+  // default was untested; these two do not inject it.
+  describe("resolves the token env-var NAME through the canonical ladder (not hardcoded)", () => {
+    const swapEnv = (patch, body) => {
+      const saved = {};
+      for (const k of Object.keys(patch)) saved[k] = process.env[k];
+      Object.assign(process.env, patch);
+      try {
+        return body();
+      } finally {
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+      }
+    };
+
+    test("env override (CATALYST_CLOUD_TOKEN_ENV) — no tokenVar injected", () => {
+      const c = swapEnv({ CATALYST_CLOUD_TOKEN_ENV: "MY_TOKEN" }, () =>
+        checkHostWriteCredentialClass({
+          envPath: "/seal/cloud-sync.env",
+          exists: () => true,
+          readFile: () =>
+            `export MY_TOKEN=${ADMIN_BEARER}\nexport CATALYST_CLOUD_TOKEN=${ORG_KEY}\n`,
+        })
+      );
+      // Grading the DEFAULT name would read the good ORG_KEY and report PASS on a host
+      // whose writer actually loads the admin bearer.
+      expect(c.status).toBe("warn");
+      expect(c.detail).toContain("WRONG CREDENTIAL CLASS");
+    });
+
+    test("Layer-2 catalyst.cloud.tokenEnv, read off a REAL file — no tokenVar injected", () => {
+      const dir = mkdtempSync(join(tmpdir(), "ctl2045-l2-"));
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, JSON.stringify({ catalyst: { cloud: { tokenEnv: "L2_TOKEN" } } }));
+      const c = swapEnv(
+        { CATALYST_LAYER2_CONFIG_FILE: cfg, CATALYST_CLOUD_TOKEN_ENV: undefined },
+        () =>
+          checkHostWriteCredentialClass({
+            envPath: "/seal/cloud-sync.env",
+            exists: () => true,
+            readFile: () =>
+              `export L2_TOKEN=${ADMIN_BEARER}\nexport CATALYST_CLOUD_TOKEN=${ORG_KEY}\n`,
+          })
+      );
+      expect(c.status).toBe("warn");
+      expect(c.detail).toContain("WRONG CREDENTIAL CLASS");
+    });
+
+    test("positive control — with no override the ladder still yields the default name", () => {
+      const c = swapEnv(
+        { CATALYST_CLOUD_TOKEN_ENV: undefined, CATALYST_LAYER2_CONFIG_FILE: "/seal/absent.json" },
+        () =>
+          checkHostWriteCredentialClass({
+            envPath: "/seal/cloud-sync.env",
+            exists: () => true,
+            readFile: () => `export CATALYST_CLOUD_TOKEN=${ORG_KEY}\n`,
+          })
+      );
+      // Without this the two cases above would also pass on a resolver that returned a
+      // constant custom name and never fell back.
+      expect(c.status).toBe("pass");
+    });
+  });
+
   test("honours a configured token env-var NAME (the writer resolves that name, not the default)", () => {
     const body = `export MY_TOKEN=${ADMIN_BEARER}\nexport CATALYST_CLOUD_TOKEN=${ORG_KEY}\n`;
     // Grading the DEFAULT name here would read the good key and report a healthy host

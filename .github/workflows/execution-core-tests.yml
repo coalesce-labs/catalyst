@@ -520,6 +520,25 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/setup-cloud-replica.test.sh
 
+      - name: host write-credential classifier parity (CTL-2045)
+        # ⛔ Codex P2 on #3706, and the important one. This suite is
+        # the ONLY thing holding lib/host-write-credential.mjs (the
+        # doctor engine) and lib/catalyst-host-write-credential.sh
+        # (the installer engine) in agreement.
+        #
+        # Shell suites here are ALLOWLISTED, not globbed — so a suite
+        # that is written but never invoked is a guard that cannot
+        # fail, and the two engines could drift apart through a green
+        # merge. That is the exact defect class the guard exists to
+        # prevent, one level up.
+        #
+        # Drives BOTH engines over the shared fixture table, checking
+        # each against a COMPUTED-EXPECTED verdict rather than against
+        # the other — two engines agreeing on a wrong answer is what a
+        # bare A-vs-B comparison cannot see.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/host-write-credential-parity.test.sh
+
       - name: SKILL.md ${PLUGIN_ROOT} assignment guard (CTL-1832)
         # CTL-1832: a SKILL.md that EXPANDS ${PLUGIN_ROOT} must also ASSIGN it, or
         # the expansion is empty and the command silently addresses a bogus path.
