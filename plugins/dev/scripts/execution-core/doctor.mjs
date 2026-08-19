@@ -80,6 +80,11 @@ import {
   // do NOT import replica-read.mjs (it pulls bun:sqlite; doctor runs under bare node).
   getReplicaDbPath,
   readLinearReplica,
+  // CTL-2074 (Codex #3738 P2): resolve the write-proxy mode through the SAME
+  // env > Layer-2 > 'off' ladder the live write transport uses, so a host that enables
+  // enforce via Layer-2 (catalyst.linearWriteProxy.mode) without exporting the env var is
+  // not silently skipped by the self-echo cross-check. Node-safe (node:fs only).
+  readLinearWriteProxyConfig,
   resolveNodeCloudTokenEnv,
   // CTL-1659: the cloud-sync loaded-dependency boot record — doctor grades it from
   // another process, so it needs the same path the writer writes.
@@ -182,6 +187,24 @@ export function readLinearBotUserIds(l1Path, l2Path) {
     if (typeof uid === "string" && uid.length > 0) s.add(uid);
   });
   return ids;
+}
+
+// CTL-2074 (Codex #3738 P2): the CURRENT cloud-proxy app-actor id, read on its own
+// from Layer-2 catalyst.linear.bot.cloud.botUserId. The self-echo cross-check ties its
+// PASS to THIS specific actor rather than to any member of the full recognition set:
+// under proxy=enforce every daemon state write carries the cloud tenant's app-actor id,
+// so a legacy worker/orchestrator id that changed state before the cutover — and is still
+// in the general set — must NOT mask an unrecognized current cloud writer with a clean
+// PASS. Returns "" when unconfigured/unreadable (never throws) — that IS the CTL-2074
+// silent condition, surfaced as WARN by the caller, not a clean pass.
+export function readCloudBotUserId(l2Path) {
+  if (!l2Path) return "";
+  try {
+    const id = JSON.parse(readFileSync(l2Path, "utf8"))?.catalyst?.linear?.bot?.cloud?.botUserId;
+    return typeof id === "string" ? id : "";
+  } catch {
+    return "";
+  }
 }
 
 // ─── Check model ─────────────────────────────────────────────────────────────
@@ -855,8 +878,14 @@ function defaultRecentStateChangeActors({ dbPath, limit = 50, run = spawnSync } 
 export function checkSelfEchoIdentityHistory(deps = {}) {
   const name = "self-echo-identity-history";
   const {
-    proxyMode = process.env.CATALYST_LINEAR_WRITE_PROXY || "off",
+    // Codex #3738 P2: resolve the mode through the write transport's env > Layer-2 >
+    // 'off' ladder, NOT the env var alone — a Layer-2-only enforce host was silently
+    // skipped by the old `process.env.CATALYST_LINEAR_WRITE_PROXY || "off"` default.
+    proxyMode = readLinearWriteProxyConfig().mode,
     botIds = readLinearBotUserIds(layer1Path(), layer2Path()),
+    // Codex #3738 P2: the current cloud-proxy actor — the PASS is tied to THIS id, not
+    // to any historical member of botIds (see readCloudBotUserId).
+    cloudBotId = readCloudBotUserId(layer2Path()),
     recentActors = () => defaultRecentStateChangeActors({ dbPath: getReplicaDbPath() }),
   } = deps;
 
@@ -892,31 +921,59 @@ export function checkSelfEchoIdentityHistory(deps = {}) {
     );
   }
 
-  const ids = botIds instanceof Set ? botIds : new Set(Array.isArray(botIds) ? botIds : []);
-  const recognized = actors.filter((a) => a.actorId && ids.has(a.actorId));
-  if (recognized.length > 0) {
-    const who = recognized.map((a) => a.name || a.actorId).join(", ");
-    return mkCheck(
-      name,
-      STATUS.PASS,
-      `write proxy=enforce and a recognized self-echo identity writes state: ${who} ` +
-        `(${recognized.length} of ${actors.length} recent state-writers recognized)`,
-    );
-  }
-
-  // No recognized identity among the actors who actually write state — the exact
-  // silent condition that produced CTL-2074. Name the candidates so the operator can
-  // confirm the right one AT THE PROXY (users.type is unreliable — never auto-classify).
+  // Codex #3738 P2: under enforce every daemon state write carries the CLOUD proxy
+  // app-actor id, so the PASS is tied to THAT specific id — not to any member of the
+  // full recognition set. A legacy worker/orchestrator id that changed state before the
+  // cutover is still in `botIds`, and the old "any recognized member ⇒ PASS" would let it
+  // mask an unrecognized current cloud writer with a clean pass — the exact silent
+  // condition this check exists to expose. (`ids` is retained only for the diagnostic
+  // note below, distinguishing a set the cloud id is genuinely part of.)
   const candidates = actors
     .slice(0, 5)
     .map((a) => `${a.actorId}${a.name ? ` "${a.name}"` : ""} (${a.count})`)
     .join(", ");
+  const ids = botIds instanceof Set ? botIds : new Set(Array.isArray(botIds) ? botIds : []);
+  const cloudId = typeof cloudBotId === "string" && cloudBotId.length > 0 ? cloudBotId : null;
+
+  // The cloud-proxy identity isn't configured at all — nothing pins the fleet's own
+  // proxied writes, so every one of them reads as a human reply. The CTL-2074 condition.
+  if (!cloudId) {
+    return mkCheck(
+      name,
+      STATUS.WARN,
+      "write proxy=enforce but the cloud-proxy identity is not configured " +
+        "(catalyst.linear.bot.cloud.botUserId) — the fleet's own proxied writes read as human " +
+        "replies. Confirm the cloud-proxy identity AT THE PROXY (users.type is unreliable — never " +
+        "auto-classify) and set it. Recent state-writers: " +
+        candidates,
+    );
+  }
+
+  const cloudWrites = actors.filter((a) => a.actorId === cloudId);
+  if (cloudWrites.length > 0) {
+    const who = cloudWrites.map((a) => a.name || a.actorId).join(", ");
+    const inSet = ids.has(cloudId) ? "" : " (⚠ present in history but ABSENT from the recognition set)";
+    return mkCheck(
+      name,
+      // The cloud id writing state but missing from the recognition set is itself a
+      // misconfiguration — the daemon would treat these writes as human. WARN, not PASS.
+      ids.has(cloudId) ? STATUS.PASS : STATUS.WARN,
+      `write proxy=enforce and the configured cloud-proxy identity writes state: ${who}${inSet} ` +
+        `(${cloudWrites.length} of ${actors.length} recent state-writers)`,
+    );
+  }
+
+  // The cloud id is configured but never appears among the actors who ACTUALLY write
+  // state — either it is the wrong id or a legacy actor is still writing. Either way the
+  // fleet's proxied writes are not recognized. Name the candidates so the operator can
+  // confirm the right one AT THE PROXY (users.type is unreliable — never auto-classify).
   return mkCheck(
     name,
     STATUS.WARN,
-    "write proxy=enforce but NONE of the recent state-writers are in the self-echo set — the " +
-      "fleet's own proxied writes read as human replies. Confirm the cloud-proxy identity at the " +
-      "proxy and set catalyst.linear.bot.cloud.botUserId. Recent unrecognized state-writers: " +
+    "write proxy=enforce but the configured cloud-proxy identity " +
+      `(${cloudId}) is NOT among the recent state-writers — the fleet's own proxied writes read ` +
+      "as human replies. Confirm the cloud-proxy identity AT THE PROXY and correct " +
+      "catalyst.linear.bot.cloud.botUserId. Recent state-writers: " +
       candidates,
   );
 }

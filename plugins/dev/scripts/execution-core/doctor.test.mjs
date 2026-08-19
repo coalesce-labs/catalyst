@@ -59,6 +59,7 @@ import {
   runDoctor,
   checkFleetTokenExport,
   readLinearBotUserIds,
+  readCloudBotUserId,
   checkSelfEchoIdentityHistory,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
@@ -404,6 +405,23 @@ describe("readLinearBotUserIds (doctor inline twin, CTL-2074)", () => {
     expect(ids.has("worker-uuid")).toBe(true);
     expect(ids.has("orch-uuid")).toBe(true);
   });
+
+  // Codex #3738 P2: the cloud-proxy actor is read on its own so the self-echo cross-check
+  // can tie its PASS to THIS id rather than any historical set member.
+  it("readCloudBotUserId returns the cloud slot, and \"\" when absent/unreadable", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({ catalyst: { linear: { bot: { cloud: { botUserId: "cloud-uuid" } } } } })
+    );
+    expect(readCloudBotUserId(layer2)).toBe("cloud-uuid");
+    // absent slot → "" (not undefined), never throws
+    const bare = join(tmpDir, "bare.json");
+    writeFileSync(bare, JSON.stringify({ catalyst: { linear: { bot: {} } } }));
+    expect(readCloudBotUserId(bare)).toBe("");
+    expect(readCloudBotUserId(join(tmpDir, "does-not-exist.json"))).toBe("");
+    expect(readCloudBotUserId(null)).toBe("");
+  });
 });
 
 // ─── CTL-2074: checkSelfEchoIdentityHistory — the loud history cross-check ────
@@ -415,42 +433,74 @@ const CLOUD_ID = "78f8f491-0000-4000-8000-000000000000";
 const HUMAN_ID = "c2a8cc92-0000-4000-8000-000000000000";
 
 describe("checkSelfEchoIdentityHistory (CTL-2074)", () => {
-  it("WARNs when proxy=enforce and no recognized identity writes state (names the candidates)", () => {
-    const check = checkSelfEchoIdentityHistory({
-      proxyMode: "enforce",
-      botIds: new Set([ORCH_ID]),
-      recentActors: () => [
-        { actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 },
-        { actorId: HUMAN_ID, name: "Ryan Rozich", count: 103 },
-      ],
-    });
-    expect(check.status).toBe(STATUS.WARN);
-    // names the unrecognized state-writer so the operator has a candidate to confirm
-    expect(check.detail).toMatch(/78f8f491|cloud|proxied|Catalyst Cloud/i);
-  });
-
-  it("PASSes when a recognized identity is present in history AND in the set", () => {
+  it("WARNs when proxy=enforce and the configured cloud identity never writes state (names the candidates)", () => {
     const check = checkSelfEchoIdentityHistory({
       proxyMode: "enforce",
       botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      recentActors: () => [{ actorId: HUMAN_ID, name: "Ryan Rozich", count: 103 }],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    // names the unrecognized state-writer so the operator has a candidate to confirm
+    expect(check.detail).toMatch(/c2a8cc92|Ryan Rozich|proxied|human replies/i);
+  });
+
+  it("PASSes when the configured cloud-proxy identity is present in history AND in the set", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
       recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
     });
     expect(check.status).toBe(STATUS.PASS);
   });
 
-  it("WARNs when the configured cloud id never appears in recent history (misconfigured)", () => {
+  // Codex #3738 P2 regression: a LEGACY recognized actor (pre-cutover worker/orch id
+  // still in the set) that appears in history must NOT mask an unrecognized CURRENT
+  // cloud writer. The old "any member recognized ⇒ PASS" produced a clean PASS here.
+  it("WARNs (not PASS) when a legacy set member writes state but the cloud proxy actor does not (masking)", () => {
     const check = checkSelfEchoIdentityHistory({
       proxyMode: "enforce",
       botIds: new Set([ORCH_ID, CLOUD_ID]),
-      recentActors: () => [{ actorId: HUMAN_ID, name: "Ryan Rozich", count: 103 }],
+      cloudBotId: CLOUD_ID,
+      // ORCH_ID is a recognized set member and writes state; CLOUD_ID (the current
+      // proxy actor) is absent — its proxied writes still read as human replies.
+      recentActors: () => [
+        { actorId: ORCH_ID, name: "Legacy Orchestrator", count: 42 },
+        { actorId: HUMAN_ID, name: "Ryan Rozich", count: 103 },
+      ],
     });
     expect(check.status).toBe(STATUS.WARN);
+    expect(check.detail).toMatch(/cloud-proxy identity|proxied writes read/i);
+  });
+
+  it("WARNs when the cloud-proxy identity is not configured at all (the CTL-2074 silent condition)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID]),
+      cloudBotId: "",
+      recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    expect(check.detail).toMatch(/not configured|bot\.cloud\.botUserId/i);
+  });
+
+  it("WARNs when the cloud id writes state but is ABSENT from the recognition set", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID]), // cloud id NOT in the recognition set
+      cloudBotId: CLOUD_ID,
+      recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    expect(check.detail).toMatch(/recognition set/i);
   });
 
   it("is INCONCLUSIVE (never PASS) when the replica cannot be read (recentActors → undefined)", () => {
     const check = checkSelfEchoIdentityHistory({
       proxyMode: "enforce",
       botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
       recentActors: () => undefined,
     });
     expect(check.status).not.toBe(STATUS.PASS); // could-not-look ≠ clean
@@ -460,6 +510,7 @@ describe("checkSelfEchoIdentityHistory (CTL-2074)", () => {
     const check = checkSelfEchoIdentityHistory({
       proxyMode: "enforce",
       botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
       recentActors: () => [],
     });
     expect(check.status).not.toBe(STATUS.PASS);
@@ -470,6 +521,7 @@ describe("checkSelfEchoIdentityHistory (CTL-2074)", () => {
       const check = checkSelfEchoIdentityHistory({
         proxyMode: mode,
         botIds: new Set([ORCH_ID]),
+        cloudBotId: CLOUD_ID,
         recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
       });
       expect(check.status).toBe(STATUS.INFO);
