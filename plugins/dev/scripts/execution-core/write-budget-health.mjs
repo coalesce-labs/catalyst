@@ -11,9 +11,12 @@
 // service would turn a bounded degradation into an outage. Same posture, and same reason,
 // as checkRegistryTeamIdentity and install-completeness.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 
 import { STATUS, mkCheck } from "./doctor-status.mjs";
+import { parseEnvAssignments } from "./execution-core-env-drift-health.mjs";
 import {
   DEFAULT_DAILY_BUDGET,
   DEFAULT_PER_TICKET_CAP,
@@ -23,6 +26,32 @@ import {
 } from "./linear-write-budget.mjs";
 import { defaultBudgetPath } from "./linear-write-proxy.mjs";
 
+// CTL-2073: `env.CATALYST_LINEAR_WRITE_DAILY_BUDGET` used to mean "doctor's own
+// process.env" — but doctor runs in a plain shell, and the lever the DAEMON actually
+// enforces lives in execution-core.env, the file its launcher sources before start.
+// Measured on mini: the daemon ran under 2000, doctor's shell had the var unset, so
+// this fell back to DEFAULT_DAILY_BUDGET (300) — smaller than every real deployment,
+// so the check failed in the alarming direction (WRITE-EXHAUSTED at 34% of the real
+// budget) rather than the quiet one. Same defect class as CTL-2068/CTL-2071: resolving
+// configuration from a process that isn't the one being graded.
+function resolveDaemonBudget(varName, fallback, { env, execCoreEnvPath, envFileExists, envFileRead }) {
+  if (envFileExists(execCoreEnvPath)) {
+    try {
+      const raw = parseEnvAssignments(envFileRead(execCoreEnvPath, "utf8")).get(varName);
+      if (raw !== undefined) {
+        const n = Number(raw.trim().replace(/^["']|["']$/g, ""));
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+    } catch {
+      // unreadable env file (permissions, disappeared mid-read) — fall through
+    }
+  }
+  // Still consult doctor's own env: covers a caller that already exported the var
+  // (a test, or doctor invoked from inside the daemon's own sourced shell).
+  const n = Number(env[varName]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 export function checkLinearWriteBudget(deps = {}) {
   const {
     env = process.env,
@@ -30,8 +59,25 @@ export function checkLinearWriteBudget(deps = {}) {
     path = defaultBudgetPath(env),
     readLedgerFn = readLedger,
     exists = existsSync,
-    dailyBudget = Number(env.CATALYST_LINEAR_WRITE_DAILY_BUDGET) || DEFAULT_DAILY_BUDGET,
-    perTicketCap = Number(env.CATALYST_LINEAR_WRITE_TICKET_CAP) || DEFAULT_PER_TICKET_CAP,
+    // CTL-2073 — separate DI names from the ledger's `exists`/readLedgerFn above,
+    // deliberately: a test stubbing ONLY the ledger's existence must not also make
+    // this env-file check believe execution-core.env exists on whatever host the
+    // test happens to run on.
+    execCoreEnvPath = env.CATALYST_EXECUTION_CORE_ENV || resolve(homedir(), ".config", "catalyst", "execution-core.env"),
+    envFileExists = existsSync,
+    envFileRead = readFileSync,
+    dailyBudget = resolveDaemonBudget("CATALYST_LINEAR_WRITE_DAILY_BUDGET", DEFAULT_DAILY_BUDGET, {
+      env,
+      execCoreEnvPath,
+      envFileExists,
+      envFileRead,
+    }),
+    perTicketCap = resolveDaemonBudget("CATALYST_LINEAR_WRITE_TICKET_CAP", DEFAULT_PER_TICKET_CAP, {
+      env,
+      execCoreEnvPath,
+      envFileExists,
+      envFileRead,
+    }),
   } = deps;
 
   if (!exists(path)) {
