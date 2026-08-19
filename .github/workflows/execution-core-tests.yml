@@ -595,6 +595,24 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/worktree-salvage.test.sh
 
+      - name: cluster fence-guard unit tests (CTL-864, CTL-2048)
+        # ⛔ PINNED BECAUSE IT WAS NOT. Verified before adding this step:
+        # `grep -rn cluster-fence-guard .github/workflows/` returned NOTHING,
+        # while the same grep for `worktree-salvage.test.sh` (right above,
+        # same lib/__tests__ directory) returns its own run line. So this
+        # suite has only ever run in a local full gate — the FIFTH inert
+        # suite found in three days.
+        #
+        # What it guards: the guard decides whether a worker may perform an
+        # irreversible side-effect. Its CTL-2048 cases pin that a fence it
+        # could not READ is never reported as a fence it read and found
+        # STALE, that the unreadable case is retried and the answered stale
+        # case is not, and that a transient failure recovers instead of
+        # writing a terminal status. Measured 6 fail / 12 pass against the
+        # pre-fix guard.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/cluster-fence-guard.test.sh
+
       - name: worktree-salvage destroy-site wiring tests (CTL-1639)
         # Deterministic source-order invariant: each destructive bash site
         # (phase-agent-dispatch L3, orphan-sweep, phase-teardown SKILL.md) must

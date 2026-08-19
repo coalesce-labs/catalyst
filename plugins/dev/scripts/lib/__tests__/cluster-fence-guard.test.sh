@@ -5,6 +5,11 @@
 #   A — CATALYST_CLUSTER_GENERATION unset → silent no-op, exit 0, emit NOT called
 #   B — generation set + fence current (fence-check exit 0) → exit 0, emit NOT called
 #   C — generation set + fence stale (fence-check exit 10) → exit 10, emit called
+#   D — fence UNREADABLE on every attempt (exit 1) → exit 10, emit reason
+#       cluster_fence_unverified — NOT cluster_fence_stale (CTL-2048)
+#   E — fence unreadable ONCE then current → exit 0, emit NOT called (the retry
+#       recovers the transient case that was measured on mini-2)
+#   F — a stale answer is NOT retried (exactly one fence-check call)
 #
 # Stubs: a fake PLUGIN_ROOT with stub cluster-claim.mjs and phase-agent-emit-complete
 # so the guard never touches Linear or the real dispatcher.
@@ -50,11 +55,29 @@ setup_stubs() {
 	local fence_exit="${2:-0}"
 	FAKE_ROOT="${SCRATCH}/${tag}"
 	EMIT_LOG="${FAKE_ROOT}/emit.log"
+	FENCE_CALL_LOG="${FAKE_ROOT}/fence-calls.log"
 	mkdir -p "${FAKE_ROOT}/scripts/execution-core"
 
 	# Stub cluster-claim.mjs: ignore all args, exit with configurable code.
+	#
+	# CTL-2048: it also COUNTS its invocations (FENCE_CALL_LOG) and can fail a fixed
+	# number of times before succeeding (FENCE_STUB_FAIL_TIMES), which is what makes the
+	# retry observable at all — without the counter, "the retry ran" and "the first call
+	# happened to succeed" look identical from the guard's exit code.
 	cat >"${FAKE_ROOT}/scripts/execution-core/cluster-claim.mjs" <<EOF
 #!/usr/bin/env node
+import { appendFileSync, readFileSync } from "node:fs";
+const log = process.env.FENCE_CALL_LOG;
+let n = 0;
+if (log) {
+  try { n = readFileSync(log, "utf8").split("\n").filter(Boolean).length; } catch {}
+  appendFileSync(log, "call\n");
+}
+const failTimes = parseInt(process.env.FENCE_STUB_FAIL_TIMES ?? "0");
+if (n < failTimes) {
+  process.stderr.write("transport-error route=attachments caller=cluster-claim\n");
+  process.exit(1);
+}
 const exitCode = parseInt(process.env.FENCE_STUB_EXIT ?? "${fence_exit}");
 process.exit(exitCode);
 EOF
@@ -104,6 +127,65 @@ C_EMIT_LOG="$(cat "$EMIT_LOG" 2>/dev/null || echo "")"
 assert_contains "$C_EMIT_LOG" "--status" "stale gen → emit-complete called with --status"
 assert_contains "$C_EMIT_LOG" "failed" "stale gen → emit-complete called with failed status"
 assert_contains "$C_EMIT_LOG" "cluster_fence_stale" "stale gen → emit-complete reason=cluster_fence_stale"
+
+# ─── Case D: fence UNREADABLE on every attempt → unverified, NOT stale ──────
+#
+# ⛔ THE DEFECT (CTL-2048). `fence-check` exits 10 for a genuinely stale generation and 1
+# when it THREW. The guard branched on `if …; then exit 0; fi` and called everything else
+# stale, so a transport error was recorded as a definite takeover by another host. Measured
+# on mini-2 on 2026-08-18: two real triage.json artifacts, both signals written
+# `cluster_fence_stale`, and neither fence was stale.
+echo ""
+echo "Case D: fence unreadable (exit 1) on every attempt → exit 10, reason=cluster_fence_unverified"
+setup_stubs D 1
+CATALYST_CLUSTER_GENERATION=1 FENCE_STUB_EXIT=1 CATALYST_FENCE_CHECK_RETRIES=1 \
+	CLAUDE_PLUGIN_ROOT="${FAKE_ROOT}" EMIT_LOG="${EMIT_LOG}" FENCE_CALL_LOG="${FENCE_CALL_LOG}" \
+	bash "$GUARD" --phase pr --ticket CTL-1 2>/dev/null
+D_RC=$?
+assert_eq "10" "$D_RC" "unreadable fence → exit 10 (side-effect still declined)"
+D_EMIT_LOG="$(cat "$EMIT_LOG" 2>/dev/null || echo "")"
+assert_contains "$D_EMIT_LOG" "cluster_fence_unverified" "unreadable fence → reason=cluster_fence_unverified"
+# ⛔ The whole point: it must NOT assert a fact it did not establish.
+D_SAID_STALE="$([[ $D_EMIT_LOG == *"cluster_fence_stale"* ]] && echo yes || echo no)"
+assert_eq "no" "$D_SAID_STALE" "unreadable fence → does NOT report cluster_fence_stale"
+D_CALLS="$(wc -l <"$FENCE_CALL_LOG" 2>/dev/null | tr -d ' ')"
+assert_eq "2" "$D_CALLS" "unreadable fence → retried (1 retry ⇒ 2 fence-check calls)"
+
+# ─── Case E: unreadable ONCE, then current → the retry recovers it ──────────
+#
+# The measured mini-2 case: one transport error, then {"current":true} on re-run 3/3.
+# One retry would have avoided both real failures.
+echo ""
+echo "Case E: fence unreadable once then current → exit 0, no emit (retry recovers)"
+setup_stubs E 0
+CATALYST_CLUSTER_GENERATION=1 FENCE_STUB_EXIT=0 FENCE_STUB_FAIL_TIMES=1 \
+	CLAUDE_PLUGIN_ROOT="${FAKE_ROOT}" EMIT_LOG="${EMIT_LOG}" FENCE_CALL_LOG="${FENCE_CALL_LOG}" \
+	bash "$GUARD" --phase pr --ticket CTL-1 2>/dev/null
+E_RC=$?
+assert_eq "0" "$E_RC" "transient unreadable → exit 0 (proceed after retry)"
+E_EMIT_CALLED="$([[ -f $EMIT_LOG && -s $EMIT_LOG ]] && echo yes || echo no)"
+assert_eq "no" "$E_EMIT_CALLED" "transient unreadable → NO failure emitted"
+E_CALLS="$(wc -l <"$FENCE_CALL_LOG" 2>/dev/null | tr -d ' ')"
+# ⛔ Without this the case passes even if the guard never retried and the stub simply
+# succeeded first time — the assertion has to see the failed attempt.
+assert_eq "2" "$E_CALLS" "transient unreadable → the FIRST call really did fail (2 calls)"
+
+# ─── Case F: a STALE answer is not retried ─────────────────────────────────
+#
+# Exit 10 is an ANSWER, not a failure to read. Retrying it asks a settled question again
+# and delays a real zombie's bow-out.
+echo ""
+echo "Case F: stale (exit 10) is answered, not retried → exactly one fence-check call"
+setup_stubs F 10
+CATALYST_CLUSTER_GENERATION=1 FENCE_STUB_EXIT=10 CATALYST_FENCE_CHECK_RETRIES=3 \
+	CLAUDE_PLUGIN_ROOT="${FAKE_ROOT}" EMIT_LOG="${EMIT_LOG}" FENCE_CALL_LOG="${FENCE_CALL_LOG}" \
+	bash "$GUARD" --phase pr --ticket CTL-1 2>/dev/null
+F_RC=$?
+assert_eq "10" "$F_RC" "stale → exit 10"
+F_CALLS="$(wc -l <"$FENCE_CALL_LOG" 2>/dev/null | tr -d ' ')"
+assert_eq "1" "$F_CALLS" "stale → exactly ONE fence-check call (no retry)"
+F_EMIT_LOG="$(cat "$EMIT_LOG" 2>/dev/null || echo "")"
+assert_contains "$F_EMIT_LOG" "cluster_fence_stale" "stale → still reason=cluster_fence_stale"
 
 echo ""
 echo "─────────────────────────────────────────────"
