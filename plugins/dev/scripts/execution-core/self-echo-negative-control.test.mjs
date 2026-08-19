@@ -120,7 +120,12 @@ describe("CTL-2074 — self-echo suppression of a proxied-identity DESCRIPTION U
     const orchDir = seedInFlightWorker("CTL-2074");
     try {
       const writer = createUpdateInboxWriter(orchDir, setFromConfig({ withCloud: true }));
-      writer({ ticket: "CTL-2074", description: "updated", descriptionChanged: true, actorId: CLOUD_ID });
+      writer({
+        ticket: "CTL-2074",
+        description: "updated",
+        descriptionChanged: true,
+        actorId: CLOUD_ID,
+      });
       expect(readInbox(orchDir, "CTL-2074")).toEqual([]);
     } finally {
       rmSync(orchDir, { recursive: true, force: true });
@@ -131,7 +136,12 @@ describe("CTL-2074 — self-echo suppression of a proxied-identity DESCRIPTION U
     const orchDir = seedInFlightWorker("CTL-2074");
     try {
       const writer = createUpdateInboxWriter(orchDir, setFromConfig({ withCloud: false }));
-      writer({ ticket: "CTL-2074", description: "updated", descriptionChanged: true, actorId: CLOUD_ID });
+      writer({
+        ticket: "CTL-2074",
+        description: "updated",
+        descriptionChanged: true,
+        actorId: CLOUD_ID,
+      });
       expect(readInbox(orchDir, "CTL-2074")).toHaveLength(1);
     } finally {
       rmSync(orchDir, { recursive: true, force: true });
@@ -143,7 +153,12 @@ describe("CTL-2074 — self-echo suppression of a proxied-identity DESCRIPTION U
       const orchDir = seedInFlightWorker("CTL-2074");
       try {
         const writer = createUpdateInboxWriter(orchDir, setFromConfig({ withCloud }));
-        writer({ ticket: "CTL-2074", description: "updated", descriptionChanged: true, actorId: HUMAN_ID });
+        writer({
+          ticket: "CTL-2074",
+          description: "updated",
+          descriptionChanged: true,
+          actorId: HUMAN_ID,
+        });
         expect(readInbox(orchDir, "CTL-2074")).toHaveLength(1);
       } finally {
         rmSync(orchDir, { recursive: true, force: true });
@@ -182,12 +197,18 @@ describe("CTL-2074 — handleCommentWake needs-human clear respects the proxied 
   }
 
   test("proxied-id comment does NOT clear needs-human when the cloud id is in the set", async () => {
-    const removed = await runWake({ authorId: CLOUD_ID, botSet: setFromConfig({ withCloud: true }) });
+    const removed = await runWake({
+      authorId: CLOUD_ID,
+      botSet: setFromConfig({ withCloud: true }),
+    });
     expect(removed).not.toContain("needs-human"); // self-echo guard short-circuited
   });
 
   test("⭐ NEGATIVE CONTROL: drop the cloud id and the SAME proxied comment clears needs-human (the defect)", async () => {
-    const removed = await runWake({ authorId: CLOUD_ID, botSet: setFromConfig({ withCloud: false }) });
+    const removed = await runWake({
+      authorId: CLOUD_ID,
+      botSet: setFromConfig({ withCloud: false }),
+    });
     expect(removed).toContain("needs-human"); // the daemon's own write reads as a human
   });
 
