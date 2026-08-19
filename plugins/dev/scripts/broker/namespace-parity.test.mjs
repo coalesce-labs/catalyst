@@ -86,6 +86,8 @@ import {
 } from "../execution-core/publish-preflight-event.mjs";
 // CTL-1871 COORD-29 — ASK comment gate events, imported from their owning module.
 import { NEEDS_HUMAN_ASK_EVENTS } from "../execution-core/label-guard.mjs";
+// CTL-1871 Phase 4 — stale-needs-human sweep event.
+import { STALE_SWEEP_EVENT } from "./stale-needs-human-sweep.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -145,6 +147,7 @@ const EXEC_CORE_EVENT_NAMES = [
   PUBLISH_PREFLIGHT_BLOCKED, // CAT-60 publish-preflight-event.mjs — denied push capability
   PUBLISH_PREFLIGHT_WOULD_BLOCK, // CAT-60 publish-preflight-event.mjs — shadow mode would-block
   ...NEEDS_HUMAN_ASK_EVENTS, // CTL-1871 COORD-29 label-guard.mjs — ASK comment gate failures
+  STALE_SWEEP_EVENT, // CTL-1871 Phase 4 stale-needs-human-sweep.mjs
   ...INLINE_EVENT_NAMES,
 ];
 

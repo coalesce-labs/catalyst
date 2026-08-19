@@ -36,6 +36,7 @@ import {
   upsertTicketDescriptor,
 } from "./broker-state.mjs";
 import { startTerminalNeedsHumanReconcile } from "./terminal-needs-human-reconcile.mjs";
+import { startStaleNeedsHumanSweep } from "./stale-needs-human-sweep.mjs"; // CTL-1871 Phase 4
 // CTL-532: re-export the worker-state store helpers through the barrel.
 export {
   upsertWorkerState,
@@ -640,6 +641,32 @@ function main() {
       }
     },
   });
+  // CTL-1871 Phase 4: daily sweep over active needs-human tickets lacking an ASK
+  // comment. Applies stale-needs-human + posts a defect comment. Default: shadow.
+  const staleNeedsHumanSweepId = startStaleNeedsHumanSweep({
+    getCandidates: () => getAllTicketDescriptors().filter(
+      (d) => Array.isArray(d?.labels) && d.labels.includes("needs-human")
+    ),
+    log,
+    emit: (summary) => {
+      try {
+        appendEvent({
+          event: "broker.stale-needs-human.swept",
+          orchestrator: null,
+          worker: null,
+          severity: "WARN",
+          detail: {
+            broker: true,
+            mode: summary.mode,
+            scanned: summary.scanned,
+            flagged: summary.flagged,
+            tickets: summary.items.map((i) => i.ticket),
+          },
+        });
+      } catch { /* best-effort */ }
+    },
+  });
+
   // CTL-1171: periodic liveness heartbeat so an idle broker doesn't false-report
   // "down" in the monitor (which keys off catalyst.broker event recency). Beat
   // immediately so the broker is fresh the moment it boots, then every interval.
@@ -683,6 +710,7 @@ function main() {
     clearInterval(driftCheckId); // CTL-1161: drift-check backstop timer
     if (cacheReconcileId) clearInterval(cacheReconcileId); // CTL-1277: cache reconcile
     clearInterval(terminalNeedsHumanReconcileId); // CTL-1242: stop the needs-human reconcile
+    clearInterval(staleNeedsHumanSweepId); // CTL-1871: stop the stale-needs-human sweep
     // CTL-529: the debounce timer handles are router module-internal.
     clearDebounceTimers();
     // CTL-351: emit a parallel shutdown event so subscribers can pair

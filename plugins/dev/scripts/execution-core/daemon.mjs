@@ -146,7 +146,7 @@ import {
   clearDispositionEmit as defaultClearDispositionEmit, // Codex #2970 round 3: reset the in-process worker.transition dedup after an out-of-band clear
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
-import { labelMarkerBase, clearStalledLabel } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth); CTL-1552: clear needs-human LABEL + once-marker together (leaf module → no cycle)
+import { labelMarkerBase, clearStalledLabel } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth); CTL-1552: clear needs-human LABEL + once-marker together (leaf module → no cycle); CTL-1871: labelMarkerBase used for stale-needs-human sweep in clearNeedsHumanMarkers
 import { defaultForgetIntent } from "./recovery-reasoning.mjs"; // CTL-1567: re-arm recovery when a human responds
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator clear
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
@@ -571,12 +571,29 @@ export function defaultIsManagedTicket(ticket, orchDir) {
 // A missing marker is success, not an error: most parked tickets have no worker
 // dir at all. A REAL failure (permissions, EIO) is surfaced to the caller rather
 // than swallowed, so a marker we could not delete is never reported as reconciled.
+//
+// CTL-1871: also clears stale-needs-human markers and the ASK comment idempotency
+// marker (.needs-human-ask.applied) so the next escalation can re-post an ASK if
+// the human responds and the ticket later re-enters needs-human.  These are
+// best-effort (ENOENT benign; other errors surfaced in `failed[]`).
 export function clearNeedsHumanMarkers(orchDir, ticket, { rm = unlinkSync } = {}) {
-  const base = labelMarkerBase(orchDir, ticket, "needs-human");
   const removed = [];
   const failed = [];
-  for (const suffix of [".applied", ".skipped"]) {
-    const p = `${base}${suffix}`;
+  // Guard: labelMarkerBase uses path.join which throws on non-string orchDir/ticket.
+  if (!orchDir || !ticket) return { removed, failed };
+  const base = labelMarkerBase(orchDir, ticket, "needs-human");
+  const staleBase = labelMarkerBase(orchDir, ticket, "stale-needs-human");
+  // Build the full list of markers to clear: needs-human + stale-needs-human both
+  // have .applied/.skipped variants; plus the one ASK idempotency marker.
+  const askMarker = join(orchDir, "workers", ticket, ".needs-human-ask.applied");
+  const paths = [
+    `${base}.applied`,
+    `${base}.skipped`,
+    `${staleBase}.applied`,
+    `${staleBase}.skipped`,
+    askMarker,
+  ];
+  for (const p of paths) {
     try {
       rm(p);
       removed.push(p);

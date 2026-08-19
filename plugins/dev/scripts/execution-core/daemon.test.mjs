@@ -25,6 +25,7 @@ import {
   parseEventTailChunk,
   resolveBootConcurrency,
   handleCommentWake,
+  clearNeedsHumanMarkers,
   __resetEventTailCursorForTest,
   __getEventTailLeftoverForTest,
   __getEventPollTimerForTest,
@@ -3816,5 +3817,73 @@ describe("CAT-40 — GitHub quota timer start ordering", () => {
       },
     });
     expect(order).toEqual(["quota-timer", "scheduler"]);
+  });
+});
+
+// CTL-1871: clearNeedsHumanMarkers now also clears stale-needs-human markers
+// and the ASK comment idempotency marker (.needs-human-ask.applied).
+describe("clearNeedsHumanMarkers (CTL-1871 extension)", () => {
+  const tmpDir = () => mkdtempSync(join(tmpdir(), "ctl1871-clearnh-"));
+
+  test("clears needs-human markers AND stale-needs-human markers AND the ASK marker", () => {
+    const orch = tmpDir();
+    const wdir = join(orch, "workers", "CTL-1871-A");
+    mkdirSync(wdir, { recursive: true });
+    const markers = [
+      join(wdir, ".linear-label-needs-human.applied"),
+      join(wdir, ".linear-label-needs-human.skipped"),
+      join(wdir, ".linear-label-stale-needs-human.applied"),
+      join(wdir, ".linear-label-stale-needs-human.skipped"),
+      join(wdir, ".needs-human-ask.applied"),
+    ];
+    for (const m of markers) writeFileSync(m, "");
+    for (const m of markers) expect(existsSync(m)).toBe(true);
+
+    const rmCalls = [];
+    clearNeedsHumanMarkers(orch, "CTL-1871-A", {
+      rm: (p) => { rmCalls.push(p); try { rmSync(p); } catch { /* ENOENT ok */ } },
+    });
+
+    // All 5 paths were attempted for removal
+    expect(rmCalls.length).toBe(5);
+  });
+
+  test("the injected rm is called for all five marker paths (including ASK)", () => {
+    const orch = tmpDir();
+    mkdirSync(join(orch, "workers", "CTL-1871-B"), { recursive: true });
+    const called = [];
+    clearNeedsHumanMarkers(orch, "CTL-1871-B", { rm: (p) => { called.push(p); throw Object.assign(new Error("enoent"), { code: "ENOENT" }); } });
+    // Exactly 5 paths: nh.applied, nh.skipped, stale.applied, stale.skipped, ask
+    expect(called.length).toBe(5);
+    expect(called.some((p) => p.includes("stale-needs-human"))).toBe(true);
+    expect(called.some((p) => p.includes(".needs-human-ask.applied"))).toBe(true);
+  });
+
+  test("non-ENOENT removal failure surfaces in failed[]", () => {
+    const orch = tmpDir();
+    mkdirSync(join(orch, "workers", "CTL-1871-C"), { recursive: true });
+    const { failed } = clearNeedsHumanMarkers(orch, "CTL-1871-C", {
+      rm: (p) => {
+        if (p.includes("stale-needs-human")) {
+          throw Object.assign(new Error("permissions"), { code: "EPERM" });
+        }
+        throw Object.assign(new Error("enoent"), { code: "ENOENT" });
+      },
+    });
+    expect(failed.length).toBe(2); // two stale-needs-human variants
+    expect(failed.every((f) => f.code === "EPERM")).toBe(true);
+    expect(failed.some((f) => f.path.includes("stale-needs-human"))).toBe(true);
+  });
+
+  test("missing orchDir: early-returns with empty removed/failed rather than calling path.join on null", () => {
+    // labelMarkerBase calls path.join which throws a TypeError on non-string args.
+    // The null-orchDir guard must fire BEFORE those calls.
+    const rmCalls = [];
+    const { removed, failed } = clearNeedsHumanMarkers(null, "CTL-1871-D", {
+      rm: (p) => { rmCalls.push(p); },
+    });
+    expect(rmCalls).toEqual([]);   // rm was never called
+    expect(removed).toEqual([]);
+    expect(failed).toEqual([]);
   });
 });
