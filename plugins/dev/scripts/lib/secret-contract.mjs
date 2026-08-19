@@ -137,6 +137,18 @@ export const SECRET_REGISTRY = Object.freeze(
       bootstrapFor: null,
     },
     {
+      // CTL-2042: the SOPS secret overlay sourced at the end of the committed per-host
+      // execution-core.env posture file. Holds only CATALYST_WORKFLOW_GITHUB_TOKEN.
+      // Separate from execution-core.env so the non-secret posture can be committed
+      // plain (reviewable in git diff) while the credential stays encrypted.
+      id: "execution-core-secrets.env",
+      envNames: [],
+      delivery: "env-file",
+      configJsonPath: null,
+      rotation: { class: "boot-only" },
+      bootstrapFor: null,
+    },
+    {
       id: "linear-api-token",
       envNames: ["LINEAR_API_TOKEN", "LINEAR_API_KEY"],
       delivery: "env-alias",

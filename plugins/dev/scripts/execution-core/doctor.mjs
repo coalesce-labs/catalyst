@@ -35,6 +35,7 @@ import { checkInstallCompleteness } from "./install-completeness.mjs";
 // CTL-1936 AC5: the standing answer to "is this host write-exhausted".
 import { checkLinearWriteBudget } from "./write-budget-health.mjs";
 import { checkAgentToolsWritePath } from "./agent-tools-write-path-health.mjs";
+import { checkExecutionCoreEnvDrift } from "./execution-core-env-drift-health.mjs";
 import { checkIndexServingRoot } from "./index-serving-root-health.mjs";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -187,6 +188,7 @@ export { checkInstallCompleteness };
 
 export { checkLinearWriteBudget };
 export { checkAgentToolsWritePath };
+export { checkExecutionCoreEnvDrift };
 export { checkIndexServingRoot };
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
@@ -6061,6 +6063,7 @@ export function checksForClass(nc, opts = {}) {
   // copies reporting clean: measured on this laptop (node class `developer`), whose
   // ~/catalyst/comms/tools/linear-reply.mjs is the drifted file this row exists to name.
   const agentToolsWritePathCheck = () => checkAgentToolsWritePath();
+  const executionCoreEnvDriftCheck = () => checkExecutionCoreEnvDrift(); // CTL-2042: on-disk-vs-repo posture drift
 
   // Unrecognized explicit class → a single hard FAIL; grade no profile (CTL-1355).
   if (!nc.recognized) {
@@ -6127,6 +6130,7 @@ export function checksForClass(nc, opts = {}) {
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
+      executionCoreEnvDriftCheck, // CTL-2042: on-disk-vs-repo posture drift
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
       developerBotCredentials,
@@ -6173,6 +6177,7 @@ export function checksForClass(nc, opts = {}) {
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
+      executionCoreEnvDriftCheck, // CTL-2042: on-disk-vs-repo posture drift
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
@@ -6202,6 +6207,7 @@ export function checksForClass(nc, opts = {}) {
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
     agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
+    executionCoreEnvDriftCheck, // CTL-2042: on-disk-vs-repo posture drift
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),

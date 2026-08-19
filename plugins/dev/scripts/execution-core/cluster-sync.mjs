@@ -484,6 +484,138 @@ export function syncProfileFiles(opts = {}) {
   return result;
 }
 
+// ─── CTL-2042: per-host plain posture file materialization ───────────────────
+
+// syncHostEnvFiles — materialize per-host plain posture files from the cluster
+// repo's `hosts/<hostName>/` directory into ~/.config/catalyst/. This covers the
+// non-secret part of execution-core.env that cannot live in the SOPS bundle
+// because it must be reviewable as plain text in `git diff` (AC3).
+//
+// The function reads a fixed manifest of host-env entries:
+//   { repoSubpath: "hosts/<host>/execution-core.env", dest: "execution-core.env" }
+//
+// For each entry, it selects the file matching this host (via `hostName`), reads
+// its content, and writes it to `~/.config/catalyst/<dest>` at mode 0o600. It
+// tracks `written[]` (all written) and `changed[]` (content-changed subset) on the
+// DEST name so the caller can merge changed[] into the restart-required emitter
+// filtered through `isEnvBackedSecretFile()`.
+//
+// Fail-closed on hostName errors (never writes a wrong host's posture); fail-open
+// on write errors (records in failed[], does not throw). An absent hosts/ directory
+// or no file for this host → skipped: true.
+//
+// Result shape mirrors syncSecretFiles():
+//   { written[], changed[], failed[], skipped, reason }
+export function syncHostEnvFiles(opts = {}) {
+  const {
+    clusterDir = getClusterRepoDir(),
+    configDir = defaultConfigDir(),
+    hostName: hostNameOpt,
+    // CTL-2042 (Codex P2): the daemon launcher sources the env file from the
+    // CATALYST_EXECUTION_CORE_ENV override when set, NOT the Layer-2-adjacent default.
+    // Materialize to that exact path so the committed posture actually reaches the
+    // daemon; injectable so tests stay hermetic.
+    env = process.env,
+    // CTL-1612 read-back seam: detect rewrites vs real changes.
+    readFile = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    writeFile = defaultWriteFile,
+    logger = log,
+  } = opts;
+
+  const result = { written: [], changed: [], failed: [], skipped: false, reason: null };
+
+  // Resolve this host's name. A throwing or missing hostName is a definitive skip —
+  // never fall through to write a bystander host's posture.
+  let host;
+  try {
+    host = typeof hostNameOpt === "function" ? hostNameOpt() : (hostNameOpt ?? getHostName());
+  } catch (err) {
+    logger?.warn?.(`[cluster-sync] syncHostEnvFiles: hostname probe failed (${err?.message ?? err}); skipping`);
+    result.skipped = true;
+    result.reason = `hostname-probe-failed:${err?.message ?? err}`;
+    return result;
+  }
+  if (typeof host !== "string" || host.length === 0) {
+    result.skipped = true;
+    result.reason = "hostname-empty";
+    return result;
+  }
+
+  // Fixed manifest: the posture entries managed by this function.
+  const MANIFEST = [{ repoFile: resolve(clusterDir, "hosts", host, "execution-core.env"), dest: "execution-core.env" }];
+
+  // Check that at least the hosts/<host> directory exists; skip if not.
+  const hostDir = resolve(clusterDir, "hosts", host);
+  if (!existsSync(hostDir)) {
+    result.skipped = true;
+    result.reason = `no-host-dir:hosts/${host}`;
+    return result;
+  }
+
+  try {
+    mkdirSync(configDir, { recursive: true });
+  } catch {
+    /* configDir usually exists */
+  }
+
+  for (const { repoFile, dest } of MANIFEST) {
+    if (!existsSync(repoFile)) {
+      // A specific entry absent → skip just that entry (not the whole call).
+      logger?.warn?.(`[cluster-sync] syncHostEnvFiles: no repo file for ${host} at ${repoFile}; skipping entry`);
+      result.skipped = true;
+      result.reason = `no-repo-file:${dest}`;
+      continue;
+    }
+
+    let content;
+    try {
+      content = readFileSync(repoFile, "utf8");
+    } catch (err) {
+      logger?.warn?.(`[cluster-sync] syncHostEnvFiles: failed to read repo file ${repoFile} (${err?.message ?? err})`);
+      result.failed.push(dest);
+      continue;
+    }
+
+    // Resolve the write target the SAME way the launcher (catalyst-execution-core)
+    // resolves it: the CATALYST_EXECUTION_CORE_ENV override, else <configDir>/<dest>.
+    // The tracked `dest` name stays the logical basename so isEnvBackedSecretFile()
+    // (restart-required filter) and the manifest are unaffected by an override path.
+    const overrideEnvPath =
+      dest === "execution-core.env" &&
+      typeof env?.CATALYST_EXECUTION_CORE_ENV === "string" &&
+      env.CATALYST_EXECUTION_CORE_ENV.length > 0
+        ? env.CATALYST_EXECUTION_CORE_ENV
+        : null;
+    const destPath = overrideEnvPath ? resolve(overrideEnvPath) : resolve(configDir, dest);
+    try {
+      // The override may point outside configDir (which we already mkdir'd above);
+      // ensure the target's parent exists so the first write on a fresh host succeeds.
+      if (overrideEnvPath) {
+        try {
+          mkdirSync(dirname(destPath), { recursive: true });
+        } catch {
+          /* parent usually exists */
+        }
+      }
+      const prior = readFile(destPath);
+      writeFile(destPath, content);
+      result.written.push(dest);
+      if (prior !== content) result.changed.push(dest);
+    } catch (err) {
+      logger?.warn?.(`[cluster-sync] syncHostEnvFiles: write ${dest} failed (${err?.message ?? err})`);
+      result.failed.push(dest);
+    }
+  }
+
+  return result;
+}
+
 // ─── CTL-1393: durable change-detection + periodic refresh ───────────────────
 
 // Default ISO clock for the marker's lastDecryptedAt. Injectable as `now` so tests
@@ -514,6 +646,30 @@ function gitRevParseHead({ clusterDir, gitCapture }) {
 // a missed rotation is the bug we're fixing. Never throws.
 function gitSecretsChangedBetween({ clusterDir, fromSha, toSha, gitCapture }) {
   const r = gitCapture(["-C", clusterDir, "diff", "--quiet", fromSha, toSha, "--", "secrets/"]);
+  if (r && r.status === 0) return false;
+  return true;
+}
+
+// gitHostEnvChangedBetween — CTL-2042. Did this host's posture dir (`hosts/<host>/`)
+// differ between two shas? Same contract as gitSecretsChangedBetween (exit 0 =
+// identical, any other exit = assume CHANGED; never throws). The per-host posture
+// lives OUTSIDE `secrets/`, so a commit that touches only
+// `hosts/<host>/execution-core.env` leaves gitSecretsChangedBetween returning false;
+// without this predicate refreshClusterSecretsIfChanged takes the secrets-unchanged
+// fast path, advances the marker, and permanently skips the posture materialization
+// (Codex P1). An empty/absent hostName can never scope a diff → treat as unchanged.
+function gitHostEnvChangedBetween({ clusterDir, hostName, fromSha, toSha, gitCapture }) {
+  if (typeof hostName !== "string" || hostName.length === 0) return false;
+  const r = gitCapture([
+    "-C",
+    clusterDir,
+    "diff",
+    "--quiet",
+    fromSha,
+    toSha,
+    "--",
+    `hosts/${hostName}/`,
+  ]);
   if (r && r.status === 0) return false;
   return true;
 }
@@ -713,11 +869,12 @@ export const ENV_BACKED_SECRET_FILES = ENV_BACKED_SECRET_EXACT;
 //   config-refused   — syncClusterSecrets refused (sync.ok === false), empty skipped
 //   secrets-skipped  — a JSON secret was skipped while another succeeded (partial)
 //   bare-write-failed — a bare file decrypted but its write failed (partial)
-function assessMaterialization({ sync, files, profiles }) {
+function assessMaterialization({ sync, files, profiles, hostEnvFiles }) {
   const synced = Array.isArray(sync?.synced) ? sync.synced : [];
   const skipped = Array.isArray(sync?.skipped) ? sync.skipped : [];
   const bareFailed = Array.isArray(files?.failed) ? files.failed : [];
   const profileFailed = Array.isArray(profiles?.failed) ? profiles.failed : [];
+  const hostEnvFailed = Array.isArray(hostEnvFiles?.failed) ? hostEnvFiles.failed : [];
 
   // 1. Bare-bundle wholesale failure — the whole node-secret-files.sops.json bundle
   //    failed to decrypt. Checked BEFORE schemaSkipped so a too-new JSON schema can
@@ -738,6 +895,11 @@ function assessMaterialization({ sync, files, profiles }) {
   }
   if (profileFailed.length > 0) {
     return { fullSuccess: false, reason: "profile-write-failed" };
+  }
+  // 2c. CTL-2042: per-host plain posture file write failure. Checked pre-schemaSkipped
+  //     for the same masking rationale as the bare-file and profile checks above.
+  if (hostEnvFailed.length > 0) {
+    return { fullSuccess: false, reason: "host-env-write-failed" };
   }
   // 3. Schema too-new is fail-CLOSED by design — treat as success for the marker.
   //    Reaching here means the bare-file part is already confirmed OK (1–2 above), so
@@ -814,8 +976,61 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
     lastSha &&
     !gitSecretsChangedBetween({ clusterDir, fromSha: lastSha, toSha: head, gitCapture })
   ) {
-    // HEAD advanced but secrets/ did not — advance the marker so we don't re-diff the
-    // same range every tick, but DON'T spend a sops spawn.
+    // secrets/ did not change across lastSha..HEAD — no sops spawn is needed. But the
+    // per-host posture (`hosts/<host>/execution-core.env`) lives OUTSIDE secrets/ and
+    // MIGHT have moved in this same range; a posture-only commit would otherwise be
+    // skipped forever once the marker advances past it (Codex P1). Materialize it
+    // FIRST, then advance the marker.
+    if (
+      gitHostEnvChangedBetween({ clusterDir, hostName: node, fromSha: lastSha, toSha: head, gitCapture })
+    ) {
+      const _syncHostEnvFilesImpl =
+        typeof opts.syncHostEnvFiles === "function" ? opts.syncHostEnvFiles : syncHostEnvFiles;
+      // Pin the materialization to the SAME host identity the diff was scoped to, so the
+      // change-detection and the write can never disagree on which host's posture applies.
+      const hostEnvFiles = _syncHostEnvFilesImpl({ clusterDir, configDir, hostName: node, logger });
+      status.hostEnvFiles = hostEnvFiles;
+
+      // A write shortfall must NOT advance the marker (same discipline as the full
+      // materialization path below) — leave it behind so the next tick retries.
+      if (Array.isArray(hostEnvFiles?.failed) && hostEnvFiles.failed.length > 0) {
+        status.ok = false;
+        status.reason = "host-env-write-failed";
+        emit({ name: "refresh-failed", node, now, payload: { reason: "host-env-write-failed", toSha: head } });
+        return status;
+      }
+
+      // Emit restart-required for any boot-captured env file whose CONTENT changed
+      // (same filter + envelope as the full path).
+      const rotated = (Array.isArray(hostEnvFiles?.changed) ? hostEnvFiles.changed : []).filter((f) =>
+        isEnvBackedSecretFile(f),
+      );
+      status.restartRequired = rotated;
+      for (const file of rotated) {
+        logger?.warn?.(
+          `[cluster-sync] boot-captured secret rotated (${file}) — restart the daemon(s) that ` +
+            "read it to apply (its value is captured at process start, not per use)",
+        );
+        emit({ name: "restart-required", node, now, payload: { file, fromSha: lastSha, toSha: head } });
+      }
+
+      writeState(
+        statePath,
+        {
+          lastDecryptedSha: head,
+          lastDecryptedAt: now(),
+          written: Array.isArray(state?.written) ? state.written : [],
+          synced: Array.isArray(state?.synced) ? state.synced : [],
+        },
+        logger,
+      );
+      status.changed = Array.isArray(hostEnvFiles?.changed) && hostEnvFiles.changed.length > 0;
+      status.reason = "host-env-refreshed";
+      return status;
+    }
+
+    // Neither secrets/ nor this host's posture changed — pure fast path. Advance the
+    // marker so we don't re-diff the same range every tick, no sops spawn.
     writeState(
       statePath,
       {
@@ -854,9 +1069,13 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   // CTL-1595: the direnv-profile bundle rides the same refresh; profilesDir
   // intentionally NOT overridable from here (tests inject via clusterSync/opts).
   const profiles = syncProfileFiles({ clusterDir, profilesDir: opts.profilesDir, ageKeyFile, decrypt: sopsDecrypt, logger });
+  // CTL-2042: per-host plain posture file materialization (non-SOPS, readable in git diff).
+  const _syncHostEnvFilesImpl = typeof opts.syncHostEnvFiles === "function" ? opts.syncHostEnvFiles : syncHostEnvFiles;
+  const hostEnvFiles = _syncHostEnvFilesImpl({ clusterDir, configDir, logger });
   status.synced = Array.isArray(sync?.synced) ? sync.synced : [];
   status.written = Array.isArray(files?.written) ? files.written : [];
   status.profiles = Array.isArray(profiles?.written) ? profiles.written : [];
+  status.hostEnvFiles = hostEnvFiles;
 
   // 7. Advance the marker ONLY on FULL materialization success (Codex-A). A PARTIAL
   // shortfall (a single JSON secret skipped while another succeeded, the config sync
@@ -882,7 +1101,12 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   // old sha, so the next attempt re-decrypts and rewrites the same bytes, `changed` comes
   // back EMPTY, and once the unrelated failure clears the marker advances having never
   // asked for the restart — leaving the daemon on the old credential forever.
-  const rotated = Array.isArray(files?.changed) ? files.changed : status.written;
+  // Merge secret-file changes and host-env-file changes into the restart-required set.
+  // Both families can contain boot-captured env files; filter through isEnvBackedSecretFile.
+  const rotated = [
+    ...(Array.isArray(files?.changed) ? files.changed : status.written),
+    ...(Array.isArray(hostEnvFiles?.changed) ? hostEnvFiles.changed : []),
+  ];
   const restartRequired = rotated.filter((f) => isEnvBackedSecretFile(f));
   status.restartRequired = restartRequired;
   for (const file of restartRequired) {
@@ -893,7 +1117,7 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
     emit({ name: "restart-required", node, now, payload: { file, fromSha: lastSha, toSha: head } });
   }
 
-  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files, profiles });
+  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files, profiles, hostEnvFiles });
   if (!fullSuccess) {
     status.ok = false;
     status.reason = shortfall;
@@ -960,6 +1184,7 @@ export function clusterSync(opts = {}) {
   const sync = syncClusterSecrets(opts);
   const files = syncSecretFiles(opts);
   const profiles = syncProfileFiles(opts); // CTL-1595: direnv profile bundle
+  const hostEnvFilesResult = syncHostEnvFiles(opts); // CTL-2042: per-host plain posture files
 
   // Seed the marker ONLY when boot materialization FULLY succeeded — the SAME
   // hardened predicate the periodic refresh uses (Codex-A). A WHOLESALE failure (sops
@@ -970,7 +1195,7 @@ export function clusterSync(opts = {}) {
   // stays fail-CLOSED (intentional, not a failure) and still seeds. An empty secrets
   // repo (nothing to decrypt) is full success and still seeds.
   const synced = Array.isArray(sync?.synced) ? sync.synced : [];
-  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files, profiles });
+  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files, profiles, hostEnvFiles: hostEnvFilesResult });
 
   try {
     const head = gitRevParseHead({ clusterDir, gitCapture });
@@ -1016,7 +1241,7 @@ export function clusterSync(opts = {}) {
   } catch (err) {
     logger?.warn?.(`[cluster-sync] boot marker seed failed (${err?.message ?? err})`);
   }
-  return { pull, sync, files, profiles };
+  return { pull, sync, files, profiles, hostEnvFiles: hostEnvFilesResult };
 }
 
 // Exposed for doctor + tests.
