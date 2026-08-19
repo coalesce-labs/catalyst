@@ -75,6 +75,18 @@ EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
 # recovered on the very next call.
 FENCE_RETRIES="${CATALYST_FENCE_CHECK_RETRIES:-2}"
 case "$FENCE_RETRIES" in ''|*[!0-9]*) FENCE_RETRIES=2 ;; esac
+# ⛔ BASE 10, EXPLICITLY — AND THIS IS AN UNBOUNDED-LOOP BUG, NOT STYLE (Codex on #3685).
+# The all-digits check above ACCEPTS a zero-padded value like `08`, and bash reads a leading
+# zero as octal: `[[ $attempt -gt 08 ]]` errors with "value too great for base" and the
+# construct evaluates FALSE. Measured — with FENCE_RETRIES=08 the break fires at NO attempt
+# count, not even 99: the loop runs forever with `sleep $attempt` growing without limit, on
+# a worker that is blocked waiting for it. This repo's own rule is that the loop must be
+# self-limiting rather than relying on a condition that can fail open.
+# `10#` forces base 10; the cap bounds the worst case an operator can ask for
+# (10 retries ⇒ 1+2+…+10 = 55s of sleep) so a fat-fingered value cannot wedge a phase.
+FENCE_RETRIES=$((10#$FENCE_RETRIES))
+[[ $FENCE_RETRIES -lt 0 ]] && FENCE_RETRIES=0
+[[ $FENCE_RETRIES -gt 10 ]] && FENCE_RETRIES=10
 
 fence_rc=0
 fence_out=""

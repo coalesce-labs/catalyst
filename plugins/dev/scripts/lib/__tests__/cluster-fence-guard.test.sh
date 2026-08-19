@@ -187,6 +187,58 @@ assert_eq "1" "$F_CALLS" "stale → exactly ONE fence-check call (no retry)"
 F_EMIT_LOG="$(cat "$EMIT_LOG" 2>/dev/null || echo "")"
 assert_contains "$F_EMIT_LOG" "cluster_fence_stale" "stale → still reason=cluster_fence_stale"
 
+# ─── Case G: a zero-padded retry count must not create an UNBOUNDED loop ───
+#
+# ⛔ Codex on #3685. The all-digits validation accepts `08`, and bash reads a leading zero
+# as OCTAL: `[[ $attempt -gt 08 ]]` errors with "value too great for base" and evaluates
+# FALSE, so the break fires at NO attempt count — measured, not even at 99. The loop then
+# runs forever with `sleep $attempt` growing without limit, on a blocked worker.
+#
+# The assertion is TERMINATION, and it is made by a wall-clock bound: with 8 retries the
+# guard sleeps 1+2+…+8 = 36s, so a correct run finishes well inside the window while the
+# defective one never returns at all.
+echo ""
+echo "Case G: CATALYST_FENCE_CHECK_RETRIES=08 (octal trap) → still terminates, still bounded"
+setup_stubs G 1
+# ⛔ `sleep` is stubbed and the guard runs under a WATCHDOG, for two reasons.
+# (1) Speed: the real backoff for 8 retries is 1+2+…+8 = 36s of pure waiting, in a suite
+#     that otherwise finishes in under a second.
+# (2) Correctness of the FAILURE MODE: with the defect present this loop never terminates,
+#     so a plain foreground call would HANG the suite rather than fail it — and a test that
+#     hangs reports nothing at all. The watchdog kills it and the exit-code assertion then
+#     fails loudly with a number. (No `timeout`/`gtimeout`: stock macOS ships neither.)
+mkdir -p "${FAKE_ROOT}/bin"
+printf '#!/bin/sh\nexit 0\n' >"${FAKE_ROOT}/bin/sleep"
+chmod +x "${FAKE_ROOT}/bin/sleep"
+(
+	PATH="${FAKE_ROOT}/bin:$PATH" \
+		CATALYST_CLUSTER_GENERATION=1 FENCE_STUB_EXIT=1 CATALYST_FENCE_CHECK_RETRIES=08 \
+		CLAUDE_PLUGIN_ROOT="${FAKE_ROOT}" EMIT_LOG="${EMIT_LOG}" FENCE_CALL_LOG="${FENCE_CALL_LOG}" \
+		bash "$GUARD" --phase pr --ticket CTL-1 2>/dev/null
+) &
+G_PID=$!
+(sleep 20; kill "$G_PID" 2>/dev/null) &
+G_WD=$!
+wait "$G_PID"
+G_RC=$?
+kill "$G_WD" 2>/dev/null
+assert_eq "10" "$G_RC" "zero-padded retries → the guard TERMINATES on its own (exit 10, not killed)"
+G_CALLS="$(wc -l <"$FENCE_CALL_LOG" 2>/dev/null | tr -d ' ')"
+# 08 must be read as 8 — not as 0, and not as an error: 1 initial call + 8 retries.
+assert_eq "9" "$G_CALLS" "zero-padded retries → read as base 10 (9 fence-check calls)"
+
+# ─── Case H: an absurd retry count is CAPPED, not honoured ─────────────────
+echo ""
+echo "Case H: CATALYST_FENCE_CHECK_RETRIES=999 → capped at 10"
+setup_stubs H 1
+CATALYST_CLUSTER_GENERATION=1 FENCE_STUB_EXIT=10 CATALYST_FENCE_CHECK_RETRIES=999 \
+	CLAUDE_PLUGIN_ROOT="${FAKE_ROOT}" EMIT_LOG="${EMIT_LOG}" FENCE_CALL_LOG="${FENCE_CALL_LOG}" \
+	bash "$GUARD" --phase pr --ticket CTL-1 2>/dev/null
+H_RC=$?
+assert_eq "10" "$H_RC" "absurd retries + stale answer → exit 10 immediately"
+H_CALLS="$(wc -l <"$FENCE_CALL_LOG" 2>/dev/null | tr -d ' ')"
+assert_eq "1" "$H_CALLS" "absurd retries → a stale ANSWER is still not retried"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "cluster-fence-guard: ${PASSES} passed, ${FAILURES} failed"
