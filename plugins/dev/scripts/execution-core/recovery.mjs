@@ -174,6 +174,7 @@ const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", 
 // resolvePhaseSessionId — extracted to session-resolve.mjs (CTL-729) so
 // transcript-silence.mjs can import it without pulling in recovery.mjs's
 // heavy dependency graph. Imported for local use + re-exported for callers.
+import { RETRACTABLE_STATUS } from "./artifact-contradiction.mjs"; // CTL-2050
 import { resolvePhaseSessionId } from "./session-resolve.mjs";
 export { resolvePhaseSessionId };
 import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
@@ -2349,6 +2350,125 @@ export function defaultExpireYield(
   } catch {
     // Best-effort: the next tick retries. Clear the temp file so a failed rename
     // cannot leave debris in workers/ for the dir sweeps to trip over.
+    try {
+      rm(tmp, { force: true });
+    } catch {
+      /* nothing further to do */
+    }
+    return false;
+  }
+  return true;
+}
+
+// ─── CTL-2050: retract a failure an ARTIFACT contradicts ─────────────────────
+//
+// The writer half of artifact-contradiction.mjs. The classifier decides; this
+// rewrites the signal, and it is the ONLY thing in the fleet that turns a
+// terminal `failed` back into `done`.
+//
+// It is a near-clone of defaultExpireYield above ON PURPOSE — same identity
+// resolution, same re-read-before-write, same atomic tmp+rename, same
+// best-effort event. Sharing one generic "rewrite a signal" helper between them
+// would need a callback per difference and would hide the one thing a reader of
+// EITHER function must see: exactly which precondition is re-asserted against
+// the bytes on disk before it overwrites them.
+export function defaultRetractContradictedFailure(
+  orchDir,
+  signal,
+  verdict,
+  {
+    readFile = readFileSync,
+    writeFile = writeFileSync,
+    rename = renameSync,
+    rm = rmSync,
+    appendEventLog = defaultAppendEventLog,
+    now = () => new Date(),
+  } = {}
+) {
+  // Refuse rather than build a nonsense path — `workers//phase-.json` cannot
+  // exist, so a missing identity would silently no-op forever (CTL-1854 round 25
+  // shipped exactly that bug on the yield path). Prefer a VALID identity, not a
+  // merely PRESENT one: `??` keeps a numeric or object ticket, which then fails
+  // the type check and turns the refusal permanent.
+  const _valid = (v) => (typeof v === "string" && v !== "" ? v : undefined);
+  const _ticket = _valid(signal?.ticket) ?? _valid(signal?.derivedTicket);
+  const _phase = _valid(signal?.phase) ?? _valid(signal?.derivedPhase);
+  if (!_ticket || !_phase) return false;
+  if (verdict?.retract !== true) return false; // belt: only the classifier may authorize
+
+  const p = join(orchDir, "workers", _ticket, `phase-${_phase}.json`);
+  let cur;
+  try {
+    cur = JSON.parse(readFile(p, "utf8"));
+  } catch {
+    return false; // nothing on disk to retract
+  }
+  // ⛔ RE-ASSERT BOTH HALVES OF THE PRECONDITION AGAINST THE CANONICAL BYTES.
+  // The tick's signal view was read earlier and by a different reader. If
+  // anything has since rewritten this file — a redispatched worker declaring a
+  // real completion, an operator, another host — the verdict describes a record
+  // that no longer exists and applying it would destroy a real result.
+  //
+  // ⚠️ This NARROWS the window; it does not close it. The read above and the
+  // write below are separate syscalls against a file other PROCESSES write, so a
+  // record landing between them is still overwritten. Same bound, same tracking
+  // ticket, as the yield expiry (CTL-1860). Said plainly because a comment
+  // claiming a guarantee the code does not provide is how the next reader stops
+  // looking.
+  if (String(cur.status) !== RETRACTABLE_STATUS) return false;
+  if (String(cur.failureReason) !== String(verdict.failureReason)) return false;
+
+  const ts = now().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const tmp = `${p}.tmp.${process.pid}`;
+  try {
+    writeFile(
+      tmp,
+      JSON.stringify({
+        ...cur,
+        status: "done",
+        // The audit trail is the point. `retractedFailureReason` preserves the
+        // string the guard wrote, so "why is this done?" is answerable from the
+        // signal alone and the original failure is never erased — only demoted.
+        retractedFailureReason: verdict.failureReason,
+        retractedAt: ts,
+        retractedBy: "artifact-contradiction",
+        failureReason: null,
+        // `outcome` carries "abandoned" on some terminal writers; leaving it on a
+        // `done` record would read as a completed-but-abandoned phase.
+        outcome: undefined,
+        // ⭐ CTL-1789: FABRICATED, never declared. The agent never ran its own
+        // emit wrapper — the guard bowed out before it could — so this terminal
+        // is infrastructure asserting on the agent's behalf and must say so.
+        assertedBy: ASSERTED_BY.RECOVERY_ARTIFACT_CONTRADICTION,
+        completedAt: cur.completedAt ?? ts,
+        updatedAt: ts,
+      })
+    );
+    rename(tmp, p);
+    // ⚠️ The event name is deliberately NOT `phase.<phase>.complete.<ticket>`.
+    // That name is a ROUTING name: PHASE_EVENT_PATTERN matches it, so re-emitting
+    // it would fire that phase's `wait-for` subscribers and the broker's
+    // phase-lifecycle router on a terminal the agent never declared. Advancement
+    // is a signal-file tick-scan, not an event fold, so the rename above is
+    // already sufficient to release the ticket; this is pure audit.
+    // `failure-retracted` is in the `phase.<known-phase>.*` namespace but not in
+    // the terminal-status set, so tryPhaseLifecycleRoute returns [] for it — the
+    // same "audit, zero wake side effect" shape as `phase.advance.held`.
+    try {
+      appendEventLog({
+        // The RESOLVED identity, not the record's raw fields: older signals omit
+        // both, and `phase.null.failure-retracted.null` looks like a real event
+        // for a phase that does not exist, which is worse than silence.
+        phase: _phase,
+        ticket: _ticket,
+        status: "failure-retracted",
+        reason: `artifact contradicts ${verdict.failureReason}`,
+        orchestrator: cur?.orchestrator,
+      });
+    } catch {
+      /* the signal is authoritative; a failed emit must not fail the retraction */
+    }
+  } catch {
     try {
       rm(tmp, { force: true });
     } catch {
