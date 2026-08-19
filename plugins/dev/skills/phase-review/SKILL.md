@@ -127,9 +127,11 @@ multi-agent cloud review, the user runs it interactively before merge.
 
 The `findings` array in `verify.json` (from [[phase-verify]]) is the upstream
 source of truth. Treat each verify finding as a candidate review item. This
-phase is round 1 of the fleet's PR review convergence policy (see the
-target repo's `docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md` —
-P1 fixed every round, P2-and-lower ticketed rather than chased indefinitely):
+phase runs once (it is not part of the iterative round loop the fleet's PR
+review convergence policy governs — see [[review-comments]]'s Step 1.5 for
+that policy's current round schedule, canonical as of
+`docs/DECISIONS/2026-08-19-review-convergence-policy-update.md`), so it
+applies the simplest end of that same policy unconditionally:
 
 - HIGH severity (P1) + deterministic fix → remediation commit
 - HIGH severity (P1) + ambiguous fix → record in `review.json` for human attention
