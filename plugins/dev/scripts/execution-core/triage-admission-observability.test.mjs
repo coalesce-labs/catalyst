@@ -24,7 +24,9 @@ import {
   clearTriageSkip,
   pruneTriageSkips,
   _resetTriageSkipStreaks,
+  triageSkipSeverity,
 } from "./monitor.mjs";
+import { CLAIM_REASON, isClaimFailure } from "./cluster-claim-sync.mjs";
 
 beforeEach(() => _resetTriageSkipStreaks());
 
@@ -112,9 +114,12 @@ describe("CTL-879 wiring: every blind triage-admission gate records a reason", (
     return hits[0];
   }
 
-  // [label, anchor, recorder, windowLines]. The window is per site because the
+  // [label, anchor, recorder, after, before]. The window is per site because the
   // claim gate carries a long explanatory comment between its `log.debug` and
-  // its recorder; a single global window would silently stop covering it.
+  // its recorder; a single global window would silently stop covering it. `before`
+  // exists because CTL-2033's discriminator is READ above the gate's log line —
+  // a forward-only window cannot see it, and a guard that cannot see the thing it
+  // guards is the failure mode this whole file is about.
   const SITES = [
     ["drain gate", "drain: skipping triage dispatch — node draining", "noteTriageSkip", 8],
     ["HRW ownership gate", "ctl-1091: ticket not owned by this host under HRW", "noteTriageSkip", 8],
@@ -124,13 +129,29 @@ describe("CTL-879 wiring: every blind triage-admission gate records a reason", (
     // CTL-879 follow-up: the sixth gate. The first instrument missed it, and it
     // is the only silent exit left after drain/HRW — so it is where a ticket its
     // OWNER accepted still fails to launch.
-    ["cross-host claim gate", "ctl-862: lost cross-host claim", "noteTriageSkip", 24],
+    // CTL-2033 grew the explanatory block between the anchor and the recorder by
+    // six lines. The window is sized with headroom rather than to the current
+    // exact distance, so the next comment does not silently un-cover the site.
+    ["cross-host claim gate", "ctl-862: lost cross-host claim", "noteTriageSkip", 36],
+    // CTL-2033: the gate must also CONSULT the discriminator — a recorder that
+    // writes the same reason for both outcomes is the defect, one level in.
+    ["cross-host claim gate discriminates", "ctl-862: lost cross-host claim", "isClaimFailure", 36, 8],
+    // ⚠️ MUTATION-DRIVEN. Asserting `isClaimFailure` is READ is not enough: a gate
+    // can consult the discriminator and then record the same reason either way,
+    // which is the pre-CTL-2033 behaviour exactly. Mutating the gate to a single
+    // literal passed all 84 tests until these two rows existed. Both literals must
+    // survive in the window, so collapsing either direction fails here.
+    ["claim gate keeps the FAILURE reason", "ctl-862: lost cross-host claim", '"claim-write-failed"', 36, 8],
+    ["claim gate keeps the RACE reason", "ctl-862: lost cross-host claim", '"lost-cross-host-claim"', 36, 8],
+    ["claim gate raises severity only for the failure", "ctl-862: lost cross-host claim", "alwaysWarn: failed", 36, 8],
+    // The pure rule is only worth testing if the recorder actually consults it.
+    ["noteTriageSkip routes through the pure severity rule", "const context = { ticket: identifier, reason, held_sweeps: streak", "triageSkipSeverity(streak", 4, 6],
   ];
 
-  for (const [label, anchor, recorder, windowLines] of SITES) {
+  for (const [label, anchor, recorder, after, before = 0] of SITES) {
     test(`${label} records its outcome`, () => {
       const at = lineOf(anchor);
-      const window = LINES.slice(at, at + windowLines).join("\n");
+      const window = LINES.slice(Math.max(0, at - before), at + after).join("\n");
       expect(window).toContain(recorder);
     });
   }
@@ -148,4 +169,108 @@ describe("CTL-879 wiring: every blind triage-admission gate records a reason", (
     const between = LINES.slice(accumulate + 1, prune);
     expect(between.some((l) => /^ {2}\}/.test(l))).toBe(true);
   });
+});
+
+
+// ─── CTL-2033 ────────────────────────────────────────────────────────────────
+// The claim gate above records a reason — but until this ticket the reason it
+// recorded was the SAME STRING whether a peer legitimately won the fence or our
+// claim write never landed, because `claimDispatchSync` returned one
+// `{won:false, generation:null}` for both. Measured 2026-08-18: 36 of 36 held
+// tickets logged `lost-cross-host-claim` on tickets their own host OWNS under
+// HRW — a race that cannot happen — with `claim_reason: null` on every line.
+
+// ⛔ THE SEVERITY IS TESTED THROUGH A PURE FUNCTION, NOT THROUGH THE LOGGER.
+// The first version of these cases captured `process.stdout/stderr.write` and
+// matched config.mjs's console-shim prefix `[execution-core:<level>]`. That
+// passed locally — pino is not a dependency of this repo — and FAILED in CI,
+// where pino IS installed and emits `{"level":40,...}` JSON through a
+// destination it captured at construction, so the monkeypatch saw nothing.
+// A severity rule asserted through whichever logger happens to be installed is
+// a test of the environment. `triageSkipSeverity` is the rule itself.
+
+describe("CTL-2033: a FAILED claim and a LOST race are different outcomes", () => {
+  test("the claim result's reasons are all distinct values — none may collapse into another", () => {
+    const values = Object.values(CLAIM_REASON);
+    expect(values.length).toBeGreaterThanOrEqual(6);
+    expect(new Set(values).size).toBe(values.length);
+  });
+
+  test("only an explicit peer-win counts as normal; an unknown or absent reason is a FAILURE", () => {
+    expect(isClaimFailure(CLAIM_REASON.PEER_WON)).toBe(false);
+    expect(isClaimFailure(CLAIM_REASON.WON)).toBe(false);
+    expect(isClaimFailure(CLAIM_REASON.BUDGET_REFUSED)).toBe(true);
+    expect(isClaimFailure(null)).toBe(true);
+  });
+
+  test("a normal skip is INFO on its first sweep", () => {
+    expect(triageSkipSeverity(1, { alwaysWarn: false })).toBe("info");
+  });
+
+  test("a FAILED claim warns on sweep ONE — not after TRIAGE_SKIP_ESCALATE_AFTER sweeps", () => {
+    // At the measured 5-10 min sweep cadence, waiting for the streak escalation
+    // is 75-150 minutes of silence on a condition that is abnormal immediately.
+    expect(triageSkipSeverity(1, { alwaysWarn: true })).toBe("warn");
+  });
+
+  test("alwaysWarn raises SEVERITY, never FREQUENCY — the sparse gate still bounds the write", () => {
+    // Sweeps 2..9 are neither first, periodic, nor the escalation edge, so a
+    // 20-candidate sweep on a budget-exhausted host cannot flood the log.
+    for (let streak = 2; streak <= 9; streak++) {
+      expect(triageSkipSeverity(streak, { alwaysWarn: true })).toBeNull();
+      expect(triageSkipSeverity(streak, { alwaysWarn: false })).toBeNull();
+    }
+    // ...and the sweeps that ARE written are written for both.
+    for (const streak of [1, 10, 15, 20]) {
+      expect(triageSkipSeverity(streak, { alwaysWarn: true })).not.toBeNull();
+    }
+  });
+
+  test("the persistence escalation still wins on its own, with or without alwaysWarn", () => {
+    // A long streak is a WARN even for a normal lost race — the pre-existing
+    // CTL-879 ladder, which this change must not have removed.
+    expect(triageSkipSeverity(15, { alwaysWarn: false })).toBe("warn");
+    expect(triageSkipSeverity(20, { alwaysWarn: false })).toBe("warn");
+  });
+
+  test("noteTriageSkip still returns the streak and still never throws", () => {
+    expect(noteTriageSkip("CTL-A", "lost-cross-host-claim", { claim_reason: CLAIM_REASON.PEER_WON })).toBe(1);
+    expect(() =>
+      noteTriageSkip("CTL-B", "claim-write-failed", { claim_reason: CLAIM_REASON.BUDGET_REFUSED }, { alwaysWarn: true }),
+    ).not.toThrow();
+  });
+
+  test("the two outcomes use DIFFERENT gate reasons, so a streak of one never masquerades as the other", () => {
+    // A shared reason string would also merge the two into one streak, so a host
+    // alternating between them would escalate on evidence about neither.
+    expect(noteTriageSkip("CTL-D", "lost-cross-host-claim")).toBe(1);
+    expect(noteTriageSkip("CTL-D", "lost-cross-host-claim")).toBe(2);
+    expect(noteTriageSkip("CTL-D", "claim-write-failed", {}, { alwaysWarn: true })).toBe(1);
+  });
+});
+
+// ── WIRING GUARD: the other two claim gates ──────────────────────────────────
+// The triage gate is not the only caller of the soft-CAS. scheduler.mjs's
+// new-work dispatch and recovery.mjs's dead-host takeover had the SAME
+// blindness — a log.debug and a bare `continue` respectively — and a fix that
+// covered only the gate we happened to be looking at would leave two silent
+// stalls behind. Anchors match on the GATE, never on the recorder.
+describe("CTL-2033 wiring: every claim gate reads the discriminator", () => {
+  const CASES = [
+    ["scheduler new-work claim", "scheduler.mjs", "ctl-850: lost cross-host claim", 8, 20],
+    ["recovery takeover claim", "recovery.mjs", "Soft-CAS claim: bump generation to take ownership", 28, 0],
+  ];
+  for (const [label, file, anchor, after, before] of CASES) {
+    test(`${label} distinguishes a failed claim from a lost race`, () => {
+      const lines = readFileSync(join(import.meta.dir, file), "utf8").split("\n");
+      const hits = lines.map((l, i) => (l.includes(anchor) ? i : -1)).filter((i) => i >= 0);
+      expect(hits.length).toBe(1);
+      const window = lines.slice(Math.max(0, hits[0] - before), hits[0] + after).join("\n");
+      expect(window).toContain("isClaimFailure");
+      // BOTH branches must survive: a gate that warns unconditionally is as blind
+      // as one that debugs unconditionally — it just fails in the noisy direction.
+      expect(window).toContain("log.warn");
+      expect(window).toContain("log.debug");
+    });
+  }
 });

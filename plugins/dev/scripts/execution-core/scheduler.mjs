@@ -419,7 +419,7 @@ import {
   openBrokerStateDb,
 } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap). CTL-1157: getAllPrStatuses = the filter_state PR-lifecycle reader for the phantom/orphaned-PR invariants. openBrokerStateDb (CTL-1157 Codex round-6): the exec-core daemon must open the broker DB handle before these readers — ensure() throws otherwise and assembleBoardState swallows it, leaving the board/PR maps empty and the cohorts inert.
 import { readReconcileHealthMarkers } from "./reconcile-health.mjs"; // CTL-1290: stranded-node reconcile signal
-import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
+import { claimDispatchSync, isClaimFailure } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS (CTL-2033: + the outcome discriminator)
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
 import {
@@ -8271,10 +8271,23 @@ export function schedulerTick(
         phase: NEW_WORK_ENTRY_PHASE,
       });
       if (!claim.won) {
-        log.debug(
-          { ticket: t.identifier, host: self },
-          "ctl-850: lost cross-host claim — another host owns this dispatch, deferring"
-        );
+        // CTL-2033: the new-work claim gate had the same blindness the triage gate
+        // did — one log.debug for both "a peer won" and "our write never landed".
+        // A FAILED claim here is a silent new-work stall for this ticket on the one
+        // host HRW says may dispatch it, so it warns; a lost race stays debug.
+        const claimReason = claim?.reason ?? null;
+        const ctx = { ticket: t.identifier, host: self, claim_reason: claimReason, claim_detail: claim?.detail ?? null };
+        if (isClaimFailure(claimReason)) {
+          log.warn(
+            ctx,
+            "ctl-850: cross-host claim FAILED (the soft-CAS never ran) — new-work dispatch is deferred and nothing else will pick this ticket up"
+          );
+        } else {
+          log.debug(
+            ctx,
+            "ctl-850: lost cross-host claim — another host owns this dispatch, deferring"
+          );
+        }
         continue;
       }
       clusterGeneration = claim.generation; // CTL-864: the fencing token for this worker
