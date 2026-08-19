@@ -1416,51 +1416,82 @@ export function startDaemon({
     // `linear-transition.sh` — the thing that actually performs the write this guard judges —
     // is invoked with `--config <repoRoot>/.catalyst/config.json`. Ranking off any other file
     // risks judging against a map the writer does not use.
-    let laneClaimStateMap = null;
-    let laneClaimStateMapSource = "none";
+    // ⛔ CTL-2068 (Codex P1): resolved PER TEAM, not once process-wide. The registry holds
+    // several teams, each with its own repoRoot and its own `.catalyst/config.json`, and
+    // linear-write.mjs resolves repoRoot PER TICKET and hands THAT project's config to
+    // linear-transition.sh — including its higher-precedence per-project overrides. Ranking
+    // every team against the first registry entry's map judges tickets against names their
+    // own writer never uses.
+    const laneClaimTeamPaths = new Map();
     try {
-      const candidates = [];
       for (const proj of listProjectsFn() ?? []) {
-        if (proj?.repoRoot) {
-          candidates.push([
-            `registry:${proj.team ?? "?"}`,
-            resolve(proj.repoRoot, ".catalyst", "config.json"),
-          ]);
+        if (proj?.team && proj?.repoRoot) {
+          laneClaimTeamPaths.set(
+            String(proj.team).toUpperCase(),
+            resolve(proj.repoRoot, ".catalyst", "config.json")
+          );
         }
       }
-      candidates.push(["configPath", configPath], ["layer2", layer2Path]);
-      const resolved = resolveStateMap(candidates, (path) => readFileSync(path, "utf8"));
-      laneClaimStateMap = resolved.stateMap;
-      laneClaimStateMapSource = resolved.source;
     } catch {
-      /* a throwing registry must not block boot → the guard abstains, never refuses */
+      /* a throwing registry must not block boot → the guard falls back to the default map */
     }
+    const laneClaimReadFile = (path) => readFileSync(path, "utf8");
+    const laneClaimFallback = [
+      ["configPath", configPath],
+      ["layer2", layer2Path],
+    ];
+    // The DEFAULT map — every registry project, then the two ambient paths. Used for a ticket
+    // whose team is not in the registry, and by the install line below.
+    const laneClaimDefault = resolveStateMap(
+      [
+        ...[...laneClaimTeamPaths].map(([team, path]) => [`registry:${team}`, path]),
+        ...laneClaimFallback,
+      ],
+      laneClaimReadFile
+    );
+    const laneClaimStateMap = laneClaimDefault.stateMap;
+    const laneClaimStateMapSource = laneClaimDefault.source;
+    const laneClaimStateMapForTicket = (ticket) => {
+      const team = String(ticket ?? "")
+        .split("-")[0]
+        ?.toUpperCase();
+      const path = team ? laneClaimTeamPaths.get(team) : null;
+      if (!path) return laneClaimDefault;
+      return resolveStateMap([[`registry:${team}`, path], ...laneClaimFallback], laneClaimReadFile);
+    };
     // Only an explicit "off" disables the dispatch veto — an unset or misspelled value leaves
     // it armed, because the failure this ticket is about is a claim quietly not being honoured.
     const laneClaimDispatchVeto =
       String(process.env.CATALYST_LANE_CLAIM_DISPATCH_GUARD ?? "")
         .trim()
         .toLowerCase() !== "off";
-    setLaneClaimGuard(
-      buildLaneClaimGuard({
-        stateMap: laneClaimStateMap,
-        botUserIds: linearBotUserIds,
-        readLastStateChange: replicaReader ? (t) => replicaReader.lastStateChange(t) : undefined,
-        readCurrentState: replicaReader ? (t) => replicaReader.lookup(t)?.state ?? null : undefined,
-        dispatchVeto: laneClaimDispatchVeto,
-      })
-    );
-    // ⚠️ `ranked_states: 0` means the guard is INSTALLED AND INERT — it can never refuse.
-    // Logged at WARN in that case precisely because the healthy-looking INFO line is what let
-    // the inert install sit unnoticed on mini.
+    const laneClaimGuardInstance = buildLaneClaimGuard({
+      stateMap: laneClaimStateMap,
+      stateMapForTicket: laneClaimStateMapForTicket,
+      botUserIds: linearBotUserIds,
+      readLastStateChange: replicaReader ? (t) => replicaReader.lastStateChange(t) : undefined,
+      readCurrentState: replicaReader ? (t) => replicaReader.lookup(t)?.state ?? null : undefined,
+      readFleetSeen: replicaReader ? (t, ids) => replicaReader.fleetEverWroteState(t, ids) : undefined,
+      dispatchVeto: laneClaimDispatchVeto,
+    });
+    setLaneClaimGuard(laneClaimGuardInstance);
+    // ⛔ CTL-2068 (Codex P2): `ranked_states` is the guard's OWN rank size, never the raw
+    // map's key count. buildStateRank deliberately drops todo/backlog/triage/done, so a map
+    // carrying only those keys counts nonzero while the rank is EMPTY — and the healthy INFO
+    // line would print over a guard that can never refuse. That is exactly the false-healthy
+    // this commit exists to expose, one level in.
     const laneClaimFields = {
-      ranked_states: Object.keys(laneClaimStateMap ?? {}).length,
+      ranked_states: laneClaimGuardInstance.rank.size,
       state_map_source: laneClaimStateMapSource,
+      registry_teams: laneClaimTeamPaths.size,
       history_source: replicaReader ? "replica" : "none",
       dispatch_veto: laneClaimDispatchVeto,
     };
     if (laneClaimFields.ranked_states === 0) {
-      log.warn(laneClaimFields, "ctl-2068: lane-claim guard installed but INERT — no state map resolved, it can never refuse");
+      log.warn(
+        laneClaimFields,
+        "ctl-2068: lane-claim guard installed but INERT — no rankable state map resolved, it can never refuse"
+      );
     } else {
       log.info(laneClaimFields, "ctl-2068: lane-claim guard installed");
     }

@@ -234,6 +234,15 @@ function buildEligibleSelect({ project, label } = {}) {
 // read whoever last renamed the ticket as the actor who set its state.
 const LAST_STATE_CHANGE_SELECT = `SELECT h.actor_id AS actorId, h.to_state AS toState, h.created_at AS atMs FROM issue_history h JOIN issues i ON i.id = h.issue_id WHERE i.identifier = ? AND h.to_state IS NOT NULL ORDER BY h.created_at DESC LIMIT 1`;
 
+// CTL-2068 — has any of these actor ids authored a STATE change on this ticket? The
+// POSITIVE CONTROL for the lane-claim guard: the whole verdict rests on "actorId in
+// botUserIds means the fleet", and when this guard first armed that set named two legacy
+// direct-write app-actors while every real state change was authored by the cloud proxy's
+// identity. Every actor then read as a lane. If no KNOWN fleet id has ever written this
+// ticket, the guard cannot tell the two apart here and must abstain.
+const FLEET_WROTE_SELECT = (n) =>
+  `SELECT 1 FROM issue_history h JOIN issues i ON i.id = h.issue_id WHERE i.identifier = ? AND h.to_state IS NOT NULL AND h.actor_id IN (${Array(n).fill("?").join(",")}) LIMIT 1`;
+
 const OWNERSHIP_SELECT = `SELECT assignee_id, delegate_id, delegate_name FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
 // Relation enrichment, mirroring normalizeDetail in linear-cli.mjs. forward:
 // edges this issue OWNS (relatedIssue is the target); inverse: edges that point
@@ -966,10 +975,26 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
+  // fleetEverWroteState(identifier, ids) → true | false | undefined
+  //   undefined = "could not look" (no db, empty id set, any throw). ⛔ The caller must NOT
+  //   conflate that with false: false disarms the guard for this ticket, and a replica that
+  //   cannot answer would otherwise disarm it everywhere.
+  const fleetEverWroteState = (identifier, ids) => {
+    const list = Array.isArray(ids) ? ids : ids instanceof Set ? [...ids] : [];
+    if (!identifier || list.length === 0) return undefined;
+    try {
+      return Boolean(open().prepare(FLEET_WROTE_SELECT(list.length)).get(identifier, ...list));
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
   return {
     lookup,
     freshness,
     lastStateChange, // CTL-2068
+    fleetEverWroteState, // CTL-2068
     titles,
     estimates, // CTL-1806
     relations, // CTL-1806
