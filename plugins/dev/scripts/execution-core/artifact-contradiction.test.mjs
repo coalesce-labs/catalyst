@@ -32,9 +32,17 @@ import {
   classifyArtifactContradiction,
   isRetractableFailure,
   INFRA_FAILURE_REASONS,
+  INFRA_FAILURE_REASON_RULES,
   CONTRADICTION_REASONS,
   RETRACTABLE_STATUS,
+  CTL_2048_PRODUCER_FIX_MS,
 } from "./artifact-contradiction.mjs";
+import {
+  WORK_DONE_PROBES,
+  WORK_DONE_PROBE_DESCRIPTIONS,
+  NETWORK_BOUND_PROBE_PHASES,
+  probeIsLocal,
+} from "./work-done-probes.mjs";
 import { defaultRetractContradictedFailure } from "./recovery.mjs";
 import {
   retractContradictedFailures,
@@ -45,6 +53,15 @@ import {
 import { ASSERTED_BY, classifyAdvanceEvidence, EVIDENCE } from "./assertion-evidence.mjs";
 
 const FENCE = "cluster_fence_stale";
+// The two axes added by Codex's #3690 review, defaulted here so every test below
+// states only the axis it is ABOUT. Both get their own describe blocks where
+// they are varied explicitly — a default that is never varied is a constant, and
+// a constant cannot fail.
+const IN_WINDOW = CTL_2048_PRODUCER_FIX_MS - 60_000; // a signal from before CTL-2048
+const AFTER_WINDOW = CTL_2048_PRODUCER_FIX_MS + 60_000; // the producer no longer conflates
+const classify = (o = {}) =>
+  classifyArtifactContradiction({ writtenAtMs: IN_WINDOW, probeIsLocal: true, ...o });
+
 const failed = (over = {}) => ({
   ticket: "CTC-239",
   phase: "triage",
@@ -56,7 +73,7 @@ const failed = (over = {}) => ({
 // ─────────────────────────────────────────────────────────────────────────────
 describe("classifyArtifactContradiction — conjunct (a), the reason", () => {
   test("both conjuncts satisfied → the ONLY retracting verdict", () => {
-    const v = classifyArtifactContradiction({
+    const v = classify({
       signal: failed(),
       hasProbe: true,
       artifactPresent: true,
@@ -66,7 +83,7 @@ describe("classifyArtifactContradiction — conjunct (a), the reason", () => {
 
   test.each(INFRA_FAILURE_REASONS)("registered infra reason %s retracts", (reason) => {
     expect(
-      classifyArtifactContradiction({
+      classify({
         signal: failed({ failureReason: reason }),
         hasProbe: true,
         artifactPresent: true,
@@ -89,7 +106,7 @@ describe("classifyArtifactContradiction — conjunct (a), the reason", () => {
     "not_cluster_fence_stale",
     "CLUSTER_FENCE_STALE",
   ])("a real failure reason (%s) is NEVER retracted", (reason) => {
-    const v = classifyArtifactContradiction({
+    const v = classify({
       signal: failed({ failureReason: reason }),
       hasProbe: true,
       artifactPresent: true, // artifact present and it STILL must not retract
@@ -105,7 +122,7 @@ describe("classifyArtifactContradiction — conjunct (a), the reason", () => {
     ["needs-human", "not-failed"],
     ["awaiting-work", "not-failed"],
   ])("status %s is never retracted (%s)", (status, reason) => {
-    const v = classifyArtifactContradiction({
+    const v = classify({
       signal: failed({ status }),
       hasProbe: true,
       artifactPresent: true,
@@ -117,7 +134,7 @@ describe("classifyArtifactContradiction — conjunct (a), the reason", () => {
   test.each([[null], [undefined], [""], ["   "], [42], [{}], [["cluster_fence_stale"]]])(
     "a non-string / empty failureReason (%p) is reason-absent, not reason-not-infra-class",
     (failureReason) => {
-      const v = classifyArtifactContradiction({
+      const v = classify({
         signal: failed({ failureReason }),
         hasProbe: true,
         artifactPresent: true,
@@ -131,21 +148,21 @@ describe("classifyArtifactContradiction — conjunct (a), the reason", () => {
   test.each([[null], [undefined], [42], ["failed"], [[]]])(
     "an unreadable signal (%p) holds",
     (signal) => {
-      const v = classifyArtifactContradiction({ signal, hasProbe: true, artifactPresent: true });
+      const v = classify({ signal, hasProbe: true, artifactPresent: true });
       expect(v).toEqual({ retract: false, reason: "unreadable-signal", failureReason: null });
     }
   );
 
   test("no arguments at all holds rather than throwing", () => {
     expect(classifyArtifactContradiction().retract).toBe(false);
-    expect(classifyArtifactContradiction({}).retract).toBe(false);
+    expect(classify({}).retract).toBe(false);
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe("classifyArtifactContradiction — conjunct (b), the artifact", () => {
   test("artifact absent → hold, and the reason NAMES the absence", () => {
-    const v = classifyArtifactContradiction({
+    const v = classify({
       signal: failed(),
       hasProbe: true,
       artifactPresent: false,
@@ -159,7 +176,7 @@ describe("classifyArtifactContradiction — conjunct (b), the artifact", () => {
   test.each([[null], [undefined]])(
     "artifact %p (probe could not answer) is INCONCLUSIVE, not absent",
     (artifactPresent) => {
-      const v = classifyArtifactContradiction({ signal: failed(), hasProbe: true, artifactPresent });
+      const v = classify({ signal: failed(), hasProbe: true, artifactPresent });
       expect(v.retract).toBe(false);
       expect(v.reason).toBe("artifact-inconclusive");
       expect(v.reason).not.toBe("artifact-absent");
@@ -169,14 +186,14 @@ describe("classifyArtifactContradiction — conjunct (b), the artifact", () => {
   test("a truthy-but-not-true artifactPresent does NOT retract", () => {
     for (const v of [1, "yes", {}, []]) {
       expect(
-        classifyArtifactContradiction({ signal: failed(), hasProbe: true, artifactPresent: v })
+        classify({ signal: failed(), hasProbe: true, artifactPresent: v })
           .retract
       ).toBe(false);
     }
   });
 
   test("a phase with no registered probe holds as no-probe (cannot look ≠ absent)", () => {
-    const v = classifyArtifactContradiction({
+    const v = classify({
       signal: failed(),
       hasProbe: false,
       artifactPresent: true, // even a caller claiming true cannot override a missing probe
@@ -191,7 +208,7 @@ describe("classifyArtifactContradiction — conjunct (b), the artifact", () => {
       for (const hasProbe of [true, false]) {
         for (const artifactPresent of [true, false, null]) {
           produced.add(
-            classifyArtifactContradiction({ signal, hasProbe, artifactPresent }).reason
+            classify({ signal, hasProbe, artifactPresent }).reason
           );
         }
       }
@@ -199,6 +216,129 @@ describe("classifyArtifactContradiction — conjunct (b), the artifact", () => {
     for (const r of produced) expect(CONTRADICTION_REASONS).toContain(r);
     // and the sweep is wide enough to have exercised every branch but one
     expect(produced.size).toBeGreaterThanOrEqual(7);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⛔ THE AMBIGUITY WINDOW (Codex #3690 P1). `cluster_fence_stale` is ALSO the
+// string a GENUINE ownership loss writes — and the losing worker still leaves a
+// valid artifact, because phase-triage writes triage.json BEFORE it takes the
+// fence. So conjunct (b) does not exclude a real bow-out, and the only thing
+// that does is WHEN the signal was written.
+describe("the cluster_fence_stale ambiguity window", () => {
+  const both = { hasProbe: true, probeIsLocal: true, artifactPresent: true };
+
+  test("⭐ inside the window (pre-CTL-2048 producer) it retracts", () => {
+    const v = classify({ signal: failed(), writtenAtMs: IN_WINDOW, ...both });
+    expect(v.retract).toBe(true);
+    expect(v.reason).toBe("contradicted");
+  });
+
+  // ⛔ THE DEFECT ITSELF. A genuine takeover, artifact and all.
+  test("⛔ AFTER the window a genuine takeover is NOT retracted, artifact or not", () => {
+    const v = classify({ signal: failed(), writtenAtMs: AFTER_WINDOW, ...both });
+    expect(v.retract).toBe(false);
+    expect(v.reason).toBe("reason-window-expired");
+  });
+
+  test("the cutoff instant itself is OUTSIDE the window (>=, not >)", () => {
+    const v = classify({ signal: failed(), writtenAtMs: CTL_2048_PRODUCER_FIX_MS, ...both });
+    expect(v.retract).toBe(false);
+    expect(v.reason).toBe("reason-window-expired");
+  });
+
+  // ⚠️ "I could not date it" is its own answer. Collapsing it into either edge
+  // is the false-clean shape: to 0 and every undatable signal retracts, to now()
+  // and none do while the feature reads as working.
+  test.each([[null], [undefined], ["2026-08-18"], [NaN], [Infinity], [{}], ["nonsense"]])(
+    "an undatable signal (%p) HOLDS as signal-age-unknown, not as either edge",
+    (writtenAtMs) => {
+      const v = classify({ signal: failed(), writtenAtMs, ...both });
+      expect(v.retract).toBe(false);
+      expect(v.reason).toBe("signal-age-unknown");
+      expect(v.reason).not.toBe("reason-window-expired");
+    }
+  );
+
+  // The unwindowed reason must be unaffected by every one of those dates — it is
+  // CTL-2048's own string and says nothing about ownership at any time.
+  test.each([[IN_WINDOW], [AFTER_WINDOW], [CTL_2048_PRODUCER_FIX_MS], [null], [undefined]])(
+    "cluster_fence_unverified carries no window and retracts at date %p",
+    (writtenAtMs) => {
+      const v = classify({
+        signal: failed({ failureReason: "cluster_fence_unverified" }),
+        writtenAtMs,
+        ...both,
+      });
+      expect(v.retract).toBe(true);
+    }
+  );
+
+  test("every registered reason declares a window explicitly (null counts, absent does not)", () => {
+    for (const reason of INFRA_FAILURE_REASONS) {
+      const rule = INFRA_FAILURE_REASON_RULES[reason];
+      expect(rule).toBeDefined();
+      expect(Object.prototype.hasOwnProperty.call(rule, "ambiguousBeforeMs")).toBe(true);
+      const w = rule.ambiguousBeforeMs;
+      expect(w === null || Number.isFinite(w)).toBe(true);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⛔ NETWORK-BOUND PROBES (Codex #3690 P1). This classifier is consulted from a
+// scheduler TICK, and a `failed` signal is never cleared by its probe answering
+// false — so a registered network probe is an unbounded poll, not a one-off.
+describe("probe locality — the sweep may not poll GitHub", () => {
+  test.each(NETWORK_BOUND_PROBE_PHASES)(
+    "%s holds as probe-not-local even with everything else satisfied",
+    () => {
+      const v = classify({
+        signal: failed(),
+        hasProbe: true,
+        probeIsLocal: false,
+        artifactPresent: true,
+      });
+      expect(v.retract).toBe(false);
+      expect(v.reason).toBe("probe-not-local");
+    }
+  );
+
+  test("an unanswered locality question holds — the default is not permissive", () => {
+    const v = classifyArtifactContradiction({
+      signal: failed(),
+      writtenAtMs: IN_WINDOW,
+      hasProbe: true,
+      artifactPresent: true,
+    });
+    expect(v.retract).toBe(false);
+    expect(v.reason).toBe("probe-not-local");
+  });
+
+  test("no-probe is reported BEFORE probe-not-local — they are different facts", () => {
+    const v = classify({ signal: failed(), hasProbe: false, probeIsLocal: false });
+    expect(v.reason).toBe("no-probe");
+  });
+
+  // ⭐ The parity control: adding a probe forces the locality question, and the
+  // answer must agree with what the probe DESCRIBES itself as checking. A new
+  // GitHub-backed probe left unclassified fails HERE rather than on the fleet.
+  test("every registered probe is classified, and the classification matches its description", () => {
+    for (const phase of Object.keys(WORK_DONE_PROBES)) {
+      const desc = WORK_DONE_PROBE_DESCRIPTIONS[phase] ?? "";
+      const describesNetwork = /github/i.test(desc);
+      expect(probeIsLocal(phase)).toBe(!describesNetwork);
+      expect(NETWORK_BOUND_PROBE_PHASES.includes(phase)).toBe(describesNetwork);
+    }
+    // and the set names nothing that is not a probe
+    for (const phase of NETWORK_BOUND_PROBE_PHASES) {
+      expect(Object.prototype.hasOwnProperty.call(WORK_DONE_PROBES, phase)).toBe(true);
+    }
+  });
+
+  test("an unregistered phase is never local", () => {
+    expect(probeIsLocal("not-a-phase")).toBe(false);
+    expect(probeIsLocal(undefined)).toBe(false);
   });
 });
 
@@ -217,8 +357,8 @@ describe("isRetractableFailure — the cheap gate agrees with the full classifie
       failed({ failureReason: "cluster_fence_unverified" }),
     ];
     for (const signal of signals) {
-      const cheap = isRetractableFailure({ signal });
-      const full = classifyArtifactContradiction({ signal, hasProbe: true, artifactPresent: true });
+      const cheap = isRetractableFailure({ signal, writtenAtMs: IN_WINDOW });
+      const full = classify({ signal, hasProbe: true, artifactPresent: true });
       if (cheap.eligible) {
         expect(full.retract).toBe(true);
         expect(full.failureReason).toBe(cheap.failureReason);
@@ -237,6 +377,13 @@ function scenario() {
     mkdirSync(join(orch, "workers", ticket), { recursive: true });
     writeFileSync(join(orch, "workers", ticket, file), JSON.stringify(obj));
   };
+  // ⚠️ Every phase signal carries an explicit date, because the sweep's fallback
+  // is the FILE's mtime — and a fixture written just now is dated NOW, which is
+  // outside the ambiguity window. Without this the whole e2e would hold on
+  // `reason-window-expired` and its "nothing was retracted" assertions would
+  // still read as a healthy pass. (They did: 13 tests went red the moment the
+  // window landed, which is how this fixture was found.)
+  const at = (ms) => new Date(ms).toISOString();
   // ⭐ THE MEASURED SHAPE (mini-2, 2026-08-18): triage worked, its artifact is on
   // disk, and the fence guard falsified the record at the emit step.
   w("CTC-239", "triage.json", { classification: "bug", summary: "real triage output" });
@@ -245,6 +392,7 @@ function scenario() {
     phase: "triage",
     status: "failed",
     failureReason: FENCE,
+    completedAt: at(IN_WINDOW),
     orchestrator: "orch-1",
     assertedBy: null,
   });
@@ -254,32 +402,167 @@ function scenario() {
   // (the other host did the work) looks exactly like this.
   w("CTC-900", "phase-triage.json", {
     ticket: "CTC-900", phase: "triage", status: "failed", failureReason: FENCE,
+    completedAt: at(IN_WINDOW),
   });
   // NEGATIVE CONTROL 2 — artifact present, but the phase's OWN work failed.
   w("CTC-901", "triage.json", { classification: "bug" });
   w("CTC-901", "phase-triage.json", {
     ticket: "CTC-901", phase: "triage", status: "failed", failureReason: "test_failed",
+    completedAt: at(IN_WINDOW),
   });
   // NEGATIVE CONTROL 3 — infra reason, artifact present but STRUCTURALLY INVALID
   // (empty classification). The probe validates content, not existence.
   w("CTC-902", "triage.json", { classification: "   " });
   w("CTC-902", "phase-triage.json", {
     ticket: "CTC-902", phase: "triage", status: "failed", failureReason: FENCE,
+    completedAt: at(IN_WINDOW),
   });
   // NEGATIVE CONTROL 4 — a real ESCALATION: stalled, not failed.
   w("CTC-903", "triage.json", { classification: "bug" });
   w("CTC-903", "phase-triage.json", {
     ticket: "CTC-903", phase: "triage", status: "stalled", failureReason: FENCE,
+    completedAt: at(IN_WINDOW),
+  });
+  // ⛔ NEGATIVE CONTROL 5 — Codex #3690 P1, THE defect this window exists for: a
+  // GENUINE fence takeover, dated AFTER CTL-2048 closed the ambiguity. The
+  // losing worker wrote a complete, valid triage.json before it lost the fence,
+  // so this ticket is byte-identical to CTC-239 on every axis EXCEPT its date.
+  // Retracting it would advance a ticket from output the fence deliberately
+  // refused to publish — the double-act the fence exists to prevent, produced by
+  // the recovery meant to be safe.
+  w("CTC-904", "triage.json", { classification: "bug", summary: "real triage output" });
+  w("CTC-904", "phase-triage.json", {
+    ticket: "CTC-904", phase: "triage", status: "failed", failureReason: FENCE,
+    completedAt: at(AFTER_WINDOW),
   });
   return { orch, read: (t, f = "phase-triage.json") =>
     JSON.parse(readFileSync(join(orch, "workers", t, f), "utf8")) };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ⛔ Codex #3690 P2, and the ONE fix in this round that no existing test could
+// see. The e2e above exercises `triage`, whose probe reads the WORKER dir — so
+// the recorded worktree path is irrelevant there and deleting the pass-through
+// left the suite fully green (measured: mutation M3, 79 pass / 0 fail). The
+// worktree-backed phases are where it decides the answer, and `resolveWorktree`
+// matches ONLY an exact `refs/heads/<ticket>` branch: the real fleet's branches
+// are `ryan/<ticket>-slug`, so without the recorded path a complete research doc
+// probes FALSE and the sweep's hold reads as a correct decline.
+// ⛔ Codex #3690 P1 (the second one), at the SWEEP rather than the classifier.
+// The classifier's `probe-not-local` hold prevents a wrong VERDICT; it does not
+// prevent the cost, because by the time the classifier is consulted the probe
+// has already run. The guard that matters is on the CALL — and nothing else in
+// this file could see it: hardcoding `local = true` in the sweep left the suite
+// 81 pass / 0 fail (measured, mutation M4). This is the test that makes the
+// per-tick `gh api` impossible rather than merely pointless.
+describe("the sweep never RUNS a network-bound probe", () => {
+  test("a failed monitor-merge signal holds as probe-not-local, and the probe is never invoked", () => {
+    const orch = mkdtempSync(join(tmpdir(), "ctl2050-net-"));
+    mkdirSync(join(orch, "workers", "CTC-906"), { recursive: true });
+    writeFileSync(
+      join(orch, "workers", "CTC-906", "phase-monitor-merge.json"),
+      JSON.stringify({
+        ticket: "CTC-906",
+        phase: "monitor-merge",
+        status: "failed",
+        failureReason: FENCE,
+        completedAt: new Date(IN_WINDOW).toISOString(),
+      })
+    );
+    let calls = 0;
+    const res = retractContradictedFailures(orch, {
+      // The REAL registry's monitor-merge probe shells out to `gh api`. Here it
+      // is replaced by a counter that also throws, so a regression fails loudly
+      // instead of quietly spending an authenticated request per tick forever.
+      probes: {
+        ...WORK_DONE_PROBES,
+        "monitor-merge": () => {
+          calls += 1;
+          throw new Error("network probe must not be reached from a scheduler tick");
+        },
+      },
+      retract: () => {
+        throw new Error("must not be reached");
+      },
+    });
+    expect(res.ok).toBe(true);
+    expect(calls).toBe(0); // ⭐ the assertion the classifier-level test cannot make
+    expect(res.retracted).toBe(0);
+    expect(res.heldReasons["probe-not-local"]).toBe(1);
+    // and NOT the reason a thrown probe would have produced — the two are
+    // different facts and only one of them means "we did not spend the request"
+    expect(res.heldReasons["artifact-inconclusive"]).toBeUndefined();
+  });
+});
+
+describe("the sweep passes the RECORDED worktree path to worktree-backed probes", () => {
+  const researchFixture = () => {
+    const orch = mkdtempSync(join(tmpdir(), "ctl2050-wt-"));
+    const tree = mkdtempSync(join(tmpdir(), "ctl2050-tree-"));
+    mkdirSync(join(tree, "thoughts", "shared", "research"), { recursive: true });
+    writeFileSync(
+      join(tree, "thoughts", "shared", "research", "2026-08-18-ctc-905-fence.md"),
+      "# CTC-905 research\n\n## Summary\n" + "x".repeat(300) + "\n\n## Code References\n- a.mjs:1\n"
+    );
+    mkdirSync(join(orch, "workers", "CTC-905"), { recursive: true });
+    writeFileSync(
+      join(orch, "workers", "CTC-905", "phase-research.json"),
+      JSON.stringify({
+        ticket: "CTC-905",
+        phase: "research",
+        status: "failed",
+        failureReason: FENCE,
+        completedAt: new Date(IN_WINDOW).toISOString(),
+        // ⭐ the canonical recorded path — and the branch it came from is a shape
+        // resolveWorktree cannot match, which is the whole point.
+        worktreePath: tree,
+      })
+    );
+    return { orch, tree };
+  };
+
+  const sweep = (orch) =>
+    retractContradictedFailures(orch, {
+      // repoRoot must be non-null (the probe rejects a missing one before it
+      // ever consults the path) and deliberately is NOT a git repo, so branch
+      // resolution CANNOT succeed: the recorded path is the only way through.
+      resolveRepoRoot: () => "/nonexistent/repo/root",
+      retract: (o, sig, v) => defaultRetractContradictedFailure(o, sig, v, { appendEventLog: () => {} }),
+    });
+
+  test("⭐ a complete research artifact under a real-shaped branch IS retracted", () => {
+    const { orch } = researchFixture();
+    const res = sweep(orch);
+    expect(res.eligible).toBe(1);
+    expect(res.retracted).toBe(1);
+    const after = JSON.parse(
+      readFileSync(join(orch, "workers", "CTC-905", "phase-research.json"), "utf8")
+    );
+    expect(after.status).toBe("done");
+    expect(after.assertedBy).toBe(ASSERTED_BY.RECOVERY_ARTIFACT_CONTRADICTION);
+  });
+
+  // The negative half: strip the recorded path and the identical artifact must
+  // become UNREACHABLE — proving the retraction above went through that path and
+  // not through branch resolution or some other accident of the fixture.
+  test("without the recorded path the same artifact probes absent (the pre-fix behaviour)", () => {
+    const { orch } = researchFixture();
+    const sigPath = join(orch, "workers", "CTC-905", "phase-research.json");
+    const sig = JSON.parse(readFileSync(sigPath, "utf8"));
+    delete sig.worktreePath;
+    writeFileSync(sigPath, JSON.stringify(sig));
+    const res = sweep(orch);
+    expect(res.eligible).toBe(1);
+    expect(res.retracted).toBe(0);
+    expect(res.heldReasons["artifact-absent"]).toBe(1);
+  });
+});
+
 describe("the sweep — end to end over a real worker directory", () => {
   test("⭐ the measured ticket is retracted and NO negative control is touched", () => {
     const { orch, read } = scenario();
     const before = Object.fromEntries(
-      ["CTC-900", "CTC-901", "CTC-902", "CTC-903"].map((t) => [t, JSON.stringify(read(t))])
+      ["CTC-900", "CTC-901", "CTC-902", "CTC-903", "CTC-904"].map((t) => [t, JSON.stringify(read(t))])
     );
 
     // Real sweep, real probes, real writer. Only the event log is silenced (it
@@ -291,6 +574,13 @@ describe("the sweep — end to end over a real worker directory", () => {
 
     expect(res.ok).toBe(true);
     expect(res.retracted).toBe(1);
+    // ⭐ Each control must be held for ITS OWN reason, not merely be untouched:
+    // a sweep that declined everything for one wrong reason would satisfy every
+    // "unchanged" assertion in this test. CTC-904 in particular must be held by
+    // the WINDOW — if it were held because its artifact failed to probe, the
+    // control would be measuring the fixture, not the guard.
+    expect(res.heldReasons["reason-window-expired"]).toBe(1); // CTC-904, the genuine takeover
+    expect(res.heldReasons["artifact-absent"]).toBe(2); // CTC-900 (none) + CTC-902 (invalid)
 
     const after = read("CTC-239");
     expect(after.status).toBe("done");

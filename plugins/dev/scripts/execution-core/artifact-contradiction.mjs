@@ -70,18 +70,59 @@
 // Deliberately opened at TWO rows, both measured, rather than at the wider set a
 // first reading suggests. Adding a row later is one line; a row added wrongly
 // now is a silent false success on every ticket that carries it.
-export const INFRA_FAILURE_REASONS = Object.freeze([
-  // The fence was READ and another host owned it. Pre-CTL-2048 this string was
-  // ALSO written when the fence could not be read at all — which is the exact
-  // population of the three measured tickets, and why it is registered even
-  // though a genuine stale fence is a legitimate bow-out. A genuine bow-out
-  // still has no artifact of its own (the host that owned the fence did the
-  // work elsewhere), so conjunct (b) excludes it.
-  "cluster_fence_stale",
+// ⛔ THE AMBIGUITY WINDOW — the correction Codex forced on #3690, and the reason
+// this registry is a MAP and not a list.
+//
+// The first cut registered `cluster_fence_stale` on the argument that *a genuine
+// bow-out has no artifact of its own — the host that owned the fence did the work
+// elsewhere, so conjunct (b) excludes it*. ⛔ THAT CLAIM IS FALSE, and it is false
+// for the very phase this module was built for: `phase-triage` writes
+// `triage.json` (phase-triage/SKILL.md:255-273) BEFORE it invokes the fence
+// (:316-317), and every other fenced phase likewise produces its output before
+// the side-effect fence. A worker that GENUINELY lost the fence therefore leaves
+// a valid artifact on disk — and retracting on it would advance a ticket from
+// output the fence deliberately refused to publish. That is the double-act the
+// fence exists to prevent, manufactured by the recovery meant to be safe.
+//
+// Artifact presence cannot separate the two. TIME can. `cluster_fence_stale` was
+// ambiguous only while the PRODUCER conflated an unreadable fence with a stale
+// one; CTL-2048 (#3685) closed that window at its merge. Before that instant the
+// string means "stale OR unreadable" — the measured residue lives there. At or
+// after it the string means what it says, and this module must not touch it.
+//
+// ⚠️ THE CUTOFF IS THE MERGE, NOT THE ROLLOUT. A host runs the old producer for
+// the few minutes between the merge and its plugin refresh, so a genuinely
+// ambiguous signal written in that gap is HELD, not retracted. That is the safe
+// direction on purpose: a ticket left stuck is visible and fixable; a genuine
+// ownership loss laundered into a success is neither.
+export const CTL_2048_PRODUCER_FIX_MS = Date.parse("2026-08-19T03:39:12Z"); // #3685, 2026-08-18 22:39:12 CT
+
+// INFRA_FAILURE_REASON_RULES — failure reasons attributable to an EMIT-TIME
+// INFRASTRUCTURE GUARD rather than to the phase's own work, each with the window
+// in which it is ambiguous (`ambiguousBeforeMs: null` = no window; the string is
+// unconditionally infra-class).
+//
+// ⛔ THE BAR FOR ADDING A ROW. A reason belongs here only if a phase carrying it
+// may have COMPLETED ITS WORK SUCCESSFULLY — i.e. the guard sits between the
+// finished work and the record of it. `test_failed`, `turn-cap-exhausted`,
+// `yield-expired` and every escalation reason do NOT qualify: they describe the
+// work itself, and a retraction on them would be the laundering above. And a row
+// whose string is ALSO written for a legitimate, non-retractable condition needs
+// a window — otherwise it is only safe by an accident of ordering.
+export const INFRA_FAILURE_REASON_RULES = Object.freeze({
+  // The fence was READ and another host owned it — a legitimate bow-out, EXCEPT
+  // in the pre-CTL-2048 window where the same string was also written for a
+  // fence that could not be read at all. That window is the measured residue
+  // (CTC-239/266/772) and is the only population this row may retract.
+  cluster_fence_stale: Object.freeze({ ambiguousBeforeMs: CTL_2048_PRODUCER_FIX_MS }),
   // CTL-2048's new string: the fence was NOT read after every retry. By
-  // construction this says nothing about the phase's work.
-  "cluster_fence_unverified",
-]);
+  // construction it says nothing about the phase's work and nothing about
+  // ownership, so it carries no window.
+  cluster_fence_unverified: Object.freeze({ ambiguousBeforeMs: null }),
+});
+
+// Retained as the flat name list — parity tests and operators read this.
+export const INFRA_FAILURE_REASONS = Object.freeze(Object.keys(INFRA_FAILURE_REASON_RULES));
 
 const INFRA_REASON_SET = new Set(INFRA_FAILURE_REASONS);
 
@@ -99,7 +140,10 @@ export const CONTRADICTION_REASONS = Object.freeze([
   "not-failed", // status is not `failed`
   "reason-absent", // `failed` with no failureReason at all
   "reason-not-infra-class", // a real failure of the phase's own work
+  "signal-age-unknown", // ⚠️ a windowed reason whose signal cannot be dated — NOT "outside the window"
+  "reason-window-expired", // the producer no longer conflates this string; it means what it says
   "no-probe", // no registered artifact probe for this phase → cannot look
+  "probe-not-local", // ⛔ the probe answers over the network — a tick sweep must not poll it
   "artifact-absent", // the probe ran and said the artifact is not there
   "artifact-inconclusive", // ⚠️ the probe could not answer (threw) — NOT "absent"
 ]);
@@ -121,7 +165,17 @@ const hold = (reason, failureReason = null) =>
 //
 // Returns { eligible, reason, failureReason }. `reason` on an ineligible signal
 // is the same CONTRADICTION_REASONS string the full classifier would report.
-export function isRetractableFailure({ signal, failureReason: failureReasonOverride } = {}) {
+export function isRetractableFailure({
+  signal,
+  failureReason: failureReasonOverride,
+  // ⚠️ THREE-VALUED, and the third value is the point: a finite epoch-ms for when
+  // this signal was WRITTEN, or null/undefined for "I could not date it". A
+  // windowed reason cannot be proved to sit inside its window without a date, so
+  // an undatable signal HOLDS (`signal-age-unknown`) rather than defaulting to
+  // either edge. Defaulting to 0 would retract everything undatable; defaulting
+  // to now() would retract nothing and read as the feature working.
+  writtenAtMs,
+} = {}) {
   if (signal === null || signal === undefined || typeof signal !== "object" || Array.isArray(signal)) {
     return { eligible: false, reason: "unreadable-signal", failureReason: null };
   }
@@ -138,6 +192,16 @@ export function isRetractableFailure({ signal, failureReason: failureReasonOverr
   const reason = raw.trim();
   if (!INFRA_REASON_SET.has(reason)) {
     return { eligible: false, reason: "reason-not-infra-class", failureReason: reason };
+  }
+  // The ambiguity window. A reason with no window passes straight through.
+  const cutoff = INFRA_FAILURE_REASON_RULES[reason].ambiguousBeforeMs;
+  if (cutoff !== null) {
+    if (typeof writtenAtMs !== "number" || !Number.isFinite(writtenAtMs)) {
+      return { eligible: false, reason: "signal-age-unknown", failureReason: reason };
+    }
+    if (writtenAtMs >= cutoff) {
+      return { eligible: false, reason: "reason-window-expired", failureReason: reason };
+    }
   }
   return { eligible: true, reason: null, failureReason: reason };
 }
@@ -164,16 +228,28 @@ export function isRetractableFailure({ signal, failureReason: failureReasonOverr
 export function classifyArtifactContradiction({
   signal,
   failureReason: failureReasonOverride,
+  writtenAtMs,
   hasProbe,
+  probeIsLocal,
   artifactPresent,
 } = {}) {
-  const cheap = isRetractableFailure({ signal, failureReason: failureReasonOverride });
+  const cheap = isRetractableFailure({ signal, failureReason: failureReasonOverride, writtenAtMs });
   if (!cheap.eligible) return hold(cheap.reason, cheap.failureReason);
   const reason = cheap.failureReason;
 
   // Conjunct (b). Order matters: `no-probe` is a statement about the PHASE and
   // must be distinguishable from a probe that ran and found nothing.
   if (hasProbe !== true) return hold("no-probe", reason);
+  // ⛔ AND THE PROBE MUST ANSWER FROM DISK. `pr` and `monitor-merge` answer by
+  // calling the GitHub API, and this classifier is consulted from a scheduler
+  // TICK — so registering them would make every unmerged, fence-failed PR spend
+  // an authenticated request per tick, forever, on a signal the sweep is about
+  // to decline anyway. That is the poll loop AGENTS.md forbids, wearing a
+  // recovery's clothes. Those phases are not unreachable in principle; reaching
+  // them needs an EVENT (the PR's own merge event), not a sweep, and that is a
+  // separate ticket. Defaulting to `undefined` holds — a caller that does not
+  // answer this question does not get to probe.
+  if (probeIsLocal !== true) return hold("probe-not-local", reason);
   if (artifactPresent === true) {
     return Object.freeze({ retract: true, reason: "contradicted", failureReason: reason });
   }

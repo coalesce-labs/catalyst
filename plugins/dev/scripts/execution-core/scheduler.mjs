@@ -74,7 +74,7 @@ import { readVerifyVerdict } from "./work-done-probes.mjs";
 // CTL-2050: the artifact-contradiction retraction reuses the SAME work-done probes
 // the reclaim sweep uses — "did this phase produce its artifact" already has one
 // tested answer in this repo and a second one would drift from it.
-import { WORK_DONE_PROBES, hasProbe } from "./work-done-probes.mjs";
+import { WORK_DONE_PROBES, hasProbe, probeIsLocal } from "./work-done-probes.mjs";
 import { isRetractableFailure, classifyArtifactContradiction } from "./artifact-contradiction.mjs";
 import { explainAdvanceEvidence } from "./assertion-evidence.mjs"; // CTL-1789: from-phase terminal attribution
 import {
@@ -1396,6 +1396,10 @@ export function retractContradictedFailures(
     retract = defaultRetractContradictedFailure,
     probes = WORK_DONE_PROBES,
     probeExists = hasProbe,
+    // Is this phase's probe answerable from DISK? Seam over the registry that
+    // lives with the probes (work-done-probes.mjs), so adding a probe forces the
+    // question rather than silently inheriting "local".
+    probeIsLocalFn = probeIsLocal,
     // Per-ticket repoRoot resolution, resolved LAZILY and only for a signal that
     // already passed the cheap conjunct. The code-phase probes (implement,
     // research, plan, remediate) resolve the ticket worktree FROM repoRoot
@@ -1413,6 +1417,30 @@ export function retractContradictedFailures(
     resolveRepoRoot = (ticket) => {
       const team = teamOf(ticket);
       return team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
+    },
+    // WHEN was this signal written — the input the `cluster_fence_stale`
+    // ambiguity window is decided on (CTL-2050, Codex #3690 P1).
+    //
+    // A ladder, then the disk. `completedAt` is what phase-agent-emit-complete
+    // stamps on a terminal (`failed` IS terminal, so it is present on exactly
+    // this population); `updatedAt` is the reader's projection and the fallback
+    // for a signal some other writer produced. If neither parses, the FILE's
+    // mtime answers — it is the physical fact "when were these bytes last
+    // written", and a terminal signal is not rewritten afterwards.
+    //
+    // ⚠️ Returns null, never a guess, when nothing can be read. The classifier
+    // holds on null (`signal-age-unknown`). A seam so a test can drive the
+    // window from both edges without touching the clock or the filesystem.
+    signalWrittenAtMs = (sig) => {
+      for (const v of [sig?.raw?.completedAt, sig?.updatedAt, sig?.raw?.updatedAt]) {
+        const ms = typeof v === "number" ? v : typeof v === "string" ? Date.parse(v) : NaN;
+        if (Number.isFinite(ms)) return ms;
+      }
+      try {
+        return statSync(sig.signalPath).mtimeMs;
+      } catch {
+        return null;
+      }
     },
   } = {}
 ) {
@@ -1447,9 +1475,25 @@ export function retractContradictedFailures(
       // Same shape as the yield path, which spreads `signal.raw` for the same
       // reason.
       const failureReason = sig?.failureReason ?? sig?.raw?.failureReason;
+      // The ambiguity window's input, resolved for `failed` signals ONLY — at
+      // worst one statSync, and only on a signal that is already terminal-failed.
+      // Every other signal stops before it, so the steady-state sweep still costs
+      // one read per tick.
+      const writtenAtMs = String(sig?.status) === "failed" ? signalWrittenAtMs(sig) : null;
       // Conjunct (a) — free. The overwhelming majority of `failed` signals stop here.
-      const cheap = isRetractableFailure({ signal: sig, failureReason });
-      if (!cheap.eligible) continue;
+      const cheap = isRetractableFailure({ signal: sig, failureReason, writtenAtMs });
+      if (!cheap.eligible) {
+        // ⭐ Only the WINDOW holds are counted. The other cheap rejects are every
+        // non-failed signal in the orchDir — recording them would swamp the
+        // breakdown with the healthy fleet. `signal-age-unknown` and
+        // `reason-window-expired` are different: they are infra-class failures
+        // this sweep looked at and declined, and an operator asking "why did the
+        // retraction not fire?" is asking about exactly those two.
+        if (cheap.reason === "signal-age-unknown" || cheap.reason === "reason-window-expired") {
+          note(cheap.reason);
+        }
+        continue;
+      }
       eligible += 1;
 
       // PATH-DERIVED identity, exactly as the yield sweep supplies it: a signal
@@ -1473,11 +1517,28 @@ export function retractContradictedFailures(
       // inherit a probe whose failure is indistinguishable from its negative,
       // which is how this repo's false zeros get built.
       const registered = probeExists(phase);
+      // ⛔ Network-bound probes (`pr`, `monitor-merge`) are NOT run here, and the
+      // guard is on the CALL, not only on the classifier: a classifier-only
+      // guard would still have spent the `gh api` request before declining.
+      const local = probeIsLocalFn(phase);
       let artifactPresent = null;
-      if (registered) {
+      if (registered && local) {
         try {
           artifactPresent =
-            probes[phase]({ ticket, phase, orchDir, repoRoot: resolveRepoRoot(ticket) }) === true;
+            probes[phase]({
+              ticket,
+              phase,
+              orchDir,
+              repoRoot: resolveRepoRoot(ticket),
+              // CTL-2050 (Codex #3690 P2): the CANONICAL recorded path. Without
+              // it the artifact probes fall back to resolveWorktree's exact
+              // `refs/heads/<ticket>` match, which every real branch shape
+              // (`ryan/<ticket>-slug`) misses — so a valid research/plan/
+              // implement artifact would probe FALSE and the hold would read as
+              // a correct decline. Passing it is the difference between the
+              // sweep working and a check that cannot fire.
+              worktreePath: sig.worktreePath ?? sig.raw?.worktreePath ?? null,
+            }) === true;
         } catch (err) {
           artifactPresent = null;
           log.warn(
@@ -1490,7 +1551,9 @@ export function retractContradictedFailures(
       const verdict = classifyArtifactContradiction({
         signal: sig,
         failureReason,
+        writtenAtMs,
         hasProbe: registered,
+        probeIsLocal: local,
         artifactPresent,
       });
       if (!verdict.retract) {

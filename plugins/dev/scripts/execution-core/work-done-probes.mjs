@@ -542,6 +542,34 @@ export function hasProbe(phase) {
   return Object.prototype.hasOwnProperty.call(WORK_DONE_PROBES, phase);
 }
 
+// NETWORK_BOUND_PROBE_PHASES — CTL-2050 (Codex #3690 P1). The probes that answer
+// by calling the GitHub API rather than by reading disk.
+//
+// ⛔ WHY THIS IS A PROPERTY OF THE PROBE AND NOT OF ITS CALLER. The reclaim sweep
+// runs a probe once per DEAD worker — a cold, rare path where an authenticated
+// request is the right price. CTL-2050's retraction sweep runs every scheduler
+// TICK over every `failed` signal, and a `failed` signal is never cleared by the
+// probe answering false — so an unmerged, fence-failed PR would spend one
+// `gh api` call per tick, forever, and can synchronously occupy the tick until
+// its timeout. Same probe, same answer, opposite cost: the caller that polls has
+// to be able to ASK which kind it is, and the answer has to live where the probe
+// is registered so that adding a probe forces the question.
+//
+// Kept honest by `probe-locality` in artifact-contradiction.test.mjs: every
+// registered probe must be classified, and the classification must agree with
+// WORK_DONE_PROBE_DESCRIPTIONS (the descriptions name GitHub for exactly these).
+export const NETWORK_BOUND_PROBE_PHASES = Object.freeze(["pr", "monitor-merge"]);
+
+const NETWORK_BOUND_PROBE_SET = new Set(NETWORK_BOUND_PROBE_PHASES);
+
+// probeIsLocal — true only when the phase HAS a probe and that probe answers
+// from the filesystem (or from git, which is local). False for an unregistered
+// phase and for every network-bound probe, so a caller cannot get a permissive
+// answer out of a typo'd phase name.
+export function probeIsLocal(phase) {
+  return hasProbe(phase) && !NETWORK_BOUND_PROBE_SET.has(phase);
+}
+
 // CTL-664: human-readable description of what each work-done probe verifies.
 // Co-located with WORK_DONE_PROBES so adding a probe and describing it stay in
 // one place (the first probe-descriptions test enforces a description for every
