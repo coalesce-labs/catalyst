@@ -2101,6 +2101,34 @@ export function readDelegateFirstConfig(envObj = process.env) {
   return { mode };
 }
 
+// CTL-2000: steward-first escalation mode reader. Same three-layer ladder as
+// readDelegateFirstConfig — env (CATALYST_STEWARD_ESCALATION) > Layer-2
+// (.catalyst.stewardEscalation.mode) > code default. The ONE deliberate
+// deviation from delegate-first: the safe default is "shadow", not "off", so a
+// merge logs what it WOULD route (would-route-steward) without changing any
+// instrument's live behavior until an operator flips it to "enforce".
+export const STEWARD_ESCALATION_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2StewardEscalation() {
+  try {
+    const se = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.stewardEscalation;
+    return se && typeof se === "object" ? se : {};
+  } catch {
+    return {};
+  }
+}
+
+export function readStewardEscalationConfig(envObj = process.env) {
+  const l2 = readLayer2StewardEscalation();
+  const env = envObj?.CATALYST_STEWARD_ESCALATION;
+  let mode;
+  if (env === "0") mode = "off";
+  else if (typeof env === "string" && STEWARD_ESCALATION_MODES.has(env)) mode = env;
+  else if (typeof l2.mode === "string" && STEWARD_ESCALATION_MODES.has(l2.mode)) mode = l2.mode;
+  else mode = "shadow"; // conservative default: shadow-first, never act until flipped
+  return { mode };
+}
+
 // CTL-1847: cloud-feed dispatch-source mode reader. Same ladder as
 // readDelegateFirstConfig — env (CATALYST_CLOUD_FEED) > Layer-2
 // (.catalyst.cloudFeed.mode) > 'off'.
