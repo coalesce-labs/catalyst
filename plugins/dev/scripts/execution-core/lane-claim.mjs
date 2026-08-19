@@ -134,6 +134,42 @@ export function buildKeyRank() {
 }
 
 /**
+ * resolveStateMap — pure. Walks an ordered list of `[label, path]` candidates and returns the
+ * FIRST that yields a non-empty `catalyst.linear.stateMap`, with the label that produced it.
+ *
+ * ⛔ Exists because the first cut of this guard read ONE path and shipped INERT on half the
+ * fleet. Measured after that ship: `ranked_states: 0` on `mini`, meaning the guard could never
+ * refuse anything. `configPath` is `CATALYST_CONFIG_FILE || <cwd>/.catalyst/config.json`, and
+ * the two hosts differ — mini-2 pins the env var, mini does not and its daemon's cwd is HOME,
+ * where a `.catalyst/config.json` exists carrying no `catalyst.linear` at all. The read
+ * SUCCEEDED and returned nothing, which is worse than failing: a throw would have been visible.
+ *
+ * ⚠️ So an empty or absent map is treated as NO ANSWER and the walk continues. A file that
+ * parses is not evidence it is the right file.
+ *
+ * @param {Array<[string, string|null]>} candidates ordered [label, path] pairs
+ * @param {(path: string) => string} readFile throwing reader (node:fs readFileSync)
+ * @returns {{ stateMap: object|null, source: string }} source is "none" when nothing resolved
+ */
+export function resolveStateMap(candidates, readFile) {
+  for (const entry of candidates ?? []) {
+    const label = entry?.[0];
+    const path = entry?.[1];
+    if (typeof path !== "string" || path.length === 0) continue;
+    let map = null;
+    try {
+      map = JSON.parse(readFile(path))?.catalyst?.linear?.stateMap ?? null;
+    } catch {
+      continue; // unreadable/malformed → not an answer, keep walking
+    }
+    if (map && typeof map === "object" && !Array.isArray(map) && Object.keys(map).length > 0) {
+      return { stateMap: map, source: String(label ?? "?") };
+    }
+  }
+  return { stateMap: null, source: "none" };
+}
+
+/**
  * classifyLaneClaimWrite — pure. Decides whether the pipeline may write `targetState` over
  * `currentState`, given who last changed the ticket's state.
  *

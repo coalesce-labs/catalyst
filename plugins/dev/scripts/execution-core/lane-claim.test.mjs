@@ -6,6 +6,7 @@ import {
   buildKeyRank,
   classifyLaneClaimWrite,
   buildLaneClaimGuard,
+  resolveStateMap,
   VERDICT,
   REASON,
 } from "./lane-claim.mjs";
@@ -405,5 +406,98 @@ describe("⛔ the STALE-HISTORY decline (Codex P1) — the 18× latency gap betw
       rank: RANK,
     });
     expect(v.verdict).toBe(VERDICT.REFUSE);
+  });
+});
+
+describe("⛔ resolveStateMap — the ladder, written after this guard shipped INERT on half the fleet", () => {
+  // Measured on the fleet right after CTL-2068 first merged:
+  //   mini-2  ranked_states: 12   (armed)
+  //   mini    ranked_states: 0    (INSTALLED AND INERT — it could never refuse)
+  // The two hosts resolve `configPath` differently: mini-2 pins CATALYST_CONFIG_FILE at the
+  // plugin-source config, mini does not and its daemon's cwd is HOME, where a
+  // `.catalyst/config.json` exists carrying no `catalyst.linear` at all.
+  const reader = (files) => (path) => {
+    if (!(path in files)) throw new Error(`ENOENT ${path}`);
+    return files[path];
+  };
+  const MAP = { research: "Research", inProgress: "Implement" };
+
+  test("returns the first candidate that yields a map, and names its source", () => {
+    const r = resolveStateMap(
+      [
+        ["registry:CTL", "/repo/.catalyst/config.json"],
+        ["configPath", "/other.json"],
+      ],
+      reader({
+        "/repo/.catalyst/config.json": JSON.stringify({ catalyst: { linear: { stateMap: MAP } } }),
+      })
+    );
+    expect(r.stateMap).toEqual(MAP);
+    expect(r.source).toBe("registry:CTL");
+  });
+
+  test("⭐⭐ THE MINI CASE — a file that PARSES but has no catalyst.linear is skipped, not accepted", () => {
+    // This is the whole reason the ladder exists. The read SUCCEEDED and returned nothing,
+    // which is worse than failing: a throw would have been visible.
+    const r = resolveStateMap(
+      [
+        ["configPath", "/home/.catalyst/config.json"], // parses, no catalyst.linear — mini
+        ["registry:CTL", "/repo/.catalyst/config.json"],
+      ],
+      reader({
+        "/home/.catalyst/config.json": JSON.stringify({ catalyst: { orchestration: {} } }),
+        "/repo/.catalyst/config.json": JSON.stringify({ catalyst: { linear: { stateMap: MAP } } }),
+      })
+    );
+    expect(r.stateMap).toEqual(MAP);
+    expect(r.source).toBe("registry:CTL");
+  });
+
+  test("an EMPTY stateMap object is not an answer either — the walk continues", () => {
+    const r = resolveStateMap(
+      [
+        ["configPath", "/a.json"],
+        ["layer2", "/b.json"],
+      ],
+      reader({
+        "/a.json": JSON.stringify({ catalyst: { linear: { stateMap: {} } } }),
+        "/b.json": JSON.stringify({ catalyst: { linear: { stateMap: MAP } } }),
+      })
+    );
+    expect(r.source).toBe("layer2");
+  });
+
+  test("unreadable and malformed candidates are skipped without throwing", () => {
+    const r = resolveStateMap(
+      [
+        ["missing", "/nope.json"],
+        ["malformed", "/bad.json"],
+        ["good", "/g.json"],
+      ],
+      reader({
+        "/bad.json": "{not json",
+        "/g.json": JSON.stringify({ catalyst: { linear: { stateMap: MAP } } }),
+      })
+    );
+    expect(r.source).toBe("good");
+  });
+
+  test("nothing resolves → { null, 'none' }, which the install line reports as INERT", () => {
+    const r = resolveStateMap([["a", "/x.json"]], reader({}));
+    expect(r).toEqual({ stateMap: null, source: "none" });
+  });
+
+  test("⛔ null/empty/omitted candidate lists do not throw", () => {
+    expect(() => resolveStateMap()).not.toThrow();
+    expect(resolveStateMap().source).toBe("none");
+    expect(
+      resolveStateMap(
+        [
+          [null, null],
+          ["x", ""],
+        ],
+        reader({})
+      ).source
+    ).toBe("none");
   });
 });

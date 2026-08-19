@@ -173,7 +173,7 @@ import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
 import { setLaneClaimGuard } from "./lane-claim-install.mjs"; // CTL-2068
-import { buildLaneClaimGuard } from "./lane-claim.mjs"; // CTL-2068
+import { buildLaneClaimGuard, resolveStateMap } from "./lane-claim.mjs"; // CTL-2068
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
 import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
@@ -1400,12 +1400,40 @@ export function startDaemon({
     // Without a replica reader the guard has no history to consult and answers INCONCLUSIVE
     // for every ticket — allowing the write, and SAYING so in the log line below rather than
     // silently doing nothing.
+    //
+    // ⛔ THE STATE MAP IS RESOLVED THROUGH A LADDER, NOT FROM `configPath` ALONE.
+    // Measured on the fleet immediately after this guard first shipped: it installed on both
+    // minis and ranked ZERO states on `mini`, i.e. it could never refuse anything — an
+    // installed-but-inert guard, visible only because the install line logs the count.
+    //
+    // Cause: `configPath` is `CATALYST_CONFIG_FILE || <cwd>/.catalyst/config.json`, and the
+    // two hosts differ. mini-2 pins the env var at the plugin-source config; mini does not,
+    // and the daemon's cwd there is the HOME dir — where a `.catalyst/config.json` happens to
+    // exist carrying no `catalyst.linear` at all. So the read succeeded and returned nothing,
+    // which is worse than failing.
+    //
+    // The registry's repoRoots are tried FIRST because they are the authoritative source:
+    // `linear-transition.sh` — the thing that actually performs the write this guard judges —
+    // is invoked with `--config <repoRoot>/.catalyst/config.json`. Ranking off any other file
+    // risks judging against a map the writer does not use.
     let laneClaimStateMap = null;
+    let laneClaimStateMapSource = "none";
     try {
-      laneClaimStateMap =
-        JSON.parse(readFileSync(configPath, "utf8"))?.catalyst?.linear?.stateMap ?? null;
+      const candidates = [];
+      for (const proj of listProjectsFn() ?? []) {
+        if (proj?.repoRoot) {
+          candidates.push([
+            `registry:${proj.team ?? "?"}`,
+            resolve(proj.repoRoot, ".catalyst", "config.json"),
+          ]);
+        }
+      }
+      candidates.push(["configPath", configPath], ["layer2", layer2Path]);
+      const resolved = resolveStateMap(candidates, (path) => readFileSync(path, "utf8"));
+      laneClaimStateMap = resolved.stateMap;
+      laneClaimStateMapSource = resolved.source;
     } catch {
-      /* absent/malformed Layer-1 → no rank map → the guard abstains, never refuses */
+      /* a throwing registry must not block boot → the guard abstains, never refuses */
     }
     // Only an explicit "off" disables the dispatch veto — an unset or misspelled value leaves
     // it armed, because the failure this ticket is about is a claim quietly not being honoured.
@@ -1422,14 +1450,20 @@ export function startDaemon({
         dispatchVeto: laneClaimDispatchVeto,
       })
     );
-    log.info(
-      {
-        ranked_states: Object.keys(laneClaimStateMap ?? {}).length,
-        history_source: replicaReader ? "replica" : "none",
-        dispatch_veto: laneClaimDispatchVeto,
-      },
-      "ctl-2068: lane-claim guard installed"
-    );
+    // ⚠️ `ranked_states: 0` means the guard is INSTALLED AND INERT — it can never refuse.
+    // Logged at WARN in that case precisely because the healthy-looking INFO line is what let
+    // the inert install sit unnoticed on mini.
+    const laneClaimFields = {
+      ranked_states: Object.keys(laneClaimStateMap ?? {}).length,
+      state_map_source: laneClaimStateMapSource,
+      history_source: replicaReader ? "replica" : "none",
+      dispatch_veto: laneClaimDispatchVeto,
+    };
+    if (laneClaimFields.ranked_states === 0) {
+      log.warn(laneClaimFields, "ctl-2068: lane-claim guard installed but INERT — no state map resolved, it can never refuse");
+    } else {
+      log.info(laneClaimFields, "ctl-2068: lane-claim guard installed");
+    }
 
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
     // CTL-1654 (Codex P2 "gate the daemon before starting actuators"): resolve the
