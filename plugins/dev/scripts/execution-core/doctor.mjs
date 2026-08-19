@@ -34,6 +34,7 @@ import { STATUS, mkCheck } from "./doctor-status.mjs";
 import { checkInstallCompleteness } from "./install-completeness.mjs";
 // CTL-1936 AC5: the standing answer to "is this host write-exhausted".
 import { checkLinearWriteBudget } from "./write-budget-health.mjs";
+import { checkAgentToolsWritePath } from "./agent-tools-write-path-health.mjs";
 import { checkIndexServingRoot } from "./index-serving-root-health.mjs";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -185,6 +186,7 @@ export { STATUS, mkCheck } from "./doctor-status.mjs";
 export { checkInstallCompleteness };
 
 export { checkLinearWriteBudget };
+export { checkAgentToolsWritePath };
 export { checkIndexServingRoot };
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
@@ -6051,6 +6053,14 @@ export function checksForClass(nc, opts = {}) {
   // checkPeerUniqueness/checkCloudTokenEnv/checkWorkerLabels) emits is
   // STATUS.INFO — zero grade change (design §7/§9). PR3 flips this to graded.
   const secretContractCheck = () => checkSecretContract();
+  // CTL-2026 (Codex P2): class-INDEPENDENT, for the same reason deploymentModeCheck is.
+  // The out-of-tree agent tools are invoked by an operator's skills, and a `developer`
+  // node is defined a few lines below as one whose "operator's skills write
+  // transitions/comments to Linear" — so a developer is precisely where these tools run.
+  // Registering this only on the worker arm would have left the class that HOLDS the live
+  // copies reporting clean: measured on this laptop (node class `developer`), whose
+  // ~/catalyst/comms/tools/linear-reply.mjs is the drifted file this row exists to name.
+  const agentToolsWritePathCheck = () => checkAgentToolsWritePath();
 
   // Unrecognized explicit class → a single hard FAIL; grade no profile (CTL-1355).
   if (!nc.recognized) {
@@ -6116,6 +6126,7 @@ export function checksForClass(nc, opts = {}) {
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+      agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
       developerBotCredentials,
@@ -6161,6 +6172,7 @@ export function checksForClass(nc, opts = {}) {
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+      agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
@@ -6189,6 +6201,7 @@ export function checksForClass(nc, opts = {}) {
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+    agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),
