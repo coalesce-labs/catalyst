@@ -71,6 +71,11 @@ export { EMPTY_WORKER_DIR_GRACE_DEFAULT_MS };
 // budget) live here. deriveAdvancement stays pure — the impure reads happen in
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
+// CTL-2050: the artifact-contradiction retraction reuses the SAME work-done probes
+// the reclaim sweep uses — "did this phase produce its artifact" already has one
+// tested answer in this repo and a second one would drift from it.
+import { WORK_DONE_PROBES, hasProbe, probeIsLocal } from "./work-done-probes.mjs";
+import { isRetractableFailure, classifyArtifactContradiction } from "./artifact-contradiction.mjs";
 import { explainAdvanceEvidence } from "./assertion-evidence.mjs"; // CTL-1789: from-phase terminal attribution
 import {
   computeAdvanceEdgeKey,
@@ -198,6 +203,7 @@ import { emitReapIntent } from "./reap-intent.mjs";
 // derivable from the unified event log.
 import {
   reclaimDeadWorkIfPossible as defaultReclaimDeadWork,
+  defaultRetractContradictedFailure, // CTL-2050
   reclaimDeadHostWork,
   // CTL-1191: surviving-roster primitives so the recovery passes (unstuck /
   // reasoning / diagnostician) HRW-gate over the SURVIVING roster — a dead
@@ -1361,6 +1367,224 @@ export function expireYieldedSignals(
     }
   }
   return { evaluated, ok: true };
+}
+
+// retractContradictedFailures — CTL-2050. Re-derive `done` for any phase whose
+// signal says `failed` for an EMIT-TIME INFRASTRUCTURE reason while the phase's
+// own artifact proves the work landed.
+//
+// ⛔ DELIBERATELY NOT GATED ON `inFlightTickets` — that predicate is gate 2 of
+// the deadlock. isTicketInFlight returns FALSE the moment any live phase reads
+// `failed`, so every ticket this sweep exists to release is, by construction,
+// already outside the in-flight set the reclaim loop below iterates. Putting the
+// call behind that filter would be a bound whose enforcement point cannot fire —
+// the same shape as the yield deadline that lived only in the runner (CTL-1854).
+//
+// Ordering inside the loop is load-bearing for COST, not just for correctness:
+// the cheap conjunct (status + reason, no I/O) runs first, and only a signal
+// that passes it gets a WORK_DONE_PROBE — two of which (`pr`, `monitor-merge`)
+// spend a GitHub API call. In steady state the eligible population is empty and
+// this sweep costs one signal read per tick.
+//
+// Fail-open per signal: one bad signal must never wedge the tick or stop the
+// remaining retractions. Never silent — a swallowed read failure would disable
+// the whole sweep exactly the way the TDZ ReferenceError disabled yield expiry.
+export function retractContradictedFailures(
+  orchDir,
+  {
+    readAll = readAllPhaseSignals,
+    retract = defaultRetractContradictedFailure,
+    probes = WORK_DONE_PROBES,
+    probeExists = hasProbe,
+    // Is this phase's probe answerable from DISK? Seam over the registry that
+    // lives with the probes (work-done-probes.mjs), so adding a probe forces the
+    // question rather than silently inheriting "local".
+    probeIsLocalFn = probeIsLocal,
+    // Per-ticket repoRoot resolution, resolved LAZILY and only for a signal that
+    // already passed the cheap conjunct. The code-phase probes (implement,
+    // research, plan, remediate) resolve the ticket worktree FROM repoRoot
+    // (work-done-probes.mjs resolveWorktree) and silently return 0/false without
+    // it — so passing `undefined` here would make those probes answer
+    // "artifact-absent" for every ticket, which reads as a correct hold and is
+    // really a check that cannot fire. Same resolution the hung-worker watchdog
+    // and the reclaim sweep use.
+    //
+    // ⚠️ It is a SEAM, not an inline expression: `repoRoot` has no binding at the
+    // schedulerTick call site (the only other one in this file is block-scoped
+    // inside the watchdog loop), and reaching for it there would have thrown a
+    // ReferenceError on every tick — the same shape as the TDZ throw that
+    // disabled yield expiry, which `node --check` cannot see.
+    resolveRepoRoot = (ticket) => {
+      const team = teamOf(ticket);
+      return team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
+    },
+    // WHEN was this signal written — the input the `cluster_fence_stale`
+    // ambiguity window is decided on (CTL-2050, Codex #3690 P1).
+    //
+    // A ladder, then the disk. `completedAt` is what phase-agent-emit-complete
+    // stamps on a terminal (`failed` IS terminal, so it is present on exactly
+    // this population); `updatedAt` is the reader's projection and the fallback
+    // for a signal some other writer produced. If neither parses, the FILE's
+    // mtime answers — it is the physical fact "when were these bytes last
+    // written", and a terminal signal is not rewritten afterwards.
+    //
+    // ⚠️ Returns null, never a guess, when nothing can be read. The classifier
+    // holds on null (`signal-age-unknown`). A seam so a test can drive the
+    // window from both edges without touching the clock or the filesystem.
+    signalWrittenAtMs = (sig) => {
+      for (const v of [sig?.raw?.completedAt, sig?.updatedAt, sig?.raw?.updatedAt]) {
+        const ms = typeof v === "number" ? v : typeof v === "string" ? Date.parse(v) : NaN;
+        if (Number.isFinite(ms)) return ms;
+      }
+      try {
+        return statSync(sig.signalPath).mtimeMs;
+      } catch {
+        return null;
+      }
+    },
+  } = {}
+) {
+  let eligible = 0;
+  let retracted = 0;
+  // ⭐ WHY a per-reason breakdown and not a bare hold count: "it held" is not an
+  // answer an operator can act on. `artifact-absent` (the probe looked and the
+  // artifact is not there — a genuine fence bow-out) and `artifact-inconclusive`
+  // (the probe could not answer) are the same number and completely different
+  // facts, and collapsing them is how a detector stops being able to fail. Same
+  // reason the classifier is three-valued at all.
+  const heldReasons = Object.create(null);
+  const note = (r) => { heldReasons[r] = (heldReasons[r] ?? 0) + 1; };
+  let signals;
+  try {
+    signals = readAll(orchDir);
+  } catch (err) {
+    log.warn(
+      { orchDir, err: err?.message },
+      "retractContradictedFailures: signal read failed — no failure evaluated this tick (CTL-2050)"
+    );
+    return { eligible: 0, retracted: 0, heldReasons, ok: false };
+  }
+  for (const sig of signals ?? []) {
+    try {
+      // ⛔ THE READER'S VIEW IS NOT THE RECORD. readAllPhaseSignals projects a
+      // FIXED field list (ticket/phase/status/liveness/updatedAt/pr/worktreePath/
+      // host) and puts everything else — `failureReason` included — under `.raw`.
+      // Classifying `sig` alone therefore saw NO reason on any signal, answered
+      // `reason-absent` for every one, and the whole sweep was inert while its
+      // unit tests stayed green. The e2e over the real reader is what caught it.
+      // Same shape as the yield path, which spreads `signal.raw` for the same
+      // reason.
+      const failureReason = sig?.failureReason ?? sig?.raw?.failureReason;
+      // The ambiguity window's input, resolved for `failed` signals ONLY — at
+      // worst one statSync, and only on a signal that is already terminal-failed.
+      // Every other signal stops before it, so the steady-state sweep still costs
+      // one read per tick.
+      const writtenAtMs = String(sig?.status) === "failed" ? signalWrittenAtMs(sig) : null;
+      // Conjunct (a) — free. The overwhelming majority of `failed` signals stop here.
+      const cheap = isRetractableFailure({ signal: sig, failureReason, writtenAtMs });
+      if (!cheap.eligible) {
+        // ⭐ Only the WINDOW holds are counted. The other cheap rejects are every
+        // non-failed signal in the orchDir — recording them would swamp the
+        // breakdown with the healthy fleet. `signal-age-unknown` and
+        // `reason-window-expired` are different: they are infra-class failures
+        // this sweep looked at and declined, and an operator asking "why did the
+        // retraction not fire?" is asking about exactly those two.
+        if (cheap.reason === "signal-age-unknown" || cheap.reason === "reason-window-expired") {
+          note(cheap.reason);
+        }
+        continue;
+      }
+      eligible += 1;
+
+      // PATH-DERIVED identity, exactly as the yield sweep supplies it: a signal
+      // whose JSON omits ticket/phase would otherwise give the writer no target
+      // and the retraction would silently no-op forever.
+      const _parts = String(sig.signalPath ?? "").split("/");
+      const _file = _parts[_parts.length - 1] ?? "";
+      sig.derivedTicket = _parts[_parts.length - 2] ?? null;
+      sig.derivedPhase =
+        _file.startsWith("phase-") && _file.endsWith(".json")
+          ? _file.slice("phase-".length, -".json".length)
+          : null;
+      const ticket =
+        typeof sig.ticket === "string" && sig.ticket ? sig.ticket : sig.derivedTicket;
+      const phase = typeof sig.phase === "string" && sig.phase ? sig.phase : sig.derivedPhase;
+
+      // Conjunct (b) — the artifact. ⚠️ THREE-VALUED: `null` means the probe
+      // could not answer, and the classifier must see that as inconclusive
+      // rather than as "the artifact is absent". Collapsing a throw into `false`
+      // would be safe here by luck (both hold) — but the next reader would
+      // inherit a probe whose failure is indistinguishable from its negative,
+      // which is how this repo's false zeros get built.
+      const registered = probeExists(phase);
+      // ⛔ Network-bound probes (`pr`, `monitor-merge`) are NOT run here, and the
+      // guard is on the CALL, not only on the classifier: a classifier-only
+      // guard would still have spent the `gh api` request before declining.
+      const local = probeIsLocalFn(phase);
+      let artifactPresent = null;
+      if (registered && local) {
+        try {
+          artifactPresent =
+            probes[phase]({
+              ticket,
+              phase,
+              orchDir,
+              repoRoot: resolveRepoRoot(ticket),
+              // CTL-2050 (Codex #3690 P2): the CANONICAL recorded path. Without
+              // it the artifact probes fall back to resolveWorktree's exact
+              // `refs/heads/<ticket>` match, which every real branch shape
+              // (`ryan/<ticket>-slug`) misses — so a valid research/plan/
+              // implement artifact would probe FALSE and the hold would read as
+              // a correct decline. Passing it is the difference between the
+              // sweep working and a check that cannot fire.
+              worktreePath: sig.worktreePath ?? sig.raw?.worktreePath ?? null,
+            }) === true;
+        } catch (err) {
+          artifactPresent = null;
+          log.warn(
+            { ticket, phase, err: err?.message },
+            "retractContradictedFailures: artifact probe threw — inconclusive, holding (CTL-2050)"
+          );
+        }
+      }
+
+      const verdict = classifyArtifactContradiction({
+        signal: sig,
+        failureReason,
+        writtenAtMs,
+        hasProbe: registered,
+        probeIsLocal: local,
+        artifactPresent,
+      });
+      if (!verdict.retract) {
+        note(verdict.reason);
+        log.debug(
+          { ticket, phase, reason: verdict.reason, failureReason: verdict.failureReason },
+          "retractContradictedFailures: holding (CTL-2050)"
+        );
+        continue;
+      }
+      const wrote = retract(orchDir, sig, verdict);
+      if (wrote) retracted += 1;
+      else note("write-declined");
+      // Report what HAPPENED, not what was attempted: a refused or failed write
+      // that logged success would be a log that cannot be wrong about the thing
+      // it reports (the CTL-1854 round-fix, on a new path).
+      log.warn(
+        { ticket, phase, failureReason: verdict.failureReason, wrote },
+        wrote
+          ? "retractContradictedFailures: artifact contradicts an infra failure — re-derived done, FABRICATED (CTL-2050)"
+          : "retractContradictedFailures: retraction declined at the write (signal changed on disk) (CTL-2050)"
+      );
+    } catch (err) {
+      log.warn(
+        { ticket: sig?.ticket, phase: sig?.phase, signalPath: sig?.signalPath, err: err?.message },
+        "retractContradictedFailures: evaluation threw for one signal (CTL-2050)"
+      );
+      note("evaluation-threw");
+    }
+  }
+  return { eligible, retracted, heldReasons, ok: true };
 }
 
 // CTL-1323: the set of REAL pipeline phases — a signal whose phase is one of these
@@ -6195,6 +6419,13 @@ export function schedulerTick(
   // CTL-1854: expire yields BEFORE (and independently of) the reclaim loop below.
   // Two reasons, both learned the hard way — see expireYieldedSignals.
   expireYieldedSignals(orchDir, { reclaim: reclaimDeadWork });
+
+  // CTL-2050: retract failures an artifact contradicts, BEFORE the reclaim loop
+  // and — like the yield expiry — independently of `inFlightTickets`. A `failed`
+  // signal makes isTicketInFlight false, so these tickets are precisely the ones
+  // the loop below never sees. Running it here also means a retraction landed
+  // this tick is visible to the SAME tick's advancement sweep.
+  retractContradictedFailures(orchDir);
 
   for (const sig of readWorkerSignals(orchDir)) {
     if (!inFlightTickets.has(sig.ticket)) continue;
