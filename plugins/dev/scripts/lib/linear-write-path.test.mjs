@@ -159,3 +159,38 @@ describe("⛔ the eyes-clear must never fail a reply that already posted", () =>
     expect(eyesClearBlock().length).toBeGreaterThan(200);
   });
 });
+
+// ── CTL-2026: the branch the TOOLS restate when this very file is unreachable ────────
+//
+// `linear-ack.mjs` / `linear-reply.mjs` guard the import of this module (an out-of-tree
+// copy cannot resolve it) and, in the catch, cannot then ASK it what to do. They carry a
+// four-line inline fallback instead. That fallback is not a second dialect — it restates
+// exactly one branch of the function below, the `proxyReady:false` column — but a
+// restatement drifts the moment this file changes and nothing tells the author.
+//
+// So this pins the property the fallback depends on, over the WHOLE mode set rather than
+// the three modes someone happened to think of: with no transport, refusal is reserved to
+// `enforce` and nothing else. If that ever stops being true, this fails and names the two
+// files that must change with it.
+describe("the unreachable-leaf fallback (linear-ack.mjs / linear-reply.mjs)", () => {
+  test("with no transport, `refuse` is reserved to enforce — every other mode writes direct", () => {
+    for (const mode of WRITE_PROXY_MODES) {
+      const d = decideWritePath({ mode, proxyReady: false, unavailableReason: "modules unreachable" });
+      expect(`${mode} -> ${d.action}`).toBe(`${mode} -> ${mode === "enforce" ? "refuse" : "direct"}`);
+    }
+  });
+
+  test("an unrecognised mode is not a licence to refuse (it degrades to off, i.e. direct)", () => {
+    // The tools' fallback compares against the literal "enforce"; anything else must be
+    // safe to treat as direct, or a typo'd env var would silently stop every reply.
+    for (const mode of ["", "ENFORCE", "on", "1", undefined, null]) {
+      expect(decideWritePath({ mode, proxyReady: false }).action).toBe("direct");
+    }
+  });
+
+  test("with no transport, nothing is ever OBSERVED — the fallback has no proxy to observe with", () => {
+    for (const mode of WRITE_PROXY_MODES) {
+      expect(decideWritePath({ mode, proxyReady: false }).observe).toBe(false);
+    }
+  });
+});

@@ -25,14 +25,39 @@ const humans=d.issue.comments.nodes.filter(n=>n.user&&!n.botActor&&n.user.id===(
 // routing would silently never engage. A gate that cannot fire is worse than no gate,
 // because it reports the same thing as a working one. Construction mirrors
 // `cluster-claim.mjs`'s defaultTransport, which had to solve this same problem.
+//
+// ⛔ CTL-2026 — THE LEAF IMPORT MUST BE INSIDE THIS GUARD, AND IT WAS NOT.
+// The catch below exists BECAUSE an out-of-tree copy cannot resolve these imports. The
+// first cut then imported `./lib/linear-write-path.mjs` on its own line, OUTSIDE the try —
+// so a copy of this file with no sibling directories died with an unhandled module
+// resolution error before it could take the very branch written to handle that case.
+// Measured 2026-08-18 by copying this file alone into an empty directory and running it:
+// `Cannot find module '<dir>/lib/linear-write-path.mjs'`, no reaction attempted, no reason
+// printed. `~/catalyst/comms/tools/` is exactly that shape, and CTL-2026(b)'s announced
+// sync step is what would have put this file there. A guard whose result is consumed
+// outside the guard is not a guard.
+//
+// ⛔ AND THE MODE MUST BE READ BEFORE THE GUARD, NOT INSIDE IT.
+// `proxyMode` was assigned from `readLinearWriteProxyConfig` INSIDE the try, so an
+// unreachable-modules host fell through with the initialiser `"off"` still in place —
+// i.e. the one state in which the refusal matters was also the one state that computed
+// "no proxy configured". The env read below is the only mode source that survives the
+// modules being gone. It is deliberately WEAKER than the real ladder (env only, no
+// Layer-2), so it reports `null` = "could not confirm" rather than claiming `"off"`.
+const envMode = ["off", "shadow", "enforce"].includes(process.env.CATALYST_LINEAR_WRITE_PROXY)
+  ? process.env.CATALYST_LINEAR_WRITE_PROXY
+  : null;
 let proxyMode = "off";
 let proxy = null;
 let proxyUnavailable = null; // a REASON, never a silent null — see below
+let decideWritePath = null;
 try {
-  const [{ createLinearWriteProxy }, { readLinearWriteProxyConfig }] = await Promise.all([
+  const [{ createLinearWriteProxy }, { readLinearWriteProxyConfig }, writePath] = await Promise.all([
     import("./execution-core/linear-write-proxy.mjs"),
     import("./execution-core/config.mjs"),
+    import("./lib/linear-write-path.mjs"),
   ]);
+  decideWritePath = writePath.decideWritePath;
   const cfg = readLinearWriteProxyConfig(process.env);
   proxyMode = cfg.mode ?? "off";
   if (proxyMode === "shadow" || proxyMode === "enforce") {
@@ -46,6 +71,7 @@ try {
   // to "direct" forever while looking like a routed tool. So the reason is kept and, under
   // enforce, it REFUSES rather than quietly writing direct.
   proxyUnavailable = `proxy modules unreachable: ${err?.message ?? err}`;
+  proxyMode = envMode ?? "off";
 }
 
 const viaProxy = async (mode) => {
@@ -74,8 +100,21 @@ const directAdd = async () => {
 };
 
 const mode = remove ? "remove" : "add";
-const { decideWritePath } = await import("./lib/linear-write-path.mjs");
-const plan = decideWritePath({ mode: proxyMode, proxyReady: proxy != null, unavailableReason: proxyUnavailable });
+// ⛔ We cannot ask the leaf what to do about the leaf being missing. This restates its
+// STRICTEST branch and nothing else — with no transport, `enforce` REFUSES and every other
+// mode writes direct — and it is pinned against the real function by "the unreachable-leaf
+// fallback" in lib/linear-write-path.test.mjs, which fails if that branch ever changes.
+// An env that never named a mode is reported as UNCONFIRMED rather than as `off`: this
+// degraded path cannot read Layer-2, so "no mode here" is not evidence of "no mode".
+const plan = decideWritePath
+  ? decideWritePath({ mode: proxyMode, proxyReady: proxy != null, unavailableReason: proxyUnavailable })
+  : proxyMode === "enforce"
+    ? { action: "refuse", observe: false, reason: proxyUnavailable ?? "proxy unavailable under enforce" }
+    : {
+        action: "direct",
+        observe: false,
+        reason: `${proxyUnavailable ?? "write-path leaf unreachable"}${envMode ? "" : "; CATALYST_LINEAR_WRITE_PROXY unset, so the mode is UNCONFIRMED (Layer-2 unreadable without the modules)"}`,
+      };
 
 if (plan.action === "refuse") {
   console.error(`linear-ack: REFUSED — mode=${proxyMode} but the proxy is unavailable (${plan.reason})`);
