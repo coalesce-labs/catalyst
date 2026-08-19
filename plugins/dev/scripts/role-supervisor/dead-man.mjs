@@ -17,9 +17,47 @@ import { fileURLToPath } from "node:url";
 import { deadManShouldFire, DEAD_MAN_AFTER_MS } from "./backstop.mjs";
 import { roleDir, catalystDir } from "./paths.mjs";
 import { readHeartbeat } from "./state.mjs";
+import { TARGET } from "../execution-core/escalation-router.mjs";
 
 const LATCH_NAME = ".dead-man-latch.json";
 const latchPath = (env) => join(catalystDir(env), "roles", LATCH_NAME);
+
+// The out-of-fleet backstops post to the concierge channel themselves; their own
+// posts must NEVER count as a "channel turn" (concierge life) or the alarm would
+// re-arm off its own page and fire in a loop. A genuine turn is anyone else.
+const OUT_OF_FLEET_AUTHORS = new Set(["dead-man", "holding-sentinel", "stale-pr-rescue", "quiet-fleet"]);
+
+// The "no channel turn" signal, read from a POPULATED source: the concierge
+// comms channel itself (catalyst-comms JSONL). heartbeat.last_turn_ts is NOT that
+// source — `beat()` defaults it to null and nothing supplies it, so reading it
+// left `turnDead` permanently true (the alarm paged on the heartbeat alone and
+// its latch could never re-arm). Returns the epoch-ms of the most recent GENUINE
+// turn (a message not authored by an out-of-fleet backstop), or null when the
+// channel is absent/empty/unreadable — absence is not evidence of life.
+function defaultLastChannelTurnMs({ env = process.env } = {}) {
+  try {
+    const channel = env.CATALYST_CONCIERGE_CHANNEL || "concierge";
+    const file = join(catalystDir(env), "comms", "channels", `${channel}.jsonl`);
+    const text = readFileSync(file, "utf8");
+    let latest = null;
+    for (const line of text.split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      let msg;
+      try {
+        msg = JSON.parse(s);
+      } catch {
+        continue; // a torn/partial append is not a turn
+      }
+      if (OUT_OF_FLEET_AUTHORS.has(msg?.from)) continue;
+      const ms = typeof msg?.ts === "string" ? Date.parse(msg.ts) : typeof msg?.ts === "number" ? msg.ts : NaN;
+      if (Number.isFinite(ms) && (latest === null || ms > latest)) latest = ms;
+    }
+    return latest;
+  } catch {
+    return null;
+  }
+}
 
 function readLatch(env) {
   try {
@@ -97,11 +135,15 @@ export function runDeadManOnce({
   env = process.env,
   pushHuman = defaultPushHuman,
   postChannel = postOnChannel,
+  lastChannelTurnMs = defaultLastChannelTurnMs,
 } = {}) {
   const role = conciergeRole(env);
   const hb = safeHeartbeat(role, env);
   const conciergeHbAgeMs = typeof hb?.ts === "number" ? now - hb.ts : null;
-  const lastChannelTurnAgeMs = typeof hb?.last_turn_ts === "number" ? now - hb.last_turn_ts : null;
+  // Read the channel turn from the POPULATED source (the comms channel), not the
+  // never-written heartbeat.last_turn_ts. See defaultLastChannelTurnMs above.
+  const turnTs = lastChannelTurnMs({ env });
+  const lastChannelTurnAgeMs = typeof turnTs === "number" ? now - turnTs : null;
 
   const latch = readLatch(env);
   const alreadyPushed = latch?.pushed === true;
@@ -119,16 +161,33 @@ export function runDeadManOnce({
     return { fired: false, recovered: false, conciergeHbAgeMs, lastChannelTurnAgeMs, dry_run: dryRun, checked_at: now };
   }
 
+  // The human is reached as an ASK, not a bare alert (routing.md: "You reach the
+  // human only as an ask, with Options and a Default"; "a push is for a
+  // decision"). The dead-man is the sanctioned out-of-fleet exception to
+  // "escalate inward" — every inward rung (steward, concierge) is by definition
+  // down when it fires ("you cannot be the thing that notices you are dead",
+  // routing.md L43-46), so it resolves straight to the ladder's terminal rung,
+  // TARGET.ASK — the human, framed as a decision, never an ad-hoc page.
+  const mins = Math.round(DEAD_MAN_AFTER_MS / 60_000);
   const body =
-    `The concierge (\`${role}\`) has no heartbeat and no channel turn for >= ${Math.round(DEAD_MAN_AFTER_MS / 60_000)} minutes. ` +
-    `The coordination fleet may be down (529 wave). A human is needed to relaunch it.`;
+    `[ask · ${TARGET.ASK}] Dead-man: the concierge (\`${role}\`) has had no heartbeat AND no channel turn for >= ${mins} minutes. ` +
+    `The coordination fleet may be down (529 wave).\n` +
+    `Decision needed:\n` +
+    `  - Options: (a) relaunch the coordination fleet; (b) investigate before relaunch.\n` +
+    `  - Default if no reply: (a) relaunch.`;
 
   if (dryRun) {
-    return { fired: true, recovered: false, conciergeHbAgeMs, lastChannelTurnAgeMs, would: "push-human+post-channel", dry_run: true, checked_at: now };
+    return { fired: true, recovered: false, conciergeHbAgeMs, lastChannelTurnAgeMs, target: TARGET.ASK, would: "ask-human+post-channel", dry_run: true, checked_at: now };
   }
 
   const pushed = pushHuman(body, { env });
   const posted = postChannel(body, { env });
-  writeLatchAtomic({ pushed: true, push_ok: pushed, post_ok: posted, fired_at: now }, env);
-  return { fired: true, recovered: false, pushed, posted, conciergeHbAgeMs, lastChannelTurnAgeMs, dry_run: false, checked_at: now };
+  // Latch the episode as delivered ONLY when a sink actually accepted the alarm.
+  // If BOTH fail (unwritable FS + catalyst-comms absent — the very fleet-wide
+  // outage this backstop exists to surface), persist pushed:false so the NEXT
+  // tick RE-FIRES rather than treating an undelivered alarm as delivered and
+  // going silent forever (Codex P1).
+  const delivered = pushed || posted;
+  writeLatchAtomic({ pushed: delivered, push_ok: pushed, post_ok: posted, fired_at: now }, env);
+  return { fired: true, delivered, recovered: false, pushed, posted, target: TARGET.ASK, conciergeHbAgeMs, lastChannelTurnAgeMs, dry_run: false, checked_at: now };
 }

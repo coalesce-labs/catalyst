@@ -88,6 +88,15 @@ export async function superviseRole(role, {
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   log = console.log,
   maxIterations = Infinity,
+  // How often to refresh the heartbeat WHILE a session runs. A productive SDK
+  // session is intentionally long-lived (15m+), and the supervisor writes no
+  // heartbeat between the pre-session beat and the post-session beat — so a
+  // healthy long session's boundary heartbeat ages past the holding-sentinel's
+  // 15m silence threshold and past classifyHeartbeat's 10m SILENT mark, and a
+  // working steward gets kickstarted. Refreshing under those thresholds keeps a
+  // live session legible as live. 0 disables (tests whose fake session resolves
+  // instantly never trip it either way — the timer is cleared before it fires).
+  livenessRefreshMs = 5 * 60 * 1000,
 } = {}) {
   const manifest = readManifest(role, env);
   if (!manifest) throw new Error(`role-supervisor: no manifest for role '${role}' at ${roleFiles(role, env).manifest}`);
@@ -112,6 +121,25 @@ export async function superviseRole(role, {
 
       beat(role, { now: now(), sessionId: resumeSessionId, scope: manifest.scope, state: "running" }, env);
 
+      // Keep the heartbeat fresh for the LIFE of the session, not just at its
+      // boundary — otherwise a healthy long-running role reads as silent and its
+      // own backstop restarts it (Codex P1). Runs off the event loop, unref'd so
+      // it never keeps the process alive, and cleared in `finally` so a session
+      // that resolves before the first tick never writes an extra beat. A crashed
+      // process stops the event loop and thus stops beating, so a genuinely dead
+      // role is still detected and restarted.
+      let refreshTimer = null;
+      if (livenessRefreshMs > 0 && typeof setInterval === "function") {
+        refreshTimer = setInterval(() => {
+          try {
+            beat(role, { now: now(), sessionId: resumeSessionId, scope: manifest.scope, state: "running" }, env);
+          } catch {
+            /* fail-open: a failed liveness refresh must never crash the supervisor */
+          }
+        }, livenessRefreshMs);
+        if (refreshTimer && typeof refreshTimer.unref === "function") refreshTimer.unref();
+      }
+
       let result;
       try {
         result = await runSession({ prompt, cwd: manifest.cwd, env, resumeSessionId });
@@ -119,6 +147,8 @@ export async function superviseRole(role, {
         // A thrown error is a crash: classify it the same way as a bad exit so
         // an overload thrown rather than returned still takes the same ladder.
         result = { exitCode: 1, thrown: err, overloaded: false };
+      } finally {
+        if (refreshTimer) clearInterval(refreshTimer);
       }
 
       if (result?.sessionId) writeSession(role, result.sessionId, env);

@@ -31,7 +31,7 @@ import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs
 // today (free-text scopes) and lights up when CTL-1974 populates scopeKeys —
 // wired here so no call-site edit is needed then. listRoles/readManifest are
 // node:*-only leaves (agent-liveness/state/paths), safe under bun.
-import { nextEscalationTarget, resolveSteward as resolveStewardCore } from "./escalation-router.mjs";
+import { nextEscalationTarget, resolveSteward as resolveStewardCore, TARGET } from "./escalation-router.mjs";
 import { listRoles } from "../role-supervisor/doctor.mjs";
 import { readManifest } from "../role-supervisor/state.mjs";
 // Default Linear transport for the escalation path. The daemon does not thread
@@ -358,17 +358,24 @@ export function defaultResolveSteward(scope) {
   }
 }
 
-// CTL-2000: page the concierge on the shared channel (never a human). Fail-open
-// — a failed post must not turn into a silent drop. Best-effort spawn, short
-// timeout; the returned bool is advisory.
-export function defaultPostConciergePage({ ticket, detail, env = process.env } = {}) {
+// CTL-2000: page the resolved ladder rung on the shared channel (never a human).
+// Honors `target` (from nextEscalationTarget): a STEWARD route is delivered TO
+// the resolved steward, not to the concierge — otherwise the emitted event and
+// return value claim `routed-to-steward` while the message silently goes to the
+// concierge, skipping the mandated steward rung (Codex P2). Falls back to the
+// concierge when there is no steward (today's only reachable case until CTL-1974
+// populates `scopeKeys`). Fail-open — a failed post must not turn into a silent
+// drop; best-effort spawn, short timeout; the returned bool is advisory.
+export function defaultPostConciergePage({ ticket, detail, target, env = process.env } = {}) {
   try {
     const channel = env?.CATALYST_CONCIERGE_CHANNEL || "concierge";
-    const to = env?.CATALYST_CONCIERGE_ID || "concierge";
+    const toSteward = target?.target === TARGET.STEWARD && target?.steward?.role ? String(target.steward.role) : null;
+    const to = toSteward ?? env?.CATALYST_CONCIERGE_ID ?? "concierge";
+    const rung = toSteward ? `steward (${to})` : "the steward";
     const comms = fileURLToPath(new URL("../catalyst-comms", import.meta.url));
     const body =
       `instrument/stale-pr-rescue: ${ticket} could not be rescued (${detail?.reason ?? "unresolvable conflict"}` +
-      `${detail?.prNumber ? `, PR #${detail.prNumber}` : ""}) — page the steward / decide ask-vs-relaunch.`;
+      `${detail?.prNumber ? `, PR #${detail.prNumber}` : ""}) — ${toSteward ? "your scope" : `page ${rung}`} / decide ask-vs-relaunch.`;
     const res = spawnSync(comms, ["send", channel, body, "--as", "stale-pr-rescue", "--to", to, "--type", "attention"], {
       encoding: "utf8",
       timeout: 15_000,

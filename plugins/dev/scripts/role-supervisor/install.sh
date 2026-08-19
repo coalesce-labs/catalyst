@@ -71,6 +71,14 @@ if [[ -n "$FLEET_UNIT" ]]; then
   UNIT_CWD="${CWD:-$CWD_DEFAULT}"
 
   if [[ $UNINSTALL -eq 1 ]]; then
+    # --dry-run must only PRINT — it must not bootout or remove the plist (the
+    # advertised guarantee), and dry-run also skips the launchd-domain guard.
+    if [[ $DRY_RUN -eq 1 ]]; then
+      echo "role-supervisor: [dry-run] would uninstall ${UNIT_LABEL}"
+      echo "  would: launchctl bootout gui/$(id -u)/${UNIT_LABEL}"
+      echo "  would: rm -f ${UNIT_DEST}"
+      exit 0
+    fi
     launchctl bootout "gui/$(id -u)/${UNIT_LABEL}" 2>/dev/null || true
     rm -f "$UNIT_DEST"
     echo "role-supervisor: uninstalled ${UNIT_LABEL}"
@@ -113,6 +121,14 @@ LABEL="com.catalyst.role.${ROLE}"
 DEST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 
 if [[ $UNINSTALL -eq 1 ]]; then
+  # --dry-run must only PRINT — same non-destructive guarantee as the fleet-unit
+  # path above (and dry-run skips the launchd-domain guard).
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "role-supervisor: [dry-run] would uninstall ${LABEL}"
+    echo "  would: launchctl bootout gui/$(id -u)/${LABEL}"
+    echo "  would: rm -f ${DEST}"
+    exit 0
+  fi
   launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
   rm -f "$DEST"
   echo "role-supervisor: uninstalled ${LABEL}"

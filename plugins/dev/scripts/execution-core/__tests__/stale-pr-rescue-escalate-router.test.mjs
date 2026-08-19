@@ -107,6 +107,7 @@ test("enforce emits an observable routed-to-concierge event on the log", () => {
 test("enforce with a matched steward pages the steward, not the concierge, and applies no label", () => {
   const orchDir = tmpOrch();
   const calls = [];
+  const posted = [];
   try {
     const out = defaultEscalate("CTL-1", { reason: "conflict", prNumber: 9 }, {
       orchDir,
@@ -114,11 +115,17 @@ test("enforce with a matched steward pages the steward, not the concierge, and a
       env: { CATALYST_STEWARD_ESCALATION: "enforce" },
       appendDelegateEvent: () => {},
       resolveSteward: () => ({ role: "steward-x", scope: "CTL-1" }), // CTL-1974 forward-compat
-      postConciergePage: () => true,
+      postConciergePage: (p) => { posted.push(p); return true; },
     });
     expect(calls).toHaveLength(0);
     expect(out.escalatedTo).toBe("steward");
     expect(out.confirmed).toBe(false);
+    // Codex P2: the resolved steward target MUST be threaded to the page function
+    // so defaultPostConciergePage can deliver TO the steward instead of hardcoding
+    // the concierge — otherwise the event claims a steward route the message never took.
+    expect(posted).toHaveLength(1);
+    expect(posted[0].target?.target).toBe("steward");
+    expect(posted[0].target?.steward?.role).toBe("steward-x");
   } finally {
     rmSync(orchDir, { recursive: true, force: true });
   }
