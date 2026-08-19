@@ -20,7 +20,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 SETUP="${REPO_ROOT}/setup-catalyst.sh"
-[[ -f "$SETUP" ]] || {
+[[ -f $SETUP ]] || {
 	echo "FAIL: setup-catalyst.sh not found at $SETUP"
 	exit 1
 }
@@ -72,12 +72,21 @@ file_mode() {
 #
 # The stub speaks the ONE contract validate_cloud_token relies on: honour
 # `-w '%{http_code}'` by printing the code on stdout, and send the body to -o.
+#
+# ⛔ CTL-2045: THE STUB IS ROUTE-AWARE, AND IT HAS TO BE. setup_cloud_replica now makes
+# TWO authenticated calls — `GET /issues` (generic read, CTL-1913) and
+# `GET /agent/attachments` (the per-host binding preflight) — and the 2026-08-18 incident
+# is the case where those two answer DIFFERENTLY: the admin bearer read 200 from /issues
+# and 403 from every /agent/* route. A single-code stub cannot express that signature at
+# all, so a suite built on one would be structurally incapable of failing for the exact
+# defect this ticket exists to prevent. AGENT_CODE defaults to CODE, so every pre-existing
+# case keeps its old meaning.
 make_curl_stub() {
-	local bindir="$1" code="$2"
+	local bindir="$1" code="$2" agent_code="${3:-$2}"
 	mkdir -p "$bindir"
 	cat >"$bindir/curl" <<STUB
 #!/usr/bin/env bash
-# Records every invocation, then answers with a fixed HTTP code.
+# Records every invocation, then answers with a fixed HTTP code per route family.
 echo "\$*" >>"$bindir/stub_calls"
 # validate_cloud_token feeds the auth header on stdin via --config -; drain it so
 # the writer never blocks on a full pipe, and prove the token never hit argv.
@@ -86,7 +95,8 @@ for a in "\$@"; do
   if [[ \$a == "-o" ]]; then next=out; continue; fi
   if [[ \${next:-} == out ]]; then : >"\$a" 2>/dev/null; next=; fi
 done
-printf '%s' "$code"
+# The route family decides the answer: /agent/* is the per-host binding path.
+if [[ " \$* " == *"/agent/"* ]]; then printf '%s' "$agent_code"; else printf '%s' "$code"; fi
 exit 0
 STUB
 	chmod +x "$bindir/curl"
@@ -100,9 +110,9 @@ STUB
 # only care about the FILE the function writes leave it at 200; the CTL-1913 cases
 # drive it to 401/403/000.
 run_case() {
-	local home="$1" token="$2" account="$3" code="${4:-200}"
+	local home="$1" token="$2" account="$3" code="${4:-200}" agent_code="${5:-${4:-200}}"
 	local bindir="$home/.stub-bin"
-	make_curl_stub "$bindir" "$code"
+	make_curl_stub "$bindir" "$code" "$agent_code"
 	seal_stack "$bindir"
 	(
 		export HOME="$home"
@@ -113,7 +123,7 @@ run_case() {
 		# Deliberately NOT pinned by default: the base URL is left unset so the
 		# cases below exercise the REAL shipped default (CTL-1910's whole subject).
 		# Set CASE_BASE_URL to test the override path.
-		[[ -n ${CASE_BASE_URL:-} ]] && export CATALYST_CLOUD_BASE_URL="$CASE_BASE_URL"
+		[[ -n ${CASE_BASE_URL-} ]] && export CATALYST_CLOUD_BASE_URL="$CASE_BASE_URL"
 		# shellcheck disable=SC1090
 		source "$SETUP" >/dev/null 2>&1
 		# setup-catalyst.sh sets -e; re-disable AFTER sourcing so a deliberate
@@ -147,7 +157,7 @@ seal_stack() {
 	local bindir="$1"
 	mkdir -p "$bindir"
 	[[ -x "$bindir/catalyst-stack" ]] && return 0
-	make_stack_stub "$bindir" 0 "stubbed catalyst-stack (CTL-1968: the real one mutates gui/\$(id -u))"
+	make_stack_stub "$bindir" 0 'stubbed catalyst-stack (CTL-1968: the real one mutates gui/$(id -u))'
 }
 
 # make_stack_stub BINDIR RC MESSAGE — a `catalyst-stack` on PATH that exits RC
@@ -172,9 +182,9 @@ STACKSTUB
 # deliberately drives a NON-ZERO return (every rejection case does) aborts the whole
 # suite mid-run instead of asserting. Cost one debugging round.
 run_case_capturing() {
-	local home="$1" token="$2" account="$3" code="${4:-200}"
+	local home="$1" token="$2" account="$3" code="${4:-200}" agent_code="${5:-${4:-200}}"
 	local bindir="$home/.stub-bin"
-	make_curl_stub "$bindir" "$code"
+	make_curl_stub "$bindir" "$code" "$agent_code"
 	seal_stack "$bindir"
 	(
 		export HOME="$home"
@@ -188,6 +198,13 @@ run_case_capturing() {
 		setup_cloud_replica 2>&1
 	)
 }
+
+# ⛔ CTL-2045: every fixture token below is now a WELL-SHAPED per-host organization key.
+# Provisioning refuses any other class outright, so the old `tok_test_abc` fixtures would
+# have made every case below exercise the class refusal rather than the behaviour it was
+# written to assert — a suite that stays green while testing nothing it names.
+OK_TOKEN="ctc_acct_sk_fixture_testonly_000000000000000000000000000000"
+OK_TOKEN_2="ctc_acct_sk_fixture_testonly_111111111111111111111111111111"
 
 echo "CTL-1836 — setup-catalyst.sh cloud replica provisioning"
 
@@ -206,7 +223,7 @@ scrub "$H1"
 # This is the tenant-0 footgun. It must fail, and it must not leave a half-written
 # credential behind.
 H2=$(mktemp -d)
-rc=$(run_case "$H2" "tok_test_abc" "")
+rc=$(run_case "$H2" "$OK_TOKEN" "")
 if [[ $rc != "0" ]]; then ok "token without account → non-zero exit (refuses to guess the tenant)"; else bad "token without account → returned 0; it defaulted instead of refusing"; fi
 if [[ ! -e "$H2/.config/catalyst/cloud-sync.env" ]]; then
 	ok "token without account → no cloud-sync.env written"
@@ -217,10 +234,10 @@ scrub "$H2"
 
 # ── Case 3: token + account → env file written, 0600, explicit values ────────
 H3=$(mktemp -d)
-rc=$(run_case "$H3" "tok_test_abc" "tenant-7")
+rc=$(run_case "$H3" "$OK_TOKEN" "tenant-7")
 ENV_FILE="$H3/.config/catalyst/cloud-sync.env"
 if [[ $rc == "0" ]]; then ok "token + account → returns 0"; else bad "token + account → expected rc 0, got $rc"; fi
-if [[ -f "$ENV_FILE" ]]; then
+if [[ -f $ENV_FILE ]]; then
 	ok "token + account → cloud-sync.env written"
 
 	mode=$(file_mode "$ENV_FILE")
@@ -255,7 +272,7 @@ if [[ -f "$ENV_FILE" ]]; then
 		bad "expected the staging.catalystcloud.dev default, got: $(grep '^export CATALYST_CLOUD_BASE_URL=' "$ENV_FILE")"
 	fi
 
-	if grep -q '^export CATALYST_CLOUD_TOKEN=tok_test_abc$' "$ENV_FILE"; then
+	if grep -q "^export CATALYST_CLOUD_TOKEN=${OK_TOKEN}$" "$ENV_FILE"; then
 		ok "token written"
 	else
 		bad "token missing from cloud-sync.env"
@@ -267,7 +284,7 @@ scrub "$H3"
 
 # ── Case 4: CATALYST_CLOUD_BASE_URL override is honoured ─────────────────────
 H4=$(mktemp -d)
-CASE_BASE_URL="https://example.invalid/api/v1" rc=$(CASE_BASE_URL="https://example.invalid/api/v1" run_case "$H4" "t" "a")
+CASE_BASE_URL="https://example.invalid/api/v1" rc=$(CASE_BASE_URL="https://example.invalid/api/v1" run_case "$H4" "$OK_TOKEN" "a")
 if grep -q '^export CATALYST_CLOUD_BASE_URL=https://example.invalid/api/v1$' "$H4/.config/catalyst/cloud-sync.env" 2>/dev/null; then
 	ok "explicit CATALYST_CLOUD_BASE_URL override is honoured"
 else
@@ -294,7 +311,7 @@ mkdir -p "$H5/.config/catalyst"
 : >"$H5/.config/catalyst/cloud-sync.env"
 chmod 644 "$H5/.config/catalyst/cloud-sync.env"
 pre_mode=$(file_mode "$H5/.config/catalyst/cloud-sync.env")
-rc=$(run_case "$H5" "tok_test_abc" "tenant-9")
+rc=$(run_case "$H5" "$OK_TOKEN" "tenant-9")
 post_mode=$(file_mode "$H5/.config/catalyst/cloud-sync.env")
 if [[ $pre_mode == "644" ]]; then
 	ok "precondition established: env file started 0644 (proves this case can discriminate)"
@@ -324,7 +341,7 @@ scrub "$H5"
 # This is not theoretical bookkeeping — it is the exact silent-death shape of
 # CTL-1844, which cost hours to diagnose on a live host.
 H6=$(mktemp -d)
-rc=$(run_case "$H6" "tok_export_check" "tenant-3")
+rc=$(run_case "$H6" "$OK_TOKEN_2" "tenant-3")
 E6="$H6/.config/catalyst/cloud-sync.env"
 if [[ -f $E6 ]]; then
 	assigns=$(grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' "$E6" || true)
@@ -339,7 +356,7 @@ if [[ -f $E6 ]]; then
 	if (
 		# shellcheck disable=SC1090
 		. "$E6"
-		env | grep -q '^CATALYST_CLOUD_TOKEN=tok_export_check$'
+		env | grep -q "^CATALYST_CLOUD_TOKEN=${OK_TOKEN_2}$"
 	); then
 		ok "sourcing the file puts the token in the ENVIRONMENT (env|grep, not just set)"
 	else
@@ -364,7 +381,7 @@ seal_stack "$H7/.stub-bin"
 	export HOME="$H7" CATALYST_SETUP_LIB_ONLY=1
 	export PATH="$H7/.stub-bin:$PATH"
 	export CATALYST_CLOUD_TOKEN_ENV="MY_CUSTOM_CLOUD_TOKEN"
-	export MY_CUSTOM_CLOUD_TOKEN="tok_custom_name"
+	export MY_CUSTOM_CLOUD_TOKEN="ctc_acct_tok_custom_name"
 	export CATALYST_CLOUD_ACCOUNT="tenant-4"
 	# shellcheck disable=SC1090
 	source "$SETUP" >/dev/null 2>&1
@@ -372,7 +389,7 @@ seal_stack "$H7/.stub-bin"
 	setup_cloud_replica >/dev/null 2>&1
 )
 E7="$H7/.config/catalyst/cloud-sync.env"
-if grep -q '^export MY_CUSTOM_CLOUD_TOKEN=tok_custom_name$' "$E7" 2>/dev/null; then
+if grep -q '^export MY_CUSTOM_CLOUD_TOKEN=ctc_acct_tok_custom_name$' "$E7" 2>/dev/null; then
 	ok "token written under the CONFIGURED name, not the hardcoded default"
 else
 	bad "configured token name ignored — writer would resolve a name the file never sets"
@@ -416,7 +433,7 @@ for spec in "401:a garbage or revoked token:REJECTED by the hub" \
 	desc="${rest%%:*}"
 	expect_msg="${rest#*:}"
 	HB=$(mktemp -d)
-	out=$(run_case_capturing "$HB" "FAKE-TOKEN-NOT-REAL" "acme-tenant" "$code" || true)
+	out=$(run_case_capturing "$HB" "ctc_acct_FAKE-TOKEN-NOT-REAL" "acme-tenant" "$code" || true)
 	if grep -qF "$expect_msg" <<<"$out"; then
 		ok "HTTP $code → the message names its own cause (\"$expect_msg\")"
 	else
@@ -424,7 +441,7 @@ for spec in "401:a garbage or revoked token:REJECTED by the hub" \
 	fi
 	scrub "$HB"
 	HB=$(mktemp -d)
-	rc=$(run_case "$HB" "FAKE-TOKEN-NOT-REAL" "acme-tenant" "$code")
+	rc=$(run_case "$HB" "ctc_acct_FAKE-TOKEN-NOT-REAL" "acme-tenant" "$code")
 	if [[ $rc != "0" ]]; then
 		ok "HTTP $code ($desc) → non-zero exit"
 	else
@@ -451,7 +468,7 @@ done
 # above would pass on a function that refused unconditionally — which would break
 # every real install rather than fix it.
 HOK=$(mktemp -d)
-rc=$(run_case "$HOK" "tok_good" "tenant-1" 200)
+rc=$(run_case "$HOK" "ctc_acct_tok_good" "tenant-1" 200)
 if [[ $rc == "0" ]]; then
 	ok "POSITIVE CONTROL: HTTP 200 → returns 0 (the refusal is driven by the CODE, not unconditional)"
 else
@@ -467,14 +484,14 @@ fi
 # A probe that omits the token would return 401 for a perfectly good token, and an
 # unauthenticated reachability ping would pass for a garbage one — the exact
 # "correct and garbage are indistinguishable" defect, reintroduced.
-if [[ -f "$HOK/.stub-bin/stub_stdin" ]] && grep -q 'Authorization: Bearer tok_good' "$HOK/.stub-bin/stub_stdin"; then
+if [[ -f "$HOK/.stub-bin/stub_stdin" ]] && grep -q 'Authorization: Bearer ctc_acct_tok_good' "$HOK/.stub-bin/stub_stdin"; then
 	ok "the validation call carries the bearer token (authenticated, not a reachability ping)"
 else
 	bad "no Authorization header reached the transport — validation is unauthenticated"
 fi
 # ⛔ and the token must NOT be on argv: `ps` is world-readable, so a bearer token in
 # the command line is visible to every local user for the life of the call.
-if grep -q 'tok_good' "$HOK/.stub-bin/stub_calls" 2>/dev/null; then
+if grep -q 'ctc_acct_tok_good' "$HOK/.stub-bin/stub_calls" 2>/dev/null; then
 	bad "the token appears in curl's ARGV — readable by any local user via ps"
 else
 	ok "the token is never on curl's argv (passed via --config on stdin)"
@@ -494,7 +511,7 @@ scrub "$HOK"
 # none of them is evidence the token works.
 for code in 500 502 404 302 418; do
 	HU=$(mktemp -d)
-	rc=$(run_case "$HU" "tok_unknown_code" "tenant-2" "$code")
+	rc=$(run_case "$HU" "ctc_acct_tok_unknown_code" "tenant-2" "$code")
 	if [[ $rc != "0" ]]; then
 		ok "HTTP $code (unlisted) → non-zero exit"
 	else
@@ -515,7 +532,7 @@ done
 HD=$(mktemp -d)
 mkdir -p "$HD/.stub-bin"
 make_stack_stub "$HD/.stub-bin" 3 "launchctl: Bootstrap failed: 5: Input/output error"
-out=$(run_case_capturing "$HD" "tok_adopt" "tenant-5" 200 || true)
+out=$(run_case_capturing "$HD" "ctc_acct_tok_adopt" "tenant-5" 200 || true)
 if grep -q 'Bootstrap failed: 5: Input/output error' <<<"$out"; then
 	ok "adopt-cloud-sync's stderr reaches the operator (not discarded to /dev/null)"
 else
@@ -536,7 +553,7 @@ fi
 HS=$(mktemp -d)
 mkdir -p "$HS/.stub-bin"
 make_stack_stub "$HS/.stub-bin" 0 "some ordinary chatter on stderr"
-out=$(run_case_capturing "$HS" "tok_adopt" "tenant-6" 200 || true)
+out=$(run_case_capturing "$HS" "ctc_acct_tok_adopt" "tenant-6" 200 || true)
 if grep -qi 'writer adopted' <<<"$out" && ! grep -q 'ordinary chatter' <<<"$out"; then
 	ok "NEGATIVE CONTROL: a successful adopt prints the success line and stays quiet"
 else
@@ -562,7 +579,7 @@ scrub "$HN"
 # first would be wasted work and would send the token somewhere before we had
 # decided the input was even usable.
 HA=$(mktemp -d)
-rc=$(run_case "$HA" "tok_test_abc" "" 200)
+rc=$(run_case "$HA" "$OK_TOKEN" "" 200)
 if ! stub_was_called "$HA"; then
 	ok "token without account → refused BEFORE any network call"
 else
@@ -600,7 +617,7 @@ export CATALYST_CLOUD_TOKEN=tok_from_a_previous_run
 export CATALYST_CLOUD_ACCOUNT=tenant-carried
 export CATALYST_CLOUD_BASE_URL=https://staging.catalystcloud.dev/api/v1
 CFEOF
-rc=$(run_case "$HCF" "tok_test_abc" "" 200)
+rc=$(run_case "$HCF" "$OK_TOKEN" "" 200)
 if [[ $rc == "0" ]]; then
 	ok "⭐ account absent from flag+env but recorded in cloud-sync.env → provisions (rc=0)"
 else
@@ -618,7 +635,7 @@ scrub "$HCF"
 # defaulted the account would pass every case above.
 HNF=$(mktemp -d)
 mkdir -p "$HNF/.config/catalyst"
-rc=$(run_case "$HNF" "tok_test_abc" "" 200)
+rc=$(run_case "$HNF" "$OK_TOKEN" "" 200)
 if [[ $rc != "0" ]]; then
 	ok "⛔ INVERSION GUARD: no flag, no env, NO file → still refuses (rc=$rc), never guesses tenant-0"
 else
@@ -631,7 +648,7 @@ HEL=$(mktemp -d)
 mkdir -p "$HEL/.config/catalyst"
 printf 'export CATALYST_CLOUD_TOKEN=tok_only\nexport CATALYST_CLOUD_BASE_URL=https://x/api/v1\n' \
 	>"$HEL/.config/catalyst/cloud-sync.env"
-rc=$(run_case "$HEL" "tok_test_abc" "" 200)
+rc=$(run_case "$HEL" "$OK_TOKEN" "" 200)
 if [[ $rc != "0" ]]; then
 	ok "cloud-sync.env present but carrying NO account line → still refuses"
 else
@@ -643,7 +660,7 @@ scrub "$HEL"
 HPR=$(mktemp -d)
 mkdir -p "$HPR/.config/catalyst"
 printf 'export CATALYST_CLOUD_ACCOUNT=tenant-from-file\n' >"$HPR/.config/catalyst/cloud-sync.env"
-rc=$(run_case "$HPR" "tok_test_abc" "tenant-from-env" 200)
+rc=$(run_case "$HPR" "$OK_TOKEN" "tenant-from-env" 200)
 if [[ $rc == "0" ]] && grep -q '^export CATALYST_CLOUD_ACCOUNT=tenant-from-env$' \
 	"$HPR/.config/catalyst/cloud-sync.env" 2>/dev/null; then
 	ok "precedence holds: env account beats the recorded file"
@@ -660,14 +677,153 @@ HTK=$(mktemp -d)
 mkdir -p "$HTK/.config/catalyst"
 printf 'export CATALYST_CLOUD_TOKEN=tok_STALE_from_file\nexport CATALYST_CLOUD_ACCOUNT=tenant-carried\n' \
 	>"$HTK/.config/catalyst/cloud-sync.env"
-rc=$(run_case "$HTK" "tok_CALLER_wins" "" 200)
-if grep -q 'tok_CALLER_wins' "$HTK/.config/catalyst/cloud-sync.env" 2>/dev/null &&
+rc=$(run_case "$HTK" "ctc_acct_tok_CALLER_wins" "" 200)
+if grep -q 'ctc_acct_tok_CALLER_wins' "$HTK/.config/catalyst/cloud-sync.env" 2>/dev/null &&
 	! grep -q 'tok_STALE_from_file' "$HTK/.config/catalyst/cloud-sync.env" 2>/dev/null; then
 	ok "⭐ reads the ACCOUNT only — the caller's token wins, the file's stale token is not adopted"
 else
 	bad "the carry-forward pulled the token out of the env file (it must read one named field)"
 fi
 scrub "$HTK"
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# CTL-2045 — the credential CLASS gate and the per-host BINDING preflight
+# ══════════════════════════════════════════════════════════════════════════════════════
+#
+# The 2026-08-18 incident: mini-2's reinstall provisioned the tenant-wide ADMIN_TOKEN as
+# this host's write credential. Every cross-host claim 403'd and the board froze for four
+# hours — while `catalyst doctor` passed, the daemons ran, the heartbeat stayed fresh, and
+# the local write ledger showed ZERO refusals.
+#
+# ⚠️ EVERY CASE BELOW WOULD HAVE PASSED BEFORE THIS TICKET. That is the point: the suite
+# above is 59 green assertions that are all blind to a mis-provisioned credential class.
+echo ""
+echo "CTL-2045 — credential class + per-host binding"
+
+# ── §1: the class gate refuses, BEFORE any packet leaves the host ────────────────────
+# ⭐ Each row is a shape the cloud treats differently, and the `sk_` row is the one a
+# blacklist implementation would let through (BE-12: the cloud ACCEPTS a bare sk_ key but
+# derives no per-host binding from it). Implementing the ticket's TITLE — "refuse an admin
+# bearer" — passes that row and reopens the hole one credential over.
+while IFS='|' read -r label token expect_fragment; do
+	[[ -z ${label// /} ]] && continue
+	HC=$(mktemp -d)
+	# ⛔ The transport answers 200 for EVERYTHING. So if the install still refuses, the
+	# refusal cannot have come from the network — it came from the class gate. A case
+	# that drove the stub to 403 could not tell the two apart.
+	out=$(run_case_capturing "$HC" "$token" "tenant-1" 200 200 || true)
+	rc=$(run_case "$HC" "$token" "tenant-1" 200 200)
+
+	if [[ $rc != "0" ]]; then
+		ok "class gate: ${label} → non-zero exit"
+	else
+		bad "class gate: ${label} → returned 0; a wrong-class credential was provisioned"
+	fi
+	if [[ ! -e "$HC/.config/catalyst/cloud-sync.env" ]]; then
+		ok "class gate: ${label} → wrote NO cloud-sync.env"
+	else
+		bad "class gate: ${label} → wrote a credential it had already classified as unusable"
+	fi
+	# The operator has to be told WHICH class arrived, or the message is just another 403.
+	if printf '%s' "$out" | grep -q "$expect_fragment"; then
+		ok "class gate: ${label} → names the class it received (\"${expect_fragment}\")"
+	else
+		bad "class gate: ${label} → generic diagnostic; expected \"${expect_fragment}\", got: $(printf '%s' "$out" | tr '\n' '|' | head -c 160)"
+	fi
+	# ⛔ THE SECRET MUST NOT REACH THE TERMINAL. The refusal echoes a SHAPE precisely so
+	# it never echoes a value; a message that pasted the token would leak it into every
+	# CI log and support thread that carries a failed install.
+	if printf '%s' "$out" | grep -q -- "$token"; then
+		bad "class gate: ${label} → THE REFUSAL PRINTED THE TOKEN VALUE"
+	else
+		ok "class gate: ${label} → refusal carries the shape, never the secret"
+	fi
+	# ⭐ Refused with NO network call at all — the class is decidable on-host.
+	if stub_was_called "$HC"; then
+		bad "class gate: ${label} → made a network call before classifying (the class needs no round trip)"
+	else
+		ok "class gate: ${label} → refused before any network call"
+	fi
+	scrub "$HC"
+done <<'CLASSCASES'
+admin-bearer shape (64 chars, no prefix)|0123456789012345678901234567890123456789012345678901234567890123|no recognized prefix
+a USER key (ctc_user_)|ctc_user_sk_fixture_000000000000000000000000000000000000|USER key
+a bare issuer key (sk_)|sk_fixture_00000000000000000000000000000000000000000|RAW issuer key
+CLASSCASES
+
+# ── §2: the per-host BINDING preflight — the incident's exact signature ──────────────
+# ⭐⭐ THE CASE THAT WOULD HAVE CAUGHT mini-2, and the reason the stub is route-aware.
+# A well-SHAPED credential, `GET /issues` → 200, `GET /agent/attachments` → 403. That is
+# byte-for-byte what the admin bearer did: it authenticated for generic reads and was
+# refused on every agent route. CTL-1913's validation passes it; only this gate does not.
+HB2=$(mktemp -d)
+out=$(run_case_capturing "$HB2" "$OK_TOKEN" "tenant-1" 200 403 || true)
+rc=$(run_case "$HB2" "$OK_TOKEN" "tenant-1" 200 403)
+if [[ $rc != "0" ]]; then
+	ok "⭐ binding: generic read 200 + agent route 403 → install REFUSES (the mini-2 signature)"
+else
+	bad "⭐ binding: generic read 200 + agent route 403 → returned 0 — this IS the four-hour freeze"
+fi
+if [[ ! -e "$HB2/.config/catalyst/cloud-sync.env" ]]; then
+	ok "binding: refused → wrote NO cloud-sync.env"
+else
+	bad "binding: refused → still wrote the credential to disk"
+fi
+if printf '%s' "$out" | grep -q "agent write path"; then
+	ok "binding: names the agent write path, not a generic auth failure"
+else
+	bad "binding: generic diagnostic; got: $(printf '%s' "$out" | tr '\n' '|' | head -c 160)"
+fi
+# Seal + route proof: the verdict came from the stub AND the stub was asked the /agent/
+# route. Without the route assertion this case could pass on a probe that never ran.
+if grep -q '/agent/attachments' "$HB2/.stub-bin/stub_calls" 2>/dev/null; then
+	ok "binding: the preflight really requested /agent/attachments (sealed transport)"
+else
+	bad "binding: no /agent/attachments request recorded — the refusal came from somewhere else"
+fi
+scrub "$HB2"
+
+# ── §2 positive controls: the pass arm must be WIDE, or every real install breaks ─────
+# ⛔ 404 IS THE AUTHORIZED ANSWER on a probe issue id that does not exist. Measured
+# 2026-08-18: a per-host key against its own account returns 404 for an absent issue,
+# while the admin bearer returned 403 for the identical request. A gate pinned to
+# "200 only" would refuse every correctly-provisioned host — a fix worse than the bug.
+for agent_code in 200 404 400; do
+	HP=$(mktemp -d)
+	rc=$(run_case "$HP" "$OK_TOKEN" "tenant-1" 200 "$agent_code")
+	if [[ $rc == "0" ]]; then
+		ok "POSITIVE CONTROL: agent route ${agent_code} → install proceeds (authorized, past the binding check)"
+	else
+		bad "POSITIVE CONTROL: agent route ${agent_code} → rc ${rc}; a correctly-provisioned host was refused"
+	fi
+	scrub "$HP"
+done
+
+# An unreachable agent route is UNVERIFIED, and unverified is fatal here — the same
+# posture CTL-1913 already takes for the generic read. Reporting success on a check that
+# did not run is what produced green installs with permanently dead writers.
+HN=$(mktemp -d)
+rc=$(run_case "$HN" "$OK_TOKEN" "tenant-1" 200 000)
+if [[ $rc != "0" ]]; then
+	ok "binding: agent route unreachable (000) → refuses as UNVERIFIED, never assumes"
+else
+	bad "binding: agent route unreachable → returned 0; the binding was never proven"
+fi
+scrub "$HN"
+
+# ── ⭐ THE ORDERING ASSERTION — §1 must run before §2, and §2 before the write ────────
+# A well-shaped token whose agent route 403s reaches the network; a wrong-class token must
+# not. Proving both in one place is what makes "cheapest gate first" a tested property
+# rather than a comment. Without it, someone could reorder the three gates and every other
+# case above would stay green.
+HO=$(mktemp -d)
+rc=$(run_case "$HO" "0123456789012345678901234567890123456789012345678901234567890123" "tenant-1" 403 403)
+if [[ $rc != "0" ]] && ! stub_was_called "$HO"; then
+	ok "⭐ ordering: a wrong-CLASS credential never reaches the network, even when the hub would also refuse it"
+else
+	bad "⭐ ordering: the class gate did not run first (stub called=$(stub_was_called "$HO" && echo yes || echo no), rc=$rc)"
+fi
+scrub "$HO"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
