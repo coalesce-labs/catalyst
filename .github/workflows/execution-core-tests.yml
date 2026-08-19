@@ -1313,6 +1313,9 @@ jobs:
             signal-reader.test.mjs \
             stale-pr-rescue-timer.test.mjs \
             stale-pr-rescue.test.mjs \
+            __tests__/escalation-router.test.mjs \
+            __tests__/stale-pr-rescue-escalate-router.test.mjs \
+            __tests__/no-direct-human-escalation.test.mjs \
             stalled-detector.test.mjs \
             terminal-state.test.mjs \
             test-setup.test.mjs \

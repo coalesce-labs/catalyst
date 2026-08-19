@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the quiet-fleet ALARM — CTL-2000.
+
+  ONE unit for the whole fleet (label com.catalyst.quiet-fleet), unlike the
+  per-role com.catalyst.role.<role> template. install.sh substitutes every
+  REPLACE_WITH_* token and copies it into ~/Library/LaunchAgents/.
+
+    bash install.sh --quiet-fleet
+    bash install.sh --quiet-fleet --uninstall
+
+  The alarm enumerates every configured role, classifies each via the CTL-1994
+  heartbeat, and pages the CONCIERGE (never a human) when a role is silent/dead/
+  missing while its scope is active. It is a peer of the per-role supervisors,
+  not one of them — a supervised role that has itself gone quiet is exactly what
+  this watches, so it must run as its own unit.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>REPLACE_WITH_LABEL</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_NODE</string>
+    <string>REPLACE_WITH_CLI</string>
+    <string>quiet-fleet</string>
+    <string>--once</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- StartInterval, not KeepAlive: `--once` runs a single tick and exits 0, and
+       launchd re-fires it every 60 s. A source that goes quiet is noticed within
+       one interval. (KeepAlive would busy-restart a clean single-tick exit.) -->
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <!-- Do not let a crash-looping tick spin the box. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>REPLACE_WITH_PATH</string>
+    <!-- launchd does NOT inherit the installing shell's environment. A node
+         using a non-default CATALYST_DIR must have it persisted here, or the
+         alarm reads the wrong roles dir. -->
+    <key>CATALYST_DIR</key>
+    <string>REPLACE_WITH_CATALYST_DIR</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>REPLACE_WITH_CWD</string>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_WITH_LOG</string>
+
+  <key>StandardErrorPath</key>
+  <string>REPLACE_WITH_LOG</string>
+</dict>
+</plist>
