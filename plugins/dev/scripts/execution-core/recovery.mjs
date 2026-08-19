@@ -31,6 +31,14 @@ import {
   YIELD_EXPIRED_REASON,
   classifyYield,
 } from "../lib/phase-yield.mjs";
+// CTL-1851: when is a worker carrying NO bg_job_id provably gone? An SDK-executor
+// worker never has one, so `classifyWorker` answered "unknown" for its entire life
+// and the reclaim path no-opped — a dead worker pinned its slot forever.
+import {
+  classifyDispatchDeadline,
+  MAX_DISPATCHED_MS,
+  MIN_DISPATCH_AGE_MS,
+} from "../lib/phase-dispatch-deadline.mjs";
 import {
   getJobsRoot,
   getEventLogPath,
@@ -365,10 +373,40 @@ export function jobLifecycle(bgJobId, { statJob = defaultStatJob } = {}) {
 // mere job-dir existence. A never-cleaned-up dir whose .state is terminal
 // (stopped/failed/done/blocked) now classifies 'dead' instead of 'running' —
 // the discard the plan called out (16,462 retained job dirs, 0 pid files).
-export function classifyWorker(signal, { statJob = defaultStatJob } = {}) {
+export function classifyWorker(
+  signal,
+  {
+    statJob = defaultStatJob,
+    // CTL-1851 — the boot instant this daemon started at, epoch-ms, or null when
+    // it cannot be read.
+    //
+    // ⚠️ IT DEFAULTS TO null, AND THAT IS THE COMPATIBILITY CONTRACT. With no
+    // boot instant and a bg-less signal inside the deadline, this function
+    // returns "unknown" exactly as it always has, so every existing caller and
+    // test is byte-identical until it opts in by passing one. The ONE production
+    // caller that opts in is reclaimDeadWorkIfPossible, which already reads the
+    // boot marker for its attempt-count window.
+    bootedMs = null,
+    nowMs = Date.now(),
+    maxDispatchedMs = MAX_DISPATCHED_MS,
+    minDispatchAgeMs = MIN_DISPATCH_AGE_MS,
+  } = {}
+) {
   if (TERMINAL.has(signal?.status)) return "terminal";
   const live = signal?.liveness;
-  if (live?.kind !== "bg" || !live?.value) return "unknown";
+  if (live?.kind !== "bg" || !live?.value) {
+    // CTL-1851: a bg-less signal is not automatically unknowable. An SDK worker
+    // runs IN-PROCESS in the daemon, so a dispatch that predates this daemon's
+    // boot is PROVABLY dead — and a signal still at `dispatched` long past the
+    // ceiling never had a first turn. Either way it is `dead`, which routes it
+    // into the existing CTL-574 reclaim path (work-done probe → emit-complete,
+    // else revive, else escalate) instead of being silently dropped.
+    const verdict = classifyDispatchDeadline(
+      { ...(signal?.raw ?? {}), status: signal?.status },
+      { nowMs, bootedMs, maxDispatchedMs, minAgeMs: minDispatchAgeMs }
+    );
+    return verdict.expired ? "dead" : "unknown";
+  }
   return jobLifecycle(live.value, { statJob }) === "alive" ? "running" : "dead";
 }
 
@@ -2603,7 +2641,18 @@ export function reclaimDeadWorkIfPossible(
     return "noop";
   }
 
-  const klass = classifyWorker(signal, { statJob });
+  // CTL-1851 — hand classifyWorker this daemon's boot instant so a bg-less
+  // (SDK-executor) worker can be judged instead of being answered "unknown"
+  // forever. `readBootSinceFn` is the seam this function already uses for its
+  // attempt-count window; it returns an ISO string or undefined, and an
+  // unreadable marker degrades to `null`, which disables the proof rule and
+  // leaves the never-started timer to answer alone.
+  const bootedIso = readBootSinceFn(orchDir);
+  const bootedMs = (() => {
+    const t = typeof bootedIso === "string" ? Date.parse(bootedIso) : NaN;
+    return Number.isFinite(t) ? t : null;
+  })();
+  const klass = classifyWorker(signal, { statJob, bootedMs, nowMs: now() });
   // CTL-662: terminal (phase finished) and unknown (no bg_job_id) still
   // short-circuit — boot-classification gating is unchanged. Everything else
   // (running, OR dead-by-missing-job-dir) is routed through the status trigger
