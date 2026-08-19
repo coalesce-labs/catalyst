@@ -32,6 +32,8 @@ import {
   ENV_BACKED_SECRET_FILES,
   // CTL-1612: the boot-captured predicate that widened the restart-required set.
   isEnvBackedSecretFile,
+  // CTL-2042: per-host plain posture file materialization.
+  syncHostEnvFiles,
 } from "./cluster-sync.mjs";
 
 const QUIET = { warn() {}, info() {} };
@@ -1752,6 +1754,7 @@ describe("cluster-secret event severity + env-backed set (Codex re-review)", () 
     const historicalLiteralSet = new Set([
       "claude-accounts.env",
       "execution-core.env",
+      "execution-core-secrets.env",
       "github-token",
       "webhook-secret",
       "linear-webhook-secret",
@@ -1810,5 +1813,198 @@ describe("isEnvBackedSecretFile", () => {
     expect(isEnvBackedSecretFile(null)).toBe(false);
     expect(isEnvBackedSecretFile(undefined)).toBe(false);
     expect(isEnvBackedSecretFile(42)).toBe(false);
+  });
+
+  test("TRUE — execution-core-secrets.env is boot-captured (CTL-2042)", () => {
+    expect(isEnvBackedSecretFile("execution-core-secrets.env")).toBe(true);
+  });
+});
+
+// ─── CTL-2042: syncHostEnvFiles — per-host plain posture materialization ─────
+
+describe("syncHostEnvFiles (CTL-2042)", () => {
+  const MINI_CONTENT =
+    "export CATALYST_HOST_NAME=mini\nexport CATALYST_EXECUTOR=sdk\nexport CATALYST_LINEAR_WRITE_DAILY_BUDGET=2000\n" +
+    "[ -f \"${HOME}/.config/catalyst/execution-core-secrets.env\" ] && . \"${HOME}/.config/catalyst/execution-core-secrets.env\"\n";
+  const MINI2_CONTENT =
+    "export CATALYST_HOST_NAME=mini-2\nexport CATALYST_EXECUTOR=sdk\nexport CATALYST_LINEAR_WRITE_DAILY_BUDGET=2000\n" +
+    "[ -f \"${HOME}/.config/catalyst/execution-core-secrets.env\" ] && . \"${HOME}/.config/catalyst/execution-core-secrets.env\"\n";
+
+  function writeHostPosture(host, content) {
+    mkdirSync(join(clusterDir, "hosts", host), { recursive: true });
+    writeFileSync(join(clusterDir, "hosts", host, "execution-core.env"), content);
+  }
+
+  test("selects the file matching this host and writes it to the canonical dest name", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+    writeHostPosture("mini-2", MINI2_CONTENT);
+
+    const written = [];
+    const writeFile = (dest, content) => {
+      written.push({ dest, content });
+      writeFileSync(dest, content, { mode: 0o600 });
+    };
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      writeFile,
+      logger: QUIET,
+    });
+
+    expect(res.written).toEqual(["execution-core.env"]);
+    expect(written).toHaveLength(1);
+    expect(written[0].dest).toBe(resolve(configDir, "execution-core.env"));
+    expect(written[0].content).toBe(MINI_CONTENT);
+    // mini-2's content was never written
+    expect(written.some((w) => w.content === MINI2_CONTENT)).toBe(false);
+  });
+
+  test("reports changed[] on the dest name when on-disk content differs", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+    // pre-existing on-disk file with different content
+    writeFileSync(join(configDir, "execution-core.env"), "old content");
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      logger: QUIET,
+    });
+
+    expect(res.written).toContain("execution-core.env");
+    expect(res.changed).toContain("execution-core.env");
+  });
+
+  test("omits from changed[] when on-disk already matches (rewrite, not change)", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+    // pre-existing on-disk file with SAME content
+    writeFileSync(join(configDir, "execution-core.env"), MINI_CONTENT);
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      logger: QUIET,
+    });
+
+    expect(res.written).toContain("execution-core.env");
+    expect(res.changed).not.toContain("execution-core.env");
+  });
+
+  test("no host file for getHostName() → skipped, reason set, nothing written", () => {
+    // only mini exists; mini-3 does not
+    writeHostPosture("mini", MINI_CONTENT);
+
+    const written = [];
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini-3",
+      writeFile: (dest, content) => { written.push(dest); writeFileSync(dest, content); },
+      logger: QUIET,
+    });
+
+    expect(res.skipped).toBe(true);
+    expect(typeof res.reason).toBe("string");
+    expect(res.reason.length).toBeGreaterThan(0);
+    expect(written).toHaveLength(0);
+  });
+
+  test("getHostName() throws → skipped, never writes a wrong host's file", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+
+    const written = [];
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: () => { throw new Error("hostname-probe-failed"); },
+      writeFile: (dest, content) => { written.push(dest); writeFileSync(dest, content); },
+      logger: QUIET,
+    });
+
+    expect(res.skipped).toBe(true);
+    expect(written).toHaveLength(0);
+  });
+
+  test("writes posture at mode 0o600", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      logger: QUIET,
+    });
+
+    expect(res.written).toContain("execution-core.env");
+    const mode = statSync(join(configDir, "execution-core.env")).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  test("write failure → records name in failed[], written[] omits it", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      writeFile: () => { throw new Error("EIO"); },
+      logger: QUIET,
+    });
+
+    expect(res.written).not.toContain("execution-core.env");
+    expect(res.failed).toContain("execution-core.env");
+  });
+
+  test("changed dest from syncHostEnvFiles feeds catalyst.cluster.secrets.restart-required", () => {
+    // Set up: mini's posture file exists in clusterDir; configDir has DIFFERENT content
+    writeHostPosture("mini", MINI_CONTENT);
+    writeFileSync(join(configDir, "execution-core.env"), "old content");
+
+    // Simulate the secrets bundle for syncSecretFiles (the SOPS-encrypted secrets part)
+    writeFileSync(
+      join(clusterDir, "secrets", "node-secret-files.sops.json"),
+      "{ciphertext-placeholder}",
+    );
+
+    // gitRevParseHead checks existsSync(clusterDir/.git) before calling gitCapture,
+    // and expects { status: number, stdout: string } from gitCapture (same shape as
+    // the rest of the refreshClusterSecretsIfChanged test suite).
+    mkdirSync(join(clusterDir, ".git"), { recursive: true });
+
+    const restartEvents = [];
+    const emit = (evt) => { if (evt.name === "restart-required") restartEvents.push(evt); };
+
+    // refreshClusterSecretsIfChanged calls syncHostEnvFiles internally and should
+    // merge its changed[] into the restart-required emitter
+    refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath: join(configDir, ".state.json"),
+      git: () => {},
+      gitCapture: (args) => {
+        // gitRevParseHead calls gitCapture(["rev-parse", "HEAD"]) and checks status+stdout
+        if (args.includes("rev-parse")) return { status: 0, stdout: "abc123\n" };
+        // gitSecretsChangedBetween — no prior sha (readState null) so this is never called
+        return { status: 1, stdout: "" };
+      },
+      decrypt: () => ({ "github-token": "tok" }),
+      readState: () => null, // no prior state → always re-decrypt
+      writeState: () => {},
+      emit,
+      now: () => "2026-01-01T00:00:00Z",
+      node: "mini",
+      // Inject syncHostEnvFiles override that returns a changed entry
+      syncHostEnvFiles: ({ configDir: cd }) => {
+        writeFileSync(join(cd, "execution-core.env"), MINI_CONTENT);
+        return { written: ["execution-core.env"], changed: ["execution-core.env"], failed: [], skipped: false, reason: null };
+      },
+      logger: QUIET,
+    });
+
+    // execution-core.env is an env-file/boot-only → isEnvBackedSecretFile → restart-required
+    expect(restartEvents.some((e) => e.payload?.file === "execution-core.env")).toBe(true);
   });
 });
