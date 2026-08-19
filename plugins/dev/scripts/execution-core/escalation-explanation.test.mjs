@@ -670,3 +670,66 @@ describe("CTL-1754 — resolveSignalReason", () => {
     }
   });
 });
+
+// ── CTL-1754 / #3699 P1: the shape the scheduler ACTUALLY passes ────────────
+//
+// ⛔ THE MISTAKE THIS SUITE EXISTS TO PREVENT. The first cut of this fix was
+// verified against 44 real signal FILES and was still inert, because the
+// scheduler never passes the on-disk JSON — it passes the canonical projection
+// from signal-reader.mjs `parseSignal`, which promotes ticket/layout/phase/
+// status/liveness/updatedAt/pr/worktreePath/host/raw and NO reason key. A
+// census of the disk is a positive control on the WRONG SURFACE.
+//
+// So this block builds the fixture by writing a real signal file and reading it
+// back through the real `readWorkerSignals` — no hand-built object can prove
+// the projection is handled, because a hand-built object is exactly what got
+// this wrong the first time.
+describe("CTL-1754 — the canonical projection, end to end", () => {
+  const REAL_CASES = [
+    { file: "phase-monitor-merge.json", key: "failureReason", value: "ended-without-declaration" },
+    { file: "phase-implement.json", key: "attentionReason", value: "sdk-overloaded-exhausted" },
+    { file: "phase-pr.json", key: "stalledReason", value: "source_conflict_ctl708_unavailable" },
+  ];
+
+  test("⭐ a reason written to disk survives readWorkerSignals and reaches the card", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { readWorkerSignals } = await import("./signal-reader.mjs");
+
+    for (const { file, key, value } of REAL_CASES) {
+      const orchDir = mkdtempSync(join(tmpdir(), "ctl1754-"));
+      const wd = join(orchDir, "workers", "CTC-266");
+      mkdirSync(wd, { recursive: true });
+      writeFileSync(
+        join(wd, file),
+        JSON.stringify({
+          ticket: "CTC-266",
+          phase: file.replace(/^phase-|\.json$/g, ""),
+          status: "failed",
+          bg_job_id: null,
+          updatedAt: new Date(0).toISOString(),
+          [key]: value,
+        })
+      );
+
+      const signals = readWorkerSignals(orchDir);
+      // Positive control: the reader found the signal at all. Without this, an
+      // empty list would make every assertion below pass vacuously.
+      expect(signals.length).toBeGreaterThan(0);
+      const sig = signals.find((s) => s.ticket === "CTC-266");
+      expect(sig).toBeDefined();
+
+      // ⛔ The projection really does hide it at the top level — assert that,
+      // so this test still means something if parseSignal ever changes.
+      expect(sig[key]).toBeUndefined();
+      expect(sig.raw[key]).toBe(value);
+
+      // ...and the resolver must find it anyway.
+      expect(resolveSignalReason(sig).reason).toBe(value);
+      expect(resolveSignalReason(sig).key).toBe(key);
+      expect(describeSignalReason(sig)).toBe(value);
+      expect(describeSignalReason(sig)).not.toBe(describeSignalReason({ status: "failed" }));
+    }
+  });
+});

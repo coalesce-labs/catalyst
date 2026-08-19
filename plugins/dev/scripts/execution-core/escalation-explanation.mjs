@@ -386,6 +386,22 @@ function normalizeShape(f = {}) {
 // them into one "(no reason)" string is exactly how this defect survived 41
 // instances: an unreadable signal and a reasonless one produced byte-identical
 // cards, so no operator could tell a missing worker dir from a missing field.
+//
+// ⛔⛔ READ BOTH LEVELS — AND THIS IS WHY THE ORIGINAL BUG WAS UNCONDITIONAL.
+// The scheduler does not hand this function the on-disk JSON. It hands it the
+// CANONICAL PROJECTION from `signal-reader.mjs` `parseSignal`, which promotes
+// exactly: ticket, layout, signalPath, phase, status, liveness, updatedAt, pr,
+// worktreePath, host, raw. NO reason key is promoted — all three live only
+// under `.raw`. So `signal.stalledReason` was undefined for EVERY signal
+// regardless of what was on disk: even the one path that does write
+// `stalledReason` (unstuck-act-seams.mjs) could never have surfaced through
+// this card. The disk census explains why the field is rare; the projection
+// explains why the card was empty 41 times out of 41.
+//
+// ⚠️ A fixture shaped like the on-disk JSON therefore CANNOT prove this works —
+// the function never receives that shape in production. `signal.outcome ??
+// signal.raw?.outcome` in signal-reader.mjs is the existing precedent for
+// reading both levels, and this follows it. Credit: Codex, #3699 P1.
 
 /** Keys that carry a failure/stall reason on a phase signal, in ladder order. */
 export const SIGNAL_REASON_KEYS = Object.freeze([
@@ -410,10 +426,16 @@ export function resolveSignalReason(signal) {
   if (signal === null || signal === undefined || typeof signal !== "object") {
     return { reason: null, key: null, status: "unreadable" };
   }
+  const raw = signal.raw;
+  const nested = raw !== null && typeof raw === "object" ? raw : null;
   for (const key of SIGNAL_REASON_KEYS) {
-    const v = signal[key];
-    if (typeof v === "string" && v.trim() !== "") {
-      return { reason: v.trim(), key, status: "named" };
+    // Top level first, then `.raw` — the canonical projection carries the
+    // reason ONLY under `.raw`, while a hand-built or on-disk-shaped object
+    // carries it at the top. Both must resolve or the fix is inert.
+    for (const candidate of [signal[key], nested?.[key]]) {
+      if (typeof candidate === "string" && candidate.trim() !== "") {
+        return { reason: candidate.trim(), key, status: "named" };
+      }
     }
   }
   return { reason: null, key: null, status: "absent" };
