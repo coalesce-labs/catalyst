@@ -45,7 +45,14 @@ import { spawnSync, execFileSync } from "node:child_process";
 // REJECTS). The alternative was a hand-maintained copy here, which would keep
 // reporting three uncovered names after CTC-691/CTC-667/CTC-704 close.
 import { resolveGithubFeedMode } from "../lib/github-feed-mode.mjs";
-import { GITHUB_CONSUMED_NAMES, GITHUB_SUPPRESSIBLE_NAMES } from "../lib/github-feed-names.mjs";
+import {
+  GITHUB_CONSUMED_NAMES,
+  GITHUB_SUPPRESSIBLE_NAMES,
+  resolveGithubFeedAccount, // CTL-2030: hoisted here so bare-node doctor shares the producer's answer
+} from "../lib/github-feed-names.mjs";
+// CTL-2030: the producer's readiness heartbeat. `github-feed-ready.mjs` imports only
+// node:fs + node:path, so it loads under bare node (unlike github-feed-gate.mjs).
+import { defaultReadyPath, readReadyState } from "./github-feed-ready.mjs";
 import {
   getHostName,
   getClusterHosts,
@@ -1174,6 +1181,45 @@ function defaultLinearSecretEnvName() {
   }
 }
 
+// defaultReadGithubFeedReady — read the GitHub-feed producer's readiness heartbeat.
+//
+// ⛔ THE PATH IS RESOLVED THE PRODUCER'S WAY, NOT THE READER'S. CTL-1976 already paid
+// for this once: the broker derived the readiness path from ITS orchDir
+// (`~/catalyst/shadow/...`) while the daemon wrote `~/catalyst/execution-core/shadow/...`,
+// and the miss is silent because `readReadyState` answers `ready:false` for an absent
+// file — indistinguishable from "the producer is down". Same rule for the ACCOUNT: it
+// comes from the hoisted `resolveGithubFeedAccount`, the one the producer itself calls.
+//
+// Returns the verdict object unchanged (`{ ready, reason, state }`) plus the path it
+// looked at, because "I could not look" and "it is not there" must be separable in the
+// message — a check that cannot tell those apart is the class this ticket is about.
+function defaultReadGithubFeedReady() {
+  const path = defaultReadyPath(getExecutionCoreDir(), resolveGithubFeedAccount());
+  try {
+    return { ...readReadyState(path), path };
+  } catch (err) {
+    return { ready: false, reason: `ready-read-threw:${err?.message ?? "unknown"}`, state: null, path };
+  }
+}
+
+// githubFeedCoverageFromReady — the RUNTIME coverage, read off the producer's own
+// heartbeat (CTL-2030). Returns null when the record predates this field or the tick
+// threw; callers must treat null as UNKNOWN and must NOT fall back to
+// GITHUB_SUPPRESSIBLE_NAMES, which is the frozen constant whose staleness is half of
+// what this ticket fixes.
+function githubFeedCoverageFromReady(state) {
+  const c = state?.coverage;
+  if (!c || typeof c !== "object") return null;
+  const suppressible = Number(c.suppressible);
+  const consumed = Number(c.consumed);
+  if (!Number.isFinite(suppressible) || !Number.isFinite(consumed)) return null;
+  return {
+    suppressible,
+    consumed,
+    uncovered: Array.isArray(c.uncovered) ? c.uncovered : [],
+  };
+}
+
 export function checkWebhookIngestion(deps = {}) {
   const {
     resolveRoster = resolveClusterHosts,
@@ -1201,6 +1247,10 @@ export function checkWebhookIngestion(deps = {}) {
     // it, and driving it through the real env would make these tests mutate a
     // process-wide flag that four readers in three processes consult.
     resolveGithubFeedModeFn = resolveGithubFeedMode,
+    // CTL-2030: the producer's readiness heartbeat, and the ONLY evidence this check
+    // has about whether the live GitHub route is actually delivering. Injectable for
+    // the same reason the two resolvers above are.
+    readGithubFeedReadyFn = defaultReadGithubFeedReady,
   } = deps;
 
   const roster = resolveRoster();
@@ -1235,7 +1285,62 @@ export function checkWebhookIngestion(deps = {}) {
     githubSecretEnvName === "CATALYST_WEBHOOK_SECRET" &&
     secretFileNonEmpty(configDir, "webhook-secret");
   const ghSecret = ghEnvSecret || ghFileSecret;
-  const githubWired = ghSmee.length > 0 && ghSecret;
+  const smeeWired = ghSmee.length > 0 && ghSecret;
+
+  // ─── CTL-2030: grade the route this host ACTUALLY USES ─────────────────────
+  //
+  // ⛔ THE FEED MODE IS NOW RESOLVED UNCONDITIONALLY. It used to be read only inside
+  // the declared-`cloud` branch, so on the two production minis — which declare
+  // `cluster`, not `cloud` — this check never looked at the feed at all and reported
+  //
+  //     [PASS] webhook-ingestion: webhook ingestion wired (github=true, ...)
+  //
+  // while BOTH hosts received zero GitHub webhooks: the tunnel is suppressed at
+  // `enforce` and all eight webhooks are `active:false` (CTL-1929, 17:36 CT
+  // 2026-08-18). `githubWired` is CONFIGURATION PRESENCE — smeeChannel + an HMAC
+  // secret — and both are deliberately retained because they are the rollback lever.
+  // So the check answered "is the smee route configured?" (yes, on purpose) and
+  // printed it as "ingestion wired".
+  //
+  // ⛔ That is not merely cosmetic, and the second failure is the one that matters:
+  // if the FEED breaks on an enforce host, this check still PASSes, because it never
+  // looks at the feed. The one condition under which GitHub ingestion is actually
+  // dead is the one condition it could not detect.
+  //
+  // A throwing resolver grades as `off` — the pre-cutover reading — for the same
+  // fail-closed reason the declared-cloud branch already used: an unreadable config
+  // must never be why doctor tells an operator the route is whole.
+  let ghFeed;
+  try {
+    ghFeed = resolveGithubFeedModeFn();
+  } catch {
+    ghFeed = { mode: "off", source: "resolver-threw" };
+  }
+  // At `enforce` the smee wiring is INERT: the tunnel is suppressed and the webhooks
+  // are disabled, so its configuration says nothing about whether events arrive.
+  const feedIsLiveRoute = ghFeed.mode === "enforce";
+  const githubWired = feedIsLiveRoute ? false : smeeWired;
+  // Read once. Consulted by the enforce branch below AND by the declared-cloud
+  // branch's runtime-coverage read, so a single read keeps the two from disagreeing
+  // about the same file within one run.
+  // Resolved once, here, because BOTH the enforce branch below and the
+  // no-route branch after it need it. Same fail-closed handling as before:
+  // an unresolvable mode keeps the original FAIL guarantee.
+  let declaredMode;
+  try {
+    declaredMode = resolveDeploymentModeFn();
+  } catch {
+    declaredMode = undefined;
+  }
+  const declaredTail = declaredMode?.recognized
+    ? ` [declared deployment mode "${declaredMode.mode}", source=${declaredMode.source}]`
+    : "";
+  let feedReady;
+  try {
+    feedReady = readGithubFeedReadyFn();
+  } catch (err) {
+    feedReady = { ready: false, reason: `ready-read-threw:${err?.message ?? "unknown"}`, state: null, path: null };
+  }
 
   // CTL-1616 PR2: shadow comparison for the github webhook-secret leg only —
   // the linear-webhook-secret family has no single scalar contract value (it's
@@ -1281,6 +1386,103 @@ export function checkWebhookIngestion(deps = {}) {
   const danglingKeys = webhookKeys.filter((k) => !keySecretWired(k));
   const linearWired = linSmee.length > 0 && wiredKeys.length > 0;
 
+  // ─── CTL-2030: the GitHub feed is the live route — grade IT ────────────────
+  //
+  // Placed before every smee-shaped branch below, because at `enforce` those
+  // branches are reasoning about a route that is deliberately dead: they would
+  // either PASS on retained rollback config (the live defect) or FAIL with
+  // "NO webhook route enabled", which is equally wrong in the other direction.
+  //
+  // ⚠️ THE THREE OUTCOMES ARE KEPT APART ON PURPOSE. "the feed is delivering",
+  // "the feed is NOT delivering", and "I could not observe the feed" are different
+  // answers, and collapsing the third into either of the others is the failure this
+  // whole ticket is about. An absent/unparseable/unstamped record means the producer
+  // never wrote one OR doctor is looking in the wrong directory (CTL-1976 shipped
+  // exactly that bug once) — that is INCONCLUSIVE, so it WARNs and names the path.
+  // A record we CAN read that says stale/unready/wrong-mode is a real negative and
+  // FAILs.
+  if (feedIsLiveRoute) {
+    // Config residue still fails, matching the declared-cloud branch's (a) rule: a
+    // dangling Linear webhookId without its secret is residue no mode excuses.
+    if (danglingKeys.length > 0) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.FAIL,
+          `multiHost member with half-wired Linear webhook(s): ${danglingKeys.join(", ")} configured (webhookId) but missing HMAC secret file (linear-webhook-secret-<key>) — GitHub feed at enforce does not excuse config residue`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    const linTail = `linear(smee=${linSmee ? "set" : "unset"},wiredKeys=${wiredKeys.length})`;
+    // INCONCLUSIVE: we could not observe the producer at all.
+    if (feedReady.state === null) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.WARN,
+          `GitHub feed is the live route (CATALYST_GITHUB_FEED=enforce, source=${ghFeed.source}) and smee is inert${declaredTail}, but the producer's readiness could NOT be observed: ${feedReady.reason} at ${feedReady.path ?? "(unresolved path)"} — this is "could not look", not "ingestion is fine"; ${linTail}`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    // ⛔ A FRESH RECORD WITH THE WRONG MODE READS HEALTHY UNLESS THIS IS CHECKED.
+    // The producer stamps the mode it RESOLVED (`mode.effective`), which degrades to
+    // shadow when enforce is not honourable. A host whose flag says enforce while its
+    // producer runs as shadow emits markers, not events — and its heartbeat is
+    // perfectly fresh the whole time.
+    const producerMode = feedReady.state?.mode ?? null;
+    if (feedReady.ready === true && producerMode !== "enforce") {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.FAIL,
+          `GitHub feed readers DISAGREE${declaredTail}: this host's flag resolves "enforce" (source=${ghFeed.source}) but the producer's readiness record says mode="${producerMode ?? "absent"}" — smee is suppressed while the producer is not emitting real github.* names; ${linTail}`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    if (feedReady.ready !== true) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.FAIL,
+          `GitHub ingestion is DOWN${declaredTail}: the feed is the live route (enforce, source=${ghFeed.source}), smee is suppressed, and the producer is not ready — ${feedReady.reason} (${feedReady.path ?? "path unresolved"}); monitor-merge, CI waits and PR-lifecycle routing have no github.* source; ${linTail}`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    const rtCoverage = githubFeedCoverageFromReady(feedReady.state);
+    if (rtCoverage === null) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.WARN,
+          `GitHub feed is live and the producer is ready (enforce, source=${ghFeed.source}), but its readiness record carries no runtime coverage — cannot confirm which consumed github.* names have a source; ${linTail}`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    if (rtCoverage.uncovered.length > 0) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.WARN,
+          `GitHub feed is live and ready (enforce, source=${ghFeed.source}) but covers ${rtCoverage.suppressible}/${rtCoverage.consumed} consumed github.* names — ${rtCoverage.uncovered.length} have NO source on this node: ${rtCoverage.uncovered.join(", ")}; ${linTail}`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    return [
+      mkCheck(
+        "webhook-ingestion",
+        STATUS.PASS,
+        `GitHub ingestion via the cloud feed at enforce (source=${ghFeed.source})${declaredTail}, producer ready, covering all ${rtCoverage.consumed} consumed github.* names; smee is intentionally inert (rollback lever retained: smee=${ghSmee ? "set" : "unset"}, secret=${ghSecret ? "set" : "unset"}); ${linTail}`,
+      ),
+      ...webhookShadow,
+    ];
+  }
+
   if (!githubWired && !linearWired) {
     // Mode-alignment: a DECLARED (recognized, not inferred) non-cluster mode
     // means the join gate intentionally skipped wiring — no-route is the
@@ -1290,12 +1492,6 @@ export function checkWebhookIngestion(deps = {}) {
     // declared-cluster node this FAIL is the intentional loud signal for a
     // missed activation step 2b (docs/cluster-onboarding.md), and a
     // pre-migration node must keep its original guarantee.
-    let declaredMode;
-    try {
-      declaredMode = resolveDeploymentModeFn();
-    } catch {
-      declaredMode = undefined;
-    }
     if (
       declaredMode &&
       declaredMode.inferred === false &&
@@ -1350,35 +1546,13 @@ export function checkWebhookIngestion(deps = {}) {
         // Same fail-closed direction the deployment-mode resolver above takes: an
         // unreadable config must never be the reason doctor tells an operator the
         // GitHub route is whole.
-        let ghFeed;
-        try {
-          ghFeed = resolveGithubFeedModeFn();
-        } catch {
-          ghFeed = { mode: "off", source: "resolver-threw" };
-        }
-        if (ghFeed.mode === "enforce") {
-          const uncovered = GITHUB_CONSUMED_NAMES.filter(
-            (n) => !GITHUB_SUPPRESSIBLE_NAMES.includes(n),
-          );
-          if (uncovered.length === 0) {
-            return [
-              mkCheck(
-                "webhook-ingestion",
-                STATUS.PASS,
-                `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired; Linear ingestion is replaced by the cloud feed (CTL-1928) and GitHub ingestion by the GitHub feed at enforce (CTL-1929), covering all ${GITHUB_CONSUMED_NAMES.length} consumed github.* names`,
-              ),
-              ...webhookShadow,
-            ];
-          }
-          return [
-            mkCheck(
-              "webhook-ingestion",
-              STATUS.WARN,
-              `declared deployment mode "cloud" (source=${declaredMode.source}) — GitHub feed at enforce (source=${ghFeed.source}) covers ${GITHUB_SUPPRESSIBLE_NAMES.length}/${GITHUB_CONSUMED_NAMES.length} consumed github.* names, but ${uncovered.length} have NO source on this node: ${uncovered.join(", ")} — the merge→deploy join, the CI wait and rebase detection degrade`,
-            ),
-            ...webhookShadow,
-          ];
-        }
+        // ⛔ CTL-2030: THE `enforce` SUB-BRANCH THAT USED TO LIVE HERE IS GONE, NOT
+        // MOVED-AND-DUPLICATED. The unified enforce branch near the top of this
+        // function now answers for EVERY host whose feed is at enforce — cluster or
+        // cloud — so anything written here for that case would be unreachable, and
+        // unreachable grading code is how the static-vs-runtime comparison it
+        // contained went unnoticed in the first place (its PASS could not be reached
+        // by any input). Reaching this point means the feed is off or shadow.
         return [
           mkCheck(
             "webhook-ingestion",
