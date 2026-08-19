@@ -89,7 +89,7 @@ describe("synthesizeParkedNeedsHumanTickets — the pure card builder", () => {
     );
     expect(cards).toHaveLength(1);
     expect(cards[0].attention).toBe("needs-human");
-    expect(String(cards[0].humanQuestion)).toContain("needs-input");
+    expect(String(cards[0].humanQuestion)).toContain("paused and asked a question");
     expect(classifyTicket(cards[0])).toBe("attention");
   });
 
