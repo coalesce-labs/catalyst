@@ -59,6 +59,7 @@ import {
   runDoctor,
   checkFleetTokenExport,
   readLinearBotUserIds,
+  checkSelfEchoIdentityHistory,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
@@ -402,6 +403,77 @@ describe("readLinearBotUserIds (doctor inline twin, CTL-2074)", () => {
     expect(ids.has("cloud-uuid")).toBe(true);
     expect(ids.has("worker-uuid")).toBe(true);
     expect(ids.has("orch-uuid")).toBe(true);
+  });
+});
+
+// ─── CTL-2074: checkSelfEchoIdentityHistory — the loud history cross-check ────
+// Turns the silent failure loud: compares the resolved recognition set against the
+// actors who ACTUALLY write state in real issue_history (positive control included),
+// never against config. Advisory (WARN, not FAIL) — "make it loud", not "block".
+const ORCH_ID = "ba2989f1-0000-4000-8000-000000000000";
+const CLOUD_ID = "78f8f491-0000-4000-8000-000000000000";
+const HUMAN_ID = "c2a8cc92-0000-4000-8000-000000000000";
+
+describe("checkSelfEchoIdentityHistory (CTL-2074)", () => {
+  it("WARNs when proxy=enforce and no recognized identity writes state (names the candidates)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID]),
+      recentActors: () => [
+        { actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 },
+        { actorId: HUMAN_ID, name: "Ryan Rozich", count: 103 },
+      ],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    // names the unrecognized state-writer so the operator has a candidate to confirm
+    expect(check.detail).toMatch(/78f8f491|cloud|proxied|Catalyst Cloud/i);
+  });
+
+  it("PASSes when a recognized identity is present in history AND in the set", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+    });
+    expect(check.status).toBe(STATUS.PASS);
+  });
+
+  it("WARNs when the configured cloud id never appears in recent history (misconfigured)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      recentActors: () => [{ actorId: HUMAN_ID, name: "Ryan Rozich", count: 103 }],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+  });
+
+  it("is INCONCLUSIVE (never PASS) when the replica cannot be read (recentActors → undefined)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      recentActors: () => undefined,
+    });
+    expect(check.status).not.toBe(STATUS.PASS); // could-not-look ≠ clean
+  });
+
+  it("is INCONCLUSIVE (never PASS) when history is present but empty (positive control failed)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      recentActors: () => [],
+    });
+    expect(check.status).not.toBe(STATUS.PASS);
+  });
+
+  it("off/shadow proxy mode → INFO/skip (the guard only matters under enforce)", () => {
+    for (const mode of ["off", "shadow"]) {
+      const check = checkSelfEchoIdentityHistory({
+        proxyMode: mode,
+        botIds: new Set([ORCH_ID]),
+        recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+      });
+      expect(check.status).toBe(STATUS.INFO);
+    }
   });
 });
 

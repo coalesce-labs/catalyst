@@ -1101,3 +1101,75 @@ describe("createReplicaReader.labelsBatch", () => {
     expect(reader.labelsBatch(["CTL-200"])).toBeUndefined();
   });
 });
+
+// ── CTL-2074: recentStateChangeActors — the positive-control history read ─────
+// doctor's self-echo-identity-history check verifies the recognition set against
+// who ACTUALLY writes state, from real issue_history rows (not config). This is
+// the accessor it reads. Fail-open (undefined) on "could not look", never a false
+// empty.
+const CLOUD_ID = "78f8f491-0000-4000-8000-000000000000";
+const HUMAN_ID = "c2a8cc92-0000-4000-8000-000000000000";
+
+function seedHistory(rows) {
+  const db = new Database(dbPath, { create: true });
+  db.run(`CREATE TABLE issue_history (id TEXT, issue_id TEXT, actor_id TEXT, created_at INTEGER, to_state TEXT)`);
+  db.run(`CREATE TABLE users (id TEXT, name TEXT)`);
+  let i = 0;
+  for (const r of rows) {
+    db.run(
+      `INSERT INTO issue_history (id, issue_id, actor_id, created_at, to_state) VALUES (?, ?, ?, ?, ?)`,
+      [`h${i}`, r.issueId ?? "I1", r.actorId ?? null, r.atMs ?? 1000 + i, r.toState ?? null],
+    );
+    i += 1;
+  }
+  db.run(`INSERT INTO users (id, name) VALUES (?, ?)`, [CLOUD_ID, "Catalyst Cloud"]);
+  db.run(`INSERT INTO users (id, name) VALUES (?, ?)`, [HUMAN_ID, "Ryan Rozich"]);
+  db.close();
+}
+
+describe("createReplicaReader.recentStateChangeActors (CTL-2074)", () => {
+  test("returns distinct state-change actors with counts + names (positive control)", () => {
+    seedHistory([
+      { actorId: CLOUD_ID, toState: "Done" },
+      { actorId: HUMAN_ID, toState: "In Progress" },
+      { actorId: HUMAN_ID, toState: "Done" },
+      { actorId: null, toState: null }, // a field edit, NOT a state change → excluded
+    ]);
+    reader = createReplicaReader({ dbPath });
+    const actors = reader.recentStateChangeActors({ limit: 50 });
+    expect(actors).toBeInstanceOf(Array); // rows returned ⇒ positive control holds
+    expect(actors.find((a) => a.actorId === CLOUD_ID).count).toBe(1);
+    expect(actors.find((a) => a.actorId === CLOUD_ID).name).toBe("Catalyst Cloud");
+    expect(actors.find((a) => a.actorId === HUMAN_ID).count).toBe(2);
+    expect(actors.some((a) => a.actorId === null)).toBe(false); // to_state null excluded
+  });
+
+  test("returns [] (looked, found nothing) when the table is present but empty", () => {
+    seedHistory([]);
+    reader = createReplicaReader({ dbPath });
+    expect(reader.recentStateChangeActors({ limit: 50 })).toEqual([]);
+  });
+
+  test("returns undefined on no db (fail-open, never a false empty)", () => {
+    reader = createReplicaReader({ dbPath: "/nonexistent/replica.db" });
+    expect(reader.recentStateChangeActors({ limit: 50 })).toBeUndefined();
+  });
+
+  test("returns undefined when issue_history is absent (throw → could-not-look)", () => {
+    const db = new Database(dbPath, { create: true });
+    db.run(`CREATE TABLE unrelated (x INTEGER)`);
+    db.close();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.recentStateChangeActors({ limit: 50 })).toBeUndefined();
+  });
+
+  test("honors the limit bound", () => {
+    seedHistory([
+      { actorId: "a1", toState: "Done" },
+      { actorId: "a2", toState: "Done" },
+      { actorId: "a3", toState: "Done" },
+    ]);
+    reader = createReplicaReader({ dbPath });
+    expect(reader.recentStateChangeActors({ limit: 2 })).toHaveLength(2);
+  });
+});
