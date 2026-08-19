@@ -25,6 +25,7 @@ import {
 const OLD = "f51bc697-c64b-47b8-9fba-a2981fbfe652"; // retired 2026-08-10
 const NEW = "ba2989f1-f250-4273-943c-ca511c66e793"; // current, from 2026-08-10
 const HUMAN = "11111111-2222-3333-4444-555555555555"; // a genuine third party
+const CLOUD = "78f8f491-0000-4000-8000-000000000000"; // synthetic cloud-proxy identity (CTL-2074)
 
 let dir;
 let ledger;
@@ -272,6 +273,23 @@ describe("readSelfEchoIdentities — the seam the daemon actually calls", () => 
     const after = readSelfEchoIdentities(null, layer2(dir, { orchestrator: HUMAN }), ledger);
     expect(after.has(NEW)).toBe(true);
     expect(after.has(OLD)).toBe(true);
+  });
+
+  // CTL-2074: a configured cloud id flows through the same sync seam for free —
+  // rotation-durable with no ledger change, because a configured id is "an id we
+  // write as" (source: config), not an OBSERVED writer.
+  test("a configured cloud id is recorded in the identity ledger (source: config)", () => {
+    const layer2Cloud = join(dir, "layer2-cloud.json");
+    writeFileSync(
+      layer2Cloud,
+      JSON.stringify({ catalyst: { linear: { bot: { cloud: { botUserId: CLOUD } } } } }),
+    );
+    const ids = readSelfEchoIdentities(null, layer2Cloud, ledger);
+    expect(ids.has(CLOUD)).toBe(true);
+    expect(readIdentityLedger(ledger).ids.has(CLOUD)).toBe(true);
+    // and it persists after the config drops it — the rotation-durability guarantee
+    const after = readSelfEchoIdentities(null, layer2(dir, { orchestrator: NEW }), ledger);
+    expect(after.has(CLOUD)).toBe(true);
   });
 });
 

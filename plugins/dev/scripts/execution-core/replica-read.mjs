@@ -243,6 +243,23 @@ const LAST_STATE_CHANGE_SELECT = `SELECT h.actor_id AS actorId, h.to_state AS to
 const FLEET_WROTE_SELECT = (n) =>
   `SELECT 1 FROM issue_history h JOIN issues i ON i.id = h.issue_id WHERE i.identifier = ? AND h.to_state IS NOT NULL AND h.actor_id IN (${Array(n).fill("?").join(",")}) LIMIT 1`;
 
+// CTL-2074 — the distinct actors who have written a STATE change recently, with a
+// legible name and a count. This is the POSITIVE CONTROL doctor's
+// self-echo-identity-history check reads: it verifies the recognition set against who
+// ACTUALLY writes state, from real issue_history rows, never from config. Deliberately
+// NOT joined to `issues`: an inner join would silently DROP a state change whose issue
+// row has not synced yet — the exact false-empty this whole check exists to catch. The
+// `actor_id IS NOT NULL` predicate keeps a system/null-actor row from forming a bogus
+// bucket; `to_state IS NOT NULL` is the same state-change filter the two selects above use.
+const RECENT_STATE_CHANGE_ACTORS_SELECT = `
+  SELECT h.actor_id AS actorId, u.name AS name, COUNT(*) AS count
+  FROM issue_history h
+  LEFT JOIN users u ON u.id = h.actor_id
+  WHERE h.to_state IS NOT NULL AND h.actor_id IS NOT NULL
+  GROUP BY h.actor_id
+  ORDER BY count DESC
+  LIMIT ?`;
+
 const OWNERSHIP_SELECT = `SELECT assignee_id, delegate_id, delegate_name FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
 // Relation enrichment, mirroring normalizeDetail in linear-cli.mjs. forward:
 // edges this issue OWNS (relatedIssue is the target); inverse: edges that point
@@ -990,11 +1007,35 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
+  // recentStateChangeActors({ limit }) → Array<{actorId, name, count}> | undefined
+  //   HIT (table present)      → the distinct recent state-change actors (possibly []).
+  //   [] = looked-and-found-nothing (positive control FAILED — the caller treats this
+  //        as inconclusive, NOT clean); undefined = could-not-look (no db / missing
+  //        table / any throw). ⛔ The two must stay distinct: a doctor check that reads
+  //        an empty array as "no problem" is the silent false-clean this ticket exists
+  //        to end. CTL-2074.
+  const recentStateChangeActors = ({ limit = 50 } = {}) => {
+    const n = Number.isInteger(limit) && limit > 0 ? limit : 50;
+    try {
+      const rows = open().prepare(RECENT_STATE_CHANGE_ACTORS_SELECT).all(n);
+      if (!Array.isArray(rows)) return undefined;
+      return rows.map((r) => ({
+        actorId: r.actorId ?? null,
+        name: r.name ?? null,
+        count: Number(r.count) || 0,
+      }));
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
   return {
     lookup,
     freshness,
     lastStateChange, // CTL-2068
     fleetEverWroteState, // CTL-2068
+    recentStateChangeActors, // CTL-2074
     titles,
     estimates, // CTL-1806
     relations, // CTL-1806

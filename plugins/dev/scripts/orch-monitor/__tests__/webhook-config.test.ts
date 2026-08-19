@@ -5,6 +5,7 @@ import { join } from "path";
 import {
   loadWebhookConfig,
   loadLinearAgentConfig,
+  loadLinearBotUserIds,
   _resetWebhookDeprecationWarning,
 } from "../lib/webhook-config";
 
@@ -1431,5 +1432,43 @@ describe("loadWebhookConfig — linearAgentConfig", () => {
     const cfg = loadWebhookConfig(homeDir, projectConfigPath);
 
     expect(cfg!.linearAgentConfig).toBeNull();
+  });
+});
+
+// CTL-2074: the cloud-proxy recognition slot must be picked up here too — this
+// resolver feeds orch-monitor's Linear webhook _isBotActor. It must stay in
+// lockstep with the daemon + doctor twins.
+describe("loadLinearBotUserIds — cloud slot (CTL-2074)", () => {
+  it("includes catalyst.linear.bot.cloud.botUserId from Layer-2", () => {
+    writeFileSync(
+      join(homeDir, "config.json"),
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: {
+              worker: { botUserId: "worker-uuid" },
+              orchestrator: { botUserId: "orch-uuid" },
+              cloud: { botUserId: "cloud-uuid" },
+            },
+          },
+        },
+      }),
+    );
+    const ids = loadLinearBotUserIds(homeDir, projectConfigPath);
+    expect(ids.has("cloud-uuid")).toBe(true);
+    expect(ids.has("worker-uuid")).toBe(true);
+    expect(ids.has("orch-uuid")).toBe(true);
+  });
+
+  it("omits the cloud slot when absent (no phantom id)", () => {
+    writeFileSync(
+      join(homeDir, "config.json"),
+      JSON.stringify({
+        catalyst: { linear: { bot: { orchestrator: { botUserId: "orch-uuid" } } } },
+      }),
+    );
+    const ids = loadLinearBotUserIds(homeDir, projectConfigPath);
+    expect(ids.has("orch-uuid")).toBe(true);
+    expect(ids.size).toBe(1);
   });
 });

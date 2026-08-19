@@ -390,8 +390,8 @@ export function loadLinearAgentConfig(
  *
  * Returns `null` if either the channel or secret cannot be resolved.
  */
-/** Linear app-actor user ids: worker + orchestrator botUserIds from the Layer-2
- *  global config.json, plus the Layer-1 back-compat
+/** Linear app-actor user ids: worker + orchestrator + cloud (CTL-2074) botUserIds
+ *  from the Layer-2 global config.json, plus the Layer-1 back-compat
  *  `catalyst.monitor.linear.botUserId`. Exported SEPARATELY from
  *  loadWebhookConfig because these ids also classify agent comments on read
  *  surfaces (the discussion timeline) — a monitor with no webhook transport
@@ -415,6 +415,12 @@ export function loadLinearBotUserIds(
         }
         if (isRecord(botSection.orchestrator) && typeof botSection.orchestrator.botUserId === "string") {
           const id = botSection.orchestrator.botUserId;
+          if (id.length > 0) linearBotUserIds.add(id);
+        }
+        // CTL-2074: cloud-proxy app-actor — recognition-only. Must stay in lockstep
+        // with the daemon + doctor twins so a proxied write's authorId is recognised.
+        if (isRecord(botSection.cloud) && typeof botSection.cloud.botUserId === "string") {
+          const id = botSection.cloud.botUserId;
           if (id.length > 0) linearBotUserIds.add(id);
         }
       }
