@@ -1668,6 +1668,9 @@ describe("labelNeedsHumanUnlessBeliefOwner — CTL-2056 escalation emit", () => 
     ).not.toThrow();
     // The .applied marker must still be written (label application succeeded).
     expect(existsSync(join(orchDir, "workers", "CTL-THROW", ".linear-label-needs-human.applied"))).toBe(true);
+  });
+});
+
 // ─── CTL-1871 COORD-29: ASK comment gate ────────────────────────────────────
 
 describe("CTL-1871: NEEDS_HUMAN_ASK_EVENTS + NEEDS_HUMAN_LABEL_FAMILY exports", () => {
