@@ -56,6 +56,7 @@ import {
   GITHUB_SUPPRESSIBLE_NAMES,
   githubSuppressibleNames,
 } from "./github-feed-gate.mjs";
+import { resolveGithubFeedAccount } from "../lib/github-feed-names.mjs"; // CTL-2030
 import { defaultReadyPath, writeReadyState } from "./github-feed-ready.mjs";
 
 /**
@@ -71,9 +72,11 @@ import { defaultReadyPath, writeReadyState } from "./github-feed-ready.mjs";
  * gives the rule: this must match `cloud-sync.mjs`'s resolution "so the two cannot
  * disagree about which account this host is".
  */
-export function resolveAccount(envObj = process.env) {
-  return envObj.CATALYST_CLOUD_ACCOUNT || DEFAULT_ACCOUNT;
-}
+// CTL-2030: the implementation moved to the zero-import leaf `lib/github-feed-names.mjs`
+// so `catalyst doctor` (bare node — this file's `bun:sqlite` graph is unloadable there)
+// can resolve the SAME account rather than keeping a copy. Re-exported under the
+// original name so every existing caller is untouched.
+export const resolveAccount = resolveGithubFeedAccount;
 
 /** The shadow-only marker name. Deliberately NOT a `github.*` name — see the header. */
 export const EVENT_WOULD_DISPATCH = "github-feed.would-dispatch";
@@ -373,7 +376,27 @@ export function runGithubFeedTick({
       logger.warn({ requested: resolved.requested, effective: resolved.effective, reason: resolved.reason },
         "github-feed: enforce requested but not honourable — running as shadow");
     }
-    return { skipped: null, mode: resolved, counts, emitted: emitted.length, ready: unready === null, unready };
+    // CTL-2030: the RUNTIME coverage, carried out of the tick so the readiness file
+    // can publish it. `catalyst doctor` runs under bare node and cannot open the
+    // replica (`bun:sqlite`), so without this it can only compare the frozen
+    // GITHUB_SUPPRESSIBLE_NAMES constant — the exact static-vs-runtime split CTL-2018
+    // fixed in this file. The producer already resolved the honest answer three lines
+    // into this try; publishing it is strictly cheaper than a second reader.
+    const coverageReport = {
+      suppressible: tickSuppressibleNames.length,
+      consumed: GITHUB_CONSUMED_NAMES.length,
+      uncovered: GITHUB_CONSUMED_NAMES.filter((n) => !tickSuppressible.has(n)),
+      ok: coverage.ok === true,
+    };
+    return {
+      skipped: null,
+      mode: resolved,
+      counts,
+      emitted: emitted.length,
+      ready: unready === null,
+      unready,
+      coverage: coverageReport,
+    };
   } finally {
     try { source.close(); } catch { /* best effort */ }
     try { seen.close(); } catch { /* best effort */ }
@@ -449,7 +472,16 @@ export function startGithubFeedTimer({
         authorityAtEntry: authority,
       });
       authority = last?.ready === true;
-      publishReady({ ready: authority, unready: last?.unready ?? null, mode: last?.mode?.effective ?? null });
+      // CTL-2030: `coverage` rides the heartbeat so a bare-node reader (doctor) gets
+      // the producer's OWN runtime answer instead of re-deriving it from a constant.
+      // Absent on the pre-CTL-2030 record shape and on a throwing tick — readers must
+      // treat missing coverage as UNKNOWN, never as full.
+      publishReady({
+        ready: authority,
+        unready: last?.unready ?? null,
+        mode: last?.mode?.effective ?? null,
+        coverage: last?.coverage ?? null,
+      });
     } catch (err) {
       // A guardrail that can wedge the daemon tick is not a guardrail.
       logger?.error?.({ err: err?.message }, "github-feed: tick threw");
@@ -459,7 +491,7 @@ export function startGithubFeedTimer({
       // there until the staleness window expired and the gate would keep suppressing
       // smee for up to 90 s on the authority of a tick that crashed.
       authority = false;
-      publishReady({ ready: false, unready: `tick-threw:${err?.name ?? "unknown"}`, mode: null });
+      publishReady({ ready: false, unready: `tick-threw:${err?.name ?? "unknown"}`, mode: null, coverage: null });
     }
   };
 

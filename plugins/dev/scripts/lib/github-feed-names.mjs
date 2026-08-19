@@ -134,3 +134,27 @@ export const EXCLUSION_REASONS = Object.freeze({
   "github.check_suite.completed": "no-replacement:no-pr-association-until-0.1.18:CTC-712",
   "github.push": "lossy-replacement:pushes-keyed-per-ref:CTC-704",
 });
+
+// ─── CTL-2030: the account name, hoisted into this leaf ──────────────────────
+//
+// ⛔ WHY IT MOVED. `resolveAccount` lived in `github-feed-timer.mjs`, which imports
+// `github-feed-source.mjs` → `bun:sqlite`. `catalyst doctor` runs under BARE NODE
+// and cannot load that graph (the same measured constraint that put
+// GITHUB_CONSUMED_NAMES here in CTL-1929: config.mjs loads under bare node,
+// github-feed-gate.mjs REJECTS). Doctor needs the account to resolve the
+// producer's readiness-file path, so the choice was hoist-or-copy.
+//
+// ⚠️ A COPY WOULD HAVE BEEN THE DEFECT, NOT THE SHORTCUT. `github-feed-timer.mjs`'s
+// own comment gives the rule this function exists to satisfy: it "must match
+// cloud-sync.mjs's resolution so the two cannot disagree about which account this
+// host is". A doctor with its own copy would read a DIFFERENT host's readiness
+// file the first time anyone sets CATALYST_CLOUD_ACCOUNT — and report
+// `ready-file-absent`, i.e. "the producer never ran", about a producer that is
+// running perfectly. `github-feed-timer.mjs` re-exports this one; there is no
+// second implementation.
+export const GITHUB_FEED_DEFAULT_ACCOUNT = "tenant-0";
+
+/** The cloud account this host is. See the block comment above before copying it. */
+export function resolveGithubFeedAccount(envObj = process.env) {
+  return envObj?.CATALYST_CLOUD_ACCOUNT || GITHUB_FEED_DEFAULT_ACCOUNT;
+}

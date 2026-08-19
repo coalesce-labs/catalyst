@@ -733,10 +733,151 @@ describe("checkWebhookIngestion", () => {
     expect(checks[0].detail).toContain("single-host");
   });
 
+  // ─── CTL-2030: the check grades the route the host ACTUALLY USES ───────────
+  //
+  // Live on both minis on 2026-08-18 after the CTL-1929 cutover:
+  //   [PASS] webhook-ingestion: webhook ingestion wired (github=true, linear=false)
+  // while both hosts received ZERO GitHub webhooks — the tunnel suppressed at
+  // enforce, all eight webhooks active:false. `githubWired` was configuration
+  // PRESENCE (smeeChannel + HMAC secret), both deliberately retained as the
+  // rollback lever. The check answered "is smee configured?" and printed it as
+  // "ingestion wired" — and, worse, would have kept PASSing if the FEED broke,
+  // because it never looked at the feed.
+  describe("CTL-2030: an enforce host is graded on the feed, not on smee's config", () => {
+    const cluster = () => ({ mode: "cluster", source: "layer1", inferred: false, recognized: true });
+    // The minis' real shape: smee CONFIGURED (rollback lever) and the feed at enforce.
+    const monitorWithSmee = { github: { smeeChannel: "catalyst-gh" }, linear: {} };
+    const ready = (over = {}) => () => ({
+      ready: true,
+      reason: "producer-ready",
+      path: "/x/github-feed-ready-tenant-0.json",
+      state: {
+        ready: true,
+        mode: "enforce",
+        coverage: { suppressible: GITHUB_CONSUMED_NAMES.length, consumed: GITHUB_CONSUMED_NAMES.length, uncovered: [] },
+      },
+      ...over,
+    });
+    const run = (readFn, ghFeedMode = "enforce") =>
+      checkWebhookIngestion({
+        resolveDeploymentModeFn: cluster,
+        resolveRoster: multiHost,
+        monitor: monitorWithSmee,
+        secretFileNonEmpty: () => true, // the HMAC secret IS on disk — the rollback lever
+        resolveSecretContract: agreeingSecretContract(true),
+        resolveGithubFeedModeFn: () => ({ mode: ghFeedMode, source: "layer2" }),
+        readGithubFeedReadyFn: readFn,
+      })[0];
+
+    it("⭐ THE REGRESSION: retained smee config no longer reads as 'ingestion wired'", () => {
+      // Same inputs that produced the live false PASS, plus a HEALTHY feed. The
+      // verdict is still PASS — but for the feed, and it says so. If the message
+      // ever goes back to claiming the smee route is wired, this fails.
+      const c = run(ready());
+      expect(c.status).toBe(STATUS.PASS);
+      expect(c.detail).toContain("cloud feed at enforce");
+      expect(c.detail).toContain("smee is intentionally inert");
+      expect(c.detail).not.toContain("webhook ingestion wired");
+    });
+
+    it("⛔ a BROKEN feed on an enforce host does NOT pass — the condition it could not detect", () => {
+      const c = run(() => ({ ready: false, reason: "producer-unready:sweep-behind", path: "/x/r.json", state: { ready: false, mode: "enforce" } }));
+      expect(c.status).toBe(STATUS.FAIL);
+      expect(c.detail).toContain("GitHub ingestion is DOWN");
+      expect(c.detail).toContain("producer-unready:sweep-behind");
+    });
+
+    it("⛔ a STALE readiness record is a FAIL, and the message names what it read", () => {
+      const c = run(() => ({ ready: false, reason: "ready-file-stale:412s", path: "/x/r.json", state: { ready: true, mode: "enforce" } }));
+      expect(c.status).toBe(STATUS.FAIL);
+      expect(c.detail).toContain("ready-file-stale:412s");
+    });
+
+    it("⚠️ an UNOBSERVABLE producer is a WARN naming the path — 'could not look' is not 'fine'", () => {
+      // Absent means the producer never ran OR doctor is looking in the wrong
+      // directory (CTL-1976 shipped exactly that bug once). Grading it FAIL would
+      // page an operator for a reader bug; grading it PASS is the defect this
+      // ticket fixes. It is inconclusive, and it says so.
+      const c = run(() => ({ ready: false, reason: "ready-file-absent", path: "/some/where/r.json", state: null }));
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("could NOT be observed");
+      expect(c.detail).toContain("/some/where/r.json");
+      expect(c.detail).toContain('"could not look", not "ingestion is fine"');
+    });
+
+    it("⛔ a FRESH record with the WRONG MODE is a FAIL — freshness alone reads healthy", () => {
+      // The producer stamps the mode it RESOLVED, which degrades to shadow when
+      // enforce is not honourable. A host whose flag says enforce while its producer
+      // runs as shadow emits markers, not events — with a perfectly fresh heartbeat
+      // the whole time. Checking only `ready` would pass it.
+      const c = run(ready({ state: { ready: true, mode: "shadow", coverage: { suppressible: 12, consumed: 12, uncovered: [] } } }));
+      expect(c.status).toBe(STATUS.FAIL);
+      expect(c.detail).toContain("readers DISAGREE");
+      expect(c.detail).toContain('mode="shadow"');
+    });
+
+    it("⚠️ a ready producer with uncovered names is a WARN that names them", () => {
+      const c = run(ready({ state: { ready: true, mode: "enforce", coverage: { suppressible: 10, consumed: 12, uncovered: ["github.push", "github.check_suite.completed"] } } }));
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("10/12");
+      expect(c.detail).toContain("github.push");
+    });
+
+    it("a SHADOW host is unchanged — it still grades the smee route exactly as before", () => {
+      // The feed replaces nothing at shadow, so smee is still the live route and the
+      // pre-CTL-2030 grade must be preserved byte-for-byte.
+      const c = run(ready(), "shadow");
+      expect(c.status).toBe(STATUS.PASS);
+      expect(c.detail).toContain("webhook ingestion wired");
+      expect(c.detail).toContain("github=true");
+    });
+
+    it("⛔ half-wired Linear config still FAILs at enforce — no mode excuses residue", () => {
+      const c = checkWebhookIngestion({
+        resolveDeploymentModeFn: cluster,
+        resolveRoster: multiHost,
+        monitor: { github: { smeeChannel: "g" }, linear: { smeeChannel: "l", workspace: { webhookId: "w1" } } },
+        secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+        resolveSecretContract: agreeingSecretContract(true),
+        resolveGithubFeedModeFn: () => ({ mode: "enforce", source: "layer2" }),
+        readGithubFeedReadyFn: ready(),
+      })[0];
+      expect(c.status).toBe(STATUS.FAIL);
+      expect(c.detail).toContain("half-wired");
+    });
+
+    it("⛔ a THROWING readiness reader does not pass and does not throw", () => {
+      const c = run(() => {
+        throw new Error("EACCES");
+      });
+      expect(c.status).not.toBe(STATUS.PASS);
+      expect(c.detail).toContain("could NOT be observed");
+    });
+  });
+
   // ─── CTL-1929: the declared-cloud grade now depends on the GitHub feed ──────
   describe("declared cloud + the GitHub feed (CTL-1929)", () => {
     const cloud = () => ({ mode: "cloud", source: "layer2", inferred: false, recognized: true });
-    const run = (ghFeed) =>
+    // CTL-2030: coverage now comes from the PRODUCER'S readiness record, not from the
+    // frozen constants. These cases keep exercising today's real gap by publishing it
+    // as the producer would, so they still fail when the derivation is hand-written —
+    // and they no longer depend on doctor reading a file off the real filesystem.
+    const readyWith = (uncovered) => () => ({
+      ready: true,
+      reason: "producer-ready",
+      path: "/x/github-feed-ready-tenant-0.json",
+      state: {
+        ready: true,
+        mode: "enforce",
+        coverage: {
+          suppressible: GITHUB_CONSUMED_NAMES.length - uncovered.length,
+          consumed: GITHUB_CONSUMED_NAMES.length,
+          uncovered,
+        },
+      },
+    });
+    const todaysGaps = GITHUB_CONSUMED_NAMES.filter((x) => !GITHUB_SUPPRESSIBLE_NAMES.includes(x));
+    const run = (ghFeed, readGithubFeedReadyFn = readyWith(todaysGaps)) =>
       checkWebhookIngestion({
         resolveDeploymentModeFn: cloud,
         resolveRoster: multiHost,
@@ -744,6 +885,7 @@ describe("checkWebhookIngestion", () => {
         secretFileNonEmpty: noSecrets,
         resolveSecretContract: agreeingSecretContract(false),
         resolveGithubFeedModeFn: () => ghFeed,
+        readGithubFeedReadyFn,
       })[0];
 
     it("feed OFF → WARN naming the mode, because github.* has no source at all", () => {
@@ -769,21 +911,48 @@ describe("checkWebhookIngestion", () => {
       // rebase detection are the parts that are missing.
       const c = run({ mode: "enforce", source: "env" });
       expect(c.status).toBe(STATUS.WARN);
-      for (const n of GITHUB_CONSUMED_NAMES.filter((x) => !GITHUB_SUPPRESSIBLE_NAMES.includes(x))) {
+      for (const n of todaysGaps) {
         expect(c.detail).toContain(n);
       }
-      expect(c.detail).toContain(`${GITHUB_SUPPRESSIBLE_NAMES.length}/${GITHUB_CONSUMED_NAMES.length}`);
+      expect(c.detail).toContain(`${GITHUB_CONSUMED_NAMES.length - todaysGaps.length}/${GITHUB_CONSUMED_NAMES.length}`);
+    });
+
+    it("⛔ CTL-2030: a FULLY-COVERED node reaches the PASS branch — it was UNREACHABLE before", () => {
+      // The static comparison could never yield zero on a 0.1.18 replica (the frozen
+      // constant is 10 of 12), so this PASS existed in the source and could not be
+      // reached by any input. Driving it from the producer's own runtime answer is
+      // what makes it real.
+      const c = run({ mode: "enforce", source: "env" }, readyWith([]));
+      expect(c.status).toBe(STATUS.PASS);
+      expect(c.detail).toContain(`all ${GITHUB_CONSUMED_NAMES.length} consumed github.* names`);
+    });
+
+    it("⚠️ CTL-2030: unknown runtime coverage is a WARN, NOT a fall-back to the constant", () => {
+      // A pre-CTL-2030 readiness record (or a thrown tick) carries no coverage.
+      // Degrading to GITHUB_SUPPRESSIBLE_NAMES here would re-introduce the stale
+      // reading this ticket removes, wearing a fresh-looking verdict.
+      const noCoverage = () => ({
+        ready: true,
+        reason: "producer-ready",
+        path: "/x/r.json",
+        state: { ready: true, mode: "enforce" },
+      });
+      const c = run({ mode: "enforce", source: "env" }, noCoverage);
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("carries no runtime coverage");
     });
 
     it("⭐ the counts and names are DERIVED — the WARN stops warning by itself when the gaps close", () => {
       // Drives the post-CTC-691/667/704 world through the same code path. A
       // hand-written detail string passes every test above and keeps reporting three
       // uncovered names forever.
-      const uncovered = GITHUB_CONSUMED_NAMES.filter((x) => !GITHUB_SUPPRESSIBLE_NAMES.includes(x));
-      expect(uncovered.length).toBeGreaterThan(0); // precondition: gaps are open today
+      expect(todaysGaps.length).toBeGreaterThan(0); // precondition: gaps are open today
       expect(GITHUB_SUPPRESSIBLE_NAMES.length).toBeLessThan(GITHUB_CONSUMED_NAMES.length);
       const c = run({ mode: "enforce", source: "env" });
-      expect(c.detail).toContain(`${uncovered.length} have NO source`);
+      expect(c.detail).toContain(`${todaysGaps.length} have NO source`);
+      // ...and with ONE gap published instead of today's set, the number follows.
+      const one = run({ mode: "enforce", source: "env" }, readyWith([todaysGaps[0]]));
+      expect(one.detail).toContain("1 have NO source");
     });
 
     it("⛔ a THROWING feed resolver grades as NO REPLACEMENT, not as a degraded enforce", () => {
