@@ -276,7 +276,12 @@ let _eventLogLeftover = "";
 // config layers so the self-echo guard covers every app-actor identity:
 //   1. NEW:  ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
 //   2. NEW:  ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
-//   3. OLD:  .catalyst/config.json           catalyst.monitor.linear.botUserId  (Layer-1)
+//   3. NEW:  ~/.config/catalyst/config.json  catalyst.linear.bot.cloud.botUserId (CTL-2074)
+//   4. OLD:  .catalyst/config.json           catalyst.monitor.linear.botUserId  (Layer-1)
+// The `cloud` slot names the cloud tenant's app-actor id the fleet's writes carry
+// when CATALYST_LINEAR_WRITE_PROXY=enforce (CTL-1889/ADR-0031). RECOGNITION-ONLY:
+// it enters the self-echo set but is deliberately NOT returned by readLinearBotWriteId
+// (the daemon must never self-assign as the cloud tenant).
 // Returns a Set<string>. Empty set = no filter (fail-open). Never throws. CTL-749.
 export function readLinearBotUserIds(layer1Path, layer2Path) {
   const ids = new Set();
@@ -296,6 +301,9 @@ export function readLinearBotUserIds(layer1Path, layer2Path) {
       s.add(bot.worker.botUserId);
     if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
       s.add(bot.orchestrator.botUserId);
+    // CTL-2074: cloud-proxy app-actor — recognition-only (never a self-assign id).
+    if (typeof bot?.cloud?.botUserId === "string" && bot.cloud.botUserId.length > 0)
+      s.add(bot.cloud.botUserId);
   });
   // OLD Layer-1 path: catalyst.monitor.linear.botUserId (back-compat). CTL-749.
   addFromPath(layer1Path, (p, s) => {

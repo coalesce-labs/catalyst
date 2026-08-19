@@ -152,9 +152,13 @@ import { collectConfigDump } from "./config-dump.mjs";
 // Collects all known Linear bot user UUIDs from both config layers:
 //   1. ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
 //   2. ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
-//   3. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
+//   3. ~/.config/catalyst/config.json  catalyst.linear.bot.cloud.botUserId (CTL-2074,
+//        recognition-only — the cloud-proxy app-actor; kept in lockstep with the daemon)
+//   4. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
 // Returns a Set<string>. Empty set = no filter (fail-open). Never throws.
-function readLinearBotUserIds(l1Path, l2Path) {
+// Exported so doctor.test.mjs exercises the inline twin directly and it cannot
+// silently drift from the daemon resolver (CTL-2074).
+export function readLinearBotUserIds(l1Path, l2Path) {
   const ids = new Set();
   function addFromPath(path, extractor) {
     if (!path) return;
@@ -169,6 +173,9 @@ function readLinearBotUserIds(l1Path, l2Path) {
       s.add(bot.worker.botUserId);
     if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
       s.add(bot.orchestrator.botUserId);
+    // CTL-2074: cloud-proxy app-actor — recognition-only (never a self-assign id).
+    if (typeof bot?.cloud?.botUserId === "string" && bot.cloud.botUserId.length > 0)
+      s.add(bot.cloud.botUserId);
   });
   addFromPath(l1Path, (p, s) => {
     const uid = p?.catalyst?.monitor?.linear?.botUserId;

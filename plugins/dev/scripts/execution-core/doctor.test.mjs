@@ -58,6 +58,7 @@ import {
   parseArgs,
   runDoctor,
   checkFleetTokenExport,
+  readLinearBotUserIds,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
@@ -367,6 +368,40 @@ describe("checkPeerUniqueness", () => {
     expect(checks[0].name).toBe("peer-uniqueness");
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("empty");
+  });
+});
+
+// ─── CTL-2074: doctor's inline readLinearBotUserIds twin picks up the cloud slot ──
+// The inline copy at doctor.mjs:157 exists to keep doctor off the daemon's bun: graph;
+// it must not drift from the daemon resolver. This exercises the copy directly so a
+// missing cloud slot fails here at CI, not silently in production.
+describe("readLinearBotUserIds (doctor inline twin, CTL-2074)", () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "doctor-bot-ids-"));
+  });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  it("includes catalyst.linear.bot.cloud.botUserId", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: {
+              worker: { botUserId: "worker-uuid" },
+              orchestrator: { botUserId: "orch-uuid" },
+              cloud: { botUserId: "cloud-uuid" },
+            },
+          },
+        },
+      })
+    );
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("cloud-uuid")).toBe(true);
+    expect(ids.has("worker-uuid")).toBe(true);
+    expect(ids.has("orch-uuid")).toBe(true);
   });
 });
 
