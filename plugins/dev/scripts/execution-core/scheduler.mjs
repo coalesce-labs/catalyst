@@ -420,6 +420,12 @@ import {
 } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap). CTL-1157: getAllPrStatuses = the filter_state PR-lifecycle reader for the phantom/orphaned-PR invariants. openBrokerStateDb (CTL-1157 Codex round-6): the exec-core daemon must open the broker DB handle before these readers — ensure() throws otherwise and assembleBoardState swallows it, leaving the board/PR maps empty and the cohorts inert.
 import { readReconcileHealthMarkers } from "./reconcile-health.mjs"; // CTL-1290: stranded-node reconcile signal
 import { claimDispatchSync, isClaimFailure } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS (CTL-2033: + the outcome discriminator)
+// COORD-236: one owner for "may this label write be re-issued next tick?"
+import {
+  TERMINAL_LABEL_REASONS,
+  shouldCoolDownLabel,
+  isThrottledLabelReason,
+} from "./label-failure-class.mjs";
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
 import {
@@ -2579,28 +2585,34 @@ export function convergeHeldLabel(
         );
       }
     }
-    if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
+    if (orchDir && res && res.applied === false && shouldCoolDownLabel(res.reason)) {
       recordLabelCooldown(orchDir, ticket, desired, now());
+      // COORD-236: the two classes get DIFFERENT sentences, because an operator
+      // reading "unrecoverable" for a budget refusal would go looking for a
+      // missing label that is not missing.
+      const throttled = isThrottledLabelReason(res.reason);
       log.warn(
-        { ticket, label: desired, reason: res.reason },
-        "ctl-834: held-label apply unrecoverable — backing off (cool-down)"
+        { ticket, label: desired, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
+        throttled
+          ? "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses"
+          : "ctl-834: held-label apply unrecoverable — backing off (cool-down)"
       );
     }
   }
   return writes;
 }
 
-// UNRECOVERABLE_LABEL_REASONS — applyLabel reasons that can never land this
-// daemon lifetime, so convergeHeldLabel arms a cool-down instead of re-issuing
-// the write every tick (CTL-834). Mirrors label-guard.labelOnce's .skipped set.
-// "team-mismatch": CTL-1085 split it out of "missing-label" in classifyLabelFailure;
-// it MUST stay in this set or convergeHeldLabel loses its cool-down on cross-team
-// (ADV) label failures and re-introduces the CTL-834 per-tick retry storm.
-const UNRECOVERABLE_LABEL_REASONS = new Set([
-  "missing-label",
-  "exclusive-conflict",
-  "team-mismatch",
-]);
+// UNRECOVERABLE_LABEL_REASONS — the TERMINAL class, now owned by
+// label-failure-class.mjs so this file and label-guard.mjs cannot drift apart
+// (they carried byte-identical hand-written copies). Kept under its original
+// name so every existing reader of this identifier still resolves.
+//
+// ⛔ COORD-236: this set was never the whole answer, and reading it as such is
+// what cost the fleet a day's write budget. It answers "can this EVER land?" —
+// a budget refusal answers "not right now", which is a different question, and
+// falling out of this set meant the converger re-issued the write every tick for
+// hours. `shouldCoolDownLabel` is the predicate the cool-down actually wants.
+const UNRECOVERABLE_LABEL_REASONS = TERMINAL_LABEL_REASONS;
 
 // convergeDispositionLabel — generalised version of convergeHeldLabel covering the
 // full worker-status disposition set (CTL-764 Phase 4). Like convergeHeldLabel it
@@ -2656,11 +2668,14 @@ export function convergeDispositionLabel(
       );
     }
     writes++;
-    if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
+    if (orchDir && res && res.applied === false && shouldCoolDownLabel(res.reason)) {
       recordLabelCooldown(orchDir, ticket, desired, now());
+      const throttled = isThrottledLabelReason(res.reason);
       log.warn(
-        { ticket, label: desired, reason: res.reason },
-        "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
+        { ticket, label: desired, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
+        throttled
+          ? "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses"
+          : "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
       );
     }
   }
