@@ -70,6 +70,75 @@ DAEMON_SCRIPT="${BROKER_DAEMON_SCRIPT:-$SCRIPT_DIR/broker/index.mjs}"
 
 is_alive() { kill -0 "$1" 2>/dev/null; }
 
+# ─── CTL-2028: count brokers by IDENTITY, not by the pid file ────────────────
+#
+# ⛔ THE PID FILE CANNOT COUNT. On mini-2 on 2026-08-18 two brokers ran for 85
+# minutes — both alive, both heartbeating, both tailing the same event log — and
+# `catalyst-broker status` reported ONE the entire time, because the newer process
+# had overwritten the file the status reads. A status derived from the pid file can
+# only ever report 0 or 1; the number that matters is how many processes exist.
+#
+# ⚠️ `-ww` IS LOAD-BEARING: Linux procps wraps `ps` output at 80 columns when stdout
+# is not a tty, and a bun-launched daemon's command line is longer than that — so
+# without it the marker below is truncated away and the count silently reads 0.
+# That exact truncation shipped once in catalyst-monitor.sh and reproduced only on
+# Linux, because macOS ps does not truncate.
+#
+# ⚠️ MATCHES THE ENTRYPOINT PATH, NOT THE WORD "broker": the bare word appears in
+# this very script's own command line, in log paths, and in any shell that mentions
+# it.
+BROKER_IDENTITY_MARKER="broker/index.mjs"
+
+# broker_pids_by_identity — newline-separated pids of every running broker.
+# Prints nothing when there are none. Fails OPEN (prints nothing) when ps cannot
+# be read, because a status command must never be the thing that breaks.
+#
+# ⛔ THE MARKER IS PASSED THROUGH THE ENVIRONMENT, NOT AS AN AWK ARGUMENT, AND THAT
+# IS THE WHOLE CORRECTNESS OF THIS FUNCTION.
+#
+# The first version used `awk -v m="$BROKER_IDENTITY_MARKER"`. That puts the literal
+# string `broker/index.mjs` into AWK'S OWN COMMAND LINE — which `ps -eo command=` then
+# lists, and which the matcher then matches. Measured on a laptop with NO broker
+# running and NO pid file: it reported `1 broker process(es) are running (pids: 23661)`,
+# and 23661 was the awk. It is the `grep -v grep` bug wearing a different hat, and the
+# comment two lines above warned about exactly this class before the code walked into
+# it.
+#
+# ⚠️ It is a FALSE POSITIVE, which is the dangerous direction here: this detector's
+# whole job is to report duplicates, so an unconditional +1 makes a single healthy
+# broker read as two and would send an operator hunting a phantom.
+#
+# `ENVIRON[]` keeps the string out of argv entirely; awk's own command line is then
+# just the program text, which contains no marker. `ps` itself never contains it.
+# There is a regression test for this exact shape.
+# ⛔ AND A MENTION IS NOT AN INVOCATION. Excluding awk's own argv is necessary but
+# NOT sufficient: any shell whose command line merely CONTAINS the marker matches
+# too. Measured immediately after the ENVIRON fix, on a host with no broker: the
+# remaining match was the wrapping `/bin/zsh -c ...` whose argv quoted the marker.
+# So the match additionally requires the command to BE a runtime invocation — the
+# first token's basename must be `bun` or `node`. A shell, an editor, a grep, or a
+# log path that names the entrypoint is a mention and is not counted.
+broker_pids_by_identity() {
+  BROKER_IDENTITY_MARKER="$BROKER_IDENTITY_MARKER" ps -ww -eo pid=,command= 2>/dev/null \
+    | BROKER_IDENTITY_MARKER="$BROKER_IDENTITY_MARKER" awk '
+        {
+          line = $0
+          if (index(line, ENVIRON["BROKER_IDENTITY_MARKER"]) == 0) next
+          # $1 is the pid; $2 is the executable as invoked (absolute or bare).
+          exe = $2
+          n = split(exe, parts, "/")
+          base = parts[n]
+          if (base == "bun" || base == "node") print $1
+        }
+      ' 2>/dev/null || true
+}
+
+broker_count_by_identity() {
+  local pids; pids="$(broker_pids_by_identity)"
+  [[ -z "$pids" ]] && { echo 0; return 0; }
+  printf '%s\n' "$pids" | grep -c . || echo 0
+}
+
 read_pid() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
@@ -167,24 +236,60 @@ cmd_status() {
     esac
   done
 
+  # CTL-2028: the identity count is computed FIRST and reported in BOTH shapes,
+  # because it is the only number that can see a duplicate. A count > 1 is an
+  # ERROR — two brokers process the same event log, double-applying
+  # handleAgentCheckin's upsertAgent/_autoRegisterPrLifecycle and emitting every
+  # filter.wake twice — and it must not be hidden behind a pid file that can only
+  # ever say 0 or 1.
+  local count pids
+  count="$(broker_count_by_identity)"
+  pids="$(broker_pids_by_identity | tr '\n' ' ' | sed 's/ *$//')"
+
   local pid
   if pid=$(read_pid); then
     if [[ $json -eq 1 ]]; then
       if [[ -f "$STATE_FILE" ]] && jq -e . "$STATE_FILE" >/dev/null 2>&1; then
-        jq --argjson pid "$pid" '. + {running: true, pid: $pid}' "$STATE_FILE"
+        jq --argjson pid "$pid" --argjson n "$count" --arg pids "$pids" \
+          '. + {running: true, pid: $pid, processCount: $n, processPids: ($pids | split(" ") | map(select(length > 0))), duplicate: ($n > 1)}' "$STATE_FILE"
       else
-        jq -n --argjson pid "$pid" '{running: true, pid: $pid, keyHealth: null, gateway: null}'
+        jq -n --argjson pid "$pid" --argjson n "$count" --arg pids "$pids" \
+          '{running: true, pid: $pid, processCount: $n, processPids: ($pids | split(" ") | map(select(length > 0))), duplicate: ($n > 1), keyHealth: null, gateway: null}'
       fi
     else
       echo "running (pid $pid)"
+      if [[ "$count" -gt 1 ]]; then
+        echo "ERROR: $count brokers are running (pids: $pids) — the pid file names only $pid, so every pid-based check sees ONE. Two brokers route the same event log. Stop the extras by pid." >&2
+      fi
     fi
+    # ⚠️ THE EXIT CODE IS DELIBERATELY UNCHANGED — 0, exactly as before.
+    #
+    # My first cut returned 2 on a duplicate and 1 when stopped, which reads as
+    # obviously better and is a silent behaviour change on an unrelated path:
+    # `orchestrate-register-interests.sh:62` does `if ! catalyst-broker status
+    # >/dev/null 2>&1 ... then exit 0`, i.e. it treats ANY non-zero as "no broker,
+    # skip registration". Under that cut a DUPLICATED broker — which is running —
+    # would have made the legacy-wave path silently stop registering interests.
+    # A pid-file fix has no business changing that contract. The anomaly is
+    # reported on stderr and in --json; widening the exit contract is its own
+    # ticket, with its own audit of the two callers.
     return 0
   fi
   if [[ $json -eq 1 ]]; then
-    jq -n '{running: false, pid: null, keyHealth: null, gateway: null}'
+    jq -n --argjson n "$count" --arg pids "$pids" \
+      '{running: false, pid: null, processCount: $n, processPids: ($pids | split(" ") | map(select(length > 0))), duplicate: ($n > 1), keyHealth: null, gateway: null}'
   else
     echo "stopped"
+    # ⭐ The case the pid file is BLIND to, and the one that stranded mini-2: no
+    # usable pid file, yet brokers are running. Reported as an error rather than
+    # as a clean "stopped", which is what a supervisor would act on by starting
+    # yet another one.
+    if [[ "$count" -gt 0 ]]; then
+      echo "ERROR: no usable pid file, but $count broker process(es) are running (pids: $pids) — they are UNMANAGED; starting another would add to them." >&2
+    fi
   fi
+  # Unchanged (0), for the reason given in the running branch above.
+  return 0
 }
 
 cmd_logs() {
