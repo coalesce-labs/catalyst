@@ -25,8 +25,15 @@ import {
   pruneTriageSkips,
   _resetTriageSkipStreaks,
   triageSkipSeverity,
+  triageBudgetSkip,
+  triageSkipWarnMessage,
+  TRIAGE_SKIP_WARN_MESSAGES,
 } from "./monitor.mjs";
 import { CLAIM_REASON, isClaimFailure } from "./cluster-claim-sync.mjs";
+// The SAME logger object monitor.mjs imports — module bindings share the instance, so
+// replacing a method here is observed there. This is how the emitted SENTENCE is captured
+// without parsing stdout (which would test whichever logger the environment installed).
+import { log } from "./config.mjs";
 
 beforeEach(() => _resetTriageSkipStreaks());
 
@@ -123,7 +130,15 @@ describe("CTL-879 wiring: every blind triage-admission gate records a reason", (
   const SITES = [
     ["drain gate", "drain: skipping triage dispatch — node draining", "noteTriageSkip", 8],
     ["HRW ownership gate", "ctl-1091: ticket not owned by this host under HRW", "noteTriageSkip", 8],
-    ["sweep budget gate", "readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP", "noteTriageSkip", 8],
+    // CTL-879/INIT-34 grew the explanatory block between this anchor and its recorder,
+    // and an 8-line window stopped covering the site — the same drift CTL-2033 hit two
+    // rows down. Sized with headroom rather than to the current exact distance.
+    ["sweep budget gate", "readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP", "noteTriageSkip", 20],
+    // ⛔ And the gate must CONSULT the two-mechanism discriminator, exactly as the claim
+    // gate below must consult isClaimFailure. Without this row the site could record one
+    // reason for both a busy fleet and a fail-closed hold — which is the pre-change
+    // behaviour, and the whole defect.
+    ["sweep budget gate discriminates", "readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP", "triageBudgetSkip(budget)", 20],
     ["sweep already-triaged exit", "if (hasTriageArtifact(orchDir, t.identifier))", "clearTriageSkip", 8],
     ["sweep in-flight gate", "if (t.fromTriageBoard && isTriageInFlight(", "noteTriageSkip", 8],
     // CTL-879 follow-up: the sixth gate. The first instrument missed it, and it
@@ -273,4 +288,223 @@ describe("CTL-2033 wiring: every claim gate reads the discriminator", () => {
       expect(window).toContain("log.debug");
     });
   }
+});
+
+
+// ── CTL-879 / INIT-34: `remaining: 0` had two producers and one observable ──────
+//
+// `computeTriageBudget` answers 0 from the fail-closed yielded-occupancy hold AND from
+// genuine capacity. Their prognoses are OPPOSITE — capacity is recomputed every sweep and
+// frees itself when a worker finishes; the hold NEVER clears on its own — yet both printed
+// the identical `sweep-budget-exhausted / budget_remaining: 0`. An operator could not tell
+// a busy fleet from a host that will produce no triage.json for the rest of the night.
+//
+// ⛔ WHAT EACH LAYER HERE PROVES, STATED PLAINLY. `sweepMissingTriage` cannot be driven
+// without the project registry and the eligible set, and `dispatchTriage` is not exported —
+// so there is no way to observe the sweep's call directly. Instead the decision was
+// EXTRACTED into `triageBudgetSkip`, which these tests exercise as ordinary code, and the
+// single-source test below pins that the reason literals exist nowhere else in monitor.mjs,
+// so no call site can hand-roll one past this function. That is a real constraint, not a
+// mention-scan: it fails if someone re-inlines the ternary.
+describe("triageBudgetSkip — the two zero-budget mechanisms", () => {
+  test("⭐ a HELD budget gets its own reason, the held reason, and warns immediately", () => {
+    const s = triageBudgetSkip({ remaining: 0, held: true, heldReason: "workers/ unreadable: EACCES" });
+    expect(s.reason).toBe("sweep-budget-held-scan-failed");
+    expect(s.detail).toEqual({ budget_remaining: 0, held_reason: "workers/ unreadable: EACCES" });
+    expect(s.alwaysWarn).toBe(true);
+  });
+
+  test("⛔ capacity-zero keeps the pre-existing reason and does NOT warn immediately", () => {
+    const s = triageBudgetSkip({ remaining: 0, held: false, heldReason: null });
+    expect(s.reason).toBe("sweep-budget-exhausted");
+    expect(s.detail).toEqual({ budget_remaining: 0 });
+    expect(s.alwaysWarn).toBe(false);
+    // ⛔ and it carries NO held_reason key — a null one would render in Loki as a held
+    // budget with an unknown cause, which is the confusion this change removes.
+    expect("held_reason" in s.detail).toBe(false);
+  });
+
+  test("a budget from a caller that predates `held` reads as healthy, never as held", () => {
+    // sweepMissingTriage's sibling call site accepts an INJECTED budget; an older shape
+    // must keep its exact previous behaviour rather than silently escalating.
+    for (const b of [{ remaining: 0 }, { remaining: 3 }, {}, undefined, null]) {
+      expect(triageBudgetSkip(b).reason).toBe("sweep-budget-exhausted");
+      expect(triageBudgetSkip(b).alwaysWarn).toBe(false);
+    }
+  });
+
+  test("only the boolean true holds — a truthy value is not a hold", () => {
+    for (const held of ["true", 1, {}, []]) {
+      expect(triageBudgetSkip({ remaining: 0, held }).reason).toBe("sweep-budget-exhausted");
+    }
+  });
+
+  test("⭐ the two reasons produce DIFFERENT severities on sweep 1 — the answer changes, not just the label", () => {
+    const held = triageBudgetSkip({ remaining: 0, held: true, heldReason: "x" });
+    const busy = triageBudgetSkip({ remaining: 0, held: false });
+    // This is the composition that matters: alwaysWarn is only meaningful if it reaches
+    // triageSkipSeverity and changes what comes out on the very first sweep.
+    expect(triageSkipSeverity(1, { alwaysWarn: held.alwaysWarn })).toBe("warn");
+    expect(triageSkipSeverity(1, { alwaysWarn: busy.alwaysWarn })).not.toBe("warn");
+  });
+
+  test("the two reasons keep SEPARATE streaks — a host flipping between them does not read as one episode", () => {
+    _resetTriageSkipStreaks();
+    const held = triageBudgetSkip({ remaining: 0, held: true, heldReason: "x" }).reason;
+    const busy = triageBudgetSkip({ remaining: 0, held: false }).reason;
+    expect(noteTriageSkip("CTL-1", busy)).toBe(1);
+    expect(noteTriageSkip("CTL-1", busy)).toBe(2);
+    // Switching mechanism must RESET the streak — the escalation sentence claims
+    // persistence of one cause, and it would be a false statement across a switch.
+    expect(noteTriageSkip("CTL-1", held)).toBe(1);
+  });
+});
+
+describe("the reason literals have exactly one home", () => {
+  // ⛔ This is the wiring half, and it is a CONSTRAINT rather than a mention-scan: if the
+  // ternary is ever re-inlined at a call site, that literal appears a second time and this
+  // fails. It does not prove the sweep calls triageBudgetSkip — nothing available here can —
+  // but it does prove no OTHER code can emit these reasons behind its back.
+  const src = readFileSync(join(import.meta.dirname, "monitor.mjs"), "utf8");
+  // ⛔ The reason strings legitimately have TWO homes: `triageBudgetSkip`, which PRODUCES
+  // them, and TRIAGE_SKIP_WARN_MESSAGES, which is KEYED by them. The registry is a lookup
+  // table, not a call site, so it is excised before counting rather than being allowed to
+  // relax the count to "2" — a bare `toBe(2)` would then silently accept a genuine
+  // hand-rolled third occurrence at a call site.
+  const registryStart = src.indexOf("export const TRIAGE_SKIP_WARN_MESSAGES");
+  const registryEnd = src.indexOf("});", registryStart) + 3;
+  const outsideRegistry = src.slice(0, registryStart) + src.slice(registryEnd);
+  test("the registry block was actually located (else the excision is a no-op)", () => {
+    // Positive control: without this, a renamed registry would make every count below
+    // pass for the wrong reason.
+    expect(registryStart).toBeGreaterThan(-1);
+    expect(registryEnd).toBeGreaterThan(registryStart);
+    expect(src.length - outsideRegistry.length).toBeGreaterThan(100);
+  });
+  for (const literal of ['"sweep-budget-held-scan-failed"', '"sweep-budget-exhausted"']) {
+    test(`${literal} appears exactly once outside the message registry`, () => {
+      expect(outsideRegistry.split(literal).length - 1).toBe(1);
+    });
+  }
+  test("...and both occurrences are inside triageBudgetSkip", () => {
+    const start = src.indexOf("export function triageBudgetSkip");
+    const end = src.indexOf("\n}", src.indexOf("return { reason: \"sweep-budget-exhausted\""));
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, end);
+    expect(body).toContain('"sweep-budget-held-scan-failed"');
+    expect(body).toContain('"sweep-budget-exhausted"');
+  });
+});
+
+
+// ── Codex P2 on #3682: the first-sweep WARN sentence must match the REASON ───────
+//
+// ⛔ `alwaysWarn` was introduced by CTL-2033 when the claim failure was its only caller, so
+// the branch it selects hardcoded that cause. The moment CTL-2047's scan hold set
+// `alwaysWarn`, it inherited "the cross-host claim never landed … read claim_reason" — a
+// confident, specific, WRONG attribution, pointing at a `claim_reason` its payload does not
+// even carry. That is worse than the ambiguity CTL-2047 removes: an operator can act on
+// "I cannot tell"; they cannot act on a misattribution.
+//
+// ⚠️ MY OWN TESTS MISSED THIS. They asserted `alwaysWarn === true` and that
+// triageSkipSeverity(1, {alwaysWarn:true}) is "warn" — the SEVERITY — and never once looked
+// at the SENTENCE that severity selects. Pinning a flag is not pinning the output.
+describe("triageSkipWarnMessage — the sentence follows the reason", () => {
+  test("each registered reason gets its OWN sentence, and they are distinct", () => {
+    const claim = triageSkipWarnMessage("claim-write-failed");
+    const held = triageSkipWarnMessage("sweep-budget-held-scan-failed");
+    expect(claim).not.toBe(held);
+    expect(claim).toContain("cross-host claim never landed");
+    expect(claim).toContain("claim_reason");
+    expect(held).toContain("yielded-occupancy scan failed host-wide");
+    expect(held).toContain("held_reason");
+  });
+
+  test("⛔ the scan hold must NEVER be described as a claim failure", () => {
+    const held = triageSkipWarnMessage("sweep-budget-held-scan-failed");
+    expect(held).not.toContain("cross-host claim");
+    expect(held).not.toContain("claim_reason");
+    // It must also say the thing an operator needs: this is not a busy fleet.
+    expect(held).toContain("does NOT refill");
+  });
+
+  test("an UNREGISTERED reason gets a vague-but-true default, never a concrete cause", () => {
+    const d = triageSkipWarnMessage("some-future-reason");
+    expect(d).not.toContain("cross-host claim");
+    expect(d).not.toContain("yielded-occupancy");
+    // It must point the reader at the field that actually distinguishes.
+    expect(d).toContain("reason");
+    // …and every unregistered reason gets the same default, so this cannot silently
+    // become a per-reason guess.
+    expect(triageSkipWarnMessage("another-one")).toBe(d);
+    expect(triageSkipWarnMessage(undefined)).toBe(d);
+  });
+
+  test("every reason that triageBudgetSkip flags alwaysWarn HAS a registered sentence", () => {
+    // The rule that keeps the default from being reached in production: if a producer
+    // raises severity, it owes the reader an explanation.
+    const held = triageBudgetSkip({ remaining: 0, held: true, heldReason: "x" });
+    expect(held.alwaysWarn).toBe(true);
+    expect(Object.keys(TRIAGE_SKIP_WARN_MESSAGES)).toContain(held.reason);
+  });
+});
+
+describe("the claim sentence has exactly one home", () => {
+  // Same constraint as the reason literals: if the warn branch ever hardcodes a cause
+  // again, that sentence appears twice and this fails.
+  test("'the cross-host claim never landed' appears once in monitor.mjs", () => {
+    const src = readFileSync(join(import.meta.dirname, "monitor.mjs"), "utf8");
+    expect(src.split("the cross-host claim never landed").length - 1).toBe(1);
+  });
+});
+
+
+describe("noteTriageSkip EMITS the reason-specific sentence", () => {
+  // ⛔⛔ THE MUTATION THAT SURVIVED EVERYTHING ELSE. With the pure selector fully tested and
+  // the literals single-homed, reverting the warn branch to
+  // `log.warn(context, TRIAGE_SKIP_WARN_MESSAGES["claim-write-failed"])` — i.e. exactly the
+  // pre-fix misattribution — still passed 45/45. Every test proved the selector was CORRECT
+  // and none proved it was CALLED. That is "asserting a discriminator is READ is not
+  // asserting the answer CHANGES", one level up from where it was caught before, in the fix
+  // for a defect of that same shape.
+  const capture = (fn) => {
+    const seen = [];
+    const orig = log.warn;
+    log.warn = (ctx, msg) => seen.push({ ctx, msg });
+    try {
+      fn();
+    } finally {
+      log.warn = orig; // restored in `finally` — a leaked stub silently mutes every later suite
+    }
+    return seen;
+  };
+
+  test("the scan hold emits the HOLD sentence, not the claim one", () => {
+    _resetTriageSkipStreaks();
+    const seen = capture(() =>
+      noteTriageSkip("CTL-H", "sweep-budget-held-scan-failed", { held_reason: "EACCES" }, { alwaysWarn: true })
+    );
+    expect(seen.length).toBe(1);
+    expect(seen[0].msg).toContain("yielded-occupancy scan failed host-wide");
+    expect(seen[0].msg).not.toContain("cross-host claim");
+    expect(seen[0].ctx.held_reason).toBe("EACCES");
+  });
+
+  test("the claim failure still emits the CLAIM sentence — the fix must not break the first caller", () => {
+    _resetTriageSkipStreaks();
+    const seen = capture(() =>
+      noteTriageSkip("CTL-C", "claim-write-failed", { claim_reason: "cli-failed" }, { alwaysWarn: true })
+    );
+    expect(seen.length).toBe(1);
+    expect(seen[0].msg).toContain("cross-host claim never landed");
+    expect(seen[0].ctx.claim_reason).toBe("cli-failed");
+  });
+
+  test("the two callers get DIFFERENT sentences from the same code path", () => {
+    _resetTriageSkipStreaks();
+    const held = capture(() => noteTriageSkip("CTL-H", "sweep-budget-held-scan-failed", {}, { alwaysWarn: true }));
+    _resetTriageSkipStreaks();
+    const claim = capture(() => noteTriageSkip("CTL-C", "claim-write-failed", {}, { alwaysWarn: true }));
+    expect(held[0].msg).not.toBe(claim[0].msg);
+  });
 });
