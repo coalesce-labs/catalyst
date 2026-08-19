@@ -67,7 +67,7 @@ describe("classifyLaneClaimWrite — the CTC-787 collision", () => {
     const v = classifyLaneClaimWrite({
       currentState: "Implement",
       targetRank: tr("research"),
-      lastChange: { actorId: LANE },
+      lastChange: { actorId: LANE, toState: "Implement" },
       botUserIds: BOTS,
       rank: RANK,
     });
@@ -84,7 +84,7 @@ describe("classifyLaneClaimWrite — the CTC-787 collision", () => {
     const v = classifyLaneClaimWrite({
       currentState: "Implement",
       targetRank: tr("research"),
-      lastChange: { actorId: FLEET },
+      lastChange: { actorId: FLEET, toState: "Implement" },
       botUserIds: BOTS,
       rank: RANK,
     });
@@ -98,7 +98,7 @@ describe("classifyLaneClaimWrite — forward moves are never refused", () => {
     const v = classifyLaneClaimWrite({
       currentState: "Implement",
       targetRank: tr("inReview"),
-      lastChange: { actorId: LANE },
+      lastChange: { actorId: LANE, toState: "Implement" },
       botUserIds: BOTS,
       rank: RANK,
     });
@@ -110,7 +110,7 @@ describe("classifyLaneClaimWrite — forward moves are never refused", () => {
     const v = classifyLaneClaimWrite({
       currentState: "Validate",
       targetRank: tr("verifying"),
-      lastChange: { actorId: LANE },
+      lastChange: { actorId: LANE, toState: "Validate" },
       botUserIds: BOTS,
       rank: RANK,
     });
@@ -125,7 +125,7 @@ describe("classifyLaneClaimWrite — every decline is INCONCLUSIVE and NAMED, ne
       const v = classifyLaneClaimWrite({
         currentState: "Implement",
         targetRank: tr("research"),
-        lastChange: { actorId: LANE },
+        lastChange: { actorId: LANE, toState: "Implement" },
         botUserIds: bots,
         rank: RANK,
       });
@@ -166,7 +166,7 @@ describe("classifyLaneClaimWrite — every decline is INCONCLUSIVE and NAMED, ne
     const v = classifyLaneClaimWrite({
       currentState: "Todo",
       targetRank: tr("research"),
-      lastChange: { actorId: LANE },
+      lastChange: { actorId: LANE, toState: "Todo" },
       botUserIds: BOTS,
       rank: RANK,
     });
@@ -178,7 +178,7 @@ describe("classifyLaneClaimWrite — every decline is INCONCLUSIVE and NAMED, ne
     const v = classifyLaneClaimWrite({
       currentState: "Implement",
       targetRank: undefined,
-      lastChange: { actorId: LANE },
+      lastChange: { actorId: LANE, toState: "Implement" },
       botUserIds: BOTS,
       rank: RANK,
     });
@@ -225,7 +225,7 @@ describe("buildKeyRank — the TARGET side", () => {
     const v = classifyLaneClaimWrite({
       currentState: "Validate",
       targetRank: tr("verifying"),
-      lastChange: { actorId: LANE },
+      lastChange: { actorId: LANE, toState: "Validate" },
       botUserIds: BOTS,
       rank: RANK,
     });
@@ -281,7 +281,7 @@ describe("evaluateDispatch — the veto that actually stops the duplicate work",
     buildLaneClaimGuard({
       stateMap: STATE_MAP,
       botUserIds: BOTS,
-      readLastStateChange: () => ({ actorId: LANE }),
+      readLastStateChange: () => ({ actorId: LANE, toState: "Implement" }),
       readCurrentState: () => "Implement",
       ...o,
     });
@@ -297,7 +297,9 @@ describe("evaluateDispatch — the veto that actually stops the duplicate work",
   });
 
   test("⛔ CONTROL — the same backward phase is allowed when the FLEET made the last move", () => {
-    const v = mk({ readLastStateChange: () => ({ actorId: FLEET }) }).evaluateDispatch({
+    const v = mk({
+      readLastStateChange: () => ({ actorId: FLEET, toState: "Implement" }),
+    }).evaluateDispatch({
       ticket: "CTC-787",
       phase: "research",
     });
@@ -345,5 +347,63 @@ describe("evaluateDispatch — the veto that actually stops the duplicate work",
     expect(g.evaluateDispatch({ ticket: "X-1", phase: "research" }).verdict).toBe(
       VERDICT.INCONCLUSIVE
     );
+  });
+});
+
+describe("⛔ the STALE-HISTORY decline (Codex P1) — the 18× latency gap between the two sources", () => {
+  // Measured in this repo by CTL-1847 (linear-feed-diff.mjs): `issues.state` lands in ~11 s
+  // (webhook-fed), `issue_history` in ~201 s (reconcile-only). The window this guard exists
+  // for is 74 SECONDS, so the newest available history row is the transition BEFORE the
+  // lane's claim — and on CTC-787 that earlier transition was made by the FLEET.
+  test("⭐⭐ the lag scenario: a fleet-authored row that predates the claim must NOT be trusted", () => {
+    const v = classifyLaneClaimWrite({
+      currentState: "Implement", // the lane's claim — already visible at ~11 s
+      targetRank: tr("research"),
+      lastChange: { actorId: FLEET, toState: "Validate" }, // the PREVIOUS transition, ~201 s behind
+      botUserIds: BOTS,
+      rank: RANK,
+    });
+    // ⛔ Before this fix the call returned ALLOW / LAST_CHANGE_BY_FLEET — the guard
+    // cheerfully permitting the exact regression it was built to refuse.
+    expect(v.verdict).not.toBe(VERDICT.ALLOW);
+    expect(v.verdict).toBe(VERDICT.INCONCLUSIVE);
+    expect(v.reason).toBe(REASON.STALE_HISTORY);
+  });
+
+  test("a row whose toState MATCHES the current state is trusted (the settled case)", () => {
+    const v = classifyLaneClaimWrite({
+      currentState: "Implement",
+      targetRank: tr("research"),
+      lastChange: { actorId: LANE, toState: "Implement" },
+      botUserIds: BOTS,
+      rank: RANK,
+    });
+    expect(v.verdict).toBe(VERDICT.REFUSE);
+  });
+
+  test("a stale row is declined even when its actor is a LANE — staleness is judged first", () => {
+    // Otherwise a coincidentally lane-authored OLDER row would be read as a live claim.
+    const v = classifyLaneClaimWrite({
+      currentState: "Implement",
+      targetRank: tr("research"),
+      lastChange: { actorId: LANE, toState: "Plan" },
+      botUserIds: BOTS,
+      rank: RANK,
+    });
+    expect(v.verdict).toBe(VERDICT.INCONCLUSIVE);
+    expect(v.reason).toBe(REASON.STALE_HISTORY);
+  });
+
+  test("a row with no toState is still judged on its actor — absent is not contradictory", () => {
+    // 140 fleet-wide issues have NO history rows at all (CTL-1847) and older rows may omit
+    // the field. Only a row that DISAGREES with the current state is declined.
+    const v = classifyLaneClaimWrite({
+      currentState: "Implement",
+      targetRank: tr("research"),
+      lastChange: { actorId: LANE, toState: null },
+      botUserIds: BOTS,
+      rank: RANK,
+    });
+    expect(v.verdict).toBe(VERDICT.REFUSE);
   });
 });

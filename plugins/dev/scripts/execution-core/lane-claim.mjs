@@ -60,6 +60,7 @@ export const REASON = Object.freeze({
   UNRANKED_CURRENT: "current-state-not-in-pipeline",
   UNRANKED_TARGET: "target-state-not-in-pipeline",
   BAD_INPUT: "malformed-input",
+  STALE_HISTORY: "history-row-does-not-match-current-state",
   DISPATCH_VETO_DISABLED: "dispatch-veto-disabled",
   NO_CURRENT_STATE: "current-state-unreadable",
   PHASE_WRITES_NO_STATUS: "phase-writes-no-status",
@@ -140,10 +141,22 @@ export function buildKeyRank() {
  * @param {string|null} o.currentState  the ticket's state right now (a NAME)
  * @param {number|undefined} o.targetRank rank of the state this write would set, from
  *   buildKeyRank() — see there for why the target is ranked by key and not by name
- * @param {{actorId: string|null}|null} o.lastChange the most recent state change on the
- *   ticket, or null when history is unavailable. Only the actor is consulted: this call site
- *   already knows the ticket's CURRENT state from a fresher read than history, so re-deriving
- *   it from the history row would be a second, staler source for the same fact.
+ * @param {{actorId: string|null, toState: string|null}|null} o.lastChange the most recent
+ *   state change on the ticket, or null when history is unavailable.
+ *
+ *   ⛔ `toState` IS consulted, and that is the whole of the CTL-2068 Codex P1 fix. The two
+ *   inputs come from sources with very different latency, measured in this repo by CTL-1847
+ *   (`linear-feed-diff.mjs`): `issues.state` — where `currentState` comes from — is
+ *   webhook-fed and lands in ~11 s, while `issue_history` is RECONCILE-ONLY and lands in
+ *   ~201 s, an 18× gap. So during exactly the short claim-to-dispatch window this guard
+ *   exists for, the newest available history row is the transition BEFORE the lane's claim —
+ *   often one the fleet itself made. Trusting its actor would return LAST_CHANGE_BY_FLEET
+ *   and cheerfully permit the regression: a guard that is wrong precisely when it matters.
+ *
+ *   The row is therefore trusted ONLY when its `toState` equals the state the ticket is
+ *   actually in. A row that does not describe the current state is not evidence about who
+ *   put it there, and saying so (STALE_HISTORY) is the difference between a named blind spot
+ *   somebody can count and a silent false negative.
  * @param {Set<string>} o.botUserIds    known fleet actor ids
  * @param {Map<string,number>} o.rank   from buildStateRank
  * @returns {{verdict: string, reason: string, currentRank?: number, targetRank?: number,
@@ -170,6 +183,20 @@ export function classifyLaneClaimWrite({
   if (typeof actorId !== "string" || actorId.length === 0) {
     return { verdict: VERDICT.INCONCLUSIVE, reason: REASON.NO_ACTOR, actorId: null };
   }
+  // ⛔ The row must DESCRIBE the state we are judging. See the `lastChange` doc above: the
+  // history table lags the state table by ~18×, so a row whose toState is not the current
+  // state is a row from before whatever put the ticket where it is now.
+  //
+  // ⚠️ This DECLINES (inconclusive → the write proceeds); it does not refuse. That is the
+  // correct fail direction and it is also an honest admission: the ~200 s immediately after
+  // a claim is NOT covered by this guard, and no timely actor source exists in the replica
+  // to cover it (measured: `issues.bot_actor_name` is empty for 4,478 of 4,481 issues, so
+  // the one webhook-fed actor column does not discriminate). Tracked as follow-up work.
+  const rowState = lastChange.toState ?? null;
+  if (typeof rowState === "string" && rowState.length > 0 && rowState !== currentState) {
+    return { verdict: VERDICT.INCONCLUSIVE, reason: REASON.STALE_HISTORY, actorId };
+  }
+
   if (botUserIds.has(actorId)) {
     // The fleet itself made the last move, so there is no lane claim to protect. Recovery's
     // legitimate backward moves land here — this is the branch that keeps them working.

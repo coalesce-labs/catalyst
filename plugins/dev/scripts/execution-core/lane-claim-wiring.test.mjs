@@ -29,7 +29,7 @@ function harness({ lastActor, currentState = "Implement" }) {
   const guard = buildLaneClaimGuard({
     stateMap: STATE_MAP,
     botUserIds: new Set([FLEET]),
-    readLastStateChange: () => ({ actorId: lastActor }),
+    readLastStateChange: () => ({ actorId: lastActor, toState: currentState }),
   });
   const call = (phase = "research") =>
     applyPhaseStatus({
@@ -117,7 +117,7 @@ describe("the MODULE-LEVEL install — the path production uses", () => {
       buildLaneClaimGuard({
         stateMap: STATE_MAP,
         botUserIds: new Set([FLEET]),
-        readLastStateChange: () => ({ actorId: LANE }),
+        readLastStateChange: () => ({ actorId: LANE, toState: "Implement" }),
       })
     );
     const execCalls = [];
@@ -143,7 +143,7 @@ describe("the MODULE-LEVEL install — the path production uses", () => {
     const g = buildLaneClaimGuard({
       stateMap: STATE_MAP,
       botUserIds: bots,
-      readLastStateChange: () => ({ actorId: "NEW-ACTOR" }),
+      readLastStateChange: () => ({ actorId: "NEW-ACTOR", toState: "Implement" }),
     });
     const args = { ticket: "T-1", currentState: "Implement", targetKey: "research" };
     expect(g.evaluate(args).verdict).toBe(VERDICT.REFUSE); // NEW-ACTOR unknown → looks like a lane
@@ -194,7 +194,7 @@ describe("the DISPATCH veto, through schedulerTick", () => {
       buildLaneClaimGuard({
         stateMap: STATE_MAP,
         botUserIds: new Set([FLEET]),
-        readLastStateChange: () => ({ actorId: lastActor }),
+        readLastStateChange: () => ({ actorId: lastActor, toState: currentState }),
         readCurrentState: () => currentState,
       })
     );
@@ -276,7 +276,7 @@ describe("the PROXY rung — the guard on the fresher resolve-only evidence", ()
       buildLaneClaimGuard({
         stateMap: STATE_MAP,
         botUserIds: new Set([FLEET]),
-        readLastStateChange: () => ({ actorId: lastActor }),
+        readLastStateChange: () => ({ actorId: lastActor, toState: "Implement" }),
       })
     );
     const p = proxy();
