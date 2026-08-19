@@ -389,7 +389,14 @@ if (sub === "escalated") {
           { applyLabel: (a) => applyLabel({ ...a, readLabels: replicaReadLabels }) },
           // treatAlreadyAppliedAsLanded: this gate asks "is the label PRESENT?",
           // not "did I apply it on this call" (Codex #2861 P1).
-          { site: "recovery-emit-escalated", treatAlreadyAppliedAsLanded: true },
+          // CTL-1871 COORD-29: explanation drives the ASK comment the gate posts
+          // atomically with the label (enforce: comment first, label withheld if
+          // comment fails; shadow: attempt + log, then label regardless).
+          {
+            site: "recovery-emit-escalated",
+            treatAlreadyAppliedAsLanded: true,
+            explanation: escalation,
+          },
         ) === true;
     } catch (err) {
       process.stderr.write(`recovery-emit: needs-human label write threw on ${ticket}: ${err.message}\n`);
@@ -472,17 +479,13 @@ if (sub === "escalated") {
     }
   }
 
-  // (5) CTL-1439 (P0a): ticket-visible escalation comment — the audit found the
-  //     skill-side comment discipline failed in practice (0/7 posted), so the
-  //     shim posts it itself. One line; the full briefing lives in the inbox.
-  //     CTL-1568: gated on the label, so it never claims an inbox row that is not
-  //     there. In shadow mode both are suppressed together, which is consistent.
-  if (labelled || ownedByBelief || RECOVERY_MODE !== "enforce") {
-    postTicketComment(
-      ticket,
-      `🔼 **recovery-pass** escalated this to the operator — ${escalation.call_to_action ?? reason}. (See your inbox.)`,
-    );
-  } else {
+  // (5) CTL-1871 COORD-29: the gate now posts the ASK comment atomically with the
+  //     label (comment before label in enforce; best-effort + log in shadow). There
+  //     is no separate postTicketComment call here any more. The only remaining
+  //     obligation is to raise recovery.escalation.split when the label did NOT land
+  //     AND the belief engine does not own it — gate failure (comment rejected in
+  //     enforce mode, or label API error) leaves both absent.
+  if (!labelled && !ownedByBelief) {
     // AC #5 — the split is a should-never-happen state; raise it loudly rather than
     // leaving a WARN line. Exit stays 0 (see below).
     defaultEmitEvent({
@@ -495,8 +498,8 @@ if (sub === "escalated") {
       deferrals: readEscalationDeferrals(orchDir, ticket),
     });
     process.stderr.write(
-      `recovery-emit: needs-human label did NOT land on ${ticket} — escalation comment withheld ` +
-        `(the inbox row would not exist); raised recovery.escalation.split\n`,
+      `recovery-emit: needs-human label did NOT land on ${ticket} — ASK comment also withheld ` +
+        `(atomic gate: no label ↔ no comment); raised recovery.escalation.split\n`,
     );
   }
 

@@ -9,6 +9,8 @@ import {
   resolveSignalReason,
   describeSignalReason,
   SIGNAL_REASON_KEYS,
+  normOneLine,
+  DEFAULT_IF_SILENT,
 } from "./escalation-explanation.mjs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -731,5 +733,125 @@ describe("CTL-1754 — the canonical projection, end to end", () => {
       expect(describeSignalReason(sig)).toBe(value);
       expect(describeSignalReason(sig)).not.toBe(describeSignalReason({ status: "failed" }));
     }
+  });
+});
+
+// ── CTL-1871: normOneLine ─────────────────────────────────────────────────────
+
+describe("normOneLine (CTL-1871)", () => {
+  test("collapses tabs and runs of spaces to single spaces", () => {
+    expect(normOneLine("foo  bar\tbaz")).toBe("foo bar baz");
+  });
+
+  test("collapses newlines to single spaces", () => {
+    expect(normOneLine("line one\n  line two\n\nline three")).toBe("line one line two line three");
+  });
+
+  test("trims leading and trailing whitespace", () => {
+    expect(normOneLine("  hello world  ")).toBe("hello world");
+  });
+
+  test("PRESERVES case — does NOT lowercase", () => {
+    expect(normOneLine("Hello WORLD")).toBe("Hello WORLD");
+  });
+
+  test("handles null/undefined without throwing", () => {
+    expect(normOneLine(null)).toBe("");
+    expect(normOneLine(undefined)).toBe("");
+  });
+
+  test("handles a number input (coerces to string)", () => {
+    expect(normOneLine(42)).toBe("42");
+  });
+});
+
+// ── CTL-1871: DEFAULT_IF_SILENT export ───────────────────────────────────────
+
+describe("DEFAULT_IF_SILENT (CTL-1871)", () => {
+  test("is a non-empty string", () => {
+    expect(typeof DEFAULT_IF_SILENT).toBe("string");
+    expect(DEFAULT_IF_SILENT.trim()).not.toBe("");
+  });
+});
+
+// ── CTL-1871: default_if_silent in validateExplanation ───────────────────────
+
+describe("validateExplanation — default_if_silent (CTL-1871)", () => {
+  test("valid explanation WITHOUT default_if_silent still passes", () => {
+    expect(validateExplanation(authzGood).valid).toBe(true);
+    expect("default_if_silent" in authzGood).toBe(false);
+  });
+
+  test("valid explanation WITH a non-empty default_if_silent passes", () => {
+    const e = { ...authzGood, default_if_silent: "The ticket stays open until you act." };
+    expect(validateExplanation(e).valid).toBe(true);
+  });
+
+  test("empty-string default_if_silent is rejected", () => {
+    const r = validateExplanation({ ...authzGood, default_if_silent: "" });
+    expect(r.valid).toBe(false);
+    expect(r.errors.some((e) => e.includes("default_if_silent"))).toBe(true);
+  });
+
+  test("whitespace-only default_if_silent is rejected", () => {
+    const r = validateExplanation({ ...authzGood, default_if_silent: "   " });
+    expect(r.valid).toBe(false);
+    expect(r.errors.some((e) => e.includes("default_if_silent"))).toBe(true);
+  });
+
+  test("non-string default_if_silent is rejected", () => {
+    for (const v of [42, null, [], {}]) {
+      const r = validateExplanation({ ...authzGood, default_if_silent: v });
+      expect(r.valid).toBe(false);
+    }
+  });
+});
+
+// ── CTL-1871: coerceExplanation always populates default_if_silent ────────────
+
+describe("coerceExplanation — default_if_silent always populated (CTL-1871)", () => {
+  test("empty fields → degraded object has non-empty default_if_silent", () => {
+    const e = coerceExplanation({});
+    expect(typeof e.default_if_silent).toBe("string");
+    expect(e.default_if_silent.trim()).not.toBe("");
+  });
+
+  test("degraded authorization has non-empty default_if_silent", () => {
+    const e = coerceExplanation({}, { canExecute: true, ticket: "CTL-1" });
+    expect(typeof e.default_if_silent).toBe("string");
+    expect(e.default_if_silent.trim()).not.toBe("");
+    expect(e.escalation_type).toBe("authorization");
+  });
+
+  test("valid explanation gains DEFAULT_IF_SILENT when caller did not supply one", () => {
+    const e = coerceExplanation(authzGood);
+    expect(e.default_if_silent).toBe(DEFAULT_IF_SILENT);
+  });
+
+  test("caller-supplied default_if_silent is preserved on valid path", () => {
+    const custom = "The ticket closes automatically after 48 hours.";
+    const e = coerceExplanation({ ...authzGood, default_if_silent: custom });
+    expect(e.default_if_silent).toBe(custom);
+  });
+
+  test("caller-supplied default_if_silent is preserved on degraded path", () => {
+    const custom = "No retry happens; the ticket needs manual attention.";
+    const e = coerceExplanation({ default_if_silent: custom });
+    expect(e.default_if_silent).toBe(custom);
+  });
+});
+
+// ── CTL-1871: buildExplanation with default_if_silent round-trips ─────────────
+
+describe("buildExplanation — default_if_silent passthrough (CTL-1871)", () => {
+  test("explicit default_if_silent round-trips unchanged", () => {
+    const custom = "The ticket is automatically archived after 7 days.";
+    const e = buildExplanation({ ...authzGood, default_if_silent: custom });
+    expect(e.default_if_silent).toBe(custom);
+  });
+
+  test("explanation without default_if_silent is still valid (not required by schema)", () => {
+    const e = buildExplanation(authzGood);
+    expect(validateExplanation(e).valid).toBe(true);
   });
 });

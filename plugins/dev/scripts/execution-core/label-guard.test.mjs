@@ -3,7 +3,7 @@
 //   cd plugins/dev/scripts/execution-core && bun test label-guard.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -21,6 +21,9 @@ import {
   labelNeedsHumanUnlessBeliefOwner,
   resolveAndApplyWorkerStatusLabel,
   WORKER_STATUS_LABELS,
+  NEEDS_HUMAN_ASK_EVENTS,
+  NEEDS_HUMAN_LABEL_FAMILY,
+  clearNeedsHumanMarkers,
 } from "./label-guard.mjs";
 import { validateExplanation } from "./escalation-explanation.mjs";
 
@@ -1665,5 +1668,173 @@ describe("labelNeedsHumanUnlessBeliefOwner — CTL-2056 escalation emit", () => 
     ).not.toThrow();
     // The .applied marker must still be written (label application succeeded).
     expect(existsSync(join(orchDir, "workers", "CTL-THROW", ".linear-label-needs-human.applied"))).toBe(true);
+// ─── CTL-1871 COORD-29: ASK comment gate ────────────────────────────────────
+
+describe("CTL-1871: NEEDS_HUMAN_ASK_EVENTS + NEEDS_HUMAN_LABEL_FAMILY exports", () => {
+  test("NEEDS_HUMAN_ASK_EVENTS is a frozen array with the expected event name", () => {
+    expect(Array.isArray(NEEDS_HUMAN_ASK_EVENTS)).toBe(true);
+    expect(NEEDS_HUMAN_ASK_EVENTS).toContain("escalation.ask-post-failed");
+    expect(Object.isFrozen(NEEDS_HUMAN_ASK_EVENTS)).toBe(true);
+  });
+
+  test("NEEDS_HUMAN_LABEL_FAMILY contains needs-human and stale-needs-human", () => {
+    expect(NEEDS_HUMAN_LABEL_FAMILY).toContain("needs-human");
+    expect(NEEDS_HUMAN_LABEL_FAMILY).toContain("stale-needs-human");
+    expect(Object.isFrozen(NEEDS_HUMAN_LABEL_FAMILY)).toBe(true);
+  });
+});
+
+describe("CTL-1871: labelNeedsHumanUnlessBeliefOwner — ASK gate (COORD-29)", () => {
+  let ticket;
+  let workerDir;
+
+  function makeWriteStatus(applyResult = { applied: true, reason: null }) {
+    return {
+      applyLabel: (_ticket, _label) => {
+        return applyResult;
+      },
+    };
+  }
+
+  beforeEach(() => {
+    ticket = `CTL-ASK-${Math.random().toString(36).slice(2, 8)}`;
+    workerDir = join(orchDir, "workers", ticket);
+    mkdirSync(workerDir, { recursive: true });
+  });
+
+  test("shadow mode (default): applies label even if ASK comment fails", () => {
+    const failingPoster = (_t, _body) => ({ status: 1, stderr: "network-error" });
+    const result = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, makeWriteStatus(), {
+      env: { CATALYST_NEEDS_HUMAN_ASK: "shadow" },
+      explanation: { type: "authorization", problem: "test", call_to_action: "Decide." },
+      postAskComment: failingPoster,
+    });
+    // Shadow: label still lands despite failed comment
+    expect(result).toBe(true);
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+    // ASK marker NOT written (post failed)
+    expect(existsSync(join(workerDir, ".needs-human-ask.applied"))).toBe(false);
+  });
+
+  test("shadow mode: writes ASK marker when comment succeeds", () => {
+    const successPoster = (_t, _body) => ({ status: 0 });
+    const result = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, makeWriteStatus(), {
+      env: { CATALYST_NEEDS_HUMAN_ASK: "shadow" },
+      explanation: { type: "authorization", problem: "test", call_to_action: "Decide." },
+      postAskComment: successPoster,
+    });
+    expect(result).toBe(true);
+    expect(existsSync(join(workerDir, ".needs-human-ask.applied"))).toBe(true);
+  });
+
+  test("enforce mode: withholds label when ASK comment fails (atomicity)", () => {
+    const failingPoster = (_t, _body) => ({ status: 1, stderr: "network-error" });
+    const outcomes = [];
+    const result = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, makeWriteStatus(), {
+      env: { CATALYST_NEEDS_HUMAN_ASK: "enforce" },
+      explanation: { type: "authorization", problem: "test", call_to_action: "Decide." },
+      postAskComment: failingPoster,
+      onOutcome: (o) => outcomes.push(o),
+    });
+    // Enforce: label withheld
+    expect(result).toBe(false);
+    // Label marker must NOT be written
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+    // ASK marker must NOT be written
+    expect(existsSync(join(workerDir, ".needs-human-ask.applied"))).toBe(false);
+    // onOutcome reports the failure
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].reason).toBe("ask-post-failed");
+    expect(outcomes[0].applied).toBe(false);
+  });
+
+  test("enforce mode: applies label when ASK comment succeeds", () => {
+    const successPoster = (_t, _body) => ({ status: 0 });
+    const result = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, makeWriteStatus(), {
+      env: { CATALYST_NEEDS_HUMAN_ASK: "enforce" },
+      explanation: { type: "authorization", problem: "test", call_to_action: "Decide." },
+      postAskComment: successPoster,
+    });
+    expect(result).toBe(true);
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+    expect(existsSync(join(workerDir, ".needs-human-ask.applied"))).toBe(true);
+  });
+
+  test("off mode: applies label without attempting ASK comment", () => {
+    let posterCalled = false;
+    const trackingPoster = (_t, _body) => { posterCalled = true; return { status: 0 }; };
+    const result = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, makeWriteStatus(), {
+      env: { CATALYST_NEEDS_HUMAN_ASK: "off" },
+      explanation: { type: "authorization", problem: "test", call_to_action: "Decide." },
+      postAskComment: trackingPoster,
+    });
+    expect(result).toBe(true);
+    expect(posterCalled).toBe(false); // off = no attempt
+    expect(existsSync(join(workerDir, ".needs-human-ask.applied"))).toBe(false);
+  });
+
+  test("idempotency: second call skips comment post when marker exists", () => {
+    let posterCallCount = 0;
+    const trackingPoster = (_t, _body) => { posterCallCount++; return { status: 0 }; };
+
+    // First call — posts comment, writes marker, applies label
+    labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, makeWriteStatus(), {
+      env: { CATALYST_NEEDS_HUMAN_ASK: "shadow" },
+      explanation: { type: "authorization", problem: "test", call_to_action: "Decide." },
+      postAskComment: trackingPoster,
+    });
+    expect(posterCallCount).toBe(1);
+
+    // Reset label marker so labelOnce runs again, but keep ASK marker
+    unlinkSync(join(workerDir, ".linear-label-needs-human.applied"));
+
+    // Second call — marker exists, comment NOT re-posted
+    labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, makeWriteStatus(), {
+      env: { CATALYST_NEEDS_HUMAN_ASK: "shadow" },
+      explanation: { type: "authorization", problem: "test", call_to_action: "Decide." },
+      postAskComment: trackingPoster,
+    });
+    expect(posterCallCount).toBe(1); // still 1 — not called again
+  });
+
+  test("poster receives the formatted ASK body containing the call_to_action", () => {
+    let capturedBody = null;
+    const capturingPoster = (_t, body) => { capturedBody = body; return { status: 0 }; };
+    labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, makeWriteStatus(), {
+      env: { CATALYST_NEEDS_HUMAN_ASK: "shadow" },
+      explanation: { type: "authorization", problem: "test", call_to_action: "Authorize retry or cancel." },
+      postAskComment: capturingPoster,
+    });
+    expect(capturedBody).toBeTruthy();
+    expect(capturedBody).toContain("ASK (Ryan):");
+    expect(capturedBody).toContain("Authorize retry or cancel.");
+    expect(capturedBody).toContain("default if silent:");
+  });
+});
+
+describe("CTL-1871: clearNeedsHumanMarkers", () => {
+  test("removes all three marker families when they exist", () => {
+    const ticket = "CTL-CNH-1";
+    const wDir = join(orchDir, "workers", ticket);
+    mkdirSync(wDir, { recursive: true });
+
+    const markers = [
+      join(wDir, ".linear-label-needs-human.applied"),
+      join(wDir, ".linear-label-needs-human.skipped"),
+      join(wDir, ".linear-label-stale-needs-human.applied"),
+      join(wDir, ".linear-label-stale-needs-human.skipped"),
+      join(wDir, ".needs-human-ask.applied"),
+    ];
+    for (const p of markers) writeFileSync(p, "");
+    for (const p of markers) expect(existsSync(p)).toBe(true);
+
+    clearNeedsHumanMarkers(orchDir, ticket);
+    for (const p of markers) expect(existsSync(p)).toBe(false);
+  });
+
+  test("is a no-op when no markers exist (does not throw)", () => {
+    const ticket = "CTL-CNH-2";
+    mkdirSync(join(orchDir, "workers", ticket), { recursive: true });
+    expect(() => clearNeedsHumanMarkers(orchDir, ticket)).not.toThrow();
   });
 });
