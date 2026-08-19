@@ -9,7 +9,7 @@
 // a reason to take a host out of service. Same rationale as checkLinearWriteBudget
 // and checkRegistryTeamIdentity.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import { STATUS, mkCheck } from "./doctor-status.mjs";
@@ -86,9 +86,21 @@ export function diffVarNames(diskMap, repoMap) {
  * @param {{ code: string }|null} o.diskError   non-null for non-ENOENT read errors
  * @param {string|null} o.repoContent   same for the cluster-repo copy
  * @param {{ code: string }|null} o.repoError
+ * @param {boolean} [o.clusterAvailable=true]   POSITIVE CONTROL: did we actually
+ *   inspect the cluster source? A missing/mis-mounted clone, or one lacking its
+ *   `hosts/` tree, produces the SAME `repoContent === null` as a deliberately absent
+ *   per-host posture. Without this flag both collapse to ABSENT ("nothing to drift
+ *   from") — a false clean when the source could not be inspected (Codex P2). When
+ *   false, a null repo is INCONCLUSIVE, never ABSENT.
  * @returns {{ verdict: string, onlyOnDisk?: string[], onlyInRepo?: string[], valueDiffers?: string[], reason?: string }}
  */
-export function classifyExecutionCoreEnvDrift({ diskContent, diskError, repoContent, repoError }) {
+export function classifyExecutionCoreEnvDrift({
+  diskContent,
+  diskError,
+  repoContent,
+  repoError,
+  clusterAvailable = true,
+}) {
   // A non-ENOENT read failure on either side → INCONCLUSIVE.
   // "I could not look" is not evidence of no drift.
   if (diskError) {
@@ -98,7 +110,18 @@ export function classifyExecutionCoreEnvDrift({ diskContent, diskError, repoCont
     return { verdict: VERDICT.INCONCLUSIVE, reason: `repo: ${repoError.code}` };
   }
 
-  // Repo absent → this host has no committed posture; nothing to drift from.
+  // Repo absent, but the source was NEVER INSPECTABLE (no clone / wrong path / no
+  // hosts/ tree) → INCONCLUSIVE, not ABSENT. A null repoContent here means "could
+  // not look", which must not read as "nothing to drift from" (Codex P2).
+  if (repoContent === null && clusterAvailable === false) {
+    return {
+      verdict: VERDICT.INCONCLUSIVE,
+      reason: "cluster posture unavailable (clone missing, wrong path, or no hosts/ tree)",
+    };
+  }
+
+  // Repo absent AND the source WAS inspectable → this host genuinely has no committed
+  // posture; nothing to drift from.
   if (repoContent === null) {
     return { verdict: VERDICT.ABSENT, onlyOnDisk: [], onlyInRepo: [], valueDiffers: [] };
   }
@@ -142,12 +165,26 @@ export function checkExecutionCoreEnvDrift(deps = {}) {
     clusterDir = getClusterRepoDir(),
     hostName = getHostName(),
     readFile = readFileSync,
+    exists = existsSync,
     // eslint-disable-next-line no-unused-vars
     logger = log,
   } = deps;
 
-  const diskPath = resolve(configDir, "execution-core.env");
+  // CTL-2042 (Codex P2): inspect the SAME on-disk file the daemon launcher sources —
+  // the CATALYST_EXECUTION_CORE_ENV override when set, else <configDir>/execution-core.env.
+  // Checking the Layer-2-adjacent default when the launcher sources elsewhere would
+  // report drift against a file the daemon never reads.
+  const diskPath =
+    typeof env?.CATALYST_EXECUTION_CORE_ENV === "string" && env.CATALYST_EXECUTION_CORE_ENV.length > 0
+      ? resolve(env.CATALYST_EXECUTION_CORE_ENV)
+      : resolve(configDir, "execution-core.env");
   const repoPath = resolve(clusterDir, "hosts", String(hostName), "execution-core.env");
+
+  // POSITIVE CONTROL (Codex P2): could we actually inspect the cluster source? A
+  // missing/mis-mounted clone or one without a `hosts/` tree yields the same null
+  // repoContent as a genuinely absent per-host posture; distinguish them so an
+  // un-inspectable source reports INCONCLUSIVE, not a false-clean ABSENT.
+  const clusterAvailable = exists(clusterDir) && exists(resolve(clusterDir, "hosts"));
 
   let diskContent = null;
   let diskError = null;
@@ -165,7 +202,13 @@ export function checkExecutionCoreEnvDrift(deps = {}) {
     if (err?.code !== "ENOENT") repoError = { code: err?.code ?? "unknown" };
   }
 
-  const r = classifyExecutionCoreEnvDrift({ diskContent, diskError, repoContent, repoError });
+  const r = classifyExecutionCoreEnvDrift({
+    diskContent,
+    diskError,
+    repoContent,
+    repoError,
+    clusterAvailable,
+  });
 
   if (r.verdict === VERDICT.ABSENT) {
     return mkCheck(
@@ -202,7 +245,7 @@ export function checkExecutionCoreEnvDrift(deps = {}) {
     "execution-core-env-drift",
     STATUS.WARN,
     `execution-core.env DRIFT detected for host ${String(hostName)}. Variable names: ${nameSummary}. ` +
-      `Run \`catalyst-stack cluster-sync\` or wait for the refresh timer to materialize the committed posture. ` +
+      `Run \`catalyst cluster sync\` or wait for the refresh timer to materialize the committed posture. ` +
       `Disk: ${diskPath}. Repo: ${repoPath}. Values are never shown.`,
   );
 }

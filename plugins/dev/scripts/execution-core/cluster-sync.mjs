@@ -511,6 +511,11 @@ export function syncHostEnvFiles(opts = {}) {
     clusterDir = getClusterRepoDir(),
     configDir = defaultConfigDir(),
     hostName: hostNameOpt,
+    // CTL-2042 (Codex P2): the daemon launcher sources the env file from the
+    // CATALYST_EXECUTION_CORE_ENV override when set, NOT the Layer-2-adjacent default.
+    // Materialize to that exact path so the committed posture actually reaches the
+    // daemon; injectable so tests stay hermetic.
+    env = process.env,
     // CTL-1612 read-back seam: detect rewrites vs real changes.
     readFile = (p) => {
       try {
@@ -577,8 +582,27 @@ export function syncHostEnvFiles(opts = {}) {
       continue;
     }
 
-    const destPath = resolve(configDir, dest);
+    // Resolve the write target the SAME way the launcher (catalyst-execution-core)
+    // resolves it: the CATALYST_EXECUTION_CORE_ENV override, else <configDir>/<dest>.
+    // The tracked `dest` name stays the logical basename so isEnvBackedSecretFile()
+    // (restart-required filter) and the manifest are unaffected by an override path.
+    const overrideEnvPath =
+      dest === "execution-core.env" &&
+      typeof env?.CATALYST_EXECUTION_CORE_ENV === "string" &&
+      env.CATALYST_EXECUTION_CORE_ENV.length > 0
+        ? env.CATALYST_EXECUTION_CORE_ENV
+        : null;
+    const destPath = overrideEnvPath ? resolve(overrideEnvPath) : resolve(configDir, dest);
     try {
+      // The override may point outside configDir (which we already mkdir'd above);
+      // ensure the target's parent exists so the first write on a fresh host succeeds.
+      if (overrideEnvPath) {
+        try {
+          mkdirSync(dirname(destPath), { recursive: true });
+        } catch {
+          /* parent usually exists */
+        }
+      }
       const prior = readFile(destPath);
       writeFile(destPath, content);
       result.written.push(dest);
@@ -622,6 +646,30 @@ function gitRevParseHead({ clusterDir, gitCapture }) {
 // a missed rotation is the bug we're fixing. Never throws.
 function gitSecretsChangedBetween({ clusterDir, fromSha, toSha, gitCapture }) {
   const r = gitCapture(["-C", clusterDir, "diff", "--quiet", fromSha, toSha, "--", "secrets/"]);
+  if (r && r.status === 0) return false;
+  return true;
+}
+
+// gitHostEnvChangedBetween — CTL-2042. Did this host's posture dir (`hosts/<host>/`)
+// differ between two shas? Same contract as gitSecretsChangedBetween (exit 0 =
+// identical, any other exit = assume CHANGED; never throws). The per-host posture
+// lives OUTSIDE `secrets/`, so a commit that touches only
+// `hosts/<host>/execution-core.env` leaves gitSecretsChangedBetween returning false;
+// without this predicate refreshClusterSecretsIfChanged takes the secrets-unchanged
+// fast path, advances the marker, and permanently skips the posture materialization
+// (Codex P1). An empty/absent hostName can never scope a diff → treat as unchanged.
+function gitHostEnvChangedBetween({ clusterDir, hostName, fromSha, toSha, gitCapture }) {
+  if (typeof hostName !== "string" || hostName.length === 0) return false;
+  const r = gitCapture([
+    "-C",
+    clusterDir,
+    "diff",
+    "--quiet",
+    fromSha,
+    toSha,
+    "--",
+    `hosts/${hostName}/`,
+  ]);
   if (r && r.status === 0) return false;
   return true;
 }
@@ -928,8 +976,61 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
     lastSha &&
     !gitSecretsChangedBetween({ clusterDir, fromSha: lastSha, toSha: head, gitCapture })
   ) {
-    // HEAD advanced but secrets/ did not — advance the marker so we don't re-diff the
-    // same range every tick, but DON'T spend a sops spawn.
+    // secrets/ did not change across lastSha..HEAD — no sops spawn is needed. But the
+    // per-host posture (`hosts/<host>/execution-core.env`) lives OUTSIDE secrets/ and
+    // MIGHT have moved in this same range; a posture-only commit would otherwise be
+    // skipped forever once the marker advances past it (Codex P1). Materialize it
+    // FIRST, then advance the marker.
+    if (
+      gitHostEnvChangedBetween({ clusterDir, hostName: node, fromSha: lastSha, toSha: head, gitCapture })
+    ) {
+      const _syncHostEnvFilesImpl =
+        typeof opts.syncHostEnvFiles === "function" ? opts.syncHostEnvFiles : syncHostEnvFiles;
+      // Pin the materialization to the SAME host identity the diff was scoped to, so the
+      // change-detection and the write can never disagree on which host's posture applies.
+      const hostEnvFiles = _syncHostEnvFilesImpl({ clusterDir, configDir, hostName: node, logger });
+      status.hostEnvFiles = hostEnvFiles;
+
+      // A write shortfall must NOT advance the marker (same discipline as the full
+      // materialization path below) — leave it behind so the next tick retries.
+      if (Array.isArray(hostEnvFiles?.failed) && hostEnvFiles.failed.length > 0) {
+        status.ok = false;
+        status.reason = "host-env-write-failed";
+        emit({ name: "refresh-failed", node, now, payload: { reason: "host-env-write-failed", toSha: head } });
+        return status;
+      }
+
+      // Emit restart-required for any boot-captured env file whose CONTENT changed
+      // (same filter + envelope as the full path).
+      const rotated = (Array.isArray(hostEnvFiles?.changed) ? hostEnvFiles.changed : []).filter((f) =>
+        isEnvBackedSecretFile(f),
+      );
+      status.restartRequired = rotated;
+      for (const file of rotated) {
+        logger?.warn?.(
+          `[cluster-sync] boot-captured secret rotated (${file}) — restart the daemon(s) that ` +
+            "read it to apply (its value is captured at process start, not per use)",
+        );
+        emit({ name: "restart-required", node, now, payload: { file, fromSha: lastSha, toSha: head } });
+      }
+
+      writeState(
+        statePath,
+        {
+          lastDecryptedSha: head,
+          lastDecryptedAt: now(),
+          written: Array.isArray(state?.written) ? state.written : [],
+          synced: Array.isArray(state?.synced) ? state.synced : [],
+        },
+        logger,
+      );
+      status.changed = Array.isArray(hostEnvFiles?.changed) && hostEnvFiles.changed.length > 0;
+      status.reason = "host-env-refreshed";
+      return status;
+    }
+
+    // Neither secrets/ nor this host's posture changed — pure fast path. Advance the
+    // marker so we don't re-diff the same range every tick, no sops spawn.
     writeState(
       statePath,
       {

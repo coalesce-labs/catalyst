@@ -562,6 +562,82 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
   });
 
+  test("(b2) CTL-2042: secrets/ unchanged but hosts/<host>/ changed → materialize posture, advance marker", () => {
+    seedClone();
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+    // gitCapture that distinguishes the pathspec: secrets/ unchanged, hosts/ changed.
+    const scopedGitCapture = (args) => {
+      if (args.includes("rev-parse")) return { status: 0, stdout: "NEWSHA\n" };
+      if (args.includes("diff")) {
+        const scopedToHosts = args.some((a) => typeof a === "string" && a.startsWith("hosts/"));
+        return { status: scopedToHosts ? 1 : 0, stdout: "" };
+      }
+      return { status: 0, stdout: "" };
+    };
+    let hostEnvCalls = 0;
+    let decryptCalls = 0;
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: scopedGitCapture,
+      // Inject the posture materializer so the test controls its result deterministically.
+      syncHostEnvFiles: () => {
+        hostEnvCalls += 1;
+        return { written: ["execution-core.env"], changed: ["execution-core.env"], failed: [], skipped: false, reason: null };
+      },
+      decrypt: () => {
+        decryptCalls += 1;
+        return {};
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t2",
+      node: "test-node",
+      logger: QUIET,
+    });
+    expect(res.reason).toBe("host-env-refreshed");
+    expect(hostEnvCalls).toBe(1); // posture materialized despite secrets/ being unchanged
+    expect(decryptCalls).toBe(0); // still no sops spawn
+    expect(res.changed).toBe(true);
+    // marker advanced so we don't re-diff the same range forever
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
+
+  test("(b3) CTL-2042: host-env write shortfall → refresh-failed, marker NOT advanced", () => {
+    seedClone();
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+    const scopedGitCapture = (args) => {
+      if (args.includes("rev-parse")) return { status: 0, stdout: "NEWSHA\n" };
+      if (args.includes("diff")) {
+        const scopedToHosts = args.some((a) => typeof a === "string" && a.startsWith("hosts/"));
+        return { status: scopedToHosts ? 1 : 0, stdout: "" };
+      }
+      return { status: 0, stdout: "" };
+    };
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: scopedGitCapture,
+      syncHostEnvFiles: () => ({ written: [], changed: [], failed: ["execution-core.env"], skipped: false, reason: null }),
+      emit: (e) => emits.push(e),
+      now: () => "t3",
+      node: "test-node",
+      logger: QUIET,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("host-env-write-failed");
+    expect(emits.some((e) => e.name === "refresh-failed")).toBe(true);
+    // marker stays behind so the next tick retries the un-applied posture
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
   test("(c) secrets/ changed → re-decrypt + OVERWRITE stale placeholder + emit refreshed", () => {
     seedClone();
     writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
@@ -1859,6 +1935,37 @@ describe("syncHostEnvFiles (CTL-2042)", () => {
     expect(written[0].content).toBe(MINI_CONTENT);
     // mini-2's content was never written
     expect(written.some((w) => w.content === MINI2_CONTENT)).toBe(false);
+  });
+
+  test("Codex P2: writes to the CATALYST_EXECUTION_CORE_ENV override path, not the configDir default", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+    const overridePath = join(configDir, "custom", "exec-core.env");
+
+    const written = [];
+    const writeFile = (dest, content) => {
+      written.push({ dest, content });
+      writeFileSync(dest, content, { mode: 0o600 });
+    };
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      env: { CATALYST_EXECUTION_CORE_ENV: overridePath },
+      writeFile,
+      logger: QUIET,
+    });
+
+    // Tracked dest NAME stays the logical basename (restart-required filter unaffected)…
+    expect(res.written).toEqual(["execution-core.env"]);
+    // …but the actual write lands at the launcher's canonical override path.
+    expect(written).toHaveLength(1);
+    expect(written[0].dest).toBe(resolve(overridePath));
+    expect(written[0].content).toBe(MINI_CONTENT);
+    // the parent dir of the override (outside configDir) was created
+    expect(existsSync(resolve(overridePath))).toBe(true);
+    // nothing was written to the configDir default
+    expect(existsSync(join(configDir, "execution-core.env"))).toBe(false);
   });
 
   test("reports changed[] on the dest name when on-disk content differs", () => {

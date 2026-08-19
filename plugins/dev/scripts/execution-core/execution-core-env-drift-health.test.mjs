@@ -256,10 +256,14 @@ describe("checkExecutionCoreEnvDrift", () => {
   const HOST_ENV =
     "export CATALYST_HOST_NAME=mini\nexport CATALYST_EXECUTOR=sdk\nexport CATALYST_LINEAR_WRITE_DAILY_BUDGET=2000\n";
 
-  const makeDeps = ({ diskContent, repoContent, diskError, repoError } = {}) => ({
+  const makeDeps = ({ diskContent, repoContent, diskError, repoError, clusterAvailable = true } = {}) => ({
     hostName: "mini",
     configDir: "/fake/config",
     clusterDir: "/fake/cluster",
+    // Positive control (CTL-2042 Codex P2): default to an inspectable clone so a null
+    // repo means "genuinely no committed posture" (ABSENT). Set clusterAvailable:false
+    // to model a missing/mis-mounted clone (INCONCLUSIVE, never a false-clean ABSENT).
+    exists: () => clusterAvailable,
     readFile: (path) => {
       if (path.includes("/fake/config/execution-core.env")) {
         if (diskError) throw Object.assign(new Error(diskError.code), diskError);
@@ -279,6 +283,16 @@ describe("checkExecutionCoreEnvDrift", () => {
     const check = checkExecutionCoreEnvDrift(makeDeps({ diskContent: null, repoContent: null }));
     expect(check.status).toBe("pass");
     expect(check.name).toBe("execution-core-env-drift");
+  });
+
+  test("returns WARN/INCONCLUSIVE when the cluster clone is unavailable (positive control)", () => {
+    // A null repo read that comes from an un-inspectable source (no clone / wrong path /
+    // no hosts/ tree) must NOT collapse to a false-clean ABSENT (Codex P2).
+    const check = checkExecutionCoreEnvDrift(
+      makeDeps({ diskContent: null, repoContent: null, clusterAvailable: false }),
+    );
+    expect(check.status).toBe("warn");
+    expect(check.detail).toContain("INCONCLUSIVE");
   });
 
   test("returns PASS when disk matches repo (MATCHES)", () => {
