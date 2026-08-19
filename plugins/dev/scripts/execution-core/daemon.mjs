@@ -1435,7 +1435,12 @@ export function startDaemon({
     } catch {
       /* a throwing registry must not block boot → the guard falls back to the default map */
     }
-    const laneClaimReadFile = (path) => readFileSync(path, "utf8");
+    // ⚠️ The parameter is NOT named `path`. CTL-1529's event-log read guard taints that
+    // identifier module-wide, so `(path) => readFileSync(path, "utf8")` trips it — a false
+    // positive (this reads a project's .catalyst/config.json, never the event log). Renaming
+    // is the honest fix: an allowlist entry would carve a permanent exemption into a guard
+    // that is right to be conservative.
+    const laneClaimReadFile = (configFilePath) => readFileSync(configFilePath, "utf8");
     const laneClaimFallback = [
       ["configPath", configPath],
       ["layer2", layer2Path],
