@@ -38,6 +38,13 @@ function defaultLastChannelTurnMs({ env = process.env } = {}) {
   try {
     const channel = env.CATALYST_CONCIERGE_CHANNEL || "concierge";
     const file = join(catalystDir(env), "comms", "channels", `${channel}.jsonl`);
+    // EVENT-LOG-FULL-READ-OK(CTL-2000): NOT the event log — a per-channel comms
+    // JSONL (~/catalyst/comms/channels/<name>.jsonl), the same file class the
+    // CTL-1529 guard already allowlists for orch-monitor/lib/comms-reader.ts. The
+    // taint analysis can't tell the two `.jsonl` paths apart. Bounded in practice by
+    // one run's channel traffic (KBs), and the dead-man tick runs on its own launchd
+    // timer with no event loop to block; the contract is "the most recent genuine
+    // turn", which needs every line (an instrument post may be the last one).
     const text = readFileSync(file, "utf8");
     let latest = null;
     for (const line of text.split("\n")) {
