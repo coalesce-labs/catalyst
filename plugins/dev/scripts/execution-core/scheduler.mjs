@@ -13,6 +13,8 @@
 // Composes: lib/dependency-graph.mjs (readiness), scheduler-rank.mjs (ranking),
 // lib/phase-fsm.mjs (phase advancement, Phase 4), eligible-set.mjs (candidates).
 
+import { getLaneClaimGuard } from "./lane-claim-install.mjs"; // CTL-2068
+import { VERDICT as LANE_CLAIM_VERDICT } from "./lane-claim.mjs"; // CTL-2068
 import {
   readdirSync,
   readFileSync,
@@ -5350,6 +5352,38 @@ export function schedulerTick(
       failLogIncludePhase = true, // Pass 2's original rc!=0 log omits the phase field
     }
   ) {
+    // ⛔ CTL-2068 — LANE-CLAIM DISPATCH VETO. The single choke point every phase dispatch
+    // passes through, and the half that actually stops the collision: on CTC-787 the fleet
+    // held the ticket in its pipeline the whole time, so refusing the STATE write alone
+    // would have left the worker running and still opening the duplicate PR.
+    //
+    // Placed ABOVE the dispatch-requested emit on purpose — recording a decision we are
+    // about to refuse would put a phantom dispatch in the audit stream and feed the
+    // runaway-rate detector.
+    //
+    // Fails OPEN in every case it cannot judge (no guard installed, no replica, unranked
+    // state, `triage` — which writes no status and is where fleet work legitimately
+    // begins). Only a positive "a non-fleet actor moved this ticket, and this phase sits
+    // behind where they moved it" refuses.
+    const laneClaimGuard = getLaneClaimGuard();
+    if (laneClaimGuard) {
+      const lc = laneClaimGuard.evaluateDispatch({ ticket, phase });
+      if (lc?.verdict === LANE_CLAIM_VERDICT.REFUSE) {
+        log.warn(
+          {
+            ticket,
+            phase,
+            actor_id: lc.actorId,
+            reason: lc.reason,
+            current_rank: lc.currentRank,
+            target_rank: lc.targetRank,
+          },
+          "ctl-2068: skipping dispatch — a lane holds this ticket"
+        );
+        return { aborted: true, laneClaimed: true };
+      }
+    }
+
     // CTL-660: record the dispatch DECISION before the spawn. Best-effort.
     safeEmit(
       appendDispatchRequestedEvent,

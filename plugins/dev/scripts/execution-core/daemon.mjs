@@ -172,6 +172,8 @@ import { createProxyResolver } from "./linear-write-proxy-resolve.mjs"; // CTL-1
 import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
+import { setLaneClaimGuard } from "./lane-claim-install.mjs"; // CTL-2068
+import { buildLaneClaimGuard } from "./lane-claim.mjs"; // CTL-2068
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
 import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
@@ -1376,6 +1378,59 @@ export function startDaemon({
       });
     refreshBotIdentities();
     const linearBotWriteId = readLinearBotWriteId(configPath, layer2Path); // CTL-781
+
+    // ── CTL-2068 — install the lane-claim guard ──
+    //
+    // "A claim another automation can overwrite is not a claim." Twice in two nights a lane
+    // claimed a ticket and the pipeline dragged it BACK to a candidate state minutes later,
+    // whereupon a worker dispatched it and opened a duplicate PR.
+    //
+    // ⛔ Installed UNCONDITIONALLY, not behind a mode flag. Its refusal is narrow (only a
+    // regression, and only when a non-fleet actor made the last state change) and every case
+    // it cannot judge ALLOWS the write, so there is no posture for it to be wrong in — while
+    // a shadow default would reproduce this repo's recurring failure of shipping a correct
+    // mechanism nobody ever arms. The DISPATCH half has its own kill switch below, because
+    // that one withholds work rather than merely a status write.
+    //
+    // ⭐ `linearBotUserIds` is passed by REFERENCE on purpose: it is the stable Set filled in
+    // place by refreshBotIdentities on every cluster-sync tick, so an app-actor re-mint keeps
+    // the guard's notion of "the fleet" current instead of freezing it at boot. A copy here
+    // would make the guard read every post-rotation fleet write as a lane's.
+    //
+    // Without a replica reader the guard has no history to consult and answers INCONCLUSIVE
+    // for every ticket — allowing the write, and SAYING so in the log line below rather than
+    // silently doing nothing.
+    let laneClaimStateMap = null;
+    try {
+      laneClaimStateMap =
+        JSON.parse(readFileSync(configPath, "utf8"))?.catalyst?.linear?.stateMap ?? null;
+    } catch {
+      /* absent/malformed Layer-1 → no rank map → the guard abstains, never refuses */
+    }
+    // Only an explicit "off" disables the dispatch veto — an unset or misspelled value leaves
+    // it armed, because the failure this ticket is about is a claim quietly not being honoured.
+    const laneClaimDispatchVeto =
+      String(process.env.CATALYST_LANE_CLAIM_DISPATCH_GUARD ?? "")
+        .trim()
+        .toLowerCase() !== "off";
+    setLaneClaimGuard(
+      buildLaneClaimGuard({
+        stateMap: laneClaimStateMap,
+        botUserIds: linearBotUserIds,
+        readLastStateChange: replicaReader ? (t) => replicaReader.lastStateChange(t) : undefined,
+        readCurrentState: replicaReader ? (t) => replicaReader.lookup(t)?.state ?? null : undefined,
+        dispatchVeto: laneClaimDispatchVeto,
+      })
+    );
+    log.info(
+      {
+        ranked_states: Object.keys(laneClaimStateMap ?? {}).length,
+        history_source: replicaReader ? "replica" : "none",
+        dispatch_veto: laneClaimDispatchVeto,
+      },
+      "ctl-2068: lane-claim guard installed"
+    );
+
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
     // CTL-1654 (Codex P2 "gate the daemon before starting actuators"): resolve the
     // node class BEFORE arming the actuators, and arm the monitor + scheduler ONLY on
