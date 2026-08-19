@@ -181,11 +181,24 @@ export function checkAgentToolsWritePath(deps = {}) {
           });
         }
       }
-    } catch {
-      // ENOENT is the only benign reason to be here, and it is the common one. Any other
-      // errno also lands here; it is reported as absent rather than inconclusive because
-      // an entry doctor cannot even lstat is not one the lanes are invoking either.
-      return classifyAgentToolCopy({ name, outPresent: false, repoDir: canonicalRepoDir });
+    } catch (err) {
+      // ⛔ ABSENT IS RESERVED FOR ENOENT (Codex P2 on #3679). The first cut caught every
+      // errno here and called it absent, reasoning that an unlistable entry is not one the
+      // lanes are invoking. That is the false-clean this whole row exists to refuse: with
+      // both probes failing EACCES — a directory whose permissions changed, an unreadable
+      // mount — every tool reports absent, the all-absent branch returns PASS, and doctor
+      // states "no out-of-tree agent tools" about a directory it could not open. "The
+      // tools are not there" and "I could not look" must not share an outcome, and lstat
+      // is the one probe where the distinction is carried by the errno alone.
+      if (err?.code === "ENOENT") {
+        return classifyAgentToolCopy({ name, outPresent: false, repoDir: canonicalRepoDir });
+      }
+      return classifyAgentToolCopy({
+        name,
+        outPresent: true,
+        reason: `could not stat the out-of-tree entry (${err?.code ?? "unknown"})`,
+        repoDir: canonicalRepoDir,
+      });
     }
     if (linkTarget)
       return classifyAgentToolCopy({ name, outPresent, linkTarget, repoDir: canonicalRepoDir });

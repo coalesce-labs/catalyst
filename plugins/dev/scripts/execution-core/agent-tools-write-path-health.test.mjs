@@ -148,6 +148,58 @@ describe("checkAgentToolsWritePath", () => {
   });
 });
 
+describe("lstat failures (Codex P2 on #3679)", () => {
+  // ⛔ THE FALSE CLEAN THIS PINS: catching every errno as "absent" means a directory whose
+  // permissions changed reports "no out-of-tree agent tools" — a PASS about a directory
+  // doctor could not open. ENOENT is the ONLY errno that means absent.
+  const failingLstat = (code) => () => {
+    throw Object.assign(new Error(code), { code });
+  };
+
+  test("EACCES on BOTH tools must NOT produce the all-absent PASS", () => {
+    const c = checkAgentToolsWritePath({
+      outDir: "/nonexistent/tools",
+      repoDir: "/nonexistent/scripts",
+      lstat: failingLstat("EACCES"),
+    });
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("INCONCLUSIVE");
+    expect(c.detail).toContain("EACCES");
+  });
+
+  test("EIO is inconclusive too — the list of bad errnos is not enumerated, ENOENT is", () => {
+    const c = checkAgentToolsWritePath({
+      outDir: "/nonexistent/tools",
+      repoDir: "/nonexistent/scripts",
+      lstat: failingLstat("EIO"),
+    });
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("EIO");
+  });
+
+  test("ENOENT still means absent — the benign, overwhelmingly common case still PASSes", () => {
+    const c = checkAgentToolsWritePath({
+      outDir: "/nonexistent/tools",
+      repoDir: "/nonexistent/scripts",
+      lstat: failingLstat("ENOENT"),
+    });
+    expect(c.status).toBe("pass");
+    expect(c.detail).toContain("no out-of-tree agent tools");
+  });
+
+  test("an errno-less throw is inconclusive, not absent — an unknown failure is still a failure", () => {
+    const c = checkAgentToolsWritePath({
+      outDir: "/nonexistent/tools",
+      repoDir: "/nonexistent/scripts",
+      lstat: () => {
+        throw new Error("no code property");
+      },
+    });
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("INCONCLUSIVE");
+  });
+});
+
 describe("classifyAgentToolCopy — the pure core", () => {
   test("every unknown resolves to INCONCLUSIVE, never to a match", () => {
     const cases = [

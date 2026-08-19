@@ -6053,6 +6053,14 @@ export function checksForClass(nc, opts = {}) {
   // checkPeerUniqueness/checkCloudTokenEnv/checkWorkerLabels) emits is
   // STATUS.INFO — zero grade change (design §7/§9). PR3 flips this to graded.
   const secretContractCheck = () => checkSecretContract();
+  // CTL-2026 (Codex P2): class-INDEPENDENT, for the same reason deploymentModeCheck is.
+  // The out-of-tree agent tools are invoked by an operator's skills, and a `developer`
+  // node is defined a few lines below as one whose "operator's skills write
+  // transitions/comments to Linear" — so a developer is precisely where these tools run.
+  // Registering this only on the worker arm would have left the class that HOLDS the live
+  // copies reporting clean: measured on this laptop (node class `developer`), whose
+  // ~/catalyst/comms/tools/linear-reply.mjs is the drifted file this row exists to name.
+  const agentToolsWritePathCheck = () => checkAgentToolsWritePath();
 
   // Unrecognized explicit class → a single hard FAIL; grade no profile (CTL-1355).
   if (!nc.recognized) {
@@ -6118,6 +6126,7 @@ export function checksForClass(nc, opts = {}) {
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+      agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
       developerBotCredentials,
@@ -6163,6 +6172,7 @@ export function checksForClass(nc, opts = {}) {
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+      agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
@@ -6191,6 +6201,7 @@ export function checksForClass(nc, opts = {}) {
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+    agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),
@@ -6225,13 +6236,6 @@ export function checksForClass(nc, opts = {}) {
     () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
     () => checkInstallCompleteness(), // CTL-1918: did the install FINISH — CLIs, plugin-source, sweep, enrolment — advisory only (never FAIL)
     () => checkLinearWriteBudget(), // CTL-1936: host cloud-write spend / exhaustion — advisory only (never FAIL)
-    // CTL-2026: the two agent tools every lane invokes live OUTSIDE this repo
-    // (~/catalyst/comms/tools/), so a rubric that walks only the checkout would certify a
-    // host that is still writing around the proxy. This row makes that directory visible
-    // and can never PASS by not looking. Advisory only (never FAIL) — during the CTL-2026(b)
-    // interim EVERY host legitimately holds a copy, and doctor's FAIL count gates worker
-    // activation.
-    () => checkAgentToolsWritePath(),
     () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
     () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
   ];
