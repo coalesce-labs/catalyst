@@ -6,6 +6,9 @@ import {
   coerceExplanation,
   buildRemediateCapExplanation,
   tierProducer,
+  resolveSignalReason,
+  describeSignalReason,
+  SIGNAL_REASON_KEYS,
 } from "./escalation-explanation.mjs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -572,5 +575,98 @@ describe("CLI shim (escalation-explain.mjs)", () => {
     const r3 = spawnSync("node", [SHIM_PATH, "--can-execute", "false"], { encoding: "utf8" });
     expect(JSON.parse(r3.stdout).escalation_type).toBe("decision");
     expect(JSON.parse(r3.stdout).escalation_type).not.toBe("manual");
+  });
+});
+
+// ── CTL-1754: the reason an escalation reports ──────────────────────────────
+//
+// ⛔ THE FIXTURE TRAP THIS SUITE EXISTS TO AVOID. The broken code read
+// `signal.stalledReason`. A test whose fixture carries `stalledReason` PASSES
+// against that broken code — so a suite built from invented fixtures cannot
+// detect this bug at all. Every fixture below is therefore taken from the
+// measured key distribution on the live fleet (44 failed/stalled phase signals,
+// both hosts, 2026-08-19): attentionReason 26, failureReason 18,
+// stalledReason 0, no-reason-at-all 0. The values are the real ones too.
+describe("CTL-1754 — resolveSignalReason", () => {
+  // The exact shapes that produced "(no reason)" cards on the fleet.
+  const LIVE_FIXTURES = [
+    { sig: { status: "failed", failureReason: "ended-without-declaration" }, want: "ended-without-declaration", key: "failureReason" },
+    { sig: { status: "failed", failureReason: "worker-vanished" }, want: "worker-vanished", key: "failureReason" },
+    { sig: { status: "failed", failureReason: "rebase_refused_dirty_tree" }, want: "rebase_refused_dirty_tree", key: "failureReason" },
+    { sig: { status: "stalled", attentionReason: "sdk-overloaded-exhausted" }, want: "sdk-overloaded-exhausted", key: "attentionReason" },
+    { sig: { status: "stalled", attentionReason: "codex-rate-park-exhausted" }, want: "codex-rate-park-exhausted", key: "attentionReason" },
+  ];
+
+  test("⭐ every live failed/stalled shape resolves to a NAMED reason", () => {
+    for (const { sig, want, key } of LIVE_FIXTURES) {
+      const r = resolveSignalReason(sig);
+      expect(r.status).toBe("named");
+      expect(r.reason).toBe(want);
+      expect(r.key).toBe(key);
+      // The card must not fall back to the "(no reason)" text for any of these.
+      expect(describeSignalReason(sig)).toBe(want);
+    }
+  });
+
+  test("⛔ MUTATION CONTROL: a stalledReason-only ladder fails every live fixture", () => {
+    // This is the OLD behaviour, inlined. If someone reverts the ladder to the
+    // single key, this is what the fleet gets — and this assertion documents
+    // that it is wrong for 100% of real signals, not merely incomplete.
+    const oldBehaviour = (sig) => sig?.stalledReason ?? "no reason";
+    // ⚠️ The assertion that matters is the SECOND one, and it must compare
+    // against the text the code actually renders for a reasonless signal. An
+    // earlier draft compared against the literal "no reason" while
+    // describeSignalReason returns "no reason recorded" — so it passed whether
+    // or not the ladder was broken. A mutation control that cannot fail is the
+    // same defect class as the bug it is guarding.
+    const ABSENT_TEXT = describeSignalReason({ status: "failed" });
+    for (const { sig, want } of LIVE_FIXTURES) {
+      expect(oldBehaviour(sig)).toBe("no reason");
+      expect(describeSignalReason(sig)).not.toBe(ABSENT_TEXT);
+      expect(describeSignalReason(sig)).toBe(want);
+      expect(resolveSignalReason(sig).status).toBe("named");
+    }
+  });
+
+  test("stalledReason stays FIRST — a deliberate stall reason is never masked", () => {
+    const r = resolveSignalReason({
+      stalledReason: "source_conflict_ctl708_unavailable",
+      failureReason: "ended-without-declaration",
+    });
+    expect(r.reason).toBe("source_conflict_ctl708_unavailable");
+    expect(r.key).toBe("stalledReason");
+    expect(SIGNAL_REASON_KEYS[0]).toBe("stalledReason");
+  });
+
+  test("⭐ THREE-VALUED: absent and unreadable are different facts", () => {
+    // A readable signal that records no reason...
+    const absent = resolveSignalReason({ status: "failed" });
+    expect(absent.status).toBe("absent");
+    expect(absent.reason).toBeNull();
+
+    // ...is NOT the same as having no signal to read at all.
+    for (const missing of [null, undefined, "not-an-object", 42]) {
+      const r = resolveSignalReason(missing);
+      expect(r.status).toBe("unreadable");
+      expect(r.reason).toBeNull();
+    }
+
+    // ⛔ The rendered text must keep them distinguishable — collapsing both to
+    // one string is how 41 escalations became indistinguishable from each other.
+    expect(describeSignalReason({ status: "failed" })).toBe("no reason recorded");
+    expect(describeSignalReason(undefined)).toBe("signal unreadable");
+    expect(describeSignalReason({ status: "failed" })).not.toBe(describeSignalReason(undefined));
+  });
+
+  test("a blank or non-string reason is NOT a named reason", () => {
+    for (const bad of [{ failureReason: "   " }, { failureReason: "" }, { failureReason: null }, { failureReason: 7 }]) {
+      expect(resolveSignalReason(bad).status).toBe("absent");
+    }
+  });
+
+  test("never throws on hostile input — it sits on the escalation write path", () => {
+    for (const hostile of [Object.create(null), [], new Map(), { get failureReason() { return "lazy"; } }]) {
+      expect(() => resolveSignalReason(hostile)).not.toThrow();
+    }
   });
 });
