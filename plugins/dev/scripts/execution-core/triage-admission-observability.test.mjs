@@ -25,6 +25,7 @@ import {
   pruneTriageSkips,
   _resetTriageSkipStreaks,
   triageSkipSeverity,
+  triageBudgetSkip,
 } from "./monitor.mjs";
 import { CLAIM_REASON, isClaimFailure } from "./cluster-claim-sync.mjs";
 
@@ -123,7 +124,15 @@ describe("CTL-879 wiring: every blind triage-admission gate records a reason", (
   const SITES = [
     ["drain gate", "drain: skipping triage dispatch — node draining", "noteTriageSkip", 8],
     ["HRW ownership gate", "ctl-1091: ticket not owned by this host under HRW", "noteTriageSkip", 8],
-    ["sweep budget gate", "readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP", "noteTriageSkip", 8],
+    // CTL-879/INIT-34 grew the explanatory block between this anchor and its recorder,
+    // and an 8-line window stopped covering the site — the same drift CTL-2033 hit two
+    // rows down. Sized with headroom rather than to the current exact distance.
+    ["sweep budget gate", "readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP", "noteTriageSkip", 20],
+    // ⛔ And the gate must CONSULT the two-mechanism discriminator, exactly as the claim
+    // gate below must consult isClaimFailure. Without this row the site could record one
+    // reason for both a busy fleet and a fail-closed hold — which is the pre-change
+    // behaviour, and the whole defect.
+    ["sweep budget gate discriminates", "readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP", "triageBudgetSkip(budget)", 20],
     ["sweep already-triaged exit", "if (hasTriageArtifact(orchDir, t.identifier))", "clearTriageSkip", 8],
     ["sweep in-flight gate", "if (t.fromTriageBoard && isTriageInFlight(", "noteTriageSkip", 8],
     // CTL-879 follow-up: the sixth gate. The first instrument missed it, and it
@@ -273,4 +282,95 @@ describe("CTL-2033 wiring: every claim gate reads the discriminator", () => {
       expect(window).toContain("log.debug");
     });
   }
+});
+
+
+// ── CTL-879 / INIT-34: `remaining: 0` had two producers and one observable ──────
+//
+// `computeTriageBudget` answers 0 from the fail-closed yielded-occupancy hold AND from
+// genuine capacity. Their prognoses are OPPOSITE — capacity is recomputed every sweep and
+// frees itself when a worker finishes; the hold NEVER clears on its own — yet both printed
+// the identical `sweep-budget-exhausted / budget_remaining: 0`. An operator could not tell
+// a busy fleet from a host that will produce no triage.json for the rest of the night.
+//
+// ⛔ WHAT EACH LAYER HERE PROVES, STATED PLAINLY. `sweepMissingTriage` cannot be driven
+// without the project registry and the eligible set, and `dispatchTriage` is not exported —
+// so there is no way to observe the sweep's call directly. Instead the decision was
+// EXTRACTED into `triageBudgetSkip`, which these tests exercise as ordinary code, and the
+// single-source test below pins that the reason literals exist nowhere else in monitor.mjs,
+// so no call site can hand-roll one past this function. That is a real constraint, not a
+// mention-scan: it fails if someone re-inlines the ternary.
+describe("triageBudgetSkip — the two zero-budget mechanisms", () => {
+  test("⭐ a HELD budget gets its own reason, the held reason, and warns immediately", () => {
+    const s = triageBudgetSkip({ remaining: 0, held: true, heldReason: "workers/ unreadable: EACCES" });
+    expect(s.reason).toBe("sweep-budget-held-scan-failed");
+    expect(s.detail).toEqual({ budget_remaining: 0, held_reason: "workers/ unreadable: EACCES" });
+    expect(s.alwaysWarn).toBe(true);
+  });
+
+  test("⛔ capacity-zero keeps the pre-existing reason and does NOT warn immediately", () => {
+    const s = triageBudgetSkip({ remaining: 0, held: false, heldReason: null });
+    expect(s.reason).toBe("sweep-budget-exhausted");
+    expect(s.detail).toEqual({ budget_remaining: 0 });
+    expect(s.alwaysWarn).toBe(false);
+    // ⛔ and it carries NO held_reason key — a null one would render in Loki as a held
+    // budget with an unknown cause, which is the confusion this change removes.
+    expect("held_reason" in s.detail).toBe(false);
+  });
+
+  test("a budget from a caller that predates `held` reads as healthy, never as held", () => {
+    // sweepMissingTriage's sibling call site accepts an INJECTED budget; an older shape
+    // must keep its exact previous behaviour rather than silently escalating.
+    for (const b of [{ remaining: 0 }, { remaining: 3 }, {}, undefined, null]) {
+      expect(triageBudgetSkip(b).reason).toBe("sweep-budget-exhausted");
+      expect(triageBudgetSkip(b).alwaysWarn).toBe(false);
+    }
+  });
+
+  test("only the boolean true holds — a truthy value is not a hold", () => {
+    for (const held of ["true", 1, {}, []]) {
+      expect(triageBudgetSkip({ remaining: 0, held }).reason).toBe("sweep-budget-exhausted");
+    }
+  });
+
+  test("⭐ the two reasons produce DIFFERENT severities on sweep 1 — the answer changes, not just the label", () => {
+    const held = triageBudgetSkip({ remaining: 0, held: true, heldReason: "x" });
+    const busy = triageBudgetSkip({ remaining: 0, held: false });
+    // This is the composition that matters: alwaysWarn is only meaningful if it reaches
+    // triageSkipSeverity and changes what comes out on the very first sweep.
+    expect(triageSkipSeverity(1, { alwaysWarn: held.alwaysWarn })).toBe("warn");
+    expect(triageSkipSeverity(1, { alwaysWarn: busy.alwaysWarn })).not.toBe("warn");
+  });
+
+  test("the two reasons keep SEPARATE streaks — a host flipping between them does not read as one episode", () => {
+    _resetTriageSkipStreaks();
+    const held = triageBudgetSkip({ remaining: 0, held: true, heldReason: "x" }).reason;
+    const busy = triageBudgetSkip({ remaining: 0, held: false }).reason;
+    expect(noteTriageSkip("CTL-1", busy)).toBe(1);
+    expect(noteTriageSkip("CTL-1", busy)).toBe(2);
+    // Switching mechanism must RESET the streak — the escalation sentence claims
+    // persistence of one cause, and it would be a false statement across a switch.
+    expect(noteTriageSkip("CTL-1", held)).toBe(1);
+  });
+});
+
+describe("the reason literals have exactly one home", () => {
+  // ⛔ This is the wiring half, and it is a CONSTRAINT rather than a mention-scan: if the
+  // ternary is ever re-inlined at a call site, that literal appears a second time and this
+  // fails. It does not prove the sweep calls triageBudgetSkip — nothing available here can —
+  // but it does prove no OTHER code can emit these reasons behind its back.
+  const src = readFileSync(join(import.meta.dirname, "monitor.mjs"), "utf8");
+  for (const literal of ['"sweep-budget-held-scan-failed"', '"sweep-budget-exhausted"']) {
+    test(`${literal} appears exactly once in monitor.mjs`, () => {
+      expect(src.split(literal).length - 1).toBe(1);
+    });
+  }
+  test("...and both occurrences are inside triageBudgetSkip", () => {
+    const start = src.indexOf("export function triageBudgetSkip");
+    const end = src.indexOf("\n}", src.indexOf("return { reason: \"sweep-budget-exhausted\""));
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, end);
+    expect(body).toContain('"sweep-budget-held-scan-failed"');
+    expect(body).toContain('"sweep-budget-exhausted"');
+  });
 });

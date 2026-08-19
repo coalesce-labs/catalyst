@@ -827,9 +827,27 @@ export function computeTriageBudget({
   }
   if (!y.ok) {
     log.warn({ orchDir, reason: y.reason ?? null }, "computeTriageBudget: yielded-occupancy scan failed host-wide — holding triage admission (CTL-1854)");
-    return { remaining: 0 };
+    // ⛔ `held` IS THE WHOLE POINT OF THIS RETURN. Both this branch and the one below can
+    // answer `remaining: 0`, and until now they were indistinguishable to every consumer:
+    // the sweep's skip line printed the identical `sweep-budget-exhausted /
+    // budget_remaining: 0` under either. Their prognoses are OPPOSITE — capacity is
+    // recomputed every sweep and frees itself as soon as a worker finishes, whereas this
+    // fail-closed hold NEVER clears on its own; it holds until the scan starts succeeding.
+    // A host in this branch produces no triage.json no matter how long anyone waits, and
+    // an operator reading the log could not tell that from a busy fleet.
+    //
+    // The gate itself is correct and stays exactly as it was — inability to inspect must
+    // not read as free capacity (the comment above says so, and the scheduler's twin gate
+    // agrees). The defect was only that its silent state and its healthy state printed the
+    // same number.
+    return { remaining: 0, held: true, heldReason: y.reason ?? "yielded-occupancy-scan-failed" };
   }
-  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight + y.count) };
+  // ⛔ `held: false` even when `remaining` is 0. "Held" means THE SCAN FAILED, not "the
+  // number is zero" — a budget that is legitimately at capacity, or one decremented to 0
+  // by dispatches during this very sweep, is healthy and must keep reading that way.
+  // Deriving `held` from `remaining === 0` would re-merge the two branches at the consumer
+  // and hand back the ambiguity this field exists to remove.
+  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight + y.count), held: false, heldReason: null };
 }
 
 // ── CTL-879: triage-admission observability ──────────────────────────────────
@@ -883,6 +901,43 @@ export function triageSkipSeverity(streak, { alwaysWarn = false } = {}) {
   // `alwaysWarn` raises SEVERITY, never FREQUENCY: it is read only AFTER the
   // sparse gate above has already decided this sweep is written at all.
   return alwaysWarn ? "warn" : "info";
+}
+
+/**
+ * triageBudgetSkip — CTL-879 / INIT-34. Turn a zero budget into the skip it deserves.
+ *
+ * ⛔ WHY THIS IS A FUNCTION AND NOT A TERNARY AT THE CALL SITE. `sweepMissingTriage`
+ * cannot be driven from a unit test without standing up the project registry and the
+ * eligible set, and `dispatchTriage` is not exported — so an expression inlined there is
+ * unreachable by any test, and the only available assertion would be that the right
+ * literal appears somewhere in the file. That is the "asserting a discriminator is READ is
+ * not asserting the answer CHANGES" trap this repo has now shipped twice. Extracted, the
+ * decision is ordinary testable code.
+ *
+ * ⛔ A DISTINCT `reason`, NOT A FLAG IN THE DETAIL. `reason` is what noteTriageSkip keys
+ * its streak on, so folding both mechanisms into one reason merges their streaks: a host
+ * alternating between busy and held would report one unbroken run of a single cause. It is
+ * also what a Loki query selects on, while `held_reason` in the payload is stripped
+ * off-machine by otel-forward.
+ *
+ * `alwaysWarn` on the held branch for the CTL-2033 reason: a hold that structurally never
+ * self-clears is abnormal on its FIRST sweep, and waiting TRIAGE_SKIP_ESCALATE_AFTER
+ * sweeps to say so is 75-150 minutes at the measured cadence. The sparse gate inside
+ * triageSkipSeverity still bounds how often it is written.
+ */
+export function triageBudgetSkip(budget) {
+  const remaining = budget?.remaining;
+  if (budget?.held === true) {
+    return {
+      reason: "sweep-budget-held-scan-failed",
+      detail: { budget_remaining: remaining, held_reason: budget.heldReason ?? null },
+      alwaysWarn: true,
+    };
+  }
+  // Everything else — genuine capacity, a budget decremented to 0 mid-sweep, and an
+  // INJECTED budget from a caller that predates `held` — is the pre-existing healthy
+  // throttle, byte-identical to before. A missing `held` must never read as held.
+  return { reason: "sweep-budget-exhausted", detail: { budget_remaining: remaining }, alwaysWarn: false };
 }
 
 // noteTriageSkip — record that `identifier` was declined by `reason` this sweep.
@@ -1138,10 +1193,21 @@ function dispatchTriage(
     return false;
   }
   if (budget && budget.remaining <= 0) {
-    log.info(
-      { identifier },
-      "monitor: triage dispatch deferred — no free slots (maxParallel); sweepMissingTriage will retry (CTL-716)"
-    );
+    // The retry promise in the pre-existing sentence ("sweepMissingTriage will retry") is
+    // TRUE for capacity and MISLEADING for a held budget: the sweep does retry, and gets
+    // held again every time, forever. Two sentences, because one of them is a lie in the
+    // other's case.
+    if (budget.held) {
+      log.warn(
+        { identifier, held_reason: budget.heldReason ?? null },
+        "monitor: triage dispatch deferred — the yielded-occupancy scan failed host-wide, so admission is HELD, not merely full; this does not clear on its own (CTL-1854)"
+      );
+    } else {
+      log.info(
+        { identifier },
+        "monitor: triage dispatch deferred — no free slots (maxParallel); sweepMissingTriage will retry (CTL-716)"
+      );
+    }
     return false;
   }
   // CTL-781/CTL-1174: respect-assignment + delegate gate. A →Triage/→Todo
@@ -1786,9 +1852,11 @@ export function sweepMissingTriage({
         // CTL-879: was a bare `continue`. This is the gate that makes a busy
         // fleet look identical to a broken one — dispatchTriage is never called,
         // so its own info-level budget line never fires either.
-        noteTriageSkip(t.identifier, "sweep-budget-exhausted", {
-          budget_remaining: budget.remaining,
-        });
+        // CTL-879 / INIT-34: which of the two zero-budget mechanisms this is. See
+        // triageBudgetSkip — the reason must DIFFER, not carry a flag, because `reason` is
+        // the streak key and the Loki selector.
+        const bs = triageBudgetSkip(budget);
+        noteTriageSkip(t.identifier, bs.reason, bs.detail, { alwaysWarn: bs.alwaysWarn });
         continue;
       }
       if (hasTriageArtifact(orchDir, t.identifier)) {
