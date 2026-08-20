@@ -88,7 +88,11 @@ import {
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
-import { canOccupySlotNow, defaultHasTriageArtifact } from "./dispatch-readiness.mjs";
+import {
+  canOccupySlotNow,
+  defaultHasTriageArtifact,
+  triageReservationDeadlocked,
+} from "./dispatch-readiness.mjs";
 import {
   defaultDispatch,
   dispatchTicket,
@@ -984,6 +988,13 @@ export function buildGlobalRanking(orchDir, eligible) {
 
   for (const t of eligible ?? []) {
     if (started.has(t.identifier)) continue; // already in-flight (listed above)
+    // CTL-2090: a queued descriptor here is by construction untriaged (no
+    // workers/<t>/ dir), and preemption's justification is that the freed slot
+    // lets the monitor TRIAGE it (CAT-36 guard below). A triage-capped ticket
+    // (CTL-1441) will never be triaged, so preempting a live worker for it kills
+    // real work for a slot nothing can consume. Same predicate as the STEP A
+    // admission exclusion.
+    if (triageReservationDeadlocked(orchDir, t.identifier)) continue;
     descriptors.push({
       identifier: t.identifier,
       priority: t.priority,
@@ -7209,7 +7220,27 @@ export function schedulerTick(
       // "Can't start ⇒ don't spend a slot on it" is enforced where it actually
       // applies: the new-work sweep's `dispatchableReady` gate, which is what stops
       // an untriaged ticket consuming a *dispatch*.
-      const readyCandidates = rankTickets(admissionPool.filter((t) => readyIds.has(t.identifier)));
+      //
+      // CTL-2090: with ONE narrow exception — a ticket whose triage re-dispatch cap
+      // has tripped (CTL-1441) and that still lacks its triage.json. The reservation
+      // premise above ("the monitor's triage pass then spends the slot") is FALSE for
+      // it: dispatchTriage's cap gate refuses forever, so the reservation can never
+      // be consumed, and at maxParallel=1 it starves every triaged waiter behind it
+      // for the daemon's lifetime — restart-proof, because the cap file persists
+      // (mini-2, 2026-08-20: CTC-750 held the host's only slot for 36h). The
+      // starves-urgent-untriaged-work argument does not apply: capped means triage
+      // will not run regardless of how many slots are free. Triaged waiters are
+      // exempt from the probe (they own an artifact by construction).
+      const readyCandidates = rankTickets(
+        admissionPool.filter(
+          (t) =>
+            readyIds.has(t.identifier) &&
+            (triagedWaitingSet.has(t.identifier) ||
+              !triageReservationDeadlocked(orchDir, t.identifier, {
+                hasTriageArtifact: _hasTriageArtifact,
+              }))
+        )
+      );
       const admittedSlice = selectDispatchablePerProject(
         readyCandidates,
         new Set(),
