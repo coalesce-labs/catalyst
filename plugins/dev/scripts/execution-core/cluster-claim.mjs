@@ -449,19 +449,29 @@ export async function claimViaLease({
     // than looping forever.
     if (res.refusal === "not_entitled" && !entitleAttempted) {
       entitleAttempted = true;
-      try {
-        ensureEntitled({ client, node: hostName, workTtlMs, budgetUsd });
-      } catch (err) {
-        if (err?.retryable && transientRetries < maxRetries) {
-          transientRetries += 1;
-        } else {
+      // PR3756 review (P2): a retryable `ensureEntitled` throw used to only bump the counter and
+      // `continue` — which re-ran `client.claim`, NOT `ensureEntitled` — so a transient entitlement
+      // transport blip skipped straight to another claim attempt with `entitleAttempted` already
+      // true. That claim's inevitable second `not_entitled` then fell through to the ordinary
+      // peer-loss return below, silently stalling dispatch on every sweep instead of getting the
+      // bounded retries + loud exhaustion every other transient failure in this loop gets. Retry
+      // `ensureEntitled` itself, sharing the same `transientRetries` budget as the claim retries.
+      for (;;) {
+        try {
+          ensureEntitled({ client, node: hostName, workTtlMs, budgetUsd });
+          break;
+        } catch (err) {
+          if (err?.retryable && transientRetries < maxRetries) {
+            transientRetries += 1;
+            continue;
+          }
           throw err;
         }
       }
       continue;
     }
     // lease_held, a repeat not_entitled, or any other refusal → a peer won. Silent backoff.
-    return { won: false, generation: null };
+    return { won: false, generation: null, refusal: res.refusal ?? "lease_held" };
   }
 }
 
@@ -483,8 +493,12 @@ export function defaultLeaseClient(env = process.env) {
 export async function observeLeaseClaim({ ticket, phase, hostName, client, append = undefined }) {
   try {
     const res = await claimViaLease({ ticket, phase, hostName, client });
+    // PR3756 review (P2): this used to hardcode "lease_held" for every loss. A repeated
+    // `not_entitled` (or any future refusal kind) would then be recorded as ordinary lease
+    // contention, corrupting the shadow telemetry enforce-readiness is judged from. `claimViaLease`
+    // now carries the real refusal through on a loss — use it.
     emitLeaseClaimObservation(
-      { ticket, phase, node: hostName, won: res.won, generation: res.generation, refusal: res.won ? null : "lease_held" },
+      { ticket, phase, node: hostName, won: res.won, generation: res.generation, refusal: res.won ? null : res.refusal },
       append ? { append } : {},
     );
     return res;
@@ -651,6 +665,21 @@ export async function runCli(
     }
     case "fence-check": {
       const [ticket, gen] = rest;
+      const mode = leaseMode ?? resolveLeaseAuthorityMode(env);
+      // CTL-1786 (PR3756 review, P1): `enforce` NEVER writes the Linear attachment — claimViaLease
+      // bypasses writeClaim entirely (see the claim case above) — so isFenceCurrent's attachment read
+      // would find no fence record and report `current:false` (stale) on EVERY call, silently
+      // suppressing every guarded external write for a lease-authority winner. There is also no live
+      // "is my generation still current" read on the lease authority yet: re-claiming to check would
+      // itself bump the generation and invalidate the very grant being checked (acquireLease's CAS in
+      // catalyst-cloud advances `generation` on every grant, including a same-holder re-acquire). So
+      // this throws a named, non-stale error rather than fabricating an answer.
+      // `cluster-fence-guard.sh` already treats any non-0/non-10 exit as UNVERIFIED — decline the
+      // side-effect, but say the true thing — instead of a false STALE; that is exactly the posture
+      // this needs, with zero change to the guard.
+      if (mode === "enforce") {
+        throw new LeaseAuthorityError("fence-check-not-implemented-for-lease-authority", { retryable: false });
+      }
       const current = await isFenceCurrent(ticket, Number(gen), { post, transport: t });
       process.stdout.write(JSON.stringify({ current }) + "\n");
       return current ? 0 : FENCE_STALE_EXIT;

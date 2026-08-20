@@ -1096,7 +1096,7 @@ The per-host key, endpoint base, and curl-over-stdin credential discipline are t
 write proxy above (the `cloud-token` secret-contract row, `CATALYST_CLOUD_BASE_URL`, token never in
 argv/on disk). The lease routes require the cloud tenant's **admin token** today (CTC-418/419 is the
 follow-up to open them to per-host service keys); a host whose `CATALYST_CLOUD_TOKEN` does not
-satisfy that gate stays dark in `enforce` — run `node cluster-claim/lease-authority.mjs probe` (the
+satisfy that gate stays dark in `enforce` — run `node execution-core/lease-authority.mjs probe` (the
 non-mutating auth spike: `400` ⇒ authorized, `401/403` ⇒ blocked on the cloud-auth dependency).
 
 The node re-entitles itself on the daemon's cluster-sync cadence when the gate is `shadow`/`enforce`

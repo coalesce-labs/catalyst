@@ -452,11 +452,22 @@ export function probeAuth({ env = process.env, httpFn = defaultLeaseHttpFn, reso
   } catch (err) {
     return { ok: false, reason: "transport-threw", detail: scrub(err?.message ?? String(err)), status: null, authorized: null };
   }
-  const status = res?.status ?? null;
-  // 400 (or any non-auth 4xx that is not 401/403) means the credential was accepted and only
-  // the payload was rejected — i.e. authorized. 401/403 is an auth rejection.
-  const authorized = status === 401 || status === 403 ? false : status !== null ? true : null;
-  return { ok: true, status, authorized, bodyText: res?.bodyText ?? "" };
+  // PR3756 review (P2): `httpFn` returns `{transportOk, ...}` and a curl connection failure
+  // writes trailer "000" — `/^\d{3}$/.test("000")` matches, so `Number("000")` parses to `0`,
+  // a non-null status that used to fall straight into the "authorized" arm below. Treat a
+  // failed transport as inconclusive BEFORE looking at status at all, same as the catch above.
+  if (!res || res.transportOk === false) {
+    return { ok: false, reason: res?.reason ?? "transport-error", status: res?.status ?? null, authorized: null };
+  }
+  const status = res.status ?? null;
+  // Only 400 (invalid_field) is the POSITIVE CONTROL this probe is built on: the deliberately
+  // empty body reached the DO and was rejected by VALIDATION, which only happens once the
+  // credential itself was accepted. 401/403 is a definite auth rejection. Any other status
+  // (404, 5xx, an unreadable trailer) means the probe cannot tell whether it even reached
+  // validation — that is INCONCLUSIVE, not "authorized", so an outage or a misrouted probe
+  // cannot be misread as a green light to enable enforce.
+  const authorized = status === 400 ? true : status === 401 || status === 403 ? false : null;
+  return { ok: true, status, authorized, bodyText: res.bodyText ?? "" };
 }
 
 // isMain — true when run as `node lease-authority.mjs …`, false when imported. Suffix check
