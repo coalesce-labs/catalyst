@@ -166,6 +166,7 @@ import { setLinearWriteProxy, setLinearWriteProxyResolver } from "./linear-write
 import { createLinearWriteProxy } from "./linear-write-proxy.mjs"; // CTL-1889
 import { createAgentSessionNarrator } from "./agent-session-narrator.mjs"; // CTL-1943
 import { createProxyResolver } from "./linear-write-proxy-resolve.mjs"; // CTL-1889
+import { buildTeamIdentityMismatchEvents } from "./config-identity-event.mjs"; // CTL-2076: surface a registry team-identity mismatch (CAT-52) on the unified event log
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
 // so the phantom worker-dir validity sweep is operative in production.
@@ -1431,8 +1432,13 @@ export function startDaemon({
     // every team against the first registry entry's map judges tickets against names their
     // own writer never uses.
     const laneClaimTeamPaths = new Map();
+    // CTL-2076: read the registry identity ONCE and share it between the path map
+    // build below and the mismatch scan after guard install — a throwing registry
+    // still leaves an empty [] so both paths degrade gracefully.
+    let laneClaimProjects = [];
     try {
-      for (const proj of listProjectsFn() ?? []) {
+      laneClaimProjects = listProjectsFn() ?? [];
+      for (const proj of laneClaimProjects) {
         if (proj?.team && proj?.repoRoot) {
           laneClaimTeamPaths.set(
             String(proj.team).toUpperCase(),
@@ -1507,6 +1513,21 @@ export function startDaemon({
       );
     } else {
       log.info(laneClaimFields, "ctl-2068: lane-claim guard installed");
+    }
+
+    // CTL-2076: a registry entry whose repoRoot declares a DIFFERENT teamKey makes
+    // the lane-claim guard abstain (UNRANKED_CURRENT) for every ticket of that team.
+    // doctor's registry-team-identity (CAT-52) already WARNs, but only in an advisory
+    // section it never FAILs on — so put it on the unified event log too, where the
+    // broker/HUD/orch-monitor/Loki (a lane and a human) actually read. Best-effort:
+    // defaultAppendOperatorEvent never throws.
+    try {
+      for (const evt of buildTeamIdentityMismatchEvents(laneClaimProjects)) {
+        defaultAppendOperatorEvent(evt);
+        log.warn(evt.payload, "ctl-2076: registry entry declares a different Linear team (CAT-52)");
+      }
+    } catch {
+      /* best-effort — a mismatch scan must never block boot */
     }
 
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);

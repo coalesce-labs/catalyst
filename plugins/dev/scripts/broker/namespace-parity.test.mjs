@@ -53,6 +53,9 @@ import { DEP_SKEW_RESTART_EVENT, DEP_SKEW_WOULD_RESTART_EVENT } from "../executi
 // CTL-1889 — the Linear write-proxy trio, imported from its owning module so a
 // rename cannot leave a re-typed literal behind that still passes.
 import { PROXY_EVENT_NAMES } from "../execution-core/linear-write-proxy.mjs";
+// CTL-2076 — the registry team-identity mismatch (CAT-52) event, imported from its
+// owning module rather than re-typed as a literal (same precedent as CTL-1659/CTL-1889).
+import { CONFIG_TEAM_IDENTITY_MISMATCH } from "../execution-core/config-identity-event.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -99,6 +102,7 @@ const EXEC_CORE_EVENT_NAMES = [
   DEP_SKEW_RESTART_EVENT, // CTL-1659 cloud-sync.mjs — the writer restarting to load an installed dep fix
   DEP_SKEW_WOULD_RESTART_EVENT, // CTL-1659 — sustained skew that did NOT act (shadow / budget / undurable ledger)
   ...PROXY_EVENT_NAMES, // CTL-1889 linear-write-proxy.mjs — would-write / applied / failed
+  CONFIG_TEAM_IDENTITY_MISMATCH, // CTL-2076 config-identity-event.mjs — registry team-identity mismatch (CAT-52), boot telemetry
   ...INLINE_EVENT_NAMES,
 ];
 

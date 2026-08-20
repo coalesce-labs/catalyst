@@ -520,6 +520,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/setup-cloud-replica.test.sh
 
+      - name: setup-catalyst.sh stateMap preservation (CTL-2076)
+        # CTL-2076: this workflow allowlists shell suites by name rather than globbing
+        # __tests__/, so a new suite runs in required CI only once registered here.
+        # Guards both clobber paths setup_project_config / update_config_with_linear_states
+        # can take over a committed, non-empty linear.stateMap on a credentialed re-run —
+        # the regression this ticket fixes. Carries its own positive control (T5: a fresh
+        # install still refreshes the map from Linear, so the guard is not over-broad).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/setup-catalyst-config-preserve.test.sh
+
       - name: host write-credential classifier parity (CTL-2045)
         # ⛔ Codex P2 on #3706, and the important one. This suite is
         # the ONLY thing holding lib/host-write-credential.mjs (the
