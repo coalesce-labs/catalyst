@@ -271,10 +271,25 @@ export function startLivenessPublisher({
     // self is always entitled (self ∈ roster), so this is a guaranteed no-op until
     // W12's authority provider is injected. Best-effort — a throw here never aborts
     // the fence re-emit or liveness publish below.
+    //
+    // revokedTickets (code review, chatgpt-codex-connector P1): the fence re-emit
+    // loop right below re-claims every ticket in `owned` unconditionally. Since the
+    // broker projection is last-write-wins, a ticket released here and then
+    // re-claimed in the same tick is left claimed from a peer's point of view — the
+    // revoke never actually takes effect. Track which tickets emitReleased actually
+    // landed for and skip those in the re-emit loop.
+    let revokedTickets = [];
     try {
       const eMode = entitlementMode();
       if (eMode === "enforce") {
-        revoke({ self, ownedTickets: owned, provider: entitlementProvider(), mode: eMode, roster });
+        const { revoked } = revoke({
+          self,
+          ownedTickets: owned,
+          provider: entitlementProvider(),
+          mode: eMode,
+          roster,
+        });
+        if (Array.isArray(revoked)) revokedTickets = revoked;
       }
     } catch {
       /* best-effort — never block the tick on the entitlement check */
@@ -284,9 +299,12 @@ export function startLivenessPublisher({
     // append (zero app-actor traffic), so it must never be suppressed by the
     // Linear breaker. Its own try/catch keeps a fence-log hiccup from ever
     // aborting the liveness publish. Runs only multi-host (this publisher is inert
-    // at roster<=1), which is exactly when the fence projection is read.
+    // at roster<=1), which is exactly when the fence projection is read. Excludes
+    // any ticket the revoke-on-loss check above just released (see revokedTickets).
     try {
+      const revokedSet = revokedTickets.length ? new Set(revokedTickets) : null;
       for (const ticket of owned) {
+        if (revokedSet?.has(ticket)) continue;
         const generation = readGeneration(ticket);
         if (!Number.isFinite(generation)) continue; // no won token → nothing to refresh
         emitFence({ ticket, owner_host: self, generation });

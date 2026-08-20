@@ -54,6 +54,23 @@ import { resolve } from "node:path";
 // change nothing, enforce = actually shed unentitled hosts + revoke their leases.
 export const ENTITLEMENT_MODES = Object.freeze(["off", "shadow", "enforce"]);
 
+// trimAsciiWhitespace — linear scan, not regex. A trailing `[\t\n\v\f\r ]+$`
+// alternated with a leading anchor is a classic polynomial ReDoS shape (CodeQL
+// flagged this file's copy as high severity): on a long run of matching chars
+// that ultimately fails to reach `$`, the engine backtracks the quantifier one
+// char at a time per start offset, which is O(n^2) on adversarial input. This
+// helper is byte-identical to the regex it replaces — same six-char ASCII set,
+// deliberately narrower than String.prototype.trim() for bash parity (see
+// classifyCandidate below) — with no backtracking possible.
+const ASCII_WHITESPACE = new Set(["\t", "\n", "\v", "\f", "\r", " "]);
+function trimAsciiWhitespace(str) {
+  let start = 0;
+  let end = str.length;
+  while (start < end && ASCII_WHITESPACE.has(str[start])) start++;
+  while (end > start && ASCII_WHITESPACE.has(str[end - 1])) end--;
+  return str.slice(start, end);
+}
+
 // The safest degradation target for every soft-failure case (unset, non-string,
 // or unrecognized string). off means "act exactly as every host does today" —
 // zero-config, zero-behavior-change (mirrors DEPLOYMENT_MODE_DEFAULT's contract).
@@ -223,7 +240,7 @@ function classifyCandidate(raw, source) {
       result: { mode: ENTITLEMENT_MODE_DEFAULT, source, inferred: false, recognized: false, raw },
     };
   }
-  const normalized = raw.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "").toLowerCase();
+  const normalized = trimAsciiWhitespace(raw).toLowerCase();
   if (normalized.length === 0) return { fallthrough: true };
   if (ENTITLEMENT_MODES.includes(normalized)) {
     return { result: { mode: normalized, source, inferred: false, recognized: true, raw } };
@@ -257,7 +274,7 @@ export function resolveEntitlementMode({ env = process.env, layer1ConfigPath, la
 // (mirrors deployment-mode.mjs: a JSON value like {"toString": null} would throw
 // on template coercion, breaking getEntitlementMode's never-throws contract on
 // exactly the degraded path it exists to report).
-function printableRaw(raw) {
+export function printableRaw(raw) {
   if (typeof raw === "string") return raw;
   try {
     return JSON.stringify(raw) ?? String(raw);

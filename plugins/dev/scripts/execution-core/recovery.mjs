@@ -42,10 +42,17 @@ import {
 import {
   getJobsRoot,
   getEventLogPath,
-  // CTL-1785: dead-host reclaim + heartbeat reads are ENTITLEMENT gates (who may
-  // own/take work), so they hash over the entitled roster. In `off` mode (default)
-  // getEntitledHosts() === getClusterHosts(), so this is behavior-neutral.
+  // CTL-1785: heartbeat reads (readClusterHeartbeats) are an ENTITLEMENT gate (who
+  // may own/take work), so they hash over the entitled roster. In `off` mode
+  // (default) getEntitledHosts() === getClusterHosts(), so this is behavior-neutral.
+  // reclaimDeadHostWork ALSO uses this, but only to narrow survivor eligibility —
+  // see the EXISTENCE VS ENTITLEMENT note on that function for the full split.
   getEntitledHosts,
+  // CTL-1785 (code review, chatgpt-codex-connector P1): reclaimDeadHostWork's
+  // victim discovery (the single-host guard, deadHosts, ownedTicketsForHost) must
+  // hash over the EXISTENCE roster, not the entitled one — a shed-but-silent host
+  // must still be found dead and reclaimed. See reclaimDeadHostWork below.
+  getExistenceHosts,
   getHostName,
   getLivenessAnchorIssue,
   getLivenessReadSource, // CTL-1420 (#17): loki|linear cross-host liveness source
@@ -5009,6 +5016,19 @@ function writeLocalClusterGeneration(orchDir, ticket, generation) {
 // SINGLE-HOST INSTALLS ARE AN EXACT NO-OP: the function short-circuits immediately
 // when `roster.length <= 1`. Every new behavior is gated on multiHost.
 //
+// EXISTENCE VS ENTITLEMENT (CTL-1785, code review chatgpt-codex-connector P1):
+// `roster` here is the EXISTENCE roster (defaults to getExistenceHosts(), same as
+// the scheduler.mjs call site's own pre-check — see its "EXISTENCE-gated" comment)
+// and drives victim discovery: the single-host guard, deadHosts(), and
+// ownedTicketsForHost(). A host shed from ENTITLEMENT still physically exists, so
+// its work must remain reclaimable — hashing victim discovery over the entitled
+// roster instead would silently drop a shed-and-silent host from `dead` and orphan
+// its in-flight tickets forever (the exact CTL-1760 blind spot this ticket closes).
+// Entitlement only narrows the SURVIVOR set below, via getEntitledHosts({ hosts }):
+// a shed host must never become the new owner of reclaimed work. In `off` mode
+// (default) getEntitledHosts() is the identity function over its `hosts` input, so
+// this narrowing is behavior-neutral until entitlement is actually enforced.
+//
 // All collaborators are injectable for unit tests (no network, fs, or subprocess
 // in tests — they inject fakes for every seam).
 export async function reclaimDeadHostWork(
@@ -5020,7 +5040,10 @@ export async function reclaimDeadHostWork(
     // to the caller's .catch and the sweep is skipped for this tick (conservative:
     // no reclaim on unproven data). Production threads the tick's SHARED reader in.
     readHeartbeats = () => readClusterHeartbeats({ requireGraceWindow: true }),
-    roster = getEntitledHosts(),
+    // CTL-1785: EXISTENCE roster for victim discovery — see the EXISTENCE VS
+    // ENTITLEMENT note above. Every current test injects an explicit array here
+    // (never relies on this default), so this default only affects production.
+    roster = getExistenceHosts(),
     self = getHostName(),
     graceMs = HEARTBEAT_GRACE_MS,
     nowMs = Date.now(),
@@ -5056,12 +5079,16 @@ export async function reclaimDeadHostWork(
   const dead = deadHosts({ lastSeen, roster, graceMs, nowMs });
   if (dead.length === 0) return { taken };
 
-  const survivors = survivingRoster(roster, dead);
+  // CTL-1785: survivors narrows the EXISTENCE-alive set down to hosts that are
+  // also currently ENTITLED — a shed survivor must never win HRW ownership of
+  // reclaimed work. getEntitledHosts({ hosts }) is the identity function in `off`
+  // mode (default), so this is behavior-neutral until entitlement is enforced.
+  const survivors = getEntitledHosts({ hosts: survivingRoster(roster, dead) });
 
   for (const deadHost of dead) {
     const tickets = ownedTicketsForHost(deadHost) ?? [];
     for (const ticket of tickets) {
-      // HRW check: are we the new owner over the surviving roster?
+      // HRW check: are we the new owner over the surviving (existence ∩ entitled) roster?
       if (ownerFn(ticket, survivors) !== self) continue;
 
       // Soft-CAS claim: bump generation to take ownership.

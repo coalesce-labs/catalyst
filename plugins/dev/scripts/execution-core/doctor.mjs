@@ -109,7 +109,16 @@ import {
 // CTL-1785: the TTL constants + enum, imported DIRECTLY from the zero-import leaf
 // (node built-ins only — safe under doctor's bare-Node runtime), same pattern as
 // secret-contract.mjs below, not re-exported through config.mjs.
-import { ENTITLEMENT_MODES, ENTITLEMENT_TTL_MS, WORK_LEASE_TTL_MS } from "../lib/entitlement.mjs";
+import {
+  ENTITLEMENT_MODES,
+  ENTITLEMENT_TTL_MS,
+  WORK_LEASE_TTL_MS,
+  // CTL-1785 (code review, chatgpt-codex-connector P2): a malformed JSON config
+  // can supply a non-string mode like {"toString": null} as m.raw — interpolating
+  // that directly throws TypeError instead of producing the advisory WARN. Reuse
+  // the same never-throws renderer getEntitlementMode() already uses for this.
+  printableRaw,
+} from "../lib/entitlement.mjs";
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 // CTL-1659: the loaded-dependency skew comparator. A zero-import leaf (node:crypto/fs/path
 // only), like lib/secret-contract.mjs — safe under doctor's bare-Node runtime.
@@ -5242,7 +5251,7 @@ export function checkEntitlementConsistency(deps = {}) {
       mkCheck(
         "entitlement-mode",
         STATUS.WARN,
-        `entitlement mode "${m.raw}" is not one of [${ENTITLEMENT_MODES.join(", ")}] — ` +
+        `entitlement mode "${printableRaw(m.raw)}" is not one of [${ENTITLEMENT_MODES.join(", ")}] — ` +
           `treating this node as "${m.mode}" (byte-identical to today); correct or unset ` +
           `catalyst.entitlement.mode / CATALYST_ENTITLEMENT (source=${m.source})`,
       ),
