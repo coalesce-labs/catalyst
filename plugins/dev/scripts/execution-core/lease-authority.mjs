@@ -76,6 +76,17 @@ export class LeaseAuthorityError extends Error {
   }
 }
 
+/**
+ * TTL defaults (CTL-1786). The WORK lease outlives a normal phase so it never expires under a
+ * running worker: `DEFAULT_WORK_TTL_MS` is ≥ the CTL-1854 30-minute yield/session-stale episode
+ * ceiling. `ENTITLE_REFRESH_WINDOW_MS` is how close to the entitlement deadline the heartbeat
+ * re-entitles. Known residual (see the plan): a phase that runs past the work TTL without renewal
+ * could have its lease expire — that is the progress-asserted-renewal follow-up.
+ */
+export const DEFAULT_WORK_TTL_MS = 45 * 60_000; // 45 min > the 30-min episode ceiling
+export const DEFAULT_ENTITLE_TTL_MS = 60 * 60_000; // node entitlement window, refreshed on the heartbeat
+export const ENTITLE_REFRESH_WINDOW_MS = 10 * 60_000;
+
 /** resolveLeaseBaseUrl — the cloud API base, the SAME one the write proxy uses. */
 export function resolveLeaseBaseUrl(env = process.env) {
   return resolveProxyBaseUrl(env);
@@ -276,6 +287,34 @@ export function createLeaseAuthorityClient({
       throw new LeaseAuthorityError("renew-not-implemented", { retryable: false });
     },
   };
+}
+
+/**
+ * ensureEntitled — establish/refresh a node's entitlement, idempotently and TTL-aware.
+ *
+ * With a `cachedExpiresAtMs` beyond the refresh window it is a NO-OP (no wire call) — this is
+ * what keeps the daemon heartbeat from re-entitling every tick. With no cache (or a deadline
+ * inside the window) it calls `client.entitle` and returns the fresh deadline for the caller to
+ * cache. `claimViaLease` uses it with NO cache on a `not_entitled`, so a refusal always forces a
+ * real re-entitle. Returns `{ entitled, refreshed, expiresAtMs, entitlement }`; propagates a
+ * transport throw so the caller can bound-retry it (never a silent `entitled:true`).
+ */
+export function ensureEntitled({
+  client,
+  node,
+  ttlMs = DEFAULT_ENTITLE_TTL_MS,
+  workTtlMs = DEFAULT_WORK_TTL_MS,
+  budgetUsd = null,
+  cachedExpiresAtMs = null,
+  now = () => Date.now(),
+  refreshWindowMs = ENTITLE_REFRESH_WINDOW_MS,
+}) {
+  if (typeof cachedExpiresAtMs === "number" && cachedExpiresAtMs - now() > refreshWindowMs) {
+    return { entitled: true, refreshed: false, expiresAtMs: cachedExpiresAtMs, entitlement: null };
+  }
+  const res = client.entitle({ node, ttlMs, workTtlMs, budgetUsd });
+  const expiresAtMs = typeof res?.entitlement?.expiresAtMs === "number" ? res.entitlement.expiresAtMs : null;
+  return { entitled: res?.ok === true, refreshed: true, expiresAtMs, entitlement: res?.entitlement ?? null };
 }
 
 // ─── Auth spike (CTL-1786 Phase 1 §2) ────────────────────────────────────────

@@ -24,6 +24,15 @@ import {
 } from "./cluster-attachment-transport.mjs";
 import { createLinearWriteProxy } from "./linear-write-proxy.mjs";
 import { readLinearWriteProxyConfig } from "./config.mjs";
+// CTL-1786 — the lease-authority client half of CTC-410. The refusable claim path lives beside
+// the attachment soft-CAS here so `runCli`/`defaultTransport` can select it on the env gate with
+// ZERO change to any caller: it returns the same {won, generation} contract.
+import {
+  DEFAULT_WORK_TTL_MS,
+  LeaseAuthorityError,
+  createLeaseAuthorityClient,
+  ensureEntitled as defaultEnsureEntitled,
+} from "./lease-authority.mjs";
 //
 // ─── The storage mechanism (VERIFIED via live Linear API probe, 2026-06-08) ──
 // Linear has no custom fields and labels can't model a counter, so the claim +
@@ -379,6 +388,89 @@ export async function claimTicket(
 export async function isFenceCurrent(ticket, generation, { post = defaultPost, transport = null } = {}) {
   const current = await readClaim(ticket, { post, transport });
   return current?.generation === generation;
+}
+
+// ─── lease-authority refusable claim (CTL-1786) ──────────────────────────────
+//
+// The parallel claim path to `claimTicket`, backed by the cloud lease authority instead of the
+// Linear-attachment soft-CAS. It returns the EXACT same public contract — `{won, generation}`,
+// throw-on-terminal-failure — so `runCli` slots it in behind the env gate with no caller change.
+//
+// The whole point is that the store can REFUSE: a `lease_held` refusal is a definitive "a peer
+// won", returned as `{won:false}` with NO retry (silent backoff, AC-1). A `not_entitled` refusal
+// self-heals ONCE — (re-)entitle the node then re-claim — because entitlement lapses on a DO reset
+// and must not fail the phase. A transient transport error is bounded-retried; anything terminal
+// (auth, malformed grant, exhausted retries) THROWS, so `runCli` yields exit 11 (a stall, not a
+// lost race) exactly like the attachment path.
+
+/** Bounded transient-retry cap. The real backoff is the next dispatch sweep; this only rides out a blip. */
+export const LEASE_CLAIM_MAX_RETRIES = 2;
+
+/**
+ * claimViaLease — refusable claim through an injected lease `client`.
+ *
+ * `client` is the `createLeaseAuthorityClient` shape (`{claim, entitle, ...}`), injectable so the
+ * two Gherkin ACs run against a fake single-winner authority with no network. `hostName` is the
+ * node identity the store attributes the lease to (its `node`). Returns `{won, generation}`;
+ * `generation` is the grant nonce on a win (the drop-in fence-guard equality token) and null on a
+ * loss.
+ */
+export async function claimViaLease({
+  ticket,
+  phase,
+  hostName,
+  client,
+  ttlMs = DEFAULT_WORK_TTL_MS,
+  workTtlMs = DEFAULT_WORK_TTL_MS,
+  budgetUsd = null,
+  maxRetries = LEASE_CLAIM_MAX_RETRIES,
+  ensureEntitled = defaultEnsureEntitled,
+}) {
+  if (!client) throw new LeaseAuthorityError("no-lease-client", { retryable: false });
+  let entitleAttempted = false;
+  let transientRetries = 0;
+  for (;;) {
+    let res;
+    try {
+      res = await client.claim({ ticket, phase, node: hostName, ttlMs });
+    } catch (err) {
+      // Only a retryable transport blip is retried, and only up to the cap; a terminal error
+      // (auth, 4xx, malformed grant) is surfaced immediately so the CLI stalls loudly (exit 11).
+      if (err?.retryable && transientRetries < maxRetries) {
+        transientRetries += 1;
+        continue;
+      }
+      throw err;
+    }
+    if (res.won) return { won: true, generation: res.generation };
+    // A `not_entitled` refusal self-heals exactly once: (re-)entitle then re-claim. A second
+    // one (entitlement did not take) falls through to the silent-backoff return below rather
+    // than looping forever.
+    if (res.refusal === "not_entitled" && !entitleAttempted) {
+      entitleAttempted = true;
+      try {
+        ensureEntitled({ client, node: hostName, workTtlMs, budgetUsd });
+      } catch (err) {
+        if (err?.retryable && transientRetries < maxRetries) {
+          transientRetries += 1;
+        } else {
+          throw err;
+        }
+      }
+      continue;
+    }
+    // lease_held, a repeat not_entitled, or any other refusal → a peer won. Silent backoff.
+    return { won: false, generation: null };
+  }
+}
+
+/**
+ * defaultLeaseClient — construct the production lease client from this process's env. Built here
+ * (not read from an install slot) for the same reason `defaultTransport` builds the write proxy
+ * locally: this module runs as a spawnSync child, so any process-wide slot is empty in it.
+ */
+export function defaultLeaseClient(env = process.env) {
+  return createLeaseAuthorityClient({ env });
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
