@@ -2406,6 +2406,27 @@ export function readGithubFeedConfig(envObj = process.env) {
   return { mode, intervalSec, source };
 }
 
+// CTL-2011 Phase 3: the broker/orch-monitor VIEW of the github-feed mode — the
+// second reader whose disagreement with this daemon is the reader-split alarm.
+//
+// The daemon (this process) sources execution-core.env, so its own mode carries
+// any CATALYST_GITHUB_FEED pin. The broker and orch-monitor NEVER source that
+// file, so their mode is the ambient env with the pin stripped — only Layer-2
+// (or the default) applies. This is the exact same pin-strip idiom doctor.mjs's
+// checkGithubFeedReaderConsistency uses to compute its broker view; here it is
+// the resolver the daemon hands to startGithubFeedTimer as `resolveLayer2ModeFn`
+// so the timer can edge-detect a split against the pinned exec-core mode. Named
+// (not inlined at the call site) so the production wiring is unit-testable and a
+// regression is caught by a test rather than only in the field.
+export function resolveGithubFeedLayer2Mode(envObj = process.env) {
+  const {
+    CATALYST_GITHUB_FEED: _pin,
+    CATALYST_GITHUB_FEED_INTERVAL_SEC: _pinInterval,
+    ...stripped
+  } = envObj;
+  return readGithubFeedConfig(stripped);
+}
+
 // CTL-1889: Linear write-proxy mode reader. Same ladder as readCloudFeedConfig —
 // env (CATALYST_LINEAR_WRITE_PROXY) > Layer-2 (.catalyst.linearWriteProxy.mode) > 'off'.
 //

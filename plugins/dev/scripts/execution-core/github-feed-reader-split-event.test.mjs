@@ -1,8 +1,8 @@
 // CTL-2011: Phase 3 tests — reader-split alertable events.
 // Run: cd plugins/dev/scripts && bun test execution-core/github-feed-reader-split-event.test.mjs
 
-import { describe, expect, it } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { describe, expect, it, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
   EVENT_READERS_CONVERGED,
   startGithubFeedTimer,
 } from "./github-feed-timer.mjs";
+import { readGithubFeedConfig, resolveGithubFeedLayer2Mode } from "./config.mjs";
 
 // Helper: get the event name from a canonical (v2) event object.
 const eventName = (e) => e?.attributes?.["event.name"] ?? e?.name ?? null;
@@ -210,6 +211,85 @@ describe("startGithubFeedTimer — reader-split events (Phase 3)", () => {
       (e) => eventName(e) === EVENT_READERS_DIVERGED || eventName(e) === EVENT_READERS_CONVERGED,
     );
     expect(splitEvents).toHaveLength(0);
+  });
+});
+
+// ── Production wiring (CTL-2011 remediation) ─────────────────────────────────
+//
+// The tests above all INJECT resolveLayer2ModeFn, so they prove the timer's
+// mechanism but say nothing about whether the daemon ever hands it a resolver.
+// verify.json flagged exactly that gap: the sole production caller
+// (daemon.mjs) defaulted resolveLayer2ModeFn to null, so the alarm was dead in
+// prod (the CTL-1644 dead-detector family). These two tests lock the wiring:
+// (1) the resolver the daemon uses actually strips the pin to produce the
+// broker view, and (2) the daemon call site actually passes it.
+
+describe("resolveGithubFeedLayer2Mode — the daemon's broker-view resolver", () => {
+  // A hermetic HOME with no Layer-2 config → Layer-2 read falls through to the
+  // "off" default. So an env pin that says "enforce" is a genuine split: the
+  // exec-core view (pin honored) is enforce, the broker view (pin stripped) is off.
+  const hermeticHome = () => {
+    const d = join(tmpdir(), `cth-l2-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(d, { recursive: true });
+    return d;
+  };
+
+  it("strips CATALYST_GITHUB_FEED so the broker view diverges from the pinned exec-core view", () => {
+    const HOME = hermeticHome();
+    const env = { HOME, CATALYST_GITHUB_FEED: "enforce" };
+    // Exec-core view: pin honored.
+    expect(readGithubFeedConfig(env).mode).toBe("enforce");
+    // Broker view: pin stripped → falls through to the default.
+    expect(resolveGithubFeedLayer2Mode(env).mode).toBe("off");
+    // And the pair is exactly what classifyReaderSplit calls a divergence.
+    const split = classifyReaderSplit({
+      source: readGithubFeedConfig(env).source,
+      effectiveMode: readGithubFeedConfig(env).mode,
+      layer2Mode: resolveGithubFeedLayer2Mode(env).mode,
+    });
+    expect(split.diverged).toBe(true);
+  });
+
+  it("also strips CATALYST_GITHUB_FEED_INTERVAL_SEC (both pins gone in the broker view)", () => {
+    const HOME = hermeticHome();
+    const env = { HOME, CATALYST_GITHUB_FEED: "enforce", CATALYST_GITHUB_FEED_INTERVAL_SEC: "5" };
+    const broker = resolveGithubFeedLayer2Mode(env);
+    expect(broker.mode).toBe("off");
+    // The interval-pin cannot leak through into the broker view.
+    expect(broker.intervalSec).not.toBe(5);
+  });
+
+  it("no env pin → broker view equals exec-core view (no split)", () => {
+    const HOME = hermeticHome();
+    const env = { HOME };
+    expect(resolveGithubFeedLayer2Mode(env).mode).toBe(readGithubFeedConfig(env).mode);
+  });
+});
+
+describe("⛔ daemon wires resolveLayer2ModeFn into startGithubFeedTimer (else the alarm is dead in prod)", () => {
+  // Comments are stripped before matching so an assertion cannot be satisfied by
+  // prose that merely mentions the symbol (the CTL-50 false-read trap — the same
+  // family as the finding this test remediates).
+  const daemonSrc = readFileSync(join(import.meta.dir, "daemon.mjs"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .map((l) => l.replace(/\/\/.*$/, ""))
+    .join("\n");
+
+  test("the startGithubFeedTimer({...}) call passes resolveLayer2ModeFn", () => {
+    const callStart = daemonSrc.indexOf("startGithubFeedTimer({");
+    expect(callStart).toBeGreaterThan(-1);
+    // Bound the search to the call's own argument object so a resolveLayer2ModeFn
+    // elsewhere in the file cannot satisfy this.
+    const callEnd = daemonSrc.indexOf("});", callStart);
+    expect(callEnd).toBeGreaterThan(callStart);
+    const callArgs = daemonSrc.slice(callStart, callEnd);
+    expect(callArgs).toContain("resolveLayer2ModeFn:");
+    expect(callArgs).toContain("resolveGithubFeedLayer2Mode(");
+  });
+
+  test("resolveGithubFeedLayer2Mode is imported from config.mjs", () => {
+    expect(daemonSrc).toContain("resolveGithubFeedLayer2Mode");
   });
 });
 
