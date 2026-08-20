@@ -722,6 +722,18 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test deployment-mode.test.mjs
 
+      - name: entitlement resolver + provider unit tests (bun, CTL-1785)
+        # CTL-1785 W13: lib/entitlement.mjs is a deliberately ZERO-IMPORT leaf
+        # (node built-ins only, loadable by bare-Node catalyst doctor) that lives
+        # OUTSIDE the execution-core/ tree the "Run stable unit tests" step below
+        # is scoped to — so it gets its own step, exactly like the deployment-mode
+        # leaf above. Registered in the SAME change that adds the suite (the
+        # four-times-burned exec-core-stable-test-allowlist lesson). Positive
+        # control: `grep -n entitlement.test .github/workflows/execution-core-tests.yml`
+        # returns this run: line.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test entitlement.test.mjs
+
       - name: ask-verb unit tests (bun, CTL-1922 / CTL-1944)
         # ⛔ `ask-verbs.test.mjs` shipped with #3509 and was registered in NO workflow —
         # 20 tests that had never run in CI. Verified with the instrument note above:
