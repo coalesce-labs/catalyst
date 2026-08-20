@@ -535,11 +535,13 @@ export async function readLinearCache({
   // injection seams for tests (default to the real durable-cache readers)
   ticketStateReader = readTicketStateById,
   eligibleReader = readEligibleById,
-  // CTC-133 Phase 2: replica reader injection seam. Defaults to readReplicaTicketDetails.
-  // Accepts { ids, dbPath } and returns { [id]: details } — fail-open (never throws into caller).
-  // Injected as null (not the default) to skip the replica tier when the caller
-  // provides no replicaReader explicitly (backward-compatible: the real default
-  // readReplicaTicketDetails is only used when this field is left undefined).
+  // CTC-133 Phase 2: replica reader injection seam. Defaults to readReplicaTicketDetails,
+  // which accepts { ids } and resolves its own DB path via CATALYST_REPLICA_DB /
+  // defaultReplicaDbPath(). Callers that need a custom replica path can pass
+  // (opts) => readReplicaTicketDetails({ ...opts, dbPath: customPath }).
+  // Tests inject a synchronous stub (async () => map) — the function signature
+  // receives { ids } and is free to ignore or use any field it wants.
+  // NEVER forward `dbPath` here — that is the filter-state.db path, not the replica.
   replicaReader = readReplicaTicketDetails,
   // The read-model passes the live breaker state purely so this function can
   // record that it is serving cache-only while the breaker is open. There is no
@@ -561,10 +563,13 @@ export async function readLinearCache({
   // CTC-133 Phase 2: read replica facts for the full id set.
   // Fail-open: any failure (DB absent/stale/locked) degrades to {} so the
   // ticket_state + eligible chain continues to serve facts as before.
+  // Note: only `ids` is forwarded — NOT `dbPath`. The `dbPath` param here is
+  // the filter-state.db path; the replica reader resolves its own path via
+  // CATALYST_REPLICA_DB / defaultReplicaDbPath() when no dbPath is provided.
   let replicaFacts = {};
   if (ids.length > 0 && typeof replicaReader === "function") {
     try {
-      const rep = await replicaReader({ ids, dbPath });
+      const rep = await replicaReader({ ids });
       if (rep && typeof rep === "object") replicaFacts = rep;
     } catch {
       // replica unavailable → fall through to ticket_state + eligible chain
