@@ -58,7 +58,11 @@ import {
 import { defaultReadyPath, readReadyState } from "./github-feed-ready.mjs";
 import {
   getHostName,
-  getClusterHosts,
+  // CTL-1785: doctor's roster reads are diagnostic/audit over the physical
+  // EXISTENCE roster (all members need worker labels, the HRW-partition dry-run
+  // shows the full topology). Entitlement is reported separately by
+  // checkEntitlementConsistency. `off` mode: getExistenceHosts() === getClusterHosts().
+  getExistenceHosts,
   resolveClusterHosts,
   hostMembershipWarning,
   getLivenessAnchorIssue,
@@ -514,7 +518,7 @@ function defaultListTickets() {
 export async function checkHrwPartition(deps = {}) {
   const {
     getHostName: _getHostName = getHostName,
-    getClusterHosts: _getClusterHosts = getClusterHosts,
+    getClusterHosts: _getClusterHosts = getExistenceHosts,
     listTickets = defaultListTickets,
     ownedBy: _ownedBy = ownedBy,
   } = deps;
@@ -4576,7 +4580,7 @@ export function checkRegistryTeamIdentity(deps = {}) {
 // sole writer); this check only reports drift and points at the remediation.
 export async function checkWorkerLabels(deps = {}) {
   const {
-    getRoster = getClusterHosts,
+    getRoster = getExistenceHosts,
     // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
     // answer now — see resolveLinearTokenLive's docstring for why the PR2
     // shadow comparison this call site carried is retired, not merely muted.

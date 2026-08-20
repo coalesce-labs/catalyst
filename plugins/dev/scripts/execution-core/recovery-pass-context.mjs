@@ -35,7 +35,10 @@ import { fileURLToPath } from "node:url";
 
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { ownerForTicket } from "./hrw.mjs";
-import { getClusterHosts, getHostName } from "./config.mjs";
+// CTL-1785: this context builds HRW OWNERSHIP (ownerForTicket over the roster),
+// an ENTITLEMENT question, so it reads the entitled roster. `off` mode (default):
+// getEntitledHosts() === getClusterHosts() → behavior-neutral.
+import { getEntitledHosts, getHostName } from "./config.mjs";
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
 function parseArgs(argv) {
@@ -389,7 +392,7 @@ async function main() {
   // HRW context (identity no-op at N=1).
   let roster, self, multiHost;
   try {
-    roster = getClusterHosts();
+    roster = getEntitledHosts();
     self = getHostName();
     multiHost = Array.isArray(roster) && roster.length > 1;
   } catch {

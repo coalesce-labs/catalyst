@@ -26,7 +26,12 @@ import { join } from "node:path";
 import { computeLastPhaseAdvanceTs, countYieldedOccupancy as defaultCountYieldedOccupancy, readAllPhaseSignals, readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
 import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-agents.mjs";
 import {
-  getClusterHosts,
+  // CTL-1785: publishing this host's liveness heartbeat is EXISTENCE (observability
+  // that must survive an entitlement/authority outage — the Desired End State keeps
+  // a shed host's `catalyst cluster status` visible). The roster here is only a
+  // single-host `.length <= 1` no-op gate, a topology fact, never a work-ownership
+  // decision. `off` mode: getExistenceHosts() === getClusterHosts().
+  getExistenceHosts,
   getHostName,
   getLivenessAnchorIssue,
   getLivenessReadSource, // CTL-1420 (#17): gate the Linear anchor publish on the active source
@@ -184,7 +189,7 @@ export function localActiveSlotCount(
 // All collaborators are injectable for unit tests.
 export function startLivenessPublisher({
   intervalMs = LIVENESS_PUBLISH_INTERVAL_MS,
-  roster = getClusterHosts(),
+  roster = getExistenceHosts(),
   self = getHostName(),
   anchorIssue = getLivenessAnchorIssue(),
   orchDir,

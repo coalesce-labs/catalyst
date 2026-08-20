@@ -1390,4 +1390,5 @@ jobs:
             github-quota-timer.test.mjs \
             cluster-sync.test.mjs \
             reconstruct-ticket-state.test.mjs \
-            hosts-json-retired.test.mjs
+            hosts-json-retired.test.mjs \
+            entitlement-hosts.test.mjs

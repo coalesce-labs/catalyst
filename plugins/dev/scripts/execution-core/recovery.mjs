@@ -42,7 +42,10 @@ import {
 import {
   getJobsRoot,
   getEventLogPath,
-  getClusterHosts,
+  // CTL-1785: dead-host reclaim + heartbeat reads are ENTITLEMENT gates (who may
+  // own/take work), so they hash over the entitled roster. In `off` mode (default)
+  // getEntitledHosts() === getClusterHosts(), so this is behavior-neutral.
+  getEntitledHosts,
   getHostName,
   getLivenessAnchorIssue,
   getLivenessReadSource, // CTL-1420 (#17): loki|linear cross-host liveness source
@@ -4561,7 +4564,7 @@ export function makeTickHeartbeatReader({ scanLocal = null, ...scanOpts } = {}) 
 // not a whole-file read. Peak transient is one chunk regardless of log size.
 export function readClusterHeartbeats({
   logPath = getEventLogPath(),
-  roster = getClusterHosts(),
+  roster = getEntitledHosts(),
   anchorIssue = getLivenessAnchorIssue(),
   readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
   // CTL-1529 bounded-read seams. `scanLocal` is a zero-arg memo (makeHeartbeatScanMemo)
@@ -5017,7 +5020,7 @@ export async function reclaimDeadHostWork(
     // to the caller's .catch and the sweep is skipped for this tick (conservative:
     // no reclaim on unproven data). Production threads the tick's SHARED reader in.
     readHeartbeats = () => readClusterHeartbeats({ requireGraceWindow: true }),
-    roster = getClusterHosts(),
+    roster = getEntitledHosts(),
     self = getHostName(),
     graceMs = HEARTBEAT_GRACE_MS,
     nowMs = Date.now(),

@@ -9,7 +9,10 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { ownerForTicket } from "../hrw.mjs";
 import {
-  getClusterHosts,
+  // CTL-1785: `catalyst cluster` is a DISPLAY/EXISTENCE surface — it shows the
+  // physical roster; the ownership subcommand keeps a `--roster=` override for any
+  // other view. `off` mode: getExistenceHosts() === getClusterHosts().
+  getExistenceHosts,
   getHostName,
   getLivenessAnchorIssue,
   getCatalystRepoDirHostsPath,
@@ -139,7 +142,7 @@ function renderStatus(s) {
 export function runStatus(argv = []) {
   const anchor = getLivenessAnchorIssue();
   const status = buildStatus({
-    roster: getClusterHosts(),
+    roster: getExistenceHosts(),
     self: getHostName(),
     peers: anchor ? readPeerHeartbeatsSync({ anchorIssue: anchor }) : {},
     draining: isDraining(getExecutionCoreDir()),
@@ -490,7 +493,7 @@ export function runOwnership(argv = [], { listTickets = listTodoTickets } = {}) 
   const rosterArg = argv.find((a) => a.startsWith("--roster="));
   const roster = rosterArg
     ? rosterArg.slice("--roster=".length).split(",").map((s) => s.trim()).filter(Boolean)
-    : getClusterHosts();
+    : getExistenceHosts();
   let tickets;
   try {
     tickets = listTickets();

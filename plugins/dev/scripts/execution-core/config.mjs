@@ -89,6 +89,23 @@ export {
 // which re-exports without creating a usable local name, so resolveLeaseAuthorityMode's
 // single-host coherence needs this explicit import to call it in the module body.
 import { resolveDeploymentMode as resolveDeploymentModeLocal } from "../lib/deployment-mode.mjs";
+
+// CTL-1785 (W13): the entitlement seam — a zero-import leaf shared verbatim by
+// execution-core (this re-export) and doctor (bare-Node import), same rationale
+// as deployment-mode above. getEntitledHosts() / getExistenceHosts() below split
+// fleet MEMBERSHIP into existence (local, self-declared) vs entitlement
+// (may-take-work). Imported locally (not just re-exported) because
+// getEntitledHosts' default params reference getEntitlementMode /
+// makeLocalEntitlementProvider, and resolveEntitledRoster owns the shadow/enforce
+// logic (split out to keep config.mjs import-light).
+import {
+  ENTITLEMENT_MODES,
+  resolveEntitlementMode,
+  getEntitlementMode,
+  makeLocalEntitlementProvider,
+} from "../lib/entitlement.mjs";
+import { resolveEntitledRoster } from "./entitlement-roster.mjs";
+export { ENTITLEMENT_MODES, resolveEntitlementMode, getEntitlementMode };
 // CTL-1929: the canonical github-feed resolver. Zero-import leaf for the same reason
 // deployment-mode.mjs above is one — doctor.mjs runs under bare Node and cannot load
 // this file (its chain reaches bun:sqlite via linear-query.mjs).
@@ -1108,8 +1125,59 @@ export function resolveClusterHosts() {
 // hashes over). Delegates to resolveClusterHosts and returns just the hosts array
 // (the existing callers' contract; CTL-1273 moved the precedence into the
 // resolver so the boot assertion and the reader can never diverge). Never throws.
+//
+// CTL-1785: RETAINED, not deleted. It is byte-for-byte the EXISTENCE roster
+// (`resolveClusterHosts().hosts`), so display/observability callers that still read
+// it (orch-monitor's governance/roster views) get correct existence data. New code
+// should call the intent-explicit accessors below: getExistenceHosts() for
+// display/topology, getEntitledHosts() for any "may this host take work?" gate. The
+// hard rule the caller-classification guard enforces: NO entitlement caller reads
+// getClusterHosts() (they all hash over getEntitledHosts()).
 export function getClusterHosts() {
   return resolveClusterHosts().hosts;
+}
+
+// --- CTL-1785 (W13): existence vs. entitlement split ---
+//
+// getClusterHosts() historically served BOTH questions at once — "is this node in
+// the fleet?" (existence) and "may this node take work?" (entitlement) — which is
+// the CTL-1760 conflation (a silent node stayed a work-owner "by declaration" for
+// 33 days). These two accessors separate them. In the default `off` mode they are
+// byte-identical to getClusterHosts(), so reclassifying callers is behavior-neutral.
+
+// getExistenceHosts — local, self-declared, no network. An alias of today's local
+// roster: this is what observability / display / archive / topology callers want,
+// and it must keep working during a cloud/authority outage. multiHost topology
+// facts (the fenceGuard !multiHost short-circuit) stay keyed on THIS, never on
+// entitlement, so shedding can never re-enable an N=1 disarm (CTL-1781's defect
+// class).
+export function getExistenceHosts() {
+  return resolveClusterHosts().hosts;
+}
+
+// defaultEntitlementProvider — the local provider (entitled iff self ∈ roster),
+// which reproduces today's behavior. Swapped for W12's authority provider
+// (CTL-1786) when the lease store lands. A factory (not a singleton) so a fresh
+// ttlMs default is read each call and tests can inject freely.
+export function defaultEntitlementProvider() {
+  return makeLocalEntitlementProvider();
+}
+
+// getEntitledHosts — "may this host take work?" The roster dispatch/recovery hash
+// HRW ownership over. In `off` mode this is byte-identical to getClusterHosts(); in
+// shadow/enforce it consults the injectable provider via resolveEntitledRoster.
+// Never throws; fail direction preserves the full roster (today's behavior).
+// Every parameter is an injection seam with a production default, so callers that
+// already accept an injectable roster keep their seam — only the default changes.
+export function getEntitledHosts({
+  mode = getEntitlementMode(),
+  provider = defaultEntitlementProvider(),
+  hosts = getClusterHosts(),
+  self = getHostName(),
+  emit,
+} = {}) {
+  if (mode === "off") return hosts;
+  return resolveEntitledRoster({ mode, provider, hosts, self, emit });
 }
 
 // getCatalystRepoDirHostsPath — absolute path to the committed cluster roster.
