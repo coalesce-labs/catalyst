@@ -404,6 +404,28 @@ Track-B intent (migrate `extern` rules or retire the compiler). Do NOT "fix" `RE
 code; CTL-736 progress-gate is live). Complements ADR-018 / ADR-006/008. Rejected: rip out the
 engine; promote `advance_to` now; full "log is the agent" rewrite now (= Track B).
 
+**Amendment, 2026-08-20 — Track B is retired; Track A stands.** Two-plus months after acceptance,
+both gating flags (`CATALYST_BELIEFS_SHADOW`, `CATALYST_INTENTS_ENFORCE`) remain `0` on every fleet
+host (verified live: `catalyst-cluster/hosts/{mini,mini-2}/execution-core.env`) — the shadow oracle
+this decision's Track B graduation was gated on has never run a single tick. In the interim, ADR-029
+(2026-08-13) and the lease-authority work (CTL-1785/1786) independently solved the problem Track B
+was aimed at — the pipeline's control path (advancement, dispatch exclusion) now runs on Linear as
+trigger + a cloud-DO lease as the conditional-write lock, with no rule-engine derivation involved.
+CTL-1244 (the epic executing this ADR's Track B, "graduate the Datalog `advance_to` derivation;
+demote `signal.json` to a projection") is retargeted: the "kill `signal.json` as primary state"
+goal stays, but its mechanism becomes the plain log+projection rewrite the lease/trigger work already
+implies, not a Datalog-derived EDB. **Track B is retired, not merely left ungraduated** — the
+3/18-compiled `rules.dl`/`compiler/index.mjs` and the `advance-shadow` comparator are dead weight to
+delete alongside CTL-1244's rescoped work, not a bet to keep open.
+
+**Track A is explicitly NOT part of this amendment.** Health/absence-detection/provenance
+(`catalyst why`, negation-over-time, the CTL-1143 ingestion-stale-detector graduation still sitting
+in the Hardening backlog) keeps the engine as its derivation substrate — nothing here blocks or
+deprioritizes it. An unratified proposal (`thoughts/.../2026-08-11-event-delivery-plane.md`, status
+"proposal — not yet ratified", explicitly marked DO NOT IMPLEMENT) argues for deleting the whole
+15,202-line engine outright; that broader call was considered and deferred — Track A's fate is a
+separate decision, not decided by this amendment.
+
 ## ADR-023: Shadow→Enforce Rollout Discipline for Autonomous Actuators
 
 **Accepted 2026-06-16.** The fleet has many autonomous actuators (session reaper CTL-649/657,
