@@ -23,7 +23,8 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { computeLastPhaseAdvanceTs, readAllPhaseSignals, readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
+import { computeLastPhaseAdvanceTs, countYieldedOccupancy as defaultCountYieldedOccupancy, readAllPhaseSignals, readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
+import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-agents.mjs";
 import {
   getClusterHosts,
   getHostName,
@@ -106,6 +107,10 @@ export function localInFlightTickets(hostName, { orchDir } = {}) {
 // (signal-reader's SDK_INFLIGHT_STATUSES), so a peer that omitted it would
 // believe this host had a free slot the local scheduler knows it does not — the
 // cross-host version of the same disagreement CTL-1581 fixed here.
+// CTL-1864: localActiveSlotCount is the SLOT-based twin of localActiveTickets —
+// published as catalyst.node.active_count (decoupled from the deduped ticket-ID
+// list). See localActiveSlotCount() below. localActiveTickets stays unchanged
+// (the identity list for ownership/reclaim); active_tickets still carries it.
 const ACTIVE_STATUSES = new Set(["running", "dispatched", "needs-input", YIELDED_STATUS]);
 
 // localActiveTickets — the slot-OCCUPYING subset of localInFlightTickets on
@@ -132,6 +137,36 @@ export function localActiveTickets(hostName, { orchDir } = {}) {
   } catch {
     return []; // fail-open
   }
+}
+
+// localActiveSlotCount — CTL-1864: the SLOT-based occupancy this host actually holds.
+// Published as catalyst.node.active_count so a peer's freeSlots never exceeds the local
+// scheduler's. Reuses the SAME two functions the scheduler's occupancy uses
+// (countBackgroundAgents + countYieldedOccupancy), so it cannot drift into a third counter.
+// Fail-open on the live-count probe; fail-closed on the yield scan (never under-reports
+// occupancy on a scan error — mirrors the scheduler's own posture).
+export function localActiveSlotCount(
+  _hostName,
+  { orchDir, liveCountFn = defaultCountBackgroundAgents, countYieldedOccupancyFn = defaultCountYieldedOccupancy } = {},
+) {
+  if (!orchDir) return 0;
+  let live = 0;
+  try {
+    const n = liveCountFn();
+    live = Number.isInteger(n) && n >= 0 ? n : 0;
+  } catch {
+    live = 0;
+  }
+  let yielded = 0;
+  try {
+    const y = countYieldedOccupancyFn(orchDir);
+    yielded = y && Number.isInteger(y.count) && y.count >= 0 ? y.count : 0;
+    // fail-closed: an unreadable workers/ dir must not silently read as zero slots.
+    if (y && y.ok === false) return Math.max(live + yielded, live);
+  } catch {
+    // fail-open on the yield probe: fall through to live-only count
+  }
+  return live + yielded;
 }
 
 // startLivenessPublisher — arm a periodic cross-host liveness publisher.
