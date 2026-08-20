@@ -1064,6 +1064,55 @@ Observable events (all safe for a LogQL filter
 - `linear.write.proxy.applied.<TICKET>` — enforce hit, the cloud accepted the write
 - `linear.write.proxy.failed.<TICKET>` — enforce hit, NOT written (ERROR; `reason` attached)
 
+### Lease-authority claim (`CATALYST_LEASE_AUTHORITY`, CTL-1786)
+
+Selects the cross-host `(ticket, phase)` claim mechanism. The default (`off`) is the
+Linear-attachment **soft-CAS** (`cluster-claim.mjs`): an unconditional last-writer-wins upsert with
+no conditional-write primitive, so any racer can install itself and **no racer can refuse** —
+correctness depends on every participant running the honest read-back-and-yield code. `shadow` /
+`enforce` route the claim through the **cloud lease authority** (a per-tenant Durable Object, the
+catalyst-repo half of CTC-410), whose `POST /lease/claim` is a genuine store-side compare-and-swap:
+exactly one racer receives a grant and the loser is **told it lost** (`{claimed:false, refusal}`),
+so a loser backs off silently with no retry and no error.
+
+The client returns the **same** `{won, generation}` / CLI-exit contract as the attachment path, so
+no dispatch call site (`scheduler.mjs` / `monitor.mjs` / `recovery.mjs`) changes. On a win the
+grant is mapped to the **numeric `generation`** written into `cluster-generation.json`, so
+`fence-guard.mjs` keeps gating every external write **unchanged** (it compares generations by
+equality). Mode resolves from the env var over Layer-2 over the safe default `off`; the `0`
+kill-switch and any unset/garbage value resolve to `off`.
+
+| Key                                        | Default | Notes                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CATALYST_LEASE_AUTHORITY` _(env var)_     | `off`   | `off` / `0` (the attachment soft-CAS runs; no lease module is constructed; byte-identical to not setting the flag), `shadow` (the lease claim **is** called and a `lease.claim.would-{grant,refuse}.<TICKET>` event is emitted, but the **attachment** verdict stays authoritative for the dispatch decision), `enforce` (the lease authority **is** the claim; the attachment CAS is not consulted). Garbage values fall back to `off`. Overrides Layer-2. |
+| `catalyst.leaseAuthority.mode` _(Layer-2)_ | `off`   | Same three values; honored when the env var is absent or unrecognised. **Not read from Layer-1** — a live-path claim gate in the committable config would let a merge flip the whole fleet into enforce with no per-host rollback (same containment posture as the write proxy and github-feed).                                                                                    |
+
+On a **single-host** deployment (`catalyst.deployment.mode`) `enforce` degrades to `off` — there are
+no peers to arbitrate, so a single-host clone that inherited an enforce env can never block its own
+dispatch on a cloud round-trip. The claim path is already unreachable single-host (callers gate on a
+non-null cluster generation); this makes that guarantee explicit.
+
+The per-host key, endpoint base, and curl-over-stdin credential discipline are the **same** as the
+write proxy above (the `cloud-token` secret-contract row, `CATALYST_CLOUD_BASE_URL`, token never in
+argv/on disk). The lease routes require the cloud tenant's **admin token** today (CTC-418/419 is the
+follow-up to open them to per-host service keys); a host whose `CATALYST_CLOUD_TOKEN` does not
+satisfy that gate stays dark in `enforce` — run `node execution-core/lease-authority.mjs probe` (the
+non-mutating auth spike: `400` ⇒ authorized, `401/403` ⇒ blocked on the cloud-auth dependency).
+
+The node re-entitles itself on the daemon's cluster-sync cadence when the gate is `shadow`/`enforce`
+(a `not_entitled` refusal otherwise self-heals reactively on the next claim). **Not in scope
+(follow-ups):** progress-asserted lease **renewal** (`/lease/renew` requires a non-empty progress
+assertion, so a phase that runs past `workTtlMs` ≈ 45 min could see its lease expire) and explicit
+lease **release on phase-terminal** (the lease frees at TTL regardless — `releaseViaLease` exists as
+a tested capability but is not yet wired to a terminal call site, matching the attachment path, whose
+`emitFenceReleased` is likewise unwired). Retiring the attachment CAS happens after an enforce soak.
+
+Observable events (LogQL
+`{job="catalyst-events"} | json | attributes["event.name"] =~ "lease\\.claim\\..*"`):
+
+- `lease.claim.would-grant.<TICKET>` — shadow hit; the lease **would** have granted (attachment still authoritative)
+- `lease.claim.would-refuse.<TICKET>` — shadow hit; the lease **would** have refused
+
 ## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
 
 `catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from

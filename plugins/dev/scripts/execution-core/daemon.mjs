@@ -56,6 +56,7 @@ import {
   readCloudFeedConfig, // CTL-1847: cloud-feed dispatch-source mode
   readGithubFeedConfig, // CTL-1929: github-feed dispatch-source mode (SEPARATE knob)
   readLinearWriteProxyConfig, // CTL-1889: Linear write-proxy transport mode
+  resolveLeaseAuthorityMode, // CTL-1786: lease-authority claim gate (off/shadow/enforce)
   readLinearReplica, // CTL-1340: read-replica tier flag (inert; default off)
   getExecutor, // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
   dispatchModeForExecutor, // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
@@ -178,6 +179,9 @@ import { buildLaneClaimGuard, resolveStateMap } from "./lane-claim.mjs"; // CTL-
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
 import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
+// CTL-1786: lease-authority node entitlement, refreshed on the cluster-sync cadence so a
+// not_entitled claim refusal is a rare self-healing edge rather than the steady state.
+import { createLeaseAuthorityClient, ensureEntitled as ensureLeaseEntitled } from "./lease-authority.mjs";
 
 // CTL-1623: register the github-token row's rearm hook at module load — BEFORE either
 // call site below (both live inside startDaemon(), invoked only later) can fire. Makes
@@ -256,6 +260,39 @@ let _heartbeat = null;
 let _livenessPublisher = null;
 // CTL-1274: cluster-repo auto-pull timer handle (git pull --ff-only on a cadence).
 let _clusterSyncTimer = null;
+
+// CTL-1786: lease-authority node entitlement state. `_leaseClient` is built lazily; the cached
+// entitlement deadline lets ensureLeaseEntitled skip the cloud call until it is close to expiry,
+// so the (synchronous) entitle round-trip runs ~once per TTL, not every cluster-sync tick.
+let _leaseClient = null;
+let _leaseEntitlementExpiresAtMs = null;
+
+// refreshLeaseEntitlement — (re-)entitle this node when the lease gate is shadow/enforce. Cheap
+// and cached; FAIL-OPEN — a cloud outage here is logged, never thrown, because a not_entitled
+// refusal already self-heals reactively inside claimViaLease. A no-op under `off` (the default),
+// so this is inert until an operator opts a host into the lease authority.
+function refreshLeaseEntitlement() {
+  let mode;
+  try {
+    mode = resolveLeaseAuthorityMode(process.env);
+  } catch {
+    return;
+  }
+  if (mode !== "shadow" && mode !== "enforce") return;
+  try {
+    if (!_leaseClient) _leaseClient = createLeaseAuthorityClient({ env: process.env });
+    const r = ensureLeaseEntitled({
+      client: _leaseClient,
+      node: getHostName(),
+      cachedExpiresAtMs: _leaseEntitlementExpiresAtMs,
+    });
+    if (r?.refreshed && typeof r.expiresAtMs === "number") {
+      _leaseEntitlementExpiresAtMs = r.expiresAtMs;
+    }
+  } catch (err) {
+    log.warn({ err: err?.message }, "cluster-sync timer: lease entitlement refresh threw (continuing)");
+  }
+}
 // CTL-684: auto-tuner stop handle.
 let _stopAutoTuner = null;
 let _eventWatcher = null;
@@ -2037,6 +2074,10 @@ export function startDaemon({
         // via `log`. A wrapping try/catch here would only ever imply protection the callee
         // already provides.
         armSecret("github-token", { env: process.env });
+        // CTL-1786: keep this node entitled with the lease authority on the same cadence, so a
+        // claim's not_entitled refusal is a rare self-healing edge, not the steady state. Cached
+        // + fail-open (see refreshLeaseEntitlement); a strict no-op when the gate is off.
+        refreshLeaseEntitlement();
       }, clusterSyncIntervalMs);
       _clusterSyncTimer.unref?.();
     }
