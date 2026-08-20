@@ -666,6 +666,18 @@ update_config_with_linear_states() {
 	fi
 	local secrets_file="$HOME/.config/catalyst/config-${PROJECT_KEY}.json"
 
+	# CTL-2076: never re-derive over a committed, PRESERVED stateMap. setup_project_config
+	# sets CATALYST_STATEMAP_PRESERVED=1 when it kept an existing non-empty committed map;
+	# honoring it here closes the second clobber path (a credentialed re-run over a real
+	# config, e.g. mini-2's CTL checkout, where fetch+build_state_map_from_linear would
+	# otherwise overwrite the curated map with the positional heuristic). A fresh install
+	# leaves the flag 0 (or unset), so the Linear-derived refresh still runs there.
+	if [[ "${CATALYST_STATEMAP_PRESERVED:-0}" == "1" ]]; then
+		echo ""
+		echo "✓ Preserving committed linear.stateMap (skipping Linear-derived refresh)"
+		return 0
+	fi
+
 	# Need both files to exist
 	if [[ ! -f $config_file ]] || [[ ! -f $secrets_file ]]; then
 		return 0
@@ -1707,10 +1719,20 @@ setup_project_config() {
 	# regeneration (CTL-2076); otherwise use today's generic 8-key default. Injected as a
 	# pre-encoded JSON blob the same way deployment_mode_json is, so a preserved map lands
 	# byte-for-byte and a fresh install keeps the exact current default.
+	#
+	# CTL-2076: signal the preservation to update_config_with_linear_states (called next in
+	# main), which would otherwise re-derive the map from Linear via the positional heuristic
+	# in build_state_map_from_linear and collapse a curated map (research/planning/inProgress =
+	# Research/Plan/Implement) back to a single started-state name — re-introducing the exact
+	# clobber this ticket fixes. The flag is deliberately NOT `local`: both functions run in
+	# the same process from main(), and a just-written generic default (flag=0) must still be
+	# refreshed from Linear on a fresh install. Defaults to 0 for a fresh/absent config.
 	local state_map_json
+	CATALYST_STATEMAP_PRESERVED=0
 	if [[ -f $config_file ]] &&
 		[[ $(jq -r '(.catalyst.linear.stateMap | objects | length) // 0' "$config_file" 2>/dev/null) -gt 0 ]]; then
 		state_map_json=$(jq -c '.catalyst.linear.stateMap' "$config_file")
+		CATALYST_STATEMAP_PRESERVED=1
 	else
 		state_map_json=$(jq -cn '{backlog:"Backlog",todo:"Todo",research:"In Progress",planning:"In Progress",inProgress:"In Progress",inReview:"In Review",done:"Done",canceled:"Canceled"}')
 	fi
