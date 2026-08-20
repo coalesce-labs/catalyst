@@ -70,6 +70,69 @@ else
 	fail "expected launch-ctl27.txt, got '$GOT'"
 fi
 
+# Re-implement the rolling-window relaunch cap under test, mirroring lane-relaunch.sh's own
+# functions exactly (kept in sync by hand; if you change one, change both).
+RELAUNCH_HOURLY_CAP=4
+RELAUNCH_WINDOW_SECONDS=3600
+relaunch_count_in_window() {
+	local rf="$PIDDIR/$1.relaunches"
+	[ -f "$rf" ] || { echo 0; return; }
+	local now cutoff; now=$(date +%s); cutoff=$((now - RELAUNCH_WINDOW_SECONDS))
+	local kept; kept=$(awk -v cutoff="$cutoff" '$1 >= cutoff' "$rf")
+	if [ -z "$kept" ]; then : >"$rf"; echo 0; else printf '%s\n' "$kept" >"$rf"; printf '%s\n' "$kept" | grep -c .; fi
+}
+record_relaunch_attempt() { date +%s >>"$PIDDIR/$1.relaunches"; }
+
+echo "Test: a lane with no relaunch history reads as 0 attempts this hour"
+COUNT=$(relaunch_count_in_window "freshlane")
+if [ "$COUNT" -eq 0 ]; then pass "no history -> 0"; else fail "expected 0, got $COUNT"; fi
+
+echo "Test: recording CAP attempts brings the count to exactly CAP, not capped yet"
+for _ in $(seq 1 "$RELAUNCH_HOURLY_CAP"); do record_relaunch_attempt "atcap"; done
+COUNT=$(relaunch_count_in_window "atcap")
+if [ "$COUNT" -eq "$RELAUNCH_HOURLY_CAP" ]; then
+	pass "$RELAUNCH_HOURLY_CAP attempts -> count $RELAUNCH_HOURLY_CAP (caller compares >= to cap)"
+else
+	fail "expected $RELAUNCH_HOURLY_CAP, got $COUNT"
+fi
+
+echo "Test: one more attempt past the cap is still counted (the caller enforces the skip, not this fn)"
+record_relaunch_attempt "atcap"
+COUNT=$(relaunch_count_in_window "atcap")
+if [ "$COUNT" -eq $((RELAUNCH_HOURLY_CAP + 1)) ]; then
+	pass "count keeps rising past cap ($COUNT) — caller's >= check is what stops relaunching"
+else
+	fail "expected $((RELAUNCH_HOURLY_CAP + 1)), got $COUNT"
+fi
+
+echo "Test: an attempt older than the window ages OUT and does not count toward the cap"
+OLD_TS=$(($(date +%s) - RELAUNCH_WINDOW_SECONDS - 60))
+echo "$OLD_TS" >"$PIDDIR/aging.relaunches"
+COUNT=$(relaunch_count_in_window "aging")
+if [ "$COUNT" -eq 0 ]; then
+	pass "attempt older than 60min window pruned to 0"
+else
+	fail "expected 0 (pruned), got $COUNT"
+fi
+if [ -s "$PIDDIR/aging.relaunches" ]; then
+	fail "pruning should have rewritten the file empty, but it still has content"
+else
+	pass "pruning rewrote the counter file, so it doesn't grow unbounded forever"
+fi
+
+echo "Test: a mix of one stale + one fresh timestamp prunes to just the fresh one"
+FRESH_TS=$(date +%s)
+{
+	echo "$OLD_TS"
+	echo "$FRESH_TS"
+} >"$PIDDIR/mixed.relaunches"
+COUNT=$(relaunch_count_in_window "mixed")
+if [ "$COUNT" -eq 1 ]; then
+	pass "stale entry pruned, fresh entry kept -> count 1"
+else
+	fail "expected 1, got $COUNT"
+fi
+
 echo ""
 echo "== $PASSES passed, $FAILURES failed =="
 [ "$FAILURES" -eq 0 ]
