@@ -369,6 +369,7 @@ import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs"
 // runTransition (would double-audit the triage path, which keeps its own
 // phase.triage.linear-transition event). Best-effort: swallow-on-error.
 import { appendLinearStateWriteEvent } from "./linear-state-write-event.mjs";
+import { recordFleetWrite as defaultRecordFleetWrite } from "./lane-claim-write-ledger.mjs"; // CTL-2070: the timely write-ledger record seam
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 Phase 5
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { resolveTicketType } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
@@ -4866,6 +4867,11 @@ export function schedulerTick(
     // distinct source tag — slice-1's deviation note: the parked re-dispatch reuses
     // the scheduler-advance / preemption-resume sites, it is not its own write.)
     appendStateWriteEvent = appendLinearStateWriteEvent,
+    // CTL-2070: the timely fleet write-ledger record seam. Default null so a bare unit tick that
+    // does not inject it never touches the durable ledger; PRODUCTION wires the real
+    // defaultRecordFleetWrite via runTick (same pattern as appendWorkerTransitionEvent below).
+    // Called from emitStateWrite ONLY on an applied transition that carries a to_state.
+    recordFleetWrite = null,
     // CTL-764 Phase 5: unified worker.transition event emitter. Injectable for tests
     // (pass a spy to capture emitted transitions). Default no-op so bare unit ticks
     // that do not inject this seam are unaffected. Production wires the real
@@ -5232,6 +5238,18 @@ export function schedulerTick(
       },
       { ticket, phase, source }
     );
+    // CTL-2070: record the fleet's OWN write in the timely write-ledger, so the lane-claim guard
+    // can tell a fleet recovery/re-run move from a foreign lane claim during the ~200 s window
+    // before issue_history catches up. Only an APPLIED transition with a concrete to_state is a
+    // real fleet write; a no-op / short-circuited write is not. Guarded so a ledger throw can
+    // never abort the tick (recordFleetWrite is itself fail-open, this is belt-and-braces).
+    if (typeof recordFleetWrite === "function" && writerResult.applied && writerResult.to_state) {
+      try {
+        recordFleetWrite(ticket, writerResult.to_state, Date.now());
+      } catch {
+        /* the write-ledger is best-effort observability; never wedge a transition on it */
+      }
+    }
   }
 
   // CTL-764 Phase 5: recordTransition — the per-tick sync chokepoint for worker
@@ -9681,6 +9699,11 @@ function runTick() {
       // startScheduler({ appendWorkerTransitionEvent }).
       appendWorkerTransitionEvent:
         runningOpts.appendWorkerTransitionEvent ?? defaultAppendWorkerTransitionEvent,
+      // CTL-2070: the LIVE fleet write-ledger record seam. schedulerTick defaults this to null
+      // (bare unit ticks never touch the durable ledger); production threads the real
+      // defaultRecordFleetWrite here so every applied state write is recorded for the lane-claim
+      // guard's timely source. A test may inject its own via startScheduler({ recordFleetWrite }).
+      recordFleetWrite: runningOpts.recordFleetWrite ?? defaultRecordFleetWrite,
       // CTL-1774: the LIVE delegate-event emitter. schedulerTick defaults to
       // defaultAppendDelegateEvent, so bare unit ticks that don't inject it are
       // already wired to the real log. runTick threads it explicitly so tests
@@ -10411,6 +10434,9 @@ export function startScheduler({
   // the per-tick schedulerTick opts (production). A test injects a spy here to
   // capture transitions through the production runTick path.
   appendWorkerTransitionEvent,
+  // CTL-2070: optional fleet write-ledger record seam override (test seam). Undefined → runTick
+  // defaults to the real defaultRecordFleetWrite.
+  recordFleetWrite,
   // CTL-1774: optional delegate-event emitter override (test seam). Undefined →
   // runTick threads defaultAppendDelegateEvent (the real log append). A test
   // injects a spy here to capture delegate events through the production runTick path.
@@ -10479,6 +10505,7 @@ export function startScheduler({
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
     appendPhaseAdvanceAppliedEvent, // CTL-1789: optional applied-advance emit seam
     appendWorkerTransitionEvent, // CTL-764: optional worker.transition emitter override (test seam; runTick defaults to defaultAppendWorkerTransitionEvent)
+    recordFleetWrite, // CTL-2070: optional fleet write-ledger record seam override (test seam; runTick defaults to defaultRecordFleetWrite)
     appendDelegateEvent, // CTL-1774: optional delegate-event emitter override (test seam; runTick defaults to defaultAppendDelegateEvent)
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
     checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)

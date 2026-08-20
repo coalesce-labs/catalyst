@@ -497,6 +497,17 @@ export function buildLaneClaimGuard({
   // who needs the fleet to plough through a claim can set
   // CATALYST_LANE_CLAIM_DISPATCH_GUARD=off without giving up the write-side protection.
   dispatchVeto = true,
+  // CTL-2070 — the TIMELY per-ticket actor source. All optional: when readFleetWrite is not
+  // wired, the wrapper yields `undefined` and the guard is EXACTLY CTL-2068. The two readers get
+  // the same fail-open try/catch as readLast/readFleet.
+  //   readFleetWrite(ticket)      → { toState, atMs } | null | undefined (the durable ledger)
+  //   readCurrentUpdatedAt(ticket) → epoch-ms | undefined (issues.updated_at, the timely obs)
+  //   nowMs()                     → wall clock for the recency bound (default Date.now)
+  //   recencyMs                   → the timely-window bound (undefined → bound skipped)
+  readFleetWrite,
+  readCurrentUpdatedAt,
+  nowMs = () => Date.now(),
+  recencyMs,
 } = {}) {
   const defaultRank = buildStateRank(stateMap);
   const keyRank = buildKeyRank();
@@ -536,6 +547,42 @@ export function buildLaneClaimGuard({
     }
   };
 
+  // CTL-2070: the guard's HALF of the three-valued ledger contract. The module returns
+  // null|entry and NEVER undefined; the guard wrapper is the SOLE producer of `undefined`, on an
+  // unwired reader or a THROW — so a transient read error reads as "could not look" (→ unknown →
+  // legacy ladder), never as "the fleet never wrote this ticket" (→ lane → a spurious refusal).
+  const readLedger = (ticket) => {
+    if (typeof readFleetWrite !== "function" || !ticket) return undefined;
+    try {
+      return readFleetWrite(ticket);
+    } catch {
+      return undefined;
+    }
+  };
+
+  // CTL-2070: the timely issues.updated_at observation. Fail-open to undefined so a reader miss
+  // or throw leaves the supersession test unable to run (→ unknown), never a refusal.
+  const readUpdatedAt = (ticket) => {
+    if (typeof readCurrentUpdatedAt !== "function" || !ticket) return undefined;
+    try {
+      return readCurrentUpdatedAt(ticket);
+    } catch {
+      return undefined;
+    }
+  };
+
+  // CTL-2070: resolve the wall clock once per evaluation, fail-open to undefined so a throwing
+  // nowMs() disables only the recency bound (never wedges a write).
+  const clockNow = () => {
+    if (typeof nowMs !== "function") return undefined;
+    try {
+      const n = nowMs();
+      return typeof n === "number" ? n : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   return {
     // `rank` is the DEFAULT map's rank. ⛔ Callers reporting how many states the guard can
     // actually rank must read THIS, never the raw stateMap's key count — buildStateRank
@@ -557,6 +604,11 @@ export function buildLaneClaimGuard({
         botUserIds,
         rank: rankFor(ticket),
         fleetSeen: readFleet(ticket),
+        // CTL-2070 — the timely source.
+        fleetWrite: readLedger(ticket),
+        currentUpdatedAtMs: readUpdatedAt(ticket),
+        nowMs: clockNow(),
+        recencyMs,
       });
     },
 
@@ -595,6 +647,11 @@ export function buildLaneClaimGuard({
         botUserIds,
         rank: rankFor(ticket),
         fleetSeen: readFleet(ticket),
+        // CTL-2070 — the same timely source, so the dispatch veto sees the fresher evidence too.
+        fleetWrite: readLedger(ticket),
+        currentUpdatedAtMs: readUpdatedAt(ticket),
+        nowMs: clockNow(),
+        recencyMs,
       });
     },
   };
