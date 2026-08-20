@@ -64,6 +64,7 @@ catalyst-hud|HUD & display|0|Ink TUI for the catalyst event stream (bare invocat
 catalyst-hud-classic|HUD & display|0|Color-coded terminal HUD for the event stream (minimal-deps fallback; bare runs forever).
 catalyst|Umbrella & lifecycle|1|The single front-door router for the Catalyst toolchain (git-style dispatch to every catalyst-* tool).
 catalyst-stack|Umbrella & lifecycle|1|Bring the Catalyst service stack up or down on this host (idempotent, dependency-ordered).
+catalyst-enrol|Umbrella & lifecycle|1|One-key host enrollment installer — binds a fresh machine to a Catalyst Cloud account/tenant with a single --cloud-key, generating (or accepting an existing) age keypair for local secret decryption.
 catalyst-install|Umbrella & lifecycle|1|Provision or tear down this node for its class (composes setup scripts; install/uninstall/reinstall).
 catalyst-doctor|Umbrella & lifecycle|1|Fail-closed activation gate — class-aware health/activation grade (exit 0 ⇒ safe to activate).
 catalyst-config|Umbrella & lifecycle|1|Read-only per-key config provenance dump (value + env-override/config/default source, resolved layer paths, fingerprint) for cross-host diffing.
