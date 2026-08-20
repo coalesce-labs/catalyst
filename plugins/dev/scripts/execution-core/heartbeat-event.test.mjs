@@ -526,3 +526,107 @@ describe("localActiveTickets (CTL-1581 — slot-occupancy subset)", () => {
     rms(dir, { recursive: true, force: true });
   });
 });
+
+// CTL-1864: localActiveSlotCount + activeSlotCountFn seam
+describe("localActiveSlotCount (CTL-1864 — slot-based active_count)", () => {
+  // Shared fixture builder: one ticket with a yielded recovery-pass AND a running
+  // implement phase. localActiveTickets sees 1 ticket; the scheduler charges 2 slots.
+  function makeFixture() {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = require("node:fs");
+    const { tmpdir } = require("node:os");
+    const { join } = require("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "ctl1864-"));
+    const mk = (ticket, phase, status, extra = {}) => {
+      mkdirSync(join(dir, "workers", ticket), { recursive: true });
+      writeFileSync(
+        join(dir, "workers", ticket, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status, host: { name: "mini" }, ...extra }),
+      );
+    };
+    // yielded ancillary — charges one slot via countYieldedOccupancy
+    mk("CTL-XYZ", "recovery-pass", "awaiting-work");
+    // running pipeline phase — charges one slot via liveCountFn
+    mk("CTL-XYZ", "implement", "running", { bg_job_id: "abc123" });
+    return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  test("returns liveCount + countYieldedOccupancy (both counts, composed, not a literal)", async () => {
+    const { localActiveSlotCount } = await import("./cluster-heartbeat-publisher.mjs");
+    const { countYieldedOccupancy } = await import("./signal-reader.mjs");
+    const { dir, cleanup } = makeFixture();
+    try {
+      const liveCount = 1; // one background agent running the implement phase
+      const yieldResult = countYieldedOccupancy(dir);
+      const expected = liveCount + yieldResult.count;
+      const got = localActiveSlotCount("mini", {
+        orchDir: dir,
+        liveCountFn: () => liveCount,
+      });
+      // Assert using the COMPOSED inputs (AC2: never a hand-written literal).
+      expect(got).toBe(expected);
+      // And the concrete value for the two-phase case must be 2.
+      expect(got).toBe(2);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("diverges legitimately from localActiveTickets on the two-phase fixture", async () => {
+    const { localActiveSlotCount, localActiveTickets } = await import("./cluster-heartbeat-publisher.mjs");
+    const { dir, cleanup } = makeFixture();
+    try {
+      // ticket-level: one ticket, deduped
+      expect(localActiveTickets("mini", { orchDir: dir }).length).toBe(1);
+      // slot-level: two slots (yielded + running)
+      expect(localActiveSlotCount("mini", { orchDir: dir, liveCountFn: () => 1 })).toBe(2);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("fail direction: ok:false from yield scan never under-reports below liveCount", async () => {
+    const { localActiveSlotCount } = await import("./cluster-heartbeat-publisher.mjs");
+    const { dir, cleanup } = makeFixture();
+    try {
+      const liveCount = 1;
+      const got = localActiveSlotCount("mini", {
+        orchDir: dir,
+        liveCountFn: () => liveCount,
+        countYieldedOccupancyFn: () => ({ count: 0, ok: false }),
+      });
+      // Must never report LESS than liveCount (fail-closed: mirror the scheduler's posture).
+      expect(got).toBeGreaterThanOrEqual(liveCount);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("returns 0 when orchDir is absent or falsy", async () => {
+    const { localActiveSlotCount } = await import("./cluster-heartbeat-publisher.mjs");
+    expect(localActiveSlotCount("mini")).toBe(0);
+    expect(localActiveSlotCount("mini", { orchDir: null })).toBe(0);
+  });
+});
+
+describe("buildHeartbeatEnvelope activeSlotCountFn seam (CTL-1864)", () => {
+  test("active_count comes from activeSlotCountFn when supplied (decoupled from activeTickets.length)", () => {
+    const env = buildHeartbeatEnvelope({
+      activeTicketsFn: () => ["CTL-XYZ"],
+      activeSlotCountFn: () => 2,
+    });
+    // slot count overrides the ticket-list length
+    expect(env.attributes["catalyst.node.active_count"]).toBe(2);
+    // the ID list stays ticket-level and deduped
+    expect(env.attributes["catalyst.node.active_tickets"]).toBe("CTL-XYZ");
+  });
+
+  test("backward-compatible: falls back to activeTickets.length when no activeSlotCountFn", () => {
+    const env = buildHeartbeatEnvelope({ activeTicketsFn: () => ["A", "B"] });
+    expect(env.attributes["catalyst.node.active_count"]).toBe(2);
+  });
+
+  test("backward-compatible: no seams at all → active_count is 0 (empty list length)", () => {
+    const env = buildHeartbeatEnvelope();
+    expect(env.attributes["catalyst.node.active_count"]).toBe(0);
+  });
+});
