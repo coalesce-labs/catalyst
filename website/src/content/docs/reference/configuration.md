@@ -330,21 +330,23 @@ setup tool manages. See the
 [Worker-status labels reference](/autonomous-workflow/worker-status-labels/) for what each label
 means and how the HUD displays them.
 
-## Linear app-actor identity (`catalyst.linear.bot.{worker,orchestrator}.botUserId`)
+## Linear app-actor identity (`catalyst.linear.bot.{worker,orchestrator,cloud}.botUserId`)
 
 Catalyst posts to Linear as a Linear OAuth **app actor** — the "Linear for Agents" identity that
 comments **as Catalyst**. Linear OAuth apps are account-level (one app serves every team), so the
 bot identity and OAuth credentials now live in the **global** `~/.config/catalyst/config.json` under
-`catalyst.linear.bot`, split into two app actors:
+`catalyst.linear.bot`, split into app actors:
 
 - `catalyst.linear.bot.worker` — the worker app that posts phase-agent mirror comments and mints
   tokens via `client_credentials`.
 - `catalyst.linear.bot.orchestrator` — the orchestrator app that posts run-level updates.
+- `catalyst.linear.bot.cloud` — the cloud tenant's app actor whose identity the fleet's writes
+  carry when `CATALYST_LINEAR_WRITE_PROXY=enforce` (CTL-1889/ADR-0031). Recognition-only.
 
 Each carries a `botUserId` (the Linear user UUID of that app actor). The daemon and orch-monitor
-read **both** `botUserId`s into a single set so the self-echo / loop-prevention guard suppresses
-comments and issue events from **either** app actor. These UUIDs aren't secret (they appear on every
-comment the app posts), but they are account-specific.
+read **all** the `botUserId`s into a single set so the self-echo / loop-prevention guard suppresses
+comments and issue events from **any** of those app actors. These UUIDs aren't secret (they appear on
+every comment the app posts), but they are account-specific.
 
 ```json
 {
@@ -363,6 +365,9 @@ comment the app posts), but they are account-specific.
           "clientSecret": "...",
           "accessToken": "...",
           "botUserId": null
+        },
+        "cloud": {
+          "botUserId": null
         }
       }
     }
@@ -374,6 +379,7 @@ comment the app posts), but they are account-specific.
 | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `catalyst.linear.bot.worker.botUserId`                                         | Linear user UUID of the worker app actor. Suppresses self-echo on mirror comments / description updates. Also the read ID for the daemon's self-echo filter.                                                                                                                                                                                      |
 | `catalyst.linear.bot.orchestrator.botUserId`                                   | Linear user UUID of the orchestrator app actor. **Also drives self-assign on claim (CTL-1011)** — the daemon writes this UUID as the Linear assignee when it claims a ticket. When absent, `applyAssignee` emits a single deduped `warn` and leaves the ticket unassigned. Daemon reads it **only at startup** — restart required after changing. |
+| `catalyst.linear.bot.cloud.botUserId`                                          | Linear user UUID the fleet's writes carry when `CATALYST_LINEAR_WRITE_PROXY=enforce` (the cloud tenant's app actor, ADR-0031/CTL-1889). **Recognition-only:** enters the self-echo set so proxied comments/updates are suppressed and don't read as a human reply; does **not** drive self-assign (`readLinearBotWriteId` still prefers the orchestrator id). Provisioned from a proxy-confirmed value (CTL-2074). Verify with `catalyst doctor` (the self-echo-identity-history check). |
 | `catalyst.linear.bot.worker.{clientId,clientSecret,webhookSecret,accessToken}` | OAuth app-actor credentials for the worker identity. Secrets — keep in the un-committed global config                                                                                                                                                                                                                                             |
 
 > **Self-assign activation:** `catalyst.linear.bot.orchestrator.botUserId` must be set AND the
@@ -387,7 +393,7 @@ comment the app posts), but they are account-specific.
 Every reader prefers the new global path and falls back to the old location, so a running daemon or
 webhook receiver keeps working whether the value has been migrated yet:
 
-- **Bot IDs:** `catalyst.linear.bot.{worker,orchestrator}.botUserId` (global) → fall back to
+- **Bot IDs:** `catalyst.linear.bot.{worker,orchestrator,cloud}.botUserId` (global) → fall back to
   `catalyst.monitor.linear.botUserId` (per-repo `.catalyst/config.json`, the legacy single-actor
   location).
 - **Worker OAuth creds:** `catalyst.linear.bot.worker.{clientId,clientSecret}` (global) → fall back

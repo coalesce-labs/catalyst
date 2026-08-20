@@ -80,6 +80,11 @@ import {
   // do NOT import replica-read.mjs (it pulls bun:sqlite; doctor runs under bare node).
   getReplicaDbPath,
   readLinearReplica,
+  // CTL-2074 (Codex #3738 P2): resolve the write-proxy mode through the SAME
+  // env > Layer-2 > 'off' ladder the live write transport uses, so a host that enables
+  // enforce via Layer-2 (catalyst.linearWriteProxy.mode) without exporting the env var is
+  // not silently skipped by the self-echo cross-check. Node-safe (node:fs only).
+  readLinearWriteProxyConfig,
   resolveNodeCloudTokenEnv,
   // CTL-1659: the cloud-sync loaded-dependency boot record — doctor grades it from
   // another process, so it needs the same path the writer writes.
@@ -152,9 +157,13 @@ import { collectConfigDump } from "./config-dump.mjs";
 // Collects all known Linear bot user UUIDs from both config layers:
 //   1. ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
 //   2. ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
-//   3. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
+//   3. ~/.config/catalyst/config.json  catalyst.linear.bot.cloud.botUserId (CTL-2074,
+//        recognition-only — the cloud-proxy app-actor; kept in lockstep with the daemon)
+//   4. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
 // Returns a Set<string>. Empty set = no filter (fail-open). Never throws.
-function readLinearBotUserIds(l1Path, l2Path) {
+// Exported so doctor.test.mjs exercises the inline twin directly and it cannot
+// silently drift from the daemon resolver (CTL-2074).
+export function readLinearBotUserIds(l1Path, l2Path) {
   const ids = new Set();
   function addFromPath(path, extractor) {
     if (!path) return;
@@ -169,12 +178,33 @@ function readLinearBotUserIds(l1Path, l2Path) {
       s.add(bot.worker.botUserId);
     if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
       s.add(bot.orchestrator.botUserId);
+    // CTL-2074: cloud-proxy app-actor — recognition-only (never a self-assign id).
+    if (typeof bot?.cloud?.botUserId === "string" && bot.cloud.botUserId.length > 0)
+      s.add(bot.cloud.botUserId);
   });
   addFromPath(l1Path, (p, s) => {
     const uid = p?.catalyst?.monitor?.linear?.botUserId;
     if (typeof uid === "string" && uid.length > 0) s.add(uid);
   });
   return ids;
+}
+
+// CTL-2074 (Codex #3738 P2): the CURRENT cloud-proxy app-actor id, read on its own
+// from Layer-2 catalyst.linear.bot.cloud.botUserId. The self-echo cross-check ties its
+// PASS to THIS specific actor rather than to any member of the full recognition set:
+// under proxy=enforce every daemon state write carries the cloud tenant's app-actor id,
+// so a legacy worker/orchestrator id that changed state before the cutover — and is still
+// in the general set — must NOT mask an unrecognized current cloud writer with a clean
+// PASS. Returns "" when unconfigured/unreadable (never throws) — that IS the CTL-2074
+// silent condition, surfaced as WARN by the caller, not a clean pass.
+export function readCloudBotUserId(l2Path) {
+  if (!l2Path) return "";
+  try {
+    const id = JSON.parse(readFileSync(l2Path, "utf8"))?.catalyst?.linear?.bot?.cloud?.botUserId;
+    return typeof id === "string" ? id : "";
+  } catch {
+    return "";
+  }
 }
 
 // ─── Check model ─────────────────────────────────────────────────────────────
@@ -793,6 +823,159 @@ export async function checkBotCredentials(deps = {}) {
   }
 
   return checks;
+}
+
+// ─── CTL-2074: self-echo identity ↔ real issue_history cross-check ────────────
+//
+// `botUserIds` is the fleet's answer to "was this Linear change made by us?". Since
+// CTL-1889 both minis write THROUGH the cloud proxy (CATALYST_LINEAR_WRITE_PROXY=
+// enforce), so their writes carry the cloud tenant's app-actor id — and if that id is
+// absent from the recognition set, a proxied write mirrored back reads as "a human
+// replied on the daemon's own output". That is a SILENT failure: nothing errors, and
+// the set is resolved from config + a durable ledger, NEVER from history. This check
+// turns it loud — it verifies the recognition set against who ACTUALLY writes state,
+// from real issue_history rows (the AC's "verified by a query against real
+// issue_history rows, not by reading config"), with a positive control.
+//
+// Advisory (WARN, never FAIL): doctor's exit code is the FAIL count and gates
+// activation; this is "make it loud", not "block a node whose cloud id isn't
+// provisioned yet". Every negative carries a positive control — an undefined read or
+// an empty result is INCONCLUSIVE (WARN), never a clean PASS.
+//
+// defaultRecentStateChangeActors — read the replica via the sqlite3 CLI (an OPTIONAL
+// dependency), the SAME discipline as defaultReadDbTables (CAT-35): doctor runs under
+// bare node and must not import replica-read.mjs (bun:sqlite). This SQL is a twin of
+// replica-read.mjs's RECENT_STATE_CHANGE_ACTORS_SELECT — kept a copy precisely because
+// doctor cannot share the bun: reader. undefined = could-not-look (sqlite3 absent /
+// query failed / db missing); [] = looked-and-found-nothing. The two must stay
+// distinct — an empty read reported as clean is the silent false-clean this ends.
+function defaultRecentStateChangeActors({ dbPath, limit = 50, run = spawnSync } = {}) {
+  if (!dbPath) return undefined;
+  const n = Number.isInteger(limit) && limit > 0 ? limit : 50;
+  const sql =
+    "SELECT h.actor_id AS actorId, u.name AS name, COUNT(*) AS count " +
+    "FROM issue_history h LEFT JOIN users u ON u.id = h.actor_id " +
+    "WHERE h.to_state IS NOT NULL AND h.actor_id IS NOT NULL " +
+    `GROUP BY h.actor_id ORDER BY count DESC LIMIT ${n}`; // n is a validated integer — no injection
+  let r;
+  try {
+    r = run("sqlite3", ["-readonly", "-json", dbPath, sql], { encoding: "utf8", timeout: 10_000 });
+  } catch {
+    return undefined;
+  }
+  if (!r || r.error || r.status !== 0 || typeof r.stdout !== "string") return undefined;
+  const out = r.stdout.trim();
+  if (out === "") return []; // looked, found nothing (positive control failed downstream)
+  try {
+    const rows = JSON.parse(out);
+    if (!Array.isArray(rows)) return undefined;
+    return rows.map((x) => ({ actorId: x.actorId ?? null, name: x.name ?? null, count: Number(x.count) || 0 }));
+  } catch {
+    return undefined;
+  }
+}
+
+export function checkSelfEchoIdentityHistory(deps = {}) {
+  const name = "self-echo-identity-history";
+  const {
+    // Codex #3738 P2: resolve the mode through the write transport's env > Layer-2 >
+    // 'off' ladder, NOT the env var alone — a Layer-2-only enforce host was silently
+    // skipped by the old `process.env.CATALYST_LINEAR_WRITE_PROXY || "off"` default.
+    proxyMode = readLinearWriteProxyConfig().mode,
+    botIds = readLinearBotUserIds(layer1Path(), layer2Path()),
+    // Codex #3738 P2: the current cloud-proxy actor — the PASS is tied to THIS id, not
+    // to any historical member of botIds (see readCloudBotUserId).
+    cloudBotId = readCloudBotUserId(layer2Path()),
+    recentActors = () => defaultRecentStateChangeActors({ dbPath: getReplicaDbPath() }),
+  } = deps;
+
+  const mode = String(proxyMode || "off").toLowerCase();
+  // The guard only bites under enforce — off/shadow proxied writes carry the direct
+  // app-actor id already in the set, so history recognition is N/A.
+  if (mode !== "enforce") {
+    return mkCheck(
+      name,
+      STATUS.INFO,
+      `write proxy not enforcing (CATALYST_LINEAR_WRITE_PROXY=${mode}) — proxied-identity self-echo N/A`,
+    );
+  }
+
+  const actors = typeof recentActors === "function" ? recentActors() : recentActors;
+  // could-not-look — NEVER a clean pass.
+  if (actors === undefined) {
+    return mkCheck(
+      name,
+      STATUS.WARN,
+      "replica unavailable — cannot verify the self-echo identity against issue_history " +
+        "(inconclusive, not a clean pass)",
+    );
+  }
+  // looked, found nothing — the positive control failed, so a "recognized" verdict
+  // would be unfounded. Inconclusive, never PASS.
+  if (!Array.isArray(actors) || actors.length === 0) {
+    return mkCheck(
+      name,
+      STATUS.WARN,
+      "no state changes in the recent window — positive control failed; cannot confirm the " +
+        "self-echo identity against history (inconclusive, not a clean pass)",
+    );
+  }
+
+  // Codex #3738 P2: under enforce every daemon state write carries the CLOUD proxy
+  // app-actor id, so the PASS is tied to THAT specific id — not to any member of the
+  // full recognition set. A legacy worker/orchestrator id that changed state before the
+  // cutover is still in `botIds`, and the old "any recognized member ⇒ PASS" would let it
+  // mask an unrecognized current cloud writer with a clean pass — the exact silent
+  // condition this check exists to expose. (`ids` is retained only for the diagnostic
+  // note below, distinguishing a set the cloud id is genuinely part of.)
+  const candidates = actors
+    .slice(0, 5)
+    .map((a) => `${a.actorId}${a.name ? ` "${a.name}"` : ""} (${a.count})`)
+    .join(", ");
+  const ids = botIds instanceof Set ? botIds : new Set(Array.isArray(botIds) ? botIds : []);
+  const cloudId = typeof cloudBotId === "string" && cloudBotId.length > 0 ? cloudBotId : null;
+
+  // The cloud-proxy identity isn't configured at all — nothing pins the fleet's own
+  // proxied writes, so every one of them reads as a human reply. The CTL-2074 condition.
+  if (!cloudId) {
+    return mkCheck(
+      name,
+      STATUS.WARN,
+      "write proxy=enforce but the cloud-proxy identity is not configured " +
+        "(catalyst.linear.bot.cloud.botUserId) — the fleet's own proxied writes read as human " +
+        "replies. Confirm the cloud-proxy identity AT THE PROXY (users.type is unreliable — never " +
+        "auto-classify) and set it. Recent state-writers: " +
+        candidates,
+    );
+  }
+
+  const cloudWrites = actors.filter((a) => a.actorId === cloudId);
+  if (cloudWrites.length > 0) {
+    const who = cloudWrites.map((a) => a.name || a.actorId).join(", ");
+    const inSet = ids.has(cloudId) ? "" : " (⚠ present in history but ABSENT from the recognition set)";
+    return mkCheck(
+      name,
+      // The cloud id writing state but missing from the recognition set is itself a
+      // misconfiguration — the daemon would treat these writes as human. WARN, not PASS.
+      ids.has(cloudId) ? STATUS.PASS : STATUS.WARN,
+      `write proxy=enforce and the configured cloud-proxy identity writes state: ${who}${inSet} ` +
+        `(${cloudWrites.length} of ${actors.length} recent state-writers)`,
+    );
+  }
+
+  // The cloud id is configured but never appears among the actors who ACTUALLY write
+  // state — either it is the wrong id or a legacy actor is still writing. Either way the
+  // fleet's proxied writes are not recognized. Name the candidates so the operator can
+  // confirm the right one AT THE PROXY (users.type is unreliable — never auto-classify).
+  return mkCheck(
+    name,
+    STATUS.WARN,
+    "write proxy=enforce but the configured cloud-proxy identity " +
+      `(${cloudId}) is NOT among the recent state-writers — the fleet's own proxied writes read ` +
+      "as human replies. Confirm the cloud-proxy identity AT THE PROXY and correct " +
+      "catalyst.linear.bot.cloud.botUserId. Recent state-writers: " +
+      candidates,
+  );
 }
 
 // ─── Phase 5: Connectivity + Secrets hygiene ─────────────────────────────────
@@ -6088,6 +6271,10 @@ export function checksForClass(nc, opts = {}) {
   const skillsDirPluginsThunk = () => checkSkillsDirPlugins({ nodeClass: nc.class });
 
   const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
+  // CTL-2074: verify the self-echo recognition set against who ACTUALLY writes state
+  // in real issue_history (not config). Advisory (never FAIL). Defaults resolve
+  // proxyMode/botIds/replica internally; graded for the classes that write to Linear.
+  const selfEchoIdentityHistoryThunk = () => checkSelfEchoIdentityHistory();
   const wontOwnThunk = () =>
     checkWontOwnWork({
       resolveRoster,
@@ -6157,6 +6344,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkCloudTokenEnv(), // advisory
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
       () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
+      selfEchoIdentityHistoryThunk, // CTL-2074: does the self-echo set name the id the fleet's proxied writes actually carry? (advisory)
       () => checkCloudSyncSkew(), // CTL-1659: is the RUNNING writer serving the lockfile's modules? (advisory)
       () => checkFleetTokenExport(), // CTL-1908: does a login shell spend the FLEET's Claude budget? (advisory)
       () => checkConfigScopeLeak(), // advisory
@@ -6232,6 +6420,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)
+    selfEchoIdentityHistoryThunk, // CTL-2074: does the self-echo set name the id the fleet's proxied writes actually carry? (advisory)
     () => checkCloudSyncSkew(), // CTL-1659: a merged dependency fix that never reached the running writer (advisory)
     () => checkFleetTokenExport(), // CTL-1908: the login-shell export that stalled the fleet for 7h (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
