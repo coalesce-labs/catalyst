@@ -1766,6 +1766,9 @@ export function readRatelimitPollerConfig() {
     usageEndpoint:
       process.env.EXECUTION_CORE_RATELIMIT_USAGE_ENDPOINT ||
       "https://api.anthropic.com/api/oauth/usage",
+    // CTL-2056: "accounts-env" (default) uses the durable setup-token probe;
+    // "oauth-login" restores the prior interactive-login keychain/file path.
+    credentialMode: process.env.EXECUTION_CORE_RATELIMIT_CRED_MODE || "accounts-env",
   };
 }
 

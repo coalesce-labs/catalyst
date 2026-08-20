@@ -46,6 +46,9 @@ const TOKEN = "sk-oauth-FAKE-TOKEN-never-logged";
 const EMAIL = "ryan@rozich.com";
 
 // Build a test harness. All seams injected; defaults to a healthy 200 path.
+// credentialMode defaults to "oauth-login" so existing OAuth-path tests are
+// unaffected. New accounts-env tests pass credentialMode:"accounts-env" and
+// a probeAccounts seam explicitly.
 function harness({
   readToken = () => TOKEN,
   fetchUsage = async () => ({ status: 200, body: usageBody() }),
@@ -54,7 +57,8 @@ function harness({
     rateLimitTier: "default_claude_max_20x",
     subscriptionType: "active",
   }),
-  config = { enabled: true, intervalMs: 300000, usageEndpoint: "https://example/usage" },
+  probeAccounts = async () => ({ accounts: [] }),
+  config = { enabled: true, intervalMs: 300000, usageEndpoint: "https://example/usage", credentialMode: "oauth-login" },
 } = {}) {
   const emitted = [];
   const fetchCalls = [];
@@ -63,6 +67,7 @@ function harness({
   const w = startRatelimitPoller({
     clock,
     config,
+    probeAccounts,
     readToken,
     fetchUsage: async (token, opts) => {
       fetchCalls.push({ token, opts });
@@ -197,7 +202,7 @@ describe("tick — 429 backoff", () => {
     // Always-429: every real attempt grows the backoff toward the cap.
     const { w, fetchCalls } = harness({
       fetchUsage: async () => ({ status: 429, body: null }),
-      config: { enabled: true, intervalMs, usageEndpoint: "https://example/usage" },
+      config: { enabled: true, intervalMs, usageEndpoint: "https://example/usage", credentialMode: "oauth-login" },
     });
     let maxSkipRun = 0; // most skipped ticks observed before any real attempt
     let skipsSinceLastFetch = 0;
@@ -352,7 +357,7 @@ test("stop() calls clock.clearInterval with the registered handle", () => {
   const clock = recordingClock();
   const w = startRatelimitPoller({
     clock,
-    config: { enabled: true, intervalMs: 300000, usageEndpoint: "https://x/usage" },
+    config: { enabled: true, intervalMs: 300000, usageEndpoint: "https://x/usage", credentialMode: "oauth-login" },
     readToken: () => null,
     fetchUsage: async () => ({ status: 0, body: null }),
     resolveEmail: async () => null,
@@ -361,4 +366,105 @@ test("stop() calls clock.clearInterval with the registered handle", () => {
   expect(clock.wasCleared()).toBe(false);
   w.stop();
   expect(clock.wasCleared()).toBe(true);
+});
+
+// ─── CTL-2056: accounts-env credential path ──────────────────────────────────
+
+// Shared probe JSON fixture (mirrors the plan's representative shape).
+function probeJson(overrides = {}) {
+  return {
+    generatedAt: "2026-08-19T23:40:00Z",
+    accounts: [
+      {
+        label: "acct1",
+        email: "ops@coalesce.dev",
+        isActive: true,
+        overallStatus: "allowed_warning",
+        fiveHour: { pct: 96.0, resetsAt: "2026-08-20T04:40:00Z", status: "allowed_warning" },
+        sevenDay: { pct: 89.0, resetsAt: "2026-08-26T00:00:00Z", status: "allowed" },
+      },
+      {
+        label: "acct2",
+        email: "spare@coalesce.dev",
+        isActive: false,
+        fiveHour: { pct: 3.0, resetsAt: "2026-08-20T04:40:00Z", status: "allowed" },
+        sevenDay: { pct: 10.0, resetsAt: "2026-08-26T00:00:00Z", status: "allowed" },
+      },
+      ...(overrides.accounts ? [] : []),
+    ],
+    ...overrides,
+  };
+}
+
+function accountsHarness({
+  probeAccounts = async () => probeJson(),
+} = {}) {
+  const emitted = [];
+  const clock = recordingClock();
+  const w = startRatelimitPoller({
+    clock,
+    config: { enabled: true, intervalMs: 300000, usageEndpoint: "https://x/usage", credentialMode: "accounts-env" },
+    probeAccounts,
+    readToken: () => { throw new Error("should not be called on accounts-env path"); },
+    fetchUsage: async () => { throw new Error("should not be called on accounts-env path"); },
+    resolveEmail: async () => { throw new Error("should not be called on accounts-env path"); },
+    emit: (name, payload) => emitted.push({ name, payload }),
+  });
+  return { w, emitted, clock };
+}
+
+describe("tick — accounts-env path (CTL-2056)", () => {
+  test("emits the ACTIVE account's 5h/7d utilisation with 0-100 pct unchanged", async () => {
+    const { w, emitted } = accountsHarness();
+    await w.tick();
+    expect(emitted.length).toBe(1);
+    const { name, payload } = emitted[0];
+    expect(name).toBe(RATELIMIT_EVENT_SAMPLED);
+    expect(payload.email).toBe("ops@coalesce.dev");
+    expect(payload.fiveHourPct).toBe(96.0);
+    expect(payload.sevenDayPct).toBe(89.0);
+    expect(payload.fiveHourResetsAt).toBe("2026-08-20T04:40:00Z");
+    expect(payload.sevenDayResetsAt).toBe("2026-08-26T00:00:00Z");
+    // These fields are unavailable via the setup-token path.
+    expect(payload.opusPct).toBeNull();
+    expect(payload.sonnetPct).toBeNull();
+    expect(payload.rateLimitTier).toBeNull();
+    expect(payload.subscriptionType).toBeNull();
+  });
+
+  test("falls back to highest 5h-utilisation account when none is marked active", async () => {
+    const probe = probeJson({
+      accounts: [
+        { email: "a@x.com", isActive: false, fiveHour: { pct: 3.0, resetsAt: "2026-08-20T04:40:00Z" }, sevenDay: { pct: 10 } },
+        { email: "b@x.com", isActive: false, fiveHour: { pct: 96.0, resetsAt: "2026-08-20T04:40:00Z" }, sevenDay: { pct: 89 } },
+      ],
+    });
+    const { w, emitted } = accountsHarness({ probeAccounts: async () => probe });
+    await w.tick();
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].payload.email).toBe("b@x.com");
+    expect(emitted[0].payload.fiveHourPct).toBe(96.0);
+  });
+
+  test("empty probe → skips the tick, emits nothing, does not throw", async () => {
+    const { w, emitted } = accountsHarness({ probeAccounts: async () => ({ accounts: [] }) });
+    await expect(w.tick()).resolves.toBeUndefined();
+    expect(emitted.length).toBe(0);
+  });
+
+  test("throwing probe → skips the tick, emits nothing, does not throw", async () => {
+    const { w, emitted } = accountsHarness({ probeAccounts: async () => { throw new Error("spawn error"); } });
+    await expect(w.tick()).resolves.toBeUndefined();
+    expect(emitted.length).toBe(0);
+  });
+
+  test("legacy OAuth path still works when credentialMode=oauth-login", async () => {
+    const { w, emitted } = harness({
+      config: { enabled: true, intervalMs: 300000, usageEndpoint: "https://example/usage", credentialMode: "oauth-login" },
+    });
+    await w.tick();
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].name).toBe(RATELIMIT_EVENT_SAMPLED);
+    expect(emitted[0].payload.email).toBe(EMAIL);
+  });
 });
