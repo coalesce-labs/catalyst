@@ -290,3 +290,46 @@ describe("createClusterEntity forwards admissionReader through project() (CTL-13
     expect(view.nodes.find((n) => n.host === "mini")).toMatchObject({ accepting: false, holdReason: "drain" });
   });
 });
+
+// CTL-1864: consumer semantic guard — resolveCapacity stays correct under a slot-based
+// active_count. The slot count can legitimately exceed the ticket count when a yielded
+// ancillary phase + a running pipeline phase occupy the same ticket.
+describe("resolveCapacity clamp guard (CTL-1864 — slot-based active_count)", () => {
+  it("slot count=2 on maxParallel=3 yields freeSlots=1 (activeCount preferred over inFlightCount)", () => {
+    const view = assembleClusterView({
+      board: board([ticket("CTL-XYZ")]),
+      hosts: ["mini"],
+      heartbeats: { mini: "2026-06-13T10:00:00Z" },
+      // active_count is slot-based (2) while inFlightCount is ticket-based (1)
+      capacityReader: () => ({ maxParallel: 3, inFlightCount: 1, activeCount: 2 }),
+      now,
+    });
+    const mini = view.nodes.find((n) => n.host === "mini");
+    expect(mini?.freeSlots).toBe(1); // max(0, 3-2)
+    expect(mini?.activeCount).toBe(2);
+    // inFlightCount is still carried unchanged
+    expect(mini?.inFlightCount).toBe(1);
+  });
+
+  it("slot count equals maxParallel → freeSlots 0 (no underflow)", () => {
+    const view = assembleClusterView({
+      board: board([ticket("CTL-XYZ")]),
+      hosts: ["mini"],
+      heartbeats: { mini: "2026-06-13T10:00:00Z" },
+      capacityReader: () => ({ maxParallel: 3, inFlightCount: 1, activeCount: 3 }),
+      now,
+    });
+    expect(view.nodes.find((n) => n.host === "mini")?.freeSlots).toBe(0);
+  });
+
+  it("slot count exceeds maxParallel → freeSlots 0 (clamp holds, never negative)", () => {
+    const view = assembleClusterView({
+      board: board([ticket("CTL-XYZ")]),
+      hosts: ["mini"],
+      heartbeats: { mini: "2026-06-13T10:00:00Z" },
+      capacityReader: () => ({ maxParallel: 3, inFlightCount: 1, activeCount: 4 }),
+      now,
+    });
+    expect(view.nodes.find((n) => n.host === "mini")?.freeSlots).toBe(0);
+  });
+});
