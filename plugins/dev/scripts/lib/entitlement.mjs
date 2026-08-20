@@ -59,11 +59,50 @@ export const ENTITLEMENT_MODES = Object.freeze(["off", "shadow", "enforce"]);
 // zero-config, zero-behavior-change (mirrors DEPLOYMENT_MODE_DEFAULT's contract).
 const ENTITLEMENT_MODE_DEFAULT = "off";
 
-// Local-provider TTL. Deliberately a long window — the local provider never
-// actually expires anything (self ∈ its own roster is stable), but a provider
-// must expose a ttlMs for the ordering constraint (Phase 4). 15 min mirrors the
-// plan's ENTITLEMENT_TTL default (> HEARTBEAT_GRACE_MS 10 min, > CLAIM_STALE 5 min).
-const LOCAL_ENTITLEMENT_TTL_MS = 15 * 60 * 1000;
+// --- The load-bearing ordering constraint (CTL-1785 Phase 4) ---
+//
+// From the ticket: entitlement TTL MUST exceed the work-lease TTL, and losing
+// entitlement MUST revoke work leases — otherwise work is held by an unentitled
+// node and is invisible to a reclaim loop that iterates roster members (an orphan
+// by construction). This module owns the numeric half of that invariant.
+//
+// WORK_LEASE_TTL_MS mirrors the effective work-lease window — today the 5-minute
+// claim-stale gate (CLAIM_STALE_MS_DEFAULT, cluster-claim.mjs; also > the 4-minute
+// fence-fresh window FENCE_FRESH_MS_DEFAULT, fence-guard.mjs). It is duplicated
+// here rather than imported because this is a ZERO-IMPORT leaf (importing
+// cluster-claim.mjs would drag its whole graph). The final numbers are reconciled
+// with W12's real lease duration when the authority lands (plan Open Question 2).
+export const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
+
+// ENTITLEMENT_TTL_MS — 15 min: strictly greater than WORK_LEASE_TTL_MS (5 min) AND
+// than HEARTBEAT_GRACE_MS (10 min), so an entitlement lease outlives the work lease
+// it protects.
+export const ENTITLEMENT_TTL_MS = 15 * 60 * 1000;
+
+// assertEntitlementOrdering — throw LOUDLY if the ordering constraint is violated.
+// Pure + injectable so a test can feed a deliberately-inverted fixture and assert
+// it fires. Called once at module load with the real constants below, so importing
+// this leaf (config, doctor, the roster resolver) can never silently run with an
+// inverted TTL — the one constraint that, if broken, orphans work by construction.
+export function assertEntitlementOrdering(
+  entitlementTtlMs = ENTITLEMENT_TTL_MS,
+  workLeaseTtlMs = WORK_LEASE_TTL_MS,
+) {
+  if (!(Number(entitlementTtlMs) > Number(workLeaseTtlMs))) {
+    throw new Error(
+      `entitlement ordering violated: ENTITLEMENT_TTL_MS (${entitlementTtlMs}) must exceed ` +
+        `the work-lease TTL (${workLeaseTtlMs}) — otherwise an unentitled node holds work ` +
+        `invisible to the reclaim loop (orphan by construction, CTL-1785)`,
+    );
+  }
+  return true;
+}
+assertEntitlementOrdering();
+
+// Local-provider TTL. The local provider never actually expires anything (self ∈
+// its own roster is stable), but a provider must expose a ttlMs; it uses the same
+// ENTITLEMENT_TTL_MS window as the contract.
+const LOCAL_ENTITLEMENT_TTL_MS = ENTITLEMENT_TTL_MS;
 
 // verdict shape mirrors lane-claim.mjs (CTL-2068): a frozen VERDICT enum plus a
 // named REASON so a log line, an event, and a test all agree, and an operator

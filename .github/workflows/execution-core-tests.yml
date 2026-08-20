@@ -1401,4 +1401,5 @@ jobs:
             hosts-json-retired.test.mjs \
             entitlement-hosts.test.mjs \
             entitlement-shadow.test.mjs \
-            entitlement-audit.test.mjs
+            entitlement-audit.test.mjs \
+            entitlement-enforce.test.mjs

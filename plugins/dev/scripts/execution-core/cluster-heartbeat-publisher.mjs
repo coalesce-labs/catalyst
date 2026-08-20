@@ -36,12 +36,15 @@ import {
   getLivenessAnchorIssue,
   getLivenessReadSource, // CTL-1420 (#17): gate the Linear anchor publish on the active source
   LIVENESS_PUBLISH_INTERVAL_MS,
+  getEntitlementMode, // CTL-1785: entitlement rollout mode (off default)
+  defaultEntitlementProvider, // CTL-1785: local provider (self ∈ roster → entitled)
   log,
 } from "./config.mjs";
 import { publishHeartbeatSync } from "./cluster-heartbeat-sync.mjs";
 import { linearBreaker } from "./linear-breaker.mjs"; // CTL-1420 follow-up: share the CTL-679 breaker
 import { isRateClassLinearError } from "./cluster-heartbeat.mjs"; // rate-class discriminator (pure)
 import { emitFenceClaimed } from "./fence-event.mjs"; // CTL-863: Linear-free fence re-emit
+import { revokeLeasesOnEntitlementLoss } from "./entitlement-revoke.mjs"; // CTL-1785: revoke-on-loss teeth
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
 
 // localClusterGeneration — read this host's won fence generation for `ticket`
@@ -215,6 +218,13 @@ export function startLivenessPublisher({
   // CTL-1420 (#17): the active cross-host liveness source. Injectable seam so tests
   // can force loki|linear; defaults to the env-driven getLivenessReadSource().
   readSource = getLivenessReadSource,
+  // CTL-1785: entitlement revoke-on-loss seams. `entitlementMode` re-reads the
+  // rollout mode per tick (off default → no-op); `entitlementProvider` defaults to
+  // the local provider (self ∈ its own roster → always entitled → no-op today);
+  // `revoke` is the ordering-constraint teeth. All injectable for tests.
+  entitlementMode = getEntitlementMode,
+  entitlementProvider = defaultEntitlementProvider,
+  revoke = revokeLeasesOnEntitlementLoss,
 } = {}) {
   // Single-host no-op (no network, no publish, zero cost).
   if (!Array.isArray(roster) || roster.length <= 1) {
@@ -254,6 +264,21 @@ export function startLivenessPublisher({
     // liveness publish observe the same set (and ownedTickets is invoked exactly
     // once per tick, as before this fence re-emit was added).
     const owned = ownedTickets();
+    // CTL-1785: entitlement revoke-on-loss — the single daemon call site for the
+    // ordering-constraint teeth. If this host's entitlement has lapsed under an
+    // enforce-mode authority, release its held work leases (fence.released) so a
+    // reclaiming host can enumerate them. Off by default; under the local provider
+    // self is always entitled (self ∈ roster), so this is a guaranteed no-op until
+    // W12's authority provider is injected. Best-effort — a throw here never aborts
+    // the fence re-emit or liveness publish below.
+    try {
+      const eMode = entitlementMode();
+      if (eMode === "enforce") {
+        revoke({ self, ownedTickets: owned, provider: entitlementProvider(), mode: eMode, roster });
+      }
+    } catch {
+      /* best-effort — never block the tick on the entitlement check */
+    }
     // CTL-863: re-emit fence.claimed for each owned ticket FIRST, unconditionally
     // — BEFORE the breaker check below. This is a local, Linear-free event-log
     // append (zero app-actor traffic), so it must never be suppressed by the

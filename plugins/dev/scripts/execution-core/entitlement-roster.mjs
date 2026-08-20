@@ -15,7 +15,7 @@
 //            total-outage degrades to the full roster) and emits `entitlement.shed.*`.
 
 import { VERDICT } from "../lib/entitlement.mjs";
-import { ENTITLEMENT_WOULD_SHED } from "./entitlement-event.mjs";
+import { ENTITLEMENT_WOULD_SHED, ENTITLEMENT_SHED } from "./entitlement-event.mjs";
 
 // safeCheck — provider.check is contractually total (fail direction ENTITLED), but
 // an INJECTED provider (W12's authority, a test double) may throw. A throw here
@@ -67,7 +67,42 @@ export function resolveEntitledRoster({ mode, provider, hosts, self, emit } = {}
     return hosts;
   }
 
-  // Phase 4 wires the enforce branch (shed + self-always-admitted + degrade); until
-  // then enforce is behavior-neutral too (returns the full roster).
+  if (mode === "enforce") {
+    // Actually shed unentitled hosts from the roster dispatch/recovery hash over.
+    // Two fail-safes mirror computeSurvivingRoster / resolveDispatchRoster:
+    //   1. ALWAYS ADMIT SELF (liveness-deflap.mjs:77-82) — a node never sheds
+    //      itself, so it can always act on its own HRW slice.
+    //   2. TOTAL-OUTAGE DEGRADE — if shedding would empty the roster (authority
+    //      outage / everyone inconclusive AND self not listed), fall back to the
+    //      FULL roster rather than strand the fleet (scheduler.mjs total-outage
+    //      degrade). With self in the roster this can't trigger (self is admitted),
+    //      so it only guards the self-absent edge.
+    const kept = [];
+    const shedHosts = [];
+    for (const host of hosts) {
+      if (host === self) {
+        kept.push(host);
+        continue;
+      }
+      const v = safeCheck(provider, { host, roster: hosts });
+      if (v.verdict === VERDICT.UNENTITLED) {
+        shedHosts.push(host);
+        continue;
+      }
+      kept.push(host); // ENTITLED or inconclusive (fail-open) → keep
+    }
+    if (kept.length === 0) {
+      // Never strand the fleet. No shed events — nothing was actually removed.
+      return hosts;
+    }
+    if (shedHosts.length > 0 && typeof emit === "function") {
+      for (const host of shedHosts) {
+        emit(`${ENTITLEMENT_SHED}.${host}`, { host, self, mode, roster_size: hosts.length });
+      }
+    }
+    return kept;
+  }
+
+  // Unknown mode (should not happen — config gates off/shadow/enforce): fail-open.
   return hosts;
 }
