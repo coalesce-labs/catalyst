@@ -249,6 +249,9 @@ jobs:
       ${{ !cancelled() && (needs.detect-changes.result != 'success' ||
       needs.detect-changes.outputs.relevant == 'true') }}
     runs-on: ubuntu-latest
+    # CTL-2079: bound the job so a hung step reds fast, never rides GitHub's 6h
+    # default (timeout-minutes: 360). Healthy runs finish well under 20 min.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: plugins/dev/scripts/execution-core
@@ -336,6 +339,9 @@ jobs:
         run: bash plugins/dev/scripts/__tests__/catalyst-backup.test.sh
 
       - name: direnv fleet readiness test (CTL-1944)
+        # CTL-2079: the named hang site — red fast on an apt-lock rather than
+        # riding the job ceiling. A healthy apt install + the two suites run in ~1-2 min.
+        timeout-minutes: 8
         # The property under test is not "is direnv installed" — it is that every way of being
         # NOT-owner-ready renders RED. Two regression guards carry the weight: a BLOCKED .envrc
         # must not read as a clean host (the allowed-state is read positively from `Found RC
@@ -348,8 +354,12 @@ jobs:
         # this step failing to provision direnv is a RED result rather than a quiet pass.
         working-directory: .
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq direnv
+          # CTL-2079: non-interactive + dpkg-lock-bounded so an apt-lock wedge
+          # (contention with the runner's unattended-upgrades) fails fast with a
+          # clear error instead of hanging indefinitely.
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq direnv
           direnv version
           bash plugins/dev/scripts/__tests__/check-direnv-fleet.test.sh
           # CTL-1956: the provisioning half. The check
@@ -468,9 +478,13 @@ jobs:
         # two assertions SKIP (not fail) when zsh is absent, and this workflow's other
         # zsh install lands hundreds of lines later — so without this step the required
         # check could pass without ever exercising the shell that caused the regression.
-        run:
-          command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y
-          --no-install-recommends zsh)
+        # CTL-2079: install zsh only when absent, but non-interactive + dpkg-lock-bounded
+        # so an apt-lock wedge fails fast instead of hanging.
+        run: |
+          command -v zsh >/dev/null 2>&1 || \
+            (export DEBIAN_FRONTEND=noninteractive && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 update -qq && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends zsh)
 
       - name: cloud-sync token probe test
         working-directory: plugins/dev/scripts
@@ -1028,9 +1042,13 @@ jobs:
         # without this step the required check could pass without ever exercising
         # the zsh path. Installed explicitly rather than assumed present on the
         # runner image so the regression coverage doesn't silently degrade to a skip.
-        run:
-          command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y
-          --no-install-recommends zsh)
+        # CTL-2079: install zsh only when absent, but non-interactive + dpkg-lock-bounded
+        # so an apt-lock wedge fails fast instead of hanging.
+        run: |
+          command -v zsh >/dev/null 2>&1 || \
+            (export DEBIAN_FRONTEND=noninteractive && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 update -qq && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends zsh)
 
       - name: phase-artifact-gate contract + zsh regression test
         # Covers match_thoughts_artifact (tail/slug/case forms, cross-ticket
