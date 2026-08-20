@@ -409,6 +409,7 @@ export function runGithubFeedTick({
  */
 export function startGithubFeedTimer({
   mode,
+  source = null,
   intervalSec = 30,
   orchDir,
   account = resolveAccount(),
@@ -456,7 +457,7 @@ export function startGithubFeedTimer({
     // written while healthy is indistinguishable from a dead process — which is the
     // same failure the staleness bound exists for, arriving one step earlier. The
     // un-ready ticks are the ones whose REASON an operator most needs.
-    writeReadyState(readyFile, { ...state, at: Date.now(), intervalSec }, { logger });
+    writeReadyState(readyFile, { ...state, source, at: Date.now(), intervalSec }, { logger });
   };
 
   const tick = () => {

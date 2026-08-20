@@ -2402,8 +2402,8 @@ export function readCloudFeedConfig(envObj = process.env) {
 // the wrong direction for a containment knob — an operator reaching for the env var
 // to REDUCE actuation would have silently left a Layer-2 `enforce` live.
 export function readGithubFeedConfig(envObj = process.env) {
-  const { mode, intervalSec } = resolveGithubFeedMode({ env: envObj });
-  return { mode, intervalSec };
+  const { mode, intervalSec, source } = resolveGithubFeedMode({ env: envObj });
+  return { mode, intervalSec, source };
 }
 
 // CTL-1889: Linear write-proxy mode reader. Same ladder as readCloudFeedConfig —

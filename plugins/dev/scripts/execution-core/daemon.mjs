@@ -1763,6 +1763,7 @@ export function startDaemon({
     if (githubFeedCfg.mode !== "off") {
       _githubFeedTimer = startGithubFeedTimer({
         mode: githubFeedCfg.mode,
+        source: githubFeedCfg.source,
         intervalSec: githubFeedCfg.intervalSec,
         orchDir,
         dbPath: getReplicaDbPath(),
