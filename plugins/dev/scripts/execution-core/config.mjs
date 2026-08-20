@@ -85,6 +85,10 @@ export {
   resolveDeploymentMode,
   getDeploymentMode,
 } from "../lib/deployment-mode.mjs";
+// CTL-1786: a LOCAL binding of the deployment resolver. The block above is `export … from`,
+// which re-exports without creating a usable local name, so resolveLeaseAuthorityMode's
+// single-host coherence needs this explicit import to call it in the module body.
+import { resolveDeploymentMode as resolveDeploymentModeLocal } from "../lib/deployment-mode.mjs";
 // CTL-1929: the canonical github-feed resolver. Zero-import leaf for the same reason
 // deployment-mode.mjs above is one — doctor.mjs runs under bare Node and cannot load
 // this file (its chain reaches bun:sqlite via linear-query.mjs).
@@ -2244,6 +2248,52 @@ export function readLinearWriteProxyConfig(envObj = process.env) {
     if (Object.keys(clean).length > 0) routes = clean;
   }
   return { mode, routes };
+}
+
+// CTL-1786: lease-authority claim mode reader. Same ladder as readLinearWriteProxyConfig —
+// env (CATALYST_LEASE_AUTHORITY) > Layer-2 (.catalyst.leaseAuthority.mode) > 'off'.
+//
+// ⛔ DELIBERATELY NOT READ FROM LAYER-1. This gate sits on the LIVE claim/dispatch path, so it
+// follows the write-proxy / cloud-feed containment posture, NOT the plan's literal "Layer-1"
+// mention: a claim gate in the committable Layer-1 config would let a MERGE flip the whole fleet
+// into enforce with no operator action and no per-host rollback (the exact hazard the githubFeed
+// reader's comment above spells out). Enforce is opted into per host via env or the host-local
+// Layer-2, and it ships 'off' so merging this wiring is a strict no-op everywhere until an
+// operator says otherwise.
+//
+// Deployment coherence: on a single-host deployment there are no peers to arbitrate, so `enforce`
+// degrades to `off` — a single-host clone that inherited an enforce env can never block its own
+// dispatch on a cloud round-trip. (The claim path is already unreachable single-host — callers
+// gate on a non-null clusterGeneration — this makes the guarantee explicit and fail-safe.) The
+// deployment read is wrapped so it can never throw the resolution.
+export const LEASE_AUTHORITY_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2LeaseAuthority() {
+  try {
+    const p = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.leaseAuthority;
+    return p && typeof p === "object" ? p : {};
+  } catch {
+    return {};
+  }
+}
+
+export function resolveLeaseAuthorityMode(envObj = process.env) {
+  const l2 = readLayer2LeaseAuthority();
+  const env = envObj.CATALYST_LEASE_AUTHORITY;
+  let mode;
+  if (env === "0") mode = "off";
+  else if (typeof env === "string" && LEASE_AUTHORITY_MODES.has(env)) mode = env;
+  else if (typeof l2.mode === "string" && LEASE_AUTHORITY_MODES.has(l2.mode)) mode = l2.mode;
+  else mode = "off";
+  if (mode === "enforce") {
+    try {
+      const dep = resolveDeploymentModeLocal({ env: envObj });
+      if (dep?.mode === "single-host") mode = "off";
+    } catch {
+      // Deployment mode unreadable → leave enforce (cluster is this repo's Layer-1 default).
+    }
+  }
+  return mode;
 }
 
 // CTL-1245: dead-but-running doc-worker reclaim mode reader. Mirrors

@@ -1183,6 +1183,9 @@ jobs:
             cluster-claim-sync.test.mjs \
             cluster-claim.test.mjs \
             cluster-attachment-transport.test.mjs \
+            lease-authority.test.mjs \
+            lease-authority-claim.test.mjs \
+            lease-authority-gate.test.mjs \
             cluster-heartbeat.test.mjs \
             cluster-heartbeat-capacity.test.mjs \
             comms-drain.test.mjs \

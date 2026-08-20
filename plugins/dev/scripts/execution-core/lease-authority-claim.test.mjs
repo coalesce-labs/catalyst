@@ -36,7 +36,10 @@ function makeFakeAuthority({ grantBoth = false, requireEntitlement = false } = {
       if (held && !grantBoth) {
         return { won: false, refusal: "lease_held", current: held };
       }
-      const nonce = `nonce-${(nonceSeq += 1)}`;
+      // Numeric nonce — the fence machinery requires a finite-number generation (see
+      // grantGeneration). The real client maps grant → number; this fake returns the mapped
+      // value directly since it stands in for the whole client.
+      const nonce = (nonceSeq += 1);
       if (!held) leases.set(key, { holder: node, nonce });
       return { won: true, generation: nonce, grant: { nonce } };
     },
@@ -81,7 +84,7 @@ describe("AC-1 — two racers, exactly one wins", () => {
     const authority = makeFakeAuthority();
     const res = await claimViaLease({ ticket: "CTL-9", phase: "triage", hostName: "mini", client: authority.client });
     expect(res.won).toBe(true);
-    expect(typeof res.generation).toBe("string");
+    expect(Number.isFinite(res.generation)).toBe(true);
     expect(authority.leases.get("CTL-9::triage").nonce).toBe(res.generation);
   });
 });
@@ -166,7 +169,7 @@ describe("not_entitled self-heals; transient retries; lease_held never retries",
       claim: () => {
         attempts += 1;
         if (attempts <= 2) throw new LeaseAuthorityError("server-error", { retryable: true, status: 503 });
-        return { won: true, generation: "n-late", grant: { nonce: "n-late" } };
+        return { won: true, generation: 99, grant: { nonce: 99 } };
       },
       entitle: () => ({ ok: true, entitlement: {} }),
     };

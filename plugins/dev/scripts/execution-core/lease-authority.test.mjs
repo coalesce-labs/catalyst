@@ -16,6 +16,7 @@ import {
   LEASE_WOULD_REFUSE_EVENT,
   LeaseAuthorityError,
   createLeaseAuthorityClient,
+  grantGeneration,
   parseLeaseHttpResult,
   probeAuth,
   resolveLeaseBaseUrl,
@@ -102,9 +103,24 @@ describe("parseLeaseHttpResult — raw transport → {transportOk,status,bodyTex
   });
 });
 
+describe("grantGeneration — the fence-compatible NUMERIC generation mapping", () => {
+  test("a numeric nonce is the generation (the plan's nonce-as-generation)", () => {
+    expect(grantGeneration({ nonce: 7 })).toBe(7);
+    expect(grantGeneration({ nonce: "42" })).toBe(42);
+  });
+  test("a non-numeric nonce falls back to coordinationHeadSeqAtGrant (still a finite number)", () => {
+    expect(grantGeneration({ nonce: "uuid-abc", coordinationHeadSeqAtGrant: 5 })).toBe(5);
+  });
+  test("neither numeric → null (caller throws rather than freeze the fence)", () => {
+    expect(grantGeneration({ nonce: "uuid-abc" })).toBeNull();
+    expect(grantGeneration({})).toBeNull();
+    expect(grantGeneration(null)).toBeNull();
+  });
+});
+
 describe("claim — request shape", () => {
   test("POSTs to ${base}/lease/claim with body {ticket,phase,node,ttlMs} and the key as bearer", () => {
-    const { httpFn, calls } = fakeHttp(ok({ claimed: true, grant: { nonce: "n1", expiresAtMs: 1, scope: { ticket: "CTL-1", phase: "implement" } } }));
+    const { httpFn, calls } = fakeHttp(ok({ claimed: true, grant: { nonce: 1, expiresAtMs: 1, scope: { ticket: "CTL-1", phase: "implement" } } }));
     const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
     client.claim({ ticket: "CTL-1", phase: "implement", node: "mini", ttlMs: 60000 });
     expect(calls).toHaveLength(1);
@@ -130,12 +146,12 @@ describe("claim — request shape", () => {
 
 describe("claim — outcome classification", () => {
   test("win: {claimed:true, grant:{nonce}} → {won:true, generation:nonce}", () => {
-    const grant = { nonce: "nonce-abc", expiresAtMs: 123, scope: { ticket: "CTL-1", phase: "implement" } };
+    const grant = { nonce: 314, expiresAtMs: 123, scope: { ticket: "CTL-1", phase: "implement" } };
     const { httpFn } = fakeHttp(ok({ claimed: true, grant, lease: { id: "L1" }, attribution: { by: "store" } }));
     const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
     const res = client.claim({ ticket: "CTL-1", phase: "implement", node: "mini" });
     expect(res.won).toBe(true);
-    expect(res.generation).toBe("nonce-abc");
+    expect(res.generation).toBe(314);
     expect(res.grant).toEqual(grant);
   });
 

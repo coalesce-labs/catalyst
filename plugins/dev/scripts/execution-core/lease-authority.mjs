@@ -38,6 +38,9 @@
 // layer can bound-retry the transient ones and give up loudly on the terminal ones. A claim
 // path may NEVER return a silent `won:true` it did not earn — an ambiguous 2xx throws.
 
+import { randomBytes } from "node:crypto";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   defaultHttpFn,
   parseProxyBody,
@@ -45,6 +48,8 @@ import {
   resolveProxyBaseUrl,
   scrub,
 } from "./linear-write-proxy.mjs";
+import { getEventLogPath } from "./config.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
 /** The lease verb family. Frozen — this is DATA. Distinct from the write-proxy /agent/* family. */
 export const LEASE_VERBS = Object.freeze(["entitle", "claim", "renew", "release", "revoke"]);
@@ -146,6 +151,28 @@ function leaseErrorForStatus(status, body) {
 const is2xx = (status) => status !== null && status >= 200 && status < 300;
 
 /**
+ * grantGeneration — map a lease grant to the numeric `generation` the fence machinery uses.
+ *
+ * ⛔ THE GENERATION MUST BE A FINITE NUMBER. `fence-guard.mjs:readClusterGeneration` returns
+ * `Number.isFinite(g.generation) ? … : null` and `parseClaimMetadata` coerces to Number — a
+ * NON-numeric token written to `cluster-generation.json` reads back as null, fails the fence
+ * closed, and suppresses every external write (the CTL-1423 board-freeze shape). The plan's
+ * "grant.nonce IS the generation" holds when the nonce is numeric; when it is not (a UUID-style
+ * nonce), the numeric `coordinationHeadSeqAtGrant` is the fencing token instead. Either way this
+ * returns a finite number so fence-guard stays UNCHANGED. Returns null when neither is numeric,
+ * which the caller turns into a LOUD `grant-missing-nonce` throw rather than a board-freezing write.
+ */
+export function grantGeneration(grant) {
+  const nonce = grant?.nonce;
+  if (nonce != null && nonce !== "") {
+    const n = Number(nonce);
+    if (Number.isFinite(n)) return n;
+  }
+  if (Number.isFinite(grant?.coordinationHeadSeqAtGrant)) return grant.coordinationHeadSeqAtGrant;
+  return null;
+}
+
+/**
  * createLeaseAuthorityClient — the installed client.
  *
  * `{ entitle, claim, release, renew }`. Each verb builds a JSON body, POSTs it through the
@@ -215,15 +242,16 @@ export function createLeaseAuthorityClient({
           throw new LeaseAuthorityError("unreadable-claim-body", { retryable: true, status });
         }
         if (body.claimed === true) {
-          const nonce = body?.grant?.nonce;
-          if (typeof nonce !== "string" && typeof nonce !== "number") {
-            // A win we cannot turn into a generation is useless AND dangerous — fail loud
-            // rather than return won:true with no token to write into cluster-generation.json.
+          const generation = grantGeneration(body.grant);
+          if (generation === null) {
+            // A win we cannot turn into a FINITE-NUMBER generation is useless AND dangerous —
+            // fail loud rather than return won:true with a token fence-guard reads as null and
+            // freezes the board on. See grantGeneration.
             throw new LeaseAuthorityError("grant-missing-nonce", { retryable: false, status });
           }
           return {
             won: true,
-            generation: nonce,
+            generation,
             grant: body.grant,
             lease: body.lease ?? null,
             attribution: body.attribution ?? null,
@@ -287,6 +315,90 @@ export function createLeaseAuthorityClient({
       throw new LeaseAuthorityError("renew-not-implemented", { retryable: false });
     },
   };
+}
+
+// ─── Shadow-mode observation (CTL-1786 Phase 3) ──────────────────────────────
+//
+// In `shadow` the host runs the real lease claim to compare against the authoritative attachment
+// verdict, and records the would-be outcome as a v2 event. Two names (grant/refuse), not a flag,
+// so an off-machine Loki alert can select divergence from `attributes` alone. Modeled on
+// fence-event.mjs / buildProxyEvent so the audit families agree on channel/actor/stream_class.
+
+/**
+ * buildLeaseClaimEvent — the v2 JSONL envelope (string + "\n") for one shadow observation.
+ * `won` selects would-grant vs would-refuse. The generation (win) or refusal (loss) rides both
+ * the payload and — because otel-forward strips `body.payload` — the attributes.
+ */
+export function buildLeaseClaimEvent(
+  { ticket, phase, node, won, generation = null, refusal = null },
+  {
+    now = () => new Date(),
+    newId = () => randomBytes(8).toString("hex"),
+    newTrace = () => randomBytes(16).toString("hex"),
+    newSpan = () => randomBytes(8).toString("hex"),
+  } = {},
+) {
+  const name = won ? LEASE_WOULD_GRANT_EVENT : LEASE_WOULD_REFUSE_EVENT;
+  const ts = now().toISOString().replace(/\.\d{3}Z$/, "Z");
+  return (
+    JSON.stringify({
+      ts,
+      id: newId(),
+      observedTs: ts,
+      severityText: "INFO",
+      severityNumber: 9,
+      traceId: newTrace(),
+      spanId: newSpan(),
+      channel: "execution-core",
+      resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
+      attributes: {
+        "event.name": ticket ? `${name}.${ticket}` : name,
+        "event.stream_class": "coordination",
+        "event.entity": "lease",
+        "event.action": won ? "would-grant" : "would-refuse",
+        "event.label": ticket ?? phase,
+        "event.channel": "execution-core",
+        "linear.issue.identifier": ticket ?? undefined,
+        "catalyst.lease.phase": phase ?? undefined,
+        "catalyst.lease.node": node ?? undefined,
+        "catalyst.lease.generation": won ? (generation ?? undefined) : undefined,
+        "catalyst.lease.refusal": won ? undefined : (refusal ?? undefined),
+      },
+      body: {
+        payload: {
+          ticket: ticket ?? null,
+          phase: phase ?? null,
+          node: node ?? null,
+          won: !!won,
+          generation: won ? (generation ?? null) : null,
+          refusal: won ? null : (refusal ?? null),
+        },
+      },
+    }) + "\n"
+  );
+}
+
+/** defaultAppendLeaseEvent — append one line to the canonical event log (local disk only). */
+export function defaultAppendLeaseEvent(line) {
+  const logPath = getEventLogPath();
+  mkdirSync(dirname(logPath), { recursive: true });
+  appendFileSync(logPath, line);
+}
+
+/**
+ * emitLeaseClaimObservation — build + append one shadow observation. Returns true on success,
+ * false on any error (swallowed) — a telemetry write must never fail a dispatch.
+ */
+export function emitLeaseClaimObservation(
+  { ticket, phase, node, won, generation = null, refusal = null },
+  { append = defaultAppendLeaseEvent } = {},
+) {
+  try {
+    append(buildLeaseClaimEvent({ ticket, phase, node, won, generation, refusal }));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

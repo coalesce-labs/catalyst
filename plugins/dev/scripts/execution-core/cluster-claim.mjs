@@ -23,7 +23,7 @@ import {
   resolveAttachmentTransport,
 } from "./cluster-attachment-transport.mjs";
 import { createLinearWriteProxy } from "./linear-write-proxy.mjs";
-import { readLinearWriteProxyConfig } from "./config.mjs";
+import { readLinearWriteProxyConfig, resolveLeaseAuthorityMode } from "./config.mjs";
 // CTL-1786 — the lease-authority client half of CTC-410. The refusable claim path lives beside
 // the attachment soft-CAS here so `runCli`/`defaultTransport` can select it on the env gate with
 // ZERO change to any caller: it returns the same {won, generation} contract.
@@ -31,6 +31,7 @@ import {
   DEFAULT_WORK_TTL_MS,
   LeaseAuthorityError,
   createLeaseAuthorityClient,
+  emitLeaseClaimObservation,
   ensureEntitled as defaultEnsureEntitled,
 } from "./lease-authority.mjs";
 //
@@ -473,6 +474,44 @@ export function defaultLeaseClient(env = process.env) {
   return createLeaseAuthorityClient({ env });
 }
 
+/**
+ * observeLeaseClaim — the SHADOW-mode side call. Runs the real lease claim purely to record the
+ * would-be verdict; the attachment CAS remains authoritative for the dispatch decision. NEVER
+ * throws — a shadow observation must not fail a dispatch — so a cloud outage in shadow is logged
+ * as a missing observation, not a dropped ticket.
+ */
+export async function observeLeaseClaim({ ticket, phase, hostName, client, append = undefined }) {
+  try {
+    const res = await claimViaLease({ ticket, phase, hostName, client });
+    emitLeaseClaimObservation(
+      { ticket, phase, node: hostName, won: res.won, generation: res.generation, refusal: res.won ? null : "lease_held" },
+      append ? { append } : {},
+    );
+    return res;
+  } catch {
+    // Shadow must never fail the dispatch. The lost observation self-heals next sweep.
+    return null;
+  }
+}
+
+/**
+ * releaseViaLease — hand the lease back on phase-terminal so the slot frees before its TTL (the
+ * lease analogue of emitFenceReleased). Best-effort: a null nonce is a no-op (nothing to release),
+ * and a transport throw is swallowed because the lease expires at TTL regardless. `client` is the
+ * lease client; `nonce` is the grant nonce written into cluster-generation.json at claim-win.
+ */
+export async function releaseViaLease({ ticket, phase, holder, nonce, client }) {
+  if (!client || nonce === null || nonce === undefined || nonce === "") {
+    return { released: false, skipped: true };
+  }
+  try {
+    const res = await client.release({ ticket, phase, holder, nonce });
+    return { released: res?.released !== false, skipped: false };
+  } catch (err) {
+    return { released: false, skipped: false, error: err?.reason ?? String(err?.message ?? err) };
+  }
+}
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 // A thin argv shim so the SYNCHRONOUS daemon (scheduler.mjs / monitor.mjs) can
 // drive these async claim/fence functions through spawnSync — the same
@@ -546,20 +585,55 @@ export function defaultTransport({ env = process.env, post = defaultPost } = {})
   return resolveAttachmentTransport({ mode, post, proxy, caller: "cluster-claim" });
 }
 
-export async function runCli(argv, { post = defaultPost, transport = null } = {}) {
+export async function runCli(
+  argv,
+  {
+    post = defaultPost,
+    transport = null,
+    // CTL-1786 lease-authority gate seams. `env` selects the mode; `leaseMode`/`leaseClient`/
+    // `appendLeaseEvent` are test overrides. The env gate is read here (not passed down through
+    // the sync bridge) because the mode rides the inherited env across the spawnSync boundary,
+    // exactly like CATALYST_LINEAR_WRITE_PROXY.
+    env = process.env,
+    leaseMode = null,
+    leaseClient = null,
+    appendLeaseEvent = null,
+  } = {},
+) {
   const t = transport ?? defaultTransport({ post });
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "claim": {
       const [ticket, hostName, phase, issueIdRaw] = rest;
       const issueId = issueIdRaw != null && issueIdRaw !== "" ? issueIdRaw : null;
+      const mode = leaseMode ?? resolveLeaseAuthorityMode(env);
       // CTL-2033: REPORT the failure instead of only throwing it. The catch is
       // scoped to `claim` alone — every other subcommand keeps the module's
       // top-level catch (stderr + exit 1) byte-for-byte. stdout stays exactly one
       // JSON line either way, so the wrapper's "take the last non-empty line"
       // parse is unchanged; stderr keeps a human line for an operator grep.
       try {
-        const res = await claimTicket(ticket, hostName, phase, { post, transport: t, issueId });
+        let res;
+        if (mode === "enforce") {
+          // CTL-1786: the lease authority IS the claim. A refusal returns {won:false}
+          // (a lost race, exit 0); a terminal failure throws → exit 11 (a stall).
+          const client = leaseClient ?? defaultLeaseClient(env);
+          res = await claimViaLease({ ticket, phase, hostName, client });
+        } else {
+          if (mode === "shadow") {
+            // Observe the real lease claim, emit telemetry, but keep the ATTACHMENT
+            // verdict authoritative. Never throws.
+            const client = leaseClient ?? defaultLeaseClient(env);
+            await observeLeaseClaim({
+              ticket,
+              phase,
+              hostName,
+              client,
+              append: appendLeaseEvent ?? undefined,
+            });
+          }
+          res = await claimTicket(ticket, hostName, phase, { post, transport: t, issueId });
+        }
         process.stdout.write(JSON.stringify(res) + "\n");
         return 0;
       } catch (err) {
