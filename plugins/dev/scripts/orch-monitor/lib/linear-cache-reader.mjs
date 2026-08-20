@@ -516,8 +516,15 @@ async function readEligibleById(eligibleDir) {
 
 // readLinearCache — assemble the enrichment `byId` map the read-model hands to
 // board-data, merging the durable ticket_state descriptor (authoritative) with
-// the eligible projection (gap-filler). Pure-ish: all sources are injectable so
-// the unit tests drive it without a real DB or homedir layout.
+// the eligible projection (gap-filler) and the SDK-managed replica (CTC-133
+// Phase 2: replica-first for display facts). Pure-ish: all sources are injectable
+// so the unit tests drive it without a real DB or homedir layout.
+//
+// Source priority for display facts: replica > ticket_state > eligible.
+// Exception — `project`: eligible is the SOLE source (ticket_state has no project
+// column; replica.project is ignored here — Open Q1 in the CTC-133 research doc).
+// Fence/ownership data comes from ticket_state (ticket_fence reads happen in
+// gateway-read.mjs; this layer does not reach broker-state for fence data).
 //
 // Returns: { [ticketId]: { priority, estimate, project, labels, relations,
 //   assignee, linearState, title, ownerHost, generation, fencePhase, claimedAt,
@@ -528,6 +535,12 @@ export async function readLinearCache({
   // injection seams for tests (default to the real durable-cache readers)
   ticketStateReader = readTicketStateById,
   eligibleReader = readEligibleById,
+  // CTC-133 Phase 2: replica reader injection seam. Defaults to readReplicaTicketDetails.
+  // Accepts { ids, dbPath } and returns { [id]: details } — fail-open (never throws into caller).
+  // Injected as null (not the default) to skip the replica tier when the caller
+  // provides no replicaReader explicitly (backward-compatible: the real default
+  // readReplicaTicketDetails is only used when this field is left undefined).
+  replicaReader = readReplicaTicketDetails,
   // The read-model passes the live breaker state purely so this function can
   // record that it is serving cache-only while the breaker is open. There is no
   // refresh path to gate — cache is ALWAYS served — so this is informational.
@@ -543,36 +556,56 @@ export async function readLinearCache({
   const ticketState = tsRes.status === "fulfilled" ? tsRes.value : {};
   const eligible = elRes.status === "fulfilled" ? elRes.value : {};
 
-  const ids = new Set([...Object.keys(ticketState), ...Object.keys(eligible)]);
+  const ids = [...new Set([...Object.keys(ticketState), ...Object.keys(eligible)])];
+
+  // CTC-133 Phase 2: read replica facts for the full id set.
+  // Fail-open: any failure (DB absent/stale/locked) degrades to {} so the
+  // ticket_state + eligible chain continues to serve facts as before.
+  let replicaFacts = {};
+  if (ids.length > 0 && typeof replicaReader === "function") {
+    try {
+      const rep = await replicaReader({ ids, dbPath });
+      if (rep && typeof rep === "object") replicaFacts = rep;
+    } catch {
+      // replica unavailable → fall through to ticket_state + eligible chain
+    }
+  }
+
   const byId = {};
   for (const id of ids) {
     const ts = ticketState[id];
     const el = eligible[id];
+    const rep = replicaFacts[id]; // undefined = miss; null = absent
+
+    // Normalize replica labels: details() returns { name, color }[] objects;
+    // the board cache only needs label name strings.
+    const repLabels = Array.isArray(rep?.labels)
+      ? rep.labels.map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean)
+      : null;
+
     byId[id] = {
-      // priority: ticket_state first, else eligible, else 0 (Linear "no priority")
-      priority: ts?.priority ?? el?.priority ?? 0,
-      // CTL-957: estimate now flows from ticket_state (broker projects it from
-      // Linear webhooks) — or from the eligible projection when ticket_state
-      // has no row yet (queued ticket, not yet started). Honest null when
-      // neither cache has seen an estimate for this ticket.
-      estimate: ts?.estimate ?? el?.estimate ?? null,
-      // project: ticket_state has no project column, so eligible owns it
-      project: ts?.project ?? el?.project ?? null,
-      labels: ts?.labels ?? [],
-      relations: ts?.relations ?? el?.relations ?? null,
+      // replica-first for display facts; ticket_state as fallback; eligible as final fallback
+      priority: rep?.priority ?? ts?.priority ?? el?.priority ?? 0,
+      // CTL-957: estimate flows from replica (authoritative) → ticket_state (broker-projected
+      // from webhooks) → eligible (queued ticket, not yet started). Honest null when none.
+      estimate: rep?.estimate ?? ts?.estimate ?? el?.estimate ?? null,
+      // project: eligible is the SOLE source — ticket_state has no project column and
+      // replica.project is intentionally ignored here (Open Q1 in CTC-133 research).
+      project: el?.project ?? ts?.project ?? null,
+      // labels: replica-first (normalized to name strings); fallback to ticket_state.
+      labels: repLabels ?? ts?.labels ?? [],
+      // relations: replica details() includes a full relation graph; fallback to ts/el.
+      relations: rep?.relations ?? ts?.relations ?? el?.relations ?? null,
+      // assignee: replica details() has no assignee field (no users JOIN in detailsSelect);
+      // ticket_state remains the source until a dedicated replica.assignee() is added.
       assignee: ts?.assignee ?? null,
-      linearState: ts?.linearState ?? null,
-      // title: ticket_state has no title column, so the eligible projection is
-      // the only durable source (BFF9). Honest null when neither cache has it.
-      title: ts?.title ?? el?.title ?? null,
-      // CTL-922 (BFF10) + CTL-884 (BFF2): the owning host NAME + fence companions
-      // (generation, phase, claimed-at, held-since), projected into ticket_state
-      // by the broker (BFF11). The eligible projection carries no fence data —
-      // ticket_state is the sole durable source. board-data uses ownerHost (host
-      // fallback) and generation (the value the web mutations pass to
-      // isFenceCurrent without a live attachment fetch); the cluster view (BFF2)
-      // groups by ownerHost and renders hold duration from heldSince. null when
-      // no fence attachment has been observed for the ticket.
+      // linearState: replica state.name (synthesized from timestamps) > ticket_state.
+      linearState: rep?.state?.name ?? ts?.linearState ?? null,
+      // title: replica-first (BFF9 fix — ticket_state still has no title column).
+      title: rep?.title ?? ts?.title ?? el?.title ?? null,
+      // CTL-922 (BFF10) + CTL-884 (BFF2): fence/ownership data. ticket_state is the
+      // sole durable source here — gateway-read.mjs owns the ticket_fence prefer-new
+      // fallback logic. The eligible projection carries no fence data.
       ownerHost: ts?.ownerHost ?? null,
       generation: ts?.generation ?? null,
       fencePhase: ts?.fencePhase ?? null,
