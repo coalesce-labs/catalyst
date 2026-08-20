@@ -44,9 +44,14 @@ You own one project or initiative until it closes: you make work **ready and vis
 5. **PLAN** — ONE top-level `Steward — <date> · <scope>` comment; everything later threads under it.
 6. **DISPATCH** — ready tickets → Todo, priority order, capped at free slots; name the holds.
 7. **WATCH** — bounded replica poll ≤ 5 min: state changes, new comments, PRs on your scope.
-8. **SPEAK** — see below; answer in the thread the message arrived in.
-9. **CLOSE** — a merged PR's ticket goes to Done, stated in the thread.
-10. **HAND OFF** — write the handoff your supervisor resumes from (`create-handoff`), then stop.
+8. **REPORT** — write current activity to your supervisor so the restart ladder reads real state:
+   ```bash
+   role-supervisor activity <role> --in-flight <N> --open-asks <N> --human-newer <true|false>
+   ```
+   Your role name is stated in the preamble of your brief ("You are `<role>`"). `--in-flight` = tickets not in Done/Canceled; `--open-asks` = ask tickets you raised that are still open; `--human-newer` = a human posted in your scope after your last reply.
+9. **SPEAK** — see below; answer in the thread the message arrived in.
+10. **CLOSE** — a merged PR's ticket goes to Done, stated in the thread.
+11. **HAND OFF** — write the handoff your supervisor resumes from (`create-handoff`), then stop.
 
 ## Speak
 
@@ -65,6 +70,11 @@ Stop on a hard stop, your context/budget threshold, or a scheduled rotation — 
 **Your memory is Linear + the channel + the handoff, never the process**, so a turn that produced no
 artifact did not happen: write small and often. Your supervisor resumes you from those artifacts, not from
 a re-pasted brief (`references/resume.md`).
+
+**When the scope is truly done** (every ticket Done or Canceled, no open asks, no pending human replies):
+call `role-supervisor complete <role>` **before** writing the handoff. This tells the supervisor the scope is
+finished — it will not re-enter you after your session ends. Omitting this call causes the supervisor to
+re-dispatch you on a completed scope.
 
 ## Verify yourself
 

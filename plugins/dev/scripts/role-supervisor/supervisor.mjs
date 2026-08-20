@@ -113,7 +113,6 @@ export async function superviseRole(role, {
     for (;;) {
       if (++iterations > maxIterations) return { stopped: "max-iterations", attempt };
 
-      const scopeActive = isScopeActive(manifest.activity ?? {});
       const resumeSessionId = readSession(role, env);
       const prompt = resumeSessionId
         ? buildIdleReentryPrompt()
@@ -154,13 +153,21 @@ export async function superviseRole(role, {
       if (result?.sessionId) writeSession(role, result.sessionId, env);
       beat(role, { now: now(), sessionId: result?.sessionId ?? resumeSessionId, scope: manifest.scope, state: "between-sessions", lastArtifact: result?.lastArtifact ?? null }, env);
 
+      // CTL-2095: re-read the manifest AFTER the session completes so that a steward
+      // which called `role-supervisor complete` during its turn is honoured. The
+      // top-of-iteration read (used for the resume-prompt build) may remain stale —
+      // only the DECISION must use the fresh copy. isScopeActive is computed here,
+      // replacing the stale value from the top of the loop.
+      const freshManifest = readManifest(role, env) ?? manifest;
+      const freshScopeActive = isScopeActive(freshManifest.activity ?? {});
+
       const counters = readCounters(role, env);
       const decision = decideRestart({
         exitCode: result?.exitCode ?? 1,
         overloaded: !!result?.overloaded,
         quotaExhausted: !!result?.quotaExhausted,
         stopRequested: !!result?.stopRequested,
-        scopeActive,
+        scopeActive: freshScopeActive,
         attempt,
         restartsLastHour: countLastHour(counters, "restart", { now: now() }),
         reentriesLastHour: countLastHour(counters, "reentry", { now: now() }),

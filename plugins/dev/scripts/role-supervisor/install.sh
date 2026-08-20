@@ -142,6 +142,33 @@ NODE_BIN="$(command -v node || true)"
 CWD="${CWD:-$(cd "${SCRIPT_DIR}/../../../.." && pwd)}"
 LOG="${ROLE_DIR}/supervisor.log"
 
+# CTL-2095: dry-run for the regular role install path. Print what would happen
+# and exit 0 without touching launchd, the manifest, or the LaunchAgents dir.
+if [[ $DRY_RUN -eq 1 ]]; then
+  _DRY_PATH_VAL="${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  if [[ -f "${ROLE_DIR}/manifest.json" ]]; then
+    echo "role-supervisor: [dry-run] would keep existing ${ROLE_DIR}/manifest.json"
+  else
+    echo "role-supervisor: [dry-run] would write ${ROLE_DIR}/manifest.json"
+    printf '  role=%s scope="%s" skill=%s cwd=%s\n' "${ROLE}" "${SCOPE:-}" "${SKILL}" "${CWD}"
+  fi
+  _DRY_TMP="$(mktemp)"
+  sed \
+    -e "s|REPLACE_WITH_LABEL|${LABEL}|g" \
+    -e "s|REPLACE_WITH_NODE|${NODE_BIN}|g" \
+    -e "s|REPLACE_WITH_CLI|${SCRIPT_DIR}/cli.mjs|g" \
+    -e "s|REPLACE_WITH_ROLE|${ROLE}|g" \
+    -e "s|REPLACE_WITH_PATH|${_DRY_PATH_VAL}|g" \
+    -e "s|REPLACE_WITH_CATALYST_DIR|${CATALYST_DIR_VAL}|g" \
+    -e "s|REPLACE_WITH_CWD|${CWD}|g" \
+    -e "s|REPLACE_WITH_LOG|${LOG}|g" \
+    "${SCRIPT_DIR}/com.catalyst.role.plist" > "$_DRY_TMP"
+  echo "role-supervisor: [dry-run] would install ${LABEL} → ${DEST}"
+  cat "$_DRY_TMP"
+  rm -f "$_DRY_TMP"
+  exit 0
+fi
+
 mkdir -p "$ROLE_DIR"
 
 # The manifest is what the role IS. Written here so that installing a role and
