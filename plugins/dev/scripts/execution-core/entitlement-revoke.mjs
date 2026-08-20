@@ -74,9 +74,13 @@ export function revokeLeasesOnEntitlementLoss({
   const revoked = [];
   for (const ticket of ownedTickets) {
     try {
-      // emitFenceReleased({ ticket }, opts) — Linear-free local append, never throws.
-      emitReleased({ ticket }, append ? { append } : {});
-      revoked.push(ticket);
+      // emitFenceReleased({ ticket }, opts) — Linear-free local append, never
+      // throws; it returns FALSE on an append failure. Only record a ticket as
+      // revoked when the release actually landed — an optimistic `revoked[]` would
+      // claim a release the reclaim loop will never see (the exact orphan this
+      // path exists to prevent, laundered into a false "handled").
+      const ok = emitReleased({ ticket }, append ? { append } : {});
+      if (ok !== false) revoked.push(ticket);
     } catch {
       /* fail-open per ticket — a failed release never blocks the others */
     }

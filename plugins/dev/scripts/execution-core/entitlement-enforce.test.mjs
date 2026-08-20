@@ -169,6 +169,20 @@ test("revoke wires the REAL emitFenceReleased (produces fence.released.<ticket>)
   expect(appended[0].body.payload).toMatchObject({ ticket: "CTL-7", owner_host: null });
 });
 
+test("a failed release (emitReleased returns false) is NOT counted as revoked", () => {
+  const provider = { ttlMs: 1, check: () => ({ verdict: "unentitled" }) };
+  // emitFenceReleased returns false on an append failure; the honest accounting
+  // must not claim a release the reclaim loop will never see.
+  const r = revokeLeasesOnEntitlementLoss({
+    self: "mini",
+    ownedTickets: ["CTL-1", "CTL-2"],
+    provider,
+    mode: "enforce",
+    emitReleased: ({ ticket }) => (ticket === "CTL-1" ? false : true),
+  });
+  expect(r.revoked).toEqual(["CTL-2"]); // CTL-1's append failed → not revoked
+});
+
 test("a throwing self-check fails open: never revokes on an unanswerable authority", () => {
   const provider = {
     ttlMs: 1,
