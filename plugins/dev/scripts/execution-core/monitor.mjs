@@ -1219,6 +1219,14 @@ function dispatchTriage(
         "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm"
       );
     }
+    // CTL-2090: this was the ONE remaining silent exit in triage admission — the
+    // markTriageCapped WARN above fires once per park episode, and every later
+    // sweep returned with no record at any level. On mini-2 (2026-08-20) a capped
+    // ticket that a human had re-queued in Linear was routed here every sweep for
+    // 36h while the scheduler reserved the host's only slot for it, and nothing in
+    // the logs said why — the exact ctl-879 blindness class, one branch over.
+    // Count it like every other skip; the streak escalates to WARN on persistence.
+    noteTriageSkip(identifier, "triage-redispatch-capped", { cap: TRIAGE_DISPATCH_CAP });
     return false;
   }
   if (budget && budget.remaining <= 0) {
