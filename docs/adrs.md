@@ -404,27 +404,54 @@ Track-B intent (migrate `extern` rules or retire the compiler). Do NOT "fix" `RE
 code; CTL-736 progress-gate is live). Complements ADR-018 / ADR-006/008. Rejected: rip out the
 engine; promote `advance_to` now; full "log is the agent" rewrite now (= Track B).
 
-**Amendment, 2026-08-20 — Track B is retired; Track A stands.** Two-plus months after acceptance,
-both gating flags (`CATALYST_BELIEFS_SHADOW`, `CATALYST_INTENTS_ENFORCE`) remain `0` on every fleet
-host (verified live: `catalyst-cluster/hosts/{mini,mini-2}/execution-core.env`) — the shadow oracle
-this decision's Track B graduation was gated on has never run a single tick. In the interim, ADR-029
-(2026-08-13) and the lease-authority work (CTL-1785/1786) independently solved the problem Track B
-was aimed at — the pipeline's control path (advancement, dispatch exclusion) now runs on Linear as
-trigger + a cloud-DO lease as the conditional-write lock, with no rule-engine derivation involved.
-CTL-1244 (the epic executing this ADR's Track B, "graduate the Datalog `advance_to` derivation;
-demote `signal.json` to a projection") is retargeted: the "kill `signal.json` as primary state"
-goal stays, but its mechanism becomes the plain log+projection rewrite the lease/trigger work already
-implies, not a Datalog-derived EDB. **Track B is retired, not merely left ungraduated** — the
+**Amendment, 2026-08-20 — Track B is retired; Track A stands, pending a lease-liveness follow-up.**
+Two-plus months after acceptance, neither gating flag (`CATALYST_BELIEFS_SHADOW`,
+`CATALYST_INTENTS_ENFORCE`) is set anywhere in `catalyst-cluster` — not in either host's
+`hosts/{mini,mini-2}/execution-core.env`, not anywhere else in that repo (verified live via grep,
+2026-08-20). Both default to off in code (`config.mjs:2714-2716`'s flag map; `label-guard.mjs:113/497`,
+`recovery.mjs:2821`, `scheduler.mjs:9101` all gate on `env.X === "1"` / `env.X ?? "0"`), so both are
+dark on both hosts by default-absence, not an explicit `=0` override — same practical effect (the
+shadow oracle Track B's graduation was gated on has never run a single tick), corrected citation.
+
+Two independent things happened in the interim that change the call, not one:
+
+1. **The control path is already solved.** ADR-029 (2026-08-13) and the lease-authority work
+   (CTL-1785/1786) together give the pipeline's control path (advancement, dispatch exclusion) a
+   real mechanism — Linear as trigger, a cloud-DO lease as the conditional-write lock — with no
+   rule-engine derivation involved. This alone retires Track B's stated goal (Datalog owning
+   `advance_to`/dispatch exclusion): there's nothing left for it to graduate into.
+2. **Leases are also a better fit for the liveness reasoning Track B and part of Track A were doing
+   heuristically.** A live example, from the same day this amendment was written: CTL-2090 (mini-2's
+   scheduler admitting zero new work despite a free slot and a ready ticket) required hours of
+   stewards manually SSHing in, grepping `daemon.log`, and diffing tick counters by hand to answer
+   "is this claim actually still alive" — exactly the kind of question a rules engine encoding
+   heuristics was meant to answer, done instead as ad-hoc inference because no first-class "is this
+   lease currently held and recently renewed" fact exists yet. A real claim/renew/release lease
+   answers that directly, once renewal ships (`renew()` is currently stubbed —
+   `lease-verbs.ts`'s `renew-not-implemented` — the actual blocking prerequisite, not a reason to
+   abandon the approach).
+
+CTL-1244 (the epic executing this ADR's Track B) is retargeted: the "kill `signal.json` as primary
+state" goal stays, but its mechanism becomes the plain log+projection rewrite the lease/trigger work
+already implies, not a Datalog-derived EDB. **Track B is retired, not merely left ungraduated** — the
 3/18-compiled `rules.dl`/`compiler/index.mjs` and the `advance-shadow` comparator are dead weight to
 delete alongside CTL-1244's rescoped work, not a bet to keep open.
 
-**Track A is explicitly NOT part of this amendment.** Health/absence-detection/provenance
-(`catalyst why`, negation-over-time, the CTL-1143 ingestion-stale-detector graduation still sitting
-in the Hardening backlog) keeps the engine as its derivation substrate — nothing here blocks or
-deprioritizes it. An unratified proposal (`thoughts/.../2026-08-11-event-delivery-plane.md`, status
-"proposal — not yet ratified", explicitly marked DO NOT IMPLEMENT) argues for deleting the whole
-15,202-line engine outright; that broader call was considered and deferred — Track A's fate is a
-separate decision, not decided by this amendment.
+**Track A stands as this amendment's decision — not reopened here — but item 2 above puts its
+liveness/absence-detection half on watch, not settled.** Provenance work with no liveness angle
+(`catalyst why`, negation-over-time) is unaffected. The CTL-1143 ingestion-stale-detector graduation
+(Hardening backlog) is exactly the kind of absence-detection Track A was scoped to own, and it is the
+same shape of problem leases solved for CTL-2090 — worth a real comparison once lease renewal lands,
+not before. That comparison is future work, explicitly not decided by this amendment. Separately, an
+unratified proposal (`thoughts/.../2026-08-11-event-delivery-plane.md`, status "proposal — not yet
+ratified", explicitly marked DO NOT IMPLEMENT) argues for deleting the whole 15,202-line engine
+outright now; that broader call was considered and deferred, same as before this amendment.
+
+(HRW — the deterministic-hashing layer that assigns ticket ownership across the roster — is a
+separate mechanism from both Track A and Track B and is out of scope here. It depends on every
+member knowing the full roster, which is fine while the roster is a small set of long-lived hosts;
+it becomes worth revisiting only once execution moves toward elastic/cloud-managed workers with a
+dynamic roster, which is a real but not-yet-scheduled direction, not a current decision.)
 
 ## ADR-023: Shadow→Enforce Rollout Discipline for Autonomous Actuators
 
