@@ -894,8 +894,16 @@ jobs:
         # `bun test` list below for the same reason as its neighbours: that step's
         # cwd is execution-core/ and these modules need the broker package's pino.
         # Measured 7 pass / 0 fail on this branch (new file; absent at merge base).
+        # CTL-1785: namespace-parity.test.mjs joins the same hand-enumerated list.
+        # `grep -rln namespace-parity .github/workflows/` returned NOTHING before
+        # this — the cross-producer namespace contract (CTL-1142) that keeps every
+        # exec-core event name (now incl. the entitlement.* trio) off the broker's
+        # protected namespace had never run in required CI, so registering the new
+        # names there would have shipped inert (the exact unlisted-suite trap this
+        # step documents). Measured green on origin/main (9 pass) and this branch
+        # (10 pass), so it imports no pre-existing red like fence-held-fold would.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs
+        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs
 
       - name: plugin-refresh + lock-resolution-audit tests (CTL-1831)
         # `grep plugin-refresh .github/workflows/` returned only two COMMENTS
@@ -1391,4 +1399,6 @@ jobs:
             cluster-sync.test.mjs \
             reconstruct-ticket-state.test.mjs \
             hosts-json-retired.test.mjs \
-            entitlement-hosts.test.mjs
+            entitlement-hosts.test.mjs \
+            entitlement-shadow.test.mjs \
+            entitlement-audit.test.mjs

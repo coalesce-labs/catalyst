@@ -8,7 +8,7 @@
 
 import { homedir, hostname } from "node:os";
 import { resolve, join } from "node:path";
-import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync, renameSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync, renameSync, appendFileSync } from "node:fs";
 
 // CTL-1211: schema-version policy for cluster config. config-schema.mjs is a
 // dep-free sibling leaf, so this import cannot reintroduce the bun-install crash
@@ -105,6 +105,7 @@ import {
   makeLocalEntitlementProvider,
 } from "../lib/entitlement.mjs";
 import { resolveEntitledRoster } from "./entitlement-roster.mjs";
+import { buildCanonicalEventLine } from "./lib/canonical-event.mjs";
 export { ENTITLEMENT_MODES, resolveEntitlementMode, getEntitlementMode };
 // CTL-1929: the canonical github-feed resolver. Zero-import leaf for the same reason
 // deployment-mode.mjs above is one — doctor.mjs runs under bare Node and cannot load
@@ -1163,6 +1164,29 @@ export function defaultEntitlementProvider() {
   return makeLocalEntitlementProvider();
 }
 
+// defaultEntitlementEmit — the production event-append seam for shadow/enforce
+// entitlement events (`entitlement.would-shed/shed/restored.<host>`). Lives here,
+// not in entitlement-roster.mjs, because config.mjs owns getEventLogPath and
+// entitlement-roster.mjs must not import config.mjs (cycle). Best-effort/fail-open:
+// a failed append never blocks roster resolution — the same posture as
+// stale-pr-rescue-timer's defaultEmit. v3 bare-name via the canonical builder so
+// otel-forward's event-name boundary resolves it and the ticket suffix is not
+// present (the suffix is the HOST, mirrored as an attribute for off-machine reads).
+function defaultEntitlementEmit(name, payload) {
+  try {
+    appendFileSync(
+      getEventLogPath(),
+      buildCanonicalEventLine({
+        name,
+        payload,
+        attributes: payload?.host ? { "catalyst.host.name": payload.host } : {},
+      }),
+    );
+  } catch {
+    /* best-effort — never block dispatch/recovery on a telemetry append */
+  }
+}
+
 // getEntitledHosts — "may this host take work?" The roster dispatch/recovery hash
 // HRW ownership over. In `off` mode this is byte-identical to getClusterHosts(); in
 // shadow/enforce it consults the injectable provider via resolveEntitledRoster.
@@ -1174,7 +1198,7 @@ export function getEntitledHosts({
   provider = defaultEntitlementProvider(),
   hosts = getClusterHosts(),
   self = getHostName(),
-  emit,
+  emit = defaultEntitlementEmit,
 } = {}) {
   if (mode === "off") return hosts;
   return resolveEntitledRoster({ mode, provider, hosts, self, emit });
