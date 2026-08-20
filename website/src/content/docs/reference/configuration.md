@@ -1185,6 +1185,59 @@ PR1 (this file) ships the resolver in isolation — nothing outside its own test
 wiring into webhook ingestion gating, secret-provider selection, and `catalyst doctor`'s
 roster-consistency checks lands in later PRs of the CTL-1617 migration plan.
 
+## Entitlement mode (`catalyst.entitlement.mode`, CTL-1785)
+
+Fleet **membership** is two facts, not one. `catalyst.entitlement.mode` governs the rollout of the
+split (see `docs/architecture.md` → "Host entitlement vs. existence"):
+
+- **Existence** — "is this node in the fleet, observable/monitorable?" — is local, self-declared,
+  needs no network, and keeps working during a cloud/authority outage (`getExistenceHosts()`).
+- **Entitlement** — "may this node take work?" — is a lease from an external authority, required to
+  claim, and self-expiring (`getEntitledHosts()`).
+
+**Modes** (`off` | `shadow` | `enforce`, default **`off`**):
+
+| Mode      | Effect                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------- |
+| `off`     | **Default.** `getEntitledHosts()` returns exactly `getClusterHosts()` — byte-identical to today.   |
+| `shadow`  | Emits `entitlement.would-shed.<host>` for each unentitled rostered host but returns the FULL roster (safe dry-run). |
+| `enforce` | Actually sheds unentitled hosts from the dispatch/recovery roster (self always admitted; total-outage degrades to the full roster) and revokes this host's held leases (`fence.released.<ticket>`) if its own entitlement lapses. |
+
+With the default **local provider** (entitled iff self ∈ roster), `enforce` is still byte-identical
+to today — self is always entitled — so live enforcement only begins once the W12 lease authority
+(**CTL-1786**, unmerged) is injected.
+
+**Resolution** (`resolveEntitlementMode()`, the same ladder shape as deployment mode):
+
+| Precedence | Source                                             |
+| ---------- | -------------------------------------------------- |
+| 1          | `CATALYST_ENTITLEMENT` env var                     |
+| 2          | `catalyst.entitlement.mode` in the Layer-2 config  |
+| 3          | `catalyst.entitlement.mode` in the Layer-1 config  |
+| 4          | constant default `off`                             |
+
+- **Absent everywhere ⇒ `off`** — zero-config, zero-behavior-change.
+- **An explicit but unrecognized value** (a typo) degrades to `off` (the safest direction, byte-identical
+  to today); `catalyst doctor`'s advisory `entitlement-mode` check WARNs (never FAILs).
+- Same ENV-vs-FILE asymmetry as deployment mode: `CATALYST_ENTITLEMENT` is captured once at daemon
+  launch; Layer-1/Layer-2 file edits are picked up live per call.
+
+**TTL / ordering constraint** — the load-bearing invariant is `ENTITLEMENT_TTL_MS > work-lease TTL`
+(otherwise an unentitled node holds work invisible to the reclaim loop — an orphan by construction):
+
+| Constant             | Default | Notes                                                                       |
+| -------------------- | ------- | --------------------------------------------------------------------------- |
+| `ENTITLEMENT_TTL_MS` | 15 min  | > `HEARTBEAT_GRACE_MS` (10 min) and > the work-lease TTL below.             |
+| `WORK_LEASE_TTL_MS`  | 5 min   | Mirrors the claim-stale window (`CLAIM_STALE_MS_DEFAULT`); reconciled with W12's real lease duration when it lands. |
+
+`assertEntitlementOrdering()` throws loudly at module load if the constraint is inverted; `catalyst
+doctor`'s advisory `entitlement-ordering` check reports it (INFO when it holds, WARN if inverted —
+never FAIL). Final numbers depend on W12's lease duration.
+
+**Deletion of the inferred-liveness apparatus** (`cluster.json` roster, `loki-liveness.mjs`, the
+heartbeat channels, the deflap) is **out of scope** here — that is **W16 = CTL-1787**, safe only once
+a live authority exists. This ticket introduces the entitlement seam alongside the existing apparatus.
+
 ## Secret contract registry (CTL-1616)
 
 Every secret Catalyst resolves — the GitHub token, the Linear API token, the OAuth-mint credentials,
