@@ -212,6 +212,13 @@ export function readTailUtf8(path: string, maxBytes: number): string {
     }
     const text = buf.toString("utf8", 0, got);
     if (from === 0) return text;
+    // CTL-1550 (Codex P2): inspect the byte immediately before `from`. If it is a
+    // newline, the window begins exactly on a record boundary and the first buffered
+    // line is a COMPLETE record, not a fragment — keep it. Only drop the first line
+    // when the window truly starts mid-record (the byte before `from` is NOT `\n`).
+    const prev = Buffer.allocUnsafe(1);
+    const pn = readSync(fd, prev, 0, 1, from - 1);
+    if (pn === 1 && prev[0] === 0x0a /* \n */) return text;
     const nl = text.indexOf("\n");
     return nl === -1 ? "" : text.slice(nl + 1);
   } catch {
