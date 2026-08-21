@@ -21,7 +21,7 @@
 // other resolution (off/shadow/unset, or enforce with no reachable proxy) refuses.
 //
 // Prints JSON {via:"proxy", applied, commentId, emoji, mode} on success.
-import { readLatestHumanComment } from "./execution-core/replica-comment-read.mjs";
+import { readLatestHumanComment, isReplicaCurrent } from "./execution-core/replica-comment-read.mjs";
 import { getReplicaDbPath } from "./execution-core/config.mjs";
 
 function arg(name, dflt) {
@@ -43,10 +43,18 @@ if (!key) {
 // loud, not a silent no-op. `null` = the DB is fine but the issue has no human comment.
 let commentId = commentIdArg;
 if (!commentId) {
+  const dbPath = getReplicaDbPath();
+  // CTL-1958: SURFACE a stale replica rather than silently trusting it (the freshness gate the
+  // leaf exports for exactly this). A present-but-stale replica (fresh-looking file, dead
+  // cloud-sync writer) could miss a very-recently-posted human comment. WARN, don't hard-fail —
+  // bounded by the ≤5-min freshness threshold, and the read below is still the best answer.
+  if (!isReplicaCurrent(dbPath)) {
+    console.error("linear-ack: WARN — replica may be STALE (cloud-sync writer not fresh); the latest human comment could be missed.");
+  }
   const latest = await readLatestHumanComment({
-    dbPath: getReplicaDbPath(),
+    dbPath,
     identifier: key,
-    humanId: process.env.ASK_HUMAN_ID, // undefined → the leaf's DEFAULT_ASK_HUMAN_ID
+    humanId: process.env.ASK_HUMAN_ID || undefined, // '' or unset → the leaf's DEFAULT_ASK_HUMAN_ID (JS defaults fire on undefined only, not '')
   });
   if (!latest) {
     console.log("no human comment");
@@ -128,8 +136,15 @@ if (plan.action !== "proxy") {
 }
 
 const res = proxy.send({ routeId: "reaction", ticket: key, payload: { commentId, emoji, mode }, caller: "linear-ack" });
-if (!res?.handled) {
-  console.error(`linear-ack: REFUSED — the proxy did not handle the write (${res?.reason ?? "unknown"}). Nothing written.`);
+// ⛔ GUARD BOTH `handled` AND `applied` (mirrors linear-reply.mjs:155). Under enforce the
+// proxy returns {handled:true, applied:false, reason} for EVERY genuine write failure —
+// unauthorized 401/403, rate-limited 429, server-error 5xx, no-cloud-token, and the host-budget
+// refuse gate (linear-write-proxy.mjs). A `!res?.handled`-only guard let those pass and printed
+// applied:false with exit 0 — a silent failure. The reaction IS the whole operation here (the
+// 👀 "read, working on it" claim), and callers (ask/concierge/steward) key off the exit status,
+// so a non-applied reaction MUST fail LOUDLY with no fallback (ticket AC).
+if (!res?.handled || res.applied !== true) {
+  console.error(`linear-ack: REFUSED — the proxy did not apply the reaction (${res?.reason ?? "unknown"}). Nothing written.`);
   process.exit(1);
 }
-console.log(JSON.stringify({ via: "proxy", applied: res.applied === true, commentId, emoji, mode }));
+console.log(JSON.stringify({ via: "proxy", applied: true, commentId, emoji, mode }));

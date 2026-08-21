@@ -130,6 +130,28 @@ else
   bad "missing replica should fail loud (rc=${LAST_RC}, out=${LAST_OUT})"
 fi
 
+# --- Handled-but-NOT-applied: enforce + valid replica + NO cloud key. The proxy returns
+# {handled:true, applied:false, reason:"no-cloud-token"} (linear-write-proxy.mjs fail()), which
+# is its shape for EVERY genuine write failure (401/403, 429, 5xx, no-token, host-budget refuse).
+# The reaction IS the whole operation, so the tool MUST fail LOUDLY (non-zero exit) — never print
+# applied:false with exit 0. Regression guard for the CTL-1958 verify HIGH: the old
+# `!res?.handled`-only guard passed this and silently reported the failed reaction as success.
+# HOME is a throwaway (no Layer-2) and the cloud-token env vars are stripped so the no-token
+# refusal is reached hermetically (this session's ambient CATALYST_CLOUD_TOKEN must not leak in).
+home_hba="$(mktemp -d)"
+out_hba=""; rc_hba=0
+out_hba="$(HOME="$home_hba" CATALYST_REPLICA_DB="$DB_WITH" CATALYST_LINEAR_WRITE_PROXY=enforce \
+  env -u CATALYST_CLOUD_TOKEN -u CATALYST_CLOUD_TOKEN_ENV \
+  "$RUNTIME" "$TOOL" CTL-1 2>&1)" || rc_hba=$?
+rm -rf "$home_hba"
+if [[ "$rc_hba" -ne 0 ]] \
+   && printf '%s' "$out_hba" | grep -q "REFUSED" \
+   && ! printf '%s' "$out_hba" | grep -q '"applied":false'; then
+  ok "enforce + no cloud key → proxy handled:true/applied:false → non-zero exit + REFUSED (not a silent applied:false, exit 0)"
+else
+  bad "handled-but-not-applied should fail loud (rc=${rc_hba}, out=${out_hba})"
+fi
+
 rm -f "$DB_WITH" "$DB_EMPTY"
 
 echo ""

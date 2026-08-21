@@ -37,7 +37,7 @@
 // exit code 0. (linear-ack is deliberately different: there the reaction IS the whole
 // operation, so refusing is correct — nothing has been written to contradict.)
 import { readFileSync } from "node:fs";
-import { readReplyContext, readIssueId, readCommentThreadRoot } from "./execution-core/replica-comment-read.mjs";
+import { readReplyContext, readIssueId, readCommentThreadRoot, isReplicaCurrent } from "./execution-core/replica-comment-read.mjs";
 import { getReplicaDbPath } from "./execution-core/config.mjs";
 
 function arg(name, dflt) {
@@ -63,6 +63,13 @@ const postBody = `${body}\n\n— _${asAgent}_`;
 // parent + the 👀 clear target, all credential-free from the replica. A missing/unreadable
 // replica throws ReplicaUnavailableError (loud) rather than degrading to a silent no-op.
 const DB = getReplicaDbPath();
+// CTL-1958: SURFACE a stale replica rather than silently trusting it (the freshness gate the leaf
+// exports for exactly this). A present-but-stale replica could miss a very-recently-posted human
+// comment → we'd thread top-level or under the wrong root. WARN, don't hard-fail — bounded by the
+// ≤5-min freshness threshold, and the read is still the best answer (eyes-clear is best-effort).
+if (!isReplicaCurrent(DB)) {
+  console.error("linear-reply: WARN — replica may be STALE (cloud-sync writer not fresh); threading/eyes-clear target could be missed.");
+}
 let issueId = null;
 let parentId = null;
 let eyesTarget = null; // comment id whose 👀 we clear (best-effort), or null
@@ -78,7 +85,9 @@ if (top) {
   parentId = await readCommentThreadRoot({ dbPath: DB, commentId: parentArg }); // always the root
   eyesTarget = parentId;
 } else {
-  const ctx = await readReplyContext({ dbPath: DB, identifier: issueKey, humanId: process.env.ASK_HUMAN_ID });
+  // `|| undefined`: JS default parameters fire on undefined only, not '', so an explicitly-empty
+  // ASK_HUMAN_ID='' would otherwise query author_id='' (matches nothing) → a silent "no comment".
+  const ctx = await readReplyContext({ dbPath: DB, identifier: issueKey, humanId: process.env.ASK_HUMAN_ID || undefined });
   issueId = ctx.issueId;
   if (ctx.latest) {
     parentId = ctx.latest.parentId;
