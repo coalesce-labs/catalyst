@@ -1236,6 +1236,14 @@ function defaultEntitlementEmit(name, payload) {
   }
 }
 
+// Inter-tick shed-state accumulation for entitlement.restored.* (CTL-2108).
+// Module-level so the primary scheduler tick can accumulate across calls without
+// threading the Set through the scheduler's large closure. Opt-in via trackShedState;
+// only the primary per-tick call (scheduler.mjs:5354) enables it.
+let _entitlementShedState = new Set();
+/** @internal test-only — reset inter-tick shed accumulation between test cases */
+export function __resetEntitlementShedState() { _entitlementShedState = new Set(); }
+
 // getEntitledHosts — "may this host take work?" The roster dispatch/recovery hash
 // HRW ownership over. In `off` mode this is byte-identical to getClusterHosts(); in
 // shadow/enforce it consults the injectable provider via resolveEntitledRoster.
@@ -1248,9 +1256,16 @@ export function getEntitledHosts({
   hosts = getClusterHosts(),
   self = getHostName(),
   emit = defaultEntitlementEmit,
+  trackShedState = false,
 } = {}) {
   if (mode === "off") return hosts;
-  return resolveEntitledRoster({ mode, provider, hosts, self, emit });
+  const previouslyShedHosts = trackShedState ? _entitlementShedState : undefined;
+  const roster = resolveEntitledRoster({ mode, provider, hosts, self, emit, previouslyShedHosts });
+  if (trackShedState && mode === "enforce" && Array.isArray(hosts) && Array.isArray(roster)) {
+    // newShed = hosts \ roster, excluding self (self is always kept, never shed).
+    _entitlementShedState = new Set(hosts.filter((h) => h !== self && !roster.includes(h)));
+  }
+  return roster;
 }
 
 // getCatalystRepoDirHostsPath — absolute path to the committed cluster roster.
