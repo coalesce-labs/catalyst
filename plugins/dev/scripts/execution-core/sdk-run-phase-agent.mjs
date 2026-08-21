@@ -546,8 +546,10 @@ function defaultWriteSignalTerminal(signalFile, status, reason, { seed = null, o
 // defaultWriteSignalTerminal that writes status:"stalled" with an `attentionReason`
 // (NOT `failureReason` — a failureReason trips revive Loop 2's escalate branch,
 // which does NOT retry). Mirror of phase-agent-dispatch's mark_launch_failed. The
-// 2-arg shape is the seam defaultEmitBackstop injects for the failed/overloaded
-// (non-turn-cap) backstops.
+// (signalFile, reason) call shape is the seam defaultEmitBackstop injects for the
+// failed/overloaded (non-turn-cap) backstops; CTL-2015 added a 3rd `opts` arg
+// (seed / onBeforeCreate) that defaults to `{}`, so every pre-existing 2-arg caller
+// (codex-run-phase-agent.mjs, the !pre.ok path) is unaffected.
 // CTL-1457: exported so the sibling codex-exec launch verb
 // (codex-run-phase-agent.mjs) reuses the SAME "flip a still-in-flight signal to
 // stalled" writer instead of duplicating the atomic tmp+rename + P3
