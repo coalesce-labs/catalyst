@@ -45,11 +45,13 @@ _CSC_CONFIG_JSON_PATH=(
   "groq.apiKey" "catalyst.cloud.tokenEnv" ""
 )
 _CSC_ROTATION_CLASS=(
-  "re-armable" "boot-only" "boot-only" "boot-only" "boot-only" "boot-only" "re-armable" "re-armable"
+  "re-armable" "boot-only" "boot-only" "re-armable" "boot-only" "boot-only" "re-armable" "re-armable"
   "boot-only" "boot-only" "boot-only" "n/a"
+  # index 3 (claude-accounts.env): CTL-1984 reclassified boot-only → re-armable/timer
 )
 _CSC_ROTATION_TRIGGER=(
-  "timer" "" "" "" "" "" "on-401" "on-401" "" "" "" ""
+  "timer" "" "" "timer" "" "" "on-401" "on-401" "" "" "" ""
+  # index 3 (claude-accounts.env): CTL-1984 — timer trigger mirrors github-token wiring
 )
 _CSC_BOOTSTRAP_FOR=(
   "" "" "" "" "" "" "" "" "" "" "cloud" "cluster"

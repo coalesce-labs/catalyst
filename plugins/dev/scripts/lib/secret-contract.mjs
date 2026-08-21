@@ -125,7 +125,10 @@ export const SECRET_REGISTRY = Object.freeze(
       // Sourced into the daemon's boot env by catalyst-execution-core; kept as a REGISTRY
       // ROW (design §2) — not a parallel hand-maintained Set — so cluster-sync's
       // rotation-report source is the registry once PR1-of-the-migration-plan re-points it.
-      rotation: { class: "boot-only" },
+      // CTL-1984: reclassified from boot-only to re-armable/timer — the daemon registers
+      // rearmClaudeAccountsFromFile as the hook (execution-core/claude-accounts-rearm.mjs)
+      // so an account-slot switch takes effect on the next cluster-sync tick with no restart.
+      rotation: { class: "re-armable", trigger: "timer" },
       bootstrapFor: null,
     },
     {
