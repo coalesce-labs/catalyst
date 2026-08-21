@@ -173,6 +173,26 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
       ON ticket_state(uuid)
       WHERE uuid IS NOT NULL
   `);
+  // CTC-133 Phase 1: dedicated fence table (CQRS read side for owner/generation/
+  // phase/claimed_at/held_since). ticket_state inline fence columns remain for
+  // backward compat; Phase 3 will drop them once all readers migrate.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS ticket_fence (
+      ticket              TEXT PRIMARY KEY,
+      owner_host          TEXT,
+      catalyst_generation INTEGER,
+      fence_phase         TEXT,
+      claimed_at          TEXT,
+      held_since          TEXT,
+      updated_at          TEXT NOT NULL
+    )
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_ticket_fence_owner_host
+      ON ticket_fence(owner_host)
+      WHERE owner_host IS NOT NULL
+  `);
+
 
   // CTL-403: waiting_sessions tracks active wait-for loops so the watchdog can
   // distinguish 'silently dead' (no heartbeat AND no active wait) from
@@ -840,6 +860,44 @@ export function upsertTicketFence(input = {}) {
      ON CONFLICT(ticket) DO UPDATE SET ${setClauses.join(", ")}`,
     [ticket, ...vals, nowIso()]
   );
+
+  // CTC-133 Phase 1: dual-write to ticket_fence with stale-generation guard.
+  // ticket_fence is the canonical CQRS read table; ticket_state inline fence
+  // columns remain for backward compat until Phase 3 drops them.
+  if ("ownerHost" in input) {
+    const ts2 = nowIso();
+    if (input.ownerHost == null) {
+      // Release: null out all fence fields. Guard does not apply to releases.
+      ensure().run(
+        `UPDATE ticket_fence
+         SET owner_host = NULL, catalyst_generation = NULL,
+             fence_phase = NULL, claimed_at = NULL, updated_at = ?
+         WHERE ticket = ?`,
+        [ts2, ticket]
+      );
+    } else {
+      const incomingGen = "generation" in input ? (input.generation ?? null) : null;
+      const incomingPhase = "phase" in input ? (input.phase ?? null) : null;
+      const incomingCa = "claimedAt" in input ? (input.claimedAt ?? null) : null;
+      ensure().run(
+        `INSERT INTO ticket_fence
+           (ticket, owner_host, catalyst_generation, fence_phase, claimed_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(ticket) DO UPDATE SET
+           owner_host          = excluded.owner_host,
+           catalyst_generation = excluded.catalyst_generation,
+           fence_phase         = CASE WHEN excluded.fence_phase IS NULL
+                                      THEN ticket_fence.fence_phase
+                                      ELSE excluded.fence_phase END,
+           claimed_at          = excluded.claimed_at,
+           updated_at          = excluded.updated_at
+         WHERE ticket_fence.catalyst_generation IS NULL
+            OR excluded.catalyst_generation IS NULL
+            OR excluded.catalyst_generation >= ticket_fence.catalyst_generation`,
+        [ticket, input.ownerHost, incomingGen, incomingPhase, incomingCa, ts2]
+      );
+    }
+  }
 }
 
 // setTicketHeldSince — stamp the held-label applied-at timestamp. STICKY: the
@@ -859,6 +917,15 @@ export function setTicketHeldSince(ticket, heldSince) {
        updated_at = excluded.updated_at`,
     [ticket, ts, nowIso()]
   );
+  // CTC-133 Phase 1: dual-write held_since to ticket_fence
+  ensure().run(
+    `INSERT INTO ticket_fence (ticket, held_since, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(ticket) DO UPDATE SET
+       held_since = COALESCE(ticket_fence.held_since, excluded.held_since),
+       updated_at = excluded.updated_at`,
+    [ticket, ts, nowIso()]
+  );
 }
 
 // clearTicketHeldSince — null the held-since timestamp when the held labels
@@ -871,6 +938,37 @@ export function clearTicketHeldSince(ticket) {
     `UPDATE ticket_state SET held_since = NULL, updated_at = ? WHERE ticket = ?`,
     [nowIso(), ticket]
   );
+  // CTC-133 Phase 1: dual-write clear to ticket_fence
+  ensure().run(
+    `UPDATE ticket_fence SET held_since = NULL, updated_at = ? WHERE ticket = ?`,
+    [nowIso(), ticket]
+  );
+}
+
+// getTicketFence — read the ticket_fence row for a ticket. Returns null when
+// the row is absent (signal to caller: fall back to ticket_state inline cols).
+// Returns an object (possibly with ownerHost: null) when the row exists.
+export function getTicketFence(ticket) {
+  if (!ticket) return null;
+  const row = ensure().prepare(
+    `SELECT owner_host, catalyst_generation, fence_phase, claimed_at
+     FROM ticket_fence WHERE ticket = ?`
+  ).get(ticket);
+  if (!row) return null;
+  return {
+    ownerHost: row.owner_host ?? null,
+    generation: row.catalyst_generation ?? null,
+    phase: row.fence_phase ?? null,
+    claimedAt: row.claimed_at ?? null,
+  };
+}
+
+// clearTicketFence — delete the ticket_fence row for a ticket. Used in tests
+// and explicit teardown; the normal release path goes through upsertTicketFence
+// with ownerHost: null (which NULLs the columns but keeps the row).
+export function clearTicketFence(ticket) {
+  if (!ticket) return;
+  ensure().run(`DELETE FROM ticket_fence WHERE ticket = ?`, [ticket]);
 }
 
 // ─── worker_state helpers (CTL-532) ──────────────────────────────────────────
