@@ -1019,6 +1019,53 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
   });
 
+  // ── CTL-1984 AC2: two env-backed files materialize; ONLY the one whose content ──
+  //    actually changed should appear in restartRequired (delivery-based, not a
+  //    simple "was written" flag). This is the negative-control companion to (f):
+  //    the reclassification of claude-accounts.env must NOT affect which files
+  //    raise restart-required — the predicate is delivery-based (env-file ∈
+  //    _BOOT_CAPTURED_DELIVERIES), regardless of rotation.class.              ────
+
+  test("(f-ac2) CTL-1984 AC2: only the CHANGED env-backed file raises restart-required; unchanged file does not", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    // Decrypt: execution-core.env changes; claude-accounts.env is NOT in the bundle
+    // (cluster-sync only raises restart-required for files in res.written, which
+    // requires them to appear in the decrypted output and differ from disk).
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json")
+          ? { "execution-core.env": "SOME_VAR=new-value\n" }
+          : {},
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    // Only execution-core.env materialized — not claude-accounts.env
+    expect(res.written).toContain("execution-core.env");
+    expect(res.written).not.toContain("claude-accounts.env");
+    // Only execution-core.env needs a restart
+    expect(res.restartRequired).toContain("execution-core.env");
+    expect(res.restartRequired).not.toContain("claude-accounts.env");
+    // Exactly one restart-required signal emitted
+    const restarts = emits.filter((e) => e.name === "restart-required");
+    expect(restarts).toHaveLength(1);
+    expect(restarts[0].payload).toMatchObject({ file: "execution-core.env" });
+  });
+
   // ── CTL-1612: the widened boot-captured enrollment, exercised THROUGH the call
   //    site. isEnvBackedSecretFile is unit-tested below, but a correct predicate
   //    that is never wired into the restartRequired filter is exactly the 2026-08-02

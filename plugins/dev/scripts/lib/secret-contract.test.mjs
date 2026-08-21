@@ -1008,7 +1008,7 @@ describe("registry validation (§6) — the rearm-hook honesty rules", () => {
     // remains genuinely hookless everywhere in the codebase as of this PR.
     const reArmable = SECRET_REGISTRY.filter((r) => r.rotation.class === "re-armable");
     expect(reArmable.map((r) => r.id).sort()).toEqual(
-      ["github-token", "linear-api-token", "linear-orchestrator-actor"].sort(),
+      ["claude-accounts.env", "github-token", "linear-api-token", "linear-orchestrator-actor"].sort(),
     );
     for (const row of reArmable) {
       const env = { PROBE_UNSET_VAR_FOR_TEST: "x" }; // resolves to none for every one of these rows
@@ -1059,6 +1059,12 @@ describe("registry validation (§6) — the rearm-hook honesty rules", () => {
     armSecret("github-token", { env }); // establishes baseline via the degrade path
     const r = armSecret("github-token", { env });
     expect(r.armed).toBe(false); // hook path never entered
+  });
+
+  test("CTL-1984: registerRearmHook('claude-accounts.env') returns true (capability ceiling lifted)", () => {
+    const fn = () => ({ rearmed: true });
+    expect(registerRearmHook("claude-accounts.env", fn)).toBe(true);
+    clearRearmHook("claude-accounts.env");
   });
 });
 
