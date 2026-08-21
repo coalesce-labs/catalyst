@@ -19,9 +19,9 @@ never a status paragraph.
 
 ## 2. Creating one (the raising agent)
 
-**Use the verb** — it builds the exact body, files the ticket, reads it BACK out of Linear, and proves
-the decision trigger can parse the options. It exits **2** rather than leaving you a ticket that can
-never be answered:
+**Then use the verb** — it builds the exact body, files the ticket, reads it BACK out of Linear, and
+proves the decision trigger can parse the options. It exits **2** rather than leaving you a ticket
+that can never be answered:
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
@@ -72,6 +72,7 @@ equivalent, and what to do when the human's action surfaces a defect:
 
 ## 6. Where things live
 
+- **Reporting to the human:** rank by blast radius (work held × priority), not age — [`references/triage.md`](references/triage.md), `scripts/ask-triage.sh`.
 - Ask view **My decisions — what needs me** (a decided item leaves it); the board is a summary, not the record.
 - Related skills: `catalyst-dev:linearis`, `catalyst-dev:create-handoff`, `catalyst-dev:steward`.
 - Measured Linear facts this SOP rests on: threads are one level deep (CTL-1891) and the app actor cannot
