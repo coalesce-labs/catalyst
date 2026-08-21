@@ -68,6 +68,11 @@ let parentId = null;
 let eyesTarget = null; // comment id whose 👀 we clear (best-effort), or null
 if (top) {
   issueId = await readIssueId({ dbPath: DB, identifier: issueKey });
+  // eyesTarget stays null on purpose. The clear target is "the comment we replied under"
+  // (plan §Phase 3: the latest-human-comment id from the read, or the --parent root). A
+  // top-level post replies to no one, so there is nothing to clear — deliberately narrower
+  // than the old tool, which always cleared the latest human comment's 👀 even on --top
+  // (clearing an unrelated human's read-receipt for a comment it did not answer).
 } else if (parentArg) {
   issueId = await readIssueId({ dbPath: DB, identifier: issueKey });
   parentId = await readCommentThreadRoot({ dbPath: DB, commentId: parentArg }); // always the root
