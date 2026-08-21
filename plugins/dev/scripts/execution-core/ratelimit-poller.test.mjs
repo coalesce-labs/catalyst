@@ -336,7 +336,12 @@ test("an injected now() controls the emitted envelope's ts", async () => {
   const clock = recordingClock();
   const w = startRatelimitPoller({
     clock,
-    config: { enabled: true, intervalMs: 300000, usageEndpoint: "https://example/usage" },
+    // credentialMode:"oauth-login" — this is an OAuth-path test (it injects
+    // readToken/fetchUsage/resolveEmail). Without it, the CTL-2056 default
+    // credMode "accounts-env" would route the tick through the real
+    // defaultProbeAccounts and ignore these seams (the tick would spawn a
+    // real probe and hang).
+    config: { enabled: true, intervalMs: 300000, usageEndpoint: "https://example/usage", credentialMode: "oauth-login" },
     readToken: () => TOKEN,
     fetchUsage: async () => ({ status: 200, body: usageBody() }),
     resolveEmail: async () => ({ email: EMAIL, rateLimitTier: null, subscriptionType: null }),
