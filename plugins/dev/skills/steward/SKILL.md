@@ -77,4 +77,4 @@ Before going quiet, check all five — each is something a steward has actually 
 
 ## Pointers
 
-`catalyst-dev:ask` (ask + canonical threading) · `catalyst-dev:linearis` · `catalyst-dev:gherkin-ticket` · `catalyst-dev:create-handoff` · `grilling`.
+`catalyst-dev:ask` (ask + canonical threading) · `catalyst-dev:linearis` · `catalyst-dev:gherkin-ticket` · `catalyst-dev:create-handoff` · `catalyst-dev:project-orchestrator` (the project-scoped entry point) · `grilling`.

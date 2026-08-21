@@ -280,6 +280,47 @@ outage (heartbeat read throws / everyone looks dead) degrades to the **full rost
 only its own HRW slice — never double-acts). The Linear-CAS claim (`cluster-claim.mjs` soft-CAS on
 `catalyst://fence/<TICKET>`, applied HRW-first/claim-second) remains the transition-race serializer.
 
+**Host entitlement vs. existence (CTL-1785, W13 — host half of CTC-411).** The static `cluster.json`
+roster conflates two facts, and the conflation is load-bearing: **existence** ("is this node in the
+fleet, observable/monitorable?" — local, self-declared, no network) and **entitlement** ("may this
+node take work?" — a lease from an external authority, required to claim, self-expiring on its own
+TTL). Because being *listed* implied being *entitled*, CTL-1760's mini-2 stayed a work-owner "by
+declaration" for **33 days** after it went silent. This ticket splits them behind two accessors —
+`getExistenceHosts()` (topology / observability / display / archive; also the source of the `multiHost`
+`fenceGuard` `!multiHost` disarm, so shedding can never re-enable an N=1 disarm) and
+`getEntitledHosts()` (every dispatch / recovery / reclaim / HRW-ownership gate) — with each caller
+reclassified per the two classes. `getClusterHosts()` is **retained**, not deleted: it is byte-for-byte
+the existence roster, so display callers not yet migrated still read correct data. The hard invariant
+a source-scan guard enforces is that **no entitlement caller reads `getClusterHosts()`**.
+
+Entitlement is resolved through an injectable `EntitlementProvider` seam (`lib/entitlement.mjs`, a
+zero-import leaf) whose default **local provider** answers ENTITLED iff self ∈ roster — reproducing
+today's behavior with **fail direction ENTITLED** (any inability to decide preserves the full roster,
+the opposite of a lock: this is a permit whose absence must not strand a healthy fleet before the
+authority is wired). Rollout is the tri-state `CATALYST_ENTITLEMENT` ∈ `off` (default,
+byte-identical) → `shadow` (emit `entitlement.would-shed.<host>`, change nothing) → `enforce`
+(actually shed unentitled hosts — self always admitted, total-outage degrades to the full roster —
+and revoke this host's held leases). The **load-bearing ordering constraint** is
+`ENTITLEMENT_TTL_MS` (15 min) `>` the work-lease TTL (5 min, the claim-stale window), asserted loudly
+at module load: otherwise a node loses entitlement while still holding a fresher work lease, and the
+work is invisible to a reclaim loop that iterates roster members (an **orphan by construction**).
+Losing self-entitlement therefore **revokes** the held leases — `revokeLeasesOnEntitlementLoss`
+(`entitlement-revoke.mjs`) is the **first production caller** of the previously-never-wired
+`emitFenceReleased`, threaded into the heartbeat-publisher tick as a single gated, fail-open call.
+
+Acceptance is "an observable event and an absence" (`entitlement-audit.mjs`): the absence query counts
+tickets whose live work-lease holder has no current entitlement (must be **0**), and its mandatory
+**positive control** counts leases held by an entitled node (must be **> 0** when work exists) — a
+bare zero over zero live leases returns **`inconclusive`**, never a clean pass. Config/rollout ladder,
+the TTL knobs, and the modes live in `website/src/content/docs/reference/configuration.md` →
+"Entitlement mode". **Not in scope here**: the lease *store* itself (W12 = **CTL-1786**, the Durable
+Object — this ticket ships against an injectable provider + a local fallback, so `enforce` is
+byte-identical to today until that authority is injected), deleting the inferred-liveness apparatus
+(W16 = **CTL-1787**), and progress-gated lease renewal (W14 = **CTL-1784**). `catalyst doctor`'s
+advisory `entitlement-*` checks report the resolved mode, the provider (local vs authority), and
+whether the ordering constraint holds — INFO/WARN only, never FAIL. The `entitlement.*` event prefix
+is **unprotected** under the CTL-1142 namespace contract.
+
 **Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
 scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.
 Its `dispatchLiveness` invariant judges only this host's owned queue, while preserving the raw and

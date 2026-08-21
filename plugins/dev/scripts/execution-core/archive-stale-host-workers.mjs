@@ -152,10 +152,12 @@ if (import.meta.main) {
   const archiveRoot = archIdx !== -1 ? args[archIdx + 1] : join(homedir(), "catalyst", "archives");
 
   // Import cluster config at runtime (not available during unit tests)
-  const { getClusterHosts } = await import("./config.mjs");
+  // CTL-1785: archiving stale-host worker dirs enumerates the EXISTENCE roster
+  // (all physical members, for cleanup/observability). `off`: identical.
+  const { getExistenceHosts } = await import("./config.mjs");
   const { readClusterHeartbeats } = await import("./recovery.mjs");
 
-  const roster = getClusterHosts();
+  const roster = getExistenceHosts();
   const heartbeats = readClusterHeartbeats();
   const HEARTBEAT_GRACE_MS = 10 * 60 * 1000; // 10 minutes
   const now = Date.now();
