@@ -156,6 +156,8 @@ import {
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
 import { rearmClaudeAccountsFromFile } from "./claude-accounts-rearm.mjs"; // CTL-1984: account-slot live-rearm hook
+import { syncClaudeAccountsFromCloud, resolveClaudeAccountsCloudMode } from "./claude-accounts-cloud-fetch.mjs"; // CTL-1991: cloud delivery of claude-accounts.env (default off)
+import { getDeploymentMode } from "../lib/deployment-mode.mjs"; // CTL-1991: genuine-cloud gate for the cloud-token materialize path
 import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { getReconcileHealth } from "./reconcile-health.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
@@ -1055,6 +1057,9 @@ export function startDaemon({
   refreshClusterSecrets = realRefreshClusterSecrets,
   clusterSyncIntervalMs = CLUSTER_SYNC_INTERVAL_MS,
   enableClusterSync = process.env.CATALYST_CLUSTER_SYNC !== "0",
+  // CTL-1991: injectable for tests; production default is the real module function.
+  // Resolved deployment mode + cloud mode knob are computed once at startup below.
+  syncClaudeAccountsFromCloud: syncClaudeAccountsFromCloudFn = syncClaudeAccountsFromCloud,
   // CTL-665: committed executionCore concurrency knobs resolved in main() from
   // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
   // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
@@ -1096,6 +1101,12 @@ export function startDaemon({
   const orchDir = getExecutionCoreDir();
   let bootDependencyState = { ok: true, missing: [], holdReason: null };
   ensureState(orchDir);
+  // CTL-1991: resolve deployment mode and the cloud-accounts knob once at startup.
+  // Both are passed into every syncClaudeAccountsFromCloud call so we don't re-read
+  // config on every timer tick. Default "off" means zero behavior change until an
+  // operator on a confirmed cloud host flips CATALYST_CLAUDE_ACCOUNTS_CLOUD.
+  const _claudeAccountsDeploymentMode = getDeploymentMode();
+  const _claudeAccountsCloudMode = resolveClaudeAccountsCloudMode(process.env);
   // CTL-862: write the resolved config path back into the env so downstream
   // callers (getClusterHosts → getCatalystRepoDir) resolve the right repo
   // regardless of the daemon's cwd. ||= preserves any launcher-provided value.
@@ -1352,6 +1363,19 @@ export function startDaemon({
         log.warn({ err: err?.message }, "execution-core daemon: boot cluster-sync threw (continuing)");
       }
     }
+    // CTL-1991: on cloud hosts, materialize claude-accounts.env from the cloud product
+    // (CTC-732) at boot, so dispatched workers see the cloud-current token from their
+    // first launch. Runs after clusterSync (which handles single-host/cluster delivery via
+    // SOPS) so the SOPS path is already on disk as a fallback. Default "off" = no-op.
+    // Fire-and-forget: startDaemon is not async; the cloud sync is best-effort and the
+    // SOPS-materialized file is already on disk if the cloud call loses the race.
+    syncClaudeAccountsFromCloudFn({
+      deploymentMode: _claudeAccountsDeploymentMode,
+      mode: _claudeAccountsCloudMode,
+      log,
+    }).catch((err) => {
+      log.warn({ err: err?.message }, "claude-accounts-cloud-fetch: boot sync threw (continuing)");
+    });
     // Re-arm ONLY (no probe) before anything dispatches: this is a cheap local file read,
     // and it is what stops a boot-resumed worker inheriting a credential the sync just
     // superseded. The probe is deliberately NOT here — it spawns `gh` with a 10s timeout,
@@ -2102,7 +2126,7 @@ export function startDaemon({
       // CTL-1612: the BOOT sync moved earlier (before the boot-resume dispatches, so
       // resumed workers never inherit a stale credential). Only the periodic refresh
       // is armed here, alongside the other timers.
-      _clusterSyncTimer = setInterval(() => {
+      _clusterSyncTimer = setInterval(async () => {
         try {
           refreshClusterSecrets();
         } catch (err) {
@@ -2138,6 +2162,18 @@ export function startDaemon({
         // via `log`. A wrapping try/catch here would only ever imply protection the callee
         // already provides.
         armSecret("github-token", { env: process.env });
+        // CTL-1991: on cloud hosts, refresh claude-accounts.env from the cloud product
+        // BEFORE re-arming, so the rearm hook (below) reads the cloud-current content.
+        // Default "off" makes this a no-op on cluster/single-host nodes.
+        try {
+          await syncClaudeAccountsFromCloudFn({
+            deploymentMode: _claudeAccountsDeploymentMode,
+            mode: _claudeAccountsCloudMode,
+            log,
+          });
+        } catch (err) {
+          log.warn({ err: err?.message }, "claude-accounts-cloud-fetch: timer sync threw (continuing)");
+        }
         // CTL-1984: re-arm the account-slot token on the same tick. armSecret never throws;
         // the hook closure (rearmClaudeAccountsFromFile) logs+swallows its own errors.
         armSecret("claude-accounts.env", { env: process.env });

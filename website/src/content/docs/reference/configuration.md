@@ -1468,6 +1468,71 @@ active deployment mode is declared `cloud` (recognized, not inferred) and the `c
 bootstrap row does not resolve — the one FAIL doctor cannot route around, per the cloud guard's
 bootstrap short-circuit above.
 
+## Claude account tokens via cloud (`CATALYST_CLAUDE_ACCOUNTS_CLOUD`, CTL-1991)
+
+On a declared-cloud host the execution-core daemon can pull the active
+`claude-accounts.env` content (Claude OAuth subscription tokens) from the cloud
+product (CTC-732) instead of reading a SOPS-materialized file from the git
+bundle. The file is written atomically at 0o600 via tmp+rename to
+`~/.config/catalyst/claude-accounts.env` (or the path in `CLAUDE_ACCOUNTS_ENV`).
+All downstream consumers — the launcher `source`, the live rearm hook
+(`claude-accounts-rearm.mjs`), the per-slot usage probes — read the same
+on-disk path and require no changes.
+
+**Tri-state knob** (`CATALYST_CLAUDE_ACCOUNTS_CLOUD ∈ off | shadow | enforce`,
+default **`off`**):
+
+| Mode      | Effect                                                                                                   |
+| --------- | -------------------------------------------------------------------------------------------------------- |
+| `off`     | **Default.** No cloud fetch; daemon reads whatever SOPS materialized (byte-identical to today).          |
+| `shadow`  | Fetches the cloud content and logs whether it would have written, but never writes to disk.              |
+| `enforce` | Fetches and materializes. A cloud fetch failure leaves the on-disk file **untouched** — fail-open.       |
+
+The knob is only meaningful on a **genuinely declared** cloud node
+(`catalyst.deployment.mode = cloud`, `inferred: false`, `recognized: true`). Any
+other deployment mode short-circuits to `skipped / not-cloud` before the knob is
+read — a cluster or single-host node is never contacted.
+
+**Resolution order:**
+
+| Precedence | Source                                                                        |
+| ---------- | ----------------------------------------------------------------------------- |
+| 1          | `mode` injected at call time (test / recovery seam)                          |
+| 2          | `CATALYST_CLAUDE_ACCOUNTS_CLOUD` env var on the daemon process               |
+| 3          | constant default `off`                                                        |
+
+Unknown values degrade to `off`.
+
+**Timing** (daemon cluster-sync timer, CTL-1991):
+
+The cloud sync runs inside the cluster-sync timer callback **before**
+`armSecret("claude-accounts.env")` on every tick, so the rearm hook reads a
+freshly materialized file on each cycle. At daemon boot the call is fire-and-forget
+(`.catch()`) — `startDaemon` is not async and boot fails open if the cloud is
+unavailable at startup. A no-churn idempotency check (byte-compare before write)
+prevents mtime-churn from spuriously triggering the rearm hook on every tick when
+the content is unchanged.
+
+**Path override** — the target path and the API path can each be overridden for
+testing or if the CTC-732 endpoint path changes:
+
+- `CLAUDE_ACCOUNTS_ENV` — override the local destination file path
+- `CATALYST_CLOUD_BASE_URL` — override the cloud API base URL
+- `CATALYST_CLAUDE_ACCOUNTS_CLOUD_PATH` — override the endpoint path (default `/me/secrets/claude-accounts.env`)
+
+**Minting is not in scope.** This feature delivers and refreshes tokens that were
+minted via `claude login`; it does not issue credentials. The cloud product owns
+switching subscription OAuth tokens across fleet hosts (CTC-732).
+
+**Events** (see `docs/architecture.md` → "Secret Contract"):
+
+| Event                                              | Emitted when                              |
+| -------------------------------------------------- | ----------------------------------------- |
+| `catalyst.claude-accounts.cloud_materialized`      | enforce mode wrote a new or changed file  |
+| `catalyst.claude-accounts.cloud_would_materialize` | shadow mode would have written            |
+
+Both names are unprotected under the CTL-1142 namespace contract.
+
 ## GitHub merge rules live in GitHub
 
 Catalyst can open PRs, fix CI, answer review bots, and merge. But GitHub decides what must pass
