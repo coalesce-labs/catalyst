@@ -99,9 +99,6 @@ const INLINE_EVENT_NAMES = [
   "fence.claimed.CTL-1",              // CTL-863 fence-event.mjs (exec-core-owned, projected-not-re-emitted)
   "fence.released.CTL-1",             // CTL-863 fence-event.mjs
   "escalation.explanation-absent",    // CTL-1609 label-guard.mjs (warn when explanation omitted)
-  "delegate.would-route",             // CTL-1609 delegate-first.mjs (shadow mode — would enqueue)
-  "delegate.routed",                  // CTL-1609 delegate-first.mjs (enforce mode — enqueued ok)
-  "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
   "catalyst.replica.writer_idle",     // CAT-21 cloud-sync.mjs (tokenless writer provisioning gap)
   "cloud-feed.would-dispatch",        // CTL-1847 cloud-feed-timer.mjs (shadow mode — would dispatch from the feed)
   "recovery.escalation.correlated",   // CAT-170 recovery-reasoning.mjs (enforced member pointer)
