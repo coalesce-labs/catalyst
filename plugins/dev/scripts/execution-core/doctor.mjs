@@ -105,6 +105,10 @@ import {
   // CTL-1785: entitlement mode resolver, re-exported from the zero-import leaf
   // (same pattern as deployment-mode above) — doctor grades it advisory-only.
   resolveEntitlementMode,
+  // CTL-1210: merged Layer-2 reader — cluster-secrets.json (top) > node.json >
+  // config.json (bottom), each fail-open to {}. Used by layer2HasKey so doctor
+  // grades the same merged view the daemon reads.
+  readLayer2Merged,
 } from "./config.mjs";
 // CTL-1785: the TTL constants + enum, imported DIRECTLY from the zero-import leaf
 // (node built-ins only — safe under doctor's bare-Node runtime), same pattern as
@@ -395,7 +399,7 @@ function layer2Path() {
 
 function layer2HasKey(key) {
   try {
-    let obj = JSON.parse(readFileSync(layer2Path(), "utf8"));
+    let obj = readLayer2Merged();
     for (const part of key.split(".")) {
       if (obj == null || typeof obj !== "object") return false;
       obj = obj[part];
