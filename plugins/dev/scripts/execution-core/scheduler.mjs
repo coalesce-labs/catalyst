@@ -140,6 +140,12 @@ import {
 import { collectBeliefsTick, getBeliefsDb, getEscalateHumanBelief } from "./beliefs/collector.mjs";
 import { buildRecoveryItems } from "./recovery-evidence.mjs";
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator re-arm
+import {
+  appendFenceStandoffEvent as defaultAppendFenceStandoffEvent,
+  clearFenceStandoff,
+  maybeBreakGlass,
+  resolveStandoffCooldownMs,
+} from "./fence-standoff.mjs"; // CAT-173: bounded out-of-band surfacing for fence standoffs
 // CTL-1045 Bug 1: kill-storm suppression guard for defaultJanitorKillIntentRecorder.
 import {
   isIntentEffective,
@@ -3869,6 +3875,35 @@ function escalationProbeCooldownPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ".escalation-probe-cooldown");
 }
 
+// CAT-173: successful fence-standoff delivery has its own long cooldown. Keep it
+// separate from `.fence-suppressed`: terminalDoneOnce consumes that marker and
+// must remain free to write Done while standoff re-escalation is rate-bounded.
+function fenceStandoffCooldownPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".fence-standoff-cooldown");
+}
+
+function stampFenceStandoffCooldown(orchDir, ticket, nowMs, env = process.env) {
+  try {
+    writeFileSync(
+      fenceStandoffCooldownPath(orchDir, ticket),
+      JSON.stringify({ expiresAt: nowMs + resolveStandoffCooldownMs(env) }),
+    );
+  } catch {
+    /* best-effort — re-probe next tick */
+  }
+}
+
+function isFenceStandoffCooldownFresh(orchDir, ticket, nowMs) {
+  try {
+    const { expiresAt } = JSON.parse(
+      readFileSync(fenceStandoffCooldownPath(orchDir, ticket), "utf8"),
+    );
+    return Number.isFinite(expiresAt) && nowMs < expiresAt;
+  } catch {
+    return false;
+  }
+}
+
 // Best-effort: a failed write just means we re-probe next tick (no worse than before).
 function stampCooldownMarker(path, nowMs) {
   try {
@@ -5099,6 +5134,9 @@ export function schedulerTick(
     // CTL-868 — orphan-detected emitter (route B observability). Injectable; tests
     // pass a spy, production uses the canonical unified-event-log appender.
     appendOrphanDetectedEvent = defaultAppendOrphanDetectedEvent,
+    appendFenceStandoffEvent = defaultAppendFenceStandoffEvent,
+    // CAT-173: injectable terminal-sweep fence seam for scheduler integration tests.
+    terminalFenceGuard = fenceGuard,
     // CTL-537: sequencing seam. Default undefined → the new-work gate is skipped
     // entirely (byte-for-byte legacy dispatch for every test that doesn't inject
     // it). Production wires defaultCheckSequencing via runTick/startScheduler.
@@ -7425,12 +7463,17 @@ export function schedulerTick(
         for (const member of anomaly.members) {
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
+            let cycleFenceVerdict = null;
             if (
               fenceGuard(
                 { ticket: member, orchDir, multiHost, gateway, self },
-                { proceedOnMissingGeneration: true }
+                {
+                  proceedOnMissingGeneration: true,
+                  onSuppress: (verdict) => { cycleFenceVerdict = verdict; },
+                }
               )
             ) {
+              clearFenceStandoff(orchDir, member);
               const dcResult = routeStuckTicketToDelegate(orchDir, member, {
                 site: "dependency-cycle",
                 reason: "dependency-cycle",
@@ -7477,9 +7520,21 @@ export function schedulerTick(
               }
             } else {
               log.warn(
-                { ticket: member },
+                { ticket: member, reason: cycleFenceVerdict?.reason ?? null },
                 "ctl-863: stale fence — suppressing labelOnce(needs-human/cycle) write (zombie guard)"
               );
+              maybeBreakGlass({
+                orchDir,
+                ticket: member,
+                site: "triaged-waiting-cycle",
+                verdict: cycleFenceVerdict,
+                phase: "dependency-cycle",
+                now: now(),
+                env,
+                appendEvent: appendFenceStandoffEvent,
+                logger: log,
+                detail: `dependency-cycle members: ${anomaly.members.join(" → ")}`,
+              });
             }
           }
         }
@@ -8479,12 +8534,17 @@ export function schedulerTick(
           );
           // CTL-863 fence: external Linear write — a zombie host that lost its
           // claim must not label after takeover (mirrors the A.5 cycle site).
+          let c925FenceVerdict = null;
           if (
             fenceGuard(
               { ticket: member, orchDir, multiHost, gateway, self },
-              { proceedOnMissingGeneration: true }
+              {
+                proceedOnMissingGeneration: true,
+                onSuppress: (verdict) => { c925FenceVerdict = verdict; },
+              }
             )
           ) {
+            clearFenceStandoff(orchDir, member);
             const c925Result = routeStuckTicketToDelegate(orchDir, member, {
               site: "ctl-925-cycle",
               reason: "dependency-cycle",
@@ -8517,6 +8577,23 @@ export function schedulerTick(
                 source: "ctl-925-cycle",
               });
             }
+          } else {
+            log.warn(
+              { ticket: member, reason: c925FenceVerdict?.reason ?? null },
+              "cat-173: fence suppressed eligible dependency-cycle escalation",
+            );
+            maybeBreakGlass({
+              orchDir,
+              ticket: member,
+              site: "ctl-925-cycle",
+              verdict: c925FenceVerdict,
+              phase: "dependency-cycle",
+              now: now(),
+              env,
+              appendEvent: appendFenceStandoffEvent,
+              logger: log,
+              detail: `dependency-cycle members: ${anomaly.members.join(" → ")}`,
+            });
           }
         }
       }
@@ -9138,7 +9215,8 @@ export function schedulerTick(
       // fence-check runs before we've proven a write is needed.
       if (
         isFenceSuppressFresh(orchDir, ticket, now()) ||
-        isEscalationProbeCooldownFresh(orchDir, ticket, now())
+        isEscalationProbeCooldownFresh(orchDir, ticket, now()) ||
+        isFenceStandoffCooldownFresh(orchDir, ticket, now())
       ) {
         // Still surface the orphan once for the dashboard (the probe/write is what we
         // skip, not the visibility signal).
@@ -9181,11 +9259,13 @@ export function schedulerTick(
           // latch so a finished ticket's escalated/cooldown ledger entry doesn't
           // linger (hygiene — the recovery router already drops terminal tickets).
           recoveryForgetIntent(ticket, { orchDir });
+          clearFenceStandoff(orchDir, ticket);
         } else {
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
+          let fenceVerdict = null;
           if (
-            fenceGuard(
+            terminalFenceGuard(
               { ticket, orchDir, multiHost, gateway, self },
               {
                 proceedOnMissingGeneration: true,
@@ -9198,9 +9278,13 @@ export function schedulerTick(
                 // that one here would hold a genuinely-completed pipeline non-terminal
                 // for a whole cooldown window when recovery finishes teardown.
                 onMissingGeneration: () => stampEscalationProbeCooldown(orchDir, ticket, now()),
+                onSuppress: (verdict) => {
+                  fenceVerdict = verdict;
+                },
               }
             )
           ) {
+            clearFenceStandoff(orchDir, ticket);
             const stalledSig = signalByTicket.get(ticket);
             // CTL-1754: resolve the reason across every key the pipeline
             // actually writes. This line used to read `stalledSig?.stalledReason`
@@ -9232,12 +9316,49 @@ export function schedulerTick(
             }
           } else {
             log.warn(
-              { ticket },
+              { ticket, reason: fenceVerdict?.reason ?? null },
               "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
             );
             // CTL-1329: arm the cooldown so the next ticks skip this dir's probe+fence
             // instead of re-burning Linear quota every tick until the dir is reaped.
             stampFenceSuppress(orchDir, ticket, now());
+            const standoff = maybeBreakGlass({
+              orchDir,
+              ticket,
+              site: "terminal-sweep",
+              verdict: fenceVerdict,
+              phase: signalByTicket.get(ticket)?.phase ?? "terminal-sweep",
+              now: now(),
+              env,
+              appendEvent: (payload) => {
+                try {
+                  return appendFenceStandoffEvent(payload);
+                } catch {
+                  return false;
+                }
+              },
+              logger: log,
+            });
+            if (standoff.breakGlass && !standoff.deliveryPending) {
+              stampFenceStandoffCooldown(orchDir, ticket, now(), env);
+            } else if (standoff.deliveryPending && standoff.deliveryRetryable === true) {
+              // Delivery is intentionally retryable on the next tick. The ordinary
+              // 15-minute suppression marker was stamped immediately above; remove
+              // it so it cannot accidentally become a delivery-retry latch.
+              //
+              // BOUNDED (CAT-173 review): only while maybeBreakGlass still reports the
+              // failure as retryable. Dropping the marker every tick on a PERSISTENTLY
+              // failing sink (unwritable `.escalations`, full disk) re-runs this block's
+              // terminal Linear probe + fence-check subprocess ~2x/sec forever — exactly
+              // the CTL-1329 burn that drained the OAuth bucket and froze fleet dispatch.
+              // Past the bound we leave the marker, so delivery still retries — once per
+              // 15-minute cooldown instead of every tick. Fail-closed on an absent flag.
+              try {
+                unlinkSync(fenceSuppressMarkerPath(orchDir, ticket));
+              } catch {
+                /* best-effort — a missing marker already permits retry */
+              }
+            }
           }
           // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
           // non-terminal stalled/failed-no-recovery ticket is visible on the dashboard
@@ -9942,6 +10063,8 @@ function runTick() {
       // CTL-1789: same shape — undefined keeps schedulerTick's default-on
       // defaultAppendPhaseAdvanceAppliedEvent; a test injects a spy.
       appendPhaseAdvanceAppliedEvent: runningOpts.appendPhaseAdvanceAppliedEvent,
+      appendFenceStandoffEvent:
+        runningOpts.appendFenceStandoffEvent ?? defaultAppendFenceStandoffEvent,
       // CTL-1605: arm the guarded fast-path eviction seam for the STEP A terminal
       // short-circuit. Reuses the SAME warm agents snapshot + freshness + worktree
       // resolver the J4 census uses (never removes a dir whose worktree hosts a live

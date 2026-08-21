@@ -1527,6 +1527,36 @@ write-budget unit). These env vars on the `catalyst-execution-core` process boun
   since-resolved conflict can still land (the label is never permanently abandoned — COORD-236); a
   successful apply resets the counter.
 
+### Fence-standoff human-surfacing bound (CAT-173)
+
+These execution-core environment variables bound how long repeated fence suppression can remain
+invisible to a human. The count and age must both be reached; the 45-minute floor spans three
+15-minute fence cooldowns, preventing a fast tick loop from paging on a transient blip.
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `CATALYST_FENCE_STANDOFF_CAP` | `4` | Consecutive suppressions required before out-of-band escalation. |
+| `CATALYST_FENCE_STANDOFF_MIN_AGE_MS` | `2700000` (45 min) | Minimum episode age before out-of-band escalation. |
+| `CATALYST_FENCE_STANDOFF_COOLDOWN_MS` | `21600000` (6 h) | After a delivered break-glass, how long the terminal sweep skips this ticket's probe + fence check + `needs-human` write. |
+| `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` | `5` | Consecutive FAILED break-glass deliveries that may bypass the ordinary 15-minute suppression cooldown to retry on the very next tick. |
+
+Crossing the bound writes a durable board/push escalation and does not loosen the fence or perform
+a Linear write. Two cadence caveats:
+
+- The out-of-band escalation fires **once per episode**. `breakGlassAt` latches on the first
+  delivered break-glass and is reset only by `clearFenceStandoff` (a later fence PASS, or the
+  terminal branch of the sweep), so `CATALYST_FENCE_STANDOFF_COOLDOWN_MS` paces the ticket's
+  *fence re-probe*, not a repeat page.
+- Because that cooldown gates the whole terminal-sweep probe+write block, a standoff that heals
+  after a break-glass has its `needs-human` Linear write — and the terminal-clear retraction on a
+  late Done — deferred by up to one cooldown window (6 h by default, versus the 15 min the
+  pre-existing `.fence-suppressed` marker imposed).
+- A break-glass whose durable-record or event write fails drops the 15-minute marker so delivery
+  retries next tick. `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` bounds that bypass: past it the
+  ordinary cooldown is retained, so a persistently unwritable sink degrades to a 15-minute retry
+  cadence instead of re-running the per-tick Linear probe + fence-check subprocess forever
+  (the CTL-1329 quota burn).
+
 ### Broker watchdog session eviction (CTL-1516)
 
 The broker's watchdog tick keeps per-session bookkeeping (`lastHeartbeat`, `workerToOrchestrator`)

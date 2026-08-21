@@ -1312,6 +1312,7 @@ jobs:
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \
+            fence-standoff.test.mjs \
             fence-guard-integration.test.mjs \
             terminal-done-cooldown.test.mjs \
             fleet-health-event.test.mjs \
