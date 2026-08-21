@@ -433,7 +433,6 @@ import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership f
 import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
 import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
 import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
-import { readDelegateClaims } from "./delegate-claims.mjs"; // CTL-1744: orchDir/.delegate-claims/*.json → Map for the dispatch-liveness grace (zero-import leaf: monitor.mjs imports scheduler.mjs, so the reader cannot live there)
 import { readGithubQuota } from "./github-quota-timer.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609: delegate-first escalation seam
 import {
