@@ -78,6 +78,7 @@ const INLINE_EVENT_NAMES = [
   "phase.advance.held.CTL-1",         // CTL-755 recovery.mjs defaultAppendPhaseAdvanceHeldEvent
   "phase.advance.applied.CTL-1",      // CTL-1789 recovery.mjs defaultAppendPhaseAdvanceAppliedEvent
   "phase.advance.suppressed-duplicate.CTL-1", // CTL-1805 recovery.mjs defaultAppendPhaseAdvanceSuppressedEvent (idempotency guard)
+  "phase.advance.rearmed.CTL-1",              // CTL-2113 recovery.mjs defaultAppendPhaseAdvanceRearmedEvent (stale-successor re-arm)
   "phase.dispatch.claim-lost.CTL-1",  // CTL-1805 phase-agent-dispatch bow-out (audible lost single-flight claim)
   "linear.state.write.CTL-1",         // linear-state-write-event.mjs:77
   "agent.waiting_on_user",            // wait-event.mjs:buildWaitEnvelope
@@ -254,6 +255,29 @@ describe("recovery.mjs dynamic phase-slot producers", () => {
     expect(isAllowedPhaseSlot("dispatch")).toBe(true);
     expect(KNOWN_PHASES.includes("advance")).toBe(false);
     expect(KNOWN_PHASES.includes("dispatch")).toBe(false);
+  });
+
+  // CTL-2113: the stale-successor re-arm event joins the same "advance" exception
+  // slot and the same allowed-but-non-routing posture as applied/held/suppressed-
+  // duplicate. Load-bearing: a re-arm event must NEVER become a wake — a stale-
+  // marker correction retracted and fell through to dispatch; routing it would
+  // double-wake the orchestrator on what is already a dispatched phase.
+  test("CTL-2113: phase.advance.rearmed is allowed but creates NO routing match", () => {
+    const rearmedName = "phase.advance.rearmed.CTL-1";
+    expect(isBrokerProtectedName(rearmedName), `${rearmedName} must not be broker-protected`).toBe(
+      false
+    );
+    expect(
+      PHASE_EVENT_PATTERN.test(rearmedName),
+      `${rearmedName} must not match the routing pattern`
+    ).toBe(false);
+    expect(
+      phaseSlotOf(rearmedName),
+      `${rearmedName} must not resolve to a routable phase slot`
+    ).toBeNull();
+    // "advance" slot is the shared exception (held / applied / suppressed-duplicate / rearmed).
+    expect(isAllowedPhaseSlot("advance")).toBe(true);
+    expect(KNOWN_PHASES.includes("advance")).toBe(false);
   });
 });
 

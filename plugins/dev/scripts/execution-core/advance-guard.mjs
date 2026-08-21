@@ -128,6 +128,20 @@ export function recordAdvanceApplied(orchDir, ticket, from, to, key, deps = {}) 
   }
 }
 
+// isAdvanceMarkerStale — CTL-2113. A marker records a PRIOR successful advance
+// into `to` (recordAdvanceApplied only writes after verifyDispatched saw a live
+// successor signal), but the successor signal that advance created is now ABSENT
+// — a deletion path (CTL-695 failure-path reap, L3 destroy+recreate, worker-dir
+// GC) undid the advance without retracting the marker. Suppressing it further
+// wedges the ticket forever. `applied` is isAdvanceAlreadyApplied's result;
+// `successorPresent` is (readPhaseSignalRaw(orchDir, ticket, to) != null), read
+// by the caller so this stays a zero-import leaf. Fail direction: only a
+// recorded-applied edge whose successor is provably gone is stale — an
+// unknown/present successor is NOT stale.
+export function isAdvanceMarkerStale({ applied, successorPresent }) {
+  return applied === true && successorPresent === false;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // retractAdvanceMarkersInto — CTL-2024. THE MARKER IS A CLAIM ABOUT A FACT ON
 // DISK, AND ONE ACTOR CAN UNDO THAT FACT WITHOUT TOUCHING THE MARKER.

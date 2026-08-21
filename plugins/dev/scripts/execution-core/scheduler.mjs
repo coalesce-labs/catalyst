@@ -82,6 +82,7 @@ import { explainAdvanceEvidence } from "./assertion-evidence.mjs"; // CTL-1789: 
 import {
   computeAdvanceEdgeKey,
   isAdvanceAlreadyApplied,
+  isAdvanceMarkerStale,
   recordAdvanceApplied,
   retractAdvanceMarkersInto,
 } from "./advance-guard.mjs"; // CTL-1805: durable once-per-edge advancement idempotency guard
@@ -235,6 +236,7 @@ import {
   defaultAppendPhaseAdvanceHeldEvent,
   defaultAppendPhaseAdvanceAppliedEvent, // CTL-1789: the positive half of the advancement gate
   defaultAppendPhaseAdvanceSuppressedEvent, // CTL-1805: the idempotency-guard's suppressed-duplicate canary
+  defaultAppendPhaseAdvanceRearmedEvent, // CTL-2113: stale-successor re-arm visibility event
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
 } from "./recovery.mjs";
@@ -2104,13 +2106,13 @@ function emitTerminalWorkerReapOnce(orchDir, ticket, phase) {
 // re-entry can still read the dead remediate worker's bg_job_id.
 function emitPredecessorReap(orchDir, ticket, signals, next, { remediateRaw = null } = {}) {
   const pred = resolveReapPredecessor(signals, next);
-  if (!pred) return;
+  if (!pred) return null;
   const raw =
     pred.phase === REMEDIATE_PHASE
       ? (remediateRaw ?? readPhaseSignalRaw(orchDir, ticket, pred.phase))
       : readPhaseSignalRaw(orchDir, ticket, pred.phase);
   const bgJobId = raw?.bg_job_id;
-  if (!bgJobId) return;
+  if (!bgJobId) return pred; // no bg session to stop, but still return pred for callers
   emitReapIntent("phase.predecessor.reap-requested", {
     ticket,
     phase: pred.phase,
@@ -2118,6 +2120,7 @@ function emitPredecessorReap(orchDir, ticket, signals, next, { remediateRaw = nu
     worktreePath: raw?.worktreePath,
     reason: pred.reason,
   }).catch(() => {});
+  return pred;
 }
 
 // A blocker fetch that failed (or any non-terminal hydrated state) holds the
@@ -4960,6 +4963,11 @@ export function schedulerTick(
     // Best-effort, at most once per throttle window per (ticket,from,to) edge. The
     // idempotency guard's canary. Default-on; tests inject a spy.
     appendPhaseAdvanceSuppressedEvent = defaultAppendPhaseAdvanceSuppressedEvent,
+    // CTL-2113: stale-successor re-arm audit emitter — phase.advance.rearmed.<ticket>.
+    // Best-effort, one per wedge episode (fires once when the stale marker is retracted;
+    // on the next tick the successor is present → genuine suppress, or dispatch
+    // cooldown + circuit breaker limit further attempts). Default-on; tests inject a spy.
+    appendPhaseAdvanceRearmedEvent = defaultAppendPhaseAdvanceRearmedEvent,
     // CTL-757: canonical linear.state.write audit emitter, injectable for tests.
     // Caller-emitted at the 4 scheduler write sites (scheduler-advance,
     // preemption-resume, terminal-sweep, reconcile-backstop) via the emitStateWrite
@@ -7964,20 +7972,45 @@ export function schedulerTick(
       advanceGuardEnabled &&
       isAdvanceAlreadyApplied(orchDir, ticket, fromPhase, next, advanceEdgeKey)
     ) {
-      const suppressKey = `${ticket}|${fromPhase}|${next}`;
-      const lastSuppressEmit = lastAdvanceSuppressEmit.get(suppressKey);
-      if (
-        lastSuppressEmit === undefined ||
-        now() - lastSuppressEmit >= ADVANCE_SUPPRESS_WINDOW_MS
-      ) {
-        lastAdvanceSuppressEmit.set(suppressKey, now());
+      // CTL-2113: the marker attests a prior successful advance into `next`.
+      // If the successor signal it attests to is GONE (reaped / GC'd / L3-
+      // recreated without a marker retraction), the advance's effect was undone;
+      // suppressing forever wedges the ticket silently. Re-arm: retract the
+      // stale marker, WARN to daemon.log (the suppression path is event-log-only
+      // — this is the visibility the wedge lacked), emit phase.advance.rearmed,
+      // and FALL THROUGH to re-dispatch (bounded below by dispatch cooldown +
+      // circuit breaker so a repeatedly-failing edge quarantines rather than
+      // looping).
+      const successorPresent = readPhaseSignalRaw(orchDir, ticket, next) != null;
+      if (isAdvanceMarkerStale({ applied: true, successorPresent })) {
+        const retracted = retractAdvanceMarkersInto(orchDir, ticket, next);
+        log.warn(
+          { ticket, from: fromPhase, to: next, edgeKey: advanceEdgeKey, retracted },
+          "ctl-2113: stale advance marker re-armed — successor signal absent " +
+            "(edge would otherwise be suppressed permanently)"
+        );
         safeEmit(
-          appendPhaseAdvanceSuppressedEvent,
-          { orchId: ticket, ticket, from: fromPhase, to: next, edgeKey: advanceEdgeKey },
+          appendPhaseAdvanceRearmedEvent,
+          { orchId: ticket, ticket, from: fromPhase, to: next, edgeKey: advanceEdgeKey, retracted },
           { ticket, phase: "advance" }
         );
+        // fall through — do NOT continue
+      } else {
+        const suppressKey = `${ticket}|${fromPhase}|${next}`;
+        const lastSuppressEmit = lastAdvanceSuppressEmit.get(suppressKey);
+        if (
+          lastSuppressEmit === undefined ||
+          now() - lastSuppressEmit >= ADVANCE_SUPPRESS_WINDOW_MS
+        ) {
+          lastAdvanceSuppressEmit.set(suppressKey, now());
+          safeEmit(
+            appendPhaseAdvanceSuppressedEvent,
+            { orchId: ticket, ticket, from: fromPhase, to: next, edgeKey: advanceEdgeKey },
+            { ticket, phase: "advance" }
+          );
+        }
+        continue;
       }
-      continue;
     }
 
     // (STEP B) CTL-755 admission gate — hold the triage→research promotion unless
@@ -8113,7 +8146,14 @@ export function schedulerTick(
     } else {
       // CTL-695: reap the just-finished predecessor even though its successor did
       // not come up — the failed dispatch (verify-failed OR rc!=0) leaves it alive.
-      emitPredecessorReap(orchDir, ticket, preResetSignals, next, { remediateRaw });
+      const reapedPred = emitPredecessorReap(orchDir, ticket, preResetSignals, next, { remediateRaw });
+      // CTL-2113 Phase 3: the reap deletes phase-<pred>.json; retract that phase's
+      // inbound-edge marker so it can't go stale and permanently wedge (Phase 1's
+      // check-side gate is the catch-all for every other deletion path — this keeps
+      // the identified incident-causing deleter self-consistent). ONLY on the failure
+      // path: the happy-path reap's edge is never re-derived, so retracting it there
+      // risks re-opening a CTL-1805 replay.
+      if (reapedPred?.phase) retractAdvanceMarkersInto(orchDir, ticket, reapedPred.phase);
     }
   }
 
@@ -9787,6 +9827,9 @@ function runTick() {
       // CTL-1789: same shape — undefined keeps schedulerTick's default-on
       // defaultAppendPhaseAdvanceAppliedEvent; a test injects a spy.
       appendPhaseAdvanceAppliedEvent: runningOpts.appendPhaseAdvanceAppliedEvent,
+      // CTL-2113: same shape — undefined keeps schedulerTick's default-on
+      // defaultAppendPhaseAdvanceRearmedEvent; a test injects a spy.
+      appendPhaseAdvanceRearmedEvent: runningOpts.appendPhaseAdvanceRearmedEvent,
       // CTL-1605: arm the guarded fast-path eviction seam for the STEP A terminal
       // short-circuit. Reuses the SAME warm agents snapshot + freshness + worktree
       // resolver the J4 census uses (never removes a dir whose worktree hosts a live
@@ -10565,6 +10608,7 @@ export function startScheduler({
   fetchBatch, // CTL-755/784: optional override; schedulerTick defaults to fetchTicketsBatch.
   appendPhaseAdvanceHeldEvent, // CTL-755: optional override; defaults to defaultAppendPhaseAdvanceHeldEvent.
   appendPhaseAdvanceAppliedEvent, // CTL-1789: optional override; defaults to defaultAppendPhaseAdvanceAppliedEvent.
+  appendPhaseAdvanceRearmedEvent, // CTL-2113: optional override; defaults to defaultAppendPhaseAdvanceRearmedEvent.
   // CTL-764 Phase 5: optional worker.transition emitter override (test seam).
   // Undefined → runTick threads the real defaultAppendWorkerTransitionEvent into
   // the per-tick schedulerTick opts (production). A test injects a spy here to
@@ -10640,6 +10684,7 @@ export function startScheduler({
     fetchBatch, // CTL-755/784: optional admission-gate batch hydration seam
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
     appendPhaseAdvanceAppliedEvent, // CTL-1789: optional applied-advance emit seam
+    appendPhaseAdvanceRearmedEvent, // CTL-2113: optional stale-successor re-arm emit seam
     appendWorkerTransitionEvent, // CTL-764: optional worker.transition emitter override (test seam; runTick defaults to defaultAppendWorkerTransitionEvent)
     recordFleetWrite, // CTL-2070: optional fleet write-ledger record seam override (test seam; runTick defaults to defaultRecordFleetWrite)
     appendDelegateEvent, // CTL-1774: optional delegate-event emitter override (test seam; runTick defaults to defaultAppendDelegateEvent)

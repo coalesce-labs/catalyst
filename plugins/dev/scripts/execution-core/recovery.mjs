@@ -1431,6 +1431,58 @@ export function defaultAppendPhaseAdvanceSuppressedEvent({ orchId, ticket, from,
   );
 }
 
+// CTL-2113: the REARMED advance event — phase.advance.rearmed.<ticket>.
+//
+// When the advance guard's marker attests a prior successful advance into
+// `to`, but the successor signal that advance created is now ABSENT (deleted
+// by the CTL-695 failure-path reap, L3 destroy+recreate, or worker-dir GC
+// without retracting the marker), `isAdvanceMarkerStale` returns true and the
+// scheduler retracts the stale marker and falls through to re-dispatch. This
+// event records that retraction so the operator can see a previously-stuck
+// ticket re-arming and verify it is not a replay storm.
+//
+// WARN severity (matching suppressed-duplicate): a re-arm is not the system
+// working normally — it is a deletion path that missed a retraction, now
+// self-correcting. High-signal: the re-arm fires at most once per wedge
+// episode (on the next tick the successor is either present → suppress, or
+// the dispatch cooldown + circuit breaker limit further attempts).
+//
+// `retracted` carries the list of marker names actually unlinked (bounded
+// 1–2 names, no Loki cardinality risk) — left in payloadExtras, not promoted
+// to an attribute, because it is diagnostic detail rather than a join key.
+export function defaultAppendPhaseAdvanceRearmedEvent({
+  orchId,
+  ticket,
+  from,
+  to,
+  edgeKey,
+  retracted,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "advance",
+      ticket,
+      orchId,
+      action: "rearmed",
+      severityText: "WARN",
+      severityNumber: 13,
+      reason: "stale-successor",
+      payloadExtras: {
+        from: from ?? null,
+        to: to ?? null,
+        edge_key: edgeKey ?? null,
+        retracted: retracted ?? [],
+      },
+      attrExtras: {
+        "catalyst.advance.from": from ?? undefined,
+        "catalyst.advance.to": to ?? undefined,
+        "catalyst.advance.edge_key": edgeKey ?? undefined,
+      },
+    }),
+    "advance-rearmed"
+  );
+}
+
 // CTL-713: cooldown GC event — phase.scheduler.cooldown-gc.<ticket>.
 // Emitted once per reaped cooldown marker so GC activity is queryable from the
 // unified event log.
