@@ -17,6 +17,7 @@ import { join } from "node:path";
 import {
   readLatestHumanComment,
   readIssueId,
+  readCommentThreadRoot,
   isReplicaCurrent,
   ReplicaUnavailableError,
   DEFAULT_ASK_HUMAN_ID,
@@ -153,6 +154,32 @@ describe("readIssueId", () => {
     let thrown;
     try {
       await readIssueId({ dbPath: missing, identifier: "CTL-1" });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(ReplicaUnavailableError);
+  });
+});
+
+describe("readCommentThreadRoot (--parent root resolution)", () => {
+  test("returns the parent_id when the comment has one, else the id itself", async () => {
+    seed([
+      { id: "c-root", author_id: HUMAN, parent_id: null, created_at: 100 },
+      { id: "c-reply", author_id: HUMAN, parent_id: "c-root", created_at: 200 },
+    ]);
+    expect(await readCommentThreadRoot({ dbPath, commentId: "c-reply" })).toBe("c-root");
+    expect(await readCommentThreadRoot({ dbPath, commentId: "c-root" })).toBe("c-root");
+  });
+
+  test("an unknown comment id passes through as its own root (the ?? fallback)", async () => {
+    seed([{ id: "c-1", author_id: HUMAN, created_at: 1 }]);
+    expect(await readCommentThreadRoot({ dbPath, commentId: "c-unknown" })).toBe("c-unknown");
+  });
+
+  test("throws a NAMED error when the DB is absent/unreadable", async () => {
+    let thrown;
+    try {
+      await readCommentThreadRoot({ dbPath: join(dir, "nope.db"), commentId: "c-1" });
     } catch (e) {
       thrown = e;
     }

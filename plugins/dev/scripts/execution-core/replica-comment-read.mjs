@@ -146,6 +146,26 @@ export async function readReplyContext({
   }
 }
 
+// readCommentThreadRoot({ dbPath, commentId }) → rootId | null
+//   Resolve the THREAD ROOT of an explicit --parent comment id (Linear threads are one
+//   level deep, so a reply-to-a-reply must target the root). Mirrors linear-reply's old
+//   GraphQL rule `c?.parent?.id ?? parentArg`: parent_id when the comment is found and has
+//   one, else the commentId itself (so an unknown/root id passes through unchanged). null
+//   only for an empty commentId; throws ReplicaUnavailableError on an unreadable DB.
+export async function readCommentThreadRoot({ dbPath = getReplicaDbPath(), commentId } = {}) {
+  if (!commentId) return null;
+  const db = await openReadonly(dbPath);
+  try {
+    const row = db
+      .prepare(`SELECT parent_id AS parentId FROM comments WHERE id = ? AND removed_at IS NULL LIMIT 1`)
+      .get(commentId);
+    // Not found → the id passes through as its own root (the `?? parentArg` fallback).
+    return row && row.parentId ? row.parentId : commentId;
+  } finally {
+    closeQuietly(db);
+  }
+}
+
 // isReplicaCurrent(dbPath) → boolean. The writer-liveness gate (reused, one
 // implementation) so callers can WARN on a stale answer rather than silently trust it. A
 // stale replica could miss a very-recently-posted human comment (bounded by the ≤5-min
