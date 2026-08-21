@@ -544,6 +544,30 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/setup-catalyst-config-preserve.test.sh
 
+      - name: owner comms tools — linear-ack write-path (CTL-1958)
+        # CTL-1958: this workflow allowlists shell suites by name rather than globbing
+        # __tests__/, so a new suite runs in required CI only once registered here.
+        # Guards linear-ack.mjs's proxy-or-refuse contract + the credential-free replica
+        # read after the client_credentials mint was deleted. Hermetic (seeds a temp
+        # sqlite replica; refuse cases need no network).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/linear-ack-write-path.test.sh
+
+      - name: owner comms tools — linear-reply write-path (CTL-1958)
+        # CTL-1958: linear-reply.mjs's proxy-or-refuse comment write + best-effort
+        # eyes-clear + threading. The success/output-shape cases run against a
+        # self-limiting LOCAL mock cloud (node http on an ephemeral 127.0.0.1 port);
+        # refuse/loud-fail cases are network-free.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/linear-reply-write-path.test.sh
+
+      - name: owner comms tools — install-agent-tools symlink installer (CTL-1958)
+        # CTL-1958: install-agent-tools.sh symlinks ~/catalyst/comms/tools/{linear-reply,
+        # linear-ack}.mjs to the repo copies (CTL-2026 option a); verifies WRAPPER/PASS
+        # via the doctor check and the AC 'client_credentials' grep over the deployed dir.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/install-agent-tools.test.sh
+
       - name: host write-credential classifier parity (CTL-2045)
         # ⛔ Codex P2 on #3706, and the important one. This suite is
         # the ONLY thing holding lib/host-write-credential.mjs (the
@@ -1352,6 +1376,7 @@ jobs:
             pid-file-identity.test.mjs \
             registry.test.mjs \
             replica-read.test.mjs \
+            replica-comment-read.test.mjs \
             replica-supplemental-reads.test.mjs \
             scan.test.mjs \
             scheduler-created-at.test.mjs \
