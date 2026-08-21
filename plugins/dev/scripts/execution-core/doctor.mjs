@@ -109,6 +109,9 @@ import {
   // config.json (bottom), each fail-open to {}. Used by layer2HasKey so doctor
   // grades the same merged view the daemon reads.
   readLayer2Merged,
+  // CTL-1210 Phase 5: advisory presence checks for the two new Layer-2 sibling files.
+  resolveClusterSecretsPath,
+  resolveNodeConfigPath,
 } from "./config.mjs";
 // CTL-1785: the TTL constants + enum, imported DIRECTLY from the zero-import leaf
 // (node built-ins only — safe under doctor's bare-Node runtime), same pattern as
@@ -4161,6 +4164,57 @@ export function checkClusterSecretFreshness(deps = {}) {
   return checks;
 }
 
+// checkClusterSecretsPresent — CTL-1210 Phase 5. ADVISORY ONLY (WARN, never FAIL).
+// Reports whether ~/.config/catalyst/cluster-secrets.json exists, which is the
+// migration state indicator: absent on a fresh node (no cluster-sync yet run),
+// present once cluster-sync has written it. No content validation — presence only.
+export function checkClusterSecretsPresent(deps = {}) {
+  const {
+    csPath = resolveClusterSecretsPath(),
+    fileExists = (p) => existsSync(p),
+  } = deps;
+  const NAME = "cluster-secrets-present";
+  if (fileExists(csPath)) {
+    return [mkCheck(NAME, STATUS.PASS, `cluster-secrets.json present at ${csPath}`)];
+  }
+  return [
+    mkCheck(
+      NAME,
+      STATUS.WARN,
+      `cluster-secrets.json absent at ${csPath} — shared keys (bot creds, smeeChannel) ` +
+        "will be read from config.json until a cluster-sync or catalyst-join runs",
+    ),
+  ];
+}
+
+// checkNodeConfigPresent — CTL-1210 Phase 5. ADVISORY ONLY (WARN, never FAIL).
+// Reports whether ~/.config/catalyst/node.json exists and has a non-empty host.name.
+// A missing node.json is fine (new install); a present-but-host-name-less one is the
+// unexpected state worth surfacing.
+export function checkNodeConfigPresent(deps = {}) {
+  const {
+    nodePath = resolveNodeConfigPath(),
+    fileExists = (p) => existsSync(p),
+    readJson = (p) => {
+      try {
+        return JSON.parse(readFileSync(p, "utf8"));
+      } catch {
+        return null;
+      }
+    },
+  } = deps;
+  const NAME = "node-config-present";
+  if (!fileExists(nodePath)) {
+    return [mkCheck(NAME, STATUS.WARN, `node.json absent at ${nodePath} — per-node config (host.name, cloudFeed.mode, …) not split yet; config.json is the fallback`)];
+  }
+  const obj = readJson(nodePath);
+  const hostName = obj?.catalyst?.host?.name ?? obj?.catalyst?.["host.name"];
+  if (!hostName) {
+    return [mkCheck(NAME, STATUS.WARN, `node.json present but catalyst.host.name is unset — run catalyst-join or set it manually`)];
+  }
+  return [mkCheck(NAME, STATUS.PASS, `node.json present, host.name=${hostName}`)];
+}
+
 // checkConfigScopeLeak — CTL-1214. Flags a committed Layer-1 .catalyst/config.json
 // that still carries node/cluster-scoped keys, or a legacy .catalyst/hosts.json
 // roster file. `.catalyst/config.json` is committed per-repo and must carry ONLY
@@ -6470,6 +6524,8 @@ export function checksForClass(nc, opts = {}) {
       () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
       () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
       () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
+      () => checkClusterSecretsPresent(), // CTL-1210: cluster-secrets.json present? (advisory — new nodes haven't run cluster-sync yet)
+      () => checkNodeConfigPresent(), // CTL-1210: node.json present + host.name set? (advisory)
     ];
   }
 
@@ -6557,6 +6613,8 @@ export function checksForClass(nc, opts = {}) {
     () => checkLinearWriteBudget(), // CTL-1936: host cloud-write spend / exhaustion — advisory only (never FAIL)
     () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
     () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
+    () => checkClusterSecretsPresent(), // CTL-1210: cluster-secrets.json present? (advisory — new nodes haven't run cluster-sync yet)
+    () => checkNodeConfigPresent(), // CTL-1210: node.json present + host.name set? (advisory)
   ];
 }
 
