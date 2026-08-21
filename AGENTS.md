@@ -135,6 +135,24 @@ replica-read rule below is absolute).
     default**. Never answer someone else's ask, and never post as the human.
   - **Escalate inward, never outward:** instrument → steward → concierge → human (as an ask). An agent or
     instrument that pages a human directly is a defect, and a bare label in a human's queue is a defect.
+  - **A stuck agent is a request for help, NOT an escalation — and the steward's job is to answer it.**
+    The steward holds the broader context and has the standing mandate to *unblock*, not to relay. Before
+    anything reaches a human they must answer three questions: **can I decide this myself?** (technical
+    calls — which approach, retry-or-abandon, rebase-or-re-cut — are theirs, not the human's); **does this
+    need to block at all?** (if a sane default exists, take it and record it — see the ask rule above);
+    and **who else can move this?** They may pull in another agent, another steward, or the human, and
+    pulling in a peer is the preferred move. Only a genuine product/priority/approval decision — or an
+    action only a human can physically take — survives to become an ask.
+    ⛔ **A system-level failure is never a per-ticket human block.** Provider overloaded, out of capacity,
+    rate-limited, connectivity down: that is ONE fleet alert, and the affected tickets retry and resume by
+    themselves. Measured 2026-08-21: of 86 items flagged as waiting on a human, **3** genuinely were —
+    41 were the model provider being overloaded, escalated one ticket at a time as if each were a
+    priority call.
+  - **Rank what does reach the human by blast radius, not by age.** An ask must record what it `blocks`,
+    and the ordering the human sees is *how much open work is held, weighted by that work's priority* —
+    `catalyst-dev:ask` → `references/triage.md`, with `scripts/ask-triage.sh` ready-made. Search for an
+    existing ask before filing a new one and attach to it instead of duplicating: duplicates split one
+    decision's urgency across several rows and sink it below trivia.
   - **Cite an identifier only after `create` returned it.** A guessed ticket number is usually a real,
     unrelated ticket — worse than no number at all.
 - **Skills here use progressive disclosure — read the reference you need, not all of them.** A skill is a
