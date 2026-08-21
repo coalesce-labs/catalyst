@@ -19,9 +19,21 @@ never a status paragraph.
 
 ## 2. Creating one (the raising agent)
 
-**Use the verb** — it builds the exact body, files the ticket, reads it BACK out of Linear, and proves
-the decision trigger can parse the options. It exits **2** rather than leaving you a ticket that can
-never be answered:
+**FIRST — search for an existing ask; one decision should be one ask.** When several agents hit the
+same wall and each files its own, the human sees N tickets for one decision and each carries a
+fraction of the true urgency, so the decision blocking the most work sorts *below* trivia. If an
+open ask already covers your decision, **attach** to it (`linearis issues update <ASK> --blocks
+<YOUR-TICKET>`) instead of filing a second one — that raises its measured urgency rather than
+splitting it. Search query + ranking: **[`references/triage.md`](references/triage.md)**.
+
+**⛔ ALWAYS pass `--blocks`.** An ask with no `blocks` relation is structurally unrankable — invisible
+to every urgency query, no matter how long it has waited. Measured 2026-08-21: 2 of 5 open asks had
+no blocking link, one of them the oldest item on the human's plate (71h). Same class of defect as an
+unparseable body: looks fine on the board, cannot work.
+
+**Then use the verb** — it builds the exact body, files the ticket, reads it BACK out of Linear, and
+proves the decision trigger can parse the options. It exits **2** rather than leaving you a ticket
+that can never be answered:
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
@@ -70,7 +82,27 @@ It replies in-thread as the app actor and moves the ticket to Done. Two delibera
 equivalent, and what to do when the human's action surfaces a defect:
 **[`references/closing.md`](references/closing.md)**.
 
-## 6. Where things live
+## 6. Reporting to the human (the concierge/steward job)
+
+Never hand over a list. **Rank by blast radius — how much open work each ask holds up, weighted by
+that work's priority — then lead with the recommendation and the reason:**
+
+```bash
+bash "$CLAUDE_PLUGIN_ROOT/scripts/ask-triage.sh"      # ranked + the one-line roll-up
+bash "$CLAUDE_PLUGIN_ROOT/scripts/human-blocked.sh"   # genuinely blocked vs missing-link vs phantom label
+```
+
+> There are 5 things waiting on you. The two that matter: **CTL-2132 first** — it's the only one
+> holding up urgent work (blocks CTC-841, P1). Then **CTL-2135**, blocking a high-priority ticket
+> ready to move the moment you decide. Two others don't record what they block, so I can't tell you
+> their real cost — that's a gap, not a judgment.
+
+Age is the wrong sort key: "waiting 71h" and "blocks an urgent production bug" are different facts,
+and only the second tells the human what to do first. Say what you *cannot* rank and why — silence
+about a 71-hour item reads as "nothing there". Full method, weights, and the routing question
+(deferred while there is one human): **[`references/triage.md`](references/triage.md)**.
+
+## 7. Where things live
 
 - Ask view **My decisions — what needs me** (a decided item leaves it); the board is a summary, not the record.
 - Related skills: `catalyst-dev:linearis`, `catalyst-dev:create-handoff`, `catalyst-dev:steward`.
