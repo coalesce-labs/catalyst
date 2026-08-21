@@ -16,7 +16,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test label-budget-backoff.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,7 +30,12 @@ import {
   isCloudLabelRejection,
   shouldCoolDownLabel,
 } from "./label-failure-class.mjs";
-import { convergeHeldLabel, convergeDispositionLabel } from "./scheduler.mjs";
+import {
+  convergeHeldLabel,
+  convergeDispositionLabel,
+  labelCooldownPath,
+  labelRetryState,
+} from "./scheduler.mjs";
 import { labelOnce } from "./label-guard.mjs";
 
 let orchDir;
@@ -359,5 +364,151 @@ describe("⛔ CTL-2052: labelOnce must NOT write .skipped for the cloud label re
     expect(labelOnce(orchDir, "CTL-24", "needs-human", w)).toBe(true);
     expect(labelOnce(orchDir, "CTL-24", "needs-human", w)).toBe(false);
     expect(w.calls.length).toBe(1);
+  });
+});
+
+// ── CTL-2052 Phase 2 (AC3) — bound retries to N, then stop and say so ─────────
+describe("CTL-2052 labelRetryState — the pure cap arithmetic", () => {
+  const cfg = { cap: 3, exhaustedMs: 1_000 };
+  test("below the cap → not blocked, not a probe", () => {
+    expect(labelRetryState({ failedAt: 0, attempts: 2 }, 100, cfg)).toMatchObject({
+      blocked: false,
+      exhaustedProbe: false,
+      attempts: 2,
+    });
+  });
+  test("at the cap, inside the exhausted window → BLOCKED", () => {
+    expect(labelRetryState({ failedAt: 0, attempts: 3 }, 500, cfg)).toMatchObject({
+      blocked: true,
+      exhaustedProbe: false,
+    });
+  });
+  test("at the cap, PAST the exhausted window → a single self-heal probe (not blocked)", () => {
+    expect(labelRetryState({ failedAt: 0, attempts: 3 }, 2_000, cfg)).toMatchObject({
+      blocked: false,
+      exhaustedProbe: true,
+    });
+  });
+  test("a null / absent marker → nothing recorded yet, not blocked", () => {
+    expect(labelRetryState(null, 0, cfg)).toMatchObject({ blocked: false, exhaustedProbe: false, attempts: 0 });
+    expect(labelRetryState({}, 0, cfg)).toMatchObject({ blocked: false, attempts: 0 });
+  });
+});
+
+describe("CTL-2052 Phase 2: the converger counts cool-down cycles, then stops", () => {
+  const readAttempts = (ticket, label) =>
+    JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8")).attempts;
+
+  test("the attempt counter increments once per cool-down CYCLE, not per tick", () => {
+    const w = failingWriter("cloud:label-rejected");
+    let clock = 3_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 100, retryExhaustedMs: 10_000_000 };
+    convergeDispositionLabel("CTL-30", [], "blocked", w, opts); // apply 1 → attempts 1
+    expect(readAttempts("CTL-30", "blocked")).toBe(1);
+    clock += 1_000; // still inside the 60 s window: 0 applies, no increment
+    convergeDispositionLabel("CTL-30", [], "blocked", w, opts);
+    expect(readAttempts("CTL-30", "blocked")).toBe(1);
+    clock += 61_000; // window elapsed → apply 2
+    convergeDispositionLabel("CTL-30", [], "blocked", w, opts);
+    expect(readAttempts("CTL-30", "blocked")).toBe(2);
+    clock += 61_000; // apply 3
+    convergeDispositionLabel("CTL-30", [], "blocked", w, opts);
+    expect(readAttempts("CTL-30", "blocked")).toBe(3);
+    expect(w.calls.length).toBe(3);
+  });
+
+  test("after the cap the converger stops re-issuing — the cap gate wins over the time gate", () => {
+    const w = failingWriter("cloud:label-rejected");
+    let clock = 3_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 3, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 3; i++) {
+      convergeDispositionLabel("CTL-31", [], "blocked", w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(3); // reached the cap
+    // 4th convergence: the 60 s window has elapsed, but the cap gate short-circuits first.
+    convergeDispositionLabel("CTL-31", [], "blocked", w, opts);
+    expect(w.calls.length).toBe(3);
+    clock += 61_000;
+    convergeDispositionLabel("CTL-31", [], "blocked", w, opts);
+    expect(w.calls.length).toBe(3);
+  });
+
+  test("convergeHeldLabel enforces the same cap", () => {
+    const w = failingWriter("cloud:label-rejected");
+    let clock = 3_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 2, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 2; i++) {
+      convergeHeldLabel("CTL-35", [], "blocked", w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(2);
+    convergeHeldLabel("CTL-35", [], "blocked", w, opts);
+    expect(w.calls.length).toBe(2);
+  });
+
+  test("the retry-exhausted escalation fires EXACTLY ONCE, on the cap crossing (edge-triggered)", () => {
+    const w = failingWriter("cloud:label-rejected");
+    const events = [];
+    let clock = 3_000_000;
+    const opts = {
+      orchDir,
+      now: () => clock,
+      retryCap: 3,
+      retryExhaustedMs: 1_800_000,
+      onRetryExhausted: (info) => events.push(info),
+    };
+    for (let i = 0; i < 6; i++) {
+      convergeDispositionLabel("CTL-32", [], "blocked", w, opts);
+      clock += 61_000;
+    }
+    expect(events.length).toBe(1);
+    expect(events[0]).toMatchObject({
+      ticket: "CTL-32",
+      label: "blocked",
+      attempts: 3,
+      reason: "cloud:label-rejected",
+    });
+  });
+
+  test("the stop SELF-HEALS: after the long window exactly one probe apply is allowed again", () => {
+    const w = failingWriter("cloud:label-rejected");
+    let clock = 3_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 3, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 3; i++) {
+      convergeDispositionLabel("CTL-33", [], "blocked", w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(3);
+    convergeDispositionLabel("CTL-33", [], "blocked", w, opts); // still capped inside the long window
+    expect(w.calls.length).toBe(3);
+    clock += 1_800_001; // past the exhausted window → one self-heal probe
+    convergeDispositionLabel("CTL-33", [], "blocked", w, opts);
+    expect(w.calls.length).toBe(4);
+  });
+
+  test("a SUCCESSFUL apply resets the ledger — the counter starts fresh next time", () => {
+    let mode = "fail";
+    const calls = [];
+    const w = {
+      calls,
+      applyLabel({ ticket, label }) {
+        calls.push({ ticket, label });
+        return mode === "fail"
+          ? { applied: false, reason: "cloud:label-rejected" }
+          : { applied: true, reason: null };
+      },
+      removeLabel() {},
+    };
+    let clock = 3_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 10, retryExhaustedMs: 10_000_000 };
+    convergeDispositionLabel("CTL-34", [], "blocked", w, opts); // fail → attempts 1
+    clock += 61_000;
+    convergeDispositionLabel("CTL-34", [], "blocked", w, opts); // fail → attempts 2
+    expect(readAttempts("CTL-34", "blocked")).toBe(2);
+    clock += 61_000;
+    mode = "ok";
+    convergeDispositionLabel("CTL-34", [], "blocked", w, opts); // success → ledger cleared
+    expect(existsSync(labelCooldownPath(orchDir, "CTL-34", "blocked"))).toBe(false);
   });
 });
