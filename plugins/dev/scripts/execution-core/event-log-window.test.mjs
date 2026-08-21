@@ -24,7 +24,7 @@ import { writeFileSync, mkdtempSync, mkdirSync, rmSync, statSync, readFileSync }
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { scanEventsSince, scanEventsChunked, tailParsedEvents, DEFAULT_TAIL_MAX_BYTES } from "./event-tail.mjs";
+import { scanEventsSince, scanEventsChunked, tailParsedEvents, DEFAULT_TAIL_MAX_BYTES, robustCoverageMs, COVERAGE_PROBE_SAMPLE } from "./event-tail.mjs";
 import {
   scanLocalHeartbeats,
   makeHeartbeatScanMemo,
@@ -36,6 +36,7 @@ import {
   resolveHeartbeatTailMaxBytes,
   HEARTBEAT_TAIL_MIN_BYTES,
   HEARTBEAT_TAIL_CEILING_BYTES,
+  HEARTBEAT_TAIL_DEFAULT_BYTES,
   // CTL-1529 round 3 — the tail HORIZON signal.
   hostsBeyondTailHorizon,
   warnHostsBeyondTailHorizon,
@@ -593,9 +594,15 @@ describe("readClusterAdmission — bounded, same records (CTL-1529)", () => {
       initialWindow: 1024,
       onRead: (r) => reads.push(r),
     });
-    const total = reads.reduce((a, r) => a + r.bytes, 0);
-    expect(total).toBeLessThan(statSync(logPath).size);
+    // Peak transient is ONE chunk — no single read exceeds chunkSize.
+    // (CTL-1550: the probe now samples K records per step instead of 1, so the
+    // sum across probe + main passes can slightly exceed fileSize, but each
+    // individual read stays bounded.)
     for (const r of reads) expect(r.bytes).toBeLessThanOrEqual(1024);
+    // The total is bounded: probe reads K records per doubling step (≤ K/density
+    // chunks each) plus one main scan. On a large fixture this stays well under 4x
+    // the file size; a value ≥ 4x would indicate an unbounded loop.
+    expect(reads.reduce((a, r) => a + r.bytes, 0)).toBeLessThan(statSync(logPath).size * 4);
   });
 });
 
@@ -875,10 +882,11 @@ describe("resolveHeartbeatTailMaxBytes — bounded, finite, positive (Codex P2)"
 
   test("unset / empty takes the default SILENTLY (that is the documented opt-out)", () => {
     invalid.length = 0;
-    expect(parse(undefined)).toBe(DEFAULT_TAIL_MAX_BYTES);
-    expect(parse(null)).toBe(DEFAULT_TAIL_MAX_BYTES);
-    expect(parse("")).toBe(DEFAULT_TAIL_MAX_BYTES);
-    expect(parse("   ")).toBe(DEFAULT_TAIL_MAX_BYTES);
+    // CTL-1550: the default is now HEARTBEAT_TAIL_DEFAULT_BYTES (128 MiB), not DEFAULT_TAIL_MAX_BYTES (64 MiB).
+    expect(parse(undefined)).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
+    expect(parse(null)).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
+    expect(parse("")).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
+    expect(parse("   ")).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
     expect(invalid).toEqual([]);
   });
 
@@ -887,26 +895,26 @@ describe("resolveHeartbeatTailMaxBytes — bounded, finite, positive (Codex P2)"
     // every multi-host liveness read uncovered, both gates degraded to the full
     // roster on EVERY tick, failover and the dispatch shed silently off fleet-wide.
     invalid.length = 0;
-    expect(parse("-1")).toBe(DEFAULT_TAIL_MAX_BYTES);
-    expect(parse("-67108864")).toBe(DEFAULT_TAIL_MAX_BYTES);
+    expect(parse("-1")).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
+    expect(parse("-67108864")).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
     expect(invalid).toHaveLength(2);
     for (const i of invalid) expect(i.reason).toContain("minimum");
   });
 
   test("Infinity falls back LOUDLY (it re-created the unbounded whole-log read)", () => {
     invalid.length = 0;
-    expect(parse("Infinity")).toBe(DEFAULT_TAIL_MAX_BYTES);
-    expect(parse("-Infinity")).toBe(DEFAULT_TAIL_MAX_BYTES);
+    expect(parse("Infinity")).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
+    expect(parse("-Infinity")).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
     expect(invalid).toHaveLength(2);
     expect(invalid[0].reason).toContain("finite");
   });
 
   test("garbage, zero, and out-of-band values fall back LOUDLY", () => {
     invalid.length = 0;
-    expect(parse("abc")).toBe(DEFAULT_TAIL_MAX_BYTES);
-    expect(parse("0")).toBe(DEFAULT_TAIL_MAX_BYTES);
-    expect(parse("1024")).toBe(DEFAULT_TAIL_MAX_BYTES); // below the 1 MiB minimum
-    expect(parse(String(HEARTBEAT_TAIL_CEILING_BYTES + 1))).toBe(DEFAULT_TAIL_MAX_BYTES);
+    expect(parse("abc")).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
+    expect(parse("0")).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
+    expect(parse("1024")).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES); // below the 1 MiB minimum
+    expect(parse(String(HEARTBEAT_TAIL_CEILING_BYTES + 1))).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
     expect(invalid).toHaveLength(4);
   });
 
@@ -981,6 +989,28 @@ describe("resolveHeartbeatTailWindowMs — bounded, finite, above the grace floo
     expect(parse(String(HEARTBEAT_GRACE_MS + 1))).toBe(HEARTBEAT_TAIL_WINDOW_DEFAULT_MS);
     expect(invalid).toHaveLength(3);
     for (const i of invalid) expect(i.reason).toContain("minimum");
+  });
+
+  test("an EMPTY range (min > max) collapses to the CEILING, never inverts it (Codex #3760)", () => {
+    // A pathological grace (> 15.5 days) derives min = 2x grace > the 31-day max.
+    // Pre-fix, clampDefault's min-side branch ran first and returned min — a value
+    // ABOVE the ceiling this constant exists to enforce, re-creating the
+    // walk-to-BOF-every-tick read on monthly logs.
+    invalid.length = 0;
+    const hugeMin = HEARTBEAT_TAIL_WINDOW_MAX_MS * 2; // 62 days = 2x a 31-day grace
+    // At that grace the derived DEFAULT is Math.min(72x grace, MAX) = exactly MAX —
+    // which sits BELOW the uncollapsed 62-day min, so pre-fix clampDefault's
+    // min-side branch returned min (62d), a value above the ceiling.
+    const got = resolveHeartbeatTailWindowMs(undefined, {
+      defaultMs: HEARTBEAT_TAIL_WINDOW_MAX_MS,
+      min: hugeMin,
+      max: HEARTBEAT_TAIL_WINDOW_MAX_MS,
+      onInvalid: (info) => invalid.push(info),
+    });
+    expect(got).toBe(HEARTBEAT_TAIL_WINDOW_MAX_MS); // ceiling wins, floor collapses onto it
+    expect(got).toBeLessThanOrEqual(HEARTBEAT_TAIL_WINDOW_MAX_MS);
+    // And the shipped constants can never form an empty range, whatever the grace:
+    expect(HEARTBEAT_TAIL_WINDOW_MIN_MS).toBeLessThanOrEqual(HEARTBEAT_TAIL_WINDOW_MAX_MS);
   });
 
   test("a NEGATIVE value falls back LOUDLY (it used to clamp silently to the grace window)", () => {
@@ -1410,5 +1440,168 @@ describe("the tail HORIZON — a host dead beyond windowMs (CTL-1529 round 3)", 
         warnHostsBeyondTailHorizon({ hosts: ["ancient", "other"], windowMs: 12 * HOUR, nowMs: NOW + 1_000 }),
       ).toEqual(["other"]);
     });
+  });
+});
+
+// ─── Phase 1 (CTL-1550): robustCoverageMs — outlier-resistant coverage anchor ─
+
+describe("robustCoverageMs — outlier-resistant coverage anchor (CTL-1550)", () => {
+  test("odd count returns the median", () => {
+    expect(robustCoverageMs([30, 10, 20])).toBe(20);
+  });
+
+  test("even count returns the upper-middle (conservative: never older than true middle)", () => {
+    // [10, 20, 30, 40] sorted → upper-middle index = floor(4/2) = 2 → value 30.
+    // The anchor is never OLDER than the genuine midpoint, keeping the fail direction safe.
+    expect(robustCoverageMs([40, 10, 30, 20])).toBe(30);
+  });
+
+  test("a single old outlier at the window start does not move the anchor", () => {
+    // One ancient backfill among recent records → anchor stays recent.
+    const recent = 1_000_000;
+    const samples = [1, recent, recent + 1, recent + 2, recent + 3];
+    // sorted: [1, recent, recent+1, recent+2, recent+3] → upper-middle index 2 → recent+1
+    expect(robustCoverageMs(samples)).toBe(recent + 1);
+  });
+
+  test("empty array returns null", () => {
+    expect(robustCoverageMs([])).toBeNull();
+  });
+
+  test("array of non-finite values returns null", () => {
+    expect(robustCoverageMs([NaN, Infinity, -Infinity])).toBeNull();
+  });
+
+  test("COVERAGE_PROBE_SAMPLE is large enough to tolerate a single outlier (>= 3)", () => {
+    // The median of K samples tolerates floor(K/2) outliers. For 1 outlier to not
+    // swing the median we need K >= 3. K=16 gives generous headroom.
+    expect(COVERAGE_PROBE_SAMPLE).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// ─── Phase 1 (CTL-1550): scanEventsSince backfill correctness ────────────────
+
+describe("scanEventsSince: backfill correctness (CTL-1550)", () => {
+  test("a single OLD backfilled record at the window start does NOT falsely prove coverage", () => {
+    // Build a log with:
+    //   • one ancient backfill record (now-20h) at the start
+    //   • many recent records (all within the last 30s)
+    // With the old single-record probe the ancient record at the window start would
+    // make the probe think the window reaches 20h back (covered:true on a 12h target).
+    // With the median anchor the probe ignores the lone outlier and correctly
+    // reports covered:false when the window only spans seconds.
+    const p = join(dir, "backfill.jsonl");
+    const ancient = iso(NOW - 20 * HOUR);
+    const lines = [JSON.stringify({ ts: ancient, attributes: { "event.name": "noise" }, body: {} })];
+    // Fill the rest of the log with recent records (all within the last 30 seconds)
+    for (let i = 30; i >= 1; i--) {
+      lines.push(JSON.stringify({ ts: iso(NOW - i * 1000), attributes: { "event.name": "noise" }, body: {} }));
+    }
+    writeFileSync(p, lines.join("\n") + "\n");
+
+    // Use a cap small enough to only cover a few seconds from EOF (not the full 12h).
+    // With the single-record probe the ancient line at offset 0 would prove coverage.
+    // With the median probe the window should report covered:false.
+    const res = scanEventsSince({
+      path: p,
+      targetSinceMs: NOW - 12 * HOUR,
+      requiredSinceMs: NOW - 12 * HOUR,
+      // Cap: only enough to hold the ancient line + ~16 recent ones
+      maxBytes: lines.slice(0, 18).join("\n").length + 10,
+      chunkSize: 512,
+      initialWindow: 512,
+      onEvent: () => {},
+    });
+    // The window genuinely spans only seconds (mostly recent records),
+    // so coverage of 12h must NOT be claimed.
+    expect(res.covered).toBe(false);
+  });
+
+  test("a normally ordered deep window is still covered:true (no regression)", () => {
+    // The standard fixture has records from now-24h through now-5s in monotonic order.
+    // The median of the first K records near the window start should predate the 12h target.
+    const res = scanEventsSince({
+      path: logPath,
+      targetSinceMs: NOW - 12 * HOUR,
+      requiredSinceMs: NOW - 10 * MIN,
+      chunkSize: 1024,
+      initialWindow: 1024,
+      onEvent: () => {},
+    });
+    expect(res.covered).toBe(true);
+    // And the anchor still reflects a real old timestamp.
+    expect(Date.parse(res.oldestTs)).toBeLessThanOrEqual(NOW - 12 * HOUR);
+  });
+});
+
+// ─── Phase 2 (CTL-1550): HEARTBEAT_TAIL_DEFAULT_BYTES re-tuned to 128 MiB ───
+
+describe("HEARTBEAT_TAIL_DEFAULT_BYTES — re-tuned cap (CTL-1550)", () => {
+  test("the heartbeat tail default is the CTL-1550 re-tuned cap, not the shared 64 MiB", () => {
+    // Validates that the default is a named constant, not the shared DEFAULT_TAIL_MAX_BYTES.
+    expect(HEARTBEAT_TAIL_DEFAULT_BYTES).toBe(128 * 1024 * 1024);
+    expect(HEARTBEAT_TAIL_DEFAULT_BYTES).not.toBe(DEFAULT_TAIL_MAX_BYTES);
+    // resolveHeartbeatTailMaxBytes with no env value uses the new default.
+    expect(resolveHeartbeatTailMaxBytes(undefined)).toBe(HEARTBEAT_TAIL_DEFAULT_BYTES);
+  });
+
+  test("the re-tuned default is within [min, max] and finite/positive", () => {
+    expect(HEARTBEAT_TAIL_DEFAULT_BYTES).toBeGreaterThanOrEqual(HEARTBEAT_TAIL_MIN_BYTES);
+    expect(HEARTBEAT_TAIL_DEFAULT_BYTES).toBeLessThanOrEqual(HEARTBEAT_TAIL_CEILING_BYTES);
+    expect(Number.isFinite(HEARTBEAT_TAIL_DEFAULT_BYTES)).toBe(true);
+    expect(HEARTBEAT_TAIL_DEFAULT_BYTES).toBeGreaterThan(0);
+  });
+
+  test("128 MiB proves the default 12 h window at the documented worst-case density", () => {
+    // Measured worst-case fleet density: ~6.2 MiB/h on mini (2026-08-19).
+    // 12 h * 6.2 MiB/h = 74.4 MiB. 128 MiB gives ~1.7x headroom.
+    // The 64 MiB default only reached ~10.3 h (short of 12 h).
+    const DENSITY_BYTES_PER_HOUR = 6.2 * 1024 * 1024;
+    const windowHours = HEARTBEAT_TAIL_WINDOW_MS / (60 * 60 * 1000);
+    const requiredBytes = DENSITY_BYTES_PER_HOUR * windowHours;
+    expect(HEARTBEAT_TAIL_DEFAULT_BYTES).toBeGreaterThan(requiredBytes);
+    // Old 64 MiB default was NOT sufficient.
+    expect(DEFAULT_TAIL_MAX_BYTES).toBeLessThan(requiredBytes);
+  });
+});
+
+// ─── Phase 3 (CTL-1550): resolveHeartbeatTailWindowMs clamps derived default ─
+
+describe("resolveHeartbeatTailWindowMs: derived-default clamping (CTL-1550)", () => {
+  const parse = (raw, opts = {}) => resolveHeartbeatTailWindowMs(raw, opts);
+
+  test("a derived default above the 31-day max is clamped to the max, not returned raw", () => {
+    const huge = 40 * 24 * 60 * 60_000; // 40 days > max
+    const seen = [];
+    const got = parse(undefined, {
+      defaultMs: huge,
+      onInvalid: (i) => seen.push(i),
+    });
+    expect(got).toBe(HEARTBEAT_TAIL_WINDOW_MAX_MS);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].reason).toContain("exceeds");
+    expect(seen[0].reason).toContain("maximum");
+  });
+
+  test("a normal derived default (12 h) is returned unchanged and SILENTLY", () => {
+    const seen = [];
+    const got = parse(undefined, {
+      defaultMs: HEARTBEAT_TAIL_WINDOW_DEFAULT_MS,
+      onInvalid: (i) => seen.push(i),
+    });
+    expect(got).toBe(HEARTBEAT_TAIL_WINDOW_DEFAULT_MS);
+    expect(seen).toHaveLength(0);
+  });
+
+  test("the shipped HEARTBEAT_TAIL_WINDOW_DEFAULT_MS never exceeds the declared max", () => {
+    expect(HEARTBEAT_TAIL_WINDOW_DEFAULT_MS).toBeLessThanOrEqual(HEARTBEAT_TAIL_WINDOW_MAX_MS);
+  });
+
+  test("empty string also returns clamped default (not the raw unvalidated defaultMs)", () => {
+    const huge = 40 * 24 * 60 * 60_000;
+    const seen = [];
+    const got = parse("", { defaultMs: huge, onInvalid: (i) => seen.push(i) });
+    expect(got).toBe(HEARTBEAT_TAIL_WINDOW_MAX_MS);
+    expect(seen).toHaveLength(1);
   });
 });
