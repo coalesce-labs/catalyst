@@ -2997,7 +2997,7 @@ export const LAYER2_KEY_CLASS = Object.freeze({
   "repository": "shared",
   "feedback": "shared",
   "monitor.github.smeeChannel": "shared",
-  "githubFeed.mode": "shared",
+  "githubFeed.mode": "node",
   "host.name": "node",
   "node.class": "node",
   "cluster.staticRoster": "node",

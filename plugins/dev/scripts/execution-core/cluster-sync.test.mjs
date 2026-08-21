@@ -58,8 +58,8 @@ const touchSecret = (name) =>
   writeFileSync(join(clusterDir, "secrets", name), "{ciphertext-placeholder}");
 
 describe("destForSecret (CTL-1211)", () => {
-  test("cluster-bots maps to config.json (deep-merged into machine-global)", () => {
-    expect(destForSecret("cluster-bots.sops.json", "/cfg")).toBe(resolve("/cfg", "config.json"));
+  test("cluster-bots maps to cluster-secrets.json (CTL-1210: shared bot creds go to shared file)", () => {
+    expect(destForSecret("cluster-bots.sops.json", "/cfg")).toBe(resolve("/cfg", "cluster-secrets.json"));
   });
   test("config-<key> maps to config-<key>.json", () => {
     expect(destForSecret("config-catalyst-workspace.sops.json", "/cfg")).toBe(
@@ -91,13 +91,17 @@ describe("syncClusterSecrets (CTL-1211)", () => {
 
     const res = syncClusterSecrets({ clusterDir, configDir, decrypt });
     expect(res.ok).toBe(true);
-    expect(res.synced.sort()).toEqual(["config-catalyst-workspace.json", "config.json"]);
+    // CTL-1210: cluster-bots now syncs to cluster-secrets.json (not config.json)
+    expect(res.synced.sort()).toEqual(["cluster-secrets.json", "config-catalyst-workspace.json"]);
 
-    // deep-merge preserved the node-local host.name AND overlaid the bot creds
-    const merged = JSON.parse(readFileSync(join(configDir, "config.json"), "utf8"));
-    expect(merged.catalyst.host.name).toBe("mini");
-    expect(merged.catalyst.linear.bot.worker.accessToken).toBe("tok");
-    expect(statSync(join(configDir, "config.json")).mode & 0o777).toBe(0o600);
+    // config.json preserved the node-local host.name (not touched by cluster-bots)
+    const nodeCfg = JSON.parse(readFileSync(join(configDir, "config.json"), "utf8"));
+    expect(nodeCfg.catalyst.host.name).toBe("mini");
+    expect(nodeCfg.catalyst.linear?.bot?.worker?.accessToken).toBeUndefined();
+    // CTL-1210: bot creds land in cluster-secrets.json
+    const shared = JSON.parse(readFileSync(join(configDir, "cluster-secrets.json"), "utf8"));
+    expect(shared.catalyst.linear.bot.worker.accessToken).toBe("tok");
+    expect(statSync(join(configDir, "cluster-secrets.json")).mode & 0o777).toBe(0o600);
   });
 
   test("a single decrypt failure is skipped; the rest still sync (fail-open)", () => {
@@ -109,7 +113,8 @@ describe("syncClusterSecrets (CTL-1211)", () => {
       return { ok: true };
     };
     const res = syncClusterSecrets({ clusterDir, configDir, decrypt, logger: QUIET });
-    expect(res.synced).toEqual(["config.json"]);
+    // CTL-1210: cluster-bots → cluster-secrets.json
+    expect(res.synced).toEqual(["cluster-secrets.json"]);
     expect(res.skipped).toEqual(["config-adva.sops.json"]);
   });
 
@@ -139,7 +144,8 @@ describe("syncClusterSecrets (CTL-1211)", () => {
     touchSecret("cluster-bots.sops.json");
     touchSecret("node-secret-files.sops.json");
     const res = syncClusterSecrets({ clusterDir, configDir, decrypt: () => ({ x: 1 }) });
-    expect(res.synced).toEqual(["config.json"]);
+    // CTL-1210: cluster-bots → cluster-secrets.json
+    expect(res.synced).toEqual(["cluster-secrets.json"]);
     expect(existsSync(join(configDir, "node-secret-files.json"))).toBe(false);
   });
 
@@ -148,7 +154,8 @@ describe("syncClusterSecrets (CTL-1211)", () => {
     touchSecret("cluster-bots.sops.json");
     touchSecret("profile-files.sops.json");
     const res = syncClusterSecrets({ clusterDir, configDir, decrypt: () => ({ x: 1 }) });
-    expect(res.synced).toEqual(["config.json"]);
+    // CTL-1210: cluster-bots → cluster-secrets.json
+    expect(res.synced).toEqual(["cluster-secrets.json"]);
     expect(existsSync(join(configDir, "profile-files.json"))).toBe(false);
   });
 });
@@ -818,9 +825,10 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     });
 
     expect(res.changed).toBe(true);
-    expect(res.synced).toEqual(["config.json"]);
-    // overwrite: the filled value replaced the stale placeholder
-    const merged = JSON.parse(readFileSync(join(configDir, "config.json"), "utf8"));
+    // CTL-1210: cluster-bots → cluster-secrets.json
+    expect(res.synced).toEqual(["cluster-secrets.json"]);
+    // bot creds land in cluster-secrets.json; the placeholder was merged there
+    const merged = JSON.parse(readFileSync(join(configDir, "cluster-secrets.json"), "utf8"));
     expect(merged.catalyst.linear.bot.worker.accessToken).toBe("FRESH");
     // marker advanced + timestamp from the injected clock
     const marker = readClusterSyncState(statePath);
@@ -829,7 +837,8 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     // refreshed event emitted with the from→to shas
     expect(emits).toHaveLength(1);
     expect(emits[0].name).toBe("refreshed");
-    expect(emits[0].payload).toMatchObject({ fromSha: "OLDSHA", toSha: "NEWSHA", synced: ["config.json"] });
+    // CTL-1210: cluster-bots → cluster-secrets.json
+    expect(emits[0].payload).toMatchObject({ fromSha: "OLDSHA", toSha: "NEWSHA", synced: ["cluster-secrets.json"] });
   });
 
   test("(e1) sops UNRESOLVABLE on a changed HEAD → fail-open + refresh-failed event, marker NOT advanced", () => {
@@ -1048,7 +1057,8 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
 
     expect(res.ok).toBe(true);
     expect(res.changed).toBe(true);
-    expect(res.synced).toEqual(["config.json"]);
+    // CTL-1210: cluster-bots → cluster-secrets.json
+    expect(res.synced).toEqual(["cluster-secrets.json"]);
     expect(res.written).toEqual(["cma-api-key"]);
     // full success advances the marker (guard against over-correcting the predicate)
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
@@ -1947,10 +1957,11 @@ describe("clusterSync boot (CTL-1393 conditional marker seed)", () => {
     // success path still seeds the marker at the clone's HEAD
     expect(writeCalls).toHaveLength(1);
     expect(writeCalls[0].lastDecryptedSha).toBe("BOOTSHA");
-    expect(writeCalls[0].synced).toEqual(["config.json"]);
+    // CTL-1210: cluster-bots → cluster-secrets.json
+    expect(writeCalls[0].synced).toEqual(["cluster-secrets.json"]);
     // boot success does not alarm
     expect(emits.map((e) => e.name)).not.toContain("refresh-failed");
-    expect(res.sync.synced).toEqual(["config.json"]);
+    expect(res.sync.synced).toEqual(["cluster-secrets.json"]);
   });
 
   test("fresh node, EMPTY secrets repo (nothing to decrypt) → still seeds marker (not a failure)", () => {
@@ -2022,8 +2033,48 @@ describe("clusterSync boot (CTL-1393 conditional marker seed)", () => {
     expect(writeCalls).toHaveLength(0);
     expect(emits.map((e) => e.name)).toContain("refresh-failed");
     expect(emits[0].payload.reason).toBe("secrets-skipped");
-    expect(res.sync.synced).toEqual(["config.json"]);
+    // CTL-1210: cluster-bots → cluster-secrets.json
+    expect(res.sync.synced).toEqual(["cluster-secrets.json"]);
     expect(res.sync.skipped).toEqual(["config-adva.sops.json"]);
+  });
+});
+
+// CTL-1210 Phase 3: destForSecret routes cluster-bots to cluster-secrets.json and
+// syncClusterSecrets delivers bot creds there; readLayer2Merged() sees them via the chain.
+describe("destForSecret CTL-1210 Phase 3", () => {
+  test("destForSecret: cluster-bots.sops.json → cluster-secrets.json (not config.json)", () => {
+    expect(destForSecret("cluster-bots.sops.json", "/cfg")).toBe(
+      resolve("/cfg", "cluster-secrets.json"),
+    );
+  });
+
+  test("destForSecret: other secrets (config-<key>.json) are unchanged", () => {
+    expect(destForSecret("config-catalyst-workspace.sops.json", "/cfg")).toBe(
+      resolve("/cfg", "config-catalyst-workspace.json"),
+    );
+    expect(destForSecret("cluster-cloud.sops.json", "/cfg")).toBe(
+      resolve("/cfg", "cluster-cloud.json"),
+    );
+  });
+
+  test("syncClusterSecrets: bot creds land in cluster-secrets.json (not config.json)", () => {
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    const botCreds = { catalyst: { linear: { bot: { orchestrator: { accessToken: "orch-tok" }, worker: { accessToken: "worker-tok" } } } } };
+    const res = syncClusterSecrets({
+      clusterDir,
+      configDir,
+      decrypt: () => botCreds,
+      logger: QUIET,
+    });
+    expect(res.ok).toBe(true);
+    expect(res.synced).toEqual(["cluster-secrets.json"]);
+    // cluster-secrets.json gets the bot creds
+    const shared = JSON.parse(readFileSync(join(configDir, "cluster-secrets.json"), "utf8"));
+    expect(shared.catalyst.linear.bot.orchestrator.accessToken).toBe("orch-tok");
+    expect(shared.catalyst.linear.bot.worker.accessToken).toBe("worker-tok");
+    // config.json is NOT touched (it didn't exist before)
+    expect(existsSync(join(configDir, "config.json"))).toBe(false);
   });
 });
 

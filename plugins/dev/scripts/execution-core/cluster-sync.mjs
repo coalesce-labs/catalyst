@@ -164,9 +164,11 @@ function defaultGit(args) {
 }
 
 // destForSecret — map a secrets/ filename to its ~/.config/catalyst destination.
+// CTL-1210: cluster-bots contains shared bot credentials; route to cluster-secrets.json
+// so it is byte-identical across all cluster nodes and readable via readLayer2Merged().
 function destForSecret(name, configDir) {
   const base = basename(name).replace(/\.sops\.json$/, "");
-  if (base === "cluster-bots") return resolve(configDir, "config.json");
+  if (base === "cluster-bots") return resolve(configDir, "cluster-secrets.json");
   return resolve(configDir, `${base}.json`);
 }
 
