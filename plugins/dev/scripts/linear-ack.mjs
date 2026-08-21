@@ -1,49 +1,76 @@
-// linear-react.mjs <ISSUE> [--emoji eyes] [--remove] — react (as the app actor) to the latest HUMAN comment on an issue
-const GQL="https://api.linear.app/graphql", OAUTH="https://api.linear.app/oauth/token";
-const key=process.argv[2]; const emoji=(process.argv.indexOf("--emoji")>=0?process.argv[process.argv.indexOf("--emoji")+1]:"eyes"); const remove=process.argv.includes("--remove");
-const r=await fetch(OAUTH,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"client_credentials",client_id:process.env.LINEAR_SYNC_CLIENT_ID,client_secret:process.env.LINEAR_SYNC_CLIENT_SECRET,scope:"read,write,comments:create,app:assignable,app:mentionable",actor:"app"})}); const tok=(await r.json()).access_token;
-const g=async(q,v)=>{const x=await fetch(GQL,{method:"POST",headers:{"content-type":"application/json",authorization:tok},body:JSON.stringify({query:q,variables:v})});const j=await x.json(); if(j.errors) throw new Error(JSON.stringify(j.errors).slice(0,300)); return j.data;};
-const d=await g(`query($k:String!){ issue(id:$k){ comments(first:100, orderBy: createdAt){ nodes{ id createdAt user{ id name } botActor{ type } reactions{ id emoji user{ id } } } } } }`,{k:key});
-const humans=d.issue.comments.nodes.filter(n=>n.user&&!n.botActor&&n.user.id===(process.env.ASK_HUMAN_ID||"c2a8cc92-cab6-4536-9500-0f24abdf702b")).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)); const last=humans[humans.length-1]; if(!last){console.log("no human comment");process.exit(0);}
-// ── CTL-1961: the WRITE goes through the cloud proxy; the READ above stays direct ───
-// The skinny-install contract is that a host may keep a Linear credential for READS but
-// must not hold a direct WRITE path. The comment lookup above is a read and is unchanged;
-// only reactionCreate/reactionDelete are routed.
+#!/usr/bin/env node
+// linear-ack.mjs <ISSUE> [--emoji eyes] [--remove] [--comment-id <id>] — CTL-1958
+// Record the 👀 "read, working on it" claim (as the app actor) on the latest HUMAN comment
+// of an issue, THROUGH the cloud write proxy.
 //
-// Modes follow linear-comment-write.mjs, because a second dialect of "what does shadow
-// mean" is how the two drift:
-//   off      → direct, byte-identical to before this change
-//   shadow   → record the observation, then perform the direct write (a reaction is a
-//              WRITE, so "observe by doing it too" would double-write)
-//   enforce  → proxy only. A failure REFUSES and exits non-zero; it is never retried
-//              direct, because falling back would defeat the gate on exactly the runs
-//              where it matters.
+// ⛔ CTL-1958 — PROXY-OR-REFUSE, NO CREDENTIAL LEFT. This tool used to mint an app-actor
+// token and both READ (find the latest human comment) and WRITE (the direct reaction
+// mutations) against the Linear GraphQL API. That mint is the per-host "Catalyst
+// Orchestrator" credential CTL-1889 exists to retire, so it is GONE:
+//   • the READ moves to the local Catalyst-Cloud replica (credential-free, ~/catalyst/
+//     catalyst-replica.db) via readLatestHumanComment; a missing/unreadable replica throws
+//     LOUDLY (never a silent "no comment"),
+//   • the reaction WRITE was already routed through the CTC-724 `reaction` route (CTL-1961),
+//   • the direct add/remove reaction mutations are DELETED — there is no app-actor write
+//     path on this host anymore, so anything the write-path leaf does not resolve to
+//     `proxy` REFUSES and writes nothing (AC3). The reaction IS the whole operation here
+//     (unlike linear-reply's best-effort eyes-clear), so refusing is the correct terminal
+//     answer and nothing has been written to contradict.
 //
-// ⛔ The proxy is CONSTRUCTED here, not fetched with `getLinearWriteProxy()`. That
-// accessor returns a module-level singleton that something else must have INSTALLED, and
-// nothing installs it in a standalone script — so it answers `null` every time and the
-// routing would silently never engage. A gate that cannot fire is worse than no gate,
-// because it reports the same thing as a working one. Construction mirrors
-// `cluster-claim.mjs`'s defaultTransport, which had to solve this same problem.
+// These tools therefore require CATALYST_LINEAR_WRITE_PROXY=enforce + a cloud token; every
+// other resolution (off/shadow/unset, or enforce with no reachable proxy) refuses.
 //
-// ⛔ CTL-2026 — THE LEAF IMPORT MUST BE INSIDE THIS GUARD, AND IT WAS NOT.
-// The catch below exists BECAUSE an out-of-tree copy cannot resolve these imports. The
-// first cut then imported `./lib/linear-write-path.mjs` on its own line, OUTSIDE the try —
-// so a copy of this file with no sibling directories died with an unhandled module
-// resolution error before it could take the very branch written to handle that case.
-// Measured 2026-08-18 by copying this file alone into an empty directory and running it:
-// `Cannot find module '<dir>/lib/linear-write-path.mjs'`, no reaction attempted, no reason
-// printed. `~/catalyst/comms/tools/` is exactly that shape, and CTL-2026(b)'s announced
-// sync step is what would have put this file there. A guard whose result is consumed
-// outside the guard is not a guard.
+// Prints JSON {via:"proxy", applied, commentId, emoji, mode} on success.
+import { readLatestHumanComment } from "./execution-core/replica-comment-read.mjs";
+import { getReplicaDbPath } from "./execution-core/config.mjs";
+
+function arg(name, dflt) {
+  const i = process.argv.indexOf(name);
+  return i >= 0 ? process.argv[i + 1] : dflt;
+}
+const key = process.argv[2];
+const emoji = arg("--emoji", "eyes");
+const remove = process.argv.includes("--remove");
+const commentIdArg = arg("--comment-id", null);
+if (!key) {
+  console.error("usage: linear-ack.mjs <ISSUE-ID> [--emoji eyes] [--remove] [--comment-id <id>]");
+  process.exit(2);
+}
+
+// Resolve the target comment id. --comment-id is the fast path (skips the read entirely);
+// otherwise read the latest human comment from the replica. readLatestHumanComment THROWS
+// (ReplicaUnavailableError) when the replica is absent/unreadable, so a missing replica is
+// loud, not a silent no-op. `null` = the DB is fine but the issue has no human comment.
+let commentId = commentIdArg;
+if (!commentId) {
+  const latest = await readLatestHumanComment({
+    dbPath: getReplicaDbPath(),
+    identifier: key,
+    humanId: process.env.ASK_HUMAN_ID, // undefined → the leaf's DEFAULT_ASK_HUMAN_ID
+  });
+  if (!latest) {
+    console.log("no human comment");
+    process.exit(0);
+  }
+  commentId = latest.id;
+}
+
+// ── CTL-1961: construct the write proxy once ────────────────────────────────────────
+// Constructed, NOT fetched via getLinearWriteProxy(): that accessor returns an installed
+// singleton nothing installs in a standalone script, so it answers null every time and the
+// routing would silently never engage. `unavailable` is kept as a REASON rather than
+// collapsed into "off" — see lib/linear-write-path.mjs on why those must never be one answer.
 //
-// ⛔ AND THE MODE MUST BE READ BEFORE THE GUARD, NOT INSIDE IT.
-// `proxyMode` was assigned from `readLinearWriteProxyConfig` INSIDE the try, so an
-// unreachable-modules host fell through with the initialiser `"off"` still in place —
-// i.e. the one state in which the refusal matters was also the one state that computed
-// "no proxy configured". The env read below is the only mode source that survives the
-// modules being gone. It is deliberately WEAKER than the real ladder (env only, no
-// Layer-2), so it reports `null` = "could not confirm" rather than claiming `"off"`.
+// ⛔ CTL-2026 — THE LEAF IMPORT MUST BE INSIDE THIS GUARD. The catch below exists BECAUSE an
+// out-of-tree copy cannot resolve these imports; importing the leaf on its own line above the
+// try would die with an unhandled module-resolution error before the branch written for that
+// case could run. (Measured 2026-08-18 by copying this file alone into an empty directory.)
+//
+// ⛔ AND THE MODE MUST BE READ BEFORE THE GUARD. `proxyMode` was assigned INSIDE the try, so an
+// unreachable-modules host fell through with the initialiser "off" still in place — the one
+// state in which the refusal matters was also the one state that computed "no proxy configured".
+// The env read below is the only mode source that survives the modules being gone; it is
+// deliberately weaker (env only, no Layer-2), so an absent variable reports UNCONFIRMED, not "off".
 const envMode = ["off", "shadow", "enforce"].includes(process.env.CATALYST_LINEAR_WRITE_PROXY)
   ? process.env.CATALYST_LINEAR_WRITE_PROXY
   : null;
@@ -65,47 +92,18 @@ try {
     if (!proxy) proxyUnavailable = `createLinearWriteProxy returned null for mode=${proxyMode}`;
   }
 } catch (err) {
-  // ⛔ NOT the same as `off`. An out-of-tree copy of this tool cannot resolve these
-  // imports at all (CTL-2026), and a typo'd export name looks identical from here — the
-  // first cut of this change imported a name that does not exist and would have degraded
-  // to "direct" forever while looking like a routed tool. So the reason is kept and, under
-  // enforce, it REFUSES rather than quietly writing direct.
+  // ⛔ NOT the same as `off`. An out-of-tree copy of this tool cannot resolve these imports at
+  // all (CTL-2026), and a typo'd export name looks identical from here — so the reason is kept
+  // and, under enforce, it REFUSES rather than quietly writing (there is no direct path anymore).
   proxyUnavailable = `proxy modules unreachable: ${err?.message ?? err}`;
   proxyMode = envMode ?? "off";
 }
 
-const viaProxy = async (mode) => {
-  const res = proxy.send({
-    routeId: "reaction",
-    ticket: key,
-    payload: { commentId: last.id, emoji, mode },
-    caller: "linear-ack",
-  });
-  if (!res?.handled) throw new Error(`proxy did not handle the write: ${res?.reason ?? "unknown"}`);
-  return res;
-};
-
-const directRemove = async () => {
-  // The route's remove mode deletes EVERY matching reaction and reports the count, which
-  // is what this loop already did — so the two paths agree rather than merely coexisting.
-  const mine = last.reactions.filter((x) => x.emoji === emoji);
-  for (const x of mine) await g(`mutation($id:String!){ reactionDelete(id:$id){ success } }`, { id: x.id });
-  return { removed: mine.length, commentId: last.id };
-};
-const directAdd = async () => {
-  const m = await g(`mutation($in:ReactionCreateInput!){ reactionCreate(input:$in){ success reaction{ id } } }`, {
-    in: { commentId: last.id, emoji },
-  });
-  return { ok: m.reactionCreate.success, commentId: last.id, emoji };
-};
-
 const mode = remove ? "remove" : "add";
 // ⛔ We cannot ask the leaf what to do about the leaf being missing. This restates its
-// STRICTEST branch and nothing else — with no transport, `enforce` REFUSES and every other
-// mode writes direct — and it is pinned against the real function by "the unreachable-leaf
-// fallback" in lib/linear-write-path.test.mjs, which fails if that branch ever changes.
-// An env that never named a mode is reported as UNCONFIRMED rather than as `off`: this
-// degraded path cannot read Layer-2, so "no mode here" is not evidence of "no mode".
+// STRICTEST branch: with no transport, `enforce` REFUSES; every other mode ALSO refuses now
+// (the direct app-actor write is gone), so the dispatch below collapses anything != "proxy"
+// to refuse regardless. Pinned against the real function by the unreachable-leaf fallback test.
 const plan = decideWritePath
   ? decideWritePath({ mode: proxyMode, proxyReady: proxy != null, unavailableReason: proxyUnavailable })
   : proxyMode === "enforce"
@@ -116,22 +114,22 @@ const plan = decideWritePath
         reason: `${proxyUnavailable ?? "write-path leaf unreachable"}${envMode ? "" : "; CATALYST_LINEAR_WRITE_PROXY unset, so the mode is UNCONFIRMED (Layer-2 unreadable without the modules)"}`,
       };
 
-if (plan.action === "refuse") {
-  console.error(`linear-ack: REFUSED — mode=${proxyMode} but the proxy is unavailable (${plan.reason})`);
+// proxy-or-refuse: only `proxy` writes. off/shadow/enforce-without-proxy all REFUSE, because
+// no app-actor write path remains on this host (AC3). Preserves the `REFUSED — mode=…` shape.
+if (plan.action !== "proxy") {
+  const why =
+    plan.action === "refuse"
+      ? plan.reason
+      : `resolution=${plan.action} but there is no direct app-actor write path anymore (mint removed)`;
+  console.error(
+    `linear-ack: REFUSED — mode=${proxyMode}, nothing written (${why}). These tools require CATALYST_LINEAR_WRITE_PROXY=enforce + a cloud token.`
+  );
   process.exit(1);
 }
-if (plan.action === "proxy") {
-  const res = await viaProxy(mode);
-  console.log(JSON.stringify({ via: "proxy", applied: res.applied === true, commentId: last.id, emoji, mode }));
-} else {
-  if (plan.observe) {
-    try {
-      await viaProxy(mode);
-    } catch (err) {
-      console.error(`linear-ack: proxy threw in shadow (the direct write still happens): ${err?.message}`);
-    }
-  } else if (plan.reason) {
-    console.error(`linear-ack: ${plan.reason} — writing direct`);
-  }
-  console.log(JSON.stringify({ via: "direct", ...(remove ? await directRemove() : await directAdd()) }));
+
+const res = proxy.send({ routeId: "reaction", ticket: key, payload: { commentId, emoji, mode }, caller: "linear-ack" });
+if (!res?.handled) {
+  console.error(`linear-ack: REFUSED — the proxy did not handle the write (${res?.reason ?? "unknown"}). Nothing written.`);
+  process.exit(1);
 }
+console.log(JSON.stringify({ via: "proxy", applied: res.applied === true, commentId, emoji, mode }));
