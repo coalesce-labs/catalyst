@@ -137,7 +137,6 @@ import {
 // CTL-1241: getEscalateHumanBelief reads the latest escalate_human belief for the
 // recovery evidence attachment (revives the structurally-dead R12 branch).
 import { collectBeliefsTick, getBeliefsDb, getEscalateHumanBelief } from "./beliefs/collector.mjs";
-import { buildRecoveryItems } from "./recovery-evidence.mjs";
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator re-arm
 import {
   appendFenceStandoffEvent as defaultAppendFenceStandoffEvent,
@@ -289,44 +288,6 @@ import {
   defaultCollectUnstuckCandidates,
   emitUnstuckEvent,
 } from "./unstuck-sweep.mjs";
-// CTL-1176: Pass 0r — LLM reasoning recovery pass. Ships off by default (ADR-023);
-// operators opt in via CATALYST_RECOVERY_PASS=shadow then =enforce.
-//
-// The host-local cooldown / intent ledger and the act-seams resolve their
-// orchDir from process.env.CATALYST_ORCHESTRATOR_DIR — which the daemon NEVER
-// sets on its own process (that env var is exported only onto CHILD phase-agent
-// processes by dispatch.mjs / phase-agent-dispatch). So the bare defaults would
-// resolve orchDir=null in the daemon, making the cooldown / max-attempts /
-// escalated-latch all inert and turning shadow into an unconditional spammer.
-// We import the defaults explicitly and BIND them to the tick's real orchDir at
-// the call site (the scheduler already has orchDir in scope) so the storm guard
-// is real in production, not just in unit tests that inject orchDir by hand.
-import {
-  reasoningRecoveryPass,
-  defaultShouldSkipItem as recoveryShouldSkipItem,
-  defaultSkipReason as recoverySkipReason, // CTL-1440 (P0b): exhausted-vs-cooldown truth
-  escalateExhaustedIntents, // CTL-1440 (P0b): attempts-exhausted → loud escalation
-  readDeferredBoardHealthIntents, // CTL-1432 (B2): deferred board-health anchor candidates
-  defaultRecordIntent as recoveryRecordIntent,
-  // CTL-1242 (corrected scope): forget the host-local recovery-intent latch when
-  // a ticket goes terminal so the ledger doesn't accumulate stale finished-ticket
-  // files (called from the terminal-sweep clear branch below).
-  defaultForgetIntent as recoveryForgetIntent,
-  defaultInvokeSeam as recoveryInvokeSeam,
-  // CTL-1176 rung 3: the bounded-LLM path now dispatches the goal-driven
-  // recovery-pass skill (replacing the phase-remediate detour). Bound to the
-  // tick's orchDir at the call site. Still entirely behind CATALYST_RECOVERY_PASS
-  // (mode=off ⇒ the pass never runs), so no live behavior change until opt-in.
-  defaultInvokeRecoveryPass as recoveryInvokeRecoveryPass,
-  // CTL-1157: the curated-escalation signal writer (Workstream C) + the defer
-  // attempts reader (Workstream B). Bound to the tick's orchDir at the call site
-  // (like recordIntent) — the daemon never sets CATALYST_ORCHESTRATOR_DIR on its
-  // own process, so the env-resolving defaults would otherwise no-op.
-  defaultWriteEscalationSignal as recoveryWriteEscalationSignal,
-  defaultReadIntentAttempts as recoveryReadIntentAttempts,
-  defaultLatchHasNoClock as recoveryLatchHasNoClock, // CTL-1610 (Phase 2)
-  restampNoClockEscalations as recoveryRestampNoClockEscalations, // CTL-1610 (Phase 3)
-} from "./recovery-reasoning.mjs";
 // CTL-1219: the per-category enforcement seam registry (dirty-tree /
 // source-conflict / orphan-stale / stale-label). Pure-cored + injectable; bound
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
@@ -338,20 +299,9 @@ import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
 import { buildUnstuckEscalateSeam } from "./unstuck-escalate-seam.mjs";
 import {
   readUnstuckSweepConfig,
-  readRecoveryPassConfig,
-  readBoardHealthConfig,
-  readGithubQuotaBoardHealthConfig,
-  readProductivityBoardHealthConfig,
-  getLivenessAnchorIssue,
-  getLivenessReadSource,
-  getLokiQueryUrl,
   readReclaimGatewayFreshMs,
   isThrottled,
 } from "./config.mjs";
-import { readPeerHeartbeatsSyncCached } from "./cluster-heartbeat-sync.mjs";
-// CAT-57: Loki-source peer read for the productivity signal, so nodeProductivity is
-// observable under CATALYST_LIVENESS_READ_SOURCE=loki instead of going dark.
-import { readClusterLivenessFromLokiSync } from "./loki-liveness-sync.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -419,17 +369,8 @@ import {
   maybeEmitDrainIgnored as defaultMaybeEmitDrainIgnored, // CTL-1678: drain-ignored tripwire
 } from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
-import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
+import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate)
 import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
-import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
-import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
-import { readGithubQuota } from "./github-quota-timer.mjs";
-import {
-  getAllTicketDescriptors,
-  getAllPrStatuses,
-  openBrokerStateDb,
-} from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap). CTL-1157: getAllPrStatuses = the filter_state PR-lifecycle reader for the phantom/orphaned-PR invariants. openBrokerStateDb (CTL-1157 Codex round-6): the exec-core daemon must open the broker DB handle before these readers — ensure() throws otherwise and assembleBoardState swallows it, leaving the board/PR maps empty and the cohorts inert.
-import { readReconcileHealthMarkers } from "./reconcile-health.mjs"; // CTL-1290: stranded-node reconcile signal
 import { claimDispatchSync, isClaimFailure } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS (CTL-2033: + the outcome discriminator)
 // COORD-236: one owner for "may this label write be re-issued next tick?"
 import {
