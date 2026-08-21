@@ -37,7 +37,8 @@ describe("CTL-1086 sentinel write guard", () => {
       appendEvent({ name: "phase.plan.complete.CTL-100", orchestrator: "orch-test" });
       expect(existsSync(getEventLogPath())).toBe(false);
     } finally {
-      process.env.HOME = prevHome;
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
       const hermetic = process.env.CATALYST_HERMETIC_DIR;
       if (hermetic) {
         process.env.CATALYST_DIR = hermetic;
@@ -45,5 +46,6 @@ describe("CTL-1086 sentinel write guard", () => {
         process.env.CATALYST_DIR = prevDir;
       }
     }
+    expect(process.env.HOME).toBe(prevHome);
   });
 });
