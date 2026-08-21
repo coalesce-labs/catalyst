@@ -117,6 +117,9 @@ function mkBoard(o = {}) {
     // ticket is ever granted delegate-lands grace, so every pre-existing test
     // exercises exactly the pre-CTL-1744 behavior.
     delegateClaims: o.delegateClaims ?? new Map(),
+    // CTL-2133: boot-resume pending-approval gates. Empty default ⇒
+    // checkBootResumePending is green (inert) for every pre-existing test.
+    pendingApprovals: o.pendingApprovals ?? [],
     now: o.now ?? NOW,
   };
 }
@@ -3171,5 +3174,88 @@ describe("CAT-57 nodeProductivity invariant", () => {
     let called = 0;
     expect(() => assembleBoardState({ mode: "off", productivityMode: "enforce", getPeerProductivity: () => { called += 1; throw new Error("must not run"); } })).not.toThrow();
     expect(called).toBe(0);
+  });
+});
+
+// ─── CTL-2133: bootResumePending — the boot-resume gate visibility invariant ──
+describe("bootResumePending invariant (CTL-2133)", () => {
+  const pending = (rows) => mkBoard({ mode: "shadow", pendingApprovals: rows });
+
+  test("7. N pending markers → flagged=[tickets], observable, extra.pending, Tier-3 only", () => {
+    const rows = [
+      { ticket: "CTL-300", phase: "implement", ageHours: 4 },
+      { ticket: "CTL-301", phase: "verify", ageHours: 12 },
+    ];
+    const inv = evaluateInvariants(pending(rows)).bootResumePending;
+    expect(inv.observable).toBe(true);
+    expect(inv.ok).toBe(false);
+    expect(inv.flagged.sort()).toEqual(["CTL-300", "CTL-301"]);
+    expect(inv.pending).toEqual([
+      { ticket: "CTL-300", phase: "implement", ageHours: 4 },
+      { ticket: "CTL-301", phase: "verify", ageHours: 12 },
+    ]);
+    // Tier-3 escalate-only: appears in tier3, never tier1/tier2.
+    const moves = proposeMoves(evaluateInvariants(pending(rows)), pending(rows));
+    const t3 = moves.tier3.filter((m) => m.move === "escalate-boot-resume-pending");
+    expect(t3.map((m) => m.ticket).sort()).toEqual(["CTL-300", "CTL-301"]);
+    expect(moves.tier1.some((m) => m.move === "escalate-boot-resume-pending")).toBe(false);
+    expect(moves.tier2.some((m) => m.move === "escalate-boot-resume-pending")).toBe(false);
+    // carries phase + age on the move for the board-scan line
+    expect(t3.find((m) => m.ticket === "CTL-300").phase).toBe("implement");
+    expect(t3.find((m) => m.ticket === "CTL-300").ageHours).toBe(4);
+  });
+
+  test("8. empty pen → flagged:[], ok:true, still observable:true (positive-control clean)", () => {
+    const inv = evaluateInvariants(pending([])).bootResumePending;
+    expect(inv.flagged).toEqual([]);
+    expect(inv.ok).toBe(true);
+    expect(inv.observable).toBe(true);
+    // no tier3 move for it
+    const moves = proposeMoves(evaluateInvariants(pending([])), pending([]));
+    expect(moves.tier3.some((m) => m.move === "escalate-boot-resume-pending")).toBe(false);
+  });
+
+  test("off mode omits the invariant entirely (off set stays byte-identical)", () => {
+    const r = evaluateInvariants(mkBoard({ mode: "off", pendingApprovals: [{ ticket: "CTL-302", phase: "pr" }] }));
+    expect(r.bootResumePending).toBeUndefined();
+  });
+
+  test("a Tier-3-only pending pen does not make the gate proceed (non-actuating)", () => {
+    const board = pending([{ ticket: "CTL-303", phase: "implement", ageHours: 3 }]);
+    const dec = decideBoardHealth(evaluateInvariants(board), board);
+    expect(dec.gate.decision).toBe("skip");
+    expect(dec.gate.reason).toBe("no-actionable-moves");
+  });
+
+  test("assembleBoardState off mode never invokes getPendingApprovals; shadow does", () => {
+    let called = 0;
+    const off = assembleBoardState({
+      orchDir: "/tmp/x",
+      mode: "off",
+      getPendingApprovals: () => { called += 1; return [{ ticket: "CTL-304", phase: "pr", ageMs: HOUR }]; },
+      now: () => NOW,
+    });
+    expect(called).toBe(0);
+    expect(off.pendingApprovals).toEqual([]);
+    const shadow = assembleBoardState({
+      orchDir: "/tmp/x",
+      mode: "shadow",
+      getPendingApprovals: () => [{ ticket: "CTL-305", phase: "implement", ageMs: 2 * HOUR }],
+      now: () => NOW,
+    });
+    expect(shadow.pendingApprovals).toEqual([
+      { ticket: "CTL-305", phase: "implement", ageMs: 2 * HOUR, ageHours: 2 },
+    ]);
+  });
+
+  test("buildBoardScanEvent carries bootResumePendingCount + the per-gate list", () => {
+    const board = pending([{ ticket: "CTL-306", phase: "verify", ageHours: 6 }]);
+    const invariants = evaluateInvariants(board);
+    const decision = decideBoardHealth(invariants, board);
+    const evt = buildBoardScanEvent({ mode: "shadow", invariants, decision, board });
+    expect(evt.details.bootResumePendingCount).toBe(1);
+    expect(evt.details.bootResumePending).toEqual([
+      { ticket: "CTL-306", phase: "verify", ageHours: 6 },
+    ]);
   });
 });

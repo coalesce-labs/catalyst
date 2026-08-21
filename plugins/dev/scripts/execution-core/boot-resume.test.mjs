@@ -23,7 +23,16 @@ import {
   // CTL-1006
   isBootResumeEligible,
   supersededByTerminalPhase,
+  // CTL-2133
+  softSurfacePendingApprovals,
+  listPendingApprovals,
+  processApprovedResumes,
+  BOOT_RESUME_SURFACE_MS,
 } from "./boot-resume.mjs";
+import {
+  EVENT_BOOT_RESUME_PENDING,
+  emitBootResumePendingGate,
+} from "./dispatch-alert.mjs";
 
 let orchDir;
 
@@ -1455,5 +1464,158 @@ describe("reconcileBootResume — CTL-1422 review hardening", () => {
     }));
     expect(dispatched).toHaveLength(1);
     expect(existsSync(join(orchDir, "workers", "CTL-3", ".boot-resume-pending-approval"))).toBe(false);
+  });
+});
+
+// ─── CTL-2133: soft-surface pending approvals (Scenario 1) ───────────────────
+describe("softSurfacePendingApprovals (CTL-2133)", () => {
+  // writePending — a boot-resume pending-approval marker with a controllable
+  // requestedAt so age can be backdated.
+  function writePending(dir, ticket, phase, overrides = {}) {
+    const wdir = join(dir, "workers", ticket);
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(
+      bootResumePendingPath(dir, ticket),
+      JSON.stringify({ ticket, phase, requestedAt: new Date().toISOString(), ...overrides }),
+    );
+  }
+  function readMarker(dir, ticket) {
+    return JSON.parse(readFileSync(bootResumePendingPath(dir, ticket), "utf8"));
+  }
+
+  test("1. a fresh gate (age 0) emits exactly one {identifier,phase,ageMs} and stamps softSurfacedAt", () => {
+    writePending(orchDir, "CTL-100", "implement");
+    const calls = [];
+    const surfaced = softSurfacePendingApprovals({ orchDir, emitPending: (e) => calls.push(e) });
+    expect(surfaced).toEqual(["CTL-100"]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].identifier).toBe("CTL-100");
+    expect(calls[0].phase).toBe("implement");
+    expect(typeof calls[0].ageMs).toBe("number");
+    // marker stamped so the next tick dedupes
+    expect(readMarker(orchDir, "CTL-100").softSurfacedAt).toBeTruthy();
+  });
+
+  test("2. dedup — a second call on the same gate emits nothing (once per gate)", () => {
+    writePending(orchDir, "CTL-101", "verify");
+    const calls = [];
+    softSurfacePendingApprovals({ orchDir, emitPending: (e) => calls.push(e) });
+    softSurfacePendingApprovals({ orchDir, emitPending: (e) => calls.push(e) });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("3. age carried — ageMs/ageHours reflect now - requestedAt for a backdated marker", () => {
+    const fiveHoursMs = 5 * 3600e3;
+    const base = 1_000_000_000_000;
+    writePending(orchDir, "CTL-102", "implement", {
+      requestedAt: new Date(base - fiveHoursMs).toISOString(),
+    });
+    const calls = [];
+    softSurfacePendingApprovals({ orchDir, now: () => base, emitPending: (e) => calls.push(e) });
+    expect(calls[0].ageMs).toBe(fiveHoursMs);
+    expect(calls[0].ageHours).toBe(5);
+  });
+
+  test("4. no park — the gated phase signal is unchanged (status not flipped, no needs-human)", () => {
+    writePending(orchDir, "CTL-103", "implement");
+    // the gated phase signal, running
+    writeSignal(orchDir, "CTL-103", "implement", { status: "running" });
+    softSurfacePendingApprovals({ orchDir, emitPending: () => {} });
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-103", "phase-implement.json"), "utf8"),
+    );
+    expect(sig.status).toBe("running"); // NOT stalled/needs-human
+    expect(sig.stalledReason).toBeUndefined();
+    expect(sig.explanation).toBeUndefined();
+    expect(existsSync(join(orchDir, "workers", "CTL-103", ".linear-label-needs-human.applied"))).toBe(false);
+  });
+
+  test("5. independence from the 48h path — a gate younger than the TTL soft-surfaces but is NOT hard-parked", () => {
+    writePending(orchDir, "CTL-104", "implement"); // age ~0, well under 48h
+    writeSignal(orchDir, "CTL-104", "implement", { status: "running" });
+    const calls = [];
+    softSurfacePendingApprovals({ orchDir, emitPending: (e) => calls.push(e) });
+    expect(calls).toHaveLength(1); // soft-surfaced
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-104", "phase-implement.json"), "utf8"),
+    );
+    expect(sig.status).toBe("running"); // 48h surfaceStale did NOT stall it
+  });
+
+  test("6. multiple gates, one tick — three pending gates each emit their own event", () => {
+    writePending(orchDir, "CTL-105", "implement");
+    writePending(orchDir, "CTL-106", "verify");
+    writePending(orchDir, "CTL-107", "pr");
+    const calls = [];
+    const surfaced = softSurfacePendingApprovals({ orchDir, emitPending: (e) => calls.push(e) });
+    expect(surfaced.sort()).toEqual(["CTL-105", "CTL-106", "CTL-107"]);
+    expect(calls).toHaveLength(3);
+  });
+
+  test("surfaceMs threshold — a gate younger than surfaceMs is held", () => {
+    const base = 1_000_000_000_000;
+    writePending(orchDir, "CTL-108", "implement", {
+      requestedAt: new Date(base - 1000).toISOString(), // 1s old
+    });
+    const calls = [];
+    softSurfacePendingApprovals({ orchDir, now: () => base, surfaceMs: 60_000, emitPending: (e) => calls.push(e) });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("an emit throw does NOT stamp the marker (retries next tick)", () => {
+    writePending(orchDir, "CTL-109", "implement");
+    const surfaced = softSurfacePendingApprovals({
+      orchDir,
+      emitPending: () => { throw new Error("append failed"); },
+    });
+    expect(surfaced).toEqual([]);
+    expect(readMarker(orchDir, "CTL-109").softSurfacedAt).toBeUndefined();
+  });
+
+  test("BOOT_RESUME_SURFACE_MS defaults to 0 (surface on first tick)", () => {
+    expect(BOOT_RESUME_SURFACE_MS).toBe(0);
+  });
+
+  test("listPendingApprovals surfaces softSurfacedAt", () => {
+    writePending(orchDir, "CTL-110", "implement", { softSurfacedAt: "2026-08-21T00:00:00Z" });
+    const [row] = listPendingApprovals(orchDir);
+    expect(row.softSurfacedAt).toBe("2026-08-21T00:00:00Z");
+  });
+
+  test("processApprovedResumes runs the soft-surface pass (emits per-gate event)", () => {
+    writePending(orchDir, "CTL-111", "implement");
+    const calls = [];
+    processApprovedResumes({
+      orchDir,
+      // stub the 48h stale sweep so we isolate the soft-surface pass
+      surfaceStaleGates: () => {},
+      emitPendingGate: (e) => calls.push(e),
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].identifier).toBe("CTL-111");
+  });
+});
+
+// ─── CTL-2133: the per-gate dispatch-alert emitter (v3 bare-name, unthrottled) ─
+describe("emitBootResumePendingGate (CTL-2133)", () => {
+  test("appends one v3 bare-name catalyst.boot_resume.pending line, unthrottled", () => {
+    const lines = [];
+    const append = (l) => lines.push(l);
+    emitBootResumePendingGate({ identifier: "CTL-200", phase: "implement", ageMs: 3600e3, ageHours: 1, append });
+    // unthrottled: a second immediate call also writes
+    emitBootResumePendingGate({ identifier: "CTL-201", phase: "verify", ageMs: 0, ageHours: 0, append });
+    expect(lines).toHaveLength(2);
+    const evt = JSON.parse(lines[0]);
+    expect(evt.attributes["event.name"]).toBe(EVENT_BOOT_RESUME_PENDING);
+    expect(EVENT_BOOT_RESUME_PENDING).toBe("catalyst.boot_resume.pending");
+    expect(evt.body.payload.identifier).toBe("CTL-200");
+    expect(evt.body.payload.phase).toBe("implement");
+    expect(evt.attributes["linear.ticket"]).toBe("CTL-200");
+  });
+
+  test("a throwing append never propagates (best-effort)", () => {
+    expect(() =>
+      emitBootResumePendingGate({ identifier: "CTL-202", phase: "pr", append: () => { throw new Error("nope"); } }),
+    ).not.toThrow();
   });
 });

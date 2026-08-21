@@ -19,6 +19,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getEventLogPath, log } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
+import { buildCanonicalEventLine } from "./lib/canonical-event.mjs"; // CTL-2133: v3 bare-name gate events
 
 export const ALERT_ELIGIBLE_SOURCE_UNAVAILABLE = "catalyst.alert.eligible_source_unavailable";
 
@@ -205,6 +206,130 @@ export function emitGithubAuthUnusable({ tokenSource = null, reason = null, appe
     now,
     throttleMs,
   });
+}
+
+// ─── CTL-2133: boot-resume GATE observability (v3 bare-name, UNTHROTTLED) ────
+//
+// Distinct from ALERT_BOOT_RESUME_PENDING above: that is the throttled 48h loud
+// alert (one line/window/kind, the escalation tier). These three are per-GATE
+// observability events whose dedupe is the MARKER itself — the pending gate's
+// `softSurfacedAt` stamp (emitted once, on first surfacing) and the retire's
+// rename-aside (a discrete, rare act). There is deliberately NO time throttle:
+// each distinct gate must emit exactly once, and a per-kind throttle would
+// collapse three simultaneous fresh gates into one line (the silent-pen failure
+// mode this ticket closes). v3 bare-name (`catalyst.boot_resume.*`) resolved by
+// lib/event-name.mjs via attributes["event.name"]; the `catalyst.boot_resume.`
+// prefix is UNPROTECTED under the CTL-1142 namespace contract (it routes through
+// shouldSkipEvent normally — no isBrokerProtectedName collision), asserted in
+// broker/namespace-parity.test.mjs.
+export const EVENT_BOOT_RESUME_PENDING = "catalyst.boot_resume.pending";
+export const EVENT_BOOT_RESUME_RETIRED = "catalyst.boot_resume.retired";
+export const EVENT_BOOT_RESUME_WOULD_RETIRE = "catalyst.boot_resume.would-retire";
+
+export const BOOT_RESUME_GATE_EVENT_NAMES = Object.freeze([
+  EVENT_BOOT_RESUME_PENDING,
+  EVENT_BOOT_RESUME_RETIRED,
+  EVENT_BOOT_RESUME_WOULD_RETIRE,
+]);
+
+// _appendGateEvent — best-effort canonical v3 append (buildCanonicalEventLine
+// guarantees body.message + attributes["event.name"], so the record can never map
+// to an empty OTLP LogRecord). NEVER throws — a telemetry append must not break a
+// scheduler tick. `append` is injectable so tests assert the built line without
+// touching the real event log.
+function _appendGateEvent(name, payload, attributes, append = defaultAppend) {
+  try {
+    append(buildCanonicalEventLine({ name, payload, attributes }));
+    return true;
+  } catch (err) {
+    log?.error?.({ err: err?.message, name }, "boot-resume gate event append failed (continuing)");
+    return false;
+  }
+}
+
+// emitBootResumePendingGate — CTL-2133 Scenario 1. One per pending gate, the moment
+// it is soft-surfaced (deduped by the marker's softSurfacedAt). Carries phase + age
+// so an off-host consumer can render `ticket · phase · ageHours` without re-reading
+// the marker. UNTHROTTLED — dedupe is the marker stamp, not a time window.
+export function emitBootResumePendingGate({
+  identifier = null,
+  phase = null,
+  ageMs = null,
+  ageHours = null,
+  append = defaultAppend,
+} = {}) {
+  return _appendGateEvent(
+    EVENT_BOOT_RESUME_PENDING,
+    {
+      kind: "boot_resume_pending",
+      identifier,
+      phase,
+      ageMs,
+      ageHours,
+      source: "catalyst.execution-core",
+    },
+    {
+      ...(identifier ? { "linear.ticket": identifier } : {}),
+      ...(phase ? { "catalyst.phase": phase } : {}),
+      ...(ageHours != null ? { "catalyst.gate_age_hours": ageHours } : {}),
+    },
+    append,
+  );
+}
+
+// emitBootResumeRetired — CTL-2133 Scenario 2 (enforce). One per gate archived
+// because the ticket's Linear state moved strictly past the gated phase. A discrete,
+// rare, auditable act — UNTHROTTLED. `from_state` is the Linear state name that made
+// the gate moot.
+export function emitBootResumeRetired({
+  ticket = null,
+  gated_phase = null,
+  from_state = null,
+  append = defaultAppend,
+} = {}) {
+  return _appendGateEvent(
+    EVENT_BOOT_RESUME_RETIRED,
+    {
+      kind: "boot_resume_retired",
+      ticket,
+      gated_phase,
+      from_state,
+      source: "catalyst.execution-core",
+    },
+    {
+      ...(ticket ? { "linear.ticket": ticket } : {}),
+      ...(gated_phase ? { "catalyst.phase": gated_phase } : {}),
+      ...(from_state ? { "linear.state": from_state } : {}),
+    },
+    append,
+  );
+}
+
+// emitBootResumeWouldRetire — CTL-2133 Scenario 2 (shadow, the default). Same payload
+// as `retired` but the marker is LEFT IN PLACE — the shadow-first observation event an
+// operator watches for one restart-heavy evening before flipping to enforce.
+export function emitBootResumeWouldRetire({
+  ticket = null,
+  gated_phase = null,
+  from_state = null,
+  append = defaultAppend,
+} = {}) {
+  return _appendGateEvent(
+    EVENT_BOOT_RESUME_WOULD_RETIRE,
+    {
+      kind: "boot_resume_would_retire",
+      ticket,
+      gated_phase,
+      from_state,
+      source: "catalyst.execution-core",
+    },
+    {
+      ...(ticket ? { "linear.ticket": ticket } : {}),
+      ...(gated_phase ? { "catalyst.phase": gated_phase } : {}),
+      ...(from_state ? { "linear.state": from_state } : {}),
+    },
+    append,
+  );
 }
 
 // CAT-29: a daemon that cannot resolve its board/runtime dependencies stays
