@@ -469,6 +469,56 @@ export function getLayer2ConfigPath() {
   return legacyPath;
 }
 
+// CTL-1210: sibling file resolvers — resolved off the SAME dir getLayer2ConfigPath()
+// returns so the deferred canonical cutover (config.mjs:432–444) is untouched.
+// cluster-secrets.json: SHARED, byte-identical on every cluster node.
+// node.json: PER-NODE, generated/edited locally, never mirrored.
+export function resolveClusterSecretsPath() {
+  return resolve(getLayer2ConfigPath(), "..", "cluster-secrets.json");
+}
+export function resolveNodeConfigPath() {
+  return resolve(getLayer2ConfigPath(), "..", "node.json");
+}
+
+// CTL-1210: merged Layer-2 reader. Composes config.json (bottom) < node.json <
+// cluster-secrets.json (top). Each read is fail-open to {} (ENOENT/malformed/absent
+// key), matching every existing readLayer2* site. Shared and per-node keys are
+// disjoint by classification so precedence only matters for the legacy fallback:
+// every migrated key resolves from its new home; every un-migrated key still
+// resolves from config.json. With only config.json present, the merged result
+// is byte-equal to today's read — zero behavior change.
+function _deepMergeLayer2(target, source) {
+  const out = { ...target };
+  for (const key of Object.keys(source)) {
+    if (
+      source[key] !== null &&
+      typeof source[key] === "object" &&
+      !Array.isArray(source[key]) &&
+      target[key] !== null &&
+      typeof target[key] === "object" &&
+      !Array.isArray(target[key])
+    ) {
+      out[key] = _deepMergeLayer2(target[key], source[key]);
+    } else {
+      out[key] = source[key];
+    }
+  }
+  return out;
+}
+export function readLayer2Merged() {
+  const readCatalyst = (p) => {
+    try {
+      return JSON.parse(readFileSync(p, "utf8"))?.catalyst ?? {};
+    } catch {
+      return {};
+    }
+  };
+  const legacy = readCatalyst(getLayer2ConfigPath());
+  const node = readCatalyst(resolveNodeConfigPath());
+  const shared = readCatalyst(resolveClusterSecretsPath());
+  return { catalyst: _deepMergeLayer2(_deepMergeLayer2(legacy, node), shared) };
+}
+
 // The repo root that owns the committed cluster roster (.catalyst/hosts.json).
 // CATALYST_CONFIG_FILE points at <repoRoot>/.catalyst/config.json (mirrors the
 // reaper-config resolution in daemon.mjs main()); otherwise fall back to the
@@ -527,8 +577,7 @@ export function getHostName() {
   const envOverride = process.env.CATALYST_HOST_NAME;
   if (typeof envOverride === "string" && envOverride.length > 0) return envOverride;
   try {
-    const parsed = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"));
-    const name = parsed?.catalyst?.host?.name;
+    const name = readLayer2Merged().catalyst?.host?.name;
     if (typeof name === "string" && name.length > 0) return name;
   } catch {
     /* missing/malformed Layer-2 file → hostname default */
@@ -546,8 +595,8 @@ export function isHostNamePinnedFromConfig() {
   const env = process.env.CATALYST_HOST_NAME;
   if (typeof env === "string" && env.length > 0) return true;
   try {
-    const parsed = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"));
-    return typeof parsed?.catalyst?.host?.name === "string" && parsed.catalyst.host.name.length > 0;
+    const name = readLayer2Merged().catalyst?.host?.name;
+    return typeof name === "string" && name.length > 0;
   } catch {
     return false;
   }
@@ -583,7 +632,7 @@ const NODE_CLASS_MOST_RESTRICTIVE = "monitor";
 // being silently flattened to "absent".
 function readLayer2NodeClass() {
   try {
-    return JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.node?.class;
+    return readLayer2Merged().catalyst?.node?.class;
   } catch {
     /* missing/malformed Layer-2 file → undefined (default-to-worker) */
     return undefined;
@@ -1052,7 +1101,7 @@ export function getStaticRoster() {
     if (hosts.length > 0) return hosts;
   }
   try {
-    const raw = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cluster
+    const raw = readLayer2Merged().catalyst?.cluster
       ?.staticRoster;
     if (Array.isArray(raw)) {
       const hosts = raw.filter((h) => typeof h === "string" && h.length > 0);
@@ -1239,7 +1288,7 @@ export function getLivenessAnchorIssue() {
   const env = process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
   if (typeof env === "string" && env.length > 0) return env;
   try {
-    const a = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cluster
+    const a = readLayer2Merged().catalyst?.cluster
       ?.livenessAnchorIssue;
     if (typeof a === "string" && a.length > 0) return a;
   } catch {
@@ -1838,7 +1887,7 @@ export const WATCHDOG_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2Watchdog() {
   try {
-    const w = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.watchdog;
+    const w = readLayer2Merged().catalyst?.watchdog;
     return w && typeof w === "object" ? w : {};
   } catch {
     return {};
@@ -1974,7 +2023,7 @@ const COST_CAP_DEFAULT_PROM_URL = "http://100.65.193.30:9098"; // OTel/Prom stac
 
 function readLayer2CostCap() {
   try {
-    const c = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.costCap;
+    const c = readLayer2Merged().catalyst?.costCap;
     return c && typeof c === "object" ? c : {};
   } catch {
     return {};
@@ -2055,7 +2104,7 @@ export const STALL_JANITOR_DEFAULT_CENSUS_INTERVAL_MS = 900_000; // 15 minutes
 
 function readLayer2StallJanitor() {
   try {
-    const sj = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.stallJanitor;
+    const sj = readLayer2Merged().catalyst?.stallJanitor;
     return sj && typeof sj === "object" ? sj : {};
   } catch {
     return {};
@@ -2101,7 +2150,7 @@ export const UNSTUCK_SWEEP_DEFAULT_INTERVAL_MS = 900_000; // 15 minutes
 
 function readLayer2UnstuckSweep() {
   try {
-    const us = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.unstuckSweep;
+    const us = readLayer2Merged().catalyst?.unstuckSweep;
     return us && typeof us === "object" ? us : {};
   } catch {
     return {};
@@ -2146,7 +2195,7 @@ export const RECOVERY_PASS_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2RecoveryPass() {
   try {
-    const rp = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.recovery?.pass;
+    const rp = readLayer2Merged().catalyst?.recovery?.pass;
     return rp && typeof rp === "object" ? rp : {};
   } catch {
     return {};
@@ -2182,7 +2231,7 @@ const DELEGATE_FIRST_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2DelegateFirst() {
   try {
-    const df = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.delegateFirst;
+    const df = readLayer2Merged().catalyst?.delegateFirst;
     return df && typeof df === "object" ? df : {};
   } catch {
     return {};
@@ -2210,7 +2259,7 @@ export const STEWARD_ESCALATION_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2StewardEscalation() {
   try {
-    const se = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.stewardEscalation;
+    const se = readLayer2Merged().catalyst?.stewardEscalation;
     return se && typeof se === "object" ? se : {};
   } catch {
     return {};
@@ -2242,7 +2291,7 @@ const CLOUD_FEED_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2CloudFeed() {
   try {
-    const cf = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cloudFeed;
+    const cf = readLayer2Merged().catalyst?.cloudFeed;
     return cf && typeof cf === "object" ? cf : {};
   } catch {
     return {};
@@ -2317,7 +2366,7 @@ export const LINEAR_WRITE_PROXY_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2LinearWriteProxy() {
   try {
-    const p = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.linearWriteProxy;
+    const p = readLayer2Merged().catalyst?.linearWriteProxy;
     return p && typeof p === "object" ? p : {};
   } catch {
     return {};
@@ -2365,7 +2414,7 @@ export const LEASE_AUTHORITY_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2LeaseAuthority() {
   try {
-    const p = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.leaseAuthority;
+    const p = readLayer2Merged().catalyst?.leaseAuthority;
     return p && typeof p === "object" ? p : {};
   } catch {
     return {};
@@ -2407,7 +2456,7 @@ export const DEAD_DOC_WORKER_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2DeadDocWorker() {
   try {
-    const d = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.recovery
+    const d = readLayer2Merged().catalyst?.recovery
       ?.deadDocWorker;
     return d && typeof d === "object" ? d : {};
   } catch {
@@ -2458,7 +2507,7 @@ export const BOARD_HEALTH_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2BoardHealth() {
   try {
-    const b = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.boardHealth;
+    const b = readLayer2Merged().catalyst?.boardHealth;
     return b && typeof b === "object" ? b : {};
   } catch {
     return {};
@@ -2522,7 +2571,7 @@ export const COORDINATION_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2Coordination() {
   try {
-    const c = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.coordination;
+    const c = readLayer2Merged().catalyst?.coordination;
     return c && typeof c === "object" ? c : {};
   } catch {
     return {};
@@ -2653,7 +2702,7 @@ export const LINEAR_REPLICA_MODES = new Set(["on", "off"]);
 
 function readLayer2LinearReplica() {
   try {
-    const r = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.linearReplica;
+    const r = readLayer2Merged().catalyst?.linearReplica;
     return r && typeof r === "object" ? r : {};
   } catch {
     return {};
@@ -2835,7 +2884,7 @@ export function readDelegateQueueDepth() {
 
 function readLayer2Governance() {
   try {
-    const g = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.governance;
+    const g = readLayer2Merged().catalyst?.governance;
     return g && typeof g === "object" ? g : {};
   } catch {
     return {};
@@ -2935,4 +2984,158 @@ export function readGovernanceSources(env = process.env) {
     DEAD_DOC_WORKER_MODES
   );
   return out;
+}
+
+// CTL-1210: Frozen classification map (CTL-1187 table). Keyed by catalyst.* dotted
+// prefix; longest-prefix wins so "cluster.livenessAnchorIssue" → shared while
+// "cluster.staticRoster" → node. This is THE single source of truth for both the
+// migration (splitLayer2Config) and the writers.
+export const LAYER2_KEY_CLASS = Object.freeze({
+  "linear.bot": "shared",
+  "cluster.livenessAnchorIssue": "shared",
+  "layer1Identity": "shared",
+  "repository": "shared",
+  "feedback": "shared",
+  "monitor.github.smeeChannel": "shared",
+  "githubFeed.mode": "node",
+  "host.name": "node",
+  "node.class": "node",
+  "cluster.staticRoster": "node",
+  "watchdog": "node",
+  "costCap": "node",
+  "stallJanitor": "node",
+  "unstuckSweep": "node",
+  "recovery": "node",
+  "delegateFirst": "node",
+  "stewardEscalation": "node",
+  "cloudFeed": "node",
+  "linearWriteProxy": "node",
+  "leaseAuthority": "node",
+  "boardHealth": "node",
+  "coordination": "node",
+  "linearReplica": "node",
+  "governance": "node",
+  "orchestration": "node",
+  "readReplica": "node",
+  "monitor": "node",
+});
+
+// _classifyLayer2Key — return the LAYER2_KEY_CLASS class for a dotted catalyst.*
+// key, using longest-prefix-wins. Returns "unclassified" when no prefix matches.
+function _classifyLayer2Key(dotPath) {
+  let best = null;
+  let bestLen = -1;
+  for (const [prefix, cls] of Object.entries(LAYER2_KEY_CLASS)) {
+    if (dotPath === prefix || dotPath.startsWith(prefix + ".")) {
+      if (prefix.length > bestLen) {
+        bestLen = prefix.length;
+        best = cls;
+      }
+    }
+  }
+  return best ?? "unclassified";
+}
+
+// _sortedStringify — deterministic, 0o600 JSON serialization. Stable across runs
+// so the doctor hash check is meaningful.
+function _sortedStringify(obj) {
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+    return JSON.stringify(obj);
+  }
+  const keys = Object.keys(obj).sort();
+  const parts = keys.map((k) => `${JSON.stringify(k)}:${_sortedStringify(obj[k])}`);
+  return `{${parts.join(",")}}`;
+}
+
+// _setDotPath — set a dotted path inside a nested object, creating intermediaries.
+function _setDotPath(obj, dotPath, value) {
+  const parts = dotPath.split(".");
+  // Guard all segments upfront with explicit === comparisons (CodeQL-recognized sanitiser).
+  for (const p of parts) {
+    if (p === "__proto__" || p === "constructor" || p === "prototype") {
+      throw new Error(`_setDotPath: forbidden key segment "${p}"`);
+    }
+  }
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (cur[parts[i]] == null || typeof cur[parts[i]] !== "object") {
+      cur[parts[i]] = {};
+    }
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+
+// CTL-1210: splitLayer2Config — classify every catalyst.* key in an existing
+// config.json by LAYER2_KEY_CLASS, write shared keys to cluster-secrets.json and
+// per-node keys to node.json (both 0o600, sorted-key serialization, tmp+rename),
+// then rewrite config.json with the migrated keys removed.
+//
+// Idempotent: re-running on an already-split node is a no-op.
+// Crash-safe: new files are written FIRST; config.json is trimmed LAST.
+// Unclassified keys stay in config.json and are never dropped.
+// Mixed subtrees (e.g. catalyst.cluster contains both a shared and a node key)
+// are recursively decomposed — the classifer recurses when a path is unclassified
+// at a given depth but may have classified children.
+export function splitLayer2Config({
+  configPath = getLayer2ConfigPath(),
+  sharedPath = resolveClusterSecretsPath(),
+  nodePath = resolveNodeConfigPath(),
+} = {}) {
+  let existing;
+  try {
+    existing = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    return; // config.json absent or malformed — nothing to migrate
+  }
+  const catalyst = existing?.catalyst;
+  if (!catalyst || typeof catalyst !== "object" || Array.isArray(catalyst)) return;
+
+  const sharedCat = {};
+  const nodeCat = {};
+  const leftoverCat = {};
+
+  function walkCatalyst(obj, prefix) {
+    for (const [k, v] of Object.entries(obj)) {
+      const dotPath = prefix ? `${prefix}.${k}` : k;
+      const cls = _classifyLayer2Key(dotPath);
+      if (cls === "shared") {
+        _setDotPath(sharedCat, dotPath, v);
+      } else if (cls === "node") {
+        _setDotPath(nodeCat, dotPath, v);
+      } else if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+        // Unclassified at this depth — recurse into children to find classified sub-paths.
+        walkCatalyst(v, dotPath);
+      } else {
+        _setDotPath(leftoverCat, dotPath, v);
+      }
+    }
+  }
+  walkCatalyst(catalyst, "");
+
+  function writeAtomic(path, catObj) {
+    const content = _sortedStringify({ catalyst: catObj }) + "\n";
+    const tmp = `${path}.tmp.${process.pid}`;
+    writeFileSync(tmp, content, { mode: 0o600 });
+    renameSync(tmp, path);
+  }
+
+  const hasShared = Object.keys(sharedCat).length > 0;
+  const hasNode = Object.keys(nodeCat).length > 0;
+
+  // If config.json had no classified keys, nothing to migrate — preserve all files.
+  if (!hasShared && !hasNode) return;
+
+  // Write shared + node FIRST (crash-safe ordering: new files written before trimming).
+  // Always write both sibling files when any migration runs to establish clean known state
+  // so subsequent idempotency checks can read both files unconditionally.
+  writeAtomic(sharedPath, sharedCat);
+  writeAtomic(nodePath, nodeCat);
+
+  // Trim config.json to only leftover (unclassified) keys — LAST step.
+  const trimmedCat = Object.keys(leftoverCat).length > 0 ? leftoverCat : {};
+  const trimContent = _sortedStringify({ catalyst: trimmedCat }) + "\n";
+  const trimTmp = `${configPath}.tmp.${process.pid}`;
+  writeFileSync(trimTmp, trimContent, { mode: 0o600 });
+  renameSync(trimTmp, configPath);
 }

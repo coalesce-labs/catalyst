@@ -706,16 +706,17 @@ run "T2.8 multiHost roster + inferred mode FALLS BACK to heuristic and wires (CT
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
-  cfg=\"\$h/.config/catalyst/config.json\"
+  cfg_shared=\"\$h/.config/catalyst/cluster-secrets.json\"
+  cfg_node=\"\$h/.config/catalyst/node.json\"
   echo \"\$out\" | grep -qF 'decision=wire' && \
   echo \"\$out\" | grep -qF 'rule=heuristic-fallback' && \
   echo \"\$out\" | grep -qF 'inferred=true' && \
   echo \"\$out\" | grep -qF 'heuristic_would=wire' && \
-  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$cfg\" >/dev/null &&
+  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$cfg_shared\" >/dev/null &&
   echo \"\$out\" | grep -qF 'linear-stripped=yes' && \
-  jq -e '(.catalyst.monitor | has(\"linear\")) | not' \"\$cfg\" >/dev/null &&
-  ! grep -qF 'smee.io/LIN' \"\$cfg\" &&
-  jq -e '.catalyst.cloudFeed.mode == \"enforce\"' \"\$cfg\" >/dev/null"
+  jq -e '(.catalyst.monitor | has(\"linear\")) | not' \"\$cfg_shared\" >/dev/null &&
+  ! grep -qF 'smee.io/LIN' \"\$cfg_shared\" &&
+  jq -e '.catalyst.cloudFeed.mode == \"enforce\"' \"\$cfg_node\" >/dev/null"
 
 # T2.8e (CTL-1928): a bundle whose monitorWebhooks carries ONLY the retired
 # Linear block has nothing left to write once the strip runs. The decision must
@@ -751,11 +752,12 @@ run "T2.8e bundle carrying ONLY the retired Linear block wires nothing (CTL-1928
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$LINEAR_ONLY_WH_BUNDLE' 2>&1)
-  cfg=\"\$h/.config/catalyst/config.json\"
+  cfg_shared=\"\$h/.config/catalyst/cluster-secrets.json\"
+  cfg_node=\"\$h/.config/catalyst/node.json\"
   echo \"\$out\" | grep -qF 'ONLY the retired Linear block' && \
-  ! grep -qF 'smee.io/LIN' \"\$cfg\" && \
-  jq -e '((.catalyst.monitor // {}) | has(\"linear\")) | not' \"\$cfg\" >/dev/null && \
-  jq -e '.catalyst.cloudFeed.mode == \"enforce\"' \"\$cfg\" >/dev/null"
+  ! grep -qF 'smee.io/LIN' \"\$cfg_shared\" && \
+  jq -e '((.catalyst.monitor // {}) | has(\"linear\")) | not' \"\$cfg_shared\" >/dev/null && \
+  jq -e '.catalyst.cloudFeed.mode == \"enforce\"' \"\$cfg_node\" >/dev/null"
 
 # T2.8f (CTL-1928, Codex #3485 P1): removing the Linear route must not leave a
 # node with NO Linear ingestion — the join provisions the cloud-feed
@@ -766,7 +768,7 @@ run "T2.8e bundle carrying ONLY the retired Linear block wires nothing (CTL-1928
 run "T2.8f an already-declared cloudFeed.mode is NOT clobbered by the join (CTL-1928)" bash -c "
   h='${SCRATCH}/h28f'
   mkdir -p \"\$h/.config/catalyst\"
-  printf '{\"catalyst\":{\"cloudFeed\":{\"mode\":\"shadow\"}}}' > \"\$h/.config/catalyst/config.json\"
+  printf '{\"catalyst\":{\"cloudFeed\":{\"mode\":\"shadow\"}}}' > \"\$h/.config/catalyst/node.json\"
   out=\$(env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28f' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
     CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
@@ -778,8 +780,8 @@ run "T2.8f an already-declared cloudFeed.mode is NOT clobbered by the join (CTL-
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
-  cfg=\"\$h/.config/catalyst/config.json\"
-  jq -e '.catalyst.cloudFeed.mode == \"shadow\"' \"\$cfg\" >/dev/null && \
+  cfg_node=\"\$h/.config/catalyst/node.json\"
+  jq -e '.catalyst.cloudFeed.mode == \"shadow\"' \"\$cfg_node\" >/dev/null && \
   echo \"\$out\" | grep -qF 'cloudFeed=shadow'"
 
 # ─── CTL-2004: the GitHub half of the very rule T2.8e/f pin for Linear ───────────
@@ -802,14 +804,14 @@ run "T2.8g the join writes the seed's githubFeed.mode, so a member inherits the 
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$GHFEED_WH_BUNDLE' 2>&1)
-  cfg=\"\$h/.config/catalyst/config.json\"
-  jq -e '.catalyst.githubFeed.mode == \"enforce\"' \"\$cfg\" >/dev/null && \
+  cfg_node=\"\$h/.config/catalyst/node.json\"
+  jq -e '.catalyst.githubFeed.mode == \"enforce\"' \"\$cfg_node\" >/dev/null && \
   echo \"\$out\" | grep -qF 'githubFeed=enforce'"
 
 run "T2.8h an already-declared githubFeed.mode is NOT clobbered by the join (CTL-2004)" bash -c "
   h='${SCRATCH}/h28h'
   mkdir -p \"\$h/.config/catalyst\"
-  printf '{\"catalyst\":{\"githubFeed\":{\"mode\":\"shadow\"}}}' > \"\$h/.config/catalyst/config.json\"
+  printf '{\"catalyst\":{\"githubFeed\":{\"mode\":\"shadow\"}}}' > \"\$h/.config/catalyst/node.json\"
   out=\$(env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28h' \
     CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
     CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
@@ -821,8 +823,8 @@ run "T2.8h an already-declared githubFeed.mode is NOT clobbered by the join (CTL
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$GHFEED_WH_BUNDLE' 2>&1)
-  cfg=\"\$h/.config/catalyst/config.json\"
-  jq -e '.catalyst.githubFeed.mode == \"shadow\"' \"\$cfg\" >/dev/null && \
+  cfg_node=\"\$h/.config/catalyst/node.json\"
+  jq -e '.catalyst.githubFeed.mode == \"shadow\"' \"\$cfg_node\" >/dev/null && \
   echo \"\$out\" | grep -qF 'githubFeed=shadow'"
 
 # ⛔ INVERSION GUARD. An older seed carries no githubFeed; the join must write NOTHING
@@ -841,8 +843,8 @@ run "T2.8i a bundle with NO githubFeed writes no key at all (CTL-2004 inversion 
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
-  cfg=\"\$h/.config/catalyst/config.json\"
-  jq -e '((.catalyst // {}) | has(\"githubFeed\")) | not' \"\$cfg\" >/dev/null && \
+  cfg_node=\"\$h/.config/catalyst/node.json\"
+  jq -e '((.catalyst // {}) | has(\"githubFeed\")) | not' \"\$cfg_node\" >/dev/null && \
   echo \"\$out\" | grep -qF 'githubFeed=unset'"
 
 # T2.9 (fixture updated for CTL-1617 PR5 — see T2.8's note): same inferred-mode
@@ -946,7 +948,7 @@ run "T2.8b-agree mode=cluster declared AND roster>1 STILL wires (agreement case)
   echo \"\$out\" | grep -qF 'inferred=false' && \
   echo \"\$out\" | grep -qF 'heuristic_would=wire' && \
   ! echo \"\$out\" | grep -qF 'note=stage0-roster-guard' && \
-  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/config.json\" >/dev/null"
+  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/cluster-secrets.json\" >/dev/null"
 
 # T2.8c: (FIX 2 — P2 provisioner path parity) CATALYST_PLUGIN_SOURCE, when set,
 # overrides the $HOME-side default — mirroring setup-plugin-source.sh's own
@@ -978,7 +980,7 @@ run "T2.8c CATALYST_PLUGIN_SOURCE override is honored by the gate (FIX 2)" bash 
   echo \"\$out\" | grep -qF 'mode=cluster' && \
   echo \"\$out\" | grep -qF 'source=layer1' && \
   echo \"\$out\" | grep -qF 'inferred=false' && \
-  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/config.json\" >/dev/null"
+  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/cluster-secrets.json\" >/dev/null"
 
 # T2.9b: mode=single-host declared SKIPS despite roster>1 — the new behavior the
 # flip introduces (previously roster>1 alone was sufficient to wire). MULTIHOST_WH_BUNDLE
@@ -1099,7 +1101,7 @@ run "T2.9e resume after fixing the typo re-executes config-merge and wires (FIX 
   echo \"\$out\" | grep -qF 'mode=cluster' && \
   jq -e '.completedStages | index(\"config-merge\") != null' \"\$marker\" >/dev/null && \
   jq -e '.failedStage == null' \"\$marker\" >/dev/null && \
-  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/config.json\" >/dev/null"
+  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/cluster-secrets.json\" >/dev/null"
 
 # T2.9f: (#2914 Codex P2) when the UNRECOGNIZED mode came from the LAYER-1
 # plugin-source checkout (not env/layer2), failing config-merge alone is not
@@ -1160,7 +1162,7 @@ run "T2.9g resume after upstream layer1 fix re-pulls and wires (#2914 P2)" bash 
   echo \"\$out\" | grep -qF 'mode=cluster' && \
   jq -e '.completedStages | index(\"setup-plugin-source\") != null' \"\$marker\" >/dev/null && \
   jq -e '.failedStage == null' \"\$marker\" >/dev/null && \
-  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/config.json\" >/dev/null"
+  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$h/.config/catalyst/cluster-secrets.json\" >/dev/null"
 
 # T2.10 / T2.11: (CTL-1293) provision-thoughts that CLONES OK but fails push-auth
 # is FATAL on a multiHost member (roster>1 owns work → must sync thoughts to
@@ -1460,8 +1462,9 @@ run "T4.1 merge-preserve: node-local keys survive" bash -c "
     CATALYST_JOIN_REACH_PROBE='${STUBS4}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
   cfg=\"\$home41/.config/catalyst/config.json\"
+  cfg_shared=\"\$home41/.config/catalyst/cluster-secrets.json\"
   jq -e '.catalyst.otel.endpoint == \"http://localhost:4317\"' \"\$cfg\" >/dev/null && \
-  jq -e '.catalyst.cluster.livenessAnchorIssue | length > 0' \"\$cfg\" >/dev/null"
+  jq -e '.catalyst.cluster.livenessAnchorIssue | length > 0' \"\$cfg_shared\" >/dev/null"
 
 # T4.2: host.name persisted explicitly
 run "T4.2 host.name written to Layer-2 config" bash -c "
@@ -1481,7 +1484,7 @@ run "T4.2 host.name written to Layer-2 config" bash -c "
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS4}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
-  jq -e '.catalyst.host.name == \"mynode\"' \"\$home42/.config/catalyst/config.json\" >/dev/null"
+  jq -e '.catalyst.host.name == \"mynode\"' \"\$home42/.config/catalyst/node.json\" >/dev/null"
 
 # T4.3: LOCAL hosts.json written; committed roster NOT touched
 run "T4.3 local hosts.json written; committed roster untouched" bash -c "

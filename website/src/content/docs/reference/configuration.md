@@ -7,13 +7,22 @@ sidebar:
   order: 0
 ---
 
-Catalyst reads two config files. The setup script (`setup-catalyst.sh`) writes both for you, so you
+Catalyst reads two config layers. The setup script (`setup-catalyst.sh`) writes both for you, so you
 rarely edit them by hand. This page covers the keys you're most likely to touch.
 
 - **`.catalyst/config.json`** — plain project info. Safe to commit to git.
-- **`~/.config/catalyst/config-{projectKey}.json`** — secrets like API keys. Never commit this.
+- **`~/.config/catalyst/`** — machine-local Layer-2. Never commit these files. Three siblings
+  compose the merged view (earlier wins):
+  - **`cluster-secrets.json`** — shared, byte-identical across all cluster nodes (bot OAuth creds,
+    `smeeChannel`, `livenessAnchorIssue`, etc.). Written by `cluster-sync` from `cluster-bots.sops.json`
+    and by `catalyst-join` from the bundle. Read first.
+  - **`node.json`** — per-node (host name, cloudFeed/githubFeed mode, orchestration tuning, etc.).
+    Written by `catalyst-join` (non-clobber; preserves operator overrides). Read second.
+  - **`config.json`** — backward-compat fallback. Read last. Keys still here on nodes that haven't
+    run `catalyst-join` or `cluster-sync` yet; migrated keys are gradually drained by those tools.
 
-The `projectKey` links the two files.
+The `projectKey` links Layer-1 and the per-project `config-{projectKey}.json` (legacy file for
+per-team API keys; separate from the three Layer-2 siblings above).
 
 ## Project config (`.catalyst/config.json`)
 
