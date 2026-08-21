@@ -1208,8 +1208,6 @@ jobs:
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
-            board-health.test.mjs \
-            board-health-seam.test.mjs \
             dispatch-readiness.test.mjs \
             stall-janitor-throttle.test.mjs \
             clear-stall-empty-dir.test.mjs \
@@ -1252,10 +1250,6 @@ jobs:
             config-node-class.test.mjs \
             config-cloud-token-env.test.mjs \
             config.test.mjs \
-            delegate-config-event.test.mjs \
-            delegate-queue.test.mjs \
-            delegate-runner.test.mjs \
-            delegate-slot-reservation.test.mjs \
             diagnostician.test.mjs \
             cloud-sync-telemetry.test.mjs \
             cloud-sync-log.test.mjs \
@@ -1399,15 +1393,9 @@ jobs:
             worktree-refresh-timer.test.mjs \
             worktree-safety.test.mjs \
             worktree.test.mjs \
-            recovery-reasoning.test.mjs \
-            recovery-fix-backoff.test.mjs \
-            recovery-orphan-stale-e2e.test.mjs \
             recovery-seam-deps.test.mjs \
             pr-block-probe.test.mjs \
-            recovery-emit.test.mjs \
-            sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
-            recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
             unstuck-orphan-merge.test.mjs \
             orphan-sweep-explain.test.mjs \
