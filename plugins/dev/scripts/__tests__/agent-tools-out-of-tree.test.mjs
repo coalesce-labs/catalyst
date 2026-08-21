@@ -177,6 +177,95 @@ describe("the tools run when they are the only file in the directory (CTL-2026)"
   });
 });
 
+describe("linear-reply --body file-path guard (CTL-2127)", () => {
+  test("an EXISTING file path is auto-read and its CONTENT is posted, not the path", () => {
+    const fileContent = "# Real content\n\nline two\n";
+    writeFileSync(join(dir, "body.md"), fileContent);
+    const capture = `
+${STUB.replaceAll("`", "\\`")}
+const inner = globalThis.fetch;
+globalThis.fetch = async (url, opts) => {
+  let b = {};
+  try { b = opts?.body ? JSON.parse(opts.body) : {}; } catch { b = {}; }
+  if (typeof b.query === "string" && b.query.includes("commentCreate")) {
+    console.error("CAPTURED_INPUT " + JSON.stringify(b.variables.in));
+  }
+  return inner(url, opts);
+};
+`;
+    writeFileSync(join(dir, "capture-2127.mjs"), capture);
+    const r = spawnSync(
+      process.execPath,
+      ["--import", "./capture-2127.mjs", "linear-reply.mjs", "CTL-1", "--as", "CTL", "--body", "./body.md"],
+      {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, ...STUB_CREDS, CATALYST_LINEAR_WRITE_PROXY: undefined },
+      }
+    );
+    const stripped = strip(r.stderr ?? "");
+    const line = stripped.split("\n").find((l) => l.startsWith("CAPTURED_INPUT "));
+    expect(line).toBeTruthy();
+    const input = JSON.parse(line.slice("CAPTURED_INPUT ".length));
+    // The body must be the FILE CONTENT, not the path string
+    expect(input.body).toBe(fileContent);
+    expect(r.status).toBe(0);
+    // The guard must announce what it did — non-silent
+    expect(stripped).toContain("linear-reply:");
+  });
+
+  test("a path-like value that is NOT a readable file is REFUSED, nothing posted", () => {
+    const r = runIsolated("linear-reply.mjs", [
+      "CTL-1", "--as", "CTL", "--body", "/tmp/does-not-exist-ctl2127-xyz.md",
+    ]);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain("linear-reply:");
+    expect(r.err).toMatch(/file path|--body -/);
+    // No commentCreate JSON on stdout => nothing was posted
+    expect(r.out).toBe("");
+  });
+
+  test("a normal multi-word body still posts verbatim (no false positive)", () => {
+    const r = runIsolated("linear-reply.mjs", [
+      "CTL-1", "--as", "CTL", "--body", "See the notes.md file for details",
+    ]);
+    expect(JSON.parse(r.out.trim()).ok).toBe(true);
+  });
+
+  test("--body - (stdin) is unaffected by the guard", () => {
+    const stdinContent = "Content piped from stdin\n";
+    const capture = `
+${STUB.replaceAll("`", "\\`")}
+const inner = globalThis.fetch;
+globalThis.fetch = async (url, opts) => {
+  let b = {};
+  try { b = opts?.body ? JSON.parse(opts.body) : {}; } catch { b = {}; }
+  if (typeof b.query === "string" && b.query.includes("commentCreate")) {
+    console.error("CAPTURED_INPUT " + JSON.stringify(b.variables.in));
+  }
+  return inner(url, opts);
+};
+`;
+    writeFileSync(join(dir, "capture-stdin-2127.mjs"), capture);
+    const r = spawnSync(
+      process.execPath,
+      ["--import", "./capture-stdin-2127.mjs", "linear-reply.mjs", "CTL-1", "--as", "CTL", "--body", "-"],
+      {
+        cwd: dir,
+        encoding: "utf8",
+        input: stdinContent,
+        env: { ...process.env, ...STUB_CREDS, CATALYST_LINEAR_WRITE_PROXY: undefined },
+      }
+    );
+    const stripped = strip(r.stderr ?? "");
+    const line = stripped.split("\n").find((l) => l.startsWith("CAPTURED_INPUT "));
+    expect(line).toBeTruthy();
+    const input = JSON.parse(line.slice("CAPTURED_INPUT ".length));
+    expect(input.body).toBe(stdinContent);
+    expect(r.status).toBe(0);
+  });
+});
+
 describe("the avatar Ryan added out-of-tree is in the repo copy (CTL-2026)", () => {
   // ⭐ THE MEASUREMENT BEHIND THIS: CTL-2026 was filed on "they are true copies,
   // byte-identical". Six hours later Ryan hand-edited ONLY the out-of-tree

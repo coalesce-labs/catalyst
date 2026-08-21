@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # linear-comment-post.sh — Post a Linear comment using the app-actor identity.
 #
-# Usage: linear-comment-post.sh <ticket-identifier> <comment-body>
+# Usage: linear-comment-post.sh <ticket-identifier> <literal-markdown-text>
 # E.g.:  linear-comment-post.sh CTL-550 "Hello from Catalyst agent"
+# Note:  pass the LITERAL text, never a file path — use "$(cat FILE)" or '--body - < FILE'
 #
 # Reads credentials from env vars (CATALYST_LINEAR_AGENT_CLIENT_ID /
 # CATALYST_LINEAR_AGENT_CLIENT_SECRET) or the project Layer-2 config.
@@ -12,6 +13,20 @@ set -euo pipefail
 
 TICKET="${1:?ticket identifier required (e.g. CTL-550)}"
 BODY="${2:?comment body required}"
+
+# CTL-2127: reject/auto-read a body that is actually a file path (silent data-loss guard).
+# bash 3.2-safe: uses [[ == glob ]] and [[:space:]], not =~ PCRE or mapfile.
+if [[ "$BODY" != *[[:space:]]* ]] && \
+   { [[ "$BODY" == /* || "$BODY" == ./* || "$BODY" == ../* ]] || \
+     [[ "$BODY" == *.md || "$BODY" == *.txt || "$BODY" == *.json ]]; }; then
+  if [[ -f "$BODY" && -r "$BODY" ]]; then
+    echo "linear-comment-post: '$BODY' is a readable file; posting its CONTENT. Prefer piping content instead of a path." >&2
+    BODY="$(cat "$BODY")"
+  else
+    echo "linear-comment-post: '$BODY' looks like a file path but is not a readable file. Refusing to post a bare path (silent data loss). Pass the literal text or \"\$(cat FILE)\"." >&2
+    exit 2
+  fi
+fi
 
 LINEAR_API="https://api.linear.app"
 

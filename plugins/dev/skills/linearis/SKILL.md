@@ -265,7 +265,8 @@ linearis issues update ENG-123 --project-milestone "Milestone Name"
 > with the agent via `createAsUser`:
 >
 > ```bash
-> direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-123 --as <AGENT> --body "…"
+> direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-123 --as <AGENT> --body "literal text"
+> # ⚠️ --body takes LITERAL text or '-'. Never pass a file path — use '--body - < FILE'.
 > ```
 >
 > Use `linearis issues discuss` only when you genuinely intend the comment to be the
@@ -279,7 +280,8 @@ discussion commands").
 ```bash
 # An AGENT starting a comment / discussion thread — go through linear-reply.mjs, NOT `discuss`
 # (the ⛔ callout above; `discuss` posts under the human's own identity):
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body "…" --top
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body "literal text" --top
+# ⚠️ --body takes LITERAL text or '-'. Never pass a file path — use '--body - < FILE'.
 
 # `linearis issues discuss` — ONLY when the comment is genuinely meant to be the human's own:
 linearis issues discuss ENG-123 --body "Starting work on this"
@@ -557,6 +559,7 @@ linearis issues update ENG-123 --status "Done"
 # With comment — an AGENT posting the "Merged" note goes through linear-reply.mjs, not `discuss`
 linearis issues update ENG-123 --status "Done"
 direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body "Merged: PR #456" --top
+# ⚠️ --body takes LITERAL text or '-'. Never pass a file path — use '--body - < FILE'.
 ```
 
 ### UUID-based calls (CTL-207)
@@ -600,7 +603,8 @@ refresh is wired in.
    `linearis` subcommands authenticate with the single personal token the CLI resolves globally (see
    the ⛔ callout above) — there is no separate app-actor auth path inside `linearis` itself, so they
    ALWAYS post under the human's own identity, which the ask-resolution gate reads as the human
-   deciding (CTL-1567/CTL-2086). Use `linear-reply.mjs --as <AGENT>` for every agent-authored comment;
+   deciding (CTL-1567/CTL-2086). Use `linear-reply.mjs --as <AGENT> --body "literal text"` for every
+   agent-authored comment (pass LITERAL text or `--body - < FILE`, never a file path);
    reserve `issues discuss`/`issues reply` for when the comment is genuinely meant to be the human's
    own. List threads with `issues discussions <id>` (read-only, no identity risk). The old
    `comments create` still works but is a **deprecated compatibility facade** — don't use it. There is

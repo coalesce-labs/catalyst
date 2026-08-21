@@ -327,6 +327,97 @@ else
   PASS=$((PASS+1))
 fi
 
+# --- CTL-2127: file-path guard tests ---
+# Restore credentials and set up a correct-format stub (issue resolution must return \n200).
+export CATALYST_LINEAR_AGENT_CLIENT_ID="test-cid"
+export CATALYST_LINEAR_AGENT_CLIENT_SECRET="test-csec"
+
+CTL2127_BODY_FILE="${TMPDIR_TEST}/body-ctl2127.md"
+printf '# File body content\n\nCTL2127 UNIQUE LINE\n' > "$CTL2127_BODY_FILE"
+
+CTL2127_CAPTURE="${TMPDIR_TEST}/capture-ctl2127.txt"
+
+# Stub that captures all args and returns correct HTTP codes.
+# Issue resolution uses `curl -w '\n%{http_code}'` so the response must include
+# the HTTP status after a newline.
+cat >"${BIN_DIR}/curl" <<CURLEOF
+#!/usr/bin/env bash
+ARGS_STR="\$*"
+printf '%s\n' "\$ARGS_STR" >> "${CTL2127_CAPTURE}"
+if printf '%s' "\$ARGS_STR" | grep -q "oauth/token"; then
+  printf '{"access_token":"test_token"}'
+elif printf '%s' "\$ARGS_STR" | grep -q "commentCreate"; then
+  printf '{"data":{"commentCreate":{"success":true}}}'
+else
+  printf '{"data":{"issue":{"id":"uuid-ctl2127"}}}\n200'
+fi
+exit 0
+CURLEOF
+chmod +x "${BIN_DIR}/curl"
+
+# Test 15 (CTL-2127): existing file path as body → auto-read, file content posted (not path).
+rm -f "${CTL2127_CAPTURE}"
+CTL2127_T15_EXIT=0
+PATH="${BIN_DIR}:$PATH" bash "$HELPER" "CTL-550" "$CTL2127_BODY_FILE" >/dev/null 2>/dev/null \
+  || CTL2127_T15_EXIT=$?
+if [[ "$CTL2127_T15_EXIT" -eq 0 ]]; then
+  echo "PASS: CTL-2127: existing file path as body → exits 0 (auto-read)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: CTL-2127: existing file path as body should exit 0 (got $CTL2127_T15_EXIT)"
+  FAIL=$((FAIL+1))
+fi
+if grep -q "CTL2127 UNIQUE LINE" "${CTL2127_CAPTURE}" 2>/dev/null; then
+  echo "PASS: CTL-2127: file CONTENT (not path) included in mutation body"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: CTL-2127: file content not in mutation — path may have been posted verbatim"
+  FAIL=$((FAIL+1))
+fi
+CTL2127_T15_STDERR="$(rm -f "${CTL2127_CAPTURE}"; \
+  PATH="${BIN_DIR}:$PATH" bash "$HELPER" "CTL-550" "$CTL2127_BODY_FILE" 2>&1 1>/dev/null || true)"
+if printf '%s' "$CTL2127_T15_STDERR" | grep -q "linear-comment-post:"; then
+  echo "PASS: CTL-2127: auto-read emits stderr note (non-silent)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: CTL-2127: auto-read should emit a stderr note (got: $CTL2127_T15_STDERR)"
+  FAIL=$((FAIL+1))
+fi
+
+# Test 16 (CTL-2127): path-like non-file body → refused, non-zero exit, no mutation posted.
+rm -f "${CTL2127_CAPTURE}"
+CTL2127_NONFILE="/tmp/does-not-exist-ctl2127-xyz.md"
+CTL2127_T16_EXIT=0
+PATH="${BIN_DIR}:$PATH" bash "$HELPER" "CTL-550" "$CTL2127_NONFILE" >/dev/null 2>/dev/null \
+  || CTL2127_T16_EXIT=$?
+if [[ "$CTL2127_T16_EXIT" -ne 0 ]]; then
+  echo "PASS: CTL-2127: path-like non-file body → non-zero exit (refused)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: CTL-2127: path-like non-file body should be refused (got exit 0)"
+  FAIL=$((FAIL+1))
+fi
+if ! grep -q "commentCreate" "${CTL2127_CAPTURE}" 2>/dev/null; then
+  echo "PASS: CTL-2127: no mutation call when path-like non-file body is refused"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: CTL-2127: mutation was called despite refused path-like body (data loss!)"
+  FAIL=$((FAIL+1))
+fi
+
+# Test 17 (CTL-2127): normal multi-word body still posts verbatim (no false positive).
+rm -f "${CTL2127_CAPTURE}"
+CTL2127_T17_EXIT=0
+PATH="${BIN_DIR}:$PATH" bash "$HELPER" "CTL-550" "See the notes.md file for details here" \
+  >/dev/null 2>/dev/null || CTL2127_T17_EXIT=$?
+if [[ "$CTL2127_T17_EXIT" -eq 0 ]]; then
+  echo "PASS: CTL-2127: normal multi-word body posts verbatim (no false positive)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: CTL-2127: normal multi-word body incorrectly refused (exit $CTL2127_T17_EXIT)"
+  FAIL=$((FAIL+1))
+fi
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

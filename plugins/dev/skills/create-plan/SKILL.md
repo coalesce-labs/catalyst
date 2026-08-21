@@ -389,5 +389,6 @@ context):
 - **After plan saved**: Add a comment with the plan path — this is an agent-authored comment,
   so post it through the app actor (`linear-reply.mjs --as <role>`, or the
   `linear-comment-post.sh` helper), never bare `linearis issues discuss`/`reply` (those post as
-  the human — see the `linearis` skill's "Comment on a ticket" section).
+  the human — see the `linearis` skill's "Comment on a ticket" section). Pass the comment body
+  as LITERAL text or `--body - < FILE`; never pass a file path as `--body` (silent data loss).
 - If the tooling is not available, skip silently and continue planning

@@ -7,14 +7,14 @@
 //   • tagged with the agent's name via createAsUser (shows as botActor.userDisplayName).
 //
 // Usage:
-//   node linear-reply.mjs <ISSUE-ID> --as <AGENT> --body <markdown> [--parent <commentId>|--top]
-//   (body may also come from stdin: --body -)
+//   node linear-reply.mjs <ISSUE-ID> --as <AGENT> --body <literal-markdown-text|-> [--parent <commentId>|--top]
+//   (body may also come from stdin: --body -; NEVER pass a file path — use '--body - < FILE')
 // Env: LINEAR_SYNC_CLIENT_ID / LINEAR_SYNC_CLIENT_SECRET (direnv catalyst-cloud profile).
 // Without --parent/--top: threads under the ROOT of the most recent comment authored by a HUMAN
 // (non-bot) user on the issue; if none exists, posts top-level.
 // Prints JSON {ok, commentId, parentId, url} on success; non-zero exit + message on failure.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 
 const GQL = "https://api.linear.app/graphql";
 const OAUTH = "https://api.linear.app/oauth/token";
@@ -30,10 +30,30 @@ let body = arg("--body", "");
 const parentArg = arg("--parent", null);
 const top = process.argv.includes("--top");
 if (!issueKey || !body) {
-  console.error("usage: linear-reply.mjs <ISSUE-ID> --as <AGENT> --body <markdown|-> [--parent <id>|--top]");
+  console.error("usage: linear-reply.mjs <ISSUE-ID> --as <AGENT> --body <literal-markdown-text|-> [--parent <id>|--top]");
   process.exit(2);
 }
 if (body === "-") body = readFileSync(0, "utf8");
+// CTL-2127: agents repeatedly pass a FILE PATH as --body; the tool used to post the path
+// string itself (silent data loss). Guard it here — INLINE, node:fs only (this file is
+// deployed standalone at ~/catalyst/comms/tools/, CTL-2026, so no ./lib import is allowed).
+else if (body && !/\s/.test(body) &&
+         (/^(\.{0,2}\/)/.test(body) || /\.(md|txt|json)$/i.test(body))) {
+  let isFile = false;
+  try { isFile = statSync(body).isFile(); } catch { /* not a path we can stat */ }
+  if (isFile) {
+    process.stderr.write(
+      `linear-reply: --body '${body}' is a readable file; posting its CONTENT. ` +
+      `Prefer '--body - < ${body}'.\n`);
+    body = readFileSync(body, "utf8");
+  } else {
+    console.error(
+      `linear-reply: --body '${body}' looks like a file path but is not a readable file. ` +
+      `Refusing to post a bare path (this silently loses the intended comment). ` +
+      `Use '--body - < FILE' or '--body "$(cat FILE)"'.`);
+    process.exit(2);
+  }
+}
 
 const cid = process.env.LINEAR_SYNC_CLIENT_ID, csec = process.env.LINEAR_SYNC_CLIENT_SECRET;
 if (!cid || !csec) { console.error("LINEAR_SYNC_CLIENT_ID/SECRET missing (run under direnv)"); process.exit(2); }
