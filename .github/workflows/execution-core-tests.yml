@@ -629,6 +629,26 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/recovery-pass-pr-not-merged.test.sh
 
+      - name: coord kit shape + materialize + relocated lane-relaunch tests (CTL-2145)
+        # ⛔ EXPLICIT PINS, and the reason is this job's own design: CI runs an enumerated
+        # allowlist of shell suites — no glob runner, no run-tests.sh — so a suite merely
+        # PRESENT under coord/__tests__/ runs only in the local full gate. The local half
+        # is COORD_SHELL_TEST_DIR in run-tests.sh; as that file's SKILLS block states,
+        # neither half alone is sufficient.
+        #
+        # These guard a LOCATION invariant, not a logic one. The 2026-08-21 ~75-minute
+        # fleet outage was caused by the coord kit living under a concierge session's
+        # ~/.claude/jobs/<id>/tmp/ dir: when the job record was cleaned up the launchers
+        # and fleet-account.current (a symlink into it) vanished. The shape suite proves
+        # the kit is committed here and resolves through no ephemeral path; the
+        # materialize suite proves it is baked out as REAL FILES rather than symlinks.
+        # Everything is CATALYST_DIR-scoped — no test touches a real runtime dir.
+        working-directory: .
+        run: |
+          bash plugins/dev/scripts/coord/__tests__/coord-kit-shape.test.sh
+          bash plugins/dev/scripts/coord/__tests__/materialize-coord-kit.test.sh
+          bash plugins/dev/scripts/coord/__tests__/lane-relaunch.test.sh
+
       - name: review-comments headless resolution test (CTL-1496)
         working-directory: plugins/dev/scripts
         run: bash __tests__/review-comments-headless.test.sh
