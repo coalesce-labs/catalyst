@@ -198,6 +198,22 @@ const DRAG_OUT_STATES = new Set(["Backlog", "Canceled", "Duplicate"]);
 // (attributes['event.name'] + body.payload) and the legacy flat shape
 // (event.event + event.detail). Returns null for anything that is not a
 // linear.issue.state_changed event with an extractable ticket identifier.
+// normalizeTransitionAt — coerce a source transition timestamp to an ISO string.
+// Accepts epoch milliseconds (the feed's storage type) or an ISO string; anything
+// unparseable yields null, which makes the caller fall back to the envelope ts
+// rather than assert a wrong ordering. See CTL-2111 round-4 P1.
+function normalizeTransitionAt(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  if (typeof value === "string" && value !== "") {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? null : value;
+  }
+  return null;
+}
+
 export function parseStateChangedEvent(event) {
   const name = getEventName(event); // CTL-1834: the shared boundary
   if (name !== "linear.issue.state_changed") return null;
@@ -222,10 +238,12 @@ export function parseStateChangedEvent(event) {
     // Judged on `ts`, a delayed transition that genuinely PRE-dated a park could
     // appear newer and clear a cap that was created after it. Prefer the source
     // time; `ts` remains the fallback for any producer that does not carry one.
-    transitionAt:
-      typeof payload.transitionedAt === "string" && payload.transitionedAt
-        ? payload.transitionedAt
-        : null,
+    // CTL-2111 (Codex #3824 round-4 P1): accept a NUMBER (epoch ms) as well as an
+    // ISO string. The feed stores `issue_history.created_at` as an integer, and a
+    // string-only test silently discarded it and fell back to the envelope ts — the
+    // round-3 fix was inert in production. The producer now normalizes to ISO, and
+    // this stays tolerant of both so an older or third-party producer still works.
+    transitionAt: normalizeTransitionAt(payload.transitionedAt),
     // CTL triage-entry fix (Phase 0): carry the projection-fold fields so a
     // →status transition can be folded into the eligible set from the event
     // payload (no Linear poll), the same way handleIssueUpdatedEvent does.

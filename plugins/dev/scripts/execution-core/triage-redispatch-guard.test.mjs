@@ -561,6 +561,30 @@ describe("handleStateChangedEvent — re-arm orders on the source transition tim
     expect(capRec(orchDir).cappedAt).toBeUndefined();
   });
 
+  // CTL-2111 (Codex #3824 round-4 P1): the feed stores created_at as epoch
+  // MILLISECONDS, so a string-only accept made the round-3 fix inert in production
+  // — every real event fell back to the delayed envelope ts.
+  test("a NUMERIC (epoch ms) transitionedAt is honoured, not silently discarded", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    handleStateChangedEvent(
+      // 09:59 — genuinely BEFORE the 10:00 cap — as epoch ms, emitted at 10:05.
+      ev({ ts: "2026-08-21T10:05:00Z", transitionedAt: Date.parse("2026-08-21T09:59:00.000Z") }),
+      opts(orchDir),
+    );
+    expect(capRec(orchDir).cappedAt).toBe(CAPPED_AT); // latch retained
+  });
+
+  test("a NUMERIC post-cap transitionedAt still clears the cap (positive control)", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    handleStateChangedEvent(
+      ev({ ts: "2026-08-21T10:05:00Z", transitionedAt: Date.parse("2026-08-21T10:01:00.000Z") }),
+      opts(orchDir),
+    );
+    expect(capRec(orchDir).cappedAt).toBeUndefined();
+  });
+
   // Back-compat: a producer that carries no transitionedAt still falls back to ts.
   test("no transitionedAt → falls back to the envelope ts (back-compat)", () => {
     const orchDir = pathJoin(dir, "execution-core");
