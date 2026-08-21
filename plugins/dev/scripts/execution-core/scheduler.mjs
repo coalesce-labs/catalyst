@@ -5389,7 +5389,9 @@ export function schedulerTick(
   // daemon restart). multiHost gates the Linear-touching claim: a single-host
   // roster makes the HRW filter an identity AND skips the claim entirely, so the
   // coordination wiring is an exact no-op until a 2nd host joins the roster.
-  const roster = hosts ?? getEntitledHosts();
+  // trackShedState: true — this is the single accumulation point for entitlement.restored.*
+  // events (CTL-2108). The diagnostician call at line ~9746 stays bare (no accumulation).
+  const roster = hosts ?? getEntitledHosts({ trackShedState: true });
   const self = hostName ?? getHostName();
   // CTL-1785: multiHost (the fenceGuard `!multiHost` disarm + the Linear-touching
   // claim gate) stays EXISTENCE-derived so entitlement shedding can never re-enable
