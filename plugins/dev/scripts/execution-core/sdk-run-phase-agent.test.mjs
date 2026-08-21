@@ -28,6 +28,8 @@ import {
   runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
+// CTL-2015: sourced, not hand-listed — the whole point of the AC's phase table.
+import { PHASES, ANCILLARY_PHASES } from "../lib/workflow-descriptor.mjs";
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -1680,6 +1682,110 @@ describe("defaultEmitBackstop — absent signal file (CTL-2015)", () => {
   });
 });
 
+// ── CTL-2015: EVERY dispatchable phase, as a table ───────────────────────────
+// Sourced from the workflow descriptor + the delegate runner's recovery-pass, NOT
+// hand-listed: a phase added to the descriptor is covered by construction. That is
+// the whole point of the AC — the defect was "covered the phase they were looking at".
+// delegate-runner-entry.mjs:62 dispatches this through the same sdk runner, and it
+// is deliberately NOT in PHASES (∉ descriptor steps/ancillarySteps).
+const DISPATCHABLE_PHASES = [...PHASES, ...ANCILLARY_PHASES, "recovery-pass"];
+
+describe("sdkRunPhaseAgent — overload exhaustion leaves a stalled artifact for EVERY phase", () => {
+  // Real defaultEmitBackstop (NOT injected) so the signal WRITE is exercised. Only
+  // spawn is faked (no real prelaunch / emit binary) — the seam the old test at
+  // :803 stubbed away, which is why it could not catch this.
+  const runExhaustion = async ({ phase, seedSignal }) => {
+    const dir = mkdtempSync(join(tmpdir(), `ctl2015-${phase}-`));
+    const workerDir = join(dir, "workers", "CTL-100");
+    const signalFile = join(workerDir, `phase-${phase}.json`);
+    const spec = makeSpec({ phase, signalFile });
+    // seedSignal=false reproduces the CTC-427 / CTC-55 state: the file is GONE
+    // when the budget runs out.
+    const { spawn } = spawnReturningSpec({ spec, signalFile: seedSignal ? signalFile : undefined });
+    if (seedSignal) mkdirSync(workerDir, { recursive: true });
+    const r = await sdkRunPhaseAgent(
+      { orchDir: dir, ticket: "CTL-100", phase, worktreePath: "/wt/CTL-100" },
+      { ...GOOD_AUTH, spawn,
+        runQuery: () => (async function* () {
+          yield resultMsg({ subtype: "error", is_error: true, api_error_status: 529 });
+        })(),
+        sleep: () => Promise.resolve(), maxRetries: 1, backoff: { baseMs: 1, capMs: 2 },
+        emitEvent: () => {},
+        // NOTE: emitBackstop deliberately NOT injected — the real one must run.
+      },
+    );
+    return { r, dir, signalFile };
+  };
+
+  for (const phase of DISPATCHABLE_PHASES) {
+    test(`${phase}: exhaustion with the signal file PRESENT → stalled/sdk-overloaded-exhausted`, async () => {
+      const { r, dir, signalFile } = await runExhaustion({ phase, seedSignal: true });
+      expect(r.code).toBe(1);
+      const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+      expect(sig.status).toBe("stalled");
+      expect(sig.attentionReason).toBe("sdk-overloaded-exhausted");
+      expect(sig.assertedBy).toBe(ASSERTED_BY.SDK_BACKSTOP);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    test(`${phase}: exhaustion with the signal file ABSENT → still stalled/sdk-overloaded-exhausted`, async () => {
+      // The 2026-08-18 shape exactly: CTC-427 held no phase-implement.json,
+      // CTC-55 held no phase-plan.json, and neither was escalated.
+      const { r, dir, signalFile } = await runExhaustion({ phase, seedSignal: false });
+      expect(r.code).toBe(1);
+      expect(existsSync(signalFile)).toBe(true);
+      const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+      expect(sig.status).toBe("stalled");
+      expect(sig.attentionReason).toBe("sdk-overloaded-exhausted");
+      expect(sig.phase).toBe(phase);
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
+
+  test("the table is sourced from the descriptor, not hand-listed (fails if a phase is dropped)", () => {
+    // A guard on the guard: if someone shortens the table, this fails rather than
+    // silently shrinking coverage.
+    expect(DISPATCHABLE_PHASES).toContain("triage");
+    expect(DISPATCHABLE_PHASES).toContain("implement");
+    expect(DISPATCHABLE_PHASES).toContain("plan");
+    expect(DISPATCHABLE_PHASES).toContain("remediate");
+    expect(DISPATCHABLE_PHASES).toContain("recovery-pass");
+    expect(DISPATCHABLE_PHASES.length).toBe(PHASES.length + ANCILLARY_PHASES.length + 1);
+  });
+});
+
+// ── CTL-2015 negative control: a transient blip must leave NO stalled artifact ──
+describe("sdkRunPhaseAgent — a recovered overload writes no stalled artifact", () => {
+  for (const phase of ["triage", "plan", "implement"]) {
+    test(`${phase}: one 529 then success → no stalled signal`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), `ctl2015-neg-${phase}-`));
+      const workerDir = join(dir, "workers", "CTL-100");
+      mkdirSync(workerDir, { recursive: true });
+      const signalFile = join(workerDir, `phase-${phase}.json`);
+      const spec = makeSpec({ phase, signalFile });
+      const { spawn } = spawnReturningSpec({ spec, signalFile });
+      let n = 0;
+      const r = await sdkRunPhaseAgent(
+        { orchDir: dir, ticket: "CTL-100", phase, worktreePath: "/wt/CTL-100" },
+        { ...GOOD_AUTH, spawn,
+          runQuery: () => (async function* () {
+            n += 1;
+            yield n === 1
+              ? resultMsg({ subtype: "error", is_error: true, api_error_status: 529 })
+              : resultMsg();
+          })(),
+          sleep: () => Promise.resolve(), backoff: { baseMs: 1, capMs: 2 }, emitEvent: () => {} },
+      );
+      expect(r.code).toBe(0);
+      expect(n).toBe(2); // retried once, then succeeded
+      const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+      expect(sig.status).not.toBe("stalled");
+      expect(sig.attentionReason).toBeUndefined();
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
+});
+
 // ── CTL-1367 item 9 + P3: resolveSdkBootExecutor (daemon-boot auth gate + event) ─
 describe("resolveSdkBootExecutor (CTL-1367 item 9 + P3 observability)", () => {
   test("executor != sdk → pure pass-through (no auth check, no event)", () => {
@@ -1856,6 +1962,110 @@ describe("sdkRunPhaseAgent — overload shape table", () => {
       expect(attempt).toBe(2);
     }
   });
+});
+
+// ── CTL-2015: EVERY dispatchable phase, as a table ───────────────────────────
+// Sourced from the workflow descriptor + the delegate runner's recovery-pass, NOT
+// hand-listed: a phase added to the descriptor is covered by construction. That is
+// the whole point of the AC — the defect was "covered the phase they were looking at".
+// delegate-runner-entry.mjs:62 dispatches "recovery-pass" through the same sdk
+// runner, and it is deliberately NOT in PHASES (∉ descriptor steps/ancillarySteps).
+const DISPATCHABLE_PHASES = [...PHASES, ...ANCILLARY_PHASES, "recovery-pass"];
+
+describe("sdkRunPhaseAgent — overload exhaustion leaves a stalled artifact for EVERY phase", () => {
+  // Real defaultEmitBackstop (NOT injected) so the signal WRITE is exercised. Only
+  // spawn is faked (no real prelaunch / emit binary) — the seam the old test at
+  // :803 stubbed away, which is why it could not catch this.
+  const runExhaustion = async ({ phase, seedSignal }) => {
+    const dir = mkdtempSync(join(tmpdir(), `ctl2015-${phase}-`));
+    const workerDir = join(dir, "workers", "CTL-100");
+    const signalFile = join(workerDir, `phase-${phase}.json`);
+    const spec = makeSpec({ phase, signalFile });
+    // seedSignal=false reproduces the CTC-427 / CTC-55 state: the file is GONE
+    // when the budget runs out.
+    const { spawn } = spawnReturningSpec({ spec, signalFile: seedSignal ? signalFile : undefined });
+    if (seedSignal) mkdirSync(workerDir, { recursive: true });
+    const r = await sdkRunPhaseAgent(
+      { orchDir: dir, ticket: "CTL-100", phase, worktreePath: "/wt/CTL-100" },
+      { ...GOOD_AUTH, spawn,
+        runQuery: () => (async function* () {
+          yield resultMsg({ subtype: "error", is_error: true, api_error_status: 529 });
+        })(),
+        sleep: () => Promise.resolve(), maxRetries: 1, backoff: { baseMs: 1, capMs: 2 },
+        emitEvent: () => {},
+        // NOTE: emitBackstop deliberately NOT injected — the real one must run.
+      },
+    );
+    return { r, dir, signalFile };
+  };
+
+  for (const phase of DISPATCHABLE_PHASES) {
+    test(`${phase}: exhaustion with the signal file PRESENT → stalled/sdk-overloaded-exhausted`, async () => {
+      const { r, dir, signalFile } = await runExhaustion({ phase, seedSignal: true });
+      expect(r.code).toBe(1);
+      const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+      expect(sig.status).toBe("stalled");
+      expect(sig.attentionReason).toBe("sdk-overloaded-exhausted");
+      expect(sig.assertedBy).toBe(ASSERTED_BY.SDK_BACKSTOP);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    test(`${phase}: exhaustion with the signal file ABSENT → still stalled/sdk-overloaded-exhausted`, async () => {
+      // The 2026-08-18 shape exactly: CTC-427 held no phase-implement.json,
+      // CTC-55 held no phase-plan.json, and neither was escalated.
+      const { r, dir, signalFile } = await runExhaustion({ phase, seedSignal: false });
+      expect(r.code).toBe(1);
+      expect(existsSync(signalFile)).toBe(true);
+      const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+      expect(sig.status).toBe("stalled");
+      expect(sig.attentionReason).toBe("sdk-overloaded-exhausted");
+      expect(sig.phase).toBe(phase);
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
+
+  test("the table is sourced from the descriptor, not hand-listed (fails if a phase is dropped)", () => {
+    // A guard on the guard: if someone shortens the table, this fails rather than
+    // silently shrinking coverage.
+    expect(DISPATCHABLE_PHASES).toContain("triage");
+    expect(DISPATCHABLE_PHASES).toContain("implement");
+    expect(DISPATCHABLE_PHASES).toContain("plan");
+    expect(DISPATCHABLE_PHASES).toContain("remediate");
+    expect(DISPATCHABLE_PHASES).toContain("recovery-pass");
+    expect(DISPATCHABLE_PHASES.length).toBe(PHASES.length + ANCILLARY_PHASES.length + 1);
+  });
+});
+
+// ── CTL-2015 negative control: a transient blip must leave NO stalled artifact ──
+describe("sdkRunPhaseAgent — a recovered overload writes no stalled artifact", () => {
+  for (const phase of ["triage", "plan", "implement"]) {
+    test(`${phase}: one 529 then success → no stalled signal`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), `ctl2015-neg-${phase}-`));
+      const workerDir = join(dir, "workers", "CTL-100");
+      mkdirSync(workerDir, { recursive: true });
+      const signalFile = join(workerDir, `phase-${phase}.json`);
+      const spec = makeSpec({ phase, signalFile });
+      const { spawn } = spawnReturningSpec({ spec, signalFile });
+      let n = 0;
+      const r = await sdkRunPhaseAgent(
+        { orchDir: dir, ticket: "CTL-100", phase, worktreePath: "/wt/CTL-100" },
+        { ...GOOD_AUTH, spawn,
+          runQuery: () => (async function* () {
+            n += 1;
+            yield n === 1
+              ? resultMsg({ subtype: "error", is_error: true, api_error_status: 529 })
+              : resultMsg();
+          })(),
+          sleep: () => Promise.resolve(), backoff: { baseMs: 1, capMs: 2 }, emitEvent: () => {} },
+      );
+      expect(r.code).toBe(0);
+      expect(n).toBe(2); // retried once, then succeeded
+      const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+      expect(sig.status).not.toBe("stalled");
+      expect(sig.attentionReason).toBeUndefined();
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
 });
 
 // ── CTL-1410 Phase B: in-process worker-registry wiring ───────────────────────
