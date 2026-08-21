@@ -20,7 +20,6 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { jobLifecycle } from "./recovery.mjs";
-import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-2141: direct Phase-1 chokepoint (delegate-first reverted)
 import { fenceGuard } from "./fence-guard.mjs";

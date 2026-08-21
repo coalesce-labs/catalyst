@@ -434,7 +434,6 @@ import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./live
 import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first). CTL-1644 (Codex P2): lookupPrStatus reused for getStrandedEvidence's no-cross-repo-borrow PR resolution.
 import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
 import { readGithubQuota } from "./github-quota-timer.mjs";
-import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609: delegate-first escalation seam
 import {
   getAllTicketDescriptors,
   getAllPrStatuses,
@@ -6738,30 +6737,9 @@ export function schedulerTick(
 
   const liveCount = liveBackgroundCount();
 
-  // CTL-1331: a board-health delegate runs async — the tick enqueues an intent and
-  // a detached runner does the heavy spawn later. A queued/claimed intent has
-  // RESERVED a slot it has not yet filled (its `claude --bg` isn't live, so
-  // liveBackgroundCount can't see it). Reserve it here — GC terminal/stale
-  // reservations first — so new-work/promotion/resume admission can't over-fill
-  // past maxParallel into a slot a queued delegate will claim. The reservation
-  // only ever LOWERS freeSlots (conservative-only, §3b); with an empty queue both
-  // calls return 0, so occupiedCount === liveCount (Phase A inert: zero change).
-  try {
-    // CTL-1157 (GROUP-3 #2): pass the resolved executor so the GC keeps a launched
-    // sdk delegate intent (in-process query(), no bg_job_id) LIVE instead of dropping
-    // it as a dead bg job — dropping it would free the reservation/existence guard and
-    // let the next scan re-dispatch the same in-flight ticket. Inert under bg (executor
-    // null → the no-bg_job_id launched intent still drops exactly as today).
-    gcDelegateIntents(orchDir, now(), { executor: dispatchMode === "sdk" ? "sdk" : null });
-  } catch {
-    /* GC is best-effort — never block the tick */
-  }
-  let queuedDelegates = 0;
-  try {
-    queuedDelegates = countQueuedDelegates(orchDir);
-  } catch {
-    /* reservation read is best-effort — fall back to 0 reserved */
-  }
+  // CTL-2141: the async board-health delegate queue (delegate-queue.mjs) was
+  // deleted with the judgment layer, so nothing is ever queued — this stays 0.
+  const queuedDelegates = 0;
   // CTL-1367 P1: under executor=sdk the in-process SDK workers have NO `claude --bg`
   // job, so liveCount is blind to them. Add their occupancy (dispatched/running
   // nested signals with no bg_job_id) so the slot gate counts them like bg jobs and
