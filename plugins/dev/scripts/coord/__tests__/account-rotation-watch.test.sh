@@ -742,6 +742,144 @@ else
 fi
 chmod 755 "$COORD_RT" 2>/dev/null || true
 
+# ─── 17. an already-active no-op picks a DIFFERENT target next tick ──────────
+#
+# The CTL-2145 loop this closes (Codex #3867 P1). Another node switched since this host
+# last materialized claude-accounts.env, so the LOCAL selector still reads acct1 while the
+# cluster already holds the rejected acct2. The actor picks acct2, the verb's already-active
+# branch returns 0 without re-materializing anything, and the rc=0-is-not-proof check
+# correctly refuses to claim a rotation — but every INPUT to the selection is unchanged, so
+# the old code recomputed acct2 on the next tick, and the next, until the hourly cap was
+# spent. acct3 was never tried during the outage the actor exists for.
+#
+# The no-op branch is modelled by make_switch_stub WITHOUT its 4th argument: it exits 0 and
+# leaves the selector alone, exactly as the real verb's already-active branch does.
+
+echo "Test 17: after an already-active no-op the NEXT tick tries a different candidate"
+new_case t17
+make_switch_stub "$STUB" "$RECORD" 0            # no accounts env => models the no-op branch
+write_latch "$CDIR" true "$NOW_MS"
+# Raise the cap above the handle count so the cap can never be what stops the walk — the
+# candidate ledger has to be the thing doing the work, or this test proves nothing.
+ROTATION_HOURLY_CAP=9 run_actor enforce >/dev/null 2>&1
+FIRST="$(tr ' ' '\n' <"$RECORD" | grep -m1 -E '^acct[0-9]+$' || true)"
+ROTATION_HOURLY_CAP=9 run_actor enforce >/dev/null 2>&1
+SECOND="$(tr ' ' '\n' <"$RECORD" | grep -E '^acct[0-9]+$' | sed -n 2p || true)"
+if [[ "$FIRST" == "acct2" ]]; then
+	pass "first tick targeted acct2 (the handle after the walled acct1)"
+else
+	fail "expected the first tick to target acct2, got '${FIRST}' — $(cat "$RECORD")"
+fi
+if [[ -n "$SECOND" && "$SECOND" != "$FIRST" ]]; then
+	pass "second tick targeted a DIFFERENT candidate (${FIRST} -> ${SECOND}) instead of re-picking the dead one"
+else
+	fail "second tick re-picked '${SECOND}' after '${FIRST}' — the cap would be spent on one dead candidate: $(cat "$RECORD")"
+fi
+if [[ "$SECOND" == "acct3" ]]; then
+	pass "and it is acct3 — the walk continues in file order rather than restarting"
+else
+	fail "expected acct3 on the second tick, got '${SECOND}'"
+fi
+if [[ -s "$COORD_RT/.account-rotation-tried" ]]; then
+	pass "recorded the attempted-and-not-taken candidates in the per-episode ledger"
+else
+	fail "no per-episode candidate ledger was written — nothing would survive to the next tick"
+fi
+if [[ -z "$(marker_value)" ]]; then
+	pass "consumed NO edge while walking (markers unadvanced, as an unverified switch requires)"
+else
+	fail "advanced the acted-marker (='$(marker_value)') on an unverified switch"
+fi
+
+# ─── 18. every candidate exhausted → says so and stops, WITHOUT rotating ─────
+#
+# The walk has to terminate. With acct2 and acct3 both attempted and neither taking, there
+# is no third option, and the actor must say that in those words rather than silently
+# re-picking or spinning. Note the count: exactly 2 switch calls for 3 handles — one per
+# non-walled candidate, never a repeat.
+
+echo "Test 18: with every candidate attempted the actor names the exhaustion and stops"
+OUT="$(ROTATION_HOURLY_CAP=9 run_actor enforce)"; RC=$?
+if [[ "$(switch_calls)" == "2" ]]; then
+	pass "the third tick invoked the verb 0 more times (2 total = one per non-walled candidate)"
+else
+	fail "expected 2 total switch calls across the whole episode, got $(switch_calls) — $(cat "$RECORD")"
+fi
+if grep -qi 'every candidate has already been attempted' <<<"$OUT"; then
+	pass "named the exhaustion (a silent no-op would be indistinguishable from a healthy tick)"
+else
+	fail "exhausted the candidates without saying so: $OUT"
+fi
+if [[ $RC -eq 0 ]]; then
+	pass "exit 0 — exhaustion is a reported dead end, not a crash"
+else
+	fail "expected exit 0 on exhaustion, got $RC — $OUT"
+fi
+if [[ -z "$(marker_value)" ]]; then
+	pass "left the edge live, so a later tick still acts if the active handle changes"
+else
+	fail "consumed the edge on exhaustion (marker='$(marker_value)')"
+fi
+
+# POSITIVE CONTROL — the ledger is EPISODE-scoped, not permanent. A newer latch ts is a new
+# outage, and every handle is a first-class candidate again. Without this, test 18 would pass
+# just as well if the actor had simply stopped rotating forever.
+echo "Test 18b: positive control — a NEW episode re-arms every candidate"
+NEWER_MS=$((NOW_MS + 60000))
+write_latch "$CDIR" true "$NEWER_MS"
+make_switch_stub "$STUB" "$RECORD" 0 "$ACCTS"   # a REAL switch again
+OUT="$(ROTATION_HOURLY_CAP=9 run_actor enforce)"
+if [[ "$(switch_calls)" == "3" && "$(current_account)" == "acct2" ]]; then
+	pass "positive control: the new episode rotated to acct2 again — the ledger expired with the old episode"
+else
+	fail "positive control FAILED — $(switch_calls) call(s), current '$(current_account)': tests 17/18 prove nothing — $OUT"
+fi
+
+# ─── 19. an UNREADABLE counter refuses to rotate (read side of the breaker) ──
+#
+# cw_record_attempt's unwritable case is test 16; this is its read-side twin. A counter that
+# cannot be inspected is "could not look", and reporting that as 0 attempts would leave the
+# cap permanently clear while the actuator stayed fully live — the one direction a circuit
+# breaker must not fail in. The script runs under `set -uo pipefail` with no `-e`, so an
+# unchecked assignment would leave COUNT empty and `[[ "" -ge N ]]` reads the empty string
+# as 0: the failure is silent by default, which is why it is pinned here.
+
+echo "Test 19: an unreadable rotation counter refuses to rotate instead of reading as 0"
+new_case t19
+write_latch "$CDIR" true "$NOW_MS"
+printf '%s\n' "$(date +%s)" >"$COORD_RT/.rotations"
+chmod 200 "$COORD_RT/.rotations" 2>/dev/null || true
+if [[ -r "$COORD_RT/.rotations" ]]; then
+	echo "  INCONCLUSIVE: chmod 200 did not make the counter unreadable to this process (root? ACL?) — the unreadable-counter case cannot run here"
+	chmod 644 "$COORD_RT/.rotations" 2>/dev/null || true
+else
+	OUT="$(run_actor enforce)"; RC=$?
+	if [[ "$(switch_calls)" == "0" ]]; then
+		pass "did NOT invoke the switch verb when the cap could not be read"
+	else
+		fail "rotated with an unreadable breaker: $(switch_calls) call(s) — $(cat "$RECORD")"
+	fi
+	if [[ $RC -ne 0 ]]; then
+		pass "exited non-zero (an uninspectable breaker is a hard refusal, not a quiet skip)"
+	else
+		fail "exited 0 — an unreadable cap read as a normal tick: $OUT"
+	fi
+	if grep -qi 'circuit breaker' <<<"$OUT"; then
+		pass "named the decline rather than dying on a bare permission error"
+	else
+		fail "refused without naming the circuit breaker: $OUT"
+	fi
+	chmod 644 "$COORD_RT/.rotations" 2>/dev/null || true
+
+	# POSITIVE CONTROL — same fixture, counter readable again.
+	OUT="$(run_actor enforce)"
+	if [[ "$(switch_calls)" == "1" ]]; then
+		pass "positive control: the SAME edge rotates once the counter is readable — the refusal was the breaker, not the fixture"
+	else
+		fail "positive control FAILED — $(switch_calls) call(s): test 19 proves nothing — $OUT"
+	fi
+fi
+
 echo ""
 echo "== ${PASSES} passed, ${FAILURES} failed =="
 [[ $FAILURES -eq 0 ]]

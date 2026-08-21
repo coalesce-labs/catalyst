@@ -322,9 +322,21 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
   exit 0
 fi
 
-# ─── non-Darwin early exit ───────────────────────────────────────────────────
-
-if [[ "$(_os)" != "Darwin" ]]; then
+# ─── non-Darwin early exit (INSTALL path only) ───────────────────────────────
+#
+# --print-only is deliberately EXEMPT and is handled further down, after TEMPLATE
+# resolution. Print mode is documented as a side-effect-free preview, and
+# `catalyst-stack install-services --print` calls this delegate BEFORE its own Darwin
+# gate — so gating the preview on the platform silently omitted the account-rotation
+# plist from every non-Darwin preview. Silently is the operative word: the caller
+# suppresses this delegate's stderr and accepts exit 0, so "rendered nothing" and
+# "rendered fine" were indistinguishable, and the only way to see the plist was the
+# test-only CATALYST_FORCE_OS=Darwin override (CTL-2145).
+#
+# The INSTALL path still exits HERE, before BAKE_DIR resolution, so a non-Darwin host
+# never reaches the ephemeral-path refusal below — which would turn this documented
+# no-op into a hard exit-1 failure of an otherwise fine install-services run.
+if [[ "$PRINT_ONLY" -ne 1 && "$(_os)" != "Darwin" ]]; then
   echo "install-account-rotation.sh: non-Darwin platform detected ($(_os))." >&2
   echo "  This agent is a macOS LaunchAgent; no launchctl action taken." >&2
   exit 0
@@ -357,8 +369,10 @@ fi
 
 # ─── --print-only ────────────────────────────────────────────────────────────
 #
-# Before the applicability gate: `install-services --print` must be able to show the
-# rendered agent on any host, including one where it would not actually be installed.
+# Before the applicability gate AND after the platform gate's install-path exit above:
+# `install-services --print` must be able to show the rendered agent on any host —
+# including one where it would not actually be installed, and including a non-Darwin
+# one (CTL-2145).
 
 if [[ "$PRINT_ONLY" -eq 1 ]]; then
   _substitute
@@ -373,6 +387,36 @@ fi
 # runs as one of install-services' non-fatal delegates — but neither is SILENT, which
 # is the property that matters: "no agent installed" and "agent installed and quietly
 # broken" must not look the same from the install log.
+#
+# ⚠️ "Not applicable" must also RETRACT, not merely decline (CTL-2145). A host that
+# qualified yesterday and does not today — reclassified out of ROTATION_NODE_CLASSES,
+# or with its claude-accounts.env removed — still has the old LaunchAgent LOADED, baked
+# with whatever mode it carried at install time (potentially `enforce`). Exiting 0 and
+# leaving it there means a host the gate now explicitly excludes keeps rotating accounts
+# and restarting the stack on its own schedule, and every routine install-services run
+# re-affirms that state while logging a line that reads like the agent is absent. So
+# each refusal below retires an existing install before it exits.
+
+# _retire_installed_agent REASON — boot out + remove an already-installed agent on a
+# host that no longer qualifies. Idempotent (nothing installed = nothing to do) and
+# NON-FATAL in every direction, because it runs on the delegate's exit-0 refusal paths.
+#
+# The launchd guard is consulted DIRECTLY (launchd_guard_ok) rather than through the
+# exiting launchd_agent_guard wrapper: under a sealed/foreign HOME the right move is to
+# touch nothing AND to keep the delegate's exit 0, not to abort the caller's whole
+# install-services run. Refusing loudly is the point — a skipped retraction that printed
+# nothing would leave the operator believing the agent was gone.
+_retire_installed_agent() {
+  local reason="$1"
+  [[ -e "$DEST" ]] || return 0
+  if ! launchd_guard_ok "the account-rotation agent"; then
+    echo "install-account-rotation.sh: ${LABEL} is still installed at ${DEST} and this host no longer qualifies (${reason}), but the launchd domain guard REFUSED (${CATALYST_LAUNCHD_GUARD_REASON}) — NOT retiring it here. Remove it by hand with '$0 --uninstall' from a normal session." >&2
+    return 0
+  fi
+  launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
+  rm -f "$DEST"
+  echo "install-account-rotation.sh: retired the previously-installed ${LABEL} — this host no longer qualifies (${reason})"
+}
 
 NODE_CLASS="$(_node_class)"
 if [[ -n "$NODE_CLASS" ]]; then
@@ -382,6 +426,7 @@ if [[ -n "$NODE_CLASS" ]]; then
   done
   if [[ "$_permitted" -eq 0 ]]; then
     echo "install-account-rotation.sh: node class '${NODE_CLASS}' is not in '${ROTATION_NODE_CLASSES}' — not installing ${LABEL} (not an error)"
+    _retire_installed_agent "node class '${NODE_CLASS}' is not in '${ROTATION_NODE_CLASSES}'"
     exit 0
   fi
 else
@@ -392,6 +437,7 @@ fi
 
 if [[ ! -f "$ACCOUNTS_ENV" ]]; then
   echo "install-account-rotation.sh: no claude-accounts.env at ${ACCOUNTS_ENV} — this host has no accounts to rotate between; not installing ${LABEL} (not an error)"
+  _retire_installed_agent "no claude-accounts.env at ${ACCOUNTS_ENV}"
   exit 0
 fi
 
@@ -512,12 +558,31 @@ _retire_stray_loops() {
       stale=1
     fi
   done
-  ((stale == 0)) && echo "install-account-rotation.sh: verified all retired stray loops are gone"
+  # ⚠️ The survival probe's verdict is RETURNED, not merely printed (CTL-2145). TERM and
+  # KILL can both fail to remove a match — it is owned by another user, or it lingers as
+  # an unreaped zombie — and the old unconditional `return 0` let the install proceed and
+  # report success with the old loop still running alongside the new actor. That is a
+  # check that cannot fail: the assertion above is written as a positive control
+  # precisely so it CAN fail, and swallowing its result put the failure back.
+  #
+  # Written as an explicit if/return rather than `((stale == 0)) && echo …` — that form
+  # yields the AND-list's status, which `set -e` deliberately exempts (the failing command
+  # is not the one following the final &&), so it looked fail-closed while returning 0.
+  if ((stale != 0)); then
+    return 1
+  fi
+  echo "install-account-rotation.sh: verified all retired stray loops are gone"
   return 0
 }
 
 if [[ "${CATALYST_SKIP_STRAY_RETIRE:-0}" != "1" ]]; then
-  _retire_stray_loops
+  if ! _retire_stray_loops; then
+    echo "install-account-rotation.sh: REFUSING to install ${LABEL} — a stray lane/rotation loop survived both TERM and KILL (see the WARNING above)." >&2
+    echo "  Installing now would leave that loop running alongside the new actor, which is the" >&2
+    echo "  duplicate-supervisor state this retire exists to prevent. Retire it by hand and re-run," >&2
+    echo "  or set CATALYST_SKIP_STRAY_RETIRE=1 to install deliberately without the retire." >&2
+    exit 1
+  fi
 fi
 
 # ─── install ─────────────────────────────────────────────────────────────────

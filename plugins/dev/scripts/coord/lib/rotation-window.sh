@@ -21,17 +21,43 @@
 
 # cw_count_in_window FILE WINDOW_SECONDS
 # Prunes FILE to the trailing WINDOW_SECONDS and prints the number of entries left.
+#
+# Returns NON-ZERO when the counter could not be INSPECTED, and — exactly like
+# cw_record_attempt's — that status is load-bearing rather than advisory. An absent file is
+# a genuine zero (nothing has been attempted yet) and returns 0; a file that EXISTS but
+# cannot be read is "could not look", which is not the same fact and must never be reported
+# as the count 0.
+#
+# It used to be. `kept=$(awk ...)` on an unreadable-but-writable counter (mode 0200, or an
+# equivalent ACL) leaves `kept` empty exactly as an aged-out window does, so the branch
+# below truncated the file and printed 0 — while cw_record_attempt could still append
+# successfully. The caller's `count >= cap` was then never true, so a repeatedly failing
+# switch or launcher never reached its cap: the breaker read as permanently clear while the
+# actuator stayed fully live, which is the one direction a circuit breaker must not fail in,
+# and the truncation destroyed the evidence on the way past (CTL-2145).
 cw_count_in_window() {
 	local rf="$1" window="${2:-3600}"
 	[ -f "$rf" ] || {
 		echo 0
-		return
+		return 0
 	}
+	if [ ! -r "$rf" ]; then
+		echo "rotation-window: counter ${rf} exists but is NOT READABLE — reporting the breaker as unavailable rather than as 0 attempts" >&2
+		return 1
+	fi
 	local now cutoff
 	now=$(date +%s)
 	cutoff=$((now - window))
-	local kept
-	kept=$(awk -v cutoff="$cutoff" '$1 >= cutoff' "$rf")
+	local kept rc
+	# `-r` above can still pass where an ACL denies the actual open, so awk's own exit
+	# status is checked too: empty output alone cannot distinguish "read fine, all entries
+	# aged out" from "could not open the file".
+	kept=$(awk -v cutoff="$cutoff" '$1 >= cutoff' "$rf" 2>/dev/null)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		echo "rotation-window: could not read the counter ${rf} (awk rc=${rc}) — reporting the breaker as unavailable rather than as 0 attempts" >&2
+		return 1
+	fi
 	# `printf '%s\n' ""` writes a stray blank line, not a truly empty file — truncate
 	# explicitly instead, or the counter file never actually shrinks back to empty after
 	# the window clears (and the blank line then counts as an attempt forever).
@@ -42,6 +68,7 @@ cw_count_in_window() {
 		printf '%s\n' "$kept" >"$rf"
 		printf '%s\n' "$kept" | grep -c .
 	fi
+	return 0
 }
 
 # cw_record_attempt FILE — append "now" to FILE's rolling-window counter.

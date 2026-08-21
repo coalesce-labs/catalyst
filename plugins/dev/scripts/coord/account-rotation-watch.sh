@@ -61,6 +61,10 @@ MARKER="${COMMS_DIR}/.account-rotation-acted"
 ANNOUNCED="${COMMS_DIR}/.account-rotation-announced"
 ROTATIONS="${COMMS_DIR}/.rotations"
 CUR="${COMMS_DIR}/fleet-account.current"
+# Per-EPISODE ledger of candidates that were attempted and provably did not take, one
+# `<latch_ts> <handle>` line each. Scoped by latch ts so a new episode starts from a
+# clean slate; see the no-op paragraph at the verification branch below (CTL-2145).
+TRIED="${COMMS_DIR}/.account-rotation-tried"
 EVENTS_DIR="${CATALYST_DIR}/events"
 ROTATION_WINDOW_SECONDS=3600
 ROTATION_HOURLY_CAP="${ROTATION_HOURLY_CAP:-3}"
@@ -310,30 +314,102 @@ if [[ "$HANDLE_COUNT" -lt 2 ]]; then
   exit 0
 fi
 
-# _next_handle ACTIVE — the handle after ACTIVE in file order, wrapping; never ACTIVE.
-# With ACTIVE unknown (no selector, no pointer) it falls back to the FIRST handle, which
-# is a defensible target rather than a refusal — but the refusal above already covers the
-# only case where no target exists at all.
+# _tried_handles — the candidates already attempted-and-not-taken in THIS episode.
+#
+# Three-valued in the same spirit as the latch read above, but with the OPPOSITE fail
+# direction, deliberately. A ledger that cannot be read means "could not look", and it is
+# reported as such — but it does NOT refuse the rotation, because the consequence of
+# proceeding without it is merely the pre-CTL-2145 behaviour (possibly re-picking a
+# candidate that already no-opped), which the hourly cap still bounds. Refusing instead
+# would sacrifice the actor's entire purpose during the exact outage it exists for, over a
+# bookkeeping file. Contrast $ROTATIONS, where refusal IS correct: losing that counter
+# leaves the actuator UNCAPPED, which nothing else bounds.
+_tried_handles() {
+  [[ -f "$TRIED" ]] || return 0
+  if [[ ! -r "$TRIED" ]]; then
+    warn "could not read the per-episode candidate ledger at ${TRIED} — selecting without it; a candidate that already no-opped may be re-tried (bounded by the ${ROTATION_HOURLY_CAP}/hour cap)"
+    return 0
+  fi
+  awk -v ts="$LATCH_TS" '$1 == ts { print $2 }' "$TRIED" 2>/dev/null | awk '!seen[$0]++'
+}
+
+# _record_tried HANDLE — add HANDLE to this episode's ledger, pruning every other
+# episode's lines on the way past so the file cannot grow without bound.
+# Best-effort: a ledger we cannot write costs a repeated candidate, never a wrong
+# rotation, so it warns rather than failing the tick (same reasoning as _tried_handles).
+_record_tried() {
+  local handle="$1" kept=""
+  [[ -f "$TRIED" && -r "$TRIED" ]] && kept="$(awk -v ts="$LATCH_TS" '$1 == ts' "$TRIED" 2>/dev/null || true)"
+  {
+    [[ -n "$kept" ]] && printf '%s\n' "$kept"
+    printf '%s %s\n' "$LATCH_TS" "$handle"
+  } >"${TRIED}.tmp.$$" 2>/dev/null && mv "${TRIED}.tmp.$$" "$TRIED" 2>/dev/null && return 0
+  rm -f "${TRIED}.tmp.$$" 2>/dev/null || true
+  warn "could not record '${handle}' as tried at ${TRIED} — the next tick may re-select it (bounded by the ${ROTATION_HOURLY_CAP}/hour cap)"
+  return 1
+}
+
+# _next_handle ACTIVE [EXCLUDED] — walk forward from ACTIVE in file order, wrapping, and
+# return the first handle that is neither ACTIVE nor one of the newline-separated
+# EXCLUDED candidates. With ACTIVE unknown (no selector, no pointer) the walk starts at
+# the FIRST handle, which is a defensible target rather than a refusal — the refusal above
+# already covers the only case where no target exists at all.
 _next_handle() {
-  printf '%s\n' "$HANDLES" | awk -v active="$1" '
+  printf '%s\n' "$HANDLES" | awk -v active="$1" -v excluded="${2:-}" '
+    BEGIN {
+      n = split(excluded, ex, "\n")
+      for (i = 1; i <= n; i++) if (ex[i] != "") skip[ex[i]] = 1
+    }
     { h[NR] = $0 }
     END {
       if (NR == 0) exit
       idx = 0
       for (i = 1; i <= NR; i++) if (h[i] == active) idx = i
-      if (idx == 0) { print h[1]; exit }
-      print h[(idx % NR) + 1]
+      for (step = 0; step < NR; step++) {
+        cand = h[((idx + step) % NR) + 1]
+        if (cand == active) continue
+        if (cand in skip) continue
+        print cand
+        exit
+      }
     }'
 }
 
-NEXT="$(_next_handle "$ACTIVE")"
+TRIED_HANDLES="$(_tried_handles)"
+NEXT="$(_next_handle "$ACTIVE" "$TRIED_HANDLES")"
 if [[ -z "$NEXT" || "$NEXT" == "$ACTIVE" ]]; then
+  # Distinguish "there was never a target" from "this episode has burned through every
+  # target". The second is the CTL-2145 exhaustion case and reads very differently to an
+  # operator: the actor tried each provisioned account and none of them took, so the wall
+  # is not something rotation can route around.
+  if [[ -n "$TRIED_HANDLES" ]]; then
+    log "INCONCLUSIVE: every candidate has already been attempted without taking in this episode (active='${ACTIVE}', tried=$(printf '%s' "$TRIED_HANDLES" | tr '\n' ' ')) — no rotation; markers NOT advanced, so a later tick still acts on this edge if the active handle changes"
+    _emit "account.rotation.candidates-exhausted" WARN "no untried rotation candidate remains for this episode" \
+      "$(jq -nc --arg from "$ACTIVE" --arg ts "$LATCH_TS" --arg mode "$MODE" \
+        --argjson tried "$(printf '%s' "$TRIED_HANDLES" | jq -R . | jq -sc .)" \
+        '{from:$from,latch_ts:$ts,mode:$mode,tried:$tried}' 2>/dev/null || echo null)"
+    exit 0
+  fi
   log "INCONCLUSIVE: could not select a handle other than the walled one (active='${ACTIVE}', handles=$(printf '%s' "$HANDLES" | tr '\n' ' ')) — no rotation"
   exit 0
 fi
 
 # ─── rolling-window cap ─────────────────────────────────────────────────────
-COUNT="$(cw_count_in_window "$ROTATIONS" "$ROTATION_WINDOW_SECONDS")"
+#
+# cw_count_in_window reports a counter it could not INSPECT as a failure rather than as
+# the count 0 (CTL-2145), and that status is load-bearing here. This script runs under
+# `set -uo pipefail` with no `-e`, so an unchecked assignment would leave COUNT empty,
+# and `[[ "" -ge N ]]` evaluates the empty string as 0 — the cap would silently read as
+# clear on exactly the tick that could not verify it, which is the one direction a
+# circuit breaker must not fail in. Same refusal as the unwritable-counter branch below:
+# no working breaker, no rotation.
+if ! COUNT="$(cw_count_in_window "$ROTATIONS" "$ROTATION_WINDOW_SECONDS")"; then
+  warn "FATAL: could not READ the rotation counter at ${ROTATIONS} — refusing to rotate ${ACTIVE} -> ${NEXT} without a working circuit breaker (is it readable?). Markers NOT advanced, so this edge stays live for the first tick that can read the counter."
+  _emit "account.rotation.breaker-unavailable" ERROR "rotation circuit breaker unavailable" \
+    "$(jq -nc --arg from "$ACTIVE" --arg to "$NEXT" --arg counter "$ROTATIONS" --arg ts "$LATCH_TS" --arg mode "$MODE" \
+      '{from:$from,to:$to,counter_file:$counter,latch_ts:$ts,mode:$mode,operation:"read"}' 2>/dev/null || echo null)"
+  exit 1
+fi
 if [[ "$COUNT" -ge "$ROTATION_HOURLY_CAP" ]]; then
   log "CAPPED — ${COUNT} rotations in the last hour (cap ${ROTATION_HOURLY_CAP}); refusing to rotate ${ACTIVE} -> ${NEXT} until the window ages out"
   _emit "account.rotation.capped" WARN "account rotation capped" \
@@ -444,7 +520,25 @@ fi
 # completed rotation.
 OBSERVED="$(_selector_handle)"
 if [[ "$OBSERVED" != "$NEXT" ]]; then
-  warn "INCONCLUSIVE: switch verb returned rc=0 but the selector in ${ACCOUNTS_ENV} reads '${OBSERVED:-<none>}', not '${NEXT}' — treating this as NOT rotated (the verb's already-active branch also exits 0). Markers NOT advanced and ${CUR} NOT written, so this edge stays live for the next tick (bounded by the ${ROTATION_HOURLY_CAP}/hour cap)."
+  # ⚠️ Leaving the edge live is necessary but NOT sufficient — the next tick must also
+  # pick a DIFFERENT target (CTL-2145). The failure this closes: another node has switched
+  # since this host last materialized claude-accounts.env, so the local selector still
+  # reads acct1 while the cluster already holds the rejected acct2. _next_handle picks
+  # acct2, the verb's already-active branch returns 0 without re-materializing anything,
+  # and the verification below correctly refuses to claim a rotation. But every input to
+  # the selection is unchanged, so the NEXT tick recomputes the very same acct2 — and the
+  # one after that — until the hourly cap is spent, and acct3 is never tried during the
+  # outage the actor exists for. A cap reached by re-attempting one dead candidate is a
+  # cap that protected nothing.
+  #
+  # So the candidate is recorded as attempted-and-not-taken for THIS episode, and the
+  # selection above skips it from here on. Recorded unconditionally in this branch rather
+  # than only when OBSERVED == ACTIVE: whatever the selector reads, this target verifiably
+  # did not take, and re-attempting it inside the same episode has already been shown not
+  # to work. It is scoped to the episode, so a candidate that failed during one wall is a
+  # first-class option again during the next.
+  _record_tried "$NEXT" || true
+  warn "INCONCLUSIVE: switch verb returned rc=0 but the selector in ${ACCOUNTS_ENV} reads '${OBSERVED:-<none>}', not '${NEXT}' — treating this as NOT rotated (the verb's already-active branch also exits 0). Markers NOT advanced and ${CUR} NOT written, so this edge stays live for the next tick, which will now try a DIFFERENT candidate (bounded by the ${ROTATION_HOURLY_CAP}/hour cap)."
   printf '%s\n' "$SWITCH_OUT" | sed 's/^/  | /' >&2
   _emit "account.rotation.unverified" WARN "account rotation could not be verified" \
     "$(jq -nc --arg from "$ACTIVE" --arg to "$NEXT" --arg observed "$OBSERVED" --arg ts "$LATCH_TS" \

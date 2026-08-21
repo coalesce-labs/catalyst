@@ -57,9 +57,16 @@ assert_file "${COORD_DIR}/templates/lanes.manifest.example" "templates/lanes.man
 assert_file "${COORD_DIR}/templates/launch-on-account.sh.template" "templates/launch-on-account.sh.template exists"
 
 echo "Test: the launcher template carries the tokens materialize substitutes"
-for token in REPLACE_ACCOUNT REPLACE_HOME; do
-	if grep -q "$token" "${COORD_DIR}/templates/launch-on-account.sh.template" 2>/dev/null; then
-		pass "launcher template contains ${token}"
+# OPERATIVE occurrences only. REPLACE_HOME used to be checked here too, but the template no
+# longer uses it operatively — the runtime paths are baked from the values the generator
+# actually resolved (REPLACE_COORD_RT / REPLACE_ENV_FILE) rather than re-guessed from $HOME
+# (CTL-2145). A whole-file grep still found REPLACE_HOME in a COMMENT and passed, which is a
+# check that can no longer fail; the generator keeps substituting it for templates that do
+# reference it, and the token-set agreement below is what actually holds the two files
+# together now.
+for token in REPLACE_ACCOUNT REPLACE_COORD_RT REPLACE_ENV_FILE; do
+	if grep -vE '^[[:space:]]*#' "${COORD_DIR}/templates/launch-on-account.sh.template" 2>/dev/null | grep -q "$token"; then
+		pass "launcher template contains ${token} (operatively, not just in a comment)"
 	else
 		fail "launcher template is missing ${token} (materialize substitutes it)"
 	fi
@@ -125,6 +132,68 @@ else
 	else
 		pass "no coord artifact resolves through ~/.claude/jobs (${#COORD_ARTIFACTS[@]} artifacts scanned)"
 	fi
+fi
+
+
+# ─── no REPLACE_ token may be a PREFIX of another (CTL-2145) ─────────────────
+#
+# materialize-coord-kit.sh substitutes every token with one `sed -e … -e …` invocation, and
+# sed applies those expressions IN ORDER to the same line. So a token that has another token
+# as a prefix is rewritten by the shorter one first, and its own expression then matches
+# nothing — silently, leaving a launcher that still parses and still runs.
+#
+# That is not hypothetical: `REPLACE_ACCOUNTS_ENV` was eaten by `REPLACE_ACCOUNT` and baked
+# the literal `acct1S_ENV` as the accounts-file path, so every launch looked for a token
+# file that could not exist and burned the relaunch cap doing it. This asserts the PROPERTY
+# rather than the one instance, so the next token added here cannot reintroduce it.
+
+echo "Test: no REPLACE_ token in the launcher template is a prefix of another"
+# OPERATIVE lines only — a token NAMED in a comment (the template documents the retired
+# REPLACE_ACCOUNTS_ENV precisely so this collision stays understood) is not a substitution
+# site, and counting it would make the fix's own explanation fail the check. Same
+# operative-vs-commented distinction the .claude/jobs probe above already draws.
+TOKENS="$(grep -vE '^[[:space:]]*#' "${COORD_DIR}/templates/launch-on-account.sh.template" 2>/dev/null |
+	grep -oE 'REPLACE_[A-Z_]+' | sort -u)"
+if [ -n "$TOKENS" ]; then
+	pass "positive control: the template still carries REPLACE_ tokens to check ($(printf '%s' "$TOKENS" | tr '\n' ' '))"
+else
+	fail "found no REPLACE_ tokens at all — this check would pass vacuously"
+fi
+COLLISIONS=""
+for a in $TOKENS; do
+	for b in $TOKENS; do
+		[ "$a" = "$b" ] && continue
+		case "$b" in "$a"*) COLLISIONS="${COLLISIONS}${a} is a prefix of ${b}; " ;; esac
+	done
+done
+if [ -z "$COLLISIONS" ]; then
+	pass "no token is a prefix of another (substitution order cannot corrupt one)"
+else
+	fail "prefix collision(s) — the longer token is silently corrupted: ${COLLISIONS}"
+fi
+# Positive control for the probe itself: the known-bad pair must be detected.
+case "REPLACE_ACCOUNTS_ENV" in
+	"REPLACE_ACCOUNT"*) pass "positive control: the prefix probe fires on the pair it was written for" ;;
+	*) fail "the prefix probe cannot detect the original collision — it proves nothing" ;;
+esac
+
+# ─── every substituted token is actually CONSUMED (CTL-2145) ────────────────
+#
+# The companion assertion: a token the generator never substitutes leaves a literal
+# REPLACE_ string in a generated launcher. materialize-coord-kit.test.sh covers generation
+# end-to-end; this one keeps the two files' token SETS in agreement at the source level, so
+# a token added to the template without a matching -e expression fails here rather than on a
+# fleet host.
+
+echo "Test: every REPLACE_ token in the template has a substitution in the generator"
+MISSING=""
+for tok in $TOKENS; do
+	grep -q "s|${tok}|" "${COORD_DIR}/materialize-coord-kit.sh" || MISSING="${MISSING}${tok} "
+done
+if [ -z "$MISSING" ]; then
+	pass "every template token is substituted by materialize-coord-kit.sh"
+else
+	fail "template token(s) with no substitution — they survive verbatim into the launcher: ${MISSING}"
 fi
 
 echo ""

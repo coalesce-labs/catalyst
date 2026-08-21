@@ -53,7 +53,12 @@
 
 set -u
 
-COMMS_DIR="${COMMS_DIR:-$HOME/catalyst/comms/coord}"
+# EXPORTED, not merely assigned (CTL-2145): the per-account launcher invoked below reads
+# COMMS_DIR from its ENVIRONMENT to locate the brief and the log, falling back to the path
+# baked in at materialize time. Without the export a kit running under a nondefault
+# COMMS_DIR handed the launcher nothing, so it looked for briefs in the baked location,
+# failed every launch, and consumed the relaunch cap doing it.
+export COMMS_DIR="${COMMS_DIR:-$HOME/catalyst/comms/coord}"
 # CTL-2145: LAUNCHER_DIR used to be REQUIRED, and the operator convention was to point it at the
 # concierge session's `~/.claude/jobs/<id>/tmp/` dir — which is precisely the ephemeral location
 # that vanished mid-incident and left this watchdog invoking a launcher that no longer existed. It
@@ -119,7 +124,17 @@ while :; do
   while read -r lane repo; do
     [ -z "$lane" ] && continue
     if is_alive "$lane"; then continue; fi
-    COUNT=$(relaunch_count_in_window "$lane")
+    # A counter that cannot be READ is a broken breaker, exactly like one that cannot be
+    # written, and it must decline in the same direction. cw_count_in_window used to convert
+    # an unreadable file into the count 0 (and truncate it on the way past), so a lane whose
+    # counter lost read permission was relaunched every pass forever with `COUNT >= CAP`
+    # never true — the uncapped-actuator direction the block below exists to prevent.
+    if ! COUNT=$(relaunch_count_in_window "$lane"); then
+      MSG="$(date '+%H:%M:%S') REFUSING to relaunch $lane — could not READ the relaunch counter at $PIDDIR/$lane.relaunches; without a working circuit breaker this loop would relaunch uncapped every pass (is it readable?). Not launching; the lane stays down until the counter can be read."
+      echo "$MSG" >> "$LOG" 2>/dev/null || true
+      echo "$MSG" >&2
+      continue
+    fi
     if [ "$COUNT" -ge "$RELAUNCH_HOURLY_CAP" ]; then
       echo "$(date '+%H:%M:%S') CAPPED $lane — $COUNT relaunches in the last hour (cap $RELAUNCH_HOURLY_CAP), skipping" >> "$LOG"
       continue

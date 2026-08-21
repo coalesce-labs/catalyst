@@ -39,6 +39,20 @@ CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 COORD_RT="${CATALYST_DIR}/comms/coord"
 ACCOUNTS_ENV="${CLAUDE_ACCOUNTS_ENV:-${HOME}/.config/catalyst/claude-accounts.env}"
 TEMPLATES="${COORD_SRC}/templates"
+# LANE_MAX_SECONDS — baked into every generated launcher as the lane's own deadline
+# (AGENTS.md: a background child must carry one rather than rely on its launcher). 24h is a
+# BACKSTOP against an orphan that never exits, not a scheduling knob; lane-relaunch.sh
+# restarts a lane that ends. Overridable per host, and `0` disables it explicitly.
+LANE_MAX_SECONDS="${LANE_MAX_SECONDS:-86400}"
+if ! [[ "$LANE_MAX_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "materialize-coord-kit: LANE_MAX_SECONDS='${LANE_MAX_SECONDS}' is not a non-negative integer — using 86400" >&2
+  LANE_MAX_SECONDS=86400
+fi
+
+# _sed_escape — escape the characters that are special in a sed `s|...|repl|` REPLACEMENT.
+# One helper rather than a per-call inline expression, so a path containing `&`, `|` or a
+# backslash cannot corrupt one substitution while another stays safe.
+_sed_escape() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
 
 DRY_RUN=0
 for arg in "$@"; do
@@ -217,11 +231,28 @@ else
       continue
     fi
     tmp="${dest}.tmp.$$"
-    # $HOME and the handle are both substituted; neither can carry a sed metacharacter
-    # in any supported configuration (handles are ^acct[0-9]+$ by construction above),
-    # but $HOME can contain `&` or `|`, so escape it.
-    home_esc="$(printf '%s' "$HOME" | sed -e 's/[&|\\]/\\&/g')"
+    # The handle cannot carry a sed metacharacter (handles are ^acct[0-9]+$ by construction
+    # above), but every PATH here can contain `&` or `|`, so each is escaped.
+    #
+    # ⚠️ NO TOKEN BELOW MAY BE A PREFIX OF ANOTHER. These expressions are applied in order
+    # to the same line, so `REPLACE_ACCOUNT` rewrites the front of a longer token before
+    # that token's own expression is reached — `REPLACE_ACCOUNTS_ENV` became the literal
+    # `acct1S_ENV`, silently, in a launcher that still parsed fine. Hence REPLACE_ENV_FILE.
+    # coord-kit-shape.test.sh asserts the no-prefix property so the next token added here
+    # cannot reintroduce it.
+    #
+    # CTL-2145: the launcher is baked with the paths THIS run actually resolved — $COORD_RT
+    # and $ACCOUNTS_ENV — not with $HOME-relative guesses. A kit materialized under a
+    # nondefault CATALYST_DIR or CLAUDE_ACCOUNTS_ENV otherwise generated launchers pointing
+    # at $HOME, which fail every launch and burn the relaunch cap. REPLACE_HOME is still
+    # substituted so a template that references it keeps working.
+    home_esc="$(_sed_escape "$HOME")"
+    coord_rt_esc="$(_sed_escape "$COORD_RT")"
+    accounts_env_esc="$(_sed_escape "$ACCOUNTS_ENV")"
     if sed -e "s|REPLACE_ACCOUNT|${handle}|g" -e "s|REPLACE_HOME|${home_esc}|g" \
+      -e "s|REPLACE_COORD_RT|${coord_rt_esc}|g" \
+      -e "s|REPLACE_ENV_FILE|${accounts_env_esc}|g" \
+      -e "s|REPLACE_LANE_MAX_SECONDS|${LANE_MAX_SECONDS}|g" \
       "$LAUNCHER_TEMPLATE" >"$tmp"; then
       [[ -L "$dest" ]] && rm -f "$dest"
       chmod 755 "$tmp"

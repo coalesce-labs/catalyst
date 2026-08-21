@@ -514,6 +514,187 @@ for p in "${STRAY_PID:-}" "${GOOD_PID:-}" "${RT_PID:-}"; do
 done
 if [[ $LEAKED -eq 0 ]]; then pass "no test process leaked"; else fail "a test process LEAKED"; fi
 
+
+# ─── 14. a host that STOPS qualifying has its agent retired, not just declined ─
+#
+# CTL-2145 (Codex #3867 P1). The D5 gate in test 5 only ever DECLINED — it exited 0 and
+# left whatever was already installed exactly where it was. So a worker reclassified to
+# `monitor`, or one whose claude-accounts.env was removed, kept a LOADED LaunchAgent baked
+# with its old mode (potentially `enforce`), still rotating accounts and restarting the
+# stack on a host the gate now explicitly excludes — and every routine install-services run
+# re-affirmed that state while logging a line that reads like the agent is absent.
+#
+# Both refusal paths are exercised, because they are two independent branches and only one
+# of them had ever been reached with a plist already on disk.
+
+echo "Test 14: a reclassified host retires the agent it already has"
+: >"$LAUNCHCTL_LOG"
+bash "$INSTALLER" >/dev/null 2>&1                       # install as a qualifying worker
+if [[ -f "$DEST" ]]; then
+	pass "positive control: the agent IS installed before the host stops qualifying"
+else
+	fail "fixture failed — nothing installed, so the retirement below would prove nothing"
+fi
+: >"$LAUNCHCTL_LOG"
+OUT14="$(CATALYST_NODE_CLASS=monitor bash "$INSTALLER" 2>&1)"
+RC14=$?
+if [[ ! -e "$DEST" ]]; then
+	pass "node-class refusal REMOVED the stale plist"
+else
+	fail "left ${DEST} in place on a host the gate excludes: $OUT14"
+fi
+if grep -q 'bootout' "$LAUNCHCTL_LOG" 2>/dev/null; then
+	pass "booted the label out of the domain (removing the file alone leaves it loaded)"
+else
+	fail "never called launchctl bootout — the old agent keeps running: $(cat "$LAUNCHCTL_LOG")"
+fi
+if [[ $RC14 -eq 0 ]]; then
+	pass "still exit 0 — retirement does not turn a non-fatal delegate into a failure"
+else
+	fail "retirement exited ${RC14}: $OUT14"
+fi
+if grep -qi 'retired' <<<"$OUT14"; then
+	pass "said it retired the agent (a silent removal is as opaque as a silent no-op)"
+else
+	fail "removed the agent without saying so: $OUT14"
+fi
+
+echo "Test 14b: the same retirement fires when claude-accounts.env disappears"
+: >"$LAUNCHCTL_LOG"
+bash "$INSTALLER" >/dev/null 2>&1
+if [[ ! -f "$DEST" ]]; then fail "fixture failed — reinstall did not restore the plist"; fi
+: >"$LAUNCHCTL_LOG"
+OUT15="$(CLAUDE_ACCOUNTS_ENV="${SCRATCH}/no-such-accounts.env" bash "$INSTALLER" 2>&1)"
+if [[ ! -e "$DEST" ]] && grep -q 'bootout' "$LAUNCHCTL_LOG" 2>/dev/null; then
+	pass "accounts-env refusal also retires the installed agent"
+else
+	fail "accounts-env refusal left the agent installed: $OUT15"
+fi
+
+echo "Test 14c: retirement is idempotent — nothing installed means nothing to do"
+: >"$LAUNCHCTL_LOG"
+OUT16="$(CATALYST_NODE_CLASS=monitor bash "$INSTALLER" 2>&1)"
+RC16=$?
+if [[ $RC16 -eq 0 ]] && ! grep -qi 'retired' <<<"$OUT16"; then
+	pass "a second refusal on a clean host retires nothing and stays quiet about it"
+else
+	fail "claimed a retirement with nothing installed: $OUT16"
+fi
+
+# ─── 15. --print-only renders on a NON-Darwin host ───────────────────────────
+#
+# CTL-2145 (Codex #3867 P2). Print mode is documented as a side-effect-free preview and
+# `catalyst-stack install-services --print` calls this delegate BEFORE its own Darwin gate.
+# The platform gate used to sit ahead of the print branch, so on Linux the delegate exited 0
+# having rendered nothing — and because the caller suppresses this delegate's stderr and
+# accepts exit 0, "rendered nothing" and "rendered fine" were indistinguishable. The plist
+# was simply missing from every non-Darwin preview.
+
+echo "Test 15: --print-only renders on a non-Darwin host"
+OUT17="$(CATALYST_FORCE_OS=Linux bash "$INSTALLER" --print 2>/dev/null)"
+RC17=$?
+if [[ $RC17 -eq 0 ]]; then pass "exit 0 on Linux"; else fail "--print on Linux exited ${RC17}"; fi
+if grep -q '<string>ai.coalesce.catalyst-account-rotation</string>' <<<"$OUT17"; then
+	pass "rendered the plist rather than exiting empty at the platform gate"
+else
+	fail "--print on Linux rendered nothing — the preview silently omits the agent"
+fi
+if [[ ! -e "$DEST" ]]; then
+	pass "and installed nothing (print stays side-effect-free)"
+else
+	fail "--print on Linux installed a plist"
+fi
+
+echo "Test 15b: a real INSTALL on a non-Darwin host still exits early and non-fatally"
+OUT18="$(CATALYST_FORCE_OS=Linux bash "$INSTALLER" 2>&1)"
+RC18=$?
+if [[ $RC18 -eq 0 && ! -e "$DEST" ]]; then
+	pass "install path still no-ops on Linux (exit 0, nothing written)"
+else
+	fail "the print exemption leaked into the install path: rc=${RC18}"
+fi
+if grep -qi 'non-Darwin' <<<"$OUT18"; then
+	pass "and still says why"
+else
+	fail "Linux install refused silently: $OUT18"
+fi
+
+
+# ─── 16. a stray loop that SURVIVES retirement fails the install ─────────────
+#
+# CTL-2145 (Codex #3867 P1). The final survival probe is written as a positive control
+# precisely so it CAN fail — but its verdict was then thrown away by an unconditional
+# `return 0`, so an install proceeded and reported success with the old loop still running
+# alongside the new actor. (The tempting `((stale == 0)) && echo …` form does not save it
+# either: that yields the AND-list's status, which `set -e` deliberately exempts, so it
+# looks fail-closed while returning 0.)
+#
+# A process that survives both TERM and KILL cannot be fabricated portably — that is the
+# point of the finding, since it happens for reasons the installer does not control (owned
+# by another user, an unreaped zombie). So the PROBE is seamed instead: a PATH-shadowed `ps`
+# that reports a stray on `-eo` and reports it still alive on `-p`, which is exactly the
+# observable state a survivor produces. Scoped to these two cases only.
+
+echo "Test 16: a stray loop surviving TERM and KILL refuses the install"
+PSMOCK="${SCRATCH}/psmock"
+mkdir -p "$PSMOCK"
+make_ps_mock() { # $1 = "alive" | "dead" — what `ps -p <fake>` reports after the kills
+	cat >"${PSMOCK}/ps" <<EOF
+#!/usr/bin/env bash
+FAKE_PID=99991
+SURVIVES=$1
+if [[ "\$*" == *"-eo"* ]]; then
+	# Discovery: one stray, at a path that is neither the bake dir nor the runtime kit.
+	printf '%7s %s\n' "\$FAKE_PID" "bash /private/tmp/ctl2145-fake-stray/lane-relaunch.sh"
+	exit 0
+fi
+if [[ "\$1" == "-p" && "\$2" == "\$FAKE_PID" ]]; then
+	[[ "\$SURVIVES" == "alive" ]] && exit 0
+	exit 1
+fi
+exec /bin/ps "\$@"
+EOF
+	chmod +x "${PSMOCK}/ps"
+}
+
+make_ps_mock alive
+rm -f "$DEST"
+OUT19="$(PATH="${PSMOCK}:$PATH" CATALYST_SKIP_STRAY_RETIRE=0 bash "$INSTALLER" 2>&1)"
+RC19=$?
+if [[ $RC19 -ne 0 ]]; then
+	pass "exited non-zero when the stray survived (the probe's verdict is load-bearing)"
+else
+	fail "install reported SUCCESS with a surviving stray loop: $OUT19"
+fi
+if [[ ! -e "$DEST" ]]; then
+	pass "installed nothing — the refusal happens BEFORE the plist is written"
+else
+	fail "wrote ${DEST} despite refusing: the new actor now runs beside the old loop"
+fi
+if grep -qi 'SURVIVED' <<<"$OUT19" && grep -qi 'REFUSING' <<<"$OUT19"; then
+	pass "named both the survivor and the refusal"
+else
+	fail "refused without naming what happened: $OUT19"
+fi
+
+# POSITIVE CONTROL — the identical mock, differing ONLY in what the survival probe reports.
+# Without it, a mock that simply broke the installer would pass every assertion above.
+echo "Test 16b: positive control — the same mock with the stray actually gone installs fine"
+make_ps_mock dead
+rm -f "$DEST"
+OUT20="$(PATH="${PSMOCK}:$PATH" CATALYST_SKIP_STRAY_RETIRE=0 bash "$INSTALLER" 2>&1)"
+RC20=$?
+if [[ $RC20 -eq 0 && -f "$DEST" ]]; then
+	pass "positive control: install succeeds when the stray is gone — the refusal was the probe, not the mock"
+else
+	fail "positive control FAILED (rc=${RC20}, plist $([[ -f "$DEST" ]] && echo present || echo absent)): test 16 proves nothing — $OUT20"
+fi
+if grep -qi 'verified all retired stray loops are gone' <<<"$OUT20"; then
+	pass "and it says so positively rather than by silence"
+else
+	fail "clean retire printed no confirmation: $OUT20"
+fi
+
 echo ""
 echo "== ${PASSES} passed, ${FAILURES} failed =="
 [[ $FAILURES -eq 0 ]]

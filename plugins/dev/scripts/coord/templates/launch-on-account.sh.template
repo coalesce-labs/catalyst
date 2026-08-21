@@ -15,8 +15,25 @@
 set -u
 
 ACCOUNT="REPLACE_ACCOUNT"
-COMMS_DIR="${COMMS_DIR:-REPLACE_HOME/catalyst/comms/coord}"
-ACCOUNTS_ENV="${CLAUDE_ACCOUNTS_ENV:-REPLACE_HOME/.config/catalyst/claude-accounts.env}"
+# CTL-2145: these defaults are the paths the GENERATOR actually resolved (CATALYST_DIR /
+# CLAUDE_ACCOUNTS_ENV as materialize-coord-kit.sh saw them), not a fresh $HOME guess. A kit
+# baked under a nondefault CATALYST_DIR used to hard-code REPLACE_HOME/catalyst/... here, so
+# the launcher looked for its brief under $HOME, failed every launch, and burned the relaunch
+# cap — while the same mismatch hid a custom accounts file from the token lookup below.
+COMMS_DIR="${COMMS_DIR:-REPLACE_COORD_RT}"
+# ⚠️ REPLACE_ENV_FILE, not REPLACE_ACCOUNTS_ENV. The generator substitutes REPLACE_ACCOUNT
+# too, and sed applies its expressions in order to the same line — so a token that has
+# REPLACE_ACCOUNT as a PREFIX gets eaten by that earlier substitution and its own
+# expression then matches nothing. `REPLACE_ACCOUNTS_ENV` baked the literal `acct1S_ENV`
+# as this path: a silent corruption that still produced a syntactically valid launcher,
+# which then failed every launch and burned the relaunch cap looking for a token file that
+# could never exist. No REPLACE_ token here may be a prefix of another (CTL-2145).
+ACCOUNTS_ENV="${CLAUDE_ACCOUNTS_ENV:-REPLACE_ENV_FILE}"
+
+# LANE_MAX_SECONDS — the lane's OWN deadline (see the watchdog at the bottom of this file).
+# 0 disables it, which is an explicit operator choice rather than the silent default it used
+# to be.
+LANE_MAX_SECONDS="${LANE_MAX_SECONDS:-REPLACE_LANE_MAX_SECONDS}"
 
 BRIEF_NAME="${1:?usage: launch-on-REPLACE_ACCOUNT.sh <brief-name> <repo-dir>}"
 REPO_DIR="${2:?usage: launch-on-REPLACE_ACCOUNT.sh <brief-name> <repo-dir>}"
@@ -45,9 +62,45 @@ cd "$REPO_DIR" || exit 1
 
 # The lane is a long-lived `claude -p` process supervised by lane-relaunch.sh's pid file,
 # so it is deliberately backgrounded here and its pid reported to the caller. `nohup`
-# detaches it from this launcher's terminal; the relaunch cap in lane-relaunch.sh is what
-# bounds it, since a lane has no meaningful self-deadline.
+# detaches it from this launcher's terminal.
 nohup claude -p "$(cat "$BRIEF")" >>"$LOG" 2>&1 &
 LANE_PID=$!
+
+# ─── the lane's OWN deadline (CTL-2145) ──────────────────────────────────────
+#
+# The relaunch cap in lane-relaunch.sh bounds how OFTEN a lane is started, not how LONG a
+# started one lives — so with no deadline here the `nohup` child reparents to PID 1 the
+# moment this launcher returns and runs forever if the watchdog (or the session that owns
+# it) goes away. That is exactly the orphaned long-lived-process failure this ticket exists
+# to retire, and AGENTS.md is explicit that a background child must carry its own deadline
+# rather than rely on a cleanup path that may never run.
+#
+# So: the AGENTS.md watchdog shape — sleep, then signal — detached alongside the lane. It is
+# self-limiting (one `sleep`, then it exits on its own), so it cannot become a second
+# unbounded process; and it never spins, because the deadline is a single sleep rather than
+# a polling loop. `timeout`/`gtimeout` are deliberately not used: stock macOS ships neither.
+#
+# It re-checks process IDENTITY before every signal instead of trusting `kill -0`. A lane
+# that already exited frees its pid for REUSE, and killing a bare recycled pid would take
+# out an unrelated process — the same fail-closed pid-identity discipline the rest of the
+# fleet's supervisors use.
+if [ "${LANE_MAX_SECONDS:-0}" -gt 0 ] 2>/dev/null; then
+  nohup bash -c '
+    pid="$1"; deadline="$2"; log="$3"; acct="$4"
+    _still_ours() { case "$(ps -p "$pid" -o command= 2>/dev/null)" in *claude*) return 0 ;; *) return 1 ;; esac; }
+    sleep "$deadline"
+    _still_ours || exit 0
+    echo "$(date "+%H:%M:%S") launch-on-${acct}: lane pid ${pid} hit its ${deadline}s deadline — terminating" >>"$log" 2>&1
+    kill "$pid" 2>/dev/null || exit 0
+    sleep 10
+    if _still_ours; then
+      echo "$(date "+%H:%M:%S") launch-on-${acct}: lane pid ${pid} survived TERM — sending KILL" >>"$log" 2>&1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  ' _ "$LANE_PID" "$LANE_MAX_SECONDS" "$LOG" "$ACCOUNT" >/dev/null 2>&1 &
+else
+  echo "launch-on-$ACCOUNT: WARNING — LANE_MAX_SECONDS=${LANE_MAX_SECONDS:-0}; lane pid ${LANE_PID} runs with NO deadline" >&2
+fi
+
 echo "launch-on-$ACCOUNT: started ${BRIEF_NAME} in ${REPO_DIR} (log: $LOG)"
 echo "pid $LANE_PID"
