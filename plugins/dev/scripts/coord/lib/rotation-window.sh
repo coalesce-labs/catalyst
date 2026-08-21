@@ -47,7 +47,17 @@ cw_count_in_window() {
 # cw_record_attempt FILE — append "now" to FILE's rolling-window counter.
 # Callers record BEFORE acting, so an action that itself fails or hangs still counts
 # toward the cap: a broken actuator must not become an unbounded tight retry either.
+#
+# Returns NON-ZERO when the attempt could not be persisted, and that status is LOAD-BEARING
+# rather than advisory — a caller that ignores it has no breaker at all. Both consumers keep
+# this counter in the same directory as their act-marker, so a directory that refuses this
+# append refuses the marker too; cw_count_in_window then reads the missing file as 0 on every
+# subsequent tick, the `count >= cap` branch is never taken, and the edge is never consumed.
+# The cap does not merely under-count in that state, it becomes a permanent no-op while the
+# actuator stays fully live — the one direction a circuit breaker must never fail in. The
+# raw redirect error is muted here because a bare `Permission denied` on stderr is not a
+# named decline; the caller owns saying which path refused and why (CTL-2145).
 cw_record_attempt() {
 	mkdir -p "$(dirname "$1")" 2>/dev/null || true
-	date +%s >>"$1"
+	date +%s >>"$1" 2>/dev/null || return 1
 }

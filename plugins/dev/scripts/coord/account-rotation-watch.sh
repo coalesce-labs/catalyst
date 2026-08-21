@@ -377,7 +377,24 @@ fi
 # Record the attempt BEFORE calling the verb, so a switch that itself fails or hangs
 # still counts toward the cap — a broken verb must not become an unbounded tight retry
 # (lane-relaunch.sh's rule, same reason).
-cw_record_attempt "$ROTATIONS"
+#
+# And if the attempt cannot be PERSISTED, refuse to rotate at all. $ROTATIONS lives in
+# COMMS_DIR beside $MARKER, so a directory that refuses this append refuses the marker
+# too — and cw_count_in_window reads the missing counter as 0 forever after. Acting anyway
+# means an UNCAPPED actuator on an edge that is never consumed: every tick would re-run a
+# real `catalyst-stack claude-account switch`, which flips the SOPS selector, commits and
+# pushes to the cluster secrets repo and restarts the stack, flip-flopping between handles
+# for as long as the wall lasts. The marker-write warning further down names the cap as the
+# bound on exactly that retry; in this state that bound does not exist, so the only safe
+# move is not to start. Same precedent as the missing-lib FATAL at the top of this file —
+# no working breaker means no rotation, reached a different way (CTL-2145).
+if ! cw_record_attempt "$ROTATIONS"; then
+  warn "FATAL: could not record the rotation attempt at ${ROTATIONS} — refusing to rotate ${ACTIVE} -> ${NEXT} without a working circuit breaker (is ${COMMS_DIR} writable?). Markers NOT advanced and ${CUR} NOT written, so this edge stays live for the first tick that can persist the counter."
+  _emit "account.rotation.breaker-unavailable" ERROR "rotation circuit breaker unavailable" \
+    "$(jq -nc --arg from "$ACTIVE" --arg to "$NEXT" --arg counter "$ROTATIONS" --arg ts "$LATCH_TS" \
+      '{from:$from,to:$to,counter_file:$counter,latch_ts:$ts,mode:"enforce"}' 2>/dev/null || echo null)"
+  exit 1
+fi
 log "rotating ${ACTIVE} -> ${NEXT} (rejected edge at latch ts=${LATCH_TS}, attempt $((COUNT + 1))/${ROTATION_HOURLY_CAP} this hour)"
 
 # The sanctioned operator-grade verb: it validates the handle, probes its token auth,

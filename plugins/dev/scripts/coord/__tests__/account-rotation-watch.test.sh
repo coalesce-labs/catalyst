@@ -672,6 +672,76 @@ else
 	fail "expected a completed rotation, marker '$(marker_value)' current '$(current_account)': $OUT_B"
 fi
 
+# ─── 16. an unwritable COMMS_DIR must not disarm the cap ─────────────────────
+#
+# The HIGH finding. The circuit breaker's counter ($ROTATIONS) and the act-marker live in
+# the SAME directory, so ONE unwritable dir takes out both at once — and the two failures
+# compound instead of cancelling. cw_count_in_window reads a missing counter as 0, so
+# `COUNT >= CAP` is never true and no tick is ever CAPPED; the marker write fails too, so
+# the edge is never consumed. The pre-fix actor called cw_record_attempt un-checked under
+# `set -uo pipefail` (no -e), so the failed append changed nothing and it rotated ANYWAY —
+# every tick, indefinitely, each one a real SOPS selector flip + push to the cluster
+# secrets repo + stack restart. The actor's own marker-write warning names the cap as the
+# bound on that retry ("bounded by the cap"), which is precisely the bound that does not
+# exist in this state.
+#
+# The assertion that matters is that the switch stub was NEVER invoked. Counting CAPPED
+# lines would pass VACUOUSLY here — the unwritable run produces none either way, because
+# never reaching the cap is the whole defect.
+
+echo "Test 16: an unwritable COMMS_DIR refuses to rotate instead of rotating uncapped"
+new_case t16
+write_latch "$CDIR" true "$NOW_MS"
+chmod 555 "$COORD_RT" 2>/dev/null || true
+
+# Verify the INSTRUMENT before trusting what it measures: assert the directory really did
+# become unwritable to THIS process. A mode change silently ignored (running as root, an
+# ACL, a filesystem that does not honour the bits) would leave a perfectly writable dir, and
+# the refusal assertions below would then be measuring nothing at all. Tested by probing the
+# dir rather than by checking the uid, so every one of those causes is caught, not just root.
+if touch "$COORD_RT/.writability-probe" 2>/dev/null; then
+	rm -f "$COORD_RT/.writability-probe" 2>/dev/null || true
+	echo "  INCONCLUSIVE: chmod 555 did not make ${COORD_RT} unwritable to this process (root? ACL?) — the unwritable-dir case cannot run here"
+	chmod 755 "$COORD_RT" 2>/dev/null || true
+else
+	OUT="$(run_actor enforce)"; RC=$?
+	# THE assertion. Everything else in this case is corroboration.
+	if [[ "$(switch_calls)" == "0" ]]; then
+		pass "did NOT invoke the switch verb when the attempt could not be recorded"
+	else
+		fail "rotated with a disarmed breaker: $(switch_calls) call(s) — $(cat "$RECORD")"
+	fi
+	if [[ $RC -ne 0 ]]; then
+		pass "exited non-zero (a breaker that cannot record is a hard refusal, not a quiet skip)"
+	else
+		fail "exited 0 — an unusable circuit breaker read as a normal tick: $OUT"
+	fi
+	if grep -qi 'circuit breaker' <<<"$OUT"; then
+		pass "named the decline (a bare 'Permission denied' on stderr is not a named decline)"
+	else
+		fail "refused without naming the circuit breaker: $OUT"
+	fi
+	if [[ -z "$(marker_value)" ]]; then
+		pass "left the marker unadvanced so the edge stays live for a tick that can persist"
+	else
+		fail "consumed the edge (marker='$(marker_value)') despite refusing to rotate"
+	fi
+	# Restore BEFORE the positive control (and before the EXIT trap's rm -rf, which cannot
+	# unlink through a 555 directory).
+	chmod 755 "$COORD_RT" 2>/dev/null || true
+
+	# POSITIVE CONTROL — the identical case with the dir writable again. Without it, an actor
+	# that refused to rotate for any other reason (or a broken t16 fixture) would pass every
+	# assertion above while proving nothing about the breaker.
+	OUT="$(run_actor enforce)"
+	if [[ "$(switch_calls)" == "1" && "$(marker_value)" == "$NOW_MS" ]]; then
+		pass "positive control: the SAME edge rotates once the dir is writable — the refusal was the breaker, not the fixture"
+	else
+		fail "positive control FAILED — $(switch_calls) call(s), marker '$(marker_value)': test 16 proves nothing — $OUT"
+	fi
+fi
+chmod 755 "$COORD_RT" 2>/dev/null || true
+
 echo ""
 echo "== ${PASSES} passed, ${FAILURES} failed =="
 [[ $FAILURES -eq 0 ]]
