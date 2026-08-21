@@ -1568,6 +1568,118 @@ describe("defaultEmitBackstop → defaultWriteSignalStalled terminal-status guar
   });
 });
 
+// ── CTL-2015: the backstop must leave an artifact even when the signal is GONE ──
+// The 2026-08-18 incident: the overload backstop ran (the exhausted event fired) but
+// defaultWriteSignalTerminal's `catch { return; }` no-op'd on an absent file, so the
+// board read the ticket as in-flight while the event log said failed.
+describe("defaultEmitBackstop — absent signal file (CTL-2015)", () => {
+  const SEED = { ticket: "CTL-1", phase: "implement", generation: 3, worktreePath: "/wt/CTL-1" };
+
+  test("an ABSENT signal file is CREATED as stalled when a seed is supplied", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-"));
+    const signalFile = join(dir, "workers", "CTL-1", "phase-implement.json"); // dir does NOT exist
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile, signalSeed: SEED },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.attentionReason).toBe("sdk-overloaded-exhausted");
+    expect(sig.assertedBy).toBe(ASSERTED_BY.SDK_BACKSTOP);
+    expect(sig.phaseTimestamps.stalled).toBeTruthy();
+    // The seed identity survives — a signal the sweep can attribute.
+    expect(sig.ticket).toBe("CTL-1");
+    expect(sig.phase).toBe("implement");
+    expect(sig.generation).toBe(3);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("NO seed → an absent file is STILL a no-op (claim-lost / pre-claim failure)", () => {
+    // CTL-1367 P2-G: a claim-lost loser has no local signal because the WINNER owns it.
+    // Creating one there would write a stalled signal into the winner's worker dir.
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-noseed-"));
+    const signalFile = join(dir, "phase-implement.json");
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-prelaunch-failed", orchDir: "/ec", signalFile },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    expect(existsSync(signalFile)).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a file that APPEARS between the read and the create is NEVER clobbered", () => {
+    // Exclusive create (wx): if a newer generation's prelaunch won the race, that
+    // worker owns the phase — bow out rather than stalling a live dispatch.
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-race-"));
+    const signalFile = join(dir, "phase-implement.json");
+    let created = false;
+    const raceWrite = () => {
+      if (created) return;
+      created = true;
+      writeFileSync(signalFile, JSON.stringify({ status: "dispatched", generation: 4 }));
+    };
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile, signalSeed: SEED },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {},
+        // seam that simulates the concurrent prelaunch landing mid-call
+        onBeforeCreate: raceWrite },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("dispatched"); // the live gen-4 dispatch is untouched
+    expect(sig.generation).toBe(4);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("an EXISTING non-terminal signal still takes the PATCH path (seed does not replace it)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-patch-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(signalFile, JSON.stringify({ status: "running", ticket: "CTL-1",
+      phase: "implement", generation: 9, catalystSessionId: "sess_x" }));
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile, signalSeed: SEED },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.generation).toBe(9);              // on-disk value wins, not the seed's 3
+    expect(sig.catalystSessionId).toBe("sess_x"); // pre-existing fields preserved
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the P3 terminal-clobber guard is unchanged — a 'done' success survives a seeded backstop", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-p3-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(signalFile, JSON.stringify({ status: "done", ticket: "CTL-1" }));
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile, signalSeed: SEED },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("done");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a created signal carries NO yield anchors (CTL-1854 family rule)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-yield-"));
+    const signalFile = join(dir, "phase-implement.json");
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile,
+        signalSeed: { ...SEED, yieldedAt: "2026-08-21T00:00:00Z", firstYieldedAt: "x", yieldMs: 1 } },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect("yieldedAt" in sig).toBe(false);
+    expect("firstYieldedAt" in sig).toBe(false);
+    expect("yieldMs" in sig).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 // ── CTL-1367 item 9 + P3: resolveSdkBootExecutor (daemon-boot auth gate + event) ─
 describe("resolveSdkBootExecutor (CTL-1367 item 9 + P3 observability)", () => {
   test("executor != sdk → pure pass-through (no auth check, no event)", () => {

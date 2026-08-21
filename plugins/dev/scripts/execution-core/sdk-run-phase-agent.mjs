@@ -64,7 +64,7 @@ import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getEventLogPath } from "./config.mjs";
+import { getEventLogPath, getHostName } from "./config.mjs";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: stamp stream class on the direct terminal-fallback writer
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
@@ -305,12 +305,13 @@ function defaultEmitEvent(name, payload) {
 // --no-signal-update so the skill/pre-launch keeps ownership of the signal file).
 // Best-effort; never throws.
 export function defaultEmitBackstop(
-  { phase, ticket, status, reason, orchDir, signalFile, orchestrator },
+  { phase, ticket, status, reason, orchDir, signalFile, orchestrator, signalSeed = null },
   {
     spawn = spawnSync,
     writeSignalStalled = defaultWriteSignalStalled,
     writeSignalTerminal = defaultWriteSignalTerminal,
     appendEventLog = defaultAppendEventLog,
+    onBeforeCreate = null,
   } = {},
 ) {
   // Step 1 (CTL-1367 item 4 + P2-F): mirror mark_launch_failed — flip the signal to
@@ -326,10 +327,13 @@ export function defaultEmitBackstop(
   // the event stream says turn-cap-exhausted. Every other abnormal backstop
   // (failed / overloaded-exhausted) still writes "stalled".
   if (signalFile) {
+    // CTL-2015: signalSeed is threaded to BOTH branches. Fixing one writer of a
+    // family is not fixing the family (the CTL-1854 note above, same file).
+    const opts = { seed: signalSeed, onBeforeCreate };
     if (status === "turn-cap-exhausted") {
-      writeSignalTerminal(signalFile, "turn-cap-exhausted", reason);
+      writeSignalTerminal(signalFile, "turn-cap-exhausted", reason, opts);
     } else {
-      writeSignalStalled(signalFile, reason);
+      writeSignalStalled(signalFile, reason, opts);
     }
   }
 
@@ -452,13 +456,51 @@ const SIGNAL_TERMINAL_STATUSES = new Set([
 // terminal event (a turn-cap-exhausted backstop must leave "turn-cap-exhausted", not
 // "stalled"; the terminal sweep applies needs-human only to stalled/failed). The P3
 // terminal-clobber guard and the atomic tmp+rename are shared by every status.
-function defaultWriteSignalTerminal(signalFile, status, reason) {
+//
+// CTL-2015: an ABSENT signal file used to mean "write nothing, say nothing" — the
+// 2026-08-18 gap. The exhaustion EVENT fired for CTC-427 (implement) and CTC-55
+// (plan) while both worker dirs held no phase-<phase>.json at all, so the event
+// stream read failed and the board read in-flight for 38+ minutes.
+//
+// ⚠️ The create is OPT-IN via `seed`, never blanket. Two callers REQUIRE the old
+// no-op: the !pre.ok prelaunch-failure path, and CTL-1367 P2-G's claim-lost loser,
+// which has no local signal precisely because the WINNER owns the phase. Creating
+// one there would write a stalled signal into another worker's dir. Only a caller
+// that has passed prelaunch and holds the claim supplies a seed.
+function defaultWriteSignalTerminal(signalFile, status, reason, { seed = null, onBeforeCreate = null } = {}) {
   try {
     let sig;
     try {
       sig = JSON.parse(readFileSync(signalFile, "utf8"));
     } catch {
-      return; // no signal to flip (prelaunch never wrote one) — nothing to do
+      if (!seed) return; // no seed → unchanged: no signal to flip, nothing to do
+      // Test seam: lets the race case land a concurrent prelaunch write here.
+      if (onBeforeCreate) onBeforeCreate();
+      const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+      const fresh = {
+        ...seed,
+        status,
+        attentionReason: reason || "sdk-backstop",
+        assertedBy: ASSERTED_BY.SDK_BACKSTOP,
+        updatedAt: ts,
+        phaseTimestamps: { ...(seed.phaseTimestamps ?? {}), [status]: ts },
+      };
+      // CTL-1854 family rule: no terminal signal carries yield anchors.
+      delete fresh.yieldedAt;
+      delete fresh.firstYieldedAt;
+      delete fresh.yieldMs;
+      try {
+        mkdirSync(dirname(signalFile), { recursive: true });
+        // ⚠️ EXCLUSIVE create. This writer has NO generation fence (the SDK fence
+        // lives only in flipSignalAbandonedOnUndeclaredExit). Today the ENOENT
+        // return incidentally guaranteed no newer generation existed; `wx`
+        // preserves that guarantee explicitly — if a newer prelaunch won the race
+        // it owns the phase, and we bow out rather than stalling a live dispatch.
+        writeFileSync(signalFile, JSON.stringify(fresh), { flag: "wx" });
+      } catch {
+        /* EEXIST (raced) or unwritable — best-effort; the terminal event still emits */
+      }
+      return;
     }
     if (!sig || typeof sig !== "object") return;
     // CTL-1367 P3: never clobber a terminal status (esp. a done/complete success).
@@ -502,8 +544,8 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
 // stalled" writer instead of duplicating the atomic tmp+rename + P3
 // terminal-clobber guard. Its closure deps (defaultWriteSignalTerminal,
 // SIGNAL_TERMINAL_STATUSES) travel with it.
-export function defaultWriteSignalStalled(signalFile, reason) {
-  return defaultWriteSignalTerminal(signalFile, "stalled", reason);
+export function defaultWriteSignalStalled(signalFile, reason, opts = {}) {
+  return defaultWriteSignalTerminal(signalFile, "stalled", reason, opts);
 }
 
 // CTL-1410 Phase A: the SDK success-branch signal flip. When query() resolves
@@ -1222,6 +1264,21 @@ export async function sdkRunPhaseAgent(
   }
   const spec = pre.spec;
   const signalFile = spec.signalFile; // CTL-1367 item 4: the file the backstop flips to stalled
+  // CTL-2015: the recreate seed. Safe HERE and only here — we are past prelaunch,
+  // so this process holds the single-flight claim for (ticket, phase); the
+  // idempotent/claim-lost and !pre.ok paths returned above and never reach this.
+  // Mirrors the fields phase-agent-dispatch writes into a "dispatched" signal so a
+  // recreated file is attributable by readWorkerSignals / the terminal sweep.
+  const signalSeed = {
+    ticket, phase,
+    orchestrator: resolveOrchestratorId(ticket),
+    executor: "sdk",
+    bg_job_id: null,
+    worktreePath: spec.worktreePath ?? worktreePath ?? null,
+    generation: spec.generation ?? null,
+    attempt: spec.attempt ?? attempt ?? null,
+    host: { name: getHostName() },
+  };
   const secrets = [oauthToken, authEnv.ANTHROPIC_API_KEY, authEnv.ANTHROPIC_AUTH_TOKEN];
 
   const env = buildSdkEnv(spec.env, { base: authEnv, oauthToken, settingsEnv: spec.settings?.env });
@@ -1328,7 +1385,7 @@ export async function sdkRunPhaseAgent(
         emitEvent("execution-core.sdk.overloaded", {
           ticket, phase, attempt: i, exhausted: true, status: statusOf(lastOverload),
         });
-        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-overloaded-exhausted", orchDir, signalFile }, { spawn });
+        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-overloaded-exhausted", orchDir, signalFile, signalSeed }, { spawn });
         return {
           code: 1,
           stdout: "",
@@ -1344,7 +1401,7 @@ export async function sdkRunPhaseAgent(
       // instead of turn-cap-exhausted (because the thrown branch returned before
       // mapResult).
       if (thrown && !result) {
-        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-threw", orchDir, signalFile }, { spawn });
+        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-threw", orchDir, signalFile, signalSeed }, { spawn });
         return {
           code: 1,
           stdout: "",
@@ -1390,7 +1447,7 @@ export async function sdkRunPhaseAgent(
         });
       }
       if (backstop) {
-        emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir, signalFile }, { spawn });
+        emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir, signalFile, signalSeed }, { spawn });
       } else if (signalFile) {
         // CTL-1410 Phase A / CTL-1790: the process exited 0 with no backstop. If
         // the signal is STILL in-flight the phase SKILL never declared an outcome,
