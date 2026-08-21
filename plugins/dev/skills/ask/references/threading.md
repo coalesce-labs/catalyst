@@ -39,8 +39,8 @@ as an ADR before it ships, because history cannot be re-tagged.
 ## The helper (do not hand-roll the write)
 
 ```bash
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body "<markdown>"
-#   --body -          read the body from stdin
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body "literal reply text"
+#   --body -          read the body from stdin (NEVER pass a file path — use '--body - < FILE')
 #   --parent <id>     thread under a specific comment (its ROOT is used)
 #   --top             start a new top-level comment
 ```

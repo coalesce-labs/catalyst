@@ -260,7 +260,7 @@ function usage() {
   console.error(`Usage:
   ask.mjs create --team <TEAM> --title <t> --why <text> [--option <label> ...]
                  [--default <text>] [--blocks <ISSUE>] [--priority <1-4>] [--dry-run]
-  ask.mjs accept <ISSUE> --as <AGENT> --body <markdown|-> [--dry-run]
+  ask.mjs accept <ISSUE> --as <AGENT> --body <literal-markdown-text|-> [--dry-run]
 
 create files a correctly-shaped ask ticket, then READS IT BACK and proves the decision
 trigger can parse its options. accept replies in-thread as the app actor and moves the
@@ -428,7 +428,7 @@ function cmdAccept(argv) {
   let body = argOf(argv, "--body");
   const dryRun = argv.includes("--dry-run");
   if (!id || !as || !body) {
-    console.error("ask accept: <ISSUE> --as <AGENT> --body <markdown|-> are required");
+    console.error("ask accept: <ISSUE> --as <AGENT> --body <literal-markdown-text|-> are required");
     return 1;
   }
   if (body === "-") body = readFileSync(0, "utf8");

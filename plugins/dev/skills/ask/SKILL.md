@@ -54,7 +54,8 @@ in one place: **[`references/threading.md`](references/threading.md)** — one-l
 what a reply must contain. Read it before your first reply.
 
 ```bash
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body "<markdown>"
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body "literal reply text"
+# ⚠️ --body takes LITERAL text or '-' (stdin). Never pass a file path — use '--body - < FILE'.
 ```
 
 ## 5. Closing (the raising agent)
