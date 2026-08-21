@@ -156,3 +156,24 @@ describe("buildRecoveryItems — signalPath threading (CTL-1680)", () => {
     expect(items[0].evidence.signalPath).toBe("/orch/workers/CTL-3/phase-pr.json");
   });
 });
+
+// CTL-1679 Phase 2: surface the signal's retrySafe flag on the evidence so the
+// Phase-3 generic retry rule can read evidence.retrySafe. The fence guard stamps
+// retry_safe → phase-agent-emit-complete writes signal.retrySafe → here it rides
+// onto evidence.retrySafe.
+describe("buildRecoveryItems — retrySafe threading (CTL-1679)", () => {
+  const sig = (ticket, raw = {}) => ({ ticket, phase: raw.phase ?? "pr", raw });
+
+  test("surfaces signal.retrySafe onto evidence.retrySafe when present", () => {
+    const items = buildRecoveryItems(
+      [sig("CTL-4", { retrySafe: true, failureReason: "cluster_fence_stale" })],
+      {},
+    );
+    expect(items[0].evidence.retrySafe).toBe(true);
+  });
+
+  test("evidence.retrySafe is undefined when the signal omits it", () => {
+    const items = buildRecoveryItems([sig("CTL-5", { failureReason: "other" })], {});
+    expect(items[0].evidence.retrySafe).toBeUndefined();
+  });
+});

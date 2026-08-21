@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { ownerForTicket } from "./hrw.mjs";
+import { collectEventLog } from "./recovery-pass-context.mjs";
 
 const SCRIPT = join(import.meta.dir, "recovery-pass-context.mjs");
 
@@ -173,11 +174,14 @@ describe("sweep — union dedupe across signals + event log", () => {
     const eventsDir = join(orchDir, "events");
     mkdirSync(eventsDir, { recursive: true });
     const ym = new Date().toISOString().slice(0, 7);
+    const recentTs = new Date().toISOString(); // within the default 7-day window
     const evt = {
+      ts: recentTs,
       attributes: { "event.name": "recovery.escalated" },
       body: { payload: { ticket: "CTL-200", reason: "value judgment" } },
     };
     const evt2 = {
+      ts: recentTs,
       attributes: { "event.name": "recovery.would-escalate" },
       body: { payload: { ticket: "CTL-201", reason: "arch change" } },
     };
@@ -253,6 +257,83 @@ describe("dispatched mode — brief read", () => {
     }));
     const healthy = runScript(["--ticket", "CTL-302", "--orch-dir", orchDir]);
     expect(healthy).not.toContain("GitHub core quota:");
+  });
+});
+
+describe("collectEventLog: per-event timestamp filter (CTL-1550)", () => {
+  let logDir;
+  beforeEach(() => {
+    logDir = mkdtempSync(join(tmpdir(), "rpc-cel-"));
+  });
+  afterEach(() => {
+    rmSync(logDir, { recursive: true, force: true });
+  });
+
+  function makeEvent(name, ticket, tsIso) {
+    return JSON.stringify({
+      ts: tsIso,
+      attributes: { "event.name": name },
+      body: { payload: { ticket, reason: "test-reason" } },
+    });
+  }
+
+  it("includes events whose ts falls within the window", () => {
+    const now = new Date("2026-08-01T12:00:00Z").getTime();
+    const windowMs = 60 * 60 * 1000; // 1 hour
+    const inWindow = makeEvent(
+      "recovery.escalated",
+      "CTL-100",
+      "2026-08-01T11:30:00Z", // 30 min ago — inside window
+    );
+    const logPath = join(logDir, "events.jsonl");
+    writeFileSync(logPath, inWindow + "\n");
+    const { items } = collectEventLog({ nowMs: now, windowMs, logPath });
+    expect(items).toHaveLength(1);
+    expect(items[0].ticket).toBe("CTL-100");
+  });
+
+  it("excludes events whose ts is before the window (backfill guard)", () => {
+    const now = new Date("2026-08-01T12:00:00Z").getTime();
+    const windowMs = 60 * 60 * 1000; // 1 hour
+    const tooOld = makeEvent(
+      "recovery.escalated",
+      "CTL-200",
+      "2026-08-01T10:59:59Z", // 1 second before the window opens
+    );
+    const logPath = join(logDir, "events.jsonl");
+    writeFileSync(logPath, tooOld + "\n");
+    const { items } = collectEventLog({ nowMs: now, windowMs, logPath });
+    expect(items).toHaveLength(0);
+  });
+
+  it("excludes events with a missing or unparseable ts", () => {
+    const now = new Date("2026-08-01T12:00:00Z").getTime();
+    const windowMs = 60 * 60 * 1000;
+    const noTs = JSON.stringify({
+      attributes: { "event.name": "recovery.escalated" },
+      body: { payload: { ticket: "CTL-300", reason: "x" } },
+    });
+    const badTs = JSON.stringify({
+      ts: "not-a-date",
+      attributes: { "event.name": "recovery.escalated" },
+      body: { payload: { ticket: "CTL-301", reason: "x" } },
+    });
+    const logPath = join(logDir, "events.jsonl");
+    writeFileSync(logPath, noTs + "\n" + badTs + "\n");
+    const { items } = collectEventLog({ nowMs: now, windowMs, logPath });
+    expect(items).toHaveLength(0);
+  });
+
+  it("keeps events within the window and drops events outside, from the same log", () => {
+    const now = new Date("2026-08-01T12:00:00Z").getTime();
+    const windowMs = 60 * 60 * 1000; // 1 hour
+    const old = makeEvent("recovery.escalated", "CTL-400", "2026-08-01T10:00:00Z");
+    const fresh = makeEvent("recovery.escalated", "CTL-401", "2026-08-01T11:45:00Z");
+    const logPath = join(logDir, "events.jsonl");
+    writeFileSync(logPath, old + "\n" + fresh + "\n");
+    const { items } = collectEventLog({ nowMs: now, windowMs, logPath });
+    expect(items).toHaveLength(1);
+    expect(items[0].ticket).toBe("CTL-401");
   });
 });
 
