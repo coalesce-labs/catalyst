@@ -1,5 +1,20 @@
 # Changelog
 
+## [12.61.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.60.0...catalyst-dev-v12.61.0) (2026-08-21)
+
+
+### Features
+
+* **dev:** CTC-133 — CQRS fencing split + SDK replica cutover ([#3762](https://github.com/coalesce-labs/catalyst/issues/3762)) ([15450f1](https://github.com/coalesce-labs/catalyst/commit/15450f160a63929a03df159c39959937fefaecdb))
+* **dev:** CTL-1984 — re-arm claude-accounts.env without daemon restart ([#3809](https://github.com/coalesce-labs/catalyst/issues/3809)) ([b24dedc](https://github.com/coalesce-labs/catalyst/commit/b24dedc30fe20e70ace7d97e3dd854868fb7d435))
+* **dev:** CTL-2070 — a timely per-ticket actor source (fleet write-ledger) for the lane-claim guard ([#3765](https://github.com/coalesce-labs/catalyst/issues/3765)) ([cf9efd0](https://github.com/coalesce-labs/catalyst/commit/cf9efd029ba7e76f67563a2b5d0ba278c7d43425))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1783 — a deliberate reopen archives the stale worker dir, doesn't get re-Done'd ([#3723](https://github.com/coalesce-labs/catalyst/issues/3723)) ([2d6ee09](https://github.com/coalesce-labs/catalyst/commit/2d6ee09f98f317344e39e23d82bdb6c7d90da630))
+* **dev:** CTL-2082 — refresh linear skill against linearis drift ([#3750](https://github.com/coalesce-labs/catalyst/issues/3750)) ([a93eca9](https://github.com/coalesce-labs/catalyst/commit/a93eca94e81c93fa4b754d7582e38ed3e6aa1ec0))
+
 ## [12.60.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.59.0...catalyst-dev-v12.60.0) (2026-08-20)
 
 
