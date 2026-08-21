@@ -443,6 +443,7 @@ import {
   TERMINAL_LABEL_REASONS,
   shouldCoolDownLabel,
   isThrottledLabelReason,
+  isCloudLabelRejection,
 } from "./label-failure-class.mjs";
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
@@ -2715,6 +2716,19 @@ function unmetBlockersFor(candidateId, edges, poolById, blockerStates) {
 // number of write calls issued (0 == idempotent no-op OR cooled-down). `orchDir`/
 // `now` are optional so legacy callers / bare unit ticks keep the prior
 // best-effort-every-tick behavior (the cool-down simply never arms).
+// CTL-2052 — the three-way operator-log discriminator, factored into ONE helper so the
+// two convergers (convergeHeldLabel / convergeDispositionLabel) cannot hand-drift their
+// class → message mapping (the header above warns they must stay in step —
+// CTL-834/CTL-764). It only chooses the class name for the structured
+// `label_failure_class` field and the human message; the caller supplies its own
+// converger-specific message trio. Order matters: cloud-rejection is checked first
+// because a `cloud:label-rejected` is neither throttled nor terminal.
+function classifyLabelCooldownLog(reason, { cloudMsg, throttledMsg, terminalMsg }) {
+  if (isCloudLabelRejection(reason)) return { cls: "cloud-rejection", message: cloudMsg };
+  if (isThrottledLabelReason(reason)) return { cls: "throttled", message: throttledMsg };
+  return { cls: "terminal", message: terminalMsg };
+}
+
 export function convergeHeldLabel(
   ticket,
   current,
@@ -2832,16 +2846,18 @@ export function convergeHeldLabel(
     }
     if (orchDir && res && res.applied === false && shouldCoolDownLabel(res.reason)) {
       recordLabelCooldown(orchDir, ticket, desired, now());
-      // COORD-236: the two classes get DIFFERENT sentences, because an operator
-      // reading "unrecoverable" for a budget refusal would go looking for a
-      // missing label that is not missing.
-      const throttled = isThrottledLabelReason(res.reason);
-      log.warn(
-        { ticket, label: desired, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
-        throttled
-          ? "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses"
-          : "ctl-834: held-label apply unrecoverable — backing off (cool-down)"
-      );
+      // COORD-236 / CTL-2052: each class gets a DIFFERENT sentence, because an operator
+      // reading "unrecoverable" for a budget refusal would go looking for a missing
+      // label that is not missing, and reading "throttled" for a cloud rejection would
+      // hunt a non-existent budget problem (AC2 — surface the RIGHT reason).
+      const { cls, message } = classifyLabelCooldownLog(res.reason, {
+        cloudMsg:
+          "ctl-2052: held-label apply refused by the cloud (deterministic) — backing off (cool-down); this write is not re-issued until the cool-down elapses",
+        throttledMsg:
+          "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
+        terminalMsg: "ctl-834: held-label apply unrecoverable — backing off (cool-down)",
+      });
+      log.warn({ ticket, label: desired, reason: res.reason, label_failure_class: cls }, message);
     }
   }
   return writes;
@@ -2915,13 +2931,14 @@ export function convergeDispositionLabel(
     writes++;
     if (orchDir && res && res.applied === false && shouldCoolDownLabel(res.reason)) {
       recordLabelCooldown(orchDir, ticket, desired, now());
-      const throttled = isThrottledLabelReason(res.reason);
-      log.warn(
-        { ticket, label: desired, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
-        throttled
-          ? "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses"
-          : "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
-      );
+      const { cls, message } = classifyLabelCooldownLog(res.reason, {
+        cloudMsg:
+          "ctl-2052: disposition-label apply refused by the cloud (deterministic) — backing off (cool-down); this write is not re-issued until the cool-down elapses",
+        throttledMsg:
+          "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
+        terminalMsg: "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)",
+      });
+      log.warn({ ticket, label: desired, reason: res.reason, label_failure_class: cls }, message);
     }
   }
   return writes;
