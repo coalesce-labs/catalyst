@@ -443,7 +443,10 @@ import {
   TERMINAL_LABEL_REASONS,
   shouldCoolDownLabel,
   isThrottledLabelReason,
+  isCloudLabelRejection,
 } from "./label-failure-class.mjs";
+// CTL-2052 (AC3): the "stopped after N and said so" escalation emitter.
+import { emitLabelRetryExhaustedEvent } from "./label-retry-event.mjs";
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
 import {
@@ -2715,13 +2718,70 @@ function unmetBlockersFor(candidateId, edges, poolById, blockerStates) {
 // number of write calls issued (0 == idempotent no-op OR cooled-down). `orchDir`/
 // `now` are optional so legacy callers / bare unit ticks keep the prior
 // best-effort-every-tick behavior (the cool-down simply never arms).
+// CTL-2052 — the three-way operator-log discriminator, factored into ONE helper so the
+// two convergers (convergeHeldLabel / convergeDispositionLabel) cannot hand-drift their
+// class → message mapping (the header above warns they must stay in step —
+// CTL-834/CTL-764). It only chooses the class name for the structured
+// `label_failure_class` field and the human message; the caller supplies its own
+// converger-specific message trio. Order matters: cloud-rejection is checked first
+// because a `cloud:label-rejected` is neither throttled nor terminal.
+function classifyLabelCooldownLog(reason, { cloudMsg, throttledMsg, terminalMsg }) {
+  if (isCloudLabelRejection(reason)) return { cls: "cloud-rejection", message: cloudMsg };
+  if (isThrottledLabelReason(reason)) return { cls: "throttled", message: throttledMsg };
+  return { cls: "terminal", message: terminalMsg };
+}
+
+// CTL-2052 (AC3) — the cap gate, shared by both convergers. Returns true when the apply
+// must be short-circuited: the attempt count has reached the cap and we are still inside
+// the long back-off window. Once that window elapses it resets the ledger so exactly ONE
+// self-heal probe is let through (the label can still land if the sibling was removed
+// meanwhile — COORD-236 "never permanently abandon a label"). Placed BEFORE the ordinary
+// per-window cool-down gate so the cap wins over the time gate.
+function labelRetryCapBlocks(orchDir, ticket, label, now, { cap, exhaustedMs }) {
+  const st = labelRetryState(readLabelCooldownMarker(orchDir, ticket, label), now, { cap, exhaustedMs });
+  if (st.blocked) return true;
+  if (st.exhaustedProbe) clearLabelCooldown(orchDir, ticket, label); // spend one self-heal probe
+  return false;
+}
+
+// CTL-2052 (AC3) — edge-triggered retry-exhausted escalation. Fires exactly on the
+// convergence that brings the attempt count to the cap (compare the post-increment
+// value), so a genuinely stuck label logs ONE operator line + one unified-log event,
+// not one per window (same discipline as CTL-1817's sparse-warn). The log.error is the
+// REQUIRED AC3 "says so" (Alloy→Loki); the event is additive and fail-open via the
+// injected `onRetryExhausted` seam (default null so bare unit ticks stay silent).
+function maybeEscalateRetryExhausted({ ticket, label, attempts, reason, cap, onRetryExhausted }) {
+  if (attempts !== cap) return;
+  log.error(
+    { ticket, label, attempts, reason },
+    "ctl-2052: label apply refused N times — stopping re-issue for the long back-off window and escalating (linear.label.retry-exhausted)"
+  );
+  onRetryExhausted?.({ ticket, label, attempts, reason });
+}
+
 export function convergeHeldLabel(
   ticket,
   current,
   desired,
   writeStatus,
-  { orchDir, now = Date.now, onRemoveResult } = {}
+  {
+    orchDir,
+    now = Date.now,
+    onRemoveResult,
+    retryCap = LABEL_RETRY_CAP,
+    retryExhaustedMs = LABEL_RETRY_EXHAUSTED_MS,
+    onRetryExhausted = null,
+  } = {}
 ) {
+  // CTL-2052 (AC3): cap gate — after N cool-down cycles STOP re-issuing for the long
+  // back-off window (one self-heal probe once it elapses). Before the per-window gate.
+  if (
+    orchDir &&
+    desired &&
+    labelRetryCapBlocks(orchDir, ticket, desired, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs })
+  ) {
+    return 0;
+  }
   // CTL-834: back off if a recent apply of `desired` failed unrecoverably.
   if (orchDir && desired && inLabelCooldown(orchDir, ticket, desired, now())) {
     return 0;
@@ -2831,17 +2891,22 @@ export function convergeHeldLabel(
       }
     }
     if (orchDir && res && res.applied === false && shouldCoolDownLabel(res.reason)) {
-      recordLabelCooldown(orchDir, ticket, desired, now());
-      // COORD-236: the two classes get DIFFERENT sentences, because an operator
-      // reading "unrecoverable" for a budget refusal would go looking for a
-      // missing label that is not missing.
-      const throttled = isThrottledLabelReason(res.reason);
-      log.warn(
-        { ticket, label: desired, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
-        throttled
-          ? "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses"
-          : "ctl-834: held-label apply unrecoverable — backing off (cool-down)"
-      );
+      const attempts = recordLabelCooldown(orchDir, ticket, desired, now());
+      // COORD-236 / CTL-2052: each class gets a DIFFERENT sentence, because an operator
+      // reading "unrecoverable" for a budget refusal would go looking for a missing
+      // label that is not missing, and reading "throttled" for a cloud rejection would
+      // hunt a non-existent budget problem (AC2 — surface the RIGHT reason).
+      const { cls, message } = classifyLabelCooldownLog(res.reason, {
+        cloudMsg:
+          "ctl-2052: held-label apply refused by the cloud (deterministic) — backing off (cool-down); this write is not re-issued until the cool-down elapses",
+        throttledMsg:
+          "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
+        terminalMsg: "ctl-834: held-label apply unrecoverable — backing off (cool-down)",
+      });
+      log.warn({ ticket, label: desired, reason: res.reason, label_failure_class: cls, attempts }, message);
+      maybeEscalateRetryExhausted({ ticket, label: desired, attempts, reason: res.reason, cap: retryCap, onRetryExhausted }); // CTL-2052 AC3
+    } else if (orchDir && desired && (res === undefined || res?.applied === true)) {
+      clearLabelCooldown(orchDir, ticket, desired); // CTL-2052: success resets the ledger
     }
   }
   return writes;
@@ -2877,7 +2942,13 @@ export function convergeDispositionLabel(
   current,
   desired,
   writeStatus,
-  { orchDir, now = Date.now } = {}
+  {
+    orchDir,
+    now = Date.now,
+    retryCap = LABEL_RETRY_CAP,
+    retryExhaustedMs = LABEL_RETRY_EXHAUSTED_MS,
+    onRetryExhausted = null,
+  } = {}
 ) {
   const have = new Set(current ?? []);
   // Precedence suppression: if needs-human is already applied AND desired is one of
@@ -2886,6 +2957,15 @@ export function convergeDispositionLabel(
   // When desired=null (clear-on-pickup), we still remove stale tick-converged labels
   // but leave needs-human alone (it is cleared only by genuine resolution).
   if (have.has(HELD_LABEL_NEEDS_HUMAN) && desired !== null && desired !== undefined) return 0;
+  // CTL-2052 (AC3): cap gate — STOP re-issuing after N cool-down cycles (one self-heal
+  // probe once the long window elapses). Before the ordinary per-window cool-down.
+  if (
+    orchDir &&
+    desired &&
+    labelRetryCapBlocks(orchDir, ticket, desired, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs })
+  ) {
+    return 0;
+  }
   // CTL-834: back off if a recent apply of `desired` failed unrecoverably.
   if (orchDir && desired && inLabelCooldown(orchDir, ticket, desired, now())) {
     return 0;
@@ -2914,14 +2994,18 @@ export function convergeDispositionLabel(
     }
     writes++;
     if (orchDir && res && res.applied === false && shouldCoolDownLabel(res.reason)) {
-      recordLabelCooldown(orchDir, ticket, desired, now());
-      const throttled = isThrottledLabelReason(res.reason);
-      log.warn(
-        { ticket, label: desired, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
-        throttled
-          ? "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses"
-          : "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
-      );
+      const attempts = recordLabelCooldown(orchDir, ticket, desired, now());
+      const { cls, message } = classifyLabelCooldownLog(res.reason, {
+        cloudMsg:
+          "ctl-2052: disposition-label apply refused by the cloud (deterministic) — backing off (cool-down); this write is not re-issued until the cool-down elapses",
+        throttledMsg:
+          "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
+        terminalMsg: "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)",
+      });
+      log.warn({ ticket, label: desired, reason: res.reason, label_failure_class: cls, attempts }, message);
+      maybeEscalateRetryExhausted({ ticket, label: desired, attempts, reason: res.reason, cap: retryCap, onRetryExhausted }); // CTL-2052 AC3
+    } else if (orchDir && desired && (res === undefined || res?.applied === true)) {
+      clearLabelCooldown(orchDir, ticket, desired); // CTL-2052: success resets the ledger
     }
   }
   return writes;
@@ -2996,18 +3080,56 @@ export function convergeStartedHeldLabels(
 export function labelCooldownPath(orchDir, ticket, label) {
   return join(orchDir, ".label-cooldowns", `${ticket}-${label}.json`);
 }
-function inLabelCooldown(orchDir, ticket, label, now) {
+// CTL-2052 — read the cool-down marker (or null). Its own owner of the parse, so the
+// attempt-counter reader and the time gate below cannot disagree about the shape.
+function readLabelCooldownMarker(orchDir, ticket, label) {
   try {
-    const marker = JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8"));
-    return typeof marker.failedAt === "number" && now - marker.failedAt < LABEL_COOLDOWN_MS;
+    return JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8"));
   } catch {
-    return false;
+    return null;
   }
 }
+// CTL-2052 — clear the ledger (on a successful apply, or when spending the single
+// self-heal probe). ENOENT is the expected case. Best-effort; never throws.
+function clearLabelCooldown(orchDir, ticket, label) {
+  try {
+    unlinkSync(labelCooldownPath(orchDir, ticket, label));
+  } catch {
+    /* ENOENT — nothing to clear */
+  }
+}
+function inLabelCooldown(orchDir, ticket, label, now) {
+  const marker = readLabelCooldownMarker(orchDir, ticket, label);
+  return marker != null && typeof marker.failedAt === "number" && now - marker.failedAt < LABEL_COOLDOWN_MS;
+}
+// CTL-2052 — the marker carries a per-(ticket,label) attempt count so AC3 can bound
+// the storm. Read the prior count, increment, persist, and RETURN the new value so the
+// caller can edge-trigger the cap-crossing escalation. Backward-compatible: an old
+// marker without `attempts` reads as 0, so the first increment is 1.
 function recordLabelCooldown(orchDir, ticket, label, now) {
   const p = labelCooldownPath(orchDir, ticket, label);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify({ failedAt: now }));
+  const prior = readLabelCooldownMarker(orchDir, ticket, label);
+  const priorAttempts = prior && Number.isInteger(prior.attempts) ? prior.attempts : 0;
+  const attempts = priorAttempts + 1;
+  writeFileSync(p, JSON.stringify({ failedAt: now, attempts }));
+  return attempts;
+}
+
+// CTL-2052 (AC3) — the pure cap arithmetic, exported so it can be exercised without
+// disk. `blocked` short-circuits the apply (still inside the long back-off after the
+// cap); `exhaustedProbe` says the long window elapsed so the caller may allow ONE probe
+// (and reset the ledger, so the label can still land if the sibling was removed
+// meanwhile — it self-heals on a long timescale rather than never; COORD-236 "never
+// permanently abandon a label").
+export function labelRetryState(marker, now, { cap, exhaustedMs } = {}) {
+  const attempts = marker && Number.isInteger(marker.attempts) ? marker.attempts : 0;
+  const failedAt = marker && typeof marker.failedAt === "number" ? marker.failedAt : 0;
+  if (attempts >= cap) {
+    if (now - failedAt < exhaustedMs) return { blocked: true, attempts, exhaustedProbe: false };
+    return { blocked: false, attempts, exhaustedProbe: true };
+  }
+  return { blocked: false, attempts, exhaustedProbe: false };
 }
 
 // CTL-624: dispatch cool-down marker. Conceptually mirrors the labelOnce
@@ -7465,6 +7587,7 @@ export function schedulerTick(
           {
             orchDir,
             now,
+            onRetryExhausted: emitLabelRetryExhaustedEvent, // CTL-2052 AC3: the "stopped after N" event
             onRemoveResult: (label, removed) => {
               if (desired !== null || !removed || hasNeedsHuman) return;
               const fromHeld = label === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : label;
@@ -9126,7 +9249,7 @@ export function schedulerTick(
           hit.labels,
           HELD_LABEL_NEEDS_INPUT,
           retractionWriteStatus,
-          { orchDir, now }
+          { orchDir, now, onRetryExhausted: emitLabelRetryExhaustedEvent } // CTL-2052 AC3
         );
         if (writes > 0) {
           recordTransition({
@@ -9344,6 +9467,15 @@ const DISPATCH_COOLDOWN_MS = Number(process.env.SCHEDULER_DISPATCH_COOLDOWN_MS) 
 // CTL-834: held-label apply cool-down window (convergeHeldLabel). Same default as
 // the dispatch cool-down; overridable for tests / quieter quota budgets.
 const LABEL_COOLDOWN_MS = Number(process.env.SCHEDULER_LABEL_COOLDOWN_MS) || 60_000;
+// CTL-2052 (AC3): after this many cool-down CYCLES for one (ticket,label), the
+// converger STOPS re-issuing (long back-off) and escalates once — so a genuinely
+// stuck label does not retry ~once-per-window forever. The current behavior is
+// effectively N=∞, so any finite cap is a strict improvement.
+const LABEL_RETRY_CAP = Number(process.env.SCHEDULER_LABEL_RETRY_CAP) || 5;
+// CTL-2052 (AC3): the long back-off held after the cap. > LABEL_COOLDOWN_MS so the cap
+// genuinely wins over the ordinary per-window gate; when it elapses, exactly one probe
+// is let through so a since-resolved conflict can still land (COORD-236 self-heal).
+const LABEL_RETRY_EXHAUSTED_MS = Number(process.env.SCHEDULER_LABEL_RETRY_EXHAUSTED_MS) || 1_800_000; // 30 min
 // CTL-713: permanent-failure cooldown. code=2 (prior_artifact_missing,
 // phase-agent-dispatch exit 2) is a structural refusal — back it off longer than
 // the 60s transient window. GC reaps the marker once the ticket leaves the eligible set.

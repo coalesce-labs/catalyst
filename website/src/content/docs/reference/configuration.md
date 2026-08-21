@@ -1498,6 +1498,26 @@ outage can never quarantine a healthy, resolvable, in-flight ticket.
 `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` is the Linear-independent backstop; the runaway knobs are
 observability only.
 
+### Label-write retry cap (CTL-2052)
+
+The disposition/held-label convergers cool down a failed `applyLabel` (CTL-834/COORD-236). A
+**deterministic cloud label rejection** — an exclusive-conflict add that the write-proxy refuses,
+surfaced to the caller as the generic `cloud:failed`/`cloud:rejected` and normalized to
+`cloud:label-rejected` — is cool-down-eligible but never provably terminal on the host, so without a
+cap it would retry ~once per cool-down window forever (each refused write still spending a cloud
+write-budget unit). These env vars on the `catalyst-execution-core` process bound that:
+
+- `SCHEDULER_LABEL_RETRY_CAP` (default `5`) — after this many cool-down **cycles** for one
+  `(ticket, label)` the converger STOPS re-issuing the write and emits one
+  `linear.label.retry-exhausted` event (plus a `log.error`). Attempts are counted per cool-down
+  cycle, not per tick. The prior behavior was effectively `N=∞`, so any finite cap is a strict
+  improvement.
+- `SCHEDULER_LABEL_RETRY_EXHAUSTED_MS` (default `1800000`, 30 min) — the long back-off held after the
+  cap is reached. Must be `>` `SCHEDULER_LABEL_COOLDOWN_MS` so the cap wins over the ordinary
+  per-window cool-down. When it elapses, exactly **one** self-heal probe apply is allowed so a
+  since-resolved conflict can still land (the label is never permanently abandoned — COORD-236); a
+  successful apply resets the counter.
+
 ### Broker watchdog session eviction (CTL-1516)
 
 The broker's watchdog tick keeps per-session bookkeeping (`lastHeartbeat`, `workerToOrchestrator`)
