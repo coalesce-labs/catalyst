@@ -16,17 +16,37 @@ One decision should be one ask. When several agents hit the same wall and each f
 human sees N tickets for one decision and each carries a fraction of the true urgency — so the
 decision that is actually blocking the most work sorts *below* trivia.
 
-Search open asks before creating (replica only — never the Linear API, it is a shared fleet quota):
+Search open asks before creating (replica only — never the Linear API, it is a shared fleet quota).
+
+⛔ **A miss is only evidence of absence if the replica was fit to answer.** During a writer outage
+or a mid-reseed this query returns nothing, and "nothing" then reads as "no existing ask" — which
+files the duplicate this page exists to prevent. So gate the search, and treat an ungated or stale
+result as **inconclusive**: do not create, resolve the replica first.
 
 ```bash
-sqlite3 ~/catalyst/catalyst-replica.db "
-SELECT i.identifier, i.state, substr(i.title,1,80)
-FROM issues i
-WHERE i.removed_at IS NULL
-  AND i.state NOT IN ('Done','Canceled','Duplicate')
-  AND EXISTS (SELECT 1 FROM json_each(json_extract(i.raw,'\$.labels.nodes'))
-              WHERE json_extract(value,'\$.name') LIKE '%ask%');"
+# Resolve the path and the freshness gate the canonical way — CATALYST_REPLICA_DB /
+# CATALYST_DIR are honored, and replica_fresh checks writer-lock recency AND a
+# non-empty sync_meta cursor (seed complete, not mid-reseed).
+. "$CLAUDE_PLUGIN_ROOT/scripts/lib/linear-read-replica.sh"
+if ! replica_fresh "$CATALYST_REPLICA_DB"; then
+  echo "INCONCLUSIVE — replica stale/absent; do NOT create an ask on this evidence." >&2
+else
+  sqlite3 "$CATALYST_REPLICA_DB" "
+  SELECT i.identifier, i.state, substr(i.title,1,80)
+  FROM issues i
+  WHERE i.removed_at IS NULL
+    AND i.state NOT IN ('Done','Canceled','Duplicate')
+    AND EXISTS (SELECT 1 FROM issue_labels il JOIN labels l ON l.id = il.label_id
+                WHERE il.issue_id = i.id AND l.name IN ('catalyst-ask','ask/decision'));"
+fi
 ```
+
+⚠️ Match the two canonical label names **exactly**, against the normalized `issue_labels`/`labels`
+tables. The earlier form of this query read `json_extract(raw,'$.labels.nodes')` and matched
+`LIKE '%ask%'`; both are wrong. `raw.labels` is an **array** in the replica, so the `.nodes` path
+matched nothing for those rows, and `%ask%` additionally swallows unrelated labels such as `task`.
+Measured on the live replica 2026-08-21: the old predicate found **5** open asks where there were
+**11** — six invisible, five of them blocking real work.
 
 **If an open ask already covers your decision, ATTACH — do not file a second one.** Add a `blocks`
 edge from that ask to your work ticket:
@@ -75,9 +95,9 @@ world as today's.
 
 Do not hand over the list. Lead with the recommendation and the reason, in that order:
 
-> There are 5 things waiting on you. The two that matter: **CTL-2132 first** — it's the only one
-> holding up urgent work (blocks CTC-841, P1). Then **CTL-2135**, blocking a high-priority ticket
-> that's ready to move the moment you decide. Two others (CTC-709, 71h; CTC-875) don't record what
+> There are 5 things waiting on you. The two that matter: **PROJ-132 first** — it's the only one
+> holding up urgent work (blocks PROJ-841, P1). Then **PROJ-135**, blocking a high-priority ticket
+> that's ready to move the moment you decide. Two others (PROJ-709, 71h; PROJ-875) don't record what
 > they block, so I can't tell you their real cost — that's a gap, not a judgment.
 
 Rules that make this land:

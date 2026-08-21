@@ -12,14 +12,40 @@
 # Reads the local replica ONLY (never Linear's API — shared fleet quota).
 # Usage: bash ~/catalyst/comms/coord/ask-triage.sh
 set -uo pipefail
-DB="${CATALYST_REPLICA:-$HOME/catalyst/catalyst-replica.db}"
-[ -f "$DB" ] || { echo "replica not found: $DB" >&2; exit 1; }
 
-WAL="$DB-wal"; NOW=$(date +%s)
-MT=$(stat -f %m "$WAL" 2>/dev/null || stat -c %Y "$WAL" 2>/dev/null || echo 0)
-AGE=$(( NOW - MT ))
-[ "$AGE" -gt 900 ] && echo "⚠️  replica ${AGE}s stale (>15m) — figures may lag." >&2
+# ── Replica access goes through the canonical helper (CTL-2151 review round 1) ──
+# Round-1 review caught three separate defects in the hand-rolled version this replaces:
+#   • `stat -f %m` was probed BEFORE `stat -c %Y`; on GNU/Linux `-f` prints a filesystem
+#     report to stdout and still fails, so the mtime came back non-numeric and the
+#     arithmetic below aborted under `set -u` before any output;
+#   • WAL mtime is not a freshness signal at all — a quiet healthy writer never touches
+#     the WAL, and a half-finished reseed can have a recent one;
+#   • an undocumented $CATALYST_REPLICA ignored the supported CATALYST_REPLICA_DB /
+#     CATALYST_DIR ladder, so a relocated install ranked the WRONG replica.
+# lib/linear-read-replica.sh already owns all three (path ladder + `replica_fresh`, which
+# gates on writer-lock recency AND a non-empty sync_meta cursor). Two gates maintained
+# separately is the drift this repo has already paid for, so source it, don't re-derive it.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/lib/linear-read-replica.sh"
+DB="$CATALYST_REPLICA_DB"
 
+# ⛔ A stale or absent replica is INCONCLUSIVE, not "nothing is waiting on you". This
+# script publishes an authoritative ranking of what a human must decide; emitting one from
+# partial data is worse than emitting nothing, so fail loudly instead of degrading.
+if ! replica_fresh "$DB"; then
+  echo "⚠️  INCONCLUSIVE — replica is absent, stale, or mid-reseed: $DB" >&2
+  echo "    Not publishing a ranking from partial data. Check the replica writer, then re-run." >&2
+  exit 1
+fi
+
+# Canonical ask labels, matched EXACTLY. The predicate this replaces read
+# json_extract(raw,'$.labels.nodes') and matched LIKE '%ask%' — wrong on both axes:
+# the replica's raw.labels is an ARRAY (the .nodes path silently matched nothing for
+# those rows), and '%ask%' also swallows unrelated labels such as `task` and
+# `ask/readiness`. Measured on the live replica 2026-08-21: the old predicate returned
+# 5 open asks, this one returns 11 — six were invisible, including five that block
+# real work. The normalized issue_labels/labels tables are the stable shape.
 sqlite3 -noheader "$DB" "
 WITH asks AS (
   SELECT i.identifier, i.state, i.title, i.updated_at,
@@ -27,8 +53,8 @@ WITH asks AS (
   FROM issues i
   WHERE i.removed_at IS NULL
     AND i.state NOT IN ('Done','Canceled','Duplicate')
-    AND EXISTS (SELECT 1 FROM json_each(json_extract(i.raw,'\$.labels.nodes'))
-                WHERE json_extract(value,'\$.name') LIKE '%ask%')
+    AND EXISTS (SELECT 1 FROM issue_labels il JOIN labels l ON l.id = il.label_id
+                WHERE il.issue_id = i.id AND l.name IN ('catalyst-ask','ask/decision'))
 ),
 blocked AS (
   SELECT a.identifier AS ask, w.identifier AS work, w.state AS work_state,
@@ -42,7 +68,9 @@ scored AS (
   SELECT a.identifier, a.state, a.hours, substr(a.title,1,66) AS title,
          COUNT(b.work) AS n_blocked,
          -- weight: Urgent=8 High=4 Medium=2 Low/None=1
-         COALESCE(SUM(CASE b.pri WHEN 1 THEN 8 WHEN 2 THEN 4 WHEN 3 THEN 2 ELSE 1 END),0) AS score,
+         COALESCE(SUM(CASE WHEN b.work IS NULL THEN 0
+                           WHEN b.pri=1 THEN 8 WHEN b.pri=2 THEN 4 WHEN b.pri=3 THEN 2
+                           ELSE 1 END),0) AS score,
          COALESCE(MIN(NULLIF(b.pri,0)),9) AS top_pri,
          COALESCE(group_concat(b.work || ' (P' || b.pri || ' ' || b.work_state || ')', ', '),'') AS blocks_list
   FROM asks a LEFT JOIN blocked b ON b.ask = a.identifier
@@ -64,16 +92,16 @@ sqlite3 -noheader "$DB" "
 WITH asks AS (
   SELECT i.identifier FROM issues i
   WHERE i.removed_at IS NULL AND i.state NOT IN ('Done','Canceled','Duplicate')
-    AND EXISTS (SELECT 1 FROM json_each(json_extract(i.raw,'\$.labels.nodes'))
-                WHERE json_extract(value,'\$.name') LIKE '%ask%')
+    AND EXISTS (SELECT 1 FROM issue_labels il JOIN labels l ON l.id = il.label_id
+                WHERE il.issue_id = i.id AND l.name IN ('catalyst-ask','ask/decision'))
 )
 SELECT COUNT(*) || ' thing(s) waiting on you.' FROM asks;"
 sqlite3 -noheader "$DB" "
 WITH asks AS (
   SELECT i.identifier FROM issues i
   WHERE i.removed_at IS NULL AND i.state NOT IN ('Done','Canceled','Duplicate')
-    AND EXISTS (SELECT 1 FROM json_each(json_extract(i.raw,'\$.labels.nodes'))
-                WHERE json_extract(value,'\$.name') LIKE '%ask%')
+    AND EXISTS (SELECT 1 FROM issue_labels il JOIN labels l ON l.id = il.label_id
+                WHERE il.issue_id = i.id AND l.name IN ('catalyst-ask','ask/decision'))
 )
 SELECT COUNT(*) || ' of them have NO blocking link, so their true cost is unknown.'
 FROM asks a WHERE NOT EXISTS (
