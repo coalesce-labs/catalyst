@@ -251,12 +251,13 @@ export function deriveAttention({
   phaseFailed = false, // CTL-1180: a terminal failed/stalled phase, ticket NOT pipeline-done
   escalationType = null, // CTL-1180: passthrough of explanation.escalation_type (forensic/render)
   linearTerminal = false, // CTL-1239: live Linear state is Done/Canceled
+  correlationRole = null, // CAT-170: passthrough of correlation.role ("anchor"|"member")
 } = {}) {
   // CTL-1239: a ticket terminal in Linear (Done/Canceled) is finished regardless of
   // any stale failed/stalled phase-*.json left on disk. Short-circuit BEFORE the
   // needs-human/waiting computation so a stale signal can never re-raise attention.
   if (linearTerminal === true) {
-    return { attention: null, attentionSince: null, escalationType: null };
+    return { attention: null, attentionSince: null, escalationType: null, correlationRole: null };
   }
   const set = new Set(Array.isArray(labels) ? labels : []);
   const labelNeedsHuman =
@@ -271,6 +272,10 @@ export function deriveAttention({
       attention: "needs-human",
       attentionSince: needsHumanSince ?? (prStuck ? prStuckSince : null),
       escalationType: escalationType ?? null, // CTL-1180 passthrough; null when not a failed-phase source
+      // CAT-170: only the needs-human branch carries the correlation role — that is
+      // the one branch the notification projector acts on, so a member's alert can
+      // be suppressed in favour of its anchor's single correlated alert.
+      correlationRole: correlationRole ?? null,
     };
   }
   if (waitingOnUser === true) {
@@ -278,9 +283,10 @@ export function deriveAttention({
       attention: "waiting-on-you",
       attentionSince: waitingSince ?? null,
       escalationType: null,
+      correlationRole: null,
     };
   }
-  return { attention: null, attentionSince: null, escalationType: null };
+  return { attention: null, attentionSince: null, escalationType: null, correlationRole: null };
 }
 
 // phase → Linear workflow state (board columns for the Tickets/Linear lens).
@@ -1039,6 +1045,29 @@ export function deriveEscalationType(phaseSigs) {
   return null;
 }
 
+/** CAT-170: extract the escalation-correlation role from the most-recent phase
+ *  signal that carries one. Mirrors deriveEscalationType's newest-phase-first
+ *  scan, but reads the TOP-LEVEL `correlation` field (a sibling of
+ *  `explanation`, not a member of it — synthesizeEscalationExplanation projects
+ *  the payload down to its six render fields and drops `observed`, which is why
+ *  the correlation identity is persisted top-level in the first place).
+ *
+ *  Returns "anchor" | "member" | null. This is the projection the notification
+ *  path needs to collapse a multi-ticket incident into ONE operator alert: every
+ *  correlated member still earns its own needs-human label and signal (the
+ *  operator can open any of them), but only the anchor is allowed to notify. */
+export function deriveCorrelationRole(phaseSigs) {
+  for (let i = phaseSigs.length - 1; i >= 0; i--) {
+    const sig = phaseSigs[i];
+    if (!sig || typeof sig !== "object") continue;
+    const corr = sig.correlation;
+    if (corr && typeof corr === "object" && typeof corr.role === "string") {
+      return corr.role;
+    }
+  }
+  return null;
+}
+
 /** CTL-1130: extract call_to_action from the most-recent phase signal that
  *  carries a structured explanation. Scanned newest-phase-first so the most
  *  actionable question surfaces. Returns null when no signal has one. */
@@ -1522,6 +1551,53 @@ export function synthesizeParkedNeedsHumanTickets(
     });
   }
   return cards;
+}
+
+// mergeDurableEscalationsIntoCards — CAT-173: the complement of
+// synthesizeDurableEscalations, which by design DROPS a durable record whose ticket
+// already has a card (id dedupe). That dedupe is right for the terminal-sweep case:
+// such a ticket has a live failed/stalled signal, so deriveAttention's phaseFailed
+// path already renders it needs-human and a second card would double-list it.
+//
+// It is WRONG for a record whose existing card carries no attention at all. The
+// concrete hole: a fence-suppressed break-glass on a BEHIND PR whose rescue budget
+// is exhausted. The rescue timer only reaches that point via an existing worker
+// directory, so the ticket always has a card; BEHIND is deliberately excluded from
+// PR_BLOCKER_STATES (the pipeline may auto-rebase it); and the fence suppressed the
+// needs-human label, so nothing else marks it. The record was then deduped away —
+// leaving the break-glass on no operator surface at all, including the push bridge,
+// which projects only board tickets.
+//
+// So: fill the EXISTING card's attention instead of dropping the record. Never
+// overwrite an attention that is already set — a live reason is always better than
+// a durable record's replay of it.
+export function mergeDurableEscalationsIntoCards(
+  tickets,
+  records,
+  linfo = {},
+  terminalIds = new Set(),
+) {
+  if (!Array.isArray(tickets) || !Array.isArray(records)) return tickets;
+  const terminal = terminalIds instanceof Set ? terminalIds : new Set();
+  const byId = new Map();
+  for (const t of tickets) {
+    if (t && t.id != null && !byId.has(t.id)) byId.set(t.id, t);
+  }
+  for (const rec of records) {
+    if (!rec || !rec.ticket) continue;
+    const card = byId.get(rec.ticket);
+    if (!card) continue; // no existing card → synthesizeDurableEscalations owns it
+    // Terminal-aware, matching the synthesis path: never page on a Done/Canceled ticket.
+    if (terminal.has(rec.ticket) || isLinearTerminal(linfo?.[rec.ticket]?.linearState)) continue;
+    if (card.attention) continue; // already surfaced — keep the live reason
+    card.attention = "needs-human";
+    card.attentionSince = rec.escalatedAt ?? card.attentionSince ?? null;
+    card.humanQuestion =
+      typeof rec.reason === "string" && rec.reason.length > 0
+        ? rec.reason
+        : "Escalated for a human.";
+  }
+  return tickets;
 }
 
 // synthesizeDurableEscalations — CTL-1643: surface durable escalation records on
@@ -2193,6 +2269,10 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // surfaces this in the needs-human branch, so it stays null elsewhere.
         escalationType: escalationType ?? failedEscalationType,
         linearTerminal, // CTL-1239
+        // CAT-170: the correlation role rides the same explSigs scan (canonical +
+        // ancillary) so a recovery-pass escalation signal — which is where the
+        // correlation identity is written — is seen here.
+        correlationRole: deriveCorrelationRole(explSigs),
       });
       return {
         id,
@@ -2271,6 +2351,12 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // yellow board accent + the Inbox "Needs you" section. needs-human wins.
         attention: attn.attention,
         attentionSince: attn.attentionSince,
+        // CAT-170: "anchor" | "member" | null. The notification projectors (web
+        // push/SSE via shouldNotify, and the desktop poller) suppress a "member"
+        // so a three-ticket correlated incident produces ONE operator alert
+        // instead of three. Rendering is unaffected — every member still shows in
+        // the Needs-you list with its own card.
+        correlationRole: attn.correlationRole ?? null,
         // CTL-1220: recovery-sweep outcome flags, read from the unified event
         // log. id is the CTL key — exactly what attributes["event.label"] carries.
         autoFixed: recoveryByTicket.get(id)?.autoFixed ?? false,
@@ -2362,6 +2448,15 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
     Object.keys(linfo).filter((id) => isLinearTerminal(linfo[id]?.linearState))
   );
   const durableEscalationRecords = readDurableEscalations(EC);
+  // CAT-173: fill attention on cards that already exist BEFORE the id dedupe below
+  // drops their records, so a fence-standoff break-glass on an otherwise
+  // attention-less card (e.g. a BEHIND PR) still reaches the board and push bridge.
+  tickets = mergeDurableEscalationsIntoCards(
+    tickets,
+    durableEscalationRecords,
+    linfo,
+    terminalLinearIds,
+  );
   const durableCardIds = new Set(tickets.map((t) => t.id));
   const durableTickets = synthesizeDurableEscalations(
     durableEscalationRecords,

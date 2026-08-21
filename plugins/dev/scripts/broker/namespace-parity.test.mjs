@@ -71,6 +71,7 @@ import { ESCALATION_EVENT_NEEDS_HUMAN } from "../execution-core/escalation-event
 // (not a re-typed literal). The `linear.label.` prefix is UNPROTECTED under the
 // namespace contract (a dedicated test below asserts it, alongside the salvage family).
 import { LABEL_RETRY_EXHAUSTED_EVENT } from "../execution-core/label-retry-event.mjs";
+import { FENCE_STANDOFF_EVENT } from "../execution-core/fence-standoff.mjs"; // CAT-173
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -97,6 +98,8 @@ const INLINE_EVENT_NAMES = [
   "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
   "catalyst.replica.writer_idle",     // CAT-21 cloud-sync.mjs (tokenless writer provisioning gap)
   "cloud-feed.would-dispatch",        // CTL-1847 cloud-feed-timer.mjs (shadow mode — would dispatch from the feed)
+  "recovery.escalation.correlated",   // CAT-170 recovery-reasoning.mjs (enforced member pointer)
+  "recovery.escalation.would-correlate", // CAT-170 recovery-reasoning.mjs (shadow group)
 ];
 
 // Build the flat list of all static exec-core event names.
@@ -122,6 +125,7 @@ const EXEC_CORE_EVENT_NAMES = [
   ...ENTITLEMENT_EVENT_NAMES, // CTL-1785 entitlement-event.mjs — would-shed / shed / restored (v3 bare-name, host-suffixed)
   ESCALATION_EVENT_NEEDS_HUMAN, // CTL-2056 escalation-event.mjs — ticket.escalated (entity=ticket/action=escalated)
   LABEL_RETRY_EXHAUSTED_EVENT, // CTL-2052 label-retry-event.mjs — the "stopped after N and said so" escalation
+  FENCE_STANDOFF_EVENT, // CAT-173 fence-standoff.mjs — mutual fence standoff escalation
   ...INLINE_EVENT_NAMES,
 ];
 
@@ -162,6 +166,27 @@ describe("exec-core static event names", () => {
       // Not a phase-lifecycle event: no phase slot, so the broker never routes it
       // as a terminal phase transition.
       expect(phaseSlotOf(`${base}.mini-2`)).toBe(null);
+    }
+  });
+});
+
+describe("CAT-170 recovery escalation correlation event names", () => {
+  const CORRELATION_EVENT_NAMES = [
+    "recovery.escalation.correlated",
+    "recovery.escalation.would-correlate",
+  ];
+
+  test("both names are registered and outside protected namespaces", () => {
+    expect(
+      INLINE_EVENT_NAMES.filter((name) => CORRELATION_EVENT_NAMES.includes(name))
+    ).toEqual(CORRELATION_EVENT_NAMES);
+
+    for (const name of CORRELATION_EVENT_NAMES) {
+      expect(name.startsWith("filter.")).toBe(false);
+      expect(name.startsWith("broker.daemon")).toBe(false);
+      expect(name).not.toBe("session.heartbeat");
+      expect(isBrokerProtectedName(name)).toBe(false);
+      expect(phaseSlotOf(name)).toBeNull();
     }
   });
 });

@@ -1236,6 +1236,14 @@ function defaultEntitlementEmit(name, payload) {
   }
 }
 
+// Inter-tick shed-state accumulation for entitlement.restored.* (CTL-2108).
+// Module-level so the primary scheduler tick can accumulate across calls without
+// threading the Set through the scheduler's large closure. Opt-in via trackShedState;
+// only the primary per-tick call (scheduler.mjs:5354) enables it.
+let _entitlementShedState = new Set();
+/** @internal test-only — reset inter-tick shed accumulation between test cases */
+export function __resetEntitlementShedState() { _entitlementShedState = new Set(); }
+
 // getEntitledHosts — "may this host take work?" The roster dispatch/recovery hash
 // HRW ownership over. In `off` mode this is byte-identical to getClusterHosts(); in
 // shadow/enforce it consults the injectable provider via resolveEntitledRoster.
@@ -1248,9 +1256,16 @@ export function getEntitledHosts({
   hosts = getClusterHosts(),
   self = getHostName(),
   emit = defaultEntitlementEmit,
+  trackShedState = false,
 } = {}) {
   if (mode === "off") return hosts;
-  return resolveEntitledRoster({ mode, provider, hosts, self, emit });
+  const previouslyShedHosts = trackShedState ? _entitlementShedState : undefined;
+  const roster = resolveEntitledRoster({ mode, provider, hosts, self, emit, previouslyShedHosts });
+  if (trackShedState && mode === "enforce" && Array.isArray(hosts) && Array.isArray(roster)) {
+    // newShed = hosts \ roster, excluding self (self is always kept, never shed).
+    _entitlementShedState = new Set(hosts.filter((h) => h !== self && !roster.includes(h)));
+  }
+  return roster;
 }
 
 // getCatalystRepoDirHostsPath — absolute path to the committed cluster roster.
@@ -1413,9 +1428,44 @@ export const HEARTBEAT_GRACE_MS = Number(process.env.EXECUTION_CORE_HEARTBEAT_GR
 //
 // Invalid ⇒ the DEFAULT, reported through `onInvalid` (the daemon logs it) —
 // never a silent clamp, because the failure it causes is invisible for hours.
-export const HEARTBEAT_TAIL_WINDOW_MIN_MS = HEARTBEAT_GRACE_MS * 2;
 export const HEARTBEAT_TAIL_WINDOW_MAX_MS = 31 * 24 * 60 * 60_000; // 31 days
-export const HEARTBEAT_TAIL_WINDOW_DEFAULT_MS = HEARTBEAT_GRACE_MS * 72; // 12 h at the default grace
+// Codex #3760 review: the ceiling outranks the derived floor. A pathological grace
+// (> 15.5 days) would push 2x grace past the 31-day log horizon; an empty [min, max]
+// range must collapse to the ceiling, never invert it — clampDefault checks the min
+// side first, so an uncapped MIN here would return 2x grace and defeat the MAX.
+export const HEARTBEAT_TAIL_WINDOW_MIN_MS = Math.min(
+  HEARTBEAT_GRACE_MS * 2,
+  HEARTBEAT_TAIL_WINDOW_MAX_MS,
+);
+// CTL-1550: clamped to [min, max] so a pathologically large HEARTBEAT_GRACE_MS cannot
+// silently push the derived default above the 31-day ceiling. The derived default can
+// only breach the MAX side (since 72 > 2 ensures it always exceeds the MIN floor).
+export const HEARTBEAT_TAIL_WINDOW_DEFAULT_MS = Math.min(
+  HEARTBEAT_GRACE_MS * 72, // 12 h at the default grace
+  HEARTBEAT_TAIL_WINDOW_MAX_MS,
+);
+
+// clampDefault — apply [min, max] to a caller-supplied default and fire onInvalid when
+// a clamp was needed. ONLY fires when clamping actually occurs (not on a normal default).
+function clampDefault(defaultMs, min, max, onInvalid) {
+  // Codex #3760: an empty range (min > max, e.g. an injected floor above the
+  // month horizon) collapses to the CEILING — the min-side branch runs first,
+  // so an uncollapsed min would return a value above max and undo the cap.
+  if (min > max) min = max;
+  if (!Number.isFinite(defaultMs) || defaultMs < min) {
+    const clamped = min;
+    if (typeof onInvalid === "function")
+      onInvalid({ raw: String(defaultMs), reason: `derived default ${defaultMs}ms is below the ${min}ms minimum`, defaultMs: clamped, min, max });
+    return clamped;
+  }
+  if (defaultMs > max) {
+    const clamped = max;
+    if (typeof onInvalid === "function")
+      onInvalid({ raw: String(defaultMs), reason: `derived default ${defaultMs}ms exceeds the ${max}ms maximum`, defaultMs: clamped, min, max });
+    return clamped;
+  }
+  return defaultMs;
+}
 
 export function resolveHeartbeatTailWindowMs(
   raw,
@@ -1426,10 +1476,11 @@ export function resolveHeartbeatTailWindowMs(
     onInvalid = null,
   } = {}
 ) {
-  // Unset / empty is the documented way to take the default — stay silent.
-  if (raw === undefined || raw === null) return defaultMs;
+  // Unset / empty is the documented way to take the default — stay silent when the
+  // default is in-band; clamp and report when it isn't (e.g. a huge custom grace).
+  if (raw === undefined || raw === null) return clampDefault(defaultMs, min, max, onInvalid);
   const str = String(raw).trim();
-  if (str === "") return defaultMs;
+  if (str === "") return clampDefault(defaultMs, min, max, onInvalid);
 
   const n = Number(str);
   let reason = null;
@@ -1967,8 +2018,15 @@ export function readDaemonWatchdogConfigLayer1(configPath) {
   }
 }
 
-export function readDaemonWatchdogConfig(configPath) {
-  const l1 = readDaemonWatchdogConfigLayer1(configPath);
+// `layer1Override` lets a caller that has ALREADY read and validated the config
+// file hand in that exact snapshot instead of having it re-read here. Without it
+// a caller validates one read and this function consumes a second, so a file
+// replaced between the two is validated in one state and consumed in another —
+// and since readDaemonWatchdogConfigLayer1 swallows a parse failure and returns
+// {}, that divergence degrades silently to defaults. Omitted (undefined) keeps
+// the previous read-at-use behaviour for every existing caller.
+export function readDaemonWatchdogConfig(configPath, layer1Override) {
+  const l1 = layer1Override ?? readDaemonWatchdogConfigLayer1(configPath);
   // CATALYST_DAEMON_WATCHDOG=0 is the kill-switch → mode:off (mirrors
   // readWatchdogConfig's CATALYST_WATCHDOG=0). Otherwise env > Layer-1 > shadow.
   const mode =

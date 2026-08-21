@@ -5342,6 +5342,206 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
   });
 });
 
+describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
+  test("delivery failure does not extend fence suppression and retries next tick", () => {
+    const ticket = "PROJ-173-RETRY";
+    const nowMs = Date.now();
+    writeSignal(ticket, "implement", "failed");
+    mkdirSync(join(orchDir, ".fence-standoff"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".fence-standoff", `${ticket}.json`),
+      JSON.stringify({
+        ticket,
+        site: "terminal-sweep",
+        reason: "unverifiable",
+        firstSuppressedAt: nowMs - 2,
+        lastSuppressedAt: nowMs - 2,
+        count: 0,
+        breakGlassAt: null,
+      }),
+    );
+
+    let fenceCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      now: () => nowMs,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "1",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+        CATALYST_FENCE_STANDOFF_COOLDOWN_MS: "21600000",
+      },
+      gateway: {
+        getDescriptor: () => ({
+          state: "In Progress",
+          removed: false,
+          updatedAt: new Date(nowMs).toISOString(),
+        }),
+      },
+      writeStatus: {
+        applyPhaseStatus() {},
+        applyTerminalDone() {},
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      terminalFenceGuard: (_subject, hooks) => {
+        fenceCalls += 1;
+        hooks.onSuppress?.({ reason: "unverifiable" });
+        return false;
+      },
+      appendFenceStandoffEvent: () => {
+        throw new Error("injected append failure");
+      },
+    };
+
+    schedulerTick(orchDir, opts);
+    expect(fenceCalls).toBe(1);
+    expect(existsSync(join(orchDir, "workers", ticket, ".fence-suppressed"))).toBe(false);
+    expect(existsSync(join(orchDir, "workers", ticket, ".fence-standoff-cooldown"))).toBe(false);
+
+    schedulerTick(orchDir, opts);
+    expect(fenceCalls).toBe(2);
+  });
+
+  // CAT-173 review: the retry above must be BOUNDED. An unbounded one re-runs the
+  // terminal Linear probe + fence-check every tick on a persistently failing sink —
+  // the CTL-1329 burn. Past the bound the ordinary 15-minute marker is retained.
+  test("a persistently failing delivery stops bypassing the 15-minute cooldown", () => {
+    const ticket = "PROJ-173-RETRY-BOUND";
+    const nowMs = Date.now();
+    writeSignal(ticket, "implement", "failed");
+    mkdirSync(join(orchDir, ".fence-standoff"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".fence-standoff", `${ticket}.json`),
+      JSON.stringify({
+        ticket,
+        site: "terminal-sweep",
+        reason: "unverifiable",
+        firstSuppressedAt: nowMs - 2,
+        lastSuppressedAt: nowMs - 2,
+        count: 0,
+        breakGlassAt: null,
+      }),
+    );
+
+    let fenceCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      now: () => nowMs,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "1",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+        CATALYST_FENCE_STANDOFF_COOLDOWN_MS: "21600000",
+        CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX: "3",
+      },
+      gateway: {
+        getDescriptor: () => ({
+          state: "In Progress",
+          removed: false,
+          updatedAt: new Date(nowMs).toISOString(),
+        }),
+      },
+      writeStatus: {
+        applyPhaseStatus() {},
+        applyTerminalDone() {},
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      terminalFenceGuard: (_subject, hooks) => {
+        fenceCalls += 1;
+        hooks.onSuppress?.({ reason: "unverifiable" });
+        return false;
+      },
+      appendFenceStandoffEvent: () => {
+        throw new Error("injected persistent append failure");
+      },
+    };
+
+    for (let i = 0; i < 12; i++) schedulerTick(orchDir, opts);
+    // 4 probes: the first three failures are under the bound and drop the marker;
+    // the fourth retains it, so every later tick short-circuits before the fence.
+    expect(fenceCalls).toBe(4);
+    expect(existsSync(join(orchDir, "workers", ticket, ".fence-suppressed"))).toBe(true);
+    expect(existsSync(join(orchDir, "workers", ticket, ".fence-standoff-cooldown"))).toBe(false);
+  });
+
+  // CAT-173 verify finding #3: the POSITIVE path was unpinned — nothing asserted
+  // that a successful break-glass stamps the cooldown, nor that the cooldown then
+  // short-circuits the next tick's probe+write block.
+  test("a successful break-glass stamps the cooldown and short-circuits the next tick", () => {
+    const ticket = "PROJ-173-COOLDOWN";
+    const nowMs = Date.now();
+    writeSignal(ticket, "implement", "failed");
+    mkdirSync(join(orchDir, ".fence-standoff"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".fence-standoff", `${ticket}.json`),
+      JSON.stringify({
+        ticket,
+        site: "terminal-sweep",
+        reason: "unverifiable",
+        firstSuppressedAt: nowMs - 2,
+        lastSuppressedAt: nowMs - 2,
+        count: 0,
+        breakGlassAt: null,
+      }),
+    );
+
+    let fenceCalls = 0;
+    let appendCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      now: () => nowMs,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "1",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+        CATALYST_FENCE_STANDOFF_COOLDOWN_MS: "21600000",
+      },
+      gateway: {
+        getDescriptor: () => ({
+          state: "In Progress",
+          removed: false,
+          updatedAt: new Date(nowMs).toISOString(),
+        }),
+      },
+      writeStatus: {
+        applyPhaseStatus() {},
+        applyTerminalDone() {},
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      terminalFenceGuard: (_subject, hooks) => {
+        fenceCalls += 1;
+        hooks.onSuppress?.({ reason: "unverifiable" });
+        return false;
+      },
+      appendFenceStandoffEvent: () => {
+        appendCalls += 1;
+        return true;
+      },
+    };
+
+    schedulerTick(orchDir, opts);
+    expect(fenceCalls).toBe(1);
+    expect(appendCalls).toBe(1);
+    const cooldownPath = join(orchDir, "workers", ticket, ".fence-standoff-cooldown");
+    expect(existsSync(cooldownPath)).toBe(true);
+    expect(JSON.parse(readFileSync(cooldownPath, "utf8")).expiresAt).toBe(nowMs + 21600000);
+    // The durable, unfenced human signal was written without a Linear label.
+    const durable = JSON.parse(
+      readFileSync(join(orchDir, ".escalations", `${ticket}.json`), "utf8"),
+    );
+    expect(durable.source).toBe("fence-standoff");
+    expect(durable.labelConfirmed).toBe(false);
+
+    // Second tick inside the window: zero fence calls, zero further escalations.
+    schedulerTick(orchDir, opts);
+    expect(fenceCalls).toBe(1);
+    expect(appendCalls).toBe(1);
+  });
+});
+
 // ── CTL-1079: retraction sweep reads from broker cache instead of live API ──
 // These tests use an exec spy + the real removeLabel (from linear-write.mjs)
 // to verify that gateway cache hits suppress the live `linearis issues read`
@@ -13389,6 +13589,91 @@ describe("Pass 0a live-probe bounding for non-phantom dirs (CTL-1580)", () => {
     });
     // No recheck marker yet → the very first classify pays the live path.
     expect(seenReplica).toBeUndefined();
+  });
+});
+
+// ─── CAT-170 (Codex #3209 round-3 P1): global-move signatures ────────────────
+describe("holisticBoardHealthAct — global moves sign their own cause (CAT-170)", () => {
+  const runWith = (decision) => {
+    const intents = [];
+    holisticBoardHealthAct(
+      { candidates: ["CTL-1"], boardContext: {}, decision },
+      {
+        shouldSkipItem: () => false,
+        invokeRecoveryPass: () => ({ dispatched: true }),
+        recordIntent: (ticket, entry) => intents.push({ ticket, ...entry }),
+      },
+    );
+    return intents[0]?.signature ?? null;
+  };
+
+  test("(CAT-170) a ticketless global move names itself, not the gate count summary", () => {
+    // kick-dispatch / note-cache-drift carry no ticket, so moveByTicket cannot
+    // recover their cause and the candidate used to fall through to gate.reason.
+    const sig = runWith({
+      gate: { reason: "1 invariant(s) flagged" },
+      moves: { tier1: [{ move: "kick-dispatch", rationale: "dispatch liveness" }] },
+    });
+    expect(sig).toBe("board-health: kick-dispatch");
+    expect(sig).not.toBe("1 invariant(s) flagged");
+  });
+
+  test("(CAT-170) two unrelated global-move scans do NOT collapse into one incident", () => {
+    const dispatchScan = runWith({
+      gate: { reason: "1 invariant(s) flagged" },
+      moves: { tier1: [{ move: "kick-dispatch" }] },
+    });
+    const cacheScan = runWith({
+      gate: { reason: "1 invariant(s) flagged" },
+      moves: { tier1: [{ move: "note-cache-drift" }] },
+    });
+    // Pre-fix both signed "1 invariant(s) flagged" and correlated together.
+    expect(dispatchScan).not.toBe(cacheScan);
+  });
+
+  test("(CAT-170) a per-ticket move still outranks the scan's global moves", () => {
+    const sig = runWith({
+      gate: { reason: "2 invariant(s) flagged" },
+      moves: {
+        tier1: [{ move: "kick-dispatch" }, { ticket: "CTL-1", move: "nudge" }],
+      },
+    });
+    expect(sig).toBe("board-health: nudge");
+  });
+
+  test("(CAT-170) the global signature is order-independent", () => {
+    const a = runWith({
+      moves: { tier1: [{ move: "kick-dispatch" }, { move: "note-cache-drift" }] },
+    });
+    const b = runWith({
+      moves: { tier1: [{ move: "note-cache-drift" }, { move: "kick-dispatch" }] },
+    });
+    expect(a).toBe(b);
+  });
+
+  test("(CAT-170 round 4) an eligible-queue FALLBACK candidate is signed with the scan's triggering move", () => {
+    // Every ticket-specific candidate was cooldown/terminal-skipped, so the
+    // dispatching candidate (CTL-1) is the eligible-queue fallback and has no entry
+    // in moveByTicket. Round 3 only rescued ticketless moves, so an all-ticketed
+    // scan like this still fell through to the gate count.
+    const nudgeScan = runWith({
+      gate: { reason: "1 invariant(s) flagged" },
+      moves: { tier1: [{ ticket: "OTHER-1", move: "nudge" }] },
+    });
+    const prScan = runWith({
+      gate: { reason: "1 invariant(s) flagged" },
+      moves: { tier1: [{ ticket: "OTHER-2", move: "finish-or-close-pr" }] },
+    });
+    expect(nudgeScan).toBe("board-health: nudge");
+    expect(prScan).toBe("board-health: finish-or-close-pr");
+    // Pre-fix both were "1 invariant(s) flagged" and correlated into one incident.
+    expect(nudgeScan).not.toBe(prScan);
+  });
+
+  test("(CAT-170) with no moves at all the gate reason is still the fallback", () => {
+    expect(runWith({ gate: { reason: "3 invariant(s) flagged" }, moves: {} })).toBe(
+      "3 invariant(s) flagged",
+    );
   });
 });
 
