@@ -405,7 +405,12 @@ import {
   getEligibleDir,
   getEventLogPath,
   getHostName,
-  getClusterHosts,
+  // CTL-1785: the per-tick DISPATCH roster (HRW who-may-take-work) is ENTITLEMENT;
+  // `multiHost` (the fenceGuard !multiHost disarm) and the host-death takeover
+  // pre-gate are TOPOLOGY and stay EXISTENCE-derived. `off` mode (default):
+  // getEntitledHosts() === getExistenceHosts() === getClusterHosts().
+  getEntitledHosts,
+  getExistenceHosts,
   hostMembershipWarning,
   isDraining as isDrainingDefault,
   getDrainedMarkerPath, // CTL-1321: shared resolver for the drain.drained sentinel
@@ -5129,9 +5134,13 @@ export function schedulerTick(
   // daemon restart). multiHost gates the Linear-touching claim: a single-host
   // roster makes the HRW filter an identity AND skips the claim entirely, so the
   // coordination wiring is an exact no-op until a 2nd host joins the roster.
-  const roster = hosts ?? getClusterHosts();
+  const roster = hosts ?? getEntitledHosts();
   const self = hostName ?? getHostName();
-  const multiHost = roster.length > 1;
+  // CTL-1785: multiHost (the fenceGuard `!multiHost` disarm + the Linear-touching
+  // claim gate) stays EXISTENCE-derived so entitlement shedding can never re-enable
+  // an N=1 disarm. An injected `hosts` still controls it (existing test contract);
+  // only the default source splits from the entitled dispatch roster above.
+  const multiHost = (hosts ?? getExistenceHosts()).length > 1;
   // CTL-1057: loud one-time warning when this host is absent from a multi-host roster.
   const _smw = hostMembershipWarning(roster, self);
   if (_smw && !globalThis.__ctl1057_scheduler_warned) {
@@ -9492,7 +9501,7 @@ function runTick() {
           // evidence + escalates it, so two nodes don't double-page needs-human.
           // STRICT no-op at N=1: a single-host roster makes ownedBy an identity
           // (the lone host owns everything), so ownsSubject is always true.
-          const diagRoster = getClusterHosts();
+          const diagRoster = getEntitledHosts();
           const diagSelf = getHostName();
           // CTL-1529: reuse the tick's shared bounded heartbeat read.
           const diagSurvivors =
@@ -10268,7 +10277,11 @@ function runTick() {
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
     // Skip entirely on single-host installs (no-op inside the function, but the
     // pre-check avoids the call to stay zero-cost on the common case).
-    if (getClusterHosts().length > 1) {
+    // CTL-1785: EXISTENCE-gated — a host shed from ENTITLEMENT still physically
+    // exists and its work must remain reclaimable, so this pre-check reads the
+    // existence topology (using the entitled roster here would orphan a shed
+    // host's work — the exact orphan-by-construction this ticket prevents).
+    if (getExistenceHosts().length > 1) {
       // CTL-1481: thread the replica (second arg — the seams object) so the
       // takeover stamp's label read stays off live Linear (replica-first, loud
       // live fallback inside the stamp).

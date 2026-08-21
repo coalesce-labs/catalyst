@@ -9,7 +9,15 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { ownerForTicket } from "../hrw.mjs";
 import {
-  getClusterHosts,
+  // CTL-1785: `catalyst cluster` is mostly a DISPLAY/EXISTENCE surface (status
+  // shows the physical roster) — but `ownership` is a no-contention PROOF, so it
+  // must hash over the SAME roster source production HRW does (getEntitledHosts,
+  // code review chatgpt-codex-connector P2) or it silently diverges from
+  // production the moment enforce mode sheds a host. `--roster=` still overrides
+  // either default. `off` mode: getEntitledHosts() === getExistenceHosts() ===
+  // getClusterHosts().
+  getExistenceHosts,
+  getEntitledHosts,
   getHostName,
   getLivenessAnchorIssue,
   getCatalystRepoDirHostsPath,
@@ -139,7 +147,7 @@ function renderStatus(s) {
 export function runStatus(argv = []) {
   const anchor = getLivenessAnchorIssue();
   const status = buildStatus({
-    roster: getClusterHosts(),
+    roster: getExistenceHosts(),
     self: getHostName(),
     peers: anchor ? readPeerHeartbeatsSync({ anchorIssue: anchor }) : {},
     draining: isDraining(getExecutionCoreDir()),
@@ -490,7 +498,7 @@ export function runOwnership(argv = [], { listTickets = listTodoTickets } = {}) 
   const rosterArg = argv.find((a) => a.startsWith("--roster="));
   const roster = rosterArg
     ? rosterArg.slice("--roster=".length).split(",").map((s) => s.trim()).filter(Boolean)
-    : getClusterHosts();
+    : getEntitledHosts();
   let tickets;
   try {
     tickets = listTickets();
