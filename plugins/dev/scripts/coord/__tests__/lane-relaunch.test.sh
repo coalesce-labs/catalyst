@@ -70,18 +70,24 @@ else
 	fail "expected launch-ctl27.txt, got '$GOT'"
 fi
 
-# Re-implement the rolling-window relaunch cap under test, mirroring lane-relaunch.sh's own
-# functions exactly (kept in sync by hand; if you change one, change both).
+# CTL-2145: the rolling-window cap is SOURCED from the same lib lane-relaunch.sh and
+# account-rotation-watch.sh use — not hand-mirrored here. The previous copy carried the note
+# "kept in sync by hand; if you change one, change both", which is a test that stops testing
+# the shipped code the moment someone changes only one of them. These thin wrappers reproduce
+# lane-relaunch.sh's per-lane file naming; the mechanism under test is the real one.
+WINDOW_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/rotation-window.sh"
+if [ ! -r "$WINDOW_LIB" ]; then
+	fail "missing $WINDOW_LIB — the shared rolling-window lib is what this section tests"
+	echo ""
+	echo "== ${PASSES} passed, $((FAILURES)) failed =="
+	exit 1
+fi
+# shellcheck source=../lib/rotation-window.sh
+. "$WINDOW_LIB"
 RELAUNCH_HOURLY_CAP=4
 RELAUNCH_WINDOW_SECONDS=3600
-relaunch_count_in_window() {
-	local rf="$PIDDIR/$1.relaunches"
-	[ -f "$rf" ] || { echo 0; return; }
-	local now cutoff; now=$(date +%s); cutoff=$((now - RELAUNCH_WINDOW_SECONDS))
-	local kept; kept=$(awk -v cutoff="$cutoff" '$1 >= cutoff' "$rf")
-	if [ -z "$kept" ]; then : >"$rf"; echo 0; else printf '%s\n' "$kept" >"$rf"; printf '%s\n' "$kept" | grep -c .; fi
-}
-record_relaunch_attempt() { date +%s >>"$PIDDIR/$1.relaunches"; }
+relaunch_count_in_window() { cw_count_in_window "$PIDDIR/$1.relaunches" "$RELAUNCH_WINDOW_SECONDS"; }
+record_relaunch_attempt() { cw_record_attempt "$PIDDIR/$1.relaunches"; }
 
 echo "Test: a lane with no relaunch history reads as 0 attempts this hour"
 COUNT=$(relaunch_count_in_window "freshlane")

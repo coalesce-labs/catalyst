@@ -70,6 +70,24 @@ RELAUNCH_HOURLY_CAP="${RELAUNCH_HOURLY_CAP:-4}"
 RELAUNCH_WINDOW_SECONDS=3600
 mkdir -p "$PIDDIR"
 
+# CTL-2145: the rolling-window circuit breaker is SOURCED, not re-implemented. It used to
+# live inline here and be mirrored by hand in the test file ("if you change one, change
+# both"), and the account-rotation actor needs the identical mechanism — three copies of
+# one cap is how a circuit breaker silently stops matching the thing it breaks. A missing
+# lib is FATAL rather than a degraded run: without the window this loop is the unbounded
+# relaunch storm CTL-2097 measured at 117 duplicate launches in one night.
+_SRC="${BASH_SOURCE[0]}"
+while [ -L "$_SRC" ]; do _SRC="$(readlink "$_SRC")"; done
+COORD_SRC="$(cd "$(dirname "$_SRC")" && pwd)"
+unset _SRC
+WINDOW_LIB="$COORD_SRC/lib/rotation-window.sh"
+if [ ! -r "$WINDOW_LIB" ]; then
+  echo "lane-relaunch: FATAL — missing $WINDOW_LIB; refusing to run without the relaunch cap" >&2
+  exit 1
+fi
+# shellcheck source=lib/rotation-window.sh
+. "$WINDOW_LIB"
+
 latest_brief() { # $1 lane-prefix -> path of highest-numbered brief, digits-only match
   # The [0-9]* + grep -E anchor is load-bearing: without it, prefix "ctl" also matches a stale
   # "ctlinstall6.txt" brief from an unrelated, retired lane family.
@@ -85,19 +103,14 @@ is_alive() { # $1 lane-prefix -> 0 iff its recorded pid is a live process
 
 # $1 lane-prefix -> prunes $PIDDIR/<lane>.relaunches to the rolling window and prints the count
 # remaining. Pruning happens on every call (not just on relaunch) so a lane that has been quiet
-# for a while ages back under the cap even without a fresh attempt.
-relaunch_count_in_window() {
-  local rf="$PIDDIR/$1.relaunches"
-  [ -f "$rf" ] || { echo 0; return; }
-  local now cutoff; now=$(date +%s); cutoff=$((now - RELAUNCH_WINDOW_SECONDS))
-  local kept; kept=$(awk -v cutoff="$cutoff" '$1 >= cutoff' "$rf")
-  # `printf '%s\n' ""` writes a stray blank line, not a truly empty file — truncate explicitly
-  # instead, or the counter file never actually shrinks back to empty after the window clears.
-  if [ -z "$kept" ]; then : > "$rf"; echo 0; else printf '%s\n' "$kept" > "$rf"; printf '%s\n' "$kept" | grep -c .; fi
+# for a while ages back under the cap even without a fresh attempt. Thin per-lane adapters over
+# the shared window primitives — the mechanism itself lives in lib/rotation-window.sh.
+relaunch_count_in_window() { # $1 lane-prefix
+  cw_count_in_window "$PIDDIR/$1.relaunches" "$RELAUNCH_WINDOW_SECONDS"
 }
 
 record_relaunch_attempt() { # $1 lane-prefix -> append "now" to its rolling-window counter file
-  date +%s >> "$PIDDIR/$1.relaunches"
+  cw_record_attempt "$PIDDIR/$1.relaunches"
 }
 
 while :; do

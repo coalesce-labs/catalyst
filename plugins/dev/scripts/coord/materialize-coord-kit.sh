@@ -68,6 +68,16 @@ KIT_SCRIPTS=(
   account-rotation-watch.sh
 )
 
+# KIT_LIBS — sourced dependencies of the kit scripts, baked alongside them under lib/.
+# NOT optional: both kit scripts resolve lib/rotation-window.sh relative to their OWN
+# location and treat a missing one as FATAL (a rolling-window circuit breaker that
+# silently isn't there is worse than no breaker). Bake the scripts without their lib and
+# the materialized copy is a file that exists and cannot run — which is the same
+# "installed in name only" shape as the incident this whole kit exists to fix.
+KIT_LIBS=(
+  rotation-window.sh
+)
+
 # _handles — the provisioned account handles, in file order, parsed from
 # claude-accounts.env's `CLAUDE_TOKEN_<handle>=` DEFINITION lines.
 #
@@ -134,6 +144,26 @@ for s in "${KIT_SCRIPTS[@]}"; do
   fi
   if _install_file "${COORD_SRC}/${s}" "${COORD_RT}/${s}" 755; then
     log "baked ${s}"
+  else
+    RC=1
+  fi
+done
+
+for l in "${KIT_LIBS[@]}"; do
+  if [[ ! -f "${COORD_SRC}/lib/${l}" ]]; then
+    # A missing LIB is an error, not the WARN a not-yet-authored kit script gets: the
+    # scripts above were just baked and every one of them refuses to run without it.
+    warn "kit lib ${l} is not present in ${COORD_SRC}/lib — the baked kit scripts will refuse to run"
+    RC=1
+    continue
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "would write ${COORD_RT}/lib/${l}"
+    continue
+  fi
+  mkdir -p "${COORD_RT}/lib" 2>/dev/null || true
+  if _install_file "${COORD_SRC}/lib/${l}" "${COORD_RT}/lib/${l}" 644; then
+    log "baked lib/${l}"
   else
     RC=1
   fi

@@ -59,6 +59,41 @@ COORD_RT="$CDIR/comms/coord"
 echo "Test: materialize exits 0 on a well-formed accounts env"
 if [[ $RC -eq 0 ]]; then pass "exit 0"; else fail "expected exit 0, got $RC — output: $OUT"; fi
 
+# The baked kit must be RUNNABLE, not merely present. Both kit scripts source
+# lib/rotation-window.sh relative to their own location and FATAL without it, so a bake
+# that omits lib/ produces files that exist and cannot run — "installed in name only",
+# the same shape as the incident. Asserted by actually EXECUTING the baked copy, because
+# a presence check would pass on a lib that is there but unreadable.
+echo "Test: the baked kit is RUNNABLE — its sourced lib is baked too"
+if [[ ! -f "$COORD_RT/lib/rotation-window.sh" ]]; then
+	fail "lib/rotation-window.sh was not baked — both kit scripts refuse to run without it"
+elif [[ -L "$COORD_RT/lib/rotation-window.sh" ]]; then
+	fail "lib/rotation-window.sh is a SYMLINK into the repo — dangles when the worktree goes"
+else
+	pass "lib/rotation-window.sh baked as a real file"
+fi
+# Execute the baked actor end to end. With no latch present it must reach its INCONCLUSIVE
+# path (exit 0) rather than die on the FATAL missing-lib guard.
+BAKED_OUT="$(CATALYST_DIR="$CDIR" CLAUDE_ACCOUNTS_ENV="$ACCTS" CATALYST_ACCOUNT_ROTATION=shadow \
+	bash "$COORD_RT/account-rotation-watch.sh" 2>&1)"
+if grep -qi 'FATAL' <<<"$BAKED_OUT"; then
+	fail "the baked actor cannot run from the runtime dir: $BAKED_OUT"
+else
+	pass "the baked actor runs from the runtime dir (no FATAL missing-lib)"
+fi
+# Positive control: the same invocation against a lib-less bake DOES hit the FATAL guard,
+# so the check above is capable of failing.
+LIBLESS="$SCRATCH/libless"
+mkdir -p "$LIBLESS"
+cp "$COORD_RT/account-rotation-watch.sh" "$LIBLESS/"
+CTL_OUT="$(CATALYST_DIR="$CDIR" CLAUDE_ACCOUNTS_ENV="$ACCTS" CATALYST_ACCOUNT_ROTATION=shadow \
+	bash "$LIBLESS/account-rotation-watch.sh" 2>&1)"
+if grep -qi 'FATAL' <<<"$CTL_OUT"; then
+	pass "positive control: without lib/ the actor DOES refuse, so the check above can fail"
+else
+	fail "positive control FAILED — a lib-less bake did not refuse, so the runnable check proves nothing"
+fi
+
 echo "Test: the kit scripts are baked as REAL FILES, never symlinks (the incident)"
 for s in lane-relaunch.sh; do
 	if [[ ! -e "$COORD_RT/$s" ]]; then

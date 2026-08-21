@@ -32,6 +32,23 @@ assert_file() {
 echo "Test: the relocated lane-relaunch watchdog is committed under coord/"
 assert_exec "${COORD_DIR}/lane-relaunch.sh" "coord/lane-relaunch.sh exists and is executable"
 
+echo "Test: the account-rotation actor is committed under coord/ (Phase 2)"
+assert_exec "${COORD_DIR}/account-rotation-watch.sh" "coord/account-rotation-watch.sh exists and is executable"
+
+echo "Test: the shared rolling-window circuit breaker has ONE home"
+assert_file "${COORD_DIR}/lib/rotation-window.sh" "coord/lib/rotation-window.sh exists"
+# Both kit scripts must SOURCE it rather than carry their own copy. The cap used to be
+# inline in lane-relaunch.sh and hand-mirrored in its test ("if you change one, change
+# both"); a circuit breaker that exists in three places is one that stops matching the
+# thing it breaks.
+for _s in lane-relaunch.sh account-rotation-watch.sh; do
+	if grep -q 'lib/rotation-window.sh' "${COORD_DIR}/${_s}" 2>/dev/null; then
+		pass "${_s} sources the shared rolling-window lib"
+	else
+		fail "${_s} does not source lib/rotation-window.sh — it is carrying a second copy of the cap"
+	fi
+done
+
 echo "Test: the materialize primitive is committed under coord/"
 assert_exec "${COORD_DIR}/materialize-coord-kit.sh" "coord/materialize-coord-kit.sh exists and is executable"
 

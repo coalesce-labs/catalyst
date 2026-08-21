@@ -648,6 +648,7 @@ jobs:
           bash plugins/dev/scripts/coord/__tests__/coord-kit-shape.test.sh
           bash plugins/dev/scripts/coord/__tests__/materialize-coord-kit.test.sh
           bash plugins/dev/scripts/coord/__tests__/lane-relaunch.test.sh
+          bash plugins/dev/scripts/coord/__tests__/account-rotation-watch.test.sh
 
       - name: review-comments headless resolution test (CTL-1496)
         working-directory: plugins/dev/scripts
