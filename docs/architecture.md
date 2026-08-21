@@ -654,11 +654,14 @@ The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode 
 
 ### Orphan-stale merged-PR reconciliation (CAT-47)
 
-Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
-PR-state resolver, background-job liveness probe, stall clearer, and status writer once; Pass 0u
-uses them to build its act registry, while Pass 0r receives both that registry and the raw bundle
-for capability-checked fallback construction. An injected partial registry therefore falls back to
-real dependencies instead of either using inert defaults or failing as unavailable.
+Pass 0r and Pass 0u act on the same production act-seam dependencies. `runTick` builds a
+`unstuckSeamDeps` bundle — PR-state resolver, background-job liveness probe, stall clearer, status
+writer — and threads it to Pass 0r, which receives both that bundle **and** Pass 0u's prebuilt act
+registry. `defaultInvokeSeam` then selects by capability: an absent or partial registry falls back
+to a registry rebuilt from the bundle's real dependencies instead of either using inert defaults or
+failing as unavailable. Pass 0u still constructs its own equivalent closures inline at its
+`buildUnstuckActSeams` call site, so the two constructions are equivalent by inspection but not yet
+literally shared — collapsing them onto the one bundle is deferred follow-up.
 
 The recovery candidate contract is `{ ticket, phase, signal }`. `phase` names the exact
 `.unstuck-orphan-merge-<phase>.applied` idempotency marker, and `signal.bg_job_id` feeds the
