@@ -313,6 +313,32 @@ export async function bumpTriageAttemptCount(
   return newCount;
 }
 
+// resetTriageAttemptCount — reset the fleet-wide triage attempt count on the
+// fence attachment back to 0 (CTL-2111). Used when a human re-queues a ticket
+// that had tripped its host-local triage re-dispatch cap, so the next sweep
+// re-dispatches triage instead of refusing forever. Preserves owner_host,
+// catalyst_generation, phase, and claimed_at (does NOT bump the generation —
+// this is not a takeover — and does NOT re-stamp the staleness clock). Returns
+// 0 on success, or null when no fence exists (best-effort no-op, fail-open).
+export async function resetTriageAttemptCount(
+  ticket,
+  { post = defaultPost, transport = null, issueId = null } = {},
+) {
+  const current = await readClaim(ticket, { post, transport });
+  if (!current) return null; // no fence — no-op, fail-open
+  await writeClaim(
+    ticket,
+    {
+      owner_host: current.owner_host,
+      generation: current.generation,
+      phase: current.phase,
+      triage_attempt_count: 0,
+    },
+    { post, transport, issueId, preserveClaimedAt: current.claimed_at },
+  );
+  return 0;
+}
+
 // ─── soft-CAS claim ──────────────────────────────────────────────────────────
 
 // claimTicket — the soft compare-and-set that is the actual cross-host mutex.
@@ -702,10 +728,16 @@ export async function runCli(
       process.stdout.write(JSON.stringify({ count }) + "\n");
       return 0;
     }
+    case "reset-triage-attempt": {
+      const [ticket] = rest;
+      const count = await resetTriageAttemptCount(ticket, { post, transport: t });
+      process.stdout.write(JSON.stringify({ count }) + "\n");
+      return 0;
+    }
     default:
       process.stderr.write(
         `cluster-claim.mjs: unknown subcommand: ${cmd ?? "(none)"}\n` +
-          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> [issueId] | fence-check <ticket> <gen> | resolve-issue-id <ticket> | read-triage-attempt <ticket> | bump-triage-attempt <ticket>>\n",
+          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> [issueId] | fence-check <ticket> <gen> | resolve-issue-id <ticket> | read-triage-attempt <ticket> | bump-triage-attempt <ticket> | reset-triage-attempt <ticket>>\n",
       );
       return 1;
   }

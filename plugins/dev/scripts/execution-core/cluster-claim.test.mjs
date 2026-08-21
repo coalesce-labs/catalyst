@@ -18,6 +18,7 @@ import {
   isFenceCurrent,
   readTriageAttemptCount,
   bumpTriageAttemptCount,
+  resetTriageAttemptCount,
   runCli,
 } from "./cluster-claim.mjs";
 
@@ -856,6 +857,52 @@ describe("bumpTriageAttemptCount (CTL-1649)", () => {
   });
 });
 
+describe("resetTriageAttemptCount (CTL-2111)", () => {
+  it("resets triage_attempt_count to 0 and returns 0 on success", async () => {
+    const { post, store } = makeFakeLinear({
+      seed: { "CTL-2111": { owner_host: "mini", catalyst_generation: 2, phase: "triage", claimed_at: "2026-08-01T00:00:00Z", triage_attempt_count: 5 } },
+    });
+    const result = await resetTriageAttemptCount("CTL-2111", { post });
+    expect(result).toBe(0);
+    expect(store.get("CTL-2111").triage_attempt_count).toBe(0);
+  });
+
+  it("preserves owner_host, catalyst_generation, phase (does NOT bump generation — not a takeover)", async () => {
+    const { post, store } = makeFakeLinear({
+      seed: { "CTL-2111": { owner_host: "mac-studio", catalyst_generation: 5, phase: "triage", claimed_at: "2026-08-01T00:00:00Z", triage_attempt_count: 3 } },
+    });
+    await resetTriageAttemptCount("CTL-2111", { post });
+    const m = store.get("CTL-2111");
+    expect(m.owner_host).toBe("mac-studio");
+    expect(m.catalyst_generation).toBe(5);
+    expect(m.phase).toBe("triage");
+  });
+
+  it("preserves claimed_at (does not re-stamp the staleness clock)", async () => {
+    const original = "2026-07-01T00:00:00Z";
+    const { post, store } = makeFakeLinear({
+      seed: { "CTL-2111": { owner_host: "mini", catalyst_generation: 1, phase: "triage", claimed_at: original, triage_attempt_count: 4 } },
+    });
+    await resetTriageAttemptCount("CTL-2111", { post });
+    expect(store.get("CTL-2111").claimed_at).toBe(original);
+  });
+
+  it("returns null (no-op, fail-open) when no fence exists", async () => {
+    const { post } = makeFakeLinear();
+    expect(await resetTriageAttemptCount("CTL-2111", { post })).toBeNull();
+  });
+
+  it("a bump then a reset returns the count to 0", async () => {
+    const { post } = makeFakeLinear({
+      seed: { "CTL-2111": { owner_host: "mini", catalyst_generation: 1, phase: "triage", claimed_at: "t", triage_attempt_count: 0 } },
+    });
+    expect(await bumpTriageAttemptCount("CTL-2111", { post })).toBe(1);
+    expect(await bumpTriageAttemptCount("CTL-2111", { post })).toBe(2);
+    expect(await resetTriageAttemptCount("CTL-2111", { post })).toBe(0);
+    expect(await readTriageAttemptCount("CTL-2111", { post })).toBe(0);
+  });
+});
+
 describe("runCli — read-triage-attempt / bump-triage-attempt (CTL-1649)", () => {
   it("read-triage-attempt prints { count } and exits 0 when fence exists", async () => {
     const { post } = makeFakeLinear({
@@ -880,6 +927,23 @@ describe("runCli — read-triage-attempt / bump-triage-attempt (CTL-1649)", () =
     const { code, out } = await captureStdout(() => runCli(["bump-triage-attempt", "CTL-1649"], { post }));
     expect(code).toBe(0);
     expect(JSON.parse(out.trim())).toEqual({ count: 2 });
+  });
+
+  it("reset-triage-attempt prints { count: 0 } and exits 0 on success (CTL-2111)", async () => {
+    const { post, store } = makeFakeLinear({
+      seed: { "CTL-2111": { owner_host: "mini", catalyst_generation: 1, phase: "triage", claimed_at: "t", triage_attempt_count: 7 } },
+    });
+    const { code, out } = await captureStdout(() => runCli(["reset-triage-attempt", "CTL-2111"], { post }));
+    expect(code).toBe(0);
+    expect(JSON.parse(out.trim())).toEqual({ count: 0 });
+    expect(store.get("CTL-2111").triage_attempt_count).toBe(0);
+  });
+
+  it("reset-triage-attempt prints { count: null } and exits 0 when no fence (CTL-2111)", async () => {
+    const { post } = makeFakeLinear();
+    const { code, out } = await captureStdout(() => runCli(["reset-triage-attempt", "CTL-2111"], { post }));
+    expect(code).toBe(0);
+    expect(JSON.parse(out.trim())).toEqual({ count: null });
   });
 
   it("unknown subcommand still exits 1 with usage", async () => {
