@@ -1,6 +1,6 @@
 # Cluster Node Onboarding (CTL-1214)
 
-This document describes how to onboard a fresh macOS node into a Catalyst cluster. It covers the automated setup process, prerequisites, and how to activate the node in the committed roster.
+This document describes how to onboard a fresh macOS node into a Catalyst cluster. It covers the automated setup process, prerequisites, how to activate the node in the cluster roster, and known gotchas hit during real multi-node onboarding (not theoretical ones).
 
 ## Quick Start
 
@@ -12,12 +12,26 @@ SHADOW gate are all baked in. The canonical flow is two commands:
 # 1. On the seed (mini): mint a single-use token + arm the bundle listener
 catalyst cluster join-token
 
-# 2. On the fresh node: run the one-liner. Pass a GitHub token so the node can
-#    clone the private thoughts repos without an interactive `gh auth login`.
+# 2. On the fresh node: clone this repo (catalyst-join.sh needs its sibling
+#    scripts — provision-thoughts.sh, install-cli.sh, setup-plugin-source.sh —
+#    copying the lone file is not sufficient), cd into it, then run the join
+#    from CATALYST_SEED/CATALYST_JOIN_TOKEN env vars (NOT --seed/--token flags
+#    — the script takes environment variables, not CLI flags, for these two).
+#    Pass a GitHub token so the node can clone private repos without an
+#    interactive `gh auth login` (an already-authenticated `gh` also works —
+#    see Phase 1 below).
+git clone <this-repo-url> ~/catalyst-join-bootstrap
+cd ~/catalyst-join-bootstrap
 CATALYST_JOIN_GITHUB_TOKEN=<ghp_…> \
-  bash catalyst-join.sh --seed mini:7401 --token <jt_…>
+CATALYST_SEED=mini:7401 CATALYST_JOIN_TOKEN=<jt_…> \
+  bash plugins/dev/scripts/catalyst-join.sh
 #    (offline / seed-unreachable variant: --bundle ~/catalyst/join-bundle.json)
 ```
+
+The join token is single-use with a 15-minute TTL — if a stage fails and you need
+to re-mint, `catalyst cluster join-token` again and re-run; the script resumes
+from the last completed stage (it does NOT need to re-fetch the bundle if
+`acquire-bundle` already succeeded).
 
 `catalyst-join` walks resumable stages: preflight → acquire-bundle → **github-auth**
 → **provision-thoughts** → setup-catalyst → install-cli → setup-plugin-source →
@@ -28,7 +42,7 @@ idempotent — re-run after any failure and it resumes from the failed stage.
 has not been added to the committed roster (`cluster.json` `roster[]` in the private
 `catalyst-cluster` repo), so it owns **zero tickets** (Stage-0 SHADOW). Activation
 (adding it to the roster) is a deliberate later step — see
-[Activation](#activation-m2--future).
+[Activation](#activation-m2).
 
 ### Convenience wrapper (seed-driven)
 
@@ -70,7 +84,7 @@ Cluster nodes have no SSH keys, so thoughts clone+push uses HTTPS + a token. The
 The token needs `repo` scope (and `workflow` if the node will push workflow files).
 A Stage-0 SHADOW node owns zero tickets and the thoughts **sync-gate only activates
 at roster>1**, so missing push auth is non-fatal at join time but is the explicit
-precondition for [Activation](#activation-m2--future) — verify `humanlayer thoughts
+precondition for [Activation](#activation-m2) — verify `humanlayer thoughts
 sync` round-trips before adding the node to the committed roster.
 
 ### Phase 2: Provision Thoughts Repositories
@@ -111,7 +125,7 @@ Runs the final join stages:
 - ✅ Catalyst stack running (auto-restart on reboot)
 - ✅ Thoughts synced (all 3 orgs verified)
 - ✅ Local roster entry created (mini-2 registered locally)
-- ❌ Committed roster untouched (`cluster.json` `roster[]` in `catalyst-cluster` still excludes it) — node owns zero tickets
+- ❌ Cluster roster untouched — node owns zero tickets (see [Activation](#activation-m2) for the current roster mechanism)
 
 ### Phase 5: Verification
 
@@ -127,9 +141,54 @@ Check the onboard script's verification output:
   stack stage complete
 ```
 
-## Activation (M2 — Future)
+## Activation (M2)
 
-To activate mini-2 and begin accepting work:
+> **The per-repo committed `.catalyst/hosts.json` roster described in earlier
+> drafts of this doc is RETIRED (CTL-1274)** — a CI guard now fails the build if
+> one reappears or a reader regrows to expect it. The roster's durable home is
+> now `resolveClusterHosts()`'s precedence chain (`execution-core/config.mjs`):
+> 1. **cluster-repo** — the `catalyst-cluster` control-plane repo's
+>    `cluster.json.roster` (the fully-durable, versioned option — requires that
+>    repo to exist, with its own age-key/SOPS setup for secrets).
+> 2. **static roster** — an explicit `catalyst.cluster.staticRoster` array (or
+>    `CATALYST_STATIC_ROSTER`, comma-separated) in each node's OWN Layer-2
+>    config (`~/.config/catalyst/config.json`). Machine-local, NOT committed —
+>    per CLAUDE.md, cluster secrets/topology never go in a public repo. This is
+>    the lightweight escape hatch if you don't want to stand up the full
+>    `catalyst-cluster` repo yet.
+> 3. **single-host** — `[own hostname]` when neither resolves.
+>
+> Whichever you pick, **the SAME roster array must be set identically on every
+> node** — if they disagree, HRW partitioning disagrees too, which risks
+> double-dispatch or a node silently owning nothing.
+
+Pick one of the two mechanisms below, per the precedence documented above.
+
+### Option A — static-roster escape hatch (no `catalyst-cluster` repo needed)
+
+1. **Verify each node's own reported identity first** (see the host-identity
+   gotcha below — a node's `catalyst.host.name` is NOT guaranteed to match the
+   name you intend to put in the roster unless you've explicitly set it):
+   ```bash
+   # on each node:
+   python3 -c "import json; print(json.load(open('/Users/thagale/.config/catalyst/config.json'))['catalyst']['host']['name'])"
+   ```
+
+2. **Set the identical static roster on EVERY node** (seed + all joining nodes):
+   ```bash
+   jq '.catalyst.cluster.staticRoster = ["mini","mini-2"]' ~/.config/catalyst/config.json \
+     > /tmp/cfg.json && mv /tmp/cfg.json ~/.config/catalyst/config.json
+   chmod 600 ~/.config/catalyst/config.json
+   ```
+
+3. **Restart the stack on every node** (see the "plist env changes need a real
+   restart" gotcha below — a `launchctl kickstart` alone is not sufficient).
+
+4. **Verify**: `catalyst cluster status` shows all hosts; `catalyst doctor`'s
+   `hrw-partition` check on each node should show a non-trivial ticket count
+   (not 100% on one host) — this is the concrete proof the partition is real.
+
+### Option B — committed `catalyst-cluster` roster (durable, versioned)
 
 **Prerequisite:** **every** activated node — not just the machine performing this edit — needs its
 own local clone of the private `catalyst-cluster` repo at the default `CATALYST_CLUSTER_DIR`
@@ -156,12 +215,7 @@ for the full SHARED/PER-NODE classification.
    needed. See the [config-mirror contract](../website/src/content/docs/reference/cluster-config-mirror.md)
    for the full SHARED/PER-NODE classification.
 
-2. **Verify all nodes pull the update:**
-   ```bash
-   catalyst cluster status
-   ```
-
-2b. **Re-run the join on the activated node to wire webhook ingestion** — the
+2. **Re-run the join on the activated node to wire webhook ingestion** — the
    Stage-0 join deliberately skipped webhook wiring (`stage0-roster-guard` in
    the webhook-wiring gate: wiring a roster≤1 node would double-dispatch, since
    runtime fencing is roster-derived). The join's progress marker records
@@ -184,12 +238,22 @@ for the full SHARED/PER-NODE classification.
    activated node — that FAIL is the loud signal this step was missed, not a
    new problem.
 
-3. **Watch for zero double-dispatch** — the moment mini-2 enters the roster, the sync gate activates (`roster>1`), and phase-research/phase-plan blocks on `humanlayer thoughts sync`. Verify:
+### After either option
+
+1. **Watch for zero double-dispatch** — the moment mini-2 enters the roster, the sync gate activates (`roster>1`), and phase-research/phase-plan blocks on `humanlayer thoughts sync`. Verify:
    - No duplicate phase-researchers spawned
    - No tickets assigned twice
    - All work completes on one node only
 
-4. **Monitor the reaper** — once activated, mini-2 worktrees are eligible for reaping (CTL-1218). Watch for safe signal+merge patterns before auto-reap.
+2. **Monitor the reaper** — once activated, mini-2 worktrees are eligible for reaping (CTL-1218). Watch for safe signal+merge patterns before auto-reap.
+
+3. **(Optional but recommended) Set a liveness anchor** — without
+   `catalyst.cluster.livenessAnchorIssue` (a Linear ticket key, set identically
+   on every node) or `CATALYST_LIVENESS_ANCHOR_ISSUE`, HRW partitioning still
+   works (it's a pure hash over the roster), but cross-host DEAD-NODE detection
+   is disabled (fail-open, one-time warning) — a crashed peer's in-flight
+   tickets won't get reclaimed by a live node. File one ticket, park it in
+   Backlog (never Todo — Todo auto-dispatches), and never close it.
 
 ## Provisioning the shared cloud token (`CATALYST_CLOUD_TOKEN`, CTL-1307)
 
@@ -277,6 +341,121 @@ when it is projected to the machine-level env.
 > age key (a pre-existing prerequisite shared by *all* cluster secrets, tracked separately). Once
 > those prerequisites are in place, the cloud token is picked up with no per-host step.
 
+## Known Gotchas (from real multi-node onboarding)
+
+These are real failure modes hit while onboarding actual nodes, not theoretical
+— each cost real debugging time, so check them proactively rather than
+rediscovering them.
+
+### A fresh macOS node's `bash` is 3.2, not whatever you tested with
+
+macOS ships bash 3.2 (GPL licensing) as `/bin/bash`, and a bare `bash script.sh`
+invocation resolves to whichever is first on PATH — which may be a much newer
+Homebrew bash on your dev machine, masking bash-3.2-only syntax errors until the
+same script runs on a genuinely fresh node. One concrete trap: a heredoc
+embedded inside a `$(...)` command substitution, whose body contains an
+apostrophe (even in a comment), confuses bash 3.2's quote-tracking across that
+nested boundary and produces a syntax error dozens of lines away from the real
+cause — bash 4+/5 parses the identical file fine. Before trusting any script
+that ships as part of the join path, run `/bin/bash -n script.sh` explicitly
+(not just whatever `bash` resolves to), and consider adding that as a permanent
+regression test (see `setup-plugin-source.test.sh` for the pattern).
+
+### A node's identity may not be what you expect, and won't self-correct
+
+`catalyst-join.sh` defaults a node's `catalyst.host.name` to `hostname -s` (the
+machine's own local/system hostname) unless overridden — which can silently
+differ from whatever name you actually refer to the node by (a Tailscale
+MagicDNS name, an SSH config alias, etc.). Symptom: you activate the node under
+the name you call it, but its daemon silently owns zero tickets under HRW,
+because its actual runtime identity doesn't match any roster entry.
+
+Fix with `catalyst cluster rename <name>` — but this ONLY updates the Layer-2
+config file. The **running daemon's actual identity comes from the
+`CATALYST_HOST_NAME` environment variable baked into the launchd plist at join
+time, which wins over the config file** (env-over-config precedence, same
+pattern used throughout this stack). A rename requires manually fixing that env
+var in the plist(s) too — `ai.coalesce.catalyst-stack.plist` and
+`ai.coalesce.catalyst-log-shipper.plist` both carry it, and `~/.claude/settings.json`'s
+`OTEL_RESOURCE_ATTRIBUTES=host.name=...` should match for telemetry
+consistency. **Verify the actual running process, not just the config file**:
+```bash
+ps eww $(pgrep -f "execution-core/daemon.mjs") | grep -o "CATALYST_HOST_NAME=[^ ]*"
+```
+A doctor/config check run from a fresh ad-hoc shell will NOT catch this — it
+reads the config file, which may say the right thing while the actual daemon
+(with the stale plist env) disagrees. Always cross-check the live process.
+
+### A plist env change needs a full stop, not just `launchctl kickstart`
+
+The daemon plists deliberately set `AbandonProcessGroup` so a keep-alive tick
+doesn't SIGTERM the nohup'd children it just started (see the plist comment).
+This means an already-running broker/monitor/execution-core survives a
+`launchctl kickstart` (or even a `bootout`+`bootstrap` of the wrapper job) — the
+wrapper's own "already running" check sees the live PID and skips respawning,
+so an edited plist env var is silently NOT picked up. To actually apply a plist
+change:
+```bash
+catalyst-stack stop        # kills the actual children (log-shipper excluded, by design)
+launchctl kickstart -k gui/<uid>/ai.coalesce.catalyst-stack
+```
+A bare `catalyst-stack restart` run over SSH has a related but different
+failure mode: SSH session teardown can kill the nohup'd children even with
+`disown`, so a manually-triggered restart may not survive your SSH connection
+closing. Prefer `launchctl kickstart` (after an explicit `stop`) for anything
+you need to actually persist.
+
+### Codex needs its own separate per-node setup — the join process doesn't touch it
+
+If your fleet routes any phase to a Codex executor (`executorByPhase`), each
+node needs its OWN Codex auth — `mkdir -p ~/catalyst/codex-home && CODEX_HOME=~/catalyst/codex-home codex login`
+(a dedicated auth home is deliberately isolated from any personal `codex` CLI
+login). This is NOT part of `catalyst-join.sh` — a freshly joined node has
+`codex` on PATH (if some other step installed it) but no credentials, and will
+fail immediately on any phase routed to it. If a fleet-wide `executorByPhase`
+setting isn't the same for every node (e.g., you're rolling Codex out
+node-by-node), pin the not-yet-ready node to non-Codex executors via the
+`CATALYST_EXECUTOR_BY_PHASE` env var in ITS OWN plist (env wins over the shared
+Layer-1 `executorByPhase` config, and — unlike a Layer-1 edit on a worker node,
+which gets reset on the next config pull — an env var in the plist is durable):
+```xml
+<key>CATALYST_EXECUTOR_BY_PHASE</key>
+<string>{"triage":"bg","research":"bg","plan":"bg","implement":"bg","remediate":"bg","verify":"bg","review":"bg","pr":"bg"}</string>
+```
+
+### Webhook ingestion doesn't propagate via the join bundle
+
+`catalyst doctor`'s `webhook-ingestion` check fails-closed on any multi-host
+member with no wired route (`FAILs so the activation gate fail-closes`, per the
+check's own code comment) — but the join bundle does NOT carry the webhook
+smee-channel URLs or HMAC secret files, since those come from a one-time
+registration done on whichever node originally set up the webhook. To wire a
+new node: copy the secret files (`~/.config/catalyst/webhook-secret`,
+`~/.config/catalyst/linear-webhook-secret`) and the `catalyst.monitor.github.smeeChannel`
+/ `catalyst.monitor.linear.smeeChannel` (+ `.workspace.webhookId`) values from
+an already-wired node into the new node's own Layer-2 config. smee.io channels
+broadcast to every connected listener, so multiple nodes CAN share the same
+channel — each node's own HRW ownership check is what prevents double-acting on
+the same event (this is the "double-dispatch guard" the single-host PASS
+message refers to).
+
+### Org/thoughts convention must be explicit for a forked install
+
+`provision-thoughts.sh`'s primary org is NOT hardcoded (a prior version hardcoded
+one specific org, which is exactly the anti-pattern that broke a downstream
+fork) — set it via `--orgs`/`--registry` (which `catalyst-join.sh` derives
+automatically from the join bundle's `layer1Identity.projectKey`) or the
+`CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG` env var for a from-scratch standalone
+run. With none of the three, the script fails loudly rather than guessing.
+
+### Layer-2 config file permissions drift back to 644
+
+Several code paths that rewrite `~/.config/catalyst/config.json` (a `jq ...  >
+tmp && mv tmp file` pattern, or an `npm install -g` touching the directory)
+don't preserve the original file mode — the temp file inherits the process
+umask instead. `catalyst doctor`'s `layer2-perms` check catches this, but check
+after any manual edit or package install: `chmod 600 ~/.config/catalyst/config.json`.
+
 ## Troubleshooting
 
 ### Join script fails with "doctor gate failed"
@@ -342,15 +521,15 @@ catalyst-stack install-services
 - **Thoughts layout:** `~/catalyst/hlt/<org>/thoughts` (one per org, org = GitHub org name)
 - **Auth model:** `gh` + HTTPS (no SSH keys on cluster nodes)
 - **Node user:** local system user (ryan on mini, ryan on mini-2, etc.)
-- **HumanLayer global fallback:** `coalesce-labs` (primary org, never groundworkapp)
+- **HumanLayer global fallback:** the operator's own primary org, set via `CATALYST_PROVISION_THOUGHTS_PRIMARY_ORG` or `--orgs`/`--registry` — deliberately NOT a hardcoded org name (see the Known Gotchas section)
 - **Worktree location:** `~/catalyst/wt/catalyst-workspace/` (not ~/conductor)
-- **SHADOW mode:** nodes own zero tickets until added to the committed `cluster.json` `roster[]` in
-  the private `catalyst-cluster` repo
+- **SHADOW mode:** nodes own zero tickets until added to the cluster roster (see [Activation](#activation-m2) for the current mechanism — the roster is no longer a per-repo committed `hosts.json`)
 
 ## Related Tickets
 
 - **CTL-1214** — This ticket (thoughts provisioning + mini-2 install)
 - **CTL-1217** — Cluster liveness anchor (one Linear ticket that must never be closed)
+- **CTL-1274** — Cluster roster relocated to the `catalyst-cluster` repo's `cluster.json`; per-repo `hosts.json` retired
 - **CTL-1183–1188** — M1 install-critical path (seed→bundle endpoint, join-token, join installer, doctor gate, contract, cluster CLI)
 - **CTL-1228** — Process-by-role metrics (future: resource monitoring for each active role)
 - **CTL-1230** — Relocate observability config (project→machine config.json)
@@ -358,4 +537,4 @@ catalyst-stack install-services
 
 ---
 
-**Last updated:** 2026-06-16 | **Status:** Stage-0 SHADOW complete, ready for M2 activation
+**Last updated:** 2026-08-01 | **Status:** Stage-0 SHADOW + M2 activation both exercised on a real 3-node cluster; Known Gotchas section reflects real onboarding failures, not theoretical ones
