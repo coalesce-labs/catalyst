@@ -13,9 +13,11 @@
 //                   unentitled rostered host but STILL returns the full roster.
 //   Phase 4: enforce branch actually sheds unentitled hosts (self always admitted;
 //            total-outage degrades to the full roster) and emits `entitlement.shed.*`.
+//   CTL-2108: enforce branch also emits `entitlement.restored.<host>` when a
+//             previously-shed host returns to the kept roster.
 
 import { VERDICT } from "../lib/entitlement.mjs";
-import { ENTITLEMENT_WOULD_SHED, ENTITLEMENT_SHED } from "./entitlement-event.mjs";
+import { ENTITLEMENT_WOULD_SHED, ENTITLEMENT_SHED, ENTITLEMENT_RESTORED } from "./entitlement-event.mjs";
 
 // safeCheck — provider.check is contractually total (fail direction ENTITLED), but
 // an INJECTED provider (W12's authority, a test double) may throw. A throw here
@@ -42,9 +44,12 @@ function safeCheck(provider, arg) {
  * @param {string[]} args.hosts   the raw existence roster
  * @param {string} args.self      this host's name
  * @param {(name:string, payload:object)=>void} [args.emit]  event-append seam
+ * @param {Set<string>|string[]} [args.previouslyShedHosts]  hosts shed on a prior tick;
+ *   when a kept non-self host is in this set an `entitlement.restored.<host>` event is
+ *   emitted. Defaults to empty (backward-compatible — no restore emits without opt-in).
  * @returns {string[]}
  */
-export function resolveEntitledRoster({ mode, provider, hosts, self, emit } = {}) {
+export function resolveEntitledRoster({ mode, provider, hosts, self, emit, previouslyShedHosts } = {}) {
   // Fail-open guard: a malformed roster preserves whatever was passed.
   if (!Array.isArray(hosts)) return hosts;
 
@@ -98,6 +103,17 @@ export function resolveEntitledRoster({ mode, provider, hosts, self, emit } = {}
     if (shedHosts.length > 0 && typeof emit === "function") {
       for (const host of shedHosts) {
         emit(`${ENTITLEMENT_SHED}.${host}`, { host, self, mode, roster_size: hosts.length });
+      }
+    }
+    const prevShed = previouslyShedHosts instanceof Set
+      ? previouslyShedHosts
+      : new Set(previouslyShedHosts ?? []);
+    if (prevShed.size > 0 && typeof emit === "function") {
+      for (const host of kept) {
+        if (host === self) continue;
+        if (prevShed.has(host)) {
+          emit(`${ENTITLEMENT_RESTORED}.${host}`, { host, self, mode, roster_size: hosts.length });
+        }
       }
     }
     return kept;
