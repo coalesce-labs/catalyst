@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+# Tests for install-account-rotation.sh (CTL-2145 Phase 3).
+#
+# NO PLATFORM SKIP, deliberately. The sibling install-orphan-sweep.test.sh opens with
+# `[[ "$(uname -s)" != "Darwin" ]] && exit 0`, and its own header admits the cost: the
+# CI runner is ubuntu, so all of its assertions execute only on a developer's Mac and
+# the workflow reports a green skip. A suite whose coverage depends on where it runs is
+# the same failure class as an assertion that cannot fail. This one instead drives the
+# seams the installer already exposes — CATALYST_FORCE_OS, CATALYST_FORCE_BAKE_DIR, a
+# PATH-shadowed launchctl mock, a scratch HOME — so every assertion runs everywhere.
+#
+# Run: bash plugins/dev/scripts/__tests__/install-account-rotation.test.sh
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+INSTALLER="${REPO_ROOT}/plugins/dev/scripts/install-account-rotation.sh"
+
+PASSES=0
+FAILURES=0
+pass() { PASSES=$((PASSES + 1)); echo "  PASS: $1"; }
+fail() { FAILURES=$((FAILURES + 1)); echo "  FAIL: $1"; }
+
+SCRATCH="$(mktemp -d)"
+# A bake dir that is genuinely NON-ephemeral: not under any temp root, and its own git
+# repo so `rev-parse --absolute-git-dir` does not report a .git/worktrees/ path. Built
+# inside the repo (like the sibling suite) because every temp root is refused by design.
+BAKE_ROOT="${REPO_ROOT}/.tmp-install-account-rotation-test.$$"
+trap 'rm -rf "${SCRATCH:?}" "${BAKE_ROOT:?}"' EXIT
+
+if [[ ! -x "$INSTALLER" ]]; then
+	fail "${INSTALLER} is missing or not executable"
+	echo ""
+	echo "== ${PASSES} passed, ${FAILURES} failed =="
+	exit 1
+fi
+
+# ─── mocks ───────────────────────────────────────────────────────────────────
+MOCKBIN="${SCRATCH}/mockbin"
+mkdir -p "$MOCKBIN"
+LAUNCHCTL_LOG="${SCRATCH}/launchctl.log"
+: >"$LAUNCHCTL_LOG"
+cat >"$MOCKBIN/launchctl" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >>"${LAUNCHCTL_LOG}"
+exit 0
+EOF
+chmod +x "$MOCKBIN/launchctl"
+export PATH="${MOCKBIN}:${PATH}"
+export LAUNCHCTL_LOG
+
+# CTL-1968: launchctl is a PATH-shadowed mock and HOME is a scratch dir, so this suite
+# deliberately exercises the bootstrap path. The product refuses to mutate gui/<uid>
+# from a foreign HOME (a scratch HOME does NOT sandbox launchd). Declaring the seal is
+# how a test opts back in; a suite that FORGOT to seal is what the guard refuses.
+export CATALYST_ALLOW_FOREIGN_HOME_LAUNCHD=1
+
+FAKE_HOME="${SCRATCH}/home"
+mkdir -p "${FAKE_HOME}/Library/LaunchAgents" "${FAKE_HOME}/.config/catalyst"
+export HOME="$FAKE_HOME"
+# Never read the developer's real Layer-2 config: on a host with a registered pristine
+# clone the installer would resolve THAT as BAKE_DIR and every path assertion below
+# would silently be about the wrong tree.
+export CATALYST_LAYER2_CONFIG_FILE="${SCRATCH}/absent-layer2.json"
+export CATALYST_FORCE_OS=Darwin
+# The stray-loop retire step shells out to `ps` and can kill processes. It has its own
+# dedicated section below; every other case opts out so a test run can never signal a
+# bystander process.
+export CATALYST_SKIP_STRAY_RETIRE=1
+# Keep the node-class gate deterministic and off the developer's real config.
+export CATALYST_NODE_CLASS=worker
+
+BAKE_DIR="${BAKE_ROOT}/plugins/dev/scripts"
+mkdir -p "${BAKE_DIR}/coord"
+# Copy the WHOLE coord dir, not just the plist + actor: the install path also runs
+# materialize-coord-kit.sh from the bake dir, and a fixture missing it sends test 6b
+# down its "reported why it did not run" branch — which passes while leaving the real
+# materialize path completely uncovered.
+cp -R "${REPO_ROOT}/plugins/dev/scripts/coord/." "${BAKE_DIR}/coord/"
+git init -q "$BAKE_ROOT" >/dev/null 2>&1 || true
+export CATALYST_FORCE_BAKE_DIR="$BAKE_DIR"
+
+# An accounts env so the D5 applicability gate passes for the install cases.
+ACCTS="${SCRATCH}/claude-accounts.env"
+printf 'CLAUDE_TOKEN_acct1="sk-ant-fake-1"\nCLAUDE_TOKEN_acct2="sk-ant-fake-2"\n_catalyst_active_token="$CLAUDE_TOKEN_acct1"\n' >"$ACCTS"
+export CLAUDE_ACCOUNTS_ENV="$ACCTS"
+
+DEST="${FAKE_HOME}/Library/LaunchAgents/ai.coalesce.catalyst-account-rotation.plist"
+
+# ─── 1. --print renders a valid, fully-substituted plist ─────────────────────
+
+echo "Test 1: --print renders a valid plist"
+OUT="$(bash "$INSTALLER" --print 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]]; then pass "--print exits 0"; else fail "--print exited ${RC}: $OUT"; fi
+grep -q '<string>ai.coalesce.catalyst-account-rotation</string>' <<<"$OUT" &&
+	pass "carries the Label" || fail "no Label in rendered plist"
+if grep -q "<string>${BAKE_DIR}/coord/account-rotation-watch.sh</string>" <<<"$OUT"; then
+	pass "ProgramArguments points at the BAKE dir's actor"
+else
+	fail "ProgramArguments does not name ${BAKE_DIR}/coord/account-rotation-watch.sh: $(grep -A3 ProgramArguments <<<"$OUT")"
+fi
+if grep -qE '<integer>[0-9]+</integer>' <<<"$OUT"; then
+	pass "StartInterval substituted to an integer"
+else
+	fail "StartInterval is not an integer: $(grep -A1 StartInterval <<<"$OUT")"
+fi
+grep -q '<key>KeepAlive</key>' <<<"$OUT" &&
+	fail "rendered plist has KeepAlive — it could zombie" || pass "no KeepAlive in the rendered plist"
+grep -q '<string>shadow</string>' <<<"$OUT" &&
+	pass "rollout knob defaults to shadow" || fail "mode is not shadow by default: $(grep -A3 CATALYST_ACCOUNT_ROTATION <<<"$OUT")"
+grep -q "${FAKE_HOME}/catalyst/account-rotation.log" <<<"$OUT" &&
+	pass "log path substituted to \$HOME" || fail "log path not substituted"
+
+echo "Test 1b: --print-only is accepted as the same thing (install-services uses it)"
+OUT2="$(bash "$INSTALLER" --print-only 2>&1)"
+if [[ "$OUT2" == "$OUT" ]]; then
+	pass "--print and --print-only render identically"
+else
+	fail "--print and --print-only disagree"
+fi
+
+echo "Test 1c: an unknown flag is REJECTED, not silently treated as an install"
+OUT3="$(bash "$INSTALLER" --bogus-flag 2>&1)"
+RC3=$?
+if [[ $RC3 -ne 0 ]]; then
+	pass "unknown flag exits non-zero (rc=${RC3}) instead of installing for real"
+else
+	fail "unknown flag was ignored and the installer proceeded: $OUT3"
+fi
+
+# ─── 2. no REPLACE_ token survives ───────────────────────────────────────────
+
+echo "Test 2: every REPLACE_ token is substituted"
+# Exclude the comment block, which documents the tokens by name on purpose.
+LEFT="$(grep -n 'REPLACE_' <<<"$OUT" | grep -vE '^\s*[0-9]+:\s*(#|<!--|\s+[0-9]+\.)' | grep -vE 'Replace REPLACE_' || true)"
+if [[ -z "$LEFT" ]]; then
+	pass "no REPLACE_ token outside the instructional comment"
+else
+	fail "unsubstituted token(s) remain: $LEFT"
+fi
+# Positive control: the probe can see an unsubstituted token when one really is left.
+if grep -q 'REPLACE_' <<<"$(cat "${BAKE_DIR}/coord/ai.coalesce.catalyst-account-rotation.plist")"; then
+	pass "positive control: the raw template DOES contain REPLACE_ tokens"
+else
+	fail "positive control FAILED — the template has no tokens, so test 2 proves nothing"
+fi
+
+# ─── 3. pristine-path guard ──────────────────────────────────────────────────
+
+echo "Test 3: an ephemeral bake dir is REFUSED and renders nothing"
+for BAD in "/tmp/fake-catalyst-scripts" "${SCRATCH}/scripts"; do
+	OUT4="$(CATALYST_FORCE_BAKE_DIR="$BAD" bash "$INSTALLER" --print 2>&1)"
+	RC4=$?
+	if [[ $RC4 -ne 0 ]] && ! grep -q '<plist' <<<"$OUT4"; then
+		pass "refused ${BAD} (rc=${RC4}) and rendered no plist"
+	else
+		fail "did NOT refuse ${BAD} (rc=${RC4}): $(head -3 <<<"$OUT4")"
+	fi
+done
+echo "Test 3b: a real LINKED WORKTREE is refused (the CTL-1306 shape)"
+# The repo this test runs from is itself a linked worktree in normal development; when
+# it is not, skip LOUDLY rather than silently reporting a pass.
+WT_GITDIR="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir 2>/dev/null || true)"
+case "$WT_GITDIR" in
+	*/worktrees/*)
+		OUT5="$(CATALYST_FORCE_BAKE_DIR="${REPO_ROOT}/plugins/dev/scripts" bash "$INSTALLER" --print 2>&1)"
+		RC5=$?
+		if [[ $RC5 -ne 0 ]]; then
+			pass "refused a real linked worktree (rc=${RC5})"
+		else
+			fail "installed from a linked worktree — the path that vanishes"
+		fi
+		;;
+	*)
+		echo "  SKIP: this checkout is not a linked worktree (git-dir=${WT_GITDIR:-unknown});"
+		echo "        the /tmp and /var/folders arms above still ran."
+		;;
+esac
+
+# ─── 4. mode-resolution precedence ───────────────────────────────────────────
+
+echo "Test 4: mode precedence env > config > installed plist > shadow"
+mode_of() { grep -A2 '<key>CATALYST_ACCOUNT_ROTATION</key>' | sed -n 's|.*<string>\(.*\)</string>.*|\1|p' | head -1; }
+
+GOT="$(CATALYST_ACCOUNT_ROTATION=enforce bash "$INSTALLER" --print 2>/dev/null | mode_of)"
+[[ "$GOT" == "enforce" ]] && pass "env wins (enforce)" || fail "env: expected enforce, got '$GOT'"
+
+PROJ="${SCRATCH}/proj"
+mkdir -p "${PROJ}/.catalyst"
+printf '{"catalyst":{"accountRotation":{"mode":"enforce"}}}\n' >"${PROJ}/.catalyst/config.json"
+GOT="$(cd "$PROJ" && bash "$INSTALLER" --print 2>/dev/null | mode_of)"
+[[ "$GOT" == "enforce" ]] && pass "config wins when env is unset" || fail "config: expected enforce, got '$GOT'"
+
+# The installed-plist clause: a hand-flip must survive a routine reinstall.
+mkdir -p "$(dirname "$DEST")"
+bash "$INSTALLER" --print 2>/dev/null | sed 's|<string>shadow</string>|<string>enforce</string>|' >"$DEST"
+GOT="$(bash "$INSTALLER" --print 2>/dev/null | mode_of)"
+if [[ "$GOT" == "enforce" ]]; then
+	pass "a hand-flip in the installed plist survives a reinstall"
+else
+	fail "installed-plist clause: expected enforce, got '$GOT' — a routine reinstall would revert an operator's flip"
+fi
+
+echo "Test 4b: an invalid mode falls back to shadow and does NOT fall through"
+# The load-bearing case: `enforce` is sitting in the installed plist from above, so a
+# mistyped rollback must not be "corrected" back to it.
+GOT="$(CATALYST_ACCOUNT_ROTATION=shdow bash "$INSTALLER" --print 2>/dev/null | mode_of)"
+if [[ "$GOT" == "shadow" ]]; then
+	pass "typo => shadow, NOT the enforce sitting in the installed plist"
+else
+	fail "typo resolved to '$GOT' — an attempt to DISARM re-armed it"
+fi
+rm -f "$DEST"
+
+# ─── 5. applicability gate (D5) ──────────────────────────────────────────────
+
+echo "Test 5: the D5 gate refuses non-fatally, and never silently"
+OUT6="$(CATALYST_NODE_CLASS=monitor bash "$INSTALLER" 2>&1)"
+RC6=$?
+if [[ $RC6 -eq 0 ]]; then pass "wrong node class: exit 0 (non-fatal delegate)"; else fail "wrong node class exited ${RC6}"; fi
+if [[ ! -f "$DEST" ]]; then pass "wrong node class: installed nothing"; else fail "installed on a monitor node"; fi
+if grep -qi "node class" <<<"$OUT6"; then pass "wrong node class: said why"; else fail "refused silently: $OUT6"; fi
+
+OUT7="$(CLAUDE_ACCOUNTS_ENV="${SCRATCH}/no-such-accounts.env" bash "$INSTALLER" 2>&1)"
+RC7=$?
+if [[ $RC7 -eq 0 ]]; then pass "no accounts env: exit 0 (non-fatal delegate)"; else fail "no accounts env exited ${RC7}"; fi
+if [[ ! -f "$DEST" ]]; then pass "no accounts env: installed nothing"; else fail "installed with no accounts to rotate between"; fi
+if grep -qi "claude-accounts.env" <<<"$OUT7"; then pass "no accounts env: named the missing file"; else fail "refused silently: $OUT7"; fi
+
+# ─── 6. install + idempotent reinstall ───────────────────────────────────────
+
+echo "Test 6: install writes the plist and bootstraps idempotently"
+: >"$LAUNCHCTL_LOG"
+OUT8="$(bash "$INSTALLER" 2>&1)"
+RC8=$?
+if [[ $RC8 -eq 0 ]]; then pass "install exits 0"; else fail "install exited ${RC8}: $OUT8"; fi
+if [[ -f "$DEST" ]]; then pass "wrote ${DEST##*/}"; else fail "no plist at $DEST"; fi
+grep -q "bootout gui/$(id -u)/ai.coalesce.catalyst-account-rotation" "$LAUNCHCTL_LOG" &&
+	pass "booted out any existing instance first" || fail "no bootout: $(cat "$LAUNCHCTL_LOG")"
+grep -q "bootstrap gui/$(id -u)" "$LAUNCHCTL_LOG" &&
+	pass "bootstrapped the fresh plist" || fail "no bootstrap: $(cat "$LAUNCHCTL_LOG")"
+# NOT `grep -q ... | grep -v '#'`: `-q` prints nothing, so the downstream grep can only
+# ever exit 1 and the `else` branch fires whether or not a token survived — a check that
+# cannot fail. Match the operative lines directly, excluding the instructional comment.
+INSTALLED_LEFT="$(grep -n 'REPLACE_' "$DEST" 2>/dev/null | grep -vE ':[[:space:]]*(#|<!--)' | grep -vE 'Replace REPLACE_' || true)"
+if [[ -n "$INSTALLED_LEFT" ]]; then
+	fail "the INSTALLED plist still carries a REPLACE_ token: $INSTALLED_LEFT"
+else
+	pass "the installed plist is substituted"
+fi
+# Positive control: the same probe DOES fire on the raw template.
+if [[ -n "$(grep -n 'REPLACE_WITH_ABSOLUTE' "${BAKE_DIR}/coord/ai.coalesce.catalyst-account-rotation.plist" | grep -vE ':[[:space:]]*(#|<!--)' | grep -vE 'Replace REPLACE_' || true)" ]]; then
+	pass "positive control: the installed-plist token probe fires on the raw template"
+else
+	fail "positive control FAILED — the token probe cannot fire, so the check above proves nothing"
+fi
+# Re-running must be safe and must converge on the same content.
+CKSUM1="$(cksum <"$DEST")"
+: >"$LAUNCHCTL_LOG"
+bash "$INSTALLER" >/dev/null 2>&1
+CKSUM2="$(cksum <"$DEST")"
+if [[ "$CKSUM1" == "$CKSUM2" ]]; then
+	pass "reinstall is idempotent (identical plist)"
+else
+	fail "reinstall produced a different plist"
+fi
+
+echo "Test 6b: the install path materialized the coord kit"
+if grep -qi "materialized the coord kit" <<<"$OUT8"; then
+	pass "ran materialize-coord-kit.sh"
+else
+	fail "materialize did not run: $OUT8"
+fi
+# And it produced the runtime dir the lane watchdog reads, as REAL files.
+COORD_RT="${FAKE_HOME}/catalyst/comms/coord"
+for f in lane-relaunch.sh account-rotation-watch.sh lib/rotation-window.sh; do
+	if [[ -f "${COORD_RT}/${f}" && ! -L "${COORD_RT}/${f}" ]]; then
+		pass "baked ${f} into the runtime dir as a real file"
+	else
+		fail "runtime dir is missing (or symlinked) ${f}"
+	fi
+done
+if [[ -f "${COORD_RT}/launch-on-acct1.sh" && -f "${COORD_RT}/launch-on-acct2.sh" ]]; then
+	pass "generated one launcher per provisioned handle"
+else
+	fail "per-account launchers were not generated into ${COORD_RT}"
+fi
+
+# ─── 7. --uninstall ──────────────────────────────────────────────────────────
+
+echo "Test 7: --uninstall boots out and removes the plist"
+: >"$LAUNCHCTL_LOG"
+OUT9="$(bash "$INSTALLER" --uninstall 2>&1)"
+RC9=$?
+if [[ $RC9 -eq 0 ]]; then pass "--uninstall exits 0"; else fail "--uninstall exited ${RC9}: $OUT9"; fi
+if [[ ! -f "$DEST" ]]; then pass "removed the plist"; else fail "plist still present"; fi
+grep -q "bootout gui/$(id -u)/ai.coalesce.catalyst-account-rotation" "$LAUNCHCTL_LOG" &&
+	pass "called bootout" || fail "no bootout on uninstall: $(cat "$LAUNCHCTL_LOG")"
+
+echo "Test 7b: --uninstall works from an EPHEMERAL path (CTL-1306)"
+# uninstall must never be gated on the bake dir, or `uninstall-services` from a
+# worktree cannot remove the agent it is trying to remove.
+: >"$LAUNCHCTL_LOG"
+OUT10="$(CATALYST_FORCE_BAKE_DIR=/tmp/nope bash "$INSTALLER" --uninstall 2>&1)"
+RC10=$?
+if [[ $RC10 -eq 0 ]]; then
+	pass "--uninstall from an ephemeral bake dir still exits 0"
+else
+	fail "--uninstall was blocked by the bake-dir guard (rc=${RC10}): $OUT10"
+fi
+
+echo "Test 7c: --uninstall is NOT gated on the D5 applicability check"
+: >"$LAUNCHCTL_LOG"
+RC11=0
+CATALYST_NODE_CLASS=monitor CLAUDE_ACCOUNTS_ENV="${SCRATCH}/gone.env" bash "$INSTALLER" --uninstall >/dev/null 2>&1 || RC11=$?
+if [[ $RC11 -eq 0 ]] && grep -q "bootout" "$LAUNCHCTL_LOG"; then
+	pass "removing an agent that should not be there is exactly what uninstall is for"
+else
+	fail "uninstall was gated on applicability (rc=${RC11}); a mis-classed host could never clean up"
+fi
+
+# ─── 8. stray-loop retire (deliverable 4) ────────────────────────────────────
+#
+# The only section that lets the retire step run. It is exercised against a REAL
+# self-limiting background process, never a `while :` spinner: an unbounded loop that
+# outlives a failed assertion is the incident this repo already had (four spinners,
+# ~4 CPU cores, 16.5 hours, while the script reported "cleanup verified").
+
+echo "Test 8: the stray-loop retire kills a foreign loop and verifies positively"
+STRAY_DIR="${SCRATCH}/old-job-dir"
+mkdir -p "$STRAY_DIR"
+cat >"${STRAY_DIR}/lane-relaunch.sh" <<'EOF'
+#!/usr/bin/env bash
+# Self-limiting stand-in for the zombie: it sleeps, and it dies on its own after 120s
+# even if every kill below fails. Never `while :; do :; done`.
+end=$((SECONDS + 120))
+while [ $SECONDS -lt $end ]; do sleep 1; done
+EOF
+chmod +x "${STRAY_DIR}/lane-relaunch.sh"
+bash "${STRAY_DIR}/lane-relaunch.sh" &
+STRAY_PID=$!
+sleep 1
+if ps -p "$STRAY_PID" >/dev/null 2>&1; then
+	pass "positive control: the stray loop is running before the installer sees it"
+else
+	fail "positive control FAILED — the stray never started, so the retire below proves nothing"
+fi
+OUT11="$(CATALYST_SKIP_STRAY_RETIRE=0 bash "$INSTALLER" 2>&1)"
+# Fail CLOSED: assert the process is GONE with `ps -p`, never `kill -0 && echo`, which
+# prints nothing when the probe itself errors and self-certifies success either way.
+if ps -p "$STRAY_PID" >/dev/null 2>&1; then
+	fail "the stray loop SURVIVED the retire step (pid ${STRAY_PID})"
+	kill -9 "$STRAY_PID" 2>/dev/null || true
+else
+	pass "the stray loop is gone (asserted positively with ps -p)"
+fi
+if grep -qi "retiring stray" <<<"$OUT11"; then pass "logged the retirement"; else fail "retired silently: $OUT11"; fi
+
+echo "Test 8b: retire is idempotent — a second run on a clean machine is a no-op"
+OUT12="$(CATALYST_SKIP_STRAY_RETIRE=0 bash "$INSTALLER" 2>&1)"
+RC12=$?
+if [[ $RC12 -eq 0 ]] && grep -qi "no stray lane/rotation loop found" <<<"$OUT12"; then
+	pass "clean machine: says so and exits 0"
+else
+	fail "second run was not a clean no-op (rc=${RC12}): $OUT12"
+fi
+
+echo "Test 8c: the retire step does NOT kill the supervised copy in the bake dir"
+cp "${STRAY_DIR}/lane-relaunch.sh" "${BAKE_DIR}/coord/lane-relaunch.sh"
+bash "${BAKE_DIR}/coord/lane-relaunch.sh" &
+GOOD_PID=$!
+sleep 1
+CATALYST_SKIP_STRAY_RETIRE=0 bash "$INSTALLER" >/dev/null 2>&1
+if ps -p "$GOOD_PID" >/dev/null 2>&1; then
+	pass "left the current bake dir's own watchdog alone"
+else
+	fail "killed the supervised watchdog running from the bake dir"
+fi
+kill "$GOOD_PID" 2>/dev/null || true
+wait "$GOOD_PID" 2>/dev/null || true
+
+# Nothing this suite started may outlive it.
+for p in "${STRAY_PID:-}" "${GOOD_PID:-}"; do
+	[[ -n "$p" ]] && kill -9 "$p" 2>/dev/null || true
+done
+LEAKED=0
+for p in "${STRAY_PID:-}" "${GOOD_PID:-}"; do
+	[[ -n "$p" ]] && ps -p "$p" >/dev/null 2>&1 && LEAKED=1
+done
+if [[ $LEAKED -eq 0 ]]; then pass "no test process leaked"; else fail "a test process LEAKED"; fi
+
+echo ""
+echo "== ${PASSES} passed, ${FAILURES} failed =="
+[[ $FAILURES -eq 0 ]]

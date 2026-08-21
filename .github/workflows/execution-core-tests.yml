@@ -650,6 +650,21 @@ jobs:
           bash plugins/dev/scripts/coord/__tests__/lane-relaunch.test.sh
           bash plugins/dev/scripts/coord/__tests__/account-rotation-watch.test.sh
 
+      - name: account-rotation LaunchAgent plist + installer (CTL-2145)
+        # Same explicit-pin reason as the coord block above: this job runs an enumerated
+        # allowlist, so a suite merely PRESENT under __tests__/ never gates a PR.
+        #
+        # Both of these run on the ubuntu runner ON PURPOSE. The sibling
+        # install-orphan-sweep.test.sh opens with a `uname -s != Darwin` skip, so on CI it
+        # reports a green 0-assertion pass and its coverage exists only on a developer's
+        # Mac. These drive the installer's own CATALYST_FORCE_OS / CATALYST_FORCE_BAKE_DIR
+        # seams plus a PATH-shadowed launchctl mock instead, so every assertion executes
+        # here. The plist suite is pure static analysis and needs no seams at all.
+        working-directory: .
+        run: |
+          bash plugins/dev/scripts/__tests__/account-rotation-plist.test.sh
+          bash plugins/dev/scripts/__tests__/install-account-rotation.test.sh
+
       - name: review-comments headless resolution test (CTL-1496)
         working-directory: plugins/dev/scripts
         run: bash __tests__/review-comments-headless.test.sh
