@@ -6,7 +6,10 @@ import { defaultInvokeSeam, reasoningRecoveryPass } from "./recovery-reasoning.m
 import { RECOVERY_FIX_BACKOFF_THRESHOLD } from "./recovery-fix-backoff.mjs";
 
 let dir;
-afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); dir = null; });
+afterEach(() => {
+  if (dir) rmSync(dir, { recursive: true, force: true });
+  dir = null;
+});
 const fresh = () => (dir = mkdtempSync(join(tmpdir(), "cat-47-e2e-")));
 
 // Defect B is a CALL-SITE bug: attemptFix dropped item.phase/item.evidence.signal,
@@ -68,34 +71,81 @@ describe("defaultInvokeSeam registry selection (CAT-47 Defect A)", () => {
 
   test("an EMPTY injected registry falls back to one built from the injected deps", () => {
     let emits = 0;
-    const result = defaultInvokeSeam("CAT-47", "orphan-reconcile", {}, {
-      ...merged,
-      orchDir: fresh(),
-      actByCategory: {},
-      emitPhaseComplete: () => { emits += 1; return true; },
-    });
+    const result = defaultInvokeSeam(
+      "CAT-47",
+      "orphan-reconcile",
+      {},
+      {
+        ...merged,
+        orchDir: fresh(),
+        actByCategory: {},
+        emitPhaseComplete: () => {
+          emits += 1;
+          return true;
+        },
+      }
+    );
     expect(result.success).toBe(true);
     expect(emits).toBe(1);
   });
 
+  test("an operator-suppressed registry never rebuilds a live fallback (CAT-124 F3)", () => {
+    let emits = 0;
+    const root = fresh();
+    const result = defaultInvokeSeam(
+      "CAT-47",
+      "orphan-reconcile",
+      {},
+      {
+        ...merged,
+        orchDir: root,
+        actByCategory: {},
+        seamFallbackSuppressed: true,
+        emitPhaseComplete: () => {
+          emits += 1;
+          return true;
+        },
+      }
+    );
+    expect(result.success).toBe(false);
+    expect(result.reason).toContain("suppressed by operator override");
+    expect(result.details.suppressed).toBe(true);
+    expect(emits).toBe(0);
+  });
+
   test("a registry MISSING this category falls back rather than reporting unavailable", () => {
-    const result = defaultInvokeSeam("CAT-47", "orphan-reconcile", {}, {
-      ...merged,
-      orchDir: fresh(),
-      actByCategory: { "dirty-tree": () => {} },
-      emitPhaseComplete: () => true,
-    });
+    const result = defaultInvokeSeam(
+      "CAT-47",
+      "orphan-reconcile",
+      {},
+      {
+        ...merged,
+        orchDir: fresh(),
+        actByCategory: { "dirty-tree": () => {} },
+        emitPhaseComplete: () => true,
+      }
+    );
     expect(result.success).toBe(true);
     expect(result.reason ?? "").not.toContain("unavailable");
   });
 
   test("a registry that DOES provide the category is used verbatim (not rebuilt)", () => {
     let called = 0;
-    const result = defaultInvokeSeam("CAT-47", "orphan-reconcile", {}, {
-      orchDir: fresh(),
-      candidate: { phase: "monitor-merge", signal: null },
-      actByCategory: { "orphan-stale": (candidate) => { called += 1; expect(candidate.phase).toBe("monitor-merge"); } },
-    });
+    const result = defaultInvokeSeam(
+      "CAT-47",
+      "orphan-reconcile",
+      {},
+      {
+        orchDir: fresh(),
+        candidate: { phase: "monitor-merge", signal: null },
+        actByCategory: {
+          "orphan-stale": (candidate) => {
+            called += 1;
+            expect(candidate.phase).toBe("monitor-merge");
+          },
+        },
+      }
+    );
     expect(result.success).toBe(true);
     expect(called).toBe(1);
   });
@@ -109,7 +159,10 @@ describe("orphan-stale recovery end to end (CAT-47)", () => {
       orchDir: root,
       resolvePrState: () => "MERGED",
       jobLifecycle: () => false,
-      emitPhaseComplete: () => { emits += 1; return true; },
+      emitPhaseComplete: () => {
+        emits += 1;
+        return true;
+      },
       nowMs: () => Date.parse("2026-08-09T03:00:00Z"),
       candidate: {
         phase: "monitor-merge",
@@ -119,7 +172,9 @@ describe("orphan-stale recovery end to end (CAT-47)", () => {
     expect(defaultInvokeSeam("CAT-47", "orphan-reconcile", {}, deps).success).toBe(true);
     expect(defaultInvokeSeam("CAT-47", "orphan-reconcile", {}, deps).success).toBe(true);
     expect(emits).toBe(1);
-    expect(existsSync(join(root, "workers", "CAT-47", ".unstuck-orphan-merge-monitor-merge.applied"))).toBe(true);
+    expect(
+      existsSync(join(root, "workers", "CAT-47", ".unstuck-orphan-merge-monitor-merge.applied"))
+    ).toBe(true);
   });
 
   test("AC3: identical seam failures stop at the threshold and comment once", () => {
@@ -131,10 +186,19 @@ describe("orphan-stale recovery end to end (CAT-47)", () => {
       mode: "enforce",
       orchDir: root,
       shouldSkipItem: () => false,
-      classifyTicket: () => ({ decision: "fix", fix_class: "orphan_stale", details: { seam_id: "orphan-reconcile", reason: "stale" } }),
-      invokeSeam: () => { attempts += 1; throw new Error("same failure"); },
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "orphan_stale",
+        details: { seam_id: "orphan-reconcile", reason: "stale" },
+      }),
+      invokeSeam: () => {
+        attempts += 1;
+        throw new Error("same failure");
+      },
       recordIntent: () => {},
-      postComment: () => { comments += 1; },
+      postComment: () => {
+        comments += 1;
+      },
       emitEvent: () => {},
       log: () => {},
       nowMs: () => 1000,
@@ -150,10 +214,25 @@ describe("orphan-stale recovery end to end (CAT-47)", () => {
     const root = fresh();
     let comments = 0;
     const options = {
-      mode: "enforce", orchDir: root, shouldSkipItem: () => false,
-      classifyTicket: () => ({ decision: "fix", fix_class: "orphan_stale", details: { seam_id: "orphan-reconcile", reason: "stale" } }),
-      invokeSeam: () => { throw new Error("same failure"); }, recordIntent: () => {}, emitEvent: () => {}, log: () => {}, nowMs: () => 1000,
-      postComment: () => { comments += 1; throw new Error("Linear unavailable"); },
+      mode: "enforce",
+      orchDir: root,
+      shouldSkipItem: () => false,
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "orphan_stale",
+        details: { seam_id: "orphan-reconcile", reason: "stale" },
+      }),
+      invokeSeam: () => {
+        throw new Error("same failure");
+      },
+      recordIntent: () => {},
+      emitEvent: () => {},
+      log: () => {},
+      nowMs: () => 1000,
+      postComment: () => {
+        comments += 1;
+        throw new Error("Linear unavailable");
+      },
     };
     const item = { ticket: "CAT-47", phase: "monitor-merge", evidence: { signal: {} } };
     reasoningRecoveryPass([item], options);

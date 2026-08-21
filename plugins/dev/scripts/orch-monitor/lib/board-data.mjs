@@ -1553,6 +1553,53 @@ export function synthesizeParkedNeedsHumanTickets(
   return cards;
 }
 
+// mergeDurableEscalationsIntoCards — CAT-173: the complement of
+// synthesizeDurableEscalations, which by design DROPS a durable record whose ticket
+// already has a card (id dedupe). That dedupe is right for the terminal-sweep case:
+// such a ticket has a live failed/stalled signal, so deriveAttention's phaseFailed
+// path already renders it needs-human and a second card would double-list it.
+//
+// It is WRONG for a record whose existing card carries no attention at all. The
+// concrete hole: a fence-suppressed break-glass on a BEHIND PR whose rescue budget
+// is exhausted. The rescue timer only reaches that point via an existing worker
+// directory, so the ticket always has a card; BEHIND is deliberately excluded from
+// PR_BLOCKER_STATES (the pipeline may auto-rebase it); and the fence suppressed the
+// needs-human label, so nothing else marks it. The record was then deduped away —
+// leaving the break-glass on no operator surface at all, including the push bridge,
+// which projects only board tickets.
+//
+// So: fill the EXISTING card's attention instead of dropping the record. Never
+// overwrite an attention that is already set — a live reason is always better than
+// a durable record's replay of it.
+export function mergeDurableEscalationsIntoCards(
+  tickets,
+  records,
+  linfo = {},
+  terminalIds = new Set(),
+) {
+  if (!Array.isArray(tickets) || !Array.isArray(records)) return tickets;
+  const terminal = terminalIds instanceof Set ? terminalIds : new Set();
+  const byId = new Map();
+  for (const t of tickets) {
+    if (t && t.id != null && !byId.has(t.id)) byId.set(t.id, t);
+  }
+  for (const rec of records) {
+    if (!rec || !rec.ticket) continue;
+    const card = byId.get(rec.ticket);
+    if (!card) continue; // no existing card → synthesizeDurableEscalations owns it
+    // Terminal-aware, matching the synthesis path: never page on a Done/Canceled ticket.
+    if (terminal.has(rec.ticket) || isLinearTerminal(linfo?.[rec.ticket]?.linearState)) continue;
+    if (card.attention) continue; // already surfaced — keep the live reason
+    card.attention = "needs-human";
+    card.attentionSince = rec.escalatedAt ?? card.attentionSince ?? null;
+    card.humanQuestion =
+      typeof rec.reason === "string" && rec.reason.length > 0
+        ? rec.reason
+        : "Escalated for a human.";
+  }
+  return tickets;
+}
+
 // synthesizeDurableEscalations — CTL-1643: surface durable escalation records on
 // the board even when the worker dir has been GC'd (Hole 2) and even when the
 // needs-human label never confirmed in Linear (Hole 1). Mirrors the parked-synthesis
@@ -2401,6 +2448,15 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
     Object.keys(linfo).filter((id) => isLinearTerminal(linfo[id]?.linearState))
   );
   const durableEscalationRecords = readDurableEscalations(EC);
+  // CAT-173: fill attention on cards that already exist BEFORE the id dedupe below
+  // drops their records, so a fence-standoff break-glass on an otherwise
+  // attention-less card (e.g. a BEHIND PR) still reaches the board and push bridge.
+  tickets = mergeDurableEscalationsIntoCards(
+    tickets,
+    durableEscalationRecords,
+    linfo,
+    terminalLinearIds,
+  );
   const durableCardIds = new Set(tickets.map((t) => t.id));
   const durableTickets = synthesizeDurableEscalations(
     durableEscalationRecords,

@@ -71,6 +71,7 @@ import { ESCALATION_EVENT_NEEDS_HUMAN } from "../execution-core/escalation-event
 // (not a re-typed literal). The `linear.label.` prefix is UNPROTECTED under the
 // namespace contract (a dedicated test below asserts it, alongside the salvage family).
 import { LABEL_RETRY_EXHAUSTED_EVENT } from "../execution-core/label-retry-event.mjs";
+import { FENCE_STANDOFF_EVENT } from "../execution-core/fence-standoff.mjs"; // CAT-173
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -124,6 +125,7 @@ const EXEC_CORE_EVENT_NAMES = [
   ...ENTITLEMENT_EVENT_NAMES, // CTL-1785 entitlement-event.mjs — would-shed / shed / restored (v3 bare-name, host-suffixed)
   ESCALATION_EVENT_NEEDS_HUMAN, // CTL-2056 escalation-event.mjs — ticket.escalated (entity=ticket/action=escalated)
   LABEL_RETRY_EXHAUSTED_EVENT, // CTL-2052 label-retry-event.mjs — the "stopped after N and said so" escalation
+  FENCE_STANDOFF_EVENT, // CAT-173 fence-standoff.mjs — mutual fence standoff escalation
   ...INLINE_EVENT_NAMES,
 ];
 

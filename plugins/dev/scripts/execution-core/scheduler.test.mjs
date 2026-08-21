@@ -5342,6 +5342,206 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
   });
 });
 
+describe("CAT-173: terminal-sweep fence-standoff cooldown", () => {
+  test("delivery failure does not extend fence suppression and retries next tick", () => {
+    const ticket = "PROJ-173-RETRY";
+    const nowMs = Date.now();
+    writeSignal(ticket, "implement", "failed");
+    mkdirSync(join(orchDir, ".fence-standoff"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".fence-standoff", `${ticket}.json`),
+      JSON.stringify({
+        ticket,
+        site: "terminal-sweep",
+        reason: "unverifiable",
+        firstSuppressedAt: nowMs - 2,
+        lastSuppressedAt: nowMs - 2,
+        count: 0,
+        breakGlassAt: null,
+      }),
+    );
+
+    let fenceCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      now: () => nowMs,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "1",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+        CATALYST_FENCE_STANDOFF_COOLDOWN_MS: "21600000",
+      },
+      gateway: {
+        getDescriptor: () => ({
+          state: "In Progress",
+          removed: false,
+          updatedAt: new Date(nowMs).toISOString(),
+        }),
+      },
+      writeStatus: {
+        applyPhaseStatus() {},
+        applyTerminalDone() {},
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      terminalFenceGuard: (_subject, hooks) => {
+        fenceCalls += 1;
+        hooks.onSuppress?.({ reason: "unverifiable" });
+        return false;
+      },
+      appendFenceStandoffEvent: () => {
+        throw new Error("injected append failure");
+      },
+    };
+
+    schedulerTick(orchDir, opts);
+    expect(fenceCalls).toBe(1);
+    expect(existsSync(join(orchDir, "workers", ticket, ".fence-suppressed"))).toBe(false);
+    expect(existsSync(join(orchDir, "workers", ticket, ".fence-standoff-cooldown"))).toBe(false);
+
+    schedulerTick(orchDir, opts);
+    expect(fenceCalls).toBe(2);
+  });
+
+  // CAT-173 review: the retry above must be BOUNDED. An unbounded one re-runs the
+  // terminal Linear probe + fence-check every tick on a persistently failing sink —
+  // the CTL-1329 burn. Past the bound the ordinary 15-minute marker is retained.
+  test("a persistently failing delivery stops bypassing the 15-minute cooldown", () => {
+    const ticket = "PROJ-173-RETRY-BOUND";
+    const nowMs = Date.now();
+    writeSignal(ticket, "implement", "failed");
+    mkdirSync(join(orchDir, ".fence-standoff"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".fence-standoff", `${ticket}.json`),
+      JSON.stringify({
+        ticket,
+        site: "terminal-sweep",
+        reason: "unverifiable",
+        firstSuppressedAt: nowMs - 2,
+        lastSuppressedAt: nowMs - 2,
+        count: 0,
+        breakGlassAt: null,
+      }),
+    );
+
+    let fenceCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      now: () => nowMs,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "1",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+        CATALYST_FENCE_STANDOFF_COOLDOWN_MS: "21600000",
+        CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX: "3",
+      },
+      gateway: {
+        getDescriptor: () => ({
+          state: "In Progress",
+          removed: false,
+          updatedAt: new Date(nowMs).toISOString(),
+        }),
+      },
+      writeStatus: {
+        applyPhaseStatus() {},
+        applyTerminalDone() {},
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      terminalFenceGuard: (_subject, hooks) => {
+        fenceCalls += 1;
+        hooks.onSuppress?.({ reason: "unverifiable" });
+        return false;
+      },
+      appendFenceStandoffEvent: () => {
+        throw new Error("injected persistent append failure");
+      },
+    };
+
+    for (let i = 0; i < 12; i++) schedulerTick(orchDir, opts);
+    // 4 probes: the first three failures are under the bound and drop the marker;
+    // the fourth retains it, so every later tick short-circuits before the fence.
+    expect(fenceCalls).toBe(4);
+    expect(existsSync(join(orchDir, "workers", ticket, ".fence-suppressed"))).toBe(true);
+    expect(existsSync(join(orchDir, "workers", ticket, ".fence-standoff-cooldown"))).toBe(false);
+  });
+
+  // CAT-173 verify finding #3: the POSITIVE path was unpinned — nothing asserted
+  // that a successful break-glass stamps the cooldown, nor that the cooldown then
+  // short-circuits the next tick's probe+write block.
+  test("a successful break-glass stamps the cooldown and short-circuits the next tick", () => {
+    const ticket = "PROJ-173-COOLDOWN";
+    const nowMs = Date.now();
+    writeSignal(ticket, "implement", "failed");
+    mkdirSync(join(orchDir, ".fence-standoff"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".fence-standoff", `${ticket}.json`),
+      JSON.stringify({
+        ticket,
+        site: "terminal-sweep",
+        reason: "unverifiable",
+        firstSuppressedAt: nowMs - 2,
+        lastSuppressedAt: nowMs - 2,
+        count: 0,
+        breakGlassAt: null,
+      }),
+    );
+
+    let fenceCalls = 0;
+    let appendCalls = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      now: () => nowMs,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "1",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+        CATALYST_FENCE_STANDOFF_COOLDOWN_MS: "21600000",
+      },
+      gateway: {
+        getDescriptor: () => ({
+          state: "In Progress",
+          removed: false,
+          updatedAt: new Date(nowMs).toISOString(),
+        }),
+      },
+      writeStatus: {
+        applyPhaseStatus() {},
+        applyTerminalDone() {},
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+      },
+      terminalFenceGuard: (_subject, hooks) => {
+        fenceCalls += 1;
+        hooks.onSuppress?.({ reason: "unverifiable" });
+        return false;
+      },
+      appendFenceStandoffEvent: () => {
+        appendCalls += 1;
+        return true;
+      },
+    };
+
+    schedulerTick(orchDir, opts);
+    expect(fenceCalls).toBe(1);
+    expect(appendCalls).toBe(1);
+    const cooldownPath = join(orchDir, "workers", ticket, ".fence-standoff-cooldown");
+    expect(existsSync(cooldownPath)).toBe(true);
+    expect(JSON.parse(readFileSync(cooldownPath, "utf8")).expiresAt).toBe(nowMs + 21600000);
+    // The durable, unfenced human signal was written without a Linear label.
+    const durable = JSON.parse(
+      readFileSync(join(orchDir, ".escalations", `${ticket}.json`), "utf8"),
+    );
+    expect(durable.source).toBe("fence-standoff");
+    expect(durable.labelConfirmed).toBe(false);
+
+    // Second tick inside the window: zero fence calls, zero further escalations.
+    schedulerTick(orchDir, opts);
+    expect(fenceCalls).toBe(1);
+    expect(appendCalls).toBe(1);
+  });
+});
+
 // ── CTL-1079: retraction sweep reads from broker cache instead of live API ──
 // These tests use an exec spy + the real removeLabel (from linear-write.mjs)
 // to verify that gateway cache hits suppress the live `linearis issues read`

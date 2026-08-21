@@ -322,6 +322,52 @@ advisory `entitlement-*` checks report the resolved mode, the provider (local vs
 whether the ordering constraint holds — INFO/WARN only, never FAIL. The `entitlement.*` event prefix
 is **unprotected** under the CTL-1142 namespace contract.
 
+**Fence-standoff bound (CAT-173).** Two live hosts can each hold evidence that the other owns a
+ticket, causing every fence-guarded human escalation to be suppressed. Each escalation site records
+that suppression in the host-local, GC-surviving `.fence-standoff/<TICKET>.json` ledger. After both
+the configured count (default 4) and age (default 45 minutes) are reached, Catalyst writes an
+unfenced `.escalations/<TICKET>.json` record and emits `escalation.fence-standoff.<TICKET>`, so the
+notification bridge can surface the ticket without a Linear write.
+
+Only a MUTUAL standoff counts, and a standoff is by definition AMBIGUOUS — nobody can tell who owns
+the ticket. Just two `fenceGuard` verdicts are ambiguous in that sense and so accumulate toward the
+bound: `unverifiable` (the authoritative read neither confirmed nor refuted this host's generation)
+and `threw` (fail-closed on an error), alongside a non-fail-open `missing-generation`.
+
+The CONFIRMED-TAKEOVER verdicts are the opposite — positive evidence that a specific other host holds
+the claim, which is the correct outcome on the superseded host after a healthy takeover, where
+`fenceGuard` deliberately leaves the escalation to the current owner (whose own fence passes).
+There are TWO of them and BOTH are excluded: `foreign-owner` (the projection names a different owner
+host) and `superseded` (the authoritative read returned `stale: true`, i.e. a newer generation
+exists — the shape an ordinary healthy takeover takes on the old host, discovered via generation
+rather than owner identity). Counting either would let a lingering worker directory on the old host
+cross the bound and page an operator about a ticket the new owner is actively processing, so both are
+excluded from accounting and additionally CLEAR the ledger, letting a later genuine standoff start
+a fresh episode instead of inheriting a stale count and age.
+
+The record is GC-surviving and reaches the board two ways. When the ticket has **no** card,
+`synthesizeDurableEscalations` mints one. When it already has a card, that function's id dedupe
+drops the record, so `mergeDurableEscalationsIntoCards` runs first and stamps the escalation's
+reason onto the existing card — but only when that card carries no `attention` yet, so a live
+reason always wins. Both halves are needed: a terminal-sweep standoff has a live `failed`/`stalled`
+signal (hence a card, hence `deriveAttention`'s `phaseFailed` → `needs-human`) and only wanted the
+standoff-specific reason, whereas a stale-PR standoff on a `BEHIND` PR has a card with **no**
+attention at all — `BEHIND` is excluded from `PR_BLOCKER_STATES` as auto-rebasable and the fence
+suppressed the label — so before the merge pass its break-glass reached no operator surface,
+including the push bridge, which projects only board tickets.
+
+This changes no `fenceGuard` decision: every write suppressed before CAT-173 remains suppressed.
+It does change the **retry cadence** of those suppressed writes. Crossing the bound stamps a
+`.fence-standoff-cooldown` (default 6 h) that gates the same terminal-sweep probe+write block
+`.fence-suppressed` (15 min) already gated, so after a break-glass a healed standoff's `needs-human`
+label write — and the terminal-clear branch that retracts it on a late Done — is retried every 6 h
+rather than every 15 min. A break-glass whose delivery FAILS drops the 15-minute marker to retry on
+the next tick, bounded by `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` (default 5) so a persistently
+unwritable sink cannot reintroduce the CTL-1329 per-tick probe burn. That bound is only enforceable
+while the attempt counter survives the tick, so a failed-delivery increment that cannot be persisted
+(full disk, read-only mount) fails CLOSED — reported as not-retryable rather than retryable-forever,
+since an unpersisted counter can never grow past the max.
+
 **Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
 scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.
 Its `dispatchLiveness` invariant judges only this host's owned queue, while preserving the raw and
@@ -692,29 +738,46 @@ suppresses on.
 
 ### Orphan-stale merged-PR reconciliation (CAT-47)
 
-Pass 0r and Pass 0u act on the same production act-seam dependencies. `runTick` builds a
-`unstuckSeamDeps` bundle — PR-state resolver, background-job liveness probe, stall clearer, status
-writer — and threads it to Pass 0r, which receives both that bundle **and** Pass 0u's prebuilt act
-registry. `defaultInvokeSeam` then selects by capability: an absent or partial registry falls back
-to a registry rebuilt from the bundle's real dependencies instead of either using inert defaults or
-failing as unavailable. Pass 0u still constructs its own equivalent closures inline at its
-`buildUnstuckActSeams` call site, so the two constructions are equivalent by inspection but not yet
-literally shared — collapsing them onto the one bundle is deferred follow-up.
+Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
+`unstuckSeamDeps` bundle — PR-state resolver, background-job liveness probe, stall clearer, and
+status writer — once; Pass 0u uses it to build its act registry, while Pass 0r receives both that
+registry and the raw bundle. `defaultInvokeSeam` selects by capability: with no injected registry, a
+missing capability falls back to a registry rebuilt from the bundle's real dependencies instead of
+either using inert defaults or failing as unavailable. (This collapses the previously-duplicated
+inline construction at Pass 0u's `buildUnstuckActSeams` call site onto the one bundle — the
+follow-up an earlier revision of this section deferred.)
+
+An embedder- or test-supplied `unstuckActByCategory` is a posture binding both passes. A partial
+registry or `{}` sets `seamFallbackSuppressed`, so Pass 0r reports suppression instead of rebuilding
+a live registry behind the override. With no injected registry, capability fallback remains active.
 
 The recovery candidate contract is `{ ticket, phase, signal }`. `phase` names the exact
 `.unstuck-orphan-merge-<phase>.applied` idempotency marker, and `signal.bg_job_id` feeds the
 liveness gate. Marker construction fails closed when phase is absent, preventing malformed
-`undefined` or `null` marker names. PR-state readers are synchronous; thenables are surfaced as
-`pr-state-async-unsupported` rather than silently interpreted as missing evidence.
+`undefined` or `null` marker names. PR-state readers are synchronous. The act seam surfaces a
+thenable as `pr-state-async-unsupported` with an error-code identity; the Pass 0u census warns and
+returns `null`, which classifies as `pr-state-unknown`. A resolver error merely mentioning the
+unsupported code still fails closed to `pr-state-unknown`.
+`linearTerminal` is deliberately absent from Pass 0r candidates because both drivers pre-filter
+terminal tickets; sourcing a truthy value elsewhere would skip the merged-orphan cohort.
+
+Synthetic completion is restricted by `ORPHAN_MERGE_PHASE_ALLOWLIST` to `monitor-merge` and
+`monitor-deploy`. The classifier applies that as its first gate, so both passes refuse an early phase
+with `phase-not-allowlisted` even when its PR is merged.
 
 Repeated identical fix failures are stored at
 `<orchDir>/.recovery-fix-failures/<ticket>-<fix_class>.json`, outside `workers/` because completed
 tickets may no longer have worker directories. This separate family is not erased by
-`recoveryForgetIntent`. After `RECOVERY_FIX_BACKOFF_THRESHOLD` identical failures (default 3),
-retries use exponential windows controlled by `RECOVERY_FIX_BACKOFF_BASE_MS` (default 30 minutes)
-and `RECOVERY_FIX_BACKOFF_MAX_MS` (default 24 hours). Audit-comment hashes are committed only after
+`recoveryForgetIntent`. After `CATALYST_RECOVERY_FIX_BACKOFF_THRESHOLD` identical failures (default
+3), retries use exponential windows controlled by `CATALYST_RECOVERY_FIX_BACKOFF_BASE_MS` (default 2
+hours, longer than the 30-minute intent cooldown) and `CATALYST_RECOVERY_FIX_BACKOFF_MAX_MS` (default
+24 hours). The threshold sits above the two-attempt ledger bound so this history guards only
+post-reset re-entry. Values are captured at module load and require a daemon restart; unprefixed
+CAT-47 names remain deprecated aliases. Audit-comment hashes are committed only after
 successful delivery, so an outage leaves the comment eligible for retry while delivered duplicate
-content is suppressed.
+content is suppressed. Manual hygiene can sweep files whose newest `lastTs`/`lastCommentTs` is older
+than 14 days with `sweep-stale-recovery-intents.mjs --family fix-failures`; that retention exceeds
+twice the maximum backoff window, and nothing depends on the sweep running.
 
 ### Delegate-first escalation + explanation chokepoint (CTL-1609)
 
