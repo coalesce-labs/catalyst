@@ -3,13 +3,13 @@
 // roster), the ordering constraint holds (and its assertion fires on an inverted
 // fixture), and losing self-entitlement revokes held work leases via the
 // now-wired emitFenceReleased.
-import { test, expect } from "bun:test";
+import { test, expect, beforeEach } from "bun:test";
 import {
   ENTITLEMENT_TTL_MS,
   WORK_LEASE_TTL_MS,
   assertEntitlementOrdering,
 } from "../lib/entitlement.mjs";
-import { getEntitledHosts } from "./config.mjs";
+import { getEntitledHosts, __resetEntitlementShedState } from "./config.mjs";
 import { resolveEntitledRoster } from "./entitlement-roster.mjs";
 import { revokeLeasesOnEntitlementLoss } from "./entitlement-revoke.mjs";
 
@@ -200,4 +200,224 @@ test("a throwing self-check fails open: never revokes on an unanswerable authori
   });
   expect(released).toEqual([]);
   expect(r.reason).toBe("self-still-entitled");
+});
+
+// --- enforce restores --- (CTL-2108)
+
+test("restore is emitted when a previously-shed host returns to the kept roster", () => {
+  const provider = {
+    ttlMs: 1,
+    check: () => ({ verdict: "entitled" }),
+  };
+  const calls = [];
+  const result = resolveEntitledRoster({
+    mode: "enforce",
+    provider,
+    hosts: ["mini", "dead"],
+    self: "mini",
+    emit: (name, payload) => calls.push({ name, payload }),
+    previouslyShedHosts: new Set(["dead"]),
+  });
+  expect(result).toEqual(["mini", "dead"]);
+  expect(calls.map((c) => c.name)).toEqual(["entitlement.restored.dead"]);
+  expect(calls[0].payload).toMatchObject({ host: "dead", self: "mini", mode: "enforce" });
+});
+
+test("no restore when the host was never shed", () => {
+  const provider = { ttlMs: 1, check: () => ({ verdict: "entitled" }) };
+  const calls = [];
+  resolveEntitledRoster({
+    mode: "enforce",
+    provider,
+    hosts: ["mini", "dead"],
+    self: "mini",
+    emit: (name, payload) => calls.push({ name, payload }),
+    previouslyShedHosts: new Set(),
+  });
+  expect(calls.length).toBe(0);
+});
+
+test("no restore when the host is still unentitled (re-shed instead)", () => {
+  const provider = {
+    ttlMs: 1,
+    check: ({ host }) => ({ verdict: host === "dead" ? "unentitled" : "entitled" }),
+  };
+  const calls = [];
+  const result = resolveEntitledRoster({
+    mode: "enforce",
+    provider,
+    hosts: ["mini", "dead"],
+    self: "mini",
+    emit: (name, payload) => calls.push({ name, payload }),
+    previouslyShedHosts: new Set(["dead"]),
+  });
+  expect(result).toEqual(["mini"]);
+  expect(calls.map((c) => c.name)).toEqual(["entitlement.shed.dead"]);
+  expect(calls.map((c) => c.name)).not.toContain("entitlement.restored.dead");
+});
+
+test("self is never restored even if in previouslyShedHosts", () => {
+  const provider = { ttlMs: 1, check: () => ({ verdict: "unentitled" }) };
+  const calls = [];
+  resolveEntitledRoster({
+    mode: "enforce",
+    provider,
+    hosts: ["mini", "dead"],
+    self: "mini",
+    emit: (name, payload) => calls.push({ name, payload }),
+    previouslyShedHosts: new Set(["mini"]),
+  });
+  const names = calls.map((c) => c.name);
+  expect(names).not.toContain("entitlement.restored.mini");
+});
+
+test("no restore on the total-outage degrade (self absent)", () => {
+  const provider = { ttlMs: 1, check: () => ({ verdict: "unentitled" }) };
+  const calls = [];
+  const result = resolveEntitledRoster({
+    mode: "enforce",
+    provider,
+    hosts: ["a", "b"],
+    self: "c",
+    emit: (name, payload) => calls.push({ name, payload }),
+    previouslyShedHosts: new Set(["a"]),
+  });
+  expect(result).toEqual(["a", "b"]);
+  expect(calls.length).toBe(0);
+});
+
+test("fail-open keep of a previously-shed host emits restore", () => {
+  const provider = {
+    ttlMs: 1,
+    check: ({ host }) => {
+      if (host === "flaky") throw new Error("authority unreachable");
+      return { verdict: "entitled" };
+    },
+  };
+  const calls = [];
+  const result = resolveEntitledRoster({
+    mode: "enforce",
+    provider,
+    hosts: ["mini", "flaky"],
+    self: "mini",
+    emit: (name, payload) => calls.push({ name, payload }),
+    previouslyShedHosts: new Set(["flaky"]),
+  });
+  expect(result).toEqual(["mini", "flaky"]);
+  expect(calls.map((c) => c.name)).toContain("entitlement.restored.flaky");
+});
+
+test("previouslyShedHosts defaults to empty (no restore emits without opt-in)", () => {
+  const provider = { ttlMs: 1, check: () => ({ verdict: "entitled" }) };
+  const calls = [];
+  resolveEntitledRoster({
+    mode: "enforce",
+    provider,
+    hosts: ["mini", "dead"],
+    self: "mini",
+    emit: (name, payload) => calls.push({ name, payload }),
+    // no previouslyShedHosts
+  });
+  expect(calls.length).toBe(0);
+});
+
+// --- getEntitledHosts shed-state tracking --- (CTL-2108)
+
+beforeEach(() => {
+  __resetEntitlementShedState();
+});
+
+test("two-tick restore: provider verdict flips → shed on tick 1, restored on tick 2", () => {
+  let callCount = 0;
+  const provider = {
+    ttlMs: 1,
+    check: ({ host }) => {
+      if (host !== "dead") return { verdict: "entitled" };
+      return { verdict: callCount === 0 ? "unentitled" : "entitled" };
+    },
+  };
+  const calls1 = [];
+  callCount = 0;
+  getEntitledHosts({
+    mode: "enforce",
+    provider,
+    hosts: ["mini", "dead"],
+    self: "mini",
+    emit: (name, payload) => calls1.push({ name, payload }),
+    trackShedState: true,
+  });
+  callCount = 1;
+  const calls2 = [];
+  getEntitledHosts({
+    mode: "enforce",
+    provider,
+    hosts: ["mini", "dead"],
+    self: "mini",
+    emit: (name, payload) => calls2.push({ name, payload }),
+    trackShedState: true,
+  });
+  expect(calls1.map((c) => c.name)).toContain("entitlement.shed.dead");
+  expect(calls2.map((c) => c.name)).toContain("entitlement.restored.dead");
+});
+
+test("still-shed host is not re-restored across ticks", () => {
+  const provider = {
+    ttlMs: 1,
+    check: ({ host }) => ({ verdict: host === "dead" ? "unentitled" : "entitled" }),
+  };
+  const calls = [];
+  const emit = (name, payload) => calls.push({ name, payload });
+  getEntitledHosts({ mode: "enforce", provider, hosts: ["mini", "dead"], self: "mini", emit, trackShedState: true });
+  getEntitledHosts({ mode: "enforce", provider, hosts: ["mini", "dead"], self: "mini", emit, trackShedState: true });
+  const names = calls.map((c) => c.name);
+  expect(names).not.toContain("entitlement.restored.dead");
+});
+
+test("trackShedState defaults off: no restore emitted without opt-in", () => {
+  let callCount = 0;
+  const provider = {
+    ttlMs: 1,
+    check: ({ host }) => {
+      if (host !== "dead") return { verdict: "entitled" };
+      return { verdict: callCount === 0 ? "unentitled" : "entitled" };
+    },
+  };
+  const calls = [];
+  const emit = (name, payload) => calls.push({ name, payload });
+  callCount = 0;
+  getEntitledHosts({ mode: "enforce", provider, hosts: ["mini", "dead"], self: "mini", emit });
+  callCount = 1;
+  getEntitledHosts({ mode: "enforce", provider, hosts: ["mini", "dead"], self: "mini", emit });
+  expect(calls.map((c) => c.name)).not.toContain("entitlement.restored.dead");
+});
+
+test("shadow mode never accumulates shed state (no restore even with trackShedState)", () => {
+  let callCount = 0;
+  const provider = {
+    ttlMs: 1,
+    check: ({ host }) => {
+      if (host !== "dead") return { verdict: "entitled" };
+      return { verdict: callCount === 0 ? "unentitled" : "entitled" };
+    },
+  };
+  const calls = [];
+  const emit = (name, payload) => calls.push({ name, payload });
+  callCount = 0;
+  getEntitledHosts({ mode: "shadow", provider, hosts: ["mini", "dead"], self: "mini", emit, trackShedState: true });
+  callCount = 1;
+  getEntitledHosts({ mode: "shadow", provider, hosts: ["mini", "dead"], self: "mini", emit, trackShedState: true });
+  expect(calls.map((c) => c.name)).not.toContain("entitlement.restored.dead");
+});
+
+test("__resetEntitlementShedState clears accumulated state", () => {
+  const provider = {
+    ttlMs: 1,
+    check: ({ host }) => ({ verdict: host === "dead" ? "unentitled" : "entitled" }),
+  };
+  getEntitledHosts({ mode: "enforce", provider, hosts: ["mini", "dead"], self: "mini", emit: () => {}, trackShedState: true });
+  __resetEntitlementShedState();
+  const provider2 = { ttlMs: 1, check: () => ({ verdict: "entitled" }) };
+  const calls = [];
+  getEntitledHosts({ mode: "enforce", provider: provider2, hosts: ["mini", "dead"], self: "mini", emit: (name, payload) => calls.push({ name, payload }), trackShedState: true });
+  expect(calls.map((c) => c.name)).not.toContain("entitlement.restored.dead");
 });
