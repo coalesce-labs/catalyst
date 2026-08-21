@@ -25,8 +25,13 @@
 // even if a team's terminal workflow state carries a custom display name. A
 // non-terminal HIT returns the row's actual `state` name (or null).
 import { Database } from "bun:sqlite";
-import { statSync } from "node:fs";
 import { getReplicaDbPath } from "./config.mjs";
+// CTL-1958: the writer-liveness gate lives in a SQLite-free leaf so the node-run
+// comms tools' comment-read leaf can share the one implementation. Re-exported below
+// for this module's existing importers.
+import { isReplicaFresh } from "./replica-freshness.mjs";
+
+export { isReplicaFresh };
 
 // The light terminal SELECT. Index-backed by idx_issues_identifier (confirmed).
 // removed_at IS NULL excludes tombstoned rows (a removed ticket is a MISS → the
@@ -300,48 +305,12 @@ const LABELS_SELECT = `SELECT l.id, l.name FROM issue_labels il JOIN labels l ON
 // cursor-present = seed complete; cursor-absent/empty = mid-reseed → don't serve.
 const SEED_COMPLETE_SELECT = `SELECT 1 FROM sync_meta WHERE key = 'cursor' AND value IS NOT NULL AND value <> '' LIMIT 1`;
 
-// The eligible freshness GATE — a writer-LIVENESS proxy. A dead writer must stop
-// the replica from serving discovery, so we fall through to linearis (correct
-// answer, just un-accelerated).
-//
-// CTL-1397 (4/n): gate on the cloud-sync writer's HEARTBEAT file
-// `<db>.writer.lock`, NOT the db/`-wal` mtime. The `-wal` mtime only advances on
-// an actual APPLY, so during a QUIET Linear feed (live writer, no issue updates)
-// it goes stale within the threshold even though the replica is perfectly current
-// — and gating discovery on that false-falls-through to `linearis issues list`
-// exactly when the board is UNCHANGED, burning the shared quota + tripping the
-// CTL-679 breaker (the residual board-freeze this closes; observed live: mini
-// `-wal` 520s stale while `.writer.lock` heartbeated 5s ago). The writer touches
-// `.writer.lock` every few seconds regardless of data changes, so its mtime
-// tracks the WRITER being alive. Fall back to the db/`-wal` mtime only when the
-// lock is absent (bootstrap / an older writer without the heartbeat file).
-// Threshold = CATALYST_LINEAR_REPLICA_STALE_MS (default 5 min). Returns true when
-// fresh, false when absent/stale/unstattable.
-function isReplicaFresh(dbPath) {
-  const thresholdMs = Number(process.env.CATALYST_LINEAR_REPLICA_STALE_MS) || 300_000;
-  // Preferred signal: the writer's heartbeat lock (advances on liveness, not on
-  // data changes). Present → it is authoritative (a present-but-stale lock means
-  // the writer died, so we do NOT serve even if a recent apply left `-wal` fresh).
-  try {
-    const lock = statSync(dbPath + ".writer.lock");
-    return Date.now() - lock.mtimeMs <= thresholdMs;
-  } catch {
-    /* lock absent → fall back to the db/-wal mtime liveness proxy below */
-  }
-  let newest;
-  try {
-    newest = statSync(dbPath).mtimeMs; // throws if the file is absent → not fresh
-  } catch {
-    return false;
-  }
-  try {
-    const wal = statSync(dbPath + "-wal");
-    if (wal.size > 0) newest = Math.max(newest, wal.mtimeMs);
-  } catch {
-    /* -wal absent → main DB mtime only */
-  }
-  return Date.now() - newest <= thresholdMs;
-}
+// The eligible freshness GATE — a writer-LIVENESS proxy — now lives in
+// ./replica-freshness.mjs (CTL-1958), imported + re-exported at the top of this
+// file. It moved to a SQLite-free leaf so the node-run comms tools' comment-read
+// leaf can reuse the ONE implementation without pulling in bun:sqlite. Its full
+// rationale (heartbeat-lock-first, CTL-1397) travels with it. Referenced unchanged
+// below as isReplicaFresh(dbPath).
 
 // NOTE (Stage 0): there is intentionally NO coarse "currency" guard on ownership().
 // An earlier draft gated ownership() on the db/`-wal` mtimes being within a currency
