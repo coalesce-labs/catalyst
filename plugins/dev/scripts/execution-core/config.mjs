@@ -3047,22 +3047,23 @@ function _sortedStringify(obj) {
   return `{${parts.join(",")}}`;
 }
 
-const _PROTO_POISON = new Set(["__proto__", "constructor", "prototype"]);
-
 // _setDotPath — set a dotted path inside a nested object, creating intermediaries.
 function _setDotPath(obj, dotPath, value) {
   const parts = dotPath.split(".");
+  // Guard all segments upfront with explicit === comparisons (CodeQL-recognized sanitiser).
+  for (const p of parts) {
+    if (p === "__proto__" || p === "constructor" || p === "prototype") {
+      throw new Error(`_setDotPath: forbidden key segment "${p}"`);
+    }
+  }
   let cur = obj;
   for (let i = 0; i < parts.length - 1; i++) {
-    if (_PROTO_POISON.has(parts[i])) throw new Error(`_setDotPath: forbidden key segment "${parts[i]}"`);
     if (cur[parts[i]] == null || typeof cur[parts[i]] !== "object") {
       cur[parts[i]] = {};
     }
     cur = cur[parts[i]];
   }
-  const last = parts[parts.length - 1];
-  if (_PROTO_POISON.has(last)) throw new Error(`_setDotPath: forbidden key segment "${last}"`);
-  cur[last] = value;
+  cur[parts[parts.length - 1]] = value;
 }
 
 // CTL-1210: splitLayer2Config — classify every catalyst.* key in an existing
