@@ -401,9 +401,16 @@ _retire_stray_loops() {
   # `ps -eo pid=,command=` + a bash-side match, not `pgrep -f`: pgrep's pattern would
   # also match this very process, and its -f matching gives no way to inspect the path
   # before deciding.
-  while IFS= read -r line; do
-    pid="${line%% *}"
-    cmd="${line#* }"
+  #
+  # ⚠️ Split with `read -r pid cmd`, NOT `${line%% *}` / `${line#* }` on a whole line.
+  # ps RIGHT-ALIGNS the pid column, so a line for pid 3880 is "  3880 bash …" and
+  # `${line%% *}` strips the longest ` *` suffix — which starts at the LEADING space —
+  # yielding the EMPTY string. Every line then fails the numeric test and is skipped, so
+  # the retire found nothing on any machine and still printed "nothing to retire": a
+  # check that cannot fail, self-certifying a clean host (AGENTS.md → positive control).
+  # `read` with the default IFS discards the leading padding and puts the remainder of
+  # the line in `cmd`, which is what the path match below needs.
+  while read -r pid cmd; do
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
     [[ "$pid" == "$$" ]] && continue
     case "$cmd" in
