@@ -654,11 +654,13 @@ The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode 
 ### Orphan-stale merged-PR reconciliation (CAT-47)
 
 Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
-PR-state resolver, background-job liveness probe, stall clearer, and status writer once; Pass 0u
-uses them to build its act registry, while Pass 0r receives both that registry and the raw bundle
-for capability-checked fallback construction. With no injected registry, a missing capability can
-therefore fall back to real dependencies instead of either using inert defaults or failing as
-unavailable.
+`unstuckSeamDeps` bundle — PR-state resolver, background-job liveness probe, stall clearer, and
+status writer — once; Pass 0u uses it to build its act registry, while Pass 0r receives both that
+registry and the raw bundle. `defaultInvokeSeam` selects by capability: with no injected registry, a
+missing capability falls back to a registry rebuilt from the bundle's real dependencies instead of
+either using inert defaults or failing as unavailable. (This collapses the previously-duplicated
+inline construction at Pass 0u's `buildUnstuckActSeams` call site onto the one bundle — the
+follow-up an earlier revision of this section deferred.)
 
 An embedder- or test-supplied `unstuckActByCategory` is a posture binding both passes. A partial
 registry or `{}` sets `seamFallbackSuppressed`, so Pass 0r reports suppression instead of rebuilding
