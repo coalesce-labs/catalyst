@@ -114,6 +114,29 @@ expect_eq "dev-no-work: unknown roster never FAILs"     "WARN" "$(status_of "$(_
 # F3: boot-drain is genuinely safe even when the roster is unknown.
 expect_eq "dev-no-work: drained wins over unknown roster" "PASS" "$(status_of "$(_vn_v_dev_no_work yes yes yes unknown)")"
 
+# ── _vn_v_cloud_sync (CTL-1736: LOCAL replica writer freshness, developer) ────
+expect_eq "cloud-sync: fresh → PASS"    "PASS" "$(status_of "$(_vn_v_cloud_sync fresh)")"
+expect_eq "cloud-sync: stale → FAIL"    "FAIL" "$(status_of "$(_vn_v_cloud_sync stale)")"
+expect_eq "cloud-sync: unseeded → WARN" "WARN" "$(status_of "$(_vn_v_cloud_sync unseeded)")"
+expect_eq "cloud-sync: idle → PASS"     "PASS" "$(status_of "$(_vn_v_cloud_sync idle)")"
+expect_eq "cloud-sync: unknown → WARN"  "WARN" "$(status_of "$(_vn_v_cloud_sync bogus)")"
+
+# _cloud_sync_state classification via injected leaf seams (each in an isolating subshell).
+( _cs_agent_installed() { return 0; }; _cs_token_present() { return 0; }
+  _cs_lock_age() { echo 10; }; _cs_cursor_seeded() { return 0; }
+  expect_eq "state: adopted+young+seeded → fresh" "fresh" "$(_cloud_sync_state)" )
+( _cs_agent_installed() { return 0; }; _cs_token_present() { return 0; }
+  _cs_lock_age() { echo 999999; }; _cs_cursor_seeded() { return 0; }
+  expect_eq "state: adopted+old-lock → stale" "stale" "$(_cloud_sync_state)" )
+( _cs_agent_installed() { return 0; }; _cs_token_present() { return 0; }
+  _cs_lock_age() { echo ""; }; _cs_cursor_seeded() { return 1; }
+  expect_eq "state: adopted+no-lock → unseeded" "unseeded" "$(_cloud_sync_state)" )
+( _cs_agent_installed() { return 0; }; _cs_token_present() { return 0; }
+  _cs_lock_age() { echo 10; }; _cs_cursor_seeded() { return 1; }
+  expect_eq "state: adopted+seeded-fail → unseeded" "unseeded" "$(_cloud_sync_state)" )
+( _cs_agent_installed() { return 1; }; _cs_token_present() { return 1; }
+  expect_eq "state: no-agent+no-token → idle" "idle" "$(_cloud_sync_state)" )
+
 # ── _vn_read_replica_base extractor (env override + Layer-2 baseUrl) ──────────
 SCRATCH="$(mktemp -d)"
 CFG="${SCRATCH}/config.json"
@@ -176,6 +199,7 @@ HEALTHYDEV_OUT="$(
   _vn_read_replica_base()   { echo 'http://mini:7400'; }
   _vn_updater_ec()          { echo 0; }
   _vn_drained()             { echo no; }
+  _vn_cloud_sync_state()    { echo idle; }
   cmd_verify_node --json 2>/dev/null
 )"; HEALTHYDEV_EC=$?
 expect_eq "cmd: healthy developer exits zero" "0" "$HEALTHYDEV_EC"
@@ -183,6 +207,14 @@ expect_eq "cmd: healthy developer verdict=pass" "pass" "$(printf '%s' "$HEALTHYD
 expect_eq "cmd: healthy developer 0 required failures" "0" "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.required_failures')"
 expect_eq "cmd: healthy developer event-mirror-running PASS" "PASS" \
   "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.checks[] | select(.name=="event-mirror-running") | .status')"
+# CTL-1736: the replica-writer-local check is wired into the developer rubric, is
+# advisory (required=false so a legitimately idle laptop never flips the run), and
+# maps idle → PASS end-to-end (closes the wiring-line coverage gap left by the
+# pure-helper cases above).
+expect_eq "cmd: healthy developer replica-writer-local PASS" "PASS" \
+  "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.checks[] | select(.name=="replica-writer-local") | .status')"
+expect_eq "cmd: healthy developer replica-writer-local advisory" "false" \
+  "$(printf '%s' "$HEALTHYDEV_OUT" | jq -r '.checks[] | select(.name=="replica-writer-local") | .required')"
 
 # CTL-1662: developer with event-mirror DEAD → FAIL (the doctor blind spot this closes).
 DEVNOMIRROR_OUT="$(
