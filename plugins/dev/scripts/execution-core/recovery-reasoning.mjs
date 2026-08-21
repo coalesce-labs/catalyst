@@ -497,12 +497,38 @@ export function reasoningRecoveryPass(items, opts = {}) {
         const fixComment = formatFixComment(item.ticket, fixOutcome, classification);
         const commentHash = fixCommentHashFn(fixComment);
         if (shouldPostFixCommentFn(orchDir, item.ticket, fix_class, commentHash, nowMs())) {
+          // defaultPostComment fails CLOSED WITHOUT THROWING — a non-zero
+          // linear-comment-post.sh exit returns {ok:false}. Committing the dedup
+          // hash on that path would suppress this audit comment forever on a
+          // Linear outage, so only an explicitly non-failing result counts as
+          // delivery. An injected seam that returns nothing is treated as
+          // delivered (for those, a throw is the failure signal).
+          let delivered = false;
           try {
-            postComment(item.ticket, fixComment, { mode: "enforce" });
-            commitFixCommentHashFn(orchDir, item.ticket, fix_class, commentHash, nowMs());
-            actionLog.push("posted fix audit comment");
+            const posted = postComment(item.ticket, fixComment, { mode: "enforce" });
+            delivered = !(posted && posted.ok === false);
+            if (!delivered) {
+              log(
+                `recovery-reasoning: ${item.ticket} comment post reported failure; ` +
+                  `dedup hash not committed (comment stays eligible for retry)`,
+              );
+            }
           } catch (err) {
             log(`recovery-reasoning: ${item.ticket} comment post failed: ${err.message}`);
+          }
+          if (delivered) {
+            // Isolated from the post above: a failure HERE means the comment WAS
+            // delivered but the latch did not land, which must be logged as a
+            // latch-write failure rather than misattributed to the post.
+            try {
+              commitFixCommentHashFn(orchDir, item.ticket, fix_class, commentHash, nowMs());
+            } catch (err) {
+              log(
+                `recovery-reasoning: ${item.ticket} fix-comment dedup latch write failed: ` +
+                  `${err.message}`,
+              );
+            }
+            actionLog.push("posted fix audit comment");
           }
         } else {
           actionLog.push("suppressed duplicate fix audit comment");
