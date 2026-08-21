@@ -700,29 +700,46 @@ The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode 
 
 ### Orphan-stale merged-PR reconciliation (CAT-47)
 
-Pass 0r and Pass 0u act on the same production act-seam dependencies. `runTick` builds a
-`unstuckSeamDeps` bundle — PR-state resolver, background-job liveness probe, stall clearer, status
-writer — and threads it to Pass 0r, which receives both that bundle **and** Pass 0u's prebuilt act
-registry. `defaultInvokeSeam` then selects by capability: an absent or partial registry falls back
-to a registry rebuilt from the bundle's real dependencies instead of either using inert defaults or
-failing as unavailable. Pass 0u still constructs its own equivalent closures inline at its
-`buildUnstuckActSeams` call site, so the two constructions are equivalent by inspection but not yet
-literally shared — collapsing them onto the one bundle is deferred follow-up.
+Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
+`unstuckSeamDeps` bundle — PR-state resolver, background-job liveness probe, stall clearer, and
+status writer — once; Pass 0u uses it to build its act registry, while Pass 0r receives both that
+registry and the raw bundle. `defaultInvokeSeam` selects by capability: with no injected registry, a
+missing capability falls back to a registry rebuilt from the bundle's real dependencies instead of
+either using inert defaults or failing as unavailable. (This collapses the previously-duplicated
+inline construction at Pass 0u's `buildUnstuckActSeams` call site onto the one bundle — the
+follow-up an earlier revision of this section deferred.)
+
+An embedder- or test-supplied `unstuckActByCategory` is a posture binding both passes. A partial
+registry or `{}` sets `seamFallbackSuppressed`, so Pass 0r reports suppression instead of rebuilding
+a live registry behind the override. With no injected registry, capability fallback remains active.
 
 The recovery candidate contract is `{ ticket, phase, signal }`. `phase` names the exact
 `.unstuck-orphan-merge-<phase>.applied` idempotency marker, and `signal.bg_job_id` feeds the
 liveness gate. Marker construction fails closed when phase is absent, preventing malformed
-`undefined` or `null` marker names. PR-state readers are synchronous; thenables are surfaced as
-`pr-state-async-unsupported` rather than silently interpreted as missing evidence.
+`undefined` or `null` marker names. PR-state readers are synchronous. The act seam surfaces a
+thenable as `pr-state-async-unsupported` with an error-code identity; the Pass 0u census warns and
+returns `null`, which classifies as `pr-state-unknown`. A resolver error merely mentioning the
+unsupported code still fails closed to `pr-state-unknown`.
+`linearTerminal` is deliberately absent from Pass 0r candidates because both drivers pre-filter
+terminal tickets; sourcing a truthy value elsewhere would skip the merged-orphan cohort.
+
+Synthetic completion is restricted by `ORPHAN_MERGE_PHASE_ALLOWLIST` to `monitor-merge` and
+`monitor-deploy`. The classifier applies that as its first gate, so both passes refuse an early phase
+with `phase-not-allowlisted` even when its PR is merged.
 
 Repeated identical fix failures are stored at
 `<orchDir>/.recovery-fix-failures/<ticket>-<fix_class>.json`, outside `workers/` because completed
 tickets may no longer have worker directories. This separate family is not erased by
-`recoveryForgetIntent`. After `RECOVERY_FIX_BACKOFF_THRESHOLD` identical failures (default 3),
-retries use exponential windows controlled by `RECOVERY_FIX_BACKOFF_BASE_MS` (default 30 minutes)
-and `RECOVERY_FIX_BACKOFF_MAX_MS` (default 24 hours). Audit-comment hashes are committed only after
+`recoveryForgetIntent`. After `CATALYST_RECOVERY_FIX_BACKOFF_THRESHOLD` identical failures (default
+3), retries use exponential windows controlled by `CATALYST_RECOVERY_FIX_BACKOFF_BASE_MS` (default 2
+hours, longer than the 30-minute intent cooldown) and `CATALYST_RECOVERY_FIX_BACKOFF_MAX_MS` (default
+24 hours). The threshold sits above the two-attempt ledger bound so this history guards only
+post-reset re-entry. Values are captured at module load and require a daemon restart; unprefixed
+CAT-47 names remain deprecated aliases. Audit-comment hashes are committed only after
 successful delivery, so an outage leaves the comment eligible for retry while delivered duplicate
-content is suppressed.
+content is suppressed. Manual hygiene can sweep files whose newest `lastTs`/`lastCommentTs` is older
+than 14 days with `sweep-stale-recovery-intents.mjs --family fix-failures`; that retention exceeds
+twice the maximum backoff window, and nothing depends on the sweep running.
 
 ### Delegate-first escalation + explanation chokepoint (CTL-1609)
 

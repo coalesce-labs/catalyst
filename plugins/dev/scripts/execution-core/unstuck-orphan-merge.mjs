@@ -13,6 +13,14 @@
 // and may still have a live worker even if bg_job_id appears dead. 300 seconds.
 export const STALE_WORKER_CUTOFF_MS = 300_000;
 
+// CAT-124 F2: this reconciler advances the pipeline, so only late phases where a
+// merged PR is the completion signal are eligible. Legacy/non-string phases fail closed.
+export const ORPHAN_MERGE_PHASE_ALLOWLIST = Object.freeze(["monitor-merge", "monitor-deploy"]);
+
+export function isOrphanMergePhaseAllowed(phase) {
+  return typeof phase === "string" && ORPHAN_MERGE_PHASE_ALLOWLIST.includes(phase);
+}
+
 // classifyOrphanMergedReconcile — PURE classifier. No IO.
 // evidence shape:
 //   ticket               string
@@ -28,6 +36,7 @@ export const STALE_WORKER_CUTOFF_MS = 300_000;
 // Returns { action: 'emit-complete' } or { action: 'skip', reason }
 export function classifyOrphanMergedReconcile(evidence = {}) {
   const {
+    phase,
     prState,
     bgJobAlive,
     signalUpdatedAt,
@@ -36,6 +45,11 @@ export function classifyOrphanMergedReconcile(evidence = {}) {
     terminalDoneApplied,
     linearTerminal,
   } = evidence;
+
+  // FIRST gate deliberately: refusal to advance an early phase must not be masked.
+  if (!isOrphanMergePhaseAllowed(phase)) {
+    return { action: "skip", reason: "phase-not-allowlisted" };
+  }
 
   // .terminal-done.applied present → teardown already owns this ticket; skip.
   if (terminalDoneApplied) return { action: "skip", reason: "terminal-done-owns-it" };
@@ -76,7 +90,7 @@ export function defaultCollectOrphanMergedCandidates({
   jobLifecycle = null,   // (bgJobId) → bool (is the bg job alive)
   log = null,
   nowMs = Date.now(),
-  phaseAllowlist = ["monitor-merge", "monitor-deploy"],
+  phaseAllowlist = ORPHAN_MERGE_PHASE_ALLOWLIST,
 } = {}) {
   const out = [];
   for (const c of candidates) {
