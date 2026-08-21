@@ -194,6 +194,36 @@ export function coerceExplanation(fields, ctx = {}) {
     (TAUTOLOGY_RE.test(ctaNorm) || VAGUE_RE.test(ctaNorm) || DEFER_RE.test(ctaNorm));
   const ctaIsSameProblem = ctaNorm != null && ctaNorm === norm(rawProblem);
 
+  // CTL-1647: REFUSE to fabricate a human decision for a transient
+  // infrastructure cause. The degrade branches below invent options, a
+  // recommendation and a "priority call the agent cannot make unilaterally"
+  // rationale for ANY failure that arrives without a real explanation — but a
+  // provider 429/529 is not a priority call, it is capacity that comes back on
+  // its own. The primary fix is upstream (the terminal sweep backs off and
+  // re-arms the phase instead of parking it); this is the backstop for a
+  // transient park that still reaches the template, and it tells the human the
+  // TRUTH: the automatic window is spent, confirm it or re-dispatch it.
+  //
+  // ⚠️ Gated on the STRUCTURED reason field only — never on `problem` prose.
+  // escalation-explain.mjs and label-guard.mjs route agent-authored explanation
+  // text through here, so matching prose would silently rewrite a genuine human
+  // escalation that merely mentions "rate limit" into an all-clear.
+  //
+  // Scoped to the DECISION arm (ctx.canExecute !== true) on purpose: that is the
+  // arm label-guard hardcodes and the one the 41 tickets took, and `manual` is
+  // invalid under the anti-delegation guard when canExecute is true.
+  const transientReason =
+    type === "decision"
+      ? ([ctx.reason, fields.reason].find((c) => isTransientInfraReason(c)) ?? null)
+      : null;
+  if (transientReason !== null) {
+    return buildTransientExhaustedExplanation(
+      ticket,
+      transientReason,
+      typeof ctx.transientAttempts === "number" ? ctx.transientAttempts : 0,
+    );
+  }
+
   const degraded = { escalation_type: type, problem: rawProblem };
 
   if (type === "authorization") {
@@ -451,4 +481,139 @@ export function describeSignalReason(signal) {
   const r = resolveSignalReason(signal);
   if (r.status === "named") return r.reason;
   return r.status === "unreadable" ? "signal unreadable" : "no reason recorded";
+}
+
+// ── CTL-1647: transient infrastructure causes are NOT human decisions ────────
+//
+// A provider that returns 429/529 (overloaded / out of capacity / rate limited)
+// is a SYSTEM-level condition: it resolves by itself when capacity returns, and
+// the correct response is ONE fleet alert plus a bounded retry — never N
+// per-ticket human blocks. 41 of 79 tickets measured parked as "a human must
+// decide" on 2026-08-21 died exactly this way.
+//
+// This is a CLASSIFIER over the reason string only. The retry MECHANISM is the
+// existing one: the producer stamps `retrySafe: true` on the phase signal
+// (CTL-1679), recovery-reasoning's retry_safe_redispatch rule re-dispatches it
+// within the shared bounded budget, and an exhausted budget escalates with a
+// real coverage-gap explanation. Nothing new is invented here.
+
+/**
+ * The CLOSED SET of producer reason literals that name a transient
+ * provider/infrastructure condition. EXACT match only — deliberately NOT a
+ * substring/prose regex.
+ *
+ * ⚠️ This predicate feeds paths that SUPPRESS a human escalation, so a false
+ * positive is the same defect class this ticket fixes, pointed the other way: a
+ * genuine human escalation whose prose merely mentions "rate limit", "429" or
+ * "overloaded" (e.g. "the API client we're building has no rate limit handling")
+ * must NEVER be silently rewritten into "nothing is required". Agent-authored
+ * prose reaches `coerceExplanation` via escalation-explain.mjs and
+ * label-guard.mjs, so free-text matching here is unsafe by construction.
+ *
+ * Add a literal here only when a PRODUCER writes it as a signal reason.
+ */
+export const TRANSIENT_INFRA_REASONS = Object.freeze([
+  "sdk-overloaded-exhausted", // sdk-run-phase-agent.mjs 429/529 ladder exhausted
+  "codex-rate-park-exhausted", // codex-run-phase-agent.mjs rate-park exhausted
+]);
+const TRANSIENT_INFRA_SET = new Set(TRANSIENT_INFRA_REASONS);
+
+/**
+ * Is this failure/stall reason a transient infrastructure condition?
+ * Pure string predicate over the closed set above — never throws, false for
+ * anything that is not one of those exact literals.
+ */
+export function isTransientInfraReason(reason) {
+  if (typeof reason !== "string") return false;
+  return TRANSIENT_INFRA_SET.has(reason.trim().toLowerCase());
+}
+
+/**
+ * How long a transient signal is left alone before the normal escalation path
+ * is allowed to run. The suppression MUST be bounded: an unbounded skip turns a
+ * false page into a silently stranded ticket, which is strictly worse.
+ */
+export const TRANSIENT_ESCALATION_BACKOFF_MS = 30 * 60 * 1000; // 30 min
+
+/**
+ * Classify a phase signal as a transient-infrastructure park.
+ *
+ * @returns {{transient: boolean, reason: string|null, retrySafe: boolean,
+ *            withinBackoff: boolean, ageMs: number|null}}
+ *   `transient`     the reason is one of TRANSIENT_INFRA_REASONS
+ *   `retrySafe`     the producer stamped retrySafe:true (CTL-1679)
+ *   `withinBackoff` the signal is retry-safe AND recent enough that the bounded
+ *                   retry has not had its window yet — escalation may be SKIPPED
+ * Reads both the top level and `.raw` (the scheduler's projection nests the
+ * on-disk fields under `.raw` — the CTL-1754 trap).
+ *
+ * ⚠️ `withinBackoff` requires BOTH `retrySafe` and a READABLE timestamp:
+ *   - no `retrySafe` stamp → there is no route that re-dispatches the phase, so
+ *     suppressing the escalation would be a pure silent stall (Codex R1);
+ *   - an unreadable/absent `updatedAt` → the age can never advance, so treating
+ *     it as "fresh" would suppress the escalation on EVERY tick, forever
+ *     (Codex R2 P3). Both fall OUT of the window and escalate normally.
+ */
+export function classifyTransientSignal(
+  signal,
+  { now = Date.now(), backoffMs = TRANSIENT_ESCALATION_BACKOFF_MS } = {},
+) {
+  const absent = { transient: false, reason: null, retrySafe: false, withinBackoff: false, ageMs: null };
+  if (signal === null || signal === undefined || typeof signal !== "object") return absent;
+  const raw = signal.raw !== null && typeof signal.raw === "object" ? signal.raw : null;
+  const retrySafe = signal.retrySafe === true || raw?.retrySafe === true;
+  const { reason } = resolveSignalReason(signal);
+  const transient = isTransientInfraReason(reason);
+  if (!transient) return { ...absent, reason, retrySafe };
+
+  const stamp = signal.updatedAt ?? raw?.updatedAt ?? null;
+  const at = stamp ? Date.parse(stamp) : NaN;
+  const ageMs = Number.isFinite(at) ? Math.max(0, now - at) : null;
+  const withinBackoff = retrySafe && ageMs !== null && ageMs < backoffMs;
+  return { transient: true, reason, retrySafe, withinBackoff, ageMs };
+}
+
+/**
+ * CTL-1647: the explanation for a transient park that has ALREADY spent its
+ * automatic retry window. This is the ONLY transient wording, on purpose.
+ *
+ * The earlier draft of this fix emitted "No decision is required — it will
+ * re-dispatch itself", but every site that reaches an explanation has by then
+ * exhausted the bounded back-off (the terminal sweep re-arms up to N times
+ * before it escalates; recovery only escalates past its budget). Telling the
+ * human "nothing is required" on a ticket that demonstrably did NOT recover is
+ * a false all-clear — strictly worse than the false decision card it replaced.
+ *
+ * `manual` + blocked_capability + instructions is exactly the shape the operator
+ * inbox renders as ACT-THEN-CONFIRM (inbox-ask.mjs isValidatedManualEscalation),
+ * which is what this now genuinely is: check it, re-dispatch by hand if it is
+ * still parked. It still asks for NO priority/scope decision, and it names the
+ * fleet-level framing so N of these read as ONE incident.
+ */
+export function buildTransientExhaustedExplanation(ticket, reason, attempts = 0) {
+  const t = ticket ?? "this ticket";
+  const r = reason ?? "a transient provider-capacity condition";
+  return Object.freeze({
+    escalation_type: "manual",
+    transient: true,
+    problem:
+      `${t} stalled on a transient provider/infrastructure condition ("${r}") and its automatic ` +
+      `back-off window is spent (${attempts} automatic re-arm(s)). The provider being over capacity ` +
+      `says nothing about this ticket's work.`,
+    call_to_action:
+      `Check whether ${t} resumed once provider capacity returned; if it is still parked, re-dispatch it — ` +
+      `the automatic retry window has already passed.`,
+    blocked_capability:
+      `automatic recovery of ${t} from the provider-capacity condition "${r}" — the bounded back-off is spent`,
+    instructions: [
+      `Confirm whether ${t} re-dispatched on its own; if it is still parked, re-dispatch the failed phase`,
+      `If many tickets carry "${r}", treat it as ONE fleet provider-capacity incident — do NOT decide them one by one`,
+    ],
+    remediation_then_retry:
+      `wait for provider capacity to return, then re-dispatch ${t}'s failed phase`,
+    why_not_auto:
+      `the bounded automatic back-off for "${r}" ran ${attempts} time(s) without clearing ${t}, ` +
+      `so nothing re-dispatches it automatically any more`,
+    attempts: [{ reason: r, count: attempts }],
+  });
 }

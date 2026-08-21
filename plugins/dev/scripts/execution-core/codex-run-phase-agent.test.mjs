@@ -1633,6 +1633,61 @@ describe("codexRunPhaseAgent — failure classification", () => {
     expect(stalled.length).toBe(0); // NOT the sticky auth-park stalled path
   });
 
+  // CTL-1647: the rate-park EXHAUSTION backstop must declare itself RETRY-SAFE.
+  // Without the flag the terminal it writes is indistinguishable from a genuine
+  // dead end and the terminal sweep parks the ticket for a human — the same
+  // defect as the sdk overloaded-exhausted backstop (41 of 79 false escalations
+  // measured 2026-08-21). This drives the PRODUCTION call site: deleting
+  // `retrySafe: true` from codex-run-phase-agent.mjs's rate-park branch fails here.
+  test("CTL-1647: rate-park exhaustion marks the backstop retrySafe (production call site)", async () => {
+    const marks = [];
+    const { opts } = runnerOpts({
+      over: {
+        spawnChild: () => autoChild([RATE_ERR], 1),
+        markLaunchFailed: (arg) => marks.push(arg),
+        maxRateRetries: 1,
+      },
+    });
+    const r = await codexRunPhaseAgent(ARGS, opts);
+    expect(r.classification).toBe("rate-park");
+    expect(marks).toHaveLength(1);
+    expect(marks[0].reason).toBe("codex-rate-park-exhausted");
+    expect(marks[0].retrySafe).toBe(true);
+  });
+
+  // POSITIVE CONTROL for the test above, driven through the SAME production
+  // function: a genuine `codex-failed` terminal must NOT be retry-safe, so the
+  // assertion above discriminates rather than passing vacuously. Needs a real
+  // signal file because the failed branch gates on readSignalStatus (not injectable).
+  test("CTL-1647 POSITIVE CONTROL: a genuine codex failure is NOT retrySafe", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1647-codex-"));
+    try {
+      mkdirSync(join(dir, "workers", "CTL-100"), { recursive: true });
+      writeFileSync(
+        join(dir, "workers", "CTL-100", "phase-implement.json"),
+        JSON.stringify({ ticket: "CTL-100", phase: "implement", status: "running" }),
+      );
+      const marks = [];
+      const { opts } = runnerOpts({
+        // the signal path lives on the prelaunch SPEC, not on ARGS.orchDir
+        spec: makeCodexSpec({ signalFile: join(dir, "workers", "CTL-100", "phase-implement.json") }),
+        over: {
+          // exitCode 1 with no rate/auth marker → classification "failed"
+          spawnChild: () => autoChild(['{"type":"error","message":"compiler exploded"}'], 1),
+          markLaunchFailed: (arg) => marks.push(arg),
+        },
+      });
+      const r = await codexRunPhaseAgent({ ...ARGS, orchDir: dir }, opts);
+      expect(r.classification).toBe("failed");
+      expect(marks).toHaveLength(1);
+      expect(marks[0].reason).toBe("codex-failed");
+      // The pre-fix shape: no retry-safe marker at all.
+      expect(marks[0].retrySafe).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // D5: park is the stalled-signal + classification consumed by the daemon's
   // existing cool-down / needs-human machinery — there is NO `phase.<phase>.park`
   // canonical event. Assert neither the auth-park nor rate-park path emits one.
