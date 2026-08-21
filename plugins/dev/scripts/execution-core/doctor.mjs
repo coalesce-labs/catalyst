@@ -113,6 +113,9 @@ import {
   // CTL-1210 Phase 5: advisory presence checks for the two new Layer-2 sibling files.
   resolveClusterSecretsPath,
   resolveNodeConfigPath,
+  // CTL-2111: the eligible-projection dir (node:fs, bare-node-safe) — cross-referenced
+  // by checkTriageCapParked to WARN only for a board-eligible tripped cap.
+  getEligibleDir,
 } from "./config.mjs";
 // CTL-1785: the TTL constants + enum, imported DIRECTLY from the zero-import leaf
 // (node built-ins only — safe under doctor's bare-Node runtime), same pattern as
@@ -6614,6 +6617,121 @@ export function checkGithubFeedReaderConsistency(deps = {}) {
   ];
 }
 
+// ─── CTL-2111: triage re-dispatch cap visibility ─────────────────────────────
+// defaultListCapFiles — enumerate <orchDir>/.triage-dispatch-counts/*.json and
+// return one {ticket, cappedAt, path} per file that carries a `cappedAt` (a
+// TRIPPED cap). node:fs only (bare-node-safe). Unreadable/malformed files are
+// skipped (fail-open) — a positive-control ticket in the same scan still reports.
+function defaultListCapFiles(orchDir) {
+  const dir = join(orchDir, ".triage-dispatch-counts");
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return []; // no dir → no capped tickets
+  }
+  const out = [];
+  for (const f of entries) {
+    if (!f.endsWith(".json")) continue;
+    const path = join(dir, f);
+    try {
+      const rec = JSON.parse(readFileSync(path, "utf8"));
+      if (rec && typeof rec === "object" && rec.cappedAt) {
+        out.push({ ticket: f.slice(0, -5), cappedAt: rec.cappedAt, path });
+      }
+    } catch {
+      /* malformed/unreadable → skip (fail-open) */
+    }
+  }
+  return out;
+}
+
+// defaultReadEligibleIdentifiers — the set of board-eligible ticket identifiers,
+// read straight off the on-disk eligible projections (<eligibleDir>/*.json, shape
+// { tickets: [{identifier, ...}] }). node:fs only — the projection is the
+// bare-node-safe eligible source (never bun:sqlite). Malformed files are skipped.
+function defaultReadEligibleIdentifiers() {
+  const set = new Set();
+  let files;
+  try {
+    files = readdirSync(getEligibleDir());
+  } catch {
+    return set; // no dir → empty (nothing eligible)
+  }
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const proj = JSON.parse(readFileSync(join(getEligibleDir(), f), "utf8"));
+      if (Array.isArray(proj?.tickets)) {
+        for (const t of proj.tickets) {
+          if (t && typeof t.identifier === "string") set.add(t.identifier);
+        }
+      }
+    } catch {
+      /* malformed/unreadable → skip */
+    }
+  }
+  return set;
+}
+
+// checkTriageCapParked — report every tripped triage re-dispatch cap this host
+// owns (CTL-2111, Tier 2). A board-eligible tripped cap is a WARN (the human
+// re-queued it or it's ready and this host refuses to triage it); a tripped cap
+// that is not currently eligible is an INFO (parked, possibly legitimate). In a
+// multi-host cluster only the HRW owner reports a ticket (avoids N duplicate
+// alarms). No tripped/owned files → a single PASS. Every read is fail-open and
+// bare-node-safe (node:fs + the eligible projection, never bun:sqlite).
+export function checkTriageCapParked(deps = {}) {
+  const {
+    orchDir = getExecutionCoreDir(),
+    listCapFiles = () => defaultListCapFiles(orchDir),
+    readEligibleIdentifiers = defaultReadEligibleIdentifiers,
+    isEligible = null, // optional direct seam; else derived from readEligibleIdentifiers
+    getRoster = getExistenceHosts,
+    getHostName: _getHostName = getHostName,
+    ownedBy: _ownedBy = ownedBy,
+  } = deps;
+
+  const capped = listCapFiles();
+  if (capped.length === 0) {
+    return [mkCheck("triage-cap-parked", STATUS.PASS, "no triage-capped tickets on this host")];
+  }
+
+  const eligibleSet = isEligible ? null : readEligibleIdentifiers();
+  const eligibleOf = isEligible ?? ((t) => eligibleSet.has(t));
+  const roster = getRoster() ?? [];
+  const self = _getHostName();
+  const multiHost = roster.length > 1;
+
+  const checks = [];
+  for (const { ticket, cappedAt, path } of capped) {
+    // Multi-host: only the HRW owner reports the ticket (the owning host is the
+    // one that must act). Single-host is always "owned".
+    if (multiHost && !_ownedBy(ticket, roster, self)) continue;
+    const elig = eligibleOf(ticket);
+    const reArm =
+      `delete ${path} to re-arm` +
+      ` (also reset the fence via 'node cluster-claim.mjs reset-triage-attempt ${ticket}',` +
+      ` and if the per-ticket Linear write budget is exhausted, clear the needs-human label` +
+      ` + the linear-write-budget.json byTicket entry)`;
+    checks.push(
+      mkCheck(
+        "would-triage-capped",
+        elig ? STATUS.WARN : STATUS.INFO,
+        `${ticket} tripped its triage re-dispatch cap (cappedAt=${cappedAt})` +
+          (elig ? " and is board-eligible — this host will not triage it" : " (not currently board-eligible — parked)") +
+          ` — ${reArm}`,
+      ),
+    );
+  }
+
+  if (checks.length === 0) {
+    // Tripped caps exist but all are owned by other hosts (they report them).
+    return [mkCheck("triage-cap-parked", STATUS.PASS, "no triage-capped tickets owned by this host")];
+  }
+  return checks;
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -6876,6 +6994,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
     () => checkClusterSecretsPresent(), // CTL-1210: cluster-secrets.json present? (advisory — new nodes haven't run cluster-sync yet)
     () => checkNodeConfigPresent(), // CTL-1210: node.json present + host.name set? (advisory)
+    () => checkTriageCapParked(), // CTL-2111: this host holds a tripped triage re-dispatch cap for a board-eligible ticket? (advisory — WARN/INFO/PASS, never FAIL)
   ];
 }
 

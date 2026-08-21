@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor.test.mjs
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 // CTL-1929: the consumed/suppressible name lists, from the zero-import leaf that
@@ -64,6 +64,7 @@ import {
   checkSelfEchoIdentityHistory,
   checkClusterSecretsPresent,
   checkNodeConfigPresent,
+  checkTriageCapParked,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
@@ -224,6 +225,130 @@ describe("checkHrwPartition", () => {
     expect(checks[0].name).toBe("hrw-partition");
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("0/3");
+  });
+});
+
+// ─── CTL-2111: checkTriageCapParked ──────────────────────────────────────────
+
+describe("checkTriageCapParked (CTL-2111)", () => {
+  let capOrchDir;
+  beforeEach(() => {
+    capOrchDir = mkdtempSync(join(tmpdir(), "doctor-cap-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(capOrchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+  function seedCap(ticket, rec) {
+    const dir = join(capOrchDir, ".triage-dispatch-counts");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${ticket}.json`), JSON.stringify(rec));
+  }
+
+  it("WARNs for a tripped cap that is board-eligible and owned by self, with path + re-arm command", () => {
+    seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("would-triage-capped");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("CTL-2111");
+    expect(checks[0].detail).toContain(".triage-dispatch-counts");
+    expect(checks[0].detail).toContain("re-arm");
+  });
+
+  it("INFO for a tripped cap not currently board-eligible", () => {
+    seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.INFO);
+  });
+
+  it("omits a tripped cap NOT owned by this host (multi-host HRW)", () => {
+    seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini", "mac-studio"],
+      getHostName: () => "mini",
+      ownedBy: () => false, // owned by the other host
+    });
+    // no owned capped tickets → a single PASS
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("PASS when there are no tripped cap files", () => {
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("no triage-capped");
+  });
+
+  it("a counter file WITHOUT cappedAt is not reported (only tripped caps count)", () => {
+    seedCap("CTL-2111", { count: 1, lastDispatchAt: "2026-08-20T00:00:00Z" });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("malformed cap file is skipped (fail-open); a positive-control ticket in the same run still reports", () => {
+    const dir = join(capOrchDir, ".triage-dispatch-counts");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "CTL-BAD.json"), "not-json{");
+    seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    // CTL-BAD skipped, CTL-2111 still reported (positive control)
+    const names = checks.map((c) => c.detail);
+    expect(checks.some((c) => c.status === STATUS.WARN && c.detail.includes("CTL-2111"))).toBe(true);
+    expect(names.some((d) => d.includes("CTL-BAD"))).toBe(false);
+  });
+
+  it("checksForClass(worker) registers the check thunk", () => {
+    const thunks = checksForClass({ class: "worker", recognized: true });
+    // Every thunk is callable; at least one resolves to a would-triage-capped/triage-cap-parked row.
+    const names = new Set();
+    for (const t of thunks) {
+      try {
+        const rows = t();
+        if (Array.isArray(rows)) for (const r of rows) names.add(r?.name);
+      } catch {
+        /* network/env-dependent checks may throw in a bare test env — ignore */
+      }
+    }
+    expect(names.has("triage-cap-parked") || names.has("would-triage-capped")).toBe(true);
   });
 });
 
