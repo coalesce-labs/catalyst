@@ -1410,6 +1410,7 @@ jobs:
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
+            triage-cap-event.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
             unstuck-orphan-merge.test.mjs \
