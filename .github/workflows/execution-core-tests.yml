@@ -927,7 +927,7 @@ jobs:
         # step documents). Measured green on origin/main (9 pass) and this branch
         # (10 pass), so it imports no pre-existing red like fence-held-fold would.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs
+        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs event-leak-guard.test.mjs
 
       - name: plugin-refresh + lock-resolution-audit tests (CTL-1831)
         # `grep plugin-refresh .github/workflows/` returned only two COMMENTS
@@ -1277,6 +1277,7 @@ jobs:
             monitor-torn.test.mjs \
             event-log-window.test.mjs \
             event-log-read-guard.test.mjs \
+            env-restore-guard.test.mjs \
             event-name-fold.test.mjs \
             event-name-read-guard.test.mjs \
             event-envelope.test.mjs \
