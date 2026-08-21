@@ -10,6 +10,7 @@ import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { superviseRole } from "./supervisor.mjs";
 import { runSdkSession } from "./sdk-session.mjs";
 import { report, formatReport, listRoles } from "./doctor.mjs";
+import { setScopeKeys } from "./state.mjs";
 import { runQuietFleetOnce } from "./quiet-fleet.mjs";
 import { runHoldingSentinelOnce } from "./holding-sentinel.mjs";
 import { runDeadManOnce } from "./dead-man.mjs";
@@ -50,6 +51,20 @@ async function main() {
       console.log(roles.length ? roles.join("\n") : "(no roles configured)");
       return 0;
     }
+    // CTL-2129: back the bash `install.sh --scope-keys` with the unit-tested JS
+    // writer. `<key[,key...]>` is a CSV of Linear project ids the steward owns;
+    // merges into an existing manifest (never clobbers). This is what lets an
+    // instrument page THIS steward for a stalled item in one of its projects.
+    case "set-scope-keys": {
+      const keys = (process.argv[4] ?? "")
+        .split(",")
+        .map((k) => k.trim())
+        .filter((k) => k.length > 0);
+      if (!arg || keys.length === 0) die("usage: role-supervisor set-scope-keys <role> <key[,key...]>");
+      const next = setScopeKeys(arg, keys);
+      console.log(`role-supervisor: ${arg} scopeKeys = ${JSON.stringify(next)}`);
+      return 0;
+    }
     // The three CTL-2000 out-of-fleet / fleet-wide instruments share one loop
     // shape: `--once` runs a single tick (what the plist's StartInterval fires),
     // `--dry-run` prints intended actions and mutates nothing, and with neither
@@ -63,6 +78,7 @@ async function main() {
     default:
       die(
         "usage: role-supervisor run <role> | doctor [--json] | stop <role> | list | " +
+          "set-scope-keys <role> <key[,key...]> | " +
           "quiet-fleet [--once] [--dry-run] | holding-sentinel [--once] [--dry-run] | dead-man [--once] [--dry-run]",
       );
   }
