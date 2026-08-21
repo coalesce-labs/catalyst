@@ -6,11 +6,14 @@ import {
   _bonjourResolveCount,
   _bonjourTtlMs,
   _resetBonjourCache,
+  _resetTailscaleCache,
+  _tailscaleResolveCount,
   bonjourName,
   buildTrustedOrigins,
   isOriginAllowed,
   originHost,
   selfAddresses,
+  tailscaleMagicDnsName,
 } from "./trusted-origin.mjs";
 
 const TRUSTED = buildTrustedOrigins({
@@ -275,6 +278,59 @@ describe("bonjourName", () => {
     expect(_bonjourResolveCount()).toBe(1);
     for (let i = 0; i < 50; i++) buildTrustedOrigins({ port: 7400, addresses: [] });
     expect(_bonjourResolveCount()).toBe(1);
+  });
+});
+
+// CTL — the monitor is routinely browsed by its Tailscale MagicDNS name
+// (`<host>.<tailnet>.ts.net`), which is neither os.hostname() nor the Bonjour
+// `.local` name. Without deriving it, every host in a Tailscale-accessed fleet
+// 403s every reply identically — reproduced live across a multi-host fleet,
+// each browsed as `<name>.<tailnet>.ts.net:7400`.
+describe("tailscaleMagicDnsName", () => {
+  test("returns null when Tailscale is unavailable, and never throws", () => {
+    const n = tailscaleMagicDnsName();
+    expect(n === null || typeof n === "string").toBe(true);
+    if (typeof n === "string") expect(n).not.toBe("");
+  });
+
+  test("resolves at most once per process (rejected origins must not respawn the CLI)", () => {
+    _resetTailscaleCache();
+    expect(_tailscaleResolveCount()).toBe(0);
+    tailscaleMagicDnsName();
+    expect(_tailscaleResolveCount()).toBe(1);
+    for (let i = 0; i < 200; i++) tailscaleMagicDnsName();
+    expect(_tailscaleResolveCount()).toBe(1);
+  });
+
+  test("buildTrustedOrigins trusts an injected MagicDNS name on the bound port", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: ["mini.rozich"],
+      addresses: [],
+      tailscaleDnsName: "mini.tail1234.ts.net",
+    });
+    expect(t.has("http://mini.tail1234.ts.net:7400")).toBe(true);
+  });
+
+  test("does NOT trust the MagicDNS name without the bound port", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: ["mini.rozich"],
+      addresses: [],
+      tailscaleDnsName: "mini.tail1234.ts.net",
+    });
+    expect(t.has("http://mini.tail1234.ts.net")).toBe(false);
+  });
+
+  test("a MagicDNS name is only trusted on a wildcard bind, like Bonjour", () => {
+    const t = buildTrustedOrigins({
+      port: 7400,
+      hostnames: ["mini.rozich"],
+      addresses: ["100.65.193.30"],
+      tailscaleDnsName: "mini.tail1234.ts.net",
+      bindHost: "100.65.193.30",
+    });
+    expect(t.has("http://mini.tail1234.ts.net:7400")).toBe(false);
   });
 });
 

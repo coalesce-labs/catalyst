@@ -1,5 +1,5 @@
 // reap-intent.test.mjs — emitter unit tests (CTL-649 Phase 4).
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,14 @@ beforeEach(() => {
   const yyyymm = new Date().toISOString().slice(0, 7);
   LOG_PATH = join(SCRATCH, "events", `${yyyymm}.jsonl`);
   process.env.CATALYST_DIR = SCRATCH;
+});
+
+afterEach(() => {
+  // The "unwritable event log" test below repoints CATALYST_DIR at a
+  // non-directory path and never gets a natural chance to undo it before the
+  // next test file runs in this same bun test process. Per test-setup.mjs's
+  // documented save/restore convention, always land back on the hermetic pin.
+  process.env.CATALYST_DIR = process.env.CATALYST_HERMETIC_DIR;
 });
 
 async function freshModule() {

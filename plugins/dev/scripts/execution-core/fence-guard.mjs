@@ -54,6 +54,17 @@ import { log } from "./config.mjs";
 // CATALYST_FENCE_FRESH_MS for tuning.
 const FENCE_FRESH_MS_DEFAULT = 240_000;
 
+// CAT-173: report why a guarded write was suppressed without changing the
+// guard's boolean decision. In particular, preserve the authoritative read's
+// distinction between a confirmed takeover and an unavailable read.
+export const FENCE_SUPPRESS_REASONS = Object.freeze({
+  FOREIGN_OWNER: "foreign-owner",
+  MISSING_GENERATION: "missing-generation",
+  SUPERSEDED: "superseded",
+  UNVERIFIABLE: "unverifiable",
+  THREW: "threw",
+});
+
 function resolveFenceFreshMs(env) {
   const raw = Number(env?.CATALYST_FENCE_FRESH_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : FENCE_FRESH_MS_DEFAULT;
@@ -206,8 +217,26 @@ export function fenceGuard(
     // the terminal-probe path. Optional; default no-op so existing callers are
     // unaffected.
     onMissingGeneration = null,
+    // CAT-173: optional observation hook for false verdicts. Like
+    // onMissingGeneration, hook failures are swallowed and cannot affect the
+    // already-decided guard result.
+    onSuppress = null,
   } = {},
 ) {
+  const suppress = (reason, generation = null) => {
+    if (typeof onSuppress === "function") {
+      try {
+        onSuppress({ ticket, reason, generation });
+      } catch (err) {
+        logger?.debug?.(
+          { ticket, err: err?.message },
+          "fenceGuard: onSuppress hook threw — continuing",
+        );
+      }
+    }
+    return false;
+  };
+
   // N=1 single-host gate: provably no peer → trust local unconditionally.
   if (!multiHost) return true;
 
@@ -290,7 +319,7 @@ export function fenceGuard(
             "SUPPRESSING the guarded write (fail-closed) even at an escalation site; " +
             "the current owner escalates this ticket itself.",
         );
-        return false;
+        return suppress(FENCE_SUPPRESS_REASONS.FOREIGN_OWNER);
       }
       if (typeof onMissingGeneration === "function") {
         try {
@@ -311,7 +340,7 @@ export function fenceGuard(
         );
         return true;
       }
-      return false; // missing/null/NaN → fail-closed (mutating write sites)
+      return suppress(FENCE_SUPPRESS_REASONS.MISSING_GENERATION);
     }
 
     // Stage 1 opt-in: trust a FRESH cross-host-reconciled projection row.
@@ -320,15 +349,25 @@ export function fenceGuard(
     if (effectiveReadSource === "projection-first" && gateway) {
       const f = readFence(ticket);
       if (f && isFresh(f, env)) {
-        if (f.ownerHost !== self) return false; // foreign owner (incl. released→null) → suppress
-        return f.generation === generation; // higher/other gen → suppress
+        if (f.ownerHost !== self) {
+          return suppress(FENCE_SUPPRESS_REASONS.FOREIGN_OWNER, f.generation ?? null);
+        }
+        if (f.generation === generation) return true;
+        return suppress(FENCE_SUPPRESS_REASONS.SUPERSEDED, generation);
       }
       // stale/absent projection → fall through to the authoritative read.
     }
 
     // Stage 0 default (and Stage 1 stale/absent fallback): authoritative read.
-    return escalate({ ticket, generation }).current === true;
+    const verdict = escalate({ ticket, generation });
+    if (verdict?.current === true) return true;
+    return suppress(
+      verdict?.stale === true
+        ? FENCE_SUPPRESS_REASONS.SUPERSEDED
+        : FENCE_SUPPRESS_REASONS.UNVERIFIABLE,
+      generation,
+    );
   } catch {
-    return false; // any error → fail-closed
+    return suppress(FENCE_SUPPRESS_REASONS.THREW); // any error → fail-closed
   }
 }

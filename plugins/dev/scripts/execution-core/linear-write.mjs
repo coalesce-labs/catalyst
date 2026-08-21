@@ -67,6 +67,24 @@ export {
  * host-originated writes" while the host was still writing. Every caller below
  * already retries on the next tick.
  */
+// CTL-2052 — reason-agnostic normalization of a DETERMINISTIC cloud LABEL rejection.
+// `routeThroughProxy` is the single chokepoint both applyLabel (mode:add) and
+// removeLabel (mode:remove) flow through, and it is the only place `routeId` is known
+// (the caller below loses both routeId and status). Through the proxy an exclusive
+// conflict — which the direct path classifies as the terminal `exclusive-conflict` —
+// surfaces only as the generic `cloud:failed` / `cloud:rejected` with detail:"failed".
+// Such a rejection will not change on the next tick while the label state is unchanged,
+// so map it to the cool-down-eligible reason the converger recognizes. `detail` is
+// preserved so AC2's "surfaced WITH the reason" carries the cloud's own detail verbatim.
+// Only the label route and only these two deterministic reasons are touched; a success,
+// a null verdict, and every other reason pass through by identity (===).
+const DETERMINISTIC_LABEL_PROXY_REASONS = new Set(["cloud:failed", "cloud:rejected"]);
+export function normalizeLabelProxyVerdict(verdict, routeId) {
+  if (routeId !== "label" || !verdict || verdict.applied !== false) return verdict;
+  if (!DETERMINISTIC_LABEL_PROXY_REASONS.has(verdict.reason)) return verdict;
+  return { ...verdict, reason: "cloud:label-rejected" };
+}
+
 // CTL-1936 / AC4: `caller` names the site that issued the write. The incident could not
 // be attributed from the event stream — 302 writes on one ticket with no record of what
 // produced them, and the daemon log had rotated. It is threaded from each call site
@@ -117,11 +135,17 @@ function routeThroughProxy(proxy, { routeId, ticket, buildPayload, caller = null
     return { applied: false, reason: "proxy-threw" };
   }
   if (!res?.handled) return null;
-  return {
-    applied: res.applied === true,
-    reason: res.reason ?? null,
-    ...(res.detail ? { detail: res.detail } : {}),
-  };
+  // CTL-2052 — normalize a deterministic cloud LABEL rejection into the
+  // cool-down-eligible reason before it reaches applyLabel/removeLabel (which lose
+  // routeId). No-op for every other route/reason (identity return).
+  return normalizeLabelProxyVerdict(
+    {
+      applied: res.applied === true,
+      reason: res.reason ?? null,
+      ...(res.detail ? { detail: res.detail } : {}),
+    },
+    routeId
+  );
 }
 
 // linear-transition.sh sits one directory up from execution-core/ — mirrors the

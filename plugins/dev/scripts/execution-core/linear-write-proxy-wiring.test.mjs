@@ -12,6 +12,7 @@ import {
   applyPhaseStatus,
   applyTerminalDone,
   getLinearWriteProxy,
+  normalizeLabelProxyVerdict,
   removeLabel,
   setLinearWriteProxy,
   setLinearWriteProxyResolver,
@@ -553,6 +554,88 @@ describe("removeLabel — the proxied removal runs BEFORE the credentialed read"
     expect(r).toEqual({ removed: true, wrote: true });
     expect(proxy.sends).toEqual([{ routeId: "label", ticket: "CTL-8", payload: {}, caller: "removeLabel" }]);
     expect(calls[0].args).toEqual(["issues", "update", "CTL-8", "--labels", "bug", "--label-mode", "overwrite"]);
+  });
+});
+
+// ── CTL-2052 ─────────────────────────────────────────────────────────────────
+// On the enforce/proxy path the caller cannot read WHY the cloud refused a label
+// write — the verdict carries `detail:"failed"`, not "not exclusive child labels".
+// So a DETERMINISTIC cloud label rejection (`cloud:failed`/`cloud:rejected` on the
+// `label` route) is normalized to `cloud:label-rejected`, which the converger
+// cool-down recognizes, WITHOUT dropping `detail` (AC2: surfaced with the reason).
+describe("CTL-2052 normalizeLabelProxyVerdict — the pure classifier", () => {
+  test("maps the two deterministic label-rejection reasons ONLY on the label route", () => {
+    for (const reason of ["cloud:failed", "cloud:rejected"]) {
+      expect(
+        normalizeLabelProxyVerdict({ applied: false, reason, detail: "failed" }, "label")
+      ).toEqual({ applied: false, reason: "cloud:label-rejected", detail: "failed" });
+    }
+  });
+
+  test("preserves detail verbatim (AC2 — do not swallow the reason)", () => {
+    const out = normalizeLabelProxyVerdict(
+      { applied: false, reason: "cloud:rejected", detail: "some-cloud-detail" },
+      "label"
+    );
+    expect(out.detail).toBe("some-cloud-detail");
+  });
+
+  test("leaves every OTHER reason alone on the label route", () => {
+    // These already classify correctly (throttled / terminal / budget); only the
+    // two deterministic-rejection reasons are touched. cloud:exhausted is the budget
+    // refusal deliberately left out of scope.
+    for (const reason of ["unauthorized", "rate-limited", "server-error", "cloud:exhausted", "budget:ticket-cap", "not-found"]) {
+      const v = { applied: false, reason };
+      expect(normalizeLabelProxyVerdict(v, "label")).toBe(v);
+    }
+  });
+
+  test("leaves the two rejection reasons alone on a NON-label route (issue-state / comment)", () => {
+    for (const routeId of ["issue-state", "comment", "estimate"]) {
+      const v = { applied: false, reason: "cloud:failed", detail: "failed" };
+      expect(normalizeLabelProxyVerdict(v, routeId)).toBe(v);
+    }
+  });
+
+  test("never touches a SUCCESS verdict or a null/absent verdict", () => {
+    const ok = { applied: true, reason: null };
+    expect(normalizeLabelProxyVerdict(ok, "label")).toBe(ok);
+    expect(normalizeLabelProxyVerdict(null, "label")).toBe(null);
+    expect(normalizeLabelProxyVerdict(undefined, "label")).toBe(undefined);
+  });
+});
+
+describe("CTL-2052 applyLabel/removeLabel: the proxy verdict is normalized end-to-end", () => {
+  test("applyLabel enforce: cloud:failed → cloud:label-rejected (detail preserved)", () => {
+    const proxy = fakeProxy("enforce", { handled: true, applied: false, reason: "cloud:failed", detail: "failed" });
+    setLinearWriteProxyResolver(fakeResolver());
+    const r = applyLabel({ ticket: "CTL-25", label: "blocked", exec: () => { throw new Error("must not exec"); }, proxy });
+    expect(r).toEqual({ applied: false, reason: "cloud:label-rejected", detail: "failed" });
+  });
+
+  test("applyLabel enforce: cloud:rejected normalizes the same way", () => {
+    const proxy = fakeProxy("enforce", { handled: true, applied: false, reason: "cloud:rejected", detail: "failed" });
+    setLinearWriteProxyResolver(fakeResolver());
+    const r = applyLabel({ ticket: "CTL-25", label: "blocked", exec: () => { throw new Error("must not exec"); }, proxy });
+    expect(r.reason).toBe("cloud:label-rejected");
+  });
+
+  test("applyLabel enforce LEAVE-ALONE: unauthorized passes through unchanged", () => {
+    const proxy = fakeProxy("enforce", { handled: true, applied: false, reason: "unauthorized" });
+    setLinearWriteProxyResolver(fakeResolver());
+    const r = applyLabel({ ticket: "CTL-25", label: "blocked", exec: () => { throw new Error("must not exec"); }, proxy });
+    expect(r).toEqual({ applied: false, reason: "unauthorized" });
+  });
+
+  test("removeLabel enforce: cloud:failed → cloud:label-rejected", async () => {
+    const proxy = fakeProxy("enforce", { handled: true, applied: false, reason: "cloud:failed", detail: "failed" });
+    setLinearWriteProxyResolver(fakeResolver());
+    const r = await removeLabel("CTL-26", "needs-human", {
+      exec: () => { throw new Error("must not exec"); },
+      readLabels: () => ({ ok: true, labels: ["needs-human", "bug"] }),
+      proxy,
+    });
+    expect(r).toEqual({ removed: false, wrote: false, reason: "cloud:label-rejected" });
   });
 });
 

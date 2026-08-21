@@ -140,6 +140,12 @@ import {
 import { collectBeliefsTick, getBeliefsDb, getEscalateHumanBelief } from "./beliefs/collector.mjs";
 import { buildRecoveryItems } from "./recovery-evidence.mjs";
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator re-arm
+import {
+  appendFenceStandoffEvent as defaultAppendFenceStandoffEvent,
+  clearFenceStandoff,
+  maybeBreakGlass,
+  resolveStandoffCooldownMs,
+} from "./fence-standoff.mjs"; // CAT-173: bounded out-of-band surfacing for fence standoffs
 // CTL-1045 Bug 1: kill-storm suppression guard for defaultJanitorKillIntentRecorder.
 import {
   isIntentEffective,
@@ -443,7 +449,10 @@ import {
   TERMINAL_LABEL_REASONS,
   shouldCoolDownLabel,
   isThrottledLabelReason,
+  isCloudLabelRejection,
 } from "./label-failure-class.mjs";
+// CTL-2052 (AC3): the "stopped after N and said so" escalation emitter.
+import { emitLabelRetryExhaustedEvent } from "./label-retry-event.mjs";
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
 import {
@@ -2715,13 +2724,70 @@ function unmetBlockersFor(candidateId, edges, poolById, blockerStates) {
 // number of write calls issued (0 == idempotent no-op OR cooled-down). `orchDir`/
 // `now` are optional so legacy callers / bare unit ticks keep the prior
 // best-effort-every-tick behavior (the cool-down simply never arms).
+// CTL-2052 — the three-way operator-log discriminator, factored into ONE helper so the
+// two convergers (convergeHeldLabel / convergeDispositionLabel) cannot hand-drift their
+// class → message mapping (the header above warns they must stay in step —
+// CTL-834/CTL-764). It only chooses the class name for the structured
+// `label_failure_class` field and the human message; the caller supplies its own
+// converger-specific message trio. Order matters: cloud-rejection is checked first
+// because a `cloud:label-rejected` is neither throttled nor terminal.
+function classifyLabelCooldownLog(reason, { cloudMsg, throttledMsg, terminalMsg }) {
+  if (isCloudLabelRejection(reason)) return { cls: "cloud-rejection", message: cloudMsg };
+  if (isThrottledLabelReason(reason)) return { cls: "throttled", message: throttledMsg };
+  return { cls: "terminal", message: terminalMsg };
+}
+
+// CTL-2052 (AC3) — the cap gate, shared by both convergers. Returns true when the apply
+// must be short-circuited: the attempt count has reached the cap and we are still inside
+// the long back-off window. Once that window elapses it resets the ledger so exactly ONE
+// self-heal probe is let through (the label can still land if the sibling was removed
+// meanwhile — COORD-236 "never permanently abandon a label"). Placed BEFORE the ordinary
+// per-window cool-down gate so the cap wins over the time gate.
+function labelRetryCapBlocks(orchDir, ticket, label, now, { cap, exhaustedMs }) {
+  const st = labelRetryState(readLabelCooldownMarker(orchDir, ticket, label), now, { cap, exhaustedMs });
+  if (st.blocked) return true;
+  if (st.exhaustedProbe) clearLabelCooldown(orchDir, ticket, label); // spend one self-heal probe
+  return false;
+}
+
+// CTL-2052 (AC3) — edge-triggered retry-exhausted escalation. Fires exactly on the
+// convergence that brings the attempt count to the cap (compare the post-increment
+// value), so a genuinely stuck label logs ONE operator line + one unified-log event,
+// not one per window (same discipline as CTL-1817's sparse-warn). The log.error is the
+// REQUIRED AC3 "says so" (Alloy→Loki); the event is additive and fail-open via the
+// injected `onRetryExhausted` seam (default null so bare unit ticks stay silent).
+function maybeEscalateRetryExhausted({ ticket, label, attempts, reason, cap, onRetryExhausted }) {
+  if (attempts !== cap) return;
+  log.error(
+    { ticket, label, attempts, reason },
+    "ctl-2052: label apply refused N times — stopping re-issue for the long back-off window and escalating (linear.label.retry-exhausted)"
+  );
+  onRetryExhausted?.({ ticket, label, attempts, reason });
+}
+
 export function convergeHeldLabel(
   ticket,
   current,
   desired,
   writeStatus,
-  { orchDir, now = Date.now, onRemoveResult } = {}
+  {
+    orchDir,
+    now = Date.now,
+    onRemoveResult,
+    retryCap = LABEL_RETRY_CAP,
+    retryExhaustedMs = LABEL_RETRY_EXHAUSTED_MS,
+    onRetryExhausted = null,
+  } = {}
 ) {
+  // CTL-2052 (AC3): cap gate — after N cool-down cycles STOP re-issuing for the long
+  // back-off window (one self-heal probe once it elapses). Before the per-window gate.
+  if (
+    orchDir &&
+    desired &&
+    labelRetryCapBlocks(orchDir, ticket, desired, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs })
+  ) {
+    return 0;
+  }
   // CTL-834: back off if a recent apply of `desired` failed unrecoverably.
   if (orchDir && desired && inLabelCooldown(orchDir, ticket, desired, now())) {
     return 0;
@@ -2831,17 +2897,22 @@ export function convergeHeldLabel(
       }
     }
     if (orchDir && res && res.applied === false && shouldCoolDownLabel(res.reason)) {
-      recordLabelCooldown(orchDir, ticket, desired, now());
-      // COORD-236: the two classes get DIFFERENT sentences, because an operator
-      // reading "unrecoverable" for a budget refusal would go looking for a
-      // missing label that is not missing.
-      const throttled = isThrottledLabelReason(res.reason);
-      log.warn(
-        { ticket, label: desired, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
-        throttled
-          ? "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses"
-          : "ctl-834: held-label apply unrecoverable — backing off (cool-down)"
-      );
+      const attempts = recordLabelCooldown(orchDir, ticket, desired, now());
+      // COORD-236 / CTL-2052: each class gets a DIFFERENT sentence, because an operator
+      // reading "unrecoverable" for a budget refusal would go looking for a missing
+      // label that is not missing, and reading "throttled" for a cloud rejection would
+      // hunt a non-existent budget problem (AC2 — surface the RIGHT reason).
+      const { cls, message } = classifyLabelCooldownLog(res.reason, {
+        cloudMsg:
+          "ctl-2052: held-label apply refused by the cloud (deterministic) — backing off (cool-down); this write is not re-issued until the cool-down elapses",
+        throttledMsg:
+          "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
+        terminalMsg: "ctl-834: held-label apply unrecoverable — backing off (cool-down)",
+      });
+      log.warn({ ticket, label: desired, reason: res.reason, label_failure_class: cls, attempts }, message);
+      maybeEscalateRetryExhausted({ ticket, label: desired, attempts, reason: res.reason, cap: retryCap, onRetryExhausted }); // CTL-2052 AC3
+    } else if (orchDir && desired && (res === undefined || res?.applied === true)) {
+      clearLabelCooldown(orchDir, ticket, desired); // CTL-2052: success resets the ledger
     }
   }
   return writes;
@@ -2877,7 +2948,13 @@ export function convergeDispositionLabel(
   current,
   desired,
   writeStatus,
-  { orchDir, now = Date.now } = {}
+  {
+    orchDir,
+    now = Date.now,
+    retryCap = LABEL_RETRY_CAP,
+    retryExhaustedMs = LABEL_RETRY_EXHAUSTED_MS,
+    onRetryExhausted = null,
+  } = {}
 ) {
   const have = new Set(current ?? []);
   // Precedence suppression: if needs-human is already applied AND desired is one of
@@ -2886,6 +2963,15 @@ export function convergeDispositionLabel(
   // When desired=null (clear-on-pickup), we still remove stale tick-converged labels
   // but leave needs-human alone (it is cleared only by genuine resolution).
   if (have.has(HELD_LABEL_NEEDS_HUMAN) && desired !== null && desired !== undefined) return 0;
+  // CTL-2052 (AC3): cap gate — STOP re-issuing after N cool-down cycles (one self-heal
+  // probe once the long window elapses). Before the ordinary per-window cool-down.
+  if (
+    orchDir &&
+    desired &&
+    labelRetryCapBlocks(orchDir, ticket, desired, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs })
+  ) {
+    return 0;
+  }
   // CTL-834: back off if a recent apply of `desired` failed unrecoverably.
   if (orchDir && desired && inLabelCooldown(orchDir, ticket, desired, now())) {
     return 0;
@@ -2914,14 +3000,18 @@ export function convergeDispositionLabel(
     }
     writes++;
     if (orchDir && res && res.applied === false && shouldCoolDownLabel(res.reason)) {
-      recordLabelCooldown(orchDir, ticket, desired, now());
-      const throttled = isThrottledLabelReason(res.reason);
-      log.warn(
-        { ticket, label: desired, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
-        throttled
-          ? "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses"
-          : "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
-      );
+      const attempts = recordLabelCooldown(orchDir, ticket, desired, now());
+      const { cls, message } = classifyLabelCooldownLog(res.reason, {
+        cloudMsg:
+          "ctl-2052: disposition-label apply refused by the cloud (deterministic) — backing off (cool-down); this write is not re-issued until the cool-down elapses",
+        throttledMsg:
+          "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
+        terminalMsg: "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)",
+      });
+      log.warn({ ticket, label: desired, reason: res.reason, label_failure_class: cls, attempts }, message);
+      maybeEscalateRetryExhausted({ ticket, label: desired, attempts, reason: res.reason, cap: retryCap, onRetryExhausted }); // CTL-2052 AC3
+    } else if (orchDir && desired && (res === undefined || res?.applied === true)) {
+      clearLabelCooldown(orchDir, ticket, desired); // CTL-2052: success resets the ledger
     }
   }
   return writes;
@@ -2996,18 +3086,56 @@ export function convergeStartedHeldLabels(
 export function labelCooldownPath(orchDir, ticket, label) {
   return join(orchDir, ".label-cooldowns", `${ticket}-${label}.json`);
 }
-function inLabelCooldown(orchDir, ticket, label, now) {
+// CTL-2052 — read the cool-down marker (or null). Its own owner of the parse, so the
+// attempt-counter reader and the time gate below cannot disagree about the shape.
+function readLabelCooldownMarker(orchDir, ticket, label) {
   try {
-    const marker = JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8"));
-    return typeof marker.failedAt === "number" && now - marker.failedAt < LABEL_COOLDOWN_MS;
+    return JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8"));
   } catch {
-    return false;
+    return null;
   }
 }
+// CTL-2052 — clear the ledger (on a successful apply, or when spending the single
+// self-heal probe). ENOENT is the expected case. Best-effort; never throws.
+function clearLabelCooldown(orchDir, ticket, label) {
+  try {
+    unlinkSync(labelCooldownPath(orchDir, ticket, label));
+  } catch {
+    /* ENOENT — nothing to clear */
+  }
+}
+function inLabelCooldown(orchDir, ticket, label, now) {
+  const marker = readLabelCooldownMarker(orchDir, ticket, label);
+  return marker != null && typeof marker.failedAt === "number" && now - marker.failedAt < LABEL_COOLDOWN_MS;
+}
+// CTL-2052 — the marker carries a per-(ticket,label) attempt count so AC3 can bound
+// the storm. Read the prior count, increment, persist, and RETURN the new value so the
+// caller can edge-trigger the cap-crossing escalation. Backward-compatible: an old
+// marker without `attempts` reads as 0, so the first increment is 1.
 function recordLabelCooldown(orchDir, ticket, label, now) {
   const p = labelCooldownPath(orchDir, ticket, label);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify({ failedAt: now }));
+  const prior = readLabelCooldownMarker(orchDir, ticket, label);
+  const priorAttempts = prior && Number.isInteger(prior.attempts) ? prior.attempts : 0;
+  const attempts = priorAttempts + 1;
+  writeFileSync(p, JSON.stringify({ failedAt: now, attempts }));
+  return attempts;
+}
+
+// CTL-2052 (AC3) — the pure cap arithmetic, exported so it can be exercised without
+// disk. `blocked` short-circuits the apply (still inside the long back-off after the
+// cap); `exhaustedProbe` says the long window elapsed so the caller may allow ONE probe
+// (and reset the ledger, so the label can still land if the sibling was removed
+// meanwhile — it self-heals on a long timescale rather than never; COORD-236 "never
+// permanently abandon a label").
+export function labelRetryState(marker, now, { cap, exhaustedMs } = {}) {
+  const attempts = marker && Number.isInteger(marker.attempts) ? marker.attempts : 0;
+  const failedAt = marker && typeof marker.failedAt === "number" ? marker.failedAt : 0;
+  if (attempts >= cap) {
+    if (now - failedAt < exhaustedMs) return { blocked: true, attempts, exhaustedProbe: false };
+    return { blocked: false, attempts, exhaustedProbe: true };
+  }
+  return { blocked: false, attempts, exhaustedProbe: false };
 }
 
 // CTL-624: dispatch cool-down marker. Conceptually mirrors the labelOnce
@@ -3745,6 +3873,35 @@ function fenceSuppressMarkerPath(orchDir, ticket) {
 // non-terminal until the marker expired.
 function escalationProbeCooldownPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ".escalation-probe-cooldown");
+}
+
+// CAT-173: successful fence-standoff delivery has its own long cooldown. Keep it
+// separate from `.fence-suppressed`: terminalDoneOnce consumes that marker and
+// must remain free to write Done while standoff re-escalation is rate-bounded.
+function fenceStandoffCooldownPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".fence-standoff-cooldown");
+}
+
+function stampFenceStandoffCooldown(orchDir, ticket, nowMs, env = process.env) {
+  try {
+    writeFileSync(
+      fenceStandoffCooldownPath(orchDir, ticket),
+      JSON.stringify({ expiresAt: nowMs + resolveStandoffCooldownMs(env) }),
+    );
+  } catch {
+    /* best-effort — re-probe next tick */
+  }
+}
+
+function isFenceStandoffCooldownFresh(orchDir, ticket, nowMs) {
+  try {
+    const { expiresAt } = JSON.parse(
+      readFileSync(fenceStandoffCooldownPath(orchDir, ticket), "utf8"),
+    );
+    return Number.isFinite(expiresAt) && nowMs < expiresAt;
+  } catch {
+    return false;
+  }
 }
 
 // Best-effort: a failed write just means we re-probe next tick (no worse than before).
@@ -4633,6 +4790,58 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
   };
 }
 
+export function buildRecoverySeamDeps(
+  opts = {},
+  {
+    readSignals = readWorkerSignals,
+    getAgents = getAgentsCached,
+    clearStallFactory = defaultClearStall,
+  } = {}
+) {
+  // CAT-124 F3: an operator-supplied act registry is an intentional posture
+  // that binds BOTH passes — `unstuckActByCategory: {}` means inert everywhere.
+  // `!= null` deliberately agrees with the `??` at the Pass 0u wiring below:
+  // undefined is absent. The ternary mirrors the wholesale unstuckSweep override,
+  // which replaces the default block including actByCategory. Keep them in lockstep.
+  const unstuckActOverride = opts.unstuckSweep
+    ? opts.unstuckSweep.actByCategory
+    : opts.unstuckActByCategory;
+  const seamFallbackSuppressed = unstuckActOverride != null;
+  return {
+    orchDir: opts.orchDir,
+    seamFallbackSuppressed,
+    clearStall: clearStallFactory(opts.orchDir, opts.writeStatus ?? linearWrite),
+    writeStatus: opts.writeStatus ?? linearWrite,
+    resolvePrState: (ticket) => {
+      const adapter = opts.prAdapter;
+      if (!adapter || typeof adapter.prView !== "function") return null;
+      let pr = null;
+      for (const sig of readSignals(opts.orchDir)) {
+        if (sig.ticket === ticket) {
+          pr = sig.raw?.pr ?? sig.pr ?? null;
+          if (pr?.number) break;
+        }
+      }
+      if (!pr?.number) return null;
+      try {
+        const view = adapter.prView(ticket, pr);
+        if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
+        return view?.state ?? null;
+      } catch {
+        return null; // fail-closed: a gh error is never treated as MERGED.
+      }
+    },
+    jobLifecycle: (bgJobId) => {
+      if (typeof opts.isBgJobAlive !== "function" || !bgJobId) return false;
+      try {
+        return Boolean(opts.isBgJobAlive(bgJobId, { agents: getAgents().agents }));
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
 // CTL-1290: board-health throttle state (host-local, mirrors the unstuck-sweep /
 // recovery-pass cadence vars). The single-LLM cadence floor lives in
 // BOARD_HEALTH_INTERVAL_MS; this holds the last run ms across ticks.
@@ -4925,6 +5134,9 @@ export function schedulerTick(
     // CTL-868 — orphan-detected emitter (route B observability). Injectable; tests
     // pass a spy, production uses the canonical unified-event-log appender.
     appendOrphanDetectedEvent = defaultAppendOrphanDetectedEvent,
+    appendFenceStandoffEvent = defaultAppendFenceStandoffEvent,
+    // CAT-173: injectable terminal-sweep fence seam for scheduler integration tests.
+    terminalFenceGuard = fenceGuard,
     // CTL-537: sequencing seam. Default undefined → the new-work gate is skipped
     // entirely (byte-for-byte legacy dispatch for every test that doesn't inject
     // it). Production wires defaultCheckSequencing via runTick/startScheduler.
@@ -5229,7 +5441,9 @@ export function schedulerTick(
   // daemon restart). multiHost gates the Linear-touching claim: a single-host
   // roster makes the HRW filter an identity AND skips the claim entirely, so the
   // coordination wiring is an exact no-op until a 2nd host joins the roster.
-  const roster = hosts ?? getEntitledHosts();
+  // trackShedState: true — this is the single accumulation point for entitlement.restored.*
+  // events (CTL-2108). The diagnostician call at line ~9746 stays bare (no accumulation).
+  const roster = hosts ?? getEntitledHosts({ trackShedState: true });
   const self = hostName ?? getHostName();
   // CTL-1785: multiHost (the fenceGuard `!multiHost` disarm + the Linear-touching
   // claim gate) stays EXISTENCE-derived so entitlement shedding can never re-enable
@@ -7249,12 +7463,17 @@ export function schedulerTick(
         for (const member of anomaly.members) {
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
+            let cycleFenceVerdict = null;
             if (
               fenceGuard(
                 { ticket: member, orchDir, multiHost, gateway, self },
-                { proceedOnMissingGeneration: true }
+                {
+                  proceedOnMissingGeneration: true,
+                  onSuppress: (verdict) => { cycleFenceVerdict = verdict; },
+                }
               )
             ) {
+              clearFenceStandoff(orchDir, member);
               const dcResult = routeStuckTicketToDelegate(orchDir, member, {
                 site: "dependency-cycle",
                 reason: "dependency-cycle",
@@ -7301,9 +7520,21 @@ export function schedulerTick(
               }
             } else {
               log.warn(
-                { ticket: member },
+                { ticket: member, reason: cycleFenceVerdict?.reason ?? null },
                 "ctl-863: stale fence — suppressing labelOnce(needs-human/cycle) write (zombie guard)"
               );
+              maybeBreakGlass({
+                orchDir,
+                ticket: member,
+                site: "triaged-waiting-cycle",
+                verdict: cycleFenceVerdict,
+                phase: "dependency-cycle",
+                now: now(),
+                env,
+                appendEvent: appendFenceStandoffEvent,
+                logger: log,
+                detail: `dependency-cycle members: ${anomaly.members.join(" → ")}`,
+              });
             }
           }
         }
@@ -7465,6 +7696,7 @@ export function schedulerTick(
           {
             orchDir,
             now,
+            onRetryExhausted: emitLabelRetryExhaustedEvent, // CTL-2052 AC3: the "stopped after N" event
             onRemoveResult: (label, removed) => {
               if (desired !== null || !removed || hasNeedsHuman) return;
               const fromHeld = label === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : label;
@@ -8302,12 +8534,17 @@ export function schedulerTick(
           );
           // CTL-863 fence: external Linear write — a zombie host that lost its
           // claim must not label after takeover (mirrors the A.5 cycle site).
+          let c925FenceVerdict = null;
           if (
             fenceGuard(
               { ticket: member, orchDir, multiHost, gateway, self },
-              { proceedOnMissingGeneration: true }
+              {
+                proceedOnMissingGeneration: true,
+                onSuppress: (verdict) => { c925FenceVerdict = verdict; },
+              }
             )
           ) {
+            clearFenceStandoff(orchDir, member);
             const c925Result = routeStuckTicketToDelegate(orchDir, member, {
               site: "ctl-925-cycle",
               reason: "dependency-cycle",
@@ -8340,6 +8577,23 @@ export function schedulerTick(
                 source: "ctl-925-cycle",
               });
             }
+          } else {
+            log.warn(
+              { ticket: member, reason: c925FenceVerdict?.reason ?? null },
+              "cat-173: fence suppressed eligible dependency-cycle escalation",
+            );
+            maybeBreakGlass({
+              orchDir,
+              ticket: member,
+              site: "ctl-925-cycle",
+              verdict: c925FenceVerdict,
+              phase: "dependency-cycle",
+              now: now(),
+              env,
+              appendEvent: appendFenceStandoffEvent,
+              logger: log,
+              detail: `dependency-cycle members: ${anomaly.members.join(" → ")}`,
+            });
           }
         }
       }
@@ -8961,7 +9215,8 @@ export function schedulerTick(
       // fence-check runs before we've proven a write is needed.
       if (
         isFenceSuppressFresh(orchDir, ticket, now()) ||
-        isEscalationProbeCooldownFresh(orchDir, ticket, now())
+        isEscalationProbeCooldownFresh(orchDir, ticket, now()) ||
+        isFenceStandoffCooldownFresh(orchDir, ticket, now())
       ) {
         // Still surface the orphan once for the dashboard (the probe/write is what we
         // skip, not the visibility signal).
@@ -9004,11 +9259,13 @@ export function schedulerTick(
           // latch so a finished ticket's escalated/cooldown ledger entry doesn't
           // linger (hygiene — the recovery router already drops terminal tickets).
           recoveryForgetIntent(ticket, { orchDir });
+          clearFenceStandoff(orchDir, ticket);
         } else {
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
+          let fenceVerdict = null;
           if (
-            fenceGuard(
+            terminalFenceGuard(
               { ticket, orchDir, multiHost, gateway, self },
               {
                 proceedOnMissingGeneration: true,
@@ -9021,9 +9278,13 @@ export function schedulerTick(
                 // that one here would hold a genuinely-completed pipeline non-terminal
                 // for a whole cooldown window when recovery finishes teardown.
                 onMissingGeneration: () => stampEscalationProbeCooldown(orchDir, ticket, now()),
+                onSuppress: (verdict) => {
+                  fenceVerdict = verdict;
+                },
               }
             )
           ) {
+            clearFenceStandoff(orchDir, ticket);
             const stalledSig = signalByTicket.get(ticket);
             // CTL-1754: resolve the reason across every key the pipeline
             // actually writes. This line used to read `stalledSig?.stalledReason`
@@ -9055,12 +9316,49 @@ export function schedulerTick(
             }
           } else {
             log.warn(
-              { ticket },
+              { ticket, reason: fenceVerdict?.reason ?? null },
               "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
             );
             // CTL-1329: arm the cooldown so the next ticks skip this dir's probe+fence
             // instead of re-burning Linear quota every tick until the dir is reaped.
             stampFenceSuppress(orchDir, ticket, now());
+            const standoff = maybeBreakGlass({
+              orchDir,
+              ticket,
+              site: "terminal-sweep",
+              verdict: fenceVerdict,
+              phase: signalByTicket.get(ticket)?.phase ?? "terminal-sweep",
+              now: now(),
+              env,
+              appendEvent: (payload) => {
+                try {
+                  return appendFenceStandoffEvent(payload);
+                } catch {
+                  return false;
+                }
+              },
+              logger: log,
+            });
+            if (standoff.breakGlass && !standoff.deliveryPending) {
+              stampFenceStandoffCooldown(orchDir, ticket, now(), env);
+            } else if (standoff.deliveryPending && standoff.deliveryRetryable === true) {
+              // Delivery is intentionally retryable on the next tick. The ordinary
+              // 15-minute suppression marker was stamped immediately above; remove
+              // it so it cannot accidentally become a delivery-retry latch.
+              //
+              // BOUNDED (CAT-173 review): only while maybeBreakGlass still reports the
+              // failure as retryable. Dropping the marker every tick on a PERSISTENTLY
+              // failing sink (unwritable `.escalations`, full disk) re-runs this block's
+              // terminal Linear probe + fence-check subprocess ~2x/sec forever — exactly
+              // the CTL-1329 burn that drained the OAuth bucket and froze fleet dispatch.
+              // Past the bound we leave the marker, so delivery still retries — once per
+              // 15-minute cooldown instead of every tick. Fail-closed on an absent flag.
+              try {
+                unlinkSync(fenceSuppressMarkerPath(orchDir, ticket));
+              } catch {
+                /* best-effort — a missing marker already permits retry */
+              }
+            }
           }
           // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
           // non-terminal stalled/failed-no-recovery ticket is visible on the dashboard
@@ -9126,7 +9424,7 @@ export function schedulerTick(
           hit.labels,
           HELD_LABEL_NEEDS_INPUT,
           retractionWriteStatus,
-          { orchDir, now }
+          { orchDir, now, onRetryExhausted: emitLabelRetryExhaustedEvent } // CTL-2052 AC3
         );
         if (writes > 0) {
           recordTransition({
@@ -9344,6 +9642,15 @@ const DISPATCH_COOLDOWN_MS = Number(process.env.SCHEDULER_DISPATCH_COOLDOWN_MS) 
 // CTL-834: held-label apply cool-down window (convergeHeldLabel). Same default as
 // the dispatch cool-down; overridable for tests / quieter quota budgets.
 const LABEL_COOLDOWN_MS = Number(process.env.SCHEDULER_LABEL_COOLDOWN_MS) || 60_000;
+// CTL-2052 (AC3): after this many cool-down CYCLES for one (ticket,label), the
+// converger STOPS re-issuing (long back-off) and escalates once — so a genuinely
+// stuck label does not retry ~once-per-window forever. The current behavior is
+// effectively N=∞, so any finite cap is a strict improvement.
+const LABEL_RETRY_CAP = Number(process.env.SCHEDULER_LABEL_RETRY_CAP) || 5;
+// CTL-2052 (AC3): the long back-off held after the cap. > LABEL_COOLDOWN_MS so the cap
+// genuinely wins over the ordinary per-window gate; when it elapses, exactly one probe
+// is let through so a since-resolved conflict can still land (COORD-236 self-heal).
+const LABEL_RETRY_EXHAUSTED_MS = Number(process.env.SCHEDULER_LABEL_RETRY_EXHAUSTED_MS) || 1_800_000; // 30 min
 // CTL-713: permanent-failure cooldown. code=2 (prior_artifact_missing,
 // phase-agent-dispatch exit 2) is a structural refusal — back it off longer than
 // the 60s transient window. GC reaps the marker once the ticket leaves the eligible set.
@@ -9709,38 +10016,7 @@ function runTick() {
     // re-deriving them. The bare call is replaced by const tickResult = ...
     // CAT-47: one production dependency bundle is shared by Pass 0u's registry
     // and Pass 0r's fallback registry construction.
-    const unstuckSeamDeps = {
-      orchDir: runningOpts.orchDir,
-      clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
-      writeStatus: runningOpts.writeStatus ?? linearWrite,
-      resolvePrState: (ticket) => {
-        const adapter = runningOpts.prAdapter;
-        if (!adapter || typeof adapter.prView !== "function") return null;
-        let pr = null;
-        for (const sig of readWorkerSignals(runningOpts.orchDir)) {
-          if (sig.ticket === ticket) {
-            pr = sig.raw?.pr ?? sig.pr ?? null;
-            if (pr?.number) break;
-          }
-        }
-        if (!pr?.number) return null;
-        try {
-          const view = adapter.prView(ticket, pr);
-          if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
-          return view?.state ?? null;
-        } catch {
-          return null;
-        }
-      },
-      jobLifecycle: (bgJobId) => {
-        if (typeof runningOpts.isBgJobAlive !== "function" || !bgJobId) return false;
-        try {
-          return Boolean(runningOpts.isBgJobAlive(bgJobId, { agents: getAgentsCached().agents }));
-        } catch {
-          return false;
-        }
-      },
-    };
+    const unstuckSeamDeps = buildRecoverySeamDeps(runningOpts);
 
     const tickResult = schedulerTick(runningOpts.orchDir, {
       recoverySeamDeps: unstuckSeamDeps,
@@ -9787,6 +10063,8 @@ function runTick() {
       // CTL-1789: same shape — undefined keeps schedulerTick's default-on
       // defaultAppendPhaseAdvanceAppliedEvent; a test injects a spy.
       appendPhaseAdvanceAppliedEvent: runningOpts.appendPhaseAdvanceAppliedEvent,
+      appendFenceStandoffEvent:
+        runningOpts.appendFenceStandoffEvent ?? defaultAppendFenceStandoffEvent,
       // CTL-1605: arm the guarded fast-path eviction seam for the STEP A terminal
       // short-circuit. Reuses the SAME warm agents snapshot + freshness + worktree
       // resolver the J4 census uses (never removes a dir whose worktree hosts a live
@@ -10009,58 +10287,16 @@ function runTick() {
         // actByCategory[decision.category] solely on the enforce branch); the mode
         // gate (readUnstuckSweepConfig, default 'off') is UNTOUCHED, so production
         // stays inert until an operator opts in — enforce is an operator decision
-        // per ADR-023. Operators can still fully override via
-        // runningOpts.unstuckActByCategory (e.g. a partial registry during staged
-        // rollout, or {} to preserve the prior shadow-/escalate-only posture); the
-        // ?? precedence keeps every existing scheduler test that injects
-        // unstuckActByCategory:{} working unchanged. The seams are pure-cored +
-        // injectable; here we bind the production deps already in scope.
+        // per ADR-023. An operator override is a posture that binds BOTH passes:
+        // buildRecoverySeamDeps derives seamFallbackSuppressed from a partial
+        // registry or {}, preventing Pass 0r from rebuilding live seams behind it.
+        // The earlier claim that existing scheduler tests injected {} was wrong;
+        // no pre-existing test did. The seams are pure-cored + injectable; here we
+        // bind the production deps already in scope.
         actByCategory:
           runningOpts.unstuckActByCategory ??
           buildUnstuckActSeams({
-            orchDir: runningOpts.orchDir,
-            // re-arm seam: deletes the stalled signal so the phase re-dispatches.
-            clearStall: defaultClearStall(
-              runningOpts.orchDir,
-              runningOpts.writeStatus ?? linearWrite
-            ),
-            // label-removal seam for the stale-label category.
-            writeStatus: runningOpts.writeStatus ?? linearWrite,
-            // resolvePrState: normalize the live PR view ("MERGED" | other) for the
-            // orphan-stale gate. Reuses the SAME prAdapter the recovery short-circuit
-            // + reconcile backstop use (built once at boot, gh only fires inside
-            // prView). Inert when no prAdapter / PR number is wired.
-            resolvePrState: (ticket) => {
-              const adapter = runningOpts.prAdapter;
-              if (!adapter || typeof adapter.prView !== "function") return null;
-              let pr = null;
-              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
-                if (sig.ticket === ticket) {
-                  pr = sig.raw?.pr ?? sig.pr ?? null;
-                  if (pr?.number) break;
-                }
-              }
-              if (!pr?.number) return null;
-              try {
-                const view = adapter.prView(ticket, pr);
-                if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
-                return view?.state ?? null;
-              } catch {
-                return null; // fail-closed: a gh error is never treated as MERGED.
-              }
-            },
-            // jobLifecycle: the same bg-liveness probe the reclaim sweep uses; bound
-            // to the warm agents snapshot. Inert (→ not-alive) without isBgJobAlive.
-            jobLifecycle: (bgJobId) => {
-              if (typeof runningOpts.isBgJobAlive !== "function" || !bgJobId) return false;
-              try {
-                return Boolean(
-                  runningOpts.isBgJobAlive(bgJobId, { agents: getAgentsCached().agents })
-                );
-              } catch {
-                return false;
-              }
-            },
+            ...unstuckSeamDeps,
             // runGit / fs primitives / emitPhaseComplete fall back to real defaults
             // inside unstuck-act-seams.mjs (git, node:fs, phase-agent-emit-complete).
           }),
@@ -10449,6 +10685,60 @@ export function holisticBoardHealthAct(
   } = {}
 ) {
   const ordered = candidates.length ? candidates : anchor ? [anchor] : [];
+  // CAT-170 (Codex #3209 P1): sign each dispatch with the invariant that actually
+  // flagged THIS candidate, not the gate's count summary. `decision.gate.reason` on a
+  // proceeding scan is "N invariant(s) flagged" — identical for every ticket in the
+  // scan and identical across unrelated scans that happened to flag the same NUMBER
+  // of invariants, so two tickets stuck for completely different reasons received the
+  // same signature and the correlation sweep could collapse them into one operator
+  // incident. proposeMoves already records the per-ticket cause as the move name
+  // (kick-dispatch / judge-done-or-reopen / recover-unowned-in-flight / …), so the
+  // ticket→move map is the invariant evidence, keyed per candidate.
+  const moveByTicket = new Map();
+  // CAT-170 (Codex #3209 round-3 P1): GLOBAL moves carry no ticket. proposeMoves
+  // emits `kick-dispatch` (dispatch-liveness) and `note-cache-drift`
+  // (cache-coherence) as scan-wide findings, while selectAnchorCandidates still
+  // services those scans by picking an eligible ticket — so moveByTicket cannot
+  // name their cause and every such candidate fell through to the gate reason
+  // ("N invariant(s) flagged"). That string is identical across UNRELATED scans
+  // flagging the same count, so a dispatch-liveness scan and a cache-coherence
+  // scan signed identically and the correlation sweep collapsed two unrelated
+  // causes into one operator incident — the precise failure the per-candidate
+  // signature exists to prevent. Collect the ticketless moves in tier order and
+  // sign with them instead.
+  // CAT-170 (Codex #3209 round-4 P1): the scan-level fallback names the moves that
+  // actually TRIGGERED this scan — ticketed and ticketless alike. Round 3 covered
+  // only ticketless global moves, which left the other half of the same hole open:
+  // when every ticket-specific candidate is cooldown/terminal-skipped,
+  // selectAnchorCandidates dispatches an eligible-queue FALLBACK ticket that has no
+  // entry in moveByTicket, so a scan whose moves are all ticketed still fell through
+  // to the gate reason. Two scans triggered by unrelated causes (e.g. `nudge` vs
+  // `finish-or-close-pr`) then persisted the same "N invariant(s) flagged" signature
+  // and their exhausted tickets could collapse into one operator incident.
+  const scanMoves = new Set();
+  for (const tier of ["tier1", "tier2", "tier3"]) {
+    for (const m of decision?.moves?.[tier] ?? []) {
+      // First writer wins: tier1 outranks tier2 outranks tier3, matching
+      // selectAnchorCandidates' own ordering.
+      if (m?.ticket && !moveByTicket.has(m.ticket)) moveByTicket.set(m.ticket, m.move ?? null);
+      if (m?.move) scanMoves.add(m.move);
+    }
+  }
+  // Sorted, so the signature depends on the SET of causes and not on proposal
+  // order — two scans with the same causes always agree, two with different
+  // causes never coincide.
+  const scanSignature = scanMoves.size
+    ? `board-health: ${[...scanMoves].sort().join("+")}`
+    : null;
+  // A candidate with no proposed move of its own (a deferred-intent anchor, or the
+  // eligible-queue fallback) has no per-ticket invariant to name — fall back to the
+  // scan's triggering moves, and only then to the gate reason, which is at least
+  // truthful about why the scan proceeded even though it cannot distinguish causes.
+  const signatureFor = (cand) => {
+    const move = moveByTicket.get(cand);
+    if (move) return `board-health: ${move}`;
+    return scanSignature ?? decision?.gate?.reason ?? null;
+  };
   // CTL-1440 (P0b): track WHY candidates were ledger-skipped so the no-dispatch
   // return distinguishes "everything is terminally attempts-exhausted" (a
   // truthful non-wedge — the exhaustion sweep has escalated them to a human)
@@ -10488,6 +10778,7 @@ export function holisticBoardHealthAct(
         type: "recovery-pass",
         decision: "dispatched",
         fix_class: "board-health",
+        signature: signatureFor(cand),
         outcome: !!r?.dispatched,
         source: "board-health",
       });
@@ -10616,6 +10907,21 @@ export function startScheduler({
   // schedulerTick's inline existsSync default applies. Tests that are not
   // exercising the triage gate inject () => true to unblock Pass 2 dispatch.
   hasTriageArtifact = undefined,
+  // CAT-124 (Codex #3223 P1): the unstuck-sweep operator/test override seams.
+  // runTick reads all five off runningOpts (`runningOpts.unstuckSweep`,
+  // `.unstuckActByCategory`, `.unstuckEscalate`, `.unstuckPostComment`) and
+  // buildRecoverySeamDeps reads `opts.unstuckSweep`/`opts.unstuckActByCategory`
+  // to derive `seamFallbackSuppressed` — but startScheduler never destructured
+  // any of them, so every override silently evaporated at the production entry
+  // point: `startScheduler({ unstuckActByCategory: {} })` left the flag false and
+  // Pass 0r kept rebuilding live seams behind an operator's inert-posture
+  // registry, contrary to the documented both-passes contract. Defaulting each to
+  // undefined keeps the `??` fallbacks (and `!= null`) byte-identical for every
+  // caller that supplies none.
+  unstuckSweep = undefined,
+  unstuckActByCategory = undefined,
+  unstuckEscalate = undefined,
+  unstuckPostComment = undefined,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
@@ -10651,6 +10957,13 @@ export function startScheduler({
     botWriteId, // CTL-781: orchestrator bot UUID to write as assignee on claim
     appendIntentEvent, // CTL-936: operator-event seam for intent.ineffective
     hasTriageArtifact, // CTL-1150: triage-artifact predicate for Pass 2
+    // CAT-124 (Codex #3223 P1): retain the unstuck override seams so runTick's
+    // `runningOpts.unstuck*` reads and buildRecoverySeamDeps(runningOpts)'s
+    // seamFallbackSuppressed derivation actually observe an operator's posture.
+    unstuckSweep,
+    unstuckActByCategory,
+    unstuckEscalate,
+    unstuckPostComment,
   };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels

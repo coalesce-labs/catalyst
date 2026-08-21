@@ -1445,3 +1445,73 @@ describe("labelNeedsHumanUnlessBeliefOwner — live recovery-pass worker guard (
     expect(JSON.parse(readFileSync(SIG("CTL-LW-none"), "utf8")).status).toBe("needs-human");
   });
 });
+
+// ─── CTL-2056: escalation event emit seam in labelNeedsHumanUnlessBeliefOwner ─
+
+describe("labelNeedsHumanUnlessBeliefOwner — CTL-2056 escalation emit", () => {
+  function applyAndRecord({
+    ticket = "CTL-2056",
+    explanation = { type: "authorization", problem: "attempts exhausted", call_to_action: "check" },
+    site = "scheduler",
+    applyResult = { applied: true },
+  } = {}) {
+    const emitCalls = [];
+    const emitEscalation = (t, meta) => emitCalls.push({ ticket: t, meta });
+    mkdirSync(join(orchDir, "workers", ticket), { recursive: true });
+    const ws = { applyLabel: () => applyResult };
+    labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, ws, {
+      site,
+      explanation,
+      emitEscalation,
+    });
+    return emitCalls;
+  }
+
+  test("emits exactly one escalation event on a CONFIRMED apply", () => {
+    const calls = applyAndRecord();
+    expect(calls.length).toBe(1);
+    expect(calls[0].ticket).toBe("CTL-2056");
+    expect(calls[0].meta.site).toBe("scheduler");
+    expect(calls[0].meta.reason).toBe("attempts exhausted");
+  });
+
+  test("emits NOTHING when deferred to belief owner (CATALYST_INTENTS_ENFORCE=1)", () => {
+    const emitCalls = [];
+    const emitEscalation = (t, meta) => emitCalls.push({ ticket: t, meta });
+    mkdirSync(join(orchDir, "workers", "CTL-D1"), { recursive: true });
+    const ws = { applyLabel: () => ({ applied: true }) };
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-D1", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+      emitEscalation,
+    });
+    expect(emitCalls.length).toBe(0);
+  });
+
+  test("emits NOTHING on a marker-guarded no-op (ran:false — .applied already exists)", () => {
+    const emitCalls = [];
+    const emitEscalation = (t, meta) => emitCalls.push({ ticket: t, meta });
+    mkdirSync(join(orchDir, "workers", "CTL-NOP"), { recursive: true });
+    writeFileSync(join(orchDir, "workers", "CTL-NOP", ".linear-label-needs-human.applied"), "");
+    const ws = { applyLabel: () => ({ applied: true }) };
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-NOP", ws, { emitEscalation });
+    expect(emitCalls.length).toBe(0);
+  });
+
+  test("emits NOTHING on a failed apply (applied:false)", () => {
+    const calls = applyAndRecord({ applyResult: { applied: false, reason: "rate-limited" } });
+    expect(calls.length).toBe(0);
+  });
+
+  test("a throwing emitEscalation seam never blocks the label application (fail-open)", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-THROW"), { recursive: true });
+    const ws = { applyLabel: () => ({ applied: true }) };
+    // Must not throw even when the emit seam throws.
+    expect(() =>
+      labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-THROW", ws, {
+        emitEscalation: () => { throw new Error("emit boom"); },
+      })
+    ).not.toThrow();
+    // The .applied marker must still be written (label application succeeded).
+    expect(existsSync(join(orchDir, "workers", "CTL-THROW", ".linear-label-needs-human.applied"))).toBe(true);
+  });
+});
