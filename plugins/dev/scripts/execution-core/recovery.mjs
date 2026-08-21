@@ -4236,11 +4236,18 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
 //              whatever the file happens to be.
 export const HEARTBEAT_TAIL_MIN_BYTES = 1024 * 1024; // 1 MiB
 export const HEARTBEAT_TAIL_CEILING_BYTES = 1024 * 1024 * 1024; // 1 GiB
+// HEARTBEAT_TAIL_DEFAULT_BYTES — CTL-1550. The shared DEFAULT_TAIL_MAX_BYTES (64 MiB)
+// covers only ~10.3 h at the fleet's worst-case ~6.2 MiB/h (measured 2026-08-19),
+// short of the 12 h HEARTBEAT_TAIL_WINDOW_MS the coverage proof requires — so the
+// heartbeat scan reported covered:false and degraded to the full roster on 100% of
+// ticks. 128 MiB proves ~20.7 h (1.7x headroom). Cost is bounded: one memoized scan
+// per tick, heartbeat-only lineFilter, one-chunk peak memory. Ceiling stays 1 GiB.
+export const HEARTBEAT_TAIL_DEFAULT_BYTES = 128 * 1024 * 1024;
 
 export function resolveHeartbeatTailMaxBytes(
   raw,
   {
-    defaultBytes = DEFAULT_TAIL_MAX_BYTES,
+    defaultBytes = HEARTBEAT_TAIL_DEFAULT_BYTES,
     min = HEARTBEAT_TAIL_MIN_BYTES,
     max = HEARTBEAT_TAIL_CEILING_BYTES,
     onInvalid = null,
