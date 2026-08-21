@@ -333,7 +333,13 @@ describe("countBackgroundAgents", () => {
 
   // --- CTL-1055: dead-session exclusion ---
   // shortIdFromSessionId requires a hex-prefixed UUID (/^[0-9a-f]{8}-/).
-  const bg = (id) => ({ sessionId: `${id}-0000-0000-0000-000000000000`, kind: "background" });
+  // CTL-2137: accepts an optional `extra` so a test can set a verbatim listing
+  // field (e.g. the live `claude agents --json` `.state`) on the agent object.
+  const bg = (id, extra = {}) => ({
+    sessionId: `${id}-0000-0000-0000-000000000000`,
+    kind: "background",
+    ...extra,
+  });
 
   test("excludes a terminal (done) background session", () => {
     const statJob = (shortId) =>
@@ -374,6 +380,32 @@ describe("countBackgroundAgents", () => {
         ? { state: "working", firstTerminalAt: null }
         : { state: "done", firstTerminalAt: null };
     expect(countBackgroundAgents({ agents: [...live, ...ghosts], statJob })).toBe(3);
+  });
+
+  // --- CTL-2137: listing-`blocked` exclusion (durable/listing .state split) ---
+  // The durable state.json and the live `claude agents --json` listing .state can
+  // disagree (recovery.mjs:294-299). A listing state:"blocked" session is the
+  // wedged-never-started / dead-on-launch signature (CTL-932) and holds no real
+  // slot even when its durable state.json still reads "working".
+  test("excludes a background agent whose LISTING state is 'blocked' even when durable is alive (CTL-2137)", () => {
+    const durableAlive = () => ({ state: "working", firstTerminalAt: null });
+    const agents = [bg("a1111111", { state: "blocked" })];
+    expect(countBackgroundAgents({ agents, statJob: durableAlive })).toBe(0); // FAILS before the fix (counts 1)
+  });
+
+  test("counts a background agent whose LISTING state is 'active' and durable is alive (positive control)", () => {
+    const durableAlive = () => ({ state: "working", firstTerminalAt: null });
+    const agents = [bg("a1111111", { state: "active" })];
+    expect(countBackgroundAgents({ agents, statJob: durableAlive })).toBe(1);
+  });
+
+  test("live repro: 3 working (active listing) + 4 listing-'blocked' auth-fail ghosts → 3 (CTL-2137)", () => {
+    const durableAlive = () => ({ state: "working", firstTerminalAt: null }); // durable says alive for ALL
+    const live = ["a1111111", "a2222222", "a3333333"].map((id) => bg(id, { state: "active" }));
+    const ghosts = ["b1111111", "b2222222", "b3333333", "b4444444"].map((id) =>
+      bg(id, { state: "blocked" }),
+    );
+    expect(countBackgroundAgents({ agents: [...live, ...ghosts], statJob: durableAlive })).toBe(3);
   });
 });
 
