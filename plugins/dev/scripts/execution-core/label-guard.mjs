@@ -194,15 +194,26 @@ export function clearStalledLabel(
     const finalize = (r) => {
       // undefined (test stub) treated as success; otherwise require removed:true.
       if (r === undefined || r?.removed) {
-        // Success: clear the failure counter and delete the once-markers.
+        // Success: clear the failure counter.
         clearRemovalFailures(orchDir, ticket, label);
-        for (const suffix of [".applied", ".skipped"]) {
-          const p = `${base}${suffix}`;
-          if (existsSync(p)) {
-            try {
-              unlinkSync(p);
-            } catch {
-              /* best-effort */
+        // CTL-2098: only disarm the re-application markers when a real write
+        // happened (wrote:true), or for the loose/undefined confirmed-removal
+        // shapes existing callers/tests rely on. An explicit { wrote:false }
+        // means the label was ALREADY absent (removed out-of-band by a steward
+        // or operator) — deleting the markers here lets the terminal sweep
+        // re-apply needs-human on the next tick (the re-flap). Keep the markers
+        // so labelOnce stays a no-op. The daemon's human-reply path
+        // (clearNeedsHumanMarkers) remains the authoritative re-arm and is
+        // unchanged.
+        if (r === undefined || r?.wrote !== false) {
+          for (const suffix of [".applied", ".skipped"]) {
+            const p = `${base}${suffix}`;
+            if (existsSync(p)) {
+              try {
+                unlinkSync(p);
+              } catch {
+                /* best-effort */
+              }
             }
           }
         }
