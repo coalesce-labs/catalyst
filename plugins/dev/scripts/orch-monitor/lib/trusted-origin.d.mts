@@ -14,6 +14,12 @@ export declare function _bonjourResolveCount(): number;
 
 export declare function _bonjourTtlMs(): number;
 
+export declare function tailscaleMagicDnsName(): string | null;
+
+export declare function _resetTailscaleCache(): void;
+
+export declare function _tailscaleResolveCount(): number;
+
 export declare function buildTrustedOrigins(opts?: {
   port?: number;
   extraOrigins?: string[] | string | null;
@@ -21,6 +27,7 @@ export declare function buildTrustedOrigins(opts?: {
   addresses?: string[];
   devOrigins?: string[] | string | null;
   bindHost?: string | null;
+  tailscaleDnsName?: string | null;
 }): Set<string>;
 
 export declare function isOriginAllowed(
