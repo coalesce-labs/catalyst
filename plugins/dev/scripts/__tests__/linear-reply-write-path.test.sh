@@ -18,6 +18,20 @@ bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
 HUMAN="c2a8cc92-cab6-4536-9500-0f24abdf702b"
 
+# The tool reads the replica via node:sqlite (node >= 24) OR bun:sqlite, selected at runtime.
+# CI runners may ship an older system `node` without node:sqlite, so run the TOOL under a
+# runtime whose sqlite it can actually open: prefer `node` (the production runtime) when it can
+# use node:sqlite, else fall back to `bun` (guaranteed present via setup-bun; has bun:sqlite).
+# (The mock http server below stays under `node` — plain http works on any node version.)
+if node -e "const {DatabaseSync}=require('node:sqlite'); new DatabaseSync(':memory:').close()" >/dev/null 2>&1; then
+  RUNTIME=node
+elif command -v bun >/dev/null 2>&1; then
+  RUNTIME=bun
+else
+  RUNTIME=node
+fi
+echo "# tool runtime: ${RUNTIME}"
+
 # --- Static grep gate (+ positive control) ---
 FORBIDDEN='client_credentials|LINEAR_SYNC_CLIENT_ID|OAUTH|commentCreate|reactionDelete|createAsUser|displayIconUrl'
 CTRL="$(mktemp)"
@@ -52,9 +66,9 @@ run_tool() { # $1=mode|-  $2=db  rest=args ; sets LAST_OUT / LAST_RC ; hermetic 
   local mode="$1" db="$2"; shift 2
   local home; home="$(mktemp -d)"; local out rc=0
   if [[ "$mode" == "-" ]]; then
-    out="$(HOME="$home" CATALYST_DIR="$home/catalyst" CATALYST_REPLICA_DB="$db" env -u CATALYST_LINEAR_WRITE_PROXY node "$TOOL" "$@" 2>&1)" || rc=$?
+    out="$(HOME="$home" CATALYST_DIR="$home/catalyst" CATALYST_REPLICA_DB="$db" env -u CATALYST_LINEAR_WRITE_PROXY "$RUNTIME" "$TOOL" "$@" 2>&1)" || rc=$?
   else
-    out="$(HOME="$home" CATALYST_DIR="$home/catalyst" CATALYST_REPLICA_DB="$db" CATALYST_LINEAR_WRITE_PROXY="$mode" node "$TOOL" "$@" 2>&1)" || rc=$?
+    out="$(HOME="$home" CATALYST_DIR="$home/catalyst" CATALYST_REPLICA_DB="$db" CATALYST_LINEAR_WRITE_PROXY="$mode" "$RUNTIME" "$TOOL" "$@" 2>&1)" || rc=$?
   fi
   rm -rf "$home"; LAST_OUT="$out"; LAST_RC="$rc"
 }
@@ -139,7 +153,7 @@ else
     out="$(HOME="$home" CATALYST_DIR="$home/catalyst" CATALYST_REPLICA_DB="$db" \
       CATALYST_LINEAR_WRITE_PROXY=enforce CATALYST_CLOUD_BASE_URL="http://127.0.0.1:${PORT}" \
       CATALYST_CLOUD_TOKEN=test-token CATALYST_CLOUD_ACCOUNT=test-acct \
-      node "$TOOL" "$@" 2>&1)" || rc=$?
+      "$RUNTIME" "$TOOL" "$@" 2>&1)" || rc=$?
     rm -rf "$home"; LAST_OUT="$out"; LAST_RC="$rc"
   }
   comment_capture() { grep '"/agent/issue-comment"' "$CAP_FILE" | tail -1; }

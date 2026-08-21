@@ -15,6 +15,19 @@ FAIL=0
 ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
+# The tool reads the replica via node:sqlite (node >= 24) OR bun:sqlite, selected at runtime.
+# CI runners may ship an older system `node` without node:sqlite, so run the tool under a
+# runtime whose sqlite it can actually open: prefer `node` (the production runtime) when it can
+# use node:sqlite, else fall back to `bun` (guaranteed present via setup-bun; has bun:sqlite).
+if node -e "const {DatabaseSync}=require('node:sqlite'); new DatabaseSync(':memory:').close()" >/dev/null 2>&1; then
+  RUNTIME=node
+elif command -v bun >/dev/null 2>&1; then
+  RUNTIME=bun
+else
+  RUNTIME=node  # last resort — surfaces the real error rather than hiding it
+fi
+echo "# tool runtime: ${RUNTIME}"
+
 # --- Static grep gate (with a positive control so a zero is evidence, not a mistyped path) ---
 FORBIDDEN='client_credentials|LINEAR_SYNC_CLIENT_ID|OAUTH|reactionCreate|reactionDelete'
 # Positive control: the same pattern MUST hit a fixture that carries those strings, proving
@@ -68,10 +81,10 @@ run_tool() {
   local out rc=0
   if [[ "$mode" == "-" ]]; then
     out="$(HOME="$home" CATALYST_REPLICA_DB="$db" env -u CATALYST_LINEAR_WRITE_PROXY \
-      node "$TOOL" "$@" 2>&1)" || rc=$?
+      "$RUNTIME" "$TOOL" "$@" 2>&1)" || rc=$?
   else
     out="$(HOME="$home" CATALYST_REPLICA_DB="$db" CATALYST_LINEAR_WRITE_PROXY="$mode" \
-      node "$TOOL" "$@" 2>&1)" || rc=$?
+      "$RUNTIME" "$TOOL" "$@" 2>&1)" || rc=$?
   fi
   rm -rf "$home"
   LAST_OUT="$out"; LAST_RC="$rc"
