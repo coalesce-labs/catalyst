@@ -4589,7 +4589,10 @@ export function checkRegistryTeamIdentity(deps = {}) {
   const { listProjects: readProjects = listProjects } = deps;
   let projects;
   try {
-    projects = readProjects();
+    // CAT-116: revision inspection is deliberately opt-in so listProjects()'s
+    // scheduler/daemon hot path remains free of git subprocesses. Doctor is a
+    // one-shot caller and grades the revision a fresh dispatch would install.
+    projects = readProjects({ withDispatchIdentity: true });
   } catch (err) {
     return mkCheck(
       "registry-team-identity",
@@ -4604,18 +4607,98 @@ export function checkRegistryTeamIdentity(deps = {}) {
       "registry has no projects — nothing to check (the zero-project warning is the daemon's, CTL-854)",
     );
   }
-  const mismatches = projects.filter((project) => project?.identity?.matches === false);
+
+  // Every defect category is classified in ONE pass and reported TOGETHER
+  // (Codex #3232 P2). Precedence is per ENTRY, not per report: an entry whose
+  // dispatch revision mismatches is described only by that (strongest) category,
+  // because what dispatch installs outranks checkout state — create-worktree.sh
+  // restores tracked .catalyst paths from its start revision after copying the
+  // checkout. But precedence must never SUPPRESS a different entry's defect:
+  // returning on the first non-empty category let a multi-project run name one
+  // project while leaving another project's known mismatch undisclosed until the
+  // first was repaired and doctor rerun.
+  const classified = new Set();
+  const claim = (list) => {
+    list.forEach((project) => classified.add(project));
+    return list;
+  };
+  const revisionMismatches = claim(
+    projects.filter((project) => project?.dispatchIdentity?.matches === false),
+  );
+  const drifted = claim(projects.filter((project) =>
+    !classified.has(project) &&
+    typeof project?.identity?.declared === "string" &&
+    typeof project?.dispatchIdentity?.declared === "string" &&
+    project.identity.declared !== project.dispatchIdentity.declared));
+  const mismatches = claim(projects.filter((project) =>
+    !classified.has(project) && project?.identity?.matches === false));
+
+  const findings = [];
+  if (revisionMismatches.length) {
+    const details = revisionMismatches
+      .map((project) =>
+        `${project.team} → ${project.repoRoot} (dispatch revision ` +
+        `${project.dispatchIdentity.rev ?? "unknown"} declares ` +
+        `"${project.dispatchIdentity.declared}")`)
+      .join("; ");
+    findings.push(
+      `${revisionMismatches.length} registry entr${revisionMismatches.length === 1 ? "y" : "ies"} ` +
+        "would receive a DIFFERENT Linear team from the dispatch revision: " +
+        `${details} — a fresh worktree follows that revision (CAT-116)`,
+    );
+  }
+  if (drifted.length) {
+    const details = drifted
+      .map((project) =>
+        `${project.team} → ${project.repoRoot} (checkout declares ` +
+        `"${project.identity.declared}"; fresh worktree follows ` +
+        `"${project.dispatchIdentity.declared}" at ` +
+        `${project.dispatchIdentity.rev ?? "unknown"})`)
+      .join("; ");
+    findings.push(
+      `${drifted.length} registry entr${drifted.length === 1 ? "y has" : "ies have"} ` +
+        `checkout ↔ dispatch-revision team identity drift: ${details} (CAT-116)`,
+    );
+  }
   if (mismatches.length) {
     const details = mismatches
       .map((project) =>
         `${project.team} → ${project.repoRoot} (declares "${project.identity.declared}")`)
       .join("; ");
-    return mkCheck(
-      "registry-team-identity",
-      STATUS.WARN,
+    findings.push(
       `${mismatches.length} registry entr${mismatches.length === 1 ? "y" : "ies"} point at a ` +
         "checkout that declares a DIFFERENT Linear team — worktrees cut from it inherit that " +
         `checkout's Layer-1 catalyst.linear config and ticket prefix: ${details} (CAT-52)`,
+    );
+  }
+  if (findings.length) {
+    return mkCheck("registry-team-identity", STATUS.WARN, findings.join(" | "));
+  }
+  // Preserve the pre-CAT-116 injectable project shape: when no entry carries
+  // dispatchIdentity, grade checkout identity exactly as before. Once any
+  // entry opts into the new arm, every entry must verify both arms for PASS.
+  const hasDispatchArm = projects.some((project) =>
+    Object.prototype.hasOwnProperty.call(project ?? {}, "dispatchIdentity"));
+  if (hasDispatchArm) {
+    const knownBoth = projects.filter((project) =>
+      project?.identity?.matches === true &&
+      project?.dispatchIdentity?.matches === true &&
+      project.identity.declared === project.dispatchIdentity.declared).length;
+    if (knownBoth < projects.length) {
+      const unverified = projects.length - knownBoth;
+      return mkCheck(
+        "registry-team-identity",
+        STATUS.INFO,
+        `${knownBoth}/${projects.length} registry entries verified against both checkout and ` +
+          `dispatch revision; ${unverified} could not be checked on both arms — no mismatch ` +
+          "found, but the dispatch revision contract is unverified (CAT-116)",
+      );
+    }
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.PASS,
+      `${knownBoth}/${projects.length} registry entries verified against both checkout and ` +
+        "dispatch revision; no mismatches or drift (CAT-116)",
     );
   }
   const known = projects.filter((project) => project?.identity?.matches === true).length;
