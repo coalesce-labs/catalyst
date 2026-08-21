@@ -12,6 +12,9 @@ import {
   rmSync,
   statSync,
   existsSync,
+  symlinkSync,
+  lstatSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -428,6 +431,155 @@ describe("syncProfileFiles (CTL-1595)", () => {
     expect(res.written).toEqual(["good.env"]);
     expect(res.failed).toEqual(["bad.env"]);
     expect(res.reason).toBeNull();
+  });
+
+  // ─── CTL-1596 Bug 1: absent bundle fully reconciles ───────────────────────────
+
+  test("(CTL-1596 Bug 1) absent bundle with a pre-existing manifest removes the managed profiles", () => {
+    writeProfileBundle();
+    const dir = profilesDirOf();
+    // Sync 1: materialize two profiles and write the manifest.
+    syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "a.env": "1", "b.env": "2" }),
+      logger: QUIET,
+    });
+    // Hand-provisioned node-local profile NOT in the manifest.
+    writeFileSync(join(dir, "local.env"), "hand-made");
+    // Sync 2: delete the bundle file → should remove managed profiles.
+    rmSync(join(clusterDir, "secrets", "profile-files.sops.json"));
+    const res = syncProfileFiles({ clusterDir, profilesDir: dir, logger: QUIET });
+    expect(res.reason).toBe("absent");
+    expect(res.removed.sort()).toEqual(["a.env", "b.env"]);
+    expect(existsSync(join(dir, "a.env"))).toBe(false);
+    expect(existsSync(join(dir, "b.env"))).toBe(false);
+    expect(readFileSync(join(dir, "local.env"), "utf8")).toBe("hand-made");
+    expect(JSON.parse(readFileSync(join(dir, ".cluster-managed.json"), "utf8"))).toEqual([]);
+  });
+
+  test("(CTL-1596 Bug 1) absent bundle with no prior manifest is a pure no-op (regression guard)", () => {
+    // No bundle file, no manifest, empty profilesDir.
+    const dir = profilesDirOf();
+    const res = syncProfileFiles({ clusterDir, profilesDir: dir, logger: QUIET });
+    expect(res.reason).toBe("absent");
+    expect(res.removed).toEqual([]);
+    expect(res.written).toEqual([]);
+    // profilesDir must NOT have been created or populated.
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  // ─── CTL-1596 Bugs 3 & 4: manifest read discrimination + write-failure ───────
+
+  test("(CTL-1596 Bug 3) a corrupt manifest is preserved and removal is skipped (not treated as empty)", () => {
+    writeProfileBundle();
+    const dir = profilesDirOf();
+    // Sync 1: materialize two profiles.
+    syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "a.env": "1", "b.env": "2" }),
+      logger: QUIET,
+    });
+    // Corrupt the manifest.
+    writeFileSync(join(dir, ".cluster-managed.json"), "{not json");
+    const errors = [];
+    const spyLogger = { warn() {}, info() {}, error: (...a) => errors.push(a) };
+    // Sync 2: b.env dropped from bundle; with corrupt manifest removal must be skipped.
+    const res = syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "a.env": "1" }),
+      logger: spyLogger,
+    });
+    expect(res.removed).toEqual([]);
+    // b.env must NOT have been deleted (removal skipped due to unreadable manifest).
+    expect(existsSync(join(dir, "b.env"))).toBe(true);
+    // The manifest must be preserved, not overwritten.
+    expect(readFileSync(join(dir, ".cluster-managed.json"), "utf8")).toBe("{not json");
+    expect(res.manifestUnreadable).toBe(true);
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  test("(CTL-1596 Bug 3) ENOENT manifest (absent) behaves as before — nothing managed, normal write", () => {
+    writeProfileBundle();
+    const dir = profilesDirOf();
+    // No prior manifest.
+    const res = syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "a.env": "1" }),
+      logger: QUIET,
+    });
+    expect(res.removed).toEqual([]);
+    expect(res.manifestUnreadable).toBeFalsy();
+    expect(JSON.parse(readFileSync(join(dir, ".cluster-managed.json"), "utf8"))).toEqual(["a.env"]);
+  });
+
+  test("(CTL-1596 Bug 4) manifest write failure surfaces in failed[] so the marker cannot advance", () => {
+    writeProfileBundle();
+    const dir = profilesDirOf();
+    // writeFile throws when writing the manifest.
+    const writeFile = (path, content) => {
+      if (path.endsWith(".cluster-managed.json")) throw new Error("EPERM");
+      writeFileSync(path, content, { mode: 0o600 });
+    };
+    const errors = [];
+    const spyLogger = { warn() {}, info() {}, error: (...a) => errors.push(a) };
+    const res = syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "a.env": "1" }),
+      writeFile,
+      logger: spyLogger,
+    });
+    expect(res.written).toEqual(["a.env"]);
+    expect(res.failed).toContain(".cluster-managed.json");
+    expect(errors.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── CTL-1596 Bug 5: defaultWriteFile symlink safety ─────────────────────────
+
+describe("defaultWriteFile symlink safety (CTL-1596 Bug 5)", () => {
+  // defaultWriteFile is unexported; exercise it through syncProfileFiles with
+  // no writeFile injection (uses the real defaultWriteFile).
+  const writeProfileBundle = () =>
+    writeFileSync(join(clusterDir, "secrets", "profile-files.sops.json"), "{cipher}");
+  const profilesDirOf = () => join(configDir, "profiles");
+
+  test("replaces a symlinked destination instead of writing through it", () => {
+    writeProfileBundle();
+    const dir = profilesDirOf();
+    mkdirSync(dir, { recursive: true });
+    // Create a sibling target and a symlink pointing to it inside profilesDir.
+    const target = join(configDir, "target.txt");
+    writeFileSync(target, "OLD-TARGET");
+    symlinkSync(target, join(dir, "catalyst-cloud.env"));
+
+    syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "catalyst-cloud.env": "NEW-CONTENT" }),
+      logger: QUIET,
+    });
+
+    // The symlink must have been REPLACED by a regular file.
+    expect(lstatSync(join(dir, "catalyst-cloud.env")).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(dir, "catalyst-cloud.env"), "utf8")).toBe("NEW-CONTENT");
+    // The link target was NOT mutated.
+    expect(readFileSync(target, "utf8")).toBe("OLD-TARGET");
+    // Mode must be 0o600.
+    expect(statSync(join(dir, "catalyst-cloud.env")).mode & 0o777).toBe(0o600);
+  });
+
+  test("writes a normal destination atomically with 0600 mode (no regression)", () => {
+    writeProfileBundle();
+    const dir = profilesDirOf();
+    syncProfileFiles({
+      clusterDir, profilesDir: dir,
+      decrypt: () => ({ "catalyst-cloud.env": "CONTENT" }),
+      logger: QUIET,
+    });
+    expect(readFileSync(join(dir, "catalyst-cloud.env"), "utf8")).toBe("CONTENT");
+    expect(statSync(join(dir, "catalyst-cloud.env")).mode & 0o777).toBe(0o600);
+    // No stray .tmp file left behind.
+    const files = readdirSync(dir);
+    expect(files.every((f) => !f.includes(".tmp"))).toBe(true);
   });
 });
 
@@ -1634,6 +1786,46 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     // over-correcting the predicate)
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
     expect(emits.map((e) => e.name)).not.toContain("refresh-failed");
+  });
+
+  // ─── CTL-1596 Bug 2: removal-only refresh emits refreshed ─────────────────
+
+  test("(CTL-1596 Bug 2) a removal-only profile sync emits refreshed with removed[]", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+    const profilesDir = join(configDir, "profiles");
+    mkdirSync(profilesDir, { recursive: true });
+    // Pre-populate the manifest so syncProfileFiles sees a profile to remove.
+    writeFileSync(join(profilesDir, "b.env"), "secret");
+    writeFileSync(join(profilesDir, ".cluster-managed.json"), JSON.stringify(["b.env"]));
+
+    const emits = [];
+    // Inject syncProfileFiles to return a removal-only result (written=[], removed=[b.env]).
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      profilesDir,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: () => ({}),
+      // No bundle file → syncProfileFiles returns reason:absent + removed:[b.env]
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    // The refreshed event must have fired.
+    const refreshedEvents = emits.filter((e) => e.name === "refreshed");
+    expect(refreshedEvents.length).toBe(1);
+    expect(refreshedEvents[0].payload.removed).toEqual(["b.env"]);
+    expect(res.profilesRemoved).toEqual(["b.env"]);
+    expect(res.changed).toBe(true);
+    // Marker must have advanced.
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
   });
 });
 
