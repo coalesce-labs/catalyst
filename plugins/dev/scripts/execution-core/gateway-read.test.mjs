@@ -15,6 +15,8 @@ import {
   upsertTicketDescriptor,
   upsertTicketFence,
   markTicketRemovedByUuid,
+  setTicketHeldSince,
+  clearTicketHeldSince,
 } from "../broker/broker-state.mjs";
 import {
   createGatewayReader,
@@ -278,5 +280,73 @@ describe("claimedAtAgeMs — keyed on claimed_at, NOT updated_at (finding 6)", (
     expect(claimedAtAgeMs({})).toBe(Infinity);
     expect(claimedAtAgeMs(null)).toBe(Infinity);
     expect(claimedAtAgeMs({ claimedAt: "not a date" })).toBe(Infinity);
+  });
+});
+
+// ─── CTC-133 Phase 1: getFence + gatewayFence prefers ticket_fence ────────────
+
+describe("getFence via createGatewayReader (CTC-133)", () => {
+  test("returns null when the ticket_fence row is absent", () => {
+    openBrokerStateDb(dbPath);
+    reader = createGatewayReader({ dbPath });
+    expect(reader.getFence("CTC-1")).toBeNull();
+  });
+
+  test("returns the fence object when a ticket_fence row exists", () => {
+    openBrokerStateDb(dbPath);
+    upsertTicketFence({ ticket: "CTC-2", ownerHost: "mini", generation: 5,
+      phase: "implement", claimedAt: "2026-08-20T01:00:00Z" });
+    reader = createGatewayReader({ dbPath });
+    const f = reader.getFence("CTC-2");
+    expect(f).not.toBeNull();
+    expect(f.ownerHost).toBe("mini");
+    expect(f.generation).toBe(5);
+    expect(f.phase).toBe("implement");
+  });
+
+  test("returns object with ownerHost:null when fence is released", () => {
+    openBrokerStateDb(dbPath);
+    upsertTicketFence({ ticket: "CTC-3", ownerHost: "mini", generation: 2, phase: "pr", claimedAt: "2026-08-20T01:00:00Z" });
+    upsertTicketFence({ ticket: "CTC-3", ownerHost: null });
+    reader = createGatewayReader({ dbPath });
+    const f = reader.getFence("CTC-3");
+    expect(f).not.toBeNull();
+    expect(f.ownerHost).toBeNull();
+  });
+});
+
+describe("gatewayFence prefers ticket_fence over ticket_state inline (CTC-133)", () => {
+  test("resolves from ticket_fence when row present", () => {
+    openBrokerStateDb(dbPath);
+    upsertTicketFence({ ticket: "CTC-31", ownerHost: "laptop", generation: 7,
+      phase: "verify", claimedAt: "2026-08-20T02:00:00Z" });
+    reader = createGatewayReader({ dbPath });
+    const fence = gatewayFence(reader, "CTC-31");
+    expect(fence).not.toBeNull();
+    expect(fence.ownerHost).toBe("laptop");
+    expect(fence.generation).toBe(7);
+    expect(fence.phase).toBe("verify");
+  });
+
+  test("falls back to ticket_state inline columns when ticket_fence row absent", () => {
+    const db = openBrokerStateDb(dbPath);
+    db.run(
+      `INSERT INTO ticket_state (ticket, owner_host, catalyst_generation, fence_phase, claimed_at, updated_at)
+       VALUES ('CTC-32', 'laptop', 3, 'verify', '2026-08-20T03:00:00Z', '2026-08-20T03:00:00Z')`
+    );
+    reader = createGatewayReader({ dbPath });
+    const fence = gatewayFence(reader, "CTC-32");
+    expect(fence).not.toBeNull();
+    expect(fence.ownerHost).toBe("laptop");
+  });
+
+  test("released fence in ticket_fence returns null, does NOT fall back to ticket_state", () => {
+    openBrokerStateDb(dbPath);
+    upsertTicketFence({ ticket: "CTC-33", ownerHost: "mini", generation: 4,
+      phase: "implement", claimedAt: "2026-08-20T01:00:00Z" });
+    upsertTicketFence({ ticket: "CTC-33", ownerHost: null }); // release
+    reader = createGatewayReader({ dbPath });
+    const fence = gatewayFence(reader, "CTC-33");
+    expect(fence).toBeNull();
   });
 });

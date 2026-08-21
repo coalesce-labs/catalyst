@@ -1173,3 +1173,64 @@ describe("createReplicaReader.recentStateChangeActors (CTL-2074)", () => {
     expect(reader.recentStateChangeActors({ limit: 2 })).toHaveLength(2);
   });
 });
+
+// CTL-2070 — the timely per-identifier issues.updated_at reader. Uses the same
+// canonical seed() (updated_at is epoch-ms; CTL-4 is tombstoned, CTL-5 has NULL updated_at).
+describe("createReplicaReader.currentUpdatedAt (CTL-2070, real bun:sqlite)", () => {
+  test("returns the exact epoch-ms updated_at for a live row", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.currentUpdatedAt("CTL-3")).toBe(3000); // non-terminal live row
+    expect(reader.currentUpdatedAt("CTL-1")).toBe(1000);
+  });
+
+  test("coerces an ISO-8601 updated_at string to epoch-ms (Date.parse fallback)", () => {
+    const db = new Database(dbPath, { create: true });
+    db.run(`CREATE TABLE issues (identifier TEXT, updated_at TEXT, removed_at TEXT)`);
+    db.run(`INSERT INTO issues VALUES ('CTL-9', '2026-06-01T00:00:00.000Z', NULL)`);
+    db.close();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.currentUpdatedAt("CTL-9")).toBe(Date.parse("2026-06-01T00:00:00.000Z"));
+  });
+
+  test("unknown identifier → undefined", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.currentUpdatedAt("CTL-404")).toBeUndefined();
+  });
+
+  test("a tombstoned (removed_at NOT NULL) row → undefined", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.currentUpdatedAt("CTL-4")).toBeUndefined(); // removed_at set
+  });
+
+  test("a NULL / uncoercible updated_at → undefined (never a bogus timestamp)", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.currentUpdatedAt("CTL-5")).toBeUndefined(); // updated_at is NULL
+  });
+
+  test("empty identifier → undefined", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.currentUpdatedAt("")).toBeUndefined();
+  });
+
+  test("fail-open: missing DB → undefined, then recovers once created (dropHandle path)", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.currentUpdatedAt("CTL-1")).toBeUndefined(); // no db yet
+    seed();
+    expect(reader.currentUpdatedAt("CTL-1")).toBe(1000);
+  });
+
+  test("fail-open: DB without the issues table → undefined (query throws → dropHandle)", () => {
+    const empty = new Database(dbPath, { create: true });
+    empty.run(`CREATE TABLE unrelated (x INTEGER)`);
+    empty.close();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.currentUpdatedAt("CTL-1")).toBeUndefined();
+    seed(); // handle was dropped → next call re-opens and sees the seeded schema
+    expect(reader.currentUpdatedAt("CTL-3")).toBe(3000);
+  });
+});

@@ -1,5 +1,43 @@
 # Changelog
 
+## [12.60.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.59.0...catalyst-dev-v12.60.0) (2026-08-20)
+
+
+### Features
+
+* **dev:** CTL-1785 phase 1 — entitlement seam (zero-import leaf, tri-state flag, local provider, off by default) ([#3755](https://github.com/coalesce-labs/catalyst/issues/3755)) ([cccf3b4](https://github.com/coalesce-labs/catalyst/commit/cccf3b45f8bb7719f4bace49c255688032b9ee03))
+* **dev:** CTL-1786 phase 1 — lease-authority.mjs cloud client + auth-spike probe ([#3756](https://github.com/coalesce-labs/catalyst/issues/3756)) ([dcad0fe](https://github.com/coalesce-labs/catalyst/commit/dcad0fee56390034979922f401e3a9a228bc0e7d))
+* **dev:** CTL-1864 — publish slot-based active_count on node.heartbeat ([#3768](https://github.com/coalesce-labs/catalyst/issues/3768)) ([7051350](https://github.com/coalesce-labs/catalyst/commit/7051350ed64b5763a197ca2daffe2fc3ea85535b))
+* **dev:** CTL-1974 — codify catalyst-dev:project-orchestrator as thin steward wrapper ([#3759](https://github.com/coalesce-labs/catalyst/issues/3759)) ([4de7a1a](https://github.com/coalesce-labs/catalyst/commit/4de7a1ad9f08e330469dde9e340f14215c24acc3))
+* **dev:** CTL-1985 — catalyst enrol one-key host enrollment installer ([#3758](https://github.com/coalesce-labs/catalyst/issues/3758)) ([a903177](https://github.com/coalesce-labs/catalyst/commit/a9031770f4981f2318a2ee7119077d516df4552d))
+
+
+### Bug Fixes
+
+* **execution-core:** CTL-2090 — triage-capped ticket can no longer deadlock admission ([#3787](https://github.com/coalesce-labs/catalyst/issues/3787)) ([2a649dc](https://github.com/coalesce-labs/catalyst/commit/2a649dc184fe9a0a89d0e8cbc398e7784dbb4041))
+* **execution-core:** CTL-2103 — scrub PATH so the gh-unavailable test is deterministic ([#3778](https://github.com/coalesce-labs/catalyst/issues/3778)) ([be1840b](https://github.com/coalesce-labs/catalyst/commit/be1840b4b67fbfb1408ea52780b6fa1a9b868368))
+
+## [12.59.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.58.0...catalyst-dev-v12.59.0) (2026-08-20)
+
+
+### Features
+
+* **dev:** CTL-2000 — steward-first escalation (resolver-independent slice) ([#3742](https://github.com/coalesce-labs/catalyst/issues/3742)) ([87ca75d](https://github.com/coalesce-labs/catalyst/commit/87ca75da5c456ac84b7d9d9940a1283eaadc170d))
+* **dev:** CTL-2074 phase 1 — cloud-proxy identity config seam (bot.cloud.botUserId) ([#3738](https://github.com/coalesce-labs/catalyst/issues/3738)) ([bbb56cb](https://github.com/coalesce-labs/catalyst/commit/bbb56cb4b47beb41ac56220e187994126bfc5c6f))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1754 — the escalation card read a key written on 0 of 44 live signals, so it always said "(no reason)" ([#3699](https://github.com/coalesce-labs/catalyst/issues/3699)) ([7f562b6](https://github.com/coalesce-labs/catalyst/commit/7f562b6885779e6cf4de2d1acca08956d494e6ee))
+* **dev:** CTL-1851 — an SDK worker cannot outlive its daemon, so a restart is PROOF its ghost is dead ([#3694](https://github.com/coalesce-labs/catalyst/issues/3694)) ([61587c8](https://github.com/coalesce-labs/catalyst/commit/61587c86d543955bbbd405b6f2ecd006bee41e03))
+* **dev:** CTL-1889 inc 4 — a status write with no linearis stopped reporting itself applied ([#3724](https://github.com/coalesce-labs/catalyst/issues/3724)) ([741cbd5](https://github.com/coalesce-labs/catalyst/commit/741cbd594e35cc3e9a82c5a4667bc051e8d4aec9))
+* **dev:** CTL-2045 — the install proved the credential could READ, and the incident was a WRITE it never tested ([#3706](https://github.com/coalesce-labs/catalyst/issues/3706)) ([318268f](https://github.com/coalesce-labs/catalyst/commit/318268fb9a3fe39ba25e5bd0cdd69af5de304b16))
+* **dev:** CTL-2050 — an artifact that proves a phase succeeded retracts the infra failure that buried it ([#3690](https://github.com/coalesce-labs/catalyst/issues/3690)) ([c90e30a](https://github.com/coalesce-labs/catalyst/commit/c90e30a10c82192df6696c73530d4a85705eaa3d))
+* **dev:** CTL-2068 — a claim the pipeline can overwrite is not a claim ([#3712](https://github.com/coalesce-labs/catalyst/issues/3712)) ([18d8eb9](https://github.com/coalesce-labs/catalyst/commit/18d8eb99d29e23c14c8ea5db28dce2bee7d42bd2))
+* **dev:** CTL-2068 — the guard shipped INERT on mini; resolve the state map through a ladder ([#3714](https://github.com/coalesce-labs/catalyst/issues/3714)) ([f499dcb](https://github.com/coalesce-labs/catalyst/commit/f499dcbb440e1ac0ad5d0106fb125488d55b48c4))
+* **dev:** CTL-2076 — setup_project_config preserves committed Linear identity on regen; surface the registry team-identity mismatch (CAT-52) ([#3736](https://github.com/coalesce-labs/catalyst/issues/3736)) ([ef5b0b1](https://github.com/coalesce-labs/catalyst/commit/ef5b0b1c9209bb9afafab6b31f4d81cc3cd95567))
+* **execution-core:** OTL-67 — SDK-dispatched workers lose per-ticket OTEL_RESOURCE_ATTRIBUTES to settings.json pin ([#3721](https://github.com/coalesce-labs/catalyst/issues/3721)) ([4cc82ce](https://github.com/coalesce-labs/catalyst/commit/4cc82cede4415020d0badfb08a2cea4eccbff3b0))
+
 ## [12.58.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.57.0...catalyst-dev-v12.58.0) (2026-08-19)
 
 

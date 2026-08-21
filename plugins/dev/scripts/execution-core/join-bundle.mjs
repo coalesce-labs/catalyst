@@ -5,7 +5,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { getClusterHosts, getLivenessAnchorIssue } from "./config.mjs";
+// CTL-1785: a join bundle advertises fleet MEMBERSHIP (existence) to a joining
+// host — not work-ownership. `off` mode: getExistenceHosts() === getClusterHosts().
+import { getExistenceHosts, getLivenessAnchorIssue } from "./config.mjs";
 import { listProjects } from "./registry.mjs";
 
 export const JOIN_BUNDLE_SCHEMA_VERSION = 1;
@@ -196,7 +198,7 @@ export function assembleJoinBundle() {
 
   return {
     schemaVersion: JOIN_BUNDLE_SCHEMA_VERSION,
-    hostsRoster: getClusterHosts(),
+    hostsRoster: getExistenceHosts(),
     livenessAnchorIssue: getLivenessAnchorIssue(),
     botCreds: {
       orchestrator: bot.orchestrator ?? null,

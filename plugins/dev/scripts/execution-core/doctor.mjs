@@ -58,7 +58,11 @@ import {
 import { defaultReadyPath, readReadyState } from "./github-feed-ready.mjs";
 import {
   getHostName,
-  getClusterHosts,
+  // CTL-1785: doctor's roster reads are diagnostic/audit over the physical
+  // EXISTENCE roster (all members need worker labels, the HRW-partition dry-run
+  // shows the full topology). Entitlement is reported separately by
+  // checkEntitlementConsistency. `off` mode: getExistenceHosts() === getClusterHosts().
+  getExistenceHosts,
   resolveClusterHosts,
   hostMembershipWarning,
   getLivenessAnchorIssue,
@@ -98,7 +102,23 @@ import {
   // a second copy of the resolution ladder.
   DEPLOYMENT_MODES,
   resolveDeploymentMode,
+  // CTL-1785: entitlement mode resolver, re-exported from the zero-import leaf
+  // (same pattern as deployment-mode above) — doctor grades it advisory-only.
+  resolveEntitlementMode,
 } from "./config.mjs";
+// CTL-1785: the TTL constants + enum, imported DIRECTLY from the zero-import leaf
+// (node built-ins only — safe under doctor's bare-Node runtime), same pattern as
+// secret-contract.mjs below, not re-exported through config.mjs.
+import {
+  ENTITLEMENT_MODES,
+  ENTITLEMENT_TTL_MS,
+  WORK_LEASE_TTL_MS,
+  // CTL-1785 (code review, chatgpt-codex-connector P2): a malformed JSON config
+  // can supply a non-string mode like {"toString": null} as m.raw — interpolating
+  // that directly throws TypeError instead of producing the advisory WARN. Reuse
+  // the same never-throws renderer getEntitlementMode() already uses for this.
+  printableRaw,
+} from "../lib/entitlement.mjs";
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 // CTL-1659: the loaded-dependency skew comparator. A zero-import leaf (node:crypto/fs/path
 // only), like lib/secret-contract.mjs — safe under doctor's bare-Node runtime.
@@ -514,7 +534,7 @@ function defaultListTickets() {
 export async function checkHrwPartition(deps = {}) {
   const {
     getHostName: _getHostName = getHostName,
-    getClusterHosts: _getClusterHosts = getClusterHosts,
+    getClusterHosts: _getClusterHosts = getExistenceHosts,
     listTickets = defaultListTickets,
     ownedBy: _ownedBy = ownedBy,
   } = deps;
@@ -4576,7 +4596,7 @@ export function checkRegistryTeamIdentity(deps = {}) {
 // sole writer); this check only reports drift and points at the remediation.
 export async function checkWorkerLabels(deps = {}) {
   const {
-    getRoster = getClusterHosts,
+    getRoster = getExistenceHosts,
     // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
     // answer now — see resolveLinearTokenLive's docstring for why the PR2
     // shadow comparison this call site carried is retired, not merely muted.
@@ -5197,6 +5217,95 @@ export async function checkDeploymentModeConsistency(deps = {}) {
       );
     }
   }
+
+  return checks;
+}
+
+// checkEntitlementConsistency — CTL-1785 (W13). Advisory report on the entitlement
+// seam: the resolved off/shadow/enforce mode, the active provider (local vs a real
+// lease authority), and whether the load-bearing ordering constraint holds
+// (ENTITLEMENT_TTL_MS > work-lease TTL). ADVISORY ONLY — never emits STATUS.FAIL,
+// so it can never move doctor's exit code or wedge the run (mirrors
+// checkDeploymentModeConsistency's INFO/WARN posture). Fleet-topology-independent
+// (does not consult resolveRoster), wired into checksForClass for every class.
+//
+// Deps injectable so tests (and, later, W12's authority) can point every input at
+// a fixture: `mode` (the resolved entitlement mode), `entitlementTtlMs` /
+// `workLeaseTtlMs` (the ordering pair), and `providerKind` ("local" today;
+// "authority" once CTL-1786's lease store is injected).
+export function checkEntitlementConsistency(deps = {}) {
+  const {
+    mode: m = resolveEntitlementMode(),
+    entitlementTtlMs = ENTITLEMENT_TTL_MS,
+    workLeaseTtlMs = WORK_LEASE_TTL_MS,
+    providerKind = "local",
+  } = deps;
+
+  const checks = [];
+
+  // 1. entitlement-mode — the resolved rollout mode. INFO for a recognized value
+  //    (incl. the inferred `off` default); WARN (never FAIL) for an unrecognized
+  //    typo, which degrades to off (byte-identical to today).
+  if (!m.recognized) {
+    checks.push(
+      mkCheck(
+        "entitlement-mode",
+        STATUS.WARN,
+        `entitlement mode "${printableRaw(m.raw)}" is not one of [${ENTITLEMENT_MODES.join(", ")}] — ` +
+          `treating this node as "${m.mode}" (byte-identical to today); correct or unset ` +
+          `catalyst.entitlement.mode / CATALYST_ENTITLEMENT (source=${m.source})`,
+      ),
+    );
+  } else {
+    checks.push(
+      mkCheck(
+        "entitlement-mode",
+        STATUS.INFO,
+        `entitlement mode="${m.mode}" (source=${m.source}${m.inferred ? ", inferred default" : ""})`,
+      ),
+    );
+  }
+
+  // 2. entitlement-provider — which authority answers "may this host take work?".
+  //    WARN (advisory) when enforce is selected but only the LOCAL fallback is
+  //    wired: the local provider always entitles self (self ∈ its own roster), so
+  //    enforce is byte-identical to today until W12 (CTL-1786) injects a real
+  //    authority. INFO otherwise.
+  if (m.mode === "enforce" && providerKind === "local") {
+    checks.push(
+      mkCheck(
+        "entitlement-provider",
+        STATUS.WARN,
+        `entitlement mode=enforce but no lease authority is injected — the local fallback ` +
+          `provider always entitles self, so enforce is byte-identical to today until the ` +
+          `W12 lease authority (CTL-1786) lands`,
+      ),
+    );
+  } else {
+    checks.push(
+      mkCheck(
+        "entitlement-provider",
+        STATUS.INFO,
+        `entitlement provider=${providerKind}` + (m.mode === "off" ? " (mode=off — provider unused)" : ""),
+      ),
+    );
+  }
+
+  // 3. entitlement-ordering — the load-bearing constraint. INFO when it holds;
+  //    WARN (NEVER FAIL — advisory only) if inverted. The leaf's module-load
+  //    assertEntitlementOrdering() already throws loudly on a real inversion of
+  //    the shipped constants, so a WARN here only surfaces an injected/misconfigured pair.
+  const ordersOk = Number(entitlementTtlMs) > Number(workLeaseTtlMs);
+  checks.push(
+    mkCheck(
+      "entitlement-ordering",
+      ordersOk ? STATUS.INFO : STATUS.WARN,
+      ordersOk
+        ? `entitlement TTL ${entitlementTtlMs}ms > work-lease TTL ${workLeaseTtlMs}ms (ordering constraint holds)`
+        : `entitlement TTL ${entitlementTtlMs}ms must EXCEED work-lease TTL ${workLeaseTtlMs}ms — ` +
+            `an unentitled node would hold work invisible to the reclaim loop (advisory)`,
+    ),
+  );
 
   return checks;
 }
@@ -6230,6 +6339,11 @@ export function checksForClass(nc, opts = {}) {
   // CTL-1523 convention); the strict install-profile escalation branch exists
   // in checkDeploymentModeConsistency but is not wired into any profile yet.
   const deploymentModeCheck = () => checkDeploymentModeConsistency({ resolveRoster });
+  // CTL-1785: entitlement consistency — a fleet-topology fact independent of node
+  // class (like deploymentModeCheck), so it runs for every class. ADVISORY ONLY:
+  // every check it emits is INFO/WARN, never FAIL, so it can never move doctor's
+  // exit code (mirrors the CTL-1523/deployment-mode land-dormant convention).
+  const entitlementCheck = () => checkEntitlementConsistency();
   // #2930 round-2: split-brain Layer-2 path layout is unsupported until the
   // canonical sweep — zero rows on every non-divergent host.
   const layer2PathDivergenceCheck = () => checkLayer2PathDivergence();
@@ -6316,6 +6430,7 @@ export function checksForClass(nc, opts = {}) {
     return [
       nodeClassCheck,
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      entitlementCheck, // CTL-1785: entitlement consistency, advisory-only (INFO/WARN, never FAIL), every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
@@ -6364,6 +6479,7 @@ export function checksForClass(nc, opts = {}) {
     return [
       nodeClassCheck,
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      entitlementCheck, // CTL-1785: entitlement consistency, advisory-only (INFO/WARN, never FAIL), every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
@@ -6394,6 +6510,7 @@ export function checksForClass(nc, opts = {}) {
   return [
     nodeClassCheck,
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+    entitlementCheck, // CTL-1785: entitlement consistency, advisory-only (INFO/WARN, never FAIL), every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
     agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class

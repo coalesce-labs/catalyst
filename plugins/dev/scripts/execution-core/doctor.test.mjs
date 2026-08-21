@@ -37,6 +37,7 @@ import {
   defaultConfiguredRepos,
   checkNodeClass,
   checkDeploymentModeConsistency,
+  checkEntitlementConsistency,
   checkSecretContract,
   checkLayer2PathDivergence,
   checkReadReplicaReachable,
@@ -239,6 +240,74 @@ const agreeingSecretContract = (present) => () =>
   present
     ? { value: "contract-token", source: "inherited", provider: "env-alias" }
     : { value: null, source: "none", provider: "env-alias" };
+
+describe("checkEntitlementConsistency (CTL-1785)", () => {
+  const mode = (over = {}) => ({
+    mode: "off",
+    source: "default",
+    inferred: true,
+    recognized: true,
+    raw: null,
+    ...over,
+  });
+  const byName = (checks) => Object.fromEntries(checks.map((c) => [c.name, c]));
+
+  it("advisory INFO when mode=off (default)", () => {
+    const checks = checkEntitlementConsistency({ mode: mode() });
+    const m = byName(checks)["entitlement-mode"];
+    expect(m.status).toBe("info");
+    expect(m.detail).toContain('mode="off"');
+  });
+
+  it("WARN when mode=enforce but no real authority injected (local fallback)", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "enforce", source: "env", inferred: false }),
+      providerKind: "local",
+    });
+    const p = byName(checks)["entitlement-provider"];
+    expect(p.status).toBe("warn");
+    expect(p.detail).toContain("no lease authority");
+  });
+
+  it("INFO for the provider once a real authority is injected", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "enforce", source: "env", inferred: false }),
+      providerKind: "authority",
+    });
+    expect(byName(checks)["entitlement-provider"].status).toBe("info");
+  });
+
+  it("ordering check is INFO when the constraint holds, WARN when inverted — never FAIL", () => {
+    const ok = byName(checkEntitlementConsistency({ mode: mode(), entitlementTtlMs: 900000, workLeaseTtlMs: 300000 }));
+    expect(ok["entitlement-ordering"].status).toBe("info");
+    const bad = byName(checkEntitlementConsistency({ mode: mode(), entitlementTtlMs: 1000, workLeaseTtlMs: 2000 }));
+    expect(bad["entitlement-ordering"].status).toBe("warn");
+  });
+
+  it("a typo'd mode WARNs (never FAILs) and degrades to off", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "off", source: "env", inferred: false, recognized: false, raw: "enfroce" }),
+    });
+    expect(byName(checks)["entitlement-mode"].status).toBe("warn");
+  });
+
+  it("NEVER emits STATUS.FAIL (advisory only, cannot wedge doctor)", () => {
+    // Sweep every mode + provider + ordering combination — none may FAIL.
+    for (const mm of ["off", "shadow", "enforce"]) {
+      for (const pk of ["local", "authority"]) {
+        for (const [e, w] of [[900000, 300000], [1000, 2000]]) {
+          const checks = checkEntitlementConsistency({
+            mode: mode({ mode: mm, inferred: mm === "off", source: mm === "off" ? "default" : "env", recognized: true }),
+            providerKind: pk,
+            entitlementTtlMs: e,
+            workLeaseTtlMs: w,
+          });
+          for (const c of checks) expect(c.status).not.toBe("fail");
+        }
+      }
+    }
+  });
+});
 
 describe("checkPeerUniqueness", () => {
   it("INFO-skips when no liveness anchor issue is configured", async () => {

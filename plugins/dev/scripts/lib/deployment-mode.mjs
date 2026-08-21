@@ -203,6 +203,21 @@ function readDeploymentModeField(filePath) {
 //   - member of DEPLOYMENT_MODES ⇒ recognized:true.
 //   - non-member (typo) ⇒ degrade to single-host, recognized:false, AT this
 //     layer's source — doctor FAILs until corrected.
+const ASCII_WHITESPACE = new Set(["\t", "\n", "\v", "\f", "\r", " "]);
+
+// trimAsciiWhitespace — index-scan trim (no regex) of the same [[:space:]]
+// class as classifyCandidate's bash counterpart. A regex equivalent
+// (`/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g`) was flagged by CodeQL as a
+// polynomial-time backtracking risk on adversarial input; this walks each
+// end at most once, so it is linear by construction regardless of input.
+function trimAsciiWhitespace(value) {
+  let start = 0;
+  let end = value.length;
+  while (start < end && ASCII_WHITESPACE.has(value[start])) start++;
+  while (end > start && ASCII_WHITESPACE.has(value[end - 1])) end--;
+  return value.slice(start, end);
+}
+
 function classifyCandidate(raw, source) {
   if (raw === undefined || raw === null) return { fallthrough: true };
   if (typeof raw !== "string") {
@@ -210,7 +225,7 @@ function classifyCandidate(raw, source) {
       result: { mode: DEPLOYMENT_MODE_DEFAULT, source, inferred: false, recognized: false, raw },
     };
   }
-  const normalized = raw.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "").toLowerCase();
+  const normalized = trimAsciiWhitespace(raw).toLowerCase();
   if (normalized.length === 0) return { fallthrough: true };
   if (DEPLOYMENT_MODES.includes(normalized)) {
     return { result: { mode: normalized, source, inferred: false, recognized: true, raw } };
