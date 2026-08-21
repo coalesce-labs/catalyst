@@ -991,6 +991,28 @@ describe("resolveHeartbeatTailWindowMs — bounded, finite, above the grace floo
     for (const i of invalid) expect(i.reason).toContain("minimum");
   });
 
+  test("an EMPTY range (min > max) collapses to the CEILING, never inverts it (Codex #3760)", () => {
+    // A pathological grace (> 15.5 days) derives min = 2x grace > the 31-day max.
+    // Pre-fix, clampDefault's min-side branch ran first and returned min — a value
+    // ABOVE the ceiling this constant exists to enforce, re-creating the
+    // walk-to-BOF-every-tick read on monthly logs.
+    invalid.length = 0;
+    const hugeMin = HEARTBEAT_TAIL_WINDOW_MAX_MS * 2; // 62 days = 2x a 31-day grace
+    // At that grace the derived DEFAULT is Math.min(72x grace, MAX) = exactly MAX —
+    // which sits BELOW the uncollapsed 62-day min, so pre-fix clampDefault's
+    // min-side branch returned min (62d), a value above the ceiling.
+    const got = resolveHeartbeatTailWindowMs(undefined, {
+      defaultMs: HEARTBEAT_TAIL_WINDOW_MAX_MS,
+      min: hugeMin,
+      max: HEARTBEAT_TAIL_WINDOW_MAX_MS,
+      onInvalid: (info) => invalid.push(info),
+    });
+    expect(got).toBe(HEARTBEAT_TAIL_WINDOW_MAX_MS); // ceiling wins, floor collapses onto it
+    expect(got).toBeLessThanOrEqual(HEARTBEAT_TAIL_WINDOW_MAX_MS);
+    // And the shipped constants can never form an empty range, whatever the grace:
+    expect(HEARTBEAT_TAIL_WINDOW_MIN_MS).toBeLessThanOrEqual(HEARTBEAT_TAIL_WINDOW_MAX_MS);
+  });
+
   test("a NEGATIVE value falls back LOUDLY (it used to clamp silently to the grace window)", () => {
     invalid.length = 0;
     expect(parse("-1")).toBe(HEARTBEAT_TAIL_WINDOW_DEFAULT_MS);

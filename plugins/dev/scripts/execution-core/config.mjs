@@ -1364,8 +1364,15 @@ export const HEARTBEAT_GRACE_MS = Number(process.env.EXECUTION_CORE_HEARTBEAT_GR
 //
 // Invalid ⇒ the DEFAULT, reported through `onInvalid` (the daemon logs it) —
 // never a silent clamp, because the failure it causes is invisible for hours.
-export const HEARTBEAT_TAIL_WINDOW_MIN_MS = HEARTBEAT_GRACE_MS * 2;
 export const HEARTBEAT_TAIL_WINDOW_MAX_MS = 31 * 24 * 60 * 60_000; // 31 days
+// Codex #3760 review: the ceiling outranks the derived floor. A pathological grace
+// (> 15.5 days) would push 2x grace past the 31-day log horizon; an empty [min, max]
+// range must collapse to the ceiling, never invert it — clampDefault checks the min
+// side first, so an uncapped MIN here would return 2x grace and defeat the MAX.
+export const HEARTBEAT_TAIL_WINDOW_MIN_MS = Math.min(
+  HEARTBEAT_GRACE_MS * 2,
+  HEARTBEAT_TAIL_WINDOW_MAX_MS,
+);
 // CTL-1550: clamped to [min, max] so a pathologically large HEARTBEAT_GRACE_MS cannot
 // silently push the derived default above the 31-day ceiling. The derived default can
 // only breach the MAX side (since 72 > 2 ensures it always exceeds the MIN floor).
@@ -1377,6 +1384,10 @@ export const HEARTBEAT_TAIL_WINDOW_DEFAULT_MS = Math.min(
 // clampDefault — apply [min, max] to a caller-supplied default and fire onInvalid when
 // a clamp was needed. ONLY fires when clamping actually occurs (not on a normal default).
 function clampDefault(defaultMs, min, max, onInvalid) {
+  // Codex #3760: an empty range (min > max, e.g. an injected floor above the
+  // month horizon) collapses to the CEILING — the min-side branch runs first,
+  // so an uncollapsed min would return a value above max and undo the cap.
+  if (min > max) min = max;
   if (!Number.isFinite(defaultMs) || defaultMs < min) {
     const clamped = min;
     if (typeof onInvalid === "function")
