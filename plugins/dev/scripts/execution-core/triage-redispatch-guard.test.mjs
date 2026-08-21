@@ -257,6 +257,59 @@ describe("rearmTriageCapOnRequeue — human re-queue re-arm (CTL-2111)", () => {
     expect(s.calls.resetFence).toHaveLength(0);
   });
 
+  // ── CTL-2111 (Codex #3824 P1): the fence reset must be CONFIRMED before the
+  // host-local latch is dropped. resetTriageAttemptCountSync signals failure with
+  // `{count:null}` and never throws, so an ignored result stranded the ticket:
+  // fleet fence still capped → re-parked, local cappedAt gone → never retried,
+  // and the durable event claimed a re-arm that did not happen.
+  test("multi-host + fence reset UNCONFIRMED ({count:null}) → latch retained, no event, not rearmed", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const s = makeSpies();
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: true,
+      resetFence: () => ({ count: null }), // ordinary write failure — does NOT throw
+      clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(res.rearmed).toBe(false);
+    expect(res.reason).toBe("fence-reset-unconfirmed");
+    // The durable event must not claim a re-arm that did not happen.
+    expect(s.calls.appendRearmEvent).toHaveLength(0);
+    // The latch survives, so a later re-queue can RETRY the reset (the old code
+    // cleared cappedAt here, after which every later event read "not-capped").
+    const rec = readTriageDispatchRecord(orchDir, "CTL-2111");
+    expect(rec?.cappedAt).toBe("2026-08-20T00:00:00Z");
+  });
+
+  test("multi-host + fence reset THROWS → treated as unconfirmed, latch retained", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const s = makeSpies();
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: true,
+      resetFence: () => { throw new Error("spawn failed"); },
+      clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(res.rearmed).toBe(false);
+    expect(res.reason).toBe("fence-reset-unconfirmed");
+    expect(s.calls.appendRearmEvent).toHaveLength(0);
+    expect(readTriageDispatchRecord(orchDir, "CTL-2111")?.cappedAt).toBe("2026-08-20T00:00:00Z");
+  });
+
+  // Positive control: the SAME harness with a CONFIRMED reset must re-arm, so the
+  // two assertions above are evidence of the gate and not of a broken fixture.
+  test("multi-host + fence reset CONFIRMED ({count:0}) → latch cleared, event emitted", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const s = makeSpies();
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: true,
+      resetFence: () => ({ count: 0 }),
+      clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(res.rearmed).toBe(true);
+    expect(s.calls.appendRearmEvent).toHaveLength(1);
+    expect(readTriageDispatchRecord(orchDir, "CTL-2111")?.cappedAt).toBeFalsy();
+    expect(readTriageDispatchCount(orchDir, "CTL-2111")).toBe(0);
+  });
+
   test("single-host → resetFence NOT called; host-local reset + event still happen", () => {
     seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
     const s = makeSpies();
@@ -271,10 +324,28 @@ describe("rearmTriageCapOnRequeue — human re-queue re-arm (CTL-2111)", () => {
     expect(readTriageDispatchCount(orchDir, "CTL-2111")).toBe(0);
   });
 
-  test("every seam throwing → still rearmed:true, never throws (fail-open)", () => {
+  // CTL-2111 (Codex #3824 P1): the NON-load-bearing seams stay fail-open — but the
+  // multi-host fence reset does NOT, because on multi-host the host-local reset
+  // un-gates nothing by itself (fleetTriageDispatchCount takes max(local, fence)).
+  // This test therefore pairs a CONFIRMED fence reset with two throwing auxiliary
+  // seams; the throwing-fence case is asserted separately above.
+  test("auxiliary seams throwing → still rearmed:true, never throws (fail-open)", () => {
     seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
     const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
       eventTs: "2026-08-21T00:00:00Z", multiHost: true,
+      resetFence: () => ({ count: 0 }), // confirmed — the load-bearing seam succeeded
+      clearLabel: () => { throw new Error("linear 500"); },
+      appendRearmEvent: () => { throw new Error("disk full"); },
+    });
+    expect(res.rearmed).toBe(true);
+    expect(readTriageDispatchCount(orchDir, "CTL-2111")).toBe(0);
+    expect(readTriageDispatchRecord(orchDir, "CTL-2111").cappedAt).toBeUndefined();
+  });
+
+  test("single-host: every seam throwing → still rearmed:true, never throws (fail-open)", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: false, // no fence involved at all
       resetFence: () => { throw new Error("fence down"); },
       clearLabel: () => { throw new Error("linear 500"); },
       appendRearmEvent: () => { throw new Error("disk full"); },

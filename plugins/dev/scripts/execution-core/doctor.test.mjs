@@ -248,6 +248,73 @@ describe("checkTriageCapParked (CTL-2111)", () => {
     writeFileSync(join(dir, `${ticket}.json`), JSON.stringify(rec));
   }
 
+  // ── CTL-2111 (Codex #3824 P1): a scan that COULD NOT LOOK must never render as
+  // "there is nothing there". Previously an unreadable dir / unparseable record
+  // produced the same empty list as a genuinely empty one, and the check PASSed
+  // "no triage-capped tickets" — certifying the exact negative it could not inspect.
+  it("INCONCLUSIVE (not PASS) when the cap directory exists but cannot be read", () => {
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      // EACCES — "could not look", NOT ENOENT ("nothing there").
+      listCapFiles: () => ({ entries: [], unreadable: [".triage-dispatch-counts (EACCES)"] }),
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toMatch(/INCONCLUSIVE/);
+    expect(checks[0].detail).not.toMatch(/no triage-capped tickets/);
+  });
+
+  it("INCONCLUSIVE when a cap record file is unparseable (may or may not be capped)", () => {
+    const dir = join(capOrchDir, ".triage-dispatch-counts");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "CTL-9999.json"), "{ not json");
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks.some((c) => /INCONCLUSIVE/.test(c.detail))).toBe(true);
+    expect(checks.some((c) => c.status === STATUS.PASS)).toBe(false);
+  });
+
+  // Positive control for BOTH assertions above: a genuinely absent directory is a
+  // real negative and must still PASS, so the two tests prove the distinction
+  // rather than merely proving the check never passes.
+  it("PASSes when the cap directory is genuinely absent (ENOENT — a real negative)", () => {
+    const checks = checkTriageCapParked({
+      orchDir: join(capOrchDir, "no-such-dir"),
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toMatch(/no triage-capped tickets/);
+  });
+
+  it("still reports a tripped cap AND the doubt when the scan is partially unreadable", () => {
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      listCapFiles: () => ({
+        entries: [{ ticket: "CTL-2111", cappedAt: "2026-08-20T00:00:00Z", path: "/p/CTL-2111.json" }],
+        unreadable: ["CTL-9999.json (unparseable)"],
+      }),
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks.some((c) => c.name === "would-triage-capped")).toBe(true);
+    expect(checks.some((c) => /INCONCLUSIVE/.test(c.detail))).toBe(true);
+  });
+
   it("WARNs for a tripped cap that is board-eligible and owned by self, with path + re-arm command", () => {
     seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
     const checks = checkTriageCapParked({
@@ -318,7 +385,7 @@ describe("checkTriageCapParked (CTL-2111)", () => {
     expect(checks[0].status).toBe(STATUS.PASS);
   });
 
-  it("malformed cap file is skipped (fail-open); a positive-control ticket in the same run still reports", () => {
+  it("malformed cap file is SURFACED as doubt (not silently skipped); a positive-control ticket in the same run still reports", () => {
     const dir = join(capOrchDir, ".triage-dispatch-counts");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "CTL-BAD.json"), "not-json{");
@@ -330,10 +397,15 @@ describe("checkTriageCapParked (CTL-2111)", () => {
       getHostName: () => "mini",
       ownedBy: () => true,
     });
-    // CTL-BAD skipped, CTL-2111 still reported (positive control)
-    const names = checks.map((c) => c.detail);
+    // CTL-2111 still reported (positive control — proves the scan ran at all).
     expect(checks.some((c) => c.status === STATUS.WARN && c.detail.includes("CTL-2111"))).toBe(true);
-    expect(names.some((d) => d.includes("CTL-BAD"))).toBe(false);
+    // CTL-2111 (Codex #3824 P1): CTL-BAD is no longer SILENTLY skipped. An
+    // unparseable record may or may not carry `cappedAt`, so the scan is partial and
+    // must say so — the old contract dropped it without a trace, which is how a
+    // "no capped tickets" pass could be certified over records nobody could read.
+    const details = checks.map((c) => c.detail);
+    expect(details.some((d) => d.includes("CTL-BAD"))).toBe(true);
+    expect(details.some((d) => /INCONCLUSIVE/.test(d))).toBe(true);
   });
 
   it("checksForClass(worker) registers the check thunk", () => {

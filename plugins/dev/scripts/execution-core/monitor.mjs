@@ -1802,17 +1802,38 @@ export function rearmTriageCapOnRequeue(
   // a cappedAt we cannot parse, is a conservative no-op (cannot prove newer).
   if (!Number.isFinite(evMs) || !Number.isFinite(capMs) || evMs <= capMs)
     return { rearmed: false, reason: "not-newer" };
+  // CTL-2111 (Codex #3824 P1): on multi-host the FENCE reset must be CONFIRMED
+  // before the host-local latch is dropped. `resetTriageAttemptCountSync` reports
+  // ordinary write failures as `{count:null}` rather than throwing, and the old
+  // order cleared `cappedAt` first and then discarded that result. The next sweep
+  // therefore read the still-capped fleet fence (`fleetTriageDispatchCount` takes
+  // max(host-local, fence)) and re-parked the ticket, while every later
+  // state_changed saw no local `cappedAt` and returned "not-capped" — so the reset
+  // was never retried and the emitted event nevertheless claimed a re-arm. The
+  // host-local reset is NOT a fail-open here: on multi-host it un-gates nothing on
+  // its own. Retaining the latch keeps the re-arm retryable on the next re-queue
+  // and keeps the durable audit record honest.
+  if (multiHost) {
+    let fenceCount = null;
+    try {
+      fenceCount = resetFence({ ticket })?.count ?? null;
+    } catch {
+      // A throwing seam is indistinguishable from a failed reset — both are
+      // "unconfirmed", never "reset".
+      fenceCount = null;
+    }
+    if (fenceCount !== 0) {
+      log.warn(
+        { ticket, cappedAt: rec.cappedAt, eventTs },
+        "ctl-2111: triage cap re-arm DEFERRED — fence reset unconfirmed; local latch retained for retry"
+      );
+      return { rearmed: false, reason: "fence-reset-unconfirmed" };
+    }
+  }
   // Reset the host-local counter — drop `count` and `cappedAt` so the next sweep
   // re-dispatches triage (rewrite rather than unlink so a concurrent reader never
   // sees a transient absent file).
   writeTriageDispatchRecord(orchDir, ticket, { count: 0, lastDispatchAt: null });
-  if (multiHost) {
-    try {
-      resetFence({ ticket });
-    } catch {
-      /* fail-open — the host-local reset already un-gates the next sweep */
-    }
-  }
   try {
     clearLabel(orchDir, ticket);
   } catch {

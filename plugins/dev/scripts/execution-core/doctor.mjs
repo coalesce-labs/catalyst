@@ -6620,17 +6620,28 @@ export function checkGithubFeedReaderConsistency(deps = {}) {
 // ─── CTL-2111: triage re-dispatch cap visibility ─────────────────────────────
 // defaultListCapFiles — enumerate <orchDir>/.triage-dispatch-counts/*.json and
 // return one {ticket, cappedAt, path} per file that carries a `cappedAt` (a
-// TRIPPED cap). node:fs only (bare-node-safe). Unreadable/malformed files are
-// skipped (fail-open) — a positive-control ticket in the same scan still reports.
+// TRIPPED cap). node:fs only (bare-node-safe).
+//
+// CTL-2111 (Codex #3824 P1): the result is THREE-VALUED, not a bare array. A
+// missing directory is a genuine absence ("no caps"), but a readdir that fails on
+// permissions/IO, or a record file that will not read or parse, is "COULD NOT
+// LOOK" — and a record we cannot parse may or may not carry `cappedAt`. Collapsing
+// either into the same empty array let `checkTriageCapParked` return PASS
+// ("no triage-capped tickets") certifying the exact negative it was unable to
+// inspect — the false-clean shape AGENTS.md forbids. Each doubt is carried out in
+// `unreadable` so the caller can report INCONCLUSIVE instead of a clean pass.
 function defaultListCapFiles(orchDir) {
   const dir = join(orchDir, ".triage-dispatch-counts");
   let entries;
   try {
     entries = readdirSync(dir);
-  } catch {
-    return []; // no dir → no capped tickets
+  } catch (err) {
+    // ENOENT is the only conclusive absence: no cap dir means no capped tickets.
+    if (err?.code === "ENOENT") return { entries: [], unreadable: [] };
+    return { entries: [], unreadable: [`${dir} (${err?.code || "readdir failed"})`] };
   }
   const out = [];
+  const unreadable = [];
   for (const f of entries) {
     if (!f.endsWith(".json")) continue;
     const path = join(dir, f);
@@ -6639,11 +6650,13 @@ function defaultListCapFiles(orchDir) {
       if (rec && typeof rec === "object" && rec.cappedAt) {
         out.push({ ticket: f.slice(0, -5), cappedAt: rec.cappedAt, path });
       }
-    } catch {
-      /* malformed/unreadable → skip (fail-open) */
+    } catch (err) {
+      // Unknown whether this record carries `cappedAt` — record the doubt rather
+      // than silently counting it as "not capped".
+      unreadable.push(`${f} (${err?.code || "unparseable"})`);
     }
   }
-  return out;
+  return { entries: out, unreadable };
 }
 
 // defaultReadEligibleIdentifiers — the set of board-eligible ticket identifiers,
@@ -6692,8 +6705,23 @@ export function checkTriageCapParked(deps = {}) {
     ownedBy: _ownedBy = ownedBy,
   } = deps;
 
-  const capped = listCapFiles();
+  // CTL-2111 (Codex #3824 P1): accept BOTH the structured {entries, unreadable}
+  // shape and a bare array (an injected seam, or any caller that only has a list).
+  // A bare array carries no doubt, so it stays conclusive — unchanged behaviour.
+  const capRaw = listCapFiles();
+  const capped = Array.isArray(capRaw) ? capRaw : (capRaw?.entries ?? []);
+  const unreadable = Array.isArray(capRaw) ? [] : (capRaw?.unreadable ?? []);
+  // "I could not look" must never render as "there is nothing there".
+  const inconclusiveCheck = () =>
+    mkCheck(
+      "triage-cap-parked",
+      STATUS.WARN,
+      `INCONCLUSIVE — could not read ${unreadable.length} triage-cap record(s): ${unreadable.join(", ")}` +
+        " — a tripped cap may be present but unreadable; fix permissions/IO or remove the malformed record, then re-run",
+    );
+
   if (capped.length === 0) {
+    if (unreadable.length > 0) return [inconclusiveCheck()];
     return [mkCheck("triage-cap-parked", STATUS.PASS, "no triage-capped tickets on this host")];
   }
 
@@ -6726,9 +6754,13 @@ export function checkTriageCapParked(deps = {}) {
   }
 
   if (checks.length === 0) {
-    // Tripped caps exist but all are owned by other hosts (they report them).
+    // Tripped caps exist but all are owned by other hosts (they report them). An
+    // unreadable record could still have been THIS host's, so doubt outranks the pass.
+    if (unreadable.length > 0) return [inconclusiveCheck()];
     return [mkCheck("triage-cap-parked", STATUS.PASS, "no triage-capped tickets owned by this host")];
   }
+  // Report the tripped caps AND any doubt — a partial scan must not read as complete.
+  if (unreadable.length > 0) checks.push(inconclusiveCheck());
   return checks;
 }
 
