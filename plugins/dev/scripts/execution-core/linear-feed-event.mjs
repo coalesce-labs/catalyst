@@ -271,6 +271,15 @@ export function buildIssueEvent({ history, issue, actor, assignee, project, labe
         // line, and so an operator reading the log later can too.
         source: "cloud-feed",
         historyId: historyEventId(history),
+        // CTL-2111 (Codex #3824 round-3 P1): the SOURCE transition time, carried so
+        // consumers can order against when Linear actually recorded the change
+        // rather than when this feed emitted the envelope. `buildCanonicalEvent`
+        // stamps `ts` with now() AND truncates milliseconds, so the envelope time
+        // is both delayed (by sweep latency) and coarser than the timestamps it is
+        // compared against. The triage-cap re-arm gate is the first consumer that
+        // needs the real edge time: judged on `ts`, a delayed PRE-cap transition can
+        // look newer than a cap it actually preceded and wrongly clear it.
+        transitionedAt: history?.created_at ?? null,
       },
     },
     seams,

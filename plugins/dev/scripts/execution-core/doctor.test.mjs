@@ -435,18 +435,46 @@ describe("checkTriageCapParked (CTL-2111)", () => {
     expect(checks[0].status).toBe(STATUS.INFO);
   });
 
-  it("omits a tripped cap NOT owned by this host (multi-host HRW)", () => {
+  // CTL-2111 (Codex #3824 round-3 P1): a peer-ownership verdict now ANNOTATES
+  // rather than SUPPRESSES. Production triage hashes over the live dispatch roster
+  // (entitled → liveness → deflap), which this sync bare-Node check cannot compute;
+  // when a peer is offline or entitlement-shed, the failed-over slice belongs to
+  // THIS host while a static HRW pass still names the peer. Dropping the record
+  // there made doctor report "no triage-capped tickets owned by this host" while
+  // this host's dispatcher was blocked by exactly that cap.
+  it("REPORTS (does not omit) a tripped cap that static HRW attributes to a peer", () => {
     seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
     const checks = checkTriageCapParked({
       orchDir: capOrchDir,
       readEligibleIdentifiers: () => new Set(["CTL-2111"]),
       getRoster: () => ["mini", "mac-studio"],
       getHostName: () => "mini",
-      ownedBy: () => false, // owned by the other host
+      ownedBy: () => false, // static HRW says the other host owns it
     });
-    // no owned capped tickets → a single PASS
-    expect(checks).toHaveLength(1);
-    expect(checks[0].status).toBe(STATUS.PASS);
+    const c = checks.find((x) => x.name === "would-triage-capped");
+    expect(c).toBeDefined();
+    expect(c.detail).toContain("CTL-2111");
+    expect(c.detail).toMatch(/attributes this ticket to a peer/);
+    // Reported at INFO — visible, but not the same alarm level as a cap this host
+    // definitively owns — and never a PASS that denies the record exists.
+    expect(c.status).toBe(STATUS.INFO);
+    expect(checks.some((x) => x.status === STATUS.PASS)).toBe(false);
+  });
+
+  // Positive control: an owned + eligible cap still WARNs and carries NO peer note,
+  // so the test above proves a distinction rather than that everything reads INFO.
+  it("an owned, board-eligible cap still WARNs with no peer annotation (control)", () => {
+    seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini", "mac-studio"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    const c = checks.find((x) => x.name === "would-triage-capped");
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).not.toMatch(/attributes this ticket to a peer/);
   });
 
   it("PASS when there are no tripped cap files", () => {

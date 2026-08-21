@@ -479,3 +479,93 @@ describe("handleStateChangedEvent — cap re-arm during the fold-only boot drain
     expect(readCap(orchDir).cappedAt).toBeUndefined();
   });
 });
+
+// ── CTL-2111 (Codex #3824 round-3 P1): order on the SOURCE transition time ─────
+//
+// `buildCanonicalEvent` stamps the envelope `ts` with now() AND truncates
+// milliseconds, so `ts` is the feed's EMISSION time — late by the sweep latency
+// and coarser than the `cappedAt` it is compared against. Judged on `ts`, a
+// transition that genuinely PRE-dated a park can look newer and wrongly clear a
+// cap created after it. `buildIssueEvent` now carries `transitionedAt`
+// (history.created_at) and the re-arm prefers it.
+describe("handleStateChangedEvent — re-arm orders on the source transition time (CTL-2111 round-3 P1)", () => {
+  let dir;
+  let prevCatalystDir;
+  const TEAM = "CTL";
+  const TICKET = "CTL-2111";
+  const CAPPED_AT = "2026-08-21T10:00:00.000Z";
+
+  const writeCapped = (orchDir) => {
+    const d = pathJoin(orchDir, ".triage-dispatch-counts");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(pathJoin(d, `${TICKET}.json`), JSON.stringify({ count: 3, cappedAt: CAPPED_AT }));
+  };
+  const capRec = (orchDir) =>
+    JSON.parse(readFileSync(pathJoin(orchDir, ".triage-dispatch-counts", `${TICKET}.json`), "utf8"));
+
+  const ev = ({ ts, transitionedAt }) => ({
+    ts,
+    name: "linear.issue.state_changed",
+    body: { payload: { ticket: TICKET, teamKey: TEAM, toState: "Todo", transitionedAt } },
+  });
+
+  beforeEach(() => {
+    dir = mkdtempSync(pathJoin(tmpdir(), "ctl2111-transition-"));
+    const orchDir = pathJoin(dir, "execution-core");
+    mkdirSync(orchDir, { recursive: true });
+    writeFileSync(
+      pathJoin(orchDir, "registry.json"),
+      JSON.stringify({
+        projects: [{ team: TEAM, repoRoot: dir, eligibleQuery: { status: "Todo", triageStatus: "Triage" } }],
+      }),
+    );
+    prevCatalystDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const opts = (orchDir) => ({
+    orchDir,
+    dispatch: () => {},
+    applyTriageStatus: () => {},
+    appendEvent: () => {},
+    liveBackgroundCount: () => 0,
+    readMaxParallelFn: () => 4,
+    hosts: ["only-host"],
+    hostName: "only-host",
+    foldOnly: true, // fold path keeps the assertion about the re-arm alone
+  });
+
+  // THE DEFECT: a transition that happened BEFORE the cap, emitted after it.
+  test("a delayed pre-cap transition does NOT clear the cap, even though the envelope ts is newer", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    handleStateChangedEvent(
+      ev({ ts: "2026-08-21T10:05:00Z", transitionedAt: "2026-08-21T09:59:00.000Z" }),
+      opts(orchDir),
+    );
+    expect(capRec(orchDir).cappedAt).toBe(CAPPED_AT); // latch retained
+  });
+
+  test("a genuine post-cap transition DOES clear the cap (positive control)", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    handleStateChangedEvent(
+      ev({ ts: "2026-08-21T10:05:00Z", transitionedAt: "2026-08-21T10:01:00.000Z" }),
+      opts(orchDir),
+    );
+    expect(capRec(orchDir).cappedAt).toBeUndefined();
+  });
+
+  // Back-compat: a producer that carries no transitionedAt still falls back to ts.
+  test("no transitionedAt → falls back to the envelope ts (back-compat)", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    handleStateChangedEvent(ev({ ts: "2026-08-21T10:05:00Z", transitionedAt: undefined }), opts(orchDir));
+    expect(capRec(orchDir).cappedAt).toBeUndefined();
+  });
+});

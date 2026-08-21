@@ -213,6 +213,19 @@ export function parseStateChangedEvent(event) {
     // human re-queue is NEWER than the cap's cappedAt (only a re-queue that
     // post-dates the park re-arms). null when absent → conservative no-op.
     ts: typeof event?.ts === "string" ? event.ts : null,
+    // CTL-2111 (Codex #3824 round-3 P1): the SOURCE transition time — when Linear
+    // recorded the state change — as distinct from `ts`, the envelope EMISSION
+    // time. They are not interchangeable for an ordering comparison: the cloud
+    // feed (now the only ingestion leg, both webhook legs retired) stamps `ts`
+    // with `now()` at build time AND truncates milliseconds, so `ts` is late by
+    // the sweep latency and coarser than the `cappedAt` it is compared against.
+    // Judged on `ts`, a delayed transition that genuinely PRE-dated a park could
+    // appear newer and clear a cap that was created after it. Prefer the source
+    // time; `ts` remains the fallback for any producer that does not carry one.
+    transitionAt:
+      typeof payload.transitionedAt === "string" && payload.transitionedAt
+        ? payload.transitionedAt
+        : null,
     // CTL triage-entry fix (Phase 0): carry the projection-fold fields so a
     // →status transition can be folded into the eligible set from the event
     // payload (no Linear poll), the same way handleIssueUpdatedEvent does.
@@ -685,7 +698,8 @@ export function handleStateChangedEvent(
       // dispatch below stays gated.
       if (orchDir) {
         rearmTriageCapOnRequeue(orchDir, parsed.identifier, {
-          eventTs: parsed.ts,
+          // Source transition time when the producer carries one; envelope ts otherwise.
+          eventTs: parsed.transitionAt ?? parsed.ts,
           multiHost: (hosts ?? getExistenceHosts()).length > 1,
         });
       }
@@ -753,7 +767,8 @@ export function handleStateChangedEvent(
       // the fold-only drain, which advances the cursor and never replays it.
       if (orchDir && parsed.toState === query.status) {
         rearmTriageCapOnRequeue(orchDir, parsed.identifier, {
-          eventTs: parsed.ts,
+          // Source transition time when the producer carries one; envelope ts otherwise.
+          eventTs: parsed.transitionAt ?? parsed.ts,
           multiHost: (hosts ?? getExistenceHosts()).length > 1,
         });
       }

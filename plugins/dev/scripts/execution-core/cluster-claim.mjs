@@ -23,7 +23,7 @@ import {
   resolveAttachmentTransport,
 } from "./cluster-attachment-transport.mjs";
 import { createLinearWriteProxy } from "./linear-write-proxy.mjs";
-import { readLinearWriteProxyConfig, resolveLeaseAuthorityMode } from "./config.mjs";
+import { getHostName, readLinearWriteProxyConfig, resolveLeaseAuthorityMode } from "./config.mjs";
 // CTL-1786 — the lease-authority client half of CTC-410. The refusable claim path lives beside
 // the attachment soft-CAS here so `runCli`/`defaultTransport` can select it on the env gate with
 // ZERO change to any caller: it returns the same {won, generation} contract.
@@ -322,10 +322,42 @@ export async function bumpTriageAttemptCount(
 // 0 on success, or null when no fence exists (best-effort no-op, fail-open).
 export async function resetTriageAttemptCount(
   ticket,
-  { post = defaultPost, transport = null, issueId = null } = {},
+  { post = defaultPost, transport = null, issueId = null, hostName = null } = {},
 ) {
   const current = await readClaim(ticket, { post, transport });
   if (!current) return null; // no fence — no-op, fail-open
+  // CTL-2111 (Codex #3824 round-3 P1): this is a read-then-write with no CAS, so a
+  // human re-queue racing an ownership change could read generation G, let a
+  // concurrent `claimTicket` write G+1, then unconditionally restore G and the OLD
+  // owner_host — invalidating the real winner's fencing token and making a
+  // superseded worker current again. That is a fleet-safety failure, and a count
+  // reset must never be able to cause it.
+  //
+  // Two guards, both failing to `null` ("unconfirmed"), which the caller already
+  // treats as "retain the local latch and retry on the next re-queue" — never as a
+  // completed re-arm. The fail direction is a deferred re-arm, never a broken fence.
+  //
+  // Guard 1 — NEVER rewrite another host's claim. The re-arm runs on the host that
+  // holds the (host-local) cap record, so the claim it is refreshing should be its
+  // own. If the fence names a different owner, a takeover has already happened:
+  // decline outright rather than restoring ourselves over the winner. This alone
+  // removes the reported harm — the stale owner_host can no longer be written back
+  // — because the only claim we will now rewrite is one we already own.
+  const nonEmpty = (v) => typeof v === "string" && v !== "";
+  // A fence with no recorded owner, or a host we cannot name, is not evidence of a
+  // takeover — fall through to the read-back guard rather than declining outright,
+  // so an unowned/legacy fence record stays resettable.
+  let self = hostName;
+  if (!nonEmpty(self)) {
+    try {
+      self = getHostName();
+    } catch {
+      self = null;
+    }
+  }
+  if (nonEmpty(current.owner_host) && nonEmpty(self) && current.owner_host !== self) {
+    return null;
+  }
   await writeClaim(
     ticket,
     {
@@ -336,6 +368,20 @@ export async function resetTriageAttemptCount(
     },
     { post, transport, issueId, preserveClaimedAt: current.claimed_at },
   );
+  // Guard 2 — confirm by read-back, the same soft-CAS shape `claimTicket` uses. If
+  // anything other than exactly what we wrote is there, a concurrent writer landed
+  // after us and holds the fence: report unconfirmed rather than claiming a reset.
+  // A generation that MOVED is the takeover case; note it can only have moved
+  // FORWARD (generations are monotonic), so the winner's claim survives our write.
+  const readback = await readClaim(ticket, { post, transport });
+  if (
+    !readback ||
+    readback.owner_host !== current.owner_host ||
+    readback.generation !== current.generation ||
+    readback.triage_attempt_count !== 0
+  ) {
+    return null;
+  }
   return 0;
 }
 

@@ -63,6 +63,7 @@ import {
   // shows the full topology). Entitlement is reported separately by
   // checkEntitlementConsistency. `off` mode: getExistenceHosts() === getClusterHosts().
   getExistenceHosts,
+  getEntitledHosts, // CTL-2111 round-3 P1: the ownership-gate roster class (CTL-1785)
   resolveClusterHosts,
   hostMembershipWarning,
   getLivenessAnchorIssue,
@@ -6717,7 +6718,12 @@ export function checkTriageCapParked(deps = {}) {
     listCapFiles = () => defaultListCapFiles(orchDir),
     readEligibleIdentifiers = defaultReadEligibleIdentifiers,
     isEligible = null, // optional direct seam; else derived from readEligibleIdentifiers
-    getRoster = getExistenceHosts,
+    // CTL-2111 (Codex #3824 round-3 P1): ENTITLEMENT, not existence. Per CTL-1785
+    // every dispatch / recovery / reclaim / HRW-ownership gate reads
+    // getEntitledHosts(); getExistenceHosts() is the topology/display roster. Using
+    // the existence roster here made doctor's ownership verdict disagree with the
+    // dispatcher's by construction whenever a peer was shed.
+    getRoster = getEntitledHosts,
     getHostName: _getHostName = getHostName,
     ownedBy: _ownedBy = ownedBy,
   } = deps;
@@ -6759,15 +6765,54 @@ export function checkTriageCapParked(deps = {}) {
       if (eligibleSet?.has(t)) return true;
       return eligibleUnreadable.length > 0 ? null : false;
     });
-  const roster = getRoster() ?? [];
-  const self = _getHostName();
+  // CTL-2111 (Codex #3824 round-3 P1): resolve the roster DEFENSIVELY. The
+  // entitlement roster is a richer read than the existence roster it replaced
+  // (provider + cluster hosts + self, with an emit hook), and any of those can
+  // throw or be unavailable in a degraded or bare-Node environment. A doctor check
+  // must never throw — and least of all THIS one, whose whole job is to surface a
+  // cap record: a throw here would hide the very blockage it exists to report.
+  // Degrade entitlement → existence → empty, and treat an unresolvable roster as
+  // single-host, which makes ownership a no-op and reports every record.
+  let roster;
+  try {
+    roster = getRoster() ?? [];
+  } catch {
+    try {
+      roster = getExistenceHosts() ?? [];
+    } catch {
+      roster = [];
+    }
+  }
+  if (!Array.isArray(roster)) roster = [];
+  let self;
+  try {
+    self = _getHostName();
+  } catch {
+    self = null;
+  }
   const multiHost = roster.length > 1;
 
   const checks = [];
   for (const { ticket, cappedAt, path } of capped) {
-    // Multi-host: only the HRW owner reports the ticket (the owning host is the
-    // one that must act). Single-host is always "owned".
-    if (multiHost && !_ownedBy(ticket, roster, self)) continue;
+    // CTL-2111 (Codex #3824 round-3 P1): ownership ANNOTATES, it no longer
+    // SUPPRESSES. Production triage hashes over the live DISPATCH roster
+    // (entitled → positive-liveness → restore-deflap, via resolveDispatchRoster),
+    // which this bare-Node check cannot compute: that resolver lives in
+    // scheduler.mjs and needs an async heartbeat read, and doctor's checks are
+    // sync and deliberately free of that dependency graph. So a `continue` here
+    // was a verdict this check is structurally unable to make correctly — when a
+    // peer is offline or entitlement-shed, the failed-over slice moves to THIS
+    // host while a static HRW pass still names the peer, and doctor then dropped
+    // the record and reported "no triage-capped tickets owned by this host" while
+    // this host's dispatcher was blocked by exactly that cap.
+    //
+    // Reporting instead of suppressing is also the right dedup trade: the cap
+    // record is HOST-LOCAL, written only by the host that actually refused to
+    // triage, so a peer without the file reports nothing regardless. The alarm
+    // fan-out the filter was protecting against is bounded by that already.
+    // Mirroring the dispatch roster would additionally re-introduce the very
+    // drift this finding is about, the next time either side changes.
+    const ownedHere = !multiHost || _ownedBy(ticket, roster, self);
     const elig = eligibleOf(ticket);
     const reArm =
       `delete ${path} to re-arm` +
@@ -6779,11 +6824,18 @@ export function checkTriageCapParked(deps = {}) {
     // states a negative ("not currently board-eligible") the reader was unable to
     // verify. Unknown is reported at WARN, naming the unreadable projections.
     const eligUnknown = elig === null || elig === undefined;
+    // A cap this host holds but that static HRW attributes to a peer is still
+    // reported — at INFO, and saying so — because the two rosters can legitimately
+    // disagree (see above). It is never dropped.
+    const ownerNote = ownedHere
+      ? ""
+      : ` [static HRW attributes this ticket to a peer; the live dispatch roster may differ —` +
+        ` the cap record is nevertheless on THIS host, so this host's dispatcher is the one it blocks]`;
     checks.push(
       mkCheck(
         "would-triage-capped",
-        eligUnknown || elig ? STATUS.WARN : STATUS.INFO,
-        `${ticket} tripped its triage re-dispatch cap (cappedAt=${cappedAt})` +
+        !ownedHere ? STATUS.INFO : eligUnknown || elig ? STATUS.WARN : STATUS.INFO,
+        `${ticket} tripped its triage re-dispatch cap (cappedAt=${cappedAt})` + ownerNote +
           (eligUnknown
             ? ` — board-eligibility INCONCLUSIVE (could not read ${eligibleUnreadable.length} eligible projection(s): ${eligibleUnreadable.join(", ")});` +
               ` this host may be refusing to triage a ready ticket`
@@ -6796,8 +6848,9 @@ export function checkTriageCapParked(deps = {}) {
   }
 
   if (checks.length === 0) {
-    // Tripped caps exist but all are owned by other hosts (they report them). An
-    // unreadable record could still have been THIS host's, so doubt outranks the pass.
+    // CTL-2111 (round-3 P1): with ownership no longer suppressing, this branch is
+    // reachable only when `capped` was empty of reportable records. An unreadable
+    // record could still have been a real cap, so doubt outranks the pass.
     if (unreadable.length > 0) return [inconclusiveCheck()];
     return [mkCheck("triage-cap-parked", STATUS.PASS, "no triage-capped tickets owned by this host")];
   }

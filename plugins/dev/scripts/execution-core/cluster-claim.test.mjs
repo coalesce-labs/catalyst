@@ -6,6 +6,9 @@
 // metadata), so claimTicket's read→write→read-back soft-CAS exercises real
 // semantics.
 import { describe, it, expect, afterEach } from "bun:test";
+// CTL-2111 (round-3 P1): the owner guard in resetTriageAttemptCount compares against
+// this host, so the CLI-path test seeds the fence with the same resolver production uses.
+import { getHostName as cfgGetHostName } from "./config.mjs";
 
 import {
   fenceUrl,
@@ -862,7 +865,9 @@ describe("resetTriageAttemptCount (CTL-2111)", () => {
     const { post, store } = makeFakeLinear({
       seed: { "CTL-2111": { owner_host: "mini", catalyst_generation: 2, phase: "triage", claimed_at: "2026-08-01T00:00:00Z", triage_attempt_count: 5 } },
     });
-    const result = await resetTriageAttemptCount("CTL-2111", { post });
+    // CTL-2111 (round-3 P1): the reset only ever rewrites THIS host's own claim,
+    // so the owning host is named explicitly rather than inherited from the box.
+    const result = await resetTriageAttemptCount("CTL-2111", { post, hostName: "mini" });
     expect(result).toBe(0);
     expect(store.get("CTL-2111").triage_attempt_count).toBe(0);
   });
@@ -871,11 +876,13 @@ describe("resetTriageAttemptCount (CTL-2111)", () => {
     const { post, store } = makeFakeLinear({
       seed: { "CTL-2111": { owner_host: "mac-studio", catalyst_generation: 5, phase: "triage", claimed_at: "2026-08-01T00:00:00Z", triage_attempt_count: 3 } },
     });
-    await resetTriageAttemptCount("CTL-2111", { post });
+    const rc = await resetTriageAttemptCount("CTL-2111", { post, hostName: "mac-studio" });
+    expect(rc).toBe(0); // guards admitted it — without this the assertions below pass vacuously on a refusal
     const m = store.get("CTL-2111");
     expect(m.owner_host).toBe("mac-studio");
     expect(m.catalyst_generation).toBe(5);
     expect(m.phase).toBe("triage");
+    expect(m.triage_attempt_count).toBe(0);
   });
 
   it("preserves claimed_at (does not re-stamp the staleness clock)", async () => {
@@ -883,7 +890,7 @@ describe("resetTriageAttemptCount (CTL-2111)", () => {
     const { post, store } = makeFakeLinear({
       seed: { "CTL-2111": { owner_host: "mini", catalyst_generation: 1, phase: "triage", claimed_at: original, triage_attempt_count: 4 } },
     });
-    await resetTriageAttemptCount("CTL-2111", { post });
+    expect(await resetTriageAttemptCount("CTL-2111", { post, hostName: "mini" })).toBe(0);
     expect(store.get("CTL-2111").claimed_at).toBe(original);
   });
 
@@ -892,13 +899,57 @@ describe("resetTriageAttemptCount (CTL-2111)", () => {
     expect(await resetTriageAttemptCount("CTL-2111", { post })).toBeNull();
   });
 
+  // ── CTL-2111 (Codex #3824 round-3 P1): a count reset must never invalidate a
+  // concurrent takeover's fencing token. This is a read-then-write with no CAS, so
+  // it could read generation G, let a racing claimTicket write G+1, and then restore
+  // G and the OLD owner — making a superseded worker current again. Both guards fail
+  // to `null` ("unconfirmed"), which the caller treats as "retain the latch, retry".
+  it("declines (null) when the fence is owned by ANOTHER host — never restores a stale owner", async () => {
+    const { post, store } = makeFakeLinear({
+      seed: { "CTL-2111": { owner_host: "peer-host", catalyst_generation: 9, phase: "triage", claimed_at: "t", triage_attempt_count: 4 } },
+    });
+    expect(await resetTriageAttemptCount("CTL-2111", { post, hostName: "mini" })).toBeNull();
+    // The winner's record is untouched — owner, generation AND count.
+    const m = store.get("CTL-2111");
+    expect(m.owner_host).toBe("peer-host");
+    expect(m.catalyst_generation).toBe(9);
+    expect(m.triage_attempt_count).toBe(4);
+  });
+
+  it("declines (null) when a concurrent writer takes over between the read and the read-back", async () => {
+    const { post, store } = makeFakeLinear({
+      seed: { "CTL-2111": { owner_host: "mini", catalyst_generation: 3, phase: "triage", claimed_at: "t", triage_attempt_count: 6 } },
+    });
+    // Simulate the race: a peer wins a new generation right after our write lands,
+    // so the read-back no longer matches what we wrote.
+    let writes = 0;
+    const racingPost = async (...args) => {
+      const res = await post(...args);
+      const body = typeof args[0] === "string" ? args[0] : JSON.stringify(args[0] ?? "");
+      if (/attachmentCreate|attachmentUpdate|attachmentLinkURL/i.test(body) && ++writes === 1) {
+        store.set("CTL-2111", {
+          owner_host: "peer-host",
+          catalyst_generation: 4,
+          phase: "triage",
+          claimed_at: "t",
+          triage_attempt_count: 6,
+        });
+      }
+      return res;
+    };
+    expect(await resetTriageAttemptCount("CTL-2111", { post: racingPost, hostName: "mini" })).toBeNull();
+    // The takeover survives — we reported unconfirmed instead of claiming a reset.
+    expect(store.get("CTL-2111").catalyst_generation).toBe(4);
+    expect(store.get("CTL-2111").owner_host).toBe("peer-host");
+  });
+
   it("a bump then a reset returns the count to 0", async () => {
     const { post } = makeFakeLinear({
       seed: { "CTL-2111": { owner_host: "mini", catalyst_generation: 1, phase: "triage", claimed_at: "t", triage_attempt_count: 0 } },
     });
     expect(await bumpTriageAttemptCount("CTL-2111", { post })).toBe(1);
     expect(await bumpTriageAttemptCount("CTL-2111", { post })).toBe(2);
-    expect(await resetTriageAttemptCount("CTL-2111", { post })).toBe(0);
+    expect(await resetTriageAttemptCount("CTL-2111", { post, hostName: "mini" })).toBe(0);
     expect(await readTriageAttemptCount("CTL-2111", { post })).toBe(0);
   });
 });
@@ -930,8 +981,12 @@ describe("runCli — read-triage-attempt / bump-triage-attempt (CTL-1649)", () =
   });
 
   it("reset-triage-attempt prints { count: 0 } and exits 0 on success (CTL-2111)", async () => {
+    // CTL-2111 (round-3 P1): the CLI has no --host flag, so resetTriageAttemptCount
+    // resolves the owner guard against this box's real hostname. Seed the fence as
+    // owned by that host — which is also the production shape, since the re-arm runs
+    // on the host holding the (host-local) cap record.
     const { post, store } = makeFakeLinear({
-      seed: { "CTL-2111": { owner_host: "mini", catalyst_generation: 1, phase: "triage", claimed_at: "t", triage_attempt_count: 7 } },
+      seed: { "CTL-2111": { owner_host: cfgGetHostName(), catalyst_generation: 1, phase: "triage", claimed_at: "t", triage_attempt_count: 7 } },
     });
     const { code, out } = await captureStdout(() => runCli(["reset-triage-attempt", "CTL-2111"], { post }));
     expect(code).toBe(0);
