@@ -92,12 +92,17 @@ on:
       - "plugins/dev/scripts/install-orphan-sweep.sh"
       - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/__tests__/**"
-      # CTL-2026: the two agent tools are guarded by
-      # agent-tools-out-of-tree.test.mjs below. `__tests__/**` above catches
-      # an edit to the SUITE; without these two paths an edit to the TOOLS
-      # themselves — the thing that regresses — skips the job entirely.
-      # Verified: neither file appears elsewhere in the filter list (positive
-      # control — install-orphan-sweep.sh above is the same one-file shape).
+      # CTL-2026 / CTL-1958: the two agent tools are guarded by the
+      # linear-{ack,reply}-write-path.test.sh + install-agent-tools.test.sh
+      # suites below. `__tests__/**` above catches an edit to a SUITE; without
+      # these two paths an edit to the TOOLS themselves — the thing that
+      # regresses — skips the job entirely. (The former
+      # agent-tools-out-of-tree.test.mjs was retired in CTL-1958: the tools now
+      # TOP-LEVEL import ./execution-core/* and are deployed by symlink via
+      # install-agent-tools.sh, so the flat-out-of-tree resilience it pinned is
+      # intentionally gone.) Verified: neither file appears elsewhere in the
+      # filter list (positive control — install-orphan-sweep.sh above is the
+      # same one-file shape).
       - "plugins/dev/scripts/linear-ack.mjs"
       - "plugins/dev/scripts/linear-reply.mjs"
       # CTL-1387: the CLI-reference generator + the page it drives are guarded by
@@ -544,6 +549,30 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/setup-catalyst-config-preserve.test.sh
 
+      - name: owner comms tools — linear-ack write-path (CTL-1958)
+        # CTL-1958: this workflow allowlists shell suites by name rather than globbing
+        # __tests__/, so a new suite runs in required CI only once registered here.
+        # Guards linear-ack.mjs's proxy-or-refuse contract + the credential-free replica
+        # read after the client_credentials mint was deleted. Hermetic (seeds a temp
+        # sqlite replica; refuse cases need no network).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/linear-ack-write-path.test.sh
+
+      - name: owner comms tools — linear-reply write-path (CTL-1958)
+        # CTL-1958: linear-reply.mjs's proxy-or-refuse comment write + best-effort
+        # eyes-clear + threading. The success/output-shape cases run against a
+        # self-limiting LOCAL mock cloud (node http on an ephemeral 127.0.0.1 port);
+        # refuse/loud-fail cases are network-free.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/linear-reply-write-path.test.sh
+
+      - name: owner comms tools — install-agent-tools symlink installer (CTL-1958)
+        # CTL-1958: install-agent-tools.sh symlinks ~/catalyst/comms/tools/{linear-reply,
+        # linear-ack}.mjs to the repo copies (CTL-2026 option a); verifies WRAPPER/PASS
+        # via the doctor check and the AC 'client_credentials' grep over the deployed dir.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/install-agent-tools.test.sh
+
       - name: host write-credential classifier parity (CTL-2045)
         # ⛔ Codex P2 on #3706, and the important one. This suite is
         # the ONLY thing holding lib/host-write-credential.mjs (the
@@ -838,25 +867,6 @@ jobs:
         # a routed tool, which is what the first cut of CTL-1961 did.
         working-directory: plugins/dev/scripts/lib
         run: bun test linear-write-path.test.mjs
-
-      - name: agent tools survive being out-of-tree (CTL-2026)
-        # ⛔ PINNED WITH THE SUITE, verified the way the two steps above were:
-        # `grep -rc agent-tools-out-of-tree .github/workflows/` returned
-        # NOTHING before this step existed, while the same grep for
-        # `linear-write-path` returned 2. That is the FOURTH suite in three
-        # days that would otherwise have shipped inert.
-        #
-        # What it guards: linear-ack.mjs / linear-reply.mjs carry a try/catch
-        # whose own comment says it exists because an out-of-tree copy cannot
-        # resolve their imports — and then consumed the decision leaf on a
-        # line OUTSIDE that try, so such a copy died on module resolution
-        # before reaching the branch written for it. The suite copies each
-        # tool ALONE into an empty directory and runs it against a stubbed
-        # fetch: the deployment shape of ~/catalyst/comms/tools/. Every
-        # assertion fails on the pre-fix tools (measured 7 fail / 0 pass) and
-        # passes on the fixed ones.
-        working-directory: plugins/dev/scripts/__tests__
-        run: bun test agent-tools-out-of-tree.test.mjs
 
       - name: replica-path cross-stack parity test (CTL-1893)
         # bash == node == a hand-written expected value at every fixture cell, including
@@ -1341,6 +1351,7 @@ jobs:
             merge-state.test.mjs \
             orphan-reaper-timer.test.mjs \
             proc-reaper.test.mjs \
+            ratelimit-accounts-probe.test.mjs \
             ratelimit-event.test.mjs \
             ratelimit-poller.test.mjs \
             reap-intent.test.mjs \
@@ -1351,6 +1362,7 @@ jobs:
             pid-file-identity.test.mjs \
             registry.test.mjs \
             replica-read.test.mjs \
+            replica-comment-read.test.mjs \
             replica-supplemental-reads.test.mjs \
             scan.test.mjs \
             scheduler-created-at.test.mjs \
@@ -1365,6 +1377,7 @@ jobs:
             signal-reader.test.mjs \
             stale-pr-rescue-timer.test.mjs \
             stale-pr-rescue.test.mjs \
+            escalation-event.test.mjs \
             __tests__/escalation-router.test.mjs \
             __tests__/stale-pr-rescue-escalate-router.test.mjs \
             __tests__/no-direct-human-escalation.test.mjs \
@@ -1412,6 +1425,7 @@ jobs:
             updater/updater-tracing.test.mjs \
             service-manifest.test.mjs \
             github-auth-preflight.test.mjs \
+            claude-accounts-rearm.test.mjs \
             github-token-candidates-legacy-parity.test.mjs \
             github-quota.test.mjs \
             github-quota-timer.test.mjs \

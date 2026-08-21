@@ -35,6 +35,52 @@ ok()   { PASSES=$((PASSES+1)); echo "  PASS: $1"; }
 fail() { FAILURES=$((FAILURES+1)); echo "  FAIL: $1"; }
 check() { if [[ "$1" == "yes" ]]; then ok "$2"; else fail "$2"; fi; }
 
+_wd_bounded() { # _wd_bounded <deadline_secs> <outfile> <cmd...>
+  local limit="$1" out="$2"; shift 2
+  local mark donef cpid wpid rc
+  mark="$(mktemp -u)"
+  donef="$(mktemp -u)"
+  "$@" > "$out" 2>&1 &
+  cpid=$!
+  # A SELF-LIMITING timer, deliberately NOT a kill-based watchdog.
+  #
+  # The obvious form — `( sleep "$limit"; kill "$cpid" ) &` reaped with a kill —
+  # leaks: `sleep` is a separate process from the subshell that spawned it, so a
+  # signal aimed at that subshell leaves the sleep reparented to PID 1, running
+  # to full term. One orphan per bounded call, eight call sites, and the suite
+  # still reports every check passed. Nor is it enough to signal more politely:
+  # TERM-plus-trap, a recorded-pid handshake, and a process-group kill were each
+  # measured leaking when the bounded command returns instantly, because they all
+  # race the timer's own fork — the signal can land before the handler exists.
+  #
+  # So the timer owns its deadline instead of being stopped from outside. It
+  # needs no signal, which is exactly why nothing can be orphaned, and it still
+  # terminates on its own even if every cleanup line below were broken (the
+  # AGENTS.md background-process rule). It SLEEPS rather than spinning — an
+  # empty-body deadline loop re-evaluates as fast as the CPU allows and burns a
+  # whole core. The parent's completion marker is a file, not a pid probe, so no
+  # branch here can be confused by a recycled pid.
+  ( i=0
+    while [ "$i" -lt "$limit" ]; do
+      [ -e "$donef" ] && exit 0        # command already finished — retire early
+      sleep 1
+      i=$((i + 1))
+    done
+    : > "$mark"
+    kill -9 "$cpid" 2>/dev/null ) >/dev/null 2>&1 &
+  wpid=$!
+  wait "$cpid"; rc=$?
+  : > "$donef"                          # release the timer; never signal it
+  wait "$wpid" 2>/dev/null              # retires within ~1s, of its own accord
+  rm -f "$donef"
+  if [[ -e "$mark" ]]; then
+    rm -f "$mark"
+    echo "OVERRAN the ${limit}s deadline" >> "$out"
+    return 124
+  fi
+  return "$rc"
+}
+
 # ── 0. the pieces exist and parse ───────────────────────────────────────────
 [[ -f "$RUNNER" ]] && ok "standalone runner exists (daemon-watchdog-run.mjs)" \
                    || fail "standalone runner missing"
@@ -71,7 +117,7 @@ fi
 
 # ── 2. pid identity: a recycled pid must NOT be reported live ───────────────
 TMPDIR_T="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_T"' EXIT
+trap 'rm -rf "$TMPDIR_T" "${CFG_OFF:-}" "${CFG_DECOY:-}"' EXIT
 
 # An unrelated live process (stand-in for a recycled pid) written into both
 # pid files. Neither reader may claim it, and neither stop may signal it.
@@ -159,30 +205,118 @@ fi
 # return {} unconditionally, silently ignoring every documented Layer-1 knob.
 # On a monitor node this runner is the ONLY watchdog host, so that would strand
 # its forwarder shadow-only while workers honored the same config file.
+# Matches the call PREFIX, not a fixed arity: configPath must be the first
+# argument, but the reader also accepts an optional pre-validated Layer-1
+# snapshot, so pinning the closing paren here would fail on an unrelated change.
 if grep -q 'CATALYST_CONFIG_FILE' "$RUNNER" \
-   && grep -q 'readDaemonWatchdogConfig(configPath)' "$RUNNER"; then
+   && grep -q 'readDaemonWatchdogConfig(configPath[,)]' "$RUNNER"; then
   ok "standalone runner resolves + passes a Layer-1 config path"
 else
   fail "standalone runner ignores Layer-1 config (no configPath threaded)"
 fi
 
-# Functional: a Layer-1 `mode: "off"` must actually shut the runner down.
-CFG_HOME="$(mktemp -d)"
-mkdir -p "${CFG_HOME}/.catalyst"
-cat > "${CFG_HOME}/.catalyst/config.json" <<'JSON'
+# The explicit argv tier must beat the ambient environment tier. A separate
+# isolated check below covers the cwd fallback. CATALYST_DIR is a runtime-state
+# lever and deliberately does not participate in Layer-1 config resolution.
+CFG_OFF="$(mktemp -d)"
+mkdir -p "${CFG_OFF}/.catalyst"
+cat > "${CFG_OFF}/.catalyst/config.json" <<'JSON'
 {"catalyst":{"orchestration":{"daemonWatchdog":{"mode":"off"}}}}
 JSON
+CFG_DECOY="$(mktemp -d)"
+mkdir -p "${CFG_DECOY}/.catalyst"
+cat > "${CFG_DECOY}/.catalyst/config.json" <<'JSON'
+{"catalyst":{"orchestration":{"daemonWatchdog":{"mode":"shadow"}}}}
+JSON
 if command -v bun >/dev/null 2>&1; then
-  RUN_OUT="$(cd "$CFG_HOME" && CATALYST_DIR="$CFG_HOME" bun run "$RUNNER" 2>&1)"
-  if grep -q 'disabled by config' <<<"$RUN_OUT"; then
-    ok "Layer-1 daemonWatchdog.mode=off shuts the standalone runner down"
+  OUT="$(mktemp)"
+  if _wd_bounded 15 "$OUT" env CATALYST_CONFIG_FILE="${CFG_DECOY}/.catalyst/config.json" \
+       bun run "$RUNNER" --config "${CFG_OFF}/.catalyst/config.json" \
+     && grep -q 'disabled by config' "$OUT"; then
+    ok "--config outranks an ambient CATALYST_CONFIG_FILE"
   else
-    fail "Layer-1 mode=off ignored by the standalone runner: ${RUN_OUT}"
+    fail "--config did not win over the ambient env: $(cat "$OUT")"
   fi
+  grep -q '"configSource":"argv"\|configSource.*argv' "$OUT" \
+    && ok "runner reports which config tier won" \
+    || fail "no configSource in the runner's disabled-path log line"
+
+  if _wd_bounded 15 "$OUT" env CATALYST_CONFIG_FILE="${CFG_DECOY}/.catalyst/config.json" \
+       bun run "$RUNNER" --config "${CFG_OFF}/.catalyst/nope.json"; then
+    fail "an unreadable --config silently fell through to another tier"
+  else
+    rc=$?
+    [[ "$rc" == 2 ]] && grep -q 'config file not found' "$OUT" \
+      && ok "an unreadable --config exits 2 with a clear message" \
+      || fail "expected rc=2 + a clear message, got rc=${rc}: $(cat "$OUT")"
+  fi
+
+  printf '%s\n' '{not-json' > "${CFG_OFF}/.catalyst/malformed.json"
+  if _wd_bounded 15 "$OUT" bun run "$RUNNER" --config "${CFG_OFF}/.catalyst/malformed.json"; then
+    fail "a malformed explicit config silently degraded to defaults"
+  else
+    rc=$?
+    [[ "$rc" == 2 ]] && grep -q 'config file is not valid JSON' "$OUT" \
+      && ok "a malformed explicit config exits 2" \
+      || fail "expected rc=2 for malformed config, got rc=${rc}: $(cat "$OUT")"
+  fi
+
+  if _wd_bounded 15 "$OUT" bun run "$RUNNER" --config "${CFG_OFF}/.catalyst"; then
+    fail "a directory supplied as --config silently degraded to defaults"
+  else
+    rc=$?
+    [[ "$rc" == 2 ]] && grep -q 'config path is not a readable regular file' "$OUT" \
+      && ok "a directory supplied as --config exits 2" \
+      || fail "expected rc=2 for config directory, got rc=${rc}: $(cat "$OUT")"
+  fi
+
+  if _wd_bounded 15 "$OUT" bun run "$RUNNER" --config; then
+    fail "--config without a value silently fell through"
+  else
+    rc=$?
+    [[ "$rc" == 2 ]] && grep -q -- '--config requires a path argument' "$OUT" \
+      && ok "--config without a value exits 2 with a clear message" \
+      || fail "expected rc=2 for valueless --config, got rc=${rc}: $(cat "$OUT")"
+  fi
+
+  # The GNU `--config=<path>` form must select the same tier as the space form.
+  # Before the PROJ review it fell through to the ambient env tier and started a
+  # LIVE watchdog on the decoy config, so this asserts the WIN, not just an exit.
+  if _wd_bounded 15 "$OUT" env CATALYST_CONFIG_FILE="${CFG_DECOY}/.catalyst/config.json" \
+       bun run "$RUNNER" --config="${CFG_OFF}/.catalyst/config.json" \
+     && grep -q 'disabled by config' "$OUT" && grep -q 'argv' "$OUT"; then
+    ok "--config=<path> outranks an ambient CATALYST_CONFIG_FILE"
+  else
+    fail "--config=<path> did not win over the ambient env: $(cat "$OUT")"
+  fi
+
+  # A near-miss flag must NOT silently inherit the host config. This is the
+  # whole point of the explicit tier: fail loudly rather than watch the wrong
+  # daemon under the wrong mode.
+  if _wd_bounded 15 "$OUT" env CATALYST_CONFIG_FILE="${CFG_DECOY}/.catalyst/config.json" \
+       bun run "$RUNNER" --conifg "${CFG_OFF}/.catalyst/config.json"; then
+    fail "a typo'd flag silently fell through to the host config tier"
+  else
+    rc=$?
+    [[ "$rc" == 2 ]] && grep -q 'unrecognized argument' "$OUT" \
+      && ok "a typo'd flag exits 2 instead of inheriting host config" \
+      || fail "expected rc=2 for unknown argv, got rc=${rc}: $(cat "$OUT")"
+  fi
+
+  # Functional: mode=off must shut down through the cwd tier too. The old form
+  # inherited host config and waited forever; this invocation isolates and bounds.
+  if _wd_bounded 15 "$OUT" \
+       env -u CATALYST_CONFIG_FILE -u CATALYST_CONFIG_PATH \
+         sh -c 'cd "$1" && exec bun run "$2"' _ "$CFG_OFF" "$RUNNER" \
+     && grep -q 'disabled by config' "$OUT"; then
+    ok "cwd fallback resolves Layer-1 when no env override is present"
+  else
+    fail "cwd fallback did not honor the fixture: $(cat "$OUT")"
+  fi
+  rm -f "$OUT"
 else
-  ok "SKIP: bun unavailable — Layer-1 functional check not run"
+  ok "SKIP: bun unavailable — Layer-1 functional checks not run"
 fi
-rm -rf "$CFG_HOME"
 
 # The runner's own <cwd>/.catalyst/config.json fallback is not enough under
 # launchd: the stack LaunchAgent sets neither WorkingDirectory nor

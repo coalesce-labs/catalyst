@@ -155,6 +155,7 @@ import {
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
+import { rearmClaudeAccountsFromFile } from "./claude-accounts-rearm.mjs"; // CTL-1984: account-slot live-rearm hook
 import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { getReconcileHealth } from "./reconcile-health.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
@@ -197,6 +198,12 @@ import { createLeaseAuthorityClient, ensureEntitled as ensureLeaseEntitled } fro
 // hookless-degrade path (design §6). registerRearmHook is idempotent (Map.set), so a
 // module re-evaluation (a test re-importing this file) never double-registers.
 registerRearmHook("github-token", ({ env }) => rearmGithubTokenFromFile({ env, log }));
+// CTL-1984: register the claude-accounts.env row's rearm hook at module load — BEFORE
+// either cluster-sync tick or boot-time arm call can fire. On each cluster-sync tick
+// armSecret("claude-accounts.env") reads the active-slot token from disk and mutates
+// process.env.CLAUDE_CODE_OAUTH_TOKEN in-process, so an account-slot switch takes
+// effect with no daemon restart. registerRearmHook is idempotent (Map.set).
+registerRearmHook("claude-accounts.env", ({ env }) => rearmClaudeAccountsFromFile({ env, log }));
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -2131,6 +2138,9 @@ export function startDaemon({
         // via `log`. A wrapping try/catch here would only ever imply protection the callee
         // already provides.
         armSecret("github-token", { env: process.env });
+        // CTL-1984: re-arm the account-slot token on the same tick. armSecret never throws;
+        // the hook closure (rearmClaudeAccountsFromFile) logs+swallows its own errors.
+        armSecret("claude-accounts.env", { env: process.env });
         // CTL-1786: keep this node entitled with the lease authority on the same cadence, so a
         // claim's not_entitled refusal is a rare self-healing edge, not the steady state. Cached
         // + fail-open (see refreshLeaseEntitlement); a strict no-op when the gate is off.

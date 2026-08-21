@@ -7,13 +7,22 @@ sidebar:
   order: 0
 ---
 
-Catalyst reads two config files. The setup script (`setup-catalyst.sh`) writes both for you, so you
+Catalyst reads two config layers. The setup script (`setup-catalyst.sh`) writes both for you, so you
 rarely edit them by hand. This page covers the keys you're most likely to touch.
 
 - **`.catalyst/config.json`** — plain project info. Safe to commit to git.
-- **`~/.config/catalyst/config-{projectKey}.json`** — secrets like API keys. Never commit this.
+- **`~/.config/catalyst/`** — machine-local Layer-2. Never commit these files. Three siblings
+  compose the merged view (earlier wins):
+  - **`cluster-secrets.json`** — shared, byte-identical across all cluster nodes (bot OAuth creds,
+    `smeeChannel`, `livenessAnchorIssue`, etc.). Written by `cluster-sync` from `cluster-bots.sops.json`
+    and by `catalyst-join` from the bundle. Read first.
+  - **`node.json`** — per-node (host name, cloudFeed/githubFeed mode, orchestration tuning, etc.).
+    Written by `catalyst-join` (non-clobber; preserves operator overrides). Read second.
+  - **`config.json`** — backward-compat fallback. Read last. Keys still here on nodes that haven't
+    run `catalyst-join` or `cluster-sync` yet; migrated keys are gradually drained by those tools.
 
-The `projectKey` links the two files.
+The `projectKey` links Layer-1 and the per-project `config-{projectKey}.json` (legacy file for
+per-team API keys; separate from the three Layer-2 siblings above).
 
 ## Project config (`.catalyst/config.json`)
 
@@ -1497,6 +1506,26 @@ eligible set**, and it has **no live bg worker**. This conjunction guarantees a 
 outage can never quarantine a healthy, resolvable, in-flight ticket.
 `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` is the Linear-independent backstop; the runaway knobs are
 observability only.
+
+### Label-write retry cap (CTL-2052)
+
+The disposition/held-label convergers cool down a failed `applyLabel` (CTL-834/COORD-236). A
+**deterministic cloud label rejection** — an exclusive-conflict add that the write-proxy refuses,
+surfaced to the caller as the generic `cloud:failed`/`cloud:rejected` and normalized to
+`cloud:label-rejected` — is cool-down-eligible but never provably terminal on the host, so without a
+cap it would retry ~once per cool-down window forever (each refused write still spending a cloud
+write-budget unit). These env vars on the `catalyst-execution-core` process bound that:
+
+- `SCHEDULER_LABEL_RETRY_CAP` (default `5`) — after this many cool-down **cycles** for one
+  `(ticket, label)` the converger STOPS re-issuing the write and emits one
+  `linear.label.retry-exhausted` event (plus a `log.error`). Attempts are counted per cool-down
+  cycle, not per tick. The prior behavior was effectively `N=∞`, so any finite cap is a strict
+  improvement.
+- `SCHEDULER_LABEL_RETRY_EXHAUSTED_MS` (default `1800000`, 30 min) — the long back-off held after the
+  cap is reached. Must be `>` `SCHEDULER_LABEL_COOLDOWN_MS` so the cap wins over the ordinary
+  per-window cool-down. When it elapses, exactly **one** self-heal probe apply is allowed so a
+  since-resolved conflict can still land (the label is never permanently abandoned — COORD-236); a
+  successful apply resets the counter.
 
 ### Broker watchdog session eviction (CTL-1516)
 

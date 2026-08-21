@@ -160,4 +160,38 @@ describe("orphan-stale recovery end to end (CAT-47)", () => {
     reasoningRecoveryPass([item], options);
     expect(comments).toBe(2);
   });
+
+  // defaultPostComment fails CLOSED without throwing ({ok:false} on a non-zero
+  // linear-comment-post.sh exit), so the throw-based test above does not cover
+  // the production failure shape. Committing the hash there would suppress the
+  // audit comment permanently on a Linear outage.
+  test("a non-throwing {ok:false} post does not commit the dedup hash", () => {
+    const root = fresh();
+    let comments = 0;
+    const options = {
+      mode: "enforce", orchDir: root, shouldSkipItem: () => false,
+      classifyTicket: () => ({ decision: "fix", fix_class: "orphan_stale", details: { seam_id: "orphan-reconcile", reason: "stale" } }),
+      invokeSeam: () => { throw new Error("same failure"); }, recordIntent: () => {}, emitEvent: () => {}, log: () => {}, nowMs: () => 1000,
+      postComment: () => { comments += 1; return { ok: false, via: "app-actor", status: 1 }; },
+    };
+    const item = { ticket: "CAT-47", phase: "monitor-merge", evidence: { signal: {} } };
+    reasoningRecoveryPass([item], options);
+    reasoningRecoveryPass([item], options);
+    expect(comments).toBe(2);
+  });
+
+  test("a delivered {ok:true} post commits the hash and suppresses the duplicate", () => {
+    const root = fresh();
+    let comments = 0;
+    const options = {
+      mode: "enforce", orchDir: root, shouldSkipItem: () => false,
+      classifyTicket: () => ({ decision: "fix", fix_class: "orphan_stale", details: { seam_id: "orphan-reconcile", reason: "stale" } }),
+      invokeSeam: () => { throw new Error("same failure"); }, recordIntent: () => {}, emitEvent: () => {}, log: () => {}, nowMs: () => 1000,
+      postComment: () => { comments += 1; return { ok: true, via: "app-actor" }; },
+    };
+    const item = { ticket: "CAT-47", phase: "monitor-merge", evidence: { signal: {} } };
+    reasoningRecoveryPass([item], options);
+    reasoningRecoveryPass([item], options);
+    expect(comments).toBe(1);
+  });
 });

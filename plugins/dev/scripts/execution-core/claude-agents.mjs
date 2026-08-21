@@ -514,6 +514,12 @@ export function defaultStatJobState(shortId) {
 // and dir-gone sessions are excluded so they cannot starve the admission gate.
 // The `statJob` seam (defaulting to defaultStatJobState) is injectable for tests.
 //
+// CTL-2137: `isBgJobDead`/`statJob` read the DURABLE state.json only; a session
+// whose live LISTING .state is "blocked" (the wedged-never-started signature,
+// CTL-932) can still read durable "working" and would otherwise be counted. The
+// filter excludes listing-`blocked` sessions directly off the in-hand agent's
+// verbatim .state (zero-I/O), matching the durable-blocked / parked exclusion.
+//
 // CTL-1165 (D1): exclude the daemon's OWN controlling background session from the
 // admission count. The scheduler's in-flight count IS this live `claude agents`
 // background count (scheduler.mjs:4247), so counting the daemon's own session
@@ -537,6 +543,15 @@ export function countBackgroundAgents({
     // so the daemon's own background session never occupies an admission slot.
     if (excludeSelf && a?.sessionId && isSelf(a.sessionId, env)) return false;
     if (a?.kind !== "background") return false; // unchanged: interactive/unknown excluded
+    // CTL-2137: the durable state.json and the live `claude agents --json`
+    // listing .state can disagree (recovery.mjs:294-299 — durable "working"
+    // while the listing shows "blocked"). A listing state:"blocked" is the
+    // wedged-never-started / dead-on-launch signature (CTL-932) and holds no
+    // real slot, so it must NOT count against maxParallel even when the durable
+    // state.json still reads a non-terminal value. Zero-I/O (the agent carries
+    // the verbatim listing .state) and same capacity semantics / fail direction
+    // as the durable-blocked exclusion (CTL-768: parked ⇒ out of capacity).
+    if (a.state === "blocked") return false;
     // CTL-1055: count only if the bg job is alive.
     let shortId;
     try {

@@ -62,6 +62,8 @@ import {
   readLinearBotUserIds,
   readCloudBotUserId,
   checkSelfEchoIdentityHistory,
+  checkClusterSecretsPresent,
+  checkNodeConfigPresent,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
@@ -6327,5 +6329,73 @@ describe("checkFleetTokenExport — CTL-1908: a login shell must not spend the F
     // A check nobody runs is the failure mode this repo keeps meeting.
     const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
     expect(src.split("checkFleetTokenExport()").length - 1, "registered in BOTH class suites").toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ─── checkClusterSecretsPresent (CTL-1210 Phase 5) ───────────────────────────
+describe("checkClusterSecretsPresent (CTL-1210)", () => {
+  it("PASS when cluster-secrets.json exists", () => {
+    const [c] = checkClusterSecretsPresent({ csPath: "/h/.config/catalyst/cluster-secrets.json", fileExists: () => true });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.name).toBe("cluster-secrets-present");
+  });
+
+  it("WARN when cluster-secrets.json absent — not FAIL (advisory)", () => {
+    const [c] = checkClusterSecretsPresent({ csPath: "/h/.config/catalyst/cluster-secrets.json", fileExists: () => false });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toMatch(/cluster-secrets\.json absent/i);
+  });
+
+  it("never FAILs (advisory) — exit-code-safe", async () => {
+    const code = await runDoctor({
+      checks: [() => checkClusterSecretsPresent({ csPath: "/absent/cluster-secrets.json", fileExists: () => false })],
+    });
+    expect(code).not.toBe(2);
+  });
+
+  it("is wired into both worker and developer suites", () => {
+    const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
+    expect(src.split("checkClusterSecretsPresent()").length - 1, "registered in at least 2 class suites").toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ─── checkNodeConfigPresent (CTL-1210 Phase 5) ───────────────────────────────
+describe("checkNodeConfigPresent (CTL-1210)", () => {
+  it("WARN when node.json absent — advisory", () => {
+    const [c] = checkNodeConfigPresent({ nodePath: "/h/node.json", fileExists: () => false });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toMatch(/node\.json absent/i);
+  });
+
+  it("WARN when node.json present but host.name unset", () => {
+    const [c] = checkNodeConfigPresent({
+      nodePath: "/h/node.json",
+      fileExists: () => true,
+      readJson: () => ({ catalyst: {} }),
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toMatch(/host\.name is unset/i);
+  });
+
+  it("PASS when node.json present and host.name set", () => {
+    const [c] = checkNodeConfigPresent({
+      nodePath: "/h/node.json",
+      fileExists: () => true,
+      readJson: () => ({ catalyst: { host: { name: "mini-1" } } }),
+    });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("mini-1");
+  });
+
+  it("never FAILs (advisory) — exit-code-safe", async () => {
+    const code = await runDoctor({
+      checks: [() => checkNodeConfigPresent({ nodePath: "/absent/node.json", fileExists: () => false })],
+    });
+    expect(code).not.toBe(2);
+  });
+
+  it("is wired into both worker and developer suites", () => {
+    const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
+    expect(src.split("checkNodeConfigPresent()").length - 1, "registered in at least 2 class suites").toBeGreaterThanOrEqual(2);
   });
 });

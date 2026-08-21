@@ -13,7 +13,8 @@ monitoring code (M1 mirror tickets, CTL-1192 heartbeat quota):
 2. **Quota field-name schema** — the dotted event-log keys emitted by `ratelimit-event.mjs`,
    pinned here so heartbeat and quota consumers (CTL-1192) share one field-name contract.
 
-For the two-layer config model (`.catalyst/config.json` vs `~/.config/catalyst/config-{key}.json`)
+For the two-layer config model (`.catalyst/config.json` vs the three Layer-2 siblings:
+`cluster-secrets.json`, `node.json`, `config.json`)
 see the [configuration reference](/reference/configuration/).
 
 ---
@@ -33,15 +34,15 @@ and
 
 | Config item | File / key | Class | On mirror |
 |---|---|---|---|
-| Bot OAuth orchestrator token | `~/.config/catalyst/config.json` → `catalyst.linear.bot.orchestrator.*` | **SHARED** | Copy the whole `catalyst.linear.bot` block (one Linear app per workspace; identical across nodes) |
-| Bot OAuth worker token | `~/.config/catalyst/config.json` → `catalyst.linear.bot.worker.*` | **SHARED** | Same block — worker and orchestrator tokens are workspace-scoped, not host-scoped |
+| Bot OAuth orchestrator token | `~/.config/catalyst/cluster-secrets.json` → `catalyst.linear.bot.orchestrator.*` | **SHARED** | Written by `cluster-sync` from `cluster-bots.sops.json`; one Linear app per workspace, identical across nodes. Falls back to `config.json` on nodes that haven't run cluster-sync yet. |
+| Bot OAuth worker token | `~/.config/catalyst/cluster-secrets.json` → `catalyst.linear.bot.worker.*` | **SHARED** | Same file — worker and orchestrator tokens are workspace-scoped, not host-scoped |
 | Cluster roster | `catalyst-cluster` repo → `cluster.json` `roster[]` | **SHARED** | Add the new node's name to `cluster.json.roster` and push. `cluster-sync` pulls it and the next scheduler tick honors it — no restart. *(The legacy committed `.catalyst/hosts.json` roster was retired in CTL-1274; the daemon no longer reads it.)* |
 | Layer-1 project config | `.catalyst/config.json` | **SHARED** | Committed to git; present after `git clone` |
-| Liveness anchor issue | `~/.config/catalyst/config.json` → `catalyst.cluster.livenessAnchorIssue` | **SHARED** | Copy from the seed node; one Linear ticket identifier per fleet |
+| Liveness anchor issue | `~/.config/catalyst/cluster-secrets.json` → `catalyst.cluster.livenessAnchorIssue` | **SHARED** | Written by `catalyst-join` from the bundle; one Linear ticket identifier per fleet. Falls back to `config.json`. |
 | Cloud token (`CATALYST_CLOUD_TOKEN`) | `catalyst-cluster` repo → `secrets/cluster-cloud.sops.json` `catalyst.cloud.token` | **SHARED** | One shared catalyst-cloud service credential (CTL-1307). Add it once to the cluster repo (SOPS); `cluster-sync` decrypts it to `~/.config/catalyst/cluster-cloud.json` and `cloud-token-env.mjs` projects it to the machine-level env (`cluster.env` + `~/.zshenv` guard) on every node. **Intentionally unread by catalyst core** — a prerequisite for the opt-in cloud path, not a switch that turns it on. |
 | Plugin source | `~/catalyst/plugin-source/` | **SHARED** | Pull from the same git remote; `setup-plugin-source.sh` does this |
 | Linear team/state map | Layer-1 `catalyst.linear.teamKey` / `stateMap` | **SHARED** | Present after `git clone` via `.catalyst/config.json` |
-| `catalyst.host.name` | `~/.config/catalyst/config.json` → `catalyst.host.name` | **PER-NODE** | Set to the new node's unique roster entry (must match an entry in the `catalyst-cluster` repo's `cluster.json.roster`; a name that isn't in the roster owns zero tickets under HRW) |
+| `catalyst.host.name` | `~/.config/catalyst/node.json` → `catalyst.host.name` | **PER-NODE** | Written by `catalyst-join` (non-clobber). Set to the new node's unique roster entry (must match an entry in the `catalyst-cluster` repo's `cluster.json.roster`; a name that isn't in the roster owns zero tickets under HRW). Falls back to `config.json`. |
 | `repoRoot` | `~/catalyst/execution-core/registry.json` → `repoRoot` | **PER-NODE** | The absolute path on the new host; written by `catalyst-execution-core register` |
 | Claude Code account login | macOS Keychain or `~/.claude/.credentials.json` | **PER-NODE** | Run `claude` interactively on the new host; each node uses its own account |
 | OTel endpoints | `~/.config/catalyst/config.json` → OTel keys | **PER-NODE** | Tailscale addresses differ per node; set in Layer-2 on each host |
@@ -55,7 +56,8 @@ and
 > **Why bot OAuth is SHARED:** `catalyst.linear.bot.orchestrator` and `catalyst.linear.bot.worker`
 > are credentials for a Linear OAuth application that is registered once per workspace. Every node in
 > the fleet acts on behalf of the same app. The tokens live in machine-global
-> `~/.config/catalyst/config.json` (not in the per-project `config-<key>.json`) so all nodes can
+> `~/.config/catalyst/cluster-secrets.json` (written by `cluster-sync` from `cluster-bots.sops.json`;
+> falls back to `config.json` on nodes that haven't run cluster-sync yet) so all nodes can
 > share them without per-project duplication.
 
 > **Why the cloud token is SHARED + machine-level (CTL-1307):** `CATALYST_CLOUD_TOKEN` is a single
