@@ -69,6 +69,13 @@ import {
   recordFixFailure,
   shouldPostFixComment,
 } from "./recovery-fix-backoff.mjs";
+import {
+  correlationId,
+  groupCandidates,
+  normalizeSignature,
+  RECOVERY_CORRELATION_MIN_GROUP,
+  RECOVERY_CORRELATION_WINDOW_MS,
+} from "./escalation-correlation.mjs";
 
 // Wrap defaultLog to ensure it's a function (config.mjs may export an object)
 const defaultLogFn = typeof defaultLog === "function" ? defaultLog : (msg) => {
@@ -90,6 +97,37 @@ import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // 
 const EMIT_COMPLETE_BIN = fileURLToPath(
   new URL("../phase-agent-emit-complete", import.meta.url),
 );
+
+// deriveFailureSignature — CAT-170 (Codex #3209 P1). PURE. The raw failure text a
+// recovery attempt is signed with, read from wherever the caller actually put it.
+//
+// The original read `item.reason ?? item.signal?.stalledReason ??
+// item.signal?.failureReason` — but the PRODUCTION caller is the scheduler, whose
+// buildRecoveryItems (recovery-evidence.mjs) returns `{ticket, phase, bgJobId,
+// evidence}` and populates NEITHER `item.reason` NOR `item.signal`: the raw signal
+// fields are spread onto `item.evidence`, with the whole signal also nested at
+// `evidence.signal`. So every normal per-item fix attempt persisted a NULL
+// signature, its exhausted intent could never participate in correlation, and the
+// correlation feature was structurally dead on the path that produces the most
+// candidates. (The same gap CTL-1299 closed for the classifier, one field over.)
+//
+// Reads the item-level fields FIRST so a caller that does supply them (the tests'
+// hand-built items, and any future caller with a richer shape) keeps its meaning,
+// then falls back to the evidence object the scheduler really sends. `stalledReason`
+// outranks `failureReason` at both altitudes, preserving the original precedence.
+export function deriveFailureSignature(item = {}, evidence = null) {
+  const ev = evidence ?? item.evidence ?? {};
+  return (
+    item.reason ??
+    item.signal?.stalledReason ??
+    item.signal?.failureReason ??
+    ev.stalledReason ??
+    ev.failureReason ??
+    ev.signal?.stalledReason ??
+    ev.signal?.failureReason ??
+    null
+  );
+}
 
 // ─── Main entry point ──────────────────────────────────────────────────────
 
@@ -487,6 +525,9 @@ export function reasoningRecoveryPass(items, opts = {}) {
             fix_class,
             outcome: fixOutcome.success,
             details: fixOutcome.details,
+            // CAT-170 (Codex #3209 P1): read the signature from the COLLECTED
+            // evidence — the production item shape carries no `.reason`/`.signal`.
+            signature: deriveFailureSignature(item, evidence),
           });
           actionLog.push("recorded recovery-pass intent");
         } catch (err) {
@@ -1527,9 +1568,14 @@ export function synthesizeEscalationExplanation(escalationPayload = {}) {
 // real Needs-You brief for a router-originated escalation. Read-modify-write
 // (preserve a prior needsHumanSince) + atomic tmp+rename (mkdir -p the worker
 // dir). Best-effort: catches all, logs via opts.log, NEVER throws.
+// CAT-170 (Codex #3209 round-2 P1): reports SUCCESS as a boolean. It still never
+// throws, but a silent catch-and-log gave the caller no way to tell a persisted
+// signal from a lost one — and for a correlated member the `correlation` block
+// written here is the ONLY durable carrier of its member role. The escalate path
+// below needs that answer to decide whether the act may latch.
 function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
   const log = opts.log ?? defaultLogFn;
-  if (!orchDir || !ticket) return;
+  if (!orchDir || !ticket) return false;
   try {
     const p = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
     const explanation = synthesizeEscalationExplanation(escalationPayload);
@@ -1562,17 +1608,42 @@ function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
       updatedAt: nowIso,
       phase: RECOVERY_PASS_PHASE,
       explanation,
+      // CAT-170 (Codex #3209 P1): persist the correlation identity as a FIRST-CLASS
+      // signal field. It used to ride only inside `escalation.observed`, and
+      // synthesizeEscalationExplanation (called just above) projects the payload down
+      // to its six render fields — dropping `observed` entirely. The board therefore
+      // saw an ordinary `needs-human` authorization for every correlated member and
+      // its notification projector, which keys on ticket id, emitted a separate
+      // "<member> needs your decision" push for each one — precisely the per-ticket
+      // operator spam this correlation work exists to collapse. Written top-level so
+      // a consumer can group by `correlation.id` or suppress `correlation.role ===
+      // "member"` without reaching into the explanation. Omitted entirely for an
+      // uncorrelated escalation, so an existing single-ticket signal is unchanged.
+      ...(escalationPayload?.correlation ? { correlation: escalationPayload.correlation } : {}),
     };
+    // CAT-170 (phase-review): this writer is a read-modify-write over `prior`, so an
+    // omitted `correlation` block does NOT clear the one a previous escalation left
+    // behind — it inherits it. A ticket that once escalated as a correlated MEMBER
+    // would keep `correlation.role === "member"` forever, and a later INDEPENDENT
+    // escalation on that ticket (fresh exhaustion after the 7-day latch TTL) would be
+    // suppressed by every notification path that keys on the role — board projector
+    // and desktop bridge alike — so the operator gets no alert at all. Silent
+    // suppression of a genuine escalation is the exact failure this feature exists to
+    // prevent, inverted. The block is per-incident state, not accumulating history:
+    // an uncorrelated payload must ERASE it, not merely decline to replace it.
+    if (!escalationPayload?.correlation) delete signal.correlation;
     mkdirSync(dirname(p), { recursive: true });
     const tmp = `${p}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(signal, null, 2));
     renameSync(tmp, p); // atomic
+    return true;
   } catch (err) {
     try {
       log(`recovery-reasoning: ${ticket} escalation signal write failed: ${err.message}`);
     } catch {
       /* logging must never break the escalate path */
     }
+    return false;
   }
 }
 
@@ -1580,8 +1651,10 @@ function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
 // tick's orchDir. Resolves orchDir from opts/env (a no-op when unset).
 export function defaultWriteEscalationSignal(ticket, escalationPayload, opts = {}) {
   const orchDir = opts.orchDir ?? resolveOrchDir();
-  if (!orchDir) return;
-  writeEscalationSignal(orchDir, ticket, escalationPayload, opts);
+  // CAT-170 (Codex #3209 round-2 P1): propagate the boolean. With no orchDir there
+  // is nowhere to persist the member role, which is a failed write, not a success.
+  if (!orchDir) return false;
+  return writeEscalationSignal(orchDir, ticket, escalationPayload, opts);
 }
 
 // buildEscalationPayload — the composer-ready EscalationPayload for the router's
@@ -1774,6 +1847,16 @@ export function buildRecoveryEnvelope(event, { now } = {}) {
     escalation = null,
     site = null,
     deferrals = null,
+    // CAT-170 (Codex #3209 P2): the correlation identifiers were passed by both the
+    // shadow (`recovery.escalation.would-correlate`) and enforce
+    // (`recovery.escalation.correlated`) emitters and silently DROPPED here, so a
+    // shadow event carried nothing but its own name and a null ticket — it could not
+    // identify the proposed group at all, which is the entire point of shadow mode.
+    // (The unit tests missed it because they inspect the raw pre-envelope object.)
+    correlation_id = null,
+    signature = null,
+    anchor = null,
+    tickets = null,
   } = event;
   // Escalations carry WARN severity; fixes/triage carry INFO.
   //
@@ -1809,11 +1892,33 @@ export function buildRecoveryEnvelope(event, { now } = {}) {
       // one-off transient from a ticket wedged against a permanently failing label.
       ...(site != null ? { "recovery.site": String(site) } : {}),
       ...(deferrals != null ? { "recovery.deferrals": Number(deferrals) } : {}),
+      // CAT-170: correlation dimensions promoted to attributes so a dashboard can
+      // group an incident by id/anchor without parsing the body. `tickets` stays
+      // body-only — an unbounded list has no place in an attribute set.
+      ...(correlation_id != null ? { "recovery.correlation_id": String(correlation_id) } : {}),
+      ...(signature != null ? { "recovery.signature": String(signature) } : {}),
+      ...(anchor != null ? { "recovery.anchor": String(anchor) } : {}),
+      ...(Array.isArray(tickets) ? { "recovery.correlated_count": tickets.length } : {}),
       // CTL-1291: bounded numerics/enums promoted so the numbers are chartable.
       ...promoteNumericAttrs(type, details),
     },
     // human-readable mirror; also the reader's fallback ticket-key source.
-    body: { payload: { ticket, type, fix_class, reason, details, escalation, site, deferrals } },
+    body: {
+      payload: {
+        ticket,
+        type,
+        fix_class,
+        reason,
+        details,
+        escalation,
+        site,
+        deferrals,
+        ...(correlation_id != null ? { correlation_id } : {}),
+        ...(signature != null ? { signature } : {}),
+        ...(anchor != null ? { anchor } : {}),
+        ...(Array.isArray(tickets) ? { tickets } : {}),
+      },
+    },
   };
 }
 
@@ -2626,6 +2731,11 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
   // surface — the verdict fields must never contradict the decision).
   const hasVerdict = typeof intent.verdict === "string";
   const isMarkerWrite = intent.decision === "dispatched" || intent.decision === "defer";
+  // CAT-170: best-effort typed failure signature, written on attempt/marker
+  // writes. Absence means no typed signature; terminal writes clear stale data.
+  const signature =
+    normalizeSignature(intent.signature) ??
+    (isMarkerWrite ? normalizeSignature(prior.signature) : null);
   const entry = {
     ticket,
     ts: typeof prior.ts === "number" ? prior.ts : ts, // first-action timestamp
@@ -2647,6 +2757,7 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
             verdictTs: prior.verdictTs ?? null,
           }
         : {}),
+    ...(signature ? { signature } : {}),
   };
 
   try {
@@ -2863,6 +2974,85 @@ export function clearEscalationDeferrals(orchDir, ticket) {
   }
 }
 
+// ─── CAT-170: pending member→anchor pointer ─────────────────────────────────
+// Codex #3209 P1. A correlated group escalates in two steps: the anchor is acted on
+// first, then each member gets a pointer brief. When the anchor SUCCEEDS but a
+// member's label write transiently fails, that member is left unlatched — and the
+// anchor's ledger is now `escalated:true`, which excludes it from the next sweep's
+// candidate scan. So on the following tick the member regroups ALONE, classifies as
+// a singleton, and receives its own full `recovery.escalated` decision — a second
+// operator incident for a cause the anchor already advertised as covering it.
+//
+// This marker is what survives that gap: it records which anchor the member belongs
+// to, so its retry stays a POINTER instead of becoming a new decision. Stored beside
+// the deferral counter (never in the recovery-intent ledger, for the same reason:
+// any write carrying decision:"escalate" trips the sticky `escalated` latch and the
+// sweep would skip the very ticket we still need to retry).
+//
+// The pointer is deliberately WINDOWED by the same correlation window the grouping
+// uses — an anchor from days ago is no longer a live incident, so a stale pointer
+// expires into normal singleton handling rather than pointing a human at an
+// escalation they have long since closed.
+function correlationPointerPath(orchDir, ticket) {
+  return join(orchDir, ".escalation-correlation", `${ticket}.json`);
+}
+
+// readCorrelationPointer — this ticket's pending member pointer, or null when absent,
+// malformed, or older than `windowMs`. Never throws.
+export function readCorrelationPointer(orchDir, ticket, { windowMs, now } = {}) {
+  let prior;
+  try {
+    prior = JSON.parse(readFileSync(correlationPointerPath(orchDir, ticket), "utf8"));
+  } catch {
+    return null; // absent or malformed → no pointer
+  }
+  if (!prior || typeof prior.anchor !== "string" || !prior.anchor) return null;
+  // A pointer at its own anchor is meaningless (and would make the member loop skip
+  // the anchor act entirely) — treat it as absent.
+  if (prior.anchor === ticket) return null;
+  if (typeof windowMs === "number" && Number.isFinite(windowMs)) {
+    const at = Number(prior.at);
+    const ts = typeof now === "number" ? now : Date.now();
+    if (!Number.isFinite(at) || ts - at > windowMs) return null; // stale → expired
+  }
+  return prior;
+}
+
+// writeCorrelationPointer — record that `ticket` is a deferred member of `anchor`.
+// Best-effort: a write failure just means the next tick treats it as a singleton
+// (the pre-CAT-170 behaviour), never a thrown error. Returns true when persisted.
+export function writeCorrelationPointer(orchDir, ticket, pointer, now) {
+  const p = correlationPointerPath(orchDir, ticket);
+  try {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ticket,
+        anchor: pointer.anchor,
+        correlation_id: pointer.correlation_id ?? null,
+        signature: pointer.signature ?? null,
+        tickets: Array.isArray(pointer.tickets) ? pointer.tickets : [ticket],
+        at: now,
+      }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// clearCorrelationPointer — drop the pointer once the member's escalation completes
+// (or once it is no longer a member). Idempotent; never throws.
+export function clearCorrelationPointer(orchDir, ticket) {
+  try {
+    unlinkSync(correlationPointerPath(orchDir, ticket));
+    return true;
+  } catch {
+    return false; // absent is the common case
+  }
+}
+
 // escalateExhaustedIntents — CTL-1440 (P0b): the terminal-state policy sweep.
 // An intent whose fix attempts are exhausted (attempts >= max) WITHOUT a verdict
 // must escalate LOUDLY — ledger escalated:true (B1's 7-day TTL then ages it out
@@ -2875,6 +3065,23 @@ export function clearEscalationDeferrals(orchDir, ticket) {
 // no-verdict decisions ("dispatched" dispatch markers and "fix" classifier
 // writes) are swept — leave-alone / escalate / defer / fixed carry their own
 // terminal policies. Never throws; returns the tickets it escalated.
+// CAT-170 (Codex #3209 P2): only three modes are recognized downstream (`off`,
+// `shadow`, `enforce`). The raw env value used to pass through unvalidated, so an
+// empty string, a typo, or `Shadow` fell through every branch and behaved like
+// `off` — silently suppressing even the default-shadow telemetry an operator relies
+// on to see what correlation WOULD do. Normalize case/whitespace and fall an
+// unrecognized value back to the DECLARED default (`shadow`), never to `off`:
+// degrading toward observe-only is safe, degrading toward silence is not.
+export const RECOVERY_CORRELATION_MODES = Object.freeze(["off", "shadow", "enforce"]);
+
+export function resolveCorrelationMode(raw, fallback = "shadow") {
+  const mode = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  return RECOVERY_CORRELATION_MODES.includes(mode) ? mode : fallback;
+}
+
+export const RECOVERY_CORRELATION_MODE = () =>
+  resolveCorrelationMode(process.env.CATALYST_RECOVERY_CORRELATION);
+
 export function escalateExhaustedIntents(orchDir, opts = {}) {
   const {
     now = () => Date.now(),
@@ -2903,7 +3110,13 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     // cached terminal/merged check; default keeps the function pure/hermetic.
     isActive = () => true,
     log = defaultLogFn,
+    correlationMode: correlationModeOpt = RECOVERY_CORRELATION_MODE(),
+    correlationWindowMs = RECOVERY_CORRELATION_WINDOW_MS,
+    correlationMinGroup = RECOVERY_CORRELATION_MIN_GROUP,
   } = opts;
+  // CAT-170 (Codex #3209 P2): an INJECTED mode gets the same validation as the env
+  // one, so a caller cannot smuggle an unrecognized value past the branches below.
+  const correlationMode = resolveCorrelationMode(correlationModeOpt);
   if (!orchDir) return [];
   let files;
   try {
@@ -2911,7 +3124,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
   } catch {
     return [];
   }
-  const escalatedTickets = [];
+  const candidates = [];
   for (const f of files) {
     if (!f.endsWith(".json")) continue;
     let data;
@@ -2934,8 +3147,90 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       active = true;
     }
     if (!active) continue;
+    if (readEscalationDeferrals(orchDir, ticket) >= maxDeferrals) continue;
+    candidates.push({
+      ticket,
+      file: f,
+      data,
+      signature: data.signature ?? null,
+      lastTs: data.lastTs ?? data.ts,
+    });
+  }
+
+  // CAT-170 (Codex #3209 P1): pull out candidates carrying a PENDING member pointer
+  // BEFORE grouping. A member whose act failed after its anchor already latched is
+  // still part of that incident — but the anchor's ledger now reads `escalated:true`,
+  // so it is no longer a candidate and cannot re-form the group. Left to normal
+  // grouping the member would classify as a singleton and emit a second full
+  // `recovery.escalated` for a cause the anchor already advertised as covering it.
+  // Routing it through the pointer pass keeps its retry a POINTER at the original
+  // anchor. Only `enforce` produces members; a pointer older than the correlation
+  // window expires inside readCorrelationPointer and the ticket falls back to normal
+  // grouping (a long-closed incident must not keep pointing a human at it).
+  const pendingPointers = new Map();
+  if (correlationMode === "enforce") {
+    for (const candidate of candidates) {
+      const pointer = readCorrelationPointer(orchDir, candidate.ticket, {
+        windowMs: correlationWindowMs,
+        now: now(),
+      });
+      if (pointer) pendingPointers.set(candidate.ticket, pointer);
+    }
+  }
+  const groupableCandidates = pendingPointers.size
+    ? candidates.filter((candidate) => !pendingPointers.has(candidate.ticket))
+    : candidates;
+
+  const computedGroups = groupCandidates(groupableCandidates, {
+    windowMs: correlationWindowMs,
+    minGroup: correlationMinGroup,
+    now: now(),
+  });
+  const candidateByTicket = new Map(
+    groupableCandidates.map((candidate) => [candidate.ticket, candidate]),
+  );
+  if (correlationMode === "shadow") {
+    for (const group of computedGroups.filter((g) => g.correlated)) {
+      emitEvent({
+        type: "recovery.escalation.would-correlate",
+        correlation_id: correlationId(group.signature, group.anchor),
+        signature: group.signature,
+        anchor: group.anchor,
+        tickets: group.tickets,
+      });
+    }
+  }
+  const groups =
+    correlationMode === "enforce"
+      ? computedGroups.map((group) => ({
+          ...group,
+          anchor: candidateByTicket.get(group.anchor),
+          members: group.members.map((ticket) => candidateByTicket.get(ticket)).filter(Boolean),
+        }))
+      : candidates.map((candidate) => ({
+          signature: candidate.signature,
+          anchor: candidate,
+          members: [],
+          tickets: [candidate.ticket],
+          correlated: false,
+        }));
+  const escalatedTickets = [];
+  // A provisional anchor whose signal persisted is already operator-visible even
+  // when its ledger latch later fails. Do not fail over to a second anchor in the
+  // same tick: that would leave two durable `role: "anchor"` signals until retry.
+  const durableAnchorSignals = new Set();
+
+  const actOnTicket = (candidate, { role = "singleton", group = null, anchor = null } = {}) => {
+    const { ticket, data, file: f } = candidate;
     const reason = `self-heal attempts exhausted (${data.attempts} dispatches without a recorded verdict)`;
-    const escalation = {
+    // CAT-170: a resumed member carries the correlation id its anchor was escalated
+    // under, so prefer the recorded value over a recompute — the id a human already
+    // saw must stay stable even if the signature text is normalized differently later.
+    const corrId = group?.correlated
+      ? (group.correlationId ?? correlationId(group.signature, anchor ?? ticket))
+      : null;
+    const correlatedTickets = group?.tickets ?? [ticket];
+    const escalation = role === "singleton" ? {
       escalation_type: "authorization",
       problem: `${ticket} consumed ${data.attempts} recovery attempts (last decision "${data.decision}") without any recorded verdict — the self-heal loop is not resolving it.`,
       call_to_action: `look at ${ticket}: authorize another recovery cycle (clear its ledger latch), or take it over?`,
@@ -2946,6 +3241,41 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
         attempts: data.attempts,
         decision: data.decision ?? null,
         fix_class: data.fix_class ?? null,
+      },
+      attempts: [],
+    } : {
+      escalation_type: "authorization",
+      problem:
+        role === "anchor"
+          ? `${correlatedTickets.join(", ")} exhausted recovery attempts for the shared cause "${group.signature}".`
+          : `${ticket} is part of correlated incident ${corrId} — ${correlatedTickets.length} tickets share this cause; the decision is on ${anchor}.`,
+      call_to_action:
+        role === "anchor"
+          ? `look at ${correlatedTickets.join(", ")}: authorize one recovery cycle for this shared cause, or take the incident over?`
+          : `see the escalation on ${anchor}`,
+      recommendation: `inspect the correlated recovery-pass failures on ${anchor ?? ticket}`,
+      risk: `left latched the affected tickets rot silently`,
+      why_asking: reason,
+      observed: {
+        attempts: data.attempts,
+        decision: data.decision ?? null,
+        fix_class: data.fix_class ?? null,
+        correlation_id: corrId,
+        signature: group.signature,
+        correlated_tickets: correlatedTickets,
+        correlated_count: correlatedTickets.length,
+      },
+      // CAT-170 (Codex #3209 P1): the same identity ALSO as a first-class payload
+      // key. `observed` is audit passthrough that synthesizeEscalationExplanation
+      // discards, so it cannot be what a board consumer groups or suppresses on —
+      // writeEscalationSignal persists THIS key onto the signal instead.
+      correlation: {
+        id: corrId,
+        role,
+        anchor: anchor ?? ticket,
+        signature: group.signature,
+        tickets: correlatedTickets,
+        count: correlatedTickets.length,
       },
       attempts: [],
     };
@@ -2967,8 +3297,6 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     // has already fired and only a human can resolve it, so stop spending a Linear
     // label write on it every tick. This ceiling is what keeps the pre-latch attempt
     // from re-firing forever on a persistently-failing host.
-    if (readEscalationDeferrals(orchDir, ticket) >= maxDeferrals) continue;
-
     let labelled = false;
     try {
       labelled = labelNeedsHuman?.(orchDir, ticket) === true;
@@ -3010,10 +3338,75 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
             `after ${deferrals} attempts; escalation cannot complete from this host`,
         );
       }
-      continue; // the act did not complete — not counted as escalated
+      // CAT-170 (Codex #3209 P1): the act failed for a ticket that IS part of a
+      // correlated incident whose anchor has already latched. Record which anchor it
+      // belongs to so the next tick retries it as a POINTER rather than regrouping it
+      // into a fresh standalone escalation. Best-effort — a failed pointer write just
+      // restores the previous singleton behaviour.
+      if (group?.correlated && anchor && anchor !== ticket) {
+        writeCorrelationPointer(
+          orchDir,
+          ticket,
+          {
+            anchor,
+            correlation_id: corrId,
+            signature: group.signature,
+            tickets: correlatedTickets,
+          },
+          now(),
+        );
+      }
+      return false; // the act did not complete — not counted as escalated
     }
     // The label landed (or its owner has it) — this escalation can now complete.
     clearEscalationDeferrals(orchDir, ticket);
+
+    // CAT-170 (Codex #3209 round-2 P1): persist the escalation signal BEFORE the
+    // ledger latch, and treat a failed write as a failed act. The `correlation`
+    // block on this signal is the ONLY durable carrier of a member's role, and the
+    // latch below is IRREVERSIBLE: `escalated:true` drops the ticket from every
+    // later candidate sweep, so its pointer is never re-read and the role can never
+    // be retried. Latching first turned one lost write into a PERMANENTLY
+    // uncorrelated member — both notification projectors then treat it as
+    // independent and emit exactly the duplicate operator alert this feature exists
+    // to suppress. Writing first keeps that failure recoverable: no latch, pointer
+    // retained, so the next sweep re-acts it as a member. Ordering is safe because
+    // this write is an idempotent atomic tmp+rename keyed by ticket — a retry
+    // rewrites one file rather than re-posting anything operator-visible. The
+    // comment/event below stay gated behind the VERIFIED latch, exactly as before,
+    // so the at-most-once discipline for those surfaces is unchanged.
+    let signalWritten = true;
+    try {
+      // `!== false` so an injected double returning undefined still reads as success.
+      signalWritten = writeSignal(ticket, escalation) !== false;
+    } catch (err) {
+      log(`recovery-reasoning: ${ticket} exhausted-escalate signal write failed: ${err.message}`);
+      signalWritten = false;
+    }
+    if (!signalWritten) {
+      // Same reasoning as the label-failure branch above: this act failed for a
+      // ticket whose anchor may have already latched this tick, so the group cannot
+      // re-form next tick. Record (or refresh) the pointer or the member regroups as
+      // a singleton and raises the duplicate escalation anyway.
+      if (group?.correlated && anchor && anchor !== ticket) {
+        writeCorrelationPointer(
+          orchDir,
+          ticket,
+          {
+            anchor,
+            correlation_id: corrId,
+            signature: group.signature,
+            tickets: correlatedTickets,
+          },
+          now(),
+        );
+      }
+      log(
+        `recovery-reasoning: ${ticket} exhausted-escalate signal did not persist — retrying next tick (correlation pointer retained)`,
+      );
+      return false; // unlatched → still a candidate, pointer intact → retried as a member
+    }
+    if (role === "anchor") durableAnchorSignals.add(ticket);
 
     try {
       recordIntent(ticket, {
@@ -3026,7 +3419,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       });
     } catch (err) {
       log(`recovery-reasoning: ${ticket} exhausted-escalate ledger write failed: ${err.message}`);
-      continue; // without the latch the sweep would re-fire every tick — try again next tick
+      return false; // without the latch the sweep would re-fire every tick — try again next tick
     }
     // Codex R1: defaultRecordIntent swallows write failures (best-effort by
     // design) — VERIFY the latch actually landed before any human-facing side
@@ -3041,27 +3434,126 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     }
     if (!latched) {
       log(`recovery-reasoning: ${ticket} exhausted-escalate latch did not persist — deferring side effects to the next tick`);
-      continue;
+      return false;
     }
-    try {
-      writeSignal(ticket, escalation);
-    } catch (err) {
-      log(`recovery-reasoning: ${ticket} exhausted-escalate signal write failed: ${err.message}`);
-    }
-    emitEvent({ type: "recovery.escalated", ticket, reason, escalation });
+    // CAT-170 (Codex #3209 P2): clear the member pointer ONLY once the latch is
+    // verified. It used to be cleared before recordIntent, which meant a throwing
+    // ledger write or a latch that did not persist dropped the durable anchor
+    // pointer while the escalation itself returned for retry. The next sweep then
+    // saw an unlatched ticket with no pointer, regrouped it as a singleton, and
+    // raised a SECOND full operator escalation — the exact duplicate-alert failure
+    // this correlation work exists to prevent. Retaining the pointer until the
+    // latch is proven costs at most a stale pointer on a permanently-failing host,
+    // which the correlation window expires anyway.
+    // The signal (and with it the member's correlation role) is already durable —
+    // written and confirmed above, before the latch — so dropping the pointer here
+    // can no longer lose the role.
+    clearCorrelationPointer(orchDir, ticket);
+    emitEvent({
+      type: role === "member" ? "recovery.escalation.correlated" : "recovery.escalated",
+      ticket,
+      reason,
+      escalation,
+      ...(corrId ? { correlation_id: corrId, anchor: anchor ?? ticket } : {}),
+    });
     try {
       postComment(
         ticket,
-        `🔼 **recovery-pass** self-heal attempts exhausted on this ticket — escalated to the operator. ${reason}. (See your inbox.)`,
+        role === "member"
+          ? `Part of correlated recovery incident ${corrId}; see the operator escalation on ${anchor}.`
+          : `🔼 **recovery-pass** self-heal attempts exhausted on this ticket — escalated to the operator. ${reason}. (See your inbox.)`,
       );
     } catch {
       /* comment is best-effort; the signal + event are the durable surfaces */
     }
-    escalatedTickets.push(ticket);
+    if (role !== "member") escalatedTickets.push(ticket);
     log(
       `recovery-reasoning: ${ticket} attempts-exhausted → escalated loudly (CTL-1440)` +
         (ownedByBelief ? " [label owned by belief engine — CTL-1568 transfer]" : ""),
     );
+    return true;
+  };
+
+  for (const group of groups) {
+    if (!group.correlated) {
+      actOnTicket(group.anchor);
+      continue;
+    }
+    const ordered = [group.anchor, ...group.members];
+    let anchorCandidate = null;
+    // CAT-170 (Codex #3209 P2): remember which candidates the anchor-selection loop
+    // already spent an act on. It breaks on the FIRST success, so every candidate up
+    // to and including the winner has been attempted; the member loop below must not
+    // act on any of them a second time. A persistently label-failing ticket that was
+    // tried as a provisional anchor and then re-tried as a member performed two label
+    // writes, emitted two recovery.escalation.deferred events, and burned its bounded
+    // RECOVERY_MAX_ESCALATION_DEFERRALS budget at 2x rate in a single tick.
+    const attempted = new Set();
+    for (const candidate of ordered) {
+      attempted.add(candidate.ticket);
+      if (actOnTicket(candidate, { role: "anchor", group, anchor: candidate.ticket })) {
+        anchorCandidate = candidate;
+        break;
+      }
+      if (durableAnchorSignals.has(candidate.ticket)) break;
+    }
+    if (!anchorCandidate) {
+      // Every candidate was already attempted above (the loop only breaks on a
+      // success), and a FAILED anchor attempt produces exactly the singleton
+      // path's side effects — the label gate fails before any correlated
+      // escalation is written. Re-running them here would bump each ticket's
+      // escalation-deferral counter twice in one tick, burning the
+      // RECOVERY_MAX_ESCALATION_DEFERRALS budget at 2x rate and double-emitting
+      // recovery.escalation.deferred. Nothing left to do for this group.
+      continue;
+    }
+    for (const candidate of ordered) {
+      if (candidate.ticket === anchorCandidate.ticket) continue;
+      if (attempted.has(candidate.ticket)) {
+        // Already acted on this tick as a provisional anchor, and it failed. Do not
+        // spend a second act — but DO record the pointer, so its retry next tick is a
+        // member of the anchor that actually won rather than a fresh singleton
+        // escalation (the same P1 correlation loss the deferred-member path fixes).
+        writeCorrelationPointer(
+          orchDir,
+          candidate.ticket,
+          {
+            anchor: anchorCandidate.ticket,
+            correlation_id: correlationId(group.signature, anchorCandidate.ticket),
+            signature: group.signature,
+            tickets: group.tickets,
+          },
+          now(),
+        );
+        continue;
+      }
+      actOnTicket(candidate, {
+        role: "member",
+        group,
+        anchor: anchorCandidate.ticket,
+      });
+    }
+  }
+
+  // CAT-170 (Codex #3209 P1): the pointer pass — deferred members retrying against an
+  // anchor that has already latched (and is therefore no longer a candidate, so no
+  // group can re-form around it). Each is acted on as a MEMBER of its recorded
+  // anchor, so it stays a pointer brief instead of becoming a second standalone
+  // operator decision. A synthetic group carries the pointer's own recorded identity;
+  // `correlated: true` is what makes actOnTicket take the member branch.
+  for (const [ticket, pointer] of pendingPointers) {
+    const candidate = candidates.find((c) => c.ticket === ticket);
+    if (!candidate) continue;
+    actOnTicket(candidate, {
+      role: "member",
+      group: {
+        signature: pointer.signature ?? null,
+        correlationId: pointer.correlation_id ?? null,
+        tickets: Array.isArray(pointer.tickets) ? pointer.tickets : [ticket],
+        correlated: true,
+      },
+      anchor: pointer.anchor,
+    });
   }
   return escalatedTickets;
 }

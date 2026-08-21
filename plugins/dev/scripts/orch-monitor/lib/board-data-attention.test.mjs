@@ -5,7 +5,7 @@
 //   cd plugins/dev/scripts/orch-monitor && bun test lib/board-data-attention.test.mjs
 
 import { describe, it, expect } from "bun:test";
-import { deriveNeedsHumanSince, deriveAttention } from "./board-data.mjs";
+import { deriveNeedsHumanSince, deriveAttention, deriveCorrelationRole } from "./board-data.mjs";
 
 describe("CTL-1131: deriveNeedsHumanSince", () => {
   it("returns needsHumanSince from the newest signal carrying it", () => {
@@ -56,12 +56,71 @@ describe("CTL-1131: deriveAttention projects needsHumanSince → attentionSince"
       needsHumanMarker: true,
       needsHumanSince: "2026-06-14T16:00:00Z",
     });
-    expect(r).toEqual({ attention: "needs-human", attentionSince: "2026-06-14T16:00:00Z", escalationType: null });
+    expect(r).toEqual({
+      attention: "needs-human",
+      attentionSince: "2026-06-14T16:00:00Z",
+      escalationType: null,
+      correlationRole: null,
+    });
   });
 
   it("attentionSince is null when needs-human wins but no stamp provided", () => {
     const r = deriveAttention({ needsHumanMarker: true, needsHumanSince: null });
-    expect(r).toEqual({ attention: "needs-human", attentionSince: null, escalationType: null });
+    expect(r).toEqual({
+      attention: "needs-human",
+      attentionSince: null,
+      escalationType: null,
+      correlationRole: null,
+    });
+  });
+});
+
+// ─── CAT-170: correlation role projection (the notification-suppression seam) ──
+//
+// The producer writes a top-level `correlation` field on the escalation signal;
+// deriveCorrelationRole projects it and deriveAttention passes it through on the
+// needs-human branch ONLY. Without this projection every correlated member looked
+// like an ordinary needs-human authorization and the notification path — which
+// keys on ticket id — emitted one push per member.
+describe("CAT-170: deriveCorrelationRole", () => {
+  it("returns the role from the newest signal carrying a correlation", () => {
+    const sigs = [
+      { status: "stalled", correlation: { id: "c1", role: "anchor", anchor: "CAT-1" } },
+      { status: "stalled", correlation: { id: "c1", role: "member", anchor: "CAT-1" } },
+    ];
+    expect(deriveCorrelationRole(sigs)).toBe("member");
+  });
+
+  it("skips signals without a correlation and returns null when none carry one", () => {
+    expect(deriveCorrelationRole([{ status: "running" }, { status: "stalled" }])).toBeNull();
+  });
+
+  it("ignores a malformed correlation (no string role)", () => {
+    expect(deriveCorrelationRole([{ correlation: { id: "c1" } }, { correlation: null }])).toBeNull();
+  });
+});
+
+describe("CAT-170: deriveAttention passes the correlation role through", () => {
+  it("surfaces the role on the needs-human branch", () => {
+    const r = deriveAttention({ needsHumanMarker: true, correlationRole: "member" });
+    expect(r.attention).toBe("needs-human");
+    expect(r.correlationRole).toBe("member");
+  });
+
+  it("does not surface a role on the waiting-on-you branch", () => {
+    const r = deriveAttention({ waitingOnUser: true, correlationRole: "member" });
+    expect(r.attention).toBe("waiting-on-you");
+    expect(r.correlationRole).toBeNull();
+  });
+
+  it("does not surface a role when the ticket is Linear-terminal", () => {
+    const r = deriveAttention({
+      needsHumanMarker: true,
+      correlationRole: "member",
+      linearTerminal: true,
+    });
+    expect(r.attention).toBeNull();
+    expect(r.correlationRole).toBeNull();
   });
 });
 
