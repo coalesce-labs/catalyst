@@ -183,6 +183,35 @@ else
 	fail "launcher count changed on re-run: $BEFORE_LAUNCHERS -> $AFTER_LAUNCHERS (expected 3)"
 fi
 
+# ─── .coord-source-dir breadcrumb ────────────────────────────────────────────
+#
+# account-rotation-watch.sh's _resolve_canonical_lib ends on a rung that reads this file.
+# It shipped with NO writer anywhere in the repo, so the rung could never fire and the
+# materialized actor had no path to canonical-event.sh at all. Assert both halves: the
+# file is written, AND the path it records actually resolves the lib the reader builds
+# from it — a breadcrumb that exists but points nowhere is the same dead rung.
+echo "Test: the .coord-source-dir breadcrumb is written and its recorded path resolves"
+BREADCRUMB="$COORD_RT/.coord-source-dir"
+if [[ -r "$BREADCRUMB" ]]; then
+	pass "wrote .coord-source-dir (the rung has a writer)"
+else
+	fail "no .coord-source-dir at ${BREADCRUMB} — _resolve_canonical_lib's last rung can never fire"
+fi
+REC_SRC="$(cat "$BREADCRUMB" 2>/dev/null || true)"
+# The exact expression the reader builds: <recorded>/../lib/canonical-event.sh.
+if [[ -n "$REC_SRC" && -r "${REC_SRC}/../lib/canonical-event.sh" ]]; then
+	pass "the recorded dir resolves ../lib/canonical-event.sh (rung is live, not just present)"
+else
+	fail "recorded dir '${REC_SRC}' does not resolve ../lib/canonical-event.sh"
+fi
+# Positive control for the assertion above: the SAME probe against a dir that is
+# deliberately wrong must fail, or the check proves nothing.
+if [[ -r "${SCRATCH}/../lib/canonical-event.sh" ]]; then
+	fail "positive control FAILED — the resolve probe passes for an unrelated dir too"
+else
+	pass "positive control: the resolve probe fails for an unrelated dir"
+fi
+
 # ─── no accounts env: non-fatal, no launchers ────────────────────────────────
 echo "Test: with NO claude-accounts.env it is a clear, NON-FATAL no-op for launchers"
 CDIR2="$SCRATCH/home-catalyst-2"

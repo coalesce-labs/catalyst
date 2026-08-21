@@ -126,8 +126,13 @@ fi
 # and account.status.changed already live there — so these names need no contract change.
 #
 # The LaunchAgent runs THIS file from the pristine scripts clone, where ../lib is present.
-# The materialized copy under ~/catalyst/comms/coord may not have it, so resolution is a
-# short ladder and a genuine miss is LOUD: an event we cannot emit is reported on stderr
+# The materialized copy under ~/catalyst/comms/coord does NOT have it, so resolution is a
+# short ladder whose last rung reads the .coord-source-dir breadcrumb that
+# materialize-coord-kit.sh writes beside the baked kit — it records the coord SOURCE dir,
+# so this rung resolves `../lib/canonical-event.sh` against it exactly as rung 1 does
+# against the running file. (That rung had no writer anywhere in the repo until CTL-2145's
+# remediation: it could never fire, which made the ladder advertise a fallback that could
+# not succeed.) A genuine miss is LOUD: an event we cannot emit is reported on stderr
 # (which rides the agent's own .log) rather than skipped in silence. The load-bearing
 # record is the durable marker plus these log lines; the event is the dashboard's copy.
 _resolve_canonical_lib() {
@@ -135,7 +140,7 @@ _resolve_canonical_lib() {
   for c in \
     "${COORD_SRC}/../lib/canonical-event.sh" \
     "${CATALYST_DEV_SCRIPTS:-/nonexistent}/lib/canonical-event.sh" \
-    "$([[ -r "${COMMS_DIR}/.coord-source-dir" ]] && printf '%s/lib/canonical-event.sh' "$(cat "${COMMS_DIR}/.coord-source-dir" 2>/dev/null)")"; do
+    "$([[ -r "${COMMS_DIR}/.coord-source-dir" ]] && printf '%s/../lib/canonical-event.sh' "$(cat "${COMMS_DIR}/.coord-source-dir" 2>/dev/null)")"; do
     [[ -n "$c" && -r "$c" ]] && { printf '%s' "$c"; return 0; }
   done
   return 1
@@ -228,6 +233,17 @@ fi
 #
 # SECRETS HYGIENE: `grep -oE` on the key prefix only — no token VALUE is ever captured
 # into a variable, printed, or logged.
+#
+# ⚠️ DELIBERATE NARROWING (plan D6): both readers below match `acct[0-9]+`, while
+# catalyst-stack's canonical parser (_ca_parse_active_handle_stream) matches the wider
+# `[A-Za-z0-9_]+`. A provisioned handle NOT named acctN is therefore invisible here: it is
+# never a rotation TARGET, and when it is the ACTIVE (walled) handle _active_handle
+# returns empty and _next_handle falls back to the first handle — still a rotation AWAY
+# from the walled account, never a wrong one. That is the intended scope: this actor
+# rotates the fleet's acctN pool (the shape materialize-coord-kit.sh generates launchers
+# for, and the only shape provisioned today), and widening it is a change to what the kit
+# manages, not a bug fix. Recorded here so the divergence from the canonical parser reads
+# as a decision rather than as an oversight the next reader "fixes" in passing.
 _handles() {
   [[ -f "$ACCOUNTS_ENV" ]] || return 0
   grep -oE '^CLAUDE_TOKEN_acct[0-9]+=' "$ACCOUNTS_ENV" 2>/dev/null |

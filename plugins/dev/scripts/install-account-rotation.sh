@@ -369,6 +369,12 @@ fi
 # the pristine clone, so a failed materialize degrades the LANE side of the kit, not
 # the rotation side — but it is reported rather than swallowed.
 
+# COORD_RT — the DURABLE runtime dir materialize-coord-kit.sh bakes the kit into. Mirrors
+# that script's own `COORD_RT="${CATALYST_DIR:-$HOME/catalyst}/comms/coord"`; both must
+# name the same dir or the stray-retire exclusion below stops covering the copy that is
+# actually running.
+COORD_RT="${CATALYST_DIR:-$HOME/catalyst}/comms/coord"
+
 MATERIALIZE="${BAKE_DIR}/coord/materialize-coord-kit.sh"
 if [[ -x "$MATERIALIZE" ]]; then
   if bash "$MATERIALIZE"; then
@@ -422,6 +428,24 @@ _retire_stray_loops() {
     case "$cmd" in
       *"$BAKE_DIR"*) continue ;;
     esac
+    # ...and leave the MATERIALIZED runtime copy alone too. coord/lane-relaunch.sh's own
+    # Usage header tells operators "Run it from the materialized location, not from the
+    # repo", so ${COORD_RT}/lane-relaunch.sh is the copy that is actually running on a
+    # real host — and it is NOT under BAKE_DIR. With only the bake-dir exclusion above,
+    # every routine `catalyst-stack install-services` classified the fleet's live lane
+    # watchdog as a stray and TERM/KILLed it, logging "retiring stray" (which reads like
+    # correct behavior) while nothing restarted it: the new LaunchAgent supervises only
+    # account-rotation-watch.sh, and lane-relaunch is deliberately unsupervised. That is
+    # the same unnoticed-dead-lanes failure CTL-2097/CTL-2145 exist to prevent.
+    #
+    # Guarded on non-empty: an empty COORD_RT would make `*""*` match EVERY command line,
+    # silently turning the whole retire into a no-op that still prints its all-clear — a
+    # check that cannot fail (AGENTS.md).
+    if [[ -n "$COORD_RT" ]]; then
+      case "$cmd" in
+        *"$COORD_RT"*) continue ;;
+      esac
+    fi
     pids+=("$pid")
   done < <(ps -eo pid=,command= 2>/dev/null || true)
 

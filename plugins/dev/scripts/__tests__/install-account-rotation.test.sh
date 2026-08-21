@@ -381,12 +381,43 @@ fi
 kill "$GOOD_PID" 2>/dev/null || true
 wait "$GOOD_PID" 2>/dev/null || true
 
+echo "Test 8d: the retire step does NOT kill the MATERIALIZED runtime copy"
+# The copy operators are TOLD to run — coord/lane-relaunch.sh's own Usage header says
+# "Run it from the materialized location, not from the repo". It lives under
+# ${CATALYST_DIR:-$HOME/catalyst}/comms/coord, which is NOT under BAKE_DIR, so a
+# BAKE_DIR-only exclusion classifies the fleet's live lane watchdog as a stray and
+# TERM/KILLs it on every routine `catalyst-stack install-services`. Test 8c proves only
+# the bake-dir copy survives; that gap is why this shipped green once already.
+#
+# Overwriting the materialized script mid-flight is safe: materialize-coord-kit.sh's
+# _install_file is tmp+`mv -f`, so the running child keeps its own inode.
+COORD_RT="${FAKE_HOME}/catalyst/comms/coord"
+mkdir -p "$COORD_RT"
+cp "${STRAY_DIR}/lane-relaunch.sh" "${COORD_RT}/lane-relaunch.sh"
+chmod +x "${COORD_RT}/lane-relaunch.sh"
+bash "${COORD_RT}/lane-relaunch.sh" &
+RT_PID=$!
+sleep 1
+if ps -p "$RT_PID" >/dev/null 2>&1; then
+	pass "positive control: the materialized watchdog is running before the installer sees it"
+else
+	fail "positive control FAILED — the materialized stand-in never started, so the assertion below proves nothing"
+fi
+OUT13="$(CATALYST_SKIP_STRAY_RETIRE=0 bash "$INSTALLER" 2>&1)"
+if ps -p "$RT_PID" >/dev/null 2>&1; then
+	pass "left the materialized lane watchdog alone"
+else
+	fail "KILLED the materialized lane watchdog (${COORD_RT}/lane-relaunch.sh): $OUT13"
+fi
+kill "$RT_PID" 2>/dev/null || true
+wait "$RT_PID" 2>/dev/null || true
+
 # Nothing this suite started may outlive it.
-for p in "${STRAY_PID:-}" "${GOOD_PID:-}"; do
+for p in "${STRAY_PID:-}" "${GOOD_PID:-}" "${RT_PID:-}"; do
 	[[ -n "$p" ]] && kill -9 "$p" 2>/dev/null || true
 done
 LEAKED=0
-for p in "${STRAY_PID:-}" "${GOOD_PID:-}"; do
+for p in "${STRAY_PID:-}" "${GOOD_PID:-}" "${RT_PID:-}"; do
 	[[ -n "$p" ]] && ps -p "$p" >/dev/null 2>&1 && LEAKED=1
 done
 if [[ $LEAKED -eq 0 ]]; then pass "no test process leaked"; else fail "a test process LEAKED"; fi

@@ -169,6 +169,29 @@ for l in "${KIT_LIBS[@]}"; do
   fi
 done
 
+# ─── source-dir breadcrumb ───────────────────────────────────────────────────
+#
+# account-rotation-watch.sh's _resolve_canonical_lib walks a 3-rung ladder to find
+# lib/canonical-event.sh; its LAST rung reads this file. Without a writer that rung can
+# never fire, so the ladder advertised a fallback that could not succeed and the
+# MATERIALIZED copy of the actor had no path to canonical-event.sh at all (its rung 1 is
+# relative to its own location, and the kit is baked without ../lib). This is the writer:
+# the coord SOURCE dir, which the reader resolves `../lib/canonical-event.sh` against —
+# exactly the arithmetic rung 1 does, but anchored on the recorded source rather than on
+# the running file. Rewritten every run so it tracks a moved/re-registered clone.
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  log "would write ${COORD_RT}/.coord-source-dir"
+else
+  _src_tmp="${COORD_RT}/.coord-source-dir.tmp.$$"
+  if printf '%s\n' "$COORD_SRC" >"$_src_tmp" && mv -f "$_src_tmp" "${COORD_RT}/.coord-source-dir"; then
+    log "recorded source dir: ${COORD_SRC}"
+  else
+    warn "could not write ${COORD_RT}/.coord-source-dir — the materialized actor loses its last canonical-event.sh fallback"
+    rm -f "$_src_tmp"
+    RC=1
+  fi
+fi
+
 # ─── per-account launchers ───────────────────────────────────────────────────
 
 LAUNCHER_TEMPLATE="${TEMPLATES}/launch-on-account.sh.template"
