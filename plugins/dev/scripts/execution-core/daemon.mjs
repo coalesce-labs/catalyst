@@ -176,6 +176,13 @@ import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
 import { setLaneClaimGuard } from "./lane-claim-install.mjs"; // CTL-2068
 import { buildLaneClaimGuard, resolveStateMap } from "./lane-claim.mjs"; // CTL-2068
+// CTL-2070: the TIMELY per-ticket actor source (fleet write-ledger). loadLedger seeds the
+// process singleton at boot; readFleetWrite is the guard's durable-ledger reader. The scheduler
+// records writes into the SAME process singleton via defaultRecordFleetWrite (scheduler.mjs).
+import {
+  loadLedger as loadLaneClaimLedger,
+  readFleetWrite as readLaneClaimFleetWrite,
+} from "./lane-claim-write-ledger.mjs";
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
 import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
@@ -1521,6 +1528,44 @@ export function startDaemon({
       String(process.env.CATALYST_LANE_CLAIM_DISPATCH_GUARD ?? "")
         .trim()
         .toLowerCase() !== "off";
+    // ── CTL-2070: the TIMELY per-ticket actor source (fleet write-ledger). ────────────────────
+    // Default ON; only an explicit "off" disables it (same ethos as the dispatch veto above).
+    const laneClaimTimelyEnabled =
+      String(process.env.CATALYST_LANE_CLAIM_TIMELY_SOURCE ?? "")
+        .trim()
+        .toLowerCase() !== "off";
+    // Recency bound (seconds): env override > Layer-1 catalyst.orchestration.laneClaim
+    // .timelyRecencySeconds > default 300. Beyond this window the (now-caught-up) issue_history
+    // ladder governs, so the new REFUSE is bounded to the exact claim-to-dispatch window.
+    let laneClaimRecencySeconds = 300;
+    const laneClaimRecencyEnv = Number(process.env.CATALYST_LANE_CLAIM_TIMELY_RECENCY_SECONDS);
+    if (Number.isFinite(laneClaimRecencyEnv) && laneClaimRecencyEnv > 0) {
+      laneClaimRecencySeconds = laneClaimRecencyEnv;
+    } else {
+      try {
+        const cfg = JSON.parse(laneClaimReadFile(configPath));
+        const fromCfg = cfg?.catalyst?.orchestration?.laneClaim?.timelyRecencySeconds;
+        if (Number.isFinite(fromCfg) && fromCfg > 0) laneClaimRecencySeconds = fromCfg;
+      } catch {
+        /* no Layer-1 override → keep the default */
+      }
+    }
+    const laneClaimRecencyMs = laneClaimRecencySeconds * 1000;
+    // Seed the durable write-ledger singleton at boot. Prune window is a comfortable multiple of
+    // the recency bound (entries stay well past the window that can act on them, but the file is
+    // still bounded to roughly one entry per recently-moving ticket).
+    let laneClaimLedgerEntries = 0;
+    if (laneClaimTimelyEnabled) {
+      try {
+        const loaded = loadLaneClaimLedger(undefined, {
+          maxAgeMs: laneClaimRecencyMs * 4,
+          nowMs: Date.now(),
+        });
+        laneClaimLedgerEntries = loaded?.size ?? 0;
+      } catch {
+        /* a ledger load failure must not block boot — the guard degrades to CTL-2068 */
+      }
+    }
     const laneClaimGuardInstance = buildLaneClaimGuard({
       stateMap: laneClaimStateMap,
       stateMapForTicket: laneClaimStateMapForTicket,
@@ -1529,6 +1574,13 @@ export function startDaemon({
       readCurrentState: replicaReader ? (t) => replicaReader.lookup(t)?.state ?? null : undefined,
       readFleetSeen: replicaReader ? (t, ids) => replicaReader.fleetEverWroteState(t, ids) : undefined,
       dispatchVeto: laneClaimDispatchVeto,
+      // CTL-2070 — the timely source. When disabled, readFleetWrite is left undefined so the
+      // guard is EXACTLY CTL-2068 (the timely block is a no-op on `fleetWrite === undefined`).
+      readFleetWrite: laneClaimTimelyEnabled ? (t) => readLaneClaimFleetWrite(t) : undefined,
+      readCurrentUpdatedAt:
+        laneClaimTimelyEnabled && replicaReader ? (t) => replicaReader.currentUpdatedAt(t) : undefined,
+      nowMs: () => Date.now(),
+      recencyMs: laneClaimRecencyMs,
     });
     setLaneClaimGuard(laneClaimGuardInstance);
     // ⛔ CTL-2068 (Codex P2): `ranked_states` is the guard's OWN rank size, never the raw
@@ -1542,6 +1594,11 @@ export function startDaemon({
       registry_teams: laneClaimTeamPaths.size,
       history_source: replicaReader ? "replica" : "none",
       dispatch_veto: laneClaimDispatchVeto,
+      // CTL-2070: report the TIMELY source truthfully — the loaded ledger ENTRY COUNT, not merely
+      // "enabled" (the CTL-2068 ranked_states false-healthy lesson: count what the guard can
+      // actually use). A fresh host reads `write-ledger` / 0 until the daemon writes a transition.
+      timely_source: laneClaimTimelyEnabled ? "write-ledger" : "off",
+      ledger_entries: laneClaimLedgerEntries,
     };
     if (laneClaimFields.ranked_states === 0) {
       log.warn(

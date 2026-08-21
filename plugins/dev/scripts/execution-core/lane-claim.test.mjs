@@ -5,6 +5,7 @@ import {
   buildStateRank,
   buildKeyRank,
   classifyLaneClaimWrite,
+  classifyTimelyOwnership,
   buildLaneClaimGuard,
   resolveStateMap,
   VERDICT,
@@ -611,5 +612,246 @@ describe("⛔ per-TICKET state maps (Codex P1) — a fleet registry holds severa
     const g = buildLaneClaimGuard({ stateMap: { todo: "Todo", done: "Done", backlog: "Backlog" } });
     expect(Object.keys({ todo: "Todo", done: "Done", backlog: "Backlog" }).length).toBe(3);
     expect(g.rank.size).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-2070 — the timely per-ticket actor source (fleet write-ledger).
+// Time is ALWAYS injected as explicit epoch-ms, never a real clock: the RELATIONSHIP
+// between fleetWrite.atMs, currentUpdatedAtMs, and nowMs is the unit under test.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("classifyTimelyOwnership — the decision model, timing injected", () => {
+  test("1. fleetWrite === undefined → unknown / LEDGER_UNAVAILABLE (could not look)", () => {
+    const v = classifyTimelyOwnership({
+      currentState: "Implement",
+      currentUpdatedAtMs: 1000,
+      fleetWrite: undefined,
+    });
+    expect(v).toEqual({ owner: "unknown", reason: REASON.LEDGER_UNAVAILABLE });
+  });
+
+  test("2. a non-numeric currentUpdatedAtMs → unknown / NO_CURRENT_TIMESTAMP (never refuse without the clock)", () => {
+    for (const bad of [undefined, null, "x", NaN]) {
+      const v = classifyTimelyOwnership({
+        currentState: "Implement",
+        currentUpdatedAtMs: bad,
+        fleetWrite: { toState: "Research", atMs: 1000 },
+      });
+      expect(v).toEqual({ owner: "unknown", reason: REASON.NO_CURRENT_TIMESTAMP });
+    }
+  });
+
+  test("3. fleetWrite === null, timestamp recent → lane / NO_FLEET_WRITE (the 140 history-less tickets)", () => {
+    const v = classifyTimelyOwnership({
+      currentState: "Implement",
+      currentUpdatedAtMs: 1000,
+      fleetWrite: null,
+    });
+    expect(v).toEqual({
+      owner: "lane",
+      effectiveCurrentState: "Implement",
+      reason: REASON.NO_FLEET_WRITE,
+    });
+  });
+
+  test("4. ⭐ SUPERSESSION: fleet write NEWER than the replica observation → fleet owns the soon-to-be state", () => {
+    const v = classifyTimelyOwnership({
+      currentState: "Implement", // the replica has not caught up
+      currentUpdatedAtMs: 1000,
+      fleetWrite: { toState: "Research", atMs: 2000 }, // fleet wrote Research more recently
+    });
+    expect(v).toEqual({
+      owner: "fleet",
+      effectiveCurrentState: "Research",
+      reason: REASON.FLEET_WRITE_SUPERSEDES,
+    });
+  });
+
+  test("5. fleet write matches the current state → fleet / FLEET_WROTE_CURRENT", () => {
+    const v = classifyTimelyOwnership({
+      currentState: "Implement",
+      currentUpdatedAtMs: 2000,
+      fleetWrite: { toState: "Implement", atMs: 1000 },
+    });
+    expect(v).toEqual({
+      owner: "fleet",
+      effectiveCurrentState: "Implement",
+      reason: REASON.FLEET_WROTE_CURRENT,
+    });
+  });
+
+  test("6. FOREIGN-AFTER-FLEET: observation at/after the fleet write AND differs → lane / FOREIGN_AFTER_FLEET", () => {
+    const v = classifyTimelyOwnership({
+      currentState: "Implement",
+      currentUpdatedAtMs: 2000,
+      fleetWrite: { toState: "Research", atMs: 1000 },
+    });
+    expect(v).toEqual({
+      owner: "lane",
+      effectiveCurrentState: "Implement",
+      reason: REASON.FOREIGN_AFTER_FLEET,
+    });
+  });
+
+  test("7. RECENCY BOUND: currentUpdatedAt older than nowMs - recencyMs → unknown even with a lane-owned entry", () => {
+    const v = classifyTimelyOwnership({
+      currentState: "Implement",
+      currentUpdatedAtMs: 100_000,
+      fleetWrite: null, // would be `lane` without the bound
+      nowMs: 1_000_000,
+      recencyMs: 300_000,
+    });
+    expect(v).toEqual({ owner: "unknown", reason: REASON.OUTSIDE_TIMELY_WINDOW });
+  });
+
+  test("⛔ recency bound is SKIPPED when either clock input is absent (pure tests omit them)", () => {
+    // nowMs present but recencyMs absent → no bound → the null entry still resolves to lane.
+    const v = classifyTimelyOwnership({
+      currentState: "Implement",
+      currentUpdatedAtMs: 100_000,
+      fleetWrite: null,
+      nowMs: 1_000_000,
+    });
+    expect(v.owner).toBe("lane");
+  });
+});
+
+describe("classifyLaneClaimWrite — timely source integration", () => {
+  // Model the CTC-787 lane claim as a TIMELY observation: the ticket is in Implement, updated at
+  // T, and the regress target is `research` (rank 1 < 3). nowMs is 60 s later — inside the window.
+  const T = 1_000_000_000_000;
+  const base = {
+    currentState: "Implement",
+    targetRank: tr("research"),
+    botUserIds: BOTS,
+    rank: RANK,
+    currentUpdatedAtMs: T,
+    nowMs: T + 60_000,
+    recencyMs: 300_000,
+  };
+
+  test("8. AC#1 timing-pinned refusal: lane-owned within 60 s → REFUSE / TIMELY_LANE_CLAIM", () => {
+    const v = classifyLaneClaimWrite({ ...base, fleetWrite: null, lastChange: null });
+    expect(v.verdict).toBe(VERDICT.REFUSE);
+    expect(v.reason).toBe(REASON.TIMELY_LANE_CLAIM);
+    expect(v.currentRank).toBe(3);
+    expect(v.targetRank).toBe(1);
+  });
+
+  test("8b. an OLDER fleet write below the claim still refuses (foreign-after-fleet)", () => {
+    const v = classifyLaneClaimWrite({
+      ...base,
+      fleetWrite: { toState: "Research", atMs: T - 10_000 }, // fleet wrote earlier, human moved it to Implement
+      lastChange: null,
+    });
+    expect(v.verdict).toBe(VERDICT.REFUSE);
+    expect(v.reason).toBe(REASON.TIMELY_LANE_CLAIM);
+  });
+
+  test("9. AC#2 history-less refusal: no history AND null ledger → still REFUSE (needs no history)", () => {
+    const v = classifyLaneClaimWrite({ ...base, lastChange: null, fleetWrite: null });
+    expect(v.verdict).toBe(VERDICT.REFUSE);
+    expect(v.reason).toBe(REASON.TIMELY_LANE_CLAIM);
+  });
+
+  test("10. fleet recovery is ALLOWED: fleet wrote the current state → ALLOW / TIMELY_FLEET_OWNS", () => {
+    const v = classifyLaneClaimWrite({
+      ...base,
+      fleetWrite: { toState: "Implement", atMs: T },
+      lastChange: null,
+    });
+    expect(v.verdict).toBe(VERDICT.ALLOW);
+    expect(v.reason).toBe(REASON.TIMELY_FLEET_OWNS);
+  });
+
+  test("11. supersession does NOT false-refuse the fleet's in-flight write", () => {
+    // The replica still shows Implement (stale), but the fleet just wrote Research (newer). A
+    // regress target below Research must be allowed — effective current is Research.
+    const v = classifyLaneClaimWrite({
+      ...base,
+      currentState: "Implement",
+      fleetWrite: { toState: "Research", atMs: T + 5_000 },
+      lastChange: null,
+    });
+    expect(v.verdict).toBe(VERDICT.ALLOW);
+    expect(v.reason).toBe(REASON.TIMELY_FLEET_OWNS);
+  });
+
+  test("12. botUserIds INDEPENDENCE: case 8 with an EMPTY set → still REFUSE (timely runs before NO_BOT_IDS)", () => {
+    const v = classifyLaneClaimWrite({
+      ...base,
+      botUserIds: new Set(),
+      fleetWrite: null,
+      lastChange: null,
+    });
+    expect(v.verdict).toBe(VERDICT.REFUSE);
+    expect(v.reason).toBe(REASON.TIMELY_LANE_CLAIM);
+  });
+
+  test("⛔ NEGATIVE CONTROL — removing the timely source collapses the refusal to INCONCLUSIVE", () => {
+    // This test asserts the guard STOPS refusing when the timely source is removed. If it still
+    // refuses, the source is dead and the coverage above is a lie (the exact dead-branch class
+    // CTL-2068 shipped once). Case-8 inputs MINUS the timely source: no fleetWrite, no updatedAt,
+    // and a STALE history row (toState !== currentState) modelling the 18× latency gap.
+    const v = classifyLaneClaimWrite({
+      currentState: "Implement",
+      targetRank: tr("research"),
+      botUserIds: BOTS,
+      rank: RANK,
+      fleetWrite: undefined,
+      currentUpdatedAtMs: undefined,
+      lastChange: { actorId: LANE, toState: "Research" }, // stale: describes a state != current
+    });
+    expect(v.verdict).toBe(VERDICT.INCONCLUSIVE);
+    expect(v.reason).toBe(REASON.STALE_HISTORY);
+    expect(v.verdict).not.toBe(VERDICT.REFUSE);
+  });
+
+  test("13b. NEGATIVE CONTROL — with no history either, the removed source collapses to NO_HISTORY", () => {
+    const v = classifyLaneClaimWrite({
+      currentState: "Implement",
+      targetRank: tr("research"),
+      botUserIds: BOTS,
+      rank: RANK,
+      lastChange: null, // no history at all
+      // no timely params
+    });
+    expect(v.verdict).toBe(VERDICT.INCONCLUSIVE);
+    expect(v.reason).toBe(REASON.NO_HISTORY);
+  });
+
+  test("14. BACK-COMPAT — with no timely params, the CTL-2068 verdicts are byte-identical", () => {
+    // STALE_HISTORY (the 18× gap decline)…
+    const stale = classifyLaneClaimWrite({
+      currentState: "Implement",
+      targetRank: tr("research"),
+      lastChange: { actorId: LANE, toState: "Research" },
+      botUserIds: BOTS,
+      rank: RANK,
+    });
+    expect(stale.verdict).toBe(VERDICT.INCONCLUSIVE);
+    expect(stale.reason).toBe(REASON.STALE_HISTORY);
+    // …and LAST_CHANGE_BY_FLEET (the fleet's own legitimate backward move).
+    const fleet = classifyLaneClaimWrite({
+      currentState: "Implement",
+      targetRank: tr("research"),
+      lastChange: { actorId: FLEET, toState: "Implement" },
+      botUserIds: BOTS,
+      rank: RANK,
+    });
+    expect(fleet.verdict).toBe(VERDICT.ALLOW);
+    expect(fleet.reason).toBe(REASON.LAST_CHANGE_BY_FLEET);
+  });
+
+  test("⛔ a lane-owned effective state that is UNRANKED (Todo) abstains, not refuses", () => {
+    const v = classifyLaneClaimWrite({
+      ...base,
+      currentState: "Todo",
+      fleetWrite: null,
+      lastChange: null,
+    });
+    expect(v.verdict).toBe(VERDICT.INCONCLUSIVE);
+    expect(v.reason).toBe(REASON.UNRANKED_CURRENT);
   });
 });

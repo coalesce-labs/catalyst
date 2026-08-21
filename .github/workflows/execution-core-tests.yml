@@ -1312,6 +1312,7 @@ jobs:
             linear-write.test.mjs \
             lane-claim.test.mjs \
             lane-claim-wiring.test.mjs \
+            lane-claim-write-ledger.test.mjs \
             linear-write-proxy.test.mjs \
             linear-write-proxy-wiring.test.mjs \
             linear-write-proxy-resolve.test.mjs \
