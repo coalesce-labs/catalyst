@@ -17,7 +17,7 @@
         }
       ]
     },
-    "plugins/pm": {
+    "plugins/playground/pm": {
       "release-type": "simple",
       "component": "catalyst-pm",
       "package-name": "catalyst-pm",
@@ -31,7 +31,7 @@
         }
       ]
     },
-    "plugins/analytics": {
+    "plugins/playground/analytics": {
       "release-type": "simple",
       "component": "catalyst-analytics",
       "package-name": "catalyst-analytics",
@@ -45,7 +45,7 @@
         }
       ]
     },
-    "plugins/debugging": {
+    "plugins/playground/debugging": {
       "release-type": "simple",
       "component": "catalyst-debugging",
       "package-name": "catalyst-debugging",
@@ -73,7 +73,7 @@
         }
       ]
     },
-    "plugins/pm-ops": {
+    "plugins/playground/pm-ops": {
       "release-type": "simple",
       "component": "catalyst-pm-ops",
       "package-name": "catalyst-pm-ops",
@@ -87,7 +87,7 @@
         }
       ]
     },
-    "plugins/meeting-hygiene": {
+    "plugins/playground/meeting-hygiene": {
       "release-type": "simple",
       "component": "catalyst-meeting-hygiene",
       "package-name": "catalyst-meeting-hygiene",
@@ -101,7 +101,7 @@
         }
       ]
     },
-    "plugins/discovery": {
+    "plugins/playground/discovery": {
       "release-type": "simple",
       "component": "catalyst-discovery",
       "package-name": "catalyst-discovery",

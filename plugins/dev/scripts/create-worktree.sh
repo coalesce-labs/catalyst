@@ -341,16 +341,99 @@ else
 	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "$START_POINT"
 fi
 
+# ⛔ CTL-1921 — THIS COPY ONCE PEAKED THE DISK AT 150 GB.
+#
+# `cp -R .claude` copied the WHOLE directory, and `.claude/worktrees/` is where the
+# agent harness parks its own scratch checkouts (`wf_*`, `agent-*`) — each a full
+# working tree, several with their own `node_modules`. So every new worktree
+# inherited a byte-for-byte copy of every harness worktree that happened to exist,
+# and nested ones compounded it. Measured on this checkout the day the ticket was
+# filed:
+#
+#   .claude                1.3G
+#   .claude/worktrees      1.3G   <- 13 entries
+#   everything else        ~40K   <- rules, prompts, config*.json, settings.local
+#
+# i.e. the part actually worth copying is ~0.003% of what was being copied. The
+# sweep that found this freed 14 -> 156 GiB.
+#
+# Two independent changes, either of which would help and both of which are cheap:
+#
+#   1. SKIP the two directories that are machine-local scratch, never config.
+#      `worktrees/` (harness checkouts) and `debug/` (transcript dumps).
+#   2. CLONE instead of copy where the filesystem can. On APFS `cp -c` makes a
+#      copy-on-write clone — near-zero time and near-zero space — and GNU cp
+#      spells the same thing `--reflink=auto`. Both DEGRADE to a real copy rather
+#      than failing, but neither flag is portable, so the form is probed once and
+#      falls back to a plain `cp -R`.
+#
+# The exclusion is what makes this correct; the clone is what makes it fast. Do not
+# drop the exclusion on the grounds that cloning made it cheap — a clone still
+# materialises metadata for every file, and on a non-APFS/non-reflink filesystem it
+# is a full copy again.
+
+# _cw_copy_flag — the best available copy-on-write flag for this cp, probed ONCE
+# against a real temp file rather than sniffed from `uname`: a Mac can have GNU
+# coreutils first on PATH, and a Linux box can be running busybox cp. Empty means
+# "no clone support" — a plain recursive copy, which is always correct.
+_cw_copy_flag() {
+	local t rc=""
+	t=$(mktemp -d) || {
+		printf ''
+		return 0
+	}
+	: >"$t/probe"
+	if cp -Rc "$t/probe" "$t/out" 2>/dev/null; then
+		rc="-Rc" # BSD/macOS clone
+	elif cp -R --reflink=auto "$t/probe" "$t/out2" 2>/dev/null; then
+		rc="-R --reflink=auto" # GNU reflink
+	else
+		rc="-R"
+	fi
+	rm -rf "$t"
+	printf '%s' "$rc"
+}
+
+# Machine-local scratch that must never be inherited by a new worktree.
+_CW_SKIP_CLAUDE="worktrees debug"
+
+# _cw_copy_config_dir SRC DEST_PARENT — copy a config dir entry-by-entry, skipping
+# the scratch names. Entry-by-entry rather than `cp` + delete afterwards, because
+# deleting afterwards means the 1.3 GB is still written first — which is the whole
+# cost being removed.
+_cw_copy_config_dir() {
+	local src="$1" dest_parent="$2" flag="$3" entry base
+	mkdir -p "$dest_parent/$src"
+	# `dotglob` is not portable to plain sh, so dotfiles are enumerated separately.
+	for entry in "$src"/* "$src"/.[!.]*; do
+		[ -e "$entry" ] || continue # unmatched glob stays literal
+		base=${entry##*/}
+		case " $_CW_SKIP_CLAUDE " in
+		*" $base "*)
+			echo "   ↳ skipping $src/$base (machine-local scratch, CTL-1921)"
+			continue
+			;;
+		esac
+		# shellcheck disable=SC2086 # $flag is a deliberately-unquoted flag list
+		cp $flag "$entry" "$dest_parent/$src/" 2>/dev/null ||
+			cp -R "$entry" "$dest_parent/$src/" 2>/dev/null || true
+	done
+}
+
+_CW_COPY_FLAG=$(_cw_copy_flag)
+
 # Copy .claude directory if it exists (Claude Code native config)
 if [ -d ".claude" ]; then
 	echo "📋 Copying .claude directory..."
-	cp -R .claude "$WORKTREE_PATH/"
+	_cw_copy_config_dir .claude "$WORKTREE_PATH" "$_CW_COPY_FLAG"
 fi
 
 # Copy .catalyst directory if it exists (Catalyst workflow config)
+# Same helper for one behaviour only — the clone flag. `.catalyst` carries no
+# scratch subdirectory (measured: 88K), so the skip list simply never matches.
 if [ -d ".catalyst" ]; then
 	echo "📋 Copying .catalyst directory..."
-	cp -R .catalyst "$WORKTREE_PATH/"
+	_cw_copy_config_dir .catalyst "$WORKTREE_PATH" "$_CW_COPY_FLAG"
 fi
 
 # CTL-990: the cp -R above copies the MAIN checkout's working-tree versions of

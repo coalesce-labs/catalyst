@@ -643,6 +643,29 @@ cat > "$MULTIHOST_WH_BUNDLE" <<'BEOF'
 }
 BEOF
 
+# CTL-2004: the same multi-host bundle, but carrying the seed's GitHub-ingestion
+# posture. The bundle above hands a joiner monitor.github.smeeChannel — a tunnel
+# CHANNEL — while nothing carried the MODE that decides whether it opens
+# (githubFeedIsAuthoritative() is mode==="enforce"; the ladder defaults to "off"),
+# so a host joining after the cutover came up on smee, healthy and green.
+GHFEED_WH_BUNDLE="${SCRATCH}/ghfeed-wh.json"
+cat > "$GHFEED_WH_BUNDLE" <<'BEOF'
+{
+  "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "thoughtsOrg": "CTL",
+  "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
+  "hostsRoster": ["mini", "mini-2"],
+  "livenessAnchorIssue": "CTL-1",
+  "repoUrl": "https://github.com/example/repo",
+  "pluginSourceUrl": "https://github.com/example/plugins",
+  "githubFeed": {"mode": "enforce"},
+  "monitorWebhooks": {
+    "github": {"smeeChannel": "https://smee.io/GH"},
+    "linear": {"smeeChannel": "https://smee.io/LIN", "ctl": {"webhookId": "wh-ctl"}}
+  }
+}
+BEOF
+
 SINGLEHOST_WH_BUNDLE="${SCRATCH}/singlehost-wh.json"
 cat > "$SINGLEHOST_WH_BUNDLE" <<'BEOF'
 {
@@ -689,7 +712,138 @@ run "T2.8 multiHost roster + inferred mode FALLS BACK to heuristic and wires (CT
   echo \"\$out\" | grep -qF 'inferred=true' && \
   echo \"\$out\" | grep -qF 'heuristic_would=wire' && \
   jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$cfg\" >/dev/null &&
-  jq -e '.catalyst.monitor.linear.ctl.webhookId == \"wh-ctl\"' \"\$cfg\" >/dev/null"
+  echo \"\$out\" | grep -qF 'linear-stripped=yes' && \
+  jq -e '(.catalyst.monitor | has(\"linear\")) | not' \"\$cfg\" >/dev/null &&
+  ! grep -qF 'smee.io/LIN' \"\$cfg\" &&
+  jq -e '.catalyst.cloudFeed.mode == \"enforce\"' \"\$cfg\" >/dev/null"
+
+# T2.8e (CTL-1928): a bundle whose monitorWebhooks carries ONLY the retired
+# Linear block has nothing left to write once the strip runs. The decision must
+# report NOT wired and the config must gain no monitor block at all — the
+# failure this guards against is writing an empty/partial monitor block that
+# later reads as "ingestion configured".
+LINEAR_ONLY_WH_BUNDLE="${SCRATCH}/linear-only-wh.json"
+cat > "$LINEAR_ONLY_WH_BUNDLE" <<'BEOF'
+{
+  "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "thoughtsOrg": "CTL",
+  "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
+  "hostsRoster": ["mini", "mini-2"],
+  "livenessAnchorIssue": "CTL-1",
+  "repoUrl": "https://github.com/example/repo",
+  "pluginSourceUrl": "https://github.com/example/plugins",
+  "monitorWebhooks": {
+    "linear": {"smeeChannel": "https://smee.io/LIN", "ctl": {"webhookId": "wh-ctl"}}
+  }
+}
+BEOF
+
+run "T2.8e bundle carrying ONLY the retired Linear block wires nothing (CTL-1928)" bash -c "
+  h='${SCRATCH}/h28e'
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28e' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$LINEAR_ONLY_WH_BUNDLE' 2>&1)
+  cfg=\"\$h/.config/catalyst/config.json\"
+  echo \"\$out\" | grep -qF 'ONLY the retired Linear block' && \
+  ! grep -qF 'smee.io/LIN' \"\$cfg\" && \
+  jq -e '((.catalyst.monitor // {}) | has(\"linear\")) | not' \"\$cfg\" >/dev/null && \
+  jq -e '.catalyst.cloudFeed.mode == \"enforce\"' \"\$cfg\" >/dev/null"
+
+# T2.8f (CTL-1928, Codex #3485 P1): removing the Linear route must not leave a
+# node with NO Linear ingestion — the join provisions the cloud-feed
+# replacement, since readCloudFeedConfig defaults to "off" and doctor's
+# webhook-ingestion check is satisfied by the GitHub route alone (so the gap
+# would not even look broken). NON-CLOBBER: a node that already declares a mode
+# keeps its own.
+run "T2.8f an already-declared cloudFeed.mode is NOT clobbered by the join (CTL-1928)" bash -c "
+  h='${SCRATCH}/h28f'
+  mkdir -p \"\$h/.config/catalyst\"
+  printf '{\"catalyst\":{\"cloudFeed\":{\"mode\":\"shadow\"}}}' > \"\$h/.config/catalyst/config.json\"
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28f' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
+  cfg=\"\$h/.config/catalyst/config.json\"
+  jq -e '.catalyst.cloudFeed.mode == \"shadow\"' \"\$cfg\" >/dev/null && \
+  echo \"\$out\" | grep -qF 'cloudFeed=shadow'"
+
+# ─── CTL-2004: the GitHub half of the very rule T2.8e/f pin for Linear ───────────
+# The join already provisions the Linear REPLACEMENT in the same write that removes
+# the Linear route. The GitHub leg never got that treatment: the joiner received the
+# smee CHANNEL and no MODE, the ladder defaulted to "off", githubFeedIsAuthoritative()
+# read false, orch-monitor did not suppress the tunnel — and the node came up on smee
+# while looking perfectly healthy.
+
+run "T2.8g the join writes the seed's githubFeed.mode, so a member inherits the fleet posture (CTL-2004)" bash -c "
+  h='${SCRATCH}/h28g'
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28g' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$GHFEED_WH_BUNDLE' 2>&1)
+  cfg=\"\$h/.config/catalyst/config.json\"
+  jq -e '.catalyst.githubFeed.mode == \"enforce\"' \"\$cfg\" >/dev/null && \
+  echo \"\$out\" | grep -qF 'githubFeed=enforce'"
+
+run "T2.8h an already-declared githubFeed.mode is NOT clobbered by the join (CTL-2004)" bash -c "
+  h='${SCRATCH}/h28h'
+  mkdir -p \"\$h/.config/catalyst\"
+  printf '{\"catalyst\":{\"githubFeed\":{\"mode\":\"shadow\"}}}' > \"\$h/.config/catalyst/config.json\"
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28h' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$GHFEED_WH_BUNDLE' 2>&1)
+  cfg=\"\$h/.config/catalyst/config.json\"
+  jq -e '.catalyst.githubFeed.mode == \"shadow\"' \"\$cfg\" >/dev/null && \
+  echo \"\$out\" | grep -qF 'githubFeed=shadow'"
+
+# ⛔ INVERSION GUARD. An older seed carries no githubFeed; the join must write NOTHING
+# rather than inventing a posture. Without this the previous two tests would still pass
+# against an implementation that hardcoded a mode.
+run "T2.8i a bundle with NO githubFeed writes no key at all (CTL-2004 inversion guard)" bash -c "
+  h='${SCRATCH}/h28i'
+  out=\$(env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28i' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_GITHUB_TOKEN='ghp_TEST_DUMMY_0000' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' 2>&1)
+  cfg=\"\$h/.config/catalyst/config.json\"
+  jq -e '((.catalyst // {}) | has(\"githubFeed\")) | not' \"\$cfg\" >/dev/null && \
+  echo \"\$out\" | grep -qF 'githubFeed=unset'"
 
 # T2.9 (fixture updated for CTL-1617 PR5 — see T2.8's note): same inferred-mode
 # fallback, but SINGLEHOST_WH_BUNDLE's roster=1 makes the heuristic (and hence

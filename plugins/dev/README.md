@@ -1,19 +1,25 @@
 # Catalyst Dev Plugin
 
-Complete development workflow: research → plan → implement → validate → ship. 19 skills and 9 research agents covering the full Level 1 (single-skill) and Level 2 (guided-workflow) stack. Phase-agent / execution-core pipeline for Level 3 multi-ticket orchestration.
+Complete development workflow: research → plan → implement → validate → ship. 19 skills and 9
+research agents covering the full Level 1 (single-skill) and Level 2 (guided-workflow) stack.
+Phase-agent / execution-core pipeline for Level 3 multi-ticket orchestration.
 
 > **Plugin topology:**
+>
 > - The wave-orchestration skills `oneshot`, `orchestrate`, `god`, `setup-orchestrate` live in the
 >   **[catalyst-legacy](../legacy/README.md)** plugin — use `/catalyst-legacy:<skill>`. (The old
 >   redirect stubs that briefly lived here were removed.)
 > - The framework setup/maintenance skills `setup-catalyst`, `setup-warp`, and `research-curate`
 >   moved to the new **[catalyst-foundry](../foundry/README.md)** plugin — use
 >   `/catalyst-foundry:<skill>`.
-> - `briefing-followup` and `iterate-plan` are general workflow skills and live here in catalyst-dev.
+> - `briefing-followup` and `iterate-plan` are general workflow skills and live here in
+>   catalyst-dev.
 >
 > Both catalyst-legacy and catalyst-foundry depend on catalyst-dev for shared backing scripts.
 
-See the [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/) and [Agents Reference](https://catalyst.coalescelabs.ai/reference/agents/) for detailed per-skill documentation. The list below is the current inventory only.
+See the [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/) and
+[Agents Reference](https://catalyst.coalescelabs.ai/reference/agents/) for detailed per-skill
+documentation. The list below is the current inventory only.
 
 ## Skills (19)
 
@@ -75,7 +81,9 @@ See the [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/) a
 
 ## Automatic Workflow Context Tracking
 
-The plugin ships Claude Code hooks that keep `.catalyst/.workflow-context.json` up to date automatically. See [HOOKS.md](./HOOKS.md) and [WORKFLOW_CONTEXT.md](./WORKFLOW_CONTEXT.md) for the full mechanism.
+The plugin ships Claude Code hooks that keep `.catalyst/.workflow-context.json` up to date
+automatically. See [HOOKS.md](./HOOKS.md) and [WORKFLOW_CONTEXT.md](./WORKFLOW_CONTEXT.md) for the
+full mechanism.
 
 Summary:
 
@@ -93,13 +101,20 @@ Summary:
 
 ## Configuration
 
-Reads `.catalyst/config.json` (safe to commit) and `~/.config/catalyst/config-{projectKey}.json` (never committed — secrets). See the [Configuration Reference](https://catalyst.coalescelabs.ai/reference/configuration/) for the full schema.
+Reads `.catalyst/config.json` (safe to commit) and `~/.config/catalyst/config-{projectKey}.json`
+(never committed — secrets). See the
+[Configuration Reference](https://catalyst.coalescelabs.ai/reference/configuration/) for the full
+schema.
 
 Quick setup:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
+curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh \
+  | bash -s -- --non-interactive
 ```
+
+`-s --` is what passes the flags to the script rather than to `bash`. Omit it and the piped install
+runs interactive, which on a host with no tty degrades to defaults.
 
 ## Requirements
 
@@ -113,17 +128,26 @@ curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-c
 Runtime utilities under `scripts/`:
 
 - `catalyst-db.sh` — SQLite session store CRUD and schema migrations (see ADR-008)
-- `catalyst-monitor.sh` — On-demand orch-monitor server management (`start`, `stop`, `status`, `open`, `url`)
-- `catalyst-session.sh` — Lifecycle CLI for agent sessions (`start`, `phase`, `metric`, `tool`, `pr`, `end`, `heartbeat`, `list`, `read`, `history`). Writes to SQLite via `catalyst-db.sh` and dual-writes JSONL events for backward compatibility
+- `catalyst-monitor.sh` — On-demand orch-monitor server management (`start`, `stop`, `status`,
+  `open`, `url`)
+- `catalyst-session.sh` — Lifecycle CLI for agent sessions (`start`, `phase`, `metric`, `tool`,
+  `pr`, `end`, `heartbeat`, `list`, `read`, `history`). Writes to SQLite via `catalyst-db.sh` and
+  dual-writes JSONL events for backward compatibility
 - `catalyst-state.sh` — Writes to `~/catalyst/state.json` and `~/catalyst/events/YYYY-MM.jsonl`
-- `check-config-drift.sh` — Detect keys present in `templates/config.template.json` but missing from `.catalyst/config.json` (CTL-489); supports `--json` enumeration and `--merge-into` for atomic deep-merge
+- `check-config-drift.sh` — Detect keys present in `templates/config.template.json` but missing from
+  `.catalyst/config.json` (CTL-489); supports `--json` enumeration and `--merge-into` for atomic
+  deep-merge
 - `check-project-setup.sh` — Validate workspace has thoughts system, config, etc.
 - `create-worktree.sh` — Worktree creation with setup hooks
 - `frontmatter-utils.sh` — Parse and update markdown frontmatter
-- `orch-monitor/` — React SPA + Bun server dashboard (default port 7400, configurable via `MONITOR_PORT`). Reads `~/catalyst/catalyst.db` (SQLite, WAL mode) and watches `~/catalyst/wt/`. Start with `cd plugins/dev/scripts/orch-monitor && bun run server.ts`, or use `catalyst-monitor.sh open`
+- `orch-monitor/` — React SPA + Bun server dashboard (default port 7400, configurable via
+  `MONITOR_PORT`). Reads `~/catalyst/catalyst.db` (SQLite, WAL mode) and watches `~/catalyst/wt/`.
+  Start with `cd plugins/dev/scripts/orch-monitor && bun run server.ts`, or use
+  `catalyst-monitor.sh open`
 - `orchestrate-fixup` — Fix issues found during orchestration verification
 - `orchestrate-followup` — Handle follow-up tasks after orchestration completes
-- `orchestrate-verify.sh` — Adversarial verification checks (test existence, reward-hacking patterns)
+- `orchestrate-verify.sh` — Adversarial verification checks (test existence, reward-hacking
+  patterns)
 - `pre-assign-migrations.sh` — Pre-assign database migration numbers to avoid conflicts
 - `resolve-ticket.sh` — Extract ticket IDs from various contexts
 - `workflow-context.sh` — Read/write `.catalyst/.workflow-context.json`
@@ -140,7 +164,8 @@ Hooks under `hooks/`:
 2. **Skills orchestrate** — Spawn parallel agents, manage processes
 3. **Context is precious** — Use thoughts system for persistence between sessions
 4. **Automation via hooks** — Track automatically, not manually
-5. **Worker-side work has a boundary** — Workers exit at PR creation; polling-until-merged is the orchestrator's job
+5. **Worker-side work has a boundary** — Workers exit at PR creation; polling-until-merged is the
+   orchestrator's job
 
 ## Documentation
 

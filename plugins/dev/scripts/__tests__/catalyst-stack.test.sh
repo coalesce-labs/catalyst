@@ -73,6 +73,20 @@ EOF
 exit 0
 EOF
   chmod +x "$dir/brew"
+  # ⛔ CTL-1968: `catalyst-stack start` calls start_event_mirror, which bootouts
+  # and bootstraps ai.coalesce.catalyst-event-mirror. HOME here is the REAL home,
+  # so this is not the foreign-HOME case the launchd guard covers — an unstubbed
+  # launchctl reaches the live per-user domain and bounces THIS MACHINE's
+  # event-mirror agent, which on a monitor-class node is the fleet event feed.
+  # Measured on the laptop before this stub: one run of this file issued 7
+  # bootouts and 5 bootstraps against ~/Library/LaunchAgents — an asymmetry that
+  # can leave the agent DOWN, the same way the health-responder was left unloaded
+  # for 3h47m on 2026-08-18.
+  cat > "$dir/launchctl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$dir/launchctl"
 }
 
 STUBDIR="${SCRATCH}/stubs"
@@ -527,7 +541,10 @@ run "uninstall-services removes all three plists" bash -c "
     mkdir -p '${SCRATCH}/uninst_bin'
     printf '#!/usr/bin/env bash\nexit 0\n' > '${SCRATCH}/uninst_bin/launchctl'
     chmod +x '${SCRATCH}/uninst_bin/launchctl'
-    PATH='${SCRATCH}/uninst_bin:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' uninstall-services >/dev/null 2>&1 || true
+    # CTL-1968: launchctl is stubbed one line above and HOME is a scratch dir, so
+    # this case deliberately drives the uninstall path. The product now refuses to
+    # touch gui/<uid> from a foreign HOME; declaring the seal opts back in.
+    CATALYST_ALLOW_FOREIGN_HOME_LAUNCHD=1 PATH='${SCRATCH}/uninst_bin:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' uninstall-services >/dev/null 2>&1 || true
     [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist\" ]] && \
     [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\" ]] && \
     [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\" ]]

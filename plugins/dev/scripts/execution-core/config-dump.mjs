@@ -45,6 +45,7 @@ import {
   COORDINATION_MODES,
   DEAD_DOC_WORKER_MODES,
   RECOVERY_PASS_MODES,
+  LINEAR_WRITE_PROXY_MODES, // CTL-1889
   STALL_JANITOR_MODES,
   UNSTUCK_SWEEP_MODES,
   WATCHDOG_MODES,
@@ -384,6 +385,18 @@ export const CONFIG_KEYS = Object.freeze(
       modes: RECOVERY_PASS_MODES,
       fallback: "off",
       reader: "readRecoveryPassConfig",
+    },
+    {
+      // CTL-1889: the Linear write-proxy transport. Layer-2 only — the `routes`
+      // sibling is a URL-path map, which has no env precedent and no business in a
+      // daemon env var.
+      key: "catalyst.linearWriteProxy.mode",
+      kind: "mode",
+      layer2: "catalyst.linearWriteProxy.mode",
+      env: ["CATALYST_LINEAR_WRITE_PROXY"],
+      modes: LINEAR_WRITE_PROXY_MODES,
+      fallback: "off",
+      reader: "readLinearWriteProxyConfig",
     },
     {
       key: "catalyst.recovery.deadDocWorker.mode",

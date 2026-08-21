@@ -355,3 +355,100 @@ function normalizeShape(f = {}) {
 
   return base;
 }
+
+// ── CTL-1754: the reason an escalation reports ──────────────────────────────
+//
+// ⛔ THE DEFECT THIS EXISTS TO FIX. The terminal-sweep escalation built its
+// operator card from ONE key — `signal.stalledReason` — and that key is written
+// by exactly one production path (`unstuck-act-seams.mjs`, for the single value
+// `source_conflict_ctl708_unavailable`). Every other failed/stalled signal the
+// pipeline produces carries its reason under a DIFFERENT key, so the card read
+// "(no reason)" while the reason sat in the same file.
+//
+// Measured across every `failed`/`stalled` phase signal on both fleet hosts
+// (44 signals, 2026-08-19):
+//
+//     stalledReason     0     ⛔ the key the card read
+//     attentionReason  26
+//     failureReason    18
+//     no reason at all  0     ⭐ every signal HAS a reason
+//
+// 41 consecutive escalations reported "(no reason)". None of them lacked one.
+//
+// ⚠️ ORDER IS NOT LOAD-BEARING, and saying so is the honest claim: on the
+// measured population `failureReason` and `attentionReason` NEVER co-occur
+// (0 signals carry both), so their relative order is unobservable today.
+// `stalledReason` stays FIRST because it is the deliberate, specific stall
+// reason and must not be masked when a path does write it.
+//
+// ⭐ THREE-VALUED ON PURPOSE — not a `??` chain. "the signal records no reason"
+// and "I could not read the signal at all" are different facts, and collapsing
+// them into one "(no reason)" string is exactly how this defect survived 41
+// instances: an unreadable signal and a reasonless one produced byte-identical
+// cards, so no operator could tell a missing worker dir from a missing field.
+//
+// ⛔⛔ READ BOTH LEVELS — AND THIS IS WHY THE ORIGINAL BUG WAS UNCONDITIONAL.
+// The scheduler does not hand this function the on-disk JSON. It hands it the
+// CANONICAL PROJECTION from `signal-reader.mjs` `parseSignal`, which promotes
+// exactly: ticket, layout, signalPath, phase, status, liveness, updatedAt, pr,
+// worktreePath, host, raw. NO reason key is promoted — all three live only
+// under `.raw`. So `signal.stalledReason` was undefined for EVERY signal
+// regardless of what was on disk: even the one path that does write
+// `stalledReason` (unstuck-act-seams.mjs) could never have surfaced through
+// this card. The disk census explains why the field is rare; the projection
+// explains why the card was empty 41 times out of 41.
+//
+// ⚠️ A fixture shaped like the on-disk JSON therefore CANNOT prove this works —
+// the function never receives that shape in production. `signal.outcome ??
+// signal.raw?.outcome` in signal-reader.mjs is the existing precedent for
+// reading both levels, and this follows it. Credit: Codex, #3699 P1.
+
+/** Keys that carry a failure/stall reason on a phase signal, in ladder order. */
+export const SIGNAL_REASON_KEYS = Object.freeze([
+  "stalledReason", // deliberate stall (unstuck-act-seams); rare but most specific
+  "failureReason", // the abandon/fail path — e.g. "ended-without-declaration"
+  "attentionReason", // the attention path — e.g. "sdk-overloaded-exhausted"
+]);
+
+/**
+ * Resolve why a phase signal is failed/stalled.
+ *
+ * @param {object|null|undefined} signal a parsed phase signal, or null/undefined
+ *   when the worker dir had no signal (a `signalByTicket.get()` miss).
+ * @returns {{reason: string|null, key: string|null, status: "named"|"absent"|"unreadable"}}
+ *   - `named`      a reason was found; `key` says which field supplied it
+ *   - `absent`     the signal is readable and records no reason
+ *   - `unreadable` there is no signal object to inspect
+ *   Never throws — this sits on the escalation write path, and a resolver that
+ *   throws would suppress the very card it exists to improve.
+ */
+export function resolveSignalReason(signal) {
+  if (signal === null || signal === undefined || typeof signal !== "object") {
+    return { reason: null, key: null, status: "unreadable" };
+  }
+  const raw = signal.raw;
+  const nested = raw !== null && typeof raw === "object" ? raw : null;
+  for (const key of SIGNAL_REASON_KEYS) {
+    // Top level first, then `.raw` — the canonical projection carries the
+    // reason ONLY under `.raw`, while a hand-built or on-disk-shaped object
+    // carries it at the top. Both must resolve or the fix is inert.
+    for (const candidate of [signal[key], nested?.[key]]) {
+      if (typeof candidate === "string" && candidate.trim() !== "") {
+        return { reason: candidate.trim(), key, status: "named" };
+      }
+    }
+  }
+  return { reason: null, key: null, status: "absent" };
+}
+
+/**
+ * The parenthetical an operator card shows for a signal's reason. Keeps the
+ * three states distinguishable in the rendered text — an operator reading
+ * "signal unreadable" knows to look for a missing worker dir, where
+ * "no reason recorded" says the dir is there and the field is not.
+ */
+export function describeSignalReason(signal) {
+  const r = resolveSignalReason(signal);
+  if (r.status === "named") return r.reason;
+  return r.status === "unreadable" ? "signal unreadable" : "no reason recorded";
+}

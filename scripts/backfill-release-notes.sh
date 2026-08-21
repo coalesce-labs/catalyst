@@ -40,7 +40,8 @@ TARGET_PLUGIN="${1:-}"
 if [[ -n "$TARGET_PLUGIN" ]]; then
   CHANGELOG_FILES=("plugins/$TARGET_PLUGIN/CHANGELOG.md")
 else
-  CHANGELOG_FILES=(plugins/*/CHANGELOG.md)
+  # CTL-1999: both depths — six plugins now live at plugins/playground/<name>/.
+  CHANGELOG_FILES=(plugins/*/CHANGELOG.md plugins/*/*/CHANGELOG.md)
 fi
 
 call_claude() {
@@ -247,4 +248,4 @@ done
 
 echo ""
 echo "Backfill complete. Review changes with:"
-echo "  git diff plugins/*/CHANGELOG.md"
+echo "  git diff plugins/*/CHANGELOG.md plugins/*/*/CHANGELOG.md"

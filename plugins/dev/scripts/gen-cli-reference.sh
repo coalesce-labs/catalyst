@@ -47,6 +47,7 @@ catalyst-filter|Event & comms|1|DEPRECATED alias for catalyst-broker (delegates 
 catalyst-why|Event & comms|1|Explain why the daemon believes a worker is alive, stuck, or dead (belief→rule→facts trace).
 catalyst-transitions|Event & comms|0|Live, human-readable Linear-state + phase transition log (tails the event stream — bare runs forever).
 catalyst-verify|Event & comms|1|Verified checks that cannot report a clean result from a check that never ran — count events by exact event.name, resolve HRW ticket ownership under named rosters, enumerate every PR merge blocker (exit 2 = INCONCLUSIVE).
+catalyst-index-root|Fleet & install|1|CTL-1935: prove (and provision) the PINNED serving root a cold catalyst-index run must execute from — HEAD exactly at the recorded sha, the release symbol present on disk, and the tree pristine. Refuses to `run` from an unverified root.
 catalyst-session|Session & state|1|Lifecycle CLI for Catalyst agent sessions (start/phase/metric/tool/pr → SQLite + event log).
 catalyst-state|Session & state|1|Manage global orchestrator state at ~/catalyst/state.json (flock-protected RMW + event log).
 boot-resume-approve|Session & state|0|List boot-resume-gated tickets and approve one — writes the .boot-resume-approved sentinel so the daemon dispatches the gated phase without a restart (CTL-1443).
@@ -63,6 +64,7 @@ catalyst-hud|HUD & display|0|Ink TUI for the catalyst event stream (bare invocat
 catalyst-hud-classic|HUD & display|0|Color-coded terminal HUD for the event stream (minimal-deps fallback; bare runs forever).
 catalyst|Umbrella & lifecycle|1|The single front-door router for the Catalyst toolchain (git-style dispatch to every catalyst-* tool).
 catalyst-stack|Umbrella & lifecycle|1|Bring the Catalyst service stack up or down on this host (idempotent, dependency-ordered).
+catalyst-enrol|Umbrella & lifecycle|1|One-key host enrollment installer — binds a fresh machine to a Catalyst Cloud account/tenant with a single --cloud-key, generating (or accepting an existing) age keypair for local secret decryption.
 catalyst-install|Umbrella & lifecycle|1|Provision or tear down this node for its class (composes setup scripts; install/uninstall/reinstall).
 catalyst-doctor|Umbrella & lifecycle|1|Fail-closed activation gate — class-aware health/activation grade (exit 0 ⇒ safe to activate).
 catalyst-config|Umbrella & lifecycle|1|Read-only per-key config provenance dump (value + env-override/config/default source, resolved layer paths, fingerprint) for cross-host diffing.

@@ -43,7 +43,7 @@ replica-read rule below is absolute).
   instrument against a case known to be present and saw it come back non-zero.** Before you report
   "zero", "absent", "unrelated", "clean", or "not owned", ask the question that separates *the thing
   is not there* from *I could not look* — and if you cannot separate them, say **inconclusive**. The
-  four mechanisms that have actually produced a false clean result here, all of them silent:
+  five mechanisms that have actually produced a false clean result here, all of them silent:
   (1) an unstructured match over structured data — a substring `grep` for an event name counted the
   name where it appeared inside a commit message, reporting events that did not exist; (2) a
   malformed call returning a falsy sentinel — an ownership helper invoked with its arguments
@@ -51,7 +51,17 @@ replica-read rule below is absolute).
   set feeding a loop, so the body never ran and the trailing all-clear line printed on the strength
   of zero iterations (`[].every(p)` is `true`); (4) the right question asked of the wrong surface —
   counting a bot's issue comments returned zero while an unresolved *review thread* was the thing
-  blocking the merge. Prefer the verified helpers in `plugins/dev/scripts/lib/verified-checks.mjs`
+  blocking the merge; (5) **the search tool skipping files it never says it skipped** — in the agent
+  shell `grep` is a wrapper around `ugrep --ignore-files`, which honours `.gitignore`, and
+  `~/.config/catalyst/.gitignore` excludes `config*.json`, so **a recursive grep never reads any live
+  Catalyst config** and answers "not configured anywhere" for a value sitting in `config.json`. It is
+  convincing because the `.bak-*` copies do NOT match that pattern, so you get plausible hits from
+  stale backups while the live file is skipped. A recursive-grep zero over config, secrets, or
+  build output is **inconclusive** until re-run with `/usr/bin/grep` or an explicit file list.
+  (Sibling traps in the same family: `find` does not follow symlinks, so it misses what
+  `cat`/`readFileSync` read straight through — e.g. bun's `.bun` store entries; and zsh kills an
+  unquoted `--include=*.mjs` with "no matches found", returning nothing, which also reads as a real
+  zero.) Prefer the verified helpers in `plugins/dev/scripts/lib/verified-checks.mjs`
   (count events by exact `event.name`, resolve ticket ownership under named rosters, enumerate every
   merge blocker) — each returns a verdict that can be explicitly **inconclusive** and throws on
   malformed input rather than degrading to a falsy answer. This rule governs the bullets below: a
@@ -110,6 +120,28 @@ replica-read rule below is absolute).
   Scoping applies too: write only inside your own worktree, and chain with `cd <dir> && <cmd>` — a
   bare `cd` on its own line that silently fails will apply your edits to whichever worktree the
   shell happened to be in.
+- **Coordination has THREE roles, and "orchestrator" is not one of them.** Long-running coordination is
+  done by single-threaded owners: a **concierge** (the one agent a human talks to — owns the status board,
+  the ask inbox, routing and project scaffolding, and holds **no authority over stewards**), a **steward**
+  (owns ONE initiative or project end-to-end until it closes; makes work ready and visible, the fleet does
+  it), and **workers** (one phase of one ticket, driven by the pipeline). Invoke the `concierge` and
+  `steward` skills by name; the phase pipeline's shared contract is `phase-agent-contract`. ⚠️ Reserve
+  **"orchestrator"** for the pipeline MACHINERY — never for an agent or a person: this repo already calls
+  the phase runners *workers* in code (`workers/<ticket>/`, `worker.session.started`), so a role by that
+  name reads as the scheduler. Three rules bind you even when you are none of these roles:
+  - **Reply where the message arrived, threaded, and never as the human.** A comment inside a scope is
+    answered by that scope's **steward**, in-thread and tagged. Anything only a human can decide becomes
+    an **ask ticket** (`catalyst-dev:ask`) with Options + a Default if silent — and you **proceed on the
+    default**. Never answer someone else's ask, and never post as the human.
+  - **Escalate inward, never outward:** instrument → steward → concierge → human (as an ask). An agent or
+    instrument that pages a human directly is a defect, and a bare label in a human's queue is a defect.
+  - **Cite an identifier only after `create` returned it.** A guessed ticket number is usually a real,
+    unrelated ticket — worse than no number at all.
+- **Skills here use progressive disclosure — read the reference you need, not all of them.** A skill is a
+  short `SKILL.md` covering the common path, plus `references/*.md` loaded **on demand**; the SKILL.md
+  names which reference answers which situation. Follow that table rather than reading the whole tree.
+  `plugins/dev/skills/__tests__/skill-shape.test.sh` enforces the shape and `skills-gate` runs it on
+  every PR, so the budget is real.
 <!-- catalyst-house-rules:end -->
 
 ## Build & Test
@@ -190,7 +222,7 @@ many broad `Grep`s, getting up to speed with far fewer tool calls and tokens.
 **How release-please routes version bumps (monorepo):**
 
 - Routing is by **file paths changed**, NOT by commit message scope. A commit touching files in both
-  `plugins/dev/` and `plugins/pm/` bumps both plugins regardless of scope.
+  `plugins/dev/` and `plugins/playground/pm/` bumps both plugins regardless of scope.
 - The `(scope)` in `fix(dev):` controls **changelog grouping**, not which plugin gets bumped.
 - Squash merges work correctly — the GitHub API provides the file list to release-please.
 - Use the scope that best describes the primary intent. Both plugins still get their version bumps.
@@ -324,6 +356,10 @@ Read these on demand:
 - **Decision records (ADRs)** — `docs/adrs.md`
 - **Specs & mockups** — `docs/specs/` (durable `draft → accepted` home for specs, requirements,
   and mockups; distinct from ADRs and `thoughts/` — see `docs/specs/README.md`)
+- **smee retirement + rollback** — `docs/runbooks/cloud-feed-cutover.md` (CTL-1928 retired the
+  Linear half 2026-08-17; CTL-1929 retired the **GitHub** half 2026-08-18 — both ingestion legs
+  are now the cloud feed, all 15 webhooks are disabled-not-deleted, and the runbook holds the
+  four per-host verify-by-content checks and both rollback lever pairs)
 - **Release process** — `docs/releases.md`
 - **Observability signal catalog** — `catalyst-otel/docs/data-dictionary.md` (sister repo: every
   metric, log/event, trace, and alert; see the Observability section above)

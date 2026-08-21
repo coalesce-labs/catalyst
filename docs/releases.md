@@ -77,7 +77,7 @@ Scopes (one per plugin): `dev`, `pm`, `meta`, `analytics`, `debugging`, `pm-ops`
 `meeting-hygiene`, `discovery`, `legacy`, `foundry`.
 
 **Routing is by file paths changed, not scope.** A commit touching `plugins/dev/` and
-`plugins/pm/` bumps **both** plugins regardless of scope; the `(scope)` only sets the changelog
+`plugins/playground/pm/` bumps **both** plugins regardless of scope; the `(scope)` only sets the changelog
 section header. Squash merges work (GitHub API supplies the full file list). Use the scope of the
 primary plugin.
 

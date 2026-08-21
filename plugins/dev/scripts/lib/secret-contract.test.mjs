@@ -47,14 +47,15 @@ beforeEach(() => {
 });
 
 describe("SECRET_REGISTRY — shape", () => {
-  test("11 seed rows, matching the design §2 seed table", () => {
-    expect(SECRET_REGISTRY.length).toBe(11);
+  test("12 seed rows, matching the design §2 seed table (CTL-2042 adds execution-core-secrets.env)", () => {
+    expect(SECRET_REGISTRY.length).toBe(12);
     expect(SECRET_REGISTRY.map((r) => r.id)).toEqual([
       "github-token",
       "webhook-secret",
       "linear-webhook-secret",
       "claude-accounts.env",
       "execution-core.env",
+      "execution-core-secrets.env",
       "linear-api-token",
       "linear-orchestrator-actor",
       "linear-worker-actor",
@@ -62,6 +63,14 @@ describe("SECRET_REGISTRY — shape", () => {
       "cloud-token",
       "age-key",
     ]);
+  });
+
+  test("execution-core-secrets.env is registered as env-file/boot-only (CTL-2042)", () => {
+    const row = SECRET_REGISTRY.find((r) => r.id === "execution-core-secrets.env");
+    expect(row).toBeDefined();
+    expect(row.delivery).toBe("env-file");
+    expect(row.rotation.class).toBe("boot-only");
+    expect(row.envNames).toEqual([]);
   });
 
   test("registry and every row are frozen — DATA, never mutated at runtime", () => {
@@ -73,7 +82,7 @@ describe("SECRET_REGISTRY — shape", () => {
     expect(() => {
       SECRET_REGISTRY.push({ id: "bogus" });
     }).toThrow();
-    expect(SECRET_REGISTRY.length).toBe(11);
+    expect(SECRET_REGISTRY.length).toBe(12);
   });
 
   test("DEEP-FREEZE (Codex finding fix): every row's NESTED envNames array is also frozen, not just the outer row object", () => {
@@ -999,7 +1008,7 @@ describe("registry validation (§6) — the rearm-hook honesty rules", () => {
     // remains genuinely hookless everywhere in the codebase as of this PR.
     const reArmable = SECRET_REGISTRY.filter((r) => r.rotation.class === "re-armable");
     expect(reArmable.map((r) => r.id).sort()).toEqual(
-      ["github-token", "linear-api-token", "linear-orchestrator-actor"].sort(),
+      ["claude-accounts.env", "github-token", "linear-api-token", "linear-orchestrator-actor"].sort(),
     );
     for (const row of reArmable) {
       const env = { PROBE_UNSET_VAR_FOR_TEST: "x" }; // resolves to none for every one of these rows
@@ -1050,6 +1059,12 @@ describe("registry validation (§6) — the rearm-hook honesty rules", () => {
     armSecret("github-token", { env }); // establishes baseline via the degrade path
     const r = armSecret("github-token", { env });
     expect(r.armed).toBe(false); // hook path never entered
+  });
+
+  test("CTL-1984: registerRearmHook('claude-accounts.env') returns true (capability ceiling lifted)", () => {
+    const fn = () => ({ rearmed: true });
+    expect(registerRearmHook("claude-accounts.env", fn)).toBe(true);
+    clearRearmHook("claude-accounts.env");
   });
 });
 

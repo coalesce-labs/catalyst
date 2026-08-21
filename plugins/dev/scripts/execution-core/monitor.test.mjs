@@ -1899,11 +1899,27 @@ describe("triage re-dispatch guard (CTL-1441)", () => {
     reconcileAll({ exec });
     const dispatch = mock(() => ({ code: 0 }));
     const labelNeedsHuman = mock(() => {});
-    sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    // CTL-2090: the capped exit must never be silent — capture the shared logger
+    // (the triage-admission-observability.test.mjs pattern) across the FIRST
+    // capped sweep, where the skip streak is 1 and noteTriageSkip writes its line.
+    const infoLines = [];
+    const infoSpy = spyOn(log, "info").mockImplementation((ctx, msg) => infoLines.push({ ctx, msg }));
+    try {
+      sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    } finally {
+      infoSpy.mockRestore();
+    }
     expect(dispatch).not.toHaveBeenCalled();
     expect(labelNeedsHuman).toHaveBeenCalledTimes(1);
     expect(labelNeedsHuman).toHaveBeenCalledWith(realOrchDir, "ENG-9");
     expect(JSON.parse(readFileSync(join(countsDir, "ENG-9.json"), "utf8")).cappedAt).toBeTruthy();
+    // CTL-2090: on mini-2 (2026-08-20) this exit was routed every sweep for 36h
+    // with no record at any level. The skip must be counted like every other.
+    expect(
+      infoLines.some(
+        (l) => l.ctx?.ticket === "ENG-9" && l.ctx?.reason === "triage-redispatch-capped"
+      )
+    ).toBe(true);
     // A second sweep still skips dispatch but RE-TRIES the label — a transient
     // Linear failure leaves no labelOnce marker, so the retry must reach it
     // (Codex P2); labelOnce's own markers are the idempotence guard.

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  CTL-1908 — page before an armed Claude account exhausts its window.
+  Tokens (__HOME__, __SCRIPT__) are substituted by install-usage-page.sh; this file is a
+  TEMPLATE and is not loadable as-is.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.coalesce.catalyst-usage-page</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__SCRIPT__</string>
+    <string>--threshold</string>
+    <string>80</string>
+  </array>
+  <!-- 10 minutes: matches the script's default staleness limit, so a source that goes dark is
+       noticed within one interval rather than sitting silent until someone looks. -->
+  <key>StartInterval</key>
+  <integer>600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <!--
+    ⛔ Codex #3526 P1 — THE LINEAR SINK IS OFF BY DEFAULT HERE, ON PURPOSE.
+    launchd does not run through the direnv profile, so LINEAR_SYNC_CLIENT_ID /
+    LINEAR_SYNC_CLIENT_SECRET are absent and the repo's reply tool exits 2. Rather than ship an
+    agent whose ticket sink silently fails every run, the pager posts to the CHANNEL (which needs
+    no credentials) and REPORTS that the Linear sink is unconfigured.
+    To enable it, add CATALYST_USAGE_TICKET, CATALYST_LINEAR_REPLY, LINEAR_SYNC_CLIENT_ID and
+    LINEAR_SYNC_CLIENT_SECRET to the dict below — and verify with one manual run, because a
+    credential launchd cannot see fails identically to one that is simply wrong.
+  -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/catalyst-usage-page.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/catalyst-usage-page.err.log</string>
+</dict>
+</plist>

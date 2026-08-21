@@ -181,6 +181,8 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.daemonWatchdog.sustainedTicks`                 | `2`                          | Consecutive breach ticks required before the watchdog acts (hysteresis). Env `EXECUTION_CORE_DAEMON_WATCHDOG_SUSTAINED_TICKS`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `orchestration.daemonWatchdog.verifyTicks`                    | `2`                          | Post-restart re-check window: if the predicate is still tripped after this many ticks, the watchdog escalates (latched alert + `severity:high` finding) instead of restarting again. Env `EXECUTION_CORE_DAEMON_WATCHDOG_VERIFY_TICKS`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `catalyst.stallJanitor.censusIntervalSeconds` _(Layer 2)_     | `900` (15 min)               | How often the stall-janitor's git-heavy worktree/stall censuses (J1 orphan-worktree, J3 stall-clear, J4 terminal-signal GC) may run, off the per-tick scheduler hot path. Each fires a `git worktree list` per repo plus a `git status` per terminal worktree, so running them every tick on a many-worktree host ages the daemon heartbeat and holds new-work dispatch; this cadence keeps them off the hot path while the cheap J2 ghost-session kill still runs every tick (CTL-1324). Env `CATALYST_STALL_JANITOR_INTERVAL_MS` (milliseconds) overrides.                                                                                                                                                                                                                                                                                                                                                                    |
+| `orchestration.laneClaim.timelyRecencySeconds`                | `300`                        | CTL-2070. The lane-claim guard (CTL-2068) refuses a pipeline write/dispatch that would regress a ticket a human lane has claimed. It has a **timely per-ticket actor source** — a durable host-local write-ledger (`~/catalyst/lane-claim-write-ledger.json`) of the last Linear state this fleet set and when — that covers the ~200 s window after a claim, before the reconcile-only `issue_history` catches up (CTL-1847: `issues.state` ~11 s vs `issue_history` ~201 s), and the 140 fleet tickets that have no history rows. This bound is how long that ledger stays authoritative: past `nowMs - issues.updated_at > timelyRecencySeconds`, the now-caught-up `issue_history` ladder governs instead, so the new REFUSE is confined to the exact claim-to-dispatch window. Env `CATALYST_LANE_CLAIM_TIMELY_RECENCY_SECONDS` overrides. The timely source is **on by default**, killable with `CATALYST_LANE_CLAIM_TIMELY_SOURCE=off` (restores exact CTL-2068 behavior — the guard falls back to `issue_history`); the source identifies the fleet by its own writes, not by an app-actor id set, so it functions independently of `botUserIds` / CTL-2074. |
+| `CATALYST_LANE_CLAIM_DISPATCH_GUARD` _(env var)_              | armed                        | CTL-2068. The lane-claim guard's operator kill switch for the **DISPATCH** veto only (refusing to run a phase on a lane-claimed ticket). Any value other than `off` leaves it armed; `off` disables the dispatch veto while keeping the write-side protection. Refusing a state write is benign (the write simply retries); refusing a dispatch withholds work, so this switch exists for an operator who needs the fleet to plough through a claim.                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 The orphan child-process reaper is the corroboration-heavy companion to the session-level reaper:
 `claude stop` deregisters a worker's claude agent but leaves its reparented `node`/`bun`
@@ -330,21 +332,23 @@ setup tool manages. See the
 [Worker-status labels reference](/autonomous-workflow/worker-status-labels/) for what each label
 means and how the HUD displays them.
 
-## Linear app-actor identity (`catalyst.linear.bot.{worker,orchestrator}.botUserId`)
+## Linear app-actor identity (`catalyst.linear.bot.{worker,orchestrator,cloud}.botUserId`)
 
 Catalyst posts to Linear as a Linear OAuth **app actor** — the "Linear for Agents" identity that
 comments **as Catalyst**. Linear OAuth apps are account-level (one app serves every team), so the
 bot identity and OAuth credentials now live in the **global** `~/.config/catalyst/config.json` under
-`catalyst.linear.bot`, split into two app actors:
+`catalyst.linear.bot`, split into app actors:
 
 - `catalyst.linear.bot.worker` — the worker app that posts phase-agent mirror comments and mints
   tokens via `client_credentials`.
 - `catalyst.linear.bot.orchestrator` — the orchestrator app that posts run-level updates.
+- `catalyst.linear.bot.cloud` — the cloud tenant's app actor whose identity the fleet's writes
+  carry when `CATALYST_LINEAR_WRITE_PROXY=enforce` (CTL-1889/ADR-0031). Recognition-only.
 
 Each carries a `botUserId` (the Linear user UUID of that app actor). The daemon and orch-monitor
-read **both** `botUserId`s into a single set so the self-echo / loop-prevention guard suppresses
-comments and issue events from **either** app actor. These UUIDs aren't secret (they appear on every
-comment the app posts), but they are account-specific.
+read **all** the `botUserId`s into a single set so the self-echo / loop-prevention guard suppresses
+comments and issue events from **any** of those app actors. These UUIDs aren't secret (they appear on
+every comment the app posts), but they are account-specific.
 
 ```json
 {
@@ -363,6 +367,9 @@ comment the app posts), but they are account-specific.
           "clientSecret": "...",
           "accessToken": "...",
           "botUserId": null
+        },
+        "cloud": {
+          "botUserId": null
         }
       }
     }
@@ -374,6 +381,7 @@ comment the app posts), but they are account-specific.
 | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `catalyst.linear.bot.worker.botUserId`                                         | Linear user UUID of the worker app actor. Suppresses self-echo on mirror comments / description updates. Also the read ID for the daemon's self-echo filter.                                                                                                                                                                                      |
 | `catalyst.linear.bot.orchestrator.botUserId`                                   | Linear user UUID of the orchestrator app actor. **Also drives self-assign on claim (CTL-1011)** — the daemon writes this UUID as the Linear assignee when it claims a ticket. When absent, `applyAssignee` emits a single deduped `warn` and leaves the ticket unassigned. Daemon reads it **only at startup** — restart required after changing. |
+| `catalyst.linear.bot.cloud.botUserId`                                          | Linear user UUID the fleet's writes carry when `CATALYST_LINEAR_WRITE_PROXY=enforce` (the cloud tenant's app actor, ADR-0031/CTL-1889). **Recognition-only:** enters the self-echo set so proxied comments/updates are suppressed and don't read as a human reply; does **not** drive self-assign (`readLinearBotWriteId` still prefers the orchestrator id). Provisioned from a proxy-confirmed value (CTL-2074). Verify with `catalyst doctor` (the self-echo-identity-history check). |
 | `catalyst.linear.bot.worker.{clientId,clientSecret,webhookSecret,accessToken}` | OAuth app-actor credentials for the worker identity. Secrets — keep in the un-committed global config                                                                                                                                                                                                                                             |
 
 > **Self-assign activation:** `catalyst.linear.bot.orchestrator.botUserId` must be set AND the
@@ -387,7 +395,7 @@ comment the app posts), but they are account-specific.
 Every reader prefers the new global path and falls back to the old location, so a running daemon or
 webhook receiver keeps working whether the value has been migrated yet:
 
-- **Bot IDs:** `catalyst.linear.bot.{worker,orchestrator}.botUserId` (global) → fall back to
+- **Bot IDs:** `catalyst.linear.bot.{worker,orchestrator,cloud}.botUserId` (global) → fall back to
   `catalyst.monitor.linear.botUserId` (per-repo `.catalyst/config.json`, the legacy single-actor
   location).
 - **Worker OAuth creds:** `catalyst.linear.bot.worker.{clientId,clientSecret}` (global) → fall back
@@ -942,6 +950,171 @@ sustained incident announces once instead of flooding the log every 30 s.
 > first `catalyst doctor` run after deploy legitimately reports `cloud-sync-skew` WARN "skew
 > unknown". It self-clears on the writer's next boot.
 
+### Linear write proxy (`CATALYST_LINEAR_WRITE_PROXY`, CTL-1889)
+
+Routes a host's Linear **writes** through the Catalyst Cloud write proxy under the one Catalyst
+Cloud grant, authenticated with the **per-host key**, instead of writing to Linear directly with
+that host's own "Catalyst Orchestrator" app-actor (ADR-0031 / CTC-486). The host sends **nothing**
+that identifies it — the cloud derives which host wrote from the key it authenticated, so no
+hostname, node name, or actor field appears in the request.
+
+Increment 1 wires the two routes the execution-core write chokepoint owns — **issue-state** and
+**label** (`linear-write.mjs`: `applyPhaseStatus` / `applyTerminalDone` / `applyTriageStatus`,
+`applyLabel`, `removeLabel`). The **comment** route exists in the transport; its call sites
+(`lib/linear-comment-post.sh` and `orch-monitor/lib/linear-comment.mjs`) are a later increment.
+Nothing is retired by this flag: every existing credential, mint path, and `LINEAR_*` secret is
+untouched, and retirement is gated on a shadow window with zero host-originated writes.
+
+Mode resolves from the env var over Layer-2 over the safe default of `off`. The `0` kill-switch and
+any unset/garbage value resolve to `off`.
+
+| Key                                            | Default | Notes                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CATALYST_LINEAR_WRITE_PROXY` _(env var)_      | `off`   | `off` / `0` (kill-switch — the transport is never constructed, no key is resolved, no event is emitted; byte-identical to not setting the flag), `shadow` (emit `linear.write.proxy.would-write.<TICKET>` and still perform the existing direct write — shadow makes NO cloud call, since for a write "observe by doing it too" would double-write the board), `enforce` (the proxy IS the write; the direct path is not taken). Garbage values fall back to `off`. Overrides Layer-2. |
+| `catalyst.linearWriteProxy.mode` _(Layer-2)_   | `off`   | Same three values; honored when the env var is absent or unrecognised.                                                                                                                                                                                                                                                                                    |
+| `catalyst.linearWriteProxy.routes` _(Layer-2)_ | _(none)_ | Per-route path override, `{ "issue-state": "/…", "label": "/…", "comment": "/…" }`. Values must be strings beginning `/`; anything else is dropped. Layer-2 only — a URL path has no business in a daemon env var. Defaults are measured; see below.                                                                                                                 |
+
+The per-host key is resolved through the **secret contract's `cloud-token` row** — the same row and
+the same `resolveCloudTokenName` ladder `cloud-sync` uses, so a host whose operator set
+`CATALYST_CLOUD_TOKEN_ENV` or Layer-2 `catalyst.cloud.tokenEnv` is honored. The endpoint base is
+`CATALYST_CLOUD_BASE_URL` over the shipped cloud default, exactly as `cloud-sync` resolves it.
+`CATALYST_CLOUD_ACCOUNT`, when set, rides the request as `?account=`. It is not required — a correct
+per-host key resolves its own tenant — but sending it turns a mis-provisioned host's generic
+`401 missing account` into the specific `403 … no per-host binding`, which names the actual defect.
+
+**In `enforce`, a failure never falls back to a direct Linear write.** A fall-back would mean the
+host keeps writing under its own app-actor precisely when the proxy is broken, so the shadow window
+that gates retirement would read "zero host-originated writes" while the host was still writing.
+Every failure is a NAMED reason (`no-cloud-token`, `unauthorized`, `not-found`, `rate-limited`,
+`server-error`, `rejected`, `unreadable-outcome`, `transport-error`, `spawn-failed`,
+`body-too-large`, `unknown-route`, `proxy-threw`, plus `cloud:<outcome>` for a refusal the cloud
+itself named and `resolve:<reason>` for one the replica resolver named); callers retry on the next
+tick. The verdict is read from the response body's discriminated `outcome`, **not** from the HTTP
+status alone — a 2xx carrying no parseable outcome is `unreadable-outcome` and is not counted as
+applied, because these routes always answer with one and a bare 2xx means we reached something
+other than the route. A host in `enforce` with **no**
+per-host key fails with `no-cloud-token` plus an ERROR line naming the env var it looked in — it
+never degrades quietly.
+
+> **⛔ `enforce` needs a PER-HOST cloud key, and the tenant-wide one is refused by design.** These
+> routes require an **org-owned WorkOS API key** provisioned per host. The tenant-wide `ADMIN_TOKEN`
+> authenticates (it is a machine principal) but carries no WorkOS key id, so the cloud rejects it by
+> name: `credential has no per-host binding`. That is a deliberate refusal, not a misconfiguration
+> to work around — the key's own id is what attributes a write to a host. Measured 2026-08-17:
+> **mini-2** carries a real per-host key and a proxied write reached Linear end to end; **mini**
+> still carries the `ADMIN_TOKEN` and every write is refused. Probe a host before enabling it:
+>
+> ```bash
+> curl -s -o /dev/stderr -w '%{http_code}\n' -X POST \
+>   "$CATALYST_CLOUD_BASE_URL/agent/issue-state?account=$CATALYST_CLOUD_ACCOUNT" \
+>   -H "Authorization: Bearer $CATALYST_CLOUD_TOKEN" -H 'Content-Type: application/json' \
+>   -d '{"issueId":"00000000-0000-4000-8000-000000000000","stateId":"00000000-0000-4000-8000-000000000001"}'
+> ```
+>
+> `400 {"outcome":"rejected","reason":"Entity not found: Issue"}` = a good key (it reached Linear and
+> the fake id was rejected there). `403 … no per-host binding` = the `ADMIN_TOKEN`; this host is not
+> ready. `401 missing account` = the `ADMIN_TOKEN` with no `?account=`.
+
+**Route paths are measured**, against `catalyst-cloud` `origin/main` — `/agent/issue-state`,
+`/agent/issue-label`, `/agent/issue-comment`, relative to a base that already ends in `/api/v1`.
+The `routes` override is kept anyway: the cloud can move a route without a release of this repo,
+and the override makes that a config change rather than a release.
+
+The CTL-758 backward-write guard is **re-applied** to the state `--resolve-only` reads. The guard
+that runs before it is fail-open — when its own read cannot answer it returns null and falls
+through — and the resolve step then reads the real state off the fresh replica. On an `enforce` host
+with no `linearis` that first read is the *most* likely to fail and the second the *most* likely to
+succeed, so without the second application the proxy could reopen a terminal ticket. The forward
+terminal write stays exempt, exactly as in the original guard.
+
+**Identifiers are resolved to Linear UUIDs off the local replica**, never a live Linear read
+(`linear-write-proxy-resolve.mjs`): ticket identifier → `issues.id`, label name → `labels.id`, and
+the target state name → `workflow_states.id` scoped to the issue's team. The state NAME itself comes
+from `linear-transition.sh --resolve-only`, which runs the one four-rung precedence chain
+(per-project `stateMap` > global `stateMap` > the registry's `eligibleQuery.triageStatus` > a
+built-in default) and writes nothing — so this feature does not become a second source of truth for
+what `inProgress` means. That mode deliberately does **not** require the `linearis` binary, because
+the end state of CTL-1889 is a host with neither `linearis` nor a Linear credential.
+
+> **⛔ The resolver is behind the same freshness gate as the read path.** "Read the replica" is only
+> half the rule. Resolution refuses unless the writer heartbeat (`<db>.writer.lock` mtime) is younger
+> than `CATALYST_LINEAR_REPLICA_STALE_MS` (default 300 s) **and** `sync_meta.cursor` is non-empty —
+> the same two conditions `lib/linear-read-replica.sh`'s `replica_fresh` applies, except that this
+> one refuses (`replica-stale` / `replica-reseeding`) where the read path falls back to `linearis`.
+> The seed check runs in the **same read transaction** as the resolution query: during a cold reseed
+> the entity tables repopulate in batches, so a duplicated label can look unique while only one copy
+> is back, and the ambiguity guard below is precisely a row-count judgement.
+
+> **⛔ Resolution failure is a refusal, not a fallback.** Unlike every other replica reader in the
+> tree (which is fail-OPEN and falls through to a live read), this resolver fails **closed**: an
+> absent ticket, an archived state, an unreadable replica, or a label name matching **more than
+> one** label all refuse the write with a named `resolve:<reason>`. Ambiguity is real — `schema`,
+> `types`, `mobile`, `infra`, `etl`, `dbt` and `api` each match four label rows in the live
+> workspace, and `labels` carries no team id to disambiguate with. The four labels this increment
+> writes (`needs-human`, `needs-input`, `blocked`, `queued`) are each unique today, but a first-hit
+> resolver would be one new team-scoped label away from putting another team's label on a ticket.
+
+> **Verification narrowing in `enforce`.** The CTL-587 label read-back is a live
+> `linearis issues read` — the very host credential this feature retires — so it is **not**
+> performed on the proxied path; the cloud response is the verdict. A replica-backed read-back is
+> tracked with the comment-route call sites.
+
+Observable events (all safe for a LogQL filter
+`{job="catalyst-events"} | json | attributes["event.name"] =~ "linear\\.write\\.proxy\\..*"`):
+
+- `linear.write.proxy.would-write.<TICKET>` — shadow hit; the direct write still happened
+- `linear.write.proxy.applied.<TICKET>` — enforce hit, the cloud accepted the write
+- `linear.write.proxy.failed.<TICKET>` — enforce hit, NOT written (ERROR; `reason` attached)
+
+### Lease-authority claim (`CATALYST_LEASE_AUTHORITY`, CTL-1786)
+
+Selects the cross-host `(ticket, phase)` claim mechanism. The default (`off`) is the
+Linear-attachment **soft-CAS** (`cluster-claim.mjs`): an unconditional last-writer-wins upsert with
+no conditional-write primitive, so any racer can install itself and **no racer can refuse** —
+correctness depends on every participant running the honest read-back-and-yield code. `shadow` /
+`enforce` route the claim through the **cloud lease authority** (a per-tenant Durable Object, the
+catalyst-repo half of CTC-410), whose `POST /lease/claim` is a genuine store-side compare-and-swap:
+exactly one racer receives a grant and the loser is **told it lost** (`{claimed:false, refusal}`),
+so a loser backs off silently with no retry and no error.
+
+The client returns the **same** `{won, generation}` / CLI-exit contract as the attachment path, so
+no dispatch call site (`scheduler.mjs` / `monitor.mjs` / `recovery.mjs`) changes. On a win the
+grant is mapped to the **numeric `generation`** written into `cluster-generation.json`, so
+`fence-guard.mjs` keeps gating every external write **unchanged** (it compares generations by
+equality). Mode resolves from the env var over Layer-2 over the safe default `off`; the `0`
+kill-switch and any unset/garbage value resolve to `off`.
+
+| Key                                        | Default | Notes                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CATALYST_LEASE_AUTHORITY` _(env var)_     | `off`   | `off` / `0` (the attachment soft-CAS runs; no lease module is constructed; byte-identical to not setting the flag), `shadow` (the lease claim **is** called and a `lease.claim.would-{grant,refuse}.<TICKET>` event is emitted, but the **attachment** verdict stays authoritative for the dispatch decision), `enforce` (the lease authority **is** the claim; the attachment CAS is not consulted). Garbage values fall back to `off`. Overrides Layer-2. |
+| `catalyst.leaseAuthority.mode` _(Layer-2)_ | `off`   | Same three values; honored when the env var is absent or unrecognised. **Not read from Layer-1** — a live-path claim gate in the committable config would let a merge flip the whole fleet into enforce with no per-host rollback (same containment posture as the write proxy and github-feed).                                                                                    |
+
+On a **single-host** deployment (`catalyst.deployment.mode`) `enforce` degrades to `off` — there are
+no peers to arbitrate, so a single-host clone that inherited an enforce env can never block its own
+dispatch on a cloud round-trip. The claim path is already unreachable single-host (callers gate on a
+non-null cluster generation); this makes that guarantee explicit.
+
+The per-host key, endpoint base, and curl-over-stdin credential discipline are the **same** as the
+write proxy above (the `cloud-token` secret-contract row, `CATALYST_CLOUD_BASE_URL`, token never in
+argv/on disk). The lease routes require the cloud tenant's **admin token** today (CTC-418/419 is the
+follow-up to open them to per-host service keys); a host whose `CATALYST_CLOUD_TOKEN` does not
+satisfy that gate stays dark in `enforce` — run `node execution-core/lease-authority.mjs probe` (the
+non-mutating auth spike: `400` ⇒ authorized, `401/403` ⇒ blocked on the cloud-auth dependency).
+
+The node re-entitles itself on the daemon's cluster-sync cadence when the gate is `shadow`/`enforce`
+(a `not_entitled` refusal otherwise self-heals reactively on the next claim). **Not in scope
+(follow-ups):** progress-asserted lease **renewal** (`/lease/renew` requires a non-empty progress
+assertion, so a phase that runs past `workTtlMs` ≈ 45 min could see its lease expire) and explicit
+lease **release on phase-terminal** (the lease frees at TTL regardless — `releaseViaLease` exists as
+a tested capability but is not yet wired to a terminal call site, matching the attachment path, whose
+`emitFenceReleased` is likewise unwired). Retiring the attachment CAS happens after an enforce soak.
+
+Observable events (LogQL
+`{job="catalyst-events"} | json | attributes["event.name"] =~ "lease\\.claim\\..*"`):
+
+- `lease.claim.would-grant.<TICKET>` — shadow hit; the lease **would** have granted (attachment still authoritative)
+- `lease.claim.would-refuse.<TICKET>` — shadow hit; the lease **would** have refused
+
 ## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
 
 `catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from
@@ -1013,6 +1186,59 @@ deployment-mode WARN (advisory only — nothing else changes).
 PR1 (this file) ships the resolver in isolation — nothing outside its own tests imports it yet;
 wiring into webhook ingestion gating, secret-provider selection, and `catalyst doctor`'s
 roster-consistency checks lands in later PRs of the CTL-1617 migration plan.
+
+## Entitlement mode (`catalyst.entitlement.mode`, CTL-1785)
+
+Fleet **membership** is two facts, not one. `catalyst.entitlement.mode` governs the rollout of the
+split (see `docs/architecture.md` → "Host entitlement vs. existence"):
+
+- **Existence** — "is this node in the fleet, observable/monitorable?" — is local, self-declared,
+  needs no network, and keeps working during a cloud/authority outage (`getExistenceHosts()`).
+- **Entitlement** — "may this node take work?" — is a lease from an external authority, required to
+  claim, and self-expiring (`getEntitledHosts()`).
+
+**Modes** (`off` | `shadow` | `enforce`, default **`off`**):
+
+| Mode      | Effect                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------- |
+| `off`     | **Default.** `getEntitledHosts()` returns exactly `getClusterHosts()` — byte-identical to today.   |
+| `shadow`  | Emits `entitlement.would-shed.<host>` for each unentitled rostered host but returns the FULL roster (safe dry-run). |
+| `enforce` | Actually sheds unentitled hosts from the dispatch/recovery roster (self always admitted; total-outage degrades to the full roster) and revokes this host's held leases (`fence.released.<ticket>`) if its own entitlement lapses. |
+
+With the default **local provider** (entitled iff self ∈ roster), `enforce` is still byte-identical
+to today — self is always entitled — so live enforcement only begins once the W12 lease authority
+(**CTL-1786**, unmerged) is injected.
+
+**Resolution** (`resolveEntitlementMode()`, the same ladder shape as deployment mode):
+
+| Precedence | Source                                             |
+| ---------- | -------------------------------------------------- |
+| 1          | `CATALYST_ENTITLEMENT` env var                     |
+| 2          | `catalyst.entitlement.mode` in the Layer-2 config  |
+| 3          | `catalyst.entitlement.mode` in the Layer-1 config  |
+| 4          | constant default `off`                             |
+
+- **Absent everywhere ⇒ `off`** — zero-config, zero-behavior-change.
+- **An explicit but unrecognized value** (a typo) degrades to `off` (the safest direction, byte-identical
+  to today); `catalyst doctor`'s advisory `entitlement-mode` check WARNs (never FAILs).
+- Same ENV-vs-FILE asymmetry as deployment mode: `CATALYST_ENTITLEMENT` is captured once at daemon
+  launch; Layer-1/Layer-2 file edits are picked up live per call.
+
+**TTL / ordering constraint** — the load-bearing invariant is `ENTITLEMENT_TTL_MS > work-lease TTL`
+(otherwise an unentitled node holds work invisible to the reclaim loop — an orphan by construction):
+
+| Constant             | Default | Notes                                                                       |
+| -------------------- | ------- | --------------------------------------------------------------------------- |
+| `ENTITLEMENT_TTL_MS` | 15 min  | > `HEARTBEAT_GRACE_MS` (10 min) and > the work-lease TTL below.             |
+| `WORK_LEASE_TTL_MS`  | 5 min   | Mirrors the claim-stale window (`CLAIM_STALE_MS_DEFAULT`); reconciled with W12's real lease duration when it lands. |
+
+`assertEntitlementOrdering()` throws loudly at module load if the constraint is inverted; `catalyst
+doctor`'s advisory `entitlement-ordering` check reports it (INFO when it holds, WARN if inverted —
+never FAIL). Final numbers depend on W12's lease duration.
+
+**Deletion of the inferred-liveness apparatus** (`cluster.json` roster, `loki-liveness.mjs`, the
+heartbeat channels, the deflap) is **out of scope** here — that is **W16 = CTL-1787**, safe only once
+a live authority exists. This ticket introduces the entitlement seam alongside the existing apparatus.
 
 ## Secret contract registry (CTL-1616)
 

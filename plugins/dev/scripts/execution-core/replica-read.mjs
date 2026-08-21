@@ -227,6 +227,46 @@ function buildEligibleSelect({ project, label } = {}) {
 // a caller must never TRUST a null delegate from the replica — fetchTicketAssignee
 // live-confirms every null delegate and trusts only a non-null (actor-set) one,
 // matching the gateway path (see linear-query.mjs).
+// CTL-2068 — the most recent STATE change on a ticket, with the actor who made it.
+// `to_state IS NOT NULL` is what makes this a state change: issue_history carries a row
+// for every field edit (title, estimate, labels…), and those rows leave to_state null.
+// Without that predicate the newest row is usually an unrelated edit, and the guard would
+// read whoever last renamed the ticket as the actor who set its state.
+const LAST_STATE_CHANGE_SELECT = `SELECT h.actor_id AS actorId, h.to_state AS toState, h.created_at AS atMs FROM issue_history h JOIN issues i ON i.id = h.issue_id WHERE i.identifier = ? AND h.to_state IS NOT NULL ORDER BY h.created_at DESC LIMIT 1`;
+
+// CTL-2070: the TIMELY per-identifier `issues.updated_at` reader. Unlike
+// LAST_STATE_CHANGE_SELECT (issue_history, reconcile-only, ~201 s) this reads the
+// webhook-fed `issues` table (~11 s), so the lane-claim guard's supersession test
+// compares the fleet's write against a current observation, not a lagged one.
+// removed_at IS NULL excludes tombstones, matching TERMINAL_SELECT.
+const UPDATED_AT_SELECT = `SELECT updated_at AS atMs FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
+
+// CTL-2068 — has any of these actor ids authored a STATE change on this ticket? The
+// POSITIVE CONTROL for the lane-claim guard: the whole verdict rests on "actorId in
+// botUserIds means the fleet", and when this guard first armed that set named two legacy
+// direct-write app-actors while every real state change was authored by the cloud proxy's
+// identity. Every actor then read as a lane. If no KNOWN fleet id has ever written this
+// ticket, the guard cannot tell the two apart here and must abstain.
+const FLEET_WROTE_SELECT = (n) =>
+  `SELECT 1 FROM issue_history h JOIN issues i ON i.id = h.issue_id WHERE i.identifier = ? AND h.to_state IS NOT NULL AND h.actor_id IN (${Array(n).fill("?").join(",")}) LIMIT 1`;
+
+// CTL-2074 — the distinct actors who have written a STATE change recently, with a
+// legible name and a count. This is the POSITIVE CONTROL doctor's
+// self-echo-identity-history check reads: it verifies the recognition set against who
+// ACTUALLY writes state, from real issue_history rows, never from config. Deliberately
+// NOT joined to `issues`: an inner join would silently DROP a state change whose issue
+// row has not synced yet — the exact false-empty this whole check exists to catch. The
+// `actor_id IS NOT NULL` predicate keeps a system/null-actor row from forming a bogus
+// bucket; `to_state IS NOT NULL` is the same state-change filter the two selects above use.
+const RECENT_STATE_CHANGE_ACTORS_SELECT = `
+  SELECT h.actor_id AS actorId, u.name AS name, COUNT(*) AS count
+  FROM issue_history h
+  LEFT JOIN users u ON u.id = h.actor_id
+  WHERE h.to_state IS NOT NULL AND h.actor_id IS NOT NULL
+  GROUP BY h.actor_id
+  ORDER BY count DESC
+  LIMIT ?`;
+
 const OWNERSHIP_SELECT = `SELECT assignee_id, delegate_id, delegate_name FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
 // Relation enrichment, mirroring normalizeDetail in linear-cli.mjs. forward:
 // edges this issue OWNS (relatedIssue is the target); inverse: edges that point
@@ -943,9 +983,85 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
+  // lastStateChange(identifier) → { actorId, toState, atMs } | undefined
+  //   HIT  → the newest row whose to_state is set
+  //   no row / no db / any throw → undefined (fail-open; the CTL-2068 guard reads an
+  //   undefined here as "could not look" and ALLOWS the write, never refuses on it)
+  const lastStateChange = (identifier) => {
+    if (!identifier) return undefined;
+    try {
+      const row = open().prepare(LAST_STATE_CHANGE_SELECT).get(identifier);
+      if (!row) return undefined;
+      return { actorId: row.actorId ?? null, toState: row.toState ?? null, atMs: coerceMs(row.atMs) };
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  // currentUpdatedAt(identifier) → epoch-ms | undefined  (CTL-2070)
+  //   HIT (non-removed row, coercible updated_at) → the epoch-ms value.
+  //   absent / removed / null-or-uncoercible updated_at / no db / any throw →
+  //   undefined. Fail-open, mirroring lastStateChange(): the lane-claim guard reads
+  //   an undefined here as "no timely observation" and its supersession test does
+  //   not run (owner: unknown → the legacy history ladder governs), never a refusal.
+  const currentUpdatedAt = (identifier) => {
+    if (!identifier) return undefined;
+    try {
+      const row = open().prepare(UPDATED_AT_SELECT).get(identifier);
+      if (!row) return undefined;
+      return coerceMs(row.atMs);
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  // fleetEverWroteState(identifier, ids) → true | false | undefined
+  //   undefined = "could not look" (no db, empty id set, any throw). ⛔ The caller must NOT
+  //   conflate that with false: false disarms the guard for this ticket, and a replica that
+  //   cannot answer would otherwise disarm it everywhere.
+  const fleetEverWroteState = (identifier, ids) => {
+    const list = Array.isArray(ids) ? ids : ids instanceof Set ? [...ids] : [];
+    if (!identifier || list.length === 0) return undefined;
+    try {
+      return Boolean(open().prepare(FLEET_WROTE_SELECT(list.length)).get(identifier, ...list));
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  // recentStateChangeActors({ limit }) → Array<{actorId, name, count}> | undefined
+  //   HIT (table present)      → the distinct recent state-change actors (possibly []).
+  //   [] = looked-and-found-nothing (positive control FAILED — the caller treats this
+  //        as inconclusive, NOT clean); undefined = could-not-look (no db / missing
+  //        table / any throw). ⛔ The two must stay distinct: a doctor check that reads
+  //        an empty array as "no problem" is the silent false-clean this ticket exists
+  //        to end. CTL-2074.
+  const recentStateChangeActors = ({ limit = 50 } = {}) => {
+    const n = Number.isInteger(limit) && limit > 0 ? limit : 50;
+    try {
+      const rows = open().prepare(RECENT_STATE_CHANGE_ACTORS_SELECT).all(n);
+      if (!Array.isArray(rows)) return undefined;
+      return rows.map((r) => ({
+        actorId: r.actorId ?? null,
+        name: r.name ?? null,
+        count: Number(r.count) || 0,
+      }));
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
   return {
     lookup,
     freshness,
+    lastStateChange, // CTL-2068
+    currentUpdatedAt, // CTL-2070
+    fleetEverWroteState, // CTL-2068
+    recentStateChangeActors, // CTL-2074
     titles,
     estimates, // CTL-1806
     relations, // CTL-1806

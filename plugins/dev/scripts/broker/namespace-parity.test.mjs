@@ -50,6 +50,20 @@ import { ALERT_BOOT_DEPENDENCY_UNUSABLE } from "../execution-core/dispatch-alert
 // re-typed as a literal below, so a rename cannot leave this contract asserting over a name
 // nothing emits (the hand-copied-literal trap the ASSERTED_BY parity suite exists to prevent).
 import { DEP_SKEW_RESTART_EVENT, DEP_SKEW_WOULD_RESTART_EVENT } from "../execution-core/cloud-sync-deps.mjs";
+// CTL-1889 — the Linear write-proxy trio, imported from its owning module so a
+// rename cannot leave a re-typed literal behind that still passes.
+import { PROXY_EVENT_NAMES } from "../execution-core/linear-write-proxy.mjs";
+// CTL-1786 — the lease-authority shadow observation pair, imported from its owning module so a
+// rename cannot leave a re-typed literal behind that still passes.
+import { LEASE_EVENT_NAMES } from "../execution-core/lease-authority.mjs";
+// CTL-2076 — the registry team-identity mismatch (CAT-52) event, imported from its
+// owning module rather than re-typed as a literal (same precedent as CTL-1659/CTL-1889).
+import { CONFIG_TEAM_IDENTITY_MISMATCH } from "../execution-core/config-identity-event.mjs";
+// CTL-1785 — the entitlement shadow/enforce events (would-shed / shed / restored),
+// imported from their owning module so a rename cannot leave this contract asserting
+// over a name nothing emits. The `entitlement.` prefix is UNPROTECTED (a dedicated
+// test below asserts isBrokerProtectedName is false for each).
+import { ENTITLEMENT_EVENT_NAMES } from "../execution-core/entitlement-event.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -75,6 +89,7 @@ const INLINE_EVENT_NAMES = [
   "delegate.routed",                  // CTL-1609 delegate-first.mjs (enforce mode — enqueued ok)
   "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
   "catalyst.replica.writer_idle",     // CAT-21 cloud-sync.mjs (tokenless writer provisioning gap)
+  "cloud-feed.would-dispatch",        // CTL-1847 cloud-feed-timer.mjs (shadow mode — would dispatch from the feed)
 ];
 
 // Build the flat list of all static exec-core event names.
@@ -94,6 +109,10 @@ const EXEC_CORE_EVENT_NAMES = [
   ALERT_BOOT_DEPENDENCY_UNUSABLE,
   DEP_SKEW_RESTART_EVENT, // CTL-1659 cloud-sync.mjs — the writer restarting to load an installed dep fix
   DEP_SKEW_WOULD_RESTART_EVENT, // CTL-1659 — sustained skew that did NOT act (shadow / budget / undurable ledger)
+  ...PROXY_EVENT_NAMES, // CTL-1889 linear-write-proxy.mjs — would-write / applied / failed
+  ...LEASE_EVENT_NAMES, // CTL-1786 lease-authority.mjs — shadow would-grant / would-refuse
+  CONFIG_TEAM_IDENTITY_MISMATCH, // CTL-2076 config-identity-event.mjs — registry team-identity mismatch (CAT-52), boot telemetry
+  ...ENTITLEMENT_EVENT_NAMES, // CTL-1785 entitlement-event.mjs — would-shed / shed / restored (v3 bare-name, host-suffixed)
   ...INLINE_EVENT_NAMES,
 ];
 
@@ -116,6 +135,24 @@ describe("exec-core static event names", () => {
           `exec-core event "${name}" has phase slot "${slot}" not in KNOWN_PHASES or exceptions`
         ).toBe(true);
       }
+    }
+  });
+
+  // CTL-1785: the entitlement.* prefix is deliberately UNPROTECTED — it must route
+  // through shouldSkipEvent normally (no isBrokerProtectedName collision), so the
+  // broker's phase-lifecycle router and wait-for subscribers see it like any other
+  // exec-core observability event. Assert both the base names and a host-suffixed
+  // sample are unprotected.
+  test("entitlement.* is unprotected under the namespace contract", () => {
+    for (const base of ENTITLEMENT_EVENT_NAMES) {
+      expect(isBrokerProtectedName(base), `${base} must be unprotected`).toBe(false);
+      expect(
+        isBrokerProtectedName(`${base}.mini-2`),
+        `${base}.mini-2 (host-suffixed) must be unprotected`
+      ).toBe(false);
+      // Not a phase-lifecycle event: no phase slot, so the broker never routes it
+      // as a terminal phase transition.
+      expect(phaseSlotOf(`${base}.mini-2`)).toBe(null);
     }
   });
 });

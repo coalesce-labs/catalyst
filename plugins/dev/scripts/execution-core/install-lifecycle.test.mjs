@@ -19,6 +19,7 @@ import {
   isDrainedStatus,
   resolveRequestedClass,
   resolveReadReplica,
+  resolveGithubFeed,
   setDeepKey,
   deleteDeepKey,
   planPhases,
@@ -147,6 +148,8 @@ describe("parseArgs", () => {
   test("--print is an alias for --dry-run; --force/--json/-h flags", () => {
     expect(parseArgs(["install", "--print"]).dryRun).toBe(true);
     expect(parseArgs(["uninstall", "--force"]).force).toBe(true);
+    expect(parseArgs(["uninstall", "--archive"]).archive).toBe(true);
+    expect(parseArgs(["uninstall"]).archive).toBe(false);
     expect(parseArgs(["install", "--json"]).json).toBe(true);
     expect(parseArgs(["-h"]).help).toBe(true);
   });
@@ -269,6 +272,27 @@ describe("planPhases — per-class correctness (pure)", () => {
   test("uninstall / reinstall phase orders match their exported enums", () => {
     expect(phaseNames(planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS }))).toEqual([...UNINSTALL_PHASES]);
     expect(phaseNames(planPhases({ operation: "reinstall", nodeClass: "developer", scripts: SCRIPTS }))).toEqual([...REINSTALL_PHASES]);
+  });
+  // CTL-1975 — `catalyst uninstall --archive`. Both directions are asserted: the flag must ADD the
+  // two capture flags, and its ABSENCE must leave the lean restore point byte-identical, because a
+  // default that silently started copying a ~200 MB replica on every install is the regression this
+  // opt-in exists to avoid.
+  test("--archive upgrades the backup step to a teardown-grade capture", () => {
+    const plan = planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS, opts: { archive: true } });
+    const step = plan.find((p) => p.phase === "backup").steps[0];
+    expect(step.argv).toContain("--with-replica");
+    expect(step.argv).toContain("--tar");
+    // ⛔ NOT the `archive` verb: this step's stdout tail is read into ctx.bundlePath and handed to
+    // `catalyst-backup restore <path>`, which needs the bundle DIRECTORY. `archive` prints the
+    // tarball last, so routing through it would break rollback at the one moment it is all that is
+    // left. Pinned here so a later "simplification" to the archive verb fails loudly.
+    expect(step.argv).toContain("backup");
+    expect(step.argv).not.toContain("archive");
+  });
+  test("without --archive the backup step is unchanged (no replica, no tarball)", () => {
+    const step = planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS }).find((p) => p.phase === "backup").steps[0];
+    expect(step.argv).not.toContain("--with-replica");
+    expect(step.argv).not.toContain("--tar");
   });
   test("reinstall backs up exactly ONCE (one top-of-run snapshot covers teardown+provision)", () => {
     const plan = planPhases({ operation: "reinstall", nodeClass: "worker", scripts: SCRIPTS });
@@ -1291,5 +1315,110 @@ describe("invariants", () => {
   });
   test("INSTALL_MANAGED_KEYS contains no unsafe segments", () => {
     for (const k of INSTALL_MANAGED_KEYS) for (const seg of k.split(".")) expect(["__proto__", "prototype", "constructor"]).not.toContain(seg);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-2004 — the GitHub-ingestion posture must survive a rebuild, and a NEW member
+// must inherit it. The defect this pins: `join-bundle` hands a joiner
+// `monitor.github.smeeChannel` (a tunnel CHANNEL) while nothing carries the MODE that
+// decides whether it opens. The mode resolves env -> Layer-2 -> default "off",
+// `githubFeedIsAuthoritative()` is `mode === "enforce"`, and orch-monitor suppresses the
+// tunnel only on that — so the joiner came up on smee looking perfectly healthy.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("resolveGithubFeed — CTL-2004 carry-forward precedence", () => {
+  const tmpCfg = (obj) => {
+    const p = join(tmpdir(), `ctl2004-${Math.random().toString(36).slice(2)}.json`);
+    writeFileSync(p, JSON.stringify(obj));
+    return p;
+  };
+
+  test("flag WINS over env and Layer-2", () => {
+    const cfg = tmpCfg({ catalyst: { githubFeed: { mode: "off" } } });
+    expect(resolveGithubFeed({ flag: "enforce", env: { CATALYST_GITHUB_FEED: "shadow" }, layer2: cfg })).toBe("enforce");
+    rmSync(cfg, { force: true });
+  });
+
+  test("env WINS over Layer-2 when no flag", () => {
+    const cfg = tmpCfg({ catalyst: { githubFeed: { mode: "off" } } });
+    expect(resolveGithubFeed({ flag: null, env: { CATALYST_GITHUB_FEED: "shadow" }, layer2: cfg })).toBe("shadow");
+    rmSync(cfg, { force: true });
+  });
+
+  test("⭐ THE DEFECT: falls back to the value already in Layer-2 — captured BEFORE teardown strips it", () => {
+    const cfg = tmpCfg({ catalyst: { githubFeed: { mode: "enforce" } } });
+    expect(resolveGithubFeed({ flag: null, env: {}, layer2: cfg })).toBe("enforce");
+    rmSync(cfg, { force: true });
+  });
+
+  test("⛔ absent everywhere returns null — it must NOT manufacture an 'off' the host never declared", () => {
+    const cfg = tmpCfg({ catalyst: {} });
+    expect(resolveGithubFeed({ flag: null, env: {}, layer2: cfg })).toBeNull();
+    rmSync(cfg, { force: true });
+  });
+
+  test("⛔ a junk value in ANY tier is refused rather than coerced (flag, env, Layer-2)", () => {
+    const cfg = tmpCfg({ catalyst: { githubFeed: { mode: "banana" } } });
+    // A bad Layer-2 value is not a posture — write nothing, leave the daemon's resolver to decide.
+    expect(resolveGithubFeed({ flag: null, env: {}, layer2: cfg })).toBeNull();
+    // A bad env var likewise does not become a written key.
+    expect(resolveGithubFeed({ flag: null, env: { CATALYST_GITHUB_FEED: "banana" }, layer2: cfg })).toBeNull();
+    // A bad flag returns null here; parseArgs/main reject it outright with exit 2 (asserted below).
+    expect(resolveGithubFeed({ flag: "banana", env: {}, layer2: cfg })).toBeNull();
+    rmSync(cfg, { force: true });
+  });
+
+  test("an unreadable/missing Layer-2 degrades to null rather than throwing", () => {
+    expect(resolveGithubFeed({ flag: null, env: {}, layer2: join(tmpdir(), "ctl2004-nope.json") })).toBeNull();
+  });
+
+  test("all three modes round-trip from Layer-2", () => {
+    for (const mode of ["off", "shadow", "enforce"]) {
+      const cfg = tmpCfg({ catalyst: { githubFeed: { mode } } });
+      expect(resolveGithubFeed({ flag: null, env: {}, layer2: cfg })).toBe(mode);
+      rmSync(cfg, { force: true });
+    }
+  });
+});
+
+describe("planPhases — CTL-2004 github-feed step", () => {
+  const scripts = { setup: "/s/setup", stack: "/s/stack", doctor: "/s/doctor", execCore: "/s/ec", updater: "/s/up" };
+  const stepFor = (plan, label) => plan.flatMap((p) => p.steps).find((s) => s.label === label);
+
+  test("⭐ the step is emitted for EVERY class — the tunnel it gates runs on worker AND monitor", () => {
+    for (const nodeClass of ["worker", "monitor", "developer"]) {
+      const plan = planPhases({ operation: "install", nodeClass, scripts, opts: { githubFeed: "enforce" } });
+      const step = stepFor(plan, "github-feed");
+      expect(step).toBeDefined();
+      expect(step.kind).toBe("setkey");
+      expect(step.key).toBe("catalyst.githubFeed.mode");
+      expect(step.value).toBe("enforce");
+    }
+  });
+
+  test("⛔ INVERSION GUARD — no resolved value ⇒ NO step (the node keeps today's behaviour exactly)", () => {
+    for (const nodeClass of ["worker", "monitor", "developer"]) {
+      const plan = planPhases({ operation: "install", nodeClass, scripts, opts: {} });
+      expect(stepFor(plan, "github-feed")).toBeUndefined();
+    }
+  });
+
+  test("the step rides reinstall too — the operation the carry-forward exists for", () => {
+    const plan = planPhases({ operation: "reinstall", nodeClass: "worker", scripts, opts: { githubFeed: "shadow" } });
+    expect(stepFor(plan, "github-feed")?.value).toBe("shadow");
+  });
+
+  test("a worker gets BOTH pull-owner and github-feed — the new step does not displace the else-if branch", () => {
+    const plan = planPhases({ operation: "install", nodeClass: "worker", scripts, opts: { githubFeed: "enforce", readReplica: "http://x" } });
+    expect(stepFor(plan, "pull-owner")).toBeDefined();
+    expect(stepFor(plan, "github-feed")).toBeDefined();
+  });
+});
+
+describe("INSTALL_MANAGED_KEYS — CTL-2004 ownership", () => {
+  test("⭐ includes catalyst.githubFeed.mode, because the install now SETS it", () => {
+    // The list's contract is "set on install, stripped on uninstall". A key the install writes
+    // but teardown never removes is the half-state the list exists to prevent.
+    expect(INSTALL_MANAGED_KEYS).toContain("catalyst.githubFeed.mode");
   });
 });

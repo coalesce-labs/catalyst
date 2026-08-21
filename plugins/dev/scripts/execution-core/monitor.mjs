@@ -50,11 +50,21 @@ import {
   TAILER_POLL_INTERVAL_MS,
   log,
   getHostName, // CTL-862
-  getClusterHosts, // CTL-862
+  // CTL-1785: triage HRW ownership is ENTITLEMENT; the coordination-mirror
+  // watchers below are TOPOLOGY (single-host `.length` no-op gates) and stay
+  // EXISTENCE. `off` mode: getEntitledHosts() === getExistenceHosts() === getClusterHosts().
+  getEntitledHosts, // CTL-862 / CTL-1785
+  getExistenceHosts, // CTL-1785
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
+// CTL-1847: the dispatch-source gate. Imported here rather than the capture
+// sink or the producer, deliberately — cloud-feed-gate.mjs is a pure leaf whose
+// only import is lib/event-name.mjs, so it cannot drag `bun:sqlite` into this
+// module's graph (see the CTL-1397 note directly below). The capture sink and
+// the echo ring are INJECTED via setCloudFeedGate for the same reason.
+import { decideDispatch } from "./cloud-feed-gate.mjs";
 // CTL-1397 (Node-loadability): monitor.mjs MUST NOT import replica-read.mjs — that
 // module statically imports `bun:sqlite`, which the Node ESM loader rejects at
 // module-load (the broker entrypoint is `#!/usr/bin/env node` and loads
@@ -67,6 +77,7 @@ import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE shared event-name boundary
 import {
   claimDispatchSync,
+  isClaimFailure,
   readTriageAttemptCountSync,
   bumpTriageAttemptCountSync,
 } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS; CTL-1649: fleet-wide triage attempt count
@@ -347,6 +358,26 @@ export function handleCommentCreatedEvent(event, { onComment } = {}) {
 // no reader (mode off, or the Node broker which never injects one) → the reconcile
 // path falls to the linearis exec, byte-identical to pre-CTL-1397.
 let _injectedEligibleReplica = null;
+
+// CTL-1847: the cloud-feed dispatch gate, or null when the feature is off.
+// Null (the default) means readNewEvents skips the gate block entirely, so an
+// off host's routing is byte-identical to pre-CTL-1847 rather than merely
+// equivalent — there is no gate to be wrong about.
+let _cloudFeedGate = null;
+
+/**
+ * setCloudFeedGate — install (or clear, with null) the dispatch gate.
+ * Called by startMonitor from resolved config; exported so tests can drive
+ * readNewEvents through each mode without a daemon.
+ */
+export function setCloudFeedGate(gate) {
+  _cloudFeedGate = gate ?? null;
+}
+
+/** getCloudFeedGate — test/diagnostic read of the installed gate. */
+export function getCloudFeedGate() {
+  return _cloudFeedGate;
+}
 
 // Teams that have been reconciled at least once — used by reconcileAll to
 // detect teams dropped from the registry that must be dropProject'd.
@@ -800,9 +831,212 @@ export function computeTriageBudget({
   }
   if (!y.ok) {
     log.warn({ orchDir, reason: y.reason ?? null }, "computeTriageBudget: yielded-occupancy scan failed host-wide — holding triage admission (CTL-1854)");
-    return { remaining: 0 };
+    // ⛔ `held` IS THE WHOLE POINT OF THIS RETURN. Both this branch and the one below can
+    // answer `remaining: 0`, and until now they were indistinguishable to every consumer:
+    // the sweep's skip line printed the identical `sweep-budget-exhausted /
+    // budget_remaining: 0` under either. Their prognoses are OPPOSITE — capacity is
+    // recomputed every sweep and frees itself as soon as a worker finishes, whereas this
+    // fail-closed hold NEVER clears on its own; it holds until the scan starts succeeding.
+    // A host in this branch produces no triage.json no matter how long anyone waits, and
+    // an operator reading the log could not tell that from a busy fleet.
+    //
+    // The gate itself is correct and stays exactly as it was — inability to inspect must
+    // not read as free capacity (the comment above says so, and the scheduler's twin gate
+    // agrees). The defect was only that its silent state and its healthy state printed the
+    // same number.
+    return { remaining: 0, held: true, heldReason: y.reason ?? "yielded-occupancy-scan-failed" };
   }
-  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight + y.count) };
+  // ⛔ `held: false` even when `remaining` is 0. "Held" means THE SCAN FAILED, not "the
+  // number is zero" — a budget that is legitimately at capacity, or one decremented to 0
+  // by dispatches during this very sweep, is healthy and must keep reading that way.
+  // Deriving `held` from `remaining === 0` would re-merge the two branches at the consumer
+  // and hand back the ambiguity this field exists to remove.
+  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight + y.count), held: false, heldReason: null };
+}
+
+// ── CTL-879: triage-admission observability ──────────────────────────────────
+// A ready ticket that lacks triage.json is HELD by the scheduler's CTL-1150 gate
+// (scheduler.mjs), and the ONLY producer of that artifact is the triage
+// admission path below. When this path declined a candidate it recorded
+// NOTHING: three bare `continue`s in sweepMissingTriage and two `log.debug`
+// returns in dispatchTriage. So a fleet-wide triage stall presented as "the
+// sweep counts N candidates every tick, dispatches none, and emits no
+// per-ticket outcome at any level that ships".
+//
+// Measured 2026-08-18: triage output stopped fleet-wide at 15:00 CT. Over the
+// next three hours both hosts logged 315 "triage sweep: Triage-state source"
+// lines (latest counts CTC=16, CTL=4), ~4,000 ctl-1150 hold lines and 411
+// "board appears frozen" warnings — and ZERO dispatchTriage lines at ANY
+// severity. Three candidate mechanisms were refuted from the logs alone
+// (computeTriageBudget's yielded-occupancy scan failure, a dead host in the HRW
+// roster, a post-boot drain flag). The rest could not be told apart, because
+// the decision was never written down. Two operators spent hours on it.
+//
+// Sparse, never silent: COUNT every skip, LOG the first, every Nth, and the
+// escalation edge — the same count-every/warn-sparsely discipline as
+// scheduler.mjs's lastHoldLogged and otel-forward's sparse-warn — so a
+// 20-candidate sweep every 60s cannot flood the log it exists to make readable.
+const TRIAGE_SKIP_RELOG_EVERY = 10;
+const TRIAGE_SKIP_ESCALATE_AFTER = 15;
+const _triageSkipStreaks = new Map();
+
+// triageSkipSeverity — the PURE severity decision, extracted so it is testable
+// without the logger (CTL-2033).
+//
+// ⚠️ It was NOT extracted for tidiness. The first version of this guard asserted
+// the level by capturing `process.stdout/stderr.write` and matching the
+// `[execution-core:<level>]` prefix of config.mjs's console shim. That passes
+// locally, where pino is absent — and FAILS in CI, where pino IS installed and
+// emits `{"level":40,...}` JSON through a destination it captured at
+// construction. A severity rule tested through whichever logger happens to be
+// installed is a test of the environment, not of the rule.
+//
+// Returns "warn" | "info" | null, where null means THIS SWEEP IS NOT LOGGED —
+// the sparse gate. Callers must treat null as "count it, say nothing".
+export function triageSkipSeverity(streak, { alwaysWarn = false } = {}) {
+  const isFirst = streak === 1;
+  const isPeriodic = streak % TRIAGE_SKIP_RELOG_EVERY === 0;
+  // The escalation edge is logged explicitly: with RELOG_EVERY=10 and
+  // ESCALATE_AFTER=15 the crossing sweep is neither first nor periodic, so
+  // without this the WARN would not appear until streak 20.
+  const isEscalationEdge = streak === TRIAGE_SKIP_ESCALATE_AFTER;
+  if (!isFirst && !isPeriodic && !isEscalationEdge) return null;
+  if (streak >= TRIAGE_SKIP_ESCALATE_AFTER) return "warn";
+  // `alwaysWarn` raises SEVERITY, never FREQUENCY: it is read only AFTER the
+  // sparse gate above has already decided this sweep is written at all.
+  return alwaysWarn ? "warn" : "info";
+}
+
+/**
+ * triageBudgetSkip — CTL-879 / INIT-34. Turn a zero budget into the skip it deserves.
+ *
+ * ⛔ WHY THIS IS A FUNCTION AND NOT A TERNARY AT THE CALL SITE. `sweepMissingTriage`
+ * cannot be driven from a unit test without standing up the project registry and the
+ * eligible set, and `dispatchTriage` is not exported — so an expression inlined there is
+ * unreachable by any test, and the only available assertion would be that the right
+ * literal appears somewhere in the file. That is the "asserting a discriminator is READ is
+ * not asserting the answer CHANGES" trap this repo has now shipped twice. Extracted, the
+ * decision is ordinary testable code.
+ *
+ * ⛔ A DISTINCT `reason`, NOT A FLAG IN THE DETAIL. `reason` is what noteTriageSkip keys
+ * its streak on, so folding both mechanisms into one reason merges their streaks: a host
+ * alternating between busy and held would report one unbroken run of a single cause. It is
+ * also what a Loki query selects on, while `held_reason` in the payload is stripped
+ * off-machine by otel-forward.
+ *
+ * `alwaysWarn` on the held branch for the CTL-2033 reason: a hold that structurally never
+ * self-clears is abnormal on its FIRST sweep, and waiting TRIAGE_SKIP_ESCALATE_AFTER
+ * sweeps to say so is 75-150 minutes at the measured cadence. The sparse gate inside
+ * triageSkipSeverity still bounds how often it is written.
+ */
+export function triageBudgetSkip(budget) {
+  const remaining = budget?.remaining;
+  if (budget?.held === true) {
+    return {
+      reason: "sweep-budget-held-scan-failed",
+      detail: { budget_remaining: remaining, held_reason: budget.heldReason ?? null },
+      alwaysWarn: true,
+    };
+  }
+  // Everything else — genuine capacity, a budget decremented to 0 mid-sweep, and an
+  // INJECTED budget from a caller that predates `held` — is the pre-existing healthy
+  // throttle, byte-identical to before. A missing `held` must never read as held.
+  return { reason: "sweep-budget-exhausted", detail: { budget_remaining: remaining }, alwaysWarn: false };
+}
+
+/**
+ * The FIRST-SWEEP warn sentence, per reason (Codex P2 on #3682).
+ *
+ * ⛔ THE DEFECT THIS EXISTS FOR. `alwaysWarn` was introduced by CTL-2033 when the claim
+ * failure was its only caller, so the branch it selects hardcoded that cause: "the
+ * cross-host claim never landed … read claim_reason". The moment a SECOND reason set
+ * `alwaysWarn` — the CTL-2047 scan hold — it inherited that sentence and the log named a
+ * definite WRONG cause, pointing the operator at a `claim_reason` the payload does not even
+ * carry. That is strictly worse than the ambiguity CTL-2047 set out to remove: an operator
+ * can act on "I cannot tell"; they cannot act on a confident misattribution.
+ *
+ * ⛔ THE DEFAULT IS DELIBERATELY VAGUE AND TRUE, NOT SPECIFIC AND POSSIBLY FALSE. A future
+ * caller that sets `alwaysWarn` without registering a sentence gets a generic line that
+ * tells the reader to look at `reason`. Falling back to any concrete cause would rebuild
+ * this defect for the next reason added.
+ */
+export const TRIAGE_SKIP_WARN_MESSAGES = Object.freeze({
+  "claim-write-failed":
+    "ctl-879: triage admission FAILED (not a lost race) — the cross-host claim never landed, so no host will produce this ticket's triage.json; read claim_reason",
+  "sweep-budget-held-scan-failed":
+    "ctl-879: triage admission HELD — the yielded-occupancy scan failed host-wide, so this host's triage budget is fail-closed at zero and does NOT refill on its own; this is not a busy fleet, read held_reason (CTL-1854)",
+});
+
+export function triageSkipWarnMessage(reason) {
+  return (
+    TRIAGE_SKIP_WARN_MESSAGES[reason] ??
+    "ctl-879: triage admission declined on its FIRST sweep for a reason flagged abnormal, with no registered explanation — read `reason` and add one to TRIAGE_SKIP_WARN_MESSAGES"
+  );
+}
+
+// noteTriageSkip — record that `identifier` was declined by `reason` this sweep.
+// Returns the streak so callers/tests can assert on it. A streak that reaches
+// TRIAGE_SKIP_ESCALATE_AFTER is no longer a transient miss: nothing will produce
+// this ticket's triage.json while it holds, so it escalates INFO → WARN and says
+// so. Never throws — an observability helper that can break admission is worse
+// than the blindness it replaces.
+export function noteTriageSkip(identifier, reason, detail = {}, { alwaysWarn = false } = {}) {
+  try {
+    const prev = _triageSkipStreaks.get(identifier);
+    const streak = prev?.reason === reason ? prev.streak + 1 : 1;
+    _triageSkipStreaks.set(identifier, { reason, streak });
+    // CTL-2033: `alwaysWarn` raises the SEVERITY, never the frequency. A skip that
+    // is a FAILURE (the claim write never landed) is abnormal on its very first
+    // sweep — waiting TRIAGE_SKIP_ESCALATE_AFTER sweeps to say so is 75-150 minutes
+    // at the measured 5-10 min sweep cadence. The sparse gate inside
+    // triageSkipSeverity still bounds how often it is written, so a 20-candidate
+    // sweep cannot flood the log it exists to make readable.
+    const severity = triageSkipSeverity(streak, { alwaysWarn });
+    if (severity === null) return streak;
+    const context = { ticket: identifier, reason, held_sweeps: streak, ...detail };
+    if (streak >= TRIAGE_SKIP_ESCALATE_AFTER) {
+      log.warn(
+        context,
+        "ctl-879: triage admission blocked persistently — no triage.json can be produced for this ticket while this reason holds, so the scheduler's ctl-1150 gate will hold it indefinitely"
+      );
+    } else if (severity === "warn") {
+      // A different sentence from the persistence one: "persistently" would be a false
+      // statement on sweep 1, and `held_sweeps: 1` beside it reads as a bug in the counter
+      // rather than as the alarm it is. And a different sentence PER REASON — see
+      // triageSkipWarnMessage; a single hardcoded cause here misattributed every
+      // alwaysWarn reason but the first.
+      log.warn(context, triageSkipWarnMessage(reason));
+    } else {
+      log.info(context, "ctl-879: triage admission skipped this sweep");
+    }
+    return streak;
+  } catch {
+    return 0;
+  }
+}
+
+// clearTriageSkip — the ticket got in (or no longer needs to). Drops its streak
+// so a later block starts a fresh episode rather than resuming an obsolete one.
+export function clearTriageSkip(identifier) {
+  _triageSkipStreaks.delete(identifier);
+}
+
+// pruneTriageSkips — CAT-36's lesson, applied before it bites here: the streak
+// map is only self-cleaning on the cleared path, so a candidate that leaves the
+// sweep entirely (triaged elsewhere, reassigned, ticket closed) would keep its
+// entry for the daemon's lifetime and a later reappearance would resume the
+// stale streak — suppressing the FIRST diagnostic of the new episode, which is
+// the one that matters. Prune to exactly the identifiers this sweep considered.
+export function pruneTriageSkips(consideredIdentifiers) {
+  if (!(consideredIdentifiers instanceof Set)) return;
+  for (const id of _triageSkipStreaks.keys()) {
+    if (!consideredIdentifiers.has(id)) _triageSkipStreaks.delete(id);
+  }
+}
+
+// Test seam — unit tests need a deterministic streak table per case.
+export function _resetTriageSkipStreaks() {
+  _triageSkipStreaks.clear();
 }
 
 // dispatchTriage — fire the triage phase agent for a →Triage transition. Guards
@@ -903,6 +1137,7 @@ function dispatchTriage(
   // CTL-1095: drain gate — refuse new triage dispatch before HRW filter.
   if (isDraining(orchDir)) {
     log.debug({ identifier }, "drain: skipping triage dispatch — node draining (CTL-1095)");
+    noteTriageSkip(identifier, "node-draining"); // CTL-879
     return false;
   }
   // CTL-862/CTL-1057: HRW ownership filter. Resolve roster/self lazily per call
@@ -910,9 +1145,11 @@ function dispatchTriage(
   // TRUE no-op regardless of whether the lone roster entry string-matches the
   // resolved hostName (stale/aliased hosts.json). HRW filtering engages only
   // when roster.length > 1, matching the multiHost gate on the claim below.
-  const roster = hosts ?? getClusterHosts();
+  const roster = hosts ?? getEntitledHosts();
   const self = hostName ?? getHostName();
-  const multiHost = roster.length > 1;
+  // CTL-1785: multiHost (the claim gate + HRW identity short-circuit) stays
+  // EXISTENCE-derived; an injected `hosts` still controls it (test contract).
+  const multiHost = (hosts ?? getExistenceHosts()).length > 1;
   // CTL-1057: loud one-time warning when this host is absent from a multi-host roster.
   const _mw = hostMembershipWarning(roster, self);
   if (_mw && !globalThis.__ctl1057_monitor_warned) {
@@ -946,6 +1183,11 @@ function dispatchTriage(
       { identifier, self, roster, dispatchRoster },
       "ctl-1091: ticket not owned by this host under HRW over the live roster — skipping triage dispatch"
     );
+    // CTL-879: this is the ONE reason that is healthy at the fleet level — the
+    // peer that owns the ticket dispatches it. Recorded per-host anyway, because
+    // "nobody owns it" and "the owner is wedged" are indistinguishable from a
+    // single host's logs, and that ambiguity is what cost hours on 2026-08-18.
+    noteTriageSkip(identifier, "not-owned-by-this-host", { self, dispatchRoster });
     return false;
   }
   // CTL-1441 guard (b) — placed BEFORE the capacity gate (Codex R4: parking is
@@ -965,7 +1207,10 @@ function dispatchTriage(
   ) {
     // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
     // naturally absent until it finishes. Defer the park while in flight.
-    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
+    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) {
+      noteTriageSkip(identifier, "triage-worker-in-flight"); // CTL-879
+      return false;
+    }
     try {
       labelNeedsHuman(orchDir, identifier);
     } catch (err) {
@@ -980,13 +1225,32 @@ function dispatchTriage(
         "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm"
       );
     }
+    // CTL-2090: this was the ONE remaining silent exit in triage admission — the
+    // markTriageCapped WARN above fires once per park episode, and every later
+    // sweep returned with no record at any level. On mini-2 (2026-08-20) a capped
+    // ticket that a human had re-queued in Linear was routed here every sweep for
+    // 36h while the scheduler reserved the host's only slot for it, and nothing in
+    // the logs said why — the exact ctl-879 blindness class, one branch over.
+    // Count it like every other skip; the streak escalates to WARN on persistence.
+    noteTriageSkip(identifier, "triage-redispatch-capped", { cap: TRIAGE_DISPATCH_CAP });
     return false;
   }
   if (budget && budget.remaining <= 0) {
-    log.info(
-      { identifier },
-      "monitor: triage dispatch deferred — no free slots (maxParallel); sweepMissingTriage will retry (CTL-716)"
-    );
+    // The retry promise in the pre-existing sentence ("sweepMissingTriage will retry") is
+    // TRUE for capacity and MISLEADING for a held budget: the sweep does retry, and gets
+    // held again every time, forever. Two sentences, because one of them is a lie in the
+    // other's case.
+    if (budget.held) {
+      log.warn(
+        { identifier, held_reason: budget.heldReason ?? null },
+        "monitor: triage dispatch deferred — the yielded-occupancy scan failed host-wide, so admission is HELD, not merely full; this does not clear on its own (CTL-1854)"
+      );
+    } else {
+      log.info(
+        { identifier },
+        "monitor: triage dispatch deferred — no free slots (maxParallel); sweepMissingTriage will retry (CTL-716)"
+      );
+    }
     return false;
   }
   // CTL-781/CTL-1174: respect-assignment + delegate gate. A →Triage/→Todo
@@ -1117,9 +1381,40 @@ function dispatchTriage(
   if (multiHost) {
     const claim = claimDispatch({ ticket: identifier, hostName: self, phase: "triage" });
     if (!claim.won) {
+      // CTL-2033: the claim now says WHICH of its outcomes this was. `failed` is
+      // fail-loud on the unknown — only an explicit `peer-won` counts as the normal
+      // race (see isClaimFailure).
+      const claimReason = claim?.reason ?? null;
+      const failed = isClaimFailure(claimReason);
       log.debug(
-        { identifier, self },
+        { identifier, self, claim_reason: claimReason },
         "ctl-862: lost cross-host claim — another host owns this triage dispatch, deferring"
+      );
+      // CTL-879: the SIXTH blind gate, and the one the first instrument missed.
+      // It is the ONLY silent exit left after drain/HRW, so it is where a ticket
+      // its OWNER has already accepted still fails to launch — measured on
+      // 2026-08-18: 44 held tickets, a perfect 22/22 HRW split with ZERO declined
+      // by both hosts, every held ticket owned by the host holding it, and not one
+      // `ctl-879` line from the owner. The owner passes drain and HRW and then
+      // exits here, invisibly.
+      //
+      // ⚠️ A lost claim is NOT inherently a fault — it is the normal outcome when a
+      // peer legitimately holds the fence. What makes the silence expensive is that
+      // "a peer won it" and "our claim WRITE never landed" are the same log line at
+      // a level that does not ship, and the second is a real stall (mini's Linear
+      // write budget measured 300/300 spent with 674 refusals the same day). The
+      // reason string keeps them distinguishable at the surface.
+      //
+      // ⭐ CTL-2033 measured the answer to that question: 36 of 36 held tickets were
+      // FAILED claims, not lost ones — so the two get DIFFERENT gate reasons here.
+      // `claim-write-failed` is a stall and warns on sweep 1; `lost-cross-host-claim`
+      // keeps its name and its INFO-until-persistent ladder, because a peer winning
+      // is a normal outcome that only becomes interesting if it never stops.
+      noteTriageSkip(
+        identifier,
+        failed ? "claim-write-failed" : "lost-cross-host-claim",
+        { self, claim_reason: claimReason, claim_detail: claim?.detail ?? null },
+        { alwaysWarn: failed },
       );
       return false;
     }
@@ -1268,6 +1563,7 @@ function dispatchTriage(
       log.warn({ identifier, err: err.message }, "monitor: stampWorkerLabel threw — continuing");
     }
   }
+  clearTriageSkip(identifier); // CTL-879: dispatched — end this block episode
   return true;
 }
 
@@ -1555,6 +1851,12 @@ export function sweepMissingTriage({
     countYieldedOccupancy, // CTL-1854: charge yields to the triage budget too
     hasInProcessRoute, // CTL-1457 (N1)
   });
+  // CTL-879: the streak table is keyed by ticket across ALL projects, so the
+  // prune set must be accumulated across the whole sweep and applied ONCE at the
+  // end. Pruning per project would drop every OTHER project's streaks on each
+  // iteration, resetting them to 1 forever — the escalation would then never
+  // fire and the guard would look present while being unable to trigger.
+  const consideredThisSweep = new Set();
   for (const p of listProjects()) {
     const triageStatusName = resolveEligibleQuery(p)?.triageStatus ?? null;
     // CTL-1589: Triage-state board ∪ eligible set, deduped by ticket id. The
@@ -1589,16 +1891,30 @@ export function sweepMissingTriage({
       if (
         budget.remaining <= 0 &&
         readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP
-      )
+      ) {
+        // CTL-879: was a bare `continue`. This is the gate that makes a busy
+        // fleet look identical to a broken one — dispatchTriage is never called,
+        // so its own info-level budget line never fires either.
+        // CTL-879 / INIT-34: which of the two zero-budget mechanisms this is. See
+        // triageBudgetSkip — the reason must DIFFER, not carry a flag, because `reason` is
+        // the streak key and the Loki selector.
+        const bs = triageBudgetSkip(budget);
+        noteTriageSkip(t.identifier, bs.reason, bs.detail, { alwaysWarn: bs.alwaysWarn });
         continue;
-      if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      }
+      if (hasTriageArtifact(orchDir, t.identifier)) {
+        clearTriageSkip(t.identifier); // CTL-879: triaged — this is the healthy exit
+        continue;
+      }
       // CTL-1589 (Codex R4): a Triage-STATE ticket whose triage worker is
       // in-flight right now has no artifact yet and would route to an
       // idempotent no-op launch — which still decrements the sweep budget
       // (code 0) and would pay a pointless live revalidation read. Skip it
       // here; the eligible half keeps its pre-existing behavior.
-      if (t.fromTriageBoard && isTriageInFlight(readTriageSignalStatus(orchDir, t.identifier)))
+      if (t.fromTriageBoard && isTriageInFlight(readTriageSignalStatus(orchDir, t.identifier))) {
+        noteTriageSkip(t.identifier, "triage-worker-in-flight"); // CTL-879
         continue;
+      }
       // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
       // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
       // where the stale completion signal is retired immediately before a real
@@ -1630,7 +1946,12 @@ export function sweepMissingTriage({
         stampWorkerLabel, // CTL-1481
       });
     }
+    for (const id of seen) consideredThisSweep.add(id);
   }
+  // CTL-879: prune to exactly the identifiers this sweep considered, so the
+  // streak table cannot grow for the daemon's lifetime (CAT-36's bug, avoided
+  // rather than repeated).
+  pruneTriageSkips(consideredThisSweep);
 }
 
 // CTL-681 removed scheduleDirtyReconcile + its dirtyTimers Map. The
@@ -1827,6 +2148,30 @@ export function readNewEvents({ foldOnly = false } = {}) {
       // reader that drives dispatchTriage and the comment-wake blind. Non-gating:
       // the event is routed regardless, exactly like the torn counter above.
       checkEnvelope(event);
+      // CTL-1847: WHICH producer may drive dispatch. Both the smee→webhook
+      // receiver and the cloud feed write the same three dispatch-class names
+      // into this one log; the gate decides which is authoritative for this
+      // host right now, and the loser is CAPTURED rather than dropped so the
+      // parity harness can still answer "did the feed miss this edge?" after
+      // the fact. In the default mode (off) `decideDispatch` returns
+      // suppress:false for every webhook event, so this block is byte-identical
+      // to pre-CTL-1847 routing.
+      //
+      // ⚠️ ORDER IS LOAD-BEARING: this block must stay ABOVE the CTL-1655
+      // `markAndCheckCommentSeen` gate below. A suppressed smee comment must
+      // never enter the dedup set — if it did, it would mark the comment seen
+      // and the FEED's copy of that same comment would then be skipped as a
+      // duplicate, so the comment would reach no worker inbox at all. Because
+      // the suppression `continue`s first, exactly one copy (the feed's)
+      // dispatches. Moving this below the dedup turns enforce mode into a
+      // silent comment blackhole.
+      if (_cloudFeedGate) {
+        const verdict = decideDispatch(event, _cloudFeedGate);
+        if (verdict.suppress) {
+          _cloudFeedGate.capture?.append(event, verdict);
+          continue;
+        }
+      }
       // CTL-731: handleStateChangedEvent gates its dispatch side-effects on
       // foldOnly; handleIssueUpdatedEvent is a pure projection fold (always safe);
       // handleCommentCreatedEvent's onComment is a side-effect — withhold it on
@@ -1872,8 +2217,8 @@ export function readNewEvents({ foldOnly = false } = {}) {
 //
 // Exported so tests can drive it deterministically without wiring startTailing.
 export function readNewCoordinationComments({ foldOnly = false } = {}) {
-  // Constraint 5: single-host no-op.
-  if (getClusterHosts().length <= 1) return;
+  // Constraint 5: single-host no-op. CTL-1785: EXISTENCE topology gate.
+  if (getExistenceHosts().length <= 1) return;
 
   const mirrorPath = getCoordinationMirrorPath();
   // Reset cursor on path change (analogous to readNewEvents month-rollover guard).
@@ -1912,6 +2257,26 @@ export function readNewCoordinationComments({ foldOnly = false } = {}) {
       // Constraint 1: comment-only filter.
       const evName = getEventName(event); // CTL-1834: the shared boundary
       if (evName !== "linear.comment.created") continue;
+
+      // CTL-1847 (Codex P1, #3439): the SAME dispatch-source gate as the unified
+      // tail, and for a reason specific to this path. Webhook `linear.*` events
+      // are also published into coordination.jsonl, and this tail routed them
+      // straight into `markAndCheckCommentSeen` without consulting the gate — so
+      // on a multi-host deployment the webhook copy usually won the race, marked
+      // the comment seen, and the later cloud-feed copy was skipped as a
+      // duplicate. Enforce mode would therefore NOT be authoritative for human
+      // comments on exactly the hosts that matter most.
+      //
+      // Placed ABOVE the dedup for the same reason as in readNewEvents: a
+      // suppressed copy must never enter the dedup set, or it silences the copy
+      // that was supposed to replace it.
+      if (_cloudFeedGate) {
+        const verdict = decideDispatch(event, _cloudFeedGate);
+        if (verdict.suppress) {
+          _cloudFeedGate.capture?.append(event, { ...verdict, tail: "coordination" });
+          continue;
+        }
+      }
 
       // Constraint 2: cross-source dedup. foldOnly drains do NOT insert (boot
       // drain must not permanently poison the dedup set for future live delivery).
@@ -1953,7 +2318,8 @@ export function startTailing() {
     readNewEvents();
   });
   // CTL-1655 Phase 3: watch the coordination mirror dir too (multi-host only).
-  if (getClusterHosts().length > 1) {
+  // CTL-1785: EXISTENCE topology gate.
+  if (getExistenceHosts().length > 1) {
     const mirrorPath = getCoordinationMirrorPath();
     const mirrorDir = dirname(mirrorPath);
     const mirrorFile = basename(mirrorPath);

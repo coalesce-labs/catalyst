@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  COORD-108/118/121 — drain remote owners' queued channel turns onto the channel host.
+  Tokens (__HOME__, __SCRIPT__, __CHANNEL__, __HOSTS__) are substituted by install-comms-drain.sh;
+  this file is a TEMPLATE and is not loadable as-is.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.coalesce.catalyst-comms-drain</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__SCRIPT__</string>
+    <string>--channel</string>
+    <string>__CHANNEL__</string>
+    <string>--hosts</string>
+    <string>__HOSTS__</string>
+  </array>
+  <!--
+    120s. A remote owner's turn is a coordination signal — the whole point is that COORD reads it
+    on the next pass, not eventually. The drain is cheap (one ssh listing per host) and is a no-op
+    when nothing is queued.
+  -->
+  <key>StartInterval</key>
+  <integer>120</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <!-- ssh must resolve; launchd's default PATH does not include homebrew. -->
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/catalyst-comms-drain.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/catalyst-comms-drain.err.log</string>
+</dict>
+</plist>

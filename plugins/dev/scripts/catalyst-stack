@@ -172,6 +172,14 @@ unset _SRC
 source "$SCRIPT_DIR/lib/catalyst-agent-path.sh"
 # shellcheck source=lib/cloud-sync-token-probe.sh
 [[ -f "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh" ]] && . "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
+# shellcheck source=lib/launchd-domain-guard.sh
+# CTL-1968: refuses to mutate gui/<uid> from a scratch HOME. Hard requirement,
+# not best-effort — a missing guard is how the laptop lost its replica writer
+# twice in one morning, so an absent file must fail loudly rather than silently
+# restore the old behaviour.
+[[ -f "${SCRIPT_DIR}/lib/launchd-domain-guard.sh" ]] || {
+  printf '[catalyst-stack] ERROR: missing lib/launchd-domain-guard.sh next to catalyst-stack\n' >&2; exit 1; }
+. "${SCRIPT_DIR}/lib/launchd-domain-guard.sh"
 
 # ─── Proxy env (used only under --proxy) ─────────────────────────────────────
 PROXY_HOST="http://127.0.0.1:8080"
@@ -237,6 +245,17 @@ CLOUD_SYNC_LAUNCHER="${SCRIPT_DIR}/execution-core/cloud-sync/launch.sh"
 log()  { printf '[catalyst-stack] %s\n' "$*"; }
 warn() { printf '[catalyst-stack] WARN: %s\n' "$*" >&2; }
 fail() { printf '[catalyst-stack] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# CTL-1968: every command below that bootstraps/boots-out a LaunchAgent whose
+# plist path is derived from $HOME must clear this first. `gui/$(id -u)` is a
+# PER-USER domain, so a scratch HOME does not sandbox it — it just renders the
+# plist somewhere temporary and then re-binds the REAL label to it.
+stack_launchd_guard() {
+  local ctx="${1:-launchd agent}"
+  launchd_guard_ok "$ctx" && return 0
+  launchd_guard_message "$ctx" >&2
+  fail "launchd domain guard refused ${ctx} (${CATALYST_LAUNCHD_GUARD_REASON})"
+}
 
 pid_alive() {
   local pid="${1:-}"
@@ -865,7 +884,9 @@ start_event_mirror() {
   render_event_mirror_plist "$EVENT_MIRROR_LAUNCHER" > "$EVENT_MIRROR_AGENT_PLIST"
   local guid; guid="gui/$(id -u)"
   # Idempotent (re)load: bootout any existing instance, then bootstrap fresh.
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   launchctl bootout "$guid" "$EVENT_MIRROR_AGENT_PLIST" 2>/dev/null || true
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   if ! launchctl bootstrap "$guid" "$EVENT_MIRROR_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
     rm -f "$EVENT_MIRROR_AGENT_PLIST"
     warn "launchctl bootstrap failed for $EVENT_MIRROR_AGENT_PLIST — event-mirror not started"
@@ -888,6 +909,7 @@ stop_event_mirror() {
   command -v launchctl >/dev/null 2>&1 || { rm -f "$EVENT_MIRROR_AGENT_PLIST"; return 0; }
   local guid; guid="gui/$(id -u)"
   log "stopping event-mirror LaunchAgent ($EVENT_MIRROR_AGENT_LABEL)"
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   launchctl bootout "$guid" "$EVENT_MIRROR_AGENT_PLIST" 2>/dev/null || true
   rm -f "$EVENT_MIRROR_AGENT_PLIST"
   log "  → event-mirror stopped and uninstalled"
@@ -2050,7 +2072,9 @@ cmd_install_services() {
 
   local guid; guid="gui/$(id -u)"
   # idempotent (re)load: bootout any existing instance, then bootstrap fresh.
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   launchctl bootout "$guid" "$STACK_AGENT_PLIST" 2>/dev/null || true
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   if launchctl bootstrap "$guid" "$STACK_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
     log "loaded $STACK_AGENT_LABEL — RunAtLoad fired 'catalyst-stack start'"
   else
@@ -2060,7 +2084,9 @@ cmd_install_services() {
   render_thoughts_sync_plist "$sync_cmd" "$sync_interval" > "$SYNC_AGENT_PLIST"
   log "wrote $SYNC_AGENT_PLIST (exec: $sync_cmd, keep-alive ${sync_interval}s)"
 
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   launchctl bootout "$guid" "$SYNC_AGENT_PLIST" 2>/dev/null || true
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   if launchctl bootstrap "$guid" "$SYNC_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
     log "loaded $SYNC_AGENT_LABEL — RunAtLoad fired thoughts-pull-sync"
   else
@@ -2074,7 +2100,9 @@ cmd_install_services() {
   render_shipper_plist "$shipper_launcher" "$host_name" "$_shipper_config_resolved" > "$SHIPPER_AGENT_PLIST"
   log "wrote $SHIPPER_AGENT_PLIST (exec: launch.sh, KeepAlive foreground)"
 
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   launchctl bootout "$guid" "$SHIPPER_AGENT_PLIST" 2>/dev/null || true
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   if launchctl bootstrap "$guid" "$SHIPPER_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
     log "loaded $SHIPPER_AGENT_LABEL — KeepAlive supervising alloy"
   else
@@ -2158,6 +2186,7 @@ cmd_uninstall_services() {
   [[ "$(uname -s)" == "Darwin" ]] || fail "uninstall-services is macOS-only (launchd); this host is $(uname -s)"
   local guid; guid="gui/$(id -u)"
   if [[ -f "$STACK_AGENT_PLIST" ]]; then
+    stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
     launchctl bootout "$guid" "$STACK_AGENT_PLIST" 2>/dev/null || true
     rm -f "$STACK_AGENT_PLIST"
     log "removed $STACK_AGENT_LABEL ($STACK_AGENT_PLIST)"
@@ -2166,6 +2195,7 @@ cmd_uninstall_services() {
     log "$STACK_AGENT_LABEL not installed (no $STACK_AGENT_PLIST)"
   fi
   if [[ -f "$SYNC_AGENT_PLIST" ]]; then
+    stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
     launchctl bootout "$guid" "$SYNC_AGENT_PLIST" 2>/dev/null || true
     rm -f "$SYNC_AGENT_PLIST"
     log "removed $SYNC_AGENT_LABEL ($SYNC_AGENT_PLIST)"
@@ -2184,7 +2214,28 @@ cmd_uninstall_services() {
   if [[ -x "${SCRIPT_DIR}/install-dependabot-escalate.sh" ]]; then
     bash "${SCRIPT_DIR}/install-dependabot-escalate.sh" --uninstall 2>&1 | sed 's/^/  /' || true
   fi
+  # CTL-1975: account-usage pager (delegated; idempotent, safe if not installed). This agent was
+  # installed on every node by install-services and removed by NOTHING — measured 2026-08-18 on all
+  # three hosts. `catalyst uninstall`'s verify-clean probes the plist dir with a PREFIX regex
+  # (^ai\.coalesce\.catalyst-.*\.plist$), so the orphan it left behind failed the teardown at its
+  # last phase with no code path anywhere able to clear it.
+  # ⚠️ rc is LOGGED rather than swallowed (FLEET-37 note 1 on #3606). The overall path stays
+  # fail-closed either way — verify-clean's prefix regex catches a residual plist — but without this
+  # line the operator sees "residual plist found" at the FINAL phase and has to reconstruct which
+  # teardown failed and why. `|| true` is kept: one agent's teardown must not abort the other eight.
+  if [[ -x "${SCRIPT_DIR}/install-usage-page.sh" ]]; then
+    # The `|| true` wraps the GROUP, not the pipeline: `pipeline || true` would run `true` whenever
+    # the pipeline failed, and `true` resets PIPESTATUS — under-reporting the very rc being captured.
+    local up_rc=0
+    { bash "${SCRIPT_DIR}/install-usage-page.sh" --uninstall 2>&1 | sed 's/^/  /'; up_rc=${PIPESTATUS[0]}; } || true
+    [[ $up_rc -eq 0 ]] || warn "install-usage-page.sh --uninstall exited $up_rc — ai.coalesce.catalyst-usage-page may remain (verify-clean will refuse the teardown)"
+  fi
+  # CTL-1975: event-mirror (monitor/developer nodes). stop_event_mirror already boots out, removes
+  # the plist, is idempotent and carries the CTL-1968 domain guard — it was simply never called from
+  # a teardown path. Same orphaned-plist consequence as usage-page above, on observation nodes.
+  stop_event_mirror
   if [[ -f "$SHIPPER_AGENT_PLIST" ]]; then
+    stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
     launchctl bootout "$guid" "$SHIPPER_AGENT_PLIST" 2>/dev/null || true
     rm -f "$SHIPPER_AGENT_PLIST"
     log "removed $SHIPPER_AGENT_LABEL ($SHIPPER_AGENT_PLIST)"
@@ -2198,6 +2249,7 @@ cmd_uninstall_services() {
   # with no pull authority, so no owner-reset ritual (unlike the updater below).
   local agent_plist="${HOME}/Library/LaunchAgents/com.catalyst.agent.plist"
   if [[ -f "$agent_plist" ]]; then
+    stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
     launchctl bootout "$guid" "$agent_plist" 2>/dev/null || true
     rm -f "$agent_plist"
     log "removed com.catalyst.agent ($agent_plist)"
@@ -2216,6 +2268,7 @@ cmd_uninstall_services() {
     warn "could NOT reset pluginPullOwner=broker in $cfg — LEAVING the $UPDATER_AGENT_LABEL agent in place (it is still the only puller). Fix the config write, then re-run uninstall-services."
   else
     if [[ -f "$UPDATER_AGENT_PLIST" ]]; then
+      stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
       launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
       rm -f "$UPDATER_AGENT_PLIST"
       log "removed $UPDATER_AGENT_LABEL ($UPDATER_AGENT_PLIST)"
@@ -2231,6 +2284,7 @@ cmd_uninstall_services() {
   # side effects, so a plain bootout + rm is safe. The local replica file is left on disk
   # (it just goes stale; the scheduler read tier is mtime-gated + fail-open).
   if [[ -f "$CLOUD_SYNC_AGENT_PLIST" ]]; then
+    stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
     launchctl bootout "$guid" "$CLOUD_SYNC_AGENT_PLIST" 2>/dev/null || true
     rm -f "$CLOUD_SYNC_AGENT_PLIST"
     log "removed $CLOUD_SYNC_AGENT_LABEL ($CLOUD_SYNC_AGENT_PLIST)"
@@ -2358,7 +2412,9 @@ cmd_adopt_updater() {
   render_updater_plist "$launcher" "$host_name" > "$UPDATER_AGENT_PLIST"
   log "wrote $UPDATER_AGENT_PLIST (exec: launch.sh, KeepAlive foreground)"
 
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   if ! launchctl bootstrap "$guid" "$UPDATER_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
     rm -f "$UPDATER_AGENT_PLIST"
     _reset_owner_broker_if_updater "$cfg" || true
@@ -2374,6 +2430,7 @@ cmd_adopt_updater() {
     sleep 1
   done
   if [[ "$confirmed" != "yes" ]]; then
+    stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
     launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
     rm -f "$UPDATER_AGENT_PLIST"
     _reset_owner_broker_if_updater "$cfg" || true
@@ -2385,6 +2442,7 @@ cmd_adopt_updater() {
   # now — with the updater confirmed up — does the broker defer. Fail-closed: any write
   # failure backs out the agent AND reconciles ownership to broker, so we never strand.
   if ! _write_plugin_pull_owner "$cfg" "updater"; then
+    stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
     launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
     rm -f "$UPDATER_AGENT_PLIST"
     _reset_owner_broker_if_updater "$cfg" || true
@@ -2440,7 +2498,9 @@ cmd_adopt_thoughts_sync() {
   render_thoughts_sync_plist "$sync_cmd" "$sync_interval" > "$SYNC_AGENT_PLIST"
   log "wrote $SYNC_AGENT_PLIST (exec: $sync_cmd, interval ${sync_interval}s)"
   local guid; guid="gui/$(id -u)"
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   launchctl bootout "$guid" "$SYNC_AGENT_PLIST" 2>/dev/null || true
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   if launchctl bootstrap "$guid" "$SYNC_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
     log "loaded $SYNC_AGENT_LABEL — RunAtLoad fired thoughts-pull-sync"
   else
@@ -2604,7 +2664,9 @@ cmd_adopt_cloud_sync() {
   render_cloud_sync_plist "$launcher" "$host_name" > "$CLOUD_SYNC_AGENT_PLIST"
   log "wrote $CLOUD_SYNC_AGENT_PLIST (exec: launch.sh, KeepAlive on crash)"
 
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   launchctl bootout "$guid" "$CLOUD_SYNC_AGENT_PLIST" 2>/dev/null || true
+  stack_launchd_guard "${FUNCNAME[0]:-catalyst-stack}"
   if ! launchctl bootstrap "$guid" "$CLOUD_SYNC_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
     rm -f "$CLOUD_SYNC_AGENT_PLIST"
     fail "launchctl bootstrap failed for $CLOUD_SYNC_AGENT_PLIST — agent backed out"

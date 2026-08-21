@@ -31,10 +31,28 @@ import {
   YIELD_EXPIRED_REASON,
   classifyYield,
 } from "../lib/phase-yield.mjs";
+// CTL-1851: when is a worker carrying NO bg_job_id provably gone? An SDK-executor
+// worker never has one, so `classifyWorker` answered "unknown" for its entire life
+// and the reclaim path no-opped — a dead worker pinned its slot forever.
+import {
+  classifyDispatchDeadline,
+  MAX_DISPATCHED_MS,
+  MIN_DISPATCH_AGE_MS,
+} from "../lib/phase-dispatch-deadline.mjs";
 import {
   getJobsRoot,
   getEventLogPath,
-  getClusterHosts,
+  // CTL-1785: heartbeat reads (readClusterHeartbeats) are an ENTITLEMENT gate (who
+  // may own/take work), so they hash over the entitled roster. In `off` mode
+  // (default) getEntitledHosts() === getClusterHosts(), so this is behavior-neutral.
+  // reclaimDeadHostWork ALSO uses this, but only to narrow survivor eligibility —
+  // see the EXISTENCE VS ENTITLEMENT note on that function for the full split.
+  getEntitledHosts,
+  // CTL-1785 (code review, chatgpt-codex-connector P1): reclaimDeadHostWork's
+  // victim discovery (the single-host guard, deadHosts, ownedTicketsForHost) must
+  // hash over the EXISTENCE roster, not the entitled one — a shed-but-silent host
+  // must still be found dead and reclaimed. See reclaimDeadHostWork below.
+  getExistenceHosts,
   getHostName,
   getLivenessAnchorIssue,
   getLivenessReadSource, // CTL-1420 (#17): loki|linear cross-host liveness source
@@ -119,7 +137,7 @@ import {
 } from "./work-done-probes.mjs";
 import { STAGE_RANK, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
 import { ownerForTicket } from "./hrw.mjs";
-import { claimDispatchSync } from "./cluster-claim-sync.mjs";
+import { claimDispatchSync, isClaimFailure } from "./cluster-claim-sync.mjs"; // CTL-2033: + the outcome discriminator
 import { dispatchTicket, defaultDispatch, settleDispatchSync, sdkSignalRunnable, backstopOnRejection } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) revive dispatch synchronously + backstop a rejected async dispatch
 import { createWorktree } from "./worktree.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
@@ -166,10 +184,12 @@ const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", 
 // resolvePhaseSessionId — extracted to session-resolve.mjs (CTL-729) so
 // transcript-silence.mjs can import it without pulling in recovery.mjs's
 // heavy dependency graph. Imported for local use + re-exported for callers.
+import { RETRACTABLE_STATUS } from "./artifact-contradiction.mjs"; // CTL-2050
 import { resolvePhaseSessionId } from "./session-resolve.mjs";
 export { resolvePhaseSessionId };
 import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
 
+import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
 // detectSessionRateLimitHit — best-effort: did the dead worker's OWN session
 // immediately hit a Claude account usage/session limit, rather than genuinely
 // failing to make progress on the ticket's actual work?
@@ -364,10 +384,40 @@ export function jobLifecycle(bgJobId, { statJob = defaultStatJob } = {}) {
 // mere job-dir existence. A never-cleaned-up dir whose .state is terminal
 // (stopped/failed/done/blocked) now classifies 'dead' instead of 'running' —
 // the discard the plan called out (16,462 retained job dirs, 0 pid files).
-export function classifyWorker(signal, { statJob = defaultStatJob } = {}) {
+export function classifyWorker(
+  signal,
+  {
+    statJob = defaultStatJob,
+    // CTL-1851 — the boot instant this daemon started at, epoch-ms, or null when
+    // it cannot be read.
+    //
+    // ⚠️ IT DEFAULTS TO null, AND THAT IS THE COMPATIBILITY CONTRACT. With no
+    // boot instant and a bg-less signal inside the deadline, this function
+    // returns "unknown" exactly as it always has, so every existing caller and
+    // test is byte-identical until it opts in by passing one. The ONE production
+    // caller that opts in is reclaimDeadWorkIfPossible, which already reads the
+    // boot marker for its attempt-count window.
+    bootedMs = null,
+    nowMs = Date.now(),
+    maxDispatchedMs = MAX_DISPATCHED_MS,
+    minDispatchAgeMs = MIN_DISPATCH_AGE_MS,
+  } = {}
+) {
   if (TERMINAL.has(signal?.status)) return "terminal";
   const live = signal?.liveness;
-  if (live?.kind !== "bg" || !live?.value) return "unknown";
+  if (live?.kind !== "bg" || !live?.value) {
+    // CTL-1851: a bg-less signal is not automatically unknowable. An SDK worker
+    // runs IN-PROCESS in the daemon, so a dispatch that predates this daemon's
+    // boot is PROVABLY dead — and a signal still at `dispatched` long past the
+    // ceiling never had a first turn. Either way it is `dead`, which routes it
+    // into the existing CTL-574 reclaim path (work-done probe → emit-complete,
+    // else revive, else escalate) instead of being silently dropped.
+    const verdict = classifyDispatchDeadline(
+      { ...(signal?.raw ?? {}), status: signal?.status },
+      { nowMs, bootedMs, maxDispatchedMs, minAgeMs: minDispatchAgeMs }
+    );
+    return verdict.expired ? "dead" : "unknown";
+  }
   return jobLifecycle(live.value, { statJob }) === "alive" ? "running" : "dead";
 }
 
@@ -788,7 +838,11 @@ export function defaultPostReclaimMirror(
         dirname(fileURLToPath(import.meta.url)),
         "../lib/linear-comment-post.sh"
       );
-      return spawnSync(helperPath, [t, bodyText], { encoding: "utf8" });
+      // CTL-1889 inc 2: cloud write proxy under enforce; this helper otherwise.
+      return postLinearCommentAsSpawnResult(t, bodyText, {
+        caller: "reclaim-mirror",
+        runHelper: (tt, bb) => spawnSync(helperPath, [tt, bb], { encoding: "utf8" }),
+      });
     },
     multiHost = false,
     // CTL-863: threaded through for the Stage-1 projection-first fence read.
@@ -2316,6 +2370,125 @@ export function defaultExpireYield(
   return true;
 }
 
+// ─── CTL-2050: retract a failure an ARTIFACT contradicts ─────────────────────
+//
+// The writer half of artifact-contradiction.mjs. The classifier decides; this
+// rewrites the signal, and it is the ONLY thing in the fleet that turns a
+// terminal `failed` back into `done`.
+//
+// It is a near-clone of defaultExpireYield above ON PURPOSE — same identity
+// resolution, same re-read-before-write, same atomic tmp+rename, same
+// best-effort event. Sharing one generic "rewrite a signal" helper between them
+// would need a callback per difference and would hide the one thing a reader of
+// EITHER function must see: exactly which precondition is re-asserted against
+// the bytes on disk before it overwrites them.
+export function defaultRetractContradictedFailure(
+  orchDir,
+  signal,
+  verdict,
+  {
+    readFile = readFileSync,
+    writeFile = writeFileSync,
+    rename = renameSync,
+    rm = rmSync,
+    appendEventLog = defaultAppendEventLog,
+    now = () => new Date(),
+  } = {}
+) {
+  // Refuse rather than build a nonsense path — `workers//phase-.json` cannot
+  // exist, so a missing identity would silently no-op forever (CTL-1854 round 25
+  // shipped exactly that bug on the yield path). Prefer a VALID identity, not a
+  // merely PRESENT one: `??` keeps a numeric or object ticket, which then fails
+  // the type check and turns the refusal permanent.
+  const _valid = (v) => (typeof v === "string" && v !== "" ? v : undefined);
+  const _ticket = _valid(signal?.ticket) ?? _valid(signal?.derivedTicket);
+  const _phase = _valid(signal?.phase) ?? _valid(signal?.derivedPhase);
+  if (!_ticket || !_phase) return false;
+  if (verdict?.retract !== true) return false; // belt: only the classifier may authorize
+
+  const p = join(orchDir, "workers", _ticket, `phase-${_phase}.json`);
+  let cur;
+  try {
+    cur = JSON.parse(readFile(p, "utf8"));
+  } catch {
+    return false; // nothing on disk to retract
+  }
+  // ⛔ RE-ASSERT BOTH HALVES OF THE PRECONDITION AGAINST THE CANONICAL BYTES.
+  // The tick's signal view was read earlier and by a different reader. If
+  // anything has since rewritten this file — a redispatched worker declaring a
+  // real completion, an operator, another host — the verdict describes a record
+  // that no longer exists and applying it would destroy a real result.
+  //
+  // ⚠️ This NARROWS the window; it does not close it. The read above and the
+  // write below are separate syscalls against a file other PROCESSES write, so a
+  // record landing between them is still overwritten. Same bound, same tracking
+  // ticket, as the yield expiry (CTL-1860). Said plainly because a comment
+  // claiming a guarantee the code does not provide is how the next reader stops
+  // looking.
+  if (String(cur.status) !== RETRACTABLE_STATUS) return false;
+  if (String(cur.failureReason) !== String(verdict.failureReason)) return false;
+
+  const ts = now().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const tmp = `${p}.tmp.${process.pid}`;
+  try {
+    writeFile(
+      tmp,
+      JSON.stringify({
+        ...cur,
+        status: "done",
+        // The audit trail is the point. `retractedFailureReason` preserves the
+        // string the guard wrote, so "why is this done?" is answerable from the
+        // signal alone and the original failure is never erased — only demoted.
+        retractedFailureReason: verdict.failureReason,
+        retractedAt: ts,
+        retractedBy: "artifact-contradiction",
+        failureReason: null,
+        // `outcome` carries "abandoned" on some terminal writers; leaving it on a
+        // `done` record would read as a completed-but-abandoned phase.
+        outcome: undefined,
+        // ⭐ CTL-1789: FABRICATED, never declared. The agent never ran its own
+        // emit wrapper — the guard bowed out before it could — so this terminal
+        // is infrastructure asserting on the agent's behalf and must say so.
+        assertedBy: ASSERTED_BY.RECOVERY_ARTIFACT_CONTRADICTION,
+        completedAt: cur.completedAt ?? ts,
+        updatedAt: ts,
+      })
+    );
+    rename(tmp, p);
+    // ⚠️ The event name is deliberately NOT `phase.<phase>.complete.<ticket>`.
+    // That name is a ROUTING name: PHASE_EVENT_PATTERN matches it, so re-emitting
+    // it would fire that phase's `wait-for` subscribers and the broker's
+    // phase-lifecycle router on a terminal the agent never declared. Advancement
+    // is a signal-file tick-scan, not an event fold, so the rename above is
+    // already sufficient to release the ticket; this is pure audit.
+    // `failure-retracted` is in the `phase.<known-phase>.*` namespace but not in
+    // the terminal-status set, so tryPhaseLifecycleRoute returns [] for it — the
+    // same "audit, zero wake side effect" shape as `phase.advance.held`.
+    try {
+      appendEventLog({
+        // The RESOLVED identity, not the record's raw fields: older signals omit
+        // both, and `phase.null.failure-retracted.null` looks like a real event
+        // for a phase that does not exist, which is worse than silence.
+        phase: _phase,
+        ticket: _ticket,
+        status: "failure-retracted",
+        reason: `artifact contradicts ${verdict.failureReason}`,
+        orchestrator: cur?.orchestrator,
+      });
+    } catch {
+      /* the signal is authoritative; a failed emit must not fail the retraction */
+    }
+  } catch {
+    try {
+      rm(tmp, { force: true });
+    } catch {
+      /* nothing further to do */
+    }
+    return false;
+  }
+  return true;
+}
+
 export function reclaimDeadWorkIfPossible(
   orchDir,
   signal,
@@ -2598,7 +2771,18 @@ export function reclaimDeadWorkIfPossible(
     return "noop";
   }
 
-  const klass = classifyWorker(signal, { statJob });
+  // CTL-1851 — hand classifyWorker this daemon's boot instant so a bg-less
+  // (SDK-executor) worker can be judged instead of being answered "unknown"
+  // forever. `readBootSinceFn` is the seam this function already uses for its
+  // attempt-count window; it returns an ISO string or undefined, and an
+  // unreadable marker degrades to `null`, which disables the proof rule and
+  // leaves the never-started timer to answer alone.
+  const bootedIso = readBootSinceFn(orchDir);
+  const bootedMs = (() => {
+    const t = typeof bootedIso === "string" ? Date.parse(bootedIso) : NaN;
+    return Number.isFinite(t) ? t : null;
+  })();
+  const klass = classifyWorker(signal, { statJob, bootedMs, nowMs: now() });
   // CTL-662: terminal (phase finished) and unknown (no bg_job_id) still
   // short-circuit — boot-classification gating is unchanged. Everything else
   // (running, OR dead-by-missing-job-dir) is routed through the status trigger
@@ -4387,7 +4571,7 @@ export function makeTickHeartbeatReader({ scanLocal = null, ...scanOpts } = {}) 
 // not a whole-file read. Peak transient is one chunk regardless of log size.
 export function readClusterHeartbeats({
   logPath = getEventLogPath(),
-  roster = getClusterHosts(),
+  roster = getEntitledHosts(),
   anchorIssue = getLivenessAnchorIssue(),
   readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
   // CTL-1529 bounded-read seams. `scanLocal` is a zero-arg memo (makeHeartbeatScanMemo)
@@ -4832,6 +5016,19 @@ function writeLocalClusterGeneration(orchDir, ticket, generation) {
 // SINGLE-HOST INSTALLS ARE AN EXACT NO-OP: the function short-circuits immediately
 // when `roster.length <= 1`. Every new behavior is gated on multiHost.
 //
+// EXISTENCE VS ENTITLEMENT (CTL-1785, code review chatgpt-codex-connector P1):
+// `roster` here is the EXISTENCE roster (defaults to getExistenceHosts(), same as
+// the scheduler.mjs call site's own pre-check — see its "EXISTENCE-gated" comment)
+// and drives victim discovery: the single-host guard, deadHosts(), and
+// ownedTicketsForHost(). A host shed from ENTITLEMENT still physically exists, so
+// its work must remain reclaimable — hashing victim discovery over the entitled
+// roster instead would silently drop a shed-and-silent host from `dead` and orphan
+// its in-flight tickets forever (the exact CTL-1760 blind spot this ticket closes).
+// Entitlement only narrows the SURVIVOR set below, via getEntitledHosts({ hosts }):
+// a shed host must never become the new owner of reclaimed work. In `off` mode
+// (default) getEntitledHosts() is the identity function over its `hosts` input, so
+// this narrowing is behavior-neutral until entitlement is actually enforced.
+//
 // All collaborators are injectable for unit tests (no network, fs, or subprocess
 // in tests — they inject fakes for every seam).
 export async function reclaimDeadHostWork(
@@ -4843,7 +5040,10 @@ export async function reclaimDeadHostWork(
     // to the caller's .catch and the sweep is skipped for this tick (conservative:
     // no reclaim on unproven data). Production threads the tick's SHARED reader in.
     readHeartbeats = () => readClusterHeartbeats({ requireGraceWindow: true }),
-    roster = getClusterHosts(),
+    // CTL-1785: EXISTENCE roster for victim discovery — see the EXISTENCE VS
+    // ENTITLEMENT note above. Every current test injects an explicit array here
+    // (never relies on this default), so this default only affects production.
+    roster = getExistenceHosts(),
     self = getHostName(),
     graceMs = HEARTBEAT_GRACE_MS,
     nowMs = Date.now(),
@@ -4879,17 +5079,38 @@ export async function reclaimDeadHostWork(
   const dead = deadHosts({ lastSeen, roster, graceMs, nowMs });
   if (dead.length === 0) return { taken };
 
-  const survivors = survivingRoster(roster, dead);
+  // CTL-1785: survivors narrows the EXISTENCE-alive set down to hosts that are
+  // also currently ENTITLED — a shed survivor must never win HRW ownership of
+  // reclaimed work. getEntitledHosts({ hosts }) is the identity function in `off`
+  // mode (default), so this is behavior-neutral until entitlement is enforced.
+  const survivors = getEntitledHosts({ hosts: survivingRoster(roster, dead) });
 
   for (const deadHost of dead) {
     const tickets = ownedTicketsForHost(deadHost) ?? [];
     for (const ticket of tickets) {
-      // HRW check: are we the new owner over the surviving roster?
+      // HRW check: are we the new owner over the surviving (existence ∩ entitled) roster?
       if (ownerFn(ticket, survivors) !== self) continue;
 
       // Soft-CAS claim: bump generation to take ownership.
       const claimRes = claim(ticket, NEW_WORK_ENTRY_PHASE);
-      if (!claimRes?.won) continue;
+      if (!claimRes?.won) {
+        // CTL-2033: this was a BARE `continue` — the most silent of the three claim
+        // gates. Reclaiming a dead host's work is the path with no second actor, so
+        // a failed takeover claim strands that ticket until the next reclaim sweep
+        // with nothing written down anywhere. A lost race here is genuinely normal
+        // (a surviving peer took it) and stays at debug.
+        const claimReason = claimRes?.reason ?? null;
+        const ctx = { ticket, host: self, deadHost, claim_reason: claimReason, claim_detail: claimRes?.detail ?? null };
+        if (isClaimFailure(claimReason)) {
+          log.warn(
+            ctx,
+            "ctl-850: cross-host takeover claim FAILED (the soft-CAS never ran) — a dead host's ticket is NOT being reclaimed this sweep"
+          );
+        } else {
+          log.debug(ctx, "ctl-850: lost cross-host takeover claim — a surviving peer took it, deferring");
+        }
+        continue;
+      }
 
       // CTL-863: emit fence.claimed for the TAKEOVER bump AS SOON AS THE CLAIM
       // WINS — NOT gated on a successful redispatch (Codex P2, recovery.mjs:3358).

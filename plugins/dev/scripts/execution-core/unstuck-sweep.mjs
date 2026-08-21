@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process";
 import { log, getEventLogPath } from "./config.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "./unstuck-sweep-event-types.mjs";
 import { isTicketKey } from "./ticket-key.mjs";
+import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
 // CTL-1795: shared v1→superset envelope serializer (with its degrade-to-v1 fallback).
 import { dualEnvelopeOrV1 } from "./reap-intent.mjs";
 
@@ -289,7 +290,11 @@ function defaultRunCommentPost(ticket, body) {
     process.env.PLUGIN_ROOT ?? process.cwd(),
     "scripts/lib/linear-comment-post.sh",
   );
-  return spawnSync(helperPath, [ticket, body], { encoding: "utf8", timeout: 10_000 });
+  // CTL-1889 inc 2: cloud write proxy under enforce; this helper otherwise.
+  return postLinearCommentAsSpawnResult(ticket, body, {
+    caller: "unstuck-sweep",
+    runHelper: (t, b) => spawnSync(helperPath, [t, b], { encoding: "utf8", timeout: 10_000 }),
+  });
 }
 
 // _actionToEnforceEvent / _actionToShadowEvent — map decision.action → event type.

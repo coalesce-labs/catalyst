@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cli/args.mjs — strict argv parser shared by the execution-core audit CLI
 // nouns (sessions / worktrees / branches / tidy).
 //

@@ -27,12 +27,42 @@
 import { readFileSync, statSync, existsSync, lstatSync, realpathSync, readdirSync, openSync, readSync, closeSync } from "node:fs";
 import { resolve, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
+// CTL-1918: install-completeness lives in its own module. doctor.mjs is NOT
+// prettier-formatted on main (verified against a pristine checkout), so any edit here
+// drags a ~1,100-line reformat into the diff — extracting keeps this change reviewable.
+import { STATUS, mkCheck } from "./doctor-status.mjs";
+import { checkInstallCompleteness } from "./install-completeness.mjs";
+// CTL-1936 AC5: the standing answer to "is this host write-exhausted".
+import { checkHostWriteCredentialClass } from "./host-credential-health.mjs";
+import { checkLinearWriteBudget } from "./write-budget-health.mjs";
+import { checkAgentToolsWritePath } from "./agent-tools-write-path-health.mjs";
+import { checkExecutionCoreEnvDrift } from "./execution-core-env-drift-health.mjs";
+import { checkIndexServingRoot } from "./index-serving-root-health.mjs";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
 
+// CTL-1929: the GitHub-feed mode + the consumed/suppressible name lists, from two
+// zero-import leaves. ⛔ `github-feed-gate.mjs` — where the name lists used to live
+// — reaches `bun:sqlite` and this file runs under BARE NODE, so importing it here
+// fails at load (measured: config.mjs LOADS under bare node, github-feed-gate.mjs
+// REJECTS). The alternative was a hand-maintained copy here, which would keep
+// reporting three uncovered names after CTC-691/CTC-667/CTC-704 close.
+import { resolveGithubFeedMode } from "../lib/github-feed-mode.mjs";
+import {
+  GITHUB_CONSUMED_NAMES,
+  GITHUB_SUPPRESSIBLE_NAMES,
+  resolveGithubFeedAccount, // CTL-2030: hoisted here so bare-node doctor shares the producer's answer
+} from "../lib/github-feed-names.mjs";
+// CTL-2030: the producer's readiness heartbeat. `github-feed-ready.mjs` imports only
+// node:fs + node:path, so it loads under bare node (unlike github-feed-gate.mjs).
+import { defaultReadyPath, readReadyState } from "./github-feed-ready.mjs";
 import {
   getHostName,
-  getClusterHosts,
+  // CTL-1785: doctor's roster reads are diagnostic/audit over the physical
+  // EXISTENCE roster (all members need worker labels, the HRW-partition dry-run
+  // shows the full topology). Entitlement is reported separately by
+  // checkEntitlementConsistency. `off` mode: getExistenceHosts() === getClusterHosts().
+  getExistenceHosts,
   resolveClusterHosts,
   hostMembershipWarning,
   getLivenessAnchorIssue,
@@ -54,6 +84,11 @@ import {
   // do NOT import replica-read.mjs (it pulls bun:sqlite; doctor runs under bare node).
   getReplicaDbPath,
   readLinearReplica,
+  // CTL-2074 (Codex #3738 P2): resolve the write-proxy mode through the SAME
+  // env > Layer-2 > 'off' ladder the live write transport uses, so a host that enables
+  // enforce via Layer-2 (catalyst.linearWriteProxy.mode) without exporting the env var is
+  // not silently skipped by the self-echo cross-check. Node-safe (node:fs only).
+  readLinearWriteProxyConfig,
   resolveNodeCloudTokenEnv,
   // CTL-1659: the cloud-sync loaded-dependency boot record — doctor grades it from
   // another process, so it needs the same path the writer writes.
@@ -67,7 +102,23 @@ import {
   // a second copy of the resolution ladder.
   DEPLOYMENT_MODES,
   resolveDeploymentMode,
+  // CTL-1785: entitlement mode resolver, re-exported from the zero-import leaf
+  // (same pattern as deployment-mode above) — doctor grades it advisory-only.
+  resolveEntitlementMode,
 } from "./config.mjs";
+// CTL-1785: the TTL constants + enum, imported DIRECTLY from the zero-import leaf
+// (node built-ins only — safe under doctor's bare-Node runtime), same pattern as
+// secret-contract.mjs below, not re-exported through config.mjs.
+import {
+  ENTITLEMENT_MODES,
+  ENTITLEMENT_TTL_MS,
+  WORK_LEASE_TTL_MS,
+  // CTL-1785 (code review, chatgpt-codex-connector P2): a malformed JSON config
+  // can supply a non-string mode like {"toString": null} as m.raw — interpolating
+  // that directly throws TypeError instead of producing the advisory WARN. Reuse
+  // the same never-throws renderer getEntitlementMode() already uses for this.
+  printableRaw,
+} from "../lib/entitlement.mjs";
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 // CTL-1659: the loaded-dependency skew comparator. A zero-import leaf (node:crypto/fs/path
 // only), like lib/secret-contract.mjs — safe under doctor's bare-Node runtime.
@@ -96,6 +147,20 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
+
+// CTL-1931: doctor.mjs lives at <repo>/plugins/dev/scripts/execution-core/, so the repo's
+// `.catalyst/config.json` is four levels up — the same module-relative derivation
+// broker/router.mjs uses for its own `__REPO_CONFIG_PATH`. Exported so a test can assert
+// the production default actually supplies this rung rather than passing null.
+export const DOCTOR_REPO_CONFIG_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  "..",
+  ".catalyst",
+  "config.json"
+);
 import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 import { listProjects } from "./registry.mjs";
@@ -112,9 +177,13 @@ import { collectConfigDump } from "./config-dump.mjs";
 // Collects all known Linear bot user UUIDs from both config layers:
 //   1. ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
 //   2. ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
-//   3. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
+//   3. ~/.config/catalyst/config.json  catalyst.linear.bot.cloud.botUserId (CTL-2074,
+//        recognition-only — the cloud-proxy app-actor; kept in lockstep with the daemon)
+//   4. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
 // Returns a Set<string>. Empty set = no filter (fail-open). Never throws.
-function readLinearBotUserIds(l1Path, l2Path) {
+// Exported so doctor.test.mjs exercises the inline twin directly and it cannot
+// silently drift from the daemon resolver (CTL-2074).
+export function readLinearBotUserIds(l1Path, l2Path) {
   const ids = new Set();
   function addFromPath(path, extractor) {
     if (!path) return;
@@ -129,6 +198,9 @@ function readLinearBotUserIds(l1Path, l2Path) {
       s.add(bot.worker.botUserId);
     if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
       s.add(bot.orchestrator.botUserId);
+    // CTL-2074: cloud-proxy app-actor — recognition-only (never a self-assign id).
+    if (typeof bot?.cloud?.botUserId === "string" && bot.cloud.botUserId.length > 0)
+      s.add(bot.cloud.botUserId);
   });
   addFromPath(l1Path, (p, s) => {
     const uid = p?.catalyst?.monitor?.linear?.botUserId;
@@ -137,11 +209,39 @@ function readLinearBotUserIds(l1Path, l2Path) {
   return ids;
 }
 
+// CTL-2074 (Codex #3738 P2): the CURRENT cloud-proxy app-actor id, read on its own
+// from Layer-2 catalyst.linear.bot.cloud.botUserId. The self-echo cross-check ties its
+// PASS to THIS specific actor rather than to any member of the full recognition set:
+// under proxy=enforce every daemon state write carries the cloud tenant's app-actor id,
+// so a legacy worker/orchestrator id that changed state before the cutover — and is still
+// in the general set — must NOT mask an unrecognized current cloud writer with a clean
+// PASS. Returns "" when unconfigured/unreadable (never throws) — that IS the CTL-2074
+// silent condition, surfaced as WARN by the caller, not a clean pass.
+export function readCloudBotUserId(l2Path) {
+  if (!l2Path) return "";
+  try {
+    const id = JSON.parse(readFileSync(l2Path, "utf8"))?.catalyst?.linear?.bot?.cloud?.botUserId;
+    return typeof id === "string" ? id : "";
+  } catch {
+    return "";
+  }
+}
+
 // ─── Check model ─────────────────────────────────────────────────────────────
 
-export const STATUS = { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" };
+// CTL-1918: STATUS/mkCheck moved to the zero-import leaf doctor-status.mjs so a check
+// can live in its own module without importing this one (which would be circular).
+// Re-exported here, so every existing `import { STATUS, mkCheck } from "./doctor.mjs"`
+// keeps working unchanged.
+export { STATUS, mkCheck } from "./doctor-status.mjs";
 
-export const mkCheck = (name, status, detail) => ({ name, status, detail });
+export { checkInstallCompleteness };
+
+export { checkHostWriteCredentialClass };
+export { checkLinearWriteBudget };
+export { checkAgentToolsWritePath };
+export { checkExecutionCoreEnvDrift };
+export { checkIndexServingRoot };
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
 //
@@ -434,7 +534,7 @@ function defaultListTickets() {
 export async function checkHrwPartition(deps = {}) {
   const {
     getHostName: _getHostName = getHostName,
-    getClusterHosts: _getClusterHosts = getClusterHosts,
+    getClusterHosts: _getClusterHosts = getExistenceHosts,
     listTickets = defaultListTickets,
     ownedBy: _ownedBy = ownedBy,
   } = deps;
@@ -743,6 +843,159 @@ export async function checkBotCredentials(deps = {}) {
   }
 
   return checks;
+}
+
+// ─── CTL-2074: self-echo identity ↔ real issue_history cross-check ────────────
+//
+// `botUserIds` is the fleet's answer to "was this Linear change made by us?". Since
+// CTL-1889 both minis write THROUGH the cloud proxy (CATALYST_LINEAR_WRITE_PROXY=
+// enforce), so their writes carry the cloud tenant's app-actor id — and if that id is
+// absent from the recognition set, a proxied write mirrored back reads as "a human
+// replied on the daemon's own output". That is a SILENT failure: nothing errors, and
+// the set is resolved from config + a durable ledger, NEVER from history. This check
+// turns it loud — it verifies the recognition set against who ACTUALLY writes state,
+// from real issue_history rows (the AC's "verified by a query against real
+// issue_history rows, not by reading config"), with a positive control.
+//
+// Advisory (WARN, never FAIL): doctor's exit code is the FAIL count and gates
+// activation; this is "make it loud", not "block a node whose cloud id isn't
+// provisioned yet". Every negative carries a positive control — an undefined read or
+// an empty result is INCONCLUSIVE (WARN), never a clean PASS.
+//
+// defaultRecentStateChangeActors — read the replica via the sqlite3 CLI (an OPTIONAL
+// dependency), the SAME discipline as defaultReadDbTables (CAT-35): doctor runs under
+// bare node and must not import replica-read.mjs (bun:sqlite). This SQL is a twin of
+// replica-read.mjs's RECENT_STATE_CHANGE_ACTORS_SELECT — kept a copy precisely because
+// doctor cannot share the bun: reader. undefined = could-not-look (sqlite3 absent /
+// query failed / db missing); [] = looked-and-found-nothing. The two must stay
+// distinct — an empty read reported as clean is the silent false-clean this ends.
+function defaultRecentStateChangeActors({ dbPath, limit = 50, run = spawnSync } = {}) {
+  if (!dbPath) return undefined;
+  const n = Number.isInteger(limit) && limit > 0 ? limit : 50;
+  const sql =
+    "SELECT h.actor_id AS actorId, u.name AS name, COUNT(*) AS count " +
+    "FROM issue_history h LEFT JOIN users u ON u.id = h.actor_id " +
+    "WHERE h.to_state IS NOT NULL AND h.actor_id IS NOT NULL " +
+    `GROUP BY h.actor_id ORDER BY count DESC LIMIT ${n}`; // n is a validated integer — no injection
+  let r;
+  try {
+    r = run("sqlite3", ["-readonly", "-json", dbPath, sql], { encoding: "utf8", timeout: 10_000 });
+  } catch {
+    return undefined;
+  }
+  if (!r || r.error || r.status !== 0 || typeof r.stdout !== "string") return undefined;
+  const out = r.stdout.trim();
+  if (out === "") return []; // looked, found nothing (positive control failed downstream)
+  try {
+    const rows = JSON.parse(out);
+    if (!Array.isArray(rows)) return undefined;
+    return rows.map((x) => ({ actorId: x.actorId ?? null, name: x.name ?? null, count: Number(x.count) || 0 }));
+  } catch {
+    return undefined;
+  }
+}
+
+export function checkSelfEchoIdentityHistory(deps = {}) {
+  const name = "self-echo-identity-history";
+  const {
+    // Codex #3738 P2: resolve the mode through the write transport's env > Layer-2 >
+    // 'off' ladder, NOT the env var alone — a Layer-2-only enforce host was silently
+    // skipped by the old `process.env.CATALYST_LINEAR_WRITE_PROXY || "off"` default.
+    proxyMode = readLinearWriteProxyConfig().mode,
+    botIds = readLinearBotUserIds(layer1Path(), layer2Path()),
+    // Codex #3738 P2: the current cloud-proxy actor — the PASS is tied to THIS id, not
+    // to any historical member of botIds (see readCloudBotUserId).
+    cloudBotId = readCloudBotUserId(layer2Path()),
+    recentActors = () => defaultRecentStateChangeActors({ dbPath: getReplicaDbPath() }),
+  } = deps;
+
+  const mode = String(proxyMode || "off").toLowerCase();
+  // The guard only bites under enforce — off/shadow proxied writes carry the direct
+  // app-actor id already in the set, so history recognition is N/A.
+  if (mode !== "enforce") {
+    return mkCheck(
+      name,
+      STATUS.INFO,
+      `write proxy not enforcing (CATALYST_LINEAR_WRITE_PROXY=${mode}) — proxied-identity self-echo N/A`,
+    );
+  }
+
+  const actors = typeof recentActors === "function" ? recentActors() : recentActors;
+  // could-not-look — NEVER a clean pass.
+  if (actors === undefined) {
+    return mkCheck(
+      name,
+      STATUS.WARN,
+      "replica unavailable — cannot verify the self-echo identity against issue_history " +
+        "(inconclusive, not a clean pass)",
+    );
+  }
+  // looked, found nothing — the positive control failed, so a "recognized" verdict
+  // would be unfounded. Inconclusive, never PASS.
+  if (!Array.isArray(actors) || actors.length === 0) {
+    return mkCheck(
+      name,
+      STATUS.WARN,
+      "no state changes in the recent window — positive control failed; cannot confirm the " +
+        "self-echo identity against history (inconclusive, not a clean pass)",
+    );
+  }
+
+  // Codex #3738 P2: under enforce every daemon state write carries the CLOUD proxy
+  // app-actor id, so the PASS is tied to THAT specific id — not to any member of the
+  // full recognition set. A legacy worker/orchestrator id that changed state before the
+  // cutover is still in `botIds`, and the old "any recognized member ⇒ PASS" would let it
+  // mask an unrecognized current cloud writer with a clean pass — the exact silent
+  // condition this check exists to expose. (`ids` is retained only for the diagnostic
+  // note below, distinguishing a set the cloud id is genuinely part of.)
+  const candidates = actors
+    .slice(0, 5)
+    .map((a) => `${a.actorId}${a.name ? ` "${a.name}"` : ""} (${a.count})`)
+    .join(", ");
+  const ids = botIds instanceof Set ? botIds : new Set(Array.isArray(botIds) ? botIds : []);
+  const cloudId = typeof cloudBotId === "string" && cloudBotId.length > 0 ? cloudBotId : null;
+
+  // The cloud-proxy identity isn't configured at all — nothing pins the fleet's own
+  // proxied writes, so every one of them reads as a human reply. The CTL-2074 condition.
+  if (!cloudId) {
+    return mkCheck(
+      name,
+      STATUS.WARN,
+      "write proxy=enforce but the cloud-proxy identity is not configured " +
+        "(catalyst.linear.bot.cloud.botUserId) — the fleet's own proxied writes read as human " +
+        "replies. Confirm the cloud-proxy identity AT THE PROXY (users.type is unreliable — never " +
+        "auto-classify) and set it. Recent state-writers: " +
+        candidates,
+    );
+  }
+
+  const cloudWrites = actors.filter((a) => a.actorId === cloudId);
+  if (cloudWrites.length > 0) {
+    const who = cloudWrites.map((a) => a.name || a.actorId).join(", ");
+    const inSet = ids.has(cloudId) ? "" : " (⚠ present in history but ABSENT from the recognition set)";
+    return mkCheck(
+      name,
+      // The cloud id writing state but missing from the recognition set is itself a
+      // misconfiguration — the daemon would treat these writes as human. WARN, not PASS.
+      ids.has(cloudId) ? STATUS.PASS : STATUS.WARN,
+      `write proxy=enforce and the configured cloud-proxy identity writes state: ${who}${inSet} ` +
+        `(${cloudWrites.length} of ${actors.length} recent state-writers)`,
+    );
+  }
+
+  // The cloud id is configured but never appears among the actors who ACTUALLY write
+  // state — either it is the wrong id or a legacy actor is still writing. Either way the
+  // fleet's proxied writes are not recognized. Name the candidates so the operator can
+  // confirm the right one AT THE PROXY (users.type is unreliable — never auto-classify).
+  return mkCheck(
+    name,
+    STATUS.WARN,
+    "write proxy=enforce but the configured cloud-proxy identity " +
+      `(${cloudId}) is NOT among the recent state-writers — the fleet's own proxied writes read ` +
+      "as human replies. Confirm the cloud-proxy identity AT THE PROXY and correct " +
+      "catalyst.linear.bot.cloud.botUserId. Recent state-writers: " +
+      candidates,
+  );
 }
 
 // ─── Phase 5: Connectivity + Secrets hygiene ─────────────────────────────────
@@ -1137,6 +1390,45 @@ function defaultLinearSecretEnvName() {
   }
 }
 
+// defaultReadGithubFeedReady — read the GitHub-feed producer's readiness heartbeat.
+//
+// ⛔ THE PATH IS RESOLVED THE PRODUCER'S WAY, NOT THE READER'S. CTL-1976 already paid
+// for this once: the broker derived the readiness path from ITS orchDir
+// (`~/catalyst/shadow/...`) while the daemon wrote `~/catalyst/execution-core/shadow/...`,
+// and the miss is silent because `readReadyState` answers `ready:false` for an absent
+// file — indistinguishable from "the producer is down". Same rule for the ACCOUNT: it
+// comes from the hoisted `resolveGithubFeedAccount`, the one the producer itself calls.
+//
+// Returns the verdict object unchanged (`{ ready, reason, state }`) plus the path it
+// looked at, because "I could not look" and "it is not there" must be separable in the
+// message — a check that cannot tell those apart is the class this ticket is about.
+function defaultReadGithubFeedReady() {
+  const path = defaultReadyPath(getExecutionCoreDir(), resolveGithubFeedAccount());
+  try {
+    return { ...readReadyState(path), path };
+  } catch (err) {
+    return { ready: false, reason: `ready-read-threw:${err?.message ?? "unknown"}`, state: null, path };
+  }
+}
+
+// githubFeedCoverageFromReady — the RUNTIME coverage, read off the producer's own
+// heartbeat (CTL-2030). Returns null when the record predates this field or the tick
+// threw; callers must treat null as UNKNOWN and must NOT fall back to
+// GITHUB_SUPPRESSIBLE_NAMES, which is the frozen constant whose staleness is half of
+// what this ticket fixes.
+function githubFeedCoverageFromReady(state) {
+  const c = state?.coverage;
+  if (!c || typeof c !== "object") return null;
+  const suppressible = Number(c.suppressible);
+  const consumed = Number(c.consumed);
+  if (!Number.isFinite(suppressible) || !Number.isFinite(consumed)) return null;
+  return {
+    suppressible,
+    consumed,
+    uncovered: Array.isArray(c.uncovered) ? c.uncovered : [],
+  };
+}
+
 export function checkWebhookIngestion(deps = {}) {
   const {
     resolveRoster = resolveClusterHosts,
@@ -1159,6 +1451,15 @@ export function checkWebhookIngestion(deps = {}) {
     // undefined = the pre-alignment FAIL behavior (grading must fail closed,
     // unlike the INFO-only shadow's throw handling).
     resolveDeploymentModeFn = resolveDeploymentMode,
+    // CTL-1929: the GitHub-feed mode, injectable for the same reason
+    // resolveDeploymentModeFn is — the declared-cloud branch's grade now depends on
+    // it, and driving it through the real env would make these tests mutate a
+    // process-wide flag that four readers in three processes consult.
+    resolveGithubFeedModeFn = resolveGithubFeedMode,
+    // CTL-2030: the producer's readiness heartbeat, and the ONLY evidence this check
+    // has about whether the live GitHub route is actually delivering. Injectable for
+    // the same reason the two resolvers above are.
+    readGithubFeedReadyFn = defaultReadGithubFeedReady,
   } = deps;
 
   const roster = resolveRoster();
@@ -1193,7 +1494,62 @@ export function checkWebhookIngestion(deps = {}) {
     githubSecretEnvName === "CATALYST_WEBHOOK_SECRET" &&
     secretFileNonEmpty(configDir, "webhook-secret");
   const ghSecret = ghEnvSecret || ghFileSecret;
-  const githubWired = ghSmee.length > 0 && ghSecret;
+  const smeeWired = ghSmee.length > 0 && ghSecret;
+
+  // ─── CTL-2030: grade the route this host ACTUALLY USES ─────────────────────
+  //
+  // ⛔ THE FEED MODE IS NOW RESOLVED UNCONDITIONALLY. It used to be read only inside
+  // the declared-`cloud` branch, so on the two production minis — which declare
+  // `cluster`, not `cloud` — this check never looked at the feed at all and reported
+  //
+  //     [PASS] webhook-ingestion: webhook ingestion wired (github=true, ...)
+  //
+  // while BOTH hosts received zero GitHub webhooks: the tunnel is suppressed at
+  // `enforce` and all eight webhooks are `active:false` (CTL-1929, 17:36 CT
+  // 2026-08-18). `githubWired` is CONFIGURATION PRESENCE — smeeChannel + an HMAC
+  // secret — and both are deliberately retained because they are the rollback lever.
+  // So the check answered "is the smee route configured?" (yes, on purpose) and
+  // printed it as "ingestion wired".
+  //
+  // ⛔ That is not merely cosmetic, and the second failure is the one that matters:
+  // if the FEED breaks on an enforce host, this check still PASSes, because it never
+  // looks at the feed. The one condition under which GitHub ingestion is actually
+  // dead is the one condition it could not detect.
+  //
+  // A throwing resolver grades as `off` — the pre-cutover reading — for the same
+  // fail-closed reason the declared-cloud branch already used: an unreadable config
+  // must never be why doctor tells an operator the route is whole.
+  let ghFeed;
+  try {
+    ghFeed = resolveGithubFeedModeFn();
+  } catch {
+    ghFeed = { mode: "off", source: "resolver-threw" };
+  }
+  // At `enforce` the smee wiring is INERT: the tunnel is suppressed and the webhooks
+  // are disabled, so its configuration says nothing about whether events arrive.
+  const feedIsLiveRoute = ghFeed.mode === "enforce";
+  const githubWired = feedIsLiveRoute ? false : smeeWired;
+  // Read once. Consulted by the enforce branch below AND by the declared-cloud
+  // branch's runtime-coverage read, so a single read keeps the two from disagreeing
+  // about the same file within one run.
+  // Resolved once, here, because BOTH the enforce branch below and the
+  // no-route branch after it need it. Same fail-closed handling as before:
+  // an unresolvable mode keeps the original FAIL guarantee.
+  let declaredMode;
+  try {
+    declaredMode = resolveDeploymentModeFn();
+  } catch {
+    declaredMode = undefined;
+  }
+  const declaredTail = declaredMode?.recognized
+    ? ` [declared deployment mode "${declaredMode.mode}", source=${declaredMode.source}]`
+    : "";
+  let feedReady;
+  try {
+    feedReady = readGithubFeedReadyFn();
+  } catch (err) {
+    feedReady = { ready: false, reason: `ready-read-threw:${err?.message ?? "unknown"}`, state: null, path: null };
+  }
 
   // CTL-1616 PR2: shadow comparison for the github webhook-secret leg only —
   // the linear-webhook-secret family has no single scalar contract value (it's
@@ -1239,6 +1595,103 @@ export function checkWebhookIngestion(deps = {}) {
   const danglingKeys = webhookKeys.filter((k) => !keySecretWired(k));
   const linearWired = linSmee.length > 0 && wiredKeys.length > 0;
 
+  // ─── CTL-2030: the GitHub feed is the live route — grade IT ────────────────
+  //
+  // Placed before every smee-shaped branch below, because at `enforce` those
+  // branches are reasoning about a route that is deliberately dead: they would
+  // either PASS on retained rollback config (the live defect) or FAIL with
+  // "NO webhook route enabled", which is equally wrong in the other direction.
+  //
+  // ⚠️ THE THREE OUTCOMES ARE KEPT APART ON PURPOSE. "the feed is delivering",
+  // "the feed is NOT delivering", and "I could not observe the feed" are different
+  // answers, and collapsing the third into either of the others is the failure this
+  // whole ticket is about. An absent/unparseable/unstamped record means the producer
+  // never wrote one OR doctor is looking in the wrong directory (CTL-1976 shipped
+  // exactly that bug once) — that is INCONCLUSIVE, so it WARNs and names the path.
+  // A record we CAN read that says stale/unready/wrong-mode is a real negative and
+  // FAILs.
+  if (feedIsLiveRoute) {
+    // Config residue still fails, matching the declared-cloud branch's (a) rule: a
+    // dangling Linear webhookId without its secret is residue no mode excuses.
+    if (danglingKeys.length > 0) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.FAIL,
+          `multiHost member with half-wired Linear webhook(s): ${danglingKeys.join(", ")} configured (webhookId) but missing HMAC secret file (linear-webhook-secret-<key>) — GitHub feed at enforce does not excuse config residue`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    const linTail = `linear(smee=${linSmee ? "set" : "unset"},wiredKeys=${wiredKeys.length})`;
+    // INCONCLUSIVE: we could not observe the producer at all.
+    if (feedReady.state === null) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.WARN,
+          `GitHub feed is the live route (CATALYST_GITHUB_FEED=enforce, source=${ghFeed.source}) and smee is inert${declaredTail}, but the producer's readiness could NOT be observed: ${feedReady.reason} at ${feedReady.path ?? "(unresolved path)"} — this is "could not look", not "ingestion is fine"; ${linTail}`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    // ⛔ A FRESH RECORD WITH THE WRONG MODE READS HEALTHY UNLESS THIS IS CHECKED.
+    // The producer stamps the mode it RESOLVED (`mode.effective`), which degrades to
+    // shadow when enforce is not honourable. A host whose flag says enforce while its
+    // producer runs as shadow emits markers, not events — and its heartbeat is
+    // perfectly fresh the whole time.
+    const producerMode = feedReady.state?.mode ?? null;
+    if (feedReady.ready === true && producerMode !== "enforce") {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.FAIL,
+          `GitHub feed readers DISAGREE${declaredTail}: this host's flag resolves "enforce" (source=${ghFeed.source}) but the producer's readiness record says mode="${producerMode ?? "absent"}" — smee is suppressed while the producer is not emitting real github.* names; ${linTail}`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    if (feedReady.ready !== true) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.FAIL,
+          `GitHub ingestion is DOWN${declaredTail}: the feed is the live route (enforce, source=${ghFeed.source}), smee is suppressed, and the producer is not ready — ${feedReady.reason} (${feedReady.path ?? "path unresolved"}); monitor-merge, CI waits and PR-lifecycle routing have no github.* source; ${linTail}`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    const rtCoverage = githubFeedCoverageFromReady(feedReady.state);
+    if (rtCoverage === null) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.WARN,
+          `GitHub feed is live and the producer is ready (enforce, source=${ghFeed.source}), but its readiness record carries no runtime coverage — cannot confirm which consumed github.* names have a source; ${linTail}`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    if (rtCoverage.uncovered.length > 0) {
+      return [
+        mkCheck(
+          "webhook-ingestion",
+          STATUS.WARN,
+          `GitHub feed is live and ready (enforce, source=${ghFeed.source}) but covers ${rtCoverage.suppressible}/${rtCoverage.consumed} consumed github.* names — ${rtCoverage.uncovered.length} have NO source on this node: ${rtCoverage.uncovered.join(", ")}; ${linTail}`,
+        ),
+        ...webhookShadow,
+      ];
+    }
+    return [
+      mkCheck(
+        "webhook-ingestion",
+        STATUS.PASS,
+        `GitHub ingestion via the cloud feed at enforce (source=${ghFeed.source})${declaredTail}, producer ready, covering all ${rtCoverage.consumed} consumed github.* names; smee is intentionally inert (rollback lever retained: smee=${ghSmee ? "set" : "unset"}, secret=${ghSecret ? "set" : "unset"}); ${linTail}`,
+      ),
+      ...webhookShadow,
+    ];
+  }
+
   if (!githubWired && !linearWired) {
     // Mode-alignment: a DECLARED (recognized, not inferred) non-cluster mode
     // means the join gate intentionally skipped wiring — no-route is the
@@ -1248,12 +1701,6 @@ export function checkWebhookIngestion(deps = {}) {
     // declared-cluster node this FAIL is the intentional loud signal for a
     // missed activation step 2b (docs/cluster-onboarding.md), and a
     // pre-migration node must keep its original guarantee.
-    let declaredMode;
-    try {
-      declaredMode = resolveDeploymentModeFn();
-    } catch {
-      declaredMode = undefined;
-    }
     if (
       declaredMode &&
       declaredMode.inferred === false &&
@@ -1276,16 +1723,50 @@ export function checkWebhookIngestion(deps = {}) {
         ];
       }
       // (b) Declared CLOUD is a WARN, not a PASS: cloud suppresses the smee
-      //     tunnels but its replacement ingestion (the cloud SDK event
-      //     connection) does not exist yet — an otherwise-green doctor must
-      //     not certify a node with zero event ingestion. Flips to PASS only
-      //     when a real cloud ingestion check exists to stand in its place.
+      //     tunnels, and only ONE of the two routes has a replacement.
+      //     CTL-1928: Linear ingestion IS replaced — the cloud feed
+      //     (cloud-feed-timer.mjs, CATALYST_CLOUD_FEED) drives dispatch, and
+      //     the workspace's Linear webhook subscriptions were retired
+      //     fleet-wide. GitHub has NO cloud replacement: the cloud receives no
+      //     GitHub webhooks at all, so a declared-cloud node cannot see the
+      //     `github.*` events monitor-merge, CI waits, and the broker's
+      //     PR-lifecycle routing consume. That gap is what keeps this a WARN;
+      //     it flips to PASS when a real cloud GitHub-ingestion check exists.
+      //     (Saying "no event ingestion at all" here would now be wrong, and
+      //     wrong in the direction that sends an operator hunting a Linear
+      //     outage that isn't there.)
       if (declaredMode.mode === "cloud") {
+        // CTL-1929: the GitHub half of this WARN is no longer unconditional.
+        //
+        // ⛔ AND IT IS STILL NOT AN UNCONDITIONAL PASS. The GitHub feed at
+        // `enforce` replaces smee for the names it COVERS — 9 of the 12 the broker
+        // router consumes. `github.pr.merged` (CTC-691),
+        // `github.check_suite.completed` (CTC-667 item 4) and `github.push`
+        // (CTC-704) have no faithful replacement, so on a declared-cloud node —
+        // which has no tunnel at all — those three are genuinely unseen. Reporting
+        // PASS here would tell an operator the route is whole at exactly the moment
+        // the merge→deploy join, the CI wait, and rebase detection are the parts
+        // that are missing.
+        //
+        // ⚠️ The residual is read from the gate rather than restated, so this line
+        // stops warning by itself when the gaps close instead of needing an edit
+        // that nobody will remember to make.
+        // ⛔ A THROWING RESOLVER GRADES AS "no cloud replacement", not as a pass.
+        // Same fail-closed direction the deployment-mode resolver above takes: an
+        // unreadable config must never be the reason doctor tells an operator the
+        // GitHub route is whole.
+        // ⛔ CTL-2030: THE `enforce` SUB-BRANCH THAT USED TO LIVE HERE IS GONE, NOT
+        // MOVED-AND-DUPLICATED. The unified enforce branch near the top of this
+        // function now answers for EVERY host whose feed is at enforce — cluster or
+        // cloud — so anything written here for that case would be unreachable, and
+        // unreachable grading code is how the static-vs-runtime comparison it
+        // contained went unnoticed in the first place (its PASS could not be reached
+        // by any input). Reaching this point means the feed is off or shadow.
         return [
           mkCheck(
             "webhook-ingestion",
             STATUS.WARN,
-            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired, but cloud replacement ingestion is NOT yet implemented: this node currently has no event ingestion at all`,
+            `declared deployment mode "cloud" (source=${declaredMode.source}) — smee ingestion intentionally not wired; Linear ingestion is replaced by the cloud feed (CTL-1928), but GitHub ingestion has NO cloud replacement active (CATALYST_GITHUB_FEED=${ghFeed.mode}, source=${ghFeed.source}): this node cannot see github.* events (monitor-merge, CI waits, PR-lifecycle routing)`,
           ),
           ...webhookShadow,
         ];
@@ -3106,6 +3587,8 @@ export function checkCloudSync(deps = {}) {
     laDir = defaultLaunchAgentsDir(),
     agentInstalled = defaultAgentInstalled,
     processAlive = defaultCloudSyncProcessAlive,
+    // CTL-1963: which plist the live label is actually bound to. Injectable so tests touch no launchctl.
+    labelPath = defaultLaunchdLabelPath,
     dbPath = getReplicaDbPath(),
     fileExists = (p) => existsSync(p),
     statFile = (p) => statSync(p),
@@ -3122,6 +3605,34 @@ export function checkCloudSync(deps = {}) {
     sizeFloorBytes = 65_536,
     isSqliteFile = defaultIsSqliteFile, // CAT-35
     readDbTables = defaultReadDbTables, // CAT-35
+    // CTL-1913: when was the writer ADOPTED? The plist's mtime is the only local
+    // evidence of that, and it is what separates "provisioned minutes ago, still
+    // seeding" from "provisioned and has never once authenticated".
+    agentInstalledAt = defaultAgentInstalledAt,
+    // A writer that has not produced a replica within this window has not lost a
+    // race — it is inert. Generous on purpose: a cold seed of a large workspace is
+    // minutes, not seconds.
+    neverSeededGraceMs = Number(process.env.CATALYST_REPLICA_NEVER_SEEDED_GRACE_MS) || 900_000,
+    // ⛔ CTL-1913 — `strict` GOVERNS ONE BRANCH, AND IS DELIBERATELY UNWIRED.
+    //
+    // CTL-1913 asked for a doctor that CAN fail on a permanently-inert replica,
+    // because every check here was WARN/INFO and so nothing in the install path
+    // ever returned non-zero for one. The capability now exists — but it stays
+    // opt-in, for the reason this file already records twice (checkReaper,
+    // checkHealthResponder): **doctor's exit code IS the catalyst-join activation
+    // gate, and `do_doctor_gate` runs BEFORE `install-services`.** A FAIL here
+    // would block the join that reinstalls the writer — i.e. it would block the
+    // self-heal for the very condition it is reporting.
+    //
+    // Nor does the install profile want it: `installChecksForClass` deliberately
+    // omits the network/operational checks, since failing on a remote dependency
+    // would mis-attribute an operational gap to the install run.
+    //
+    // So this follows the precedent of `checkDeploymentModeConsistency`'s strict
+    // escalation — implemented and tested, wired into no profile yet. The
+    // install-time actuator is the one the ticket itself names:
+    // `catalyst-stack verify-cloud-sync --strict`.
+    strict = false,
   } = deps;
 
   const installed = agentInstalled(label, laDir);
@@ -3145,6 +3656,41 @@ export function checkCloudSync(deps = {}) {
     checks.push(mkCheck("cloud-sync", STATUS.WARN, "agent installed but no writer process found — KeepAlive may be retrying; check ~/catalyst/cloud-sync.log"));
   }
 
+  // (a2) launchd LABEL BINDING — CTL-1963. Does `ai.coalesce.catalyst-cloud-sync` in the live
+  // per-user domain resolve to ~/Library/LaunchAgents/<label>.plist, or to somebody else's file?
+  //
+  // Branch (a) above proves the CORRECT plist exists and whether A writer process is running. It
+  // cannot see that launchd is bound to a DIFFERENT plist — which is exactly the observed failure:
+  // a sealed-prefix install run bootstraps the real gui/$UID domain from a temp HOME, rebinds the
+  // label to /var/folders/…/T/tmp.XXXX/…, then exits and lets its temp dir be reaped. The writer
+  // dies, the correct plist is still sitting there untouched, and every other signal reads normal.
+  //
+  // ⚠️ WARN, never FAIL — deliberately, and for the reason this function documents at length above:
+  // doctor's exit code IS the catalyst-join activation gate, and `do_doctor_gate` runs BEFORE
+  // `install-services`. Failing here would block the very join that would re-bootstrap the label,
+  // i.e. it would block the self-heal for the condition it is reporting.
+  if (installed) {
+    const bound = labelPath(label);
+    const expected = resolve(laDir, `${label}.plist`);
+    if (bound === null) {
+      // ⛔ Not a pass. "Could not measure" and "measured, correct" must never render the same —
+      // an unmeasurable binding is precisely the state the squat produces on a host where the
+      // label was booted out entirely.
+      checks.push(mkCheck("cloud-sync-label", STATUS.INFO,
+        `could not resolve launchd label ${label} (launchctl unavailable or label not bootstrapped) — binding UNVERIFIED, not confirmed healthy`));
+    } else if (bound === expected) {
+      checks.push(mkCheck("cloud-sync-label", STATUS.PASS, `launchd label resolves to ${expected}`));
+    } else {
+      // Name whether the squatting file still exists: if it does not, no kickstart/bootstrap/reboot
+      // can revive the writer, which changes the remedy from "restart it" to "rebind it".
+      const gone = !fileExists(bound);
+      checks.push(mkCheck("cloud-sync-label", STATUS.WARN,
+        `launchd label ${label} is bound to ${bound}${gone ? " (WHICH NO LONGER EXISTS — the writer cannot be restarted, only rebound)" : ""}, ` +
+        `not ${expected} — a sealed-prefix install run squatted the per-user domain (gui/$UID is per-user, not per-HOME). ` +
+        `Rebind: launchctl bootout gui/$(id -u)/${label}; launchctl bootstrap gui/$(id -u) ${expected}`));
+    }
+  }
+
   // (b) replica freshness + writer liveness. KEY INSIGHT: the DB + -wal mtime only advance
   // when a change FRAME is applied, so a quiet Linear feed (no ticket changes) freezes them
   // even though the writer is perfectly alive — the SDK has no idle keepalive. So DB mtime
@@ -3154,7 +3700,44 @@ export function checkCloudSync(deps = {}) {
   let size = 0;
   let statOk = false;
   if (!dbPresent) {
-    checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
+    // ⛔ CTL-1913 — THE ONE STATE IN THIS CHECK THAT EARNS A **FAIL**.
+    //
+    // Agent installed + replica never created is not a transient: the writer
+    // `process.exit(0)`s when its token is absent, misnamed, or rejected, and under
+    // `KeepAlive={SuccessfulExit:false}` a CLEAN EXIT IS PERMANENT — launchd never
+    // retries. So this state does not heal, and it is exactly what a green install
+    // with an unvalidated token produces. Every check on this path was WARN/INFO, so
+    // nothing in the install path ever returned non-zero for a completely inert
+    // replica; that is the gap this grade closes.
+    //
+    // Gated on the ADOPTION AGE rather than graded immediately, because a writer
+    // provisioned seconds ago legitimately has no db yet — escalating on that would
+    // be a false alarm on every fresh install. Three-valued, and it never escalates
+    // on an inability to measure: an unreadable plist mtime keeps the plain WARN and
+    // SAYS the grace could not be evaluated, rather than treating "could not look"
+    // as evidence of the terminal state.
+    const adoptedAt = installed ? agentInstalledAt(label, laDir) : null;
+    const measurable = typeof adoptedAt === "number" && Number.isFinite(adoptedAt);
+    if (installed && measurable && now - adoptedAt > neverSeededGraceMs) {
+      const mins = Math.round((now - adoptedAt) / 60_000);
+      checks.push(
+        mkCheck("replica-fresh", strict ? STATUS.FAIL : STATUS.WARN,
+          `writer agent adopted ${mins}m ago and the replica db has NEVER been created (${dbPath}) — ` +
+          `the writer has never authenticated. A token that is absent, misnamed, or rejected makes it exit 0, ` +
+          `and KeepAlive={SuccessfulExit:false} means launchd never retries, so this does NOT self-heal. ` +
+          `Check ~/catalyst/cloud-sync.log, confirm ${tokenEnv.envVar} is set in a 0600 file the launcher sources, ` +
+          `then: catalyst-stack verify-cloud-sync --strict`),
+      );
+    } else if (installed && !measurable) {
+      checks.push(
+        mkCheck("replica-fresh", STATUS.WARN,
+          "replica db not present, and the writer agent's adoption time is unreadable — cannot tell a fresh adoption from a writer that has never seeded (not connected)"),
+      );
+    } else {
+      // Unchanged wording for the ordinary not-yet-seeded case: a fresh adoption,
+      // or no agent at all.
+      checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
+    }
   } else {
     let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
     try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; statOk = true; } catch { /* unreadable → handled below */ }
@@ -3266,6 +3849,100 @@ function defaultProcessCommandForPid(pid) {
   }
 }
 
+// checkFleetTokenExport — CTL-1908. Does a LOGIN SHELL hand the fleet's Claude subscription
+// token to every process this user starts?
+//
+// THE INCIDENT. 2026-08-17 ~02:00–08:57 CT the entire overnight fleet — three owner sessions
+// plus the coordinator's relaunches — stalled on "You've hit your weekly limit", while Ryan's
+// own account sat at 78%. `~/.zshenv` sourced `claude-accounts.env` in EVERY zsh, interactive
+// or not, exporting CLAUDE_CODE_OAUTH_TOKEN = the fleet's armed account. Claude Code prefers
+// the env token over the keychain login, so every shell-launched `claude` — coordinator,
+// owners, and Ryan's own terminal until he re-ran /login — silently spent the fleet's budget.
+// Seven hours of fleet time, and the symptom named the wrong account.
+//
+// ⭐ WHY THIS IS A CHECK AND NOT A FIX. The daemon does NOT need the login-shell export:
+// `catalyst-execution-core` sources `claude-accounts.env` into its own boot environment
+// unconditionally, and `claude --bg` children inherit it from there. So the export buys
+// nothing and costs the budget. But `~/.zshenv` is an unmanaged machine dotfile that nothing
+// in this repo writes, so the codified form of "keep it off" is a check that SAYS SO on every
+// host — measured 2026-08-17 23:2x CT, the laptop had been hand-fixed and BOTH minis had not,
+// which is exactly the drift an uncodified hand-fix produces.
+export function checkFleetTokenExport(deps = {}) {
+  const {
+    home = homedir(),
+    // The same six candidates check-setup.sh's CTL-869 proxy-leak scan uses. ⛔ `.bashrc` was
+    // missing here: a bash operator sourcing the env file from it would inherit the fleet
+    // credential in every interactive shell while this check reported PASS off a clean
+    // `.profile` (Codex P2 on #3506).
+    rcFiles = [".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"],
+    fileExists = existsSync,
+    readText = (p) => readFileSync(p, "utf8"),
+  } = deps;
+
+  const offenders = [];
+  const unreadable = [];
+  let scanned = 0;
+  for (const rc of rcFiles) {
+    const path = resolve(home, rc);
+    let text;
+    try {
+      if (!fileExists(path)) continue;
+      text = readText(path);
+    } catch {
+      // ⛔ NOT a `continue` that leaves `scanned > 0`. An unreadable rc may hold the very export
+      // being looked for, and an unreadable `.zshenv` beside a clean `.profile` used to report
+      // this host CLEAN — a fail-OPEN in a check whose only value is being trustworthy
+      // (Codex P2 on #3506). It now suppresses PASS below.
+      unreadable.push(rc);
+      continue;
+    }
+    scanned += 1;
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      // A COMMENTED line is the fixed state, not a finding — that is precisely how the laptop
+      // and (since tonight) the minis carry the fix, so matching the bare text would report
+      // every fixed host as broken.
+      if (/^\s*#/.test(line)) continue;
+      // ⚠️ Only an ACTUAL source of the file counts. Merely naming it — `CLAUDE_ACCOUNTS_ENV=<path>`,
+      // or an alias that cats it — injects nothing, and telling an operator to comment those out is
+      // wrong advice from a check they are meant to trust (Codex P2 on #3506).
+      //
+      // ⛔ And `source`/`.` is NOT anchored to line start, because the form this fleet actually
+      // had is `[ -f "$HOME/…/claude-accounts.env" ] && . "$HOME/…/claude-accounts.env"` — the
+      // `.` sits after `&&`. check-setup.sh's analogous regex anchors at `^` and would miss the
+      // exact line that stalled the fleet for seven hours. Command position is start-of-line or
+      // after a shell separator.
+      const sourcesEnvFile = /(?:^|[;&|{(]|&&|\|\|)\s*(?:source|\.)\s+[^;&|]*claude-accounts\.env/.test(line);
+      const exportsToken = /\bCLAUDE_CODE_OAUTH_TOKEN\s*=/.test(line);
+      if (sourcesEnvFile || exportsToken) offenders.push(`${rc}:${i + 1}`);
+    }
+  }
+
+  if (scanned === 0) {
+    return [mkCheck("fleet-token-export", STATUS.INFO, `no readable shell rc files to inspect${unreadable.length ? ` (${unreadable.length} unreadable: ${unreadable.join(", ")})` : ""} — nothing measured, which is not the same as clean`)];
+  }
+  if (offenders.length === 0 && unreadable.length > 0) {
+    return [
+      mkCheck(
+        "fleet-token-export",
+        STATUS.INFO,
+        `${scanned} rc file(s) are clean, but ${unreadable.join(", ")} could not be read — the export may be in there, so this is UNKNOWN rather than clean`,
+      ),
+    ];
+  }
+  if (offenders.length > 0) {
+    return [
+      mkCheck(
+        "fleet-token-export",
+        STATUS.WARN,
+        `a login shell exports the FLEET subscription token (${offenders.join(", ")}) — every shell-launched \`claude\` on this host spends the fleet's budget instead of its own login (CTL-1908). The daemon does not need it: catalyst-execution-core sources claude-accounts.env into its own boot env. Comment the line out.`,
+      ),
+    ];
+  }
+  return [mkCheck("fleet-token-export", STATUS.PASS, `no login-shell export of the fleet token in ${scanned} shell rc file(s)`)];
+}
+
 // checkCloudSyncSkew — CTL-1659. Is the RUNNING cloud-sync writer serving the modules the
 // current lockfile resolves? The measured incident (2026-08-04): a dependency fix landed
 // on main, the updater pulled it, the install succeeded, and the daemon kept serving the
@@ -3302,6 +3979,18 @@ export function checkCloudSyncSkew(deps = {}) {
     readText = (p) => readFileSync(p, "utf8"),
     readJson = (p) => JSON.parse(readFileSync(p, "utf8")),
     processCommandForPid = defaultProcessCommandForPid,
+    // CTL-1931: the SAME resolver the real pull path and checkPluginSourceFreshness use, so
+    // "the root this node maintains" cannot drift from "the root this check expects".
+    //
+    // ⚠️ `repoConfigPath` is passed explicitly (Codex #3493 P2). The resolver's precedence is
+    // env > REPO `.catalyst/config.json` > machine config, and the parameter defaults to
+    // null — so `resolvePluginCheckoutRoots({})` silently skips the repo rung the broker and
+    // updater pull paths both supply. That matters here in a way it does not for a purely
+    // advisory reader: this check is GRADE-CHANGING, so on a node whose `pluginDirs` lives
+    // only in Layer 1 it would resolve no roots and sit inconclusive forever, and on a node
+    // whose machine config holds an OLDER value it would compare against a root the node no
+    // longer maintains and report a false DEPENDENCY SKEW on a healthy host.
+    resolveExpectedRoots = () => resolvePluginCheckoutRoots({ repoConfigPath: DOCTOR_REPO_CONFIG_PATH }),
   } = deps;
 
   // Wrapped whole: this check reads files and spawns `ps`, and a throw here would abort
@@ -3335,7 +4024,17 @@ export function checkCloudSyncSkew(deps = {}) {
       ];
     }
 
-    const result = evaluate({ breadcrumb: record, readText, readJson, processCommandForPid });
+    // The guard sits at the CALL SITE, not inside the default: an INJECTED resolver can
+    // throw too, and putting the try/catch in the default would let that escape to the
+    // outer catch and be reported as a generic check failure instead of the specific
+    // inconclusive serving-root verdict. null degrades to INCONCLUSIVE, never to a pass.
+    let expectedRoots = null;
+    try {
+      expectedRoots = resolveExpectedRoots();
+    } catch {
+      expectedRoots = null;
+    }
+    const result = evaluate({ breadcrumb: record, readText, readJson, processCommandForPid, expectedRoots });
     const bad = result.verdicts.filter((v) => v.status !== "ok");
     if (bad.length === 0) {
       return [mkCheck("cloud-sync-skew", STATUS.PASS, `loaded modules match the lockfile — ${result.verdicts.map((v) => v.link).join(", ")} all verified`)];
@@ -3897,7 +4596,7 @@ export function checkRegistryTeamIdentity(deps = {}) {
 // sole writer); this check only reports drift and points at the remediation.
 export async function checkWorkerLabels(deps = {}) {
   const {
-    getRoster = getClusterHosts,
+    getRoster = getExistenceHosts,
     // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
     // answer now — see resolveLinearTokenLive's docstring for why the PR2
     // shadow comparison this call site carried is retired, not merely muted.
@@ -4522,6 +5221,95 @@ export async function checkDeploymentModeConsistency(deps = {}) {
   return checks;
 }
 
+// checkEntitlementConsistency — CTL-1785 (W13). Advisory report on the entitlement
+// seam: the resolved off/shadow/enforce mode, the active provider (local vs a real
+// lease authority), and whether the load-bearing ordering constraint holds
+// (ENTITLEMENT_TTL_MS > work-lease TTL). ADVISORY ONLY — never emits STATUS.FAIL,
+// so it can never move doctor's exit code or wedge the run (mirrors
+// checkDeploymentModeConsistency's INFO/WARN posture). Fleet-topology-independent
+// (does not consult resolveRoster), wired into checksForClass for every class.
+//
+// Deps injectable so tests (and, later, W12's authority) can point every input at
+// a fixture: `mode` (the resolved entitlement mode), `entitlementTtlMs` /
+// `workLeaseTtlMs` (the ordering pair), and `providerKind` ("local" today;
+// "authority" once CTL-1786's lease store is injected).
+export function checkEntitlementConsistency(deps = {}) {
+  const {
+    mode: m = resolveEntitlementMode(),
+    entitlementTtlMs = ENTITLEMENT_TTL_MS,
+    workLeaseTtlMs = WORK_LEASE_TTL_MS,
+    providerKind = "local",
+  } = deps;
+
+  const checks = [];
+
+  // 1. entitlement-mode — the resolved rollout mode. INFO for a recognized value
+  //    (incl. the inferred `off` default); WARN (never FAIL) for an unrecognized
+  //    typo, which degrades to off (byte-identical to today).
+  if (!m.recognized) {
+    checks.push(
+      mkCheck(
+        "entitlement-mode",
+        STATUS.WARN,
+        `entitlement mode "${printableRaw(m.raw)}" is not one of [${ENTITLEMENT_MODES.join(", ")}] — ` +
+          `treating this node as "${m.mode}" (byte-identical to today); correct or unset ` +
+          `catalyst.entitlement.mode / CATALYST_ENTITLEMENT (source=${m.source})`,
+      ),
+    );
+  } else {
+    checks.push(
+      mkCheck(
+        "entitlement-mode",
+        STATUS.INFO,
+        `entitlement mode="${m.mode}" (source=${m.source}${m.inferred ? ", inferred default" : ""})`,
+      ),
+    );
+  }
+
+  // 2. entitlement-provider — which authority answers "may this host take work?".
+  //    WARN (advisory) when enforce is selected but only the LOCAL fallback is
+  //    wired: the local provider always entitles self (self ∈ its own roster), so
+  //    enforce is byte-identical to today until W12 (CTL-1786) injects a real
+  //    authority. INFO otherwise.
+  if (m.mode === "enforce" && providerKind === "local") {
+    checks.push(
+      mkCheck(
+        "entitlement-provider",
+        STATUS.WARN,
+        `entitlement mode=enforce but no lease authority is injected — the local fallback ` +
+          `provider always entitles self, so enforce is byte-identical to today until the ` +
+          `W12 lease authority (CTL-1786) lands`,
+      ),
+    );
+  } else {
+    checks.push(
+      mkCheck(
+        "entitlement-provider",
+        STATUS.INFO,
+        `entitlement provider=${providerKind}` + (m.mode === "off" ? " (mode=off — provider unused)" : ""),
+      ),
+    );
+  }
+
+  // 3. entitlement-ordering — the load-bearing constraint. INFO when it holds;
+  //    WARN (NEVER FAIL — advisory only) if inverted. The leaf's module-load
+  //    assertEntitlementOrdering() already throws loudly on a real inversion of
+  //    the shipped constants, so a WARN here only surfaces an injected/misconfigured pair.
+  const ordersOk = Number(entitlementTtlMs) > Number(workLeaseTtlMs);
+  checks.push(
+    mkCheck(
+      "entitlement-ordering",
+      ordersOk ? STATUS.INFO : STATUS.WARN,
+      ordersOk
+        ? `entitlement TTL ${entitlementTtlMs}ms > work-lease TTL ${workLeaseTtlMs}ms (ordering constraint holds)`
+        : `entitlement TTL ${entitlementTtlMs}ms must EXCEED work-lease TTL ${workLeaseTtlMs}ms — ` +
+            `an unentitled node would hold work invisible to the reclaim loop (advisory)`,
+    ),
+  );
+
+  return checks;
+}
+
 // ─── CTL-1616 PR2/PR3: secret-contract observability ─────────────────────────
 //
 // checkSecretContract — INFO-ONLY OBSERVATION (design §7/§9), UNCHANGED by the
@@ -4936,6 +5724,22 @@ function defaultLaunchAgentsDir() {
 // defaultAgentInstalled — is the launchd plist for <label> present? Deterministic file probe
 // (mirrors install-lifecycle.mjs defaultProbeWorkerAgents/defaultProbeUpdaterAgent). Honors
 // CATALYST_LAUNCHAGENTS_DIR for sandbox tests.
+// defaultAgentInstalledAt — the launchd plist's mtime in ms, or null. (CTL-1913)
+// This is the only local record of WHEN a writer was adopted, and it is what lets
+// checkCloudSync separate a fresh adoption still seeding from one that has never
+// authenticated. Returns null rather than a sentinel number on any failure: the
+// caller must be able to say "could not measure" instead of computing an age from
+// a fabricated timestamp — a `0` here would read as "adopted in 1970", i.e. an
+// instant FAIL on an unreadable plist.
+function defaultAgentInstalledAt(label, dir = defaultLaunchAgentsDir()) {
+  try {
+    const m = statSync(resolve(dir, `${label}.plist`)).mtimeMs;
+    return Number.isFinite(m) ? m : null;
+  } catch {
+    return null;
+  }
+}
+
 function defaultAgentInstalled(label, dir = defaultLaunchAgentsDir()) {
   try {
     return existsSync(resolve(dir, `${label}.plist`));
@@ -4966,6 +5770,45 @@ function defaultCloudSyncProcessAlive() {
   // not the launcher (`.../cloud-sync/launch.sh` has no `.mjs`).
   const r = spawnSync("pgrep", ["-f", "cloud-sync\\.mjs"], { timeout: 5_000 });
   return !r.error && r.status === 0;
+}
+
+// defaultLaunchdLabelPath — which plist is the RUNNING launchd label actually bound to? (CTL-1963)
+//
+// ⛔ THE DEFECT THIS EXISTS FOR: `gui/$UID` is a PER-USER domain, not a per-HOME one. A sealed-prefix
+// install run under a scratch HOME still bootstraps into the REAL user domain, so the label
+// `ai.coalesce.catalyst-cloud-sync` gets rebound to a plist under /var/folders/…/T/tmp.XXXX/. The
+// squatting run then exits and its temp dir is reaped — leaving the label pointing at a path that NO
+// LONGER EXISTS. Measured twice on the laptop 2026-08-18: 04:01 (tmp.p3Tb3ig3kS) and 07:19
+// (tmp.dOCLr1E2bn), ~3h18m apart.
+//
+// ⛔ WHY plist-on-disk IS NOT THE SAME QUESTION. `defaultAgentInstalled` answers "is
+// ~/Library/LaunchAgents/<label>.plist present?" — and in BOTH incidents it was, unchanged. The
+// correct file existed the whole time; launchd was simply bound to a different one. So the existing
+// check reads PASS while the writer is dead. Only the resolved binding distinguishes them.
+//
+// ⛔ AND WHY THE EXIT-CODE FIX DOES NOT COVER IT. The 04:01 instance was diagnosed as launchd's
+// `KeepAlive={SuccessfulExit:false}` contract keeping a cleanly-exited writer down. The 07:19 instance
+// is NOT an exit-code problem: the bound path is gone, so no kickstart, bootstrap, or reboot can
+// revive it. The invariant that catches both shapes is "the label resolves to ~/Library/LaunchAgents".
+//
+// Returns the resolved path string, or null when it cannot be measured (launchctl absent, label not
+// bootstrapped, unparseable output). ⛔ null means UNKNOWN, never "fine" — the caller must not grade a
+// failure to measure as a pass. Honors CATALYST_ASSUME_NO_DAEMONS so tests touch no launchctl.
+function defaultLaunchdLabelPath(label) {
+  if (process.env.CATALYST_ASSUME_NO_DAEMONS === "1") return null;
+  try {
+    const r = spawnSync("launchctl", ["print", `gui/${process.getuid()}/${label}`], {
+      timeout: 5_000,
+      encoding: "utf8",
+    });
+    if (r.error || r.status !== 0 || typeof r.stdout !== "string") return null;
+    // `launchctl print` emits a tab-indented `path = /abs/path.plist` line. Anchor on the field name
+    // so the many other `... path = ...` keys in that output (stdout path, stderr path) cannot match.
+    const m = r.stdout.match(/^\s*path\s*=\s*(\S.*?)\s*$/m);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
 }
 
 // checkAgentsForClass — assert the correct launchd agent SET for the class. The two discriminators
@@ -5496,6 +6339,11 @@ export function checksForClass(nc, opts = {}) {
   // CTL-1523 convention); the strict install-profile escalation branch exists
   // in checkDeploymentModeConsistency but is not wired into any profile yet.
   const deploymentModeCheck = () => checkDeploymentModeConsistency({ resolveRoster });
+  // CTL-1785: entitlement consistency — a fleet-topology fact independent of node
+  // class (like deploymentModeCheck), so it runs for every class. ADVISORY ONLY:
+  // every check it emits is INFO/WARN, never FAIL, so it can never move doctor's
+  // exit code (mirrors the CTL-1523/deployment-mode land-dormant convention).
+  const entitlementCheck = () => checkEntitlementConsistency();
   // #2930 round-2: split-brain Layer-2 path layout is unsupported until the
   // canonical sweep — zero rows on every non-divergent host.
   const layer2PathDivergenceCheck = () => checkLayer2PathDivergence();
@@ -5506,6 +6354,15 @@ export function checksForClass(nc, opts = {}) {
   // checkPeerUniqueness/checkCloudTokenEnv/checkWorkerLabels) emits is
   // STATUS.INFO — zero grade change (design §7/§9). PR3 flips this to graded.
   const secretContractCheck = () => checkSecretContract();
+  // CTL-2026 (Codex P2): class-INDEPENDENT, for the same reason deploymentModeCheck is.
+  // The out-of-tree agent tools are invoked by an operator's skills, and a `developer`
+  // node is defined a few lines below as one whose "operator's skills write
+  // transitions/comments to Linear" — so a developer is precisely where these tools run.
+  // Registering this only on the worker arm would have left the class that HOLDS the live
+  // copies reporting clean: measured on this laptop (node class `developer`), whose
+  // ~/catalyst/comms/tools/linear-reply.mjs is the drifted file this row exists to name.
+  const agentToolsWritePathCheck = () => checkAgentToolsWritePath();
+  const executionCoreEnvDriftCheck = () => checkExecutionCoreEnvDrift(); // CTL-2042: on-disk-vs-repo posture drift
 
   // Unrecognized explicit class → a single hard FAIL; grade no profile (CTL-1355).
   if (!nc.recognized) {
@@ -5528,6 +6385,10 @@ export function checksForClass(nc, opts = {}) {
   const skillsDirPluginsThunk = () => checkSkillsDirPlugins({ nodeClass: nc.class });
 
   const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
+  // CTL-2074: verify the self-echo recognition set against who ACTUALLY writes state
+  // in real issue_history (not config). Advisory (never FAIL). Defaults resolve
+  // proxyMode/botIds/replica internally; graded for the classes that write to Linear.
+  const selfEchoIdentityHistoryThunk = () => checkSelfEchoIdentityHistory();
   const wontOwnThunk = () =>
     checkWontOwnWork({
       resolveRoster,
@@ -5569,8 +6430,11 @@ export function checksForClass(nc, opts = {}) {
     return [
       nodeClassCheck,
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      entitlementCheck, // CTL-1785: entitlement consistency, advisory-only (INFO/WARN, never FAIL), every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+      agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
+      executionCoreEnvDriftCheck, // CTL-2042: on-disk-vs-repo posture drift
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
       developerBotCredentials,
@@ -5595,10 +6459,13 @@ export function checksForClass(nc, opts = {}) {
       () => checkCloudTokenEnv(), // advisory
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
       () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
+      selfEchoIdentityHistoryThunk, // CTL-2074: does the self-echo set name the id the fleet's proxied writes actually carry? (advisory)
       () => checkCloudSyncSkew(), // CTL-1659: is the RUNNING writer serving the lockfile's modules? (advisory)
+      () => checkFleetTokenExport(), // CTL-1908: does a login shell spend the FLEET's Claude budget? (advisory)
       () => checkConfigScopeLeak(), // advisory
       () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
       () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
+      () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
     ];
   }
 
@@ -5612,8 +6479,11 @@ export function checksForClass(nc, opts = {}) {
     return [
       nodeClassCheck,
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      entitlementCheck, // CTL-1785: entitlement consistency, advisory-only (INFO/WARN, never FAIL), every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+      agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
+      executionCoreEnvDriftCheck, // CTL-2042: on-disk-vs-repo posture drift
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
@@ -5640,8 +6510,11 @@ export function checksForClass(nc, opts = {}) {
   return [
     nodeClassCheck,
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+    entitlementCheck, // CTL-1785: entitlement consistency, advisory-only (INFO/WARN, never FAIL), every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
+    agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
+    executionCoreEnvDriftCheck, // CTL-2042: on-disk-vs-repo posture drift
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),
@@ -5664,7 +6537,9 @@ export function checksForClass(nc, opts = {}) {
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)
+    selfEchoIdentityHistoryThunk, // CTL-2074: does the self-echo set name the id the fleet's proxied writes actually carry? (advisory)
     () => checkCloudSyncSkew(), // CTL-1659: a merged dependency fix that never reached the running writer (advisory)
+    () => checkFleetTokenExport(), // CTL-1908: the login-shell export that stalled the fleet for 7h (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
@@ -5673,7 +6548,11 @@ export function checksForClass(nc, opts = {}) {
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
     () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)
     () => checkRegistryTeamIdentity(), // CAT-52: registry team ↔ checkout teamKey contract — advisory only
+    () => checkInstallCompleteness(), // CTL-1918: did the install FINISH — CLIs, plugin-source, sweep, enrolment — advisory only (never FAIL)
+    () => checkHostWriteCredentialClass(), // CTL-2045: is this host's cloud WRITE credential a per-host org key, or the admin bearer that froze the board for 4h? — advisory only (never FAIL)
+    () => checkLinearWriteBudget(), // CTL-1936: host cloud-write spend / exhaustion — advisory only (never FAIL)
     () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
+    () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
   ];
 }
 

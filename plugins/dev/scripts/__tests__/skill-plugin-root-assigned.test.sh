@@ -60,6 +60,64 @@ else
 	fail "SKILL.md files expand \${PLUGIN_ROOT} without assigning it" "$OFFENDERS"
 fi
 
+# ── CTL-1832 / CTL-1998: THE SAME QUESTION, ASKED OF THE WHOLE SKILL ─────────
+# The scan above reads SKILL.md ALONE, and that is correct for what it asks: a
+# reader of SKILL.md may never open references/, so an expansion THERE whose
+# assignment lives elsewhere is a live hazard. But it means every ${PLUGIN_ROOT}
+# use that progressive disclosure moved INTO references/ is invisible to this
+# file — today _phase-agent-template/references/end-block.md has 1 and
+# escalation-explanation.md has 3, all correct only because prelude.md assigns it
+# in the same shell. Nothing checks that.
+#
+# So a second, independent question: taking a skill as SKILL.md PLUS its
+# references/, if it expands ${PLUGIN_ROOT} anywhere, does it assign it anywhere?
+# Delete prelude.md's assignment (or move the end block to a skill without one)
+# and every phase agent silently addresses /scripts/... — with the scan above
+# reporting clean, because no SKILL.md was involved.
+#
+# ⚠️ This does NOT replace the check above, and collapsing the two would
+# reintroduce the exact bug #3656 fixed: a use in SKILL.md with its assignment in
+# references/ satisfies THIS rule and must still fail THAT one. Both run.
+#
+# Raised by FLEET on #3656 (peer read, §4): ten more phase skills are queued for
+# the same conversion, so the guard built for this class was aimed at the wrong
+# files for all ten.
+echo "Test: every SKILL (SKILL.md + references/) that expands \${PLUGIN_ROOT} assigns it somewhere"
+SKILL_OFFENDERS=""
+SKILLS_CHECKED=0
+SKILLS_WITH_USES=0
+while IFS= read -r skillmd; do
+	skill_dir="$(dirname "$skillmd")"
+	SKILLS_CHECKED=$((SKILLS_CHECKED + 1))
+	uses=0
+	assigns=0
+	# SKILL.md plus every reference, counted with the SAME two helpers the scan
+	# above uses — so the two questions can never drift on what a "use" is.
+	for f in "$skillmd" "$skill_dir"/references/*.md; do
+		[ -f "$f" ] || continue
+		uses=$((uses + $(live_plugin_root_uses "$f")))
+		assigns=$((assigns + $(assigns_plugin_root "$f")))
+	done
+	[ "$uses" -gt 0 ] || continue
+	SKILLS_WITH_USES=$((SKILLS_WITH_USES + 1))
+	if [ "$assigns" -eq 0 ]; then
+		SKILL_OFFENDERS="${SKILL_OFFENDERS}
+    ${skill_dir#"$REPO_ROOT"/} (${uses} live use(s) across the skill, 0 assignments)"
+	fi
+done < <(find "$REPO_ROOT/plugins" -name 'SKILL.md' -type f 2>/dev/null)
+
+# A clean result here is only evidence if the scan actually looked at skills that
+# USE the variable. Zero such skills would make the pass vacuous, so assert the
+# denominator rather than just the verdict.
+if [ "$SKILLS_WITH_USES" -eq 0 ]; then
+	fail "whole-skill scan found NO skill using \${PLUGIN_ROOT} — the scan is vacuous" \
+		"checked ${SKILLS_CHECKED} skills; expected at least the phase skills"
+elif [ -z "$SKILL_OFFENDERS" ]; then
+	pass "no skill expands \${PLUGIN_ROOT} without assigning it somewhere (${SKILLS_WITH_USES} of ${SKILLS_CHECKED} skills use it)"
+else
+	fail "skills expand \${PLUGIN_ROOT} (in SKILL.md or references/) without assigning it anywhere" "$SKILL_OFFENDERS"
+fi
+
 # ── POSITIVE CONTROL ─────────────────────────────────────────────────────────
 # The check above reports a clean result. A clean result is only evidence if the
 # same instrument returns a DIRTY result on a case known to be defective. Build

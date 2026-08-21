@@ -201,12 +201,68 @@ describe("assembleJoinBundle", () => {
     expect(b.otlpEndpointHint).toBe("http://from-l2:4318");
   });
 
+  // ⛔ CTL-2004: the bundle hands a joiner monitor.github.smeeChannel — a tunnel CHANNEL.
+  // What decides whether it OPENS is catalyst.githubFeed.mode, which nothing carried:
+  // githubFeedIsAuthoritative() is mode==="enforce", orch-monitor suppresses the tunnel only
+  // on that, and the mode resolves env -> Layer-2 -> default "off". So a host joining after
+  // the cutover came up on SMEE, healthy and green, on the transport v1 retires.
+  test("⭐ githubFeed carries the seed's declared mode, so a member inherits the fleet's posture", () => {
+    writeLayer2({
+      ...LAYER2_FIXTURE,
+      catalyst: { ...LAYER2_FIXTURE.catalyst, githubFeed: { mode: "enforce" } },
+    });
+    expect(assembleJoinBundle().githubFeed).toEqual({ mode: "enforce" });
+  });
+
+  test("⛔ INVERSION GUARD — a seed declaring nothing carries null, NOT a manufactured 'off'", () => {
+    // "the seed declares nothing" must stay distinguishable from "the seed declares off":
+    // the consumer writes non-clobber, and a fabricated posture would pin every future member.
+    expect(assembleJoinBundle().githubFeed).toBeNull();
+  });
+
+  test("⛔ a junk mode is refused rather than travelling to every member", () => {
+    for (const bad of ["banana", "", 7, null, {}]) {
+      writeLayer2({
+        ...LAYER2_FIXTURE,
+        catalyst: { ...LAYER2_FIXTURE.catalyst, githubFeed: { mode: bad } },
+      });
+      expect(assembleJoinBundle().githubFeed).toBeNull();
+    }
+  });
+
+  test("all three modes travel", () => {
+    for (const mode of ["off", "shadow", "enforce"]) {
+      writeLayer2({
+        ...LAYER2_FIXTURE,
+        catalyst: { ...LAYER2_FIXTURE.catalyst, githubFeed: { mode } },
+      });
+      expect(assembleJoinBundle().githubFeed).toEqual({ mode });
+    }
+  });
+
+  test("⛔ the CHANNEL and the MODE travel together — the pairing whose absence was the defect", () => {
+    writeLayer2({
+      ...LAYER2_FIXTURE,
+      catalyst: {
+        ...LAYER2_FIXTURE.catalyst,
+        githubFeed: { mode: "enforce" },
+        monitor: { github: { smeeChannel: "https://smee.io/GH" } },
+      },
+    });
+    const b = assembleJoinBundle();
+    expect(b.monitorWebhooks.github).toEqual({ smeeChannel: "https://smee.io/GH" });
+    expect(b.githubFeed).toEqual({ mode: "enforce" });
+  });
+
   // CTL-1284: non-secret webhook wiring (smee channels + per-team webhookId map).
   test("monitorWebhooks is null when the seed has no monitor block", () => {
     expect(assembleJoinBundle().monitorWebhooks).toBeNull();
   });
 
-  test("monitorWebhooks carries non-secret smee channels + per-team webhookId map", () => {
+  // CTL-1928: the GitHub channel still travels (GitHub ingestion is still
+  // smee-fed); the whole Linear block does NOT (retired — the cloud feed
+  // drives Linear dispatch, and the subscriptions no longer deliver).
+  test("monitorWebhooks carries the GitHub smee channel and NOT the retired Linear block", () => {
     writeLayer2({
       ...LAYER2_FIXTURE,
       catalyst: {
@@ -223,17 +279,37 @@ describe("assembleJoinBundle", () => {
     });
     const wh = assembleJoinBundle().monitorWebhooks;
     expect(wh.github).toEqual({ smeeChannel: "https://smee.io/GH" });
-    expect(wh.linear.smeeChannel).toBe("https://smee.io/LIN");
-    expect(wh.linear.ctl).toEqual({
-      webhookId: "wh-ctl",
-      smeeChannel: "https://smee.io/LIN",
-      resourceTypes: ["Issue"],
-    });
-    expect(wh.linear.adv).toEqual({ webhookId: "wh-adv" });
+    expect(wh.linear).toBeUndefined();
+    // Not just "no top-level channel": readLinearSmeeChannel falls back to the
+    // FIRST per-team entry, so a surviving per-team smeeChannel would still
+    // start a tunnel. Assert the URL is nowhere in the payload at all, and
+    // that no webhookId rides along to become a dangling-key doctor FAIL.
+    expect(JSON.stringify(wh)).not.toContain("smee.io/LIN");
+    expect(JSON.stringify(wh)).not.toContain("webhookId");
     // registeredAt is dropped; no secrets ever appear.
     expect(JSON.stringify(wh)).not.toContain("registeredAt");
     expect(JSON.stringify(wh)).not.toContain("Secret");
     expect(JSON.stringify(wh)).not.toContain("secret");
+  });
+
+  // A seed whose ONLY monitor wiring is the retired Linear block has nothing
+  // left to carry — the bundle key must be null, not an empty object (the
+  // consumer's `monitor_wh != "null"` conjunct is what gates the wire/skip
+  // decision, and `{}` would read as "present" and wire nothing).
+  test("monitorWebhooks is null when the seed carries ONLY the retired Linear block", () => {
+    writeLayer2({
+      ...LAYER2_FIXTURE,
+      catalyst: {
+        ...LAYER2_FIXTURE.catalyst,
+        monitor: {
+          linear: {
+            smeeChannel: "https://smee.io/LIN",
+            ctl: { webhookId: "wh-ctl", smeeChannel: "https://smee.io/LIN" },
+          },
+        },
+      },
+    });
+    expect(assembleJoinBundle().monitorWebhooks).toBeNull();
   });
 
   // CTL-1231: allow-listed, secret-free ~/.claude/settings.json slice. The

@@ -783,6 +783,94 @@ run "triage transition resolves via the registry's customized eligibleQuery.tria
 run "used the registry's 'Intake' override, not the hardcoded 'Triage' default" \
   expect_contains "$LOG34" "linearis issues update TST-34 --status Intake"
 
+# ─── Test 35-38: --resolve-only (CTL-1889) ────────────────────────────────
+# The cloud write proxy needs the TARGET STATE without performing the write. Re-deriving
+# the four-rung precedence chain in JS would make this script one of two sources of
+# truth, so the proxy calls it in a mode that resolves and stops.
+WORK35="${SCRATCH}/t35"
+BIN35="${SCRATCH}/t35/bin"
+LOG35="${SCRATCH}/t35/log"
+mkdir -p "${WORK35}/.catalyst"
+cat > "${WORK35}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"linear":{"stateMap":{"done":"Done","inProgress":"Implement"}}}}
+EOF
+install_fake_linearis "$BIN35"
+touch "$LOG35"
+
+run "--resolve-only emits the resolved target state as JSON" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG35' PATH='$BIN35:$PATH' \
+    '$TRANSITION' --ticket TST-35 --transition inProgress --config '$WORK35/.catalyst/config.json' \
+    --resolve-only --json | grep -q '\"targetState\":\"Implement\"'"
+
+run "⛔ --resolve-only performs NO write (the whole point — linearis is never called)" \
+  bash -c "! grep -q 'issues update' '$LOG35'"
+
+run "--resolve-only reports action=resolve-only, not a transition" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG35' PATH='$BIN35:$PATH' \
+    '$TRANSITION' --ticket TST-35 --transition done --config '$WORK35/.catalyst/config.json' \
+    --resolve-only --json | grep -q '\"action\":\"resolve-only\"'"
+
+# ⭐ The property the ticket turns on: the END STATE of CTL-1889 is a host with no
+# Linear credential and no reason to have linearis installed. Resolution must still
+# work there — so this runs with a PATH that has no linearis at all. --dry-run is the
+# negative control: it exits at the availability gate with skipped-no-linearis and
+# never resolves, which is exactly why a new mode was needed rather than reusing it.
+WORK36="${SCRATCH}/t36"
+EMPTY36="${SCRATCH}/t36/emptybin"
+mkdir -p "${WORK36}/.catalyst" "$EMPTY36"
+cat > "${WORK36}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"linear":{"stateMap":{"inProgress":"Implement"}}}}
+EOF
+JQ_DIR36="$(dirname "$(command -v jq)")"
+
+run "⭐ --resolve-only still resolves on a host with NO linearis binary" \
+  bash -c "PATH='$EMPTY36:$JQ_DIR36:/usr/bin:/bin' \
+    '$TRANSITION' --ticket TST-36 --transition inProgress --config '$WORK36/.catalyst/config.json' \
+    --resolve-only --json | grep -q '\"targetState\":\"Implement\"'"
+
+run "NEGATIVE CONTROL: --dry-run on the same PATH does NOT resolve (it stops at the linearis gate)" \
+  bash -c "PATH='$EMPTY36:$JQ_DIR36:/usr/bin:/bin' \
+    '$TRANSITION' --ticket TST-36 --transition inProgress --config '$WORK36/.catalyst/config.json' \
+    --dry-run --json | grep -q 'skipped-no-linearis'"
+
+# ─── Test 37-38: --json still reports a real write on a jq-less host (CTL-1889
+# Codex P2, round 1, #3724) ─────────────────────────────────────────────────
+# jq is not a required repo dependency, so linearis-installed-but-jq-absent is a
+# supported shape — the exact one CTL-1889 migrates toward. Before this fix,
+# emit()'s jq-only JSON path silently produced no stdout on such a host, and
+# linear-write.mjs's allowlist (added earlier in this same PR) then reported a
+# REAL successful transition as `not-applied-unknown`, so the reconciliation
+# timer retried a write that had already landed. PATH here is JUST the fake
+# linearis + sed/tr (what emit()'s jq-less fallback needs) — no /usr/bin, so
+# jq is genuinely unresolvable, not merely unused. --state bypasses every
+# other jq-gated lookup (config stateMap, registry UUID cache) so this isolates
+# emit() specifically.
+WORK37="${SCRATCH}/t37"
+BIN37="${SCRATCH}/t37/bin"
+LOG37="${SCRATCH}/t37/log"
+mkdir -p "$BIN37"
+install_fake_linearis "$BIN37"
+touch "$LOG37"
+# The restricted PATH below is the ONLY PATH the script sees — it must supply
+# everything the script needs to even start (env, bash, for the #!/usr/bin/env
+# bash shebang; dirname/cat, sourced at the top) as well as what emit()'s
+# jq-less fallback uses (sed, tr) — deliberately with no jq anywhere on it.
+for _t in sed tr dirname cat env bash; do
+  ln -sf "$(command -v "$_t")" "${BIN37}/${_t}"
+done
+BASH_ABS37="$(command -v bash)"
+
+run "⭐ --json on a jq-less host still reports action=transitioned (not silently empty)" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG37' PATH='$BIN37' HOME='$HOME' \
+    '$BASH_ABS37' '$TRANSITION' --ticket TST-37 --state Done --json 2>/dev/null | grep -q '\"action\":\"transitioned\"'"
+
+run "jq-less --json output still contains ticket and targetState (manual JSON, not jq)" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG37' PATH='$BIN37' HOME='$HOME' \
+    '$BASH_ABS37' '$TRANSITION' --ticket TST-37 --state Done --json 2>/dev/null | grep -q '\"ticket\":\"TST-37\".*\"targetState\":\"Done\"'"
+
+run "jq-less path: the write really happened (linearis was invoked, not skipped)" \
+  bash -c "grep -q 'linearis issues update TST-37' '$LOG37'"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

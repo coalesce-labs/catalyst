@@ -5,7 +5,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { getClusterHosts, getLivenessAnchorIssue } from "./config.mjs";
+// CTL-1785: a join bundle advertises fleet MEMBERSHIP (existence) to a joining
+// host — not work-ownership. `off` mode: getExistenceHosts() === getClusterHosts().
+import { getExistenceHosts, getLivenessAnchorIssue } from "./config.mjs";
 import { listProjects } from "./registry.mjs";
 
 export const JOIN_BUNDLE_SCHEMA_VERSION = 1;
@@ -75,12 +77,33 @@ function resolvePluginSourceUrl(l2) {
 }
 
 // CTL-1284: extract the NON-SECRET webhook wiring a member needs to ingest
-// inbound GitHub/Linear events — smee channel URLs + the per-team webhookId map
-// that readAllLinearSecrets keys on. HMAC secrets are NEVER carried here; they
-// travel via the SOPS secret-files path (cluster-sync.mjs). Returns null when the
-// seed has no monitor block. The CONSUMER (merge_shared_config) gates writing
-// these onto a member by roster length > 1 — a single-host member must NOT
-// ingest webhooks (HRW no-op + claimDispatch skipped → double-dispatch).
+// inbound GitHub events — the smee channel URL. HMAC secrets are NEVER carried
+// here; they travel via the SOPS secret-files path (cluster-sync.mjs). Returns
+// null when the seed has no monitor block. The CONSUMER (merge_shared_config)
+// gates writing these onto a member by roster length > 1 — a single-host member
+// must NOT ingest webhooks (HRW no-op + claimDispatch skipped → double-dispatch).
+//
+// ⛔ CTL-1928: the LINEAR half is deliberately NOT carried any more. Linear
+// ingestion is the cloud feed (`cloud-feed-timer.mjs`, `CATALYST_CLOUD_FEED`),
+// and the workspace's 7 Linear webhook subscriptions were retired when the
+// fleet cut over. Propagating `linear.smeeChannel` would silently RE-CREATE the
+// retired path on every new join: `readLinearSmeeChannel` (orch-monitor's
+// webhook-config.ts) falls back to the FIRST per-team entry's `smeeChannel`, so
+// even a bundle carrying only the per-team map — no top-level channel — is
+// enough to start a Linear tunnel on the joining host. That is why the whole
+// `linear` block goes, rather than just the top-level key.
+//
+// Dropping the per-team `webhookId` map with it is deliberate too, and it is
+// what keeps `catalyst doctor` honest: its `webhook-ingestion` check FAILs a
+// member carrying a `webhookId` whose HMAC secret does not resolve ("half-wired
+// … config residue"). A joining host has no reason to hold identifiers for
+// subscriptions that no longer deliver, and carrying them would manufacture
+// exactly that dangling-key FAIL. The GitHub route stays: it is still smee-fed
+// (measured on the live fleet — ~1.6k `github.*` events per 6 h drive
+// monitor-merge, CI waits and the broker's PR-lifecycle routing), and the cloud
+// has no GitHub ingestion to replace it yet.
+//
+// The retirement + rollback procedure: docs/runbooks/cloud-feed-cutover.md.
 function extractMonitorWebhooks(l2) {
   const monitor = l2?.catalyst?.monitor;
   if (!monitor || typeof monitor !== "object") return null;
@@ -91,29 +114,19 @@ function extractMonitorWebhooks(l2) {
     out.github = { smeeChannel: ghSmee };
   }
 
-  const linear = monitor.linear;
-  if (linear && typeof linear === "object" && !Array.isArray(linear)) {
-    const lin = {};
-    if (typeof linear.smeeChannel === "string" && linear.smeeChannel) {
-      lin.smeeChannel = linear.smeeChannel;
-    }
-    // Per-team keyed entries: { ctl: {webhookId, smeeChannel, resourceTypes}, ... }.
-    // Keep only non-secret identifiers; drop registeredAt and anything else.
-    for (const key of Object.keys(linear)) {
-      const entry = linear[key];
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-      if (typeof entry.webhookId !== "string" || !entry.webhookId) continue;
-      const e = { webhookId: entry.webhookId };
-      if (typeof entry.smeeChannel === "string" && entry.smeeChannel) {
-        e.smeeChannel = entry.smeeChannel;
-      }
-      if (Array.isArray(entry.resourceTypes)) e.resourceTypes = entry.resourceTypes;
-      lin[key] = e;
-    }
-    if (Object.keys(lin).length > 0) out.linear = lin;
-  }
-
   return Object.keys(out).length > 0 ? out : null;
+}
+
+// CTL-2004: the seed's declared GitHub-ingestion mode, or null. Read as a plain value with a
+// vocabulary check rather than through resolveGithubFeedMode(): that resolver consults the SEED
+// PROCESS's own env and defaults to "off", and neither belongs in a bundle describing the cluster
+// — a seed running with a one-off CATALYST_GITHUB_FEED in its shell must not pin every future
+// member to it, and "the seed declares nothing" must stay distinguishable from "the seed declares
+// off". Kept import-free for the same reason the rest of this module is.
+const GITHUB_FEED_BUNDLE_MODES = ["off", "shadow", "enforce"];
+function extractGithubFeed(l2) {
+  const mode = l2?.catalyst?.githubFeed?.mode;
+  return typeof mode === "string" && GITHUB_FEED_BUNDLE_MODES.includes(mode) ? { mode } : null;
 }
 
 // CTL-1231: carry a SHARED-only, secret-free slice of the seed's
@@ -185,7 +198,7 @@ export function assembleJoinBundle() {
 
   return {
     schemaVersion: JOIN_BUNDLE_SCHEMA_VERSION,
-    hostsRoster: getClusterHosts(),
+    hostsRoster: getExistenceHosts(),
     livenessAnchorIssue: getLivenessAnchorIssue(),
     botCreds: {
       orchestrator: bot.orchestrator ?? null,
@@ -235,6 +248,17 @@ export function assembleJoinBundle() {
     // posture + autonomy defaults). null when the seed has no settings. Optional
     // (existence-only) — an older seed degrades gracefully.
     claudeSettings: extractClaudeSettings(),
+    // ⛔ CTL-2004: the seed's GitHub-ingestion posture. This bundle already propagates
+    // `monitor.github.smeeChannel` above (deliberately — the GitHub leg is still smee-fed per
+    // CTL-1928), so a member was handed a TUNNEL CHANNEL and no mode. The mode resolves
+    // env -> Layer-2 -> default "off", `githubFeedIsAuthoritative()` is `mode === "enforce"`, and
+    // orch-monitor suppresses the tunnel only on that — so every host joining after the fleet's
+    // cutover silently came up on smee while looking perfectly healthy. Carrying the seed's mode
+    // makes a member inherit the fleet's declared posture instead of the off default.
+    //
+    // null when the seed declares nothing — the member then behaves exactly as before rather than
+    // being pinned to a posture the seed never held.
+    githubFeed: extractGithubFeed(l2),
   };
 }
 

@@ -7,6 +7,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+// CTL-1929: the consumed/suppressible name lists, from the zero-import leaf that
+// doctor.mjs itself reads — so this test cannot drift from the grade it asserts on.
+import { GITHUB_CONSUMED_NAMES, GITHUB_SUPPRESSIBLE_NAMES } from "../lib/github-feed-names.mjs";
 import {
   STATUS,
   mkCheck,
@@ -34,6 +37,7 @@ import {
   defaultConfiguredRepos,
   checkNodeClass,
   checkDeploymentModeConsistency,
+  checkEntitlementConsistency,
   checkSecretContract,
   checkLayer2PathDivergence,
   checkReadReplicaReachable,
@@ -54,6 +58,10 @@ import {
   renderHuman,
   parseArgs,
   runDoctor,
+  checkFleetTokenExport,
+  readLinearBotUserIds,
+  readCloudBotUserId,
+  checkSelfEchoIdentityHistory,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
@@ -233,6 +241,74 @@ const agreeingSecretContract = (present) => () =>
     ? { value: "contract-token", source: "inherited", provider: "env-alias" }
     : { value: null, source: "none", provider: "env-alias" };
 
+describe("checkEntitlementConsistency (CTL-1785)", () => {
+  const mode = (over = {}) => ({
+    mode: "off",
+    source: "default",
+    inferred: true,
+    recognized: true,
+    raw: null,
+    ...over,
+  });
+  const byName = (checks) => Object.fromEntries(checks.map((c) => [c.name, c]));
+
+  it("advisory INFO when mode=off (default)", () => {
+    const checks = checkEntitlementConsistency({ mode: mode() });
+    const m = byName(checks)["entitlement-mode"];
+    expect(m.status).toBe("info");
+    expect(m.detail).toContain('mode="off"');
+  });
+
+  it("WARN when mode=enforce but no real authority injected (local fallback)", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "enforce", source: "env", inferred: false }),
+      providerKind: "local",
+    });
+    const p = byName(checks)["entitlement-provider"];
+    expect(p.status).toBe("warn");
+    expect(p.detail).toContain("no lease authority");
+  });
+
+  it("INFO for the provider once a real authority is injected", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "enforce", source: "env", inferred: false }),
+      providerKind: "authority",
+    });
+    expect(byName(checks)["entitlement-provider"].status).toBe("info");
+  });
+
+  it("ordering check is INFO when the constraint holds, WARN when inverted — never FAIL", () => {
+    const ok = byName(checkEntitlementConsistency({ mode: mode(), entitlementTtlMs: 900000, workLeaseTtlMs: 300000 }));
+    expect(ok["entitlement-ordering"].status).toBe("info");
+    const bad = byName(checkEntitlementConsistency({ mode: mode(), entitlementTtlMs: 1000, workLeaseTtlMs: 2000 }));
+    expect(bad["entitlement-ordering"].status).toBe("warn");
+  });
+
+  it("a typo'd mode WARNs (never FAILs) and degrades to off", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "off", source: "env", inferred: false, recognized: false, raw: "enfroce" }),
+    });
+    expect(byName(checks)["entitlement-mode"].status).toBe("warn");
+  });
+
+  it("NEVER emits STATUS.FAIL (advisory only, cannot wedge doctor)", () => {
+    // Sweep every mode + provider + ordering combination — none may FAIL.
+    for (const mm of ["off", "shadow", "enforce"]) {
+      for (const pk of ["local", "authority"]) {
+        for (const [e, w] of [[900000, 300000], [1000, 2000]]) {
+          const checks = checkEntitlementConsistency({
+            mode: mode({ mode: mm, inferred: mm === "off", source: mm === "off" ? "default" : "env", recognized: true }),
+            providerKind: pk,
+            entitlementTtlMs: e,
+            workLeaseTtlMs: w,
+          });
+          for (const c of checks) expect(c.status).not.toBe("fail");
+        }
+      }
+    }
+  });
+});
+
 describe("checkPeerUniqueness", () => {
   it("INFO-skips when no liveness anchor issue is configured", async () => {
     const checks = await checkPeerUniqueness({
@@ -363,6 +439,162 @@ describe("checkPeerUniqueness", () => {
     expect(checks[0].name).toBe("peer-uniqueness");
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("empty");
+  });
+});
+
+// ─── CTL-2074: doctor's inline readLinearBotUserIds twin picks up the cloud slot ──
+// The inline copy at doctor.mjs:157 exists to keep doctor off the daemon's bun: graph;
+// it must not drift from the daemon resolver. This exercises the copy directly so a
+// missing cloud slot fails here at CI, not silently in production.
+describe("readLinearBotUserIds (doctor inline twin, CTL-2074)", () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "doctor-bot-ids-"));
+  });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  it("includes catalyst.linear.bot.cloud.botUserId", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: {
+              worker: { botUserId: "worker-uuid" },
+              orchestrator: { botUserId: "orch-uuid" },
+              cloud: { botUserId: "cloud-uuid" },
+            },
+          },
+        },
+      })
+    );
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("cloud-uuid")).toBe(true);
+    expect(ids.has("worker-uuid")).toBe(true);
+    expect(ids.has("orch-uuid")).toBe(true);
+  });
+
+  // Codex #3738 P2: the cloud-proxy actor is read on its own so the self-echo cross-check
+  // can tie its PASS to THIS id rather than any historical set member.
+  it("readCloudBotUserId returns the cloud slot, and \"\" when absent/unreadable", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({ catalyst: { linear: { bot: { cloud: { botUserId: "cloud-uuid" } } } } })
+    );
+    expect(readCloudBotUserId(layer2)).toBe("cloud-uuid");
+    // absent slot → "" (not undefined), never throws
+    const bare = join(tmpDir, "bare.json");
+    writeFileSync(bare, JSON.stringify({ catalyst: { linear: { bot: {} } } }));
+    expect(readCloudBotUserId(bare)).toBe("");
+    expect(readCloudBotUserId(join(tmpDir, "does-not-exist.json"))).toBe("");
+    expect(readCloudBotUserId(null)).toBe("");
+  });
+});
+
+// ─── CTL-2074: checkSelfEchoIdentityHistory — the loud history cross-check ────
+// Turns the silent failure loud: compares the resolved recognition set against the
+// actors who ACTUALLY write state in real issue_history (positive control included),
+// never against config. Advisory (WARN, not FAIL) — "make it loud", not "block".
+const ORCH_ID = "ba2989f1-0000-4000-8000-000000000000";
+const CLOUD_ID = "78f8f491-0000-4000-8000-000000000000";
+const HUMAN_ID = "c2a8cc92-0000-4000-8000-000000000000";
+
+describe("checkSelfEchoIdentityHistory (CTL-2074)", () => {
+  it("WARNs when proxy=enforce and the configured cloud identity never writes state (names the candidates)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      recentActors: () => [{ actorId: HUMAN_ID, name: "Ryan Rozich", count: 103 }],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    // names the unrecognized state-writer so the operator has a candidate to confirm
+    expect(check.detail).toMatch(/c2a8cc92|Ryan Rozich|proxied|human replies/i);
+  });
+
+  it("PASSes when the configured cloud-proxy identity is present in history AND in the set", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+    });
+    expect(check.status).toBe(STATUS.PASS);
+  });
+
+  // Codex #3738 P2 regression: a LEGACY recognized actor (pre-cutover worker/orch id
+  // still in the set) that appears in history must NOT mask an unrecognized CURRENT
+  // cloud writer. The old "any member recognized ⇒ PASS" produced a clean PASS here.
+  it("WARNs (not PASS) when a legacy set member writes state but the cloud proxy actor does not (masking)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      // ORCH_ID is a recognized set member and writes state; CLOUD_ID (the current
+      // proxy actor) is absent — its proxied writes still read as human replies.
+      recentActors: () => [
+        { actorId: ORCH_ID, name: "Legacy Orchestrator", count: 42 },
+        { actorId: HUMAN_ID, name: "Ryan Rozich", count: 103 },
+      ],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    expect(check.detail).toMatch(/cloud-proxy identity|proxied writes read/i);
+  });
+
+  it("WARNs when the cloud-proxy identity is not configured at all (the CTL-2074 silent condition)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID]),
+      cloudBotId: "",
+      recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    expect(check.detail).toMatch(/not configured|bot\.cloud\.botUserId/i);
+  });
+
+  it("WARNs when the cloud id writes state but is ABSENT from the recognition set", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID]), // cloud id NOT in the recognition set
+      cloudBotId: CLOUD_ID,
+      recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    expect(check.detail).toMatch(/recognition set/i);
+  });
+
+  it("is INCONCLUSIVE (never PASS) when the replica cannot be read (recentActors → undefined)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      recentActors: () => undefined,
+    });
+    expect(check.status).not.toBe(STATUS.PASS); // could-not-look ≠ clean
+  });
+
+  it("is INCONCLUSIVE (never PASS) when history is present but empty (positive control failed)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      recentActors: () => [],
+    });
+    expect(check.status).not.toBe(STATUS.PASS);
+  });
+
+  it("off/shadow proxy mode → INFO/skip (the guard only matters under enforce)", () => {
+    for (const mode of ["off", "shadow"]) {
+      const check = checkSelfEchoIdentityHistory({
+        proxyMode: mode,
+        botIds: new Set([ORCH_ID]),
+        cloudBotId: CLOUD_ID,
+        recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+      });
+      expect(check.status).toBe(STATUS.INFO);
+    }
   });
 });
 
@@ -727,6 +959,254 @@ describe("checkWebhookIngestion", () => {
     expect(checks[0].name).toBe("webhook-ingestion");
     expect(checks[0].status).toBe(STATUS.PASS);
     expect(checks[0].detail).toContain("single-host");
+  });
+
+  // ─── CTL-2030: the check grades the route the host ACTUALLY USES ───────────
+  //
+  // Live on both minis on 2026-08-18 after the CTL-1929 cutover:
+  //   [PASS] webhook-ingestion: webhook ingestion wired (github=true, linear=false)
+  // while both hosts received ZERO GitHub webhooks — the tunnel suppressed at
+  // enforce, all eight webhooks active:false. `githubWired` was configuration
+  // PRESENCE (smeeChannel + HMAC secret), both deliberately retained as the
+  // rollback lever. The check answered "is smee configured?" and printed it as
+  // "ingestion wired" — and, worse, would have kept PASSing if the FEED broke,
+  // because it never looked at the feed.
+  describe("CTL-2030: an enforce host is graded on the feed, not on smee's config", () => {
+    const cluster = () => ({ mode: "cluster", source: "layer1", inferred: false, recognized: true });
+    // The minis' real shape: smee CONFIGURED (rollback lever) and the feed at enforce.
+    const monitorWithSmee = { github: { smeeChannel: "catalyst-gh" }, linear: {} };
+    const ready = (over = {}) => () => ({
+      ready: true,
+      reason: "producer-ready",
+      path: "/x/github-feed-ready-tenant-0.json",
+      state: {
+        ready: true,
+        mode: "enforce",
+        coverage: { suppressible: GITHUB_CONSUMED_NAMES.length, consumed: GITHUB_CONSUMED_NAMES.length, uncovered: [] },
+      },
+      ...over,
+    });
+    const run = (readFn, ghFeedMode = "enforce") =>
+      checkWebhookIngestion({
+        resolveDeploymentModeFn: cluster,
+        resolveRoster: multiHost,
+        monitor: monitorWithSmee,
+        secretFileNonEmpty: () => true, // the HMAC secret IS on disk — the rollback lever
+        resolveSecretContract: agreeingSecretContract(true),
+        resolveGithubFeedModeFn: () => ({ mode: ghFeedMode, source: "layer2" }),
+        readGithubFeedReadyFn: readFn,
+      })[0];
+
+    it("⭐ THE REGRESSION: retained smee config no longer reads as 'ingestion wired'", () => {
+      // Same inputs that produced the live false PASS, plus a HEALTHY feed. The
+      // verdict is still PASS — but for the feed, and it says so. If the message
+      // ever goes back to claiming the smee route is wired, this fails.
+      const c = run(ready());
+      expect(c.status).toBe(STATUS.PASS);
+      expect(c.detail).toContain("cloud feed at enforce");
+      expect(c.detail).toContain("smee is intentionally inert");
+      expect(c.detail).not.toContain("webhook ingestion wired");
+    });
+
+    it("⛔ a BROKEN feed on an enforce host does NOT pass — the condition it could not detect", () => {
+      const c = run(() => ({ ready: false, reason: "producer-unready:sweep-behind", path: "/x/r.json", state: { ready: false, mode: "enforce" } }));
+      expect(c.status).toBe(STATUS.FAIL);
+      expect(c.detail).toContain("GitHub ingestion is DOWN");
+      expect(c.detail).toContain("producer-unready:sweep-behind");
+    });
+
+    it("⛔ a STALE readiness record is a FAIL, and the message names what it read", () => {
+      const c = run(() => ({ ready: false, reason: "ready-file-stale:412s", path: "/x/r.json", state: { ready: true, mode: "enforce" } }));
+      expect(c.status).toBe(STATUS.FAIL);
+      expect(c.detail).toContain("ready-file-stale:412s");
+    });
+
+    it("⚠️ an UNOBSERVABLE producer is a WARN naming the path — 'could not look' is not 'fine'", () => {
+      // Absent means the producer never ran OR doctor is looking in the wrong
+      // directory (CTL-1976 shipped exactly that bug once). Grading it FAIL would
+      // page an operator for a reader bug; grading it PASS is the defect this
+      // ticket fixes. It is inconclusive, and it says so.
+      const c = run(() => ({ ready: false, reason: "ready-file-absent", path: "/some/where/r.json", state: null }));
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("could NOT be observed");
+      expect(c.detail).toContain("/some/where/r.json");
+      expect(c.detail).toContain('"could not look", not "ingestion is fine"');
+    });
+
+    it("⛔ a FRESH record with the WRONG MODE is a FAIL — freshness alone reads healthy", () => {
+      // The producer stamps the mode it RESOLVED, which degrades to shadow when
+      // enforce is not honourable. A host whose flag says enforce while its producer
+      // runs as shadow emits markers, not events — with a perfectly fresh heartbeat
+      // the whole time. Checking only `ready` would pass it.
+      const c = run(ready({ state: { ready: true, mode: "shadow", coverage: { suppressible: 12, consumed: 12, uncovered: [] } } }));
+      expect(c.status).toBe(STATUS.FAIL);
+      expect(c.detail).toContain("readers DISAGREE");
+      expect(c.detail).toContain('mode="shadow"');
+    });
+
+    it("⚠️ a ready producer with uncovered names is a WARN that names them", () => {
+      const c = run(ready({ state: { ready: true, mode: "enforce", coverage: { suppressible: 10, consumed: 12, uncovered: ["github.push", "github.check_suite.completed"] } } }));
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("10/12");
+      expect(c.detail).toContain("github.push");
+    });
+
+    it("a SHADOW host is unchanged — it still grades the smee route exactly as before", () => {
+      // The feed replaces nothing at shadow, so smee is still the live route and the
+      // pre-CTL-2030 grade must be preserved byte-for-byte.
+      const c = run(ready(), "shadow");
+      expect(c.status).toBe(STATUS.PASS);
+      expect(c.detail).toContain("webhook ingestion wired");
+      expect(c.detail).toContain("github=true");
+    });
+
+    it("⛔ half-wired Linear config still FAILs at enforce — no mode excuses residue", () => {
+      const c = checkWebhookIngestion({
+        resolveDeploymentModeFn: cluster,
+        resolveRoster: multiHost,
+        monitor: { github: { smeeChannel: "g" }, linear: { smeeChannel: "l", workspace: { webhookId: "w1" } } },
+        secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+        resolveSecretContract: agreeingSecretContract(true),
+        resolveGithubFeedModeFn: () => ({ mode: "enforce", source: "layer2" }),
+        readGithubFeedReadyFn: ready(),
+      })[0];
+      expect(c.status).toBe(STATUS.FAIL);
+      expect(c.detail).toContain("half-wired");
+    });
+
+    it("⛔ a THROWING readiness reader does not pass and does not throw", () => {
+      const c = run(() => {
+        throw new Error("EACCES");
+      });
+      expect(c.status).not.toBe(STATUS.PASS);
+      expect(c.detail).toContain("could NOT be observed");
+    });
+  });
+
+  // ─── CTL-1929: the declared-cloud grade now depends on the GitHub feed ──────
+  describe("declared cloud + the GitHub feed (CTL-1929)", () => {
+    const cloud = () => ({ mode: "cloud", source: "layer2", inferred: false, recognized: true });
+    // CTL-2030: coverage now comes from the PRODUCER'S readiness record, not from the
+    // frozen constants. These cases keep exercising today's real gap by publishing it
+    // as the producer would, so they still fail when the derivation is hand-written —
+    // and they no longer depend on doctor reading a file off the real filesystem.
+    const readyWith = (uncovered) => () => ({
+      ready: true,
+      reason: "producer-ready",
+      path: "/x/github-feed-ready-tenant-0.json",
+      state: {
+        ready: true,
+        mode: "enforce",
+        coverage: {
+          suppressible: GITHUB_CONSUMED_NAMES.length - uncovered.length,
+          consumed: GITHUB_CONSUMED_NAMES.length,
+          uncovered,
+        },
+      },
+    });
+    const todaysGaps = GITHUB_CONSUMED_NAMES.filter((x) => !GITHUB_SUPPRESSIBLE_NAMES.includes(x));
+    const run = (ghFeed, readGithubFeedReadyFn = readyWith(todaysGaps)) =>
+      checkWebhookIngestion({
+        resolveDeploymentModeFn: cloud,
+        resolveRoster: multiHost,
+        monitor: { github: { smeeChannel: "" }, linear: {} },
+        secretFileNonEmpty: noSecrets,
+        resolveSecretContract: agreeingSecretContract(false),
+        resolveGithubFeedModeFn: () => ghFeed,
+        readGithubFeedReadyFn,
+      })[0];
+
+    it("feed OFF → WARN naming the mode, because github.* has no source at all", () => {
+      const c = run({ mode: "off", source: "default" });
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("NO cloud replacement active");
+      expect(c.detail).toContain("CATALYST_GITHUB_FEED=off");
+    });
+
+    it("⚠️ feed SHADOW is still a WARN — shadow replaces nothing", () => {
+      // The trap: shadow looks healthy (a producer is running, events are being
+      // observed) and grades identically to off, because nothing it emits is
+      // authoritative and the dispatch gate suppresses nothing.
+      const c = run({ mode: "shadow", source: "env" });
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("NO cloud replacement active");
+    });
+
+    it("⛔ feed ENFORCE with gaps open is a WARN that NAMES the uncovered names", () => {
+      // Not a PASS. On a declared-cloud node there is no tunnel, so the three
+      // uncovered names are genuinely unseen — reporting the route whole here would
+      // say "fine" at exactly the moment the merge→deploy join, the CI wait and
+      // rebase detection are the parts that are missing.
+      const c = run({ mode: "enforce", source: "env" });
+      expect(c.status).toBe(STATUS.WARN);
+      for (const n of todaysGaps) {
+        expect(c.detail).toContain(n);
+      }
+      expect(c.detail).toContain(`${GITHUB_CONSUMED_NAMES.length - todaysGaps.length}/${GITHUB_CONSUMED_NAMES.length}`);
+    });
+
+    it("⛔ CTL-2030: a FULLY-COVERED node reaches the PASS branch — it was UNREACHABLE before", () => {
+      // The static comparison could never yield zero on a 0.1.18 replica (the frozen
+      // constant is 10 of 12), so this PASS existed in the source and could not be
+      // reached by any input. Driving it from the producer's own runtime answer is
+      // what makes it real.
+      const c = run({ mode: "enforce", source: "env" }, readyWith([]));
+      expect(c.status).toBe(STATUS.PASS);
+      expect(c.detail).toContain(`all ${GITHUB_CONSUMED_NAMES.length} consumed github.* names`);
+    });
+
+    it("⚠️ CTL-2030: unknown runtime coverage is a WARN, NOT a fall-back to the constant", () => {
+      // A pre-CTL-2030 readiness record (or a thrown tick) carries no coverage.
+      // Degrading to GITHUB_SUPPRESSIBLE_NAMES here would re-introduce the stale
+      // reading this ticket removes, wearing a fresh-looking verdict.
+      const noCoverage = () => ({
+        ready: true,
+        reason: "producer-ready",
+        path: "/x/r.json",
+        state: { ready: true, mode: "enforce" },
+      });
+      const c = run({ mode: "enforce", source: "env" }, noCoverage);
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("carries no runtime coverage");
+    });
+
+    it("⭐ the counts and names are DERIVED — the WARN stops warning by itself when the gaps close", () => {
+      // Drives the post-CTC-691/667/704 world through the same code path. A
+      // hand-written detail string passes every test above and keeps reporting three
+      // uncovered names forever.
+      expect(todaysGaps.length).toBeGreaterThan(0); // precondition: gaps are open today
+      expect(GITHUB_SUPPRESSIBLE_NAMES.length).toBeLessThan(GITHUB_CONSUMED_NAMES.length);
+      const c = run({ mode: "enforce", source: "env" });
+      expect(c.detail).toContain(`${todaysGaps.length} have NO source`);
+      // ...and with ONE gap published instead of today's set, the number follows.
+      const one = run({ mode: "enforce", source: "env" }, readyWith([todaysGaps[0]]));
+      expect(one.detail).toContain("1 have NO source");
+    });
+
+    it("⛔ a THROWING feed resolver grades as NO REPLACEMENT, not as a degraded enforce", () => {
+      // ⚠️ My first version of this asserted only `status === WARN` plus the string
+      // "resolver-threw", and the mutation (fail OPEN to enforce) PASSED — because
+      // while the three gaps are open BOTH branches grade WARN and both print the
+      // source. The assertion could not tell the two apart, and would have started
+      // being wrong precisely when the gaps closed and fail-open became a PASS.
+      //
+      // The distinguishing fact is WHICH branch answered, so assert on that: an
+      // unreadable config must land in the same place as `mode: off`.
+      const c = checkWebhookIngestion({
+        resolveDeploymentModeFn: cloud,
+        resolveRoster: multiHost,
+        monitor: { github: { smeeChannel: "" }, linear: {} },
+        secretFileNonEmpty: noSecrets,
+        resolveSecretContract: agreeingSecretContract(false),
+        resolveGithubFeedModeFn: () => { throw new Error("unreadable config"); },
+      })[0];
+      expect(c.status).toBe(STATUS.WARN);
+      expect(c.detail).toContain("NO cloud replacement active");
+      expect(c.detail).toContain("resolver-threw");
+      // ⛔ and NOT the enforce branch's language, which would claim partial coverage
+      // this node has no basis to claim.
+      expect(c.detail).not.toContain("covers");
+    });
   });
 
   it("FAILs a multiHost node with no webhook route enabled", () => {
@@ -2611,6 +3091,36 @@ describe("checksForClass — checkSdkDaemonEnv registration (CTL-1396)", () => {
   });
 });
 
+describe("checksForClass — checkAgentToolsWritePath registration (CTL-2026)", () => {
+  // ⛔ THE DEFECT THIS PINS (Codex P2 on #3679): the row was first registered only on the
+  // worker arm. `developer` and `monitor` return from their own branches ABOVE it, so it
+  // never ran there — and a `developer` is defined a few lines away as a node whose
+  // "operator's skills write transitions/comments to Linear", i.e. exactly the class that
+  // HOLDS the live out-of-tree copies. Measured: the laptop carrying the drifted
+  // linear-reply.mjs this row exists to name is node class `developer`.
+  //
+  // ⭐ And this asserts BEHAVIOUR, not a source match. The sibling suites above check that
+  // a function NAME appears in the stringified thunks; that passes on a mention inside a
+  // comment, and it cannot tell a registered thunk from a renamed one. Here the matching
+  // thunks are INVOKED and the returned row's `name` is pinned — the only form of the
+  // assertion that a mis-wired registration can fail.
+  const rowsFor = (cls) =>
+    checksForClass(nodeClassOf({ class: cls, raw: cls }))
+      .filter((f) => f.toString().includes("checkAgentToolsWritePath"))
+      .map((f) => f());
+
+  for (const cls of ["worker", "developer", "monitor"]) {
+    it(`${cls} suite registers exactly one agent-tools-write-path row, and it grades`, () => {
+      const rows = rowsFor(cls);
+      expect(rows.length).toBe(1);
+      expect(rows[0].name).toBe("agent-tools-write-path");
+      // Advisory: doctor's FAIL count gates worker activation and every host
+      // legitimately holds a copy during the CTL-2026(b) interim.
+      expect(rows[0].status).not.toBe("fail");
+    });
+  }
+});
+
 describe("checksForClass — checkDeploymentModeConsistency registration (CTL-1617)", () => {
   const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
 
@@ -2938,11 +3448,19 @@ describe("checkWebhookIngestion — deployment-mode alignment (CTL-1617, #2913 C
     expect(primary.detail).toContain("intentionally not wired");
   });
 
-  it("declared cloud: WARN, not PASS — cloud replacement ingestion does not exist yet (#2918 follow-up)", () => {
+  // CTL-1928 narrowed WHY this is a WARN: Linear ingestion now HAS a cloud
+  // replacement (the cloud feed), GitHub still does not. The status is
+  // unchanged — the remaining GitHub gap is what keeps it off PASS.
+  it("declared cloud: WARN, not PASS — GitHub has no cloud replacement ingestion yet (#2918 follow-up, narrowed by CTL-1928)", () => {
     const checks = checkWebhookIngestion({ ...NO_ROUTE_DEPS, resolveDeploymentModeFn: () => mode("cloud") });
     const primary = checks.find((c) => c.name === "webhook-ingestion");
     expect(primary.status).toBe(STATUS.WARN);
-    expect(primary.detail).toContain("no event ingestion at all");
+    expect(primary.detail).toContain("GitHub ingestion has NO cloud replacement");
+    expect(primary.detail).toContain("cloud feed");
+    // The superseded claim must not come back: a cloud node is NOT blind to
+    // Linear, and telling an operator it has "no event ingestion at all"
+    // sends them hunting a Linear outage that does not exist.
+    expect(primary.detail).not.toContain("no event ingestion at all");
   });
 
   it("declared non-cluster with a DANGLING Linear key: half-wired FAIL fires before the aligned grant (#2918 follow-up ordering)", () => {
@@ -5720,4 +6238,94 @@ describe("checksForClass — checkConfigProvenance registration (CTL-1793)", () 
       expect(src({ recognized: true, class: cls })).toContain("checkConfigProvenance");
     });
   }
+});
+
+describe("checkFleetTokenExport — CTL-1908: a login shell must not spend the FLEET's budget", () => {
+  // The incident: 2026-08-17 02:00-08:57 CT the whole overnight fleet stalled on "You've hit your
+  // weekly limit" while Ryan's own account sat at 78%, because ~/.zshenv sourced
+  // claude-accounts.env in EVERY zsh and Claude Code prefers the env token over the keychain
+  // login. Seven hours, and the symptom named the wrong account.
+  const fs = (files) => ({
+    home: "/h",
+    rcFiles: [".zshenv", ".zprofile", ".bashrc", ".profile"],
+    fileExists: (p) => Object.prototype.hasOwnProperty.call(files, p),
+    // a `null` entry models a file that EXISTS but cannot be read
+    readText: (p) => {
+      if (files[p] === null) throw new Error("EACCES");
+      return files[p];
+    },
+  });
+  const one = (files) => checkFleetTokenExport(fs(files))[0];
+
+  it("WARNs on an active source of claude-accounts.env, naming the file and line", () => {
+    const v = one({ "/h/.zshenv": '# unrelated\n[ -f "$HOME/.config/catalyst/claude-accounts.env" ] && . "$HOME/.config/catalyst/claude-accounts.env"\n' });
+    expect(v.status).toBe("warn");
+    expect(v.detail, "an operator must be told WHERE, not merely that something is wrong").toContain(".zshenv:2");
+  });
+
+  it("WARNs on a direct export of the token, not only on the file that carries it", () => {
+    expect(one({ "/h/.zprofile": 'export CLAUDE_CODE_OAUTH_TOKEN=sk-whatever\n' }).status).toBe("warn");
+  });
+
+  it("⭐ a COMMENTED line is the FIXED state, not a finding", () => {
+    // This is how the laptop and (since 2026-08-17 23:2x) both minis carry the fix. Matching the
+    // bare text would report every correctly-fixed host as broken, and the check would be
+    // uninstalled within a day.
+    const v = one({ "/h/.zshenv": '# CTL-1908: not exported to every shell\n# [ -f "$HOME/.config/catalyst/claude-accounts.env" ] && . "..."\n' });
+    expect(v.status).toBe("pass");
+  });
+
+  it("nothing to scan is INFO — a zero is not a clean result", () => {
+    // The vacuous-pass guard: with no rc file present there is no evidence either way, and
+    // "I could not look" must not render as "this host is fine".
+    expect(checkFleetTokenExport({ home: "/h", rcFiles: [".zshenv"], fileExists: () => false, readText: () => "" })[0].status).toBe("info");
+  });
+
+  // ─── Codex round 1 on #3506 ────────────────────────────────────────────────
+  const REAL_LINE = '[ -f "$HOME/.config/catalyst/claude-accounts.env" ] && . "$HOME/.config/catalyst/claude-accounts.env"';
+
+  it("⛔ matches the form this fleet ACTUALLY had — `. ` after `&&`, not at line start", () => {
+    // check-setup.sh's analogous CTL-869 regex anchors source/. at `^`, which would MISS the
+    // exact line that was live on both minis and stalled the fleet for seven hours.
+    expect(one({ "/h/.zshenv": REAL_LINE }).status).toBe("warn");
+  });
+
+  it("scans .bashrc — a bash operator's interactive shell is the same leak", () => {
+    // ⛔ Deliberately does NOT pass `rcFiles`, so the PRODUCTION DEFAULT list is what is under
+    // test. The first version of this case supplied its own list including ".bashrc" and so
+    // asserted the fixture rather than the code — removing ".bashrc" from the default left it
+    // green. A test that cannot fail on the defect it names is worse than no test.
+    const files = { "/h/.bashrc": "source ~/.config/catalyst/claude-accounts.env" };
+    const v = checkFleetTokenExport({
+      home: "/h",
+      fileExists: (p) => Object.prototype.hasOwnProperty.call(files, p),
+      readText: (p) => files[p],
+    })[0];
+    expect(v.status).toBe("warn");
+    expect(v.detail).toContain(".bashrc:1");
+  });
+
+  it("⛔ an UNREADABLE rc beside a clean one is INCONCLUSIVE, never PASS", () => {
+    // The unreadable file may hold the very export being looked for. Reporting the host clean
+    // off its readable neighbour is a fail-OPEN in a check whose only value is being trusted.
+    expect(one({ "/h/.zshenv": null, "/h/.profile": "export EDITOR=vim" }).status).toBe("info");
+  });
+
+  it("merely NAMING the env file is not sourcing it — no false warning", () => {
+    // `CLAUDE_ACCOUNTS_ENV=<path>` and an alias that cats the file inject nothing. Telling an
+    // operator to comment those out is wrong advice from a check they are meant to trust.
+    expect(one({ "/h/.zshenv": "export CLAUDE_ACCOUNTS_ENV=$HOME/.config/catalyst/claude-accounts.env" }).status).toBe("pass");
+    expect(one({ "/h/.zshenv": 'alias showenv="cat ~/.config/catalyst/claude-accounts.env"' }).status).toBe("pass");
+  });
+
+  it("POSITIVE CONTROL — the same instrument does return PASS on a genuinely clean rc", () => {
+    // Without this, the pass above would also be satisfied by a check that had stopped matching.
+    expect(one({ "/h/.zshenv": 'export EDITOR=vim\n' }).status).toBe("pass");
+  });
+
+  it("is wired into the doctor suites, not merely exported", () => {
+    // A check nobody runs is the failure mode this repo keeps meeting.
+    const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
+    expect(src.split("checkFleetTokenExport()").length - 1, "registered in BOTH class suites").toBeGreaterThanOrEqual(2);
+  });
 });

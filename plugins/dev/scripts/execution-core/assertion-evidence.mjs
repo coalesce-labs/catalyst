@@ -52,6 +52,19 @@ export const ASSERTED_BY = Object.freeze({
   RECOVERY_RECLAIM: "recovery-reclaim",
   // C (legacy wave orchestration) — orchestrate-revive's synthetic complete.
   REVIVE_SYNTHESIZED: "revive-synthesized",
+  // C — CTL-2050. The artifact-contradiction retraction: a phase whose signal
+  // says `failed` for an EMIT-TIME INFRASTRUCTURE reason, while the phase's own
+  // output artifact is present and valid, has its terminal re-derived as `done`.
+  // FABRICATED, emphatically: infrastructure is asserting completion from the
+  // artifact, and the agent's own `phase-agent-emit-complete` never ran (the
+  // guard bowed out before it could). A retraction that wrote an
+  // indistinguishable `done` would make the audit trail lie in a NEW way to fix
+  // it lying in an old one — which is precisely why this id exists rather than
+  // reusing RECOVERY_RECLAIM: the reclaim infers completion from a work-done
+  // probe on a DEAD worker, this infers it from an artifact contradicting a
+  // LIVE-written failure, and an operator asking "why is this done?" needs the
+  // two answers to be different strings.
+  RECOVERY_ARTIFACT_CONTRADICTION: "recovery-artifact-contradiction",
   // B — HISTORICAL. sdk-run-phase-agent.mjs's old `flipSignalDoneOnSuccess`, which
   // wrote status:"done" for any worker that exited zero without declaring anything.
   // CTL-1790 REMOVED that writer — no code emits this id any more.
@@ -101,6 +114,7 @@ const DECLARED_WRITERS = new Set([ASSERTED_BY.PHASE_AGENT]);
 const FABRICATED_WRITERS = new Set([
   ASSERTED_BY.RECOVERY_RECLAIM,
   ASSERTED_BY.REVIVE_SYNTHESIZED,
+  ASSERTED_BY.RECOVERY_ARTIFACT_CONTRADICTION, // CTL-2050
   ASSERTED_BY.SDK_SUCCESS_FLIP, // historical (CTL-1790 removed the writer); see above
   ASSERTED_BY.SDK_ABANDONED,
   ASSERTED_BY.SDK_BACKSTOP,

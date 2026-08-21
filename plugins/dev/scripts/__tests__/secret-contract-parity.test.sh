@@ -82,11 +82,11 @@ expect_eq "row-id-set equality: bash registry ids == JS registry ids" "$JS_IDS" 
 # row — a silent reorder is itself worth flagging).
 IFS=$'\n' read -r -d '' -a JS_ID_ARR < <(printf '%s\0' "$JS_IDS")
 IFS=$'\n' read -r -d '' -a BASH_ID_ARR < <(printf '%s\0' "$BASH_IDS")
-expect_eq "row count matches (11)" "11" "${#JS_ID_ARR[@]}"
-expect_eq "row count matches (11)" "11" "${#BASH_ID_ARR[@]}"
+expect_eq "row count matches (12)" "12" "${#JS_ID_ARR[@]}"
+expect_eq "row count matches (12)" "12" "${#BASH_ID_ARR[@]}"
 
 # ─── Property: per-row THREE-WAY field-parity table (B5) ────────────────────────────────
-# For every one of the 11 rows, assert delivery, rotation class/trigger, bootstrapFor,
+# For every one of the 12 rows, assert delivery, rotation class/trigger, bootstrapFor,
 # configJsonPath, and envNames (ORDER-sensitive — precedence matters, e.g. GH_TOKEN before
 # GITHUB_TOKEN) against EXPECTED literals in BOTH languages — not merely bash==node. This is
 # the row-level analogue of property 1 (the resolveSecret cells below already do this for
@@ -137,7 +137,7 @@ _FP_EXPECTED=(
   "$(_fp_row bare-file re-armable timer '' '' 'GH_TOKEN,GITHUB_TOKEN')"
   "$(_fp_row bare-file boot-only '' '' '' 'CATALYST_WEBHOOK_SECRET')"
   "$(_fp_row bare-file-family boot-only '' '' '' '')"
-  "$(_fp_row env-file boot-only '' '' '' '')"
+  "$(_fp_row env-file re-armable timer '' '' '')"
   "$(_fp_row env-file boot-only '' '' '' '')"
   "$(_fp_row env-alias re-armable on-401 '' '' 'LINEAR_API_TOKEN,LINEAR_API_KEY')"
   "$(_fp_row config-json re-armable on-401 '' 'catalyst.linear.bot.orchestrator' '')"

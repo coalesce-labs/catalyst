@@ -32,6 +32,8 @@ import {
   ENV_BACKED_SECRET_FILES,
   // CTL-1612: the boot-captured predicate that widened the restart-required set.
   isEnvBackedSecretFile,
+  // CTL-2042: per-host plain posture file materialization.
+  syncHostEnvFiles,
 } from "./cluster-sync.mjs";
 
 const QUIET = { warn() {}, info() {} };
@@ -560,6 +562,82 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
   });
 
+  test("(b2) CTL-2042: secrets/ unchanged but hosts/<host>/ changed → materialize posture, advance marker", () => {
+    seedClone();
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+    // gitCapture that distinguishes the pathspec: secrets/ unchanged, hosts/ changed.
+    const scopedGitCapture = (args) => {
+      if (args.includes("rev-parse")) return { status: 0, stdout: "NEWSHA\n" };
+      if (args.includes("diff")) {
+        const scopedToHosts = args.some((a) => typeof a === "string" && a.startsWith("hosts/"));
+        return { status: scopedToHosts ? 1 : 0, stdout: "" };
+      }
+      return { status: 0, stdout: "" };
+    };
+    let hostEnvCalls = 0;
+    let decryptCalls = 0;
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: scopedGitCapture,
+      // Inject the posture materializer so the test controls its result deterministically.
+      syncHostEnvFiles: () => {
+        hostEnvCalls += 1;
+        return { written: ["execution-core.env"], changed: ["execution-core.env"], failed: [], skipped: false, reason: null };
+      },
+      decrypt: () => {
+        decryptCalls += 1;
+        return {};
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t2",
+      node: "test-node",
+      logger: QUIET,
+    });
+    expect(res.reason).toBe("host-env-refreshed");
+    expect(hostEnvCalls).toBe(1); // posture materialized despite secrets/ being unchanged
+    expect(decryptCalls).toBe(0); // still no sops spawn
+    expect(res.changed).toBe(true);
+    // marker advanced so we don't re-diff the same range forever
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
+
+  test("(b3) CTL-2042: host-env write shortfall → refresh-failed, marker NOT advanced", () => {
+    seedClone();
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+    const scopedGitCapture = (args) => {
+      if (args.includes("rev-parse")) return { status: 0, stdout: "NEWSHA\n" };
+      if (args.includes("diff")) {
+        const scopedToHosts = args.some((a) => typeof a === "string" && a.startsWith("hosts/"));
+        return { status: scopedToHosts ? 1 : 0, stdout: "" };
+      }
+      return { status: 0, stdout: "" };
+    };
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: scopedGitCapture,
+      syncHostEnvFiles: () => ({ written: [], changed: [], failed: ["execution-core.env"], skipped: false, reason: null }),
+      emit: (e) => emits.push(e),
+      now: () => "t3",
+      node: "test-node",
+      logger: QUIET,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("host-env-write-failed");
+    expect(emits.some((e) => e.name === "refresh-failed")).toBe(true);
+    // marker stays behind so the next tick retries the un-applied posture
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
   test("(c) secrets/ changed → re-decrypt + OVERWRITE stale placeholder + emit refreshed", () => {
     seedClone();
     writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
@@ -939,6 +1017,53 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     expect(rr.payload).toMatchObject({ file: "claude-accounts.env", fromSha: "OLDSHA", toSha: "NEWSHA" });
     // the marker still advances — the file IS materialized; only the env needs a restart
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
+
+  // ── CTL-1984 AC2: two env-backed files materialize; ONLY the one whose content ──
+  //    actually changed should appear in restartRequired (delivery-based, not a
+  //    simple "was written" flag). This is the negative-control companion to (f):
+  //    the reclassification of claude-accounts.env must NOT affect which files
+  //    raise restart-required — the predicate is delivery-based (env-file ∈
+  //    _BOOT_CAPTURED_DELIVERIES), regardless of rotation.class.              ────
+
+  test("(f-ac2) CTL-1984 AC2: only the CHANGED env-backed file raises restart-required; unchanged file does not", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    // Decrypt: execution-core.env changes; claude-accounts.env is NOT in the bundle
+    // (cluster-sync only raises restart-required for files in res.written, which
+    // requires them to appear in the decrypted output and differ from disk).
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json")
+          ? { "execution-core.env": "SOME_VAR=new-value\n" }
+          : {},
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    // Only execution-core.env materialized — not claude-accounts.env
+    expect(res.written).toContain("execution-core.env");
+    expect(res.written).not.toContain("claude-accounts.env");
+    // Only execution-core.env needs a restart
+    expect(res.restartRequired).toContain("execution-core.env");
+    expect(res.restartRequired).not.toContain("claude-accounts.env");
+    // Exactly one restart-required signal emitted
+    const restarts = emits.filter((e) => e.name === "restart-required");
+    expect(restarts).toHaveLength(1);
+    expect(restarts[0].payload).toMatchObject({ file: "execution-core.env" });
   });
 
   // ── CTL-1612: the widened boot-captured enrollment, exercised THROUGH the call
@@ -1752,6 +1877,7 @@ describe("cluster-secret event severity + env-backed set (Codex re-review)", () 
     const historicalLiteralSet = new Set([
       "claude-accounts.env",
       "execution-core.env",
+      "execution-core-secrets.env",
       "github-token",
       "webhook-secret",
       "linear-webhook-secret",
@@ -1810,5 +1936,229 @@ describe("isEnvBackedSecretFile", () => {
     expect(isEnvBackedSecretFile(null)).toBe(false);
     expect(isEnvBackedSecretFile(undefined)).toBe(false);
     expect(isEnvBackedSecretFile(42)).toBe(false);
+  });
+
+  test("TRUE — execution-core-secrets.env is boot-captured (CTL-2042)", () => {
+    expect(isEnvBackedSecretFile("execution-core-secrets.env")).toBe(true);
+  });
+});
+
+// ─── CTL-2042: syncHostEnvFiles — per-host plain posture materialization ─────
+
+describe("syncHostEnvFiles (CTL-2042)", () => {
+  const MINI_CONTENT =
+    "export CATALYST_HOST_NAME=mini\nexport CATALYST_EXECUTOR=sdk\nexport CATALYST_LINEAR_WRITE_DAILY_BUDGET=2000\n" +
+    "[ -f \"${HOME}/.config/catalyst/execution-core-secrets.env\" ] && . \"${HOME}/.config/catalyst/execution-core-secrets.env\"\n";
+  const MINI2_CONTENT =
+    "export CATALYST_HOST_NAME=mini-2\nexport CATALYST_EXECUTOR=sdk\nexport CATALYST_LINEAR_WRITE_DAILY_BUDGET=2000\n" +
+    "[ -f \"${HOME}/.config/catalyst/execution-core-secrets.env\" ] && . \"${HOME}/.config/catalyst/execution-core-secrets.env\"\n";
+
+  function writeHostPosture(host, content) {
+    mkdirSync(join(clusterDir, "hosts", host), { recursive: true });
+    writeFileSync(join(clusterDir, "hosts", host, "execution-core.env"), content);
+  }
+
+  test("selects the file matching this host and writes it to the canonical dest name", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+    writeHostPosture("mini-2", MINI2_CONTENT);
+
+    const written = [];
+    const writeFile = (dest, content) => {
+      written.push({ dest, content });
+      writeFileSync(dest, content, { mode: 0o600 });
+    };
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      writeFile,
+      logger: QUIET,
+    });
+
+    expect(res.written).toEqual(["execution-core.env"]);
+    expect(written).toHaveLength(1);
+    expect(written[0].dest).toBe(resolve(configDir, "execution-core.env"));
+    expect(written[0].content).toBe(MINI_CONTENT);
+    // mini-2's content was never written
+    expect(written.some((w) => w.content === MINI2_CONTENT)).toBe(false);
+  });
+
+  test("Codex P2: writes to the CATALYST_EXECUTION_CORE_ENV override path, not the configDir default", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+    const overridePath = join(configDir, "custom", "exec-core.env");
+
+    const written = [];
+    const writeFile = (dest, content) => {
+      written.push({ dest, content });
+      writeFileSync(dest, content, { mode: 0o600 });
+    };
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      env: { CATALYST_EXECUTION_CORE_ENV: overridePath },
+      writeFile,
+      logger: QUIET,
+    });
+
+    // Tracked dest NAME stays the logical basename (restart-required filter unaffected)…
+    expect(res.written).toEqual(["execution-core.env"]);
+    // …but the actual write lands at the launcher's canonical override path.
+    expect(written).toHaveLength(1);
+    expect(written[0].dest).toBe(resolve(overridePath));
+    expect(written[0].content).toBe(MINI_CONTENT);
+    // the parent dir of the override (outside configDir) was created
+    expect(existsSync(resolve(overridePath))).toBe(true);
+    // nothing was written to the configDir default
+    expect(existsSync(join(configDir, "execution-core.env"))).toBe(false);
+  });
+
+  test("reports changed[] on the dest name when on-disk content differs", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+    // pre-existing on-disk file with different content
+    writeFileSync(join(configDir, "execution-core.env"), "old content");
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      logger: QUIET,
+    });
+
+    expect(res.written).toContain("execution-core.env");
+    expect(res.changed).toContain("execution-core.env");
+  });
+
+  test("omits from changed[] when on-disk already matches (rewrite, not change)", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+    // pre-existing on-disk file with SAME content
+    writeFileSync(join(configDir, "execution-core.env"), MINI_CONTENT);
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      logger: QUIET,
+    });
+
+    expect(res.written).toContain("execution-core.env");
+    expect(res.changed).not.toContain("execution-core.env");
+  });
+
+  test("no host file for getHostName() → skipped, reason set, nothing written", () => {
+    // only mini exists; mini-3 does not
+    writeHostPosture("mini", MINI_CONTENT);
+
+    const written = [];
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini-3",
+      writeFile: (dest, content) => { written.push(dest); writeFileSync(dest, content); },
+      logger: QUIET,
+    });
+
+    expect(res.skipped).toBe(true);
+    expect(typeof res.reason).toBe("string");
+    expect(res.reason.length).toBeGreaterThan(0);
+    expect(written).toHaveLength(0);
+  });
+
+  test("getHostName() throws → skipped, never writes a wrong host's file", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+
+    const written = [];
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: () => { throw new Error("hostname-probe-failed"); },
+      writeFile: (dest, content) => { written.push(dest); writeFileSync(dest, content); },
+      logger: QUIET,
+    });
+
+    expect(res.skipped).toBe(true);
+    expect(written).toHaveLength(0);
+  });
+
+  test("writes posture at mode 0o600", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      logger: QUIET,
+    });
+
+    expect(res.written).toContain("execution-core.env");
+    const mode = statSync(join(configDir, "execution-core.env")).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  test("write failure → records name in failed[], written[] omits it", () => {
+    writeHostPosture("mini", MINI_CONTENT);
+
+    const res = syncHostEnvFiles({
+      clusterDir,
+      configDir,
+      hostName: "mini",
+      writeFile: () => { throw new Error("EIO"); },
+      logger: QUIET,
+    });
+
+    expect(res.written).not.toContain("execution-core.env");
+    expect(res.failed).toContain("execution-core.env");
+  });
+
+  test("changed dest from syncHostEnvFiles feeds catalyst.cluster.secrets.restart-required", () => {
+    // Set up: mini's posture file exists in clusterDir; configDir has DIFFERENT content
+    writeHostPosture("mini", MINI_CONTENT);
+    writeFileSync(join(configDir, "execution-core.env"), "old content");
+
+    // Simulate the secrets bundle for syncSecretFiles (the SOPS-encrypted secrets part)
+    writeFileSync(
+      join(clusterDir, "secrets", "node-secret-files.sops.json"),
+      "{ciphertext-placeholder}",
+    );
+
+    // gitRevParseHead checks existsSync(clusterDir/.git) before calling gitCapture,
+    // and expects { status: number, stdout: string } from gitCapture (same shape as
+    // the rest of the refreshClusterSecretsIfChanged test suite).
+    mkdirSync(join(clusterDir, ".git"), { recursive: true });
+
+    const restartEvents = [];
+    const emit = (evt) => { if (evt.name === "restart-required") restartEvents.push(evt); };
+
+    // refreshClusterSecretsIfChanged calls syncHostEnvFiles internally and should
+    // merge its changed[] into the restart-required emitter
+    refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath: join(configDir, ".state.json"),
+      git: () => {},
+      gitCapture: (args) => {
+        // gitRevParseHead calls gitCapture(["rev-parse", "HEAD"]) and checks status+stdout
+        if (args.includes("rev-parse")) return { status: 0, stdout: "abc123\n" };
+        // gitSecretsChangedBetween — no prior sha (readState null) so this is never called
+        return { status: 1, stdout: "" };
+      },
+      decrypt: () => ({ "github-token": "tok" }),
+      readState: () => null, // no prior state → always re-decrypt
+      writeState: () => {},
+      emit,
+      now: () => "2026-01-01T00:00:00Z",
+      node: "mini",
+      // Inject syncHostEnvFiles override that returns a changed entry
+      syncHostEnvFiles: ({ configDir: cd }) => {
+        writeFileSync(join(cd, "execution-core.env"), MINI_CONTENT);
+        return { written: ["execution-core.env"], changed: ["execution-core.env"], failed: [], skipped: false, reason: null };
+      },
+      logger: QUIET,
+    });
+
+    // execution-core.env is an env-file/boot-only → isEnvBackedSecretFile → restart-required
+    expect(restartEvents.some((e) => e.payload?.file === "execution-core.env")).toBe(true);
   });
 });

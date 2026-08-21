@@ -23,11 +23,17 @@ import {
   depSkewFields,
   evaluateDepSkew,
   findLockRoot,
+  decodeBunStoreDir,
   lockKeyForPackageJsonPath,
+  lockLocationKeyFor,
   lockedVersionForKey,
+  provenLockKey,
+  splitBunStorePath,
+  workspacesFromLock,
   lockedVersionsFor,
   readDepsBreadcrumb,
   readRestartLedger,
+  SKEW_LINKS,
   recordRestartAttempt,
   sha256File,
   writeDepsBreadcrumb,
@@ -232,6 +238,10 @@ function evalDeps(files, over = {}) {
       return JSON.parse(files[p]);
     },
     processCommandForPid: (pid) => (pid === 4242 ? "bun /opt/plugin-source/plugins/dev/scripts/execution-core/cloud-sync.mjs" : null),
+    // CTL-1931: the healthy default — this node is configured to serve from the root the
+    // fixture writer actually loaded from. Tests for the OTHER links keep their meaning;
+    // the serving-root link gets its own block below, which overrides this.
+    expectedRoots: [ROOT],
     ...over,
   };
 }
@@ -894,5 +904,408 @@ describe("depSkewEventEnvelope (the unified event-log surface)", () => {
       expect(n.startsWith("filter.")).toBe(false);
       expect(n.startsWith("broker.daemon")).toBe(false);
     }
+  });
+});
+
+
+// ─── CTL-1931: link 3 — serving root ────────────────────────────────────────
+//
+// The other links are all SELF-REFERENTIAL: they compare the modules under whatever root
+// the process loaded from against THAT root's lockfile. A writer running out of a
+// different checkout entirely is internally consistent and grades clean on every one of
+// them. This block is the negative control the ticket demands.
+describe("evaluateDepSkew — link 3: serving root (CTL-1931)", () => {
+  test("the writer is serving a configured checkout → ok", () => {
+    expect(linkOf(evaluateDepSkew(evalDeps(fs())), "serving-root").status).toBe("ok");
+  });
+
+  // ⭐ THE NEGATIVE CONTROL THE TICKET REQUIRES: reconstruct CTL-1919. The laptop's writer
+  // ran from the dev checkout — three schema versions stale, so the replica had no
+  // `workflow_states` table and sat 5.5 h behind — and was found BY HAND while this
+  // detector reported nothing.
+  test("⭐ CTL-1919: a writer serving an UNCONFIGURED checkout → skew", () => {
+    const r = evaluateDepSkew(evalDeps(fs(), {
+      expectedRoots: ["/Users/ryan/catalyst/plugin-source"],
+    }));
+    const v = linkOf(r, "serving-root");
+    expect(v.status).toBe("skew");
+    expect(r.skew).toBe(true);
+    expect(v.detail).toContain(ROOT);                              // where it IS serving
+    expect(v.detail).toContain("/Users/ryan/catalyst/plugin-source"); // where it SHOULD
+  });
+
+  // ⛔ The point of the whole link, asserted directly: in that same CTL-1919 state every
+  // other link still reads ok. Without this, a reader could reasonably assume one of the
+  // existing links would have caught it eventually.
+  test("⛔ and in that state EVERY OTHER LINK still reads ok — which is why this link exists", () => {
+    const r = evaluateDepSkew(evalDeps(fs(), { expectedRoots: ["/somewhere/else"] }));
+    for (const link of SKEW_LINKS.filter((l) => l !== "serving-root")) {
+      expect(linkOf(r, link).status).toBe("ok");
+    }
+  });
+
+  test("no expectations configured → INCONCLUSIVE, never ok and never skew", () => {
+    for (const expectedRoots of [null, undefined, [], ["", "  "].slice(0, 1)]) {
+      const v = linkOf(evaluateDepSkew(evalDeps(fs(), { expectedRoots })), "serving-root");
+      expect(v.status).toBe("inconclusive");
+    }
+  });
+
+  // ⚠️ `[].includes(x)` is false, so the naive implementation reports SKEW here — a false
+  // alarm on every node with nothing configured. Inverting it to ok would be a check that
+  // passes because it never looked. Pinning the third value keeps both mistakes out.
+  test("⚠️ an empty expectation list is not a skew (the [].includes trap)", () => {
+    expect(evaluateDepSkew(evalDeps(fs(), { expectedRoots: [] })).skew).toBe(false);
+  });
+
+  test("a boot record with no root → INCONCLUSIVE", () => {
+    const args = evalDeps(fs());
+    const v = linkOf(evaluateDepSkew({ ...args, breadcrumb: { ...args.breadcrumb, root: null } }), "serving-root");
+    expect(v.status).toBe("inconclusive");
+  });
+
+  // Two spellings of one directory (a symlinked home, /System/Volumes/Data/...) must not
+  // manufacture a skew. The fixture paths do not exist on disk, so realpath is injected.
+  test("realpath-equal roots spelled differently are NOT a skew", () => {
+    const v = linkOf(evaluateDepSkew(evalDeps(fs(), {
+      expectedRoots: ["/System/Volumes/Data/opt/plugin-source"],
+      realpath: (x) => x.replace("/System/Volumes/Data", ""),
+    })), "serving-root");
+    expect(v.status).toBe("ok");
+  });
+
+  test("a trailing slash is not a skew", () => {
+    expect(linkOf(evaluateDepSkew(evalDeps(fs(), { expectedRoots: [`${ROOT}/`] })), "serving-root").status).toBe("ok");
+  });
+
+  // A throwing realpath must degrade to a literal comparison, not abort the evaluation —
+  // this is the path every unit test above actually takes (the fixture roots are fictional).
+  test("a throwing realpath falls back to the literal string", () => {
+    const v = linkOf(evaluateDepSkew(evalDeps(fs(), {
+      realpath: () => { throw new Error("ENOENT"); },
+    })), "serving-root");
+    expect(v.status).toBe("ok");
+  });
+});
+
+// ─── CTL-1931: bun's isolated linker ────────────────────────────────────────
+//
+// The defect these cover: `installed-vs-locked` answered "could not compare" on ALL THREE
+// hosts (laptop, mini, mini-2) from the day CTL-1659 shipped, because the writer resolves
+// through bun's isolated linker and `resolve()` hands back the store REALPATH — a content
+// address with no install location in it. So the one link that would have caught CTL-1919
+// (a writer serving schema 0.1.12 against a 0.1.15 pin) was inert on every host.
+//
+// Every case below is paired: a red is only evidence when the SAME instrument is shown
+// going green on the neighbouring input, and the association is proved by the symlink the
+// resolver actually traversed rather than read out of the store directory's own name —
+// which would be circular (the installed version IS the store name) and would grade every
+// host clean forever.
+const STORE = `${ROOT}/node_modules/.bun`;
+const SCHEMA_STORE = (v) => `${STORE}/@catalyst-cloud+schema@${v}+a0473b45aab9bf33`;
+const SCHEMA_PKG_DIR = (v) => `${SCHEMA_STORE(v)}/node_modules/@catalyst-cloud/schema`;
+const SDK_STORE = `${STORE}/@catalyst-cloud+sdk@0.8.11+a0473b45aab9bf33`;
+
+// A lockfile that pins schema 0.1.15 with NO chained key — the real shape measured in
+// plugin-source/bun.lock on 2026-08-17 (745 keys, 48 of them chained; schema is not one).
+const LOCK_TEXT_ISOLATED = `{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "catalyst", "dependencies": { "@catalyst-cloud/schema": "0.1.15" } },
+    "plugins/dev/scripts/execution-core": { "name": "catalyst-execution-core", "dependencies": { "@catalyst-cloud/sdk": "0.8.11" } },
+  },
+  "packages": {
+    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.15", "", {}, "sha512-aaa=="],
+    "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.11", "", {}, "sha512-bbb=="],
+  }
+}`;
+
+// links — a symlink table as `realpath` sees it: the link path collapses to its target.
+// Anything absent resolves to itself, which is what the real realpathSync does for a plain
+// directory and what makes an unmatched candidate simply fail to equal the target.
+const linkFs = (links) => ({
+  realpath: (p) => links[p] ?? p,
+  listDir: (d) => (d === STORE ? [`@catalyst-cloud+schema@0.1.15+a0473b45aab9bf33`, `@catalyst-cloud+schema@0.1.12+a0473b45aab9bf33`, `@catalyst-cloud+sdk@0.8.11+a0473b45aab9bf33`] : []),
+});
+
+describe("CTL-1931 — decoding what bun encodes in a store directory name", () => {
+  test("the id is recovered; '+' in the name half is the scope separator", () => {
+    expect(decodeBunStoreDir("@catalyst-cloud+sdk@0.8.11+a0473b45aab9bf33")).toMatchObject({ id: "@catalyst-cloud/sdk", version: "0.8.11" });
+    expect(decodeBunStoreDir("pino@9.6.0")).toMatchObject({ id: "pino", version: "9.6.0" });
+    expect(decodeBunStoreDir("@catalyst-cloud+read-model@0.1.1")).toMatchObject({ id: "@catalyst-cloud/read-model", version: "0.1.1" });
+  });
+
+  test("a name with no version segment is null, not a half-decoded guess", () => {
+    expect(decodeBunStoreDir("@scope")).toBeNull();
+    expect(decodeBunStoreDir("")).toBeNull();
+    expect(decodeBunStoreDir(null)).toBeNull();
+    // POSITIVE CONTROL on the same instrument.
+    expect(decodeBunStoreDir("pino@9.6.0").id).toBe("pino");
+  });
+
+  test("splitBunStorePath rejects a path INSIDE the package, which would decode to a plausible id", () => {
+    expect(splitBunStorePath(ROOT, SCHEMA_PKG_DIR("0.1.15"))).toMatchObject({ id: "@catalyst-cloud/schema" });
+    expect(splitBunStorePath(ROOT, `${SCHEMA_PKG_DIR("0.1.15")}/dist`), "…/schema/dist is not the package directory").toBeNull();
+    expect(splitBunStorePath(ROOT, `${ROOT}/node_modules/@catalyst-cloud/schema`), "a hoisted path is not a store path").toBeNull();
+    expect(splitBunStorePath("/elsewhere", SCHEMA_PKG_DIR("0.1.15"))).toBeNull();
+  });
+});
+
+describe("CTL-1931 — the lockfile's workspaces", () => {
+  test("every workspace is listed with BOTH its directory and its package name", () => {
+    const ws = workspacesFromLock(LOCK_TEXT_ISOLATED);
+    expect(ws.map((w) => w.dir)).toContain("plugins/dev/scripts/execution-core");
+    // ⛔ The name is a DIFFERENT string from the directory basename, and bun keys chained lock
+    // entries by the NAME. Measured in this repo's own bun.lock: the workspace at
+    // `plugins/dev/scripts/orch-monitor/ui` is named `orch-monitor-ui` and its keys read
+    // `orch-monitor-ui/react` — never `ui/react`. Deriving the prefix from the basename probes
+    // a key that cannot exist and falls back to the unrelated bare resolution (Codex P2, #3499).
+    expect(ws.find((w) => w.dir === "plugins/dev/scripts/execution-core")?.name).toBe("catalyst-execution-core");
+    expect(workspacesFromLock("{}"), "no workspaces block → none, not a throw").toEqual([]);
+    expect(workspacesFromLock(null)).toEqual([]);
+  });
+
+  test("keys NESTED inside a workspace's own object are not mistaken for directories", () => {
+    // "dependencies" / "@catalyst-cloud/sdk" sit one level deeper and must not be read as
+    // workspace paths — the walk that produced them would send the importer search to
+    // `<root>/dependencies/node_modules/...`, a directory that cannot exist.
+    const dirs = workspacesFromLock(LOCK_TEXT_ISOLATED).map((w) => w.dir);
+    expect(dirs).not.toContain("dependencies");
+    expect(dirs).not.toContain("@catalyst-cloud/sdk");
+    expect(dirs).not.toContain("name");
+  });
+});
+
+describe("CTL-1931 — the install location is recovered by PROOF, not by pattern", () => {
+  const args = (over = {}) => ({ root: ROOT, id: "@catalyst-cloud/schema", lockText: LOCK_TEXT_ISOLATED, ...over });
+
+  test("a package linked from the ROOT keys on the bare id", () => {
+    const io = linkFs({ [`${ROOT}/node_modules/@catalyst-cloud/schema`]: SCHEMA_PKG_DIR("0.1.15") });
+    expect(provenLockKey(args({ packageDir: SCHEMA_PKG_DIR("0.1.15"), ...io }))).toBe("@catalyst-cloud/schema");
+  });
+
+  test("a package linked from a WORKSPACE is found — the case this fleet actually runs", () => {
+    // Measured 2026-08-17: @catalyst-cloud/sdk is absent from plugin-source's own
+    // node_modules and linked ONLY from plugins/dev/scripts/execution-core, so a search
+    // that checked the root alone would return null for the fleet's primary dependency.
+    const io = linkFs({ [`${ROOT}/plugins/dev/scripts/execution-core/node_modules/@catalyst-cloud/sdk`]: `${SDK_STORE}/node_modules/@catalyst-cloud/sdk` });
+    expect(provenLockKey(args({ id: "@catalyst-cloud/sdk", packageDir: `${SDK_STORE}/node_modules/@catalyst-cloud/sdk`, ...io }))).toBe("@catalyst-cloud/sdk");
+  });
+
+  test("⛔ THE CTL-1919 SHAPE — the SDK's OWN stale copy is caught while the root links a healthy one", () => {
+    // The root links the PINNED 0.1.15 and looks perfectly healthy. The SDK links 0.1.12,
+    // and the SDK's copy is the one that decides whether the writer knows about
+    // `workflow_states`. A search that stopped at the first healthy link would clear this.
+    const io = linkFs({
+      [`${ROOT}/node_modules/@catalyst-cloud/schema`]: SCHEMA_PKG_DIR("0.1.15"),
+      [`${SDK_STORE}/node_modules/@catalyst-cloud/schema`]: SCHEMA_PKG_DIR("0.1.12"),
+    });
+    const key = provenLockKey(args({ packageDir: SCHEMA_PKG_DIR("0.1.12"), ...io }));
+    expect(key, "the STALE copy still resolves to the location the lockfile pins").toBe("@catalyst-cloud/schema");
+    expect(lockedVersionForKey(LOCK_TEXT_ISOLATED, key, "@catalyst-cloud/schema").version, "…and that location pins 0.1.15, so 0.1.12 is drift").toBe("0.1.15");
+  });
+
+  test("BRANCH CONTROL — with the store scan disabled the SAME input is null, so the scan is load-bearing", () => {
+    // Without this, the assertion above would also pass if the ROOT link had matched by
+    // accident: both spellings of the key are identical, so the key alone cannot tell the
+    // two branches apart.
+    const io = linkFs({
+      [`${ROOT}/node_modules/@catalyst-cloud/schema`]: SCHEMA_PKG_DIR("0.1.15"),
+      [`${SDK_STORE}/node_modules/@catalyst-cloud/schema`]: SCHEMA_PKG_DIR("0.1.12"),
+    });
+    expect(provenLockKey(args({ packageDir: SCHEMA_PKG_DIR("0.1.12"), ...io, listDir: () => [] }))).toBeNull();
+  });
+
+  test("nothing links it → null → INCONCLUSIVE, never a version read off the store name", () => {
+    const io = linkFs({});
+    expect(provenLockKey(args({ packageDir: SCHEMA_PKG_DIR("0.1.12"), ...io }))).toBeNull();
+    // POSITIVE CONTROL: the same call with the link present does resolve, so the null above
+    // is a measurement rather than a function that only ever returns null.
+    const linked = linkFs({ [`${ROOT}/node_modules/@catalyst-cloud/schema`]: SCHEMA_PKG_DIR("0.1.12") });
+    expect(provenLockKey(args({ packageDir: SCHEMA_PKG_DIR("0.1.12"), ...linked }))).toBe("@catalyst-cloud/schema");
+  });
+
+  test("lockLocationKeyFor prefers the structural ladder and falls back to the proof", () => {
+    // A classic hoisted layout still answers without touching the filesystem — proved by
+    // passing a realpath that would THROW if it were consulted.
+    const boom = () => {
+      throw new Error("realpath must not be consulted for a structural path");
+    };
+    expect(lockLocationKeyFor({ root: ROOT, packageJsonPath: SDK_PKG, id: "@catalyst-cloud/sdk", realpath: boom, listDir: boom })).toBe("@catalyst-cloud/sdk");
+    const io = linkFs({ [`${ROOT}/node_modules/@catalyst-cloud/schema`]: SCHEMA_PKG_DIR("0.1.15") });
+    expect(lockLocationKeyFor({ root: ROOT, packageJsonPath: `${SCHEMA_PKG_DIR("0.1.15")}/package.json`, id: "@catalyst-cloud/schema", lockText: LOCK_TEXT_ISOLATED, ...io })).toBe("@catalyst-cloud/schema");
+  });
+});
+
+describe("CTL-1931 — installed-vs-locked reaches a VERDICT on an isolated-linker host", () => {
+  // The full comparator, driven the way doctor drives it, on the layout every host runs.
+  const SCHEMA_ENTRY = (v) => `${SCHEMA_PKG_DIR(v)}/src/index.ts`;
+  const bootFor = (v) => ({
+    ts: NOW,
+    pid: 4242,
+    root: ROOT,
+    lockPath: LOCK,
+    lockHash: "sha256:deadbeef",
+    degraded: false,
+    degradedReasons: [],
+    packages: [{ id: "@catalyst-cloud/schema", specifier: "@catalyst-cloud/schema", resolvedPath: SCHEMA_ENTRY(v), packageJsonPath: `${SCHEMA_PKG_DIR(v)}/package.json`, version: v, entryHash: null }],
+  });
+  const gradeArgs = (v, over = {}) => {
+    const files = {
+      [LOCK]: LOCK_TEXT_ISOLATED,
+      [`${SCHEMA_PKG_DIR(v)}/package.json`]: JSON.stringify({ name: "@catalyst-cloud/schema", version: v }),
+    };
+    return {
+      breadcrumb: bootFor(v),
+      readText: (p) => {
+        if (!Object.prototype.hasOwnProperty.call(files, p)) throw new Error(`ENOENT ${p}`);
+        return files[p];
+      },
+      readJson: (p) => {
+        if (!Object.prototype.hasOwnProperty.call(files, p)) throw new Error(`ENOENT ${p}`);
+        return JSON.parse(files[p]);
+      },
+      processCommandForPid: (pid) => (pid === 4242 ? "bun /opt/plugin-source/plugins/dev/scripts/execution-core/cloud-sync.mjs" : null),
+      expectedRoots: [ROOT],
+      ...linkFs({ [`${ROOT}/node_modules/@catalyst-cloud/schema`]: SCHEMA_PKG_DIR(v) }),
+      ...over,
+    };
+  };
+
+  test("⭐ the pinned install grades ok — where it used to say 'could not compare'", () => {
+    expect(linkOf(evaluateDepSkew(gradeArgs("0.1.15")), "installed-vs-locked").status).toBe("ok");
+  });
+
+  test("⛔ NEGATIVE CONTROL — the CTL-1919 install (0.1.12 against a 0.1.15 pin) grades SKEW", () => {
+    const v = linkOf(evaluateDepSkew(gradeArgs("0.1.12")), "installed-vs-locked");
+    expect(v.status, "a genuinely stale install must still report MISMATCH").toBe("skew");
+    expect(v.detail).toContain("installed 0.1.12");
+    expect(v.detail).toContain("0.1.15");
+  });
+
+  test("the three-valued contract holds — an unprovable association is INCONCLUSIVE, never ok", () => {
+    // Same stale install, but nothing on disk links it: the comparator must not fall back
+    // to the permissive any-occurrence match that would find 0.1.12 elsewhere in the file.
+    const v = linkOf(evaluateDepSkew(gradeArgs("0.1.12", { realpath: (p) => p, listDir: () => [] })), "installed-vs-locked");
+    expect(v.status).toBe("inconclusive");
+    expect(v.detail).toMatch(/could not be associated/i);
+  });
+});
+
+describe("CTL-1931 — CRITICAL_DEPS covers the package that CAUSED CTL-1919", () => {
+  test("@catalyst-cloud/schema is recorded, resolved through the SDK that loads it", () => {
+    const schema = CRITICAL_DEPS.find((d) => d.id === "@catalyst-cloud/schema");
+    expect(schema, "the schema version is what decides whether the replica has workflow_states").toBeTruthy();
+    expect(schema.from, "the copy that matters is the SDK's, not a separate one the root may link").toBe("@catalyst-cloud/sdk/node");
+    // Ordering is load-bearing: `from` reads a resolution recorded EARLIER in the same pass.
+    expect(CRITICAL_DEPS.findIndex((d) => d.specifier === schema.from)).toBeLessThan(CRITICAL_DEPS.findIndex((d) => d.id === schema.id));
+  });
+
+  test("a `from` dep resolves from its base's location, not the daemon's", () => {
+    const SDK_DIR = `${SDK_STORE}/node_modules/@catalyst-cloud/sdk`;
+    const bases = [];
+    const record = captureLoadedDeps(
+      deps(
+        {
+          [LOCK]: LOCK_TEXT_ISOLATED,
+          [`${SDK_DIR}/dist/node.js`]: "// sdk\n",
+          [`${SDK_DIR}/package.json`]: JSON.stringify({ name: "@catalyst-cloud/sdk", version: "0.8.11" }),
+          [`${SCHEMA_PKG_DIR("0.1.12")}/src/index.ts`]: "// schema\n",
+          [`${SCHEMA_PKG_DIR("0.1.12")}/package.json`]: JSON.stringify({ name: "@catalyst-cloud/schema", version: "0.1.12" }),
+        },
+        {
+          deps: CRITICAL_DEPS,
+          resolveModule: (spec, opts) => {
+            bases.push(opts?.fromPath ?? null);
+            if (spec === "@catalyst-cloud/sdk/node") return `${SDK_DIR}/dist/node.js`;
+            if (spec === "@catalyst-cloud/schema") return `${SCHEMA_PKG_DIR("0.1.12")}/src/index.ts`;
+            throw new Error(`Cannot find module '${spec}'`);
+          },
+        },
+      ),
+    );
+    expect(bases[0], "the SDK itself resolves from the daemon").toBeNull();
+    expect(bases[1], "the schema resolves from the SDK's resolved path").toBe(`${SDK_DIR}/dist/node.js`);
+    expect(record.packages.map((p) => `${p.id}@${p.version}`)).toEqual(["@catalyst-cloud/sdk@0.8.11", "@catalyst-cloud/schema@0.1.12"]);
+  });
+
+  test("a `from` whose base did NOT resolve is degraded, never re-based onto the daemon", () => {
+    // Silently falling back to the daemon's own resolution would record a DIFFERENT copy
+    // than the writer runs — the substitution the field exists to prevent.
+    const record = captureLoadedDeps(
+      deps(
+        {},
+        {
+          deps: CRITICAL_DEPS,
+          resolveModule: (spec) => {
+            if (spec === "@catalyst-cloud/schema") return `${SCHEMA_PKG_DIR("0.1.12")}/src/index.ts`;
+            throw new Error(`Cannot find module '${spec}'`);
+          },
+        },
+      ),
+    );
+    expect(record.degraded).toBe(true);
+    expect(record.degradedReasons.join(" ")).toMatch(/base dependency @catalyst-cloud\/sdk\/node did not resolve/);
+    expect(record.packages.some((p) => p.id === "@catalyst-cloud/schema"), "the dependent is SKIPPED, not recorded against the wrong base").toBe(false);
+  });
+});
+
+describe("CTL-1931 — the two review findings, pinned (#3499 round 1)", () => {
+  // A lockfile that resolves the SAME id at TWO locations with DIFFERENT versions: the root
+  // pins 0.1.15, the SDK's nested entry pins 0.1.12. This is the shape that makes a first-match
+  // importer search unsafe.
+  const LOCK_TWO_LOCATIONS = `{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "catalyst", "dependencies": { "@catalyst-cloud/schema": "0.1.15" } },
+    "plugins/dev/scripts/execution-core": { "name": "catalyst-execution-core", "dependencies": { "@catalyst-cloud/sdk": "0.8.11" } },
+  },
+  "packages": {
+    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.15", "", {}, "sha512-aaa=="],
+    "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.11", "", {}, "sha512-bbb=="],
+    "@catalyst-cloud/sdk/@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.12", "", {}, "sha512-ccc=="],
+    "catalyst-execution-core/@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.11", "", {}, "sha512-ddd=="],
+  }
+}`;
+
+  test("⛔ P1 — two importers sharing ONE store dir is AMBIGUOUS, not the first match", () => {
+    // The root and the SDK both link the same copy, while the lockfile demands 0.1.15 at one
+    // location and 0.1.12 at the other. That disk state cannot satisfy both, so it IS a
+    // partial/shadowed install. Taking the root's bare key first would grade the shared copy
+    // against 0.1.15 and report `ok` — the exact miss this link exists to prevent.
+    const shared = SCHEMA_PKG_DIR("0.1.15");
+    const io = linkFs({
+      [`${ROOT}/node_modules/@catalyst-cloud/schema`]: shared,
+      [`${SDK_STORE}/node_modules/@catalyst-cloud/schema`]: shared,
+    });
+    expect(
+      provenLockKey({ root: ROOT, packageDir: shared, id: "@catalyst-cloud/schema", lockText: LOCK_TWO_LOCATIONS, ...io }),
+      "two proven importers disagreeing on the key must fail CLOSED",
+    ).toBeNull();
+  });
+
+  test("POSITIVE CONTROL — ONE importer against the SAME lockfile still resolves", () => {
+    // Without this, the null above would also be satisfied by a function that had simply
+    // started returning null for this lockfile.
+    const shared = SCHEMA_PKG_DIR("0.1.15");
+    const io = linkFs({ [`${ROOT}/node_modules/@catalyst-cloud/schema`]: shared });
+    expect(provenLockKey({ root: ROOT, packageDir: shared, id: "@catalyst-cloud/schema", lockText: LOCK_TWO_LOCATIONS, ...io })).toBe("@catalyst-cloud/schema");
+  });
+
+  test("⛔ P2 — a workspace's chained key uses its NAME, never its directory basename", () => {
+    // `plugins/dev/scripts/execution-core` is named `catalyst-execution-core`, so the key is
+    // `catalyst-execution-core/@catalyst-cloud/sdk`. Probing `execution-core/@catalyst-cloud/sdk`
+    // misses and silently falls back to the unrelated bare resolution.
+    const sdkDir = `${SDK_STORE}/node_modules/@catalyst-cloud/sdk`;
+    const io = linkFs({ [`${ROOT}/plugins/dev/scripts/execution-core/node_modules/@catalyst-cloud/sdk`]: sdkDir });
+    expect(provenLockKey({ root: ROOT, packageDir: sdkDir, id: "@catalyst-cloud/sdk", lockText: LOCK_TWO_LOCATIONS, ...io })).toBe("catalyst-execution-core/@catalyst-cloud/sdk");
+  });
+
+  test("a workspace with NO chained key in the lockfile still keys bare", () => {
+    // The common case: bun writes the bare key when a tree holds one version. The name-based
+    // probe must not turn a correct bare association into a miss.
+    const sdkDir = `${SDK_STORE}/node_modules/@catalyst-cloud/sdk`;
+    const io = linkFs({ [`${ROOT}/plugins/dev/scripts/execution-core/node_modules/@catalyst-cloud/sdk`]: sdkDir });
+    expect(provenLockKey({ root: ROOT, packageDir: sdkDir, id: "@catalyst-cloud/sdk", lockText: LOCK_TEXT_ISOLATED, ...io })).toBe("@catalyst-cloud/sdk");
   });
 });

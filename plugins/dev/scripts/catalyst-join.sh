@@ -886,15 +886,103 @@ merge_shared_config() {
   info "webhook-wiring gate (CTL-1617 PR5): decision=${decision} rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} source=${CATALYST_DEPLOYMENT_MODE_SOURCE} inferred=${CATALYST_DEPLOYMENT_MODE_INFERRED} | heuristic_would=${heuristic_verdict} roster_len=${roster_len:-0} monitorWebhooks=${monitor_wh_state}${note_field}"
 
   if [[ "$decision" == "wire" ]]; then
+    # CTL-1928: strip the LINEAR webhook block before the merge. Linear
+    # ingestion is the cloud feed now, and the workspace's Linear webhook
+    # subscriptions were retired at the cutover — wiring them onto a joining
+    # host would re-create a path that no longer delivers. join-bundle.mjs no
+    # longer EMITS this block, but a bundle is a file that outlives the code
+    # that wrote it (a retained --bundle, or a seed on an older plugin-source),
+    # so the consumer strips it too rather than trusting the producer.
+    #
+    # Both halves must go. orch-monitor's readLinearSmeeChannel falls back to
+    # the first per-team entry's smeeChannel, so deleting only the top-level
+    # `.linear.smeeChannel` still leaves enough to start a tunnel; and a
+    # per-team `webhookId` arriving without its HMAC secret is what doctor
+    # grades as half-wired config residue (webhook-ingestion FAIL).
+    local monitor_wh_stripped stripped_linear="no"
+    monitor_wh_stripped="$(echo "$monitor_wh" | jq -c 'del(.linear)')" || {
+      fail "webhook-wiring: could not strip the retired Linear block from monitorWebhooks"
+      return 1
+    }
+    [[ "$(echo "$monitor_wh" | jq 'has("linear")')" == "true" ]] && stripped_linear="yes"
+    # A bundle offering ONLY the retired Linear block leaves nothing to wire —
+    # but it must still fall through to the write below, because that write is
+    # what provisions the cloud-feed replacement. Merging an empty object into
+    # .catalyst.monitor is a no-op, so one code path serves both cases.
+    local github_wired="yes"
+    [[ "$(echo "$monitor_wh_stripped" | jq 'length')" -eq 0 ]] && github_wired="no"
     local tmp2
     tmp2="$(mktemp "$(dirname "$cfg")/.config.XXXXXX")"
     # Deep-merge ($wh * existing): existing node-local values WIN (non-clobber),
     # new keys from the bundle are added.
-    jq --argjson wh "$monitor_wh" '
+    #
+    # ⛔ CTL-1928 (Codex #3485 P1): provision the REPLACEMENT in the same write
+    # that removes the original. Stripping the Linear block above takes away
+    # this node's only Linear route, and `readCloudFeedConfig` defaults to
+    # "off" — so a fresh multi-host join would come up with NO Linear ingestion
+    # at all: no state-change, no issue-update, no comment events. It would not
+    # even look broken, because `webhook-ingestion` is satisfied by the GitHub
+    # route alone. Removing a path without enabling its successor is how a node
+    # ends up silently blind.
+    #
+    # `//=` so it is NON-CLOBBER: a node that already declares a mode (or an
+    # operator who has deliberately set "off"/"shadow") keeps its own value;
+    # only an ABSENT key is filled.
+    #
+    # "enforce" is the safe value to default to, not an aggressive one: the
+    # producer's own readiness gate fails CLOSED (defaultReplicaFresh — absent,
+    # unreadable, malformed or stale replica all read as NOT fresh), so the feed
+    # only becomes authoritative on a host whose replica writer is actually
+    # alive. The alternative default — "off" — cannot become authoritative
+    # under any condition, which on a post-cutover fleet means permanently no
+    # Linear dispatch. Note the live minis carry this as an ENV var in
+    # execution-core.env rather than in Layer-2, so this fills a genuinely
+    # empty key on a joining node rather than fighting an existing one.
+    #
+    # ⛔ CTL-2004: the GITHUB half of the very same rule, which the Linear half above
+    # has had since CTL-1928 and this leg never got. The write directly above hands a
+    # joining node `monitor.github.smeeChannel` — a tunnel CHANNEL. What decides whether
+    # it OPENS is `.catalyst.githubFeed.mode`: `githubFeedIsAuthoritative()` is
+    # `mode === "enforce"`, orch-monitor suppresses the tunnel only on that, and the mode
+    # resolves env -> Layer-2 -> default "off". Layer-1 does not carry it. So a node
+    # joining a fleet that has already cut over was handed the channel and no mode, read
+    # the "off" default as not-authoritative, and came up on SMEE — healthy, green, and on
+    # the exact transport the cutover retired. Same shape as the Linear comment above:
+    # carrying a route without carrying the posture that governs it is how a node ends up
+    # silently on the wrong one.
+    #
+    # ⚠️ Deliberately the SEED'S value, never a hardcoded "enforce". The Linear leg can
+    # safely default to enforce because its producer's readiness gate fails CLOSED. The
+    # GitHub feed is mid-rollout, so pinning a joining host to "enforce" while the fleet
+    # is still in shadow would shut its tunnel BEFORE the cloud feed is authoritative for
+    # it and drop github.* events wholesale — the CI wait, monitor-merge and the broker's
+    # PR-lifecycle routing. Inheriting the seed's declared posture is the only value that
+    # is correct at every point of the rollout.
+    #
+    # `//=` so it is NON-CLOBBER, matching the line above: an operator's existing value
+    # wins, only an ABSENT key is filled. A bundle with no githubFeed writes nothing at
+    # all — `$gf` is null and the `//=` is guarded — so an older seed degrades to exactly
+    # today's behaviour rather than being pinned to a posture nobody declared.
+    local bundle_gf
+    bundle_gf="$(echo "$BUNDLE_JSON" | jq -c '.githubFeed // null')" || bundle_gf="null"
+    jq --argjson wh "$monitor_wh_stripped" --argjson gf "$bundle_gf" '
         .catalyst //= {}
         | .catalyst.monitor = ($wh * (.catalyst.monitor // {}))
+        | .catalyst.cloudFeed //= {}
+        | .catalyst.cloudFeed.mode //= "enforce"
+        | if ($gf | type) == "object" and ($gf.mode | type) == "string"
+          then .catalyst.githubFeed //= {} | .catalyst.githubFeed.mode //= $gf.mode
+          else . end
       ' "$cfg" > "$tmp2" && mv "$tmp2" "$cfg" || { rm -f "$tmp2"; return 1; }
-    info "webhook ingestion wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0})"
+    local cf_mode
+    cf_mode="$(jq -r '.catalyst.cloudFeed.mode // "unset"' "$cfg" 2>/dev/null)"
+    local gf_mode
+    gf_mode="$(jq -r '.catalyst.githubFeed.mode // "unset"' "$cfg" 2>/dev/null)"
+    if [[ "$github_wired" == "no" ]]; then
+      info "webhook ingestion NOT wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0}) | bundle carried ONLY the retired Linear block (CTL-1928); cloudFeed=${cf_mode} githubFeed=${gf_mode}"
+    else
+      info "webhook ingestion wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0} github-only=yes linear-stripped=${stripped_linear} cloudFeed=${cf_mode} githubFeed=${gf_mode} CTL-1928/CTL-2004)"
+    fi
   else
     info "webhook ingestion NOT wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0})"
   fi

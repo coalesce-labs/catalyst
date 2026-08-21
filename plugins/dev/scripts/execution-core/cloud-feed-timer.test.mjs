@@ -1,0 +1,943 @@
+// cloud-feed-timer.test.mjs — CTL-1847.
+//
+// The tick's job is to run the producer and route what it makes by mode. The
+// failure that matters most is the quiet one: a mode that looks armed and
+// writes nowhere.
+
+import { describe, expect, test } from "bun:test";
+import {
+  DEFAULT_REPLICA_STALE_MS,
+  EVENT_WOULD_DISPATCH,
+  defaultReplicaFresh,
+  defaultFeedHealthy,
+  sweepUnreadyReason,
+  countsClean,
+  countsDirtyWhy,
+  buildWouldDispatchEvent,
+  createModeSink,
+  startCloudFeedTimer,
+} from "./cloud-feed-timer.mjs";
+
+const plan = { account: "tenant-0", shadowPath: "/tmp/unused-shadow.jsonl", mode: "diff" };
+
+/** A fake shadow sink so no file is touched. */
+const fakeShadow = () => {
+  const written = [];
+  return {
+    factory: () => ({
+      emit: (e) => written.push(e),
+      path: plan.shadowPath,
+      stats: () => ({ written: written.length, failed: 0, classes: {} }),
+    }),
+    written,
+  };
+};
+
+const feedEvent = (name) => ({
+  ts: "2026-08-16T20:00:00Z",
+  attributes: { "event.name": name, "linear.issue.identifier": "CTL-1", "linear.team.key": "CTL" },
+  body: { message: name, payload: { source: "cloud-feed", ticket: "CTL-1" } },
+});
+
+describe("createModeSink — enforce", () => {
+  test("appends the event ITSELF to the event log, and to the shadow file", () => {
+    const shadow = fakeShadow();
+    const appended = [];
+    const sink = createModeSink(plan, {
+      mode: "enforce",
+      eventLogPath: "/tmp/fake-events.jsonl",
+      appendFn: (_p, line) => appended.push(JSON.parse(line)),
+      makeShadow: shadow.factory,
+    });
+    const e = feedEvent("linear.issue.state_changed");
+    sink.emit(e);
+
+    // The event log gets the real event — that is what monitor.mjs dispatches.
+    expect(appended).toHaveLength(1);
+    // The event-log copy carries the emission-time authority stamp (round 6).
+    expect(appended[0].body.payload.feedAuthority).toBe(false); // authorityNow defaults to false
+    expect({ ...appended[0], body: { ...appended[0].body, payload: { ...appended[0].body.payload, feedAuthority: undefined } } })
+      .toMatchObject({ attributes: e.attributes });
+    // The shadow file still gets it too: the harness's feed-side input must not
+    // change shape at the moment of cutover.
+    expect(shadow.written).toEqual([e]);
+    expect(sink.stats().logged).toBe(1);
+  });
+
+  test("writes to the event log for every dispatch class", () => {
+    const appended = [];
+    const sink = createModeSink(plan, {
+      mode: "enforce",
+      appendFn: (_p, line) => appended.push(JSON.parse(line)),
+      makeShadow: fakeShadow().factory,
+    });
+    for (const n of ["linear.issue.state_changed", "linear.issue.updated", "linear.comment.created"]) {
+      sink.emit(feedEvent(n));
+    }
+    expect(appended).toHaveLength(3);
+    expect(sink.stats().logged).toBe(3);
+  });
+});
+
+describe("createModeSink — shadow", () => {
+  test("appends a would-dispatch OBSERVATION, never the event itself", () => {
+    // Re-emitting the real name with a "shadow" flag would fire every wait-for
+    // subscriber and the monitor's handlers on an event we are declining to act on.
+    const appended = [];
+    const sink = createModeSink(plan, {
+      mode: "shadow",
+      appendFn: (_p, line) => appended.push(JSON.parse(line)),
+      makeShadow: fakeShadow().factory,
+    });
+    sink.emit(feedEvent("linear.issue.state_changed"));
+
+    expect(appended).toHaveLength(1);
+    expect(appended[0].attributes["event.name"]).toBe(EVENT_WOULD_DISPATCH);
+    expect(appended[0].attributes["event.name"]).not.toBe("linear.issue.state_changed");
+    expect(appended[0].body.payload.wouldDispatch).toBe("linear.issue.state_changed");
+    expect(sink.stats().observed).toBe(1);
+    expect(sink.stats().logged).toBe(0);
+  });
+
+  test("still writes the real event to the shadow file", () => {
+    const shadow = fakeShadow();
+    const sink = createModeSink(plan, {
+      mode: "shadow",
+      appendFn: () => {},
+      makeShadow: shadow.factory,
+    });
+    const e = feedEvent("linear.comment.created");
+    sink.emit(e);
+    expect(shadow.written).toEqual([e]);
+  });
+});
+
+describe("createModeSink — invariants across modes", () => {
+  test("non-dispatch-class events reach the shadow file but never the event log", () => {
+    for (const mode of ["shadow", "enforce"]) {
+      const shadow = fakeShadow();
+      const appended = [];
+      const sink = createModeSink(plan, {
+        mode,
+        appendFn: (_p, l) => appended.push(l),
+        makeShadow: shadow.factory,
+      });
+      sink.emit(feedEvent("linear.issue.priority_changed"));
+      expect(shadow.written).toHaveLength(1);
+      expect(appended).toHaveLength(0);
+    }
+  });
+
+  test("the shadow write happens FIRST and is allowed to throw", () => {
+    // The sweep's last-contiguous-success cursor rule depends on that throw:
+    // swallowing it would advance the cursor past an event never recorded.
+    const sink = createModeSink(plan, {
+      mode: "enforce",
+      appendFn: () => {},
+      makeShadow: () => ({
+        emit: () => {
+          throw new Error("disk full");
+        },
+        path: "x",
+        stats: () => ({}),
+      }),
+    });
+    expect(() => sink.emit(feedEvent("linear.issue.state_changed"))).toThrow("disk full");
+  });
+
+  test("⛔ in ENFORCE an event-log append failure THROWS (Codex P1)", () => {
+    // In enforce the append IS the dispatch. Swallowing it would let the sweep
+    // settle the emission, advance the cursor past this edge, and never retry —
+    // while the gate suppresses smee's copy. The throw is what engages the
+    // sweep's last-contiguous-success rule so the next tick re-emits.
+    const sink = createModeSink(plan, {
+      mode: "enforce",
+      appendFn: () => {
+        throw new Error("EROFS");
+      },
+      makeShadow: fakeShadow().factory,
+    });
+    expect(() => sink.emit(feedEvent("linear.issue.state_changed"))).toThrow("EROFS");
+    expect(sink.stats().logged).toBe(0);
+  });
+
+  test("NEGATIVE CONTROL: in SHADOW the same failure does NOT throw", () => {
+    // The would-dispatch line is telemetry; nothing dispatches from it and smee
+    // is still authoritative, so losing one must not stall the cursor.
+    const sink = createModeSink(plan, {
+      mode: "shadow",
+      appendFn: () => {
+        throw new Error("EROFS");
+      },
+      makeShadow: fakeShadow().factory,
+    });
+    expect(() => sink.emit(feedEvent("linear.issue.state_changed"))).not.toThrow();
+    expect(sink.stats().appendFailed).toBe(1);
+    expect(sink.stats().observed).toBe(0);
+  });
+});
+
+describe("buildWouldDispatchEvent", () => {
+  test("carries the observed name, ticket and account", () => {
+    const ev = buildWouldDispatchEvent(feedEvent("linear.issue.updated"), { account: "tenant-0" });
+    expect(ev.attributes["event.name"]).toBe(EVENT_WOULD_DISPATCH);
+    expect(ev.attributes["cloud_feed.would_dispatch.name"]).toBe("linear.issue.updated");
+    expect(ev.attributes["linear.issue.identifier"]).toBe("CTL-1");
+    expect(ev.body.payload.account).toBe("tenant-0");
+    expect(ev.body.payload.teamKey).toBe("CTL");
+  });
+});
+
+describe("startCloudFeedTimer", () => {
+  test("off ⇒ returns null and schedules NOTHING", () => {
+    let scheduled = 0;
+    const handle = startCloudFeedTimer({
+      mode: "off",
+      setIntervalFn: () => {
+        scheduled += 1;
+        return 1;
+      },
+    });
+    expect(handle).toBe(null);
+    expect(scheduled).toBe(0);
+  });
+
+  test.each([undefined, null, "", "ENFORCE", "on", 1])("an unrecognized mode (%p) also starts nothing", (mode) => {
+    let scheduled = 0;
+    expect(startCloudFeedTimer({ mode, setIntervalFn: () => (scheduled += 1) })).toBe(null);
+    expect(scheduled).toBe(0);
+  });
+
+  test("shadow/enforce schedule a tick and return a stop handle", () => {
+    for (const mode of ["shadow", "enforce"]) {
+      let cleared = null;
+      const handle = startCloudFeedTimer({
+        mode,
+        plans: [],
+        runOnceFn: () => [],
+        setIntervalFn: () => "H",
+        clearIntervalFn: (h) => (cleared = h),
+      });
+      expect(handle).not.toBe(null);
+      handle.stop();
+      expect(cleared).toBe("H");
+    }
+  });
+
+  test("⛔ passes botUserIds into runOnce — the standalone runner never did", () => {
+    // classifyEdge's self-echo decline could not fire in any shadow window to
+    // date because linear-feed-shadow-run.mjs omitted this argument entirely.
+    let seen;
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "shadow",
+      plans: [],
+      botUserIds: new Set(["bot-1"]),
+      runOnceFn: (args) => {
+        seen = args;
+        return [];
+      },
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(seen.botUserIds).toBeDefined();
+    expect([...seen.botUserIds]).toEqual(["bot-1"]);
+  });
+
+  test("plans are resolved with mode 'diff' — the shipping edge source", () => {
+    let planArgs;
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "enforce",
+      orchDir: "/orch",
+      planTenantsFn: (a) => {
+        planArgs = a;
+        return [];
+      },
+      runOnceFn: () => [],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(planArgs).toEqual({ orchDir: "/orch", mode: "diff" });
+  });
+
+  test("a THROWING tick never propagates — the daemon must not die with it", () => {
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => {
+        throw new Error("replica gone");
+      },
+      setIntervalFn: () => "H",
+    });
+    expect(() => handle.tick()).not.toThrow();
+    expect(handle.tick()).toBe(null);
+  });
+
+  test("the interval floors at 5s so a bad config cannot busy-spin", () => {
+    let ms;
+    startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "shadow",
+      intervalSec: 0,
+      plans: [],
+      runOnceFn: () => [],
+      setIntervalFn: (_fn, m) => {
+        ms = m;
+        return "H";
+      },
+    });
+    expect(ms).toBe(5000);
+  });
+
+  test("⛔ isReady() is FALSE until a real non-seeding sweep completes (Codex P1)", () => {
+    const seeding = [{ account: "tenant-0", skipped: null, sweep: { mode: "seeded", seeded: 4000 } }];
+    const real = [
+      { account: "tenant-0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0, byFailure: {} }, comments: { failed: 0, byFailure: {} } } },
+    ];
+    let reports = seeding;
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => reports,
+      setIntervalFn: () => "H",
+    });
+    expect(handle.isReady()).toBe(false); // before any tick
+    handle.tick();
+    expect(handle.isReady()).toBe(false); // the SEEDING tick must not arm it
+    reports = real;
+    handle.tick();
+    expect(handle.isReady()).toBe(true); // a real sweep does
+  });
+
+  test("⛔ a sweep that FAILED to emit does NOT arm readiness (Codex P1 round 2)", () => {
+    // runDiffSweep catches an emit failure and returns stoppedEarly + failed
+    // counts WITHOUT setting r.error, so mode is still "resume". Arming on that
+    // would suppress every webhook copy while nothing replaced it — a total
+    // dispatch outage with the gate reporting itself healthy.
+    const cases = [
+      { label: "stoppedEarly", sweep: { mode: "resume", stoppedEarly: true, edges: { failed: 0 }, comments: { failed: 0 } } },
+      { label: "edge failures", sweep: { mode: "resume", edges: { failed: 3 }, comments: { failed: 0 } } },
+      { label: "comment failures", sweep: { mode: "resume", edges: { failed: 0 }, comments: { failed: 1 } } },
+    ];
+    for (const c of cases) {
+      const handle = startCloudFeedTimer({
+        feedHealthyFn: () => true,
+        mode: "enforce",
+        plans: [],
+        runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep: c.sweep }],
+        setIntervalFn: () => "H",
+      });
+      handle.tick();
+      expect(handle.isReady()).toBe(false);
+    }
+  });
+
+  test("NEGATIVE CONTROL: a clean zero-failure sweep DOES arm it", () => {
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [
+        {
+          account: "tenant-0",
+          skipped: null,
+          // `byFailure: {}` is REQUIRED, not decoration — CTL-1909 made an absent
+          // failure census disqualifying, so this fixture without it would be
+          // asserting the opposite of what its name says. Sealed below by
+          // "a counts block with NO failure census does not arm".
+          sweep: { mode: "resume", stoppedEarly: false, edges: { failed: 0, byFailure: {} }, comments: { failed: 0, byFailure: {} } },
+        },
+      ],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(true);
+  });
+
+  test("a skipped or errored tenant does NOT arm readiness", () => {
+    for (const reports of [
+      [{ account: "tenant-0", skipped: "replica-absent" }],
+      [{ account: "tenant-0", skipped: null, error: "boom" }],
+      [],
+    ]) {
+      const handle = startCloudFeedTimer({
+        feedHealthyFn: () => true,
+        mode: "enforce",
+        plans: [],
+        runOnceFn: () => reports,
+        setIntervalFn: () => "H",
+      });
+      handle.tick();
+      expect(handle.isReady()).toBe(false);
+    }
+  });
+
+  // ⛔ TABLE-DRIVEN: every way runDiffSweep can fail to emit must leave enforce
+  // UNARMED (COORD ask, after Codex found three variants across three rounds).
+  // The bug was never one predicate — it was that each fix enumerated only the
+  // failure shapes known at the time. This table is the place a fourth variant
+  // gets added, so it cannot re-appear as a silent arming.
+  const OK = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
+  const FAILURE_SHAPES = [
+    ["still seeding", { ...OK, mode: "seeded" }],
+    ["stopped early", { ...OK, stoppedEarly: true }],
+    ["edge emit failures", { ...OK, edges: { failed: 2, byReason: {}, byFailure: {} } }],
+    ["comment emit failures", { ...OK, comments: { failed: 1, byReason: {}, byFailure: {} } }],
+    ["edge cursor unwritable", { ...OK, edges: { failed: 0, byReason: {}, byFailure: { "cursor-write-failed:EACCES": 1 } } }],
+    ["comment cursor unwritable", { ...OK, comments: { failed: 0, byReason: {}, byFailure: { "cursor-write-failed:ENOSPC": 1 } } }],
+    ["cursor failure with an unknown errno", { ...OK, edges: { failed: 0, byReason: {}, byFailure: { "cursor-write-failed:unknown": 1 } } }],
+    // Round 4: a SECOND cursor reason my prefix match missed.
+    ["edge cursor init failed", { ...OK, edges: { failed: 0, byReason: {}, byFailure: { "cursor-init-failed:EACCES": 1 } } }],
+    ["comment cursor init failed", { ...OK, comments: { failed: 0, byReason: {}, byFailure: { "cursor-init-failed:EROFS": 1 } } }],
+    // ⭐ The point of deriving readiness positively: a reason nobody has thought
+    // of yet must disqualify WITHOUT a code change here. If this row ever needs
+    // a new prefix added to make it pass, the enumeration bug is back.
+    ["a completely unknown future reason", { ...OK, edges: { failed: 0, byReason: {}, byFailure: { "some-reason-invented-in-2027": 1 } } }],
+    ["an unknown reason on the comment side", { ...OK, comments: { failed: 0, byReason: {}, byFailure: { "totally-new-thing": 4 } } }],
+  ];
+
+  test.each(FAILURE_SHAPES)("readiness stays UNARMED: %s", (_label, sweep) => {
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep }],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(false);
+  });
+
+  test("NEGATIVE CONTROL for the whole table: the clean shape DOES arm", () => {
+    // Without this, every row above would pass against a predicate that never arms.
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [{ account: "tenant-0", skipped: null, sweep: OK }],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(true);
+  });
+
+  test("cursor failures are matched by PREFIX — the reason carries an errno suffix", () => {
+    // An equality check on "cursor-write-failed" would match nothing at all.
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [
+        { account: "tenant-0", skipped: null, sweep: { ...OK, comments: { failed: 0, byReason: {}, byFailure: { "cursor-write-failed:EROFS": 3 } } } },
+      ],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(false);
+  });
+
+  test("⛔ a RE-SEED after arming un-arms it (found by reasoning, not review)", () => {
+    // `seeded` means "baseline built", not "has emitted". If the last-seen store
+    // is lost after arming, the next tick re-seeds, emits nothing, and absorbs
+    // every intervening change — while a latched readiness keeps suppressing
+    // smee. Those events would reach nobody.
+    const clean = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
+    let reports = [{ account: "tenant-0", skipped: null, sweep: clean }];
+    const handle = startCloudFeedTimer({ feedHealthyFn: () => true, mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
+    handle.tick();
+    expect(handle.isReady()).toBe(true);
+
+    reports = [{ account: "tenant-0", skipped: null, sweep: { ...clean, mode: "seeded" } }];
+    handle.tick();
+    expect(handle.isReady()).toBe(false); // un-armed: smee is authoritative again
+
+    reports = [{ account: "tenant-0", skipped: null, sweep: clean }];
+    handle.tick();
+    expect(handle.isReady()).toBe(true); // and it re-arms on the next clean sweep
+  });
+
+  test("⛔ ANY unhealthy report un-arms — readiness is not latched (Codex P1 round 5)", () => {
+    // This test previously asserted the OPPOSITE (a latch surviving transient
+    // failure). That was the defect: with the replica gone or the store failing
+    // to open, runOnce reports an error, emits nothing, and a latched readiness
+    // kept enforce suppressing every webhook copy indefinitely. Second time one
+    // of my own tests has pinned behaviour that turned out to be the bug.
+    const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
+    const unhealthy = [
+      ["tenant error", [{ account: "t0", skipped: null, error: "replica gone" }]],
+      ["tenant skipped", [{ account: "t0", skipped: "replica-absent" }]],
+      ["re-seed", [{ account: "t0", skipped: null, sweep: { ...OKS, mode: "seeded" } }]],
+      ["emit failures", [{ account: "t0", skipped: null, sweep: { ...OKS, edges: { failed: 1, byReason: {}, byFailure: {} } } }]],
+      ["no tenants at all", []],
+    ];
+    for (const [label, bad] of unhealthy) {
+      let reports = [{ account: "t0", skipped: null, sweep: OKS }];
+      const handle = startCloudFeedTimer({ feedHealthyFn: () => true, mode: "enforce", plans: [], runOnceFn: () => reports, setIntervalFn: () => "H" });
+      handle.tick();
+      expect(handle.isReady()).toBe(true);
+      reports = bad;
+      handle.tick();
+      expect(handle.isReady(), `should un-arm on: ${label}`).toBe(false);
+      // ...and re-arm once healthy again.
+      reports = [{ account: "t0", skipped: null, sweep: OKS }];
+      handle.tick();
+      expect(handle.isReady()).toBe(true);
+    }
+  });
+
+  test("EVERY tenant must be clean — a healthy one cannot mask a failing one", () => {
+    const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [
+        { account: "t0", skipped: null, sweep: OKS },
+        { account: "t1", skipped: null, error: "boom" },
+      ],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(false);
+  });
+
+  test("onReport receives the per-tenant reports", () => {
+    const reports = [{ account: "tenant-0", skipped: null }];
+    let got;
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "shadow",
+      plans: [],
+      runOnceFn: () => reports,
+      onReport: (r) => (got = r),
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(got).toEqual(reports);
+  });
+});
+
+// ── CTL-1847 (Codex P1 round 6): a frozen replica must not stay armed ────────
+describe("⛔ CTL-1902 — FEED health (not writer liveness) is required for readiness", () => {
+  const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
+  const report = [{ account: "tenant-0", skipped: null, sweep: OKS }];
+
+  test("an UNHEALTHY feed un-arms even though the sweep looks perfect", () => {
+    // When cloud-sync stalls while its SQLite file stays readable, every query
+    // returns an empty page — zero rows, zero failures, zero byReason. A sweep
+    // over a frozen replica is indistinguishable from a quiet fleet.
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [{ account: "tenant-0", dbPath: "/tmp/x.db" }],
+      runOnceFn: () => report,
+      feedHealthyFn: () => false,
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(false);
+  });
+
+  test("NEGATIVE CONTROL: the same sweep with a HEALTHY feed arms", () => {
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [{ account: "tenant-0", dbPath: "/tmp/x.db" }],
+      runOnceFn: () => report,
+      feedHealthyFn: () => true,
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect(handle.isReady()).toBe(true);
+  });
+
+  test("defaultReplicaFresh fails CLOSED on absent/unreadable/malformed/stale", () => {
+    const NOW = 1_000_000_000;
+    const now = () => NOW;
+    const cases = [
+      ["absent", () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }],
+      ["malformed json", () => "not json"],
+      ["no heartbeat field", () => JSON.stringify({ pid: 1 })],
+      ["heartbeat not a number", () => JSON.stringify({ heartbeat: "soon" })],
+      ["stale heartbeat", () => JSON.stringify({ heartbeat: NOW - 10 * 60 * 1000 })],
+    ];
+    for (const [label, readFileFn] of cases) {
+      expect(defaultReplicaFresh("/tmp/x.db", { now, readFileFn }), label).toBe(false);
+    }
+    // ...and a positive control, so the above cannot pass against a probe that
+    // always returns false.
+    expect(defaultReplicaFresh("/tmp/x.db", { now, readFileFn: () => JSON.stringify({ heartbeat: NOW - 1000 }) })).toBe(true);
+  });
+
+  test("an empty/invalid dbPath is not fresh", () => {
+    expect(defaultReplicaFresh("")).toBe(false);
+    expect(defaultReplicaFresh(undefined)).toBe(false);
+  });
+});
+
+// ── CTL-1847 (Codex P1 round 6): the tenant plan is re-read every tick ───────
+describe("⛔ tenant scope is not cached at startup", () => {
+  test("planTenants is called on EVERY tick, so a new team is picked up", () => {
+    // The plan used to be resolved once and cached forever. monitor.mjs reads
+    // the LIVE registry for routing, so a team added to registry.json afterwards
+    // was suppressed by the gate while the feed never produced anything for it —
+    // a whole team silently undispatched until the daemon happened to restart.
+    let calls = 0;
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      orchDir: "/orch",
+      planTenantsFn: () => {
+        calls += 1;
+        return [];
+      },
+      runOnceFn: () => [],
+      feedHealthyFn: () => true,
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    handle.tick();
+    handle.tick();
+    expect(calls).toBe(3);
+  });
+
+  test("a team appearing mid-run reaches the sweep", () => {
+    let teams = ["CTL"];
+    let seenPlans = null;
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      orchDir: "/orch",
+      planTenantsFn: () => teams.map((t) => ({ account: "tenant-0", dbPath: "/tmp/x.db", teams: new Set([t]) })),
+      runOnceFn: ({ plans }) => {
+        seenPlans = plans;
+        return [];
+      },
+      feedHealthyFn: () => true,
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    expect([...seenPlans[0].teams]).toEqual(["CTL"]);
+    teams = ["CTC"]; // registry.json gains a project
+    handle.tick();
+    expect([...seenPlans[0].teams]).toEqual(["CTC"]);
+  });
+
+  test("NEGATIVE CONTROL: an explicitly injected plan list is still respected", () => {
+    // Callers (and tests) that pass `plans` must not have it silently re-planned.
+    let calls = 0;
+    const handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [{ account: "tenant-0", dbPath: "/tmp/x.db" }],
+      planTenantsFn: () => { calls += 1; return []; },
+      runOnceFn: () => [],
+      feedHealthyFn: () => true,
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    handle.tick();
+    expect(calls).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1901 — the stamp must carry the readiness the tick STARTED with.
+//
+// This is a WIRING test, not a value test. cloud-feed-gate's exactly-once
+// argument rests on an edge's webhook twin and its feed copy being decided under
+// the SAME readiness value: the twin under rₖ (readiness while the edge
+// happened), the feed copy under whatever this tick stamps with. That holds only
+// while `runOnce` is called BEFORE `ready` is recomputed. Recompute first and
+// every feed copy is stamped rₖ₊₁ instead — exactly-once breaks at every
+// transition and NOTHING reddens, because each individual value is still
+// "correct". Pinning the value without pinning the order is the shape that has
+// already shipped unverified on this feature three times.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1901 — authority is sampled BEFORE readiness is recomputed", () => {
+  const OKS = { mode: "resume", stoppedEarly: false, edges: { failed: 0, byReason: {}, byFailure: {} }, comments: { failed: 0, byReason: {}, byFailure: {} } };
+  const DIRTY = { ...OKS, edges: { failed: 1, byReason: {}, byFailure: {} } };
+
+  const run = (sweeps) => {
+    const sampled = [];
+    let reports;
+    let handle;
+    const runOnceFn = () => {
+      // What the sink's `authorityNow()` would return for everything this sweep
+      // emits — read at the same point in the tick the real sink reads it.
+      sampled.push(handle.isReady());
+      return reports;
+    };
+    handle = startCloudFeedTimer({
+      mode: "enforce",
+      plans: [],
+      runOnceFn,
+      feedHealthyFn: () => true,
+      setIntervalFn: () => "H",
+    });
+    const after = [];
+    for (const s of sweeps) {
+      reports = [{ account: "t0", skipped: null, sweep: s }];
+      handle.tick();
+      after.push(handle.isReady());
+    }
+    return { sampled, after };
+  };
+
+  test("the UN-ARMING tick stamps TRUE — the value its edges' webhook twins were decided under", () => {
+    // The exact CTL-1901 sequence: armed, then a sweep goes dirty. Its edges
+    // must still be stamped authoritative, because their twins were captured
+    // under the readiness that was in force when they happened.
+    const { sampled, after } = run([OKS, DIRTY]);
+    expect(after).toEqual([true, false]); // it really did un-arm on tick 2
+    expect(sampled[1]).toBe(true); // ...and tick 2 still stamped TRUE
+  });
+
+  test("the RE-ARMING tick stamps FALSE — the mirror of the same rule", () => {
+    // Its edges happened while unarmed, so their twins already dispatched via
+    // smee. Stamping them true would deliver each of them a second time.
+    const { sampled, after } = run([DIRTY, OKS]);
+    expect(after).toEqual([false, true]);
+    expect(sampled[1]).toBe(false);
+  });
+
+  test("NEGATIVE CONTROL: in a steady state the sampled value tracks readiness", () => {
+    // Without this, the two above would pass against a stamp hardwired to the
+    // previous tick's value in a way that never converged.
+    const { sampled, after } = run([OKS, OKS, OKS]);
+    expect(after).toEqual([true, true, true]);
+    expect(sampled).toEqual([false, true, true]); // false only on the very first tick
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1902 — the readiness probe the daemon actually uses, end to end.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1902 — defaultFeedHealthy reads published ingest evidence", () => {
+  const T = 1_786_940_000_000;
+  const now = () => T;
+  const record = (over = {}) => JSON.stringify({ updatedAt: T, lastFrameAt: T - 5_000, cursor: 1, genuineStall: false, ...over });
+
+  test("a HEALTHY published record arms it", () => {
+    expect(defaultFeedHealthy("/tmp/x.db", { now, readFileFn: () => record() })).toBe(true);
+  });
+
+  test("⭐ a frozen CURSOR with fresh frames still arms it — the quiet feed is healthy", () => {
+    // The literal reading of the AC would fail here, on a node that is fine.
+    expect(defaultFeedHealthy("/tmp/x.db", { now, readFileFn: () => record({ cursor: 1146621, maxUpdatedMs: T - 3_600_000 }) })).toBe(true);
+  });
+
+  test("⭐ ACCEPTANCE: a live writer with a FROZEN FEED does NOT arm it", () => {
+    // The record is fresh (so the writer is alive and publishing) but no inbound
+    // frames have arrived. Under the old writer-liveness probe this armed.
+    expect(defaultFeedHealthy("/tmp/x.db", { now, readFileFn: () => record({ lastFrameAt: T - 10 * 60 * 1000 }) })).toBe(false);
+  });
+
+  test("fails CLOSED on absent / unreadable / malformed / stale / stalled", () => {
+    const enoent = () => { const e = new Error("nope"); e.code = "ENOENT"; throw e; };
+    const cases = [
+      ["absent", enoent],
+      ["unreadable", () => { throw new Error("EACCES"); }],
+      ["malformed", () => "{not json"],
+      ["stale record", () => record({ updatedAt: T - 10 * 60 * 1000 })],
+      ["genuine stall", () => record({ genuineStall: true })],
+      ["no lastFrameAt (older SDK)", () => record({ lastFrameAt: null })],
+    ];
+    for (const [label, readFileFn] of cases) {
+      expect(defaultFeedHealthy("/tmp/x.db", { now, readFileFn }), label).toBe(false);
+    }
+  });
+
+  test("an empty db path is not healthy", () => {
+    expect(defaultFeedHealthy("")).toBe(false);
+    expect(defaultFeedHealthy(undefined)).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1902 — the un-arm alarm must say WHY.
+//
+// Measured on mini-2 2026-08-17: 21 un-arm episodes in 3.1 h, and NOT ONE of
+// them left recoverable evidence of which conjunct failed — the WARN line
+// carried `{ mode }` and the daemon never wires `onReport`. An alarm that says
+// "unhealthy" without saying why cannot be acted on.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1902 — sweepUnreadyReason names the failing conjunct", () => {
+  const OK = { failed: 0, byReason: {}, byFailure: {} };
+  const HEALTHY = { healthy: true };
+  const good = { account: "t0", skipped: null, sweep: { mode: "resume", stoppedEarly: false, edges: OK, comments: OK } };
+
+  test("NEGATIVE CONTROL: a clean report returns null (ready)", () => {
+    // Without this, every assertion below would pass against a function that
+    // always returned a string.
+    expect(sweepUnreadyReason(good, HEALTHY)).toBe(null);
+  });
+
+  test("each disqualifying condition is named, and named distinctly", () => {
+    const cases = [
+      [null, HEALTHY, "no-report"],
+      [{ account: "t0", skipped: "replica-absent" }, HEALTHY, "skipped:replica-absent"],
+      [{ account: "t0", error: "replica gone" }, HEALTHY, "error:replica gone"],
+      [good, { healthy: false, reason: "frame-silent" }, "feed-unhealthy:frame-silent"],
+      [{ account: "t0" }, HEALTHY, "no-sweep"],
+      [{ account: "t0", sweep: { ...good.sweep, mode: "seeded" } }, HEALTHY, "seeding"],
+      [{ account: "t0", sweep: { ...good.sweep, stoppedEarly: true } }, HEALTHY, "stopped-early"],
+      [{ account: "t0", sweep: { ...good.sweep, edges: { failed: 3, byReason: {}, byFailure: {} } } }, HEALTHY, "edges:failed=3"],
+      [{ account: "t0", sweep: { ...good.sweep, comments: { failed: 0, byReason: {}, byFailure: { "rate-limited": 2 } } } }, HEALTHY, "comments:rate-limited"],
+      [{ account: "t0", sweep: { ...good.sweep, labels: { failed: 1, byReason: {}, byFailure: { "label-sweep-failed:EIO": 1 } } } }, HEALTHY, "labels:failed=1,label-sweep-failed:EIO"],
+    ];
+    const seen = new Set();
+    for (const [report, health, expected] of cases) {
+      const got = sweepUnreadyReason(report, health);
+      expect(got, JSON.stringify(report)).toBe(expected);
+      seen.add(got);
+    }
+    // Distinct: an explanation that collapses two causes to one string is not
+    // an explanation.
+    expect(seen.size).toBe(cases.length);
+  });
+
+  test("the feed-health verdict is passed IN, never re-derived here", () => {
+    // The seam stays authoritative: an unhealthy verdict disqualifies even a
+    // perfect sweep, and a healthy one never rescues a dirty sweep.
+    expect(sweepUnreadyReason(good, { healthy: false, reason: "absent" })).toBe("feed-unhealthy:absent");
+    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, edges: { failed: 1, byReason: {}, byFailure: {} } } }, HEALTHY)).toBe("edges:failed=1");
+  });
+
+  test("an ABSENT health argument is not healthy (fail-closed default)", () => {
+    expect(sweepUnreadyReason(good)).toBe("feed-unhealthy:unknown");
+    expect(sweepUnreadyReason(good, null)).toBe("feed-unhealthy:unknown");
+  });
+
+  test("a label sweep that never RAN is not a label sweep that FAILED", () => {
+    // CTL-1904: `labels` absent (seeding tick / the superseded runSweep path) is
+    // clean; present-and-dirty disqualifies.
+    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, labels: undefined } }, HEALTHY)).toBe(null);
+    expect(sweepUnreadyReason({ account: "t0", sweep: { ...good.sweep, labels: OK } }, HEALTHY)).toBe(null);
+  });
+
+  test("countsClean / countsDirtyWhy: any byFailure entry disqualifies, and its KEY is reported", () => {
+    expect(countsClean({ failed: 0, byReason: {}, byFailure: {} })).toBe(true);
+    expect(countsClean(null)).toBe(false);
+    expect(countsClean({ failed: 0, byReason: {}, byFailure: { "some-future-reason": 1 } })).toBe(false);
+    expect(countsDirtyWhy({ failed: 0, byReason: {}, byFailure: { "some-future-reason": 1 } })).toBe("some-future-reason");
+    expect(countsDirtyWhy({ failed: 2, byReason: {}, byFailure: { a: 1, b: 1 } })).toBe("failed=2,a|b");
+    expect(countsDirtyWhy(null)).toBe("absent");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⛔ CTL-1909 — READINESS DISTINGUISHES A DECLINE FROM A FAILURE
+//
+// The gate read `byReason`, which is the DECLINE census. A decline is the
+// sweep's most common HEALTHY outcome, so the producer un-armed on working
+// correctly: measured live on BOTH minis 2026-08-17 as
+// `{"unready":[{"account":"tenant-0","reason":"edges:foreign-team"}]}` from
+// ordinary CTC activity, minutes after boot. Because the feed could only arm on
+// a tick that examined ZERO foreign-team rows, `enforce` degraded to "smee, most
+// of the time" and retiring the smee tunnel was unreachable.
+//
+// The controls this block owes (ticket AC): a foreign-team DECLINE must stay
+// ARMED, and a real FAILURE must UN-ARM — proven against the same fixture so
+// neither result can come from a predicate that is stuck.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("⛔ CTL-1909 — a decline is not a failure", () => {
+  const HEALTHY = { healthy: true };
+  const CLEAN = { failed: 0, byReason: {}, byFailure: {} };
+  const base = (edges) => ({
+    account: "t0",
+    skipped: null,
+    sweep: { mode: "resume", stoppedEarly: false, edges, comments: CLEAN },
+  });
+  const armed = (report) => {
+    const handle = startCloudFeedTimer({
+      feedHealthyFn: () => true,
+      mode: "enforce",
+      plans: [],
+      runOnceFn: () => [report],
+      setIntervalFn: () => "H",
+    });
+    handle.tick();
+    return handle.isReady();
+  };
+
+  // ⭐ THE TICKET'S FIRST CONTROL, at the live seam (not just the pure fn).
+  test("a sweep of ONLY declines is READY — the exact live shape that un-armed both minis", () => {
+    const declinesOnly = { emitted: 0, declined: 137, failed: 0, examined: 137, byReason: { "foreign-team": 137 }, byFailure: {} };
+    expect(countsClean(declinesOnly)).toBe(true);
+    expect(sweepUnreadyReason(base(declinesOnly), HEALTHY)).toBe(null);
+    expect(armed(base(declinesOnly))).toBe(true);
+  });
+
+  // ⭐ THE TICKET'S SECOND CONTROL, on the SAME fixture: one failure flips it.
+  // Same declines, same everything else — so a `true` above cannot be a
+  // predicate that always returns true.
+  test("the SAME sweep with one real failure is NOT ready", () => {
+    const withFailure = {
+      emitted: 0,
+      declined: 137,
+      failed: 1,
+      examined: 138,
+      byReason: { "foreign-team": 137 },
+      byFailure: { "build-failed:boom": 1 },
+    };
+    expect(countsClean(withFailure)).toBe(false);
+    expect(sweepUnreadyReason(base(withFailure), HEALTHY)).toBe("edges:failed=1,build-failed:boom");
+    expect(armed(base(withFailure))).toBe(false);
+  });
+
+  test("EVERY decline reason the classifier can produce keeps it armed", () => {
+    // Enumerated from linear-feed-event.mjs `classifyEdge` + the diff sweep's
+    // own `no-tracked-change`, minus the one FATAL verdict, which is asserted
+    // separately below. A future decline reason needs no change here — it is
+    // `decline()` at the emitting site that decides, not this list — but the
+    // list makes the CURRENT set's verdict explicit rather than assumed.
+    const DECLINE_REASONS = [
+      "foreign-team",
+      "bot-authored",
+      "no-tracked-change",
+      "unjoinable-issue",
+      "issue-has-no-team-key",
+      "issue-has-no-identifier",
+      "history-row-has-no-id",
+      "no-history-row",
+    ];
+    for (const reason of DECLINE_REASONS) {
+      const counts = { failed: 0, declined: 1, byReason: { [reason]: 1 }, byFailure: {} };
+      expect(countsClean(counts), reason).toBe(true);
+      expect(armed(base(counts)), reason).toBe(true);
+    }
+  });
+
+  test("a FAILURE reason invented in 2027 still un-arms, with no reader change", () => {
+    // The property the old design had and must not lose: failure disqualification
+    // is not an allow-list. It now comes from the emitting site choosing `fail`.
+    expect(countsClean({ failed: 0, byReason: {}, byFailure: { "something-nobody-has-written-yet": 1 } })).toBe(false);
+    expect(armed(base({ failed: 0, byReason: {}, byFailure: { "something-nobody-has-written-yet": 1 } }))).toBe(false);
+  });
+
+  // ⛔ FAIL-CLOSED ON SHAPE. A counts block from before the split has failure
+  // reasons sitting in `byReason` and no `byFailure` at all. Defaulting the map
+  // would read that as immaculate — "nothing wrong" and "could not look"
+  // byte-identical to the caller, which is the defect class this repo keeps
+  // paying for. Absent ⇒ not clean ⇒ smee stays authoritative.
+  test("a counts block with NO failure census does not arm, and says so", () => {
+    const preSplit = { failed: 0, byReason: { "cursor-write-failed:EACCES": 1 } };
+    expect(countsClean(preSplit)).toBe(false);
+    expect(countsDirtyWhy(preSplit)).toBe("no-failure-census");
+    expect(countsDirtyWhy({ failed: 2, byReason: {} })).toBe("failed=2,no-failure-census");
+    expect(armed(base(preSplit))).toBe(false);
+    // NEGATIVE CONTROL for the assertion above: the same block WITH the census
+    // present and empty does arm — so "not clean" came from the missing map, not
+    // from `byReason` still being consulted.
+    expect(armed(base({ failed: 0, byReason: { "cursor-write-failed:EACCES": 1 }, byFailure: {} }))).toBe(true);
+  });
+
+  test("a non-object failure census is not a census", () => {
+    for (const bogus of [[], "", 0, "none"]) {
+      expect(countsClean({ failed: 0, byReason: {}, byFailure: bogus }), JSON.stringify(bogus)).toBe(
+        // `[]` is an object with zero keys — it would pass a naive
+        // Object.keys().length check, which is why the type is asserted first.
+        false,
+      );
+    }
+  });
+});

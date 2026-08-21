@@ -1,19 +1,55 @@
 ---
 title: Remote and unattended hosts
-description: Run Catalyst on a headless Mac you reach over SSH — plugin install, gh token migration, and bringing the stack up.
+description:
+  Run Catalyst on a headless Mac you reach over SSH — plugin install, gh token migration, and
+  bringing the stack up.
 sidebar:
   order: 6
 ---
 
-Catalyst is macOS-only, but the host does not have to be the Mac in front of you. A
-common setup is a **headless Mac** (for example, a Mac mini) that you reach over SSH and
-leave running. This page covers the parts of setup that differ from the
-[interactive install](/getting-started/).
+Catalyst is macOS-only, but the host does not have to be the Mac in front of you. A common setup is
+a **headless Mac** (for example, a Mac mini) that you reach over SSH and leave running. This page
+covers the parts of setup that differ from the [interactive install](/getting-started/).
+
+## Install in one command
+
+The page you were sent here from presents step 1 as interactive. It does not have to be —
+`setup-catalyst.sh` has a full headless contract, so the entire install over SSH is:
+
+```bash
+cd /path/to/your/repo   # ⛔ required — see below
+curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh \
+  | bash -s -- --non-interactive \
+      --cloud-token "$CATALYST_CLOUD_TOKEN" --cloud-account "$CATALYST_CLOUD_ACCOUNT"
+```
+
+**Run it from inside the repo you are enrolling.** Setup configures Catalyst *for a project*, so a
+non-interactive run refuses rather than guessing which one:
+
+```
+✗ Not in a git repository. Run setup from inside the target repo when using --non-interactive.
+```
+
+This page previously showed the `curl` line alone and called it "the entire install", which is why
+this note exists: run from `$HOME` on a fresh host — the most natural thing to do over SSH — and the
+install stops there. Clone the repo first if the host does not have it yet.
+
+`-s --` is required — without it `bash` eats the flags and the script tries to open `/dev/tty` on a
+host that has none. `CATALYST_AUTONOMOUS=1` is an equivalent env-var form.
+
+`--cloud-account` is required the first time a cloud token is supplied, and there is deliberately no
+default (guessing would point the host at another tenant's workspace). **On later runs you can omit
+it** — setup records the account in `~/.config/catalyst/cloud-sync.env` and reads it back from there.
+
+Setup finishes the job rather than printing a list: it installs the `catalyst-*` CLIs, provisions
+`plugin-source`, turns on replica reads, and enrols the project. Anything it could not do is printed
+at the end as a deferred step with a `run:` and a `verify:` line. See
+[what to have ready](/getting-started/#what-to-have-ready) for the credentials.
 
 ## Install the plugin over SSH
 
-The in-app `/plugin` commands need an interactive Claude Code session. From a shell, use
-the CLI form instead:
+The in-app `/plugin` commands need an interactive Claude Code session. From a shell, use the CLI
+form instead:
 
 ```bash
 claude plugin marketplace add coalesce-labs/catalyst
@@ -26,15 +62,15 @@ Then install the CLI tools and start the stack exactly as in the
 ## Move your GitHub login to the remote host
 
 On macOS, `gh auth login` often stores the token in the **macOS keychain**, not in
-`~/.config/gh/hosts.yml`. Copying `hosts.yml` to another machine therefore silently
-fails — the token field is blank. Pipe the token across instead:
+`~/.config/gh/hosts.yml`. Copying `hosts.yml` to another machine therefore silently fails — the
+token field is blank. Pipe the token across instead:
 
 ```bash
 gh auth token | ssh your-host 'gh auth login --with-token'
 ```
 
-`gh auth token` reads from whichever store `gh` is using (keychain or `hosts.yml`), so
-this works regardless of how you logged in locally.
+`gh auth token` reads from whichever store `gh` is using (keychain or `hosts.yml`), so this works
+regardless of how you logged in locally.
 
 ## After a reboot
 
@@ -44,27 +80,26 @@ After the host reboots, reconnect and run:
 catalyst-stack start
 ```
 
-On a headless host you'll usually want this to happen automatically. Install the
-auto-start LaunchAgent once, then a reboot brings the whole stack back on its own:
+On a headless host you'll usually want this to happen automatically. Install the auto-start
+LaunchAgent once, then a reboot brings the whole stack back on its own:
 
 ```bash
 catalyst-stack install-services
 ```
 
-It runs `catalyst-stack start` at login plus a keep-alive that self-heals a crashed
-daemon. Because it's a per-user LaunchAgent, enable **automatic login** so it fires on
-boot without anyone signing in. See
-[Post-reboot and updates](/getting-started/reboot-and-updates/) for the day-to-day
-boot and update flow and the full `install-services` options.
+It runs `catalyst-stack start` at login plus a keep-alive that self-heals a crashed daemon. Because
+it's a per-user LaunchAgent, enable **automatic login** so it fires on boot without anyone signing
+in. See [Post-reboot and updates](/getting-started/reboot-and-updates/) for the day-to-day boot and
+update flow and the full `install-services` options.
 
 ## If the daemon dispatches nothing
 
-The execution-core daemon only dispatches work for **registered** projects. On a fresh or
-headless host the project registry (`~/catalyst/execution-core/registry.json`) may never have
-been written — the daemon then starts cleanly, logs normal ticks, and dispatches nothing.
+The execution-core daemon only dispatches work for **registered** projects. On a fresh or headless
+host the project registry (`~/catalyst/execution-core/registry.json`) may never have been written —
+the daemon then starts cleanly, logs normal ticks, and dispatches nothing.
 
-As of CTL-854 the daemon logs a one-time warning at startup when the registry is empty. To
-enroll a project, run from inside its repo:
+As of CTL-854 the daemon logs a one-time warning at startup when the registry is empty. To enroll a
+project, run from inside its repo:
 
 ```bash
 catalyst-execution-core register --team <TEAM> --repo-root "$(git rev-parse --show-toplevel)"
@@ -81,8 +116,8 @@ eligible-query format.
 
 ## Mirroring config to another node
 
-When adding a second host to a cluster, some config items must be copied verbatim from the seed
-node (SHARED) and others must be regenerated on the new host (PER-NODE). See
+When adding a second host to a cluster, some config items must be copied verbatim from the seed node
+(SHARED) and others must be regenerated on the new host (PER-NODE). See
 [Cluster config mirror contract](/reference/cluster-config-mirror/) for the full classification
-table, correct file locations for bot OAuth credentials, and the quota field-name schema consumed
-by monitoring and heartbeat code.
+table, correct file locations for bot OAuth credentials, and the quota field-name schema consumed by
+monitoring and heartbeat code.

@@ -27,6 +27,20 @@ set -euo pipefail
 _SRC="${BASH_SOURCE[0]}"
 while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
+
+# CTL-1968: `gui/$(id -u)` is a PER-USER launchd domain, so a scratch HOME does
+# NOT sandbox it — it renders the plist somewhere temporary and then re-binds the
+# REAL label to that path. Refuse rather than damage the live domain.
+[[ -f "${SCRIPT_DIR}/lib/launchd-domain-guard.sh" ]] || {
+  echo "install-dependabot-escalate.sh: missing lib/launchd-domain-guard.sh next to this script" >&2; exit 1; }
+# shellcheck source=lib/launchd-domain-guard.sh
+. "${SCRIPT_DIR}/lib/launchd-domain-guard.sh"
+launchd_agent_guard() {
+  launchd_guard_ok "the dependabot-escalate agent" && return 0
+  launchd_guard_message "the dependabot-escalate agent" >&2
+  echo "install-dependabot-escalate.sh: REFUSED (${CATALYST_LAUNCHD_GUARD_REASON})" >&2
+  exit 1
+}
 unset _SRC
 
 DEST="${HOME}/Library/LaunchAgents/ai.coalesce.catalyst-dependabot-escalate.plist"
@@ -155,6 +169,7 @@ _substitute() {
 }
 
 if [[ "$UNINSTALL" -eq 1 ]]; then
+  launchd_agent_guard
   launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
   rm -f "$DEST"
   echo "install-dependabot-escalate.sh: uninstalled ${LABEL}"
@@ -197,6 +212,7 @@ _substitute > "$local_tmp"
 mv "$local_tmp" "$DEST"
 echo "install-dependabot-escalate.sh: wrote ${DEST}"
 
+launchd_agent_guard
 launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$DEST"
 echo "install-dependabot-escalate.sh: loaded ${LABEL} into gui/$(id -u)"

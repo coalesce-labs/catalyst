@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cli/drain.mjs — CTL-1095. `catalyst-execution-core drain [--off] [--json]`
 //
 // Toggles the drain flag file, emits node.drain.changed, and prints drain

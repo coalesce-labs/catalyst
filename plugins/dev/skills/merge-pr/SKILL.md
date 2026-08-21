@@ -433,8 +433,11 @@ If ticket found and not using `--no-update`:
 "${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
   --ticket "$ticket_id" --transition done --config .catalyst/config.json
 
-# Then add a comment with PR number, merge commit, and base branch.
-# Use `linearis comments usage` for exact syntax. Skip silently if CLI missing.
+# Then add a comment with PR number, merge commit, and base branch — agent-authored,
+# so post it through the app actor (`linear-reply.mjs --as <role>`, or the
+# `linear-comment-post.sh` helper), never bare `linearis issues discuss`/`reply`
+# (those post as the human — see the `linearis` skill's "Comment on a ticket"
+# section). Skip silently if the tooling is missing.
 ```
 
 ### 11. Delete local branch and update base

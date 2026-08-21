@@ -1,5 +1,167 @@
 # Changelog
 
+## [12.60.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.59.0...catalyst-dev-v12.60.0) (2026-08-20)
+
+
+### Features
+
+* **dev:** CTL-1785 phase 1 — entitlement seam (zero-import leaf, tri-state flag, local provider, off by default) ([#3755](https://github.com/coalesce-labs/catalyst/issues/3755)) ([cccf3b4](https://github.com/coalesce-labs/catalyst/commit/cccf3b45f8bb7719f4bace49c255688032b9ee03))
+* **dev:** CTL-1786 phase 1 — lease-authority.mjs cloud client + auth-spike probe ([#3756](https://github.com/coalesce-labs/catalyst/issues/3756)) ([dcad0fe](https://github.com/coalesce-labs/catalyst/commit/dcad0fee56390034979922f401e3a9a228bc0e7d))
+* **dev:** CTL-1864 — publish slot-based active_count on node.heartbeat ([#3768](https://github.com/coalesce-labs/catalyst/issues/3768)) ([7051350](https://github.com/coalesce-labs/catalyst/commit/7051350ed64b5763a197ca2daffe2fc3ea85535b))
+* **dev:** CTL-1974 — codify catalyst-dev:project-orchestrator as thin steward wrapper ([#3759](https://github.com/coalesce-labs/catalyst/issues/3759)) ([4de7a1a](https://github.com/coalesce-labs/catalyst/commit/4de7a1ad9f08e330469dde9e340f14215c24acc3))
+* **dev:** CTL-1985 — catalyst enrol one-key host enrollment installer ([#3758](https://github.com/coalesce-labs/catalyst/issues/3758)) ([a903177](https://github.com/coalesce-labs/catalyst/commit/a9031770f4981f2318a2ee7119077d516df4552d))
+
+
+### Bug Fixes
+
+* **execution-core:** CTL-2090 — triage-capped ticket can no longer deadlock admission ([#3787](https://github.com/coalesce-labs/catalyst/issues/3787)) ([2a649dc](https://github.com/coalesce-labs/catalyst/commit/2a649dc184fe9a0a89d0e8cbc398e7784dbb4041))
+* **execution-core:** CTL-2103 — scrub PATH so the gh-unavailable test is deterministic ([#3778](https://github.com/coalesce-labs/catalyst/issues/3778)) ([be1840b](https://github.com/coalesce-labs/catalyst/commit/be1840b4b67fbfb1408ea52780b6fa1a9b868368))
+
+## [12.59.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.58.0...catalyst-dev-v12.59.0) (2026-08-20)
+
+
+### Features
+
+* **dev:** CTL-2000 — steward-first escalation (resolver-independent slice) ([#3742](https://github.com/coalesce-labs/catalyst/issues/3742)) ([87ca75d](https://github.com/coalesce-labs/catalyst/commit/87ca75da5c456ac84b7d9d9940a1283eaadc170d))
+* **dev:** CTL-2074 phase 1 — cloud-proxy identity config seam (bot.cloud.botUserId) ([#3738](https://github.com/coalesce-labs/catalyst/issues/3738)) ([bbb56cb](https://github.com/coalesce-labs/catalyst/commit/bbb56cb4b47beb41ac56220e187994126bfc5c6f))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1754 — the escalation card read a key written on 0 of 44 live signals, so it always said "(no reason)" ([#3699](https://github.com/coalesce-labs/catalyst/issues/3699)) ([7f562b6](https://github.com/coalesce-labs/catalyst/commit/7f562b6885779e6cf4de2d1acca08956d494e6ee))
+* **dev:** CTL-1851 — an SDK worker cannot outlive its daemon, so a restart is PROOF its ghost is dead ([#3694](https://github.com/coalesce-labs/catalyst/issues/3694)) ([61587c8](https://github.com/coalesce-labs/catalyst/commit/61587c86d543955bbbd405b6f2ecd006bee41e03))
+* **dev:** CTL-1889 inc 4 — a status write with no linearis stopped reporting itself applied ([#3724](https://github.com/coalesce-labs/catalyst/issues/3724)) ([741cbd5](https://github.com/coalesce-labs/catalyst/commit/741cbd594e35cc3e9a82c5a4667bc051e8d4aec9))
+* **dev:** CTL-2045 — the install proved the credential could READ, and the incident was a WRITE it never tested ([#3706](https://github.com/coalesce-labs/catalyst/issues/3706)) ([318268f](https://github.com/coalesce-labs/catalyst/commit/318268fb9a3fe39ba25e5bd0cdd69af5de304b16))
+* **dev:** CTL-2050 — an artifact that proves a phase succeeded retracts the infra failure that buried it ([#3690](https://github.com/coalesce-labs/catalyst/issues/3690)) ([c90e30a](https://github.com/coalesce-labs/catalyst/commit/c90e30a10c82192df6696c73530d4a85705eaa3d))
+* **dev:** CTL-2068 — a claim the pipeline can overwrite is not a claim ([#3712](https://github.com/coalesce-labs/catalyst/issues/3712)) ([18d8eb9](https://github.com/coalesce-labs/catalyst/commit/18d8eb99d29e23c14c8ea5db28dce2bee7d42bd2))
+* **dev:** CTL-2068 — the guard shipped INERT on mini; resolve the state map through a ladder ([#3714](https://github.com/coalesce-labs/catalyst/issues/3714)) ([f499dcb](https://github.com/coalesce-labs/catalyst/commit/f499dcbb440e1ac0ad5d0106fb125488d55b48c4))
+* **dev:** CTL-2076 — setup_project_config preserves committed Linear identity on regen; surface the registry team-identity mismatch (CAT-52) ([#3736](https://github.com/coalesce-labs/catalyst/issues/3736)) ([ef5b0b1](https://github.com/coalesce-labs/catalyst/commit/ef5b0b1c9209bb9afafab6b31f4d81cc3cd95567))
+* **execution-core:** OTL-67 — SDK-dispatched workers lose per-ticket OTEL_RESOURCE_ATTRIBUTES to settings.json pin ([#3721](https://github.com/coalesce-labs/catalyst/issues/3721)) ([4cc82ce](https://github.com/coalesce-labs/catalyst/commit/4cc82cede4415020d0badfb08a2cea4eccbff3b0))
+
+## [12.58.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.57.0...catalyst-dev-v12.58.0) (2026-08-19)
+
+
+### Features
+
+* **dev:** CTC-403 inc 1 — a host resolves Linear team and state ids from the replica, not from hand-written caches ([#3501](https://github.com/coalesce-labs/catalyst/issues/3501)) ([e42f861](https://github.com/coalesce-labs/catalyst/commit/e42f861ac80719bd36ef49b7b67179b3badfbb20))
+* **dev:** CTC-633 — the disk sweeper reports free space, and stops keeping every worktree forever ([#3504](https://github.com/coalesce-labs/catalyst/issues/3504)) ([f757f74](https://github.com/coalesce-labs/catalyst/commit/f757f74d0c8ee9474a95ff84f917499e2cf02d11))
+* **dev:** CTL-1889 inc 1 — a host's Linear writes go through the cloud write proxy, under ONE grant ([#3489](https://github.com/coalesce-labs/catalyst/issues/3489)) ([7d9e8cd](https://github.com/coalesce-labs/catalyst/commit/7d9e8cd4461104ed043ae5eb9dc46da27b46167a))
+* **dev:** CTL-1889 inc 2 — every execution-core Linear comment goes through the cloud proxy under enforce ([#3547](https://github.com/coalesce-labs/catalyst/issues/3547)) ([3711854](https://github.com/coalesce-labs/catalyst/commit/3711854a8a1fdea79330b2dbd54ecb2ea9b04327))
+* **dev:** CTL-1889 inc 3 — the cluster fence + heartbeat go through the cloud attachment proxy (CTC-692) ([#3555](https://github.com/coalesce-labs/catalyst/issues/3555)) ([e24bda2](https://github.com/coalesce-labs/catalyst/commit/e24bda2129f63b6bc3da79cfbcba740f2796c73f))
+* **dev:** CTL-1893 — the replica path derives from the ACCOUNT (increment 1: the resolver) ([#3561](https://github.com/coalesce-labs/catalyst/issues/3561)) ([61d6870](https://github.com/coalesce-labs/catalyst/commit/61d6870f1c34f7aae84cdf5e2db89c1ba2f9ca4b))
+* **dev:** CTL-1908 — doctor reports when a login shell spends the FLEET's Claude budget ([#3506](https://github.com/coalesce-labs/catalyst/issues/3506)) ([cd774d2](https://github.com/coalesce-labs/catalyst/commit/cd774d22162858a1bbc529f0268fde0fa6802061))
+* **dev:** CTL-1908 — page at 80% of an armed account's window, before the fleet stalls ([#3526](https://github.com/coalesce-labs/catalyst/issues/3526)) ([04e2ce5](https://github.com/coalesce-labs/catalyst/commit/04e2ce5639a5f80adccac41a09e2fa5a96cb6ab8))
+* **dev:** CTL-1914/1917/1918 — the documented install ends with a working node, not a list of hand-steps ([#3500](https://github.com/coalesce-labs/catalyst/issues/3500)) ([0671d38](https://github.com/coalesce-labs/catalyst/commit/0671d388c25a48df2a4768a9cc7216278aac9b9f))
+* **dev:** CTL-1916 — ship the cutover-verification tool instead of re-deriving it each session ([#3496](https://github.com/coalesce-labs/catalyst/issues/3496)) ([35035c5](https://github.com/coalesce-labs/catalyst/commit/35035c542c41333ba2d4b2af9b65005dae822b9a))
+* **dev:** CTL-1922 — `ask` skill: ask/decision-ticket SOP + threaded app-actor reply helper ([#3480](https://github.com/coalesce-labs/catalyst/issues/3480)) ([c9582a2](https://github.com/coalesce-labs/catalyst/commit/c9582a2cd21a13e73623051b7d3ab9e5afecd98b))
+* **dev:** CTL-1922 — 👀 ack on the human's latest comment; reply clears it; newest-first fix ([#3484](https://github.com/coalesce-labs/catalyst/issues/3484)) ([54203ef](https://github.com/coalesce-labs/catalyst/commit/54203ef0b9e2950a5f883dbd1cbd865e4bf69a98))
+* **dev:** CTL-1922 inc 2 — `ask create` / `ask accept` verbs that PROVE the ask is decidable ([#3509](https://github.com/coalesce-labs/catalyst/issues/3509)) ([92e32ca](https://github.com/coalesce-labs/catalyst/commit/92e32cad9940ffa3db265b1094e1089d626793d0))
+* **dev:** CTL-1929 — run the GitHub producer in shadow, behind its OWN knob, with enforce refused by name ([#3524](https://github.com/coalesce-labs/catalyst/issues/3524)) ([773675a](https://github.com/coalesce-labs/catalyst/commit/773675aa1a7f0680d684e2c380f55007ea41224d))
+* **dev:** CTL-1929 — the GitHub feed's read + event layers, with both blockers named rather than papered over ([#3513](https://github.com/coalesce-labs/catalyst/issues/3513)) ([780d309](https://github.com/coalesce-labs/catalyst/commit/780d30903b74fa35295250265ea7336d76326a28))
+* **dev:** CTL-1929 — the GitHub leg's enforce flip, suppressing smee PER NAME ([#3535](https://github.com/coalesce-labs/catalyst/issues/3535)) ([98ec1ed](https://github.com/coalesce-labs/catalyst/commit/98ec1ede73d839c2293a59d30fba1c1ce77b9a05))
+* **dev:** CTL-1929 — the installer stops opening the GitHub smee tunnel once the feed is authoritative ([#3540](https://github.com/coalesce-labs/catalyst/issues/3540)) ([6a5f359](https://github.com/coalesce-labs/catalyst/commit/6a5f3598ab81285dafc639b50c61de8f236226f4))
+* **dev:** CTL-1929 — the sweep, the suppression set, and a parity ledger that can return INCONCLUSIVE ([#3520](https://github.com/coalesce-labs/catalyst/issues/3520)) ([aa599ed](https://github.com/coalesce-labs/catalyst/commit/aa599edb9f9d224e469e6669829c60814b260b2c))
+* **dev:** CTL-1929 — wire check_suite.completed, and make BOTH remaining names' coverage a property of the replica ([#3560](https://github.com/coalesce-labs/catalyst/issues/3560)) ([3fab3bb](https://github.com/coalesce-labs/catalyst/commit/3fab3bba8543f77747ea958c0c5d5ec412876a50))
+* **dev:** CTL-1929 — wire pr.merged and per-push into the producer on schema 0.1.17 ([#3544](https://github.com/coalesce-labs/catalyst/issues/3544)) ([538214a](https://github.com/coalesce-labs/catalyst/commit/538214a6255eb2ba83ed75dd65348c8fb82f2312))
+* **dev:** CTL-1931 — the dep-skew detector can see a writer running the WRONG checkout ([#3493](https://github.com/coalesce-labs/catalyst/issues/3493)) ([85f16a9](https://github.com/coalesce-labs/catalyst/commit/85f16a907c124beb0acb873537d023b64dc626c5))
+* **dev:** CTL-1935 — pin the catalyst-index serving root to a git SHA (COORD decision 2) ([#3525](https://github.com/coalesce-labs/catalyst/issues/3525)) ([d4084ca](https://github.com/coalesce-labs/catalyst/commit/d4084caa25670b4f51a36a889e4b9c8943bd3fa8))
+* **dev:** CTL-1936 — a host bounds its own cloud write spend, and stops re-issuing a write that already converged ([#3505](https://github.com/coalesce-labs/catalyst/issues/3505)) ([4aec522](https://github.com/coalesce-labs/catalyst/commit/4aec522970c1210099349adcbad26f886cd04804))
+* **dev:** CTL-1943 — a dispatched phase narrates itself as a Linear agent session, without blocking the tick ([#3529](https://github.com/coalesce-labs/catalyst/issues/3529)) ([6a413b3](https://github.com/coalesce-labs/catalyst/commit/6a413b3014774db8f870d19f5f303a6f03b3256f))
+* **dev:** CTL-1944 — a fleet host proves it can materialize owner tokens, and installs direnv when it cannot ([#3539](https://github.com/coalesce-labs/catalyst/issues/3539)) ([b8adf84](https://github.com/coalesce-labs/catalyst/commit/b8adf842faf45da2dde4baf698d326c2e6a0c553))
+* **dev:** CTL-1951 — the ROUTINE fleet reload advances the pinned indexer serving root, out of the broker's event loop ([#3542](https://github.com/coalesce-labs/catalyst/issues/3542)) ([8cade58](https://github.com/coalesce-labs/catalyst/commit/8cade58395d641078e91168d65e00560257965ef))
+* **dev:** CTL-1961 — register the reaction + issue-create proxy routes, measured at the dispatcher ([#3647](https://github.com/coalesce-labs/catalyst/issues/3647)) ([60c5c38](https://github.com/coalesce-labs/catalyst/commit/60c5c38f375f8743aa01d420a52f2e7e15203ab7))
+* **dev:** CTL-1975 — the uninstall could not remove two agents its own verify-clean fails on ([#3606](https://github.com/coalesce-labs/catalyst/issues/3606)) ([5d842e7](https://github.com/coalesce-labs/catalyst/commit/5d842e7e6c64322afbdb1b9779dd4d2e41b7ab6a))
+* **dev:** CTL-1993/CTL-2001 — the steward skill, and one canonical copy of the threading contract ([#3612](https://github.com/coalesce-labs/catalyst/issues/3612)) ([109da9c](https://github.com/coalesce-labs/catalyst/commit/109da9c0177d0fee6c7218ca4094b90db6747efd))
+* **dev:** CTL-1994 — a supervisor keeps a long-running role alive, so the SOP's response times are a mechanism and not a promise ([#3614](https://github.com/coalesce-labs/catalyst/issues/3614)) ([f688265](https://github.com/coalesce-labs/catalyst/commit/f68826552d317bc6a2c519088481a9898d662265))
+* **dev:** CTL-1995 — the concierge skill: one door, one page, and no authority over stewards ([#3615](https://github.com/coalesce-labs/catalyst/issues/3615)) ([223aa30](https://github.com/coalesce-labs/catalyst/commit/223aa30daedc439fe7bd65b3e47bdd217093a50d))
+* **dev:** CTL-1996 — AGENTS.md teaches the coordination roles, and CI catches the block drifting ([#3618](https://github.com/coalesce-labs/catalyst/issues/3618)) ([b48ec01](https://github.com/coalesce-labs/catalyst/commit/b48ec01383471c13e553616d1c765be1a80137df))
+* **dev:** CTL-2042 — fleet host env-file materialization + doctor drift check ([#3686](https://github.com/coalesce-labs/catalyst/issues/3686)) ([da98683](https://github.com/coalesce-labs/catalyst/commit/da98683e1f9cff8f5848d2d2e49285cbe3671804))
+
+
+### Bug Fixes
+
+* **dev:** COORD-236 — the 60-second cool-down that would have stopped the label storm already existed; it could not see a budget refusal ([#3667](https://github.com/coalesce-labs/catalyst/issues/3667)) ([f29dbba](https://github.com/coalesce-labs/catalyst/commit/f29dbba17d5c21558e272829cdf9cc52f172e17f))
+* **dev:** CTL-1832 — the PLUGIN_ROOT guard scans SKILL.md only, and progressive disclosure has moved the uses into references/ ([#3660](https://github.com/coalesce-labs/catalyst/issues/3660)) ([79874f2](https://github.com/coalesce-labs/catalyst/commit/79874f2c7b23774d681dd7c428fa76b4d63f3c9e))
+* **dev:** CTL-1906 — the parity harness counts the feed's own events as smee under enforce ([#3452](https://github.com/coalesce-labs/catalyst/issues/3452)) ([17cd352](https://github.com/coalesce-labs/catalyst/commit/17cd352c0f5a09c4c8bf020c46187fd3dec4942c))
+* **dev:** CTL-1909 — readiness un-armed on the sweep's most common HEALTHY outcome ([#3469](https://github.com/coalesce-labs/catalyst/issues/3469)) ([bedc8c3](https://github.com/coalesce-labs/catalyst/commit/bedc8c337b656ddcba31e6ffcaf3ed4a65881843))
+* **dev:** CTL-1910 + CTL-1913 — the cloud installer pinned an NXDOMAIN host and never validated the token ([#3470](https://github.com/coalesce-labs/catalyst/issues/3470)) ([65bd1cf](https://github.com/coalesce-labs/catalyst/commit/65bd1cf60a57136339865210ddad7c1d98f78cb4))
+* **dev:** CTL-1918 — catalyst-doctor is CRASHING on every host (an extracted default referencing doctor's own scope) ([#3515](https://github.com/coalesce-labs/catalyst/issues/3515)) ([a9ffd66](https://github.com/coalesce-labs/catalyst/commit/a9ffd66147af5de9c3d4ffe74b7ff40c3fea074e))
+* **dev:** CTL-1920 — a writer re-seed is a torn read, not 400 changed tickets ([#3481](https://github.com/coalesce-labs/catalyst/issues/3481)) ([1c59b7b](https://github.com/coalesce-labs/catalyst/commit/1c59b7bc5ea4555edfe1583c58833f148c1489e4))
+* **dev:** CTL-1921 — every new worktree inherited 1.3 GB of other agents' scratch checkouts ([#3472](https://github.com/coalesce-labs/catalyst/issues/3472)) ([59385d9](https://github.com/coalesce-labs/catalyst/commit/59385d9f6ed9b82fcf35bf9c3c2f4eb04c27af39))
+* **dev:** CTL-1928 — the join bundle stops re-creating the retired Linear smee path ([#3485](https://github.com/coalesce-labs/catalyst/issues/3485)) ([9251f2b](https://github.com/coalesce-labs/catalyst/commit/9251f2b68a37df3500eaf16b694f611771b47990))
+* **dev:** CTL-1929 — an EMPTY check_suite association is a fact, not a gap; emit it, and put the recovered PR where nothing routes on it ([#3563](https://github.com/coalesce-labs/catalyst/issues/3563)) ([094eff3](https://github.com/coalesce-labs/catalyst/commit/094eff33904f554d282be3122936b79c19937c6e))
+* **dev:** CTL-1929 — set aside the suite conclusions the mirror cannot store (CTC-719), and collapse an observation node's duplicated deliveries ([#3565](https://github.com/coalesce-labs/catalyst/issues/3565)) ([e4134eb](https://github.com/coalesce-labs/catalyst/commit/e4134eba7def6b9bd82aebf4f71d6951dcb2e6e2))
+* **dev:** CTL-1929 — the P8 gate compared a young table against a long window and fabricated a FAIL; window both sides ([#3573](https://github.com/coalesce-labs/catalyst/issues/3573)) ([41a1a17](https://github.com/coalesce-labs/catalyst/commit/41a1a17d46d69ccf78fa51f7132df4ce9a8b77d9))
+* **dev:** CTL-1929 — the parity ledger compares only repos smee can deliver, so CLEAN is reachable ([#3551](https://github.com/coalesce-labs/catalyst/issues/3551)) ([03b9399](https://github.com/coalesce-labs/catalyst/commit/03b9399c5be95997fbe1abc23f824eec6a7908c6))
+* **dev:** CTL-1929 — the parity ledger says when its WINDOW, not the feed, produced the gap ([#3562](https://github.com/coalesce-labs/catalyst/issues/3562)) ([29cf9cb](https://github.com/coalesce-labs/catalyst/commit/29cf9cbe0481e22d3719834ca5a2e859f4e74879))
+* **dev:** CTL-1929 — the preflight checks EVERY repo on the tunnel, because the ledger structurally cannot ([#3569](https://github.com/coalesce-labs/catalyst/issues/3569)) ([67a7862](https://github.com/coalesce-labs/catalyst/commit/67a78623096e3e11df66bbf1b044a11586774fb2))
+* **dev:** CTL-1931 — the dep-skew detector can reach a verdict on a bun isolated-linker host ([#3499](https://github.com/coalesce-labs/catalyst/issues/3499)) ([8c4dc40](https://github.com/coalesce-labs/catalyst/commit/8c4dc4003e32283b0a685a8749c5407429546a45))
+* **dev:** CTL-1937 — a cli/*.mjs run by a SHELL refuses on its own, and CI keeps it that way ([#3516](https://github.com/coalesce-labs/catalyst/issues/3516)) ([5464175](https://github.com/coalesce-labs/catalyst/commit/5464175dd2e09b7ee262bc312eca52359ec409e6))
+* **dev:** CTL-1937 — a mis-invoked CLI module cannot become a 7,592-process fork chain ([#3511](https://github.com/coalesce-labs/catalyst/issues/3511)) ([7ea8206](https://github.com/coalesce-labs/catalyst/commit/7ea8206b959a9a84eee54be1fa7616105bafd55a))
+* **dev:** CTL-1947 — an account the poller CANNOT sample now says so, instead of leaving an absent series ([#3545](https://github.com/coalesce-labs/catalyst/issues/3545)) ([faaddb1](https://github.com/coalesce-labs/catalyst/commit/faaddb1ad5c7821bd28707410c9baf887d16f562))
+* **dev:** CTL-1949 — the documented `ask create` path filed nothing and exited 0, and cross-team asks carried the wrong labels ([#3531](https://github.com/coalesce-labs/catalyst/issues/3531)) ([b77e8d6](https://github.com/coalesce-labs/catalyst/commit/b77e8d6a6e94c924696a07d84a6dc1eaaff75d9c))
+* **dev:** CTL-1952 — a fully successful narration was recorded as a failure; the session route answers per part ([#3538](https://github.com/coalesce-labs/catalyst/issues/3538)) ([6bf7180](https://github.com/coalesce-labs/catalyst/commit/6bf71809154990aa7803ef515da6b9b5521d40f7))
+* **dev:** CTL-1956 — the direnv provisioning a host actually needs, on hosts that have no brew ([#3552](https://github.com/coalesce-labs/catalyst/issues/3552)) ([457f025](https://github.com/coalesce-labs/catalyst/commit/457f0254d397cc8b2e0550f8da79f3c0fadfa573))
+* **dev:** CTL-1963 — doctor asserts the cloud-sync launchd label resolves to ~/Library/LaunchAgents ([#3572](https://github.com/coalesce-labs/catalyst/issues/3572)) ([3b7eaae](https://github.com/coalesce-labs/catalyst/commit/3b7eaae6d40040cb2691c7f0922b822f51567b9b))
+* **dev:** CTL-1968 — a scratch HOME is not a launchd sandbox, so the install paths refuse it ([#3576](https://github.com/coalesce-labs/catalyst/issues/3576)) ([b70211b](https://github.com/coalesce-labs/catalyst/commit/b70211bbec5a401630a576cd03a241c2bf2b985c))
+* **dev:** CTL-1976 — the gate reads the readiness file the PRODUCER writes, not one under the caller's dir ([#3585](https://github.com/coalesce-labs/catalyst/issues/3585)) ([39037d1](https://github.com/coalesce-labs/catalyst/commit/39037d16877eb3e18ab7968d40435eb73bc329a3))
+* **dev:** CTL-1997 — two out-of-date skill instructions, each verified at file:line, and one the audit got wrong ([#3630](https://github.com/coalesce-labs/catalyst/issues/3630)) ([c7b9f2d](https://github.com/coalesce-labs/catalyst/commit/c7b9f2d51b1b090beb9396b587c38ef3758d2452))
+* **dev:** CTL-1998 — main is red on a guard that could not fire for the change it guards ([#3656](https://github.com/coalesce-labs/catalyst/issues/3656)) ([6f4afb6](https://github.com/coalesce-labs/catalyst/commit/6f4afb60d2ad76e113bea46a98b79e7fbbe376ed))
+* **dev:** CTL-1998 — two real phase-pipeline defects: an unbound $EMIT crash and a plan glob the dispatcher and the phase disagree about ([#3653](https://github.com/coalesce-labs/catalyst/issues/3653)) ([91284f7](https://github.com/coalesce-labs/catalyst/commit/91284f789eadeee8a044959fdd96042195c4a63d))
+* **dev:** CTL-2008 — the broker folds github.pr.* into pr_status_cache, because retiring smee left the table with no writer ([#3633](https://github.com/coalesce-labs/catalyst/issues/3633)) ([a79ad89](https://github.com/coalesce-labs/catalyst/commit/a79ad89cbcfde16e8ad00ca922226c1cdf28eda5))
+* **dev:** CTL-2019 — setup wrote the cloud account to a file and then refused to read it, so the whole install aborted ([#3637](https://github.com/coalesce-labs/catalyst/issues/3637)) ([88a7216](https://github.com/coalesce-labs/catalyst/commit/88a7216ea11bb56e646b9552777b869aee33bb32))
+* **dev:** CTL-2022 — the parity ledger reads the stream enforce actually emits, and a marker moves the verdict ([#3644](https://github.com/coalesce-labs/catalyst/issues/3644)) ([4337d64](https://github.com/coalesce-labs/catalyst/commit/4337d647ee461157a28293e488fdc295e7c46344))
+* **dev:** CTL-2024 — a cleared stall could never re-enter its phase, because the janitor's unstick left CTL-1805's advance marker standing ([#3649](https://github.com/coalesce-labs/catalyst/issues/3649)) ([3740736](https://github.com/coalesce-labs/catalyst/commit/37407366ae819b6e1bf1f662d00f2c357e5bdc51))
+* **dev:** CTL-2026 — doctor could certify a host whose live Linear write path is a directory it never looks at ([#3679](https://github.com/coalesce-labs/catalyst/issues/3679)) ([34cda74](https://github.com/coalesce-labs/catalyst/commit/34cda74f5379bd05f8e7cb731df4785d3046c729))
+* **dev:** CTL-2028 — a pid file naming a LIVE peer was clobbered on start and deleted on exit, so two brokers ran for 85 minutes and every status read clean ([#3675](https://github.com/coalesce-labs/catalyst/issues/3675)) ([cba6bed](https://github.com/coalesce-labs/catalyst/commit/cba6bed887ca1abf861e4849729ef5b78bc23c20))
+* **dev:** CTL-2030 — doctor graded whether smee was CONFIGURED, so after the cutover it reported a dead route as wired ([#3672](https://github.com/coalesce-labs/catalyst/issues/3672)) ([8146056](https://github.com/coalesce-labs/catalyst/commit/81460566386b0f1ce217b82a81355c15d269e8f9))
+* **dev:** CTL-2033 — the cross-host claim could not say why it lost, so a refused write and a lost race were the same value ([#3664](https://github.com/coalesce-labs/catalyst/issues/3664)) ([07a4469](https://github.com/coalesce-labs/catalyst/commit/07a4469514fa16b517f5237b9d38e2a87b2e80aa))
+* **dev:** CTL-2047 — a triage budget held by a failed scan printed the same line as a busy one ([#3682](https://github.com/coalesce-labs/catalyst/issues/3682)) ([e7b41a5](https://github.com/coalesce-labs/catalyst/commit/e7b41a528c988ea002c5e7486ec29ab9498513b8))
+* **dev:** CTL-2048 — a fence the worker could not READ was reported as a fence it read and found STALE ([#3685](https://github.com/coalesce-labs/catalyst/issues/3685)) ([c511edb](https://github.com/coalesce-labs/catalyst/commit/c511edbee10153166bcc0cb273ed62dde2d457cb))
+* **dev:** CTL-879 — the sixth blind gate, found by reading the first instrument: the cross-host claim declines at log.debug ([#3661](https://github.com/coalesce-labs/catalyst/issues/3661)) ([5e84413](https://github.com/coalesce-labs/catalyst/commit/5e84413abc6577d578ab18514d8fec429cfbff39))
+* **dev:** CTL-879 — the triage admission path declined 20 tickets an hour and wrote down nothing ([#3659](https://github.com/coalesce-labs/catalyst/issues/3659)) ([8002c5d](https://github.com/coalesce-labs/catalyst/commit/8002c5d0a7684cfd9ff950d6d8b621d09add6bd5))
+
+## [12.57.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.56.0...catalyst-dev-v12.57.0) (2026-08-17)
+
+
+### Features
+
+* **dev:** CTL-1847 — the cloud feed can drive dispatch, behind off/shadow/enforce ([#3439](https://github.com/coalesce-labs/catalyst/issues/3439)) ([9193042](https://github.com/coalesce-labs/catalyst/commit/91930429811d8d12ac15a1690050e9ff3c7d0072))
+* **dev:** CTL-1891 inc 1 — a host recognises its own Linear write without asking who wrote it ([#3437](https://github.com/coalesce-labs/catalyst/issues/3437)) ([1c6f44f](https://github.com/coalesce-labs/catalyst/commit/1c6f44fc99a85156d40f2b42ccd32b4cb484b601))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1847 — restore DEFAULT_SETTLE_SEC; execute the parity CLI in tests ([#3444](https://github.com/coalesce-labs/catalyst/issues/3444)) ([385c9a2](https://github.com/coalesce-labs/catalyst/commit/385c9a28db6d368ffe16eacacd784a6d4b6d7e97))
+* **dev:** CTL-1892 — the fleet has TWO app identities and both rotated; only one was seeded ([#3436](https://github.com/coalesce-labs/catalyst/issues/3436)) ([9ac3e07](https://github.com/coalesce-labs/catalyst/commit/9ac3e07b2e48e1087ac8bf72615edb498dd583ad))
+* **dev:** CTL-1892 — the self-echo guard survives an app-actor rotation ([#3428](https://github.com/coalesce-labs/catalyst/issues/3428)) ([4e601ef](https://github.com/coalesce-labs/catalyst/commit/4e601efe0e9ab72664cbc2037ceb7357dab30cdc))
+* **dev:** CTL-1901 — a mid-sweep readiness drop strands an already-stamped edge ([#3448](https://github.com/coalesce-labs/catalyst/issues/3448)) ([5f84a2b](https://github.com/coalesce-labs/catalyst/commit/5f84a2bebaf78a937ecf1a5e61dcb2e084a62322))
+* **dev:** CTL-1902 — readiness required the writer to be alive, not the feed to be arriving ([#3449](https://github.com/coalesce-labs/catalyst/issues/3449)) ([e530c25](https://github.com/coalesce-labs/catalyst/commit/e530c255fdb11dffcfe4e2e51bbd69e7725c71c8))
+* **dev:** CTL-1904 — the feed sees label changes the updated_at cursor cannot reach ([#3446](https://github.com/coalesce-labs/catalyst/issues/3446)) ([51a7f6a](https://github.com/coalesce-labs/catalyst/commit/51a7f6a3e4fadcea4c6989338e8100b2c7e83fcd))
+* **dev:** pin @catalyst-cloud/sdk 0.8.4, closing the migrator/writer schema skew ([#3426](https://github.com/coalesce-labs/catalyst/issues/3426)) ([4997ebe](https://github.com/coalesce-labs/catalyst/commit/4997ebe0b5ca8744614b973781042d3267756842))
+* **dev:** pin @catalyst-cloud/sdk 0.8.5, ending the pr_* frame loss ([#3432](https://github.com/coalesce-labs/catalyst/issues/3432)) ([88f24c3](https://github.com/coalesce-labs/catalyst/commit/88f24c36575222f356daa0f5cebee405165f67a3))
+* **dev:** pin @catalyst-cloud/sdk 0.8.6 — PRAGMA-accurate columns close the skew class at the root ([#3433](https://github.com/coalesce-labs/catalyst/issues/3433)) ([0be8892](https://github.com/coalesce-labs/catalyst/commit/0be8892073834fbe72d80da20677e9717efa0511))
+* **dev:** pin @catalyst-cloud/sdk 0.8.7 — the replica tenant fence ([#3434](https://github.com/coalesce-labs/catalyst/issues/3434)) ([6dc1ab6](https://github.com/coalesce-labs/catalyst/commit/6dc1ab62221ddd1b62d1fca6dee2130e85dc0bd2))
+
+## [12.56.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.55.0...catalyst-dev-v12.56.0)
+
+Aug 15, 2026
+
+<!-- ai-enhanced -->
+
+### Phase Agent Yield & Advancement Reliability
+
+Phase agents can now declare a bounded wait with `--status yield` when delegating to a background job, so finishing work is no longer recorded as abandonment. The advancement sweep gains a durable once-per-edge idempotency guard keyed on the predecessor's identity, preventing the same phase edge from firing multiple times in a single tick. Two supporting fixes round out the release: the Linear webhook monitor now detects 401 authentication failures via route-comparison against the GitHub control, and connected replicas report the schema bundle they actually loaded rather than a version string that may not reflect what's in memory.
+
+
+
+### PRs
+
+* **dev:** CTL-1805 — durable once-per-edge advancement idempotency guard ([#3404](https://github.com/coalesce-labs/catalyst/issues/3404)) ([0d9e25f](https://github.com/coalesce-labs/catalyst/commit/0d9e25f789c7019cb66d60beeaf3078024f424c6))
+* **dev:** CTL-1841 — Linear webhook 401 alarm (route-comparison detector) ([#3364](https://github.com/coalesce-labs/catalyst/issues/3364)) ([dfae529](https://github.com/coalesce-labs/catalyst/commit/dfae529b3581894c0ebab47c0abfc14d0700e552))
+* **dev:** CTL-1854 — let a phase agent declare a bounded wait, so finishing work is not recorded as abandonment ([#3383](https://github.com/coalesce-labs/catalyst/issues/3383)) ([3ebbf30](https://github.com/coalesce-labs/catalyst/commit/3ebbf3048922d42cd7d7a53ec7bde53b04a83449))
+* **dev:** CTL-1869 — report the schema bundle the replica actually loaded ([#3399](https://github.com/coalesce-labs/catalyst/issues/3399)) ([309966f](https://github.com/coalesce-labs/catalyst/commit/309966f42fcfeb60c3bca86c2b42747bb574929d))
+
 ## [12.55.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.54.1...catalyst-dev-v12.55.0)
 
 Aug 15, 2026

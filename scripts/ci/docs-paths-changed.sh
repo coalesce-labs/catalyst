@@ -5,7 +5,8 @@
 # on stdin. Prints "docs" + exit 0 if any path is docs-relevant; else "nodocs" + exit 1.
 #
 # Docs-relevant = anything under website/, or any plugins/<name>/CHANGELOG.md (the docs
-# build renders changelog pages from ../plugins/*/CHANGELOG.md — see
+# build renders changelog pages from ../plugins/*/CHANGELOG.md and
+# ../plugins/playground/*/CHANGELOG.md — see
 # website/astro.config.mjs). Pure string matching; no git, no network.
 #
 # Consumed by .github/workflows/docs-gate.yml: that workflow is the sole required
@@ -21,8 +22,11 @@ is_docs_path() {
   case "$p" in
     website/*) return 0 ;;
   esac
-  # plugins/<name>/CHANGELOG.md — exactly one path segment after plugins/.
-  if [[ "$p" =~ ^plugins/[^/]+/CHANGELOG\.md$ ]]; then
+  # plugins/<name>/CHANGELOG.md, and plugins/playground/<name>/CHANGELOG.md.
+  # CTL-1999 moved six plugins one level deeper (plugins/playground/<name>), so a
+  # single-segment pattern silently stopped matching their changelogs — the docs
+  # gate would pass a changelog-only PR without building the page it changes.
+  if [[ "$p" =~ ^plugins/[^/]+/CHANGELOG\.md$ || "$p" =~ ^plugins/playground/[^/]+/CHANGELOG\.md$ ]]; then
     return 0
   fi
   return 1

@@ -76,6 +76,63 @@ describe("startLivenessPublisher (CTL-1090)", () => {
     });
   });
 
+  test("CTL-1785: enforce mode calls revoke-on-loss with this host's owned tickets", () => {
+    const revokeCalls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9",
+      self: "mini",
+      ownedTickets: () => ["CTL-1", "CTL-2"],
+      publish: () => {},
+      intervalMs: 60_000,
+      entitlementMode: () => "enforce",
+      entitlementProvider: () => ({ ttlMs: 1, check: () => ({ verdict: "unentitled" }) }),
+      revoke: (args) => revokeCalls.push(args),
+    });
+    h.stop();
+    expect(revokeCalls.length).toBeGreaterThanOrEqual(1);
+    expect(revokeCalls[0]).toMatchObject({
+      self: "mini",
+      ownedTickets: ["CTL-1", "CTL-2"],
+      mode: "enforce",
+    });
+  });
+
+  test("CTL-1785: off mode (default) never calls revoke-on-loss", () => {
+    const revokeCalls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9",
+      self: "mini",
+      ownedTickets: () => ["CTL-1"],
+      publish: () => {},
+      intervalMs: 60_000,
+      entitlementMode: () => "off",
+      revoke: (args) => revokeCalls.push(args),
+    });
+    h.stop();
+    expect(revokeCalls.length).toBe(0);
+  });
+
+  test("CTL-1785: a throwing entitlement check never aborts the tick (fail-open)", () => {
+    const calls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9",
+      self: "mini",
+      ownedTickets: () => ["CTL-1"],
+      publish: (args) => calls.push(args),
+      intervalMs: 60_000,
+      entitlementMode: () => {
+        throw new Error("mode read failed");
+      },
+      revoke: () => {},
+    });
+    h.stop();
+    // The liveness publish still happened despite the entitlement seam throwing.
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+  });
+
   test("publishes the injected last phase advance and fails open when that seam throws", () => {
     const calls = [];
     const base = { roster: ["mini", "laptop"], anchorIssue: "CAT-1", self: "mini", ownedTickets: () => [],

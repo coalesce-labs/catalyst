@@ -24,9 +24,20 @@ import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
-import { log, getEventLogPath, getClusterHosts } from "./config.mjs";
+// CTL-1785: `tickMultiHost` below is a TOPOLOGY fact that arms the fence
+// zombie-guard — the fenceGuard `!multiHost` disarm must stay EXISTENCE-derived so
+// entitlement shedding can never re-enable an N=1 disarm (CTL-1781 defect class).
+// `off` mode: getExistenceHosts() === getClusterHosts().
+import { log, getEventLogPath, getExistenceHosts, readStewardEscalationConfig } from "./config.mjs";
 import { buildCanonicalEventLine } from "./lib/canonical-event.mjs"; // CTL-1817
 import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs";
+// CTL-2000: the escalation-ladder chokepoint. resolveStewardCore returns null
+// today (free-text scopes) and lights up when CTL-1974 populates scopeKeys —
+// wired here so no call-site edit is needed then. listRoles/readManifest are
+// node:*-only leaves (agent-liveness/state/paths), safe under bun.
+import { nextEscalationTarget, resolveSteward as resolveStewardCore, TARGET } from "./escalation-router.mjs";
+import { listRoles } from "../role-supervisor/doctor.mjs";
+import { readManifest } from "../role-supervisor/state.mjs";
 // Default Linear transport for the escalation path. The daemon does not thread
 // a writer (scheduler.mjs threads its own), so without this default every
 // escalation reason would silently degrade to a log line and the ticket would
@@ -339,6 +350,46 @@ function defaultDispatchRescue(ticket, opts) {
 // fail, and `escalatedAt` permanently skips the ticket in decideRescue, so
 // latching on a route would silently strand the PR. Fence-suppressed and
 // no-transport paths return confirmed:false too.
+// CTL-2000: the default (production) steward resolver. Wired to the router's
+// pure resolveSteward with role-supervisor's registry reads, so it returns null
+// TODAY (no manifest declares scopeKeys) and activates the steward tier the
+// moment CTL-1974 populates them — without touching this call site.
+export function defaultResolveSteward(scope) {
+  try {
+    return resolveStewardCore(scope, { listRoles, readManifest });
+  } catch {
+    return null;
+  }
+}
+
+// CTL-2000: page the resolved ladder rung on the shared channel (never a human).
+// Honors `target` (from nextEscalationTarget): a STEWARD route is delivered TO
+// the resolved steward, not to the concierge — otherwise the emitted event and
+// return value claim `routed-to-steward` while the message silently goes to the
+// concierge, skipping the mandated steward rung (Codex P2). Falls back to the
+// concierge when there is no steward (today's only reachable case until CTL-1974
+// populates `scopeKeys`). Fail-open — a failed post must not turn into a silent
+// drop; best-effort spawn, short timeout; the returned bool is advisory.
+export function defaultPostConciergePage({ ticket, detail, target, env = process.env } = {}) {
+  try {
+    const channel = env?.CATALYST_CONCIERGE_CHANNEL || "concierge";
+    const toSteward = target?.target === TARGET.STEWARD && target?.steward?.role ? String(target.steward.role) : null;
+    const to = toSteward ?? env?.CATALYST_CONCIERGE_ID ?? "concierge";
+    const rung = toSteward ? `steward (${to})` : "the steward";
+    const comms = fileURLToPath(new URL("../catalyst-comms", import.meta.url));
+    const body =
+      `instrument/stale-pr-rescue: ${ticket} could not be rescued (${detail?.reason ?? "unresolvable conflict"}` +
+      `${detail?.prNumber ? `, PR #${detail.prNumber}` : ""}) — ${toSteward ? "your scope" : `page ${rung}`} / decide ask-vs-relaunch.`;
+    const res = spawnSync(comms, ["send", channel, body, "--as", "stale-pr-rescue", "--to", to, "--type", "attention"], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    return res.status === 0;
+  } catch {
+    return false;
+  }
+}
+
 export function defaultEscalate(
   ticket,
   detail,
@@ -351,8 +402,61 @@ export function defaultEscalate(
     env = process.env,
     maxParallel = undefined,
     appendDelegateEvent = defaultAppendDelegateEvent,
+    // CTL-2000: the escalation-ladder seam. shadow (default) preserves today's
+    // exact behavior and only LOGS a would-route-steward event; enforce routes
+    // through the router (concierge today; steward when CTL-1974 lands) INSTEAD
+    // of applying needs-human. off is byte-identical to shadow minus the log.
+    resolveSteward = defaultResolveSteward,
+    postConciergePage = defaultPostConciergePage,
   } = {}
 ) {
+  const stewardMode = readStewardEscalationConfig(env).mode; // off | shadow | enforce (default shadow)
+
+  // ── enforce: route through the ladder INSTEAD of applying needs-human ──────
+  // A concierge page is a HANDOFF, not a confirmed human escalation, so
+  // confirmed stays false (escalatedAt must NOT latch on it — same rule the
+  // delegate-route path already honors). The fence-guard is preserved: a
+  // superseded ticket must not page anyone.
+  if (stewardMode === "enforce") {
+    if (
+      !fenceGuard(
+        { ticket, orchDir, multiHost, gateway, self },
+        { proceedOnMissingGeneration: true }
+      )
+    ) {
+      log.warn({ ticket }, "ctl-863: stale fence — suppressing stale-pr-rescue steward-route (zombie guard)");
+      return { confirmed: false, routed: false, reason: "fence-suppressed", escalatedTo: null };
+    }
+    const rs = typeof resolveSteward === "function" ? resolveSteward : () => null;
+    const t = nextEscalationTarget({ scope: ticket, priorPages: 0, instrument: "stale-pr-rescue", resolveSteward: rs });
+    const posted = postConciergePage({ ticket, detail, target: t, env });
+    // Observable page event on the unified log (queryable by ticket). The `type`
+    // discriminator names the ladder rung; the registered delegate.routed name
+    // keeps it a valid, non-broker-protected line.
+    appendDelegateEvent({
+      name: "delegate.routed",
+      type: `phase.rescue.routed-to-${t.target}`,
+      ticket,
+      site: "stale-pr-rescue-steward",
+      reason: detail?.reason ?? "unresolvable-conflict",
+      orchId: ticket,
+    });
+    log.warn({ ticket, target: t.target, posted, ...detail }, `stale-pr-rescue: routed to ${t.target} (steward-escalation enforce) — no needs-human label`);
+    return { confirmed: false, routed: false, reason: `routed-to-${t.target}`, escalatedTo: t.target };
+  }
+
+  // ── shadow (default): log would-route-steward, then TODAY'S EXACT PATH ──────
+  if (stewardMode === "shadow") {
+    appendDelegateEvent({
+      name: "delegate.would-route",
+      type: "phase.rescue.would-route-steward",
+      ticket,
+      site: "stale-pr-rescue-steward",
+      reason: detail?.reason ?? "unresolvable-conflict",
+      orchId: ticket,
+    });
+  }
+
   let routed = false;
   let labelled = false;
   let outcomeReason = "no-transport";
@@ -541,7 +645,7 @@ export function startStalePrRescueTimer({
       // CTL-863: live per-tick cluster-size gate. Re-read the roster each tick so
       // a 1→2 roster growth arms the fence zombie-guard on the very next tick with
       // no daemon restart. An explicitly-injected `multiHost` (tests) is honored.
-      const tickMultiHost = multiHost === undefined ? getClusterHosts().length > 1 : multiHost;
+      const tickMultiHost = multiHost === undefined ? getExistenceHosts().length > 1 : multiHost;
       await runTick({
         orchDir,
         orchId,

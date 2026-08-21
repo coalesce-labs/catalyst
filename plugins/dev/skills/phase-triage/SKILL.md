@@ -369,8 +369,8 @@ exponential / linear — whatever `issueEstimation.type` the team has set in Lin
 **Step 1 (preferred): reference-class lookup.** Run:
 
 ```bash
-bun "${REPO_ROOT}/plugins/pm/scripts/estimate/reference-class-lookup.ts" \
-  --corpus "${REPO_ROOT}/plugins/pm/scripts/estimate/reference-class-corpus.json" \
+bun "${REPO_ROOT}/plugins/playground/pm/scripts/estimate/reference-class-lookup.ts" \
+  --corpus "${REPO_ROOT}/plugins/playground/pm/scripts/estimate/reference-class-corpus.json" \
   --title "<ticket title>" --json
 ```
 
@@ -454,8 +454,10 @@ guard fails the build if this skill ever emits a `linearis issues update` call.
 The replica SQL reads above (ticket detail + backlog scan) are read-only and are fine. STEP E
 tolerates BOTH the flat-string and the rich `{id}` shapes.
 
-3. If the refined fields differ materially, post a follow-up `linearis issues discuss` comment
-   marking the refinement.
+3. If the refined fields differ materially, post a follow-up comment marking the refinement via
+   `linear-comment-post.sh <TICKET> "<body>"` (the app-actor identity) — NOT bare
+   `linearis issues discuss`, which posts under the human's own personal token and can look like the
+   human deciding on a ticket the ask-resolution gate is watching (CTL-1567/CTL-2086).
 
 The refinement step is deliberately optional — the orchestrator hand-off in CTL-452 only needs the
 `phase.triage.complete.<TICKET>` event, and the bash body already emits that.

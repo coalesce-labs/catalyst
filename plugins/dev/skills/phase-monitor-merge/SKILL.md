@@ -61,6 +61,17 @@ PR_NUMBER=$(jq -r '.pr.number // empty' "$PR_SIGNAL" 2>/dev/null || echo "")
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [[ -n "$PLUGIN_ROOT" ]] || PLUGIN_ROOT="$(dirname "$(dirname "$(dirname "$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo .)")")")"
 
+# CTL-1998: EMIT is assigned HERE, in the prelude, not in the terminal block.
+# It was previously first assigned near the end of this skill while being USED
+# ~240 lines earlier in the unresolved-human-thread branch. Under this prelude's
+# `set -euo pipefail`, that expansion aborts the shell with an unbound-variable
+# error, so the one path CTL-1680 exists to handle emitted NOTHING and the run was
+# recorded as an undeclared abandonment — the exact outcome that branch prevents.
+# Assigning once, up front, removes the ordering hazard for every later reference
+# (the failure-handling fence at the end of this file is a SEPARATE bash block and
+# had the same latent problem).
+EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
+
 COMMS="${PLUGIN_ROOT}/scripts/catalyst-comms"
 [[ -x "$COMMS" ]] || COMMS="$(command -v catalyst-comms 2>/dev/null || true)"
 if [[ -n "$COMMS" && -x "$COMMS" ]]; then
@@ -168,10 +179,12 @@ this skill copies the body verbatim, substituting `phase-monitor-merge` framing 
    `ended-without-declaration` — and buys nothing else. If you want to be resumed, do not stop.
 
    ```bash
-   # Runnable as written. Do NOT use "$EMIT" here — it is assigned in the terminal
-   # block near the end of this skill, and under the prelude's `set -u` expanding it
-   # this early aborts the shell, so no yield is written and the runner records the
-   # very abandonment this path exists to prevent.
+   # Runnable as written. CTL-1998: "$EMIT" is now assigned in the PRELUDE, so it is
+   # safe here too — this line keeps the explicit path only because it is the earliest
+   # emit in the file and reads better without the indirection. (Previously EMIT was
+   # first assigned in the terminal block, which made any earlier use abort the shell
+   # under `set -u`; one such use had already crept in at the unresolved-human-thread
+   # branch.)
    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
      --phase "$PHASE" --ticket "$TICKET" --status yield
 
@@ -670,7 +683,7 @@ write_phase_thoughts_doc "monitor-merge" "$TICKET" "${MIRROR_BODY:-}" || true
 ```
 
 ```bash
-EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
+# EMIT comes from the prelude (CTL-1998).
 if [[ -x "$EMIT" ]]; then
   "$EMIT" --phase "$PHASE" --ticket "$TICKET" --status complete
 fi

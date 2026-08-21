@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cli/beliefs-shadow-status.test.mjs — CTL-935 Phase 6: flag-live verification.
 // Run: cd plugins/dev/scripts/execution-core && bun test cli/beliefs-shadow-status.test.mjs
 

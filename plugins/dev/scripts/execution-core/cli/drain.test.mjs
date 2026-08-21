@@ -1,3 +1,4 @@
+//bin/true 2>/dev/null; exec 1>&2; echo "REFUSING: a SHELL is executing this JavaScript module — see CTL-1937."; exit 97
 // cli/drain.test.mjs — CTL-1095. Unit tests for setDrain / readDrainStatus.
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test cli/drain.test.mjs

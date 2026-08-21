@@ -420,6 +420,27 @@ export function makeCommentWakeDispatch(dispatch, { emitBackstop } = {}) {
     );
 }
 
+// ─── CTL-1943: the agent-session narrator, installed once by the daemon ──────
+//
+// A module-level singleton in the shape of setLinearWriteProxy — the daemon installs it
+// at boot, every other consumer of dispatchTicket gets it for free, and a test (or a
+// daemon with the write proxy off) leaves it null.
+//
+// ⛔ NULL IS THE DEFAULT AND THE DEFAULT MUST STAY FREE. Every dispatch in this tree,
+// including every existing test that never heard of this ticket, goes through the
+// `if (!_sessionNarrator)` branch below. That branch must remain a plain no-op.
+let _sessionNarrator = null;
+
+/** setAgentSessionNarrator — install (or clear, with null) the phase narrator. */
+export function setAgentSessionNarrator(narrator) {
+  _sessionNarrator = narrator ?? null;
+}
+
+/** getAgentSessionNarrator — test/diagnostic read of the installed narrator. */
+export function getAgentSessionNarrator() {
+  return _sessionNarrator;
+}
+
 // dispatchTicket — thin seam over the injectable dispatch function.
 // CTL-705: forwards optional resumeSession so the resume re-dispatch path can
 // pass a resume UUID. Omitted when absent — the legacy toEqual assertions stay
@@ -428,14 +449,45 @@ export function dispatchTicket(
   orchDir,
   ticket,
   phase,
-  { dispatch = defaultDispatch, resumeSession, handoffPath, attempt, clusterGeneration } = {}
+  { dispatch = defaultDispatch, resumeSession, handoffPath, attempt, clusterGeneration, narrator } = {}
 ) {
   const args = { orchDir, ticket, phase };
   if (resumeSession) args.resumeSession = resumeSession;
   if (handoffPath) args.handoffPath = handoffPath;
   if (attempt != null) args.attempt = attempt; // CTL-761
   if (clusterGeneration != null) args.clusterGeneration = clusterGeneration; // CTL-864
-  return dispatch(args);
+
+  // ── CTL-1943 — narrate the phase as a Linear agent session ──
+  //
+  // ⛔ THE ASYMMETRY, AT THE CALL SITE, SO NOBODY GENERALISES IT (COORD-122).
+  // This is the ONLY network write this function performs, and it is NON-BLOCKING:
+  // `narrate` is synchronous and total, and the request it issues is a `spawn` (not
+  // `spawnSync`) whose response is collected on a later event-loop turn. The other
+  // three proxied routes — issue-state, label, comment — stay SYNCHRONOUS, because a
+  // dispatch decision depends on each of them.
+  //
+  // The reason is `dispatchTicket`'s position, not a preference: it is called from
+  // inside the synchronous `schedulerTick`, and the proxy's blocking transport has a
+  // 20 s ceiling. A blocking narration here would add up to 20 s per dispatch to a tick
+  // CTL-1524 already records as blocking the event loop.
+  //
+  // ⛔ Placed AFTER `dispatch(args)`, and only on a CONFIRMED launch (Codex #3529
+  // round-1 P2). An earlier cut narrated first, so a dispatch that FAILED — a missing
+  // registry entry, failed worktree provisioning, a nonzero phase-agent launch — still
+  // posted a plan marking the phase `inProgress` with no worker in existence to correct
+  // it. Linear then showed active work until a later retry or the 30-minute staleness
+  // timeout, which is exactly the "the agent didn't start" misreading this feature exists
+  // to prevent, manufactured by the feature itself.
+  //
+  // "Confirmed" follows this module's own rule: a THENABLE means the SDK path, whose
+  // synchronous prelaunch has already written the status:"dispatched" signal before the
+  // promise is returned (see settleDispatchSync) — the launch happened. A plain result is
+  // confirmed by `code === 0`, the same field every dispatch consumer reads.
+  const n = narrator !== undefined ? narrator : _sessionNarrator;
+  const result = dispatch(args);
+  if (n && (isThenable(result) || result?.code === 0)) n.narrate(ticket, phase);
+
+  return result;
 }
 
 // ── CTL-1367 P1: async-dispatch settlement seam ─────────────────────────────

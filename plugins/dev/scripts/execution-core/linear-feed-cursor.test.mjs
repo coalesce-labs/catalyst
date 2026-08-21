@@ -1,0 +1,245 @@
+// linear-feed-cursor.test.mjs — CTL-1847.
+//
+// Run: cd plugins/dev/scripts/execution-core && bun test linear-feed-cursor.test.mjs
+//
+// These run against REAL files in a temp dir, not a mocked fs, because the whole
+// point of the cursor is what survives a crash and a restart — and a mocked write
+// proves nothing about that. Every write is verified by RE-READING it.
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  CURSOR_ABSENT,
+  CURSOR_OK,
+  CURSOR_UNREADABLE,
+  DEFAULT_RESET_LOOKBACK_MS,
+  defaultCursorPath,
+  readCursor,
+  resolveStartPosition,
+  writeCursor,
+} from "./linear-feed-cursor.mjs";
+
+let dir;
+let path;
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "lfc-"));
+  path = defaultCursorPath(dir);
+});
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+describe("the read is THREE-valued — absent and unreadable are opposite actions", () => {
+  test("no file at all is ABSENT (first run)", () => {
+    expect(readCursor(path)).toMatchObject({ state: CURSOR_ABSENT, position: null });
+  });
+
+  test("⭐ a file that exists but says nothing usable is UNREADABLE, not absent", () => {
+    // The distinction matters because absent means "nothing was ever emitted" while
+    // unreadable means "we HAD a position and lost it". Collapsing them into one
+    // null is the invalid-treated-as-missing shape this repo has shipped before.
+    for (const body of ["{}", "null", "[]", '{"lastCreatedAt":null}']) {
+      writeFileSync(path, body, "utf8");
+      const r = readCursor(path);
+      expect(r.state).toBe(CURSOR_UNREADABLE);
+      expect(r.position).toBeNull();
+      expect(typeof r.reason).toBe("string");
+      expect(r.reason.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("malformed JSON is UNREADABLE with a named reason", () => {
+    writeFileSync(path, "{not json", "utf8");
+    expect(readCursor(path)).toMatchObject({ state: CURSOR_UNREADABLE, reason: "malformed-json" });
+  });
+
+  test("⭐ coercion traps: a non-integer position never reads as 'the beginning of time'", () => {
+    // Number(null) and Number([]) are both 0, which as a position means "replay
+    // everything". Type is checked BEFORE any coercion for exactly this reason.
+    for (const bad of ["[]", '"123"', "{}", "-1", "1.5", "true"]) {
+      writeFileSync(path, `{"lastCreatedAt":${bad}}`, "utf8");
+      const r = readCursor(path);
+      expect(r.state).toBe(CURSOR_UNREADABLE);
+      expect(r.position).toBeNull();
+    }
+  });
+
+  test("a well-formed position reads OK", () => {
+    writeFileSync(path, '{"lastCreatedAt":1786800000000,"lastId":"hist-9"}', "utf8");
+    expect(readCursor(path)).toMatchObject({
+      state: CURSOR_OK,
+      position: { lastCreatedAt: 1786800000000, lastId: "hist-9" },
+    });
+  });
+
+  test("a read error is UNREADABLE, not absent — 'could not look' is not 'nothing there'", () => {
+    const r = readCursor(path, {
+      existsFn: () => true,
+      readFileFn: () => {
+        const e = new Error("nope");
+        e.code = "EACCES";
+        throw e;
+      },
+    });
+    expect(r).toMatchObject({ state: CURSOR_UNREADABLE, reason: "read-failed:EACCES" });
+  });
+
+  test("readCursor never throws, whatever the file contains", () => {
+    for (const body of ["", "\0", "{{{{", '{"lastCreatedAt":'.repeat(50)]) {
+      writeFileSync(path, body, "utf8");
+      expect(() => readCursor(path)).not.toThrow();
+    }
+  });
+});
+
+describe("writes are atomic and verified by RE-READ", () => {
+  test("a written position round-trips", () => {
+    writeCursor(path, { lastCreatedAt: 1786800000001, lastId: "hist-1" });
+    // verify by re-read, not by trusting the write returned
+    expect(readCursor(path)).toMatchObject({
+      state: CURSOR_OK,
+      position: { lastCreatedAt: 1786800000001, lastId: "hist-1" },
+    });
+  });
+
+  test("no .tmp file is left behind", () => {
+    writeCursor(path, { lastCreatedAt: 5, lastId: null });
+    expect(existsSync(`${path}.tmp.${process.pid}`)).toBe(false);
+    expect(readCursor(path).state).toBe(CURSOR_OK);
+  });
+
+  test("⭐ a crash mid-write leaves the PREVIOUS cursor intact", () => {
+    // tmp+rename exists so a torn write cannot cost us the position we were trying
+    // to save — losing it would force a reset, which is the expensive path.
+    writeCursor(path, { lastCreatedAt: 100, lastId: "good" });
+    expect(() =>
+      writeCursor(path, { lastCreatedAt: 200, lastId: "bad" }, {
+        renameFn: () => {
+          throw new Error("crash between write and rename");
+        },
+      }),
+    ).toThrow();
+    expect(readCursor(path)).toMatchObject({ state: CURSOR_OK, position: { lastCreatedAt: 100, lastId: "good" } });
+  });
+
+  test("a bad position is refused rather than persisted", () => {
+    for (const bad of [null, {}, { lastCreatedAt: "5" }, { lastCreatedAt: 1.5 }]) {
+      expect(() => writeCursor(path, bad)).toThrow();
+    }
+    expect(readCursor(path).state).toBe(CURSOR_ABSENT);
+  });
+
+  test("the written file is one JSON line", () => {
+    writeCursor(path, { lastCreatedAt: 7, lastId: "x" });
+    const raw = readFileSync(path, "utf8");
+    expect(raw.endsWith("\n")).toBe(true);
+    expect(raw.trim().split("\n")).toHaveLength(1);
+  });
+});
+
+describe("resolveStartPosition — a restart is not a gap, and a reset is BOUNDED", () => {
+  const now = () => 1_000_000;
+
+  test("a healthy cursor resumes exactly where it stopped, clock-independent", () => {
+    const r = resolveStartPosition({ state: CURSOR_OK, position: { lastCreatedAt: 424242, lastId: "h" } }, { now });
+    expect(r).toMatchObject({ since: 424242, mode: "resume", alarm: null });
+  });
+
+  test("first run is a cold start with no alarm", () => {
+    const r = resolveStartPosition({ state: CURSOR_ABSENT }, { now });
+    expect(r).toMatchObject({ since: 1_000_000, mode: "cold-start", alarm: null });
+  });
+
+  test("⭐ a reset resumes from a STATED bound, never bare now()", () => {
+    const r = resolveStartPosition({ state: CURSOR_UNREADABLE, reason: "malformed-json" }, { now, resetLookbackMs: 60_000 });
+    expect(r.mode).toBe("reset");
+    expect(r.since).toBe(1_000_000 - 60_000); // not 1_000_000
+    expect(r.lookbackMs).toBe(60_000);
+  });
+
+  test("the bound is carried on the alarm, so the replay size is auditable", () => {
+    const r = resolveStartPosition({ state: CURSOR_UNREADABLE, reason: "not-an-object" }, { now, resetLookbackMs: 60_000 });
+    expect(r.alarm).toMatchObject({ severity: "warn", reason: "not-an-object", lookbackMs: 60_000 });
+    expect(r.alarm.message).toContain("60000ms");
+  });
+
+  test("a reset is never silent — the alarm names why", () => {
+    for (const reason of ["malformed-json", "no-usable-position", "read-failed:EACCES"]) {
+      const r = resolveStartPosition({ state: CURSOR_UNREADABLE, reason }, { now });
+      expect(r.alarm).not.toBeNull();
+      expect(r.alarm.reason).toBe(reason);
+    }
+  });
+
+  test("an invalid lookback falls back to the stated default, not to zero", () => {
+    // A zero bound would silently turn a reset into "skip everything".
+    for (const bad of [null, -1, "60000", 1.5, undefined]) {
+      const r = resolveStartPosition({ state: CURSOR_UNREADABLE }, { now, resetLookbackMs: bad });
+      expect(r.lookbackMs).toBe(DEFAULT_RESET_LOOKBACK_MS);
+      expect(r.since).toBe(1_000_000 - DEFAULT_RESET_LOOKBACK_MS);
+    }
+  });
+
+  test("end-to-end: write, lose the file, and the reset is bounded and loud", () => {
+    writeCursor(path, { lastCreatedAt: 999, lastId: "h" });
+    expect(resolveStartPosition(readCursor(path), { now }).mode).toBe("resume");
+    writeFileSync(path, "corrupted", "utf8");
+    const after = resolveStartPosition(readCursor(path), { now, resetLookbackMs: 30_000 });
+    expect(after.mode).toBe("reset");
+    expect(after.since).toBe(1_000_000 - 30_000);
+    expect(after.alarm.reason).toBe("malformed-json");
+  });
+});
+
+
+// ── CTL-1847 (Codex P1 round 4): absent ≠ first run ──────────────────────────
+describe("resolveStartPosition — a cursor that vanishes after the producer has run", () => {
+  const NOW = 1_000_000_000;
+  const now = () => NOW;
+
+  test("absent + NEVER ran ⇒ cold-start at now (unchanged first-run behaviour)", () => {
+    const r = resolveStartPosition({ state: CURSOR_ABSENT }, { now, everRan: false });
+    expect(r.mode).toBe("cold-start");
+    expect(r.since).toBe(NOW);
+    expect(r.alarm).toBe(null);
+  });
+
+  test("⛔ absent + HAS run ⇒ bounded lookback and a LOUD alarm, not a cold start", () => {
+    // Cold-starting here silently skips everything since the last good cursor.
+    // Survivable while smee is authoritative; under enforce, readiness is latched
+    // and those events' webhook copies are suppressed, so nothing can retry them.
+    const r = resolveStartPosition({ state: CURSOR_ABSENT }, { now, everRan: true });
+    expect(r.mode).toBe("reset");
+    expect(r.since).toBe(NOW - DEFAULT_RESET_LOOKBACK_MS);
+    expect(r.lookbackMs).toBe(DEFAULT_RESET_LOOKBACK_MS);
+    expect(r.alarm).not.toBe(null);
+    expect(r.alarm.severity).toBe("warn");
+    expect(r.alarm.reason).toBe("cursor-vanished-after-first-run");
+  });
+
+  test("everRan does not disturb a readable cursor", () => {
+    const read = { state: CURSOR_OK, position: { lastCreatedAt: 42, lastId: "x" } };
+    for (const everRan of [true, false]) {
+      const r = resolveStartPosition(read, { now, everRan });
+      expect(r.mode).toBe("resume");
+      expect(r.since).toBe(42);
+    }
+  });
+
+  test("everRan does not disturb the UNREADABLE path (already a reset)", () => {
+    for (const everRan of [true, false]) {
+      const r = resolveStartPosition({ state: CURSOR_UNREADABLE }, { now, everRan });
+      expect(r.mode).toBe("reset");
+      expect(r.alarm).not.toBe(null);
+    }
+  });
+
+  test("the lookback is honoured and bounded on the vanished path too", () => {
+    const r = resolveStartPosition({ state: CURSOR_ABSENT }, { now, everRan: true, resetLookbackMs: 60_000 });
+    expect(r.since).toBe(NOW - 60_000);
+    const bad = resolveStartPosition({ state: CURSOR_ABSENT }, { now, everRan: true, resetLookbackMs: -5 });
+    expect(bad.lookbackMs).toBe(DEFAULT_RESET_LOOKBACK_MS);
+  });
+});

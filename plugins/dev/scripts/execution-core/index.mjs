@@ -38,6 +38,8 @@ export {
   startTailing,
   startMonitor,
   stopMonitor,
+  setCloudFeedGate, // CTL-1847: install/clear the cloud-feed dispatch gate
+  getCloudFeedGate, // CTL-1847
 } from "./monitor.mjs";
 // scheduler.mjs (CTL-536) — re-exported explicitly so the test-only
 // __resetForTests helper stays out of the public barrel.

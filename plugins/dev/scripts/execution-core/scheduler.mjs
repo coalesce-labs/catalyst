@@ -13,6 +13,8 @@
 // Composes: lib/dependency-graph.mjs (readiness), scheduler-rank.mjs (ranking),
 // lib/phase-fsm.mjs (phase advancement, Phase 4), eligible-set.mjs (candidates).
 
+import { getLaneClaimGuard } from "./lane-claim-install.mjs"; // CTL-2068
+import { VERDICT as LANE_CLAIM_VERDICT } from "./lane-claim.mjs"; // CTL-2068
 import {
   readdirSync,
   readFileSync,
@@ -71,16 +73,26 @@ export { EMPTY_WORKER_DIR_GRACE_DEFAULT_MS };
 // budget) live here. deriveAdvancement stays pure — the impure reads happen in
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
+// CTL-2050: the artifact-contradiction retraction reuses the SAME work-done probes
+// the reclaim sweep uses — "did this phase produce its artifact" already has one
+// tested answer in this repo and a second one would drift from it.
+import { WORK_DONE_PROBES, hasProbe, probeIsLocal } from "./work-done-probes.mjs";
+import { isRetractableFailure, classifyArtifactContradiction } from "./artifact-contradiction.mjs";
 import { explainAdvanceEvidence } from "./assertion-evidence.mjs"; // CTL-1789: from-phase terminal attribution
 import {
   computeAdvanceEdgeKey,
   isAdvanceAlreadyApplied,
   recordAdvanceApplied,
+  retractAdvanceMarkersInto,
 } from "./advance-guard.mjs"; // CTL-1805: durable once-per-edge advancement idempotency guard
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
-import { canOccupySlotNow, defaultHasTriageArtifact } from "./dispatch-readiness.mjs";
+import {
+  canOccupySlotNow,
+  defaultHasTriageArtifact,
+  triageReservationDeadlocked,
+} from "./dispatch-readiness.mjs";
 import {
   defaultDispatch,
   dispatchTicket,
@@ -197,6 +209,7 @@ import { emitReapIntent } from "./reap-intent.mjs";
 // derivable from the unified event log.
 import {
   reclaimDeadWorkIfPossible as defaultReclaimDeadWork,
+  defaultRetractContradictedFailure, // CTL-2050
   reclaimDeadHostWork,
   // CTL-1191: surviving-roster primitives so the recovery passes (unstuck /
   // reasoning / diagnostician) HRW-gate over the SURVIVING roster — a dead
@@ -360,6 +373,7 @@ import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs"
 // runTransition (would double-audit the triage path, which keeps its own
 // phase.triage.linear-transition event). Best-effort: swallow-on-error.
 import { appendLinearStateWriteEvent } from "./linear-state-write-event.mjs";
+import { recordFleetWrite as defaultRecordFleetWrite } from "./lane-claim-write-ledger.mjs"; // CTL-2070: the timely write-ledger record seam
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 Phase 5
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { resolveTicketType } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
@@ -392,7 +406,12 @@ import {
   getEligibleDir,
   getEventLogPath,
   getHostName,
-  getClusterHosts,
+  // CTL-1785: the per-tick DISPATCH roster (HRW who-may-take-work) is ENTITLEMENT;
+  // `multiHost` (the fenceGuard !multiHost disarm) and the host-death takeover
+  // pre-gate are TOPOLOGY and stay EXISTENCE-derived. `off` mode (default):
+  // getEntitledHosts() === getExistenceHosts() === getClusterHosts().
+  getEntitledHosts,
+  getExistenceHosts,
   hostMembershipWarning,
   isDraining as isDrainingDefault,
   getDrainedMarkerPath, // CTL-1321: shared resolver for the drain.drained sentinel
@@ -418,7 +437,13 @@ import {
   openBrokerStateDb,
 } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap). CTL-1157: getAllPrStatuses = the filter_state PR-lifecycle reader for the phantom/orphaned-PR invariants. openBrokerStateDb (CTL-1157 Codex round-6): the exec-core daemon must open the broker DB handle before these readers — ensure() throws otherwise and assembleBoardState swallows it, leaving the board/PR maps empty and the cohorts inert.
 import { readReconcileHealthMarkers } from "./reconcile-health.mjs"; // CTL-1290: stranded-node reconcile signal
-import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
+import { claimDispatchSync, isClaimFailure } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS (CTL-2033: + the outcome discriminator)
+// COORD-236: one owner for "may this label write be re-issued next tick?"
+import {
+  TERMINAL_LABEL_REASONS,
+  shouldCoolDownLabel,
+  isThrottledLabelReason,
+} from "./label-failure-class.mjs";
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
 import {
@@ -430,7 +455,9 @@ import {
   buildExplanation,
   buildRemediateCapExplanation,
   coerceExplanation,
-} from "./escalation-explanation.mjs"; // CTL-1130
+  describeSignalReason,
+  resolveSignalReason,
+} from "./escalation-explanation.mjs"; // CTL-1130, CTL-1754
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -967,6 +994,13 @@ export function buildGlobalRanking(orchDir, eligible) {
 
   for (const t of eligible ?? []) {
     if (started.has(t.identifier)) continue; // already in-flight (listed above)
+    // CTL-2090: a queued descriptor here is by construction untriaged (no
+    // workers/<t>/ dir), and preemption's justification is that the freed slot
+    // lets the monitor TRIAGE it (CAT-36 guard below). A triage-capped ticket
+    // (CTL-1441) will never be triaged, so preempting a live worker for it kills
+    // real work for a slot nothing can consume. Same predicate as the STEP A
+    // admission exclusion.
+    if (triageReservationDeadlocked(orchDir, t.identifier)) continue;
     descriptors.push({
       identifier: t.identifier,
       priority: t.priority,
@@ -1354,6 +1388,224 @@ export function expireYieldedSignals(
     }
   }
   return { evaluated, ok: true };
+}
+
+// retractContradictedFailures — CTL-2050. Re-derive `done` for any phase whose
+// signal says `failed` for an EMIT-TIME INFRASTRUCTURE reason while the phase's
+// own artifact proves the work landed.
+//
+// ⛔ DELIBERATELY NOT GATED ON `inFlightTickets` — that predicate is gate 2 of
+// the deadlock. isTicketInFlight returns FALSE the moment any live phase reads
+// `failed`, so every ticket this sweep exists to release is, by construction,
+// already outside the in-flight set the reclaim loop below iterates. Putting the
+// call behind that filter would be a bound whose enforcement point cannot fire —
+// the same shape as the yield deadline that lived only in the runner (CTL-1854).
+//
+// Ordering inside the loop is load-bearing for COST, not just for correctness:
+// the cheap conjunct (status + reason, no I/O) runs first, and only a signal
+// that passes it gets a WORK_DONE_PROBE — two of which (`pr`, `monitor-merge`)
+// spend a GitHub API call. In steady state the eligible population is empty and
+// this sweep costs one signal read per tick.
+//
+// Fail-open per signal: one bad signal must never wedge the tick or stop the
+// remaining retractions. Never silent — a swallowed read failure would disable
+// the whole sweep exactly the way the TDZ ReferenceError disabled yield expiry.
+export function retractContradictedFailures(
+  orchDir,
+  {
+    readAll = readAllPhaseSignals,
+    retract = defaultRetractContradictedFailure,
+    probes = WORK_DONE_PROBES,
+    probeExists = hasProbe,
+    // Is this phase's probe answerable from DISK? Seam over the registry that
+    // lives with the probes (work-done-probes.mjs), so adding a probe forces the
+    // question rather than silently inheriting "local".
+    probeIsLocalFn = probeIsLocal,
+    // Per-ticket repoRoot resolution, resolved LAZILY and only for a signal that
+    // already passed the cheap conjunct. The code-phase probes (implement,
+    // research, plan, remediate) resolve the ticket worktree FROM repoRoot
+    // (work-done-probes.mjs resolveWorktree) and silently return 0/false without
+    // it — so passing `undefined` here would make those probes answer
+    // "artifact-absent" for every ticket, which reads as a correct hold and is
+    // really a check that cannot fire. Same resolution the hung-worker watchdog
+    // and the reclaim sweep use.
+    //
+    // ⚠️ It is a SEAM, not an inline expression: `repoRoot` has no binding at the
+    // schedulerTick call site (the only other one in this file is block-scoped
+    // inside the watchdog loop), and reaching for it there would have thrown a
+    // ReferenceError on every tick — the same shape as the TDZ throw that
+    // disabled yield expiry, which `node --check` cannot see.
+    resolveRepoRoot = (ticket) => {
+      const team = teamOf(ticket);
+      return team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
+    },
+    // WHEN was this signal written — the input the `cluster_fence_stale`
+    // ambiguity window is decided on (CTL-2050, Codex #3690 P1).
+    //
+    // A ladder, then the disk. `completedAt` is what phase-agent-emit-complete
+    // stamps on a terminal (`failed` IS terminal, so it is present on exactly
+    // this population); `updatedAt` is the reader's projection and the fallback
+    // for a signal some other writer produced. If neither parses, the FILE's
+    // mtime answers — it is the physical fact "when were these bytes last
+    // written", and a terminal signal is not rewritten afterwards.
+    //
+    // ⚠️ Returns null, never a guess, when nothing can be read. The classifier
+    // holds on null (`signal-age-unknown`). A seam so a test can drive the
+    // window from both edges without touching the clock or the filesystem.
+    signalWrittenAtMs = (sig) => {
+      for (const v of [sig?.raw?.completedAt, sig?.updatedAt, sig?.raw?.updatedAt]) {
+        const ms = typeof v === "number" ? v : typeof v === "string" ? Date.parse(v) : NaN;
+        if (Number.isFinite(ms)) return ms;
+      }
+      try {
+        return statSync(sig.signalPath).mtimeMs;
+      } catch {
+        return null;
+      }
+    },
+  } = {}
+) {
+  let eligible = 0;
+  let retracted = 0;
+  // ⭐ WHY a per-reason breakdown and not a bare hold count: "it held" is not an
+  // answer an operator can act on. `artifact-absent` (the probe looked and the
+  // artifact is not there — a genuine fence bow-out) and `artifact-inconclusive`
+  // (the probe could not answer) are the same number and completely different
+  // facts, and collapsing them is how a detector stops being able to fail. Same
+  // reason the classifier is three-valued at all.
+  const heldReasons = Object.create(null);
+  const note = (r) => { heldReasons[r] = (heldReasons[r] ?? 0) + 1; };
+  let signals;
+  try {
+    signals = readAll(orchDir);
+  } catch (err) {
+    log.warn(
+      { orchDir, err: err?.message },
+      "retractContradictedFailures: signal read failed — no failure evaluated this tick (CTL-2050)"
+    );
+    return { eligible: 0, retracted: 0, heldReasons, ok: false };
+  }
+  for (const sig of signals ?? []) {
+    try {
+      // ⛔ THE READER'S VIEW IS NOT THE RECORD. readAllPhaseSignals projects a
+      // FIXED field list (ticket/phase/status/liveness/updatedAt/pr/worktreePath/
+      // host) and puts everything else — `failureReason` included — under `.raw`.
+      // Classifying `sig` alone therefore saw NO reason on any signal, answered
+      // `reason-absent` for every one, and the whole sweep was inert while its
+      // unit tests stayed green. The e2e over the real reader is what caught it.
+      // Same shape as the yield path, which spreads `signal.raw` for the same
+      // reason.
+      const failureReason = sig?.failureReason ?? sig?.raw?.failureReason;
+      // The ambiguity window's input, resolved for `failed` signals ONLY — at
+      // worst one statSync, and only on a signal that is already terminal-failed.
+      // Every other signal stops before it, so the steady-state sweep still costs
+      // one read per tick.
+      const writtenAtMs = String(sig?.status) === "failed" ? signalWrittenAtMs(sig) : null;
+      // Conjunct (a) — free. The overwhelming majority of `failed` signals stop here.
+      const cheap = isRetractableFailure({ signal: sig, failureReason, writtenAtMs });
+      if (!cheap.eligible) {
+        // ⭐ Only the WINDOW holds are counted. The other cheap rejects are every
+        // non-failed signal in the orchDir — recording them would swamp the
+        // breakdown with the healthy fleet. `signal-age-unknown` and
+        // `reason-window-expired` are different: they are infra-class failures
+        // this sweep looked at and declined, and an operator asking "why did the
+        // retraction not fire?" is asking about exactly those two.
+        if (cheap.reason === "signal-age-unknown" || cheap.reason === "reason-window-expired") {
+          note(cheap.reason);
+        }
+        continue;
+      }
+      eligible += 1;
+
+      // PATH-DERIVED identity, exactly as the yield sweep supplies it: a signal
+      // whose JSON omits ticket/phase would otherwise give the writer no target
+      // and the retraction would silently no-op forever.
+      const _parts = String(sig.signalPath ?? "").split("/");
+      const _file = _parts[_parts.length - 1] ?? "";
+      sig.derivedTicket = _parts[_parts.length - 2] ?? null;
+      sig.derivedPhase =
+        _file.startsWith("phase-") && _file.endsWith(".json")
+          ? _file.slice("phase-".length, -".json".length)
+          : null;
+      const ticket =
+        typeof sig.ticket === "string" && sig.ticket ? sig.ticket : sig.derivedTicket;
+      const phase = typeof sig.phase === "string" && sig.phase ? sig.phase : sig.derivedPhase;
+
+      // Conjunct (b) — the artifact. ⚠️ THREE-VALUED: `null` means the probe
+      // could not answer, and the classifier must see that as inconclusive
+      // rather than as "the artifact is absent". Collapsing a throw into `false`
+      // would be safe here by luck (both hold) — but the next reader would
+      // inherit a probe whose failure is indistinguishable from its negative,
+      // which is how this repo's false zeros get built.
+      const registered = probeExists(phase);
+      // ⛔ Network-bound probes (`pr`, `monitor-merge`) are NOT run here, and the
+      // guard is on the CALL, not only on the classifier: a classifier-only
+      // guard would still have spent the `gh api` request before declining.
+      const local = probeIsLocalFn(phase);
+      let artifactPresent = null;
+      if (registered && local) {
+        try {
+          artifactPresent =
+            probes[phase]({
+              ticket,
+              phase,
+              orchDir,
+              repoRoot: resolveRepoRoot(ticket),
+              // CTL-2050 (Codex #3690 P2): the CANONICAL recorded path. Without
+              // it the artifact probes fall back to resolveWorktree's exact
+              // `refs/heads/<ticket>` match, which every real branch shape
+              // (`ryan/<ticket>-slug`) misses — so a valid research/plan/
+              // implement artifact would probe FALSE and the hold would read as
+              // a correct decline. Passing it is the difference between the
+              // sweep working and a check that cannot fire.
+              worktreePath: sig.worktreePath ?? sig.raw?.worktreePath ?? null,
+            }) === true;
+        } catch (err) {
+          artifactPresent = null;
+          log.warn(
+            { ticket, phase, err: err?.message },
+            "retractContradictedFailures: artifact probe threw — inconclusive, holding (CTL-2050)"
+          );
+        }
+      }
+
+      const verdict = classifyArtifactContradiction({
+        signal: sig,
+        failureReason,
+        writtenAtMs,
+        hasProbe: registered,
+        probeIsLocal: local,
+        artifactPresent,
+      });
+      if (!verdict.retract) {
+        note(verdict.reason);
+        log.debug(
+          { ticket, phase, reason: verdict.reason, failureReason: verdict.failureReason },
+          "retractContradictedFailures: holding (CTL-2050)"
+        );
+        continue;
+      }
+      const wrote = retract(orchDir, sig, verdict);
+      if (wrote) retracted += 1;
+      else note("write-declined");
+      // Report what HAPPENED, not what was attempted: a refused or failed write
+      // that logged success would be a log that cannot be wrong about the thing
+      // it reports (the CTL-1854 round-fix, on a new path).
+      log.warn(
+        { ticket, phase, failureReason: verdict.failureReason, wrote },
+        wrote
+          ? "retractContradictedFailures: artifact contradicts an infra failure — re-derived done, FABRICATED (CTL-2050)"
+          : "retractContradictedFailures: retraction declined at the write (signal changed on disk) (CTL-2050)"
+      );
+    } catch (err) {
+      log.warn(
+        { ticket: sig?.ticket, phase: sig?.phase, signalPath: sig?.signalPath, err: err?.message },
+        "retractContradictedFailures: evaluation threw for one signal (CTL-2050)"
+      );
+      note("evaluation-threw");
+    }
+  }
+  return { eligible, retracted, heldReasons, ok: true };
 }
 
 // CTL-1323: the set of REAL pipeline phases — a signal whose phase is one of these
@@ -2578,28 +2830,34 @@ export function convergeHeldLabel(
         );
       }
     }
-    if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
+    if (orchDir && res && res.applied === false && shouldCoolDownLabel(res.reason)) {
       recordLabelCooldown(orchDir, ticket, desired, now());
+      // COORD-236: the two classes get DIFFERENT sentences, because an operator
+      // reading "unrecoverable" for a budget refusal would go looking for a
+      // missing label that is not missing.
+      const throttled = isThrottledLabelReason(res.reason);
       log.warn(
-        { ticket, label: desired, reason: res.reason },
-        "ctl-834: held-label apply unrecoverable — backing off (cool-down)"
+        { ticket, label: desired, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
+        throttled
+          ? "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses"
+          : "ctl-834: held-label apply unrecoverable — backing off (cool-down)"
       );
     }
   }
   return writes;
 }
 
-// UNRECOVERABLE_LABEL_REASONS — applyLabel reasons that can never land this
-// daemon lifetime, so convergeHeldLabel arms a cool-down instead of re-issuing
-// the write every tick (CTL-834). Mirrors label-guard.labelOnce's .skipped set.
-// "team-mismatch": CTL-1085 split it out of "missing-label" in classifyLabelFailure;
-// it MUST stay in this set or convergeHeldLabel loses its cool-down on cross-team
-// (ADV) label failures and re-introduces the CTL-834 per-tick retry storm.
-const UNRECOVERABLE_LABEL_REASONS = new Set([
-  "missing-label",
-  "exclusive-conflict",
-  "team-mismatch",
-]);
+// UNRECOVERABLE_LABEL_REASONS — the TERMINAL class, now owned by
+// label-failure-class.mjs so this file and label-guard.mjs cannot drift apart
+// (they carried byte-identical hand-written copies). Kept under its original
+// name so every existing reader of this identifier still resolves.
+//
+// ⛔ COORD-236: this set was never the whole answer, and reading it as such is
+// what cost the fleet a day's write budget. It answers "can this EVER land?" —
+// a budget refusal answers "not right now", which is a different question, and
+// falling out of this set meant the converger re-issued the write every tick for
+// hours. `shouldCoolDownLabel` is the predicate the cool-down actually wants.
+const UNRECOVERABLE_LABEL_REASONS = TERMINAL_LABEL_REASONS;
 
 // convergeDispositionLabel — generalised version of convergeHeldLabel covering the
 // full worker-status disposition set (CTL-764 Phase 4). Like convergeHeldLabel it
@@ -2655,11 +2913,14 @@ export function convergeDispositionLabel(
       );
     }
     writes++;
-    if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
+    if (orchDir && res && res.applied === false && shouldCoolDownLabel(res.reason)) {
       recordLabelCooldown(orchDir, ticket, desired, now());
+      const throttled = isThrottledLabelReason(res.reason);
       log.warn(
-        { ticket, label: desired, reason: res.reason },
-        "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
+        { ticket, label: desired, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
+        throttled
+          ? "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses"
+          : "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
       );
     }
   }
@@ -4123,13 +4384,26 @@ function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob
 // next phase on the next tick. Mirrors clearDispatchCooldown's best-effort,
 // never-throw discipline.
 //
+// ⛔ CTL-2024: that last sentence has been FALSE since CTL-1805 landed on 2026-08-15
+// (#3404) — three days — and the clear below is where it is made true. The guard and
+// this defect shipped together. deriveAdvancement DID re-derive; CTL-1805's advance
+// guard then suppressed the whole fanout, because its edge key is computed from the
+// PREDECESSOR signal, which the unstick does not touch. A cleared
+// stall could therefore NEVER re-enter its phase: CTC-427 and CTC-55 each re-derived
+// and were re-suppressed 16× (CTC-441, never cleared, 1× — the control). Step 2
+// retracts that marker, alongside the three other durable suppressors this clear
+// already re-arms.
+//
 // The clear, per the CTL-1005 Gherkin:
 //   1. delete the synthetic phase-<phase>.json stalled signal (the unstick);
-//   2. clear the needs-human label + its .linear-label-needs-human.{applied,skipped}
+//   2. retract the CTL-1805 advance marker(s) for the edge INTO <phase> (CTL-2024),
+//      because step 1 undid the very advance that marker records — without this the
+//      re-derived advance is suppressed on an unchanged predecessor key, forever;
+//   3. clear the needs-human label + its .linear-label-needs-human.{applied,skipped}
 //      marker (clearStalledLabel) so a future genuine escalation can re-apply;
-//   3. delete .orphan-detected.applied (CTL-868) so a future stall re-emits the
+//   4. delete .orphan-detected.applied (CTL-868) so a future stall re-emits the
 //      orphan-detected event instead of being silently suppressed;
-//   4. write the .janitor-cleared-<phase>.applied once-marker ON CONFIRMED label
+//   5. write the .janitor-cleared-<phase>.applied once-marker ON CONFIRMED label
 //      removal only (CTL-1045 Bug 4). Scope is the worker-dir lifetime: file-backed,
 //      survives daemon restarts, deleted only when the reaper removes the worker dir
 //      or an operator re-arms via orch-monitor respond-ticket. Storm-prevention is
@@ -4139,6 +4413,33 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
   return ({ ticket, phase }) => {
     if (!ticket || !phase) return false;
     const workerDir = join(orchDir, "workers", ticket);
+
+    // ── CTL-1936: NOTHING TO CLEAR IS NOT A CLEAR ──
+    // This used to run unconditionally, so a ticket with no stalled signal and no
+    // needs-human still issued a label REMOVAL to Linear on every tick, forever. That
+    // is the measured runaway: CTL-1805 — Done in Linear, carrying only `orchestrator`,
+    // holding a worker directory untouched since Aug 15 — spent 302 of one host's 307
+    // daily cloud writes in ~13 minutes, and every unrelated ticket on that host lost
+    // its writes as collateral.
+    //
+    // ⚠️ The gate is deliberately a CONJUNCTION, not just "is the stalled signal gone".
+    // A previous clear can delete the signal and then FAIL to remove the label; that
+    // ticket must still retry, or the label is stranded forever. So the skip requires
+    // BOTH to be absent: no stall to clear, and no local record that a label was ever
+    // applied. Either one present → proceed exactly as before.
+    const stalledSignal = join(workerDir, `phase-${phase}.json`);
+    const labelMarkerBase = join(workerDir, ".linear-label-needs-human");
+    const nothingToClear =
+      !existsSync(stalledSignal) &&
+      !existsSync(`${labelMarkerBase}.applied`) &&
+      !existsSync(`${labelMarkerBase}.skipped`);
+    if (nothingToClear) {
+      log.debug?.(
+        { ticket, phase },
+        "stall-janitor: no stalled signal and no needs-human marker — nothing to clear (CTL-1936)"
+      );
+      return false;
+    }
     // 1. delete the synthetic stalled signal (the actual unstick).
     try {
       rmSync(join(workerDir, `phase-${phase}.json`), { force: true });
@@ -4148,13 +4449,26 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
         "stall-janitor: stalled-signal delete failed (CTL-1005)"
       );
     }
-    // 2. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
+    // 2. CTL-2024: retract the advance marker(s) for the edge INTO this phase. Step 1
+    //    deleted the successor signal, which UNDOES the advance those markers record —
+    //    but the guard's key is derived from the PREDECESSOR, which nothing here
+    //    touches, so without this retraction the re-derived advance presents a
+    //    byte-identical key and is suppressed on every subsequent tick, forever.
+    //    Scoped to `-to-<phase>` only: that is the sole edge whose effect was undone.
+    const retractedAdvances = retractAdvanceMarkersInto(orchDir, ticket, phase);
+    if (retractedAdvances.length > 0) {
+      log.debug?.(
+        { ticket, phase, retracted: retractedAdvances },
+        "stall-janitor: retracted advance marker(s) so the cleared phase can re-enter (CTL-2024)"
+      );
+    }
+    // 3. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
     try {
       rmSync(join(workerDir, ".orphan-detected.applied"), { force: true });
     } catch {
       /* best-effort */
     }
-    // 3. CTL-1442: re-arm the escalation ask budget. An operator re-arming a
+    // 4. CTL-1442: re-arm the escalation ask budget. An operator re-arming a
     //    stalled ticket starts a FRESH cycle — without this, a retried phase
     //    that no-progresses again hits the spent ask-cap (askCount >= cap) and
     //    is suppressed without a fresh ask or re-stall (Codex P2 on #2590).
@@ -4163,11 +4477,11 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
     } catch {
       /* best-effort */
     }
-    // 4. CTL-1643: clear the durable escalation record so the next same-episode
+    // 5. CTL-1643: clear the durable escalation record so the next same-episode
     //    gate starts fresh. Without this, the labelAttempts > 0 guard in
     //    escalateOnce suppresses the re-escalation event after the operator re-arms.
     forgetDurableEscalation(orchDir, ticket);
-    // 5. CTL-1045 Bug 3 / CAT-24: never leave a marker-only worker dir after
+    // 6. CTL-1045 Bug 3 / CAT-24: never leave a marker-only worker dir after
     // deleting its last real phase signal. Such residue holds no slot yet excludes
     // the ticket from new-work dispatch. Tombstones are not real signals. Preserve
     // a non-empty operator inbox: the daemon writes the reply before invoking this
@@ -4195,7 +4509,7 @@ export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {})
         }
       }
     };
-    // 6. clear the needs-human label; write the once-marker ONLY on confirmed removal
+    // 7. clear the needs-human label; write the once-marker ONLY on confirmed removal
     //    (CTL-1045 Bug 4 — a failed clear must NOT disarm future escalations).
     //
     //    CAT-24 (Codex P1): this runs LAST, and the empty-dir removal above hangs off
@@ -4569,6 +4883,11 @@ export function schedulerTick(
     // distinct source tag — slice-1's deviation note: the parked re-dispatch reuses
     // the scheduler-advance / preemption-resume sites, it is not its own write.)
     appendStateWriteEvent = appendLinearStateWriteEvent,
+    // CTL-2070: the timely fleet write-ledger record seam. Default null so a bare unit tick that
+    // does not inject it never touches the durable ledger; PRODUCTION wires the real
+    // defaultRecordFleetWrite via runTick (same pattern as appendWorkerTransitionEvent below).
+    // Called from emitStateWrite ONLY on an applied transition that carries a to_state.
+    recordFleetWrite = null,
     // CTL-764 Phase 5: unified worker.transition event emitter. Injectable for tests
     // (pass a spy to capture emitted transitions). Default no-op so bare unit ticks
     // that do not inject this seam are unaffected. Production wires the real
@@ -4821,9 +5140,13 @@ export function schedulerTick(
   // daemon restart). multiHost gates the Linear-touching claim: a single-host
   // roster makes the HRW filter an identity AND skips the claim entirely, so the
   // coordination wiring is an exact no-op until a 2nd host joins the roster.
-  const roster = hosts ?? getClusterHosts();
+  const roster = hosts ?? getEntitledHosts();
   const self = hostName ?? getHostName();
-  const multiHost = roster.length > 1;
+  // CTL-1785: multiHost (the fenceGuard `!multiHost` disarm + the Linear-touching
+  // claim gate) stays EXISTENCE-derived so entitlement shedding can never re-enable
+  // an N=1 disarm. An injected `hosts` still controls it (existing test contract);
+  // only the default source splits from the entitled dispatch roster above.
+  const multiHost = (hosts ?? getExistenceHosts()).length > 1;
   // CTL-1057: loud one-time warning when this host is absent from a multi-host roster.
   const _smw = hostMembershipWarning(roster, self);
   if (_smw && !globalThis.__ctl1057_scheduler_warned) {
@@ -4935,6 +5258,18 @@ export function schedulerTick(
       },
       { ticket, phase, source }
     );
+    // CTL-2070: record the fleet's OWN write in the timely write-ledger, so the lane-claim guard
+    // can tell a fleet recovery/re-run move from a foreign lane claim during the ~200 s window
+    // before issue_history catches up. Only an APPLIED transition with a concrete to_state is a
+    // real fleet write; a no-op / short-circuited write is not. Guarded so a ledger throw can
+    // never abort the tick (recordFleetWrite is itself fail-open, this is belt-and-braces).
+    if (typeof recordFleetWrite === "function" && writerResult.applied && writerResult.to_state) {
+      try {
+        recordFleetWrite(ticket, writerResult.to_state, Date.now());
+      } catch {
+        /* the write-ledger is best-effort observability; never wedge a transition on it */
+      }
+    }
   }
 
   // CTL-764 Phase 5: recordTransition — the per-tick sync chokepoint for worker
@@ -5055,6 +5390,38 @@ export function schedulerTick(
       failLogIncludePhase = true, // Pass 2's original rc!=0 log omits the phase field
     }
   ) {
+    // ⛔ CTL-2068 — LANE-CLAIM DISPATCH VETO. The single choke point every phase dispatch
+    // passes through, and the half that actually stops the collision: on CTC-787 the fleet
+    // held the ticket in its pipeline the whole time, so refusing the STATE write alone
+    // would have left the worker running and still opening the duplicate PR.
+    //
+    // Placed ABOVE the dispatch-requested emit on purpose — recording a decision we are
+    // about to refuse would put a phantom dispatch in the audit stream and feed the
+    // runaway-rate detector.
+    //
+    // Fails OPEN in every case it cannot judge (no guard installed, no replica, unranked
+    // state, `triage` — which writes no status and is where fleet work legitimately
+    // begins). Only a positive "a non-fleet actor moved this ticket, and this phase sits
+    // behind where they moved it" refuses.
+    const laneClaimGuard = getLaneClaimGuard();
+    if (laneClaimGuard) {
+      const lc = laneClaimGuard.evaluateDispatch({ ticket, phase });
+      if (lc?.verdict === LANE_CLAIM_VERDICT.REFUSE) {
+        log.warn(
+          {
+            ticket,
+            phase,
+            actor_id: lc.actorId,
+            reason: lc.reason,
+            current_rank: lc.currentRank,
+            target_rank: lc.targetRank,
+          },
+          "ctl-2068: skipping dispatch — a lane holds this ticket"
+        );
+        return { aborted: true, laneClaimed: true };
+      }
+    }
+
     // CTL-660: record the dispatch DECISION before the spawn. Best-effort.
     safeEmit(
       appendDispatchRequestedEvent,
@@ -6127,6 +6494,13 @@ export function schedulerTick(
   // Two reasons, both learned the hard way — see expireYieldedSignals.
   expireYieldedSignals(orchDir, { reclaim: reclaimDeadWork });
 
+  // CTL-2050: retract failures an artifact contradicts, BEFORE the reclaim loop
+  // and — like the yield expiry — independently of `inFlightTickets`. A `failed`
+  // signal makes isTicketInFlight false, so these tickets are precisely the ones
+  // the loop below never sees. Running it here also means a retraction landed
+  // this tick is visible to the SAME tick's advancement sweep.
+  retractContradictedFailures(orchDir);
+
   for (const sig of readWorkerSignals(orchDir)) {
     if (!inFlightTickets.has(sig.ticket)) continue;
     // CTL-705: a parked ("preempted") worker is paused, not dead. Its signal
@@ -6873,7 +7247,27 @@ export function schedulerTick(
       // "Can't start ⇒ don't spend a slot on it" is enforced where it actually
       // applies: the new-work sweep's `dispatchableReady` gate, which is what stops
       // an untriaged ticket consuming a *dispatch*.
-      const readyCandidates = rankTickets(admissionPool.filter((t) => readyIds.has(t.identifier)));
+      //
+      // CTL-2090: with ONE narrow exception — a ticket whose triage re-dispatch cap
+      // has tripped (CTL-1441) and that still lacks its triage.json. The reservation
+      // premise above ("the monitor's triage pass then spends the slot") is FALSE for
+      // it: dispatchTriage's cap gate refuses forever, so the reservation can never
+      // be consumed, and at maxParallel=1 it starves every triaged waiter behind it
+      // for the daemon's lifetime — restart-proof, because the cap file persists
+      // (mini-2, 2026-08-20: CTC-750 held the host's only slot for 36h). The
+      // starves-urgent-untriaged-work argument does not apply: capped means triage
+      // will not run regardless of how many slots are free. Triaged waiters are
+      // exempt from the probe (they own an artifact by construction).
+      const readyCandidates = rankTickets(
+        admissionPool.filter(
+          (t) =>
+            readyIds.has(t.identifier) &&
+            (triagedWaitingSet.has(t.identifier) ||
+              !triageReservationDeadlocked(orchDir, t.identifier, {
+                hasTriageArtifact: _hasTriageArtifact,
+              }))
+        )
+      );
       const admittedSlice = selectDispatchablePerProject(
         readyCandidates,
         new Set(),
@@ -8217,10 +8611,23 @@ export function schedulerTick(
         phase: NEW_WORK_ENTRY_PHASE,
       });
       if (!claim.won) {
-        log.debug(
-          { ticket: t.identifier, host: self },
-          "ctl-850: lost cross-host claim — another host owns this dispatch, deferring"
-        );
+        // CTL-2033: the new-work claim gate had the same blindness the triage gate
+        // did — one log.debug for both "a peer won" and "our write never landed".
+        // A FAILED claim here is a silent new-work stall for this ticket on the one
+        // host HRW says may dispatch it, so it warns; a lost race stays debug.
+        const claimReason = claim?.reason ?? null;
+        const ctx = { ticket: t.identifier, host: self, claim_reason: claimReason, claim_detail: claim?.detail ?? null };
+        if (isClaimFailure(claimReason)) {
+          log.warn(
+            ctx,
+            "ctl-850: cross-host claim FAILED (the soft-CAS never ran) — new-work dispatch is deferred and nothing else will pick this ticket up"
+          );
+        } else {
+          log.debug(
+            ctx,
+            "ctl-850: lost cross-host claim — another host owns this dispatch, deferring"
+          );
+        }
         continue;
       }
       clusterGeneration = claim.generation; // CTL-864: the fencing token for this worker
@@ -8526,16 +8933,21 @@ export function schedulerTick(
             )
           ) {
             const stalledSig = signalByTicket.get(ticket);
+            // CTL-1754: resolve the reason across every key the pipeline
+            // actually writes. This line used to read `stalledSig?.stalledReason`
+            // alone — a key present on 0 of 44 live failed/stalled signals — so
+            // every card said "(no reason)" while the reason sat in the same file.
+            const stalledReason = resolveSignalReason(stalledSig);
             const tsResult = routeStuckTicketToDelegate(orchDir, ticket, {
               site: "terminal-sweep",
-              reason: stalledSig?.stalledReason ?? "stalled",
+              reason: stalledReason.reason ?? "stalled",
               boardContext: { status: stalledSig?.status, phase: stalledSig?.phase },
               applyLabel: writeStatus,
               env,
               log,
               appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: ticket }), // CTL-1774
               explanation: {
-                problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${stalledSig?.stalledReason ?? "no reason"}) and is not terminal`,
+                problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${describeSignalReason(stalledSig)}) and is not terminal`,
                 call_to_action: `decide whether to retry ${ticket} or close it`,
               },
               // CTL-1609 (Codex P1): thread the tick's resolved ceiling so a large
@@ -9107,7 +9519,7 @@ function runTick() {
           // evidence + escalates it, so two nodes don't double-page needs-human.
           // STRICT no-op at N=1: a single-host roster makes ownedBy an identity
           // (the lone host owns everything), so ownsSubject is always true.
-          const diagRoster = getClusterHosts();
+          const diagRoster = getEntitledHosts();
           const diagSelf = getHostName();
           // CTL-1529: reuse the tick's shared bounded heartbeat read.
           const diagSurvivors =
@@ -9327,6 +9739,11 @@ function runTick() {
       // startScheduler({ appendWorkerTransitionEvent }).
       appendWorkerTransitionEvent:
         runningOpts.appendWorkerTransitionEvent ?? defaultAppendWorkerTransitionEvent,
+      // CTL-2070: the LIVE fleet write-ledger record seam. schedulerTick defaults this to null
+      // (bare unit ticks never touch the durable ledger); production threads the real
+      // defaultRecordFleetWrite here so every applied state write is recorded for the lane-claim
+      // guard's timely source. A test may inject its own via startScheduler({ recordFleetWrite }).
+      recordFleetWrite: runningOpts.recordFleetWrite ?? defaultRecordFleetWrite,
       // CTL-1774: the LIVE delegate-event emitter. schedulerTick defaults to
       // defaultAppendDelegateEvent, so bare unit ticks that don't inject it are
       // already wired to the real log. runTick threads it explicitly so tests
@@ -9883,7 +10300,11 @@ function runTick() {
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
     // Skip entirely on single-host installs (no-op inside the function, but the
     // pre-check avoids the call to stay zero-cost on the common case).
-    if (getClusterHosts().length > 1) {
+    // CTL-1785: EXISTENCE-gated — a host shed from ENTITLEMENT still physically
+    // exists and its work must remain reclaimable, so this pre-check reads the
+    // existence topology (using the entitled roster here would orphan a shed
+    // host's work — the exact orphan-by-construction this ticket prevents).
+    if (getExistenceHosts().length > 1) {
       // CTL-1481: thread the replica (second arg — the seams object) so the
       // takeover stamp's label read stays off live Linear (replica-first, loud
       // live fallback inside the stamp).
@@ -10057,6 +10478,9 @@ export function startScheduler({
   // the per-tick schedulerTick opts (production). A test injects a spy here to
   // capture transitions through the production runTick path.
   appendWorkerTransitionEvent,
+  // CTL-2070: optional fleet write-ledger record seam override (test seam). Undefined → runTick
+  // defaults to the real defaultRecordFleetWrite.
+  recordFleetWrite,
   // CTL-1774: optional delegate-event emitter override (test seam). Undefined →
   // runTick threads defaultAppendDelegateEvent (the real log append). A test
   // injects a spy here to capture delegate events through the production runTick path.
@@ -10125,6 +10549,7 @@ export function startScheduler({
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
     appendPhaseAdvanceAppliedEvent, // CTL-1789: optional applied-advance emit seam
     appendWorkerTransitionEvent, // CTL-764: optional worker.transition emitter override (test seam; runTick defaults to defaultAppendWorkerTransitionEvent)
+    recordFleetWrite, // CTL-2070: optional fleet write-ledger record seam override (test seam; runTick defaults to defaultRecordFleetWrite)
     appendDelegateEvent, // CTL-1774: optional delegate-event emitter override (test seam; runTick defaults to defaultAppendDelegateEvent)
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
     checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)

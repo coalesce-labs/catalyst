@@ -2762,6 +2762,131 @@ _widen_clear
 unset WIDEN_LEGACY_PIDS SWEEP_SELF_PID_FILE SWEEP_ANCESTOR_PID_FILE WIDEN_MOCK_STATE
 rm -f "$MOCKBIN/pgrep" "$MOCKBIN/ps" "$MOCKBIN/lsof"
 
+
+# ─── CTC-633: thoughts/ — the guard, and the reclaim it unblocks ────────────
+#
+# ⛔ WHY BOTH HALVES ARE TESTED TOGETHER. `thoughts/` is unignored in catalyst-cloud, so it sits
+# in `git status` forever as an untracked entry no commit is allowed to clear (a pre-commit hook
+# blocks it). The sweep reads that as SALVAGE_DIRTY and keeps the tree — measured 2026-08-17 on
+# the dev laptop: 23 worktrees SALVAGE_DIRTY, ZERO removed. Ignoring `thoughts/` fixes that, and
+# in doing so REMOVES an accidental protection: a worktree whose thoughts/ is materialised rather
+# than symlinked is the only copy of that content. So the guard below has to exist before the
+# ignore lands, and these tests pin the pair.
+
+mkdir -p "$SCRATCH/th/real/shared"
+echo "a handoff nobody else has" > "$SCRATCH/th/real/shared/handoff.md"
+
+# t1: the status quo — an unignored thoughts/ makes an otherwise-clean tree SALVAGE_DIRTY.
+make_pushed_wt wt_th1
+mkdir -p "$SCRATCH/clf/wt_th1/thoughts"
+ln -s "$SCRATCH/th/real/shared" "$SCRATCH/clf/wt_th1/thoughts/shared"
+run "T633a: unignored thoughts/ alone makes a clean tree SALVAGE_DIRTY (the inertness being fixed)" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt_th1' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SALVAGE_DIRTY' ]]
+"
+
+# t2: with thoughts/ ignored and the farm SYMLINKED, the same tree becomes reclaimable.
+# This is the POSITIVE CONTROL for T103: it proves the classifier can still reach a REMOVING
+# verdict, so the KEEP_THOUGHTS below is a measurement rather than a function that only keeps.
+printf 'thoughts/\n' >> "$SCRATCH/clf/wt_th1/.gitignore"
+git -C "$SCRATCH/clf/wt_th1" add .gitignore >/dev/null 2>&1
+git -C "$SCRATCH/clf/wt_th1" -c user.email="test@test.com" -c user.name="Test" commit -m "ignore thoughts" >/dev/null 2>&1
+git -C "$SCRATCH/clf/wt_th1" push origin "HEAD:refs/heads/wt_th1" >/dev/null 2>&1
+find "$SCRATCH/clf/wt_th1" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+run "T633b: ignored + SYMLINKED thoughts/ -> SAFE (the reclaim the ignore unblocks)" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt_th1' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SAFE' ]]
+"
+
+# t3: THE SAFETY CASE. Same tree, one variable changed — thoughts/shared is now a real directory
+# holding the only copy of its content. The verdict must flip away from removal.
+rm "$SCRATCH/clf/wt_th1/thoughts/shared"
+mkdir -p "$SCRATCH/clf/wt_th1/thoughts/shared"
+echo "the only copy" > "$SCRATCH/clf/wt_th1/thoughts/shared/handoff.md"
+find "$SCRATCH/clf/wt_th1" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+run "T633c: materialised thoughts/ -> KEEP_THOUGHTS (SAFE would have destroyed the only copy)" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt_th1' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP_THOUGHTS' ]]
+"
+
+# t4: `searchable/` is the GENERATED grep mirror of the symlinked content — derived data, never
+# the only copy. If it counted, every worktree on the host would be permanently unreclaimable
+# and the guard would re-create the inertness it was written to remove.
+rm -rf "$SCRATCH/clf/wt_th1/thoughts"
+mkdir -p "$SCRATCH/clf/wt_th1/thoughts/searchable/shared"
+echo "generated mirror" > "$SCRATCH/clf/wt_th1/thoughts/searchable/shared/copy.md"
+ln -s "$SCRATCH/th/real/shared" "$SCRATCH/clf/wt_th1/thoughts/shared"
+find "$SCRATCH/clf/wt_th1" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+run "T633d: a generated searchable/ does NOT pin the tree -> SAFE" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt_th1' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SAFE' ]]
+"
+
+# t5-t7: ⛔ Codex P1 on #3504 — the guard first protected only DIRECTORIES, over a glob that
+# skipped dotfiles. An ignored regular file under thoughts/ contributes nothing to the dirty
+# count, so the worktree graded SAFE and `git worktree remove --force` deleted the only copy.
+rm -rf "$SCRATCH/clf/wt_th1/thoughts"
+mkdir -p "$SCRATCH/clf/wt_th1/thoughts"
+ln -s "$SCRATCH/th/real/shared" "$SCRATCH/clf/wt_th1/thoughts/shared"
+echo "the only copy of this note" > "$SCRATCH/clf/wt_th1/thoughts/note.md"
+find "$SCRATCH/clf/wt_th1" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+run "T633f: a materialised FILE under thoughts/ protects the tree (not only a directory)" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt_th1' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP_THOUGHTS' ]]
+"
+
+rm -f "$SCRATCH/clf/wt_th1/thoughts/note.md"
+mkdir -p "$SCRATCH/clf/wt_th1/thoughts/.private"
+echo "hidden but unique" > "$SCRATCH/clf/wt_th1/thoughts/.private/note.md"
+find "$SCRATCH/clf/wt_th1" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+run "T633g: a DOT-prefixed entry protects the tree (the plain * glob never saw it)" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt_th1' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP_THOUGHTS' ]]
+"
+
+# The counterweight: widening the guard must not make it universal, or the sweep is inert
+# again. `thoughts/CLAUDE.md` is HumanLayer boilerplate — present in 6 of this host's 28
+# thoughts/ directories and byte-identical per repo — so it must NOT pin the tree.
+rm -rf "$SCRATCH/clf/wt_th1/thoughts/.private"
+echo "# Thoughts Directory Structure" > "$SCRATCH/clf/wt_th1/thoughts/CLAUDE.md"
+find "$SCRATCH/clf/wt_th1" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+run "T633h: generated thoughts/CLAUDE.md does NOT pin the tree -> SAFE" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt_th1' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SAFE' ]]
+"
+
+# ─── CTC-633: the sweep reports free disk ──────────────────────────────────
+#
+# On 2026-08-17 10:29 CDT this host hit 365 MiB free and every shell command in every agent
+# session failed with ENOSPC — including the harness's own task-output files, so agents could not
+# read the output of the command that had just failed. The sweep ran throughout and never said a
+# word about disk. A reclaim tool that cannot tell you how much is left is not the thing that
+# warns you.
+run "T633e: the sweep reports free disk at BOTH ends of a run, and the delta" bash -c "
+  out=\$(SWEEP_WT_ROOT='$SCRATCH/empty-wt-root' bash '$SWEEP' --dry-run 2>&1)
+  echo \"\$out\" | grep -q 'disk: .* free (before)' || { echo 'MISSING before'; exit 1; }
+  echo \"\$out\" | grep -q 'disk: .* free (after)'  || { echo 'MISSING after';  exit 1; }
+  echo \"\$out\" | grep -q 'disk: reclaimed .* MiB this run'  || { echo 'MISSING delta'; exit 1; }
+  # ⛔ The regression this pins: _log_disk both LOGS and returns a value. Captured with \$( ),
+  # the log line is swallowed and the report vanishes from the log it was added to — caught by a
+  # dry run before it shipped. A grep for the line is the only thing that can see that.
+  true
+"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""

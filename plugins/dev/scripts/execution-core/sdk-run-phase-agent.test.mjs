@@ -204,6 +204,25 @@ describe("buildQueryOptions", () => {
     expect(o.resume).toBe("sess-abc");
     expect(o.cwd).toBe("/wt/CTL-100");
   });
+  // OTL-67: settingSources ["user","project"] means a join-provisioned
+  // ~/.claude/settings.json (host.name=<self> pin, CTL-1231) wins over plain
+  // `env` for OTEL_RESOURCE_ATTRIBUTES — mirror the per-job value into the
+  // higher-precedence "flag settings" layer (options.settings) so it isn't
+  // silently collapsed to just host_name on every SDK-dispatched worker.
+  test("OTEL_RESOURCE_ATTRIBUTES from env is mirrored into options.settings.env (flag-settings tier)", () => {
+    const o = buildQueryOptions(
+      makeSpec(),
+      { OTEL_RESOURCE_ATTRIBUTES: "host.name=mini,project=catalyst-cloud,linear.key=CTC-758" },
+      {},
+    );
+    expect(o.settings).toEqual({
+      env: { OTEL_RESOURCE_ATTRIBUTES: "host.name=mini,project=catalyst-cloud,linear.key=CTC-758" },
+    });
+  });
+  test("options.settings is omitted when env carries no OTEL_RESOURCE_ATTRIBUTES", () => {
+    expect("settings" in buildQueryOptions(makeSpec(), {}, {})).toBe(false);
+    expect("settings" in buildQueryOptions(makeSpec(), { OTEL_RESOURCE_ATTRIBUTES: "" }, {})).toBe(false);
+  });
 });
 
 // ── resolveMaxParallel + Semaphore ────────────────────────────────────────────

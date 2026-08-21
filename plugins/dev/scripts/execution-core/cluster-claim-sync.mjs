@@ -17,6 +17,11 @@
 // dispatch this tick and reconsiders next tick. A transient Linear hiccup must
 // never cause a double-dispatch; deferring is always safe (the HRW pre-filter
 // already guarantees only the owning host even reaches the claim).
+//
+// ⚠️ FAIL-CLOSED IS NOT FAIL-SILENT (CTL-2033). Every result also carries a
+// `reason` naming WHICH of those outcomes happened, so a caller can log a refused
+// write as the stall it is instead of as the lost race it is not. See CLAIM_REASON
+// below.
 
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -119,10 +124,124 @@ export function resolveIssueIdSyncCached({ ticket }, { env = process.env, ...res
   return issueId;
 }
 
+// ── CTL-2033: the claim's discriminated outcome ──────────────────────────────
+//
+// `claimDispatchSync` used to return `{ won:false, generation:null }` for FOUR
+// structurally different things: a peer legitimately winning the fence, a
+// subprocess that failed to spawn or timed out, a non-zero exit, and stdout that
+// did not parse. Only the first is normal. The other three are a stall, and they
+// were byte-identical to it — no reason, no log, nothing to alert on.
+//
+// This is the same defect the sibling `fenceCheckSync` was written NOT to have:
+// its comment says it returns "a discriminated result the caller can act on
+// WITHOUT a second interpretation pass". This function never learned it.
+//
+// Measured 2026-08-18 (CTL-879, after #3661 instrumented the gate): 36 held
+// tickets across both minis logged `lost-cross-host-claim` — every one on a
+// ticket that host OWNS under HRW, so a race was impossible, and every one with
+// `claim_reason: null`, because the result was structurally incapable of
+// carrying one. mini was simultaneously at 300/300 Linear write budget.
+//
+// ⛔ THE FAIL DIRECTION IS TOWARD "FAILURE", NOT TOWARD "NORMAL". `isClaimFailure`
+// treats anything that is not explicitly WON or PEER_WON — including a null or an
+// unrecognised reason — as a failure. An unknown outcome logged as a loud failure
+// costs an operator one WARN; an unknown outcome logged as a normal race is
+// exactly the three hours this ticket exists to buy back.
+export const CLAIM_REASON = Object.freeze({
+  /** exit 0, stdout parsed, won:true — we hold the fence. */
+  WON: "won",
+  /** exit 0, stdout parsed, won:false — the soft-CAS RAN and a peer won the read-back. NORMAL. */
+  PEER_WON: "peer-won",
+  /** the CLI reported a HOST-BUDGET refusal (`budget:*`) — the write never left this host. */
+  BUDGET_REFUSED: "budget-refused",
+  /** the CLI ran and reported a non-budget failure (auth, transport, GraphQL, unknown route). */
+  CLI_FAILED: "cli-failed",
+  /** the process ran but its stdout could not be parsed as the contract's JSON line. */
+  UNPARSEABLE: "unparseable-stdout",
+  /** `spawn` itself threw — the subprocess never started. */
+  SPAWN_THREW: "spawn-threw",
+});
+
+/**
+ * isClaimFailure — did this claim FAIL, as opposed to legitimately lose a race?
+ * Fail-loud on the unknown (see the block comment above): only the two explicitly
+ * normal reasons return false.
+ */
+export function isClaimFailure(reason) {
+  return reason !== CLAIM_REASON.WON && reason !== CLAIM_REASON.PEER_WON;
+}
+
+// CLAIM_DETAIL_MAX — the detail carried into a log line is BOUNDED. A GraphQL
+// errors[] body can be kilobytes, and this string lands in a per-ticket log line
+// on every sweep of every held ticket.
+const CLAIM_DETAIL_MAX = 240;
+
+// scrubDetail — bound the excerpt and mask anything token-shaped before it enters
+// a log line. Deliberately LOCAL rather than imported from linear-write-proxy.mjs:
+// this module is a leaf that spawnSync's the CLI, and importing the proxy would
+// pull its budget-ledger + credential graph into every caller of the sync bridge.
+// The CLI's own errors carry no credential today; this is the guard for the day
+// one of them starts to.
+function scrubDetail(text) {
+  if (typeof text !== "string" || text === "") return null;
+  const masked = text.replace(/\b(?:lin_api_|ghp_|gho_|ghs_|github_pat_|sk-|xoxb-)[A-Za-z0-9_\-]+/g, "[redacted]");
+  return masked.length > CLAIM_DETAIL_MAX ? `${masked.slice(0, CLAIM_DETAIL_MAX)}…` : masked;
+}
+
+// parseClaimLine — the CLI prints exactly one JSON line; take the last non-empty
+// one defensively. Returns null when there is nothing parseable, so the caller can
+// tell "no JSON at all" from "JSON that says won:false".
+function parseClaimLine(stdout) {
+  if (typeof stdout !== "string") return null;
+  const line = stdout.trim().split("\n").filter(Boolean).pop();
+  if (!line) return null;
+  try {
+    const parsed = JSON.parse(line);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// classifyCliReason — map the CLI's own refusal word onto this module's outcome.
+// A `budget:*` reason is named separately because it is raised by THIS HOST'S OWN
+// LEDGER before the request is ever sent, and self-clears on the UTC day roll.
+//
+// ⚠️ IT DOES NOT MEAN THE CLOUD REFUSED ANYTHING — and reading it that way cost a
+// lane an hour on 2026-08-18 (FLEET's peer read on #3664). The host ledger counts
+// writes that LEFT the host, success or not (`linear-write-proxy.mjs`), and gates
+// them against `DEFAULT_DAILY_BUDGET`, a constant whose own doc-comment calls it
+// "the cloud-side daily cap this MIRRORS". Attempts, not arrivals. Measured that
+// day: the host ledger read 300 with 674 refusals while the cloud's own
+// `/admin/write-budget` for the same key read **3** of 300 — it had declined
+// nothing. A P1 was issued to raise the cloud cap on the strength of the wrong
+// reading and was refused after measurement. **Read
+// `~/catalyst/linear-write-budget.json` ON THE HOST, not the cloud's limit.**
+// The underlying defect is CTL-2035.
+//
+// The real reason strings are `linear-write-budget.mjs`'s frozen `REASONS`:
+// `budget:day-exhausted`, `budget:ticket-cap`, `budget:already-converged`.
+// (Matched by prefix, so the exact members do not gate behaviour — but a comment
+// naming a string that does not exist sends the next grep nowhere.)
+function classifyCliReason(cliReason) {
+  if (typeof cliReason === "string" && cliReason.startsWith("budget:")) return CLAIM_REASON.BUDGET_REFUSED;
+  return CLAIM_REASON.CLI_FAILED;
+}
+
 // claimDispatchSync — soft-CAS claim `ticket` for `hostName` at `phase`,
-// synchronously. Returns { won, generation }. won:false on any failure
-// (fail-closed). `spawn`/`nodeBin`/`cli`/`env`/`timeout` are injectable so the
-// unit tests never spawn a real process.
+// synchronously. Returns { won, generation, reason, detail } — `reason` is ALWAYS
+// one of CLAIM_REASON and is never null (CTL-2033); `detail` is a bounded, scrubbed
+// string on a failure and null otherwise. won:false on any failure (fail-closed).
+// `spawn`/`nodeBin`/`cli`/`env`/`timeout` are injectable so the unit tests never
+// spawn a real process.
+//
+// ⚠️ NO IN-CALL RETRY, DELIBERATELY. This runs inside the synchronous daemon tick,
+// and the measured failure is a HOST-WIDE write-budget refusal — every candidate in
+// the sweep fails for the same reason at the same instant. A hot retry would spend
+// more of the exhausted budget, block the tick on a sleep, and add fork pressure at
+// exactly the moment the host is under it. The retry is the NEXT SWEEP (measured
+// 2026-08-18: every 5-10 min), which is a real backoff that costs nothing. What was
+// missing was never the retry — it was the reason and the alarm.
 // CTL-863 follow-up: `resolveIssueId` is the injectable pre-resolve seam (defaults to
 // resolveIssueIdSyncCached) — a resolved UUID is threaded into the `claim` argv so that
 // subprocess skips its own ResolveIssueId call. A null (miss/disabled+failed) falls back
@@ -147,18 +266,56 @@ export function claimDispatchSync(
       env,
       timeout,
     });
-    if (!res || res.status !== 0 || typeof res.stdout !== "string") {
-      return { won: false, generation: null };
+    const parsed = parseClaimLine(res?.stdout);
+    // A structured `error.reason` is authoritative wherever it appears — the CLI
+    // pairs it with CLAIM_FAILED_EXIT today, and reading it independently of the
+    // exit code means a future exit-code change cannot silently reclassify a
+    // failure as a race.
+    const cliReason = typeof parsed?.error?.reason === "string" ? parsed.error.reason : null;
+    if (cliReason) {
+      return {
+        won: false,
+        generation: null,
+        reason: classifyCliReason(cliReason),
+        detail: scrubDetail(`${cliReason}: ${parsed?.error?.message ?? ""}`.trim()),
+      };
     }
-    // The CLI prints exactly one JSON line; take the last non-empty line defensively.
-    const line = res.stdout.trim().split("\n").filter(Boolean).pop();
-    const parsed = JSON.parse(line);
+    if (!res || res.status !== 0 || typeof res.stdout !== "string") {
+      // Ran and failed, but said nothing structured: keep the exit status and the
+      // stderr excerpt, which is the only evidence left.
+      return {
+        won: false,
+        generation: null,
+        reason: CLAIM_REASON.CLI_FAILED,
+        detail: scrubDetail(
+          `exit=${res?.status ?? "null"}${res?.signal ? ` signal=${res.signal}` : ""}` +
+            `${res?.error?.message ? ` error=${res.error.message}` : ""}` +
+            `${typeof res?.stderr === "string" && res.stderr.trim() ? ` stderr=${res.stderr.trim()}` : ""}`,
+        ),
+      };
+    }
+    if (!parsed) {
+      return {
+        won: false,
+        generation: null,
+        reason: CLAIM_REASON.UNPARSEABLE,
+        detail: scrubDetail(res.stdout.trim()),
+      };
+    }
+    const won = parsed.won === true;
     return {
-      won: parsed?.won === true,
-      generation: Number.isFinite(parsed?.generation) ? parsed.generation : null,
+      won,
+      generation: Number.isFinite(parsed.generation) ? parsed.generation : null,
+      reason: won ? CLAIM_REASON.WON : CLAIM_REASON.PEER_WON,
+      detail: null,
     };
-  } catch {
-    return { won: false, generation: null };
+  } catch (err) {
+    return {
+      won: false,
+      generation: null,
+      reason: CLAIM_REASON.SPAWN_THREW,
+      detail: scrubDetail(String(err?.message ?? err)),
+    };
   }
 }
 

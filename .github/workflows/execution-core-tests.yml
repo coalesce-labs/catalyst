@@ -92,8 +92,24 @@ on:
       - "plugins/dev/scripts/install-orphan-sweep.sh"
       - "plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
       - "plugins/dev/scripts/__tests__/**"
+      # CTL-2026: the two agent tools are guarded by
+      # agent-tools-out-of-tree.test.mjs below. `__tests__/**` above catches
+      # an edit to the SUITE; without these two paths an edit to the TOOLS
+      # themselves — the thing that regresses — skips the job entirely.
+      # Verified: neither file appears elsewhere in the filter list (positive
+      # control — install-orphan-sweep.sh above is the same one-file shape).
+      - "plugins/dev/scripts/linear-ack.mjs"
+      - "plugins/dev/scripts/linear-reply.mjs"
       # CTL-1387: the CLI-reference generator + the page it drives are guarded by
       # cli-reference-drift.test.sh below; a change to either must run this suite.
+      # FLEET: the remote-owner channel transport ships its own bash test; without this
+      # path a PR touching only scripts/comms/ would skip the job that runs it.
+      - "scripts/comms/**"
+
+      # CTC-633: the worktree thoughts/ back-fill ships its own bash test; without this path a
+      # PR touching only scripts/ would skip the job that runs it.
+      - "scripts/__tests__/**"
+      - "scripts/worktree-thoughts-exclude-backfill.sh"
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
       # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
@@ -106,6 +122,24 @@ on:
       # plugins/dev/scripts/ (not covered by the scripts/** glob), so a change
       # confined to the teardown removal block would skip this workflow and the
       # ordering backstop couldn't catch a destroy-before-salvage regression.
+      # CTL-1998: THE TRIGGER MUST MATCH THE SCAN — the same lesson as the
+      # plugins/dev/scripts/** entry above, on the skills axis. 52 test files in
+      # plugins/dev/scripts/__tests__/ read a SKILL.md, and
+      # skill-plugin-root-assigned.test.sh scans `find plugins -name SKILL.md`
+      # (115 files) — while this list named FIVE skill dirs. So a change confined
+      # to any other skill ran NONE of them. That is how #3654 refactored
+      # _phase-agent-template, skipped this job on its own PR and on the push to
+      # main, and left main failing the CTL-1832 guard for an hour, blocking every
+      # PR in the repo. skills-gate.yml's header already diagnosed this exact
+      # shape: "a filter that excludes the change it guards is a guard on the
+      # wrong axis; it reads as working and never fires."
+      # Two globs because SKILL.md lives at two depths (measured, both present):
+      # plugins/<plugin>/skills/** and plugins/playground/<plugin>/skills/**.
+      - "plugins/*/skills/**"
+      - "plugins/*/*/skills/**"
+      # NOTE: the two globs above SUBSUME every plugins/*/skills path listed
+      # below. They are retained as documentation of WHICH STEP each path feeds,
+      # not as triggers — do not read the list as the trigger set.
       - "plugins/dev/skills/phase-teardown/**"
       # CTL-56: the three merge-worktree guard tests scan skills and templates
       # OUTSIDE plugins/dev/scripts/ for the --delete-branch invariant. A change
@@ -165,6 +199,14 @@ jobs:
               - "plugins/dev/scripts/orphan-sweep.sh"
               - "plugins/dev/scripts/install-orphan-sweep.sh"
               - "plugins/dev/scripts/__tests__/**"
+              # FLEET: the remote-owner channel transport ships its own bash test; without this
+              # path a PR touching only scripts/comms/ would skip the job that runs it.
+              - "scripts/comms/**"
+
+              # CTC-633: the worktree thoughts/ back-fill ships its own bash test; without this path a
+              # PR touching only scripts/ would skip the job that runs it.
+              - "scripts/__tests__/**"
+              - "scripts/worktree-thoughts-exclude-backfill.sh"
               - "plugins/dev/scripts/gen-cli-reference.sh"
               - "website/src/content/docs/reference/catalyst-cli.md"
               - "plugins/dev/scripts/migrate-dual-harness.sh"
@@ -175,6 +217,13 @@ jobs:
               - "package.json"
               - "bun.lock"
               - "turbo.json"
+              # CTL-1998: mirror the two skills globs from on.push.paths — see the
+              # long note there. This mirror had ALSO already drifted: it was
+              # missing plugins/dev/skills/phase-teardown/**, which the push list
+              # carries, so the salvage-before-destroy backstop could not fire on
+              # a PR. The globs close that gap and every future one like it.
+              - "plugins/*/skills/**"
+              - "plugins/*/*/skills/**"
               - "plugins/dev/skills/phase-monitor-merge/**"
               - "plugins/dev/skills/merge-pr/**"
               - "plugins/dev/skills/recovery-pass/**"
@@ -200,6 +249,9 @@ jobs:
       ${{ !cancelled() && (needs.detect-changes.result != 'success' ||
       needs.detect-changes.outputs.relevant == 'true') }}
     runs-on: ubuntu-latest
+    # CTL-2079: bound the job so a hung step reds fast, never rides GitHub's 6h
+    # default (timeout-minutes: 360). Healthy runs finish well under 20 min.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: plugins/dev/scripts/execution-core
@@ -217,6 +269,110 @@ jobs:
         # bun resolves the one root bun.lock instead of a per-package copy.
         working-directory: .
         run: bun install --frozen-lockfile
+
+      - name: cli/*.mjs shell-guard lint (CTL-1937)
+        # THE CLASS GUARD. cli/*.mjs have no shebang and their line-1 doc comment carries a
+        # runnable command in BACKTICKS. Run by a shell instead of a JS runtime, that backtick
+        # executes and re-invokes the CLI: on 2026-08-17 that reached 7,592 nested bash
+        # processes and fork() failed machine-wide. This fails CI on any cli/*.mjs that does
+        # not open with the guard line, so a NEW module cannot reintroduce the class.
+        working-directory: .
+        run: bash plugins/dev/scripts/lint-cli-shell-guard.sh
+
+      - name: cli/*.mjs shell-guard regression test (CTL-1937)
+        # The lint proves the line is present; this proves the line WORKS — a real cli module
+        # run under bash/zsh/sh refuses by name, exits 97, and spawns nothing. Carries its own
+        # negative control (the same file with the guard stripped DOES fire the backtick), so
+        # a green result cannot come from a module that merely has nothing to detonate.
+        run: bash __tests__/cli-shell-guard.test.sh
+
+      - name: catalyst-index pinned serving-root test (CTL-1935)
+        # The indexer is an on-demand CLI with no boot record, so evaluateDepSkew cannot grade it.
+        # This covers the pin itself: ancestry AND content AND clean, each proven to be the half
+        # that catches a case the others clear.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/catalyst-index-root.test.sh
+
+      - name: remote-owner channel transport test (scripts/comms)
+        # post-turn.sh / drain-remote-turns.sh move channel turns from a remote owner host
+        # (mini) to the channel file on the laptop. Hermetic: the test injects a fake ssh via
+        # $CATALYST_SSH. Covers the atomic .part handoff, idempotence, and the deliberate
+        # at-least-once ordering (append first, ack second).
+        working-directory: .
+        run: bash scripts/comms/__tests__/remote-turns.test.sh
+
+      - name: worktree thoughts/ back-fill test (CTC-633)
+        # info/exclude only silences UNTRACKED paths, so this test pins BOTH halves: the
+        # untracked case being fixed, and the tracked-modified case being reported rather than
+        # counted as fixed. Includes a negative control (a repo without the defect is not
+        # touched) and a zero-discovery case that must exit 2, not report a clean pass.
+        working-directory: .
+        run: bash scripts/__tests__/worktree-thoughts-exclude-backfill.test.sh
+
+      - name: account-usage pager test (CTL-1908)
+        # Pages before an armed Claude account exhausts its 5-hour / 7-day window. The property
+        # under test is not "does it page at 80%" — it is that every way of being unable to SEE
+        # usage (absent, stale, unparsable, or a payload with no percentages) renders as
+        # UNOBSERVABLE and a non-zero exit, never as "under threshold".
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/catalyst-account-usage-page.test.sh
+
+      - name: archive + uninstall test (CTL-1975)
+        # ⛔ PINNED DELIBERATELY, and the reason is the PR that added it. CI runs an EXPLICIT list
+        # of shell suites — there is no glob runner and no run-tests.sh here — so a suite that is
+        # merely present in __tests__/ runs only in the local full gate, which is banned on the
+        # primary laptop. This suite certifies that `catalyst uninstall` can actually remove every
+        # ai.coalesce.* agent; shipping it unpinned would make the next such regression exactly as
+        # invisible as the one it was written for (usage-page + event-mirror, unremovable on all
+        # three hosts, failing verify-clean at its final phase with no code path able to clear it).
+        #
+        # It mocks launchctl via a PATH stub and never touches the runner's real launchd domain.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/catalyst-archive-uninstall.test.sh
+
+      - name: catalyst-backup capture/restore test (CTL-1369 PR2)
+        # Pinned alongside the suite above: CTL-1975 changed ~300 lines of catalyst-backup (the
+        # replica capture, the tarball, the manifest, rel_to_dest), and its own regression suite
+        # was likewise present-but-unpinned. A capture path whose only coverage runs on one laptop
+        # is a capture path with no coverage.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/catalyst-backup.test.sh
+
+      - name: direnv fleet readiness test (CTL-1944)
+        # CTL-2079: the named hang site — red fast on an apt-lock rather than
+        # riding the job ceiling. A healthy apt install + the two suites run in ~1-2 min.
+        timeout-minutes: 8
+        # The property under test is not "is direnv installed" — it is that every way of being
+        # NOT-owner-ready renders RED. Two regression guards carry the weight: a BLOCKED .envrc
+        # must not read as a clean host (the allowed-state is read positively from `Found RC
+        # allowed`, never inferred from absent output), and the CALLER's ambient token must not
+        # make an unprovisioned host pass (`direnv exec` inherits, so the dump runs scrubbed).
+        #
+        # ⛔ direnv is INSTALLED here on purpose. Without it the suite skips exactly the two
+        # guards above and still reports green — a test that ships inert, which is the
+        # CTL-1919/CTL-1935 class. The test itself also refuses to skip when CI is set, so
+        # this step failing to provision direnv is a RED result rather than a quiet pass.
+        working-directory: .
+        run: |
+          # CTL-2079: non-interactive + dpkg-lock-bounded so an apt-lock wedge
+          # (contention with the runner's unattended-upgrades) fails fast with a
+          # clear error instead of hanging indefinitely.
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq direnv
+          direnv version
+          bash plugins/dev/scripts/__tests__/check-direnv-fleet.test.sh
+          # CTL-1956: the provisioning half. The check
+          # above proves a host is judged correctly; this
+          # proves the remediation installs from the
+          # VENDORED copy and never clobbers an existing
+          # profile. Extracting these functions into lib/
+          # silently re-pointed the vendored lookup one
+          # level too high — the step would have "run" and
+          # installed nothing. Wired here because a suite
+          # that is not in CI ships inert, which is the
+          # very failure this ticket is about.
+          bash plugins/dev/scripts/__tests__/direnv-provision.test.sh
 
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
@@ -274,6 +430,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-install.test.sh
 
+      - name: verify-loaded cutover-verification test (CTL-1916)
+        # CTL-1916: the tool that proves a host is running the code you think it is. It was
+        # re-derived into a session temp dir three times and lost three times, which is why
+        # it is committed AND gated here — a verification tool that is not itself under CI
+        # is one edit away from silently certifying everything.
+        # Both controls are in the suite: a correctly-loaded fixture PASSES, and a daemon
+        # serving a different root (plus five other single-fact mutations) FAILS.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/verify-loaded.test.sh
+
       - name: daemon-watchdog supervision test (CTL-1502)
         # Covers the bash half of the CTL-1502 Codex P1 fixes: node-class gating
         # (the standalone watchdog runs on a monitor node and NOT on a worker, so
@@ -312,7 +478,13 @@ jobs:
         # two assertions SKIP (not fail) when zsh is absent, and this workflow's other
         # zsh install lands hundreds of lines later — so without this step the required
         # check could pass without ever exercising the shell that caused the regression.
-        run: command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zsh)
+        # CTL-2079: install zsh only when absent, but non-interactive + dpkg-lock-bounded
+        # so an apt-lock wedge fails fast instead of hanging.
+        run: |
+          command -v zsh >/dev/null 2>&1 || \
+            (export DEBIAN_FRONTEND=noninteractive && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 update -qq && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends zsh)
 
       - name: cloud-sync token probe test
         working-directory: plugins/dev/scripts
@@ -361,6 +533,35 @@ jobs:
         # free (mktemp creates 0600 and mv preserves it, verified by mutation).
         working-directory: plugins/dev/scripts
         run: bash __tests__/setup-cloud-replica.test.sh
+
+      - name: setup-catalyst.sh stateMap preservation (CTL-2076)
+        # CTL-2076: this workflow allowlists shell suites by name rather than globbing
+        # __tests__/, so a new suite runs in required CI only once registered here.
+        # Guards both clobber paths setup_project_config / update_config_with_linear_states
+        # can take over a committed, non-empty linear.stateMap on a credentialed re-run —
+        # the regression this ticket fixes. Carries its own positive control (T5: a fresh
+        # install still refreshes the map from Linear, so the guard is not over-broad).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/setup-catalyst-config-preserve.test.sh
+
+      - name: host write-credential classifier parity (CTL-2045)
+        # ⛔ Codex P2 on #3706, and the important one. This suite is
+        # the ONLY thing holding lib/host-write-credential.mjs (the
+        # doctor engine) and lib/catalyst-host-write-credential.sh
+        # (the installer engine) in agreement.
+        #
+        # Shell suites here are ALLOWLISTED, not globbed — so a suite
+        # that is written but never invoked is a guard that cannot
+        # fail, and the two engines could drift apart through a green
+        # merge. That is the exact defect class the guard exists to
+        # prevent, one level up.
+        #
+        # Drives BOTH engines over the shared fixture table, checking
+        # each against a COMPUTED-EXPECTED verdict rather than against
+        # the other — two engines agreeing on a wrong answer is what a
+        # bare A-vs-B comparison cannot see.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/host-write-credential-parity.test.sh
 
       - name: SKILL.md ${PLUGIN_ROOT} assignment guard (CTL-1832)
         # CTL-1832: a SKILL.md that EXPANDS ${PLUGIN_ROOT} must also ASSIGN it, or
@@ -445,6 +646,24 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/worktree-salvage.test.sh
 
+      - name: cluster fence-guard unit tests (CTL-864, CTL-2048)
+        # ⛔ PINNED BECAUSE IT WAS NOT. Verified before adding this step:
+        # `grep -rn cluster-fence-guard .github/workflows/` returned NOTHING,
+        # while the same grep for `worktree-salvage.test.sh` (right above,
+        # same lib/__tests__ directory) returns its own run line. So this
+        # suite has only ever run in a local full gate — the FIFTH inert
+        # suite found in three days.
+        #
+        # What it guards: the guard decides whether a worker may perform an
+        # irreversible side-effect. Its CTL-2048 cases pin that a fence it
+        # could not READ is never reported as a fence it read and found
+        # STALE, that the unreadable case is retried and the answered stale
+        # case is not, and that a transient failure recovers instead of
+        # writing a terminal status. Measured 6 fail / 12 pass against the
+        # pre-fix guard.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/cluster-fence-guard.test.sh
+
       - name: worktree-salvage destroy-site wiring tests (CTL-1639)
         # Deterministic source-order invariant: each destructive bash site
         # (phase-agent-dispatch L3, orphan-sweep, phase-teardown SKILL.md) must
@@ -517,6 +736,32 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test deployment-mode.test.mjs
 
+      - name: entitlement resolver + provider unit tests (bun, CTL-1785)
+        # CTL-1785 W13: lib/entitlement.mjs is a deliberately ZERO-IMPORT leaf
+        # (node built-ins only, loadable by bare-Node catalyst doctor) that lives
+        # OUTSIDE the execution-core/ tree the "Run stable unit tests" step below
+        # is scoped to — so it gets its own step, exactly like the deployment-mode
+        # leaf above. Registered in the SAME change that adds the suite (the
+        # four-times-burned exec-core-stable-test-allowlist lesson). Positive
+        # control: `grep -n entitlement.test .github/workflows/execution-core-tests.yml`
+        # returns this run: line.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test entitlement.test.mjs
+
+      - name: ask-verb unit tests (bun, CTL-1922 / CTL-1944)
+        # ⛔ `ask-verbs.test.mjs` shipped with #3509 and was registered in NO workflow —
+        # 20 tests that had never run in CI. Verified with the instrument note above:
+        # parsing this workflow's YAML and searching every `run:` step for the filename
+        # returned zero, while the same search for `assertion-evidence.test.mjs`
+        # (known-present) returned its step. That is the same omission Codex raised as a
+        # round-1 P1 on #3519, now found a third time — so it is registered here rather
+        # than left for the next person.
+        #
+        # Its own step because the "Run stable unit tests" step's working-directory is
+        # execution-core/ and ask.mjs is a sibling of that tree, not inside it.
+        working-directory: plugins/dev/scripts/__tests__
+        run: bun test ask-verbs.test.mjs
+
       - name: event-name boundary unit tests (bun, CTL-1834)
         # `grep -rn event-name .github/workflows/` returned NOTHING before this
         # step. NOTE THE INSTRUMENT: a `run:`-anchored grep is NOT valid here —
@@ -545,6 +790,87 @@ jobs:
         # see the bun step above for why this suite was previously ungated.
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-deployment-mode.test.sh
+
+      - name: replica-path resolver unit tests (bun, CTL-1893)
+        # lib/replica-path.mjs derives the replica database path from the cloud ACCOUNT
+        # (today `cloud-sync.mjs` resolves account and dbPath independently, so a second
+        # account on one host targets the same file). Own step, not the "Run stable unit
+        # tests" allowlist below, for the same reason the deployment-mode /
+        # catalyst-runtime-root / event-name steps carry: that step's working-directory is
+        # execution-core/ and this is a deliberately ZERO-IMPORT leaf outside that tree.
+        #
+        # ⛔ Registered in the SAME change that adds the suite. This workflow's suite list
+        # is hand-enumerated, and an unlisted suite ships inert — the trap the ask-verb and
+        # event-name steps above each document after finding it the hard way. Verified with
+        # the instrument note on the event-name step (a `run:`-anchored grep is invalid for
+        # the multi-line allowlist block): `grep -n replica-path .github/workflows/`
+        # returned nothing before this step, against a positive control of
+        # `deployment-mode-parity`, which returns its `run:` line.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test replica-path.test.mjs
+
+      - name: install-lifecycle + join-bundle tests (CTL-2004)
+        # ⛔ PINNED DELIBERATELY, same reason as the archive+uninstall suite above (CTL-1975,
+        # FLEET-37): CI runs an EXPLICIT list — there is no glob runner — so a suite that merely
+        # exists in the tree runs only in the local full gate. Verified before adding this step:
+        # `grep -n join-bundle .github/workflows/` returned NOTHING, and `grep -n install-lifecycle`
+        # returned only the bun-build import-graph check, never a test run. Positive control:
+        # the same grep for `deployment-mode-parity` returns its own `run:` line.
+        #
+        # These two carry CTL-2004, whose whole defect was a posture that travelled nowhere and
+        # failed by looking healthy. Shipping its regression tests unpinned would reproduce the
+        # shape of the bug in its own guard.
+        working-directory: plugins/dev/scripts/execution-core
+        run: bun test install-lifecycle.test.mjs join-bundle.test.mjs
+
+      - name: linear write-path decision test (CTL-1961)
+        # ⛔ PINNED AT THE SAME TIME THE SUITE WAS WRITTEN. Verified before
+        # adding this step: `grep -c linear-write-path .github/workflows/`
+        # returned 0, so without this the suite runs only in a local full
+        # gate. That is the third time in two days a new suite would have
+        # shipped inert here (CTL-1975/FLEET-37, CTL-2004, now this) — CI
+        # runs an EXPLICIT list and nothing tells an author their file
+        # joined nothing.
+        #
+        # What it guards is a distinction, not a value: "the proxy is off"
+        # and "I could not reach the proxy" must never collapse to one
+        # answer. Collapsing them writes direct forever while reporting as
+        # a routed tool, which is what the first cut of CTL-1961 did.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test linear-write-path.test.mjs
+
+      - name: agent tools survive being out-of-tree (CTL-2026)
+        # ⛔ PINNED WITH THE SUITE, verified the way the two steps above were:
+        # `grep -rc agent-tools-out-of-tree .github/workflows/` returned
+        # NOTHING before this step existed, while the same grep for
+        # `linear-write-path` returned 2. That is the FOURTH suite in three
+        # days that would otherwise have shipped inert.
+        #
+        # What it guards: linear-ack.mjs / linear-reply.mjs carry a try/catch
+        # whose own comment says it exists because an out-of-tree copy cannot
+        # resolve their imports — and then consumed the decision leaf on a
+        # line OUTSIDE that try, so such a copy died on module resolution
+        # before reaching the branch written for it. The suite copies each
+        # tool ALONE into an empty directory and runs it against a stubbed
+        # fetch: the deployment shape of ~/catalyst/comms/tools/. Every
+        # assertion fails on the pre-fix tools (measured 7 fail / 0 pass) and
+        # passes on the fixed ones.
+        working-directory: plugins/dev/scripts/__tests__
+        run: bun test agent-tools-out-of-tree.test.mjs
+
+      - name: replica-path cross-stack parity test (CTL-1893)
+        # bash == node == a hand-written expected value at every fixture cell, including
+        # the NAMED FAILURES (account-absent vs account-invalid route to different operator
+        # actions, so failing for the wrong reason is a failure), plus an assertion that the
+        # DEFAULT_ACCOUNT constant agrees across all three files that carry it
+        # (replica-path.mjs, catalyst-replica-path.sh, cloud-sync.mjs).
+        #
+        # Mutation-verified before landing, since a parity suite that passes first try is
+        # exactly the kind that can be vacuous: breaking the bash derivation for the default
+        # account failed 3 cells, removing the JS named-failure guard failed 2, and removing
+        # the bash account-name validation failed 6. Restored, it is 35/35.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/replica-path-parity.test.sh
 
       - name: deployment-mode cross-stack parity test (CTL-1617)
         # The fixture-matrix parity test asserting bash == node == the
@@ -582,8 +908,16 @@ jobs:
         # `bun test` list below for the same reason as its neighbours: that step's
         # cwd is execution-core/ and these modules need the broker package's pino.
         # Measured 7 pass / 0 fail on this branch (new file; absent at merge base).
+        # CTL-1785: namespace-parity.test.mjs joins the same hand-enumerated list.
+        # `grep -rln namespace-parity .github/workflows/` returned NOTHING before
+        # this — the cross-producer namespace contract (CTL-1142) that keeps every
+        # exec-core event name (now incl. the entitlement.* trio) off the broker's
+        # protected namespace had never run in required CI, so registering the new
+        # names there would have shipped inert (the exact unlisted-suite trap this
+        # step documents). Measured green on origin/main (9 pass) and this branch
+        # (10 pass), so it imports no pre-existing red like fence-held-fold would.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs
+        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs
 
       - name: plugin-refresh + lock-resolution-audit tests (CTL-1831)
         # `grep plugin-refresh .github/workflows/` returned only two COMMENTS
@@ -595,16 +929,18 @@ jobs:
         # same file plus its own audit suite, and an unlisted suite is a guard that
         # lands with no gate — this job's list is hand-enumerated, not globbed.
         #
-        # Both files run: measured 196 tests / 0 fail (139 plugin-refresh + 57
+        # Both files run: measured 205 tests / 0 fail (148 plugin-refresh + 57
         # lock-resolution-audit), so there is no pre-existing red to import.
+        # CTL-1951 added 9 to plugin-refresh.test.mjs (139 -> 148), re-measured
+        # with the instrument below rather than assumed from the delta.
         # INSTRUMENT: `bun test plugin-refresh.test.mjs
         # lock-resolution-audit.test.mjs` from this step's working-directory,
         # bun 1.3.5, Darwin arm64 26.5.2, single run — the count is deterministic,
         # no spread. On a checkout WITHOUT the broker package's pino installed,
-        # exactly one of the 196 fails to LOAD (`Cannot find package 'pino' from
-        # config.mjs`) rather than failing an assertion, giving 195/1; CI runs
-        # `bun install` here, so CI sees 196/0. Both figures re-measured on this
-        # branch by stashing and restoring node_modules.
+        # exactly one of the 205 fails to LOAD (`Cannot find package 'pino' from
+        # config.mjs`) rather than failing an assertion, giving 204/1; CI runs
+        # `bun install` here, so CI sees 205/0. Re-confirmed on the CTL-1951
+        # branch: the pre-install run was 204/1 with that exact loader error.
         #
         # CTL-1835: the previous revision of this comment cited "97 tests" for
         # plugin-refresh.test.mjs and "175 tests" for the pair. Neither
@@ -687,6 +1023,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/orphan-sweep.test.sh
 
+      - name: broker pid-file identity test (CTL-2028)
+        # ⚠️ NOT hermetic in the orphan-sweep sense: this suite STARTS REAL
+        # `node` processes, because the defect is that a pid-file-derived status
+        # cannot see a second process — and a mocked `ps` would let the detector
+        # pass while counting nothing. Every fixture is short-lived, killed in a
+        # trap, and the trap ASSERTS they are gone (fail-closed) rather than
+        # probing with something that fails open.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/broker-pid-identity.test.sh
+
       - name: orphan-sweep LaunchAgent plist test (CTL-1531)
         working-directory: plugins/dev/scripts
         run: bash __tests__/orphan-sweep-plist.test.sh
@@ -726,9 +1072,13 @@ jobs:
         # without this step the required check could pass without ever exercising
         # the zsh path. Installed explicitly rather than assumed present on the
         # runner image so the regression coverage doesn't silently degrade to a skip.
-        run:
-          command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y
-          --no-install-recommends zsh)
+        # CTL-2079: install zsh only when absent, but non-interactive + dpkg-lock-bounded
+        # so an apt-lock wedge fails fast instead of hanging.
+        run: |
+          command -v zsh >/dev/null 2>&1 || \
+            (export DEBIAN_FRONTEND=noninteractive && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 update -qq && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends zsh)
 
       - name: phase-artifact-gate contract + zsh regression test
         # Covers match_thoughts_artifact (tail/slug/case forms, cross-ticket
@@ -842,6 +1192,9 @@ jobs:
             abort-worker.test.mjs \
             assertion-evidence.test.mjs \
             assertion-evidence-parity.test.mjs \
+            cli-header-backtick-guard.test.mjs \
+            agent-session-narrator.test.mjs \
+            linear-comment-write.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
@@ -855,6 +1208,7 @@ jobs:
             worker-dir-gc.test.mjs \
             in-flight-supersede.test.mjs \
             advance-idempotency.test.mjs \
+            clear-stall-advance-reentry.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
             claim.test.mjs \
@@ -866,6 +1220,12 @@ jobs:
             checkout-sync.test.mjs \
             cluster-claim-sync.test.mjs \
             cluster-claim.test.mjs \
+            cluster-attachment-transport.test.mjs \
+            lease-authority.test.mjs \
+            lease-authority-claim.test.mjs \
+            lease-authority-gate.test.mjs \
+            cluster-heartbeat.test.mjs \
+            cluster-heartbeat-capacity.test.mjs \
             comms-drain.test.mjs \
             codex-run-phase-agent.test.mjs \
             daemon-watchdog-alert.test.mjs \
@@ -894,6 +1254,8 @@ jobs:
             doctor-cloud-sync-skew.test.mjs \
             dispatch.test.mjs \
             doctor.test.mjs \
+            agent-tools-write-path-health.test.mjs \
+            execution-core-env-drift-health.test.mjs \
             doctor-replica.test.mjs \
             __tests__/replica-health.test.mjs \
             __tests__/replica-health-event.test.mjs \
@@ -912,7 +1274,30 @@ jobs:
             phase-yield-parity.test.mjs \
             phase-yield-expiry.test.mjs \
             phase-yield-e2e.test.mjs \
+            cloud-sync-account.test.mjs \
             cloud-sync-schema-identity.test.mjs \
+            linear-feed-event.test.mjs \
+            linear-feed-cursor.test.mjs \
+            linear-feed-source.test.mjs \
+            linear-feed-sweep.test.mjs \
+            linear-feed-shadow.test.mjs \
+            linear-feed-run.test.mjs \
+            linear-feed-diff.test.mjs \
+            linear-feed-diffsweep.test.mjs \
+            linear-feed-parity.test.mjs \
+            github-feed-source.test.mjs \
+            github-feed-event.test.mjs \
+            github-feed-sweep.test.mjs \
+            github-feed-parity.test.mjs \
+            github-feed-timer.test.mjs \
+            github-feed-gate.test.mjs \
+            github-feed-ready.test.mjs \
+            github-feed-gate-install.test.mjs \
+            github-feed-gate-wiring.test.mjs \
+            github-feed-mode-leaf.test.mjs \
+            cloud-feed-gate.test.mjs \
+            cloud-feed-capture.test.mjs \
+            cloud-feed-timer.test.mjs \
             lib/canonical-event.test.mjs \
             lib/dual-envelope.test.mjs \
             fence-guard.test.mjs \
@@ -930,15 +1315,26 @@ jobs:
             integration-ctl-1240.test.mjs \
             integration.test.mjs \
             job-dir-gc.test.mjs \
+            label-budget-backoff.test.mjs \
             label-guard.test.mjs \
             linear-breaker.test.mjs \
             linear-ratelimit-event.test.mjs \
             linear-cache.test.mjs \
+            linear-bot-identity.test.mjs \
             linear-estimation-method.test.mjs \
             linear-query.test.mjs \
             linear-remint.test.mjs \
             linear-state-write-event.test.mjs \
+            linear-write-echo.test.mjs \
+            self-echo-negative-control.test.mjs \
             linear-write.test.mjs \
+            lane-claim.test.mjs \
+            lane-claim-wiring.test.mjs \
+            lane-claim-write-ledger.test.mjs \
+            linear-write-proxy.test.mjs \
+            linear-write-proxy-wiring.test.mjs \
+            linear-write-proxy-resolve.test.mjs \
+            __tests__/config-linear-write-proxy.test.mjs \
             memory-event.test.mjs \
             memory-sampler-signal.test.mjs \
             memory-sampler.test.mjs \
@@ -952,6 +1348,7 @@ jobs:
             reaper.test.mjs \
             reconcile-health-event.test.mjs \
             recovery.test.mjs \
+            pid-file-identity.test.mjs \
             registry.test.mjs \
             replica-read.test.mjs \
             replica-supplemental-reads.test.mjs \
@@ -968,10 +1365,14 @@ jobs:
             signal-reader.test.mjs \
             stale-pr-rescue-timer.test.mjs \
             stale-pr-rescue.test.mjs \
+            __tests__/escalation-router.test.mjs \
+            __tests__/stale-pr-rescue-escalate-router.test.mjs \
+            __tests__/no-direct-human-escalation.test.mjs \
             stalled-detector.test.mjs \
             terminal-state.test.mjs \
             test-setup.test.mjs \
             transcript-tail.test.mjs \
+            triage-admission-observability.test.mjs \
             triage-transition-event.test.mjs \
             worker-disposition.test.mjs \
             worker-transition-event.test.mjs \
@@ -1011,9 +1412,14 @@ jobs:
             updater/updater-tracing.test.mjs \
             service-manifest.test.mjs \
             github-auth-preflight.test.mjs \
+            claude-accounts-rearm.test.mjs \
             github-token-candidates-legacy-parity.test.mjs \
             github-quota.test.mjs \
             github-quota-timer.test.mjs \
             cluster-sync.test.mjs \
             reconstruct-ticket-state.test.mjs \
-            hosts-json-retired.test.mjs
+            hosts-json-retired.test.mjs \
+            entitlement-hosts.test.mjs \
+            entitlement-shadow.test.mjs \
+            entitlement-audit.test.mjs \
+            entitlement-enforce.test.mjs

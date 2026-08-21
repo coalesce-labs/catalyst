@@ -5,7 +5,7 @@
     "": {
       "name": "catalyst",
       "dependencies": {
-        "@catalyst-cloud/schema": "0.1.9",
+        "@catalyst-cloud/schema": "0.1.18",
         "@modelcontextprotocol/sdk": "1.29.0",
       },
       "devDependencies": {
@@ -34,7 +34,7 @@
       "name": "catalyst-execution-core",
       "dependencies": {
         "@catalyst-cloud/read-model": "^0.1.0",
-        "@catalyst-cloud/sdk": "^0.8.2",
+        "@catalyst-cloud/sdk": "0.8.14",
         "@modelcontextprotocol/sdk": "1.29.0",
         "@opentelemetry/api": "^1.9.1",
         "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
@@ -210,11 +210,11 @@
 
     "@catalyst-cloud/read-model": ["@catalyst-cloud/read-model@0.1.1", "", {}, "sha512-DFnVumOR8lB4scX3aYyh9aCLc57LmfpRyrR+BX8pVFLmg7sbBNa/4kOevbq9bgXpEJ8nzUY096hoStHbcB8b7w=="],
 
-    "@catalyst-cloud/replicate": ["@catalyst-cloud/replicate@0.1.3", "", { "dependencies": { "@catalyst-cloud/schema": "^0.1.3" } }, "sha512-7LyYJTG5fkjq9RA8OaCpCzP2b/gjPOYJJmCxRce++TPsIviQULpTiaffL7MuBfwGODf2dwGrO0ozeW7n8slTTQ=="],
+    "@catalyst-cloud/replicate": ["@catalyst-cloud/replicate@0.1.12", "", { "dependencies": { "@catalyst-cloud/schema": "0.1.18" } }, "sha512-6MGQWMdWukD/fA1Ivu6dIvXj8tRzMMjv3wUvhzTgdNhLdY17YrIILQDNS0ALStcDIsZUbBhYwwdfjYnYWxGKZg=="],
 
-    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.9", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-eeRLP4gNXtfBoLPPoodHnsLICXsl5raeKMOBInUsIhfVtkUfJqolfcNTC0cevgOsE1TSEKq3iucAZhOHxCIqNQ=="],
+    "@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.18", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-w3lr2z21SLAfRb1QhFCxv+1v9JCM2epLNvvAi73tXN/ClsqV0wxCgQ+07cK/Jx+BehRXwQu3G+z+iAvqHHOdTg=="],
 
-    "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.2", "", { "dependencies": { "@catalyst-cloud/read-model": "^0.1.0", "@catalyst-cloud/replicate": "^0.1.3", "@catalyst-cloud/schema": "^0.1.3" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <2", "@sqlite.org/sqlite-wasm": "*", "better-sqlite3": "*" }, "optionalPeers": ["@opentelemetry/api", "@sqlite.org/sqlite-wasm", "better-sqlite3"] }, "sha512-QJZFWZAfDdLCr4jvfS05BfuZDR5jr6bN4n/DN2vgMQB9pRTTrZAtk+mbvcK8M3NwfxyuPD0ICVM4Qe+/8jtnEg=="],
+    "@catalyst-cloud/sdk": ["@catalyst-cloud/sdk@0.8.14", "", { "dependencies": { "@catalyst-cloud/read-model": "^0.1.0", "@catalyst-cloud/replicate": "0.1.12", "@catalyst-cloud/schema": "0.1.18" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <2", "@sqlite.org/sqlite-wasm": "*", "better-sqlite3": "*" }, "optionalPeers": ["@opentelemetry/api", "@sqlite.org/sqlite-wasm", "better-sqlite3"] }, "sha512-ulJNniSQFDDxWBdq1e7cOnDRZjgFqkI9HYodQvi9pqNcKQxLcyhHCyhh+K/Km7INUrRlFizewF7kgK1lLpD5Vw=="],
 
     "@dagrejs/dagre": ["@dagrejs/dagre@3.1.0", "", { "dependencies": { "@dagrejs/graphlib": "4.0.3" } }, "sha512-22SWJOfiQVCSFF0qN43SMiYS7Ch9Z6HZoO8+5PycGzGgmtdXIvHoZ2DoT5BweVGf+wwHxBFZu4eO0do0RIYQaw=="],
 
@@ -1543,10 +1543,6 @@
     "@babel/core/semver": ["semver@6.3.1", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
 
     "@babel/helper-compilation-targets/semver": ["semver@6.3.1", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
-
-    "@catalyst-cloud/replicate/@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.5", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-00jtw6f9bUwwR3aeviECqNHfuMrlLK73cOym4wCLBdMJNLOBo0NYM7HlkH6ejWpqycq7EI2ECfys4wqzqnhT5g=="],
-
-    "@catalyst-cloud/sdk/@catalyst-cloud/schema": ["@catalyst-cloud/schema@0.1.5", "", { "dependencies": { "drizzle-orm": "0.44.7" } }, "sha512-00jtw6f9bUwwR3aeviECqNHfuMrlLK73cOym4wCLBdMJNLOBo0NYM7HlkH6ejWpqycq7EI2ECfys4wqzqnhT5g=="],
 
     "@eslint-community/eslint-utils/eslint-visitor-keys": ["eslint-visitor-keys@3.4.3", "", {}, "sha512-wpc+LXeiyiisxPlEkUzU6svyS1frIO3Mgxj1fdy7Pm8Ygzguax2N3Fa/D/ag1WqbOprdI+uY6wMUl8/a2G+iag=="],
 

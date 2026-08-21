@@ -25,6 +25,11 @@ import {
   isOrchestratorStatusFresh,
 } from "./router.mjs";
 import { getInterests } from "./state.mjs";
+// CTL-1929: the `github.*` dispatch gate. Imported from execution-core for the same
+// reason event-tail.mjs is — the two processes share this feature's modules, and the
+// gate must be the SAME decision function the producer's tests drive.
+import { decideDispatch as decideGithubDispatch } from "../execution-core/github-feed-gate.mjs";
+import { createGithubFeedGate } from "../execution-core/github-feed-gate-install.mjs";
 
 // Identity-stable alias — loadExistingRegistrations reports interests.size.
 const interests = getInterests();
@@ -33,6 +38,23 @@ const interests = getInterests();
 // (daemon env is set at launch); ON unless CATALYST_TICK_TIMING=off.
 const BROKER_ROUTE_TIMING = process.env.CATALYST_TICK_TIMING !== "off";
 const BROKER_SLOW_ROUTE_MS = Number(process.env.CATALYST_BROKER_SLOW_ROUTE_MS) || 100;
+
+// CTL-1929: which producer's `github.*` events may drive routing on this host.
+//
+// ⛔ NULL UNLESS AN OPERATOR OPTS IN. `createGithubFeedGate` returns null for
+// `CATALYST_GITHUB_FEED=off`, which is the default on every host, so the block in
+// readNewEvents below is skipped entirely and routing is byte-identical to
+// pre-CTL-1929. Resolved once at module load, matching BROKER_ROUTE_TIMING above:
+// the daemon's env is fixed at launch, and a per-event config read on the tail that
+// sees every event in the fleet is not something to add casually.
+let _githubGate = null;
+export function initGithubFeedGate(gate = undefined) {
+  _githubGate = gate === undefined ? createGithubFeedGate({ orchDir: CATALYST_DIR, logger: log }) : gate;
+  return _githubGate;
+}
+export function getGithubFeedGate() {
+  return _githubGate;
+}
 
 // --- Reactive event log tailing ---
 let lastByteOffset = 0;
@@ -130,6 +152,32 @@ export function readNewEvents() {
       // life blind. Same process counter, same non-gating contract: the event is
       // ROUTED regardless, so this can never change what the broker delivers.
       checkEnvelope(event);
+      // CTL-1929: WHICH producer's `github.*` events may drive routing. Both the
+      // smee→webhook receiver and the GitHub feed write the same names into this one
+      // log; the gate picks one per event and the loser is CAPTURED, not dropped, so
+      // "did the feed miss this edge?" stays answerable after the fact.
+      //
+      // ⛔ SUPPRESSION IS PER NAME, AND HOW MANY NAMES IS A PROPERTY OF THIS HOST.
+      // `github.pr.merged` joined the suppressible set when CTC-691 shipped (0.1.17);
+      // `github.push` and `github.check_suite.completed` join it only on a replica
+      // that has `push_events` (CTC-704) and `check_suites.pull_request_numbers`
+      // (CTC-712, 0.1.18) respectively. The gate resolves both from the replica and
+      // re-reads them on a TTL, because they arrive at a cloud-sync writer restart
+      // this process never observes. A host missing either keeps smee authoritative
+      // for that name no matter how healthy the producer is. See github-feed-gate.mjs
+      // and github-feed-gate-install.mjs.
+      //
+      // ⚠️ Placed BEFORE processEvent and before the timing block, so a suppressed
+      // event is neither routed nor counted as a route — a suppressed event that
+      // still showed up in the slow-route histogram would make the two instruments
+      // disagree about what the broker did.
+      if (_githubGate) {
+        const verdict = decideGithubDispatch(event, _githubGate);
+        if (verdict.suppress) {
+          _githubGate.capture?.append(event, verdict);
+          continue;
+        }
+      }
       // CTL-1330 Tier 1: time each route; surface ONLY slow routes (default
       // >100ms) so we catch a broker-side hot-loop stall without flooding Loki —
       // the broker routes every appended event. ON by default (CATALYST_TICK_TIMING).

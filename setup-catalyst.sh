@@ -60,6 +60,191 @@ can_open_tty() {
 	(: </dev/tty) 2>/dev/null
 }
 
+#
+# ── CTL-1914 / CTL-1918: ONE resolver for the Catalyst source tree ──
+#
+# Four separate steps below need a helper script that lives in `plugins/dev/scripts`
+# of a Catalyst checkout: the orphan-sweep launchd installer, the Linear state
+# contract, `setup-plugin-source.sh`, and `install-cli.sh`. Each used to resolve it
+# relative to THIS script's own directory — which, in the install path every
+# user-facing doc gives (`curl -O … && ./setup-catalyst.sh`), contains nothing but
+# setup-catalyst.sh. So each degraded to a silent skip, and the documented install
+# produced a materially more-broken machine than a repo clone.
+#
+# ⛔ The resolution is CENTRAL rather than per-call-site on purpose: four copies of a
+# lookup are four chances for the next one to skip silently, and the reason the
+# original defect survived is that each site failed in its own private way.
+#
+# Resolution order (first usable tree wins):
+#   1. $CATALYST_SOURCE_DIR / --source-dir   — an operator override
+#   2. next to this script                   — the repo-clone layout
+#   3. $PROJECT_DIR                          — setup was run inside a Catalyst checkout
+#   4. the plugin-source checkout            — what the daemons already run from
+#   5. clone one                             — the documented-curl bootstrap
+#
+# Step 5 clones to the SAME default path `setup-plugin-source.sh` uses
+# (`~/catalyst/plugin-source`), so the bootstrap clone IS the plugin-source checkout
+# and that script then reuses it rather than cloning a second copy.
+CATALYST_SOURCE_DIR_RESOLVED=""
+# Which candidate won, and why a resolution failed. Both are read by callers and by
+# __tests__/setup-catalyst-source-resolver.test.sh; exported so the answer is visible
+# to a child process (and to shellcheck, which cannot see the test's use).
+export CATALYST_SOURCE_ORIGIN=""
+export CATALYST_SOURCE_REASON=""
+NO_CLONE_SOURCE=0
+
+# The marker for "this is a Catalyst source tree". Deliberately a directory rather
+# than any single helper: a tree that exists but is missing ONE script must report
+# that specific script as missing (`catalyst_helper_path`), not read as "no tree".
+catalyst_is_source_tree() {
+	[[ -n ${1-} && -d "$1/plugins/dev/scripts" ]]
+}
+
+catalyst_source_clone_target() {
+	echo "${CATALYST_PLUGIN_SOURCE:-${HOME}/catalyst/plugin-source}"
+}
+
+# resolve_catalyst_source — echo a usable source tree, or fail with a NAMED reason.
+#
+# ⛔ Never echoes a path it has not just validated, and never returns 0 without one.
+# "Could not look" and "there is nothing to find" are both failures here, but they are
+# DIFFERENT failures and the caller gets to see which: an empty clone that exits 0 is
+# the exact success-that-installed-nothing shape this whole ticket is about.
+resolve_catalyst_source() {
+	if [[ -n $CATALYST_SOURCE_DIR_RESOLVED ]]; then
+		echo "$CATALYST_SOURCE_DIR_RESOLVED"
+		return 0
+	fi
+	CATALYST_SOURCE_REASON=""
+
+	local candidate script_dir
+	if [[ -n ${CATALYST_SOURCE_DIR-} ]] && catalyst_is_source_tree "${CATALYST_SOURCE_DIR}"; then
+		CATALYST_SOURCE_DIR_RESOLVED="$(cd "${CATALYST_SOURCE_DIR}" && pwd)"
+		CATALYST_SOURCE_ORIGIN="env"
+		echo "$CATALYST_SOURCE_DIR_RESOLVED"
+		return 0
+	fi
+
+	# `BASH_SOURCE[0]` is empty under `curl … | bash` (the script arrives on stdin), so
+	# this candidate simply does not apply there — which is correct, not a bug to work
+	# around: there is genuinely no adjacent tree in that layout.
+	script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || script_dir=""
+	if catalyst_is_source_tree "$script_dir"; then
+		CATALYST_SOURCE_DIR_RESOLVED="$script_dir"
+		CATALYST_SOURCE_ORIGIN="script-dir"
+		echo "$CATALYST_SOURCE_DIR_RESOLVED"
+		return 0
+	fi
+
+	if catalyst_is_source_tree "${PROJECT_DIR-}"; then
+		CATALYST_SOURCE_DIR_RESOLVED="$(cd "${PROJECT_DIR}" && pwd)"
+		CATALYST_SOURCE_ORIGIN="project-dir"
+		echo "$CATALYST_SOURCE_DIR_RESOLVED"
+		return 0
+	fi
+
+	candidate="$(catalyst_source_clone_target)"
+	if catalyst_is_source_tree "$candidate"; then
+		CATALYST_SOURCE_DIR_RESOLVED="$(cd "$candidate" && pwd)"
+		CATALYST_SOURCE_ORIGIN="plugin-source"
+		echo "$CATALYST_SOURCE_DIR_RESOLVED"
+		return 0
+	fi
+
+	if [[ $NO_CLONE_SOURCE -eq 1 || -n ${CATALYST_NO_CLONE_SOURCE-} ]]; then
+		CATALYST_SOURCE_REASON="no-source-tree"
+		return 1
+	fi
+
+	# ── the bootstrap clone ──
+	# Same shape as setup-plugin-source.sh's own clone (main, single-branch) so the
+	# tree it later reuses is the tree it would have made. NOT --depth 1: the fleet's
+	# updater and `git merge-base --is-ancestor` checks need real history.
+	echo "" >&2
+	echo "📦 No Catalyst source tree found — cloning one to $(catalyst_source_clone_target)" >&2
+	mkdir -p "$(dirname "$(catalyst_source_clone_target)")" 2>/dev/null || true
+	if ! GIT_TERMINAL_PROMPT=0 git clone --branch main --single-branch \
+		"${CATALYST_SOURCE_REPO:-https://github.com/coalesce-labs/catalyst.git}" \
+		"$(catalyst_source_clone_target)" >/dev/null 2>&1; then
+		CATALYST_SOURCE_REASON="clone-failed"
+		return 1
+	fi
+	# ⛔ Validate the RESULT, not the exit code. A clone that exits 0 having produced
+	# nothing usable is precisely the failure mode this ticket exists to remove, and
+	# trusting rc=0 here would rebuild it one layer up.
+	candidate="$(catalyst_source_clone_target)"
+	if ! catalyst_is_source_tree "$candidate"; then
+		CATALYST_SOURCE_REASON="clone-produced-no-tree"
+		return 1
+	fi
+	CATALYST_SOURCE_DIR_RESOLVED="$(cd "$candidate" && pwd)"
+	CATALYST_SOURCE_ORIGIN="cloned"
+	echo "$CATALYST_SOURCE_DIR_RESOLVED"
+	return 0
+}
+
+# catalyst_helper_path <relative-path-under-plugins/dev/scripts>
+#
+# Echo the absolute path to a helper script, or fail. Sets CATALYST_SOURCE_REASON to
+# `missing-helper:<name>` when the tree resolved but this particular script is absent —
+# a different fact from "no tree", and one a caller must be able to report distinctly.
+#
+# ⛔ The resolver is invoked DIRECTLY, never as `$(resolve_catalyst_source)`. Command
+# substitution runs in a subshell, so every global the resolver sets — including
+# CATALYST_SOURCE_REASON, which is the entire point of failing with a NAMED reason —
+# is discarded when the subshell exits, and the caller's deferral prints an empty
+# "()" where the diagnosis should be. That is this ticket's own defect one level down:
+# a failure that still reports, but reports nothing usable. Callers read
+# CATALYST_HELPER_PATH rather than capturing stdout, for the same reason.
+CATALYST_HELPER_PATH=""
+catalyst_helper_path() {
+	local rel="$1"
+	CATALYST_HELPER_PATH=""
+	resolve_catalyst_source >/dev/null || return 1
+	if [[ ! -f "${CATALYST_SOURCE_DIR_RESOLVED}/plugins/dev/scripts/${rel}" ]]; then
+		CATALYST_SOURCE_REASON="missing-helper:${rel}"
+		return 1
+	fi
+	CATALYST_HELPER_PATH="${CATALYST_SOURCE_DIR_RESOLVED}/plugins/dev/scripts/${rel}"
+	echo "$CATALYST_HELPER_PATH"
+}
+
+#
+# ── CTL-1918: the deferred-step ledger ──
+#
+# Setup used to end by PRINTING instructions for steps it could have performed, so
+# "install finished" and "the system works" were different states with nothing
+# enforcing the gap was closed. Every step now either RUNS or is recorded here — and a
+# recorded step carries both the command that completes it AND the command that
+# verifies it later, so a deferral is checkable rather than advisory.
+CATALYST_DEFERRED_STEPS=()
+
+catalyst_defer_step() {
+	# title <TAB> complete-command <TAB> verify-command
+	CATALYST_DEFERRED_STEPS+=("${1}"$'\t'"${2}"$'\t'"${3}")
+}
+
+print_deferred_steps() {
+	local n=${#CATALYST_DEFERRED_STEPS[@]}
+	if [[ $n -eq 0 ]]; then
+		# Stated positively: an empty section and a section that was never reached read
+		# identically, and only one of them means the install is complete.
+		echo "✅ No steps were deferred — this node was fully provisioned."
+		return 0
+	fi
+	echo ""
+	echo "⚠️  ${n} step(s) were DEFERRED. This node is not fully provisioned until they are done:"
+	local entry title complete verify
+	for entry in "${CATALYST_DEFERRED_STEPS[@]}"; do
+		IFS=$'\t' read -r title complete verify <<<"$entry"
+		echo ""
+		echo "  • ${title}"
+		echo "      run:    ${complete}"
+		echo "      verify: ${verify}"
+	done
+	echo ""
+}
+
 print_usage() {
 	cat <<'USAGE'
 Usage: setup-catalyst.sh [--non-interactive|--defaults]
@@ -74,14 +259,32 @@ Usage: setup-catalyst.sh [--non-interactive|--defaults]
                             deliberately NO default here — see below.
                             Env: CATALYST_CLOUD_ACCOUNT
 
+  --source-dir <path>       Use an existing Catalyst checkout for the helper scripts
+                            setup needs (orphan-sweep installer, Linear state contract,
+                            plugin-source, CLI installer).
+                            Env: CATALYST_SOURCE_DIR
+  --no-clone-source         Never clone a Catalyst checkout. Any step that needs one is
+                            DEFERRED with the command to complete and verify it, rather
+                            than skipped.
+                            Env: CATALYST_NO_CLONE_SOURCE=1
+
 Omit the cloud flags and setup behaves exactly as it always has.
+
+Headless install (SSH-only / CI hosts), one command and one key:
+
+  curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh \
+    | bash -s -- --non-interactive \
+        --cloud-token "$CATALYST_CLOUD_TOKEN" --cloud-account "$CATALYST_CLOUD_ACCOUNT"
+
+  `-s --` is required for the piped form: without it the flags are consumed by bash
+  itself, not by this script, and the install silently runs interactive.
 USAGE
 }
 
 # Parse CLI flags. CATALYST_AUTONOMOUS is the project-wide headless signal
 # (same contract as plugins/dev/scripts/check-project-setup.sh).
 parse_args() {
-	if [[ -n ${CATALYST_AUTONOMOUS:-} ]]; then
+	if [[ -n ${CATALYST_AUTONOMOUS-} ]]; then
 		NON_INTERACTIVE=1
 	fi
 	while [[ $# -gt 0 ]]; do
@@ -108,6 +311,20 @@ parse_args() {
 			}
 			CLOUD_ACCOUNT="$2"
 			shift 2
+			;;
+		# CTL-1914: where setup finds the helper scripts it needs. Absent → the
+		# resolver's own ordered search, ending in a bootstrap clone.
+		--source-dir)
+			[[ $# -ge 2 ]] || {
+				print_error "--source-dir requires a value"
+				exit 1
+			}
+			CATALYST_SOURCE_DIR="$2"
+			shift 2
+			;;
+		--no-clone-source)
+			NO_CLONE_SOURCE=1
+			shift
 			;;
 		-h | --help)
 			print_usage
@@ -161,7 +378,7 @@ ask_yes_no() {
 # (or on EOF) echo the default without consuming stdin.
 prompt_value() {
 	local prompt="$1"
-	local default="${2:-}"
+	local default="${2-}"
 	local reply=""
 	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
 		echo "$prompt [${default}] → ${default} (non-interactive)" >&2
@@ -195,7 +412,7 @@ merge_catalyst_section() {
 # harden_secrets_dir <dir> — mkdir -p then chmod 700. Idempotent.
 harden_secrets_dir() {
 	local dir="$1"
-	[[ -n "$dir" ]] || return 1
+	[[ -n $dir ]] || return 1
 	mkdir -p "$dir" || return 1
 	chmod 700 "$dir"
 }
@@ -205,9 +422,9 @@ ensure_secrets_gitignore() {
 	local dir="$1" gi line
 	gi="${dir}/.gitignore"
 	mkdir -p "$dir" || return 1
-	[[ -f "$gi" ]] || : > "$gi"
+	[[ -f $gi ]] || : >"$gi"
 	for line in 'config*.json' '*.env'; do
-		grep -qxF "$line" "$gi" 2>/dev/null || printf '%s\n' "$line" >> "$gi"
+		grep -qxF "$line" "$gi" 2>/dev/null || printf '%s\n' "$line" >>"$gi"
 	done
 }
 
@@ -215,7 +432,13 @@ ensure_secrets_gitignore() {
 write_secret_file() {
 	local content="$1" path="$2" tmp
 	tmp="$(mktemp)" || return 1
-	( umask 077; printf '%s' "$content" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+	(
+		umask 077
+		printf '%s' "$content" >"$tmp"
+	) || {
+		rm -f "$tmp"
+		return 1
+	}
 	chmod 600 "$tmp"
 	mv "$tmp" "$path"
 }
@@ -443,6 +666,18 @@ update_config_with_linear_states() {
 	fi
 	local secrets_file="$HOME/.config/catalyst/config-${PROJECT_KEY}.json"
 
+	# CTL-2076: never re-derive over a committed, PRESERVED stateMap. setup_project_config
+	# sets CATALYST_STATEMAP_PRESERVED=1 when it kept an existing non-empty committed map;
+	# honoring it here closes the second clobber path (a credentialed re-run over a real
+	# config, e.g. mini-2's CTL checkout, where fetch+build_state_map_from_linear would
+	# otherwise overwrite the curated map with the positional heuristic). A fresh install
+	# leaves the flag 0 (or unset), so the Linear-derived refresh still runs there.
+	if [[ "${CATALYST_STATEMAP_PRESERVED:-0}" == "1" ]]; then
+		echo ""
+		echo "✓ Preserving committed linear.stateMap (skipping Linear-derived refresh)"
+		return 0
+	fi
+
 	# Need both files to exist
 	if [[ ! -f $config_file ]] || [[ ! -f $secrets_file ]]; then
 		return 0
@@ -509,21 +744,47 @@ setup_execution_core_states() {
 	# states + registry entry. The stateMap write is idempotent (the states
 	# script preserves a template-default or user-customised map).
 
-	# Locate the standalone script — installed plugin root or the repo checkout.
+	# Locate the standalone script — installed plugin root, else the central resolver.
+	# CTL-1914: the second branch was the RELATIVE path `plugins/dev/scripts/…`, i.e.
+	# resolved against CWD, which for the documented curl install holds only the setup
+	# script. The Linear workflow-state contract and the `worker-status` label group
+	# were therefore never provisioned, behind a warning that read as informational.
 	local states_script=""
-	if [[ -n ${CLAUDE_PLUGIN_ROOT:-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/setup-execution-core-states.sh" ]]; then
+	if [[ -n ${CLAUDE_PLUGIN_ROOT-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/setup-execution-core-states.sh" ]]; then
 		states_script="${CLAUDE_PLUGIN_ROOT}/scripts/setup-execution-core-states.sh"
-	elif [[ -f "plugins/dev/scripts/setup-execution-core-states.sh" ]]; then
-		states_script="plugins/dev/scripts/setup-execution-core-states.sh"
+	else
+		if catalyst_helper_path setup-execution-core-states.sh >/dev/null; then
+			states_script="$CATALYST_HELPER_PATH"
+		else
+			states_script=""
+		fi
 	fi
 	if [[ -z $states_script ]]; then
-		print_warning "execution-core repo, but setup-execution-core-states.sh not found — skipping state contract"
+		print_warning "Linear state contract NOT provisioned (${CATALYST_SOURCE_REASON})"
+		catalyst_defer_step \
+			"Provision the Linear workflow-state contract and worker-status labels (${CATALYST_SOURCE_REASON})" \
+			"git clone https://github.com/coalesce-labs/catalyst.git ~/catalyst/plugin-source && bash ~/catalyst/plugin-source/plugins/dev/scripts/setup-execution-core-states.sh --config ${config_file}" \
+			"catalyst doctor"
 		return 0
 	fi
 
 	echo ""
 	echo "🔗 Ensuring execution-core Linear-state contract..."
-	bash "$states_script" --config "$config_file" || true
+	# ⛔ Codex #3500 P1: this was `|| true`, which swallowed a nonzero exit — Linear
+	# refusing to create a state, registry setup failing — with no deferral. The new
+	# ledger would then print its all-clear on a node whose state contract never landed,
+	# which is a worse failure than the silent skip this PR removed: it is a silent skip
+	# with a green receipt attached. The `|| true` stays (a failed contract must not
+	# abort setup), but the status is now CAPTURED and recorded.
+	local states_rc=0
+	bash "$states_script" --config "$config_file" || states_rc=$?
+	if [[ $states_rc -ne 0 ]]; then
+		print_warning "Linear state contract did NOT land (setup-execution-core-states.sh exited ${states_rc})"
+		catalyst_defer_step \
+			"Provision the Linear workflow-state contract (its installer ran and exited ${states_rc})" \
+			"bash ${states_script} --config ${config_file}" \
+			"catalyst doctor"
+	fi
 }
 
 # Discover existing Sentry auth token
@@ -630,7 +891,7 @@ detect_os() {
 # unknown → all three. Fresh Linux machines default to bash, so writing only
 # ~/.zshenv left installed tools invisible in new shells (CTL-844 remediate).
 path_rc_files() {
-	case "${SHELL:-}" in
+	case "${SHELL-}" in
 	*zsh) echo "$HOME/.zshenv" ;;
 	*bash) printf '%s\n' "$HOME/.bashrc" "$HOME/.profile" ;;
 	*) printf '%s\n' "$HOME/.zshenv" "$HOME/.bashrc" "$HOME/.profile" ;;
@@ -823,7 +1084,7 @@ offer_install_node() {
 	arch=$([[ "$(detect_arch)" == "arm64" ]] && echo "arm64" || echo "x64")
 	version="${CATALYST_NODE_VERSION:-$(curl -fsSL https://nodejs.org/dist/index.json |
 		jq -r '[.[] | select(.lts != false)][0].version')}"
-	[[ -n "$version" && "$version" != "null" ]] || {
+	[[ -n $version && $version != "null" ]] || {
 		print_error "Could not resolve Node LTS version"
 		return 1
 	}
@@ -912,12 +1173,18 @@ offer_install_gh_cli() {
 	local ver os arch ext dir tmp
 	ver=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest |
 		jq -r '.tag_name' | sed 's/^v//')
-	[[ -n "$ver" && "$ver" != "null" ]] || {
+	[[ -n $ver && $ver != "null" ]] || {
 		print_error "Could not resolve gh version. Manual: https://cli.github.com/"
 		return 1
 	}
-	if [[ "$(uname -s)" == "Darwin" ]]; then os="macOS"; ext="zip"; else os="linux"; ext="tar.gz"; fi
-	if [[ "$ext" == "zip" ]] && ! command -v unzip &>/dev/null; then
+	if [[ "$(uname -s)" == "Darwin" ]]; then
+		os="macOS"
+		ext="zip"
+	else
+		os="linux"
+		ext="tar.gz"
+	fi
+	if [[ $ext == "zip" ]] && ! command -v unzip &>/dev/null; then
 		print_error "unzip not found — cannot extract gh archive. Manual: https://cli.github.com/"
 		return 1
 	fi
@@ -926,7 +1193,7 @@ offer_install_gh_cli() {
 	tmp=$(mktemp -d)
 	if curl -fsSL -o "$tmp/gh.$ext" \
 		"https://github.com/cli/cli/releases/download/v${ver}/${dir}.${ext}"; then
-		if [[ "$ext" == "zip" ]]; then
+		if [[ $ext == "zip" ]]; then
 			unzip -q "$tmp/gh.$ext" -d "$tmp"
 		else
 			tar -xzf "$tmp/gh.$ext" -C "$tmp"
@@ -1360,7 +1627,18 @@ setup_project_config() {
 	echo "  - PR titles (e.g., [${PROJECT_KEY}-123] Add new feature)"
 	echo "  - Commit messages and documentation"
 	echo ""
-	ticket_prefix=$(prompt_value "Enter ticket prefix (e.g., ENG, PROJ) [PROJ]:" "PROJ")
+	# Ticket prefix: default PROJ, but PRESERVE an existing committed value across a
+	# regeneration (CTL-2076) so a non-interactive re-run over a real config (e.g. the
+	# CTL checkout) does not clobber ticketPrefix back to PROJ. Mirrors the thoughts.*
+	# (CTL-1214) and deployment.mode (CTL-1622) preservation blocks below; identical
+	# preload+prompt shape to the deployment_mode block.
+	local ticket_prefix_default="PROJ"
+	if [[ -f $config_file ]]; then
+		local _existing_prefix
+		_existing_prefix=$(jq -r '.catalyst.project.ticketPrefix // empty' "$config_file" 2>/dev/null)
+		[[ -n $_existing_prefix ]] && ticket_prefix_default="$_existing_prefix"
+	fi
+	ticket_prefix=$(prompt_value "Enter ticket prefix (e.g., ENG, PROJ) [${ticket_prefix_default}]:" "${ticket_prefix_default}")
 
 	# Prompt for project name
 	echo ""
@@ -1377,12 +1655,12 @@ setup_project_config() {
 	# "catalyst"; regenerating the config must not clobber it and fragment the
 	# node's thoughts subtree away from the fleet's.
 	local thoughts_directory="${REPO_NAME}" thoughts_profile="${ORG_NAME}"
-	if [[ -f "$config_file" ]]; then
+	if [[ -f $config_file ]]; then
 		local _existing_dir _existing_prof
 		_existing_dir=$(jq -r '.catalyst.thoughts.directory // empty' "$config_file" 2>/dev/null)
 		_existing_prof=$(jq -r '.catalyst.thoughts.profile // empty' "$config_file" 2>/dev/null)
-		[[ -n "$_existing_dir" ]] && thoughts_directory="$_existing_dir"
-		[[ -n "$_existing_prof" ]] && thoughts_profile="$_existing_prof"
+		[[ -n $_existing_dir ]] && thoughts_directory="$_existing_dir"
+		[[ -n $_existing_prof ]] && thoughts_profile="$_existing_prof"
 	fi
 
 	# Deployment mode (CTL-1622): default single-host, but PRESERVE an existing
@@ -1391,7 +1669,7 @@ setup_project_config() {
 	# single-host. Validation is deferred to the resolver + `catalyst doctor`
 	# (same as ticket prefix), so accept any value here.
 	local deployment_mode="single-host"
-	if [[ -f "$config_file" ]]; then
+	if [[ -f $config_file ]]; then
 		local _existing_mode
 		# Preserve the value whenever the key is PRESENT and NON-NULL — including an
 		# explicit `false`/number/garbage — rather than `// empty` (which jq treats
@@ -1403,7 +1681,7 @@ setup_project_config() {
 		# "null", an unrecognized value that flips doctor to FAIL after regeneration.
 		# Deferred validation (resolver + doctor) is what surfaces a genuinely bad value.
 		_existing_mode=$(jq -r 'if (.catalyst.deployment | objects | has("mode")) and (.catalyst.deployment.mode != null) then (.catalyst.deployment.mode | tostring) else empty end' "$config_file" 2>/dev/null)
-		[[ -n "$_existing_mode" ]] && deployment_mode="$_existing_mode"
+		[[ -n $_existing_mode ]] && deployment_mode="$_existing_mode"
 	fi
 
 	echo ""
@@ -1425,6 +1703,40 @@ setup_project_config() {
 	local deployment_mode_json
 	deployment_mode_json=$(jq -Rn --arg v "$deployment_mode" '$v')
 
+	# teamKey: default to the ticket prefix (preserving today's teamKey := ticketPrefix
+	# coupling for fresh installs), but PRESERVE an existing committed linear.teamKey
+	# INDEPENDENTLY across a regeneration (CTL-2076) — a config can legitimately carry a
+	# teamKey distinct from its prefix, and clobbering it to the prefix is the exact bug
+	# that rewrote mini-2's CTL checkout to team PROJ.
+	local team_key="${ticket_prefix}"
+	if [[ -f $config_file ]]; then
+		local _existing_team
+		_existing_team=$(jq -r '.catalyst.linear.teamKey // empty' "$config_file" 2>/dev/null)
+		[[ -n $_existing_team ]] && team_key="$_existing_team"
+	fi
+
+	# stateMap: PRESERVE an existing NON-EMPTY committed linear.stateMap verbatim across a
+	# regeneration (CTL-2076); otherwise use today's generic 8-key default. Injected as a
+	# pre-encoded JSON blob the same way deployment_mode_json is, so a preserved map lands
+	# byte-for-byte and a fresh install keeps the exact current default.
+	#
+	# CTL-2076: signal the preservation to update_config_with_linear_states (called next in
+	# main), which would otherwise re-derive the map from Linear via the positional heuristic
+	# in build_state_map_from_linear and collapse a curated map (research/planning/inProgress =
+	# Research/Plan/Implement) back to a single started-state name — re-introducing the exact
+	# clobber this ticket fixes. The flag is deliberately NOT `local`: both functions run in
+	# the same process from main(), and a just-written generic default (flag=0) must still be
+	# refreshed from Linear on a fresh install. Defaults to 0 for a fresh/absent config.
+	local state_map_json
+	CATALYST_STATEMAP_PRESERVED=0
+	if [[ -f $config_file ]] &&
+		[[ $(jq -r '(.catalyst.linear.stateMap | objects | length) // 0' "$config_file" 2>/dev/null) -gt 0 ]]; then
+		state_map_json=$(jq -c '.catalyst.linear.stateMap' "$config_file")
+		CATALYST_STATEMAP_PRESERVED=1
+	else
+		state_map_json=$(jq -cn '{backlog:"Backlog",todo:"Todo",research:"In Progress",planning:"In Progress",inProgress:"In Progress",inReview:"In Review",done:"Done",canceled:"Canceled"}')
+	fi
+
 	# Create/update config
 	cat >"$config_file" <<EOF
 {
@@ -1442,17 +1754,8 @@ setup_project_config() {
       "mode": ${deployment_mode_json}
     },
     "linear": {
-      "teamKey": "${ticket_prefix}",
-      "stateMap": {
-        "backlog": "Backlog",
-        "todo": "Todo",
-        "research": "In Progress",
-        "planning": "In Progress",
-        "inProgress": "In Progress",
-        "inReview": "In Review",
-        "done": "Done",
-        "canceled": "Canceled"
-      }
+      "teamKey": "${team_key}",
+      "stateMap": ${state_map_json}
     },
     "thoughts": {
       "user": null,
@@ -1468,8 +1771,8 @@ EOF
 	echo "✓ projectKey: ${PROJECT_KEY}"
 	echo "✓ org/repo: ${ORG_NAME}/${REPO_NAME}"
 	echo "✓ ticketPrefix: ${ticket_prefix}"
-	echo "✓ linear.teamKey: ${ticket_prefix}"
-	echo "✓ linear.stateMap: defaults (will be updated with actual Linear states after API setup)"
+	echo "✓ linear.teamKey: ${team_key}"
+	echo "✓ linear.stateMap: ${state_map_json}"
 	echo "✓ deployment.mode: ${deployment_mode}"
 	echo ""
 }
@@ -1558,19 +1861,314 @@ EOF
 # URL. Changing either default would repoint or break both running replica writers
 # the moment they restarted. New installs get explicit values written here; the
 # defaults are a separate, evidence-gathering change.
-setup_cloud_replica() {
-	# Flags win over env. Absent → this whole function is a no-op and setup is
-	# byte-identical to before CTL-1836.
-	# CTL-1668: also LOOK UP the token under the configured name, not just the
-	# default — otherwise a host using a custom name has its valid token treated as
-	# absent and provisioning is silently skipped (Codex P2 on #3365).
-	local _tv="${CATALYST_CLOUD_TOKEN_ENV:-}"
+# validate_cloud_token TOKEN ACCOUNT BASE_URL — ONE authenticated call, and the
+# install refuses to continue unless it comes back 200. (CTL-1913)
+#
+# Endpoint choice is measured, not guessed. There is no /health, /me, /whoami or
+# /accounts on the hub (all 404), and `GET /issues?limit=1` discriminates BOTH
+# failure modes this function exists to catch — verified live 2026-08-17 against
+# staging.catalystcloud.dev:
+#
+#   valid token   + correct account -> 200
+#   garbage token + correct account -> 401 unauthorized
+#   valid token   + WRONG account   -> 403 forbidden
+#
+# That 403 is the tenant-0 footgun the account-required check above guards
+# syntactically; this catches the case where an account was supplied and is simply
+# not the one the key is scoped to — previously an opaque 403 the customer only met
+# hours later, in a log they had no reason to read.
+#
+# ⛔ EVERY NON-200 IS FATAL, INCLUDING "COULD NOT REACH". There is deliberately no
+# skip flag and no soft path. Provisioning a cloud replica REQUIRES reaching the
+# hub, so a host that cannot reach it at install time cannot succeed later either —
+# reporting success would recreate exactly the green-install-dead-writer state this
+# ticket removes. A distinct message per class keeps the failure actionable, and
+# `CATALYST_CLOUD_BASE_URL` remains the supported override for a different hub.
+#
+# The token is passed on stdin via a config file, never on the argv of a command
+# (`ps` is world-readable) and never interpolated into a URL.
+validate_cloud_token() {
+	local token="$1" account="$2" base_url="$3"
+
+	if ! command -v curl >/dev/null 2>&1; then
+		print_error "curl not found — cannot validate the cloud token."
+		echo ""
+		echo "  The install refuses to write a cloud config it could not verify."
+		echo "  Install curl and re-run."
+		return 1
+	fi
+
+	echo "  Validating the cloud token against ${base_url} ..."
+
+	# --max-time bounds a hung hub; -sS keeps the body quiet but lets curl's own
+	# error reach stderr. The header goes in a config file read from stdin so the
+	# bearer token never appears in this process's argv.
+	local code
+	code=$(
+		printf 'header = "Authorization: Bearer %s"\n' "$token" |
+			curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+				--config - \
+				"${base_url}/issues?account=${account}&limit=1" 2>/dev/null
+	) || code=""
+
+	case "$code" in
+	200)
+		print_success "cloud token validated against the hub (HTTP 200, account=${account})"
+		return 0
+		;;
+	401)
+		print_error "The cloud token was REJECTED by the hub (HTTP 401 unauthorized)."
+		echo ""
+		echo "  The token is wrong, expired, or revoked. Nothing has been written."
+		echo "  Re-run with a valid --cloud-token."
+		return 1
+		;;
+	403)
+		print_error "The token is valid but NOT scoped to account '${account}' (HTTP 403 forbidden)."
+		echo ""
+		echo "  The hub forces the account to match the key. Check --cloud-account"
+		echo "  against the tenant the token was issued for. Nothing has been written."
+		return 1
+		;;
+	000 | "")
+		print_error "Could not reach the hub at ${base_url} — the token was NOT validated."
+		echo ""
+		echo "  A cloud replica cannot be provisioned without reaching the hub, so this"
+		echo "  is fatal rather than a warning: reporting success here is what produced"
+		echo "  green installs with a permanently dead writer (CTL-1913)."
+		echo ""
+		echo "  Check the host resolves and is reachable, then re-run:"
+		echo "    curl -sS -o /dev/null -w '%{http_code}\\n' ${base_url}/issues"
+		echo "  (an unauthenticated 401 proves the host serves the API)"
+		return 1
+		;;
+	*)
+		print_error "The hub returned HTTP ${code} — the token was NOT validated."
+		echo ""
+		echo "  Nothing has been written. If the hub is having an outage, re-run once"
+		echo "  it recovers; a 5xx is not evidence the token is good OR bad."
+		return 1
+		;;
+	esac
+}
+
+# ── CTL-2045 §1: refuse the wrong credential CLASS before anything reaches disk ──
+#
+# assert_host_write_credential_shape TOKEN — 0 when TOKEN is a per-host org key.
+#
+# ⛔ THE INCIDENT. mini-2's 2026-08-18 reinstall provisioned the tenant-wide ADMIN_TOKEN
+# as this host's write credential. The cloud's agent routes correctly refuse an admin
+# bearer for writes, so every cross-host claim 403'd and the board froze from ~15:00 CT
+# — and `catalyst doctor` passed, the daemons ran, the heartbeat stayed fresh, and the
+# local write ledger read `2` with ZERO refusals the whole time, because nothing ever got
+# far enough to be refused locally.
+#
+# The classification itself lives in ONE place (lib/host-write-credential.mjs, mirrored
+# for bash in lib/catalyst-host-write-credential.sh, held honest over a shared fixture
+# table by __tests__/host-write-credential-parity.test.sh). Read that header for why this
+# is a positive ALLOW-LIST rather than a blacklist of admin-bearer shapes, and why it does
+# not gate on the token's LENGTH.
+#
+# ⚠️ FAILS CLOSED WHEN THE CLASSIFIER CANNOT BE LOADED. A guard that silently skips itself
+# when its helper is missing is worse than no guard: it reports the same green install as
+# a passing check, which is the precise shape of the bug being fixed here.
+assert_host_write_credential_shape() {
+	local token="$1"
+
+	catalyst_helper_path "lib/catalyst-host-write-credential.sh" >/dev/null || {
+		print_error "Cannot verify the cloud credential's class — the classifier is unavailable."
+		echo ""
+		echo "  Reason: ${CATALYST_SOURCE_REASON:-unknown}"
+		echo ""
+		echo "  This check refuses rather than skips. Provisioning a host write credential"
+		echo "  without classifying it is what put mini-2 into a silent dispatch deadlock"
+		echo "  for four hours on 2026-08-18 (CTL-2045) — every existing check stayed green."
+		return 1
+	}
+	# shellcheck disable=SC1090
+	source "$CATALYST_HELPER_PATH"
+
+	# ⛔ Called DIRECTLY, never as `$(…)`. The verdict rides globals; a command
+	# substitution runs the function in a subshell and discards all of them.
+	if catalyst_classify_host_write_credential "$token"; then
+		print_success "cloud credential is a per-host organization key (${CATALYST_CREDENTIAL_SHAPE})"
+		return 0
+	fi
+
+	print_error "The cloud token is NOT a per-host write credential — got ${CATALYST_CREDENTIAL_SHAPE}."
+	echo ""
+	echo "  Class:  ${CATALYST_CREDENTIAL_VERDICT}"
+	echo "  Detail: ${CATALYST_CREDENTIAL_DETAIL}"
+	echo ""
+	echo "  A host write credential must be a per-host ORGANIZATION key — it begins"
+	echo "  '${CATALYST_HOST_WRITE_CREDENTIAL_PREFIX}'. The cloud derives this host's identity from that key;"
+	echo "  a credential it cannot bind to a host is refused on every claim write, so the"
+	echo "  host installs green and then claims NOTHING, on any phase, forever."
+	echo ""
+	echo "  Mint a per-host key for this host and re-run with it. Nothing has been written."
+	return 1
+}
+
+# ── CTL-2045 §2: prove this host can actually take a fence ──────────────────────────
+#
+# validate_cloud_agent_binding TOKEN ACCOUNT BASE_URL
+#
+# ⭐ THE HALF THAT ACTUALLY CLOSES THE HOLE, and it is NOT what validate_cloud_token does.
+# That function calls `GET /issues` — the GENERIC read route, which never goes through the
+# cloud's `resolveAgentPrincipal`. mini-2's admin bearer sailed through it with a 200 and
+# then 403'd on every single claim. ⛔ A shape check plus a generic read is still two
+# checks that both pass on the broken credential.
+#
+# The `/agent/*` family is the one the claim actually uses, and the cloud's own code
+# settles which call is sufficient — plugins/dev/scripts/execution-core/linear-write-proxy.mjs:83:
+#
+#     "The GET read-back is NOT a weaker check than a write … resolveReadOnlyAgentContext
+#      calls the SAME resolveAgentPrincipal as resolveWriteContext, including
+#      hostId = authz.keyId and the `if (!hostId) -> 403` refusal. Only the BUDGET half
+#      differs. So `GET /agent/attachments` -> 200 already proves a per-host binding, and
+#      it is the right preflight before arming a host."
+#
+# ⭐ So the preflight is a GET, and that is a strictly better install-time probe than the
+# real write the ticket's AC2 describes: it exercises the identical per-host binding
+# refusal, while creating nothing, needing no scratch ticket, requiring no release step
+# that could fail and leave residue, and spending ZERO of the host's daily write budget.
+#
+# ⚠️ THE VERDICT IS THREE-VALUED, and the pass arm is deliberately wide.
+#   401/403 → REFUSE. This is the incident's exact signature: the credential is rejected
+#             at the agent route family. Nothing else here is evidence of anything.
+#   2xx/404/400 → PASS. The request got PAST authorization to issue resolution, which is
+#             all this probe claims. A 404 on a probe issue id is the AUTHORIZED answer
+#             (measured 2026-08-18: a per-host key against its own account returns 404 on
+#             an absent issue; the admin bearer returned 403 for the same request), so
+#             pinning the pass arm to "200 only" would refuse every correct install.
+#   anything else (000, 5xx) → REFUSE as UNVERIFIED, not as broken. Same posture
+#             validate_cloud_token already takes for an unreachable hub (CTL-1913):
+#             reporting success on a check that did not run is what produced green
+#             installs with permanently dead writers.
+validate_cloud_agent_binding() {
+	local token="$1" account="$2" base_url="$3"
+
+	# A deliberately absent issue: this probe must never touch a real ticket, and the
+	# authorization verdict it reads is decided before issue resolution either way.
+	local probe_issue="CATALYST-INSTALL-PROBE"
+
+	echo "  Verifying this host's per-host binding on the agent write path ..."
+
+	local code
+	code=$(
+		printf 'header = "Authorization: Bearer %s"\n' "$token" |
+			curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+				--config - \
+				"${base_url}/agent/attachments?issueId=${probe_issue}&account=${account}" 2>/dev/null
+	) || code=""
+
+	case "$code" in
+	401 | 403)
+		print_error "This credential is REFUSED on the agent write path (HTTP ${code})."
+		echo ""
+		echo "  It authenticated for generic reads but the cloud derives NO per-host"
+		echo "  binding from it, so every cross-host claim this host attempts will be"
+		echo "  refused. That is a silent dispatch deadlock: the daemons run, the"
+		echo "  heartbeat stays fresh, doctor passes, and the host claims no ticket on"
+		echo "  any phase. It cost the fleet four hours on 2026-08-18 (CTL-2045)."
+		echo ""
+		echo "  Use a per-host organization key minted for THIS host and account"
+		echo "  '${account}'. Nothing has been written."
+		return 1
+		;;
+	2?? | 404 | 400)
+		print_success "per-host binding proven on the agent write path (HTTP ${code})"
+		return 0
+		;;
+	000 | "")
+		print_error "Could not reach ${base_url}/agent/attachments — the binding was NOT verified."
+		echo ""
+		echo "  Refusing rather than assuming: an unverified binding is exactly the state"
+		echo "  this check exists to make impossible. Re-run once the hub is reachable."
+		return 1
+		;;
+	*)
+		print_error "The hub returned HTTP ${code} on the agent write path — binding NOT verified."
+		echo ""
+		echo "  Nothing has been written. A 5xx is not evidence the credential is good OR"
+		echo "  bad; re-run once the hub recovers."
+		return 1
+		;;
+	esac
+}
+
+# resolve_cloud_token — the ONE answer to "did this run get a cloud token".
+#
+# ⛔ Codex #3500 P1: this resolution used to live only inside setup_cloud_replica, as a
+# `local`. So a token supplied through the DOCUMENTED env var (or a custom name via
+# CATALYST_CLOUD_TOKEN_ENV) provisioned the writer while the global CLOUD_TOKEN stayed
+# empty — and finalize_install, which gated on that global, skipped `activate-replica`
+# AND recorded no deferral. Setup could report a fully provisioned node with replica
+# reads off: the exact "install finished ≠ system works" gap CTL-1918 exists to close,
+# reintroduced by the fix for it. Flags win over env; the configured name wins over the
+# default (CTL-1668).
+# resolve_cloud_account — CTL-2019. flag > env > THIS HOST'S OWN previously-recorded
+# account, read back out of the cloud-sync.env that setup_cloud_replica itself wrote.
+#
+# ⛔ WHY. The account was WRITTEN here (`export CATALYST_CLOUD_ACCOUNT=...` below) and
+# never READ back: resolution was flag-then-env only. So on any host that already has a
+# discoverable cloud token but no account exported in its shell — which is every host
+# after its first install, because the account lives in a file rather than the
+# environment — `setup_cloud_replica` found a token, found no account, and returned 1.
+# That line is `setup_cloud_replica || exit 1`, so the whole of setup aborted, and with
+# it every step `catalyst install` runs afterwards: set-class, pull-owner, install-cli,
+# install-services, adopt-cloud-sync, start-stack, verify-node, doctor.
+#
+# Measured on mini-2 during the CTL-1975 rehearsal (2026-08-18): a reinstalled node came
+# up with 1 of 8 launchd agents, 0 daemons, `node.class` unset and NO REPLICA WRITER —
+# which silently falls back to live `linearis` and burns the shared, rate-limited Linear
+# quota. Nothing was red. The value that would have prevented all of it was sitting in
+# ~/.config/catalyst/cloud-sync.env, one directory from the code that refused to look.
+#
+# ⚠️ This is a CARRY-FORWARD, not a default, and the distinction is the safety property
+# the original comment was protecting: we re-use the account THIS host already recorded
+# for itself. We still never fall back to "tenant-0" — pointing a host at the
+# maintainer's tenant on a guess is exactly the 403-with-no-explanation this refuses.
+# An absent/unreadable file still yields empty, and the hard error below still fires.
+#
+# Deliberately NOT `source`d: that file also carries the cloud TOKEN, and sourcing it
+# would pull a live credential into this shell (and into every child it spawns) to read
+# a non-secret identifier. One field is extracted by name instead.
+resolve_cloud_account() {
+	local acct="${CLOUD_ACCOUNT:-${CATALYST_CLOUD_ACCOUNT-}}"
+	if [[ -z $acct ]]; then
+		local env_file="$HOME/.config/catalyst/cloud-sync.env"
+		if [[ -r $env_file ]]; then
+			acct="$(sed -n 's/^[[:space:]]*export[[:space:]]\{1,\}CATALYST_CLOUD_ACCOUNT=//p' "$env_file" 2>/dev/null | tail -1)"
+			acct="${acct%\"}"
+			acct="${acct#\"}"
+			acct="${acct%\'}"
+			acct="${acct#\'}"
+		fi
+	fi
+	printf '%s' "$acct"
+}
+
+resolve_cloud_token() {
+	local _tv="${CATALYST_CLOUD_TOKEN_ENV-}"
 	if [[ -z $_tv ]] && [[ -r "$HOME/.config/catalyst/config.json" ]] && command -v jq >/dev/null 2>&1; then
 		_tv="$(jq -r '.catalyst.cloud.tokenEnv // empty' "$HOME/.config/catalyst/config.json" 2>/dev/null || true)"
 	fi
 	[[ -n $_tv ]] || _tv="CATALYST_CLOUD_TOKEN"
-	local token="${CLOUD_TOKEN:-${!_tv:-}}"
-	local account="${CLOUD_ACCOUNT:-${CATALYST_CLOUD_ACCOUNT:-}}"
+	printf '%s' "${CLOUD_TOKEN:-${!_tv-}}"
+}
+
+# Set only when the replica was actually provisioned. finalize_install keys activation
+# on the OUTCOME, not on a re-derived precondition — activating reads against a replica
+# that was never provisioned is meaningless, and re-deriving is how the two drifted.
+CLOUD_REPLICA_PROVISIONED=0
+
+setup_cloud_replica() {
+	# Flags win over env. Absent → this whole function is a no-op and setup is
+	# byte-identical to before CTL-1836.
+	local token account
+	token="$(resolve_cloud_token)"
+	account="$(resolve_cloud_account)"
 	[[ -n $token ]] || return 0
 
 	print_header "Provisioning Catalyst Cloud Replica"
@@ -1593,10 +2191,61 @@ setup_cloud_replica() {
 	harden_secrets_dir "$config_dir"
 	ensure_secrets_gitignore "$config_dir"
 
-	# The canonical host. cloud-sync.mjs:124 still defaults to the LEGACY
-	# api.catalyst-cloud.coalescelabs.ai, which is being retired, so a new user who
-	# relies on the default is pointed at a host that is going away. Pin it here.
-	local base_url="${CATALYST_CLOUD_BASE_URL:-https://app.catalystcloud.dev/api/v1}"
+	# ⛔ CTL-1910 — THIS COMMENT USED TO BE BACKWARDS, AND THE VALUE WITH IT.
+	# It called `app.catalystcloud.dev` "the canonical host" and
+	# `api.catalyst-cloud.coalescelabs.ai` "the LEGACY ... being retired". Measured
+	# 2026-08-17 from two hosts, with a control:
+	#
+	#   web.dev                             RESOLVES            <- control: .dev resolves here
+	#   app.catalystcloud.dev               NXDOMAIN (curl rc=6)   the pinned "canonical" host
+	#   catalystcloud.dev                   NXDOMAIN
+	#   staging.catalystcloud.dev           200 with a live token
+	#   api.catalyst-cloud.coalescelabs.ai  200 with a live token  the "retired" one
+	#
+	# The control matters: `web.dev` resolving proves the resolver handles `.dev`, so
+	# the NXDOMAIN is a real absence and not a broken lookup. So the host called
+	# canonical does not exist, and the one called retired is one of the two that
+	# actually answer. This function was writing the dead one into every new
+	# customer's 0600 launchd-sourced config: the writer could never reach the hub,
+	# the replica was never created, and setup exited 0 with two green checkmarks.
+	#
+	# Now pinned to `staging.catalystcloud.dev` (COORD's ruling — the live cloud).
+	# Verified equivalent, not assumed: authenticated `GET /api/v1/issues?limit=1`
+	# against staging and against the legacy host returned 200 with a
+	# BYTE-IDENTICAL first record, so they are the same backend serving the same
+	# tenant.
+	#
+	# ⚠️ `cloud-sync.mjs`'s own DEFAULT_BASE_URL is deliberately NOT changed here.
+	# The three hosts already running pin no base URL at all (measured: mini-2's
+	# cloud-sync.env has no CATALYST_CLOUD_BASE_URL line), so they resolve the code
+	# default — repointing it would repoint every live writer on its next restart.
+	# That is a fleet change, not an installer fix. New installs get an explicit
+	# value written below.
+	local base_url="${CATALYST_CLOUD_BASE_URL:-https://staging.catalystcloud.dev/api/v1}"
+
+	# ⛔ CTL-1913 — VALIDATE BEFORE WRITING ANYTHING.
+	# Ordered first on purpose: a config we have already proven cannot work must
+	# never reach disk. Previously nothing on this path made a single network call,
+	# so a correct token and `FAKE-TOKEN-NOT-REAL` produced byte-identical output —
+	# two green checkmarks and exit 0 — and the customer's only symptom was a
+	# replica that never appeared. (Why it stays silent: a tokenless/rejected writer
+	# `process.exit(0)`s, and under `KeepAlive={SuccessfulExit:false}` a clean exit
+	# is PERMANENT — launchd never retries.)
+	# ⛔ CTL-2045 — THREE GATES, CHEAPEST FIRST, AND NONE OF THEM WRITES.
+	#
+	# §1 the credential's CLASS (local, no network): refuses the admin bearer / a user key
+	#    / a bare sk_ issuer key before a single packet leaves the host.
+	# §2 the credential AUTHENTICATES at all (CTL-1913's generic read).
+	# §3 the credential is PER-HOST BOUND on the agent write path (CTL-2045).
+	#
+	# ⚠️ The order is load-bearing and §3 is not redundant with §2. A well-SHAPED key can
+	# still carry the wrong grants, the wrong tenant, or the wrong endpoint — all three were
+	# live hypotheses during the 2026-08-18 incident — and a generic read cannot see any of
+	# them. Conversely §1 catches the mis-provisioned class with no round trip at all, and
+	# names it precisely, rather than leaving the operator to interpret a bare 403.
+	assert_host_write_credential_shape "$token" || return 1
+	validate_cloud_token "$token" "$account" "$base_url" || return 1
+	validate_cloud_agent_binding "$token" "$account" "$base_url" || return 1
 
 	# ⛔ EVERY LINE MUST BE `export` (Codex P1 on #3365). launch.sh SOURCES this file
 	# and then `exec`s bun. A bare `FOO=bar` in a sourced file is a SHELL-LOCAL
@@ -1611,7 +2260,7 @@ setup_cloud_replica() {
 	# precedence the writer resolves with — env override → Layer-2
 	# catalyst.cloud.tokenEnv → default. Writing a fixed name while the writer looks
 	# up a custom one produces the identical silent idle.
-	local token_var="${CATALYST_CLOUD_TOKEN_ENV:-}"
+	local token_var="${CATALYST_CLOUD_TOKEN_ENV-}"
 	if [[ -z $token_var ]]; then
 		local l2_cfg="$HOME/.config/catalyst/config.json"
 		if [[ -r $l2_cfg ]] && command -v jq >/dev/null 2>&1; then
@@ -1644,32 +2293,37 @@ setup_cloud_replica() {
 	local stack
 	stack=$(command -v catalyst-stack 2>/dev/null || true)
 	if [[ -n $stack ]]; then
-		if "$stack" adopt-cloud-sync >/dev/null 2>&1; then
+		# ⛔ CTL-1913: the output is CAPTURED, not discarded. This was
+		# `>/dev/null 2>&1`, so whatever adopt-cloud-sync said about why it was
+		# unhappy was unrecoverable — the operator got one generic warning line for
+		# every possible cause. Kept out of the way on success, shown in full on
+		# failure, which is the only time anyone wants it.
+		local adopt_out adopt_rc=0
+		adopt_out=$("$stack" adopt-cloud-sync 2>&1) || adopt_rc=$?
+		if [[ $adopt_rc -eq 0 ]]; then
 			print_success "cloud-sync writer adopted (launchd agent installed)"
 		else
-			print_warning "catalyst-stack adopt-cloud-sync failed — run it by hand once the stack is installed"
+			print_warning "catalyst-stack adopt-cloud-sync failed (rc=${adopt_rc}) — its output follows"
+			# Indented so it reads as sub-output rather than as this script's own.
+			printf '%s\n' "$adopt_out" | sed 's/^/    /'
+			echo ""
+			echo "  Fix the cause above, then re-run: catalyst-stack adopt-cloud-sync"
 		fi
 	else
 		print_warning "catalyst-stack not on PATH — run 'catalyst-stack adopt-cloud-sync' after installing the stack"
 	fi
 
-	# A populated replica that nothing reads is the failure this step exists to
-	# avoid: reads are opt-in (CATALYST_LINEAR_REPLICA=on) and off by default.
-	print_warning "Replica READS are opt-in. Add to your shell env and restart execution-core:"
-	echo "    export CATALYST_LINEAR_REPLICA=on"
+	# CTL-1918: replica READS and registry enrolment used to be PRINTED here as
+	# advisory text — a populated replica that nothing reads, and a daemon with no
+	# work to find, both looking identical to a healthy install. finalize_install now
+	# performs both (and defers them with a verify command if it cannot), so printing
+	# them here would tell an operator to redo work that is already done.
 
-	# Without a registry entry the daemon dispatches nothing — a running stack that
-	# does literally nothing, which looks identical to a broken one.
-	if [[ -n ${TICKET_PREFIX:-} ]]; then
-		echo ""
-		echo "  Enroll this project so the daemon has work to find:"
-		echo "    catalyst-execution-core register --team ${TICKET_PREFIX}"
-	else
-		echo ""
-		echo "  Enroll this project so the daemon has work to find:"
-		echo "    catalyst-execution-core register --team <TEAM_KEY>"
-	fi
-
+	# Reaching here means the writer env was written and the account was accepted, so
+	# there IS a replica for reads to be turned on against. Set at the single success
+	# exit rather than at the top: a function that announces provisioning before doing
+	# it hands finalize_install a precondition that was never met.
+	CLOUD_REPLICA_PROVISIONED=1
 	return 0
 }
 
@@ -2549,37 +3203,20 @@ print_summary() {
 	print_header "Next Steps"
 	echo ""
 
-	# Resolve setup-plugin-source.sh next to THIS script. Via the `curl … | bash`
-	# flow (or when run from a non-catalyst target repo) BASH_SOURCE is empty/stdin
-	# and no such script exists locally, so print a runnable clone+run command
-	# instead of a relative path that would fail.
-	local _pss_dir _pss_script
-	_pss_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _pss_dir=""
-	_pss_script="${_pss_dir}/plugins/dev/scripts/setup-plugin-source.sh"
+	# CTL-1918: this used to be "1. Provision plugin-source …" — an instruction whose
+	# own fallback branch told the reader to clone the repo, which is exactly the work
+	# resolve_catalyst_source now does. finalize_install performs it; what remains is
+	# whatever genuinely could not be done, stated with its verify command.
+	print_deferred_steps
 
-	echo "1. Provision plugin-source (live plugin loading — NOT the marketplace cache,"
-	echo "   which lags releases and drifts per node):"
-	if [ -n "$_pss_dir" ] && [ -f "$_pss_script" ]; then
-		echo "   bash ${_pss_script}"
-	else
-		echo "   # Run from a catalyst checkout (this setup script was not run from one):"
-		echo "   git clone https://github.com/coalesce-labs/catalyst.git ~/catalyst-src \\"
-		echo "     && bash ~/catalyst-src/plugins/dev/scripts/setup-plugin-source.sh"
-	fi
-	echo "   → sets the pluginDirs machine-config key (workers load plugin-source via"
-	echo "     phase-agent-dispatch --plugin-dir) AND installs the interactive \`claude\`"
-	echo "     --plugin-dir wrapper in your shell rc (~/.zshrc or ~/.bashrc). Open a new"
-	echo "     shell to pick it up."
+	echo "1. Restart Claude Code to load configuration"
 	echo ""
 
-	echo "2. Restart Claude Code to load configuration"
-	echo ""
-
-	echo "3. Try your first workflow command:"
+	echo "2. Try your first workflow command:"
 	echo "   /research-codebase"
 	echo ""
 
-	echo "4. Create a worktree for parallel work:"
+	echo "3. Create a worktree for parallel work:"
 	echo "   /create-worktree PROJ-123 main"
 	echo ""
 
@@ -2689,7 +3326,7 @@ init_session_database() {
 	local db_script=""
 	if [ -f "${PROJECT_DIR}/plugins/dev/scripts/catalyst-db.sh" ]; then
 		db_script="${PROJECT_DIR}/plugins/dev/scripts/catalyst-db.sh"
-	elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-db.sh" ]; then
+	elif [ -n "${CLAUDE_PLUGIN_ROOT-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-db.sh" ]; then
 		db_script="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-db.sh"
 	fi
 
@@ -2712,29 +3349,171 @@ setup_sweep_config() {
 	# Resolve REPO_ROOT and SCRIPT_DIR for this function. setup-catalyst.sh
 	# sits at the repo root; PROJECT_DIR is set by detect_git_repo() for
 	# interactive runs, but may be empty if sourced in lib-only mode.
+	# CTL-1914: the old script-relative SCRIPT_DIR is gone — helper resolution is
+	# catalyst_helper_path's job now, and keeping a second, private copy of that logic
+	# here is exactly how the silent skip survived four separate call sites.
 	local REPO_ROOT="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "$PWD")}"
-	local SCRIPT_DIR
-	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "$PWD")/plugins/dev/scripts"
 	local config_file="${REPO_ROOT}/.catalyst/config.json"
-	[[ -f "$config_file" ]] || return 0
+	[[ -f $config_file ]] || return 0
 	local patch tmp
 	patch='{"idleHours":48,"intervalHours":1,"salvagePush":false,"maxRemovalsPerRun":10}'
 	tmp="${config_file}.tmp.$$"
 	# patch first so user overrides win
-	if jq --argjson p "$patch" '.catalyst.sweep = ($p + (.catalyst.sweep // {}))' "$config_file" > "$tmp" && mv "$tmp" "$config_file"; then
+	if jq --argjson p "$patch" '.catalyst.sweep = ($p + (.catalyst.sweep // {}))' "$config_file" >"$tmp" && mv "$tmp" "$config_file"; then
 		print_success "wrote catalyst.sweep defaults" 2>/dev/null || echo "setup: wrote catalyst.sweep defaults"
 	else
 		rm -f "$tmp"
 		echo "setup: warning: could not write catalyst.sweep defaults" >&2
 	fi
 	local _os="${CATALYST_FORCE_OS:-$(uname -s 2>/dev/null || echo unknown)}"
-	if [[ "$_os" == "Darwin" ]]; then
-		local installer="${SCRIPT_DIR}/install-orphan-sweep.sh"
-		if [[ -x "$installer" ]]; then
-			"$installer" >/dev/null 2>&1 || echo "setup: warning: launchd installer failed (non-fatal)" >&2
+	if [[ $_os == "Darwin" ]]; then
+		# CTL-1914: was `${SCRIPT_DIR}/install-orphan-sweep.sh` guarded by `[[ -x ]]`,
+		# which in the documented curl layout is a directory containing only
+		# setup-catalyst.sh — so the sweep scheduler was NEVER installed and nothing
+		# said so. Resolve centrally, and when it cannot be resolved, DEFER LOUDLY.
+		local installer
+		if catalyst_helper_path install-orphan-sweep.sh >/dev/null; then
+			installer="$CATALYST_HELPER_PATH"
+			if "$installer" >/dev/null 2>&1; then
+				print_success "orphan-sweep scheduler installed" 2>/dev/null || true
+			else
+				print_warning "orphan-sweep launchd installer failed" 2>/dev/null || true
+				catalyst_defer_step \
+					"Install the orphan-sweep scheduler (its installer ran but failed)" \
+					"bash ${installer}" \
+					"launchctl list | grep catalyst.orphan-sweep"
+			fi
+		else
+			print_warning "orphan-sweep scheduler NOT installed (${CATALYST_SOURCE_REASON})" 2>/dev/null || true
+			catalyst_defer_step \
+				"Install the orphan-sweep scheduler (no Catalyst source tree: ${CATALYST_SOURCE_REASON})" \
+				"git clone https://github.com/coalesce-labs/catalyst.git ~/catalyst/plugin-source && bash ~/catalyst/plugin-source/plugins/dev/scripts/install-orphan-sweep.sh" \
+				"launchctl list | grep catalyst.orphan-sweep"
 		fi
 	else
 		echo "setup: note: Linux scheduling is a follow-up (CTL-1030). Config written." >&2
+	fi
+}
+
+#
+# ── CTL-1918: finish the install instead of printing a list of hand-steps ──
+#
+# Setup used to end by printing three instructions it was perfectly able to perform,
+# so "setup completed successfully" and "this node works" were different states with
+# nothing enforcing the gap was closed. Each step below RUNS; a step that cannot run
+# is recorded in the deferred ledger with the command that completes it AND the
+# command that verifies it, so what is left is checkable rather than advisory.
+#
+# ⛔ Ordering is load-bearing: install-cli.sh is what puts `catalyst-stack` and
+# `catalyst-execution-core` on PATH, and the two steps after it are those binaries.
+# Running them first would produce two "command not found" deferrals on a node where
+# nothing was actually wrong.
+finalize_install() {
+	echo ""
+	print_header "Finishing the install"
+
+	local bin_dir="${CATALYST_BIN_DIR:-${HOME}/.catalyst/bin}"
+	local cli_script stack_bin core_bin pss
+
+	# ── 1. the CLIs on PATH ──
+	# README's "Quick Setup" never runs this, so a README-only reader reaches
+	# `command not found: catalyst-stack` at the last step of a "5 minute" install.
+	if catalyst_helper_path install-cli.sh >/dev/null; then
+		cli_script="$CATALYST_HELPER_PATH"
+		if bash "$cli_script" >/dev/null 2>&1; then
+			print_success "Catalyst CLIs installed to ${bin_dir}"
+		else
+			print_warning "install-cli.sh failed"
+			catalyst_defer_step "Put the Catalyst CLIs on PATH" \
+				"bash ${cli_script}" "command -v catalyst-stack"
+		fi
+	else
+		print_warning "Catalyst CLIs NOT installed (${CATALYST_SOURCE_REASON})"
+		catalyst_defer_step "Put the Catalyst CLIs on PATH (${CATALYST_SOURCE_REASON})" \
+			"bash <catalyst-checkout>/plugins/dev/scripts/install-cli.sh" "command -v catalyst-stack"
+	fi
+
+	# The freshly-installed symlinks are not on this process's PATH yet, and the steps
+	# below are those binaries. Resolve them by absolute path rather than hoping.
+	stack_bin="${bin_dir}/catalyst-stack"
+	core_bin="${bin_dir}/catalyst-execution-core"
+	[[ -x $stack_bin ]] || stack_bin="$(command -v catalyst-stack 2>/dev/null || echo "")"
+	[[ -x $core_bin ]] || core_bin="$(command -v catalyst-execution-core 2>/dev/null || echo "")"
+
+	# ── 2. plugin-source (live plugin loading) ──
+	# Was "Next Steps" item 1 — a printed instruction whose own fallback branch told the
+	# reader to clone the repo, i.e. the work the resolver above has already done.
+	if catalyst_helper_path setup-plugin-source.sh >/dev/null; then
+		pss="$CATALYST_HELPER_PATH"
+		# ⛔ Codex #3500 P1: this used to pass --no-interactive-wrapper whenever prompts
+		# were suppressed. That flag is NOT "the quiet variant" — its own header reserves
+		# it for the install-lifecycle acquire/pre-backup step, and it SKIPS the
+		# marketplace and shell-wrapper retirement. The result is skills links plus the
+		# two legacy load paths still live, which checkSkillsDirPlugins treats as
+		# precedence-blocking / double-loading, while setup reports plugin-source as
+		# provisioned. Prompt suppression is not a request for a partial workflow, so a
+		# headless install runs the SAME full cutover an interactive one does.
+		if bash "$pss" >/dev/null 2>&1; then
+			print_success "plugin-source provisioned (pluginDirs registered)"
+		else
+			print_warning "setup-plugin-source.sh failed"
+			catalyst_defer_step "Provision plugin-source (live plugin loading)" \
+				"bash ${pss}" "catalyst doctor"
+		fi
+	else
+		catalyst_defer_step "Provision plugin-source (${CATALYST_SOURCE_REASON})" \
+			"bash <catalyst-checkout>/plugins/dev/scripts/setup-plugin-source.sh" "catalyst doctor"
+	fi
+
+	# ── 3. replica reads ──
+	# Only meaningful when a replica was actually provisioned; `activate-replica` gates
+	# itself on `verify-cloud-sync --json` reporting ok, so a broken replica is REFUSED
+	# here rather than switched on — which is the behaviour we want, and is why this
+	# calls the existing verb instead of writing the config key directly.
+	if [[ -n "$(resolve_cloud_token)" ]] && [[ $CLOUD_REPLICA_PROVISIONED -eq 0 ]]; then
+		# A token was supplied but the replica never provisioned. Activating reads would
+		# be meaningless; saying nothing would let the all-clear stand.
+		catalyst_defer_step "Turn on replica READS (the replica was not provisioned this run)" \
+			"catalyst-stack activate-replica" "catalyst-stack verify-cloud-sync --json"
+	elif [[ $CLOUD_REPLICA_PROVISIONED -eq 1 ]]; then
+		if [[ -n $stack_bin && -x $stack_bin ]]; then
+			if "$stack_bin" activate-replica >/dev/null 2>&1; then
+				print_success "replica reads activated (catalyst.linearReplica.mode = on)"
+			else
+				print_warning "activate-replica declined — the replica is not verifiably healthy yet"
+				catalyst_defer_step "Turn on replica READS once the replica verifies healthy" \
+					"catalyst-stack activate-replica" "catalyst-stack verify-cloud-sync --json"
+			fi
+		else
+			catalyst_defer_step "Turn on replica READS (catalyst-stack not on PATH)" \
+				"catalyst-stack activate-replica" "catalyst-stack verify-cloud-sync --json"
+		fi
+	fi
+
+	# ── 4. enrol the project ──
+	# Without a registry entry the daemon dispatches nothing — a running stack that does
+	# literally nothing, which looks identical to a broken one.
+	if [[ -n ${TICKET_PREFIX-} ]]; then
+		if [[ -n $core_bin && -x $core_bin ]]; then
+			if "$core_bin" register --team "${TICKET_PREFIX}" >/dev/null 2>&1; then
+				print_success "project enrolled in the execution-core registry (team ${TICKET_PREFIX})"
+			else
+				print_warning "registry enrolment failed for team ${TICKET_PREFIX}"
+				catalyst_defer_step "Enrol this project so the daemon has work to find" \
+					"catalyst-execution-core register --team ${TICKET_PREFIX}" \
+					"catalyst-execution-core list-projects"
+			fi
+		else
+			catalyst_defer_step "Enrol this project so the daemon has work to find" \
+				"catalyst-execution-core register --team ${TICKET_PREFIX}" \
+				"catalyst-execution-core list-projects"
+		fi
+	else
+		# No team key discovered — the command cannot be spelled for the operator, so say
+		# exactly that rather than emitting a placeholder they must decode.
+		catalyst_defer_step "Enrol this project (no Linear team key was discovered during setup)" \
+			"catalyst-execution-core register --team <TEAM_KEY>" \
+			"catalyst-execution-core list-projects"
 	fi
 }
 
@@ -2782,6 +3561,9 @@ main() {
 	setup_sweep_config
 	init_humanlayer_thoughts
 	sync_thoughts
+	# CTL-1918: perform the steps setup used to print. Runs last so every input it
+	# needs (team key, cloud token, config) has been established.
+	finalize_install
 
 	# Validate
 	if validate_setup; then
@@ -2789,6 +3571,11 @@ main() {
 		exit 0
 	else
 		echo ""
+		# ⛔ The deferred ledger prints on BOTH paths. It lived only in print_summary,
+		# i.e. only on the success path — so an operator whose install FAILED, who is
+		# precisely the one who needs to know which provisioning steps did not happen,
+		# was the one person who never saw the list.
+		print_deferred_steps
 		print_error "Setup completed with errors. Please review and re-run if needed."
 		exit 1
 	fi
@@ -2803,7 +3590,7 @@ main() {
 #      function library without running setup even from contexts where the
 #      return-probe would succeed/fail unexpectedly (curl | bash runs from
 #      stdin where BASH_SOURCE is empty, so an env guard is the reliable signal).
-if (return 0 2>/dev/null) || [[ -n ${CATALYST_SETUP_LIB_ONLY:-} ]]; then
+if (return 0 2>/dev/null) || [[ -n ${CATALYST_SETUP_LIB_ONLY-} ]]; then
 	:
 else
 	main "$@"

@@ -35,6 +35,46 @@ const SEVEN_DAY_MS = 7 * 86_400_000;
 
 export const RATELIMIT_EVENT_SAMPLED = "account.ratelimit.sampled";
 
+// CTL-1947. Every path below that cannot produce a sample used to `continue` after a log.warn
+// and emit NOTHING. Prometheus then shows an ABSENT series — which, as CTL-1947 puts it, "looks
+// identical to a healthy one that happens to be at zero" and is indistinguishable from the
+// exporter not running at all. Measured on mini 2026-08-18 02:2x CT: the poller had been running
+// every 300 s and logging "account email unresolvable; skipping account this run" on EVERY run,
+// with zero ratelimit events in a 2.7 MB log, while catalyst_account_ratelimit_* had carried no
+// data for 7+ days. Nothing was broken loudly; it was broken quietly.
+//
+// So a run that cannot sample now emits a POSITIVE signal saying so, carrying the reason. An
+// absent series is not evidence; a series that says "unsampled because 401" is.
+export const RATELIMIT_EVENT_UNSAMPLED = "account.ratelimit.unsampled";
+
+// The reasons, as a closed set — an alert keys on these, so they are a contract, not free text.
+export const UNSAMPLED_NO_TOKEN = "no-token";
+export const UNSAMPLED_EMAIL_UNRESOLVABLE = "email-unresolvable";
+export const UNSAMPLED_USAGE_THROTTLED = "usage-throttled";
+export const UNSAMPLED_USAGE_HTTP_ERROR = "usage-http-error";
+
+// buildUnsampledSpec — the envelope for "this account could NOT be sampled this run".
+//
+// ⛔ It deliberately carries NO utilization fields. A zero would be read as "0% used" by every
+// consumer of the sampled metric, which is the precise confusion this event exists to remove:
+// unsampled is not low usage, it is NO MEASUREMENT.
+export function buildUnsampledSpec({ email = null, reason, status = null, source = null }) {
+  return {
+    entity: "account",
+    // Normalized to null rather than left undefined: the emit layer drops both, but a
+    // deterministic shape is what lets a test assert "emitted WITHOUT an email, deliberately"
+    // instead of accidentally passing on a typo'd key.
+    label: email ?? source ?? "unknown",
+    attrs: {
+      "account.email": email,
+      "account.source": source,
+      "ratelimit.unsampled_reason": reason,
+      "ratelimit.unsampled_http_status": status,
+    },
+    payload: { email, source, reason, status },
+  };
+}
+
 // pctOf — normalize a usage bucket to its numeric utilization. The live usage
 // endpoint returns each bucket (five_hour, seven_day, seven_day_opus,
 // seven_day_sonnet) as an object { utilization, resets_at }; older docs showed
@@ -209,6 +249,22 @@ export function buildSampledSpec({
   };
 }
 
+// emitUnsampled — emit the "could not measure" signal. Never throws: an observability emit must
+// not be able to break the sampling loop it is reporting on (the loop already runs inside a
+// per-account try, but this is the one call added on the FAILURE paths, so it fails soft by
+// construction rather than by luck).
+function emitUnsampled(emit, spec, { nowIso } = {}) {
+  try {
+    if (typeof emit !== "function") return;
+    // Third argument mirrors the sampled path EXACTLY (`{ now: nowIso }` — the emit layer
+    // receives the ISO-stamp provider, not a called value). Inventing a different envelope
+    // contract for the failure path is how a signal ends up unparseable by the same consumer.
+    emit(RATELIMIT_EVENT_UNSAMPLED, buildUnsampledSpec(spec), { now: nowIso });
+  } catch {
+    /* never throw */
+  }
+}
+
 /**
  * tickUsage — sample rate-limit usage for every account this run, emitting one
  * account.ratelimit.sampled per account. On a 429 from any account it stops the
@@ -240,6 +296,7 @@ export async function tickUsage({
       const token = account?.token;
       if (!token) {
         log.warn({ source: account?.source }, "usage: account has no token; skipping");
+        emitUnsampled(emit, { reason: UNSAMPLED_NO_TOKEN, source: account?.source }, { nowIso });
         continue;
       }
 
@@ -270,24 +327,48 @@ export async function tickUsage({
           { source: account?.source },
           "usage: account email unresolvable; skipping account this run",
         );
+        // ⛔ THE ONE THAT WENT DARK FOR 7+ DAYS. /api/oauth/profile answers 401 once the stored
+        // OAuth credential stops being authorized, resolveEmail returns null, and the ambient
+        // OTEL_RESOURCE_ATTRIBUTES fallback is not present under launchd (the plist sets only
+        // CATALYST_AGENT_METRICS_ENDPOINT / HOME / PATH), so BOTH paths to an email are dead and
+        // the account is skipped forever. It is emitted with no email — the source alone
+        // identifies it, and that is exactly the fact worth alerting on.
+        emitUnsampled(
+          emit,
+          { reason: UNSAMPLED_EMAIL_UNRESOLVABLE, source: account?.source },
+          { nowIso },
+        );
         continue;
       }
 
       const { status, body } = await fetchUsage(token, { userAgent });
 
       if (status === 429) {
-        // Shared limiter: the usage endpoint throttled us. Continuing would
-        // compound the throttle for the remaining accounts, so stop the run
-        // here and emit nothing further.
+        // Shared limiter: the usage endpoint throttled us. Continuing would compound the
+        // throttle for the remaining accounts, so stop the run here and take no further
+        // SAMPLES. (CTL-1947: it does still emit the unsampled signal for THIS account first —
+        // "we were throttled" is a measurement worth having, and it is what distinguishes a
+        // throttled run from a dead poller. The accounts not reached emit nothing, which the
+        // reason field makes legible.)
         log.warn(
           { source: account?.source },
           "usage: 429 from usage endpoint; stopping remaining accounts this run",
+        );
+        emitUnsampled(
+          emit,
+          { email, reason: UNSAMPLED_USAGE_THROTTLED, status, source: account?.source },
+          { nowIso },
         );
         break;
       }
 
       if (status !== 200 || !body) {
         log.warn({ status, source: account?.source }, "usage: non-200 usage response; skipping emit");
+        emitUnsampled(
+          emit,
+          { email, reason: UNSAMPLED_USAGE_HTTP_ERROR, status, source: account?.source },
+          { nowIso },
+        );
         continue;
       }
 

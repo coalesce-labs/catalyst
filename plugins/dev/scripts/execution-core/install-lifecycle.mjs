@@ -37,6 +37,13 @@ import { homedir } from "node:os";
 import { InstallRun, makeInstallEmitFn, INSTALL_SERVICE_NAME } from "./lib/install-telemetry.mjs";
 import { initTracing, shutdownTracing } from "./tracing.mjs";
 import { NODE_CLASSES } from "./config.mjs";
+// CTL-2004: the mode vocabulary only. Deliberately NOT resolveGithubFeedMode() — that
+// resolver DEFAULTS to "off" and applies CAT-57's containment rule (a set-but-invalid env
+// var overrides Layer-2 down to "off"). Both are right for a daemon deciding whether to
+// actuate, and both are wrong for a CARRY-FORWARD, which must be three-valued: a value to
+// re-write, or NOTHING. Collapsing "absent" to "off" would manufacture a key the host never
+// had and freeze it there.
+import { GITHUB_FEED_MODES } from "../lib/github-feed-mode.mjs";
 
 // ── phase enums ───────────────────────────────────────────────────────────────
 // install: the PR1 locked set (acquire → backup → write-config → install-agents →
@@ -73,6 +80,12 @@ export const INSTALL_MANAGED_KEYS = Object.freeze([
   "catalyst.node.class",
   "catalyst.orchestration.pluginPullOwner",
   "catalyst.readReplica.baseUrl",
+  // CTL-2004. Added because the install now SETS it (see the github-feed step in planPhases):
+  // this list's contract is "set on install, stripped on uninstall", so leaving it out would let
+  // the install write a key teardown then orphans — the half-state the list exists to prevent.
+  // Safe only because resolveGithubFeed() captures the current value BEFORE any phase runs, so a
+  // reinstall re-asserts what the node already declared. Order matters: capture, then strip.
+  "catalyst.githubFeed.mode",
 ]);
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url)); // …/plugins/dev/scripts/execution-core
@@ -215,6 +228,38 @@ export function resolveReadReplica({ flag = null, env = process.env, layer2 } = 
   }
 }
 
+/**
+ * resolveGithubFeed — CTL-2004. The GitHub-ingestion posture for this run, with the SAME
+ * default-to-current precedence as the node class and the read replica: explicit --github-feed >
+ * CATALYST_GITHUB_FEED env > the value already in Layer-2. Returns a mode string, or null meaning
+ * "write no key".
+ *
+ * ⛔ WHY THIS EXISTS. `catalyst.githubFeed.mode` is the ONLY thing that shuts the smee tunnel:
+ * `githubFeedIsAuthoritative()` is `mode === "enforce"`, orch-monitor suppresses the tunnel only on
+ * that, and the mode resolves env -> Layer-2 -> default `"off"`. Layer-1 does not carry it and
+ * `join-bundle.mjs` DOES propagate `monitor.github.smeeChannel`. So without this, a reinstall (whose
+ * teardown strips Layer-2) hands the host a channel and no mode, the default `off` reads as
+ * not-authoritative, and the rebuilt node silently comes back up on SMEE — healthy, green, and fed
+ * by the exact transport v1 says is gone. Same failure `readReplica` above was given this same
+ * treatment for; the difference is that dropping a read endpoint FAILS a rubric, while dropping
+ * this one passes every check we have.
+ *
+ * An INVALID value is never silently coerced here — `parseArgs` rejects a bad flag outright, and a
+ * junk env var or a corrupt Layer-2 value returns null (write nothing, leave the daemon's own
+ * resolver to apply its containment rule) rather than inventing a posture.
+ */
+export function resolveGithubFeed({ flag = null, env = process.env, layer2 } = {}) {
+  if (flag) return GITHUB_FEED_MODES.includes(flag) ? flag : null;
+  const raw = env.CATALYST_GITHUB_FEED;
+  if (typeof raw === "string" && raw.trim() && GITHUB_FEED_MODES.includes(raw.trim())) return raw.trim();
+  try {
+    const v = readLayer2(layer2)?.catalyst?.githubFeed?.mode;
+    return typeof v === "string" && GITHUB_FEED_MODES.includes(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 // A worker is the only class that runs the full work stack (broker/exec-core/monitor); every
 // other class is daemonless-with-updater. Centralized so the plan and the tests agree.
 function isWorker(nodeClass) {
@@ -251,9 +296,23 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
     steps: [{ label: "plugin-source", kind: "run", argv: [scripts.pluginSrc, "--no-interactive-wrapper"] }],
   });
 
+  // CTL-1975 --archive: the SAME `backup` verb with two flags, deliberately NOT catalyst-backup's
+  // `archive` verb. `archive` prints the TARBALL as its last stdout line; this step's result is read
+  // with `tail -1` into ctx.bundlePath and handed to `catalyst-backup restore <path>`, which needs a
+  // DIRECTORY. Routing --archive through the archive verb would therefore produce a rollback that
+  // fails with "not a backup bundle" at exactly the moment a rollback is what is left — so the
+  // tarball is a side artifact here and the bundle dir stays the step's answer.
   const backup = (label) => ({
     phase: "backup",
-    steps: [{ label: "backup", kind: "backup", argv: [scripts.backup, "backup", "--label", label] }],
+    steps: [
+      {
+        label: "backup",
+        kind: "backup",
+        argv: opts.archive
+          ? [scripts.backup, "backup", "--label", label, "--with-replica", "--tar"]
+          : [scripts.backup, "backup", "--label", label],
+      },
+    ],
   });
 
   const writeConfig = () => {
@@ -292,6 +351,13 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
       // reads its own local replica, so the key is meaningless there.) A missing endpoint is
       // surfaced by the developer verify-node rubric, not a hard install failure.
       steps.push({ label: "read-replica", kind: "setkey", key: "catalyst.readReplica.baseUrl", value: opts.readReplica });
+    }
+    // CTL-2004: re-assert the GitHub-ingestion posture. Deliberately OUTSIDE the worker/else-if
+    // above — the tunnel this key gates lives in orch-monitor, which runs on worker AND monitor
+    // nodes, so scoping it to one class would leave the other silently on smee. No resolved value
+    // ⇒ no step ⇒ the node keeps whatever the daemon's own resolver decides, exactly as before.
+    if (opts.githubFeed) {
+      steps.push({ label: "github-feed", kind: "setkey", key: "catalyst.githubFeed.mode", value: opts.githubFeed });
     }
     // CTL-1401: when an executor is requested, durably provision the lever into execution-core.env —
     // the file the launcher sources on every start and whose CATALYST_EXECUTOR value arms CTL-1398's
@@ -1244,7 +1310,7 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 export function parseArgs(argv) {
-  const a = { operation: null, class: null, readReplica: null, executor: null, force: false, dryRun: false, json: false, help: false, errors: [] };
+  const a = { operation: null, class: null, readReplica: null, executor: null, githubFeed: null, force: false, archive: false, dryRun: false, json: false, help: false, errors: [] };
   const rest = [...argv];
   // takeValue — consume the next token as FLAG's value; a missing value (end of args, or the next
   // token is itself a flag) is an error, not a silent null — otherwise `catalyst install --class`
@@ -1268,6 +1334,13 @@ export function parseArgs(argv) {
       case "--force":
         a.force = true;
         break;
+      // CTL-1975: promote the lifecycle's inline restore point to a teardown-grade ARCHIVE —
+      // the replica DB, the worktree/log inventory, host-state.json, and a dated tarball. Opt-in
+      // because the replica is ~200 MB: an install that pays that on every run is an install
+      // operators start skipping.
+      case "--archive":
+        a.archive = true;
+        break;
       case "--dry-run":
       case "--print":
         a.dryRun = true;
@@ -1284,6 +1357,9 @@ export function parseArgs(argv) {
       case "--executor":
         [a.executor, i] = takeValue(i, "--executor");
         break;
+      case "--github-feed":
+        [a.githubFeed, i] = takeValue(i, "--github-feed");
+        break;
       default:
         if (v.startsWith("--class=")) {
           const val = v.slice("--class=".length);
@@ -1297,6 +1373,10 @@ export function parseArgs(argv) {
           const val = v.slice("--executor=".length);
           if (val === "") a.errors.push("--executor requires a value");
           else a.executor = val;
+        } else if (v.startsWith("--github-feed=")) {
+          const val = v.slice("--github-feed=".length);
+          if (val === "") a.errors.push("--github-feed requires a value");
+          else a.githubFeed = val;
         } else if (!v.startsWith("-") && a.operation == null) {
           a.operation = v;
         }
@@ -1311,9 +1391,9 @@ export function usage() {
   return `catalyst-install — provision / tear down this node for its class (CTL-1369).
 
 Usage (normally via the router: 'catalyst install|uninstall|reinstall …'):
-  catalyst-install install   [--class developer|worker|monitor] [--read-replica <url>] [--executor bg|sdk|oneshot-legacy] [--dry-run]
-  catalyst-install uninstall [--force] [--dry-run]
-  catalyst-install reinstall [--class …] [--read-replica <url>] [--executor bg|sdk|oneshot-legacy] [--force] [--dry-run]
+  catalyst-install install   [--class developer|worker|monitor] [--read-replica <url>] [--github-feed off|shadow|enforce] [--executor bg|sdk|oneshot-legacy] [--dry-run]
+  catalyst-install uninstall [--force] [--archive] [--dry-run]
+  catalyst-install reinstall [--class …] [--read-replica <url>] [--github-feed off|shadow|enforce] [--executor bg|sdk|oneshot-legacy] [--force] [--dry-run]
 
 Options:
   --class <c>          target node class (install: declares it; un/reinstall: defaults to current)
@@ -1321,6 +1401,9 @@ Options:
   --executor <e>       durably provision the daemon executor (bg|sdk|oneshot-legacy) into
                        execution-core.env; omit to leave the node's existing executor untouched
   --force              teardown a live, non-drained node (uninstall/reinstall guard override)
+  --archive            take a teardown-grade archive instead of the lean restore point:
+                       + the replica DB, a worktree/log inventory, host-state.json (the pre/post
+                       diff instrument), and a dated .tar.gz beside the bundle
   --dry-run, --print   resolve + print the per-class step plan; run NOTHING (no side effects)
   --json               machine-readable output (with --dry-run, prints the plan as JSON)
   -h, --help           this help
@@ -1402,7 +1485,19 @@ export async function main(argv, depsOverride) {
     errOut(`catalyst-install: --executor must be one of ${VALID_EXECUTORS.join(" | ")} (got '${args.executor}')`);
     return 2;
   }
-  const opts = { force: args.force, readReplica, executor: args.executor, execCoreEnv: execCoreEnvPath(env) };
+  // CTL-2004: reject a typo'd feed mode outright rather than coercing it. The whole point of the
+  // key is that "which transport feeds this host" is DECLARED; an operator who mistypes --github-feed
+  // must not get a node that quietly reverts to the `off` default and opens a tunnel. Same posture
+  // as --executor above.
+  if (args.githubFeed != null && !GITHUB_FEED_MODES.includes(args.githubFeed)) {
+    errOut(`catalyst-install: --github-feed must be one of ${GITHUB_FEED_MODES.join(" | ")} (got '${args.githubFeed}')`);
+    return 2;
+  }
+  // Captured BEFORE any phase runs — remove-config strips Layer-2, so reading it later would read
+  // the hole this exists to fill.
+  const githubFeed = resolveGithubFeed({ flag: args.githubFeed, env, layer2: deps.layer2 });
+
+  const opts = { force: args.force, archive: args.archive, readReplica, githubFeed, executor: args.executor, execCoreEnv: execCoreEnvPath(env) };
 
   if (args.dryRun) {
     const plan = planPhases({ operation: args.operation, nodeClass, scripts: deps.scripts, opts });
