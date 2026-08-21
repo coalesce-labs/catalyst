@@ -139,6 +139,114 @@ else
 	fail "expected 1, got $COUNT"
 fi
 
+# ─── an unwritable $PIDDIR must not disarm the relaunch cap ──────────────────
+#
+# Everything above exercises PRIMITIVES. This case drives the REAL lane-relaunch.sh loop,
+# because the defect it guards lives in the caller's control flow, not in the lib: the loop
+# called record_relaunch_attempt un-checked under `set -u` (no -e), so a $PIDDIR that refused
+# the append changed nothing and it launched anyway. The two failures compound rather than
+# cancel — cw_count_in_window reads the missing counter as 0, so `COUNT >= CAP` is never true
+# and no pass is ever CAPPED, while the unwritable <lane>.pid makes is_alive report the lane
+# dead every pass — so the launcher fires every POLL_SECONDS forever, each one a real claude
+# session, with the cap that is meant to bound it silently gone. Same defect class, same
+# shared lib, as the account-rotation actor's breaker-unavailable refusal (CTL-2145).
+#
+# THE assertion is that the launcher was invoked no more often than the cap allows. Counting
+# CAPPED lines alone would pass vacuously: the unwritable run emits none either way, because
+# never reaching the cap is the whole defect.
+
+echo "Test: an unwritable \$PIDDIR refuses to relaunch instead of relaunching uncapped"
+
+LR_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lane-relaunch.sh"
+
+# run_lane_loop MODE DEADLINE -> "<launches> <capped_lines>" for one bounded run of the real
+# script against a scratch kit. The deadline lives in a watchdog that SIGKILLs the child, so
+# the unbounded `while :` poll loop can never outlive this test even if every later line here
+# is broken (AGENTS.md: a background process must not be able to outlive its starter).
+run_lane_loop() {
+	local mode="$1" deadline="$2" s p w launches capped
+	s="$(mktemp -d)"
+	mkdir -p "$s/coord" "$s/repo"
+	printf 'ctl %s\n' "$s/repo" >"$s/coord/lanes.manifest"
+	: >"$s/coord/launch-ctl1.txt"
+	printf 'acct1\n' >"$s/coord/fleet-account.current"
+	: >"$s/launches"
+	# The stub reports a pid that is definitely NOT running, so is_alive is false on every
+	# pass and the CAP is the only thing that can bound the writable control. (A stub echoing
+	# "pid 0" would make `kill -0 0` succeed — the lane would read alive and the control would
+	# bound at 1 launch without the cap ever being consulted, proving nothing.)
+	cat >"$s/coord/launch-on-acct1.sh" <<-STUB
+		#!/usr/bin/env bash
+		echo "\$*" >>"$s/launches"
+		echo "started pid 999999"
+	STUB
+	chmod +x "$s/coord/launch-on-acct1.sh"
+	mkdir -p "$s/coord/lane-pids"
+	if [ "$mode" = unwritable ]; then
+		chmod 555 "$s/coord/lane-pids"
+		# Verify the INSTRUMENT before trusting what it measures: a mode change silently
+		# ignored (root, an ACL, a filesystem that does not honour the bits) would leave a
+		# perfectly writable dir and the refusal assertion would be measuring nothing.
+		# Probed by writing, not by checking the uid, so every one of those causes is caught.
+		if touch "$s/coord/lane-pids/.probe" 2>/dev/null; then
+			rm -f "$s/coord/lane-pids/.probe" 2>/dev/null || true
+			chmod 755 "$s/coord/lane-pids" 2>/dev/null || true
+			rm -rf "$s"
+			printf 'INCONCLUSIVE'
+			return 0
+		fi
+	fi
+	COMMS_DIR="$s/coord" POLL_SECONDS=1 RELAUNCH_HOURLY_CAP=1 \
+		bash "$LR_SCRIPT" >/dev/null 2>&1 &
+	p=$!
+	(
+		sleep "$deadline"
+		kill -9 "$p" 2>/dev/null
+	) &
+	w=$!
+	wait "$p" 2>/dev/null
+	kill "$w" 2>/dev/null
+	# Restore BEFORE the cleanup rm -rf, which cannot unlink through a 555 directory.
+	chmod 755 "$s/coord/lane-pids" 2>/dev/null || true
+	# `grep -c` PRINTS its count and exits 1 when that count is zero, so the obvious
+	# `|| echo 0` appends a SECOND line and the caller's `[ "$x" -le 1 ]` dies with
+	# "integer expression expected" — a broken instrument, which is the one thing a
+	# positive control cannot catch for you. `|| true` keeps grep's own printed 0.
+	launches=0
+	[ -f "$s/launches" ] && launches=$(grep -c . "$s/launches" 2>/dev/null || true)
+	capped=0
+	[ -f "$s/coord/lane-relaunch.log" ] &&
+		capped=$(grep -c 'CAPPED' "$s/coord/lane-relaunch.log" 2>/dev/null || true)
+	rm -rf "$s"
+	printf '%s %s' "$launches" "$capped"
+}
+
+# ~22s per arm: the loop sleeps 15s after each relaunch, so an uncapped run reaches its
+# SECOND launch at t=15 while a capped one is still refusing.
+UNWRITABLE_RESULT="$(run_lane_loop unwritable 22)"
+if [ "$UNWRITABLE_RESULT" = INCONCLUSIVE ]; then
+	echo "  INCONCLUSIVE: chmod 555 did not make the pid dir unwritable to this process (root? ACL?) — the unwritable-dir case cannot run here"
+else
+	U_LAUNCHES="${UNWRITABLE_RESULT%% *}"
+	if [ "$U_LAUNCHES" -le 1 ]; then
+		pass "did NOT relaunch uncapped when the attempt could not be recorded ($U_LAUNCHES launch(es) in 22s, cap 1)"
+	else
+		fail "relaunched with a disarmed breaker: $U_LAUNCHES launches in 22s against a cap of 1"
+	fi
+
+	# POSITIVE CONTROL — the identical run with the dir writable. Without it, a loop that
+	# refused to launch for any other reason (a broken fixture, a stub that never runs) would
+	# pass the assertion above while proving nothing about the breaker.
+	CONTROL_RESULT="$(run_lane_loop writable 22)"
+	C_LAUNCHES="${CONTROL_RESULT%% *}"
+	C_CAPPED="${CONTROL_RESULT##* }"
+	if [ "$C_LAUNCHES" -ge 1 ] && [ "$C_CAPPED" -ge 1 ]; then
+		pass "positive control: the SAME fixture launches and then CAPS when the dir is writable ($C_LAUNCHES launch(es), $C_CAPPED capped pass(es)) — the refusal was the breaker, not the fixture"
+	else
+		fail "positive control FAILED — $C_LAUNCHES launch(es), $C_CAPPED capped pass(es): this test proves nothing"
+	fi
+fi
+
 echo ""
 echo "== $PASSES passed, $FAILURES failed =="
 [ "$FAILURES" -eq 0 ]

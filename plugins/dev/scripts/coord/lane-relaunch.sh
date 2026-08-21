@@ -129,7 +129,35 @@ while :; do
     name=$(basename "$brief" .txt); name=${name#launch-}
     # Record the attempt BEFORE launching, so a launcher that itself fails or hangs still counts
     # toward the cap — a broken launcher must not become an unbounded tight retry either.
-    record_relaunch_attempt "$lane"
+    #
+    # And if the attempt cannot be PERSISTED, do not launch at all. cw_record_attempt's non-zero
+    # return is load-bearing rather than advisory (lib/rotation-window.sh): $PIDDIR holds both this
+    # counter and <lane>.pid, so a directory that refuses the append refuses the pid file too. The
+    # two failures compound instead of cancelling — cw_count_in_window reads the missing counter as
+    # 0 forever, so `COUNT >= CAP` is never true and no pass is ever CAPPED, while the unwritable
+    # pid file makes is_alive report the lane dead on every pass. The result is a launcher fired
+    # every POLL_SECONDS indefinitely, each one a real claude session on the active account, with
+    # the cap that is supposed to bound it silently disarmed — the one direction a circuit breaker
+    # must never fail in. Measured, matched pair (40s, cap 1): writable -> 1 launch and 24 CAPPED
+    # refusals; $PIDDIR chmod 555 -> 3 launches and 0 CAPPED lines.
+    #
+    # `continue`, NOT `exit`: unlike the account-rotation actor beside it — a StartInterval
+    # one-shot that launchd re-runs next interval, so exiting 1 there costs one skipped tick — this
+    # is a long-running unsupervised poll loop with nothing to restart it. Exiting would convert a
+    # transient unwritable directory into a permanently dead lane watchdog, which is the very
+    # unnoticed-dead-lanes failure CTL-2097 exists to prevent. Declining this pass leaves the lane
+    # dead and the log loud, and the first pass that can persist the counter relaunches it.
+    #
+    # Announced on EVERY declining pass rather than once per episode: the marker such a latch would
+    # need lives in the directory that just refused a write. At the 900s default that is ~4 lines
+    # per hour per lane, which is a cadence an operator can read, not a flood (CTL-1817). It also
+    # goes to stderr, since $LOG is under COMMS_DIR and a wider permissions failure takes it too.
+    if ! record_relaunch_attempt "$lane"; then
+      MSG="$(date '+%H:%M:%S') REFUSING to relaunch $lane — could not record the attempt at $PIDDIR/$lane.relaunches; without a working circuit breaker this loop would relaunch uncapped every pass (is $PIDDIR writable?). Not launching; the lane stays down until the counter can be persisted."
+      echo "$MSG" >> "$LOG" 2>/dev/null || true
+      echo "$MSG" >&2
+      continue
+    fi
     echo "$(date '+%H:%M:%S') relaunching $name on $ACCT (pid-file said dead, attempt $((COUNT + 1))/$RELAUNCH_HOURLY_CAP this hour)" >> "$LOG"
     OUT=$(bash "$LAUNCHER" "$name" "$repo" 2>&1)
     echo "$OUT" >> "$LOG"
