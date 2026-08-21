@@ -664,6 +664,7 @@ jobs:
         run: |
           bash plugins/dev/scripts/__tests__/account-rotation-plist.test.sh
           bash plugins/dev/scripts/__tests__/install-account-rotation.test.sh
+          bash plugins/dev/scripts/__tests__/install-services-account-rotation.test.sh
 
       - name: review-comments headless resolution test (CTL-1496)
         working-directory: plugins/dev/scripts
