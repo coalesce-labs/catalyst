@@ -277,13 +277,19 @@ compatibility facade as of v2026.4.x — `linearis comments --help` itself says 
 discussion commands").
 
 ```bash
-# Start a comment / discussion thread (this is the one to use)
+# An AGENT starting a comment / discussion thread — go through linear-reply.mjs, NOT `discuss`
+# (the ⛔ callout above; `discuss` posts under the human's own identity):
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body "…" --top
+
+# `linearis issues discuss` — ONLY when the comment is genuinely meant to be the human's own:
 linearis issues discuss ENG-123 --body "Starting work on this"
 
 # List root threads on a ticket (use BEFORE re-posting a mirror comment, to avoid dups)
 linearis issues discussions ENG-123
 
-# Reply to a thread — <thread> MUST be a root thread ID (from discuss/discussions), NOT ENG-123
+# Reply to a thread — <thread> MUST be a root thread ID (from discuss/discussions), NOT ENG-123.
+# An agent's reply still goes through linear-reply.mjs --parent <thread-id>, not `issues reply`
+# (same identity risk as `discuss` — `issues reply` also posts under the personal token).
 linearis issues reply <thread-id> --body "follow-up"
 linearis issues replies <thread-id>                # list replies in a thread
 
@@ -548,9 +554,9 @@ linearis issues update ENG-123 --status "In Progress"
 linearis issues update ENG-123 --status "In Review"
 linearis issues update ENG-123 --status "Done"
 
-# With comment
+# With comment — an AGENT posting the "Merged" note goes through linear-reply.mjs, not `discuss`
 linearis issues update ENG-123 --status "Done"
-linearis issues discuss ENG-123 --body "Merged: PR #456"
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body "Merged: PR #456" --top
 ```
 
 ### UUID-based calls (CTL-207)
@@ -590,9 +596,15 @@ refresh is wired in.
 ## Important Rules
 
 1. **--status NOT --state**: Always `--status` for issue updates (`--state` is not a valid flag)
-2. **Commenting = `issues discuss`**: Create a comment with `linearis issues discuss <id> --body`; list
-   threads with `issues discussions <id>`. The old `comments create` still works but is a **deprecated
-   compatibility facade** — don't use it. There is no `issues comment` subcommand.
+2. **Commenting as an AGENT = `linear-reply.mjs`, NOT `issues discuss`/`issues reply`**: both of those
+   `linearis` subcommands authenticate with the single personal token the CLI resolves globally (see
+   the ⛔ callout above) — there is no separate app-actor auth path inside `linearis` itself, so they
+   ALWAYS post under the human's own identity, which the ask-resolution gate reads as the human
+   deciding (CTL-1567/CTL-2086). Use `linear-reply.mjs --as <AGENT>` for every agent-authored comment;
+   reserve `issues discuss`/`issues reply` for when the comment is genuinely meant to be the human's
+   own. List threads with `issues discussions <id>` (read-only, no identity risk). The old
+   `comments create` still works but is a **deprecated compatibility facade** — don't use it. There is
+   no `issues comment` subcommand.
 3. **milestones NOT project-milestones**: The command was renamed in v2026.4 (old name fails silently)
 4. **--status requires --team**: On `issues list`/`search`, `--status` (and `--cycle`) only work with
    `--team`; `--milestone` requires `--project`

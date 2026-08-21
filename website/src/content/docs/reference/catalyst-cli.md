@@ -233,6 +233,15 @@ Provision or tear down this node for its class (composes setup scripts; install/
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-install)
 
+### catalyst-enrol
+
+One-key host enrollment installer — binds a fresh machine to a Catalyst Cloud account/tenant with a
+single `--cloud-key`, generating (or accepting an existing) age keypair for local secret decryption.
+
+**Key subcommands:** _(run `catalyst-enrol --help`)_
+
+[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-enrol.sh)
+
 ### catalyst-doctor
 
 Fail-closed activation gate — class-aware health/activation grade (exit 0 ⇒ safe to activate).

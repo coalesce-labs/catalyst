@@ -88,7 +88,11 @@ import {
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
-import { canOccupySlotNow, defaultHasTriageArtifact } from "./dispatch-readiness.mjs";
+import {
+  canOccupySlotNow,
+  defaultHasTriageArtifact,
+  triageReservationDeadlocked,
+} from "./dispatch-readiness.mjs";
 import {
   defaultDispatch,
   dispatchTicket,
@@ -369,6 +373,7 @@ import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs"
 // runTransition (would double-audit the triage path, which keeps its own
 // phase.triage.linear-transition event). Best-effort: swallow-on-error.
 import { appendLinearStateWriteEvent } from "./linear-state-write-event.mjs";
+import { recordFleetWrite as defaultRecordFleetWrite } from "./lane-claim-write-ledger.mjs"; // CTL-2070: the timely write-ledger record seam
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 Phase 5
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { resolveTicketType } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
@@ -401,7 +406,12 @@ import {
   getEligibleDir,
   getEventLogPath,
   getHostName,
-  getClusterHosts,
+  // CTL-1785: the per-tick DISPATCH roster (HRW who-may-take-work) is ENTITLEMENT;
+  // `multiHost` (the fenceGuard !multiHost disarm) and the host-death takeover
+  // pre-gate are TOPOLOGY and stay EXISTENCE-derived. `off` mode (default):
+  // getEntitledHosts() === getExistenceHosts() === getClusterHosts().
+  getEntitledHosts,
+  getExistenceHosts,
   hostMembershipWarning,
   isDraining as isDrainingDefault,
   getDrainedMarkerPath, // CTL-1321: shared resolver for the drain.drained sentinel
@@ -984,6 +994,13 @@ export function buildGlobalRanking(orchDir, eligible) {
 
   for (const t of eligible ?? []) {
     if (started.has(t.identifier)) continue; // already in-flight (listed above)
+    // CTL-2090: a queued descriptor here is by construction untriaged (no
+    // workers/<t>/ dir), and preemption's justification is that the freed slot
+    // lets the monitor TRIAGE it (CAT-36 guard below). A triage-capped ticket
+    // (CTL-1441) will never be triaged, so preempting a live worker for it kills
+    // real work for a slot nothing can consume. Same predicate as the STEP A
+    // admission exclusion.
+    if (triageReservationDeadlocked(orchDir, t.identifier)) continue;
     descriptors.push({
       identifier: t.identifier,
       priority: t.priority,
@@ -4866,6 +4883,11 @@ export function schedulerTick(
     // distinct source tag — slice-1's deviation note: the parked re-dispatch reuses
     // the scheduler-advance / preemption-resume sites, it is not its own write.)
     appendStateWriteEvent = appendLinearStateWriteEvent,
+    // CTL-2070: the timely fleet write-ledger record seam. Default null so a bare unit tick that
+    // does not inject it never touches the durable ledger; PRODUCTION wires the real
+    // defaultRecordFleetWrite via runTick (same pattern as appendWorkerTransitionEvent below).
+    // Called from emitStateWrite ONLY on an applied transition that carries a to_state.
+    recordFleetWrite = null,
     // CTL-764 Phase 5: unified worker.transition event emitter. Injectable for tests
     // (pass a spy to capture emitted transitions). Default no-op so bare unit ticks
     // that do not inject this seam are unaffected. Production wires the real
@@ -5118,9 +5140,13 @@ export function schedulerTick(
   // daemon restart). multiHost gates the Linear-touching claim: a single-host
   // roster makes the HRW filter an identity AND skips the claim entirely, so the
   // coordination wiring is an exact no-op until a 2nd host joins the roster.
-  const roster = hosts ?? getClusterHosts();
+  const roster = hosts ?? getEntitledHosts();
   const self = hostName ?? getHostName();
-  const multiHost = roster.length > 1;
+  // CTL-1785: multiHost (the fenceGuard `!multiHost` disarm + the Linear-touching
+  // claim gate) stays EXISTENCE-derived so entitlement shedding can never re-enable
+  // an N=1 disarm. An injected `hosts` still controls it (existing test contract);
+  // only the default source splits from the entitled dispatch roster above.
+  const multiHost = (hosts ?? getExistenceHosts()).length > 1;
   // CTL-1057: loud one-time warning when this host is absent from a multi-host roster.
   const _smw = hostMembershipWarning(roster, self);
   if (_smw && !globalThis.__ctl1057_scheduler_warned) {
@@ -5232,6 +5258,18 @@ export function schedulerTick(
       },
       { ticket, phase, source }
     );
+    // CTL-2070: record the fleet's OWN write in the timely write-ledger, so the lane-claim guard
+    // can tell a fleet recovery/re-run move from a foreign lane claim during the ~200 s window
+    // before issue_history catches up. Only an APPLIED transition with a concrete to_state is a
+    // real fleet write; a no-op / short-circuited write is not. Guarded so a ledger throw can
+    // never abort the tick (recordFleetWrite is itself fail-open, this is belt-and-braces).
+    if (typeof recordFleetWrite === "function" && writerResult.applied && writerResult.to_state) {
+      try {
+        recordFleetWrite(ticket, writerResult.to_state, Date.now());
+      } catch {
+        /* the write-ledger is best-effort observability; never wedge a transition on it */
+      }
+    }
   }
 
   // CTL-764 Phase 5: recordTransition — the per-tick sync chokepoint for worker
@@ -7209,7 +7247,27 @@ export function schedulerTick(
       // "Can't start ⇒ don't spend a slot on it" is enforced where it actually
       // applies: the new-work sweep's `dispatchableReady` gate, which is what stops
       // an untriaged ticket consuming a *dispatch*.
-      const readyCandidates = rankTickets(admissionPool.filter((t) => readyIds.has(t.identifier)));
+      //
+      // CTL-2090: with ONE narrow exception — a ticket whose triage re-dispatch cap
+      // has tripped (CTL-1441) and that still lacks its triage.json. The reservation
+      // premise above ("the monitor's triage pass then spends the slot") is FALSE for
+      // it: dispatchTriage's cap gate refuses forever, so the reservation can never
+      // be consumed, and at maxParallel=1 it starves every triaged waiter behind it
+      // for the daemon's lifetime — restart-proof, because the cap file persists
+      // (mini-2, 2026-08-20: CTC-750 held the host's only slot for 36h). The
+      // starves-urgent-untriaged-work argument does not apply: capped means triage
+      // will not run regardless of how many slots are free. Triaged waiters are
+      // exempt from the probe (they own an artifact by construction).
+      const readyCandidates = rankTickets(
+        admissionPool.filter(
+          (t) =>
+            readyIds.has(t.identifier) &&
+            (triagedWaitingSet.has(t.identifier) ||
+              !triageReservationDeadlocked(orchDir, t.identifier, {
+                hasTriageArtifact: _hasTriageArtifact,
+              }))
+        )
+      );
       const admittedSlice = selectDispatchablePerProject(
         readyCandidates,
         new Set(),
@@ -9461,7 +9519,7 @@ function runTick() {
           // evidence + escalates it, so two nodes don't double-page needs-human.
           // STRICT no-op at N=1: a single-host roster makes ownedBy an identity
           // (the lone host owns everything), so ownsSubject is always true.
-          const diagRoster = getClusterHosts();
+          const diagRoster = getEntitledHosts();
           const diagSelf = getHostName();
           // CTL-1529: reuse the tick's shared bounded heartbeat read.
           const diagSurvivors =
@@ -9681,6 +9739,11 @@ function runTick() {
       // startScheduler({ appendWorkerTransitionEvent }).
       appendWorkerTransitionEvent:
         runningOpts.appendWorkerTransitionEvent ?? defaultAppendWorkerTransitionEvent,
+      // CTL-2070: the LIVE fleet write-ledger record seam. schedulerTick defaults this to null
+      // (bare unit ticks never touch the durable ledger); production threads the real
+      // defaultRecordFleetWrite here so every applied state write is recorded for the lane-claim
+      // guard's timely source. A test may inject its own via startScheduler({ recordFleetWrite }).
+      recordFleetWrite: runningOpts.recordFleetWrite ?? defaultRecordFleetWrite,
       // CTL-1774: the LIVE delegate-event emitter. schedulerTick defaults to
       // defaultAppendDelegateEvent, so bare unit ticks that don't inject it are
       // already wired to the real log. runTick threads it explicitly so tests
@@ -10237,7 +10300,11 @@ function runTick() {
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
     // Skip entirely on single-host installs (no-op inside the function, but the
     // pre-check avoids the call to stay zero-cost on the common case).
-    if (getClusterHosts().length > 1) {
+    // CTL-1785: EXISTENCE-gated — a host shed from ENTITLEMENT still physically
+    // exists and its work must remain reclaimable, so this pre-check reads the
+    // existence topology (using the entitled roster here would orphan a shed
+    // host's work — the exact orphan-by-construction this ticket prevents).
+    if (getExistenceHosts().length > 1) {
       // CTL-1481: thread the replica (second arg — the seams object) so the
       // takeover stamp's label read stays off live Linear (replica-first, loud
       // live fallback inside the stamp).
@@ -10411,6 +10478,9 @@ export function startScheduler({
   // the per-tick schedulerTick opts (production). A test injects a spy here to
   // capture transitions through the production runTick path.
   appendWorkerTransitionEvent,
+  // CTL-2070: optional fleet write-ledger record seam override (test seam). Undefined → runTick
+  // defaults to the real defaultRecordFleetWrite.
+  recordFleetWrite,
   // CTL-1774: optional delegate-event emitter override (test seam). Undefined →
   // runTick threads defaultAppendDelegateEvent (the real log append). A test
   // injects a spy here to capture delegate events through the production runTick path.
@@ -10479,6 +10549,7 @@ export function startScheduler({
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
     appendPhaseAdvanceAppliedEvent, // CTL-1789: optional applied-advance emit seam
     appendWorkerTransitionEvent, // CTL-764: optional worker.transition emitter override (test seam; runTick defaults to defaultAppendWorkerTransitionEvent)
+    recordFleetWrite, // CTL-2070: optional fleet write-ledger record seam override (test seam; runTick defaults to defaultRecordFleetWrite)
     appendDelegateEvent, // CTL-1774: optional delegate-event emitter override (test seam; runTick defaults to defaultAppendDelegateEvent)
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
     checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)

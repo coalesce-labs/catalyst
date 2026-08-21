@@ -1,5 +1,22 @@
 # Changelog
 
+## [12.60.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.59.0...catalyst-dev-v12.60.0) (2026-08-20)
+
+
+### Features
+
+* **dev:** CTL-1785 phase 1 — entitlement seam (zero-import leaf, tri-state flag, local provider, off by default) ([#3755](https://github.com/coalesce-labs/catalyst/issues/3755)) ([cccf3b4](https://github.com/coalesce-labs/catalyst/commit/cccf3b45f8bb7719f4bace49c255688032b9ee03))
+* **dev:** CTL-1786 phase 1 — lease-authority.mjs cloud client + auth-spike probe ([#3756](https://github.com/coalesce-labs/catalyst/issues/3756)) ([dcad0fe](https://github.com/coalesce-labs/catalyst/commit/dcad0fee56390034979922f401e3a9a228bc0e7d))
+* **dev:** CTL-1864 — publish slot-based active_count on node.heartbeat ([#3768](https://github.com/coalesce-labs/catalyst/issues/3768)) ([7051350](https://github.com/coalesce-labs/catalyst/commit/7051350ed64b5763a197ca2daffe2fc3ea85535b))
+* **dev:** CTL-1974 — codify catalyst-dev:project-orchestrator as thin steward wrapper ([#3759](https://github.com/coalesce-labs/catalyst/issues/3759)) ([4de7a1a](https://github.com/coalesce-labs/catalyst/commit/4de7a1ad9f08e330469dde9e340f14215c24acc3))
+* **dev:** CTL-1985 — catalyst enrol one-key host enrollment installer ([#3758](https://github.com/coalesce-labs/catalyst/issues/3758)) ([a903177](https://github.com/coalesce-labs/catalyst/commit/a9031770f4981f2318a2ee7119077d516df4552d))
+
+
+### Bug Fixes
+
+* **execution-core:** CTL-2090 — triage-capped ticket can no longer deadlock admission ([#3787](https://github.com/coalesce-labs/catalyst/issues/3787)) ([2a649dc](https://github.com/coalesce-labs/catalyst/commit/2a649dc184fe9a0a89d0e8cbc398e7784dbb4041))
+* **execution-core:** CTL-2103 — scrub PATH so the gh-unavailable test is deterministic ([#3778](https://github.com/coalesce-labs/catalyst/issues/3778)) ([be1840b](https://github.com/coalesce-labs/catalyst/commit/be1840b4b67fbfb1408ea52780b6fa1a9b868368))
+
 ## [12.59.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.58.0...catalyst-dev-v12.59.0) (2026-08-20)
 
 

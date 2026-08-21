@@ -753,14 +753,27 @@ test("ENUMERATOR: reports unverifiable (ok:false, reason) when `gh` list is unav
   // No gh binary on a clean PATH ⇒ spawnSync errors ⇒ the list pass throws ⇒ the
   // enumeration is unverifiable. (Callers no longer refuse on this — they proceed.)
   // deriveBranchName/attachment stubbed so the test stays hermetic (no spawn).
-  const r = defaultCheckOpenPrs("CTL-9", {
-    cwd: tmpdir(),
-    deriveBranchName: () => null,
-    deriveAttachmentPrs: () => [],
-  });
-  expect(r.ok).toBe(false);
-  expect(r.reason).toBeTruthy();
-  expect(r.unverifiable).toBe(true); // an unparseable/failed authoritative check is unverifiable
+  //
+  // CTL-2103: the "clean PATH" this test needs was never actually enforced — it just
+  // hoped the CI runner didn't have `gh` on PATH, which is environment-dependent and
+  // failed identically on unrelated PRs once a runner variant DID have `gh` available.
+  // Scrub PATH for the duration so `spawnSync("gh", ...)` reliably fails to resolve the
+  // binary regardless of the host — this still exercises the REAL defaultRunGh/spawnSync
+  // codepath (unlike injecting a `runGh` mock, which would test a different thing).
+  const savedPath = process.env.PATH;
+  try {
+    process.env.PATH = "";
+    const r = defaultCheckOpenPrs("CTL-9", {
+      cwd: tmpdir(),
+      deriveBranchName: () => null,
+      deriveAttachmentPrs: () => [],
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBeTruthy();
+    expect(r.unverifiable).toBe(true); // an unparseable/failed authoritative check is unverifiable
+  } finally {
+    process.env.PATH = savedPath;
+  }
 });
 
 // CTL-1157 (Codex GROUP-A fix #1): an attachment-discovered PR we KNOW exists but
