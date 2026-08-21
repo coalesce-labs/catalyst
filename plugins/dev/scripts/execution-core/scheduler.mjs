@@ -466,7 +466,140 @@ import {
   coerceExplanation,
   describeSignalReason,
   resolveSignalReason,
-} from "./escalation-explanation.mjs"; // CTL-1130, CTL-1754
+  classifyTransientSignal,
+  buildTransientExhaustedExplanation,
+} from "./escalation-explanation.mjs"; // CTL-1130, CTL-1754, CTL-1647
+
+// ── CTL-1647: bounded back-off + self re-arm for a transient provider park ───
+//
+// A provider 429/529 is a SYSTEM-level condition. The correct response is ONE
+// fleet alert plus a delayed retry — never N per-ticket human blocks.
+//
+// This lives HERE, in the terminal sweep, and not only in the recovery pass, for
+// three measured reasons:
+//   1. The recovery pass is behind `catalyst.recoveryPass.mode`, which defaults
+//      to "off" and runs in "shadow" on part of the live fleet. On those hosts a
+//      recovery-only fix is a delay, not a fix — the sweep still parks the ticket.
+//   2. The recovery budget (RECOVERY_MAX_ATTEMPTS, default 2) is the ticket's
+//      GENERIC attempt counter and can already be spent by unrelated prior fixes,
+//      giving a transient cause ZERO retries.
+//   3. Nothing on the recovery path DELAYS the redispatch — it re-fires on the
+//      next tick into a provider that is still returning 529, so both attempts
+//      are consumed against the same outage. The re-arm below is wall-clock
+//      spaced, and the counter is stored ON THE SIGNAL, so it is cause-scoped.
+//
+// Bounded on purpose: after TRANSIENT_MAX_REARMS re-arms the sweep escalates with
+// buildTransientExhaustedExplanation — a truthful "the automatic window is spent"
+// card, not a silent stall (which would be strictly worse than a false page).
+
+/** Wall-clock delay between transient re-arms. Env-overridable (NaN/0 → default). */
+export const TRANSIENT_REARM_DELAY_MS =
+  Number(process.env.CATALYST_TRANSIENT_REARM_DELAY_MIN) * 60 * 1000 || 5 * 60 * 1000;
+
+/** How many times a single transient park may re-arm itself before escalating. */
+export const TRANSIENT_MAX_REARMS = Number(process.env.CATALYST_TRANSIENT_MAX_REARMS) || 3;
+
+/** Where the cause-scoped re-arm counter lives (it must OUTLIVE the signal file). */
+export function transientRearmMarkerPath(orchDir, ticket, phase) {
+  return join(orchDir, "workers", ticket, `.transient-rearms-${phase}.json`);
+}
+
+/**
+ * maybeRearmTransientSignal — back off, then RE-ARM a transient-parked phase so
+ * the normal dispatch path launches it again.
+ *
+ * ⚠️ Re-arming means DELETING the terminal signal, not rewriting it to
+ * `pending`. `deriveAdvancement` advances only when the latest LIVE phase is
+ * `done`; a `pending` implement signal makes implement the latest live phase and
+ * returns null — the ticket would sit pending forever, a silent stall. Dropping
+ * the signal makes the previous `done` phase latest again, so the FSM re-derives
+ * this phase as next and dispatches it. This is the same reset the
+ * verify⇄remediate cycle uses (REMEDIATE_CYCLE_FILES).
+ *
+ * Because the signal goes away, the attempt counter lives in its own marker file
+ * next to it — cause-scoped (per ticket+phase), unlike the recovery-intent
+ * ledger's ticket-wide counter, which unrelated prior fixes can pre-exhaust.
+ *
+ * @returns {{handled: boolean, action: string, attempts: number, ageMs: number|null}}
+ *   handled:true  → the sweep must NOT escalate this tick ("waiting" | "rearmed")
+ *   handled:false → fall through to the normal escalation ("exhausted" | …)
+ */
+export function maybeRearmTransientSignal(
+  orchDir,
+  ticket,
+  signal,
+  {
+    now = Date.now(),
+    delayMs = TRANSIENT_REARM_DELAY_MS,
+    maxRearms = TRANSIENT_MAX_REARMS,
+    log: logArg = null,
+  } = {},
+) {
+  const raw =
+    signal?.raw !== null && typeof signal?.raw === "object" ? signal.raw : (signal ?? {});
+  const phase = raw.phase ?? signal?.phase ?? null;
+  const stamp = signal?.updatedAt ?? raw.updatedAt ?? null;
+  const at = stamp ? Date.parse(stamp) : NaN;
+  const ageMs = Number.isFinite(at) ? Math.max(0, now - at) : null;
+  if (phase === null) return { handled: false, action: "no-phase", attempts: 0, ageMs };
+
+  const markerPath = transientRearmMarkerPath(orchDir, ticket, phase);
+  let attempts = 0;
+  try {
+    const m = JSON.parse(readFileSync(markerPath, "utf8"));
+    if (Number.isFinite(m?.count)) attempts = m.count;
+  } catch {
+    attempts = 0; // absent/malformed → never re-armed
+  }
+
+  if (attempts >= maxRearms) return { handled: false, action: "exhausted", attempts, ageMs };
+  const signalPath = signal?.signalPath ?? null;
+  if (!signalPath || !existsSync(signalPath)) {
+    return { handled: false, action: "no-signal-file", attempts, ageMs };
+  }
+  // An unreadable/absent timestamp cannot age, so it must NOT hold the ticket in
+  // "waiting" forever — fall straight through to the (bounded) re-arm.
+  if (ageMs !== null && ageMs < delayMs) {
+    return { handled: true, action: "waiting", attempts, ageMs };
+  }
+  try {
+    // (1) bump the counter FIRST. If anything below throws we have still spent an
+    // attempt — the bound must never be able to leak into an unbounded retry loop.
+    const tmpMarker = `${markerPath}.tmp.${process.pid}`;
+    writeFileSync(
+      tmpMarker,
+      JSON.stringify({ count: attempts + 1, lastAt: new Date(now).toISOString(), phase }),
+    );
+    renameSync(tmpMarker, markerPath);
+    // (2) drop the stale claim tombstone — a leftover collides on the next O_EXCL
+    // claim create and silently stalls the re-dispatch ("claim-lost").
+    let gen = null;
+    try {
+      gen = JSON.parse(readFileSync(signalPath, "utf8"))?.generation ?? null;
+    } catch {
+      gen = null;
+    }
+    if (gen !== null && gen !== undefined) {
+      try {
+        rmSync(join(orchDir, "workers", ticket, `phase-${phase}.claim.${gen}`), { force: true });
+      } catch {
+        /* best-effort — a leftover tombstone is the very thing we're clearing */
+      }
+    }
+    // (3) drop the terminal signal so deriveAdvancement re-derives this phase.
+    rmSync(signalPath, { force: true });
+    // (4) clear the dispatch cooldown so a 30-min window doesn't suppress the retry.
+    try {
+      rmSync(join(orchDir, ".dispatch-cooldowns", `${ticket}-${phase}.json`), { force: true });
+    } catch {
+      /* best-effort — a stale marker just suppresses one re-dispatch */
+    }
+    return { handled: true, action: "rearmed", attempts: attempts + 1, ageMs };
+  } catch (err) {
+    logArg?.warn?.({ ticket, err: err?.message }, "ctl-1647: transient re-arm failed");
+    return { handled: false, action: "rearm-failed", attempts, ageMs };
+  }
+}
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -9291,29 +9424,71 @@ export function schedulerTick(
             // alone — a key present on 0 of 44 live failed/stalled signals — so
             // every card said "(no reason)" while the reason sat in the same file.
             const stalledReason = resolveSignalReason(stalledSig);
-            const tsResult = routeStuckTicketToDelegate(orchDir, ticket, {
-              site: "terminal-sweep",
-              reason: stalledReason.reason ?? "stalled",
-              boardContext: { status: stalledSig?.status, phase: stalledSig?.phase },
-              applyLabel: writeStatus,
-              env,
-              log,
-              appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: ticket }), // CTL-1774
-              explanation: {
-                problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${describeSignalReason(stalledSig)}) and is not terminal`,
-                call_to_action: `decide whether to retry ${ticket} or close it`,
-              },
-              // CTL-1609 (Codex P1): thread the tick's resolved ceiling so a large
-              // terminal-sweep cohort cannot enqueue past maxParallel.
-              deps: { orchDir, maxParallel },
-            });
-            // CTL-764 finding 8: emit worker.transition ONLY when the label write
-            // actually occurred. A persisted .linear-label-needs-human marker after a
-            // daemon restart (labelOnce no-ops) or a belief-owner deferral changes no
-            // label — recording a fresh needs-human transition there is a false escalation.
-            if (tsResult.labelled === true) {
-              recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
-            }
+            // CTL-1647: a TRANSIENT provider condition (429/529 overload, rate
+            // park) is a system-level fact, not a per-ticket human decision. The
+            // producer stamps `retrySafe`; instead of parking the ticket we back
+            // off and re-arm the phase HERE — the one path that runs regardless of
+            // the recovery-pass feature flag, with a wall-clock delay and a
+            // cause-scoped attempt counter (see maybeRearmTransientSignal).
+            //
+            // BOUNDED: past TRANSIENT_MAX_REARMS we DO escalate — with a truthful
+            // "the automatic window is spent, confirm or re-dispatch" card instead
+            // of the fabricated "decide whether to retry, hand off, or cancel".
+            // An unbounded skip turns a false page into a silently stranded ticket,
+            // which is strictly worse.
+            const transient = classifyTransientSignal(stalledSig, { now: now() });
+            const rearm =
+              transient.transient && transient.retrySafe
+                ? maybeRearmTransientSignal(orchDir, ticket, stalledSig, { now: now(), log })
+                : null;
+            if (rearm?.handled === true) {
+              // ONE fleet-level line, not a per-ticket human block. The producer
+              // already emitted execution-core.sdk.overloaded — that is the fleet
+              // alert; this records the per-ticket back-off decision only.
+              log.warn(
+                {
+                  ticket,
+                  reason: transient.reason,
+                  action: rearm.action,
+                  attempts: rearm.attempts,
+                  ageMs: rearm.ageMs,
+                },
+                "ctl-1647: transient provider-capacity park — backing off / re-arming, NOT parking needs-human",
+              );
+            } else {
+              const tsResult = routeStuckTicketToDelegate(orchDir, ticket, {
+                site: "terminal-sweep",
+                reason: stalledReason.reason ?? "stalled",
+                boardContext: { status: stalledSig?.status, phase: stalledSig?.phase },
+                applyLabel: writeStatus,
+                env,
+                log,
+                appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: ticket }), // CTL-1774
+                explanation: transient.transient
+                  ? // CTL-1647: the transient park DID exhaust its automatic window.
+                    // Say exactly that — never "no decision is required", which on a
+                    // still-parked ticket is a false all-clear.
+                    buildTransientExhaustedExplanation(
+                      ticket,
+                      transient.reason,
+                      rearm?.attempts ?? 0,
+                    )
+                  : {
+                      problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${describeSignalReason(stalledSig)}) and is not terminal`,
+                      call_to_action: `decide whether to retry ${ticket} or close it`,
+                    },
+                // CTL-1609 (Codex P1): thread the tick's resolved ceiling so a large
+                // terminal-sweep cohort cannot enqueue past maxParallel.
+                deps: { orchDir, maxParallel },
+              });
+              // CTL-764 finding 8: emit worker.transition ONLY when the label write
+              // actually occurred. A persisted .linear-label-needs-human marker after a
+              // daemon restart (labelOnce no-ops) or a belief-owner deferral changes no
+              // label — recording a fresh needs-human transition there is a false escalation.
+              if (tsResult.labelled === true) {
+                recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
+              }
+            } // CTL-1647: end of the non-transient escalation branch
           } else {
             log.warn(
               { ticket, reason: fenceVerdict?.reason ?? null },

@@ -305,7 +305,7 @@ function defaultEmitEvent(name, payload) {
 // --no-signal-update so the skill/pre-launch keeps ownership of the signal file).
 // Best-effort; never throws.
 export function defaultEmitBackstop(
-  { phase, ticket, status, reason, orchDir, signalFile, orchestrator },
+  { phase, ticket, status, reason, orchDir, signalFile, orchestrator, retrySafe = false },
   {
     spawn = spawnSync,
     writeSignalStalled = defaultWriteSignalStalled,
@@ -325,11 +325,23 @@ export function defaultEmitBackstop(
   // write here would mislabel a max-turns outcome as operator-stalled even though
   // the event stream says turn-cap-exhausted. Every other abnormal backstop
   // (failed / overloaded-exhausted) still writes "stalled".
+  //
+  // CTL-1647: `retrySafe` rides onto BOTH writes below. A transient provider
+  // condition (429/529 overload) is still written terminal — leaving the signal
+  // in-flight is the CTL-1367 item-4 regression — but it is written as a
+  // RETRY-SAFE terminal, which is the existing CTL-1679 vocabulary: recovery
+  // reasoning's retry_safe_redispatch rule re-dispatches it inside the shared
+  // bounded budget instead of parking it for a human. Signal and event must
+  // carry the same flag or the two records desync (the P2-F trap above).
   if (signalFile) {
     if (status === "turn-cap-exhausted") {
-      writeSignalTerminal(signalFile, "turn-cap-exhausted", reason);
+      // CTL-1647 (Codex R2 note): a turn-cap exhaustion is NEVER retry-safe — the
+      // agent burned its whole turn budget, which is a verdict about the WORK, not
+      // an infrastructure condition. Hard-coded false so no future caller can
+      // declare it transient by threading the flag through this shared backstop.
+      writeSignalTerminal(signalFile, "turn-cap-exhausted", reason, { retrySafe: false });
     } else {
-      writeSignalStalled(signalFile, reason);
+      writeSignalStalled(signalFile, reason, { retrySafe });
     }
   }
 
@@ -359,6 +371,9 @@ export function defaultEmitBackstop(
     "--no-signal-update",
   ];
   if (reason) args.push("--reason", reason);
+  // CTL-1647 / CTL-1679: the same retry_safe payload the fence guard stamps, so
+  // the emitted event matches the signal the writer above left on disk.
+  if (retrySafe) args.push("--payload-json", '{"retry_safe":true}');
   let res;
   try {
     res = spawn(EMIT_COMPLETE_BIN, args, { encoding: "utf8" });
@@ -452,7 +467,13 @@ const SIGNAL_TERMINAL_STATUSES = new Set([
 // terminal event (a turn-cap-exhausted backstop must leave "turn-cap-exhausted", not
 // "stalled"; the terminal sweep applies needs-human only to stalled/failed). The P3
 // terminal-clobber guard and the atomic tmp+rename are shared by every status.
-function defaultWriteSignalTerminal(signalFile, status, reason) {
+// CTL-1647: `opts.retrySafe` stamps the CTL-1679 `retrySafe:true` flag onto the
+// terminal signal. It is the ONE existing marker that says "this terminal is an
+// infrastructure condition, not a verdict about the work" — recovery-reasoning's
+// retry_safe_redispatch rule re-dispatches such a signal inside the shared
+// bounded budget (and the redispatch seam clears the flag again), so a provider
+// 429/529 backs off and resumes by itself instead of parking for a human.
+function defaultWriteSignalTerminal(signalFile, status, reason, { retrySafe = false } = {}) {
   try {
     let sig;
     try {
@@ -468,6 +489,9 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
     sig.attentionReason = reason || "sdk-backstop";
     // CTL-1789: record WHO asserted this terminal. Infrastructure, not the agent.
     sig.assertedBy = ASSERTED_BY.SDK_BACKSTOP;
+    // CTL-1647: only ever SET the flag — never delete an existing one, so this
+    // writer cannot downgrade a retry-safe terminal another producer stamped.
+    if (retrySafe) sig.retrySafe = true;
     sig.updatedAt = ts;
     sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), [status]: ts };
     // ⚠️ CTL-1854: strip the yield anchors on ANY non-yield terminal. This writer
@@ -502,8 +526,8 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
 // stalled" writer instead of duplicating the atomic tmp+rename + P3
 // terminal-clobber guard. Its closure deps (defaultWriteSignalTerminal,
 // SIGNAL_TERMINAL_STATUSES) travel with it.
-export function defaultWriteSignalStalled(signalFile, reason) {
-  return defaultWriteSignalTerminal(signalFile, "stalled", reason);
+export function defaultWriteSignalStalled(signalFile, reason, opts = {}) {
+  return defaultWriteSignalTerminal(signalFile, "stalled", reason, opts);
 }
 
 // CTL-1410 Phase A: the SDK success-branch signal flip. When query() resolves
@@ -1328,7 +1352,13 @@ export async function sdkRunPhaseAgent(
         emitEvent("execution-core.sdk.overloaded", {
           ticket, phase, attempt: i, exhausted: true, status: statusOf(lastOverload),
         });
-        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-overloaded-exhausted", orchDir, signalFile }, { spawn });
+        // CTL-1647: RETRY-SAFE terminal, not a human block. The provider being at
+        // capacity says nothing about this ticket — 41 of 79 tickets parked as "a
+        // human must decide" on 2026-08-21 died exactly here. The terminal write
+        // stays (CTL-1367 item 4: an in-flight signal strands the worker forever),
+        // but `retrySafe` routes it to the CTL-1679 bounded redispatch instead of
+        // the terminal sweep's needs-human label.
+        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-overloaded-exhausted", orchDir, signalFile, retrySafe: true }, { spawn });
         return {
           code: 1,
           stdout: "",

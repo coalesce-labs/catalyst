@@ -821,6 +821,44 @@ describe("sdkRunPhaseAgent — 429/529 backoff", () => {
     expect(backstops[0].reason).toBe("sdk-overloaded-exhausted");
   });
 
+  // CTL-1647: the exhaustion backstop must declare itself RETRY-SAFE. Without
+  // this the terminal it writes is indistinguishable from a genuine dead end and
+  // the terminal sweep parks the ticket for a human (41 of 79 false escalations
+  // measured 2026-08-21). This asserts the PRODUCTION CALL SITE, not just the
+  // plumbing — deleting `retrySafe: true` at sdk-run-phase-agent.mjs's overload
+  // branch fails here.
+  test("CTL-1647: backoff exhaustion marks the backstop retrySafe (transient, not terminal-failure)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const backstops = [];
+    const runQuery = () =>
+      (async function* () { yield resultMsg({ subtype: "error", is_error: true, api_error_status: 429 }); })();
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery,
+      sleep: () => Promise.resolve(),
+      maxRetries: 1,
+      backoff: { baseMs: 1, capMs: 2 },
+      emitBackstop: (e) => backstops.push(e),
+    });
+    expect(backstops[0].reason).toBe("sdk-overloaded-exhausted");
+    expect(backstops[0].retrySafe).toBe(true);
+  });
+
+  // POSITIVE CONTROL for the test above: a GENUINE failure backstop must NOT be
+  // retry-safe, so the assertion above is discriminating rather than vacuous.
+  test("CTL-1647 POSITIVE CONTROL: a thrown (non-transient) failure is NOT retrySafe", async () => {
+    const { spawn } = spawnReturningSpec();
+    const backstops = [];
+    const runQuery = () =>
+      (async function* () { throw new Error("boom"); })();
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery,
+      sleep: () => Promise.resolve(),
+      emitBackstop: (e) => backstops.push(e),
+    });
+    expect(backstops[0].reason).toBe("sdk-threw");
+    expect(backstops[0].retrySafe).toBeUndefined();
+  });
+
   test("a 200 success does NOT retry", async () => {
     const { spawn } = spawnReturningSpec();
     let attempt = 0;
