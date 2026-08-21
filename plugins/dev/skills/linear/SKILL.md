@@ -273,10 +273,10 @@ When referencing thoughts documents, always provide GitHub links:
 > and the ask-resolution gate (CTL-1567) reads a human-identity comment as *the human deciding* and
 > clears `needs-human`. An agent commenting that way can silently look like his decision.
 >
-> Post machine replies through the app actor (`Catalyst Cloud`) instead:
-> ```bash
-> direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-123 --as <AGENT> --body "…"
-> ```
+> Post machine replies through the app actor (`Catalyst Cloud`) instead, via
+> `linear-reply.mjs <TICKET-ID> --as <AGENT>` — the canonical copyable invocation is owned by
+> the `linearis` skill's "Comment on a ticket" section; use it from there rather than copying
+> the syntax here.
 > For decision/ask tickets use the `catalyst-dev:ask` skill (`ask.mjs` `create` / `accept`).
 > Use `linearis issues discuss` only when the comment is genuinely the human's. Full syntax and
 > rationale: the `linearis` skill's "Comment on a ticket" section (CTL-1922).
