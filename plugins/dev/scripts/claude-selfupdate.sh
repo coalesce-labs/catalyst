@@ -93,7 +93,9 @@ _emit_update_event() {
     --message "claude CLI update: ${suffix} (${before_ver} → ${after_ver})" \
     --payload-json "$payload")" 2>/dev/null || return 0
 
-  canonical_jsonl_append "$EVENTS_DIR" "$line" 2>/dev/null || true
+  # stderr is deliberately NOT redirected: canonical_jsonl_append's loud fallback is the
+  # only signal that an append degraded, and a caller that mutes it makes it silent (CTL-1809).
+  canonical_jsonl_append "$EVENTS_DIR" "$line" || true
 }
 
 _emit_update_event "$event_suffix" "${before:-}" "${after:-}" || true
