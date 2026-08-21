@@ -497,6 +497,23 @@ The same PR5 that unified the cloud-token name resolver did adjacent, unrelated 
 contract: none of those three call sites import `secret-contract.mjs`, and the registry's own
 `groq-api-key` row has no consumer today besides `checkSecretContract`'s shadow-only observation.
 
+**Claude account tokens via cloud materialize (CTL-1991).** The `claude-accounts.env` row in
+the secret registry is `delivery: "env-file"`, `rotation: "boot-only"` — presence-only. The token
+never flows through `resolveSecret()`; it flows through the launcher `source` and the live rearm
+hook. CTL-1991 adds a **cloud delivery path** beside the existing SOPS path: on a genuinely declared
+cloud node (`deployment.mode === "cloud"`, `inferred === false`, `recognized !== false`) the
+execution-core daemon's cluster-sync timer calls `syncClaudeAccountsFromCloud`
+(`execution-core/claude-accounts-cloud-fetch.mjs`) **before** `armSecret("claude-accounts.env")` on
+every tick. The function fetches `GET {CATALYST_CLOUD_BASE_URL}/me/secrets/claude-accounts.env`
+with a Bearer cloud-token, then materializes the body to disk via a symlink-safe 0o600 tmp+rename
+— identical to the `defaultWriteFile` pattern in `cluster-sync.mjs`. A no-churn idempotency
+check (byte-compare before write) avoids mtime churn and spurious rearm-hook triggers. Fetch
+failures in `enforce` mode leave the on-disk file untouched; a cluster outage at boot is
+fire-and-forget (`.catch()`) so the daemon always starts. Rollout is via tri-state
+`CATALYST_CLAUDE_ACCOUNTS_CLOUD ∈ off (default) | shadow | enforce`; default `off` means no live
+change on merge. See `website/src/content/docs/reference/configuration.md` → "Claude account tokens
+via cloud" for the full knob reference.
+
 **Secret-env hygiene rule**: the bash engine's `_csc_set_result` exports the non-secret
 `CATALYST_SECRET_LAST_SOURCE`/`_PROVIDER` breadcrumbs for the calling shell's convenience but
 **never** exports the resolved value itself (`CATALYST_SECRET_LAST_VALUE` stays same-shell-only,
