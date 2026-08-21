@@ -143,10 +143,31 @@ if grep -q "$LABEL" <<<"$OUT"; then
 else
 	fail "install-services --print did not render ${LABEL} ($(grep -c . <<<"$OUT") lines of output)"
 fi
-# Positive control: with the bake dir forced back to this (ephemeral) worktree, the
-# delegate refuses and the label is ABSENT — proving the assertion above is sensitive to
-# the delegate actually running, not just to the label appearing somewhere in the file.
-OUT_EPH="$(CATALYST_FORCE_OS=Darwin CATALYST_FORCE_BAKE_DIR="${REPO_ROOT}/plugins/dev/scripts" bash "$STACK" install-services --print 2>&1)"
+# Positive control: point the delegate at a bake dir that is ephemeral in EVERY
+# environment. A temp dir matches `_is_ephemeral_dir`'s /tmp | /private/tmp | /var/tmp |
+# /var/folders arm on both macOS and the Linux CI runner. The previous control used
+# ${REPO_ROOT}, which is ephemeral only when this suite runs from a LINKED WORKTREE (that
+# arm keys off a /worktrees/ segment in the git dir): on CI, a plain clone, the guard
+# correctly ALLOWED it, the label rendered, and the control failed — the very
+# "coverage depends on where it runs" defect this file's header objects to.
+#
+# `catalyst-stack` swallows the delegate's stderr, so an absent label alone would not say
+# WHY it is absent, and a control that can pass for an unrelated reason is no control.
+# So name the reason first, against the delegate directly, then assert the label is
+# absent through the stack.
+EPH_ROOT="$(mktemp -d)"
+EPH_BAKE="${EPH_ROOT}/plugins/dev/scripts"
+mkdir -p "$EPH_BAKE"
+cp -R "${REPO_ROOT}/plugins/dev/scripts/coord" "${EPH_BAKE}/"
+trap 'rm -rf "${BAKE_ROOT:?}" "${EPH_ROOT:?}"' EXIT
+EPH_DELEGATE_OUT="$(CATALYST_FORCE_OS=Darwin CATALYST_FORCE_BAKE_DIR="$EPH_BAKE" \
+	bash "${REPO_ROOT}/plugins/dev/scripts/${DELEGATE}" --print-only 2>&1)"
+if grep -q 'refusing to install from an ephemeral path' <<<"$EPH_DELEGATE_OUT"; then
+	pass "positive control: the delegate refuses an ephemeral bake dir for the named CTL-1306 reason"
+else
+	fail "positive control is not measuring the guard — the delegate did not refuse ${EPH_BAKE} (CTL-1306)"
+fi
+OUT_EPH="$(CATALYST_FORCE_OS=Darwin CATALYST_FORCE_BAKE_DIR="$EPH_BAKE" bash "$STACK" install-services --print 2>&1)"
 if grep -q "$LABEL" <<<"$OUT_EPH"; then
 	fail "positive control FAILED — the label rendered even from an ephemeral bake dir, so test 4 is not measuring the delegate"
 else
