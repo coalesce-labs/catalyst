@@ -327,16 +327,6 @@ import {
   defaultLatchHasNoClock as recoveryLatchHasNoClock, // CTL-1610 (Phase 2)
   restampNoClockEscalations as recoveryRestampNoClockEscalations, // CTL-1610 (Phase 3)
 } from "./recovery-reasoning.mjs";
-// CTL-1331: the async board-health delegate queue. countQueuedDelegates is the
-// slot reservation (a queued/claimed delegate has taken a slot its `claude --bg`
-// hasn't filled yet, so it is invisible to liveBackgroundCount); gcDelegateIntents
-// releases terminal/stale reservations. Both are injectable seams on schedulerTick
-// (defaults below) so a bare tick with an empty queue is a strict no-op (Phase A).
-import {
-  countQueuedDelegates as defaultCountQueuedDelegates,
-  gcDelegateIntents as defaultGcDelegateIntents,
-  enqueueRecoveryItemDelegate, // CTL-1331 FU-1: per-item Pass 0r recovery → queue
-} from "./delegate-queue.mjs";
 // CTL-1219: the per-category enforcement seam registry (dirty-tree /
 // source-conflict / orphan-stale / stale-label). Pure-cored + injectable; bound
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
@@ -5027,14 +5017,6 @@ export function schedulerTick(
     // its slot. Interactive sessions are excluded (unlimited). Injectable for
     // tests so a unit tick need not shell out to `claude`.
     liveBackgroundCount = () => countBackgroundAgents(),
-    // CTL-1331: slot-reservation seams for the async board-health delegate queue.
-    // countQueuedDelegates reserves a slot per queued/claimed intent (so the tick
-    // can't admit real work into a slot a queued delegate will claim);
-    // gcDelegateIntents releases terminal/stale reservations. Injectable so a unit
-    // tick injects a deterministic count; the default reads the real
-    // .delegate-queue. Empty queue → 0 → zero behavior change (Phase A inert).
-    countQueuedDelegates = defaultCountQueuedDelegates,
-    gcDelegateIntents = defaultGcDelegateIntents,
     // CTL-1367 P1: the executor=sdk occupancy reader — the in-process SDK-worker
     // analogue of liveBackgroundCount. An SDK phase worker has NO `claude --bg`
     // job, so liveBackgroundCount can't see it; without counting it the slot gate
