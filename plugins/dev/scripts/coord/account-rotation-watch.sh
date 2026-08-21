@@ -84,19 +84,41 @@ fi
 # mistyping a rollback would then be silently re-armed by a stale `enforce` sitting in
 # config (the CTL-1531 short-circuit lesson, same reasoning: a typo must not arm a
 # mutation).
-_config_mode() {
-  local dir="$PWD" cfg=""
+# _config_path — the nearest .catalyst/config.json walking up from $PWD, or empty.
+# Split out of _config_mode so an invalid-value warning can name the ACTUAL file it
+# read rather than a generic label that may not exist on this node.
+_config_path() {
+  local dir="$PWD"
   while [[ "$dir" != "/" && -n "$dir" ]]; do
-    if [[ -f "$dir/.catalyst/config.json" ]]; then cfg="$dir/.catalyst/config.json"; break; fi
+    if [[ -f "$dir/.catalyst/config.json" ]]; then
+      printf '%s' "$dir/.catalyst/config.json"
+      return 0
+    fi
     dir="$(dirname "$dir")"
   done
+  printf ''
+}
+
+_config_mode() {
+  local cfg
+  cfg="$(_config_path)"
   [[ -n "$cfg" ]] && command -v jq >/dev/null 2>&1 || { printf ''; return 0; }
   jq -r '.catalyst.accountRotation.mode // empty' "$cfg" 2>/dev/null || printf ''
 }
 
+# The warning NAMES ITS SOURCE. This loop iterates two sources, so a message that
+# always says "CATALYST_ACCOUNT_ROTATION='shdow'" sends an operator to grep the one
+# place the bad value is not when the typo is actually in .catalyst/config.json. In a
+# design whose whole contract is that every declining path names itself, mis-attributing
+# the decline is the same defect one level down. Pairs are `source|value`, split on the
+# FIRST `|` only, so a value containing the delimiter still reports intact.
 _resolve_mode() {
-  local candidate
-  for candidate in "${CATALYST_ACCOUNT_ROTATION:-}" "$(_config_mode)"; do
+  local pair mode_source candidate cfg
+  cfg="$(_config_path)"
+  for pair in "env CATALYST_ACCOUNT_ROTATION|${CATALYST_ACCOUNT_ROTATION:-}" \
+    "${cfg:-.catalyst/config.json} (catalyst.accountRotation.mode)|$(_config_mode)"; do
+    mode_source="${pair%%|*}"
+    candidate="${pair#*|}"
     case "$candidate" in
       off | shadow | enforce)
         printf '%s' "$candidate"
@@ -104,7 +126,7 @@ _resolve_mode() {
         ;;
       "") ;;
       *)
-        warn "CATALYST_ACCOUNT_ROTATION='${candidate}' is not one of off|shadow|enforce — falling back to 'shadow' (NOT to any lower-precedence value)"
+        warn "account rotation mode '${candidate}' from ${mode_source} is not one of off|shadow|enforce — falling back to 'shadow' (NOT to any lower-precedence value)"
         printf 'shadow'
         return 0
         ;;
@@ -251,12 +273,23 @@ _handles() {
     awk '!seen[$0]++'
 }
 
-_active_handle() {
+# _selector_handle — the SOPS `_catalyst_active_token` selector ALONE, with no
+# fleet-account.current fallback. Split out from _active_handle because the
+# post-switch verification below must read the one pointer a real switch
+# re-materializes; falling back to $CUR there would compare the switch's outcome
+# against a file THIS script is about to write, which can never disagree.
+_selector_handle() {
   local h=""
   if [[ -f "$ACCOUNTS_ENV" ]]; then
     h="$(grep -m1 -oE '_catalyst_active_token="\$CLAUDE_TOKEN_acct[0-9]+"' "$ACCOUNTS_ENV" 2>/dev/null |
       sed -E 's/.*CLAUDE_TOKEN_(acct[0-9]+)".*/\1/')"
   fi
+  printf '%s' "$h"
+}
+
+_active_handle() {
+  local h
+  h="$(_selector_handle)"
   # The SOPS selector is authoritative for "which account Claude is actually using".
   # fleet-account.current is only a fallback: it is the LANE launcher pointer, which the
   # two-pointer note in the architecture doc warns must not be conflated with it.
@@ -363,6 +396,42 @@ if [[ $SWITCH_RC -ne 0 ]]; then
   _emit "account.rotation.failed" ERROR "account rotation failed" \
     "$(jq -nc --arg from "$ACTIVE" --arg to "$NEXT" --argjson rc "$SWITCH_RC" --arg ts "$LATCH_TS" \
       '{from:$from,to:$to,rc:$rc,latch_ts:$ts}' 2>/dev/null || echo null)"
+  exit 1
+fi
+
+# ─── rc=0 is NOT proof a rotation happened ──────────────────────────────────
+#
+# `catalyst-stack claude-account switch` has a documented no-op branch that also
+# returns 0: when the target is ALREADY the active account it logs "nothing to do"
+# and returns 0 without touching anything. The actor and the verb can genuinely
+# disagree about who is active, because they read DIFFERENT sources — _active_handle
+# parses the LOCAL claude-accounts.env selector, while the verb parses the selector
+# freshly pulled from the CLUSTER repo (and warns when the two diverge; the local
+# file goes stale the moment any other node switches).
+#
+# On divergence, NEXT is the handle the cluster already considers active, so the verb
+# no-ops with rc=0 — and inferring success from rc alone would write
+# fleet-account.current, advance the marker, log "rotated a -> b" and emit
+# account.rotation.switched for a rotation that did not happen. That is the worst
+# possible failure here, because `latched:true` is a LEVEL held for the whole episode:
+# consuming the edge means no further attempt until the account recovers on its own,
+# so the actor's one job silently does not happen during the exact incident it exists
+# for.
+#
+# A REAL switch re-materializes claude-accounts.env and verifies it; the no-op branch
+# returns before either. So require the SELECTOR to actually read NEXT afterwards.
+# _selector_handle (not _active_handle) is deliberate: the $CUR fallback would compare
+# against a file we are about to write ourselves. On a mismatch, report INCONCLUSIVE,
+# leave BOTH markers untouched so the edge stays live for the next tick, and emit a
+# DISTINCT event — never account.rotation.switched, which downstream reads as a
+# completed rotation.
+OBSERVED="$(_selector_handle)"
+if [[ "$OBSERVED" != "$NEXT" ]]; then
+  warn "INCONCLUSIVE: switch verb returned rc=0 but the selector in ${ACCOUNTS_ENV} reads '${OBSERVED:-<none>}', not '${NEXT}' — treating this as NOT rotated (the verb's already-active branch also exits 0). Markers NOT advanced and ${CUR} NOT written, so this edge stays live for the next tick (bounded by the ${ROTATION_HOURLY_CAP}/hour cap)."
+  printf '%s\n' "$SWITCH_OUT" | sed 's/^/  | /' >&2
+  _emit "account.rotation.unverified" WARN "account rotation could not be verified" \
+    "$(jq -nc --arg from "$ACTIVE" --arg to "$NEXT" --arg observed "$OBSERVED" --arg ts "$LATCH_TS" \
+      '{from:$from,to:$to,observed:$observed,latch_ts:$ts,rc:0,mode:"enforce"}' 2>/dev/null || echo null)"
   exit 1
 fi
 

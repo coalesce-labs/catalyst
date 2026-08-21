@@ -201,6 +201,20 @@ _escape_repl() {
     -e 's/[&|]/\\&/g'
 }
 
+# _agent_path — the PATH baked into the LaunchAgent's EnvironmentVariables.
+#
+# THIS IS THE HIGH-SEVERITY ONE. launchd gives a job only its built-in
+# /usr/bin:/bin:/usr/sbin:/sbin unless a PATH is declared in the plist, and the
+# actor's default switch verb is `catalyst-stack claude-account switch` —
+# catalyst-stack installs to ~/.catalyst/bin, which is not on that list. An agent
+# without this key exits 127 on every enforce tick, and since the actor records
+# the cap attempt BEFORE invoking the verb, three such ticks exhaust the hourly
+# cap and every later tick logs "CAPPED", which reads like a healthy circuit
+# breaker. Kept in lockstep with install-health-responder.sh's _agent_path.
+_agent_path() {
+  echo "${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}
+
 # ── The rollout knob must SURVIVE reinstallation ────────────────────────────
 #
 # Precedence (each step only applies when it yields off|shadow|enforce):
@@ -224,15 +238,23 @@ _installed_rotation_mode() {
     head -1
 }
 
-_config_rotation_mode() {
-  local dir="$PWD" cfg=""
+# _config_rotation_path — the nearest .catalyst/config.json walking up from $PWD, or
+# empty. Split out so an invalid-value warning can name the ACTUAL file it read.
+_config_rotation_path() {
+  local dir="$PWD"
   while [[ "$dir" != "/" && -n "$dir" ]]; do
     if [[ -f "$dir/.catalyst/config.json" ]]; then
-      cfg="$dir/.catalyst/config.json"
-      break
+      printf '%s' "$dir/.catalyst/config.json"
+      return 0
     fi
     dir="$(dirname "$dir")"
   done
+  printf ''
+}
+
+_config_rotation_mode() {
+  local cfg
+  cfg="$(_config_rotation_path)"
   [[ -n "$cfg" ]] && command -v jq >/dev/null 2>&1 || {
     printf ''
     return 0
@@ -240,9 +262,18 @@ _config_rotation_mode() {
   jq -r '.catalyst.accountRotation.mode // empty' "$cfg" 2>/dev/null || printf ''
 }
 
+# The warning NAMES ITS SOURCE. This ladder has THREE sources, so a message hardcoding
+# CATALYST_ACCOUNT_ROTATION sends an operator to grep the one place the bad value is not
+# when the typo actually sits in config or in the already-installed plist. Pairs are
+# `source|value`, split on the FIRST `|` only.
 _resolve_rotation_mode() {
-  local candidate
-  for candidate in "${CATALYST_ACCOUNT_ROTATION:-}" "$(_config_rotation_mode)" "$(_installed_rotation_mode)"; do
+  local pair mode_source candidate cfg
+  cfg="$(_config_rotation_path)"
+  for pair in "env CATALYST_ACCOUNT_ROTATION|${CATALYST_ACCOUNT_ROTATION:-}" \
+    "${cfg:-.catalyst/config.json} (catalyst.accountRotation.mode)|$(_config_rotation_mode)" \
+    "the installed plist at ${DEST}|$(_installed_rotation_mode)"; do
+    mode_source="${pair%%|*}"
+    candidate="${pair#*|}"
     case "$candidate" in
       off | shadow | enforce)
         printf '%s' "$candidate"
@@ -250,7 +281,7 @@ _resolve_rotation_mode() {
         ;;
       "") ;;
       *)
-        echo "install-account-rotation.sh: CATALYST_ACCOUNT_ROTATION='${candidate}' is not one of off|shadow|enforce — falling back to 'shadow' (NOT to any lower-precedence value)" >&2
+        echo "install-account-rotation.sh: account rotation mode '${candidate}' from ${mode_source} is not one of off|shadow|enforce — falling back to 'shadow' (NOT to any lower-precedence value)" >&2
         printf 'shadow'
         return 0
         ;;
@@ -270,6 +301,8 @@ _substitute() {
     -e "s|REPLACE_HOME|$(_escape_repl "$HOME")|g" \
     -e "s|REPLACE_START_INTERVAL|${interval}|g" \
     -e "s|REPLACE_ROTATION_MODE|${mode}|g" \
+    -e "s|REPLACE_PATH|$(_escape_repl "$(_agent_path)")|g" \
+    -e "s|REPLACE_CATALYST_DIR|$(_escape_repl "${CATALYST_DIR:-${HOME}/catalyst}")|g" \
     "$TEMPLATE"
 }
 

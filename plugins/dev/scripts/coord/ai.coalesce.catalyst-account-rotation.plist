@@ -38,9 +38,12 @@
     3. Replace REPLACE_HOME with your home directory (e.g. /Users/you)
     4. Replace REPLACE_START_INTERVAL with the interval in seconds (e.g. 300)
     5. Replace REPLACE_ROTATION_MODE with off|shadow|enforce
-    6. Load:
+    6. Replace REPLACE_PATH with a PATH that resolves catalyst-stack
+       (e.g. /Users/you/.catalyst/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin)
+    7. Replace REPLACE_CATALYST_DIR with the runtime dir (e.g. /Users/you/catalyst)
+    8. Load:
          launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.coalesce.catalyst-account-rotation.plist
-    7. Verify:
+    9. Verify:
          launchctl list | grep account-rotation
          tail -f ~/catalyst/account-rotation.log
 
@@ -100,6 +103,37 @@
   <dict>
     <key>CATALYST_ACCOUNT_ROTATION</key>
     <string>REPLACE_ROTATION_MODE</string>
+
+    <!--
+      PATH is LOAD-BEARING, not hygiene. launchd hands a job its own built-in
+      /usr/bin:/bin:/usr/sbin:/sbin unless a PATH is declared here, and this
+      actor's default switch verb is `catalyst-stack claude-account switch` -
+      catalyst-stack lives in ~/.catalyst/bin, which is NOT on that list. Without
+      this key `enforce` can never rotate: the verb exits 127, and because the
+      actor records the cap attempt BEFORE calling it, three failed ticks burn
+      ROTATION_HOURLY_CAP and every later tick logs "CAPPED", which reads like a
+      working circuit breaker rather than a misconfigured agent.
+
+      Nothing catches this outside launchd: the template's own smoke test runs
+      from an operator shell, which inherits a full PATH and passes. The only
+      environment that fails is the only environment that matters. Nine of the ten
+      sibling catalyst LaunchAgents declare PATH for exactly this reason.
+    -->
+    <key>PATH</key>
+    <string>REPLACE_PATH</string>
+
+    <!--
+      launchd does NOT inherit the installing shell's environment: a node using a
+      nondefault CATALYST_DIR must have it PERSISTED here, or the agent resolves
+      CATALYST_DIR to $HOME/catalyst and reads a latch that is not there,
+      reporting INCONCLUSIVE on every tick forever - while the installer
+      materialized the coord kit somewhere else entirely. That divergence also
+      silently un-scopes the stray-retire exclusion, which is keyed on the
+      installer's own runtime dir. Substituted at install time from the same
+      ${CATALYST_DIR:-$HOME/catalyst} the installer resolves COORD_RT from.
+    -->
+    <key>CATALYST_DIR</key>
+    <string>REPLACE_CATALYST_DIR</string>
   </dict>
 
   <key>StandardOutPath</key>

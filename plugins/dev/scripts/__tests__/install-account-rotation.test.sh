@@ -147,6 +147,68 @@ else
 	fail "positive control FAILED — the template has no tokens, so test 2 proves nothing"
 fi
 
+echo "Test 2b: PATH and CATALYST_DIR are baked with REAL values (the HIGH finding)"
+# A plist without PATH cannot rotate at all: launchd hands a job only its built-in
+# /usr/bin:/bin:/usr/sbin:/sbin, and the actor's default switch verb (catalyst-stack)
+# lives in ~/.catalyst/bin. It fails as rc=127, and because the actor records the cap
+# attempt BEFORE calling the verb, three ticks exhaust the hourly cap and every later
+# tick logs "CAPPED" — indistinguishable from a working circuit breaker. Asserting the
+# KEY alone is not enough; a PATH with the wrong dirs is the same bug, so assert the
+# rendered value actually contains the dir holding catalyst-stack.
+env_val_of() { # $1 key — read the <string> that FOLLOWS the given <key>
+	grep -A2 "<key>$1</key>" | sed -n 's|.*<string>\(.*\)</string>.*|\1|p' | head -1
+}
+RENDERED_PATH="$(bash "$INSTALLER" --print 2>/dev/null | env_val_of PATH)"
+if [[ -z "$RENDERED_PATH" ]]; then
+	fail "the rendered plist declares no PATH — enforce mode can never resolve catalyst-stack"
+else
+	case ":${RENDERED_PATH}:" in
+		*":${HOME}/.catalyst/bin:"*) pass "rendered PATH contains \${HOME}/.catalyst/bin (catalyst-stack resolves)" ;;
+		*) fail "rendered PATH lacks \${HOME}/.catalyst/bin, so the switch verb still exit-127s: ${RENDERED_PATH}" ;;
+	esac
+	case "$RENDERED_PATH" in
+		*REPLACE_*) fail "PATH left an unsubstituted token: ${RENDERED_PATH}" ;;
+		*) pass "PATH carries no unsubstituted token" ;;
+	esac
+	# Positive control: the same case-match must be able to MISS.
+	case ":/usr/bin:/bin:/usr/sbin:/sbin:" in
+		*":${HOME}/.catalyst/bin:"*) fail "positive control FAILED — the PATH probe matches launchd's built-in PATH" ;;
+		*) pass "positive control: the PATH probe rejects launchd's built-in PATH" ;;
+	esac
+fi
+
+echo "Test 2c: a NON-DEFAULT CATALYST_DIR is persisted, and matches the materialized kit"
+# launchd does not inherit the installing shell's environment. With CATALYST_DIR unset
+# in the agent, account-rotation-watch.sh resolves it to \$HOME/catalyst and reads a
+# latch that is not there — reporting INCONCLUSIVE on every tick forever — while the
+# installer computed COORD_RT from the INSTALLING shell and materialized the kit
+# somewhere else. Installer and agent must not be able to disagree, so assert the
+# plist's value equals the dir the installer's own COORD_RT is derived from.
+ALT_DIR="${SCRATCH}/alt-catalyst-runtime"
+mkdir -p "$ALT_DIR"
+RENDERED_CD="$(CATALYST_DIR="$ALT_DIR" bash "$INSTALLER" --print 2>/dev/null | env_val_of CATALYST_DIR)"
+if [[ "$RENDERED_CD" == "$ALT_DIR" ]]; then
+	pass "a non-default CATALYST_DIR is persisted into the plist verbatim"
+else
+	fail "expected CATALYST_DIR '${ALT_DIR}' in the plist, got '${RENDERED_CD}'"
+fi
+# The agent resolves COMMS_DIR as \${CATALYST_DIR}/comms/coord and the installer
+# resolves COORD_RT the same way, so equal CATALYST_DIR is exactly equal COORD_RT.
+# Assert that identity rather than trusting the two to stay in step by inspection.
+if [[ "${RENDERED_CD}/comms/coord" == "${ALT_DIR}/comms/coord" ]]; then
+	pass "the agent's COMMS_DIR resolves to the installer's COORD_RT (${ALT_DIR}/comms/coord)"
+else
+	fail "agent COMMS_DIR '${RENDERED_CD}/comms/coord' != installer COORD_RT '${ALT_DIR}/comms/coord'"
+fi
+# Positive control: the default render must differ, or the assertion above would pass
+# on a plist that ignores CATALYST_DIR entirely.
+DEFAULT_CD="$(bash "$INSTALLER" --print 2>/dev/null | env_val_of CATALYST_DIR)"
+if [[ "$DEFAULT_CD" != "$RENDERED_CD" ]]; then
+	pass "positive control: the default render (${DEFAULT_CD}) differs, so the value really tracks CATALYST_DIR"
+else
+	fail "positive control FAILED — the plist renders the same CATALYST_DIR regardless of the env"
+fi
+
 # ─── 3. pristine-path guard ──────────────────────────────────────────────────
 
 echo "Test 3: an ephemeral bake dir is REFUSED and renders nothing"
@@ -213,6 +275,36 @@ else
 	fail "typo resolved to '$GOT' — an attempt to DISARM re-armed it"
 fi
 rm -f "$DEST"
+
+echo "Test 4c: the invalid-mode warning NAMES THE SOURCE it actually read"
+# The message used to hardcode CATALYST_ACCOUNT_ROTATION even when the bad value came
+# from config or from the installed plist, sending an operator to grep the one place
+# the typo is not. Behaviour (short-circuit to shadow) is unchanged; only attribution.
+BADPROJ="${SCRATCH}/badproj"
+mkdir -p "${BADPROJ}/.catalyst"
+printf '{"catalyst":{"accountRotation":{"mode":"shdow"}}}\n' >"${BADPROJ}/.catalyst/config.json"
+WARN_OUT="$(cd "$BADPROJ" && bash "$INSTALLER" --print 2>&1 >/dev/null)"
+if grep -q 'config.json' <<<"$WARN_OUT"; then
+	pass "a config typo is attributed to the config file"
+else
+	fail "config typo not attributed to config.json: ${WARN_OUT}"
+fi
+if grep -q "env CATALYST_ACCOUNT_ROTATION" <<<"$WARN_OUT"; then
+	fail "a config typo is STILL blamed on the env var: ${WARN_OUT}"
+else
+	pass "a config typo is no longer blamed on the env var"
+fi
+GOT="$(cd "$BADPROJ" && bash "$INSTALLER" --print 2>/dev/null | mode_of)"
+[[ "$GOT" == "shadow" ]] && pass "config typo still short-circuits to shadow (behaviour unchanged)" || fail "config typo resolved to '$GOT'"
+
+# The env source must still be named when the env really is the culprit — otherwise
+# the attribution change would just move the blame rather than fix it.
+WARN_ENV="$(CATALYST_ACCOUNT_ROTATION=shdow bash "$INSTALLER" --print 2>&1 >/dev/null)"
+if grep -q "env CATALYST_ACCOUNT_ROTATION" <<<"$WARN_ENV"; then
+	pass "an env typo is attributed to the env var"
+else
+	fail "env typo not attributed to the env var: ${WARN_ENV}"
+fi
 
 # ─── 5. applicability gate (D5) ──────────────────────────────────────────────
 

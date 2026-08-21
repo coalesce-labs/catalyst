@@ -666,6 +666,18 @@ jobs:
           bash plugins/dev/scripts/__tests__/install-account-rotation.test.sh
           bash plugins/dev/scripts/__tests__/install-services-account-rotation.test.sh
 
+      - name: run-tests.sh shell-suite discovery (CTL-2145)
+        # The LOCAL half of the two-half discovery rule the blocks above describe:
+        # run-tests.test.sh asserts that COORD_SHELL_TEST_DIR actually causes the coord
+        # suites to be discovered by `make test`. That assertion was itself CI-invisible —
+        # no workflow pinned run-tests.test.sh and no workflow runs `make test` or
+        # run-tests.sh — so the check proving the suites are discovered locally was the
+        # one thing nothing ran. That is exactly the "shipped, discovered by nothing"
+        # shape the pins above exist to prevent, one level up. Pinned here so a
+        # regression in local discovery fails a PR instead of a developer's memory.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/run-tests.test.sh
+
       - name: review-comments headless resolution test (CTL-1496)
         working-directory: plugins/dev/scripts
         run: bash __tests__/review-comments-headless.test.sh

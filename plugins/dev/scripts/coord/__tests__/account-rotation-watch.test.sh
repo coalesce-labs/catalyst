@@ -61,16 +61,40 @@ make_accounts_env() {
 	printf '_catalyst_active_token="$CLAUDE_TOKEN_%s"\n' "$active" >>"$dest"
 }
 
-# make_switch_stub DEST RECORD [EXIT] — a recording stand-in for
+# make_switch_stub DEST RECORD [EXIT] [ACCOUNTS_ENV] — a recording stand-in for
 # `catalyst-stack claude-account switch`. Appends its argv to RECORD, one invocation per
 # line, so the tests can assert BOTH the call count and the handle it was called with.
+#
+# The 4th argument is what makes it a REAL switch rather than a no-op one. The actual verb
+# re-materializes claude-accounts.env with the new selector and verifies it; its documented
+# already-active branch returns 0 without doing either. The actor no longer infers success
+# from rc=0 alone, so a stub that merely exits 0 models the NO-OP branch. Passing the
+# accounts env makes the stub move the selector the way a real switch does, which keeps the
+# present positive (test 1) a genuine end-to-end rotation instead of an assertion relaxed to
+# fit a stub. Omit it to model the no-op branch on purpose.
 make_switch_stub() {
-	local dest="$1" record="$2" rc="${3:-0}"
-	cat >"$dest" <<STUB
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >>"${record}"
-exit ${rc}
+	local dest="$1" record="$2" rc="${3:-0}" accts="${4:-}"
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'STUB_RECORD=%q\n' "$record"
+		printf 'STUB_ACCTS=%q\n' "$accts"
+		printf 'STUB_RC=%q\n' "$rc"
+		cat <<'STUB'
+printf '%s\n' "$*" >>"$STUB_RECORD"
+if [[ -n "$STUB_ACCTS" && "$STUB_RC" -eq 0 ]]; then
+	for a in "$@"; do
+		case "$a" in
+			acct[0-9]*)
+				sed -e "s|^_catalyst_active_token=.*|_catalyst_active_token=\"\$CLAUDE_TOKEN_${a}\"|" \
+					"$STUB_ACCTS" >"${STUB_ACCTS}.tmp" && mv "${STUB_ACCTS}.tmp" "$STUB_ACCTS"
+				break
+				;;
+		esac
+	done
+fi
+exit "$STUB_RC"
 STUB
+	} >"$dest"
 	chmod +x "$dest"
 }
 
@@ -93,7 +117,7 @@ new_case() {
 	mkdir -p "$COORD_RT"
 	: >"$RECORD"
 	make_accounts_env "$ACCTS" acct1 acct1 acct2 acct3
-	make_switch_stub "$STUB" "$RECORD"
+	make_switch_stub "$STUB" "$RECORD" 0 "$ACCTS"
 }
 
 # run_actor MODE — one tick, fully scoped. EVENTS dir is redirected per-case so the
@@ -295,6 +319,36 @@ if grep -qi 'would' <<<"$OUT"; then
 else
 	fail "invalid mode went silent: $OUT"
 fi
+# The warning must NAME THE SOURCE it read. It used to hardcode the env var even when the
+# bad value came from .catalyst/config.json, sending an operator to grep the one place the
+# typo is not — in a design whose contract is that every declining path names itself, a
+# mis-attributed decline is the same defect one level down.
+if grep -q "env CATALYST_ACCOUNT_ROTATION" <<<"$OUT"; then
+	pass "an env typo is attributed to the env var"
+else
+	fail "the env source was not named in the warning: $OUT"
+fi
+# The config half: same typo, different source, and the message must follow it.
+CFGDIR="$SCRATCH/t5c-proj"
+mkdir -p "$CFGDIR/.catalyst"
+printf '{"catalyst":{"accountRotation":{"mode":"shdow"}}}\n' >"$CFGDIR/.catalyst/config.json"
+OUT_CFG="$(cd "$CFGDIR" && CATALYST_DIR="$CDIR" CLAUDE_ACCOUNTS_ENV="$ACCTS" \
+	ROTATION_SWITCH_CMD="$STUB" bash "$ACTOR" 2>&1)"
+if grep -q 'config.json' <<<"$OUT_CFG"; then
+	pass "a config typo is attributed to the config file it was read from"
+else
+	fail "config typo not attributed to config.json: $OUT_CFG"
+fi
+if grep -q "env CATALYST_ACCOUNT_ROTATION" <<<"$OUT_CFG"; then
+	fail "a config typo is STILL blamed on the env var: $OUT_CFG"
+else
+	pass "a config typo is no longer blamed on the env var"
+fi
+if [[ "$(switch_calls)" == "0" ]]; then
+	pass "config typo still degrades to shadow and does not rotate (behaviour unchanged)"
+else
+	fail "config typo rotated: $(cat "$RECORD")"
+fi
 
 # ─── 6. rolling-window cap ───────────────────────────────────────────────────
 
@@ -487,6 +541,135 @@ if grep -q 'sk-ant-fake' "$ACCTS"; then
 	pass "positive control: the leak probe matches a real token value in the fixture"
 else
 	fail "positive control FAILED — the leak probe cannot match, so test 13 proves nothing"
+fi
+
+# ─── 14. rc=0 is not proof: the verb's already-active NO-OP branch ───────────
+#
+# `catalyst-stack claude-account switch` returns 0 when the target is ALREADY active,
+# logging "nothing to do" without touching the selector. The actor and the verb can
+# genuinely disagree about who is active — the actor parses the LOCAL claude-accounts.env
+# selector while the verb parses one freshly pulled from the CLUSTER repo, and the local
+# copy goes stale the moment any other node switches. On divergence NEXT is the handle the
+# cluster already considers active, so the verb no-ops.
+#
+# Inferring success from rc alone is the worst available failure here: `latched:true` is a
+# LEVEL held for the whole episode, so consuming the edge means no further attempt until
+# the account recovers on its own. The actor's one job would silently not happen during
+# the exact incident it exists for, while logging a completed rotation.
+
+echo "Test 14: a switch that exits 0 WITHOUT moving the selector is not a rotation"
+new_case t14
+# The no-op stub: rc=0, selector untouched (4th arg omitted on purpose).
+make_switch_stub "$STUB" "$RECORD" 0 ""
+write_latch "$CDIR" true "$NOW_MS"
+OUT="$(run_actor enforce)"; RC=$?
+if [[ "$(switch_calls)" == "1" ]]; then
+	pass "the verb was actually called (so this case exercises the post-switch check)"
+else
+	fail "expected 1 switch call, got $(switch_calls) — $OUT"
+fi
+if [[ -z "$(marker_value)" ]]; then
+	pass "acted-marker NOT advanced — the rejected edge stays live for the next tick"
+else
+	fail "marker advanced to '$(marker_value)' on a rotation that did not happen"
+fi
+if [[ -z "$(current_account)" ]]; then
+	pass "fleet-account.current NOT written — the two pointers cannot disagree"
+else
+	fail "wrote fleet-account.current='$(current_account)' for a rotation that did not happen"
+fi
+if grep -qi 'INCONCLUSIVE' <<<"$OUT"; then
+	pass "reported INCONCLUSIVE rather than a completed rotation"
+else
+	fail "did not report INCONCLUSIVE: $OUT"
+fi
+if grep -qi 'rotated acct1 -> acct2' <<<"$OUT"; then
+	fail "logged a completed rotation that never happened: $OUT"
+else
+	pass "did NOT log 'rotated acct1 -> acct2'"
+fi
+if [[ $RC -ne 0 ]]; then
+	pass "exited non-zero so the tick is not recorded as a success"
+else
+	fail "exited 0 on an unverified switch"
+fi
+EVENTS="$(cat "$CDIR"/events/*.jsonl 2>/dev/null || true)"
+if grep -q 'account.rotation.unverified' <<<"$EVENTS"; then
+	pass "emitted the DISTINCT account.rotation.unverified event"
+else
+	fail "no account.rotation.unverified event: ${EVENTS:-<no events written>}"
+fi
+if grep -q 'account.rotation.switched' <<<"$EVENTS"; then
+	fail "emitted account.rotation.switched — downstream reads that as a completed rotation"
+else
+	pass "did NOT emit account.rotation.switched"
+fi
+# Positive control: the SAME case with a real switch stub must rotate, so the seven
+# refusals above are evidence of the no-op branch and not of a broken t14 fixture.
+new_case t14b
+write_latch "$CDIR" true "$NOW_MS"
+OUT="$(run_actor enforce)"
+if [[ "$(marker_value)" == "$NOW_MS" && "$(current_account)" == "acct2" ]]; then
+	pass "positive control: an identical case with a REAL switch stub does rotate"
+else
+	fail "positive control FAILED — marker '$(marker_value)', current '$(current_account)': test 14 proves nothing"
+fi
+
+# ─── 15. the launchd environment, reproduced ─────────────────────────────────
+#
+# The HIGH finding. The actor's default verb is resolved through PATH, and launchd hands a
+# job only its built-in /usr/bin:/bin:/usr/sbin:/sbin unless the plist declares one. Every
+# other way of running this actor — an operator shell, the smoke test in the plist's own
+# comment block, this suite's ROTATION_SWITCH_CMD injection — inherits a usable PATH and
+# passes. So the bug is only constructible by reproducing launchd's environment, which is
+# what this case does: no ROTATION_SWITCH_CMD override, PATH set to launchd's built-in.
+
+echo "Test 15: the PATH the installer bakes is what makes the verb resolvable"
+new_case t15
+write_latch "$CDIR" true "$NOW_MS"
+FAKE_BIN="$SCRATCH/t15-catalyst-bin"
+mkdir -p "$FAKE_BIN"
+# A catalyst-stack that behaves like the real verb (moves the selector) so a resolvable
+# PATH produces a real rotation rather than merely a different failure.
+make_switch_stub "$FAKE_BIN/catalyst-stack" "$RECORD" 0 "$ACCTS"
+
+# (a) NEGATIVE CONTROL — launchd's built-in PATH, no override. This must reproduce the
+#     127 the finding measured; if it does not, (b) below proves nothing.
+OUT_A="$(env -i HOME="$SCRATCH" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+	CATALYST_DIR="$CDIR" CLAUDE_ACCOUNTS_ENV="$ACCTS" CATALYST_ACCOUNT_ROTATION=enforce \
+	/bin/bash "$ACTOR" 2>&1)"
+# The strictness of this control is CONDITIONAL, and deliberately so. It is only a
+# negative control where the verb really is unresolvable — on a host that happens to
+# ship catalyst-stack in /usr/bin there is nothing to reproduce, and a branch that
+# passes either way is a check that cannot fail. So: resolve first, then either assert
+# strictly or declare the control inconclusive (counted as neither pass nor fail).
+if env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin command -v catalyst-stack >/dev/null 2>&1; then
+	echo "  INCONCLUSIVE: catalyst-stack IS on launchd's built-in PATH on this host — the negative control cannot run here (part b below still asserts strictly)"
+elif grep -q 'rc=127' <<<"$OUT_A"; then
+	pass "negative control: launchd's built-in PATH reproduces the rc=127 (verb unresolvable)"
+else
+	fail "negative control did NOT reproduce rc=127 though catalyst-stack is unresolvable under the built-in PATH: $OUT_A"
+fi
+if [[ -z "$(marker_value)" ]]; then
+	pass "an unresolvable verb advances NO marker (the edge stays live)"
+else
+	fail "marker advanced to '$(marker_value)' though the verb could not run"
+fi
+
+# (b) THE FIX — the same tick with the dir the installer bakes into PATH prepended.
+#     Nothing else differs, so a rotation here is attributable to the PATH alone.
+OUT_B="$(env -i HOME="$SCRATCH" PATH="${FAKE_BIN}:/usr/bin:/bin:/usr/sbin:/sbin" \
+	CATALYST_DIR="$CDIR" CLAUDE_ACCOUNTS_ENV="$ACCTS" CATALYST_ACCOUNT_ROTATION=enforce \
+	/bin/bash "$ACTOR" 2>&1)"
+if grep -q 'rc=127' <<<"$OUT_B"; then
+	fail "still rc=127 with catalyst-stack on PATH: $OUT_B"
+else
+	pass "with catalyst-stack on PATH the verb resolves (no rc=127)"
+fi
+if [[ "$(marker_value)" == "$NOW_MS" && "$(current_account)" == "acct2" ]]; then
+	pass "the rotation completed — the ONLY difference from (a) is the PATH"
+else
+	fail "expected a completed rotation, marker '$(marker_value)' current '$(current_account)': $OUT_B"
 fi
 
 echo ""
