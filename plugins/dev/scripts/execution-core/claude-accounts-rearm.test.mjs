@@ -74,7 +74,7 @@ describe("parseActiveOauthToken", () => {
     expect(parseActiveOauthToken(text)).toBe(TOKEN_C);
   });
 
-  test("direct assignment with $VAR expansion is NOT honored (avoids shell evaluation)", () => {
+  test("direct assignment with $VAR expansion is NOT honored (selector wins here)", () => {
     // A line like `CLAUDE_CODE_OAUTH_TOKEN=$_catalyst_active_token` is a shell expansion —
     // our static parser must not follow it; return null so env is never mutated from guesswork.
     const text = [
@@ -82,8 +82,44 @@ describe("parseActiveOauthToken", () => {
       `_catalyst_active_token="$CLAUDE_TOKEN_acct1"`,
       `export CLAUDE_CODE_OAUTH_TOKEN="$_catalyst_active_token"`,
     ].join("\n");
-    // Selector line should win here
+    // Selector line should win here — Path 1 resolves before Path 2 is reached.
     expect(parseActiveOauthToken(text)).toBe(TOKEN_A);
+  });
+
+  test("CTL-1984 review regression: canonical format with UNPROVISIONED active slot returns null (never the quoted $-reference)", () => {
+    // The canonical launcher file always carries the direct line
+    // `export CLAUDE_CODE_OAUTH_TOKEN="$_catalyst_active_token"`. When the selected
+    // slot is a placeholder (not yet provisioned), Path 1 misses and Path 2 is reached.
+    // The quoted RHS strips to the literal "$_catalyst_active_token" — a variable NAME.
+    // The parser MUST reject it (return null), never install a broken credential.
+    // Two real slots present (acct3 is the placeholder active slot) so the single-account
+    // Path-3 fallback (size===1) does not fire — this isolates the Path-2 guard.
+    const text = [
+      `CLAUDE_TOKEN_acct1='${TOKEN_A}'`,
+      `CLAUDE_TOKEN_acct2='${TOKEN_B}'`,
+      `CLAUDE_TOKEN_acct3='PASTE_TOKEN_HERE'`, // active slot not yet provisioned
+      `_catalyst_active_token="$CLAUDE_TOKEN_acct3"`,
+      `export CLAUDE_CODE_OAUTH_TOKEN="$_catalyst_active_token"`,
+    ].join("\n");
+    expect(parseActiveOauthToken(text)).toBeNull();
+  });
+
+  test("CTL-1984 review regression: quoted direct $-reference with no selector returns null", () => {
+    // No selector line at all; the only CLAUDE_CODE_OAUTH_TOKEN line is a quoted
+    // shell reference. Path 2 must not strip the quotes and return "$SOMEVAR".
+    const text = `export CLAUDE_CODE_OAUTH_TOKEN="$SOMEVAR"`;
+    expect(parseActiveOauthToken(text)).toBeNull();
+  });
+
+  test("CTL-1984 review regression: token collection rejects a $-reference value (Path 1)", () => {
+    // A CLAUDE_TOKEN_* whose value is itself a quoted shell reference must not be
+    // captured into the token map as the literal "$SOMEVAR", or the selector would
+    // hand back a variable NAME as the credential.
+    const text = [
+      `CLAUDE_TOKEN_acct1="$SOMEVAR"`,
+      `_catalyst_active_token="$CLAUDE_TOKEN_acct1"`,
+    ].join("\n");
+    expect(parseActiveOauthToken(text)).toBeNull();
   });
 
   test("single CLAUDE_TOKEN_* with no selector — implicit single-account file", () => {
@@ -192,6 +228,25 @@ describe("rearmClaudeAccountsFromFile", () => {
     // Whitespace only
     r = rearmWith({ files: { [DEFAULT_PATH]: "   \n  " }, env });
     expect(r).toEqual({ rearmed: false, reason: "empty" });
+  });
+
+  test("CTL-1984 review regression: unprovisioned active slot → reason:empty, env NOT set to a $-reference", () => {
+    // The exact live failure the review remediation prevents: a canonical file whose
+    // selected slot is a placeholder. Pre-fix, Path 2 returned "$_catalyst_active_token"
+    // and this hook set env.CLAUDE_CODE_OAUTH_TOKEN to that garbage. It must instead
+    // treat the file as yielding no token and leave the current credential untouched.
+    const env = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_C };
+    const fileContent = [
+      `CLAUDE_TOKEN_acct1='${TOKEN_A}'`,
+      `CLAUDE_TOKEN_acct2='${TOKEN_B}'`,
+      `CLAUDE_TOKEN_acct3='PASTE_TOKEN_HERE'`, // active slot not yet provisioned
+      `_catalyst_active_token="$CLAUDE_TOKEN_acct3"`,
+      `export CLAUDE_CODE_OAUTH_TOKEN="$_catalyst_active_token"`,
+    ].join("\n");
+    const r = rearmWith({ files: { [DEFAULT_PATH]: fileContent }, env });
+    expect(r).toEqual({ rearmed: false, reason: "empty" });
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(TOKEN_C);
+    expect(env.CATALYST_CLAUDE_ACCOUNTS_SOURCE).toBeUndefined();
   });
 
   test("NUL byte in file → candidate rejected by byte guard → rearmed:false, env untouched", () => {

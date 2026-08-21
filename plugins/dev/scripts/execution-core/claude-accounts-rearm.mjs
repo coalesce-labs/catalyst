@@ -51,7 +51,12 @@ export function parseActiveOauthToken(text) {
     const m = trimmed.match(TOKEN_RE);
     if (!m) continue;
     const value = _parseValue(m[2]);
-    if (!value || value === PLACEHOLDER) continue;
+    // Never install an unexpanded shell reference as a credential. A quoted
+    // form like CLAUDE_TOKEN_acct1="$SOMEVAR" survives _parseValue as the literal
+    // string "$SOMEVAR" (quotes stripped), which the selector would then hand
+    // back as the OAuth token (CTL-1984 review). A static parser must not follow
+    // shell expansion — skip any value that is still a $-reference.
+    if (!value || value === PLACEHOLDER || value.startsWith("$")) continue;
     tokenMap.set(m[1], value);
   }
 
@@ -73,11 +78,15 @@ export function parseActiveOauthToken(text) {
     if (!trimmed || trimmed.startsWith("#")) continue;
     const m = trimmed.match(DIRECT_RE);
     if (!m) continue;
-    const rhs = m[1].trimStart();
-    // Only honor a literal value (not a variable expansion like $TOKEN)
-    if (rhs.startsWith("$")) continue;
     const value = _parseValue(m[1]);
-    if (value && value !== PLACEHOLDER) return value;
+    // Only honor a literal value — never an unexpanded shell reference. The raw
+    // `rhs.startsWith("$")` check caught the UNQUOTED `=$TOKEN` form but not the
+    // canonical launcher line `export CLAUDE_CODE_OAUTH_TOKEN="$_catalyst_active_token"`,
+    // whose quotes _parseValue strips to the literal "$_catalyst_active_token" — a
+    // variable NAME installed as the credential when Path 1 misses (unprovisioned
+    // active slot). Guard on the PARSED value so both forms are rejected (CTL-1984 review).
+    if (!value || value === PLACEHOLDER || value.startsWith("$")) continue;
+    return value;
   }
 
   // Path 3 — single-account implicit: one CLAUDE_TOKEN_* entry with no selector
