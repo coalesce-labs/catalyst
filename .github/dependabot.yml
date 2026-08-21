@@ -1,0 +1,40 @@
+version: 2
+
+updates:
+  # Root bun workspace — covers the root package.json plus every workspace
+  # under plugins/dev/scripts/* (execution-core, broker, orch-monitor, ...).
+  # This is the only committed lockfile in the repo (bun.lock at the root);
+  # website/ and event-mirror/ have their own manifests but no committed
+  # lockfile, so they are intentionally left out of this config for now.
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 8
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    # @anthropic-ai/claude-agent-sdk is deliberately NOT ignored here.
+    # It drove every fleet phase-agent dispatch on a Claude generation that
+    # was 44 patch releases stale (pinned 0.3.195 while 0.3.239 was current)
+    # because nothing was watching it. The fix for "nobody bumped it" is a
+    # weekly PR nagging for review, not suppression — so it gets tracked
+    # like every other dependency and reviewed like any bump that touches
+    # execution-core's usage.
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
