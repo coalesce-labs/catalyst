@@ -127,6 +127,10 @@ C_EMIT_LOG="$(cat "$EMIT_LOG" 2>/dev/null || echo "")"
 assert_contains "$C_EMIT_LOG" "--status" "stale gen → emit-complete called with --status"
 assert_contains "$C_EMIT_LOG" "failed" "stale gen → emit-complete called with failed status"
 assert_contains "$C_EMIT_LOG" "cluster_fence_stale" "stale gen → emit-complete reason=cluster_fence_stale"
+# CTL-1679 Phase 2: the stale branch stamps retry_safe:true via --payload-json so
+# the recovery-pass classifier can read retry-safety off the signal/evidence.
+assert_contains "$C_EMIT_LOG" "--payload-json" "stale gen → emit-complete called with --payload-json"
+assert_contains "$C_EMIT_LOG" "retry_safe" "stale gen → --payload-json carries retry_safe"
 
 # ─── Case D: fence UNREADABLE on every attempt → unverified, NOT stale ──────
 #
