@@ -115,6 +115,8 @@ import {
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
+// CTL-2111: durable, budget-independent triage-cap park event.
+import { appendTriageCapParkedEvent } from "./triage-cap-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import {
   readMaxParallel,
@@ -1133,6 +1135,10 @@ function dispatchTriage(
     // Single-host paths never call these.
     readFenceTriageAttempt = readTriageAttemptCountSync,
     bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
+    // CTL-2111: durable, budget-independent park event emitted at the cap-park
+    // site regardless of the Linear needs-human label-write outcome. Injectable
+    // so tests assert the append without a real event-log write.
+    appendTriageCapParked = appendTriageCapParkedEvent,
   }
 ) {
   if (!orchDir) {
@@ -1229,6 +1235,27 @@ function dispatchTriage(
         { identifier, cap: TRIAGE_DISPATCH_CAP },
         "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm"
       );
+      // CTL-2111 (Tier 3): surface the park DURABLY in the local event log,
+      // budget-independent. The needs-human label write above is subject to the
+      // per-ticket Linear write budget (CTC-750: an exhausted budget refused the
+      // label and the park was invisible everywhere). This append bypasses that
+      // budget entirely. Gated on markTriageCapped (the one-way first-park latch)
+      // so it fires exactly once per park episode, mirroring the WARN — a human
+      // re-queue clears cappedAt (re-arm), so a genuine re-park emits a fresh
+      // event. Fail-open: visibility must never wedge admission.
+      try {
+        appendTriageCapParked({
+          ticket: identifier,
+          orchId,
+          cap: TRIAGE_DISPATCH_CAP,
+          count: fleetTriageDispatchCount(orchDir, identifier, {
+            multiHost,
+            readFenceCount: readFenceTriageAttempt,
+          }),
+        });
+      } catch {
+        /* fail-open — visibility must never wedge admission */
+      }
     }
     // CTL-2090: this was the ONE remaining silent exit in triage admission — the
     // markTriageCapped WARN above fires once per park episode, and every later
