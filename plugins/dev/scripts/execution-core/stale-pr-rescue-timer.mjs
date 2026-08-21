@@ -387,13 +387,19 @@ export function defaultReadProjectId(ticket) {
 }
 
 // CTL-2129: the default per-item reset predicate — has the resolved steward taken
-// a turn since it was last paged on this scope? v1 uses the steward heartbeat's
-// `last_turn_ts` (state.mjs already records it). The more precise "steward
-// commented in THIS ticket's thread since the page" signal is a documented,
-// injectable drop-in replacement for exactly this predicate (see the plan's
-// Decisions §4) — deferred, not designed around. Fail-open to false: an
-// unresolvable steward or unreadable heartbeat means "no turn observed", which
-// keeps the count climbing rather than silently clearing it.
+// a turn since it was last paged on this scope? v1 reads the steward heartbeat's
+// `last_turn_ts`, but note: NO beat() caller populates that field today (state.mjs
+// defaults `lastTurnTs=null` and every supervisor.mjs beat() omits it), so this
+// predicate is currently INERT — it always returns false and the per-item count
+// never resets on a steward turn. The fail direction is safe (the count only
+// climbs → escalates INWARD to the concierge, never a human page, never silence),
+// but the reset does not fire until a real turn signal is wired. The precise
+// "steward commented in THIS ticket's thread since the page" signal — the
+// comms-channel turn dead-man.mjs already reads via `defaultLastChannelTurnMs` —
+// is the documented, injectable drop-in replacement (see the plan's Decisions §4);
+// deferred, not designed around. Fail-open to false: an unresolvable steward or
+// unreadable heartbeat means "no turn observed", which keeps the count climbing
+// rather than silently clearing it.
 export function defaultStewardTookTurn(scopeKey, lastPagedAtMs) {
   try {
     const steward = resolveStewardCore(scopeKey, { listRoles, readManifest });
@@ -489,8 +495,11 @@ export function defaultEscalate(
     const priorPages = readItemPages(orchDir, scopeKey, { stewardTookTurn });
     const t = nextEscalationTarget({ scope: scopeKey, priorPages, instrument: "stale-pr-rescue", resolveSteward: rs });
     const posted = postConciergePage({ ticket, detail, target: t, env });
-    // Count this page ONLY when it actually reached the steward — a concierge route
-    // is already the inward escalation, so counting it would double-advance the ladder.
+    // Count this page ONLY on a STEWARD route — a concierge route is already the
+    // inward escalation, so counting it would double-advance the ladder. The count
+    // advances on the resolved TARGET, not on postConciergePage's advisory success
+    // bool: a flaky comms send must still let the ladder progress inward toward the
+    // concierge, never stick at the steward rung forever.
     if (t.target === TARGET.STEWARD) recordItemPage(orchDir, scopeKey);
     // Observable page event on the unified log (queryable by ticket). The `type`
     // discriminator names the ladder rung; the registered delegate.routed name
