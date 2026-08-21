@@ -322,6 +322,7 @@ export function defaultEmitBackstop(
     writeSignalTerminal = defaultWriteSignalTerminal,
     appendEventLog = defaultAppendEventLog,
     onBeforeCreate = null,
+    onSignalWrite = null, // CTL-2015 Phase 3: invoked with "created" | "patched" | "noop"
   } = {},
 ) {
   // Step 1 (CTL-1367 item 4 + P2-F): mirror mark_launch_failed — flip the signal to
@@ -340,11 +341,12 @@ export function defaultEmitBackstop(
     // CTL-2015: signalSeed is threaded to BOTH branches. Fixing one writer of a
     // family is not fixing the family (the CTL-1854 note above, same file).
     const opts = { seed: signalSeed, onBeforeCreate };
-    if (status === "turn-cap-exhausted") {
-      writeSignalTerminal(signalFile, "turn-cap-exhausted", reason, opts);
-    } else {
-      writeSignalStalled(signalFile, reason, opts);
-    }
+    const verdict = status === "turn-cap-exhausted"
+      ? writeSignalTerminal(signalFile, "turn-cap-exhausted", reason, opts)
+      : writeSignalStalled(signalFile, reason, opts);
+    // CTL-2015 Phase 3: report back whether the writer had to recreate the file —
+    // the 2026-08-18 incident's own shape — so the caller can make it observable.
+    if (onSignalWrite) onSignalWrite(verdict);
   }
 
   // Step 2 (CTL-1367 item 5): emit with --no-signal-update (step 1 owns the
@@ -477,13 +479,17 @@ const SIGNAL_TERMINAL_STATUSES = new Set([
 // which has no local signal precisely because the WINNER owns the phase. Creating
 // one there would write a stalled signal into another worker's dir. Only a caller
 // that has passed prelaunch and holds the claim supplies a seed.
+// CTL-2015 Phase 3: returns "created" | "patched" | "noop" so a caller can tell
+// whether the ABSENT-file recreate path fired (the incident's own shape) versus
+// the ordinary patch of an existing signal. No existing caller inspected a return
+// value before this (the function returned nothing), so this is purely additive.
 function defaultWriteSignalTerminal(signalFile, status, reason, { seed = null, onBeforeCreate = null } = {}) {
   try {
     let sig;
     try {
       sig = JSON.parse(readFileSync(signalFile, "utf8"));
     } catch {
-      if (!seed) return; // no seed → unchanged: no signal to flip, nothing to do
+      if (!seed) return "noop"; // no seed → unchanged: no signal to flip, nothing to do
       // Test seam: lets the race case land a concurrent prelaunch write here.
       if (onBeforeCreate) onBeforeCreate();
       const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -507,14 +513,15 @@ function defaultWriteSignalTerminal(signalFile, status, reason, { seed = null, o
         // preserves that guarantee explicitly — if a newer prelaunch won the race
         // it owns the phase, and we bow out rather than stalling a live dispatch.
         writeFileSync(signalFile, JSON.stringify(fresh), { flag: "wx" });
+        return "created";
       } catch {
         /* EEXIST (raced) or unwritable — best-effort; the terminal event still emits */
+        return "noop";
       }
-      return;
     }
-    if (!sig || typeof sig !== "object") return;
+    if (!sig || typeof sig !== "object") return "noop";
     // CTL-1367 P3: never clobber a terminal status (esp. a done/complete success).
-    if (SIGNAL_TERMINAL_STATUSES.has(String(sig.status))) return;
+    if (SIGNAL_TERMINAL_STATUSES.has(String(sig.status))) return "noop";
     const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     sig.status = status;
     sig.attentionReason = reason || "sdk-backstop";
@@ -538,8 +545,10 @@ function defaultWriteSignalTerminal(signalFile, status, reason, { seed = null, o
     const tmp = `${signalFile}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(sig));
     renameSync(tmp, signalFile);
+    return "patched";
   } catch {
     /* best-effort — reclaim will still pick up the terminal event */
+    return "noop";
   }
 }
 
@@ -1293,6 +1302,17 @@ export async function sdkRunPhaseAgent(
     attempt: spec.attempt ?? attempt ?? null,
     host: { name: getHostName() },
   };
+  // CTL-2015 Phase 3: make an absent signal file's recreation OBSERVABLE. The
+  // research left "why was the file gone" unanswered for 2026-08-18 (the evidence
+  // is gone); this makes the NEXT occurrence measurable instead of speculative.
+  // Fires only on the "created" verdict — the healthy patch/no-op path stays quiet.
+  const onSignalRecreated = (backstopReason) => (verdict) => {
+    if (verdict === "created") {
+      emitEvent("execution-core.sdk.backstop-signal-recreated", {
+        ticket, phase, reason: backstopReason, generation: spec.generation ?? null,
+      });
+    }
+  };
   const secrets = [oauthToken, authEnv.ANTHROPIC_API_KEY, authEnv.ANTHROPIC_AUTH_TOKEN];
 
   const env = buildSdkEnv(spec.env, { base: authEnv, oauthToken, settingsEnv: spec.settings?.env });
@@ -1514,7 +1534,7 @@ export async function sdkRunPhaseAgent(
         emitEvent("execution-core.sdk.overloaded", {
           ticket, phase, attempt: i, exhausted: true, status: statusOf(lastOverload),
         });
-        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-overloaded-exhausted", orchDir, signalFile, signalSeed }, { spawn });
+        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-overloaded-exhausted", orchDir, signalFile, signalSeed }, { spawn, onSignalWrite: onSignalRecreated("sdk-overloaded-exhausted") });
         return {
           code: 1,
           stdout: "",
@@ -1530,7 +1550,7 @@ export async function sdkRunPhaseAgent(
       // instead of turn-cap-exhausted (because the thrown branch returned before
       // mapResult).
       if (thrown && !result) {
-        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-threw", orchDir, signalFile, signalSeed }, { spawn });
+        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-threw", orchDir, signalFile, signalSeed }, { spawn, onSignalWrite: onSignalRecreated("sdk-threw") });
         return {
           code: 1,
           stdout: "",
@@ -1576,7 +1596,7 @@ export async function sdkRunPhaseAgent(
         });
       }
       if (backstop) {
-        emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir, signalFile, signalSeed }, { spawn });
+        emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir, signalFile, signalSeed }, { spawn, onSignalWrite: onSignalRecreated(backstop.reason) });
       } else if (signalFile) {
         // CTL-1410 Phase A / CTL-1790: the process exited 0 with no backstop. If
         // the signal is STILL in-flight the phase SKILL never declared an outcome,
