@@ -578,6 +578,12 @@ export function assembleBoardState({
   // claim evidence no ticket is ever granted grace, so an unwired daemon behaves
   // byte-identically to before this change. See checkDispatchLiveness.
   getDelegateClaims = () => new Map(),
+  // CTL-2133: the boot-resume pending-approval gates (listPendingApprovals output:
+  // { ticket, phase, ageMs, ... }). Injected so board-health.mjs stays fs-free (same
+  // seam shape as getStalledPrState / getStrandedEvidence). Empty-array default ⇒
+  // checkBootResumePending flags nothing (byte-identical until the daemon wires the
+  // real read). Never invoked in off mode so off stays byte-identical.
+  getPendingApprovals = () => [],
 } = {}) {
   const nowMs = now();
   const safe = (fn, fallback) => {
@@ -725,6 +731,19 @@ export function assembleBoardState({
     // hasTriageArtifact seam this is always an empty Set (shadow-safe, inert until
     // the daemon binds the real fs check at the scheduler call site).
     triageLaunchFailureOnlyTickets,
+    // CTL-2133: boot-resume pending-approval gates for checkBootResumePending. Off
+    // mode returns [] (byte-identical); shadow/enforce read the injected seam once.
+    // Normalized to { ticket, phase, ageMs, ageHours } so the pure invariant needs
+    // no fs and the board-scan line can render ticket · phase · ageHours.
+    pendingApprovals:
+      mode === "off"
+        ? []
+        : safe(() => getPendingApprovals(), []).map((g) => ({
+            ticket: g.ticket ?? g.identifier ?? null,
+            phase: g.phase ?? null,
+            ageMs: Number.isFinite(g.ageMs) ? g.ageMs : null,
+            ageHours: Number.isFinite(g.ageMs) ? Math.round(g.ageMs / 3600e3) : null,
+          })),
   });
 }
 
@@ -775,6 +794,12 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       // gated like its siblings so the off set stays byte-identical.
       stalledPr: () => checkStalledPr(boardState, thresholds),
       nodeProductivity: () => checkNodeProductivity(boardState, thresholds),
+      // CTL-2133: visibility-only invariant — lists every boot-resume pending
+      // approval gate (ticket · phase · ageHours) so the silent pen is visible in
+      // the every-tick recovery.board-scan line. Tier-3 escalate-only (never
+      // dispatched — approval is deliberately an operator act). Cohort-gated like
+      // its siblings so the off invariant set stays byte-identical to origin/main.
+      bootResumePending: () => checkBootResumePending(boardState),
     });
   }
   const out = {};
@@ -1056,6 +1081,25 @@ function checkNodeProductivity(b, t) {
   // true here (observable:false likewise keeps Gate 3 from reading it).
   if (mode !== "enforce") return invariant(true, 0, false, flagged, `${mode}: ${note}`, { unproductive: details });
   return invariant(flagged.length === 0, flagged.length, true, flagged, note, { unproductive: details });
+}
+
+// #N — boot-resume pending-approval visibility (CTL-2133 Scenario 1). PURE over the
+// pre-read pendingApprovals list. This is NOT a recovery invariant: it never proposes
+// a per-ticket unstick move (approval is deliberately an operator act — see
+// proposeMoves, where its flagged set maps to a Tier-3 escalate-only line). It exists
+// only so the every-tick recovery.board-scan carries `ticket · phase · ageHours` for
+// each gate — the board-side half of closing the silent-pen (the per-gate event in
+// boot-resume.mjs is the other, always-on, half). observable:true always so a
+// non-empty pen is a positive-control-clean read, never an empty-loop all-clear.
+function checkBootResumePending(b) {
+  const pending = Array.isArray(b?.pendingApprovals) ? b.pendingApprovals : [];
+  const flagged = pending.map((g) => g.ticket).filter(Boolean);
+  const note = flagged.length
+    ? `${flagged.length} boot-resume approval gate(s) pending`
+    : "no boot-resume approval gates pending";
+  return invariant(flagged.length === 0, flagged.length, true, flagged, note, {
+    pending: pending.map((g) => ({ ticket: g.ticket, phase: g.phase, ageHours: g.ageHours })),
+  });
 }
 
 // CTL-1435 (C2): the skippedReason values that mean "the delegate proceeded with
@@ -1753,6 +1797,26 @@ export function proposeMoves(invariants, _b) {
   for (const p of invariants.projectSilence?.flagged ?? []) {
     if (!invariants.projectSilence.ok) tier3.push({ project: p, move: "escalate-project-silence", rationale: "no movement in expected cadence" });
   }
+  // CTL-2133: pending boot-resume approval gates are Tier-3 escalate-only — surfaced,
+  // NEVER dispatched (approval is an operator act; a recovery worker must not
+  // auto-approve an expensive-phase re-run). Carries phase + age per gate so the
+  // recovery.board-scan / HUD line names `ticket · phase · ageHours`.
+  const bootPending = invariants.bootResumePending?.pending ?? [];
+  const bootPendingByTicket = new Map(bootPending.map((g) => [g.ticket, g]));
+  for (const t of invariants.bootResumePending?.flagged ?? []) {
+    if (!invariants.bootResumePending.ok) {
+      const g = bootPendingByTicket.get(t) ?? {};
+      tier3.push({
+        ticket: t,
+        move: "escalate-boot-resume-pending",
+        phase: g.phase ?? null,
+        ageHours: g.ageHours ?? null,
+        rationale: `boot-resume approval gate pending${g.phase ? ` on ${g.phase}` : ""}${
+          g.ageHours != null ? ` for ${g.ageHours}h` : ""
+        }`,
+      });
+    }
+  }
   return { tier1, tier2, tier3 };
 }
 
@@ -2027,6 +2091,10 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       slotFree,
       eligibleOwnedDepth: board == null ? null : board.eligible.filter((e) => owns(e.id)).length,
       unproductiveNodeCount: invariants.nodeProductivity?.flagged?.length ?? 0,
+      // CTL-2133: chartable count of boot-resume approval gates pending this scan —
+      // so an operator can watch the silent-pen depth in Grafana without parsing the
+      // per-gate list below.
+      bootResumePendingCount: invariants.bootResumePending?.flagged?.length ?? 0,
       githubCoreRemaining: githubQuota?.remaining ?? null,
       githubCoreRemainingPct: githubQuota?.remainingPct ?? null,
       invariants: Object.fromEntries(
@@ -2034,6 +2102,10 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       ),
       // ── rosters/proposals: stay in body.payload, NEVER promoted (cardinality) ──
       flagged: dedupeFlagged(invariants),
+      // CTL-2133: the per-gate pending list (ticket · phase · ageHours). Ticket-keyed
+      // → body.payload, never a promoted scalar. This is the visibility surface that
+      // closes the silent pen on the board side.
+      bootResumePending: invariants.bootResumePending?.pending ?? [],
       // CTL-1644 (Codex P2 round 3): the full per-ticket classified route map
       // ({route, dispatchable, rationale, ...}), emitted on EVERY scan regardless
       // of whether anything dispatched. For a held-only board the anchor filter

@@ -41,7 +41,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { emitBootResumePending as defaultEmitBootResumePending } from "./dispatch-alert.mjs"; // CTL-1443
+import {
+  emitBootResumePending as defaultEmitBootResumePending, // CTL-1443 (48h throttled alert)
+  emitBootResumePendingGate as defaultEmitBootResumePendingGate, // CTL-2133 (per-gate, unthrottled)
+} from "./dispatch-alert.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1443 (Codex P1)
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs"; // CTL-1443 (Codex P1)
 import {
@@ -120,6 +123,23 @@ function readPendingMarker(orchDir, ticket) {
   }
 }
 
+// stampMarker — CTL-2133 refactor. The shared "read pending marker → set one field
+// → write it back" idiom used by BOTH the 48h `surfacedAt` stamp and the one-tick
+// `softSurfacedAt` stamp. Best-effort: on a read miss it seeds a minimal marker so
+// the stamp still lands (the caller only reaches here for a gate it just enumerated).
+// Returns true when the write succeeded. Never throws.
+function stampMarker(orchDir, ticket, field, iso) {
+  try {
+    const pending = readPendingMarker(orchDir, ticket) ?? { ticket };
+    pending[field] = iso;
+    writeFileSync(bootResumePendingPath(orchDir, ticket), JSON.stringify(pending));
+    return true;
+  } catch (err) {
+    log.warn({ ticket, field, err: err?.message }, "boot-resume: marker stamp failed — may re-surface next tick");
+    return false;
+  }
+}
+
 // ─── CTL-1443 (P1-loop-3): the approval gate becomes OPERABLE ───────────────
 //
 // The pending marker was written with a companion "operator (or a HUD button)"
@@ -132,6 +152,14 @@ function readPendingMarker(orchDir, ticket) {
 
 export const BOOT_RESUME_PENDING_TTL_MS =
   Number(process.env.CATALYST_BOOT_RESUME_PENDING_TTL_H) * 3600e3 || 48 * 3600e3;
+
+// CTL-2133 Scenario 1: the SOFT-surface threshold — how old a gate must be before
+// its per-gate `catalyst.boot_resume.pending` event fires. Default 0 = surface on
+// the first tick a gate exists. This is the two-threshold design: soft-surface
+// immediately (event + board-health line), keep the 48h TTL above as the loud
+// needs-human hard-park escalation. Deliberately NOT lowering the TTL.
+export const BOOT_RESUME_SURFACE_MS =
+  Number(process.env.CATALYST_BOOT_RESUME_SURFACE_MS) || 0;
 
 // listPendingApprovals — every gated ticket with its age + approval state.
 export function listPendingApprovals(orchDir, { now = () => Date.now() } = {}) {
@@ -157,6 +185,9 @@ export function listPendingApprovals(orchDir, { now = () => Date.now() } = {}) {
       ageMs: requestedMs != null ? Math.max(0, now() - requestedMs) : null,
       approved: existsSync(bootResumeApprovedPath(orchDir, ticket)),
       surfacedAt: pending.surfacedAt ?? null,
+      // CTL-2133: the one-tick soft-surface dedupe stamp (distinct from the 48h
+      // `surfacedAt`). Present once the per-gate pending event has fired.
+      softSurfacedAt: pending.softSurfacedAt ?? null,
     });
   }
   return out;
@@ -260,17 +291,57 @@ export function surfaceStalePendingApprovals({
       /* alert is best-effort; the signal is the operator surface */
     }
     // (3) dedupe stamp on the marker (approval still works; marker retained).
-    try {
-      const pending = readPendingMarker(orchDir, ticket) ?? { ticket, phase };
-      pending.surfacedAt = new Date(now()).toISOString();
-      writeFileSync(bootResumePendingPath(orchDir, ticket), JSON.stringify(pending));
-    } catch (err) {
-      log.warn({ ticket, err: err?.message }, "ctl-1443: surfacedAt stamp failed — the gate may re-surface next tick");
-    }
+    // CTL-2133: via the shared stampMarker helper (same idiom as softSurfacedAt).
+    stampMarker(orchDir, ticket, "surfacedAt", new Date(now()).toISOString());
     log.warn(
       { ticket, phase, ageHours },
       "ctl-1443: boot-resume approval gate exceeded its TTL — surfaced to Needs-You (approve with boot-resume-approve.mjs)"
     );
+    surfaced.push(ticket);
+  }
+  return surfaced;
+}
+
+// softSurfacePendingApprovals — CTL-2133 Scenario 1. The moment a gate exists it is
+// made VISIBLE outside the host: a per-gate `catalyst.boot_resume.pending` event
+// (deduped once per gate by the marker's softSurfacedAt stamp) carrying phase + age.
+// This is the SOFT tier of the two-threshold design — it does NO signal rewrite, NO
+// needs-human label, NO park. Parking every fresh gate would page on every merge-
+// restart (both minis restart and refill the pen), which is the noise regression the
+// board-health line + event exist to avoid; the 48h surfaceStalePendingApprovals
+// above remains the loud escalation tier. Structurally mirrors that function (same
+// listPendingApprovals iteration, same marker-stamp dedupe) but with only the event
+// side effect. Never throws; returns the tickets surfaced this pass.
+export function softSurfacePendingApprovals({
+  orchDir,
+  now = () => Date.now(),
+  surfaceMs = BOOT_RESUME_SURFACE_MS,
+  // ({ identifier, phase, ageMs, ageHours }) => void — the per-gate event seam.
+  // processApprovedResumes wires defaultEmitBootResumePendingGate; null = no emit.
+  emitPending = null,
+} = {}) {
+  const surfaced = [];
+  for (const gate of listPendingApprovals(orchDir, { now })) {
+    // Approved gates are about to dispatch; already-soft-surfaced gates dedupe.
+    if (gate.approved || gate.softSurfacedAt) continue;
+    // Age gate: default surfaceMs=0 surfaces on the first tick. A null age (marker
+    // with no parseable requestedAt) is treated as age 0 → surfaced, so a malformed
+    // requestedAt can never silence the pen (the failure this ticket closes).
+    const ageMs = gate.ageMs == null ? 0 : gate.ageMs;
+    if (ageMs < surfaceMs) continue;
+    const { ticket, phase } = gate;
+    const ageHours = Math.round(ageMs / 3600e3);
+    // (1) the per-gate observability event (unthrottled — dedupe is the stamp below).
+    try {
+      emitPending?.({ identifier: ticket, phase, ageMs, ageHours });
+    } catch (err) {
+      // A failed emit must NOT stamp the marker (else the gate is silently never
+      // surfaced) — skip the stamp so it retries next tick.
+      log.warn({ ticket, phase, err: err?.message }, "ctl-2133: pending-gate emit threw — will retry next tick");
+      continue;
+    }
+    // (2) dedupe stamp — one event per gate. The marker (and approval) are retained.
+    stampMarker(orchDir, ticket, "softSurfacedAt", new Date(now()).toISOString());
     surfaced.push(ticket);
   }
   return surfaced;
@@ -818,7 +889,20 @@ export function processApprovedResumes({
   surfaceStaleGates = (o) => surfaceStalePendingApprovals(o),
   emitStaleGateAlert = defaultEmitBootResumePending,
   staleGateLabelNeedsHuman = undefined, // CTL-1443 Codex P1: test seam
+  // CTL-2133 Scenario 1: the one-tick soft-surface pass rides the same every-tick
+  // call so no scheduler wiring is needed. Injectable for tests; the per-gate event
+  // emitter defaults to the real (unthrottled) dispatch-alert emitter.
+  softSurfaceGates = (o) => softSurfacePendingApprovals(o),
+  emitPendingGate = defaultEmitBootResumePendingGate,
 } = {}) {
+  // CTL-2133: soft-surface every pending gate FIRST (one event per gate, deduped by
+  // the marker) so a fresh gate is visible within one tick — independent of the 48h
+  // hard-park below. Best-effort; a throw logs and continues.
+  try {
+    softSurfaceGates({ orchDir, emitPending: emitPendingGate });
+  } catch (err) {
+    log.warn({ err: err?.message }, "ctl-2133: soft-surface sweep threw — continuing");
+  }
   try {
     surfaceStaleGates({
       orchDir,
