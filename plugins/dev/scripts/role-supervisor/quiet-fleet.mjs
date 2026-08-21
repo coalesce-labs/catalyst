@@ -16,7 +16,9 @@ import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LIVENESS, classifyHeartbeat } from "../lib/agent-liveness.mjs";
-import { nextEscalationTarget } from "../execution-core/escalation-router.mjs";
+// resolveSteward is renamed to resolveStewardCore so it does not shadow the
+// `resolveSteward` DEP name quietFleetScan takes (CTL-2129).
+import { nextEscalationTarget, resolveSteward as resolveStewardCore } from "../execution-core/escalation-router.mjs";
 import { roleDir } from "./paths.mjs";
 import { readHeartbeat, readManifest } from "./state.mjs";
 import { listRoles } from "./doctor.mjs";
@@ -141,7 +143,12 @@ export function runQuietFleetOnce({ now = Date.now(), dryRun = false, env = proc
     scopeActive: (r) => scopeActiveOf(r, env),
     priorPages: (r) => readLatch(r, env)?.count ?? 0,
     alreadyLatched: (r) => existsSync(latchPath(r, env)),
-    resolveSteward: () => null, // CTL-1974 will wire the registry-backed resolver
+    // CTL-2129: the registry-backed resolver. A silent role's NAME is not a
+    // project scope key, so today this still resolves null → the concierge (the
+    // correct role-liveness backstop); it lights up the steward tier the moment a
+    // manifest's scopeKeys contains the scanned scope.
+    resolveSteward: (scope) =>
+      resolveStewardCore(scope, { listRoles: () => listRoles(env), readManifest: (r) => readManifest(r, env) }),
   });
 
   const posted = [];
