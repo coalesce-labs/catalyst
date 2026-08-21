@@ -75,4 +75,4 @@ Before going quiet, check all five — each is a way this role has actually fail
 ## Pointers
 
 `catalyst-dev:ask` · `catalyst-dev:linearis` · `catalyst-dev:gherkin-ticket` · `catalyst-dev:create-handoff` ·
-`grilling` (the human-facing grill) · `steward` (the role you launch, never command).
+`grilling` (the human-facing grill) · `steward` (the role you launch, never command) · `catalyst-dev:project-orchestrator` (the project-scoped steward entry point).

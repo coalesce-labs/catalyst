@@ -65,6 +65,18 @@ export const REASON = Object.freeze({
   DISPATCH_VETO_DISABLED: "dispatch-veto-disabled",
   NO_CURRENT_STATE: "current-state-unreadable",
   PHASE_WRITES_NO_STATUS: "phase-writes-no-status",
+  // CTL-2070 — the timely per-ticket actor source (fleet write-ledger). Two verdicts…
+  TIMELY_FLEET_OWNS: "timely-fleet-owns-current-state",
+  TIMELY_LANE_CLAIM: "timely-lane-claim-regression",
+  // …and the diagnostic reasons classifyTimelyOwnership returns so an operator can tell
+  // WHY the timely source did or did not fire (each names one branch of the model).
+  LEDGER_UNAVAILABLE: "fleet-write-ledger-unavailable",
+  NO_CURRENT_TIMESTAMP: "current-updated-at-unreadable",
+  NO_FLEET_WRITE: "fleet-never-wrote-this-ticket",
+  FLEET_WRITE_SUPERSEDES: "fleet-write-newer-than-replica-observation",
+  FLEET_WROTE_CURRENT: "fleet-write-matches-current-state",
+  FOREIGN_AFTER_FLEET: "foreign-move-after-fleet-write",
+  OUTSIDE_TIMELY_WINDOW: "current-state-older-than-recency-bound",
 });
 
 /**
@@ -171,6 +183,109 @@ export function resolveStateMap(candidates, readFile) {
 }
 
 /**
+ * classifyTimelyOwnership — pure. CTL-2070. Answers ONE question — "who established the state
+ * the ticket is in RIGHT NOW?" — from three TIMELY inputs, none of which is the ~201 s-lagged
+ * `issue_history` table the legacy ladder leans on.
+ *
+ * ⛔ WHY A TIMELY SOURCE AT ALL. CTL-1847 measured the two feeds this guard straddles:
+ * `issues.state` is webhook-fed and lands in ~11 s, while `issue_history` is reconcile-only and
+ * lands in ~201 s — an ~18× gap. CTL-2068 made the guard HONEST across that gap (STALE_HISTORY
+ * declines a history row whose to_state disagrees with the current state) but honest means it
+ * ABSTAINS for the ~200 s right after a claim — the exact 74 s window CTC-787 collided in — and
+ * it can see no actor at all for the 140 fleet tickets that carry no history rows. This source
+ * fills that window from the daemon's OWN write-ledger: the fleet knows every state it set,
+ * because it set it, so it needs no history rows and is independent of `botUserIds`.
+ *
+ * The verdict is three-valued exactly like `fleetEverWroteState`, and ONLY ever produces a
+ * positive `fleet`/`lane` on evidence — on any doubt it returns `unknown` so the caller falls
+ * through to the entire existing ladder verbatim.
+ *
+ * @param {object} o
+ * @param {string|null} o.currentState the ticket's state right now (a NAME), from `issues.state`.
+ * @param {number|undefined} o.currentUpdatedAtMs `issues.updated_at` epoch-ms — the timely
+ *   observation the supersession test compares the fleet's write against. Not a number (reader
+ *   miss/throw) → the test can't run → `unknown`; never refuse without it.
+ * @param {{toState: string|null, atMs: number}|null|undefined} o.fleetWrite the durable ledger
+ *   entry for this ticket. `undefined` = ledger reader unavailable/threw (→ `unknown`, fall
+ *   through). `null` = the durable ledger has NO entry, the fleet never wrote this ticket (→
+ *   `lane`). An entry = the supersession test.
+ * @param {number|undefined} o.nowMs wall clock for the recency bound; omitted → bound skipped.
+ * @param {number|undefined} o.recencyMs the timely window; omitted → bound skipped. When both
+ *   are present and `nowMs - currentUpdatedAtMs > recencyMs`, the ledger is no longer
+ *   authoritative (the now-caught-up `issue_history` ladder should govern) → `unknown`.
+ * @returns {{owner: "fleet"|"lane"|"unknown", effectiveCurrentState?: string|null, reason: string}}
+ */
+export function classifyTimelyOwnership({
+  currentState,
+  currentUpdatedAtMs,
+  fleetWrite,
+  nowMs,
+  recencyMs,
+} = {}) {
+  // `undefined` is the "could not look" sentinel — the ledger reader was absent or threw. Never
+  // an objection; fall through to today's ladder.
+  if (fleetWrite === undefined) return { owner: "unknown", reason: REASON.LEDGER_UNAVAILABLE };
+  // The supersession test is the heart of this classifier and it cannot run without the timely
+  // observation. No timestamp → no verdict (never refuse on a missing clock).
+  if (typeof currentUpdatedAtMs !== "number" || !Number.isFinite(currentUpdatedAtMs)) {
+    return { owner: "unknown", reason: REASON.NO_CURRENT_TIMESTAMP };
+  }
+  // ⚠️ Recency bound (config, default on) — the ledger is authoritative ONLY while
+  // `issue_history` is still lagging. Past the window the ladder has caught up and should
+  // govern, so an entry that would otherwise say `lane` yields `unknown` here. Bounds the new
+  // REFUSE to the exact window the ticket cares about and shrinks a lost/pruned entry's blast
+  // radius to tickets moved in the last few minutes. Skipped when either clock input is absent
+  // (pure tests omit them).
+  if (
+    typeof nowMs === "number" &&
+    typeof recencyMs === "number" &&
+    nowMs - currentUpdatedAtMs > recencyMs
+  ) {
+    return { owner: "unknown", reason: REASON.OUTSIDE_TIMELY_WINDOW };
+  }
+  // `null` = a DURABLE "no entry": the fleet never wrote this ticket, so whoever set the current
+  // state is not the fleet → a lane owns it. This is the branch that covers the 140 history-less
+  // tickets the legacy ladder is blind to.
+  if (fleetWrite === null) {
+    return { owner: "lane", effectiveCurrentState: currentState, reason: REASON.NO_FLEET_WRITE };
+  }
+  // An entry: the supersession test. `atMs` is the fleet write's own timestamp.
+  const toState = fleetWrite.toState ?? null;
+  const atMs = fleetWrite.atMs;
+  // ⛔ THE TRAP THIS TICKET NAMES. A naive `toState === currentState` equality would REFUSE the
+  // fleet's own in-flight write here: the fleet just wrote `toState` but the replica's
+  // `issues.state` has not caught up (its own ~11 s write-propagation delay), so `currentState`
+  // is still the OLD value. The fleet's write is newer than the observation → it owns the
+  // soon-to-be current state; the effective current state is what the fleet just set.
+  if (typeof atMs === "number" && atMs > currentUpdatedAtMs) {
+    return { owner: "fleet", effectiveCurrentState: toState, reason: REASON.FLEET_WRITE_SUPERSEDES };
+  }
+  // The observation is at/after the fleet's write. If they agree, the fleet owns the current
+  // state (its recovery/re-run move — verify⇄remediate, L3 recreate — is not a lane claim).
+  if (toState === currentState) {
+    return {
+      owner: "fleet",
+      effectiveCurrentState: currentState,
+      reason: REASON.FLEET_WROTE_CURRENT,
+    };
+  }
+  // The observation is at/after the fleet's write AND differs — a foreign actor moved it after
+  // the fleet last did. A lane owns the current state.
+  return { owner: "lane", effectiveCurrentState: currentState, reason: REASON.FOREIGN_AFTER_FLEET };
+}
+
+/**
+ * judgeRegression — pure. The shared `targetRank < currentRank` comparison + result shaping, so
+ * the timely-lane and the legacy rank REFUSE paths cannot drift (CTL-2070 refactor).
+ */
+function judgeRegression(currentRank, targetRank, actorId, refuseReason) {
+  if (targetRank < currentRank) {
+    return { verdict: VERDICT.REFUSE, reason: refuseReason, actorId, currentRank, targetRank };
+  }
+  return { verdict: VERDICT.ALLOW, reason: REASON.NOT_A_REGRESSION, actorId, currentRank, targetRank };
+}
+
+/**
  * classifyLaneClaimWrite — pure. Decides whether the pipeline may write `targetState` over
  * `currentState`, given who last changed the ticket's state.
  *
@@ -200,8 +315,14 @@ export function resolveStateMap(candidates, readFile) {
  *   state change on this ticket? `false` makes the guard abstain (it cannot tell the fleet
  *   from a lane here). `undefined` means the caller did not check, and is treated as "no
  *   objection" so existing callers are unaffected.
+ * @param {{toState: string|null, atMs: number}|null|undefined} o.fleetWrite CTL-2070 — the
+ *   durable fleet write-ledger entry for this ticket (see classifyTimelyOwnership). `undefined`
+ *   (the default) makes the timely block a no-op, so every CTL-2068 caller is unaffected.
+ * @param {number|undefined} o.currentUpdatedAtMs CTL-2070 — `issues.updated_at` epoch-ms.
+ * @param {number|undefined} o.nowMs CTL-2070 — wall clock for the recency bound.
+ * @param {number|undefined} o.recencyMs CTL-2070 — the timely-window bound.
  * @returns {{verdict: string, reason: string, currentRank?: number, targetRank?: number,
- *            actorId?: string|null}}
+ *            actorId?: string|null, effectiveCurrentState?: string|null}}
  */
 export function classifyLaneClaimWrite({
   currentState,
@@ -210,8 +331,50 @@ export function classifyLaneClaimWrite({
   botUserIds,
   rank,
   fleetSeen,
+  fleetWrite,
+  currentUpdatedAtMs,
+  nowMs,
+  recencyMs,
 } = {}) {
   if (!(rank instanceof Map)) return { verdict: VERDICT.INCONCLUSIVE, reason: REASON.BAD_INPUT };
+
+  // ⭐ CTL-2070: the TIMELY source runs FIRST — before the NO_BOT_IDS gate — because the
+  // write-ledger is a `botUserIds`-INDEPENDENT discriminator (it identifies the fleet by its own
+  // writes, not by an app-actor id set), so it must work even when `botUserIds` is misconfigured,
+  // the live CTL-2074 condition. It only ever produces a verdict on POSITIVE evidence; on `unknown`
+  // the entire existing ladder below runs verbatim. `fleetWrite === undefined` (no caller wired
+  // the source) short-circuits to `unknown`, so every CTL-2068 test passes unchanged.
+  if (fleetWrite !== undefined) {
+    const timely = classifyTimelyOwnership({
+      currentState,
+      currentUpdatedAtMs,
+      fleetWrite,
+      nowMs,
+      recencyMs,
+    });
+    if (timely.owner === "fleet") {
+      // The fleet's own recovery/re-run move (verify⇄remediate, L3 recreate) is not a lane claim.
+      return {
+        verdict: VERDICT.ALLOW,
+        reason: REASON.TIMELY_FLEET_OWNS,
+        effectiveCurrentState: timely.effectiveCurrentState ?? null,
+      };
+    }
+    if (timely.owner === "lane") {
+      const effective = timely.effectiveCurrentState ?? currentState;
+      const currentRank = rank.get(effective);
+      if (currentRank === undefined) {
+        // Todo/Backlog/… — the fleet legitimately starts human-queued work; not a regression
+        // this guard can answer, so abstain (same rule as the legacy UNRANKED_CURRENT below).
+        return { verdict: VERDICT.INCONCLUSIVE, reason: REASON.UNRANKED_CURRENT };
+      }
+      if (typeof targetRank !== "number") {
+        return { verdict: VERDICT.INCONCLUSIVE, reason: REASON.UNRANKED_TARGET, currentRank };
+      }
+      return judgeRegression(currentRank, targetRank, null, REASON.TIMELY_LANE_CLAIM);
+    }
+    // owner === "unknown" → fall through to the unchanged CTL-2068 ladder.
+  }
 
   // ⛔ Order matters: the unconfigured-fleet case is checked FIRST, because with no known
   // fleet ids every actor below would read as a lane and every regression would be refused.
@@ -281,22 +444,7 @@ export function classifyLaneClaimWrite({
     return { verdict: VERDICT.INCONCLUSIVE, reason: REASON.UNRANKED_TARGET, actorId, currentRank };
   }
 
-  if (targetRank < currentRank) {
-    return {
-      verdict: VERDICT.REFUSE,
-      reason: REASON.REGRESSION_AGAINST_LANE_CLAIM,
-      actorId,
-      currentRank,
-      targetRank,
-    };
-  }
-  return {
-    verdict: VERDICT.ALLOW,
-    reason: REASON.NOT_A_REGRESSION,
-    actorId,
-    currentRank,
-    targetRank,
-  };
+  return judgeRegression(currentRank, targetRank, actorId, REASON.REGRESSION_AGAINST_LANE_CLAIM);
 }
 
 /**
@@ -349,6 +497,17 @@ export function buildLaneClaimGuard({
   // who needs the fleet to plough through a claim can set
   // CATALYST_LANE_CLAIM_DISPATCH_GUARD=off without giving up the write-side protection.
   dispatchVeto = true,
+  // CTL-2070 — the TIMELY per-ticket actor source. All optional: when readFleetWrite is not
+  // wired, the wrapper yields `undefined` and the guard is EXACTLY CTL-2068. The two readers get
+  // the same fail-open try/catch as readLast/readFleet.
+  //   readFleetWrite(ticket)      → { toState, atMs } | null | undefined (the durable ledger)
+  //   readCurrentUpdatedAt(ticket) → epoch-ms | undefined (issues.updated_at, the timely obs)
+  //   nowMs()                     → wall clock for the recency bound (default Date.now)
+  //   recencyMs                   → the timely-window bound (undefined → bound skipped)
+  readFleetWrite,
+  readCurrentUpdatedAt,
+  nowMs = () => Date.now(),
+  recencyMs,
 } = {}) {
   const defaultRank = buildStateRank(stateMap);
   const keyRank = buildKeyRank();
@@ -388,6 +547,42 @@ export function buildLaneClaimGuard({
     }
   };
 
+  // CTL-2070: the guard's HALF of the three-valued ledger contract. The module returns
+  // null|entry and NEVER undefined; the guard wrapper is the SOLE producer of `undefined`, on an
+  // unwired reader or a THROW — so a transient read error reads as "could not look" (→ unknown →
+  // legacy ladder), never as "the fleet never wrote this ticket" (→ lane → a spurious refusal).
+  const readLedger = (ticket) => {
+    if (typeof readFleetWrite !== "function" || !ticket) return undefined;
+    try {
+      return readFleetWrite(ticket);
+    } catch {
+      return undefined;
+    }
+  };
+
+  // CTL-2070: the timely issues.updated_at observation. Fail-open to undefined so a reader miss
+  // or throw leaves the supersession test unable to run (→ unknown), never a refusal.
+  const readUpdatedAt = (ticket) => {
+    if (typeof readCurrentUpdatedAt !== "function" || !ticket) return undefined;
+    try {
+      return readCurrentUpdatedAt(ticket);
+    } catch {
+      return undefined;
+    }
+  };
+
+  // CTL-2070: resolve the wall clock once per evaluation, fail-open to undefined so a throwing
+  // nowMs() disables only the recency bound (never wedges a write).
+  const clockNow = () => {
+    if (typeof nowMs !== "function") return undefined;
+    try {
+      const n = nowMs();
+      return typeof n === "number" ? n : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   return {
     // `rank` is the DEFAULT map's rank. ⛔ Callers reporting how many states the guard can
     // actually rank must read THIS, never the raw stateMap's key count — buildStateRank
@@ -409,6 +604,11 @@ export function buildLaneClaimGuard({
         botUserIds,
         rank: rankFor(ticket),
         fleetSeen: readFleet(ticket),
+        // CTL-2070 — the timely source.
+        fleetWrite: readLedger(ticket),
+        currentUpdatedAtMs: readUpdatedAt(ticket),
+        nowMs: clockNow(),
+        recencyMs,
       });
     },
 
@@ -447,6 +647,11 @@ export function buildLaneClaimGuard({
         botUserIds,
         rank: rankFor(ticket),
         fleetSeen: readFleet(ticket),
+        // CTL-2070 — the same timely source, so the dispatch veto sees the fresher evidence too.
+        fleetWrite: readLedger(ticket),
+        currentUpdatedAtMs: readUpdatedAt(ticket),
+        nowMs: clockNow(),
+        recencyMs,
       });
     },
   };

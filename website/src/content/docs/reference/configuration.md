@@ -181,6 +181,8 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.daemonWatchdog.sustainedTicks`                 | `2`                          | Consecutive breach ticks required before the watchdog acts (hysteresis). Env `EXECUTION_CORE_DAEMON_WATCHDOG_SUSTAINED_TICKS`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `orchestration.daemonWatchdog.verifyTicks`                    | `2`                          | Post-restart re-check window: if the predicate is still tripped after this many ticks, the watchdog escalates (latched alert + `severity:high` finding) instead of restarting again. Env `EXECUTION_CORE_DAEMON_WATCHDOG_VERIFY_TICKS`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `catalyst.stallJanitor.censusIntervalSeconds` _(Layer 2)_     | `900` (15 min)               | How often the stall-janitor's git-heavy worktree/stall censuses (J1 orphan-worktree, J3 stall-clear, J4 terminal-signal GC) may run, off the per-tick scheduler hot path. Each fires a `git worktree list` per repo plus a `git status` per terminal worktree, so running them every tick on a many-worktree host ages the daemon heartbeat and holds new-work dispatch; this cadence keeps them off the hot path while the cheap J2 ghost-session kill still runs every tick (CTL-1324). Env `CATALYST_STALL_JANITOR_INTERVAL_MS` (milliseconds) overrides.                                                                                                                                                                                                                                                                                                                                                                    |
+| `orchestration.laneClaim.timelyRecencySeconds`                | `300`                        | CTL-2070. The lane-claim guard (CTL-2068) refuses a pipeline write/dispatch that would regress a ticket a human lane has claimed. It has a **timely per-ticket actor source** — a durable host-local write-ledger (`~/catalyst/lane-claim-write-ledger.json`) of the last Linear state this fleet set and when — that covers the ~200 s window after a claim, before the reconcile-only `issue_history` catches up (CTL-1847: `issues.state` ~11 s vs `issue_history` ~201 s), and the 140 fleet tickets that have no history rows. This bound is how long that ledger stays authoritative: past `nowMs - issues.updated_at > timelyRecencySeconds`, the now-caught-up `issue_history` ladder governs instead, so the new REFUSE is confined to the exact claim-to-dispatch window. Env `CATALYST_LANE_CLAIM_TIMELY_RECENCY_SECONDS` overrides. The timely source is **on by default**, killable with `CATALYST_LANE_CLAIM_TIMELY_SOURCE=off` (restores exact CTL-2068 behavior — the guard falls back to `issue_history`); the source identifies the fleet by its own writes, not by an app-actor id set, so it functions independently of `botUserIds` / CTL-2074. |
+| `CATALYST_LANE_CLAIM_DISPATCH_GUARD` _(env var)_              | armed                        | CTL-2068. The lane-claim guard's operator kill switch for the **DISPATCH** veto only (refusing to run a phase on a lane-claimed ticket). Any value other than `off` leaves it armed; `off` disables the dispatch veto while keeping the write-side protection. Refusing a state write is benign (the write simply retries); refusing a dispatch withholds work, so this switch exists for an operator who needs the fleet to plough through a claim.                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 The orphan child-process reaper is the corroboration-heavy companion to the session-level reaper:
 `claude stop` deregisters a worker's claude agent but leaves its reparented `node`/`bun`
@@ -1064,6 +1066,55 @@ Observable events (all safe for a LogQL filter
 - `linear.write.proxy.applied.<TICKET>` — enforce hit, the cloud accepted the write
 - `linear.write.proxy.failed.<TICKET>` — enforce hit, NOT written (ERROR; `reason` attached)
 
+### Lease-authority claim (`CATALYST_LEASE_AUTHORITY`, CTL-1786)
+
+Selects the cross-host `(ticket, phase)` claim mechanism. The default (`off`) is the
+Linear-attachment **soft-CAS** (`cluster-claim.mjs`): an unconditional last-writer-wins upsert with
+no conditional-write primitive, so any racer can install itself and **no racer can refuse** —
+correctness depends on every participant running the honest read-back-and-yield code. `shadow` /
+`enforce` route the claim through the **cloud lease authority** (a per-tenant Durable Object, the
+catalyst-repo half of CTC-410), whose `POST /lease/claim` is a genuine store-side compare-and-swap:
+exactly one racer receives a grant and the loser is **told it lost** (`{claimed:false, refusal}`),
+so a loser backs off silently with no retry and no error.
+
+The client returns the **same** `{won, generation}` / CLI-exit contract as the attachment path, so
+no dispatch call site (`scheduler.mjs` / `monitor.mjs` / `recovery.mjs`) changes. On a win the
+grant is mapped to the **numeric `generation`** written into `cluster-generation.json`, so
+`fence-guard.mjs` keeps gating every external write **unchanged** (it compares generations by
+equality). Mode resolves from the env var over Layer-2 over the safe default `off`; the `0`
+kill-switch and any unset/garbage value resolve to `off`.
+
+| Key                                        | Default | Notes                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CATALYST_LEASE_AUTHORITY` _(env var)_     | `off`   | `off` / `0` (the attachment soft-CAS runs; no lease module is constructed; byte-identical to not setting the flag), `shadow` (the lease claim **is** called and a `lease.claim.would-{grant,refuse}.<TICKET>` event is emitted, but the **attachment** verdict stays authoritative for the dispatch decision), `enforce` (the lease authority **is** the claim; the attachment CAS is not consulted). Garbage values fall back to `off`. Overrides Layer-2. |
+| `catalyst.leaseAuthority.mode` _(Layer-2)_ | `off`   | Same three values; honored when the env var is absent or unrecognised. **Not read from Layer-1** — a live-path claim gate in the committable config would let a merge flip the whole fleet into enforce with no per-host rollback (same containment posture as the write proxy and github-feed).                                                                                    |
+
+On a **single-host** deployment (`catalyst.deployment.mode`) `enforce` degrades to `off` — there are
+no peers to arbitrate, so a single-host clone that inherited an enforce env can never block its own
+dispatch on a cloud round-trip. The claim path is already unreachable single-host (callers gate on a
+non-null cluster generation); this makes that guarantee explicit.
+
+The per-host key, endpoint base, and curl-over-stdin credential discipline are the **same** as the
+write proxy above (the `cloud-token` secret-contract row, `CATALYST_CLOUD_BASE_URL`, token never in
+argv/on disk). The lease routes require the cloud tenant's **admin token** today (CTC-418/419 is the
+follow-up to open them to per-host service keys); a host whose `CATALYST_CLOUD_TOKEN` does not
+satisfy that gate stays dark in `enforce` — run `node execution-core/lease-authority.mjs probe` (the
+non-mutating auth spike: `400` ⇒ authorized, `401/403` ⇒ blocked on the cloud-auth dependency).
+
+The node re-entitles itself on the daemon's cluster-sync cadence when the gate is `shadow`/`enforce`
+(a `not_entitled` refusal otherwise self-heals reactively on the next claim). **Not in scope
+(follow-ups):** progress-asserted lease **renewal** (`/lease/renew` requires a non-empty progress
+assertion, so a phase that runs past `workTtlMs` ≈ 45 min could see its lease expire) and explicit
+lease **release on phase-terminal** (the lease frees at TTL regardless — `releaseViaLease` exists as
+a tested capability but is not yet wired to a terminal call site, matching the attachment path, whose
+`emitFenceReleased` is likewise unwired). Retiring the attachment CAS happens after an enforce soak.
+
+Observable events (LogQL
+`{job="catalyst-events"} | json | attributes["event.name"] =~ "lease\\.claim\\..*"`):
+
+- `lease.claim.would-grant.<TICKET>` — shadow hit; the lease **would** have granted (attachment still authoritative)
+- `lease.claim.would-refuse.<TICKET>` — shadow hit; the lease **would** have refused
+
 ## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
 
 `catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from
@@ -1135,6 +1186,59 @@ deployment-mode WARN (advisory only — nothing else changes).
 PR1 (this file) ships the resolver in isolation — nothing outside its own tests imports it yet;
 wiring into webhook ingestion gating, secret-provider selection, and `catalyst doctor`'s
 roster-consistency checks lands in later PRs of the CTL-1617 migration plan.
+
+## Entitlement mode (`catalyst.entitlement.mode`, CTL-1785)
+
+Fleet **membership** is two facts, not one. `catalyst.entitlement.mode` governs the rollout of the
+split (see `docs/architecture.md` → "Host entitlement vs. existence"):
+
+- **Existence** — "is this node in the fleet, observable/monitorable?" — is local, self-declared,
+  needs no network, and keeps working during a cloud/authority outage (`getExistenceHosts()`).
+- **Entitlement** — "may this node take work?" — is a lease from an external authority, required to
+  claim, and self-expiring (`getEntitledHosts()`).
+
+**Modes** (`off` | `shadow` | `enforce`, default **`off`**):
+
+| Mode      | Effect                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------- |
+| `off`     | **Default.** `getEntitledHosts()` returns exactly `getClusterHosts()` — byte-identical to today.   |
+| `shadow`  | Emits `entitlement.would-shed.<host>` for each unentitled rostered host but returns the FULL roster (safe dry-run). |
+| `enforce` | Actually sheds unentitled hosts from the dispatch/recovery roster (self always admitted; total-outage degrades to the full roster) and revokes this host's held leases (`fence.released.<ticket>`) if its own entitlement lapses. |
+
+With the default **local provider** (entitled iff self ∈ roster), `enforce` is still byte-identical
+to today — self is always entitled — so live enforcement only begins once the W12 lease authority
+(**CTL-1786**, unmerged) is injected.
+
+**Resolution** (`resolveEntitlementMode()`, the same ladder shape as deployment mode):
+
+| Precedence | Source                                             |
+| ---------- | -------------------------------------------------- |
+| 1          | `CATALYST_ENTITLEMENT` env var                     |
+| 2          | `catalyst.entitlement.mode` in the Layer-2 config  |
+| 3          | `catalyst.entitlement.mode` in the Layer-1 config  |
+| 4          | constant default `off`                             |
+
+- **Absent everywhere ⇒ `off`** — zero-config, zero-behavior-change.
+- **An explicit but unrecognized value** (a typo) degrades to `off` (the safest direction, byte-identical
+  to today); `catalyst doctor`'s advisory `entitlement-mode` check WARNs (never FAILs).
+- Same ENV-vs-FILE asymmetry as deployment mode: `CATALYST_ENTITLEMENT` is captured once at daemon
+  launch; Layer-1/Layer-2 file edits are picked up live per call.
+
+**TTL / ordering constraint** — the load-bearing invariant is `ENTITLEMENT_TTL_MS > work-lease TTL`
+(otherwise an unentitled node holds work invisible to the reclaim loop — an orphan by construction):
+
+| Constant             | Default | Notes                                                                       |
+| -------------------- | ------- | --------------------------------------------------------------------------- |
+| `ENTITLEMENT_TTL_MS` | 15 min  | > `HEARTBEAT_GRACE_MS` (10 min) and > the work-lease TTL below.             |
+| `WORK_LEASE_TTL_MS`  | 5 min   | Mirrors the claim-stale window (`CLAIM_STALE_MS_DEFAULT`); reconciled with W12's real lease duration when it lands. |
+
+`assertEntitlementOrdering()` throws loudly at module load if the constraint is inverted; `catalyst
+doctor`'s advisory `entitlement-ordering` check reports it (INFO when it holds, WARN if inverted —
+never FAIL). Final numbers depend on W12's lease duration.
+
+**Deletion of the inferred-liveness apparatus** (`cluster.json` roster, `loki-liveness.mjs`, the
+heartbeat channels, the deflap) is **out of scope** here — that is **W16 = CTL-1787**, safe only once
+a live authority exists. This ticket introduces the entitlement seam alongside the existing apparatus.
 
 ## Secret contract registry (CTL-1616)
 

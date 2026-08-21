@@ -234,6 +234,13 @@ function buildEligibleSelect({ project, label } = {}) {
 // read whoever last renamed the ticket as the actor who set its state.
 const LAST_STATE_CHANGE_SELECT = `SELECT h.actor_id AS actorId, h.to_state AS toState, h.created_at AS atMs FROM issue_history h JOIN issues i ON i.id = h.issue_id WHERE i.identifier = ? AND h.to_state IS NOT NULL ORDER BY h.created_at DESC LIMIT 1`;
 
+// CTL-2070: the TIMELY per-identifier `issues.updated_at` reader. Unlike
+// LAST_STATE_CHANGE_SELECT (issue_history, reconcile-only, ~201 s) this reads the
+// webhook-fed `issues` table (~11 s), so the lane-claim guard's supersession test
+// compares the fleet's write against a current observation, not a lagged one.
+// removed_at IS NULL excludes tombstones, matching TERMINAL_SELECT.
+const UPDATED_AT_SELECT = `SELECT updated_at AS atMs FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
+
 // CTL-2068 — has any of these actor ids authored a STATE change on this ticket? The
 // POSITIVE CONTROL for the lane-claim guard: the whole verdict rests on "actorId in
 // botUserIds means the fleet", and when this guard first armed that set named two legacy
@@ -992,6 +999,24 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
+  // currentUpdatedAt(identifier) → epoch-ms | undefined  (CTL-2070)
+  //   HIT (non-removed row, coercible updated_at) → the epoch-ms value.
+  //   absent / removed / null-or-uncoercible updated_at / no db / any throw →
+  //   undefined. Fail-open, mirroring lastStateChange(): the lane-claim guard reads
+  //   an undefined here as "no timely observation" and its supersession test does
+  //   not run (owner: unknown → the legacy history ladder governs), never a refusal.
+  const currentUpdatedAt = (identifier) => {
+    if (!identifier) return undefined;
+    try {
+      const row = open().prepare(UPDATED_AT_SELECT).get(identifier);
+      if (!row) return undefined;
+      return coerceMs(row.atMs);
+    } catch {
+      dropHandle();
+      return undefined;
+    }
+  };
+
   // fleetEverWroteState(identifier, ids) → true | false | undefined
   //   undefined = "could not look" (no db, empty id set, any throw). ⛔ The caller must NOT
   //   conflate that with false: false disarms the guard for this ticket, and a replica that
@@ -1034,6 +1059,7 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     lookup,
     freshness,
     lastStateChange, // CTL-2068
+    currentUpdatedAt, // CTL-2070
     fleetEverWroteState, // CTL-2068
     recentStateChangeActors, // CTL-2074
     titles,

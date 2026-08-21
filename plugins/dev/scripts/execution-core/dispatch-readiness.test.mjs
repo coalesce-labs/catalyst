@@ -6,6 +6,8 @@ import {
   canOccupySlotNow,
   NOT_DISPATCHABLE_TRIAGE_PROBE_ERROR,
   NOT_DISPATCHABLE_UNTRIAGED,
+  triageCapTripped,
+  triageReservationDeadlocked,
 } from "./dispatch-readiness.mjs";
 
 let orchDir;
@@ -48,5 +50,69 @@ describe("canOccupySlotNow (CAT-36)", () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toBe(NOT_DISPATCHABLE_TRIAGE_PROBE_ERROR);
     expect(result.error).toBeInstanceOf(Error);
+  });
+});
+
+// ── CTL-2090: capped-reservation deadlock predicates ─────────────────────────
+
+function seedCapRecord(ticket, rec) {
+  const dir = join(orchDir, ".triage-dispatch-counts");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${ticket}.json`), typeof rec === "string" ? rec : JSON.stringify(rec));
+}
+
+describe("triageCapTripped (CTL-2090)", () => {
+  test("no counter file → not capped", () => {
+    expect(triageCapTripped(orchDir, "CAT-10")).toBe(false);
+  });
+  test("counter without cappedAt (attempts remaining) → not capped", () => {
+    seedCapRecord("CAT-11", { count: 2, lastDispatchAt: "2026-08-19T05:01:03Z" });
+    expect(triageCapTripped(orchDir, "CAT-11")).toBe(false);
+  });
+  test("cappedAt stamped → capped (the mini-2 CTC-750 record shape)", () => {
+    seedCapRecord("CAT-12", {
+      count: 3,
+      lastDispatchAt: "2026-08-19T05:01:03Z",
+      cappedAt: "2026-08-19T05:10:51Z",
+      cap: 3,
+    });
+    expect(triageCapTripped(orchDir, "CAT-12")).toBe(true);
+  });
+  test("malformed counter file → not capped (fail-open, mirrors readTriageDispatchRecord)", () => {
+    seedCapRecord("CAT-13", "garbage{");
+    expect(triageCapTripped(orchDir, "CAT-13")).toBe(false);
+  });
+});
+
+describe("triageReservationDeadlocked (CTL-2090)", () => {
+  const capped = { count: 3, cappedAt: "2026-08-19T05:10:51Z", cap: 3 };
+
+  test("capped AND artifact-less → deadlocked (the reservation can never be consumed)", () => {
+    seedCapRecord("CAT-20", capped);
+    expect(triageReservationDeadlocked(orchDir, "CAT-20")).toBe(true);
+  });
+  test("capped but the final attempt produced triage.json → NOT deadlocked (dispatchable)", () => {
+    seedCapRecord("CAT-21", capped);
+    seedTriage("CAT-21");
+    expect(triageReservationDeadlocked(orchDir, "CAT-21")).toBe(false);
+  });
+  test("artifact-less but NOT capped → not deadlocked (the normal CAT-36 reservation)", () => {
+    expect(triageReservationDeadlocked(orchDir, "CAT-22")).toBe(false);
+  });
+  test("artifact probe throws → not deadlocked (fail-open: an FS hiccup never changes admission)", () => {
+    seedCapRecord("CAT-23", capped);
+    expect(
+      triageReservationDeadlocked(orchDir, "CAT-23", {
+        hasTriageArtifact: () => {
+          throw new Error("EACCES");
+        },
+      })
+    ).toBe(false);
+  });
+  test("honours the injected artifact probe", () => {
+    seedCapRecord("CAT-24", capped);
+    expect(
+      triageReservationDeadlocked(orchDir, "CAT-24", { hasTriageArtifact: () => true })
+    ).toBe(false);
   });
 });

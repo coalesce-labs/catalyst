@@ -24,7 +24,11 @@ import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
-import { log, getEventLogPath, getClusterHosts, readStewardEscalationConfig } from "./config.mjs";
+// CTL-1785: `tickMultiHost` below is a TOPOLOGY fact that arms the fence
+// zombie-guard — the fenceGuard `!multiHost` disarm must stay EXISTENCE-derived so
+// entitlement shedding can never re-enable an N=1 disarm (CTL-1781 defect class).
+// `off` mode: getExistenceHosts() === getClusterHosts().
+import { log, getEventLogPath, getExistenceHosts, readStewardEscalationConfig } from "./config.mjs";
 import { buildCanonicalEventLine } from "./lib/canonical-event.mjs"; // CTL-1817
 import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs";
 // CTL-2000: the escalation-ladder chokepoint. resolveStewardCore returns null
@@ -641,7 +645,7 @@ export function startStalePrRescueTimer({
       // CTL-863: live per-tick cluster-size gate. Re-read the roster each tick so
       // a 1→2 roster growth arms the fence zombie-guard on the very next tick with
       // no daemon restart. An explicitly-injected `multiHost` (tests) is honored.
-      const tickMultiHost = multiHost === undefined ? getClusterHosts().length > 1 : multiHost;
+      const tickMultiHost = multiHost === undefined ? getExistenceHosts().length > 1 : multiHost;
       await runTick({
         orchDir,
         orchId,
