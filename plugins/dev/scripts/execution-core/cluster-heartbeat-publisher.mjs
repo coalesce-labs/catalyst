@@ -23,19 +23,28 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { computeLastPhaseAdvanceTs, readAllPhaseSignals, readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
+import { computeLastPhaseAdvanceTs, countYieldedOccupancy as defaultCountYieldedOccupancy, readAllPhaseSignals, readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
+import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-agents.mjs";
 import {
-  getClusterHosts,
+  // CTL-1785: publishing this host's liveness heartbeat is EXISTENCE (observability
+  // that must survive an entitlement/authority outage — the Desired End State keeps
+  // a shed host's `catalyst cluster status` visible). The roster here is only a
+  // single-host `.length <= 1` no-op gate, a topology fact, never a work-ownership
+  // decision. `off` mode: getExistenceHosts() === getClusterHosts().
+  getExistenceHosts,
   getHostName,
   getLivenessAnchorIssue,
   getLivenessReadSource, // CTL-1420 (#17): gate the Linear anchor publish on the active source
   LIVENESS_PUBLISH_INTERVAL_MS,
+  getEntitlementMode, // CTL-1785: entitlement rollout mode (off default)
+  defaultEntitlementProvider, // CTL-1785: local provider (self ∈ roster → entitled)
   log,
 } from "./config.mjs";
 import { publishHeartbeatSync } from "./cluster-heartbeat-sync.mjs";
 import { linearBreaker } from "./linear-breaker.mjs"; // CTL-1420 follow-up: share the CTL-679 breaker
 import { isRateClassLinearError } from "./cluster-heartbeat.mjs"; // rate-class discriminator (pure)
 import { emitFenceClaimed } from "./fence-event.mjs"; // CTL-863: Linear-free fence re-emit
+import { revokeLeasesOnEntitlementLoss } from "./entitlement-revoke.mjs"; // CTL-1785: revoke-on-loss teeth
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
 
 // localClusterGeneration — read this host's won fence generation for `ticket`
@@ -106,6 +115,10 @@ export function localInFlightTickets(hostName, { orchDir } = {}) {
 // (signal-reader's SDK_INFLIGHT_STATUSES), so a peer that omitted it would
 // believe this host had a free slot the local scheduler knows it does not — the
 // cross-host version of the same disagreement CTL-1581 fixed here.
+// CTL-1864: localActiveSlotCount is the SLOT-based twin of localActiveTickets —
+// published as catalyst.node.active_count (decoupled from the deduped ticket-ID
+// list). See localActiveSlotCount() below. localActiveTickets stays unchanged
+// (the identity list for ownership/reclaim); active_tickets still carries it.
 const ACTIVE_STATUSES = new Set(["running", "dispatched", "needs-input", YIELDED_STATUS]);
 
 // localActiveTickets — the slot-OCCUPYING subset of localInFlightTickets on
@@ -134,6 +147,36 @@ export function localActiveTickets(hostName, { orchDir } = {}) {
   }
 }
 
+// localActiveSlotCount — CTL-1864: the SLOT-based occupancy this host actually holds.
+// Published as catalyst.node.active_count so a peer's freeSlots never exceeds the local
+// scheduler's. Reuses the SAME two functions the scheduler's occupancy uses
+// (countBackgroundAgents + countYieldedOccupancy), so it cannot drift into a third counter.
+// Fail-open on the live-count probe; fail-closed on the yield scan (never under-reports
+// occupancy on a scan error — mirrors the scheduler's own posture).
+export function localActiveSlotCount(
+  _hostName,
+  { orchDir, liveCountFn = defaultCountBackgroundAgents, countYieldedOccupancyFn = defaultCountYieldedOccupancy } = {},
+) {
+  if (!orchDir) return 0;
+  let live = 0;
+  try {
+    const n = liveCountFn();
+    live = Number.isInteger(n) && n >= 0 ? n : 0;
+  } catch {
+    live = 0;
+  }
+  let yielded = 0;
+  try {
+    const y = countYieldedOccupancyFn(orchDir);
+    yielded = y && Number.isInteger(y.count) && y.count >= 0 ? y.count : 0;
+    // fail-closed: an unreadable workers/ dir must not silently read as zero slots.
+    if (y && y.ok === false) return Math.max(live + yielded, live);
+  } catch {
+    // fail-open on the yield probe: fall through to live-only count
+  }
+  return live + yielded;
+}
+
 // startLivenessPublisher — arm a periodic cross-host liveness publisher.
 // Fires one publish immediately, then every intervalMs. Returns a stop handle
 // ({ stop() }) so the daemon can tear it down symmetrically with _heartbeat.
@@ -149,7 +192,7 @@ export function localActiveTickets(hostName, { orchDir } = {}) {
 // All collaborators are injectable for unit tests.
 export function startLivenessPublisher({
   intervalMs = LIVENESS_PUBLISH_INTERVAL_MS,
-  roster = getClusterHosts(),
+  roster = getExistenceHosts(),
   self = getHostName(),
   anchorIssue = getLivenessAnchorIssue(),
   orchDir,
@@ -175,6 +218,13 @@ export function startLivenessPublisher({
   // CTL-1420 (#17): the active cross-host liveness source. Injectable seam so tests
   // can force loki|linear; defaults to the env-driven getLivenessReadSource().
   readSource = getLivenessReadSource,
+  // CTL-1785: entitlement revoke-on-loss seams. `entitlementMode` re-reads the
+  // rollout mode per tick (off default → no-op); `entitlementProvider` defaults to
+  // the local provider (self ∈ its own roster → always entitled → no-op today);
+  // `revoke` is the ordering-constraint teeth. All injectable for tests.
+  entitlementMode = getEntitlementMode,
+  entitlementProvider = defaultEntitlementProvider,
+  revoke = revokeLeasesOnEntitlementLoss,
 } = {}) {
   // Single-host no-op (no network, no publish, zero cost).
   if (!Array.isArray(roster) || roster.length <= 1) {
@@ -214,14 +264,47 @@ export function startLivenessPublisher({
     // liveness publish observe the same set (and ownedTickets is invoked exactly
     // once per tick, as before this fence re-emit was added).
     const owned = ownedTickets();
+    // CTL-1785: entitlement revoke-on-loss — the single daemon call site for the
+    // ordering-constraint teeth. If this host's entitlement has lapsed under an
+    // enforce-mode authority, release its held work leases (fence.released) so a
+    // reclaiming host can enumerate them. Off by default; under the local provider
+    // self is always entitled (self ∈ roster), so this is a guaranteed no-op until
+    // W12's authority provider is injected. Best-effort — a throw here never aborts
+    // the fence re-emit or liveness publish below.
+    //
+    // revokedTickets (code review, chatgpt-codex-connector P1): the fence re-emit
+    // loop right below re-claims every ticket in `owned` unconditionally. Since the
+    // broker projection is last-write-wins, a ticket released here and then
+    // re-claimed in the same tick is left claimed from a peer's point of view — the
+    // revoke never actually takes effect. Track which tickets emitReleased actually
+    // landed for and skip those in the re-emit loop.
+    let revokedTickets = [];
+    try {
+      const eMode = entitlementMode();
+      if (eMode === "enforce") {
+        const { revoked } = revoke({
+          self,
+          ownedTickets: owned,
+          provider: entitlementProvider(),
+          mode: eMode,
+          roster,
+        });
+        if (Array.isArray(revoked)) revokedTickets = revoked;
+      }
+    } catch {
+      /* best-effort — never block the tick on the entitlement check */
+    }
     // CTL-863: re-emit fence.claimed for each owned ticket FIRST, unconditionally
     // — BEFORE the breaker check below. This is a local, Linear-free event-log
     // append (zero app-actor traffic), so it must never be suppressed by the
     // Linear breaker. Its own try/catch keeps a fence-log hiccup from ever
     // aborting the liveness publish. Runs only multi-host (this publisher is inert
-    // at roster<=1), which is exactly when the fence projection is read.
+    // at roster<=1), which is exactly when the fence projection is read. Excludes
+    // any ticket the revoke-on-loss check above just released (see revokedTickets).
     try {
+      const revokedSet = revokedTickets.length ? new Set(revokedTickets) : null;
       for (const ticket of owned) {
+        if (revokedSet?.has(ticket)) continue;
         const generation = readGeneration(ticket);
         if (!Number.isFinite(generation)) continue; // no won token → nothing to refresh
         emitFence({ ticket, owner_host: self, generation });

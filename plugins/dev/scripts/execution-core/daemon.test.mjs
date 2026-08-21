@@ -2790,6 +2790,45 @@ describe("readLinearBotUserIds", () => {
     const ids = readLinearBotUserIds(null, layer2);
     expect(ids.size).toBe(0);
   });
+
+  // CTL-2074: the cloud-proxy recognition slot. Since CTL-1889 both minis write
+  // through the cloud proxy (CATALYST_LINEAR_WRITE_PROXY=enforce), so their writes
+  // carry the cloud tenant's app-actor id — which must be recognised as self.
+  test("reads cloud botUserId from Layer-2 (catalyst.linear.bot.cloud.botUserId)", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: { linear: { bot: { cloud: { botUserId: "cloud-uuid-1" } } } },
+      })
+    );
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("cloud-uuid-1")).toBe(true);
+    expect(ids.size).toBe(1);
+  });
+
+  test("reads worker, orchestrator, and cloud botUserIds together from Layer-2", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: {
+              worker: { botUserId: "worker-uuid" },
+              orchestrator: { botUserId: "orch-uuid" },
+              cloud: { botUserId: "cloud-uuid" },
+            },
+          },
+        },
+      })
+    );
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("worker-uuid")).toBe(true);
+    expect(ids.has("orch-uuid")).toBe(true);
+    expect(ids.has("cloud-uuid")).toBe(true);
+    expect(ids.size).toBe(3);
+  });
 });
 
 // _isBotId — normalises string vs Set so guard callers are consistent
@@ -3179,6 +3218,39 @@ describe("readLinearBotWriteId (CTL-781)", () => {
     const bad = join(tmpDir, "bad.json");
     writeFileSync(bad, "not-json{{");
     expect(() => readLinearBotWriteId(bad, bad)).not.toThrow();
+  });
+
+  // CTL-2074: the cloud slot is RECOGNITION-ONLY. The daemon must never self-assign
+  // as the cloud tenant — self-assign stays the orchestrator identity. A config that
+  // names cloud but no orchestrator must resolve to null (self-assign disabled),
+  // never to the cloud id.
+  test("does NOT return the cloud id — self-assign stays orchestrator", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: {
+              orchestrator: { botUserId: "orch-uuid-1" },
+              cloud: { botUserId: "cloud-uuid-1" },
+            },
+          },
+        },
+      })
+    );
+    expect(readLinearBotWriteId(null, layer2)).toBe("orch-uuid-1");
+  });
+
+  test("returns null (not the cloud id) when only the cloud slot is configured", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: { linear: { bot: { cloud: { botUserId: "cloud-uuid-1" } } } },
+      })
+    );
+    expect(readLinearBotWriteId(null, layer2)).toBeNull();
   });
 });
 

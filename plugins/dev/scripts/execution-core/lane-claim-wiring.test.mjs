@@ -312,3 +312,255 @@ describe("the PROXY rung — the guard on the fresher resolve-only evidence", ()
     expect(sends.length).toBe(1);
   });
 });
+
+// ── CTL-2070: the TIMELY source, wired end-to-end through applyPhaseStatus ─────────────
+//
+// These prove the write-ledger source actually reaches the real write entry point and that a
+// REFUSE stops the shell — timing PINNED via injected nowMs/updatedAt, and with a NEGATIVE
+// CONTROL asserting the refusal DISAPPEARS when the source is removed (the dead-branch class).
+describe("CTL-2070 — the timely source reaches applyPhaseStatus", () => {
+  const T = 1_000_000_000_000;
+
+  // Build a guard whose ONLY discriminator is the timely write-ledger, drive a regress through
+  // the real applyPhaseStatus, and capture whether the shell spawned.
+  const timelyCall = ({
+    readFleetWrite, // omit → the source is REMOVED (undefined wrapper)
+    currentUpdatedAt = () => T,
+    now = () => T + 60_000, // 60 s after the observation → inside the window
+    recencyMs = 300_000,
+    botUserIds = new Set([FLEET]),
+    readLastStateChange = () => null,
+    phase = "research", // Implement(3) -> Research(1): a regress
+    currentState = "Implement",
+  }) => {
+    const execCalls = [];
+    const guard = buildLaneClaimGuard({
+      stateMap: STATE_MAP,
+      botUserIds,
+      readLastStateChange,
+      readFleetWrite,
+      readCurrentUpdatedAt: currentUpdatedAt,
+      nowMs: now,
+      recencyMs,
+    });
+    const res = applyPhaseStatus({
+      ticket: "CTC-787",
+      phase,
+      resolveRepoRoot: () => "/tmp/repo",
+      exec: (bin, args) => {
+        execCalls.push({ bin, args });
+        return {
+          code: 0,
+          stdout: JSON.stringify({ action: "transitioned", currentState, targetState: "Research" }),
+        };
+      },
+      fetchState: () => currentState,
+      laneClaim: guard,
+    });
+    return { res, execCalls };
+  };
+
+  afterEach(() => setLaneClaimGuard(null));
+
+  test("1. AC#1 — a lane-owned regression within 60 s is REFUSED; the shell never spawns", () => {
+    const { res, execCalls } = timelyCall({ readFleetWrite: () => null });
+    expect(res.applied).toBe(false);
+    expect(res.skipped).toBe("lane-claimed-no-regression");
+    expect(execCalls).toEqual([]); // the load-bearing assertion
+  });
+
+  test("2. AC#2 — history-less: null ledger AND no history → STILL refused (needs no history)", () => {
+    const { res, execCalls } = timelyCall({
+      readFleetWrite: () => null,
+      readLastStateChange: () => null, // no issue_history rows at all
+    });
+    expect(res.applied).toBe(false);
+    expect(execCalls).toEqual([]);
+  });
+
+  test("⛔ 3. NEGATIVE CONTROL — remove the timely source and the SAME regress proceeds to the shell", () => {
+    // Asserts the wiring genuinely DEPENDS on the source. readFleetWrite omitted → the wrapper
+    // yields undefined → the timely block no-ops → a STALE history row falls to STALE_HISTORY
+    // (INCONCLUSIVE) → the write proceeds and the shell IS spawned. If it still refused, the
+    // source would be dead and the coverage above a lie.
+    const { res, execCalls } = timelyCall({
+      readFleetWrite: undefined,
+      readLastStateChange: () => ({ actorId: LANE, toState: "Research" }), // stale (≠ current)
+    });
+    expect(res.applied).toBe(true);
+    expect(execCalls.length).toBeGreaterThan(0);
+  });
+
+  test("4. botUserIds INDEPENDENCE — an EMPTY set still refuses (timely runs before NO_BOT_IDS)", () => {
+    const { res, execCalls } = timelyCall({
+      readFleetWrite: () => null,
+      botUserIds: new Set(),
+    });
+    expect(res.applied).toBe(false);
+    expect(execCalls).toEqual([]);
+  });
+
+  test("5. FAIL-OPEN — throwing readers degrade to INCONCLUSIVE, the write proceeds, no throw escapes", () => {
+    const { res, execCalls } = timelyCall({
+      readFleetWrite: () => {
+        throw new Error("ledger read failed");
+      },
+      currentUpdatedAt: () => {
+        throw new Error("replica read failed");
+      },
+      // no history either → the ladder abstains (NO_HISTORY) → write proceeds
+      readLastStateChange: () => null,
+    });
+    expect(res.applied).toBe(true);
+    expect(execCalls.length).toBeGreaterThan(0);
+  });
+
+  test("6. fleet recovery is ALLOWED — a ledger entry matching the current state does NOT refuse", () => {
+    const { res, execCalls } = timelyCall({
+      readFleetWrite: () => ({ toState: "Implement", atMs: T }),
+      currentUpdatedAt: () => T,
+    });
+    expect(res.applied).toBe(true);
+    expect(execCalls.length).toBeGreaterThan(0);
+  });
+});
+
+// ── CTL-2070: the DISPATCH veto uses the timely source, through the real schedulerTick ──
+describe("CTL-2070 — the timely source vetoes DISPATCH", () => {
+  let orchDir;
+  const seed = () => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl2070-"));
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dir = join(orchDir, "workers", "CTC-787");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTC-787", phase: "research", status: "done" })
+    );
+  };
+  const dispatchSpy = () => {
+    const calls = [];
+    const fn = ({ ticket, phase }) => (calls.push({ ticket, phase }), { code: 0, stdout: "", stderr: "" });
+    fn.calls = calls;
+    return fn;
+  };
+  afterEach(() => {
+    setLaneClaimGuard(null);
+    if (orchDir) rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("⭐ a lane-owned ticket (timely source, NO history) is NOT dispatched", () => {
+    seed();
+    const T = 1_000_000_000_000;
+    setLaneClaimGuard(
+      buildLaneClaimGuard({
+        stateMap: STATE_MAP,
+        botUserIds: new Set([FLEET]),
+        readCurrentState: () => "Implement", // owed phase plan(2) regresses Implement(3)
+        readLastStateChange: () => null, // NO history — the timely source alone must veto
+        readFleetWrite: () => null, // lane owns it
+        readCurrentUpdatedAt: () => T,
+        nowMs: () => T + 60_000,
+        recencyMs: 300_000,
+      })
+    );
+    const dispatch = dispatchSpy();
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 70_000 });
+    expect(dispatch.calls).toEqual([]);
+  });
+
+  test("⛔ CONTROL — a fleet-owned ledger entry lets the same tick dispatch", () => {
+    seed();
+    const T = 1_000_000_000_000;
+    setLaneClaimGuard(
+      buildLaneClaimGuard({
+        stateMap: STATE_MAP,
+        botUserIds: new Set([FLEET]),
+        readCurrentState: () => "Implement",
+        readLastStateChange: () => null,
+        readFleetWrite: () => ({ toState: "Implement", atMs: T }), // fleet owns → allow
+        readCurrentUpdatedAt: () => T,
+        nowMs: () => T + 60_000,
+        recencyMs: 300_000,
+      })
+    );
+    const dispatch = dispatchSpy();
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 70_000 });
+    expect(dispatch.calls).toContainEqual({ ticket: "CTC-787", phase: "plan" });
+  });
+});
+
+// ── CTL-2070: the write-seam records the ledger on an APPLIED transition ────────────────
+describe("CTL-2070 — emitStateWrite records the fleet write-ledger", () => {
+  let orchDir;
+  const seed = () => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl2070-seam-"));
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dir = join(orchDir, "workers", "CTC-787");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTC-787", phase: "research", status: "done" })
+    );
+  };
+  afterEach(() => {
+    if (orchDir) rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  // A dispatch that leaves a runnable successor signal, so dispatchAndVerify confirms the advance
+  // (CTL-1789: the scheduler-advance status write fires only inside the dv.ok branch).
+  const verifyingDispatch = () => ({ ticket, phase }) => {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, status: "running", bg_job_id: "bg-plan-1" })
+    );
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  test("an APPLIED transition calls recordFleetWrite(ticket, to_state, ms)", () => {
+    seed();
+    const recorded = [];
+    const recordFleetWrite = (ticket, toState, atMs) => recorded.push({ ticket, toState, atMs });
+    // writeStatus.applyPhaseStatus returns an APPLIED transition to Plan; the advance's
+    // emitStateWrite must fan that into recordFleetWrite.
+    const writeStatus = {
+      applyPhaseStatus: () => ({ applied: true, to_state: "Plan", action: "transitioned" }),
+      applyTerminalDone: () => ({ applied: false }),
+      applyLabel: () => ({ applied: false }),
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: verifyingDispatch(),
+      writeStatus,
+      recordFleetWrite,
+      liveBackgroundCount: () => 0,
+      isBgJobAlive: () => true,
+      now: () => 70_000,
+    });
+    const plan = recorded.find((r) => r.toState === "Plan");
+    expect(plan).toBeTruthy();
+    expect(plan.ticket).toBe("CTC-787");
+    expect(typeof plan.atMs).toBe("number");
+    // Only Plan is recorded — a non-applied writerResult never records (guarded in emitStateWrite).
+    expect(recorded.every((r) => r.toState === "Plan")).toBe(true);
+  });
+
+  test("⛔ CONTROL — a NON-applied transition records NOTHING", () => {
+    seed();
+    const recorded = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0, stdout: "", stderr: "" }),
+      writeStatus: {
+        applyPhaseStatus: () => ({ applied: false, to_state: "Plan" }), // NOT applied
+        applyTerminalDone: () => ({ applied: false }),
+        applyLabel: () => ({ applied: false }),
+      },
+      recordFleetWrite: (ticket, toState, atMs) => recorded.push({ ticket, toState, atMs }),
+      now: () => 70_000,
+    });
+    expect(recorded).toEqual([]);
+  });
+});

@@ -35,7 +35,10 @@ import { fileURLToPath } from "node:url";
 
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { ownerForTicket } from "./hrw.mjs";
-import { getClusterHosts, getHostName } from "./config.mjs";
+// CTL-1785: this context builds HRW OWNERSHIP (ownerForTicket over the roster),
+// an ENTITLEMENT question, so it reads the entitled roster. `off` mode (default):
+// getEntitledHosts() === getClusterHosts() → behavior-neutral.
+import { getEntitledHosts, getHostName } from "./config.mjs";
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
 function parseArgs(argv) {
@@ -212,6 +215,10 @@ export function formatEscalationCoverage({ covered, windowMs, oldestTs, maxBytes
 }
 
 // ── source 3: the webhook-fed Linear cache (NO direct Linear API) ─────────────
+// CTC-133 Phase 2: replica-first. The replica (replica-read.mjs) provides
+// authoritative labels and linearState from the SDK-managed mirror; the gateway
+// (broker-state ticket_state) is kept as the fallback id set + facts when the
+// replica is absent/stale. Both source fail-open: this function NEVER throws.
 async function collectLinearCache() {
   // getAllTicketDescriptors imports bun:sqlite. Under node that import throws;
   // catch it and signal cache-unavailable rather than aborting the whole gather.
@@ -228,12 +235,50 @@ async function collectLinearCache() {
     // db absent/unreadable → fail-open to empty (still "available", just nothing)
     return { unavailable: false, items: [] };
   }
+
+  // CTC-133 Phase 2: try to read authoritative facts from the replica for the
+  // full id set we know from ticket_state. Fail-open: any import/DB failure
+  // leaves replicaById null and all rows fall through to gateway facts.
+  const ticketIds = (rows || []).map((r) => r?.ticket).filter(Boolean);
+  let replicaById = null;
+  if (ticketIds.length > 0) {
+    let replicaReader = null;
+    try {
+      ({ createReplicaReader: replicaReader } = await importReplicaRead());
+    } catch {
+      // bun:sqlite unavailable (Node runtime) or module absent → skip replica tier
+    }
+    if (typeof replicaReader === "function") {
+      let handle = null;
+      try {
+        handle = replicaReader();
+        if (typeof handle?.details === "function") {
+          const result = handle.details(ticketIds);
+          if (result && typeof result === "object") replicaById = result;
+        }
+      } catch {
+        // DB absent/locked/stale → fall through to gateway facts
+      } finally {
+        try {
+          handle?.close?.();
+        } catch {
+          /* already closed */
+        }
+      }
+    }
+  }
+
   const items = [];
   for (const row of rows || []) {
     const ticket = row?.ticket;
     if (!ticket) continue;
-    const state = row?.state ?? row?.linearState ?? null;
-    const labels = Array.isArray(row?.labels) ? row.labels : [];
+    // CTC-133 Phase 2: prefer replica facts (authoritative) over gateway facts.
+    const rep = replicaById?.[ticket];
+    const state = rep?.state?.name ?? row?.state ?? row?.linearState ?? null;
+    const repLabels = Array.isArray(rep?.labels)
+      ? rep.labels.map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean)
+      : null;
+    const labels = repLabels ?? (Array.isArray(row?.labels) ? row.labels : []);
     const labelHit = labels.some(
       (l) => typeof l === "string" && STUCK_LABELS.has(l.toLowerCase())
     );
@@ -250,11 +295,17 @@ async function collectLinearCache() {
   return { unavailable: false, items };
 }
 
-// Indirect (non-literal) dynamic import so esbuild/Node never statically follow
+// Indirect (non-literal) dynamic imports so esbuild/Node never statically follows
 // the bun:sqlite-bearing module graph at analysis time (the vite.config bun:sqlite
-// trap, PR #1561). The specifier is computed, so it is resolved purely at runtime.
+// trap, PR #1561). Specifiers are computed, so they are resolved purely at runtime.
 async function importBrokerState() {
   const spec = ["..", "broker", "broker-state.mjs"].join("/");
+  return import(new URL(spec, import.meta.url).href);
+}
+
+// CTC-133 Phase 2: replica reader import (same fail-open pattern as importBrokerState).
+async function importReplicaRead() {
+  const spec = [".", "replica-read.mjs"].join("/");
   return import(new URL(spec, import.meta.url).href);
 }
 
@@ -389,7 +440,7 @@ async function main() {
   // HRW context (identity no-op at N=1).
   let roster, self, multiHost;
   try {
-    roster = getClusterHosts();
+    roster = getEntitledHosts();
     self = getHostName();
     multiHost = Array.isArray(roster) && roster.length > 1;
   } catch {

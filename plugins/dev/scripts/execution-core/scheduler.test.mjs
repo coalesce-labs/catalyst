@@ -7266,6 +7266,25 @@ describe("buildGlobalRanking (CTL-705)", () => {
     const result = buildGlobalRanking(orchDir, []);
     expect(result.find((d) => d.identifier === "CTL-X")).toBeUndefined();
   });
+
+  // CTL-2090: preemption's justification for a queued (untriaged) contender is
+  // that the freed slot lets the monitor triage it. A triage-capped ticket
+  // (CTL-1441) will never be triaged, so ranking it would kill live work for a
+  // slot nothing can consume. An uncapped sibling must be unaffected.
+  test("CTL-2090: a triage-capped artifact-less eligible ticket is dropped from the ranking; an uncapped sibling stays", () => {
+    mkdirSync(join(orchDir, ".triage-dispatch-counts"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".triage-dispatch-counts", "CTL-CAP.json"),
+      JSON.stringify({ count: 3, cappedAt: "2026-08-19T05:10:51Z", cap: 3 })
+    );
+    const result = buildGlobalRanking(orchDir, [
+      makeEligible("CTL-CAP", 1),
+      makeEligible("CTL-OK", 1),
+    ]);
+    const ids = result.map((d) => d.identifier);
+    expect(ids).not.toContain("CTL-CAP");
+    expect(ids).toContain("CTL-OK");
+  });
 });
 
 describe("schedulerTick — writeWorkerPriority at new-work dispatch (CTL-705)", () => {
@@ -8690,6 +8709,92 @@ describe("CTL-755: admission gate", () => {
     // CTL-764 Phase 4: "queued" (was "waiting") removed on pickup.
     expect(removed).toContainEqual({ ticket: "CTL-7", label: "queued" });
     expect(applied).toEqual([]);
+  });
+
+  // ── CTL-2090: a triage-capped, artifact-less eligible ticket must NOT hold the
+  // CAT-36 reservation that starves every triaged waiter behind it. Live shape:
+  // mini-2, 2026-08-20 — capped CTC-750 outranked 22 triaged waiters on a
+  // maxParallel=1 host and won the only free slot every tick for 36h, admitting
+  // nothing, across three daemon restarts (the cap file persists).
+  test("CTL-2090: a capped untriaged eligible ticket does not reserve the slot — the triaged waiter promotes", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done"); // triaged waiter, unblocked
+    // Higher-ranked eligible candidate whose triage re-dispatch cap has tripped
+    // (CTL-1441) — the monitor will never produce its triage.json.
+    mkdirSync(join(orchDir, ".triage-dispatch-counts"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".triage-dispatch-counts", "CTL-CAP.json"),
+      JSON.stringify({ count: 3, cappedAt: "2026-08-19T05:10:51Z", cap: 3 })
+    );
+    const dispatch = fakeDispatch();
+    const { ws } = labelSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [
+        { identifier: "CTL-CAP", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+      ],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // one slot, free
+      fetchBatch: mkBatch(() => relUnblocked()),
+    });
+    // The waiter wins the slot; the capped ticket is excluded from the ranking
+    // (Pass 2 separately keeps holding it on untriaged-no-triage-artifact).
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+  });
+
+  // Negative control (proves the fix test exercises the cap predicate, not some
+  // other exclusion): the SAME shape with NO cap record keeps the deliberate
+  // CAT-36 reservation — the urgent untriaged candidate holds the slot for the
+  // monitor's triage pass and the waiter stays queued.
+  test("CTL-2090 control: the same UNCAPPED untriaged candidate still reserves the slot (CAT-36 preserved)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [
+        { identifier: "CTL-CAP", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+      ],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked()),
+    });
+    expect(dispatch.calls).toEqual([]); // reservation holds; nothing dispatches
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "queued" });
+  });
+
+  // A capped ticket whose FINAL attempt did produce triage.json is dispatchable —
+  // it must stay ranked (and Pass 2 can dispatch it as ordinary new work).
+  test("CTL-2090: capped WITH a triage artifact still outranks the waiter (not deadlocked)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done");
+    mkdirSync(join(orchDir, ".triage-dispatch-counts"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".triage-dispatch-counts", "CTL-CAP.json"),
+      JSON.stringify({ count: 3, cappedAt: "2026-08-19T05:10:51Z", cap: 3 })
+    );
+    const dispatch = fakeDispatch();
+    const { ws } = labelSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [
+        { identifier: "CTL-CAP", priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+      ],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked()),
+      // Injected probe, not seedTriage: a real triage.json creates workers/<t>/,
+      // which listStartedTickets then excludes from the new-work pull (the
+      // CTL-1150 seam note) — the injected predicate is the documented pattern.
+      hasTriageArtifact: (od, t) => t === "CTL-CAP",
+    });
+    // The capped-but-triaged candidate takes the slot as normal new work.
+    expect(dispatch.calls.map((c) => c.ticket)).toContain("CTL-CAP");
+    expect(dispatch.calls.map((c) => c.ticket)).not.toContain("CTL-7");
   });
 
   test("steady-state held tick makes ZERO applyLabel/removeLabel calls (idempotent)", () => {

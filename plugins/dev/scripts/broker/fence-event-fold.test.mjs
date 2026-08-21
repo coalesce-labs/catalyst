@@ -14,6 +14,7 @@ import {
   openBrokerStateDb,
   closeBrokerStateDb,
   getTicketDescriptor,
+  getTicketFence,
 } from "./broker-state.mjs";
 import { processEvent } from "./router.mjs";
 import { clearInterests } from "./state.mjs";
@@ -129,5 +130,33 @@ describe("idempotence + race-freedom", () => {
     expect(() =>
       processEvent({ attributes: { "event.name": "fence.claimed." }, body: { payload: {} } }),
     ).not.toThrow();
+  });
+});
+
+// ─── CTC-133 Phase 1: dual-write ─────────────────────────────────────────────
+
+describe("dual-write: fence events land in BOTH ticket_state and ticket_fence (CTC-133)", () => {
+  test("fence.claimed populates ticket_fence alongside ticket_state", () => {
+    processEvent(fenceEvent({ ticket: "CTC-10", action: "claimed", owner_host: "mini",
+      generation: 3, phase: "implement", claimed_at: "2026-08-20T01:00:00Z" }));
+    const d = getTicketDescriptor("CTC-10");
+    expect(d.ownerHost).toBe("mini");
+    const f = getTicketFence("CTC-10");
+    expect(f).not.toBeNull();
+    expect(f.ownerHost).toBe("mini");
+    expect(f.generation).toBe(3);
+    expect(f.phase).toBe("implement");
+  });
+
+  test("fence.released clears fence columns in both ticket_state and ticket_fence", () => {
+    processEvent(fenceEvent({ ticket: "CTC-11", action: "claimed", owner_host: "mini",
+      generation: 4, phase: "pr", claimed_at: "2026-08-20T01:00:00Z" }));
+    processEvent(fenceEvent({ ticket: "CTC-11", action: "released" }));
+    const d = getTicketDescriptor("CTC-11");
+    expect(d.ownerHost).toBeNull();
+    const f = getTicketFence("CTC-11");
+    expect(f).not.toBeNull(); // row present, but cleared
+    expect(f.ownerHost).toBeNull();
+    expect(f.generation).toBeNull();
   });
 });

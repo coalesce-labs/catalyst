@@ -137,7 +137,7 @@ _FP_EXPECTED=(
   "$(_fp_row bare-file re-armable timer '' '' 'GH_TOKEN,GITHUB_TOKEN')"
   "$(_fp_row bare-file boot-only '' '' '' 'CATALYST_WEBHOOK_SECRET')"
   "$(_fp_row bare-file-family boot-only '' '' '' '')"
-  "$(_fp_row env-file boot-only '' '' '' '')"
+  "$(_fp_row env-file re-armable timer '' '' '')"
   "$(_fp_row env-file boot-only '' '' '' '')"
   "$(_fp_row env-alias re-armable on-401 '' '' 'LINEAR_API_TOKEN,LINEAR_API_KEY')"
   "$(_fp_row config-json re-armable on-401 '' 'catalyst.linear.bot.orchestrator' '')"

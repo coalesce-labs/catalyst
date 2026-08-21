@@ -37,6 +37,7 @@ import {
   defaultConfiguredRepos,
   checkNodeClass,
   checkDeploymentModeConsistency,
+  checkEntitlementConsistency,
   checkSecretContract,
   checkLayer2PathDivergence,
   checkReadReplicaReachable,
@@ -58,6 +59,9 @@ import {
   parseArgs,
   runDoctor,
   checkFleetTokenExport,
+  readLinearBotUserIds,
+  readCloudBotUserId,
+  checkSelfEchoIdentityHistory,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
@@ -237,6 +241,74 @@ const agreeingSecretContract = (present) => () =>
     ? { value: "contract-token", source: "inherited", provider: "env-alias" }
     : { value: null, source: "none", provider: "env-alias" };
 
+describe("checkEntitlementConsistency (CTL-1785)", () => {
+  const mode = (over = {}) => ({
+    mode: "off",
+    source: "default",
+    inferred: true,
+    recognized: true,
+    raw: null,
+    ...over,
+  });
+  const byName = (checks) => Object.fromEntries(checks.map((c) => [c.name, c]));
+
+  it("advisory INFO when mode=off (default)", () => {
+    const checks = checkEntitlementConsistency({ mode: mode() });
+    const m = byName(checks)["entitlement-mode"];
+    expect(m.status).toBe("info");
+    expect(m.detail).toContain('mode="off"');
+  });
+
+  it("WARN when mode=enforce but no real authority injected (local fallback)", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "enforce", source: "env", inferred: false }),
+      providerKind: "local",
+    });
+    const p = byName(checks)["entitlement-provider"];
+    expect(p.status).toBe("warn");
+    expect(p.detail).toContain("no lease authority");
+  });
+
+  it("INFO for the provider once a real authority is injected", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "enforce", source: "env", inferred: false }),
+      providerKind: "authority",
+    });
+    expect(byName(checks)["entitlement-provider"].status).toBe("info");
+  });
+
+  it("ordering check is INFO when the constraint holds, WARN when inverted — never FAIL", () => {
+    const ok = byName(checkEntitlementConsistency({ mode: mode(), entitlementTtlMs: 900000, workLeaseTtlMs: 300000 }));
+    expect(ok["entitlement-ordering"].status).toBe("info");
+    const bad = byName(checkEntitlementConsistency({ mode: mode(), entitlementTtlMs: 1000, workLeaseTtlMs: 2000 }));
+    expect(bad["entitlement-ordering"].status).toBe("warn");
+  });
+
+  it("a typo'd mode WARNs (never FAILs) and degrades to off", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "off", source: "env", inferred: false, recognized: false, raw: "enfroce" }),
+    });
+    expect(byName(checks)["entitlement-mode"].status).toBe("warn");
+  });
+
+  it("NEVER emits STATUS.FAIL (advisory only, cannot wedge doctor)", () => {
+    // Sweep every mode + provider + ordering combination — none may FAIL.
+    for (const mm of ["off", "shadow", "enforce"]) {
+      for (const pk of ["local", "authority"]) {
+        for (const [e, w] of [[900000, 300000], [1000, 2000]]) {
+          const checks = checkEntitlementConsistency({
+            mode: mode({ mode: mm, inferred: mm === "off", source: mm === "off" ? "default" : "env", recognized: true }),
+            providerKind: pk,
+            entitlementTtlMs: e,
+            workLeaseTtlMs: w,
+          });
+          for (const c of checks) expect(c.status).not.toBe("fail");
+        }
+      }
+    }
+  });
+});
+
 describe("checkPeerUniqueness", () => {
   it("INFO-skips when no liveness anchor issue is configured", async () => {
     const checks = await checkPeerUniqueness({
@@ -367,6 +439,162 @@ describe("checkPeerUniqueness", () => {
     expect(checks[0].name).toBe("peer-uniqueness");
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("empty");
+  });
+});
+
+// ─── CTL-2074: doctor's inline readLinearBotUserIds twin picks up the cloud slot ──
+// The inline copy at doctor.mjs:157 exists to keep doctor off the daemon's bun: graph;
+// it must not drift from the daemon resolver. This exercises the copy directly so a
+// missing cloud slot fails here at CI, not silently in production.
+describe("readLinearBotUserIds (doctor inline twin, CTL-2074)", () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "doctor-bot-ids-"));
+  });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  it("includes catalyst.linear.bot.cloud.botUserId", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: {
+          linear: {
+            bot: {
+              worker: { botUserId: "worker-uuid" },
+              orchestrator: { botUserId: "orch-uuid" },
+              cloud: { botUserId: "cloud-uuid" },
+            },
+          },
+        },
+      })
+    );
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("cloud-uuid")).toBe(true);
+    expect(ids.has("worker-uuid")).toBe(true);
+    expect(ids.has("orch-uuid")).toBe(true);
+  });
+
+  // Codex #3738 P2: the cloud-proxy actor is read on its own so the self-echo cross-check
+  // can tie its PASS to THIS id rather than any historical set member.
+  it("readCloudBotUserId returns the cloud slot, and \"\" when absent/unreadable", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(
+      layer2,
+      JSON.stringify({ catalyst: { linear: { bot: { cloud: { botUserId: "cloud-uuid" } } } } })
+    );
+    expect(readCloudBotUserId(layer2)).toBe("cloud-uuid");
+    // absent slot → "" (not undefined), never throws
+    const bare = join(tmpDir, "bare.json");
+    writeFileSync(bare, JSON.stringify({ catalyst: { linear: { bot: {} } } }));
+    expect(readCloudBotUserId(bare)).toBe("");
+    expect(readCloudBotUserId(join(tmpDir, "does-not-exist.json"))).toBe("");
+    expect(readCloudBotUserId(null)).toBe("");
+  });
+});
+
+// ─── CTL-2074: checkSelfEchoIdentityHistory — the loud history cross-check ────
+// Turns the silent failure loud: compares the resolved recognition set against the
+// actors who ACTUALLY write state in real issue_history (positive control included),
+// never against config. Advisory (WARN, not FAIL) — "make it loud", not "block".
+const ORCH_ID = "ba2989f1-0000-4000-8000-000000000000";
+const CLOUD_ID = "78f8f491-0000-4000-8000-000000000000";
+const HUMAN_ID = "c2a8cc92-0000-4000-8000-000000000000";
+
+describe("checkSelfEchoIdentityHistory (CTL-2074)", () => {
+  it("WARNs when proxy=enforce and the configured cloud identity never writes state (names the candidates)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      recentActors: () => [{ actorId: HUMAN_ID, name: "Ryan Rozich", count: 103 }],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    // names the unrecognized state-writer so the operator has a candidate to confirm
+    expect(check.detail).toMatch(/c2a8cc92|Ryan Rozich|proxied|human replies/i);
+  });
+
+  it("PASSes when the configured cloud-proxy identity is present in history AND in the set", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+    });
+    expect(check.status).toBe(STATUS.PASS);
+  });
+
+  // Codex #3738 P2 regression: a LEGACY recognized actor (pre-cutover worker/orch id
+  // still in the set) that appears in history must NOT mask an unrecognized CURRENT
+  // cloud writer. The old "any member recognized ⇒ PASS" produced a clean PASS here.
+  it("WARNs (not PASS) when a legacy set member writes state but the cloud proxy actor does not (masking)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      // ORCH_ID is a recognized set member and writes state; CLOUD_ID (the current
+      // proxy actor) is absent — its proxied writes still read as human replies.
+      recentActors: () => [
+        { actorId: ORCH_ID, name: "Legacy Orchestrator", count: 42 },
+        { actorId: HUMAN_ID, name: "Ryan Rozich", count: 103 },
+      ],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    expect(check.detail).toMatch(/cloud-proxy identity|proxied writes read/i);
+  });
+
+  it("WARNs when the cloud-proxy identity is not configured at all (the CTL-2074 silent condition)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID]),
+      cloudBotId: "",
+      recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    expect(check.detail).toMatch(/not configured|bot\.cloud\.botUserId/i);
+  });
+
+  it("WARNs when the cloud id writes state but is ABSENT from the recognition set", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID]), // cloud id NOT in the recognition set
+      cloudBotId: CLOUD_ID,
+      recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+    });
+    expect(check.status).toBe(STATUS.WARN);
+    expect(check.detail).toMatch(/recognition set/i);
+  });
+
+  it("is INCONCLUSIVE (never PASS) when the replica cannot be read (recentActors → undefined)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      recentActors: () => undefined,
+    });
+    expect(check.status).not.toBe(STATUS.PASS); // could-not-look ≠ clean
+  });
+
+  it("is INCONCLUSIVE (never PASS) when history is present but empty (positive control failed)", () => {
+    const check = checkSelfEchoIdentityHistory({
+      proxyMode: "enforce",
+      botIds: new Set([ORCH_ID, CLOUD_ID]),
+      cloudBotId: CLOUD_ID,
+      recentActors: () => [],
+    });
+    expect(check.status).not.toBe(STATUS.PASS);
+  });
+
+  it("off/shadow proxy mode → INFO/skip (the guard only matters under enforce)", () => {
+    for (const mode of ["off", "shadow"]) {
+      const check = checkSelfEchoIdentityHistory({
+        proxyMode: mode,
+        botIds: new Set([ORCH_ID]),
+        cloudBotId: CLOUD_ID,
+        recentActors: () => [{ actorId: CLOUD_ID, name: "Catalyst Cloud", count: 11 }],
+      });
+      expect(check.status).toBe(STATUS.INFO);
+    }
   });
 });
 

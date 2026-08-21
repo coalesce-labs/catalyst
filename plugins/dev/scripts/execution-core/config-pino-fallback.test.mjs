@@ -63,6 +63,22 @@ function stageScratch() {
   // the omission on the first full run rather than letting a host discover it — which
   // is exactly the contract the comment above states, working.
   cpSync(resolve(__dirname, "../lib/github-feed-mode.mjs"), join(libDir, "github-feed-mode.mjs"));
+  // CTL-1785: config.mjs now imports the entitlement seam — the zero-import
+  // ../lib/entitlement.mjs leaf, plus the sibling entitlement-roster.mjs (which
+  // itself pulls in entitlement-event.mjs) and execution-core/lib/canonical-event.mjs
+  // (which pulls in catalyst-resource.mjs -> host-identity.mjs + node-class.mjs, the
+  // last of which delegates back to the already-staged lib/secret-contract.mjs). Every
+  // file in that closure must be mirrored here for the same reason as the entries
+  // above — same rationale as the CTL-1929 entry that caught the prior omission.
+  cpSync(resolve(__dirname, "../lib/entitlement.mjs"), join(libDir, "entitlement.mjs"));
+  cpSync(resolve(__dirname, "entitlement-roster.mjs"), join(scratch, "entitlement-roster.mjs"));
+  cpSync(resolve(__dirname, "entitlement-event.mjs"), join(scratch, "entitlement-event.mjs"));
+  const scratchLibDir = join(scratch, "lib");
+  mkdirSync(scratchLibDir, { recursive: true });
+  cpSync(resolve(__dirname, "lib/canonical-event.mjs"), join(scratchLibDir, "canonical-event.mjs"));
+  cpSync(resolve(__dirname, "lib/catalyst-resource.mjs"), join(scratchLibDir, "catalyst-resource.mjs"));
+  cpSync(resolve(__dirname, "lib/host-identity.mjs"), join(scratchLibDir, "host-identity.mjs"));
+  cpSync(resolve(__dirname, "lib/node-class.mjs"), join(scratchLibDir, "node-class.mjs"));
   // type:module + no deps -> pino unresolvable from this directory tree.
   writeFileSync(
     join(scratch, "package.json"),

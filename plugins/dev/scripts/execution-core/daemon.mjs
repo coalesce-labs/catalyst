@@ -56,6 +56,7 @@ import {
   readCloudFeedConfig, // CTL-1847: cloud-feed dispatch-source mode
   readGithubFeedConfig, // CTL-1929: github-feed dispatch-source mode (SEPARATE knob)
   readLinearWriteProxyConfig, // CTL-1889: Linear write-proxy transport mode
+  resolveLeaseAuthorityMode, // CTL-1786: lease-authority claim gate (off/shadow/enforce)
   readLinearReplica, // CTL-1340: read-replica tier flag (inert; default off)
   getExecutor, // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
   dispatchModeForExecutor, // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
@@ -85,7 +86,7 @@ import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; //
 // Loki and Linear transports agree on what counts as a phase-boundary advance.
 import { computeLastPhaseAdvanceTs, readAllPhaseSignals } from "./signal-reader.mjs";
 import { readAdmissionState } from "./admission-state.mjs"; // CTL-1322: live admission block for the heartbeat
-import { startLivenessPublisher as realStartLivenessPublisher, localInFlightTickets, localActiveTickets } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness; CTL-1420 (#17): in-flight list; CTL-1581: active (slot-occupancy) list
+import { startLivenessPublisher as realStartLivenessPublisher, localInFlightTickets, localActiveTickets, localActiveSlotCount } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness; CTL-1420 (#17): in-flight list; CTL-1581: active (slot-occupancy) list; CTL-1864: slot count
 import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-report
 import {
   recoverStartup,
@@ -154,6 +155,7 @@ import {
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
+import { rearmClaudeAccountsFromFile } from "./claude-accounts-rearm.mjs"; // CTL-1984: account-slot live-rearm hook
 import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { getReconcileHealth } from "./reconcile-health.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
@@ -166,6 +168,7 @@ import { setLinearWriteProxy, setLinearWriteProxyResolver } from "./linear-write
 import { createLinearWriteProxy } from "./linear-write-proxy.mjs"; // CTL-1889
 import { createAgentSessionNarrator } from "./agent-session-narrator.mjs"; // CTL-1943
 import { createProxyResolver } from "./linear-write-proxy-resolve.mjs"; // CTL-1889
+import { buildTeamIdentityMismatchEvents } from "./config-identity-event.mjs"; // CTL-2076: surface a registry team-identity mismatch (CAT-52) on the unified event log
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
 // so the phantom worker-dir validity sweep is operative in production.
@@ -174,9 +177,19 @@ import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
 import { setLaneClaimGuard } from "./lane-claim-install.mjs"; // CTL-2068
 import { buildLaneClaimGuard, resolveStateMap } from "./lane-claim.mjs"; // CTL-2068
+// CTL-2070: the TIMELY per-ticket actor source (fleet write-ledger). loadLedger seeds the
+// process singleton at boot; readFleetWrite is the guard's durable-ledger reader. The scheduler
+// records writes into the SAME process singleton via defaultRecordFleetWrite (scheduler.mjs).
+import {
+  loadLedger as loadLaneClaimLedger,
+  readFleetWrite as readLaneClaimFleetWrite,
+} from "./lane-claim-write-ledger.mjs";
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
 import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
+// CTL-1786: lease-authority node entitlement, refreshed on the cluster-sync cadence so a
+// not_entitled claim refusal is a rare self-healing edge rather than the steady state.
+import { createLeaseAuthorityClient, ensureEntitled as ensureLeaseEntitled } from "./lease-authority.mjs";
 
 // CTL-1623: register the github-token row's rearm hook at module load — BEFORE either
 // call site below (both live inside startDaemon(), invoked only later) can fire. Makes
@@ -185,6 +198,12 @@ import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; //
 // hookless-degrade path (design §6). registerRearmHook is idempotent (Map.set), so a
 // module re-evaluation (a test re-importing this file) never double-registers.
 registerRearmHook("github-token", ({ env }) => rearmGithubTokenFromFile({ env, log }));
+// CTL-1984: register the claude-accounts.env row's rearm hook at module load — BEFORE
+// either cluster-sync tick or boot-time arm call can fire. On each cluster-sync tick
+// armSecret("claude-accounts.env") reads the active-slot token from disk and mutates
+// process.env.CLAUDE_CODE_OAUTH_TOKEN in-process, so an account-slot switch takes
+// effect with no daemon restart. registerRearmHook is idempotent (Map.set).
+registerRearmHook("claude-accounts.env", ({ env }) => rearmClaudeAccountsFromFile({ env, log }));
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -255,6 +274,39 @@ let _heartbeat = null;
 let _livenessPublisher = null;
 // CTL-1274: cluster-repo auto-pull timer handle (git pull --ff-only on a cadence).
 let _clusterSyncTimer = null;
+
+// CTL-1786: lease-authority node entitlement state. `_leaseClient` is built lazily; the cached
+// entitlement deadline lets ensureLeaseEntitled skip the cloud call until it is close to expiry,
+// so the (synchronous) entitle round-trip runs ~once per TTL, not every cluster-sync tick.
+let _leaseClient = null;
+let _leaseEntitlementExpiresAtMs = null;
+
+// refreshLeaseEntitlement — (re-)entitle this node when the lease gate is shadow/enforce. Cheap
+// and cached; FAIL-OPEN — a cloud outage here is logged, never thrown, because a not_entitled
+// refusal already self-heals reactively inside claimViaLease. A no-op under `off` (the default),
+// so this is inert until an operator opts a host into the lease authority.
+function refreshLeaseEntitlement() {
+  let mode;
+  try {
+    mode = resolveLeaseAuthorityMode(process.env);
+  } catch {
+    return;
+  }
+  if (mode !== "shadow" && mode !== "enforce") return;
+  try {
+    if (!_leaseClient) _leaseClient = createLeaseAuthorityClient({ env: process.env });
+    const r = ensureLeaseEntitled({
+      client: _leaseClient,
+      node: getHostName(),
+      cachedExpiresAtMs: _leaseEntitlementExpiresAtMs,
+    });
+    if (r?.refreshed && typeof r.expiresAtMs === "number") {
+      _leaseEntitlementExpiresAtMs = r.expiresAtMs;
+    }
+  } catch (err) {
+    log.warn({ err: err?.message }, "cluster-sync timer: lease entitlement refresh threw (continuing)");
+  }
+}
 // CTL-684: auto-tuner stop handle.
 let _stopAutoTuner = null;
 let _eventWatcher = null;
@@ -276,7 +328,12 @@ let _eventLogLeftover = "";
 // config layers so the self-echo guard covers every app-actor identity:
 //   1. NEW:  ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
 //   2. NEW:  ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
-//   3. OLD:  .catalyst/config.json           catalyst.monitor.linear.botUserId  (Layer-1)
+//   3. NEW:  ~/.config/catalyst/config.json  catalyst.linear.bot.cloud.botUserId (CTL-2074)
+//   4. OLD:  .catalyst/config.json           catalyst.monitor.linear.botUserId  (Layer-1)
+// The `cloud` slot names the cloud tenant's app-actor id the fleet's writes carry
+// when CATALYST_LINEAR_WRITE_PROXY=enforce (CTL-1889/ADR-0031). RECOGNITION-ONLY:
+// it enters the self-echo set but is deliberately NOT returned by readLinearBotWriteId
+// (the daemon must never self-assign as the cloud tenant).
 // Returns a Set<string>. Empty set = no filter (fail-open). Never throws. CTL-749.
 export function readLinearBotUserIds(layer1Path, layer2Path) {
   const ids = new Set();
@@ -296,6 +353,9 @@ export function readLinearBotUserIds(layer1Path, layer2Path) {
       s.add(bot.worker.botUserId);
     if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
       s.add(bot.orchestrator.botUserId);
+    // CTL-2074: cloud-proxy app-actor — recognition-only (never a self-assign id).
+    if (typeof bot?.cloud?.botUserId === "string" && bot.cloud.botUserId.length > 0)
+      s.add(bot.cloud.botUserId);
   });
   // OLD Layer-1 path: catalyst.monitor.linear.botUserId (back-compat). CTL-749.
   addFromPath(layer1Path, (p, s) => {
@@ -1423,8 +1483,13 @@ export function startDaemon({
     // every team against the first registry entry's map judges tickets against names their
     // own writer never uses.
     const laneClaimTeamPaths = new Map();
+    // CTL-2076: read the registry identity ONCE and share it between the path map
+    // build below and the mismatch scan after guard install — a throwing registry
+    // still leaves an empty [] so both paths degrade gracefully.
+    let laneClaimProjects = [];
     try {
-      for (const proj of listProjectsFn() ?? []) {
+      laneClaimProjects = listProjectsFn() ?? [];
+      for (const proj of laneClaimProjects) {
         if (proj?.team && proj?.repoRoot) {
           laneClaimTeamPaths.set(
             String(proj.team).toUpperCase(),
@@ -1470,6 +1535,44 @@ export function startDaemon({
       String(process.env.CATALYST_LANE_CLAIM_DISPATCH_GUARD ?? "")
         .trim()
         .toLowerCase() !== "off";
+    // ── CTL-2070: the TIMELY per-ticket actor source (fleet write-ledger). ────────────────────
+    // Default ON; only an explicit "off" disables it (same ethos as the dispatch veto above).
+    const laneClaimTimelyEnabled =
+      String(process.env.CATALYST_LANE_CLAIM_TIMELY_SOURCE ?? "")
+        .trim()
+        .toLowerCase() !== "off";
+    // Recency bound (seconds): env override > Layer-1 catalyst.orchestration.laneClaim
+    // .timelyRecencySeconds > default 300. Beyond this window the (now-caught-up) issue_history
+    // ladder governs, so the new REFUSE is bounded to the exact claim-to-dispatch window.
+    let laneClaimRecencySeconds = 300;
+    const laneClaimRecencyEnv = Number(process.env.CATALYST_LANE_CLAIM_TIMELY_RECENCY_SECONDS);
+    if (Number.isFinite(laneClaimRecencyEnv) && laneClaimRecencyEnv > 0) {
+      laneClaimRecencySeconds = laneClaimRecencyEnv;
+    } else {
+      try {
+        const cfg = JSON.parse(laneClaimReadFile(configPath));
+        const fromCfg = cfg?.catalyst?.orchestration?.laneClaim?.timelyRecencySeconds;
+        if (Number.isFinite(fromCfg) && fromCfg > 0) laneClaimRecencySeconds = fromCfg;
+      } catch {
+        /* no Layer-1 override → keep the default */
+      }
+    }
+    const laneClaimRecencyMs = laneClaimRecencySeconds * 1000;
+    // Seed the durable write-ledger singleton at boot. Prune window is a comfortable multiple of
+    // the recency bound (entries stay well past the window that can act on them, but the file is
+    // still bounded to roughly one entry per recently-moving ticket).
+    let laneClaimLedgerEntries = 0;
+    if (laneClaimTimelyEnabled) {
+      try {
+        const loaded = loadLaneClaimLedger(undefined, {
+          maxAgeMs: laneClaimRecencyMs * 4,
+          nowMs: Date.now(),
+        });
+        laneClaimLedgerEntries = loaded?.size ?? 0;
+      } catch {
+        /* a ledger load failure must not block boot — the guard degrades to CTL-2068 */
+      }
+    }
     const laneClaimGuardInstance = buildLaneClaimGuard({
       stateMap: laneClaimStateMap,
       stateMapForTicket: laneClaimStateMapForTicket,
@@ -1478,6 +1581,13 @@ export function startDaemon({
       readCurrentState: replicaReader ? (t) => replicaReader.lookup(t)?.state ?? null : undefined,
       readFleetSeen: replicaReader ? (t, ids) => replicaReader.fleetEverWroteState(t, ids) : undefined,
       dispatchVeto: laneClaimDispatchVeto,
+      // CTL-2070 — the timely source. When disabled, readFleetWrite is left undefined so the
+      // guard is EXACTLY CTL-2068 (the timely block is a no-op on `fleetWrite === undefined`).
+      readFleetWrite: laneClaimTimelyEnabled ? (t) => readLaneClaimFleetWrite(t) : undefined,
+      readCurrentUpdatedAt:
+        laneClaimTimelyEnabled && replicaReader ? (t) => replicaReader.currentUpdatedAt(t) : undefined,
+      nowMs: () => Date.now(),
+      recencyMs: laneClaimRecencyMs,
     });
     setLaneClaimGuard(laneClaimGuardInstance);
     // ⛔ CTL-2068 (Codex P2): `ranked_states` is the guard's OWN rank size, never the raw
@@ -1491,6 +1601,11 @@ export function startDaemon({
       registry_teams: laneClaimTeamPaths.size,
       history_source: replicaReader ? "replica" : "none",
       dispatch_veto: laneClaimDispatchVeto,
+      // CTL-2070: report the TIMELY source truthfully — the loaded ledger ENTRY COUNT, not merely
+      // "enabled" (the CTL-2068 ranked_states false-healthy lesson: count what the guard can
+      // actually use). A fresh host reads `write-ledger` / 0 until the daemon writes a transition.
+      timely_source: laneClaimTimelyEnabled ? "write-ledger" : "off",
+      ledger_entries: laneClaimLedgerEntries,
     };
     if (laneClaimFields.ranked_states === 0) {
       log.warn(
@@ -1499,6 +1614,21 @@ export function startDaemon({
       );
     } else {
       log.info(laneClaimFields, "ctl-2068: lane-claim guard installed");
+    }
+
+    // CTL-2076: a registry entry whose repoRoot declares a DIFFERENT teamKey makes
+    // the lane-claim guard abstain (UNRANKED_CURRENT) for every ticket of that team.
+    // doctor's registry-team-identity (CAT-52) already WARNs, but only in an advisory
+    // section it never FAILs on — so put it on the unified event log too, where the
+    // broker/HUD/orch-monitor/Loki (a lane and a human) actually read. Best-effort:
+    // defaultAppendOperatorEvent never throws.
+    try {
+      for (const evt of buildTeamIdentityMismatchEvents(laneClaimProjects)) {
+        defaultAppendOperatorEvent(evt);
+        log.warn(evt.payload, "ctl-2076: registry entry declares a different Linear team (CAT-52)");
+      }
+    } catch {
+      /* best-effort — a mismatch scan must never block boot */
     }
 
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
@@ -1924,6 +2054,10 @@ export function startDaemon({
         // the Workers deck renders (in_flight also counts parked dirs, which
         // hold no slot).
         activeTicketsFn: () => localActiveTickets(getHostName(), { orchDir }),
+        // CTL-1864: publish the SLOT count (liveCount + countYieldedOccupancy), not the
+        // ticket count, so a peer's freeSlots matches this host's scheduler occupancy.
+        // Reuses the SAME functions the scheduler's occupancy uses — cannot drift.
+        activeSlotCountFn: () => localActiveSlotCount(getHostName(), { orchDir }),
         // CTL-1551: carry the live slot ceiling so a peer's monitor can render
         // per-host capacity from Loki (the Linear-anchor capacity transport is
         // retired in loki mode). Uses the SAME readMaxParallel chokepoint the
@@ -2004,6 +2138,13 @@ export function startDaemon({
         // via `log`. A wrapping try/catch here would only ever imply protection the callee
         // already provides.
         armSecret("github-token", { env: process.env });
+        // CTL-1984: re-arm the account-slot token on the same tick. armSecret never throws;
+        // the hook closure (rearmClaudeAccountsFromFile) logs+swallows its own errors.
+        armSecret("claude-accounts.env", { env: process.env });
+        // CTL-1786: keep this node entitled with the lease authority on the same cadence, so a
+        // claim's not_entitled refusal is a rare self-healing edge, not the steady state. Cached
+        // + fail-open (see refreshLeaseEntitlement); a strict no-op when the gate is off.
+        refreshLeaseEntitlement();
       }, clusterSyncIntervalMs);
       _clusterSyncTimer.unref?.();
     }

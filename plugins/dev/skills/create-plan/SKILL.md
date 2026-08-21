@@ -386,6 +386,8 @@ context):
 
 - **At planning start** (Step 1): Update ticket status to `stateMap.planning` from config
   using Linearis CLI (run `linearis issues usage` for syntax).
-- **After plan saved**: Add a comment with the plan path using Linearis CLI
-  (run `linearis comments usage` for syntax).
-- If Linearis CLI not available, skip silently and continue planning
+- **After plan saved**: Add a comment with the plan path — this is an agent-authored comment,
+  so post it through the app actor (`linear-reply.mjs --as <role>`, or the
+  `linear-comment-post.sh` helper), never bare `linearis issues discuss`/`reply` (those post as
+  the human — see the `linearis` skill's "Comment on a ticket" section).
+- If the tooling is not available, skip silently and continue planning

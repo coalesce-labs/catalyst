@@ -39,10 +39,13 @@ resolve_cluster_roster_size() {
 
   # The path travels by env var, not argv, so a path containing spaces or quotes
   # cannot break out of the -e program.
+  # CTL-1785: this gates thoughts-sync on a multi-host TOPOLOGY decision (are there
+  # peers to sync with) — EXISTENCE, not entitlement. An unentitled-but-present host
+  # still syncs thoughts (observability). `off` mode: getExistenceHosts() === getClusterHosts().
   n="$(CATALYST_ROSTER_CFG_MJS="$cfg_mjs" bun -e '
     import(process.env.CATALYST_ROSTER_CFG_MJS)
       .then((m) => {
-        const hosts = m.getClusterHosts();
+        const hosts = m.getExistenceHosts();
         process.stdout.write(String(Array.isArray(hosts) ? hosts.length : 1));
       })
       .catch(() => {});

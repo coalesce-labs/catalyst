@@ -249,6 +249,9 @@ jobs:
       ${{ !cancelled() && (needs.detect-changes.result != 'success' ||
       needs.detect-changes.outputs.relevant == 'true') }}
     runs-on: ubuntu-latest
+    # CTL-2079: bound the job so a hung step reds fast, never rides GitHub's 6h
+    # default (timeout-minutes: 360). Healthy runs finish well under 20 min.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: plugins/dev/scripts/execution-core
@@ -336,6 +339,9 @@ jobs:
         run: bash plugins/dev/scripts/__tests__/catalyst-backup.test.sh
 
       - name: direnv fleet readiness test (CTL-1944)
+        # CTL-2079: the named hang site — red fast on an apt-lock rather than
+        # riding the job ceiling. A healthy apt install + the two suites run in ~1-2 min.
+        timeout-minutes: 8
         # The property under test is not "is direnv installed" — it is that every way of being
         # NOT-owner-ready renders RED. Two regression guards carry the weight: a BLOCKED .envrc
         # must not read as a clean host (the allowed-state is read positively from `Found RC
@@ -348,8 +354,12 @@ jobs:
         # this step failing to provision direnv is a RED result rather than a quiet pass.
         working-directory: .
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq direnv
+          # CTL-2079: non-interactive + dpkg-lock-bounded so an apt-lock wedge
+          # (contention with the runner's unattended-upgrades) fails fast with a
+          # clear error instead of hanging indefinitely.
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq direnv
           direnv version
           bash plugins/dev/scripts/__tests__/check-direnv-fleet.test.sh
           # CTL-1956: the provisioning half. The check
@@ -468,9 +478,13 @@ jobs:
         # two assertions SKIP (not fail) when zsh is absent, and this workflow's other
         # zsh install lands hundreds of lines later — so without this step the required
         # check could pass without ever exercising the shell that caused the regression.
-        run:
-          command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y
-          --no-install-recommends zsh)
+        # CTL-2079: install zsh only when absent, but non-interactive + dpkg-lock-bounded
+        # so an apt-lock wedge fails fast instead of hanging.
+        run: |
+          command -v zsh >/dev/null 2>&1 || \
+            (export DEBIAN_FRONTEND=noninteractive && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 update -qq && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends zsh)
 
       - name: cloud-sync token probe test
         working-directory: plugins/dev/scripts
@@ -519,6 +533,16 @@ jobs:
         # free (mktemp creates 0600 and mv preserves it, verified by mutation).
         working-directory: plugins/dev/scripts
         run: bash __tests__/setup-cloud-replica.test.sh
+
+      - name: setup-catalyst.sh stateMap preservation (CTL-2076)
+        # CTL-2076: this workflow allowlists shell suites by name rather than globbing
+        # __tests__/, so a new suite runs in required CI only once registered here.
+        # Guards both clobber paths setup_project_config / update_config_with_linear_states
+        # can take over a committed, non-empty linear.stateMap on a credentialed re-run —
+        # the regression this ticket fixes. Carries its own positive control (T5: a fresh
+        # install still refreshes the map from Linear, so the guard is not over-broad).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/setup-catalyst-config-preserve.test.sh
 
       - name: host write-credential classifier parity (CTL-2045)
         # ⛔ Codex P2 on #3706, and the important one. This suite is
@@ -712,6 +736,18 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test deployment-mode.test.mjs
 
+      - name: entitlement resolver + provider unit tests (bun, CTL-1785)
+        # CTL-1785 W13: lib/entitlement.mjs is a deliberately ZERO-IMPORT leaf
+        # (node built-ins only, loadable by bare-Node catalyst doctor) that lives
+        # OUTSIDE the execution-core/ tree the "Run stable unit tests" step below
+        # is scoped to — so it gets its own step, exactly like the deployment-mode
+        # leaf above. Registered in the SAME change that adds the suite (the
+        # four-times-burned exec-core-stable-test-allowlist lesson). Positive
+        # control: `grep -n entitlement.test .github/workflows/execution-core-tests.yml`
+        # returns this run: line.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test entitlement.test.mjs
+
       - name: ask-verb unit tests (bun, CTL-1922 / CTL-1944)
         # ⛔ `ask-verbs.test.mjs` shipped with #3509 and was registered in NO workflow —
         # 20 tests that had never run in CI. Verified with the instrument note above:
@@ -872,8 +908,16 @@ jobs:
         # `bun test` list below for the same reason as its neighbours: that step's
         # cwd is execution-core/ and these modules need the broker package's pino.
         # Measured 7 pass / 0 fail on this branch (new file; absent at merge base).
+        # CTL-1785: namespace-parity.test.mjs joins the same hand-enumerated list.
+        # `grep -rln namespace-parity .github/workflows/` returned NOTHING before
+        # this — the cross-producer namespace contract (CTL-1142) that keeps every
+        # exec-core event name (now incl. the entitlement.* trio) off the broker's
+        # protected namespace had never run in required CI, so registering the new
+        # names there would have shipped inert (the exact unlisted-suite trap this
+        # step documents). Measured green on origin/main (9 pass) and this branch
+        # (10 pass), so it imports no pre-existing red like fence-held-fold would.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs
+        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs
 
       - name: plugin-refresh + lock-resolution-audit tests (CTL-1831)
         # `grep plugin-refresh .github/workflows/` returned only two COMMENTS
@@ -1028,9 +1072,13 @@ jobs:
         # without this step the required check could pass without ever exercising
         # the zsh path. Installed explicitly rather than assumed present on the
         # runner image so the regression coverage doesn't silently degrade to a skip.
-        run:
-          command -v zsh >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y
-          --no-install-recommends zsh)
+        # CTL-2079: install zsh only when absent, but non-interactive + dpkg-lock-bounded
+        # so an apt-lock wedge fails fast instead of hanging.
+        run: |
+          command -v zsh >/dev/null 2>&1 || \
+            (export DEBIAN_FRONTEND=noninteractive && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 update -qq && \
+             sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends zsh)
 
       - name: phase-artifact-gate contract + zsh regression test
         # Covers match_thoughts_artifact (tail/slug/case forms, cross-ticket
@@ -1173,6 +1221,9 @@ jobs:
             cluster-claim-sync.test.mjs \
             cluster-claim.test.mjs \
             cluster-attachment-transport.test.mjs \
+            lease-authority.test.mjs \
+            lease-authority-claim.test.mjs \
+            lease-authority-gate.test.mjs \
             cluster-heartbeat.test.mjs \
             cluster-heartbeat-capacity.test.mjs \
             comms-drain.test.mjs \
@@ -1275,9 +1326,11 @@ jobs:
             linear-remint.test.mjs \
             linear-state-write-event.test.mjs \
             linear-write-echo.test.mjs \
+            self-echo-negative-control.test.mjs \
             linear-write.test.mjs \
             lane-claim.test.mjs \
             lane-claim-wiring.test.mjs \
+            lane-claim-write-ledger.test.mjs \
             linear-write-proxy.test.mjs \
             linear-write-proxy-wiring.test.mjs \
             linear-write-proxy-resolve.test.mjs \
@@ -1312,6 +1365,9 @@ jobs:
             signal-reader.test.mjs \
             stale-pr-rescue-timer.test.mjs \
             stale-pr-rescue.test.mjs \
+            __tests__/escalation-router.test.mjs \
+            __tests__/stale-pr-rescue-escalate-router.test.mjs \
+            __tests__/no-direct-human-escalation.test.mjs \
             stalled-detector.test.mjs \
             terminal-state.test.mjs \
             test-setup.test.mjs \
@@ -1356,9 +1412,14 @@ jobs:
             updater/updater-tracing.test.mjs \
             service-manifest.test.mjs \
             github-auth-preflight.test.mjs \
+            claude-accounts-rearm.test.mjs \
             github-token-candidates-legacy-parity.test.mjs \
             github-quota.test.mjs \
             github-quota-timer.test.mjs \
             cluster-sync.test.mjs \
             reconstruct-ticket-state.test.mjs \
-            hosts-json-retired.test.mjs
+            hosts-json-retired.test.mjs \
+            entitlement-hosts.test.mjs \
+            entitlement-shadow.test.mjs \
+            entitlement-audit.test.mjs \
+            entitlement-enforce.test.mjs

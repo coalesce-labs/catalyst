@@ -174,6 +174,44 @@ await t("a heartbeat exists after a run and names the pid and state", async () =
   s.cleanup();
 });
 
+await t("the heartbeat is REFRESHED while a long session runs, so a live role is not read as silent", async () => {
+  const s = scratch();
+  seedRole(s.env, "steward-live", { activity: {} });
+  let bootTs = null, midTs = null, midState = null;
+  await superviseRole("steward-live", {
+    env: s.env, sleep: noSleep, log: () => {},
+    // Refresh far faster than the real 5-minute cadence so the test stays quick.
+    livenessRefreshMs: 5,
+    runSession: async () => {
+      bootTs = readHeartbeat("steward-live", s.env).ts; // the boundary (pre-session) beat
+      await new Promise((r) => setTimeout(r, 60));       // a "long" (>refresh) session
+      const hb = readHeartbeat("steward-live", s.env);
+      midTs = hb.ts;
+      midState = hb.state;
+      return { exitCode: 0, sessionId: "sess-live" };
+    },
+  });
+  assert.equal(midState, "running", "the in-session refresh keeps the state 'running'");
+  assert.equal(midTs > bootTs, true, "the in-session heartbeat must be newer than the boundary one");
+  s.cleanup();
+});
+await t("livenessRefreshMs:0 disables the in-session refresh (the boundary beat is the only one)", async () => {
+  const s = scratch();
+  seedRole(s.env, "steward-norefresh", { activity: {} });
+  let bootTs = null, midTs = null;
+  await superviseRole("steward-norefresh", {
+    env: s.env, sleep: noSleep, log: () => {}, livenessRefreshMs: 0,
+    runSession: async () => {
+      bootTs = readHeartbeat("steward-norefresh", s.env).ts;
+      await new Promise((r) => setTimeout(r, 30));
+      midTs = readHeartbeat("steward-norefresh", s.env).ts;
+      return { exitCode: 0, sessionId: "sess-nr" };
+    },
+  });
+  assert.equal(midTs, bootTs, "with refresh disabled the heartbeat does not advance mid-session");
+  s.cleanup();
+});
+
 console.log("9. the resume prompt tells the role it was restarted");
 await t("a restarted role is told to state what it resumed from", () => {
   const p = buildResumePrompt({ role: "steward", scope: "P13", skill: "catalyst-dev:steward" }, { resumedFrom: "handoff.md", reason: "529" });

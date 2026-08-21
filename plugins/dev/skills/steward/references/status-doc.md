@@ -4,7 +4,11 @@ One Linear **document per project**, attached to the project, titled exactly `St
 the human's one screen for that scope. It exists **before your first dispatch** — a project with tickets
 in flight and no status doc reads, correctly, as "nobody is running this".
 
-## Template (COORD-178 — headings exactly, in this order)
+> **Every status doc — initiative and every project — is REPLACED/RECREATED in full on each
+> refresh.** It is a concise exec summary of NOW, not an append log of history. Never add a new
+> section or append to an existing one; write the whole document from scratch on every update.
+
+## Template (CTL-2094 / COORD-380 — five sections, in this order; ≤60 lines / ~3K chars)
 
 The first line under the title, always:
 
@@ -12,33 +16,28 @@ The first line under the title, always:
 > Last updated: <America/Chicago timestamp> by <steward/scope>
 ```
 
-Then, exactly these headings:
+Then, exactly these five headings:
 
 ```markdown
-## Headline
-One sentence: where the work is versus the outcome, and the landing date.
+## Goal right now
+One sentence: the outcome this work is driving to, and the landing date.
 
-## Traffic light
-🟢 / 🟡 / 🔴 — and why. The colour without the reason is decoration.
+## Needs from Ryan
+Live items only. Each row links to an ask; a row with no ask does not belong.
 
-## Done since last update
-Links. Merged PRs, closed tickets, decisions recorded.
+| what | default if silent |
 
-## In flight
-| ticket | owner | state | ETA |
+## Current status
+One line per leg.
 
-## Blocked / needs Ryan
-| ticket | what | default if silent |
-Every row here links to an ask. A row with no ask does not belong.
+## Next
+Numbered, ≤5.
 
 ## Risks
 Each with its mitigation. A risk with no mitigation is a complaint.
-
-## Next 24 h
-Numbered, and short enough that the next update can be checked against it.
 ```
 
-One screen. If it does not fit, the Headline is doing too little work.
+≤60 lines / ~3K chars. If it does not fit, the Goal is doing too little work.
 
 ## Cadence
 
