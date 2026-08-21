@@ -6662,29 +6662,46 @@ function defaultListCapFiles(orchDir) {
 // defaultReadEligibleIdentifiers — the set of board-eligible ticket identifiers,
 // read straight off the on-disk eligible projections (<eligibleDir>/*.json, shape
 // { tickets: [{identifier, ...}] }). node:fs only — the projection is the
-// bare-node-safe eligible source (never bun:sqlite). Malformed files are skipped.
+// bare-node-safe eligible source (never bun:sqlite).
+//
+// CTL-2111 (Codex #3824 round-2 P1): THREE-VALUED, for the same reason
+// `defaultListCapFiles` above is. This read decides whether a tripped cap renders
+// as WARN ("board-eligible — this host will not triage it") or INFO ("not
+// currently board-eligible — parked"), so a silent read failure does not merely
+// lose a ticket from a list: it DOWNGRADES a real alarm into a reassuring INFO
+// that asserts the very thing the reader could not check. A readdir that fails on
+// EACCES/EIO, or a projection file that will not read or parse, is "could not
+// look" — carried out in `unreadable` so the caller can say INCONCLUSIVE.
+// A MISSING directory stays conclusive: no projections means nothing is eligible.
 function defaultReadEligibleIdentifiers() {
-  const set = new Set();
+  const identifiers = new Set();
+  const unreadable = [];
+  const dir = getEligibleDir();
   let files;
   try {
-    files = readdirSync(getEligibleDir());
-  } catch {
-    return set; // no dir → empty (nothing eligible)
+    files = readdirSync(dir);
+  } catch (err) {
+    // ENOENT is the only conclusive absence — nothing is projected as eligible.
+    if (err?.code === "ENOENT") return { identifiers, unreadable };
+    return { identifiers, unreadable: [`${dir} (${err?.code || "readdir failed"})`] };
   }
   for (const f of files) {
     if (!f.endsWith(".json")) continue;
     try {
-      const proj = JSON.parse(readFileSync(join(getEligibleDir(), f), "utf8"));
+      const proj = JSON.parse(readFileSync(join(dir, f), "utf8"));
       if (Array.isArray(proj?.tickets)) {
         for (const t of proj.tickets) {
-          if (t && typeof t.identifier === "string") set.add(t.identifier);
+          if (t && typeof t.identifier === "string") identifiers.add(t.identifier);
         }
+      } else {
+        // Readable but not the expected shape — its tickets are unknown, not absent.
+        unreadable.push(`${f} (no tickets array)`);
       }
-    } catch {
-      /* malformed/unreadable → skip */
+    } catch (err) {
+      unreadable.push(`${f} (${err?.code || "unparseable"})`);
     }
   }
-  return set;
+  return { identifiers, unreadable };
 }
 
 // checkTriageCapParked — report every tripped triage re-dispatch cap this host
@@ -6725,8 +6742,23 @@ export function checkTriageCapParked(deps = {}) {
     return [mkCheck("triage-cap-parked", STATUS.PASS, "no triage-capped tickets on this host")];
   }
 
-  const eligibleSet = isEligible ? null : readEligibleIdentifiers();
-  const eligibleOf = isEligible ?? ((t) => eligibleSet.has(t));
+  // CTL-2111 (Codex #3824 round-2 P1): eligibility is THREE-VALUED — true /
+  // false / null ("could not look"). Accept both the structured
+  // {identifiers, unreadable} shape and a bare Set (an injected seam, which
+  // carries no doubt and so stays conclusive — unchanged behaviour).
+  const eligRaw = isEligible ? null : readEligibleIdentifiers();
+  const eligibleSet = eligRaw instanceof Set ? eligRaw : (eligRaw?.identifiers ?? null);
+  const eligibleUnreadable = eligRaw instanceof Set ? [] : (eligRaw?.unreadable ?? []);
+  const eligibleOf =
+    isEligible ??
+    ((t) => {
+      // PRESENCE is positive evidence regardless of any unreadable sibling file —
+      // the ticket was found. Only an ABSENCE is in doubt when part of the
+      // projection could not be read, because the missing file may be the one
+      // that listed it.
+      if (eligibleSet?.has(t)) return true;
+      return eligibleUnreadable.length > 0 ? null : false;
+    });
   const roster = getRoster() ?? [];
   const self = _getHostName();
   const multiHost = roster.length > 1;
@@ -6742,12 +6774,22 @@ export function checkTriageCapParked(deps = {}) {
       ` (also reset the fence via 'node cluster-claim.mjs reset-triage-attempt ${ticket}',` +
       ` and if the per-ticket Linear write budget is exhausted, clear the needs-human label` +
       ` + the linear-write-budget.json byTicket entry)`;
+    // CTL-2111 (Codex #3824 round-2 P1): `elig === null` is "could not determine
+    // eligibility", and it must NOT fall to the INFO/parked branch — that branch
+    // states a negative ("not currently board-eligible") the reader was unable to
+    // verify. Unknown is reported at WARN, naming the unreadable projections.
+    const eligUnknown = elig === null || elig === undefined;
     checks.push(
       mkCheck(
         "would-triage-capped",
-        elig ? STATUS.WARN : STATUS.INFO,
+        eligUnknown || elig ? STATUS.WARN : STATUS.INFO,
         `${ticket} tripped its triage re-dispatch cap (cappedAt=${cappedAt})` +
-          (elig ? " and is board-eligible — this host will not triage it" : " (not currently board-eligible — parked)") +
+          (eligUnknown
+            ? ` — board-eligibility INCONCLUSIVE (could not read ${eligibleUnreadable.length} eligible projection(s): ${eligibleUnreadable.join(", ")});` +
+              ` this host may be refusing to triage a ready ticket`
+            : elig
+              ? " and is board-eligible — this host will not triage it"
+              : " (not currently board-eligible — parked)") +
           ` — ${reArm}`,
       ),
     );

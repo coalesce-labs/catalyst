@@ -659,18 +659,37 @@ export function handleStateChangedEvent(
       // →Triage — one-shot dispatch the triage phase agent. NOT the eligible
       // set: a Triage ticket is never scheduler-pulled. Idempotent downstream
       // (phase-agent-dispatch no-ops an existing signal file).
-      // CTL-731: skipped during the fold-only boot drain (no eligible fold here,
-      // so the entire branch is a no-op when foldOnly).
+      // CTL-731: the DISPATCH is skipped during the fold-only boot drain (there is
+      // no eligible fold in this branch). The cap re-arm below is not a dispatch and
+      // deliberately still runs — see the round-2 note on it.
+      // CTL-2111: a human re-queue newer than the cap's cappedAt re-arms the
+      // tripped triage cap BEFORE the dispatch below, so the sweep proceeds.
+      // Fail-open, never blocks the dispatch; single-host skips the fence reset.
+      //
+      // CTL-2111 (Codex #3824 round-2 P1): deliberately OUTSIDE the `!foldOnly`
+      // gate. Re-arming is a state RECONCILIATION — it drops a stale local latch,
+      // exactly like the `upsertTicket` eligibility fold in the sibling branch
+      // below — not a dispatch, so CTL-731's "boot drain folds only, no dispatch"
+      // rule does not cover it. Gated, the boot-gap re-queue was lost outright:
+      // a human re-queues a capped ticket while the daemon is down, the resumed
+      // `startMonitor` consumes that state_changed with `foldOnly:true` and
+      // ADVANCES THE DURABLE CURSOR past it, so the one event that could re-arm
+      // the cap is never replayed with side effects. The startup sweep then read
+      // the unchanged cap and re-parked the ticket, leaving it stuck until some
+      // later human transition happened to arrive while the daemon was up.
+      //
+      // Safe to run during the drain because the helper is self-limiting and
+      // idempotent: it no-ops unless a `cappedAt` is present AND the event
+      // post-dates it, and the re-arm itself drops `cappedAt` — so every replayed
+      // event after the first returns `not-capped`. It starts no worker; the
+      // dispatch below stays gated.
+      if (orchDir) {
+        rearmTriageCapOnRequeue(orchDir, parsed.identifier, {
+          eventTs: parsed.ts,
+          multiHost: (hosts ?? getExistenceHosts()).length > 1,
+        });
+      }
       if (!foldOnly) {
-        // CTL-2111: a human re-queue newer than the cap's cappedAt re-arms the
-        // tripped triage cap BEFORE the dispatch below, so the sweep proceeds.
-        // Fail-open, never blocks the dispatch; single-host skips the fence reset.
-        if (orchDir) {
-          rearmTriageCapOnRequeue(orchDir, parsed.identifier, {
-            eventTs: parsed.ts,
-            multiHost: (hosts ?? getExistenceHosts()).length > 1,
-          });
-        }
         dispatchTriage(parsed.identifier, {
           dispatch,
           orchDir,
@@ -729,7 +748,10 @@ export function handleStateChangedEvent(
       // so it re-arms even when a stale triage.json is present (the CTC-750 case:
       // the ticket had a triage.json but was capped and re-queued). Fail-open;
       // never blocks the dispatch below.
-      if (!foldOnly && orchDir && parsed.toState === query.status) {
+      // CTL-2111 (Codex #3824 round-2 P1): `!foldOnly` dropped here for the same
+      // reason as the →Triage branch above — a boot-gap re-queue is consumed by
+      // the fold-only drain, which advances the cursor and never replays it.
+      if (orchDir && parsed.toState === query.status) {
         rearmTriageCapOnRequeue(orchDir, parsed.identifier, {
           eventTs: parsed.ts,
           multiHost: (hosts ?? getExistenceHosts()).length > 1,

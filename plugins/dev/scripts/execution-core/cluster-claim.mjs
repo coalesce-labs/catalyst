@@ -730,6 +730,32 @@ export async function runCli(
     }
     case "reset-triage-attempt": {
       const [ticket] = rest;
+      // CTL-2111 (Codex #3824 round-2 P1): under `enforce` the attachment counter is
+      // INAPPLICABLE, not merely absent. `claimViaLease` bypasses `writeClaim`, so no
+      // fence attachment is ever created and `resetTriageAttemptCount`'s `readClaim`
+      // returns null — reporting `{count:null}`, which is this CLI's word for "the
+      // reset did not happen". `rearmTriageCapOnRequeue` requires exactly 0 before it
+      // drops the host-local latch, so on a lease-enforced fleet a capped ticket could
+      // NEVER be re-armed by a human re-queue: every attempt returned
+      // `fence-reset-unconfirmed` forever.
+      //
+      // There is nothing to reset here, and that is a confirmed state rather than a
+      // failed write — the same counter is inert on the READ side too
+      // (`readTriageAttemptCount` finds no attachment, so `fleetTriageDispatchCount`
+      // fails open to the host-local count and the fence never gates anything under
+      // enforce). So report the reset as satisfied, with `inapplicable` naming WHY it
+      // was a no-op so the zero is never mistaken for a real attachment write.
+      //
+      // Deliberately NOT the `fence-check` treatment above: that throws because it
+      // would otherwise fabricate a STALE verdict that suppresses real writes — the
+      // fail-safe direction there is to decline. Here declining is what strands the
+      // ticket, and the honest answer ("no fleet counter exists to hold this cap") is
+      // available without inventing anything.
+      const mode = leaseMode ?? resolveLeaseAuthorityMode(env);
+      if (mode === "enforce") {
+        process.stdout.write(JSON.stringify({ count: 0, inapplicable: "lease-authority" }) + "\n");
+        return 0;
+      }
       const count = await resetTriageAttemptCount(ticket, { post, transport: t });
       process.stdout.write(JSON.stringify({ count }) + "\n");
       return 0;

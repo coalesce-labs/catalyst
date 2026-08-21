@@ -20,6 +20,7 @@ import {
   fleetTriageDispatchCount,
   markTriageCapped,
   rearmTriageCapOnRequeue,
+  handleStateChangedEvent,
 } from "./monitor.mjs";
 
 let orchDir;
@@ -353,5 +354,128 @@ describe("rearmTriageCapOnRequeue — human re-queue re-arm (CTL-2111)", () => {
     expect(res.rearmed).toBe(true);
     expect(readTriageDispatchCount(orchDir, "CTL-2111")).toBe(0);
     expect(readTriageDispatchRecord(orchDir, "CTL-2111").cappedAt).toBeUndefined();
+  });
+});
+
+// ── CTL-2111 (Codex #3824 round-2 P1): boot-gap drain must still re-arm ────────
+//
+// The defect: a human re-queues a CAPPED ticket while the daemon is down. On
+// restart, `startMonitor` resumes from its durable cursor and consumes that
+// `state_changed` with `foldOnly:true`. The re-arm used to sit INSIDE the
+// `!foldOnly` gate, so it was skipped — while the cursor advanced past the event
+// regardless. The startup sweep then read the unchanged cap and re-parked the
+// ticket, and because the event is never replayed with side effects the re-arm
+// could never happen: the ticket stayed capped until some later human transition
+// happened to land while the daemon was up.
+//
+// These drive the REAL `handleStateChangedEvent` against a temp registry
+// (CATALYST_DIR), so they exercise the actual call-site gate rather than the
+// helper in isolation.
+describe("handleStateChangedEvent — cap re-arm during the fold-only boot drain (CTL-2111 round-2 P1)", () => {
+  let dir;
+  let prevCatalystDir;
+
+  const TEAM = "CTL";
+  const TICKET = "CTL-2111";
+  const CAPPED_AT = "2026-08-21T10:00:00.000Z";
+  const REQUEUE_TS = "2026-08-21T11:00:00.000Z"; // NEWER than cappedAt
+
+  // A tripped-cap record: count at the cap plus the `cappedAt` latch.
+  const writeCapped = (orchDir) => {
+    const d = pathJoin(orchDir, ".triage-dispatch-counts");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      pathJoin(d, `${TICKET}.json`),
+      JSON.stringify({ count: 3, cappedAt: CAPPED_AT, lastDispatchAt: CAPPED_AT }),
+    );
+  };
+  const readCap = (orchDir) =>
+    JSON.parse(readFileSync(pathJoin(orchDir, ".triage-dispatch-counts", `${TICKET}.json`), "utf8"));
+
+  const stateEvent = (toState) => ({
+    ts: REQUEUE_TS,
+    name: "linear.issue.state_changed",
+    body: { payload: { ticket: TICKET, teamKey: TEAM, toState } },
+  });
+
+  beforeEach(() => {
+    dir = mkdtempSync(pathJoin(tmpdir(), "ctl2111-folddrain-"));
+    const orchDir = pathJoin(dir, "execution-core");
+    mkdirSync(orchDir, { recursive: true });
+    writeFileSync(
+      pathJoin(orchDir, "registry.json"),
+      JSON.stringify({
+        projects: [
+          { team: TEAM, repoRoot: dir, eligibleQuery: { status: "Todo", triageStatus: "Triage" } },
+        ],
+      }),
+    );
+    prevCatalystDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+  });
+
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // The seams that would otherwise reach Linear / spawn a worker.
+  const inertOpts = (orchDir, dispatched) => ({
+    orchDir,
+    dispatch: (...a) => dispatched.push(a),
+    applyTriageStatus: () => {},
+    appendEvent: () => {},
+    liveBackgroundCount: () => 0,
+    readMaxParallelFn: () => 4,
+    hosts: ["only-host"], // single-host → the fence reset is skipped entirely
+    hostName: "only-host",
+  });
+
+  for (const toState of ["Todo", "Triage"]) {
+    test(`foldOnly:true still re-arms a capped ticket on a newer →${toState} re-queue`, () => {
+      const orchDir = pathJoin(dir, "execution-core");
+      writeCapped(orchDir);
+      const dispatched = [];
+
+      handleStateChangedEvent(stateEvent(toState), {
+        ...inertOpts(orchDir, dispatched),
+        foldOnly: true,
+      });
+
+      // The latch is gone → the next sweep re-dispatches triage.
+      const rec = readCap(orchDir);
+      expect(rec.cappedAt).toBeUndefined();
+      expect(rec.count).toBe(0);
+      // …and CTL-731 is preserved: the drain still dispatched nothing.
+      expect(dispatched).toEqual([]);
+    });
+  }
+
+  test("foldOnly:true does NOT re-arm when the re-queue PRE-dates the cap (guard intact)", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    const dispatched = [];
+    const stale = { ...stateEvent("Todo"), ts: "2026-08-21T09:00:00.000Z" }; // older
+
+    handleStateChangedEvent(stale, { ...inertOpts(orchDir, dispatched), foldOnly: true });
+
+    expect(readCap(orchDir).cappedAt).toBe(CAPPED_AT); // latch retained
+    expect(dispatched).toEqual([]);
+  });
+
+  // Positive control: the same event on the LIVE path re-arms too, proving the
+  // assertions above are reading a real re-arm and not an artifact of foldOnly.
+  test("foldOnly:false re-arms as before (control)", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    const dispatched = [];
+
+    handleStateChangedEvent(stateEvent("Todo"), {
+      ...inertOpts(orchDir, dispatched),
+      foldOnly: false,
+    });
+
+    expect(readCap(orchDir).cappedAt).toBeUndefined();
   });
 });

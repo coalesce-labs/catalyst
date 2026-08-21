@@ -946,6 +946,45 @@ describe("runCli — read-triage-attempt / bump-triage-attempt (CTL-1649)", () =
     expect(JSON.parse(out.trim())).toEqual({ count: null });
   });
 
+  // CTL-2111 (Codex #3824 round-2 P1): under lease-authority `enforce` no fence
+  // attachment is ever written (claimViaLease bypasses writeClaim), so the
+  // attachment reset is INAPPLICABLE rather than failed. Reporting `{count:null}`
+  // there made `rearmTriageCapOnRequeue` refuse the re-arm forever, so a ticket
+  // capped after enforcement was enabled could never be re-queued by a human.
+  it("reset-triage-attempt under leaseMode enforce → { count: 0, inapplicable } (CTL-2111 round-2 P1)", async () => {
+    const { post } = makeFakeLinear(); // no fence — the enforce-mode reality
+    const { code, out } = await captureStdout(() =>
+      runCli(["reset-triage-attempt", "CTL-2111"], { post, leaseMode: "enforce" }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out.trim())).toEqual({ count: 0, inapplicable: "lease-authority" });
+  });
+
+  it("reset-triage-attempt under enforce does NOT touch the attachment transport (CTL-2111 round-2 P1)", async () => {
+    let calls = 0;
+    const post = async (...args) => {
+      calls += 1;
+      return makeFakeLinear().post(...args);
+    };
+    const { code } = await captureStdout(() =>
+      runCli(["reset-triage-attempt", "CTL-2111"], { post, leaseMode: "enforce" }),
+    );
+    expect(code).toBe(0);
+    expect(calls).toBe(0);
+  });
+
+  // Positive control for the pair above: the SAME no-fence store under a
+  // non-enforce mode still reports the honest `{count:null}`, so the new branch
+  // is proven to be mode-scoped rather than a blanket "always report success".
+  it("reset-triage-attempt under leaseMode off keeps the honest { count: null } (CTL-2111 round-2 P1 control)", async () => {
+    const { post } = makeFakeLinear();
+    const { code, out } = await captureStdout(() =>
+      runCli(["reset-triage-attempt", "CTL-2111"], { post, leaseMode: "off" }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out.trim())).toEqual({ count: null });
+  });
+
   it("unknown subcommand still exits 1 with usage", async () => {
     const { post } = makeFakeLinear();
     const { code } = await captureStdout(() => runCli(["bogus-cmd"], { post }));
