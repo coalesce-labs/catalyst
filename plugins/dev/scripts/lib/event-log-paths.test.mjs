@@ -102,25 +102,39 @@ test("basename week numbers are zero-padded", () => {
   expect(eventLogBasenameFor(new Date("2026-01-05T00:00:00Z"), "week")).toBe("2026-W02.jsonl");
 });
 
-test("scheme resolution degrades to month, never to week", () => {
+test("the shipped default is week (CTL-1216 phase 5)", () => {
   expect(ROTATION_SCHEMES).toEqual(["month", "week"]);
-  expect(DEFAULT_ROTATION_SCHEME).toBe("month");
-  expect(resolveRotationScheme({ env: {} })).toBe("month");
+  expect(DEFAULT_ROTATION_SCHEME).toBe("week");
+  expect(resolveRotationScheme({ env: {} })).toBe("week");
+});
+
+test("month remains explicitly selectable — it is the rollback lever", () => {
+  expect(resolveRotationScheme({ env: { CATALYST_EVENT_LOG_ROTATION: "month" } })).toBe("month");
+  expect(resolveRotationScheme({ env: { CATALYST_EVENT_LOG_ROTATION: "MONTH" } })).toBe("month");
+  expect(resolveRotationScheme({ env: { CATALYST_EVENT_LOG_ROTATION: " month " } })).toBe("month");
+});
+
+test("scheme resolution degrades to a REAL scheme — the shipped default", () => {
   expect(resolveRotationScheme({ env: { CATALYST_EVENT_LOG_ROTATION: "week" } })).toBe("week");
   expect(resolveRotationScheme({ env: { CATALYST_EVENT_LOG_ROTATION: "WEEK" } })).toBe("week");
-  expect(resolveRotationScheme({ env: { CATALYST_EVENT_LOG_ROTATION: " week " } })).toBe("week");
   for (const bad of ["daily", "", "  ", "weekly", "1"]) {
-    expect(resolveRotationScheme({ env: { CATALYST_EVENT_LOG_ROTATION: bad } })).toBe("month");
+    // NOT "month": degrading to a scheme the fleet is no longer using would let
+    // one host with a typo'd knob write somewhere nobody else is looking.
+    expect(resolveRotationScheme({ env: { CATALYST_EVENT_LOG_ROTATION: bad } })).toBe(
+      DEFAULT_ROTATION_SCHEME,
+    );
   }
 });
 
 test("scheme resolution reads config when env is absent, env wins when both are set", () => {
-  const config = { catalyst: { events: { rotation: "week" } } };
-  expect(resolveRotationScheme({ env: {}, config })).toBe("week");
-  expect(resolveRotationScheme({ env: { CATALYST_EVENT_LOG_ROTATION: "month" }, config })).toBe("month");
+  const config = { catalyst: { events: { rotation: "month" } } };
+  expect(resolveRotationScheme({ env: {}, config })).toBe("month");
+  expect(resolveRotationScheme({ env: { CATALYST_EVENT_LOG_ROTATION: "week" }, config })).toBe("week");
   // A malformed config must degrade, never throw.
-  expect(resolveRotationScheme({ env: {}, config: { catalyst: { events: { rotation: 7 } } } })).toBe("month");
-  expect(resolveRotationScheme({ env: {}, config: null })).toBe("month");
+  expect(resolveRotationScheme({ env: {}, config: { catalyst: { events: { rotation: 7 } } } })).toBe(
+    DEFAULT_ROTATION_SCHEME,
+  );
+  expect(resolveRotationScheme({ env: {}, config: null })).toBe(DEFAULT_ROTATION_SCHEME);
 });
 
 // ── basename → interval ─────────────────────────────────────────────────────
@@ -185,8 +199,13 @@ test("eventsDir honours CATALYST_EVENTS_DIR then CATALYST_DIR then HOME", () => 
 });
 
 test("getEventLogPath composes dir + active scheme", () => {
+  // Both schemes are named EXPLICITLY here. A test that leaned on whichever
+  // default happens to ship would have to be rewritten every time the default
+  // moves, and would silently stop testing the other scheme.
   const now = new Date("2026-08-22T12:00:00Z");
-  expect(getEventLogPath({ env: { CATALYST_DIR: "/c" }, now })).toBe(join("/c", "events", "2026-08.jsonl"));
+  expect(
+    getEventLogPath({ env: { CATALYST_DIR: "/c", CATALYST_EVENT_LOG_ROTATION: "month" }, now }),
+  ).toBe(join("/c", "events", "2026-08.jsonl"));
   expect(
     getEventLogPath({ env: { CATALYST_DIR: "/c", CATALYST_EVENT_LOG_ROTATION: "week" }, now }),
   ).toBe(join("/c", "events", "2026-W34.jsonl"));
@@ -269,7 +288,7 @@ test("includeCurrent does not duplicate an already-listed current file", () => {
     eventsDir: dir,
     sinceMs: now - DAY_MS,
     nowMs: now,
-    env: { CATALYST_EVENTS_DIR: dir },
+    env: { CATALYST_EVENTS_DIR: dir, CATALYST_EVENT_LOG_ROTATION: "month" },
     includeCurrent: true,
   });
   expect(p.map((x) => basename(x))).toEqual(["2026-08.jsonl"]);
@@ -278,7 +297,11 @@ test("includeCurrent does not duplicate an already-listed current file", () => {
 
 test("getPrevEventLogPath returns the newest existing file strictly older than current", () => {
   const dir = mkTmpEventsDir(["2026-06.jsonl", "2026-07.jsonl", "2026-08.jsonl"]);
-  const env = { CATALYST_EVENTS_DIR: dir };
+  // Explicit `month`: under the shipped `week` default the current file would be
+  // 2026-W34.jsonl, which is not in this fixture, so "the newest file older than
+  // current" would legitimately be 2026-08 — a different property than the one
+  // this test is pinning.
+  const env = { CATALYST_EVENTS_DIR: dir, CATALYST_EVENT_LOG_ROTATION: "month" };
   const now = new Date("2026-08-22T00:00:00Z");
   expect(basename(getPrevEventLogPath({ env, now }))).toBe("2026-07.jsonl");
   cleanup();

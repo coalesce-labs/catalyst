@@ -303,7 +303,11 @@ pass "loud fallback: warns on stderr and still emits when canonical-event.sh is 
 # abort is batch-scoped rather than a permanent wedge — which is exactly why it was never
 # noticed.
 D="$(newdir)"; TMPS+=("$D")
-EV="$D/events/$(date -u +%Y-%m).jsonl"
+# CTL-1216: the fixture name comes from the SAME mirror catalyst-events resolves
+# through, so this case keeps testing torn-line handling rather than accidentally
+# testing whether the two halves agree on a filename (they are covered by
+# __tests__/canonical-event-rotation.test.sh T4).
+EV="$D/events/$( . "${SCRIPTS_DIR}/lib/catalyst-event-log-paths.sh"; catalyst_event_log_basename )"
 mkdir -p "$(dirname "$EV")"
 {
   printf '{"attributes":{"event.name":"before.torn"}}\n'

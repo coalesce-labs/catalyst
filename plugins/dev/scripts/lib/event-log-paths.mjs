@@ -22,8 +22,11 @@
 //
 // ── THE SCHEME IS A KNOB, AND IT DEGRADES TOWARD WHAT IS ALREADY ON DISK ────
 // `catalyst.events.rotation` / CATALYST_EVENT_LOG_ROTATION ∈ month | week.
-// Any unrecognized value settles at `month`: month is the scheme already on
-// disk, so an unreadable knob asserts the FEWEST new things. Never throws.
+// Any unrecognized value settles at DEFAULT_ROTATION_SCHEME — a REAL scheme, so
+// a broken knob can never leave the fleet without a rotation policy. It settles
+// at the shipped default rather than at `month`, so one host with a typo'd knob
+// does not silently write to a different file from the rest of the fleet.
+// Never throws.
 //
 // ── READERS ARE SCHEME-AGNOSTIC BY CONSTRUCTION ─────────────────────────────
 // resolveEventLogPathsForWindow ENUMERATES and PARSES the events directory
@@ -40,7 +43,17 @@ const DAY_MS = 86400000;
 const WEEK_MS = 7 * DAY_MS;
 
 export const ROTATION_SCHEMES = Object.freeze(["month", "week"]);
-export const DEFAULT_ROTATION_SCHEME = "month";
+// CTL-1216 phase 5: the shipped default is WEEK. Measured on mini-2 at
+// 2026-08-22T02:14Z the monthly file was 2,587,408,830 bytes / 3,026,635 lines
+// at day 21 and growing ~123 MB/day; month over month 2026-06 = 295 MiB,
+// 2026-07 = 971 MiB, 2026-08 = 2.41 GiB. Weekly bounds the working file to
+// ~860 MB against an extrapolated ~3.7 GB month.
+//
+// ROLLBACK LEVER: CATALYST_EVENT_LOG_ROTATION=month (or
+// catalyst.events.rotation: "month"), then restart. It is NOT destructive —
+// readers have been scheme-agnostic since phase 2, so weekly files written in
+// the interim stay readable.
+export const DEFAULT_ROTATION_SCHEME = "week";
 
 // resolveRotationScheme — env > config > default. DEGRADES TO the default on
 // any unrecognized value (including a non-string config value, which is why the

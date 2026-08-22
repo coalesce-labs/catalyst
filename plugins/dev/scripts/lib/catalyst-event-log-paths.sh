@@ -34,7 +34,10 @@
 [[ -n "${_CATALYST_EVENT_LOG_PATHS_SH_LOADED:-}" ]] && return 0
 _CATALYST_EVENT_LOG_PATHS_SH_LOADED=1
 
-CATALYST_EVENT_LOG_DEFAULT_ROTATION="month"
+# CTL-1216 phase 5: the shipped default is WEEK. Must stay in lock-step with
+# DEFAULT_ROTATION_SCHEME in lib/event-log-paths.mjs — the parity suite goes red
+# otherwise, which is the suite doing its job.
+CATALYST_EVENT_LOG_DEFAULT_ROTATION="week"
 
 # catalyst_event_log_scheme — env > config > default; degrades to the default
 # on ANY unrecognized value. Never fails.

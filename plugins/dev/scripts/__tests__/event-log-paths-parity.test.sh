@@ -141,20 +141,36 @@ expect_eq "bash basename (week)" "$expected_week" "$(sh_basename_now CATALYST_EV
 expect_eq "js   basename (week)" "$expected_week" "$(js_basename "$(date -u +%Y-%m-%d)" CATALYST_EVENT_LOG_ROTATION=week)"
 expect_eq "bash basename (month)" "$expected_month" "$(sh_basename_now CATALYST_EVENT_LOG_ROTATION=month)"
 expect_eq "js   basename (month)" "$expected_month" "$(js_basename "$(date -u +%Y-%m-%d)" CATALYST_EVENT_LOG_ROTATION=month)"
-expect_eq "bash basename (unset -> default)" "$expected_month" "$(sh_basename_now)"
-expect_eq "js   basename (unset -> default)" "$expected_month" "$(js_basename "$(date -u +%Y-%m-%d)")"
+# CTL-1216 phase 5: the shipped default is `week`. Asserted against the SAME
+# date(1)-computed value, not against either engine.
+expect_eq "bash basename (unset -> shipped default)" "$expected_week" "$(sh_basename_now)"
+expect_eq "js   basename (unset -> shipped default)" "$expected_week" "$(js_basename "$(date -u +%Y-%m-%d)")"
 
-# ── T3: scheme-degradation parity — an unrecognized value settles at `month` ─
-# on BOTH engines. `month` is the scheme already on disk, so degradation
-# asserts the fewest new things.
+# ── T3: scheme-degradation parity ────────────────────────────────────────────
+# An unrecognized value settles at the SHIPPED DEFAULT on both engines — a REAL
+# scheme, so a typo'd knob can never leave a host without a rotation policy, and
+# never leaves one host writing where the rest of the fleet is not looking.
+DEFAULT_SCHEME="week"
 for bad_val in daily weekly 1 "" "  " WEEKLY month-ish; do
-  expect_eq "bash degrade '${bad_val}'" "month" "$(sh_scheme CATALYST_EVENT_LOG_ROTATION="$bad_val")"
+  expect_eq "bash degrade '${bad_val}'" "$DEFAULT_SCHEME" "$(sh_scheme CATALYST_EVENT_LOG_ROTATION="$bad_val")"
   js_deg="$(env -i PATH="$PATH" HOME="$HOME" CATALYST_EVENT_LOG_ROTATION="$bad_val" \
     "$NODE_BIN" --input-type=module -e "
       const m = await import('file://${JS_LIB}');
       process.stdout.write(m.resolveRotationScheme({ env: process.env }));
     " 2>/dev/null)"
-  expect_eq "js   degrade '${bad_val}'" "month" "$js_deg"
+  expect_eq "js   degrade '${bad_val}'" "$DEFAULT_SCHEME" "$js_deg"
+done
+
+# The ROLLBACK LEVER must work on both engines: `month` stays explicitly
+# selectable, or the flip is one-way.
+for m in month MONTH " month "; do
+  expect_eq "bash rollback '${m}'" "month" "$(sh_scheme CATALYST_EVENT_LOG_ROTATION="$m")"
+  js_m="$(env -i PATH="$PATH" HOME="$HOME" CATALYST_EVENT_LOG_ROTATION="$m" \
+    "$NODE_BIN" --input-type=module -e "
+      const m = await import('file://${JS_LIB}');
+      process.stdout.write(m.resolveRotationScheme({ env: process.env }));
+    " 2>/dev/null)"
+  expect_eq "js   rollback '${m}'" "month" "$js_m"
 done
 
 # Case/whitespace tolerance parity.
@@ -234,7 +250,7 @@ expect_eq "js   W53 rejected in 2027" "no" "$([[ -n "$(js_week_start 2027 53)" ]
 
 echo
 echo "assertions: ${ASSERTIONS}  passed: ${PASSES}  failed: ${FAILURES}"
-if [[ "$ASSERTIONS" -lt 40 ]]; then
+if [[ "$ASSERTIONS" -lt 46 ]]; then
   echo "FAIL: only ${ASSERTIONS} assertions ran — a parity suite that barely runs is not evidence"
   exit 1
 fi

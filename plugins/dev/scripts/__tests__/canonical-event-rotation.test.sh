@@ -37,20 +37,25 @@ emit_one() {
   ' "$SCRIPTS" "$1" "$2"
 }
 
-echo "=== T1: default (no env) writes the monthly file — byte-identical to today ==="
+echo "=== T1: default (no env) writes the WEEKLY file — the phase-5 flip ==="
 D1="$(mktemp -d)/events"
 emit_one "$D1" "ctl1216.t1"
-expect_eq "default -> \$(date -u +%Y-%m).jsonl" "$(date -u +%Y-%m).jsonl" "$(ls "$D1" 2>/dev/null | head -1)"
+expect_eq "default -> \$(date -u +%G-W%V).jsonl" "$(date -u +%G-W%V).jsonl" "$(ls "$D1" 2>/dev/null | head -1)"
 
 echo "=== T2: week scheme writes the ISO-week file ==="
 D2="$(mktemp -d)/events"
 CATALYST_EVENT_LOG_ROTATION=week emit_one "$D2" "ctl1216.t2"
 expect_eq "week -> \$(date -u +%G-W%V).jsonl" "$(date -u +%G-W%V).jsonl" "$(ls "$D2" 2>/dev/null | head -1)"
 
-echo "=== T3: an unrecognized scheme DEGRADES to month, it does not invent a file ==="
+echo "=== T3: an unrecognized scheme DEGRADES to the shipped default, it does not invent a file ==="
 D3="$(mktemp -d)/events"
 CATALYST_EVENT_LOG_ROTATION=daily emit_one "$D3" "ctl1216.t3"
-expect_eq "daily -> degrades to monthly" "$(date -u +%Y-%m).jsonl" "$(ls "$D3" 2>/dev/null | head -1)"
+expect_eq "daily -> degrades to the shipped default" "$(date -u +%G-W%V).jsonl" "$(ls "$D3" 2>/dev/null | head -1)"
+
+echo "=== T3b: ROLLBACK LEVER — month stays explicitly selectable ==="
+D3B="$(mktemp -d)/events"
+CATALYST_EVENT_LOG_ROTATION=month emit_one "$D3B" "ctl1216.t3b"
+expect_eq "month -> \$(date -u +%Y-%m).jsonl" "$(date -u +%Y-%m).jsonl" "$(ls "$D3B" 2>/dev/null | head -1)"
 
 echo "=== T4: WRITER/READER AGREEMENT — the whole point ==="
 # Emit under `week`, then ask the READER's own path resolver (the same mirror
@@ -112,7 +117,7 @@ expect_eq "no raw >> append in canonical_jsonl_append" "0" "$RAW"
 echo
 echo "assertions: ${ASSERTIONS}  passed: ${PASSES}  failed: ${FAILURES}"
 # Fail closed: a suite that barely ran is not evidence.
-if [[ "$ASSERTIONS" -lt 10 ]]; then
+if [[ "$ASSERTIONS" -lt 11 ]]; then
   echo "FAIL: only ${ASSERTIONS} assertions ran"
   exit 1
 fi

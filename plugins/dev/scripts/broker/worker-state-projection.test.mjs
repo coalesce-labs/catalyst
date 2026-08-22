@@ -33,6 +33,7 @@ import {
 // DB lifecycle is imported directly from broker-state.mjs (the
 // broker-state.test.mjs precedent) — these are not part of the pinned barrel.
 import { openBrokerStateDb, closeBrokerStateDb } from "./broker-state.mjs";
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 let tmpDir;
 let savedCatalystDir;
@@ -710,8 +711,10 @@ describe("reduceWorkerStateEvent (CTL-532)", () => {
 
 function monthLogPath(dir) {
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return join(dir, "events", `${ym}.jsonl`);
+  // CTL-1216: resolve through the SAME leaf production uses, so a scheme change
+  // moves this fixture and the code under test together. A pinned monthly name
+  // here writes a file the broker no longer opens.
+  return join(dir, "events", eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })));
 }
 
 describe("projection integration (CTL-532)", () => {

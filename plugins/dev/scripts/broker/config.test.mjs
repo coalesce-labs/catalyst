@@ -1,6 +1,7 @@
 // config.test.mjs — CTL-1086 broker config unit tests.
 import { describe, expect, test } from "bun:test";
 import { getEventLogPath, parseIntKnob } from "./config.mjs";
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 describe("CTL-1086: broker config", () => {
   test("getEventLogPath uses UTC year-month (parity with execution-core/config.mjs)", () => {
@@ -8,7 +9,9 @@ describe("CTL-1086: broker config", () => {
     process.env.CATALYST_DIR = "/tmp/ctl1086-utc";
     try {
       const now = new Date();
-      const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+      // CTL-1216: resolve through the production leaf rather than pinning the
+      // monthly shape — otherwise this asserts the scheme, not the resolution.
+      const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
       expect(getEventLogPath()).toBe(`/tmp/ctl1086-utc/events/${ym}.jsonl`);
     } finally {
       process.env.CATALYST_DIR = prev;
