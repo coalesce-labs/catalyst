@@ -458,6 +458,158 @@ describe("clearStalledLabel", () => {
     expect(applied).toBe(1);
     expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
   });
+
+  // ─── CTL-2098: wrote:false (already-absent) must RETAIN markers ─────────────
+
+  test("retains .applied marker when removeLabel reports already-absent (wrote:false)", () => {
+    // Bug 2 root fix: a steward/operator removes the Linear label out-of-band →
+    // removeLabel returns { removed:true, wrote:false } (label was already absent,
+    // no write performed). Deleting the marker here lets the terminal sweep
+    // re-apply needs-human on the next tick. Retain the marker so labelOnce stays
+    // a no-op (no re-flap). (Fails without the CTL-2098 fix.)
+    const workerDir = join(orchDir, "workers", "CTL-2098-A");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const ws = { removeLabel: () => ({ removed: true, wrote: false }) };
+
+    clearStalledLabel(orchDir, "CTL-2098-A", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+  });
+
+  test("retains .skipped marker when removeLabel reports already-absent (wrote:false)", () => {
+    const workerDir = join(orchDir, "workers", "CTL-2098-B");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.skipped"), "");
+    const ws = { removeLabel: () => ({ removed: true, wrote: false }) };
+
+    clearStalledLabel(orchDir, "CTL-2098-B", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.skipped"))).toBe(true);
+  });
+
+  test("still deletes .applied marker on a real write (wrote:true)", () => {
+    // Guard against over-correction: a genuine confirmed write must still disarm.
+    const workerDir = join(orchDir, "workers", "CTL-2098-C");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const ws = { removeLabel: () => ({ removed: true, wrote: true }) };
+
+    clearStalledLabel(orchDir, "CTL-2098-C", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+
+  test("onRemoved still fires on a wrote:false confirmed removal (bookkeeping unchanged)", () => {
+    // Only marker deletion is gated on wrote:true; bookkeeping callbacks are
+    // unchanged and still fire whenever removed:true (including wrote:false).
+    const workerDir = join(orchDir, "workers", "CTL-2098-D");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let called = 0;
+
+    clearStalledLabel(
+      orchDir, "CTL-2098-D", "needs-human",
+      { removeLabel: () => ({ removed: true, wrote: false }) },
+      { onRemoved: () => { called++; } },
+    );
+
+    expect(called).toBe(1);
+  });
+
+  test("no-reflap: apply → out-of-band-clear(wrote:false) → labelOnce stays no-op", () => {
+    // Regression: simulate the re-flap scenario end-to-end.
+    // 1. Daemon applies needs-human label → .applied marker written.
+    // 2. Steward removes label out-of-band → clearStalledLabel sees wrote:false.
+    //    With the fix, marker is RETAINED.
+    // 3. Terminal sweep calls labelOnce again — must be a no-op (marker present).
+    //    Without the fix, marker was deleted → labelOnce re-applies (re-flap).
+    const workerDir = join(orchDir, "workers", "CTL-2098-E");
+    mkdirSync(workerDir, { recursive: true });
+
+    // Step 1: apply → marker written
+    labelOnce(orchDir, "CTL-2098-E", "needs-human", { applyLabel: () => ({ applied: true }) });
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+
+    // Step 2: out-of-band clear → wrote:false; marker must be RETAINED
+    clearStalledLabel(orchDir, "CTL-2098-E", "needs-human", { removeLabel: () => ({ removed: true, wrote: false }) });
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+
+    // Step 3: terminal sweep tries to apply again — must be no-op (marker present)
+    let reapplied = 0;
+    labelOnce(orchDir, "CTL-2098-E", "needs-human", { applyLabel: () => { reapplied++; return { applied: true }; } });
+    expect(reapplied).toBe(0); // no re-flap
+  });
+
+  // ─── CTL-2098 HIGH finding fix: `converged:true` is the enforce-reachable ───
+  // equivalent of `wrote:false`. Review found `wrote:false` is produced ONLY by
+  // the direct (non-proxy) path — enforce cloud-proxy hosts (production
+  // mini/mini-2) always return `wrote:true` for an already-absent label, so the
+  // gate above was previously unreachable in production. These tests use the
+  // shape `removeLabel` ACTUALLY returns on enforce (`{removed:true, wrote:true,
+  // converged:true}`), not the direct-path-only `wrote:false` shape the original
+  // 5 tests used — closing the review's "root-cause premise unverified" gap.
+
+  test("retains .applied marker on the enforce shape (wrote:true, converged:true)", () => {
+    const workerDir = join(orchDir, "workers", "CTL-2098-F");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const ws = { removeLabel: () => ({ removed: true, wrote: true, converged: true }) };
+
+    clearStalledLabel(orchDir, "CTL-2098-F", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+  });
+
+  test("still deletes the marker on the enforce shape when converged is absent (a real removal)", () => {
+    // Guard against over-correction on the enforce path specifically: a genuine
+    // removal (the label WAS present, the proxy actually removed it) reports
+    // wrote:true with no converged flag at all, and must still disarm.
+    const workerDir = join(orchDir, "workers", "CTL-2098-G");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const ws = { removeLabel: () => ({ removed: true, wrote: true }) };
+
+    clearStalledLabel(orchDir, "CTL-2098-G", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+
+  test("Codex round-1 P1: a NON-sticky label (e.g. 'blocked') always disarms, even on converged:true", () => {
+    // clearStalledLabel is also called generically for the tick-converged
+    // dispositions (scheduler.mjs:3054, convergeStartedHeldLabels) — those must
+    // complete their retraction every time, or they strand in
+    // budget:already-converged refusals forever instead of finishing. Only
+    // needs-human (labelOnce, apply-once) needs the marker kept.
+    const workerDir = join(orchDir, "workers", "CTL-2098-I");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-blocked.applied"), "");
+    const ws = { removeLabel: () => ({ removed: true, wrote: true, converged: true }) };
+
+    clearStalledLabel(orchDir, "CTL-2098-I", "blocked", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-blocked.applied"))).toBe(false);
+  });
+
+  test("no-reflap on the enforce shape: apply → out-of-band-clear(converged:true) → labelOnce stays no-op", () => {
+    // The end-to-end regression this ticket exists for, reproduced with the
+    // shape production enforce hosts actually return (mini/mini-2), not the
+    // direct-path stub.
+    const workerDir = join(orchDir, "workers", "CTL-2098-H");
+    mkdirSync(workerDir, { recursive: true });
+
+    labelOnce(orchDir, "CTL-2098-H", "needs-human", { applyLabel: () => ({ applied: true }) });
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+
+    clearStalledLabel(orchDir, "CTL-2098-H", "needs-human", {
+      removeLabel: () => ({ removed: true, wrote: true, converged: true }),
+    });
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+
+    let reapplied = 0;
+    labelOnce(orchDir, "CTL-2098-H", "needs-human", { applyLabel: () => { reapplied++; return { applied: true }; } });
+    expect(reapplied).toBe(0); // no re-flap, this time via the path production actually takes
+  });
 });
 
 // ─── CTL-1045 Bug 4: clearStalledLabel onRemoved callback ───────────────────

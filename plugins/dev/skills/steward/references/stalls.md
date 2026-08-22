@@ -49,6 +49,30 @@ in one screen is a stall nobody has to ask about.
 the human is only ever reached as an ask. A bare `needs-human` label with no ask behind it puts a row in
 their queue that nothing can clear.
 
+## Clearing a needs-human label (do it, don't just say it)
+
+A comment saying "clearing needs-human" does **not** remove the label. Steward comments are posted by the
+app actor — the daemon's human-provenance gate rejects them — so the label stays attached and the re-flap
+cycle continues. You must issue the label-removal mutation directly.
+
+```bash
+# 1. Read current labels through the freshness-gated replica helper — NEVER a bare
+#    `linearis issues read`, which burns the shared 2500/hr fleet-wide API quota
+#    (see plugins/dev/skills/linearis/SKILL.md, "Reading Linear").
+source plugins/dev/scripts/lib/linear-read-replica.sh
+json=$(linear_read_ticket CTL-XXXX) || exit 1   # falls back to a live read only if the replica is stale/absent
+labels=$(echo "$json" | jq -r '[.labels.nodes[].name] | map(select(. != "needs-human")) | join(",")')
+
+# 2a. Remove needs-human while keeping any other labels present
+linearis issues update CTL-XXXX --labels "$labels" --label-mode overwrite
+
+# 2b. If needs-human is the ONLY label (or you want to clear all)
+linearis issues update CTL-XXXX --clear-labels
+```
+
+Still post an in-thread comment explaining **why** it was a false fire — the comment is the audit trail;
+the mutation is the action. Both are complementary.
+
 ## When the instrument pages you
 
 Board-health and the stalled-PR sweep page **you** first, in-thread, tagged `instrument/<name>`. Treat the
