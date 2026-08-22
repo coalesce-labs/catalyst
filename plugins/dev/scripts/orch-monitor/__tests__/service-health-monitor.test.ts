@@ -97,7 +97,11 @@ describe("readEmissionAge", () => {
       expect(readFileSyncSpy.mock.calls.filter((c) => c[0] === path)).toEqual([]);
       const requested = bytesRequested(readSyncSpy.mock.calls as unknown[][]);
       expect(requested).toBeGreaterThan(0);
-      expect(requested).toBeLessThanOrEqual(512 * 1024);
+      // CTL-1550: readTailUtf8's boundary-aware first-line drop reads ONE extra
+      // byte (the byte immediately before the window) to tell a mid-record cut
+      // from an exact record boundary, so the bounded read is at most cap + 1.
+      // This matches event-log-reader.test.ts's own `<= cap + 1` assertion.
+      expect(requested).toBeLessThanOrEqual(512 * 1024 + 1);
     } finally {
       readSyncSpy.mockRestore();
       readFileSyncSpy.mockRestore();

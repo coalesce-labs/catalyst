@@ -76,6 +76,7 @@ function ticket(id: string): BoardTicket {
     currentPhaseSince: null,
     attention: null,
     attentionSince: null,
+    correlationRole: null, // CAT-170
     host: null,
     generation: null,
   };

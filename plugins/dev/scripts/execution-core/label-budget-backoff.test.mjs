@@ -16,7 +16,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test label-budget-backoff.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,11 +24,18 @@ import {
   TERMINAL_LABEL_REASONS,
   THROTTLED_LABEL_REASONS,
   BUDGET_REASON_PREFIX,
+  CLOUD_LABEL_REJECTION_REASONS,
   isTerminalLabelReason,
   isThrottledLabelReason,
+  isCloudLabelRejection,
   shouldCoolDownLabel,
 } from "./label-failure-class.mjs";
-import { convergeHeldLabel, convergeDispositionLabel } from "./scheduler.mjs";
+import {
+  convergeHeldLabel,
+  convergeDispositionLabel,
+  labelCooldownPath,
+  labelRetryState,
+} from "./scheduler.mjs";
 import { labelOnce } from "./label-guard.mjs";
 
 let orchDir;
@@ -494,5 +501,250 @@ describe("COORD-236 wiring: the cool-down is armed by the WIDE predicate", () =>
     // ...and no code line calls it.
     const code = GUARD.split("\n").filter((l) => !l.trimStart().startsWith("//"));
     expect(code.join("\n")).not.toContain("shouldCoolDownLabel(");
+  });
+});
+
+// ── CTL-2052 ─────────────────────────────────────────────────────────────────
+// A DETERMINISTIC cloud rejection of a LABEL write (the enforce/proxy path's
+// `cloud:failed`/`cloud:rejected`, normalized to `cloud:label-rejected`) is a
+// THIRD class: cool-down-eligible (so the storm stops) but NOT terminal (so it
+// never earns labelOnce's permanent `.skipped` — COORD-236) and NOT throttled
+// (so the operator log names the right thing — AC2).
+describe("CTL-2052 classification: the deterministic cloud label rejection is its own class", () => {
+  test("the cloud-label-rejection set is EXACTLY { cloud:label-rejected }", () => {
+    expect([...CLOUD_LABEL_REJECTION_REASONS].sort()).toEqual(["cloud:label-rejected"]);
+    expect(isCloudLabelRejection("cloud:label-rejected")).toBe(true);
+  });
+
+  test("it cools down but is NEITHER terminal NOR throttled", () => {
+    expect(shouldCoolDownLabel("cloud:label-rejected")).toBe(true); // AC1: back off
+    expect(isTerminalLabelReason("cloud:label-rejected")).toBe(false); // no permanent .skipped
+    expect(isThrottledLabelReason("cloud:label-rejected")).toBe(false); // not "budget/throttled"
+  });
+
+  test("the RAW proxy reasons are still nothing on their own — normalization is what classifies", () => {
+    // The raw verdict reaches the classifier only AFTER routeThroughProxy has
+    // normalized it (linear-write.mjs). If a future refactor drops the
+    // normalization, the raw reason reads as "retryable next tick" and the storm
+    // returns — this pins that the raw strings do NOT cool down by themselves.
+    for (const raw of ["cloud:failed", "cloud:rejected"]) {
+      expect(isCloudLabelRejection(raw)).toBe(false);
+      expect(shouldCoolDownLabel(raw)).toBe(false);
+    }
+  });
+
+  test("cloud:exhausted is deliberately NOT this class — it is a budget refusal, left alone here", () => {
+    // `cloud:${outcome}` also produces cloud:exhausted (a budget exhaustion). This
+    // ticket touches only the two DETERMINISTIC label rejections; the budget one is
+    // out of scope (research Finding, plan §NOT in scope).
+    expect(isCloudLabelRejection("cloud:exhausted")).toBe(false);
+  });
+});
+
+describe("CTL-2052: the converger backs off on the normalized cloud label rejection (AC1)", () => {
+  test("convergeDispositionLabel issues ONE apply, then ZERO for the cool-down window", () => {
+    const w = failingWriter("cloud:label-rejected");
+    let clock = 2_000_000;
+    const opts = { orchDir, now: () => clock };
+    expect(convergeDispositionLabel("CTL-20", [], "blocked", w, opts)).toBe(1);
+    expect(w.calls.length).toBe(1);
+    for (let i = 0; i < 30; i++) {
+      clock += 1_000;
+      convergeDispositionLabel("CTL-20", [], "blocked", w, opts);
+    }
+    expect(w.calls.length).toBe(1); // AC1: does NOT re-issue on the next tick
+  });
+
+  test("convergeHeldLabel backs off on the same normalized reason", () => {
+    const w = failingWriter("cloud:label-rejected");
+    let clock = 2_000_000;
+    const opts = { orchDir, now: () => clock };
+    expect(convergeHeldLabel("CTL-21", [], "blocked", w, opts)).toBe(1);
+    for (let i = 0; i < 30; i++) {
+      clock += 1_000;
+      convergeHeldLabel("CTL-21", [], "blocked", w, opts);
+    }
+    expect(w.calls.length).toBe(1);
+  });
+
+  test("NEGATIVE CONTROL: the RAW cloud:failed is NOT cooled down — it storms (proving the test bites)", () => {
+    // If normalization were removed, the converger would see the raw reason and
+    // re-fire every tick. Feed the raw reason directly to prove the harness would
+    // catch that regression.
+    const w = failingWriter("cloud:failed");
+    let clock = 2_000_000;
+    const opts = { orchDir, now: () => clock };
+    for (let i = 0; i < 10; i++) {
+      convergeDispositionLabel("CTL-22", [], "blocked", w, opts);
+      clock += 1_000;
+    }
+    expect(w.calls.length).toBe(10);
+  });
+});
+
+describe("⛔ CTL-2052: labelOnce must NOT write .skipped for the cloud label rejection (COORD-236 asymmetry)", () => {
+  test("a cloud:label-rejected refusal leaves NO .skipped marker, so a later genuine apply is not abandoned", () => {
+    const w = failingWriter("cloud:label-rejected");
+    withWorkerDir("CTL-23");
+    expect(labelOnce(orchDir, "CTL-23", "needs-human", w)).toBe(true);
+    expect(w.calls.length).toBe(1);
+    // No terminal marker ⇒ the next call runs the write again (unprovable-terminal
+    // must never be permanently abandoned).
+    expect(labelOnce(orchDir, "CTL-23", "needs-human", w)).toBe(true);
+    expect(w.calls.length).toBe(2);
+  });
+
+  test("contrast: exclusive-conflict DOES write .skipped and stops — the asymmetry is preserved", () => {
+    const w = failingWriter("exclusive-conflict");
+    withWorkerDir("CTL-24");
+    expect(labelOnce(orchDir, "CTL-24", "needs-human", w)).toBe(true);
+    expect(labelOnce(orchDir, "CTL-24", "needs-human", w)).toBe(false);
+    expect(w.calls.length).toBe(1);
+  });
+});
+
+// ── CTL-2052 Phase 2 (AC3) — bound retries to N, then stop and say so ─────────
+describe("CTL-2052 labelRetryState — the pure cap arithmetic", () => {
+  const cfg = { cap: 3, exhaustedMs: 1_000 };
+  test("below the cap → not blocked, not a probe", () => {
+    expect(labelRetryState({ failedAt: 0, attempts: 2 }, 100, cfg)).toMatchObject({
+      blocked: false,
+      exhaustedProbe: false,
+      attempts: 2,
+    });
+  });
+  test("at the cap, inside the exhausted window → BLOCKED", () => {
+    expect(labelRetryState({ failedAt: 0, attempts: 3 }, 500, cfg)).toMatchObject({
+      blocked: true,
+      exhaustedProbe: false,
+    });
+  });
+  test("at the cap, PAST the exhausted window → a single self-heal probe (not blocked)", () => {
+    expect(labelRetryState({ failedAt: 0, attempts: 3 }, 2_000, cfg)).toMatchObject({
+      blocked: false,
+      exhaustedProbe: true,
+    });
+  });
+  test("a null / absent marker → nothing recorded yet, not blocked", () => {
+    expect(labelRetryState(null, 0, cfg)).toMatchObject({ blocked: false, exhaustedProbe: false, attempts: 0 });
+    expect(labelRetryState({}, 0, cfg)).toMatchObject({ blocked: false, attempts: 0 });
+  });
+});
+
+describe("CTL-2052 Phase 2: the converger counts cool-down cycles, then stops", () => {
+  const readAttempts = (ticket, label) =>
+    JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8")).attempts;
+
+  test("the attempt counter increments once per cool-down CYCLE, not per tick", () => {
+    const w = failingWriter("cloud:label-rejected");
+    let clock = 3_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 100, retryExhaustedMs: 10_000_000 };
+    convergeDispositionLabel("CTL-30", [], "blocked", w, opts); // apply 1 → attempts 1
+    expect(readAttempts("CTL-30", "blocked")).toBe(1);
+    clock += 1_000; // still inside the 60 s window: 0 applies, no increment
+    convergeDispositionLabel("CTL-30", [], "blocked", w, opts);
+    expect(readAttempts("CTL-30", "blocked")).toBe(1);
+    clock += 61_000; // window elapsed → apply 2
+    convergeDispositionLabel("CTL-30", [], "blocked", w, opts);
+    expect(readAttempts("CTL-30", "blocked")).toBe(2);
+    clock += 61_000; // apply 3
+    convergeDispositionLabel("CTL-30", [], "blocked", w, opts);
+    expect(readAttempts("CTL-30", "blocked")).toBe(3);
+    expect(w.calls.length).toBe(3);
+  });
+
+  test("after the cap the converger stops re-issuing — the cap gate wins over the time gate", () => {
+    const w = failingWriter("cloud:label-rejected");
+    let clock = 3_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 3, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 3; i++) {
+      convergeDispositionLabel("CTL-31", [], "blocked", w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(3); // reached the cap
+    // 4th convergence: the 60 s window has elapsed, but the cap gate short-circuits first.
+    convergeDispositionLabel("CTL-31", [], "blocked", w, opts);
+    expect(w.calls.length).toBe(3);
+    clock += 61_000;
+    convergeDispositionLabel("CTL-31", [], "blocked", w, opts);
+    expect(w.calls.length).toBe(3);
+  });
+
+  test("convergeHeldLabel enforces the same cap", () => {
+    const w = failingWriter("cloud:label-rejected");
+    let clock = 3_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 2, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 2; i++) {
+      convergeHeldLabel("CTL-35", [], "blocked", w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(2);
+    convergeHeldLabel("CTL-35", [], "blocked", w, opts);
+    expect(w.calls.length).toBe(2);
+  });
+
+  test("the retry-exhausted escalation fires EXACTLY ONCE, on the cap crossing (edge-triggered)", () => {
+    const w = failingWriter("cloud:label-rejected");
+    const events = [];
+    let clock = 3_000_000;
+    const opts = {
+      orchDir,
+      now: () => clock,
+      retryCap: 3,
+      retryExhaustedMs: 1_800_000,
+      onRetryExhausted: (info) => events.push(info),
+    };
+    for (let i = 0; i < 6; i++) {
+      convergeDispositionLabel("CTL-32", [], "blocked", w, opts);
+      clock += 61_000;
+    }
+    expect(events.length).toBe(1);
+    expect(events[0]).toMatchObject({
+      ticket: "CTL-32",
+      label: "blocked",
+      attempts: 3,
+      reason: "cloud:label-rejected",
+    });
+  });
+
+  test("the stop SELF-HEALS: after the long window exactly one probe apply is allowed again", () => {
+    const w = failingWriter("cloud:label-rejected");
+    let clock = 3_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 3, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 3; i++) {
+      convergeDispositionLabel("CTL-33", [], "blocked", w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(3);
+    convergeDispositionLabel("CTL-33", [], "blocked", w, opts); // still capped inside the long window
+    expect(w.calls.length).toBe(3);
+    clock += 1_800_001; // past the exhausted window → one self-heal probe
+    convergeDispositionLabel("CTL-33", [], "blocked", w, opts);
+    expect(w.calls.length).toBe(4);
+  });
+
+  test("a SUCCESSFUL apply resets the ledger — the counter starts fresh next time", () => {
+    let mode = "fail";
+    const calls = [];
+    const w = {
+      calls,
+      applyLabel({ ticket, label }) {
+        calls.push({ ticket, label });
+        return mode === "fail"
+          ? { applied: false, reason: "cloud:label-rejected" }
+          : { applied: true, reason: null };
+      },
+      removeLabel() {},
+    };
+    let clock = 3_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 10, retryExhaustedMs: 10_000_000 };
+    convergeDispositionLabel("CTL-34", [], "blocked", w, opts); // fail → attempts 1
+    clock += 61_000;
+    convergeDispositionLabel("CTL-34", [], "blocked", w, opts); // fail → attempts 2
+    expect(readAttempts("CTL-34", "blocked")).toBe(2);
+    clock += 61_000;
+    mode = "ok";
+    convergeDispositionLabel("CTL-34", [], "blocked", w, opts); // success → ledger cleared
+    expect(existsSync(labelCooldownPath(orchDir, "CTL-34", "blocked"))).toBe(false);
   });
 });

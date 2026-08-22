@@ -37,6 +37,7 @@ import {
   defaultConfiguredRepos,
   checkNodeClass,
   checkDeploymentModeConsistency,
+  checkEntitlementConsistency,
   checkSecretContract,
   checkLayer2PathDivergence,
   checkReadReplicaReachable,
@@ -61,6 +62,8 @@ import {
   readLinearBotUserIds,
   readCloudBotUserId,
   checkSelfEchoIdentityHistory,
+  checkClusterSecretsPresent,
+  checkNodeConfigPresent,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
@@ -239,6 +242,74 @@ const agreeingSecretContract = (present) => () =>
   present
     ? { value: "contract-token", source: "inherited", provider: "env-alias" }
     : { value: null, source: "none", provider: "env-alias" };
+
+describe("checkEntitlementConsistency (CTL-1785)", () => {
+  const mode = (over = {}) => ({
+    mode: "off",
+    source: "default",
+    inferred: true,
+    recognized: true,
+    raw: null,
+    ...over,
+  });
+  const byName = (checks) => Object.fromEntries(checks.map((c) => [c.name, c]));
+
+  it("advisory INFO when mode=off (default)", () => {
+    const checks = checkEntitlementConsistency({ mode: mode() });
+    const m = byName(checks)["entitlement-mode"];
+    expect(m.status).toBe("info");
+    expect(m.detail).toContain('mode="off"');
+  });
+
+  it("WARN when mode=enforce but no real authority injected (local fallback)", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "enforce", source: "env", inferred: false }),
+      providerKind: "local",
+    });
+    const p = byName(checks)["entitlement-provider"];
+    expect(p.status).toBe("warn");
+    expect(p.detail).toContain("no lease authority");
+  });
+
+  it("INFO for the provider once a real authority is injected", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "enforce", source: "env", inferred: false }),
+      providerKind: "authority",
+    });
+    expect(byName(checks)["entitlement-provider"].status).toBe("info");
+  });
+
+  it("ordering check is INFO when the constraint holds, WARN when inverted — never FAIL", () => {
+    const ok = byName(checkEntitlementConsistency({ mode: mode(), entitlementTtlMs: 900000, workLeaseTtlMs: 300000 }));
+    expect(ok["entitlement-ordering"].status).toBe("info");
+    const bad = byName(checkEntitlementConsistency({ mode: mode(), entitlementTtlMs: 1000, workLeaseTtlMs: 2000 }));
+    expect(bad["entitlement-ordering"].status).toBe("warn");
+  });
+
+  it("a typo'd mode WARNs (never FAILs) and degrades to off", () => {
+    const checks = checkEntitlementConsistency({
+      mode: mode({ mode: "off", source: "env", inferred: false, recognized: false, raw: "enfroce" }),
+    });
+    expect(byName(checks)["entitlement-mode"].status).toBe("warn");
+  });
+
+  it("NEVER emits STATUS.FAIL (advisory only, cannot wedge doctor)", () => {
+    // Sweep every mode + provider + ordering combination — none may FAIL.
+    for (const mm of ["off", "shadow", "enforce"]) {
+      for (const pk of ["local", "authority"]) {
+        for (const [e, w] of [[900000, 300000], [1000, 2000]]) {
+          const checks = checkEntitlementConsistency({
+            mode: mode({ mode: mm, inferred: mm === "off", source: mm === "off" ? "default" : "env", recognized: true }),
+            providerKind: pk,
+            entitlementTtlMs: e,
+            workLeaseTtlMs: w,
+          });
+          for (const c of checks) expect(c.status).not.toBe("fail");
+        }
+      }
+    }
+  });
+});
 
 describe("checkPeerUniqueness", () => {
   it("INFO-skips when no liveness anchor issue is configured", async () => {
@@ -6258,5 +6329,73 @@ describe("checkFleetTokenExport — CTL-1908: a login shell must not spend the F
     // A check nobody runs is the failure mode this repo keeps meeting.
     const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
     expect(src.split("checkFleetTokenExport()").length - 1, "registered in BOTH class suites").toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ─── checkClusterSecretsPresent (CTL-1210 Phase 5) ───────────────────────────
+describe("checkClusterSecretsPresent (CTL-1210)", () => {
+  it("PASS when cluster-secrets.json exists", () => {
+    const [c] = checkClusterSecretsPresent({ csPath: "/h/.config/catalyst/cluster-secrets.json", fileExists: () => true });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.name).toBe("cluster-secrets-present");
+  });
+
+  it("WARN when cluster-secrets.json absent — not FAIL (advisory)", () => {
+    const [c] = checkClusterSecretsPresent({ csPath: "/h/.config/catalyst/cluster-secrets.json", fileExists: () => false });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toMatch(/cluster-secrets\.json absent/i);
+  });
+
+  it("never FAILs (advisory) — exit-code-safe", async () => {
+    const code = await runDoctor({
+      checks: [() => checkClusterSecretsPresent({ csPath: "/absent/cluster-secrets.json", fileExists: () => false })],
+    });
+    expect(code).not.toBe(2);
+  });
+
+  it("is wired into both worker and developer suites", () => {
+    const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
+    expect(src.split("checkClusterSecretsPresent()").length - 1, "registered in at least 2 class suites").toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ─── checkNodeConfigPresent (CTL-1210 Phase 5) ───────────────────────────────
+describe("checkNodeConfigPresent (CTL-1210)", () => {
+  it("WARN when node.json absent — advisory", () => {
+    const [c] = checkNodeConfigPresent({ nodePath: "/h/node.json", fileExists: () => false });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toMatch(/node\.json absent/i);
+  });
+
+  it("WARN when node.json present but host.name unset", () => {
+    const [c] = checkNodeConfigPresent({
+      nodePath: "/h/node.json",
+      fileExists: () => true,
+      readJson: () => ({ catalyst: {} }),
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toMatch(/host\.name is unset/i);
+  });
+
+  it("PASS when node.json present and host.name set", () => {
+    const [c] = checkNodeConfigPresent({
+      nodePath: "/h/node.json",
+      fileExists: () => true,
+      readJson: () => ({ catalyst: { host: { name: "mini-1" } } }),
+    });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("mini-1");
+  });
+
+  it("never FAILs (advisory) — exit-code-safe", async () => {
+    const code = await runDoctor({
+      checks: [() => checkNodeConfigPresent({ nodePath: "/absent/node.json", fileExists: () => false })],
+    });
+    expect(code).not.toBe(2);
+  });
+
+  it("is wired into both worker and developer suites", () => {
+    const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
+    expect(src.split("checkNodeConfigPresent()").length - 1, "registered in at least 2 class suites").toBeGreaterThanOrEqual(2);
   });
 });

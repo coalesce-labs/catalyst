@@ -1,6 +1,6 @@
 // linear-estimation-method.test.mjs — unit tests for CTL-954.
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-estimation-method.test.mjs
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -16,7 +16,10 @@ import {
 // Isolate each test by redirecting HOME to a temp dir so cache files don't
 // collide with production state and don't persist between tests.
 let tmpHome;
+let savedHome;
+const HOME_AT_LOAD = process.env.HOME;
 beforeEach(() => {
+  savedHome = process.env.HOME;
   tmpHome = join(tmpdir(), `lem-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(join(tmpHome, "catalyst", "execution-core"), { recursive: true });
   process.env.HOME = tmpHome;
@@ -24,8 +27,12 @@ beforeEach(() => {
 });
 afterEach(() => {
   if (tmpHome && existsSync(tmpHome)) rmSync(tmpHome, { recursive: true, force: true });
-  delete process.env.HOME;
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
   _resetMemoForTests();
+});
+afterAll(() => {
+  expect(process.env.HOME).toBe(HOME_AT_LOAD);
 });
 
 function cacheFilePath(teamId) {
