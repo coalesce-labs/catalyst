@@ -3,9 +3,6 @@ version: 2
 updates:
   # Root bun workspace — covers the root package.json plus every workspace
   # under plugins/dev/scripts/* (execution-core, broker, orch-monitor, ...).
-  # This is the only committed lockfile in the repo (bun.lock at the root);
-  # website/ and event-mirror/ have their own manifests but no committed
-  # lockfile, so they are intentionally left out of this config for now.
   - package-ecosystem: "bun"
     directory: "/"
     schedule:
@@ -25,6 +22,22 @@ updates:
     # weekly PR nagging for review, not suppression — so it gets tracked
     # like every other dependency and reviewed like any bump that touches
     # execution-core's usage.
+
+  # website/ has its own committed lockfile (package-lock.json) and its
+  # package.json is not part of the root bun workspace, so it needs its
+  # own npm entry — otherwise its dependencies drift with no Dependabot PRs.
+  - package-ecosystem: "npm"
+    directory: "/website"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 8
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"
