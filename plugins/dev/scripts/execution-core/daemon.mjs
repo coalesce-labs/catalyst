@@ -146,7 +146,7 @@ import {
   clearDispositionEmit as defaultClearDispositionEmit, // Codex #2970 round 3: reset the in-process worker.transition dedup after an out-of-band clear
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
-import { labelMarkerBase, clearStalledLabel } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth); CTL-1552: clear needs-human LABEL + once-marker together (leaf module → no cycle); CTL-1871: labelMarkerBase used for stale-needs-human sweep in clearNeedsHumanMarkers
+import { labelMarkerBase, clearStalledLabel, NEEDS_HUMAN_LABEL_FAMILY } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth); CTL-1552: clear needs-human LABEL + once-marker together (leaf module → no cycle); CTL-1871: labelMarkerBase used for stale-needs-human sweep in clearNeedsHumanMarkers; NEEDS_HUMAN_LABEL_FAMILY iterated in the comment-wake clear so the stale-needs-human LABEL never outlives its reason
 import { defaultForgetIntent } from "./recovery-reasoning.mjs"; // CTL-1567: re-arm recovery when a human responds
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator clear
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
@@ -707,12 +707,27 @@ export async function handleCommentWake(
   // emission instead of zero.
   let needsInputWroteEarly = false;
   if (humanProvenance && isManagedTicket(ticket, orchDir)) {
-    try {
-      const res = await removeLabel(ticket, "needs-human");
-      clearedNeedsHuman = res?.removed !== false; // undefined (test stub) ⇒ success
-      clearedNeedsHumanWrote = res?.wrote === true;
-    } catch {
-      /* fail-open on the WRITE — a Linear 5xx must not block the wake path */
+    // CTL-1871 (phase-review remediation): clear the WHOLE needs-human LABEL
+    // FAMILY (needs-human + the stale-needs-human sweep label) on a confirmed
+    // human reply, so no family member outlives its reason once the human
+    // responds. Iterating NEEDS_HUMAN_LABEL_FAMILY — rather than hard-coding
+    // "needs-human" — closes the Phase-4 gap phase-verify surfaced: the sweep
+    // APPLIES the stale-needs-human LABEL but no resolution path REMOVED it, so
+    // flipping the sweep to enforce would accumulate labels that never clear —
+    // the inverse of what this ticket exists to fix. The PRIMARY `needs-human`
+    // removal still OWNS the clearedNeedsHuman / …Wrote gates (marker reconcile
+    // + worker.transition emission below); sibling family labels are best-effort
+    // and MUST never block or double-count the wake path.
+    for (const famLabel of NEEDS_HUMAN_LABEL_FAMILY) {
+      try {
+        const res = await removeLabel(ticket, famLabel);
+        if (famLabel === "needs-human") {
+          clearedNeedsHuman = res?.removed !== false; // undefined (test stub) ⇒ success
+          clearedNeedsHumanWrote = res?.wrote === true;
+        }
+      } catch {
+        /* fail-open on the WRITE — a Linear 5xx must not block the wake path */
+      }
     }
     // CTL-1567 (Codex P1): `needs-input` is the OTHER park label, and the board
     // treats either as a Needs-You ticket (it synthesizes no-worker-dir cards from

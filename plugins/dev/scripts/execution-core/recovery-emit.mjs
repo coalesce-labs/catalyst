@@ -391,11 +391,17 @@ if (sub === "escalated") {
           // not "did I apply it on this call" (Codex #2861 P1).
           // CTL-1871 COORD-29: explanation drives the ASK comment the gate posts
           // atomically with the label (enforce: comment first, label withheld if
-          // comment fails; shadow: attempt + log, then label regardless).
+          // comment fails; shadow: comment AFTER label, only when label lands).
+          // Thread postTicketComment through so the injectable COMMENT_HELPER is
+          // used in every mode — the gate's default runner ignores it.
           {
             site: "recovery-emit-escalated",
             treatAlreadyAppliedAsLanded: true,
             explanation: escalation,
+            postAskComment: (t, b) => {
+              const ok = postTicketComment(t, b);
+              return { status: ok === true ? 0 : 1 };
+            },
           },
         ) === true;
     } catch (err) {

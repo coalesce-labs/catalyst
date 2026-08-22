@@ -52,7 +52,9 @@ describe("classifyStaleNeedsHuman", () => {
     expect(r.flag).toBe(true);
   });
 
-  test("needs-human + no comments at all → flag:true", () => {
+  // Present-but-empty comments array = we LOOKED and found no ASK → flag:true.
+  // (Contrast with the missing-FIELD case below, which is could-not-look.)
+  test("needs-human + no comments at all (empty array, looked) → flag:true", () => {
     const r = classifyStaleNeedsHuman(active(["needs-human"], []));
     expect(r.flag).toBe(true);
   });
@@ -70,9 +72,15 @@ describe("classifyStaleNeedsHuman", () => {
     expect(r.flag).toBe(false);
   });
 
-  test("undefined comments treated as empty array", () => {
+  // CTL-1871 phase-review remediation: a descriptor with NO `comments` field means
+  // the sweep could not look at the ticket's comments (the wired
+  // getAllTicketDescriptors → rowToTicketDescriptor carries no comments field), which
+  // must NOT be read as "no ASK". Fail-safe / inconclusive, never a false-positive
+  // flag. This is the "missing field reads as absent" trap AGENTS.md forbids.
+  test("missing comments FIELD → flag:false (comments-unavailable, could-not-look)", () => {
     const r = classifyStaleNeedsHuman({ ticket: "CTL-2", state: "todo", labels: ["needs-human"] });
-    expect(r.flag).toBe(true);
+    expect(r.flag).toBe(false);
+    expect(r.reason).toBe("comments-unavailable");
   });
 });
 

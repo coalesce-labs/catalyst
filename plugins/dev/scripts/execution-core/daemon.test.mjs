@@ -1921,6 +1921,7 @@ describe("handleCommentWake (CTL-549)", () => {
         dispatch: () => ({ code: 0 }),
         removeLabel: async (_t, label) => {
           if (label === "needs-human") return { removed: true, wrote: false }; // never applied on this ticket
+          if (label === "stale-needs-human") return { removed: true, wrote: false }; // CTL-1871 family sibling — never applied here
           // needs-input: the FIRST call (the earlier needs-human-block cleanup)
           // performs the real write; the SECOND call (the per-signal loop) finds
           // it already gone.
@@ -1965,6 +1966,7 @@ describe("handleCommentWake (CTL-549)", () => {
         dispatch: () => ({ code: 0 }),
         removeLabel: async (_t, label) => {
           if (label === "needs-human") return { removed: true, wrote: false };
+          if (label === "stale-needs-human") return { removed: true, wrote: false }; // CTL-1871 family sibling — never applied here
           // The FIRST needs-input call (the earlier needs-human-block cleanup)
           // performs the real write; every subsequent call — one per signal
           // file the per-signal loop visits — finds it already gone.
@@ -2008,6 +2010,7 @@ describe("handleCommentWake (CTL-549)", () => {
         dispatch: () => ({ code: 0 }),
         removeLabel: async (_t, label) => {
           if (label === "needs-human") return { removed: true, wrote: false };
+          if (label === "stale-needs-human") return { removed: true, wrote: false }; // CTL-1871 family sibling — never applied here
           needsInputCalls += 1;
           // Call 1: the earlier needs-human-block cleanup earns the real write.
           if (needsInputCalls === 1) return { removed: true, wrote: true };
@@ -2115,6 +2118,32 @@ describe("handleCommentWake (CTL-549)", () => {
     );
     expect(removed).toContain("needs-human");
     expect(removed).toContain("needs-input");
+  });
+
+  // CTL-1871 phase-review remediation: the stale-needs-human LABEL (applied by the
+  // daily sweep) is a member of NEEDS_HUMAN_LABEL_FAMILY and must be REMOVED from
+  // Linear on resolution, not merely have its local markers cleared — otherwise a
+  // sweep flipped to enforce accumulates labels that outlive their reason, the
+  // inverse of what this ticket fixes. This is the Phase-3 Red test that was
+  // specified but not implemented (phase-verify medium finding).
+  test("clears the stale-needs-human LABEL on a human reply (not just its markers)", async () => {
+    const orch = tmpOrcDir();
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "PROJ-STALE", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (t, l) => { removed.push(l); },
+        isManagedTicket: () => true,
+        forgetIntent: () => true,
+      }
+    );
+    // Positive control: the family's primary label removal still happens.
+    expect(removed).toContain("needs-human");
+    // The gap this remediation closes: the sibling sweep label is removed too.
+    expect(removed).toContain("stale-needs-human");
   });
 
   test("re-arms recovery so the response is not suppressed by the escalated latch", async () => {

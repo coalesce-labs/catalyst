@@ -694,11 +694,8 @@ export function labelNeedsHumanUnlessBeliefOwner(
   // body is ready, and so an explanation is always present on the write path.
   const warnFn =
     typeof logArg?.warn === "function" ? logArg.warn.bind(logArg) : log.warn.bind(log);
-  if (explanation === undefined || explanation === null) {
-    // Emit the absent-warning here (before the label) so callers that never reach
-    // the `applied` branch still see it — keeps the existing behaviour for the
-    // tests that check this event on the non-applying path.
-  }
+  // The escalation.explanation-absent warning fires in the `applied` branch below
+  // (the only path that mutates Linear); there is no early emission here.
   const coerced = coerceExplanation(explanation ?? {}, { ticket, canExecute: false });
 
   // CTL-1871 COORD-29: ASK comment — attempt before the label in `enforce` mode
@@ -708,15 +705,17 @@ export function labelNeedsHumanUnlessBeliefOwner(
     postLinearCommentAsSpawnResult(t, body, { caller: "label-guard" })
   );
 
-  if (askMode !== "off") {
+  // CTL-1871 COORD-29 enforce: comment BEFORE label, withhold label if comment fails.
+  // Shadow mode posts AFTER the label (see post-label block below) so a failed label
+  // write never leaks a standalone comment — preserving CTL-1568's label⇄comment pairing.
+  if (askMode === "enforce") {
     const askPosted = ensureAskCommentPosted(ticket, coerced, {
       env,
       orchDir,
       log: logArg,
       postAskComment: _postAskComment,
     });
-    // enforce mode: withhold the label when the ASK comment couldn't land.
-    if (askMode === "enforce" && !askPosted) {
+    if (!askPosted) {
       if (typeof onOutcome === "function") {
         onOutcome({ deferred: false, applied: false, ran: false, reason: "ask-post-failed" });
       }
@@ -762,6 +761,17 @@ export function labelNeedsHumanUnlessBeliefOwner(
       emitEscalation(ticket, { site, reason: explanation?.problem ?? null });
     } catch {
       /* fail-open: observability must never block the label path */
+    }
+    // CTL-1871 COORD-29 shadow: post ASK comment AFTER label succeeds.
+    // Conditional on `applied` so a failed label write withholds the comment
+    // (CTL-1568 guarantee: comment never arrives without the label).
+    if (askMode === "shadow") {
+      ensureAskCommentPosted(ticket, coerced, {
+        env,
+        orchDir,
+        log: logArg,
+        postAskComment: _postAskComment,
+      });
     }
   }
   if (typeof onOutcome === "function") {

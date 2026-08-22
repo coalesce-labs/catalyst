@@ -40,7 +40,10 @@ export const STALE_SWEEP_EVENT = "broker.stale-needs-human.swept";
  *   - ticket {string}
  *   - state {string}  — Linear workflow state (lowercased)
  *   - labels {string[]}
- *   - comments {Array<{body: string}>}  — the ticket's Linear comments
+ *   - comments {Array<{body: string}>}  — the ticket's Linear comments. When the
+ *     descriptor carries NO `comments` field at all (not merely an empty array),
+ *     the sweep could not look at the ticket's comments and MUST NOT conclude the
+ *     ASK is missing — see the comments-unavailable guard below.
  * @returns {{ flag: boolean, reason: string }}
  */
 export function classifyStaleNeedsHuman(descriptor) {
@@ -58,9 +61,21 @@ export function classifyStaleNeedsHuman(descriptor) {
     return { flag: false, reason: "already-flagged" };
   }
 
+  // CTL-1871 phase-review remediation — fail-safe on a missing comments FIELD.
+  // Distinguish "could not look" (no `comments` field on the descriptor) from
+  // "looked, found no ASK" (a present, possibly-empty array). The wired
+  // getCandidates (getAllTicketDescriptors → rowToTicketDescriptor) produces NO
+  // `comments` field, so coercing undefined→[] made `hasAsk` ALWAYS false and
+  // flagged EVERY non-terminal needs-human ticket — the "missing field reads as
+  // absent → false positive" trap AGENTS.md forbids (a check that cannot fail
+  // loudly is not evidence). When we cannot look, we do not flag. This makes the
+  // sweep safely inert under the current wiring until ticket comments are
+  // populated onto the descriptor (tracked follow-up) rather than actively wrong.
+  if (!Array.isArray(comments)) {
+    return { flag: false, reason: "comments-unavailable" };
+  }
   // Does the ticket have at least one well-formed ASK comment?
-  const commentArr = Array.isArray(comments) ? comments : [];
-  const hasAsk = commentArr.some((c) => parseAskComment(String(c?.body ?? "")).isAsk);
+  const hasAsk = comments.some((c) => parseAskComment(String(c?.body ?? "")).isAsk);
   if (hasAsk) {
     return { flag: false, reason: "has-ask" };
   }
