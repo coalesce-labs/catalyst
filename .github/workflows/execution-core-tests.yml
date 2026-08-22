@@ -322,6 +322,29 @@ jobs:
         working-directory: .
         run: bash plugins/dev/scripts/__tests__/catalyst-account-usage-page.test.sh
 
+      - name: claude-account switch/sync + --soft rotation test (CTL-1650 / CTL-2147)
+        # ⛔ PINNED DELIBERATELY (same reason as the suites around it): CI runs an EXPLICIT list of
+        # shell suites, not a glob runner, so an unpinned suite runs only in the local full gate.
+        # This one is entirely hermetic — no real sops/git/network/daemon — see the file's own
+        # header comment.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/catalyst-stack-claude-account.test.sh
+
+      - name: execution-core CLI noun/verb routing test (CTL-649 / CTL-2147)
+        # Backcompat daemon aliases, the `daemon` noun, the `sessions`/`worktrees`/`branches` audit
+        # routes, and (CTL-2147) the `rearm` verb — including its success path against a fake
+        # SIGHUP-trapping process, not just its "daemon not running" failure path.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/execution-core-cli-routing.test.sh
+
+      - name: architecture.md armSecret-claim guard (CTL-2147)
+        # docs/architecture.md is @-imported in full at every agent session start, so a stale claim
+        # there actively misleads the next agent. Grep guard + positive control (daemon.mjs really
+        # does still call armSecret 3+ times) so this fails loudly if the callers are ever removed
+        # rather than silently blessing a doc that would then be correct again.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/architecture-armsecret-claim.test.sh
+
       - name: archive + uninstall test (CTL-1975)
         # ⛔ PINNED DELIBERATELY, and the reason is the PR that added it. CI runs an EXPLICIT list
         # of shell suites — there is no glob runner and no run-tests.sh here — so a suite that is
@@ -1429,6 +1452,7 @@ jobs:
             service-manifest.test.mjs \
             github-auth-preflight.test.mjs \
             claude-accounts-rearm.test.mjs \
+            daemon-signals.test.mjs \
             github-token-candidates-legacy-parity.test.mjs \
             github-quota.test.mjs \
             github-quota-timer.test.mjs \

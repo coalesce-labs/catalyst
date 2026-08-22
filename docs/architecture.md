@@ -512,9 +512,23 @@ than one that structurally can't) reports it when a caller invokes `armSecret` a
 value has changed since the PROCESS's last `armSecret` observation for that id (`_lastArmedValue` is
 module-level, one baseline per secret id shared by every caller in the process — caller B observing
 a rotation resets what caller A sees) — a caller-invoked report, not an automatic one fired the
-moment the value changes. No production call site invokes `armSecret` today (a repo-wide search
-outside tests finds only the definition and a comment reference in `linear-remint.mjs`), so this
-reporting is not yet wired to any running daemon.
+moment the value changes. `armSecret` has three live production call sites, all in
+`execution-core/daemon.mjs`: a boot-time arm of `github-token` (`:1363`), and two calls on the
+periodic `_clusterSyncTimer` tick (`:2140` `github-token`, `:2143` `claude-accounts.env`). The
+`claude-accounts.env` row is `re-armable`/`timer` with **no boot-time arm** — its only historical
+trigger was that 5-minute timer, until CTL-2147 added `SIGHUP` as an on-demand trigger for the same
+row (see "Phase-Agent Communication" → `catalyst-stack claude-account switch/sync --soft` below).
+
+**Soft claude-account rotation (CTL-2147).** `catalyst-stack claude-account switch <handle> --soft`
+and `claude-account sync --soft` flip the selector exactly as the default (restart-based) path, but
+skip `cmd_restart` entirely: they `kill -HUP` the execution-core daemon (`catalyst-execution-core
+rearm`) to trigger the `claude-accounts.env` rearm above immediately, then verify against the
+daemon's own emitted `account.rearm.applied` event — never a re-read of the local file, which would
+report success identically against a daemon that never re-armed. Correct only under `executor=sdk`
+(the SDK executor binds `CLAUDE_CODE_OAUTH_TOKEN` from the daemon's live `process.env` on every
+dispatch — `sdk-run-phase-agent.mjs:1152-1157`/`:950`), so `--soft` refuses on any other executor.
+Because it never restarts, `--soft` removes account rotation as a trigger of the CTL-2133
+boot-resume pen — the restart-based path stays the default rotation mechanism.
 
 **Consumers folded onto the contract so far**: the 10-file/12-site Linear-token read
 (`linear-query.mjs` — 3 sites, `cluster-heartbeat.mjs`, `cluster-claim.mjs`,
