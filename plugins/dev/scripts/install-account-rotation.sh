@@ -444,9 +444,14 @@ fi
 # ─── materialize the coord kit ───────────────────────────────────────────────
 #
 # Before bootstrap, so the runtime dir the actor and the lane watchdog read from is
-# populated the moment the agent can first fire. Non-fatal: the agent itself runs from
-# the pristine clone, so a failed materialize degrades the LANE side of the kit, not
-# the rotation side — but it is reported rather than swallowed.
+# populated the moment the agent can first fire. FATAL, not merely reported: the
+# rotation actor's own circuit breaker (cw_record_attempt, see lib/rotation-window.sh)
+# writes its attempt counter and acted marker into this same materialized dir. A failed
+# materialize does not just degrade the lane side of the kit — under
+# CATALYST_ACCOUNT_ROTATION=enforce it leaves the actor unable to persist an attempt,
+# so `cw_record_attempt` fails closed and every rotation is refused. Installing the
+# LaunchAgent anyway would report success while bootstrapping an actor whose load-bearing
+# breaker cannot be written (Codex #3867 P1).
 
 # COORD_RT — the DURABLE runtime dir materialize-coord-kit.sh bakes the kit into. Mirrors
 # that script's own `COORD_RT="${CATALYST_DIR:-$HOME/catalyst}/comms/coord"`; both must
@@ -459,10 +464,12 @@ if [[ -x "$MATERIALIZE" ]]; then
   if bash "$MATERIALIZE"; then
     echo "install-account-rotation.sh: materialized the coord kit"
   else
-    echo "install-account-rotation.sh: WARNING — materialize-coord-kit.sh failed; the lane kit under ~/catalyst/comms/coord may be incomplete" >&2
+    echo "install-account-rotation.sh: ABORTING — materialize-coord-kit.sh failed; the rotation actor's attempt counter under ${COORD_RT} would be unwritable, so its circuit breaker could never record an attempt. Fix the failure above and re-run." >&2
+    exit 1
   fi
 else
-  echo "install-account-rotation.sh: WARNING — no materialize-coord-kit.sh at ${MATERIALIZE}" >&2
+  echo "install-account-rotation.sh: ABORTING — no materialize-coord-kit.sh at ${MATERIALIZE}; cannot populate ${COORD_RT}, which the rotation actor's circuit breaker requires." >&2
+  exit 1
 fi
 
 # ─── retire any stray legacy loop (deliverable 4) ────────────────────────────

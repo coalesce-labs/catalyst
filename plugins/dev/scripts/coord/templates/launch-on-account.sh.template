@@ -99,7 +99,13 @@ if [ "${LANE_MAX_SECONDS:-0}" -gt 0 ] 2>/dev/null; then
     fi
   ' _ "$LANE_PID" "$LANE_MAX_SECONDS" "$LOG" "$ACCOUNT" >/dev/null 2>&1 &
 else
-  echo "launch-on-$ACCOUNT: WARNING — LANE_MAX_SECONDS=${LANE_MAX_SECONDS:-0}; lane pid ${LANE_PID} runs with NO deadline" >&2
+  # Codex #3867 P2: never write a bare "pid <digits>" substring here. lane-relaunch.sh
+  # captures this launcher's stdout+stderr combined and greps the WHOLE blob for
+  # `pid [0-9]*` to learn the real lane pid below; a second incidental match in this
+  # warning duplicates the pid into the pid file with an embedded newline, and the
+  # resulting `kill -0 "$pid"` call then fails on the malformed argument and reads a
+  # live lane as dead. "pid=" (no space) does not match that pattern.
+  echo "launch-on-$ACCOUNT: WARNING — LANE_MAX_SECONDS=${LANE_MAX_SECONDS:-0}; lane pid=${LANE_PID} runs with NO deadline" >&2
 fi
 
 echo "launch-on-$ACCOUNT: started ${BRIEF_NAME} in ${REPO_DIR} (log: $LOG)"
