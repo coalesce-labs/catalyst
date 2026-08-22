@@ -25,10 +25,14 @@ function defaultWorkersDir() {
   return join(defaultOrchDir(), "workers");
 }
 
-function defaultEventLogPath() {
-  const now = new Date();
+// CAT-216: resolve from the same injectable catalyst root used by server.ts.
+export function eventLogPathFor(catalystDir, now = new Date()) {
   const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return join(homedir(), "catalyst", "events", `${ym}.jsonl`);
+  return join(catalystDir, "events", `${ym}.jsonl`);
+}
+
+function defaultEventLogPath() {
+  return eventLogPathFor(process.env.CATALYST_DIR || join(homedir(), "catalyst"));
 }
 
 // ── scanHops ─────────────────────────────────────────────────────────────────
