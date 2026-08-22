@@ -1,0 +1,15 @@
+# lanes.manifest — CTL-2145. One "<lane-prefix> <repo-dir>" per line; read by
+# lane-relaunch.sh, which relaunches any lane whose recorded pid is no longer alive.
+#
+# materialize-coord-kit.sh seeds this file from THIS example ONLY when no
+# lanes.manifest exists yet. Once you edit it, re-materializing never clobbers it —
+# the manifest is operator state, not generated state.
+#
+# <lane-prefix> selects that lane's briefs: the highest-numbered launch-<prefix>N.txt
+# in the coord dir wins (digits only after the prefix, so "ctl" matches launch-ctl27.txt
+# and never launch-ctlinstall6.txt — the CTL-2097 cross-match bug).
+# <repo-dir> is the working directory the lane is launched in.
+#
+# Uncomment and adapt:
+# ctl   /Users/you/catalyst/wt/catalyst-workspace
+# infra /Users/you/code/infra

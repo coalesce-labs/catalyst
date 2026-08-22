@@ -1591,6 +1591,90 @@ a Linear write. Two cadence caveats:
   cadence instead of re-running the per-tick Linear probe + fence-check subprocess forever
   (the CTL-1329 quota burn).
 
+### Account rotation (`catalyst.accountRotation`, CTL-2145)
+
+The account-rotation actor (`plugins/dev/scripts/coord/account-rotation-watch.sh`) is the durable
+consumer of the CTL-1653 account-status latch. It runs as a `StartInterval` LaunchAgent
+(`ai.coalesce.catalyst-account-rotation`, installed by
+`plugins/dev/scripts/install-account-rotation.sh` and delegated from `catalyst-stack
+install-services`), reads `~/catalyst/account-status-latch.json`, and on a fresh `rejected` **edge**
+rotates the active Claude account via `catalyst-stack claude-account switch <handle> --yes`, then
+writes `~/catalyst/comms/coord/fleet-account.current` so `lane-relaunch.sh` picks the matching
+launcher.
+
+| Key                                        | Default    | Meaning                                                                                                              |
+| ------------------------------------------ | ---------: | -------------------------------------------------------------------------------------------------------------------- |
+| `catalyst.accountRotation.mode`            | `shadow`   | `off` \| `shadow` \| `enforce`. See the precedence and semantics below.                                              |
+| `catalyst.accountRotation.intervalSeconds` | `300`      | The agent's `StartInterval`, clamped to `[60, 3600]`. Baked into the plist at install time.                          |
+
+**Modes.** `off` is a total no-op that does not even consume the edge. `shadow` (the default) logs
+the rotation it WOULD make and emits `account.rotation.would-switch`, mutating nothing. `enforce`
+performs the switch and emits `account.rotation.switched`. An unrecognized value degrades to
+`shadow` — never to `enforce`, since a typo must not arm something that restarts the whole stack —
+and it **short-circuits** rather than falling through to a lower-precedence source, so a mistyped
+rollback cannot be silently "corrected" back to an `enforce` sitting in config or in the installed
+plist.
+
+**Precedence**, resolved identically by the actor at tick time and by the installer when baking the
+plist: the `CATALYST_ACCOUNT_ROTATION` env var, then `.catalyst/config.json`, then — installer only
+— the value already present in the installed plist, then `shadow`. That third clause is what makes
+an operator's hand-flip survive a routine `catalyst-stack install-services`, which regenerates and
+replaces the plist every run (the CTL-1531 lesson: a knob a routine reinstall resets is worse than
+no knob).
+
+**Edge, not level.** `latched: true` stays true for the whole rate-limit episode, so the actor acts
+only when the latch's `ts` is strictly newer than its last-acted marker
+(`~/catalyst/comms/coord/.account-rotation-acted`). A level-triggered actor ticking every few
+minutes would burn every provisioned handle in one wall. `shadow` keeps a **separate**
+`.account-rotation-announced` marker so it announces each edge once rather than once per tick,
+while leaving the edge live — a dry run that consumed the edge would leave a later flip to
+`enforce` with nothing to act on, mid-outage.
+
+**Bounds and refusals.** Rotations are capped by a rolling one-hour window
+(`ROTATION_HOURLY_CAP`, default `3`, shared with `lane-relaunch.sh` via
+`coord/lib/rotation-window.sh`); past the cap the tick logs `CAPPED` and leaves the edge live. Every
+non-rotating path names itself rather than exiting quietly: an absent or malformed latch and a host
+with no alternative handle both report **INCONCLUSIVE** and never a clean tick, and a failed switch
+advances neither the marker nor `fleet-account.current`, so the edge is retried next tick (bounded
+by the cap) and the two account pointers can never disagree. An invalid mode value names the
+**source it was read from** (the env var, the specific `config.json`, or the installed plist) rather
+than always blaming the env var — a mis-attributed decline sends an operator to grep the one place
+the bad value is not.
+
+**`rc=0` from the switch verb is not proof of a rotation.** `catalyst-stack claude-account switch`
+has a documented already-active branch that returns `0` without touching anything, and the actor and
+the verb can genuinely disagree about who is active: the actor parses the **local**
+`claude-accounts.env` selector, while the verb parses one freshly pulled from the **cluster** repo,
+and the local copy goes stale the moment any other node switches. So after `rc=0` the actor re-reads
+the selector and requires it to actually name the target. If it does not, the tick reports
+**INCONCLUSIVE**, leaves both markers and `fleet-account.current` untouched so the edge stays live,
+and emits `account.rotation.unverified` — never `account.rotation.switched`. This matters because
+`latched: true` is a level held for the whole episode: consuming the edge on a rotation that did not
+happen means no further attempt until the account recovers on its own.
+
+**The LaunchAgent's environment is load-bearing.** launchd does not inherit the installing shell's
+environment, so the installer bakes two more keys into the plist besides the mode:
+
+| Plist key      | Token                    | Substituted with                                                                 |
+| -------------- | ------------------------ | -------------------------------------------------------------------------------- |
+| `PATH`         | `REPLACE_PATH`           | `~/.catalyst/bin` + the usual bin dirs (`install-account-rotation.sh`'s `_agent_path`) |
+| `CATALYST_DIR` | `REPLACE_CATALYST_DIR`   | the installer's own `${CATALYST_DIR:-$HOME/catalyst}` — the dir it derived `COORD_RT` from |
+
+Neither is optional. Without `PATH`, launchd gives the job only its built-in
+`/usr/bin:/bin:/usr/sbin:/sbin`, which does not contain `catalyst-stack` — so `enforce` can never
+rotate: the verb exits `127`, and because the cap attempt is recorded **before** the verb is called,
+three such ticks exhaust the hourly cap and every later tick logs `CAPPED`, which reads like a
+working circuit breaker rather than a misconfigured agent. Without `CATALYST_DIR`, a node using a
+non-default runtime dir has its agent read `$HOME/catalyst/account-status-latch.json` (absent) and
+report INCONCLUSIVE forever while the installer materialized the coord kit somewhere else. Note the
+smoke test in the plist's comment block runs from an operator shell and inherits a usable `PATH`, so
+it passes either way — the only environment that exposes the `PATH` bug is launchd itself.
+
+**Where it installs.** `install-account-rotation.sh` applies its own applicability gate: the node
+class must be in its `ROTATION_NODE_CLASSES` constant (`worker` today) **and**
+`~/.config/catalyst/claude-accounts.env` must exist — a host with no provisioned accounts has
+nothing to rotate between. Both refusals are non-fatal (exit 0) and both state their reason.
+
 ### Broker watchdog session eviction (CTL-1516)
 
 The broker's watchdog tick keeps per-session bookkeeping (`lastHeartbeat`, `workerToOrchestrator`)

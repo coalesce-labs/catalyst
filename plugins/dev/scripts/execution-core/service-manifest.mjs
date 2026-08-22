@@ -19,12 +19,27 @@ export const LABELS = {
   orphanSweep: "ai.coalesce.catalyst-orphan-sweep",
   agent: "com.catalyst.agent",
   cloudSync: "ai.coalesce.catalyst-cloud-sync",
+  // CTL-2145: the account-rotation actor's LaunchAgent. DOCUMENTATION-LEVEL, like every
+  // other entry in MANIFEST.required (see the header): nothing enforces this list at
+  // runtime. The agent is actually installed by the `install-services` delegate to
+  // install-account-rotation.sh, which applies its own node-class + claude-accounts.env
+  // gate — so a worker host with no accounts provisioned correctly ends up WITHOUT it
+  // even though it is listed as required here. Declaring it still buys the doctor-facing
+  // label resolution and states the intent in one place.
+  accountRotation: "ai.coalesce.catalyst-account-rotation",
 };
 
 export const MANIFEST = {
   worker: {
     shipsLogs: true,
-    required: [LABELS.stack, LABELS.thoughtsSync, LABELS.shipper, LABELS.orphanSweep, LABELS.agent],
+    required: [
+      LABELS.stack,
+      LABELS.thoughtsSync,
+      LABELS.shipper,
+      LABELS.orphanSweep,
+      LABELS.agent,
+      LABELS.accountRotation,
+    ],
     forbidden: [LABELS.updater],
     installVia: "install-services",
   },

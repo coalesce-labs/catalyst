@@ -65,19 +65,19 @@ EMPTY_LIB_DIR="$(mktemp -d)"
 # Test 2: all-pass fixture exits 0
 FIX="$(make_fixture "aaa:0" "bbb:0")"
 trap 'rm -rf "$FIX" "$FIX2" "$FIX3" "$FIX4" "$FIX5" "$EMPTY_LIB_DIR"' EXIT
-if SHELL_TEST_DIR="$FIX" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" >/dev/null 2>&1; then
+if SHELL_TEST_DIR="$FIX" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" >/dev/null 2>&1; then
 	pass "all-pass fixture exits 0"
 else fail "all-pass fixture should exit 0"; fi
 
 # Test 3: a failing test (exit 1) makes the runner exit non-zero
 FIX2="$(make_fixture "ok:0" "bad:1")"
-if SHELL_TEST_DIR="$FIX2" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" >/dev/null 2>&1; then
+if SHELL_TEST_DIR="$FIX2" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" >/dev/null 2>&1; then
 	fail "fixture with a failing test should exit non-zero"
 else pass "failing test makes runner exit non-zero"; fi
 
 # Test 4: exit-with-count pattern (exit 3) is treated as failure, not pass
 FIX3="$(make_fixture "ok:0" "counted:3")"
-if SHELL_TEST_DIR="$FIX3" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" >/dev/null 2>&1; then
+if SHELL_TEST_DIR="$FIX3" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" >/dev/null 2>&1; then
 	fail "exit-code 3 should count as failure"
 else pass "any rc>0 (exit 3) counts as failure"; fi
 
@@ -86,7 +86,7 @@ else pass "any rc>0 (exit 3) counts as failure"; fi
 # always contains the word "skipped", so a bare substring grep would pass even
 # if SKIP detection were broken and the suite miscounted as a pass.
 FIX4="$(make_fixture "ok:0" "skipme:0:SKIP: dependency absent")"
-OUT="$(SHELL_TEST_DIR="$FIX4" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+OUT="$(SHELL_TEST_DIR="$FIX4" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 RC=$?
 if [[ $RC -eq 0 ]]; then
 	pass "SKIP test does not fail the runner"
@@ -101,7 +101,7 @@ else fail "summary skip/pass/fail count wrong" "$OUT"; fi
 # Test 6: SKIP detection is anchored to '^SKIP:'. A passing suite that merely
 # mentions SKIP mid-line (indented, or with leading text) must stay PASS.
 FIX5="$(make_fixture "ok:0" "mentions:0:  note: SKIP: handling exercised")"
-OUT="$(SHELL_TEST_DIR="$FIX5" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+OUT="$(SHELL_TEST_DIR="$FIX5" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 if grep -q 'shell 2 passed / 0 failed / 0 skipped' <<<"$OUT"; then
 	pass "indented 'SKIP:' does not trigger skip classification (^SKIP: anchored)"
 else fail "non-column-0 'SKIP:' wrongly classified" "$OUT"; fi
@@ -111,18 +111,28 @@ else fail "non-column-0 'SKIP:' wrongly classified" "$OUT"; fi
 # glob and the suite would pass whether or not the skills dir is ever discovered
 # — which is the "a cap is never silent" failure the skills gate itself is about.
 FIX6B="$(make_fixture "skills_fixture:0")"
-OUT="$(SHELL_TEST_DIR="$EMPTY_LIB_DIR" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$FIX6B" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+OUT="$(SHELL_TEST_DIR="$EMPTY_LIB_DIR" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$FIX6B" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 if grep -q "skills_fixture" <<<"$OUT"; then
 	pass "SKILLS_SHELL_TEST_DIR fixture is discovered and run"
 else fail "SKILLS_SHELL_TEST_DIR override was not wired into the shell suite" "$OUT"; fi
 rm -rf "$FIX6B"
+
+# Test 7c (CTL-2145): COORD_SHELL_TEST_DIR is genuinely wired, not merely declared —
+# the same proof 7b makes for the skills dir. A fourth test directory that is globbed
+# by nothing is this repo's recurring defect; asserting the override actually reaches
+# the shell loop is what makes the runner line real rather than decorative.
+FIX6C="$(make_fixture "coord_fixture:0")"
+OUT="$(SHELL_TEST_DIR="$EMPTY_LIB_DIR" LIB_SHELL_TEST_DIR="$EMPTY_LIB_DIR" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$FIX6C" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+if grep -q 'coord_fixture.test.sh' <<<"$OUT"; then
+	pass "COORD_SHELL_TEST_DIR fixture is discovered and run"
+else fail "COORD_SHELL_TEST_DIR override was not wired into the shell suite" "$OUT"; fi
 
 # Test 7 (CTL-1612 round 7): LIB_SHELL_TEST_DIR is genuinely wired, not just
 # harmlessly ignored — a fixture placed there is discovered and run, proving
 # it is not a dead override.
 FIX6="$(make_fixture "libok:0")"
 trap 'rm -rf "$FIX" "$FIX2" "$FIX3" "$FIX4" "$FIX5" "$FIX6" "$FIX7" "$FIX7_LIB" "$EMPTY_LIB_DIR"' EXIT
-OUT="$(SHELL_TEST_DIR="$EMPTY_LIB_DIR" LIB_SHELL_TEST_DIR="$FIX6" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+OUT="$(SHELL_TEST_DIR="$EMPTY_LIB_DIR" LIB_SHELL_TEST_DIR="$FIX6" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 if grep -q 'shell 1 passed / 0 failed / 0 skipped' <<<"$OUT"; then
 	pass "LIB_SHELL_TEST_DIR fixture is discovered and run"
 else fail "LIB_SHELL_TEST_DIR override was not wired into the shell suite" "$OUT"; fi
@@ -168,7 +178,7 @@ exit 0
 FIX7EOF
 FIX7_LIB="$(mktemp -d)"
 cp "${FIX7}/secrets-hygiene.test.sh" "${FIX7_LIB}/secrets-hygiene.test.sh"
-OUT="$(SHELL_TEST_DIR="$FIX7" LIB_SHELL_TEST_DIR="$FIX7_LIB" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+OUT="$(SHELL_TEST_DIR="$FIX7" LIB_SHELL_TEST_DIR="$FIX7_LIB" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 MARKER_COUNT="$(grep -c 'PASS .*secrets-hygiene\.test\.sh' <<<"$OUT")"
 if [[ "$MARKER_COUNT" -eq 1 ]]; then
 	pass "wrapped basename (secrets-hygiene.test.sh) runs exactly once, present under both SHELL_TEST_DIR and LIB_SHELL_TEST_DIR"
@@ -188,7 +198,7 @@ else fail "aggregate summary miscounted the wrapped-basename fixture" "$OUT"; fi
 FIX9_SHELL="$(mktemp -d)"
 FIX9_LIB="$(make_fixture "secrets-hygiene:0")"
 trap 'rm -rf "$FIX" "$FIX2" "$FIX3" "$FIX4" "$FIX5" "$FIX6" "$FIX7" "$FIX7_LIB" "$FIX9_SHELL" "$FIX9_LIB" "$FIX10_SHELL" "$FIX10_LIB" "$EMPTY_LIB_DIR"' EXIT
-OUT="$(SHELL_TEST_DIR="$FIX9_SHELL" LIB_SHELL_TEST_DIR="$FIX9_LIB" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+OUT="$(SHELL_TEST_DIR="$FIX9_SHELL" LIB_SHELL_TEST_DIR="$FIX9_LIB" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 if grep -q 'shell 1 passed / 0 failed / 0 skipped' <<<"$OUT"; then
 	pass "wrapped-basename lib suite runs directly when no wrapper is present under the active SHELL_TEST_DIR"
 else fail "wrapped-basename lib suite was wrongly skipped with no active wrapper (0 tests, silent PASS)" "$OUT"; fi
@@ -216,7 +226,7 @@ exit 0
 FIX10EOF
 FIX10_LIB="$(mktemp -d)"
 cp "${FIX10_SHELL}/brand-new-lib-suite.test.sh" "${FIX10_LIB}/brand-new-lib-suite.test.sh"
-OUT="$(SHELL_TEST_DIR="$FIX10_SHELL" LIB_SHELL_TEST_DIR="$FIX10_LIB" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+OUT="$(SHELL_TEST_DIR="$FIX10_SHELL" LIB_SHELL_TEST_DIR="$FIX10_LIB" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 MARKER_COUNT="$(grep -c 'PASS .*brand-new-lib-suite\.test\.sh' <<<"$OUT")"
 if [[ "$MARKER_COUNT" -eq 1 ]]; then
 	pass "a brand-new wrapper/basename never in any hardcoded list is self-registering and dedupes correctly"
@@ -244,7 +254,7 @@ cat >"${FIX11_SHELL}/commentmention.test.sh" <<'FIX11EOF'
 exit 0
 FIX11EOF
 FIX11_LIB="$(make_fixture "totally-fake-suite:0")"
-OUT="$(SHELL_TEST_DIR="$FIX11_SHELL" LIB_SHELL_TEST_DIR="$FIX11_LIB" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+OUT="$(SHELL_TEST_DIR="$FIX11_SHELL" LIB_SHELL_TEST_DIR="$FIX11_LIB" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 if grep -q 'PASS .*totally-fake-suite\.test\.sh' <<<"$OUT"; then
 	pass "a comment-only mention of a lib/__tests__ path does not suppress the real lib suite"
 else fail "comment-only mention wrongly suppressed the lib suite (0 tests, silently skipped)" "$OUT"; fi
@@ -272,7 +282,7 @@ exit 0
 exec bash "${SCRIPT_DIR}/../lib/__tests__/dead-code-wrapper.test.sh"
 FIX12EOF
 FIX12_LIB="$(make_fixture "dead-code-wrapper:1")"
-OUT="$(SHELL_TEST_DIR="$FIX12_SHELL" LIB_SHELL_TEST_DIR="$FIX12_LIB" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
+OUT="$(SHELL_TEST_DIR="$FIX12_SHELL" LIB_SHELL_TEST_DIR="$FIX12_LIB" SKILLS_SHELL_TEST_DIR="$EMPTY_LIB_DIR" COORD_SHELL_TEST_DIR="$EMPTY_LIB_DIR" EXTRA_SHELL_TESTS="" SKIP_BUN=1 bash "$RUNNER" 2>&1)"
 RC=$?
 if grep -q 'FAIL .*dead-code-wrapper\.test\.sh' <<<"$OUT"; then
 	pass "an unreachable (post-exit) invocation-shaped reference does not suppress the real lib suite"

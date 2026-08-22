@@ -38,6 +38,15 @@ LIB_SHELL_TEST_DIR="${LIB_SHELL_TEST_DIR:-${SCRIPT_DIR}/lib/__tests__}"
 # sufficient: the glob alone leaves it outside CI, the pin alone leaves it
 # outside the local gate. If you add another suite here, do BOTH.
 SKILLS_SHELL_TEST_DIR="${SKILLS_SHELL_TEST_DIR:-${REPO_ROOT}/plugins/dev/skills/__tests__}"
+# CTL-2145: plugins/dev/scripts/coord/__tests__ is a FOURTH test directory (the coord
+# kit: the relocated lane-relaunch watchdog, the materialize primitive, the
+# account-rotation actor). Its runner line lands in the same commit as the code, per
+# the rule the role-supervisor block below states outright — a new test DIRECTORY is
+# this repo's recurring shape of "shipped, discovered by nothing" (rounds 7 and 9,
+# CTL-1978, CTL-1993). The CI half is the explicit per-suite pins in
+# execution-core-tests.yml; as the SKILLS block above says, neither half alone is
+# sufficient.
+COORD_SHELL_TEST_DIR="${COORD_SHELL_TEST_DIR:-${REPO_ROOT}/plugins/dev/scripts/coord/__tests__}"
 # CTL-1612 round 9 (Codex P2 follow-up): 6 of the 13 lib/__tests__ suites
 # ALREADY run via a one-line SHELL_TEST_DIR wrapper
 # (`exec bash ".../lib/__tests__/<name>.test.sh"`, predating the round-7
@@ -206,6 +215,11 @@ done
 # wrapper-dedup pass is needed the way LIB_SHELL_TEST_DIR needs one — nothing
 # under scripts/__tests__ exec's these, so they cannot be double-discovered.
 for f in "$SKILLS_SHELL_TEST_DIR"/*.test.sh; do
+	run_shell_test "$f"
+done
+# CTL-2145: the coord kit (see COORD_SHELL_TEST_DIR above). Like the skills dir, nothing
+# under scripts/__tests__ exec's these, so no wrapper-dedup pass is needed.
+for f in "$COORD_SHELL_TEST_DIR"/*.test.sh; do
 	run_shell_test "$f"
 done
 for f in $EXTRA_SHELL_TESTS; do

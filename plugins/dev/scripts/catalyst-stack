@@ -1430,6 +1430,15 @@ CLAUDE_UPDATE_AGENT_LABEL="ai.coalesce.catalyst-claude-update"
 CLAUDE_UPDATE_AGENT_PLIST="${HOME}/Library/LaunchAgents/${CLAUDE_UPDATE_AGENT_LABEL}.plist"
 CLAUDE_UPDATE_INTERVAL_DEFAULT=21600   # 6h in seconds
 
+# CTL-2145: account-rotation LaunchAgent — the durable consumer of the CTL-1653
+# account-status latch. StartInterval one-shot (not KeepAlive): it reads the latch,
+# rotates on a fresh `rejected` edge, and exits, so it cannot become the blind zombie
+# whose session-owned `nohup` predecessor caused the 2026-08-21 fleet outage.
+# Installed/removed by install-services / uninstall-services, both delegating to
+# install-account-rotation.sh (which owns the node-class + claude-accounts.env gate).
+ACCOUNT_ROTATION_AGENT_LABEL="ai.coalesce.catalyst-account-rotation"
+ACCOUNT_ROTATION_AGENT_PLIST="${HOME}/Library/LaunchAgents/${ACCOUNT_ROTATION_AGENT_LABEL}.plist"
+
 # CTL-1654: event-mirror LaunchAgent — fans fleet events into the local event file on
 # observation nodes (monitor/developer). Installed/uninstalled by start/stop_event_mirror
 # at each catalyst-stack start/stop (not by install-services — observation-only opt-in).
@@ -2123,6 +2132,10 @@ cmd_install_services() {
     [[ -x "${SCRIPT_DIR}/install-orphan-sweep.sh" ]] && bash "${SCRIPT_DIR}/install-orphan-sweep.sh" --print-only 2>/dev/null || true
     [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]] && bash "${SCRIPT_DIR}/install-health-responder.sh" --print-only 2>/dev/null || true
     [[ -x "${SCRIPT_DIR}/install-dependabot-escalate.sh" ]] && bash "${SCRIPT_DIR}/install-dependabot-escalate.sh" --print-only 2>/dev/null || true
+    # CTL-2145: account-rotation agent. --print-only renders BEFORE the installer's
+    # node-class / claude-accounts.env applicability gate, so a preview shows the agent
+    # on any host — including one where a real install would (correctly) no-op.
+    [[ -x "${SCRIPT_DIR}/install-account-rotation.sh" ]] && bash "${SCRIPT_DIR}/install-account-rotation.sh" --print-only 2>/dev/null || true
     # CTL-2085: claude CLI self-update agent (all node classes).
     render_claude_update_plist "$(_resolve_claude_update_cmd)" "$CLAUDE_UPDATE_INTERVAL_DEFAULT"
     return 0
@@ -2220,6 +2233,25 @@ cmd_install_services() {
     warn "install-dependabot-escalate.sh not found next to catalyst-stack — dependabot-escalate sweep not installed"
   fi
 
+  # CTL-2145: account-rotation actor (the durable consumer of the CTL-1653 account-status
+  # latch). Delegated to install-account-rotation.sh, which bakes the canonical
+  # pristine-clone path (never an ephemeral worktree — the CTL-1306 rule), materializes
+  # the coord kit, retires any stray legacy lane/rotation loop, and is idempotent.
+  #
+  # The delegate owns its own applicability gate (D5: node class + a provisioned
+  # claude-accounts.env) and exits 0 with a REASON when it does not apply, so a host with
+  # no accounts is an ordinary no-op rather than a failure — but never a silent one.
+  # Non-fatal here, like every sibling: a rotation hiccup must not block the core stack.
+  if [[ -x "${SCRIPT_DIR}/install-account-rotation.sh" ]]; then
+    if bash "${SCRIPT_DIR}/install-account-rotation.sh" 2>&1 | sed 's/^/  /'; then
+      log "processed ${ACCOUNT_ROTATION_AGENT_LABEL} — account-rotation actor (see its output for whether this host qualifies)"
+    else
+      warn "account-rotation install skipped/failed (continuing) — install it from the pristine clone"
+    fi
+  else
+    warn "install-account-rotation.sh not found next to catalyst-stack — account rotation not installed"
+  fi
+
   # CTL-1407: per-account rate-limit usage sampler (5th agent). Until now com.catalyst.agent
   # was only ever hand-installed (mini-2 alone), so the dashboard's Per-Account Rate-Limit
   # Scoreboard read No-data across the rest of the WORKER fleet. Provision it here so `catalyst-stack
@@ -2305,6 +2337,13 @@ cmd_uninstall_services() {
   # CTL-1662: dependabot-escalate sweep (delegated; idempotent, safe if not installed).
   if [[ -x "${SCRIPT_DIR}/install-dependabot-escalate.sh" ]]; then
     bash "${SCRIPT_DIR}/install-dependabot-escalate.sh" --uninstall 2>&1 | sed 's/^/  /' || true
+  fi
+  # CTL-2145: account-rotation actor (delegated; idempotent, safe if not installed).
+  # Its uninstall is deliberately NOT gated on the node class or on claude-accounts.env
+  # still being present — removing an agent that should not be there is exactly what this
+  # is for, and gating it would recreate the CTL-1975 orphan one label over.
+  if [[ -x "${SCRIPT_DIR}/install-account-rotation.sh" ]]; then
+    bash "${SCRIPT_DIR}/install-account-rotation.sh" --uninstall 2>&1 | sed 's/^/  /' || true
   fi
   # CTL-1975: account-usage pager (delegated; idempotent, safe if not installed). This agent was
   # installed on every node by install-services and removed by NOTHING — measured 2026-08-18 on all
