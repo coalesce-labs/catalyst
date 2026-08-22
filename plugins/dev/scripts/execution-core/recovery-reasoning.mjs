@@ -40,6 +40,14 @@ import { dirname, join } from "node:path";
 // CTL-1568: read-only predicate — is the belief engine the needs-human owner?
 // label-guard imports only node builtins + config.mjs, so this adds no cycle.
 import { beliefOwnsNeedsHuman } from "./label-guard.mjs";
+// CTL-2158: THE stall classifier. OUTPUT re-target only — this 3,600-line
+// reasoner is not rewritten; its escalation signal simply gains a durable
+// S/A/M/HELD verdict and the "already published" stamp.
+import {
+  classifyStall,
+  stallClassSignalFields,
+  ESCALATION_PUBLISHED_FIELD,
+} from "./stall-class.mjs";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -1620,6 +1628,23 @@ function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
       // "member"` without reaching into the explanation. Omitted entirely for an
       // uncorrelated escalation, so an existing single-ticket signal is unchanged.
       ...(escalationPayload?.correlation ? { correlation: escalationPayload.correlation } : {}),
+      // CTL-2158 — OUTPUT RE-TARGET (this reasoner is NOT rewritten). `needs_human`
+      // records THAT an escalation happened and nothing about why, so it cannot tell
+      // a provider outage from a judgment call — which is how one overload became 37
+      // separate per-ticket decisions. The class can. Additive: `status` and
+      // `stalledReason` keep their CTL-1552 values, so every existing consumer reads
+      // what it read before; what is new is the durable S/A/M/HELD verdict and the
+      // explicit "an escalation was already published" stamp that unstuck-sweep's
+      // quiet-gate keys on instead of the token.
+      ...stallClassSignalFields(
+        classifyStall({
+          reason: prior.failureReason ?? escalationPayload?.observed?.reason ?? null,
+          signal: { ...prior, stalledReason: "needs_human" },
+          explanation: escalationPayload,
+          site: "recovery-reasoning-escalate",
+        }),
+      ),
+      [ESCALATION_PUBLISHED_FIELD]: true,
     };
     // CAT-170 (phase-review): this writer is a read-modify-write over `prior`, so an
     // omitted `correlation` block does NOT clear the one a previous escalation left

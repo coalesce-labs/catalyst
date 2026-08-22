@@ -76,6 +76,14 @@ import {
 // CTL-1568: this shim posts the escalation comment but never applied the
 // needs-human LABEL, so an agent reply could not bring the row back to the inbox.
 import { labelNeedsHumanUnlessBeliefOwner, beliefOwnsNeedsHuman } from "./label-guard.mjs";
+// CTL-2158: classify the stall as SYSTEM / ASK / MOOT (or HELD) and stamp the
+// verdict onto the signal. OUTPUT re-target only — the escalation logic above is
+// untouched.
+import {
+  classifyStall,
+  stallClassSignalFields,
+  ESCALATION_PUBLISHED_FIELD,
+} from "./stall-class.mjs";
 
 // CTL-1568 (Codex #2861 P0): this file's shebang is `#!/usr/bin/env node` and the
 // recovery-pass skill invokes it with `node`. A STATIC `import { applyLabel } from
@@ -259,6 +267,21 @@ function mergeExplanationIntoSignal(orchDir, ticket, phase, escalation) {
   // include "stalled", so the ticket stays visible as stuck / needs-you.
   sig.status = "stalled";
   sig.stalledReason = "needs_human";
+  // CTL-2158 — OUTPUT RE-TARGET. `needs_human` records THAT an escalation
+  // happened and says nothing about why, so it can never tell an outage from a
+  // judgment call. The class does. Additive: `status` and `stalledReason` are
+  // unchanged, so every existing consumer of those reads exactly what it read
+  // before; what is new is a durable, on-disk S/A/M/HELD verdict plus the
+  // explicit "an escalation was already published" stamp that unstuck-sweep's
+  // quiet-gate now keys on instead of the token (which CTL-2159 deletes).
+  const verdict = classifyStall({
+    reason: sig.failureReason ?? escalation?.observed?.reason ?? null,
+    signal: sig,
+    explanation: escalation,
+    site: "recovery-emit-escalated",
+  });
+  Object.assign(sig, stallClassSignalFields(verdict));
+  sig[ESCALATION_PUBLISHED_FIELD] = true;
   if (!sig.needsHumanSince) sig.needsHumanSince = new Date().toISOString();
   sig.updatedAt = new Date().toISOString();
   try {

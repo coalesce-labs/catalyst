@@ -132,6 +132,27 @@
         "tests_failed"
       ]
     },
+    "stallClass": {
+      "type": "string",
+      "enum": ["system", "ask", "moot", "held"],
+      "description": "CTL-2158. The stall's ONE class, written by the escalation producers via stall-class.mjs::classifyStall. \"system\" = provider overload, rate/account limits, connectivity, executor death, retry/cycle caps, an untidy working copy, orphan-sweep staleness \u2014 retry with backoff, and if persistent ONE fleet alert, never a per-ticket artifact. \"ask\" = a scope/priority/approval/credential decision only a person can take \u2014 one ask ticket carrying `blocks`. \"moot\" = already done, superseded, no actionable plan \u2014 close. \"held\" = the classifier could not prove any of the three (or the evidence pointed two ways): HELD FOR REVIEW, never dropped, never auto-retried forever, never auto-cleared. Additive \u2014 `status` and `stalledReason` keep their CTL-1552 values.",
+      "examples": ["system", "held"]
+    },
+    "stallClassRule": {
+      "type": "string",
+      "description": "CTL-2158. WHICH rule produced stallClass, so a verdict can be audited rather than trusted: `exact:<reason>`, `prefix:<prefix>`, `family:<class>`, `signal:stallClass`, `ambiguous:<a>+<b>`, `manufactured-escalation`, `no-reason`, or `unclassified`.",
+      "examples": ["exact:orphan-sweep-stale", "unclassified", "ambiguous:system+ask"]
+    },
+    "stallClassManufactured": {
+      "type": "boolean",
+      "description": "CTL-2158. True when the escalation's explanation came from escalation-explanation.mjs::coerceExplanation's degrade branch (`degraded:true`) \u2014 i.e. the human-facing prose is a template (\"priority call the agent cannot make unilaterally\"), not a real question. Present so a board can say the ask was generated. A manufactured explanation NEVER promotes a stall to `ask`.",
+      "examples": [true]
+    },
+    "escalationPublished": {
+      "type": "boolean",
+      "description": "CTL-2158. Set by the producers that publish a COMPLETE escalation (label + brief + Linear comment): recovery-emit, recovery-reasoning, recovery.mjs::markEscalationCapTerminal, boot-resume's expired approval gate. unstuck-sweep's quiet-gate keys on this instead of on `stalledReason === \"needs_human\"`, so a ticket a human is already holding never receives a second authored comment once that token is deleted. \u26d4 It is deliberately NOT inferred from the presence of `explanation`: scheduler.mjs's generic stall writer attaches a coerced explanation to EVERY stall it records, so inferring it would silence the sweep's repair actions wholesale.",
+      "examples": [true]
+    },
     "attentionReason": {
       "type": [
         "string",

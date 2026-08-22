@@ -424,6 +424,29 @@ where a downstream alert rule routes them to a channel. **Delivery is a separate
 — the broker emits intent only; no channel or credential lives in the daemon, so the
 alerter survives a monitor death without depending on it.
 
+**Every stall resolves to exactly ONE class — or is HELD (CTL-2158).**
+`execution-core/stall-class.mjs` is the single classifier: `classifyStall(evidence)`
+maps a stall reason to **S — system** (provider overload, rate/account limits, tokens
+exhausted, connectivity, executor or worker death, an artifact written late,
+retry/cycle caps, an untidy working copy, fence/zombie trips, orphan-sweep staleness
+→ retry with backoff; if persistent, the ONE fleet alert above, and **zero**
+per-ticket artifacts), **A — ask** (scope, priority, approval, a credential or
+dashboard action only a person can take, design sign-off → one ask ticket carrying
+`blocks`), or **M — moot** (already done, superseded, no actionable plan → close).
+An exact table is tried first, then prefix rules, then three family patterns; if two
+families match, or none does, the verdict is **HELD** — not a fourth disposition but
+the *absence* of one. A held stall is never dropped, never guessed at, never
+auto-retried forever and never auto-cleared, because both possible defaults are
+expensive: defaulting to *ask* re-creates the bin (of 86 items flagged as waiting on
+a human, 3 genuinely were), and defaulting to *system* strands a real judgment call
+silently. `needs_human` itself classifies as HELD by construction — it records
+*that* an escalation happened and nothing about *why*. The verdict is stamped onto
+the phase signal (`stallClass`, `stallClassRule`, `stallClassManufactured`) by the
+four producers that publish a complete escalation, alongside `escalationPublished`,
+which is what `unstuck-sweep.mjs`'s quiet-gate now keys on — a property, not the
+`stalledReason:"needs_human"` token — so a ticket a human is already holding never
+receives a second authored Linear comment once that token goes away.
+
 **The execution-core daemon reaper (CTL-649) is the second producer-and-consumer.**
 It consumes the reap-intent requests appended by the reap-intent producers
 (`lib/emit-reap-intent.sh`, `execution-core/reap-intent.mjs`) — `phase.<kind>.reap-requested`,

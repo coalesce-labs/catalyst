@@ -26,6 +26,13 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
+// CTL-2158: classify the stall and stamp "an escalation was published" so the
+// unstuck sweep's quiet-gate no longer needs the reason token.
+import {
+  classifyStall,
+  stallClassSignalFields,
+  ESCALATION_PUBLISHED_FIELD,
+} from "./stall-class.mjs";
 import {
   YIELDED_STATUS,
   YIELD_EXPIRED_REASON,
@@ -2213,6 +2220,14 @@ function markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalle
     sig.status = "stalled";
     sig.stalledReason = stalledReason;
     sig.explanation = explanation;
+    // CTL-2158 — OUTPUT RE-TARGET. Additive: status/stalledReason unchanged.
+    Object.assign(
+      sig,
+      stallClassSignalFields(
+        classifyStall({ reason: stalledReason, signal: sig, explanation, site: "escalation-cap-terminal" }),
+      ),
+    );
+    sig[ESCALATION_PUBLISHED_FIELD] = true;
     if (!sig.needsHumanSince) sig.needsHumanSince = new Date().toISOString();
     sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     const tmp = `${signalPath}.tmp.${process.pid}`;

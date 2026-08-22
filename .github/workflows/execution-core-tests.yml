@@ -1195,6 +1195,21 @@ jobs:
         #   `grep -n ask-wake .github/workflows/` returned NOTHING before this
         #   edit, against a positive control of `assertion-evidence-parity`,
         #   which returns its list line.
+        #
+        #   CTL-2158 NOTE: stall-class.test.mjs (the pure S/A/M/HELD classifier)
+        #   and stall-class-wiring.test.mjs (the unstuck-sweep quiet-gate + the
+        #   escalation producers' output re-target) are listed for the same
+        #   reason, and registered in the SAME change that adds them. What they
+        #   guard is a gate whose failure is INVISIBLE in both directions: lose
+        #   it one way and every sweep interval posts another authored Linear
+        #   comment on a ticket a human is already holding (CTL-638); lose it the
+        #   other way and an unclassifiable stall goes silent — no label, no ask,
+        #   no alert, no retry. Both suites are pure + tmpdir only: no timer, no
+        #   watcher, no Linear call (60 pass, ~60 ms combined). Instrument (a
+        #   `run:`-anchored grep is invalid for this multi-line block — see the
+        #   event-name step): `grep -rn stall-class .github/workflows/` returned
+        #   NOTHING before this edit, against the same positive control of
+        #   `assertion-evidence-parity`, which returns its list line.
         run: |
           bun test \
             beliefs/advance-rules.test.mjs \
@@ -1222,6 +1237,8 @@ jobs:
             assertion-evidence-parity.test.mjs \
             ask-wake.test.mjs \
             ask-wake-daemon.test.mjs \
+            stall-class.test.mjs \
+            stall-class-wiring.test.mjs \
             cli-header-backtick-guard.test.mjs \
             agent-session-narrator.test.mjs \
             linear-comment-write.test.mjs \
