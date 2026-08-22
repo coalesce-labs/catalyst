@@ -113,10 +113,57 @@ export const THROTTLED_LABEL_REASONS = Object.freeze(new Set(["rate-limited", "u
  * to page would never be paged.
  * ⛔ Deliberately NOT THROTTLED. It is not a budget/rate-limit that clears on its own,
  * so the operator log must not say "throttled/budget" (AC2 — surface the RIGHT reason).
+ *
+ * ⚠️ CTL-2043 NARROWED THIS SET'S JOB. It no longer decides whether to cool down —
+ * `CLOUD_REASON_PREFIX` does that for the whole family. What survives here is the
+ * operator-LOG class: this exact member routes to the "deterministic cloud rejection"
+ * message, while any other `cloud:*` routes to the generic cloud-family message. Do
+ * NOT widen this set to a prefix; that would re-collapse the two classes CTL-2052
+ * split apart.
  */
 export const CLOUD_LABEL_REJECTION_REASONS = Object.freeze(new Set(["cloud:label-rejected"]));
 
-/** isCloudLabelRejection — a deterministic cloud LABEL rejection (CTL-2052). */
+/**
+ * CLOUD_REASON_PREFIX — CTL-2043. Every cloud-authored refusal shares this prefix:
+ * `linear-write-proxy.mjs` builds its reason as `cloud:${parsed.outcome}`.
+ *
+ * ⛔ WHY A PREFIX AND NOT A SET. The outcome set is authored BY THE CLOUD, not by
+ * this repo (CTC-509: rejected | failed | exhausted, and growable), so an
+ * enumeration here can never be complete by construction — and it fails in the
+ * SILENT direction: a cloud outcome nobody has added reads as "retryable next tick"
+ * and the COORD-236 storm returns with no test failing. That is not hypothetical.
+ * CTL-2052 enumerated the class (CLOUD_LABEL_REJECTION_REASONS, below) and the
+ * already-reachable `cloud:exhausted` fell out of BOTH predicates: it armed no
+ * cool-down and was re-issued every tick. A prefix cannot fall behind — the same
+ * argument BUDGET_REASON_PREFIX makes above.
+ *
+ * ⚠️ This is a COOL-DOWN predicate only. It must never gate `labelOnce`'s permanent
+ * `.skipped` marker (see the header): a cloud refusal is "not right now", and a
+ * permanent marker would outlive the credential re-mint / budget roll that clears it.
+ */
+export const CLOUD_REASON_PREFIX = "cloud:";
+
+/**
+ * isCloudReason — any cloud-authored refusal (CTL-2043).
+ *
+ * A strict SUPERSET of `isCloudLabelRejection`, and the two are deliberately not
+ * merged: this one answers "should the caller back off?" (the whole family), while
+ * that one answers "is this the DETERMINISTIC rejection?" — the operator-log class
+ * (CTL-2052 AC2). Collapsing them would make a `cloud:exhausted` budget exhaustion
+ * log as a deterministic rejection, sending an operator after the wrong cause.
+ */
+export function isCloudReason(reason) {
+  return typeof reason === "string" && reason.startsWith(CLOUD_REASON_PREFIX);
+}
+
+/**
+ * isCloudLabelRejection — the DETERMINISTIC cloud LABEL rejection (CTL-2052).
+ *
+ * ⚠️ EXACT membership, deliberately, and not widened to the CTL-2043 prefix: this is
+ * the operator-LOG discriminator, and only the normalized `cloud:label-rejected`
+ * carries the "the cloud deterministically refused this label" meaning. The
+ * cool-down question is answered by `isCloudReason` / `shouldCoolDownLabel`.
+ */
 export function isCloudLabelRejection(reason) {
   return typeof reason === "string" && CLOUD_LABEL_REJECTION_REASONS.has(reason);
 }
@@ -148,6 +195,13 @@ export function shouldCoolDownLabel(reason) {
   return (
     isTerminalLabelReason(reason) ||
     isThrottledLabelReason(reason) ||
-    isCloudLabelRejection(reason) // CTL-2052 — the deterministic cloud label rejection cools down too
+    // CTL-2043 — the WHOLE `cloud:*` family cools down, matched by PREFIX. This
+    // SUBSUMES CTL-2052's exact `isCloudLabelRejection` arm (which is why that term
+    // is gone from here, not merely redundant beside it) and additionally covers
+    // `cloud:exhausted` plus every future cloud outcome. Note the consequence, which
+    // is intended: the RAW `cloud:failed`/`cloud:rejected` now cool down BEFORE
+    // `normalizeLabelProxyVerdict` runs, so storm-prevention no longer depends on
+    // that step — normalization is retained for operator-log fidelity alone.
+    isCloudReason(reason)
   );
 }

@@ -25,14 +25,17 @@ import {
   THROTTLED_LABEL_REASONS,
   BUDGET_REASON_PREFIX,
   CLOUD_LABEL_REJECTION_REASONS,
+  CLOUD_REASON_PREFIX,
   isTerminalLabelReason,
   isThrottledLabelReason,
   isCloudLabelRejection,
+  isCloudReason,
   shouldCoolDownLabel,
 } from "./label-failure-class.mjs";
 import {
   convergeHeldLabel,
   convergeDispositionLabel,
+  classifyLabelCooldownLog,
   labelCooldownPath,
   labelRetryState,
 } from "./scheduler.mjs";
@@ -92,6 +95,39 @@ describe("COORD-236 classification: 'never' and 'not right now' are different an
       expect(isThrottledLabelReason(r)).toBe(true);
       expect(isTerminalLabelReason(r)).toBe(false);
       expect(shouldCoolDownLabel(r)).toBe(true);
+    }
+  });
+
+  test("CTL-2043: every cloud-authored refusal is cool-down-eligible, matched by PREFIX", () => {
+    // The mirror of the budget: prefix test above, and for the same reason: the
+    // `cloud:<outcome>` reason set is authored BY THE CLOUD (`cloud:${parsed.outcome}`
+    // in linear-write-proxy.mjs — CTC-509 lists rejected | failed | exhausted, and it
+    // can grow), so an enumeration in THIS repo can never be complete by construction.
+    // CTL-2052 enumerated one member; the reachable `cloud:exhausted` fell out of both
+    // predicates and was re-issued every tick. The last entry is deliberately a string
+    // nobody has written yet — AC3: a future cloud outcome classifies with NO code
+    // change here.
+    for (const r of [
+      "cloud:label-rejected",
+      "cloud:failed",
+      "cloud:rejected",
+      "cloud:exhausted",
+      "cloud:something-nobody-has-written-yet",
+    ]) {
+      expect(r.startsWith(CLOUD_REASON_PREFIX)).toBe(true);
+      expect(isCloudReason(r)).toBe(true);
+      expect(shouldCoolDownLabel(r)).toBe(true);
+      expect(isTerminalLabelReason(r)).toBe(false);
+    }
+  });
+
+  test("CTL-2043: the prefix BOUNDARY — a near-miss non-cloud string is still NEITHER", () => {
+    // Pins that widening to a prefix did not widen to a substring: only the
+    // `cloud:` family (colon included) cools down. Without this, "cloudy" would
+    // read as cloud-authored and a genuinely transient reason would be delayed 60 s.
+    for (const r of ["cloudy", "cloud", "cloud-rejected", "not-cloud:failed"]) {
+      expect(isCloudReason(r)).toBe(false);
+      expect(shouldCoolDownLabel(r)).toBe(false);
     }
   });
 
@@ -286,22 +322,34 @@ describe("CTL-2052 classification: the deterministic cloud label rejection is it
     expect(isThrottledLabelReason("cloud:label-rejected")).toBe(false); // not "budget/throttled"
   });
 
-  test("the RAW proxy reasons are still nothing on their own — normalization is what classifies", () => {
-    // The raw verdict reaches the classifier only AFTER routeThroughProxy has
-    // normalized it (linear-write.mjs). If a future refactor drops the
-    // normalization, the raw reason reads as "retryable next tick" and the storm
-    // returns — this pins that the raw strings do NOT cool down by themselves.
+  test("CTL-2043 INVERTS this pin: the RAW proxy reasons now cool down on their OWN", () => {
+    // ⚠️ DELIBERATE REVERSAL of the CTL-2052 property that stood here ("the raw
+    // strings do NOT cool down by themselves — normalization is what classifies").
+    // Under the `cloud:` prefix arm, storm-prevention no longer DEPENDS on the
+    // normalization step: even if a future refactor drops normalizeLabelProxyVerdict,
+    // the raw reason still backs off. That is strictly stronger than what the old pin
+    // defended, which is why it is inverted rather than deleted.
+    //
+    // Normalization is KEPT and stays load-bearing for exactly one thing now:
+    // operator-log reason fidelity (CTL-2052 AC2). So the exactness pin below stands —
+    // only the NORMALIZED `cloud:label-rejected` is the deterministic-rejection LOG
+    // class; a raw `cloud:failed` is cool-down-eligible but is not that class.
     for (const raw of ["cloud:failed", "cloud:rejected"]) {
-      expect(isCloudLabelRejection(raw)).toBe(false);
-      expect(shouldCoolDownLabel(raw)).toBe(false);
+      expect(shouldCoolDownLabel(raw)).toBe(true); // CTL-2043 — belt AND suspenders
+      expect(isCloudLabelRejection(raw)).toBe(false); // CTL-2052 — log class stays EXACT
     }
   });
 
-  test("cloud:exhausted is deliberately NOT this class — it is a budget refusal, left alone here", () => {
-    // `cloud:${outcome}` also produces cloud:exhausted (a budget exhaustion). This
-    // ticket touches only the two DETERMINISTIC label rejections; the budget one is
-    // out of scope (research Finding, plan §NOT in scope).
+  test("cloud:exhausted cools down by prefix (CTL-2043) but is NOT the exact rejection class", () => {
+    // `cloud:${outcome}` also produces cloud:exhausted (a budget exhaustion). CTL-2052
+    // left it out of BOTH predicates, so it armed no cool-down and was re-issued every
+    // tick — the enumeration gap CTL-2043 closes. It now cools down via the family
+    // prefix while staying out of the exact rejection class, so the operator log says
+    // "cloud" (family), never "cloud-rejection" (deterministic) and never "terminal".
     expect(isCloudLabelRejection("cloud:exhausted")).toBe(false);
+    expect(shouldCoolDownLabel("cloud:exhausted")).toBe(true);
+    expect(isTerminalLabelReason("cloud:exhausted")).toBe(false);
+    expect(isThrottledLabelReason("cloud:exhausted")).toBe(false);
   });
 });
 
@@ -331,18 +379,86 @@ describe("CTL-2052: the converger backs off on the normalized cloud label reject
     expect(w.calls.length).toBe(1);
   });
 
-  test("NEGATIVE CONTROL: the RAW cloud:failed is NOT cooled down — it storms (proving the test bites)", () => {
-    // If normalization were removed, the converger would see the raw reason and
-    // re-fire every tick. Feed the raw reason directly to prove the harness would
-    // catch that regression.
-    const w = failingWriter("cloud:failed");
+  test("CTL-2043: an UNNORMALIZED family member (cloud:exhausted) also backs off — the PREFIX is what bites", () => {
+    // Repointed from the CTL-2052 negative control, which fed a raw `cloud:failed`
+    // to prove it stormed when normalization was absent. `cloud:exhausted` is never
+    // normalized to anything (it is not a deterministic rejection), so it isolates
+    // the prefix arm: ONE apply, then zero for the window. The positive control that
+    // this harness really drives N ticks and can still observe a storm is the
+    // `transient` case above ("REGRESSION SHAPE: ... ~60 writes, not 1").
+    const w = failingWriter("cloud:exhausted");
     let clock = 2_000_000;
     const opts = { orchDir, now: () => clock };
     for (let i = 0; i < 10; i++) {
       convergeDispositionLabel("CTL-22", [], "blocked", w, opts);
       clock += 1_000;
     }
-    expect(w.calls.length).toBe(10);
+    expect(w.calls.length).toBe(1);
+  });
+
+  test("CTL-2043: convergeHeldLabel backs off on cloud:exhausted, and it is TIME-BOXED", () => {
+    const w = failingWriter("cloud:exhausted");
+    let clock = 2_000_000;
+    const opts = { orchDir, now: () => clock };
+    expect(convergeHeldLabel("CTL-25", [], "blocked", w, opts)).toBe(1);
+    for (let i = 0; i < 30; i++) {
+      clock += 1_000;
+      convergeHeldLabel("CTL-25", [], "blocked", w, opts);
+    }
+    expect(w.calls.length).toBe(1);
+    // ⛔ The critical half: a cloud budget exhaustion clears on its own, so the
+    // back-off must expire — never permanently abandon the label (COORD-236).
+    clock += 61_000;
+    convergeHeldLabel("CTL-25", [], "blocked", w, opts);
+    expect(w.calls.length).toBe(2);
+  });
+
+  test("CTL-2043: convergeDispositionLabel retries cloud:exhausted after the window too", () => {
+    const w = failingWriter("cloud:exhausted");
+    let clock = 2_000_000;
+    const opts = { orchDir, now: () => clock };
+    convergeDispositionLabel("CTL-26", [], "queued", w, opts);
+    expect(w.calls.length).toBe(1);
+    clock += 61_000;
+    convergeDispositionLabel("CTL-26", [], "queued", w, opts);
+    expect(w.calls.length).toBe(2);
+  });
+
+  test("CTL-2043: the operator log names the RIGHT class for each cloud reason (AC2 not regressed)", () => {
+    // The three-way discriminator became four-way. A `cloud:exhausted` must read as
+    // the cloud FAMILY, not as "terminal" (which sends an operator hunting a missing
+    // label) and not as "cloud-rejection" (which claims a determinism it does not
+    // have); the normalized `cloud:label-rejected` must keep its exact class.
+    const msgs = {
+      cloudMsg: "M-cloud-rejection",
+      cloudFamilyMsg: "M-cloud",
+      throttledMsg: "M-throttled",
+      terminalMsg: "M-terminal",
+    };
+    expect(classifyLabelCooldownLog("cloud:label-rejected", msgs)).toEqual({
+      cls: "cloud-rejection",
+      message: "M-cloud-rejection",
+    });
+    expect(classifyLabelCooldownLog("cloud:exhausted", msgs)).toEqual({
+      cls: "cloud",
+      message: "M-cloud",
+    });
+    expect(classifyLabelCooldownLog("cloud:something-nobody-has-written-yet", msgs)).toEqual({
+      cls: "cloud",
+      message: "M-cloud",
+    });
+    expect(classifyLabelCooldownLog("budget:day-exhausted", msgs)).toEqual({
+      cls: "throttled",
+      message: "M-throttled",
+    });
+    expect(classifyLabelCooldownLog("rate-limited", msgs)).toEqual({
+      cls: "throttled",
+      message: "M-throttled",
+    });
+    expect(classifyLabelCooldownLog("missing-label", msgs)).toEqual({
+      cls: "terminal",
+      message: "M-terminal",
+    });
   });
 });
 

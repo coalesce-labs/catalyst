@@ -450,6 +450,7 @@ import {
   shouldCoolDownLabel,
   isThrottledLabelReason,
   isCloudLabelRejection,
+  isCloudReason, // CTL-2043: the whole cloud:* family (log discriminator's 4th class)
 } from "./label-failure-class.mjs";
 // CTL-2052 (AC3): the "stopped after N and said so" escalation emitter.
 import { emitLabelRetryExhaustedEvent } from "./label-retry-event.mjs";
@@ -2729,10 +2730,24 @@ function unmetBlockersFor(candidateId, edges, poolById, blockerStates) {
 // class → message mapping (the header above warns they must stay in step —
 // CTL-834/CTL-764). It only chooses the class name for the structured
 // `label_failure_class` field and the human message; the caller supplies its own
-// converger-specific message trio. Order matters: cloud-rejection is checked first
+// converger-specific message quartet. Order matters: cloud-rejection is checked first
 // because a `cloud:label-rejected` is neither throttled nor terminal.
-function classifyLabelCooldownLog(reason, { cloudMsg, throttledMsg, terminalMsg }) {
+//
+// CTL-2043 makes it FOUR-way by inserting the cloud FAMILY between the exact
+// cloud-rejection and throttled. Placement is load-bearing in both directions:
+//   • AFTER cloud-rejection, so the normalized `cloud:label-rejected` keeps its exact
+//     class — the family arm would otherwise swallow it (CTL-2052 AC2 regression).
+//   • BEFORE the terminal fallback, so a `cloud:exhausted` stops reading as
+//     "unrecoverable" and sending an operator to hunt a label that is not missing.
+// It is safe beside throttled in either order (no `cloud:*` is a `budget:*` or a
+// bare `rate-limited`/`unauthorized`), but it is written before it to keep the
+// cloud-authored reasons contiguous.
+//
+// Exported (CTL-2043) so the class→message mapping is assertable directly, without
+// having to infer it from a converger's emitted log line.
+export function classifyLabelCooldownLog(reason, { cloudMsg, cloudFamilyMsg, throttledMsg, terminalMsg }) {
   if (isCloudLabelRejection(reason)) return { cls: "cloud-rejection", message: cloudMsg };
+  if (isCloudReason(reason)) return { cls: "cloud", message: cloudFamilyMsg }; // CTL-2043
   if (isThrottledLabelReason(reason)) return { cls: "throttled", message: throttledMsg };
   return { cls: "terminal", message: terminalMsg };
 }
@@ -2905,6 +2920,8 @@ export function convergeHeldLabel(
       const { cls, message } = classifyLabelCooldownLog(res.reason, {
         cloudMsg:
           "ctl-2052: held-label apply refused by the cloud (deterministic) — backing off (cool-down); this write is not re-issued until the cool-down elapses",
+        cloudFamilyMsg:
+          "ctl-2043: held-label apply refused by the cloud (e.g. budget-exhausted) — backing off (cool-down); the cause is cloud-side, not a missing label and not this host's write budget",
         throttledMsg:
           "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
         terminalMsg: "ctl-834: held-label apply unrecoverable — backing off (cool-down)",
@@ -3004,6 +3021,8 @@ export function convergeDispositionLabel(
       const { cls, message } = classifyLabelCooldownLog(res.reason, {
         cloudMsg:
           "ctl-2052: disposition-label apply refused by the cloud (deterministic) — backing off (cool-down); this write is not re-issued until the cool-down elapses",
+        cloudFamilyMsg:
+          "ctl-2043: disposition-label apply refused by the cloud (e.g. budget-exhausted) — backing off (cool-down); the cause is cloud-side, not a missing label and not this host's write budget",
         throttledMsg:
           "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
         terminalMsg: "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)",
