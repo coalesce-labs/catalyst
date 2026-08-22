@@ -1378,6 +1378,8 @@ jobs:
             pid-file-identity.test.mjs \
             registry.test.mjs \
             replica-read.test.mjs \
+            __tests__/scope-for-ticket.test.mjs \
+            __tests__/steward-item-pages.test.mjs \
             replica-comment-read.test.mjs \
             replica-supplemental-reads.test.mjs \
             scan.test.mjs \

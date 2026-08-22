@@ -1738,6 +1738,34 @@ one of three `delegate.*` events:
 All three are safe for LogQL/Loki filters:
 `{job="catalyst-events"} | json | attributes["event.name"] =~ "delegate\\..*"`
 
+### Steward escalation routing (CTL-2000 / CTL-2129)
+
+When an instrument (today: the stalled-PR sweep, `stale-pr-rescue`) can no longer make progress on an
+item, it must page the **steward whose scope contains that item** — never drop a `needs-human` label
+into a human's queue. The ladder is `instrument → steward → concierge → human (as an ask)`; the router
+(`escalation-router.mjs`) resolves the steward rung, and the human is reachable **only** as an ask, so
+no instrument can page a human directly.
+
+The router matches an item's **scope key** — its Linear **project id** — against each supervised role's
+`manifest.scopeKeys`:
+
+| Field / key                          | Where                                                  | Notes                                                                                                                                                                                                                                             |
+| ------------------------------------ | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scopeKeys` _(role manifest field)_  | `~/catalyst/roles/<role>/manifest.json`                | Array of Linear **project ids** the steward owns. Populated at scaffold time by `role-supervisor/install.sh --scope-keys "<projectId>[,<id>...]"` (→ `cli.mjs set-scope-keys` → `state.mjs setScopeKeys`, an atomic merge-into-existing). `resolveSteward` returns this role for any item whose project id is in the array. A role with no `scopeKeys` — the default — never matches, so its items fall through to the concierge (the correct backstop). |
+| `CATALYST_STEWARD_ESCALATION` _(env)_ | escalation gate                                        | `off` / `shadow` (default) / `enforce`. `shadow` is byte-identical to the pre-CTL-2000 path plus a `delegate.would-route` (`phase.rescue.would-route-steward`) log; `enforce` routes through the ladder and applies **no** `needs-human`. Overrides Layer-2. |
+| `catalyst.stewardEscalation.mode` _(Layer-2)_ | `.catalyst/config.json`                         | Same three values; honored when the env var is absent or unrecognised. Default `shadow`.                                                                                                                                                          |
+
+CTL-2129 is what makes `enforce` actually reach a steward: it populates the `scopeKeys` registry, maps
+a ticket to its project id (`scopeForTicket` via the replica's `issues.project_id`), and counts pages
+**per item** so the same flagged item paged twice without a steward turn escalates inward to the
+concierge. No new flag — the wiring rides the existing `stewardEscalation` gate at its `shadow`
+default, so no host changes live behavior until an operator flips `enforce`. Roles without `scopeKeys`
+continue to resolve to the concierge, so a partial rollout (some stewards registered, some not) is safe.
+
+Observable on the event log (`delegate.routed` with a `phase.rescue.routed-to-{steward,concierge}`
+type discriminator):
+`{job="catalyst-events"} | json | attributes["event.name"] = "delegate.routed"`
+
 ### Monitor reply-route trusted origins (CTL-1573)
 
 `POST /api/ticket/<ticket>/reply` posts operator-authored text to Linear, and the monitor binds
