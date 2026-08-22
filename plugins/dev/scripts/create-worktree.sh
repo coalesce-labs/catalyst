@@ -133,6 +133,15 @@ BASE_BRANCH="${POSITIONAL[1]:-$(git branch --show-current)}"
 # Get repository information
 REPO_ROOT=$(git rev-parse --show-toplevel)
 REPO_NAME=$(basename "$REPO_ROOT")
+_CW_DRAFT_PR_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/draft-pr.sh"
+if [ -r "$_CW_DRAFT_PR_LIB" ]; then
+	# shellcheck source=/dev/null
+	source "$_CW_DRAFT_PR_LIB"
+fi
+PUSH_REMOTE="origin"
+if type _draft_pr_push_remote >/dev/null 2>&1; then
+	PUSH_REMOTE="$(_draft_pr_push_remote)"
+fi
 
 # Try to detect GitHub org from remote URL
 GIT_REMOTE=$(git config --get remote.origin.url 2>/dev/null || echo "")
@@ -309,11 +318,11 @@ else
 	# between the snapshot and the fetch could be missed), and a missing ticket ref simply
 	# makes the fetch exit non-zero so we fall through to seeding from base.
 	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ] \
-		&& git fetch --quiet origin \
-			"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
-		START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+		&& git fetch --quiet "$PUSH_REMOTE" \
+			"+refs/heads/${WORKTREE_NAME}:refs/remotes/${PUSH_REMOTE}/${WORKTREE_NAME}" 2>/dev/null; then
+		START_POINT="refs/remotes/${PUSH_REMOTE}/${WORKTREE_NAME}"
 		SEEDED_FROM_REMOTE=true
-		echo "🌱 Resuming from origin/${WORKTREE_NAME}; seeding worktree from its pushed tip (CTL-1640)"
+		echo "🌱 Resuming from ${PUSH_REMOTE}/${WORKTREE_NAME}; seeding worktree from its pushed tip (CTL-1640)"
 	fi
 	if [ "$SEEDED_FROM_REMOTE" = false ] && [ "$SKIP_FETCH" = false ]; then
 		if git fetch --quiet origin "$BASE_BRANCH" 2>/dev/null; then
@@ -331,11 +340,11 @@ else
 		# the add. It does NOT fully close the race — the durable fix is a cluster-fence guard
 		# on the producer's early-draft push — but it converts the common case back to a resume.
 		if [ "$FROM_REMOTE" = true ] \
-			&& git fetch --quiet origin \
-				"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
-			START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+			&& git fetch --quiet "$PUSH_REMOTE" \
+				"+refs/heads/${WORKTREE_NAME}:refs/remotes/${PUSH_REMOTE}/${WORKTREE_NAME}" 2>/dev/null; then
+			START_POINT="refs/remotes/${PUSH_REMOTE}/${WORKTREE_NAME}"
 			SEEDED_FROM_REMOTE=true
-			echo "🌱 origin/${WORKTREE_NAME} appeared during provisioning; resuming from its pushed tip (CTL-1640)"
+			echo "🌱 ${PUSH_REMOTE}/${WORKTREE_NAME} appeared during provisioning; resuming from its pushed tip (CTL-1640)"
 		fi
 	fi
 	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "$START_POINT"
