@@ -368,15 +368,6 @@ while the attempt counter survives the tick, so a failed-delivery increment that
 (full disk, read-only mount) fails CLOSED — reported as not-retryable rather than retryable-forever,
 since an unpersisted counter can never grow past the max.
 
-**Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
-scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.
-Its `dispatchLiveness` invariant judges only this host's owned queue, while preserving the raw and
-owned depths in its scan context; dispatch-recency evidence is also host-scoped, fail-open for
-legacy events without host attribution. The separate `nodeProductivity` invariant reports a live
-peer that owns work but has not crossed a phase boundary within the configured window. It defaults
-to `shadow` and proposes only an escalate-only tier-3 move, so it cannot dispatch a recovery
-delegate.
-
 **Worker signal projection (CTL-532 = ADR-018 Phase 3, shipped; Phase 1 retired, CTL-1628).**
 Per-worker `workers/<TICKET>.json` files are still written by ~7 scripts with no inter-process
 locking; ADR-018 originally proposed closing that gap via a `worker.state_changed` command event and
@@ -678,146 +669,54 @@ active work:
 - **Deferred**: reading `.draftPr` draft-state as a secondary advancement signal (advancement
   currently driven by signal `status === "done"` only).
 
-### Recovery-pass `pr_not_merged` remediation (CTL-1496)
-
-When `phase-teardown` emits `failed(reason: "pr_not_merged")`, the scheduler's **Pass 0r** sweeps it
-as a recovery item. Previously the classifier blindly escalated it to a human. With CTL-1496
-(`CATALYST_RECOVERY_PASS=shadow|enforce`), the classifier instead probes live GitHub state
-(`pr-block-probe.mjs` → one `gh pr view` + GraphQL `reviewThreads` + `gh pr view --json reviews`):
-
-- **Failing required checks or unresolved bot (Codex) threads, no human `CHANGES_REQUESTED`** →
-  `{ decision: "fix", fix_class: "bounded-llm" }` with a `"pr-not-merged"` brief embedding the
-  concrete failing-check names and thread ids. The recovery-pass worker fixes the CI, addresses the
-  review findings, resolves the threads, and posts `@codex review` via
-  `gh-pr-comment.sh --idempotent` to re-trigger the automated reviewer, then merges when `CLEAN`.
-- **Human `CHANGES_REQUESTED`** → `escalate` with the specific reviewer ask (PR and thread linked),
-  never the opaque `"Failure reason: pr_not_merged"` string.
-- **Probe throws** → `defer` (transient GitHub outage — retry next tick).
-- **No open PR found** → `escalate`.
-
-The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode logs a
-`recovery.would-fix` event without dispatching; enforce dispatches the recovery-pass worker.
-
-### Correlated retry-cap escalation (CAT-170)
-
-Retry-cap escalation records a normalized failure signature at attempt time in the host-local
-`.recovery-intents/<TICKET>.json` ledger. The exhausted-intent sweep then follows a
-**collect → group → act** flow: candidates sharing a signature inside the configured window are
-represented by one deterministic anchor escalation, while each other ticket receives a member
-pointer to that anchor. Every affected ticket retains its `needs-human` label, but the pointer
-briefs do not represent separate operator decisions.
-
-Signatures are read from the evidence the collector actually produced, not from item-level fields
-the production `buildRecoveryItems` shape never populates, and a board-health attempt is signed with
-the invariant that flagged **that** candidate rather than the gate's count summary — two tickets
-stuck for unrelated reasons must not share a signature. Signature normalization strips ticket ids
-and occurrence timestamps but preserves stable numeric identifiers (account, customer, and build
-numbers), so distinct causes cannot collapse into one incident.
-
-`CATALYST_RECOVERY_CORRELATION` controls rollout: `off` keeps independent escalations, `shadow`
-(the default) computes groups and emits `recovery.escalation.would-correlate` without changing the
-operator-visible path, and `enforce` emits one anchor plus `recovery.escalation.correlated` member
-events. An unrecognized value degrades to `shadow`, never to silence, and the window/group-size
-tunables accept only a finite positive window and an integer group size of at least two.
-Correlation identifiers ride the event envelope as both attributes and body payload, so a shadow
-event can identify the group it proposed. Correlation is intentionally per-host because the intent
-ledger is host-local; cross-host correlation remains separate work. A missing/null signature always
-forms a singleton and can never correlate with another missing signature.
-
-Group membership survives a partial act. Within a tick, a candidate tried as a provisional anchor is
-never acted on a second time in the member loop — that double-act burned the bounded escalation-
-deferral budget at twice the rate. Across ticks, a member whose label write fails records a durable
-pointer at its anchor under `.escalation-correlation/<TICKET>.json`; because the anchor's ledger is
-already latched `escalated:true` it is no longer a candidate and no group can re-form, so without
-that pointer the member would regroup as a singleton and raise a second full operator decision for a
-cause the anchor already covers. The pointer is windowed by the same correlation window, so a
-long-closed incident expires back to normal handling. For a correlated member the escalation signal
-carries a first-class `correlation` block (id, role, anchor, tickets) — the curated explanation
-projection drops the audit `observed` field, so that block is what a board consumer groups or
-suppresses on.
-
 ### Orphan-stale merged-PR reconciliation (CAT-47)
 
-Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
-`unstuckSeamDeps` bundle — PR-state resolver, background-job liveness probe, stall clearer, and
-status writer — once; Pass 0u uses it to build its act registry, while Pass 0r receives both that
-registry and the raw bundle. `defaultInvokeSeam` selects by capability: with no injected registry, a
-missing capability falls back to a registry rebuilt from the bundle's real dependencies instead of
-either using inert defaults or failing as unavailable. (This collapses the previously-duplicated
-inline construction at Pass 0u's `buildUnstuckActSeams` call site onto the one bundle — the
-follow-up an earlier revision of this section deferred.)
+`runTick` constructs the `unstuckSeamDeps` bundle — PR-state resolver, background-job liveness
+probe, stall clearer, and status writer — once via `buildRecoverySeamDeps`, and Pass 0u uses it to
+build its act registry. (CTL-2141 deleted Pass 0r, the bundle's other historical consumer; the
+bundle-then-registry shape and the `seamFallbackSuppressed` posture below are unchanged for Pass 0u
+alone.)
 
-An embedder- or test-supplied `unstuckActByCategory` is a posture binding both passes. A partial
-registry or `{}` sets `seamFallbackSuppressed`, so Pass 0r reports suppression instead of rebuilding
+An embedder- or test-supplied `unstuckActByCategory` is an intentional posture: a partial registry
+or `{}` sets `seamFallbackSuppressed`, so the pass reports suppression instead of silently rebuilding
 a live registry behind the override. With no injected registry, capability fallback remains active.
 
 The recovery candidate contract is `{ ticket, phase, signal }`. `phase` names the exact
 `.unstuck-orphan-merge-<phase>.applied` idempotency marker, and `signal.bg_job_id` feeds the
 liveness gate. Marker construction fails closed when phase is absent, preventing malformed
 `undefined` or `null` marker names. PR-state readers are synchronous. The act seam surfaces a
-thenable as `pr-state-async-unsupported` with an error-code identity; the Pass 0u census warns and
-returns `null`, which classifies as `pr-state-unknown`. A resolver error merely mentioning the
-unsupported code still fails closed to `pr-state-unknown`.
-`linearTerminal` is deliberately absent from Pass 0r candidates because both drivers pre-filter
-terminal tickets; sourcing a truthy value elsewhere would skip the merged-orphan cohort.
+thenable as `pr-state-async-unsupported` with an error-code identity; the census warns and returns
+`null`, which classifies as `pr-state-unknown`. A resolver error merely mentioning the unsupported
+code still fails closed to `pr-state-unknown`.
 
 Synthetic completion is restricted by `ORPHAN_MERGE_PHASE_ALLOWLIST` to `monitor-merge` and
-`monitor-deploy`. The classifier applies that as its first gate, so both passes refuse an early phase
-with `phase-not-allowlisted` even when its PR is merged.
+`monitor-deploy`. The classifier applies that as its first gate, refusing an early phase with
+`phase-not-allowlisted` even when its PR is merged.
 
-Repeated identical fix failures are stored at
-`<orchDir>/.recovery-fix-failures/<ticket>-<fix_class>.json`, outside `workers/` because completed
-tickets may no longer have worker directories. This separate family is not erased by
-`recoveryForgetIntent`. After `CATALYST_RECOVERY_FIX_BACKOFF_THRESHOLD` identical failures (default
-3), retries use exponential windows controlled by `CATALYST_RECOVERY_FIX_BACKOFF_BASE_MS` (default 2
-hours, longer than the 30-minute intent cooldown) and `CATALYST_RECOVERY_FIX_BACKOFF_MAX_MS` (default
-24 hours). The threshold sits above the two-attempt ledger bound so this history guards only
-post-reset re-entry. Values are captured at module load and require a daemon restart; unprefixed
-CAT-47 names remain deprecated aliases. Audit-comment hashes are committed only after
-successful delivery, so an outage leaves the comment eligible for retry while delivered duplicate
-content is suppressed. Manual hygiene can sweep files whose newest `lastTs`/`lastCommentTs` is older
-than 14 days with `sweep-stale-recovery-intents.mjs --family fix-failures`; that retention exceeds
-twice the maximum backoff window, and nothing depends on the sweep running.
+### Explanation-required escalation chokepoint (CTL-1609, delegate-first routing removed CTL-2141)
 
-### Delegate-first escalation + explanation chokepoint (CTL-1609)
+CTL-1609 originally closed two gaps where the scheduler labels a ticket `needs-human`: a
+delegate-first routing seam (`routeStuckTicketToDelegate` / `execution-core/delegate-first.mjs`,
+gated by `CATALYST_DELEGATE_FIRST`) that could route a stuck ticket to the delegate runner instead
+of labelling it, and an explanation-required chokepoint on the direct label path. CTL-2141 deleted
+the delegate-first seam along with the rest of the recovery-pass/board-health judgment layer it fed
+— off-mode was always byte-identical to the direct label call in production, so removing it changed
+no live behavior. All six `needs-human` producer sites (`scheduler.mjs` / `monitor.mjs` /
+`stale-pr-rescue-timer.mjs`) now call `labelNeedsHumanUnlessBeliefOwner` directly, as they did before
+CTL-1609 and as they always resolved to in production regardless.
 
-Two gaps closed at the point where the scheduler labels a ticket `needs-human`:
-
-**Gap 1 — Delegate-first routing seam.** Every `needs-human` producer (six sites in `scheduler.mjs`
-/ `monitor.mjs` / `stale-pr-rescue-timer.mjs`, not including `attempts-exhausted` which is
-post-delegate by definition) now routes through `routeStuckTicketToDelegate`
-(`execution-core/delegate-first.mjs`) instead of calling `labelNeedsHumanUnlessBeliefOwner`
-directly. Ordered fallback: **(1) auto-fix [deferred]** → **(2) delegate runner** → **(3) human**.
-
-- **`CATALYST_DELEGATE_FIRST=off`** (default): byte-identical to the direct call — no behavior
-  change until the flag is lit.
-- **`CATALYST_DELEGATE_FIRST=shadow`**: logs a `delegate.would-route` event per eligible ticket but
-  still labels `needs-human`. Safe dry-run.
-- **`CATALYST_DELEGATE_FIRST=enforce`**: calls `enqueueDelegateIntent`; if the queue accepts
-  (`enqueued`, `already-pending`, or `worker-live`) emits `delegate.routed` and returns without
-  labelling. Queue-full / write-failed / no-orch-dir → emit `delegate.route-fallback` and fall back
-  to labelling. Side effects (`recordTransition`, `cache.invalidate`) are gated on
-  `result.labelled === true` so routed tickets never record a spurious `needs-human` transition.
-
-**Gap 2 — Explanation-required chokepoint.** `labelNeedsHumanUnlessBeliefOwner`
-(`execution-core/label-guard.mjs`) now accepts an optional `explanation` object. After a confirmed
-label application:
+**The explanation-required chokepoint stays.** `labelNeedsHumanUnlessBeliefOwner`
+(`execution-core/label-guard.mjs`) accepts an optional `explanation` object. After a confirmed label
+application:
 
 - If `explanation` is absent → emits `escalation.explanation-absent` warn and coerces a degraded
   fallback via `coerceExplanation` (type `authorization`, `degraded: true`).
 - Writes the coerced or caller-supplied explanation to `workers/<TICKET>/phase-recovery-pass.json`
-  via `writeExplanationSignal` (atomic tmp+rename). A **no-overwrite guard** protects the rich
-  curated signal written by `escalateExhaustedIntents` before it calls the label function —
-  `prior.explanation && prior.explanation.degraded !== true` prevents the thin hint from clobbering
-  it.
+  via `writeExplanationSignal` (atomic tmp+rename).
 - All six wired sites supply a `problem` + `call_to_action` structured explanation so the operator
   inbox can render a real "What's needed now" card instead of a bare label.
-- The `attempts-exhausted` site passes a thin hint; `escalateExhaustedIntents` writes the full
-  curated explanation first via a direct `writeExplanationSignal` call, and the no-overwrite guard
-  ensures the chokepoint's coercion cannot overwrite it.
 
-New event names (registered in `broker/namespace-parity.test.mjs`): `escalation.explanation-absent`,
-`delegate.would-route`, `delegate.routed`, `delegate.route-fallback`.
+New event name (registered in `broker/namespace-parity.test.mjs`): `escalation.explanation-absent`.
 
 ### Runaway-loop guards (CTL-671)
 
@@ -1324,12 +1223,11 @@ resolve fleet events locally with no polling loop. The fan-in is transport-abstr
 ### GitHub core REST quota snapshot (CAT-40)
 
 The execution-core daemon samples `gh api rate_limit` on a dedicated timer and atomically writes the
-host's normalized core REST quota to `<orchDir>/github-quota.json`. Board-health reads that local
-snapshot rather than spending a GitHub call on its scan path, publishes the remaining count,
-percentage, reset time, sampling host, and snapshot age, and emits the scalar values on
-`recovery.board-scan`. Sampling and publication are on by default, but actuation is not:
-`CATALYST_BH_GH_QUOTA` defaults to `shadow`, so `rateLimitHeadroom` stays unobservable to Gate 3
-until an operator explicitly selects `enforce`.
+host's normalized core REST quota to `<orchDir>/github-quota.json` (`orchestration.githubQuotaSweep`,
+see the configuration reference). CTL-2141 deleted this snapshot's only consumer (board-health's
+`rateLimitHeadroom` gate and its `recovery.board-scan` emission); the sampler still runs and
+publishes the snapshot, so the local read-avoidance benefit is retained, but nothing currently acts
+on the published quota.
 
 **Worktree salvage-before-destroy (CTL-1639).** Every destructive worktree removal — the
 dispatcher's L3 destroy+recreate, the orphan-sweep, phase-teardown, and the JS reaper's PR-merged
