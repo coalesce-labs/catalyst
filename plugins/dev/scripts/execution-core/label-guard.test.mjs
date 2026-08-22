@@ -145,11 +145,17 @@ describe("labelOnce", () => {
     );
   });
 
-  test("rate-limited (any non-applied, non-missing-label) → no marker, next tick retries", () => {
+  test("rate-limited → no PERMANENT marker; CTL-2043 backs it off for the window, then retries", () => {
+    // Pre-CTL-2043 this asserted the retry landed on the very next call. That was the
+    // P2-a defect, not a property worth keeping: re-issuing into a 429 every tick is
+    // the COORD-236 storm by another name, and each attempt spends a host write unit.
+    // What must survive — and is asserted — is that no PERMANENT marker is written.
     const ws = { applyLabel: recorder({ applied: false, reason: "rate-limited" }) };
     mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+    let clock = 1_000_000;
+    const opts = { now: () => clock };
 
-    labelOnce(orchDir, "CTL-1", "needs-human", ws);
+    labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
     expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
       false
     );
@@ -157,9 +163,161 @@ describe("labelOnce", () => {
       false
     );
 
-    // Next call still attempts the write — by design.
-    labelOnce(orchDir, "CTL-1", "needs-human", ws);
+    // In-window: cooled down.
+    clock += 1_000;
+    labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+    expect(ws.applyLabel.calls.length).toBe(1);
+    // Past the window: attempted again.
+    clock += 61_000;
+    labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
     expect(ws.applyLabel.calls.length).toBe(2);
+  });
+
+  // ── CTL-2043 (P2-a): labelOnce gets a TIME-BOXED cool-down, never .skipped ──
+  //
+  // The gap CTL-2052 left: labelOnce wrote `.applied` on success and `.skipped` for a
+  // terminal reason, and NOTHING for a throttled/cloud one — so the needs-human
+  // escalation path re-issued the write every tick, spending a host budget unit each
+  // time, for as long as the refusal lasted. The fix must not reach for `.skipped`:
+  // that marker is permanent and would outlive the re-mint / budget roll, abandoning
+  // the label the operator page depends on (COORD-236 — strictly worse than the storm).
+  describe("CTL-2043: cool-down on a throttled/cloud refusal", () => {
+    const cooldownMarker = (ticket, label) =>
+      join(orchDir, ".label-cooldowns", `${ticket}-${label}.json`);
+    const skippedMarker = (ticket, label) =>
+      join(orchDir, "workers", ticket, `.linear-label-${label}.skipped`);
+
+    for (const reason of ["cloud:label-rejected", "unauthorized", "cloud:exhausted", "budget:day-exhausted"]) {
+      test(`${reason}: ONE attempt, ZERO inside the window, retried after it`, () => {
+        const ws = { applyLabel: recorder({ applied: false, reason }) };
+        mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+        let clock = 7_000_000;
+        const opts = { now: () => clock };
+
+        expect(labelOnce(orchDir, "CTL-1", "needs-human", ws, opts)).toBe(true);
+        expect(ws.applyLabel.calls.length).toBe(1);
+
+        for (let i = 0; i < 30; i++) {
+          clock += 1_000;
+          labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+        }
+        expect(ws.applyLabel.calls.length).toBe(1);
+
+        clock += 61_000;
+        labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+        expect(ws.applyLabel.calls.length).toBe(2);
+      });
+
+      test(`${reason}: writes a COOL-DOWN marker and NO .skipped (AC2 asymmetry)`, () => {
+        const ws = { applyLabel: recorder({ applied: false, reason }) };
+        mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+        labelOnce(orchDir, "CTL-1", "needs-human", ws);
+
+        // Both halves are asserted: a missing .skipped alone would also pass on the
+        // pre-fix code (which wrote nothing at all), so it cannot show the cool-down
+        // was armed. The marker's presence is what does.
+        expect(existsSync(skippedMarker("CTL-1", "needs-human"))).toBe(false);
+        expect(existsSync(cooldownMarker("CTL-1", "needs-human"))).toBe(true);
+        expect(
+          JSON.parse(readFileSync(cooldownMarker("CTL-1", "needs-human"), "utf8")).failedAt
+        ).toBeNumber();
+      });
+    }
+
+    test("a TERMINAL reason still takes the .skipped branch — it never reaches the cool-down arm", () => {
+      const ws = { applyLabel: recorder({ applied: false, reason: "exclusive-conflict" }) };
+      mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+      labelOnce(orchDir, "CTL-1", "needs-human", ws);
+
+      expect(existsSync(skippedMarker("CTL-1", "needs-human"))).toBe(true);
+      // The cool-down set is exactly `shouldCoolDownLabel MINUS terminal`; a terminal
+      // reason early-returns forever on .skipped, so arming a window too would be
+      // dead state that muddies the ledger the converger's cap reads.
+      expect(existsSync(cooldownMarker("CTL-1", "needs-human"))).toBe(false);
+    });
+
+    test("a genuinely TRANSIENT reason arms NOTHING — it must still retry next tick", () => {
+      const ws = { applyLabel: recorder({ applied: false, reason: "transient" }) };
+      mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+      labelOnce(orchDir, "CTL-1", "needs-human", ws);
+      labelOnce(orchDir, "CTL-1", "needs-human", ws);
+
+      expect(ws.applyLabel.calls.length).toBe(2);
+      expect(existsSync(cooldownMarker("CTL-1", "needs-human"))).toBe(false);
+      expect(existsSync(skippedMarker("CTL-1", "needs-human"))).toBe(false);
+    });
+
+    test("a cooled-down call is a no-op: applyLabel is NOT called and onApplyResult does NOT fire", () => {
+      // Same shape as the marker-guarded early return, which the caller
+      // (labelNeedsHumanUnlessBeliefOwner) already handles — it gates its side
+      // effects on a CONFIRMED apply, so a silent no-op must not look like a result.
+      const results = [];
+      const ws = { applyLabel: recorder({ applied: false, reason: "cloud:exhausted" }) };
+      mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+      let clock = 7_000_000;
+      const opts = { now: () => clock, onApplyResult: (r) => results.push(r) };
+
+      labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+      expect(results.length).toBe(1);
+
+      clock += 1_000;
+      expect(labelOnce(orchDir, "CTL-1", "needs-human", ws, opts)).toBe(false);
+      expect(ws.applyLabel.calls.length).toBe(1);
+      expect(results.length).toBe(1); // no second result for a write that never happened
+    });
+
+    test("the cool-down is PER (ticket, label) — one refused label does not mute another", () => {
+      const ws = { applyLabel: recorder({ applied: false, reason: "cloud:exhausted" }) };
+      mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+      mkdirSync(join(orchDir, "workers", "CTL-2"), { recursive: true });
+      const opts = { now: () => 7_000_000 };
+
+      labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+      labelOnce(orchDir, "CTL-1", "stalled", ws, opts); // different label
+      labelOnce(orchDir, "CTL-2", "needs-human", ws, opts); // different ticket
+      expect(ws.applyLabel.calls.length).toBe(3);
+    });
+
+    test("a SUCCESSFUL apply clears the ledger, so a later refusal starts a fresh window", () => {
+      let mode = "fail";
+      const calls = [];
+      const ws = {
+        applyLabel: (...args) => {
+          calls.push(args);
+          return mode === "fail" ? { applied: false, reason: "cloud:exhausted" } : { applied: true };
+        },
+      };
+      mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+      let clock = 7_000_000;
+      const opts = { now: () => clock };
+
+      labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+      expect(existsSync(cooldownMarker("CTL-1", "needs-human"))).toBe(true);
+      clock += 61_000;
+      mode = "ok";
+      labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+      // A stale marker would be harmless here (.applied early-returns forever), but a
+      // left-behind attempt count is read by the converger's cap gate for the same
+      // (ticket, label) — clearing it keeps that ledger honest.
+      expect(existsSync(cooldownMarker("CTL-1", "needs-human"))).toBe(false);
+      expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
+        true
+      );
+    });
+
+    test("the window defaults to real time when no `now` seam is supplied", () => {
+      // Production passes no clock. Without a Date.now default the guard would read
+      // NaN and never bite — the check-that-cannot-fail shape.
+      const ws = { applyLabel: recorder({ applied: false, reason: "cloud:exhausted" }) };
+      mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+      labelOnce(orchDir, "CTL-1", "needs-human", ws);
+      labelOnce(orchDir, "CTL-1", "needs-human", ws);
+      expect(ws.applyLabel.calls.length).toBe(1);
+    });
   });
 
   test("applyLabel returning undefined (test stubs) → treated as success", () => {
