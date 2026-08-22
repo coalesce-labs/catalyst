@@ -35,31 +35,52 @@ compact and summarize your context without losing any of the key details of what
 
 ## Process
 
-### 1. Filepath & Metadata
+### 1. Filepath & Metadata — computed, never composed
 
 **IMPORTANT: Document Storage Rules**
 
 - ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
-Create your file under `thoughts/shared/handoffs/PROJ-XXX/YYYY-MM-DD_HH-MM-SS_description.md`:
+**Do NOT compose the filename yourself.** `thoughts/shared` is a *per-project symlink*: the
+same relative path resolves to a different physical subtree depending on which worktree you
+are in, and a hand-typed `HH-MM-SS` drifts between the filename, the frontmatter and the
+citation. Both produce a path you announce and the next turn cannot find (CTL-2104). Ask the
+helper instead — it stamps the time mechanically and resolves the symlink for you:
 
-- `YYYY-MM-DD` — today's date
-- `HH-MM-SS` — current time in 24-hour format (e.g., `13-55-22`)
-- `PROJ-XXX` — ticket number directory (use `general` if no ticket)
-- `description` — brief kebab-case description
+```bash
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/handoff-durability.sh"
+
+# <scope> = the ticket id (e.g. PROJ-123), or `general` when there is no ticket.
+# <description> = brief kebab-case description.
+HANDOFF_PATHS="$(handoff_resolve_path "<scope>" "<description>")"
+HANDOFF_REL="$(printf '%s\n' "$HANDOFF_PATHS" | sed -n '1p')"   # thoughts/shared/handoffs/...
+HANDOFF_ABS="$(printf '%s\n' "$HANDOFF_PATHS" | sed -n '2p')"   # /Users/.../repos/<project>/shared/...
+printf 'relative: %s\nabsolute: %s\n' "$HANDOFF_REL" "$HANDOFF_ABS"
+```
+
+Capture **both** echoed lines. `$HANDOFF_ABS` is the absolute path you will cite; it is the
+one form that stays correct no matter which worktree the reader is in.
 
 Get current git information for metadata (branch, commit, repository name) using git commands.
+Use the timestamp already embedded in `$HANDOFF_REL` for the frontmatter `date` — do not
+generate a second one.
 
-**Examples:**
+**Examples of what the helper returns:**
 
-- With ticket: `thoughts/shared/handoffs/PROJ-123/2025-01-08_13-55-22_PROJ-123_auth-feature.md`
+- With ticket: `thoughts/shared/handoffs/PROJ-123/2025-01-08_13-55-22_auth-feature.md`
 - Without ticket: `thoughts/shared/handoffs/general/2025-01-08_13-55-22_refactor-api.md`
 
 ### 2. Handoff writing.
 
-using the above conventions, write your document. use the defined filepath, and the following YAML
-frontmatter pattern. Use the metadata gathered in step 1, Structure the document with YAML
+Using the above conventions, write your document **to a temp file** — `handoff_write_verified`
+installs it at `$HANDOFF_ABS` in step 3 and proves the bytes landed:
+
+```bash
+HANDOFF_TMP="$(mktemp -t handoff-XXXXXX)"   # Write your document content here.
+```
+
+Use the following YAML frontmatter pattern. Use the metadata gathered in step 1, Structure the document with YAML
 frontmatter followed by content:
 
 Use the following template structure:
@@ -127,28 +148,81 @@ that don't fall into the above categories}
 
 ---
 
-### 3. Sync and Complete
+### 3. Install, sync, and report the durability verdict
 
-Run `humanlayer thoughts sync` to save the document. Then respond to the user with the template between
-<template_response></template_response> XML tags. do NOT include the tags in your response.
-
-<template_response> Handoff created and synced! You can resume from this handoff in a new session
-with the following command:
+Install the content and classify what actually happened. Both commands echo the fact you
+will cite — never restate a path or a durability claim from memory:
 
 ```bash
-/catalyst-dev:resume-handoff path/to/handoff.md
+# Installs atomically, then RE-READS the destination and byte-compares. Non-zero means the
+# handoff is NOT on disk: say so and stop, do not announce a path that does not exist.
+HANDOFF_ABS="$(handoff_write_verified "$HANDOFF_ABS" "$HANDOFF_TMP")" || exit 1
+rm -f "$HANDOFF_TMP"
+
+# Echoes exactly one verdict token: `synced`, or `local-only:<reason>`.
+HANDOFF_VERDICT="$(handoff_sync_and_classify "$HANDOFF_ABS")"
+printf 'path: %s\nverdict: %s\n' "$HANDOFF_ABS" "$HANDOFF_VERDICT"
+```
+
+⚠️ **Cite the echoed `$HANDOFF_ABS` verbatim, and do NOT re-type the path or the timestamp
+from memory.** A re-typed stamp that differs by one second is a citation that misses a file
+which genuinely exists — one of the three causes behind CTL-2104.
+
+## Durability contract
+
+The helper returns a verdict so the caller never has to re-verify a citation by hand. Report
+the one you actually got — this section is the guarantee attached to each:
+
+| Verdict                         | What it guarantees                                                                                       |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `synced`                        | Sync exited 0 **and** the bytes are in the thoughts repo's upstream tree. Safe to cite **from any host, now**. |
+| `local-only:sync-failed`        | `humanlayer thoughts sync` exited non-zero (typically a rebase conflict).                                 |
+| `local-only:not-in-pushed-tree` | Sync exited 0 but the file never reached the pushed tree — the silent-abort case.                         |
+| `local-only:sync-unavailable`   | No `humanlayer` on PATH.                                                                                  |
+| `local-only:git-unavailable`    | No `git`, or the thoughts tree is not a checkout — durability is unprovable here.                         |
+
+**Every `local-only:*` verdict still means the file is written and verified on disk at
+`$HANDOFF_ABS`.** No work is lost, and the path is safe to cite on **this host now**;
+cross-host resume becomes available after the next sync tick (≤300 s). Do **not** retry the
+sync yourself — two retry ladders on one failure is a storm.
+
+Never announce "synced" on a `local-only:*` verdict. An unconditional durability claim is
+exactly what made six real files look like phantoms.
+
+Then respond to the user with the template matching your verdict, between
+<template_response></template_response> XML tags. Do NOT include the tags in your response.
+
+**When `HANDOFF_VERDICT` is `synced`:**
+
+<template_response> Handoff written, verified, and synced — durable and safe to cite from any
+host. Resume from it in a new session with:
+
+```bash
+/catalyst-dev:resume-handoff <the echoed absolute path>
 ```
 
 </template_response>
 
-for example (between <example_response></example_response> XML tags - do NOT include these tags in
-your actual response to the user)
+**When `HANDOFF_VERDICT` starts with `local-only`:**
 
-<example_response> Handoff created and synced! You can resume from this handoff in a new session
-with the following command:
+<template_response> Handoff written and verified on disk, but **not yet synced**
+(`<the verdict>`) — it is safe to cite on this host now; cross-host resume follows the next
+sync tick. Resume from it with:
 
 ```bash
-/catalyst-dev:resume-handoff thoughts/shared/handoffs/PROJ-123/2025-01-08_13-44-55_PROJ-123_create-context-compaction.md
+/catalyst-dev:resume-handoff <the echoed absolute path>
+```
+
+</template_response>
+
+for example (between <example_response></example_response> XML tags — do NOT include these tags
+in your actual response to the user)
+
+<example_response> Handoff written, verified, and synced — durable and safe to cite from any
+host. Resume from it in a new session with:
+
+```bash
+/catalyst-dev:resume-handoff /Users/you/hlt/coalesce-labs/thoughts/repos/my-project/shared/handoffs/PROJ-123/2025-01-08_13-44-55_create-context-compaction.md
 ```
 
 </example_response>

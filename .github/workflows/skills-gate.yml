@@ -34,3 +34,5 @@ jobs:
         run: bash plugins/dev/skills/__tests__/skill-shape.test.sh
       - name: Check project-orchestrator skill shape (CTL-1974)
         run: bash plugins/dev/skills/__tests__/project-orchestrator-shape.test.sh
+      - name: Check handoff write-then-cite contract (CTL-2104)
+        run: bash plugins/dev/skills/__tests__/handoff-contract.test.sh
