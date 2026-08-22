@@ -43,7 +43,7 @@ jq -nc \
       persistent: true,
       ticket: $ticket,
       phase_names: $phases
-    }}' >> ~/catalyst/events/$(date -u +%Y-%m).jsonl
+    }}' >> $(ls -t ~/catalyst/events/*.jsonl | head -1)
 ```
 
 ## Match logic (no Groq call)

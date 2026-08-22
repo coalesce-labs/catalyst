@@ -133,7 +133,7 @@ Runtime utilities under `scripts/`:
 - `catalyst-session.sh` — Lifecycle CLI for agent sessions (`start`, `phase`, `metric`, `tool`,
   `pr`, `end`, `heartbeat`, `list`, `read`, `history`). Writes to SQLite via `catalyst-db.sh` and
   dual-writes JSONL events for backward compatibility
-- `catalyst-state.sh` — Writes to `~/catalyst/state.json` and `~/catalyst/events/YYYY-MM.jsonl`
+- `catalyst-state.sh` — Writes to `~/catalyst/state.json` and `~/catalyst/events/<period>.jsonl`
 - `check-config-drift.sh` — Detect keys present in `templates/config.template.json` but missing from
   `.catalyst/config.json` (CTL-489); supports `--json` enumeration and `--merge-into` for atomic
   deep-merge

@@ -10,12 +10,12 @@ description:
 # monitor-events — Event-driven waits in skill prose
 
 CTL-210 unified the Catalyst event log: every GitHub webhook, Linear webhook, comms post,
-and orchestrator/worker lifecycle event flows through `~/catalyst/events/YYYY-MM.jsonl`.
+and orchestrator/worker lifecycle event flows through `~/catalyst/events/<period>.jsonl`.
 This skill documents the canonical patterns. Use as a reference — do not invoke as a slash command.
 
 ## Prerequisite — orch-monitor daemon must be running
 
-`catalyst-events tail`/`wait-for` read from `~/catalyst/events/YYYY-MM.jsonl`, populated
+`catalyst-events tail`/`wait-for` read from `~/catalyst/events/<period>.jsonl`, populated
 by `orch-monitor`. When the daemon is down, `tail` returns empty and `wait-for` times out.
 
 Liveness check:

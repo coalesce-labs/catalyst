@@ -73,7 +73,7 @@ and writes its state to `${ORCH_DIR}/workers/<ticket>/phase-*.json`.
   its `status`, its `failureReason`, and the `bg_job_id`.
 - **The worker transcript** — `claude logs <shortId>` (the first 8 chars of the
   signal's `bg_job_id`): what the worker actually did and where it stopped.
-- **The unified event log** — `~/catalyst/events/YYYY-MM.jsonl`: the surrounding
+- **The unified event log** — `~/catalyst/events/<period>.jsonl`: the surrounding
   phase/recovery events for this ticket (escalations, dispatches, completions).
 - **The worktree** — `~/catalyst/wt/catalyst-workspace/<ticket>`: the live branch
   state — `git status`, `git log`, conflict markers, a half-finished rebase.

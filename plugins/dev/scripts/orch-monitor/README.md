@@ -110,7 +110,7 @@ Empty/missing → auto-discovery only. See the website docs for the full setup f
 3. Subscribes to each repo in `watchRepos` (Layer 1) before replay runs, so configured repos get the 1-hour replay too
 4. For each `(owner, repo)` observed in worker signal files, creates or reuses a webhook subscription — deduped against step 3
 5. On startup, replays the last hour of deliveries from `gh api repos/{repo}/hooks/{id}/deliveries` so events missed during downtime are reconciled
-6. Every accepted webhook event is also fanned out to `~/catalyst/events/YYYY-MM.jsonl` for downstream consumers (UI activity feed, future `catalyst-events` CLI)
+6. Every accepted webhook event is also fanned out to `~/catalyst/events/<period>.jsonl` for downstream consumers (UI activity feed, future `catalyst-events` CLI)
 
 ### Subscribed events
 

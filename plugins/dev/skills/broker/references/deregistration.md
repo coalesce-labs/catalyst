@@ -8,7 +8,7 @@ or when the broker is not running and you need a direct wait-for fallback._
 ```bash
 jq -nc --arg sid "$CATALYST_SESSION_ID" \
   '{ts: (now | todate), event: "filter.deregister",
-    detail: {interest_id: $sid}}' >> ~/catalyst/events/$(date -u +%Y-%m).jsonl
+    detail: {interest_id: $sid}}' >> $(ls -t ~/catalyst/events/*.jsonl | head -1)
 ```
 
 Auto-deregistration happens on:

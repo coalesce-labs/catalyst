@@ -6,7 +6,7 @@ events in parallel to OTLP/HTTP, PostHog, and Cloudflare Analytics Engine.
 ## Architecture
 
 ```
-~/catalyst/events/YYYY-MM.jsonl
+~/catalyst/events/<period>.jsonl
          │
          ▼ (byte-offset tail, 200ms poll)
   catalyst-otel-forward

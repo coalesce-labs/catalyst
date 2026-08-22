@@ -1336,7 +1336,7 @@ flowchart LR
     OS --> SJ[~/catalyst/runs/&lt;id&gt;/<br/>state.json]
     PAD[phase-agent-dispatch] --> PSF[workers/&lt;TICKET&gt;/<br/>phase-&lt;name&gt;.json]
     BROKER[broker daemon] --> BI[~/catalyst/broker-interests.json]
-    BROKER --> EL[~/catalyst/events/<br/>YYYY-MM.jsonl]
+    BROKER --> EL[~/catalyst/events/<br/>&lt;period&gt;.jsonl]
     REAPER[execution-core<br/>daemon reaper] -- "emits *.reap-complete<br/>/ *.reap-failed echoes" --> EL
   end
   subgraph Surfaces

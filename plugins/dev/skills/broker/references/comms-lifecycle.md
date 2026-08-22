@@ -64,7 +64,7 @@ jq -nc \
       subscriber_kind: "orchestrator",
       owned_workers: $workers,
       types_of_interest: ["attention", "done"]
-    }}' >> ~/catalyst/events/$(date -u +%Y-%m).jsonl
+    }}' >> $(ls -t ~/catalyst/events/*.jsonl | head -1)
 ```
 
 ## Registering (worker)
@@ -93,7 +93,7 @@ jq -nc \
       channel: $channel,
       subscriber_kind: "worker",
       subscriber_ticket: $ticket
-    }}' >> ~/catalyst/events/$(date -u +%Y-%m).jsonl
+    }}' >> $(ls -t ~/catalyst/events/*.jsonl | head -1)
 ```
 
 ## Match logic (no Groq call)

@@ -24,7 +24,7 @@ jq -nc \
       repo: $repo,
       base_branches: [{pr: $pr, base: $base}],
       session_id: $sid
-    }}' >> ~/catalyst/events/$(date -u +%Y-%m).jsonl
+    }}' >> $(ls -t ~/catalyst/events/*.jsonl | head -1)
 ```
 
 Events matched: `github.check_suite.completed`, `github.pr.merged`, `github.pr.closed`,
