@@ -49,8 +49,9 @@ describe("CTL-1774 Phase 4 — end-to-end integration", () => {
       appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: "CTL-TEST" }),
     });
 
-    // Label spy called — shadow mutates nothing but still labels
-    expect(labelSpy).toHaveBeenCalledTimes(1);
+    // ⛔ CTL-2159: was toHaveBeenCalledTimes(1). Shadow no longer labels because
+    // NOTHING labels — the publish chokepoint routes through the classifier.
+    expect(labelSpy).toHaveBeenCalledTimes(0);
 
     // Real emitter wrote to the event log
     const now = new Date();
@@ -90,8 +91,8 @@ describe("CTL-1774 Phase 4 — end-to-end integration", () => {
       appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: "CTL-TEST" }),
     });
 
-    // Label still applied in off mode
-    expect(labelSpy).toHaveBeenCalledTimes(1);
+    // ⛔ CTL-2159: was toHaveBeenCalledTimes(1) — see the shadow case above.
+    expect(labelSpy).toHaveBeenCalledTimes(0);
 
     // No file written
     const now = new Date();

@@ -72,6 +72,14 @@ export function routeStuckTicketToDelegate(
       site,
       log: logArg,
       explanation,
+      // ⛔ CTL-2159: forward the reason. All six escalation sites that reach the
+      // label ONLY through this seam already compute one (`dispatch-circuit-
+      // breaker:N`, `triage-redispatch-cap`, `unresolvable-conflict`, …) and it
+      // was dropped here. Without it the classifier sees no reason and returns
+      // HELD for every one of them — including scheduler.mjs:9294, the volume
+      // producer — so the SYSTEM retry/alert path would never fire and this
+      // phase would ship inert while passing its own tests.
+      reason,
     });
     return labelled;
   };

@@ -301,7 +301,13 @@ describe("recovery-emit escalated — comment surfacing (CTL-1439 P0a)", () => {
   });
 });
 
-// ─── CTL-1568: the escalation comment and the needs-human LABEL are one act ───
+// ─── CTL-1568: the escalation comment and the ESCALATION RECORD are one act ───
+// ⛔ CTL-2159 rewrote what the second half of that pair IS. It was the Linear
+// `needs-human` label, so a rate-limited label write withheld the comment, left
+// the ledger unlatched, and burned a retry budget until it gave up loudly. The
+// pairing survives — the comment still posts only when the escalation is
+// PUBLISHED — but publishing is now a local, classified act, so a shared-quota
+// 429 can no longer decide whether a human hears about a stuck ticket.
 // Fake ticket ids throughout: the PATH stub seals the transport, but these ids must
 // never name a real ticket even if that seal is one day removed.
 describe("recovery-emit escalated — needs-human label (CTL-1568)", () => {
@@ -313,21 +319,38 @@ describe("recovery-emit escalated — needs-human label (CTL-1568)", () => {
   const linearisCalls = () =>
     existsSync(linearisCallsFile) ? readFileSync(linearisCallsFile, "utf8") : "";
 
-  test("escalated APPLIES needs-human — without it an agent reply cannot return the row", () => {
+  test("escalated PUBLISHES the escalation and posts the comment — with NO label write", () => {
     const res = runCli([
       "escalated", "--ticket", "TST-900", "--orch-dir", orchDir,
       "--phase", "recovery-pass", "--escalation", escalation,
     ]);
     expect(res.status).toBe(0);
-    // the label write actually reached the transport…
-    expect(linearisCalls()).toContain("issues update TST-900 --labels needs-human --label-mode add");
-    // …and the comment is posted, because the label landed
+    // ⛔ CTL-2159: the label write is gone from the transport entirely.
+    expect(linearisCalls()).not.toContain("--labels needs-human");
+    // POSITIVE CONTROL for the instrument. The label write was the ONLY thing on
+    // this path that touched linearis, so an empty call log is now the expected
+    // state and "not called" is indistinguishable from "recorder broken" unless
+    // the recorder is proven separately. Drive the stub directly and watch the
+    // same probe go non-empty.
+    spawnSync(pathJoin(catalystDir, "bin", "linearis"), ["issues", "update", "TST-PC", "--labels", "needs-human"], {
+      encoding: "utf8",
+      env: { ...process.env, CATALYST_DIR: catalystDir, LINEARIS_CALLS_FILE: linearisCallsFile },
+    });
+    expect(linearisCalls()).toContain("needs-human");
+    // …and the comment is posted, because the escalation was published
     expect(readFileSync(captureFile, "utf8")).toContain("TST-900");
     expect(res.stdout).toContain("needs-human=applied");
   });
 
-  test("a FAILED label write withholds the comment and raises recovery.escalation.split", () => {
-    // Break only the label write: the stub exits non-zero for `issues update`.
+  // ⛔ CTL-2159 — THE INVERSION. This pair used to pin "a FAILED label write
+  // withholds the comment" and "a label that FAILS repeatedly eventually latches,
+  // loudly". Both premises are gone with the label: a broken Linear `issues
+  // update` transport can no longer withhold a human-facing escalation, so there
+  // is no split to alarm on and no retry budget to exhaust. That is the point —
+  // the CTL-638 storm those guards contained was caused by the label write they
+  // were guarding.
+  test("CTL-2159 — a broken Linear transport no longer withholds the comment or splits", () => {
+    // Break the label-shaped write exactly as before: the stub exits non-zero.
     writeFileSync(
       pathJoin(catalystDir, "bin", "linearis"),
       `#!/bin/bash\nif [[ "$1" == "issues" && "$2" == "update" ]]; then echo "rate limited" >&2; exit 1; fi\nprintf '{"identifier":"%s","labels":{"nodes":[]}}\\n' "$3"\nexit 0\n`,
@@ -337,50 +360,16 @@ describe("recovery-emit escalated — needs-human label (CTL-1568)", () => {
       "escalated", "--ticket", "TST-901", "--orch-dir", orchDir,
       "--phase", "recovery-pass", "--escalation", escalation,
     ]);
-    // O1: exit stays 0 — the skill invokes this as a bare bash call with no
-    // exit-code contract, so a non-zero exit could retry the whole pass.
     expect(res.status).toBe(0);
-    expect(existsSync(captureFile)).toBe(false); // ← the CTL-1568 defect, fixed
-    expect(readEvents().some((e) => e.attributes?.["event.name"] === "recovery.escalation.split")).toBe(true);
-    // the durable surfaces still landed
+    // The comment lands (was: withheld) and the ledger latches on the FIRST pass
+    // (was: left unlatched to retry for up to a whole budget).
+    expect(existsSync(captureFile)).toBe(true);
+    expect(readLedger("TST-901").escalated).toBe(true);
+    // No split: there are no longer two halves that can disagree.
+    expect(readEvents().some((e) => e.attributes?.["event.name"] === "recovery.escalation.split")).toBe(false);
+    // POSITIVE CONTROL: the durable escalation event DID land, so the zero above
+    // is not an empty event log.
     expect(readEvents().some((e) => e.attributes?.["event.name"] === "recovery.escalated")).toBe(true);
-    // CTL-1568 (Codex #2861 P1): the ledger must NOT be latched here. `escalated:true`
-    // is TERMINAL — defaultSkipReason treats it as done for 7 days — so latching on a
-    // TRANSIENT label failure (this stub is a rate-limit) left the ticket escalated but
-    // unlabelled, comment withheld, and nothing retrying for a week. Leaving it
-    // unlatched is what lets the next recovery pass re-enter and retry.
-    let ledger901 = null;
-    try { ledger901 = readLedger("TST-901"); } catch { ledger901 = null; }
-    expect(ledger901?.escalated === true).toBe(false);
-    // The split alarm now carries WARN severity and its own dimensions, so an
-    // operator can tell a one-off transient from a wedged ticket.
-    const split = readEvents().find((e) => e.attributes?.["event.name"] === "recovery.escalation.split");
-    expect(split.severityText).toBe("WARN");
-    expect(split.attributes["recovery.site"]).toBe("recovery-emit-escalated");
-    expect(typeof split.attributes["recovery.deferrals"]).toBe("number");
-  });
-
-  test("a label that FAILS repeatedly eventually latches, loudly, instead of retrying forever", () => {
-    writeFileSync(
-      pathJoin(catalystDir, "bin", "linearis"),
-      `#!/bin/bash\nif [[ "$1" == "issues" && "$2" == "update" ]]; then echo "rate limited" >&2; exit 1; fi\nprintf '{"identifier":"%s","labels":{"nodes":[]}}\\n' "$3"\nexit 0\n`,
-    );
-    chmodSync(pathJoin(catalystDir, "bin", "linearis"), 0o755);
-    let last = null;
-    // Re-enter until the retry budget is spent; the bound is what stops this being
-    // an infinite retry loop once the label is permanently broken.
-    for (let i = 0; i < 8; i++) {
-      last = runCli([
-        "escalated", "--ticket", "TST-903", "--orch-dir", orchDir,
-        "--phase", "recovery-pass", "--escalation", escalation,
-      ]);
-      expect(last.status).toBe(0);
-      let l = null;
-      try { l = readLedger("TST-903"); } catch { l = null; }
-      if (l?.escalated === true) break;
-    }
-    expect(readLedger("TST-903").escalated).toBe(true);
-    expect(last.stderr).toContain("retry budget exhausted");
   });
 
   test("shadow mode writes NEITHER label nor comment", () => {

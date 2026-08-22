@@ -121,6 +121,12 @@ export const STALL_REASON_CLASS = Object.freeze({
   "stalled-no-recovery": STALL_CLASS.SYSTEM,
   "continue-failed": STALL_CLASS.SYSTEM,
   "consecutive-dispatch-failures": STALL_CLASS.SYSTEM,
+  // CTL-2159: the BARE token. The prefix row `dispatch-circuit-breaker:` below
+  // covers scheduler.mjs:3330's counted form (`dispatch-circuit-breaker:7`), but
+  // writeTerminalStalled records the breaker trip as the bare word — so the
+  // highest-frequency dispatch failure in the system fell through every rule and
+  // classified HELD. Found by the producer sweep, not by inspection.
+  "dispatch-circuit-breaker": STALL_CLASS.SYSTEM,
 
   // ── S: provider / account / capacity ──────────────────────────────────────
   "claude-resource-shed": STALL_CLASS.SYSTEM,

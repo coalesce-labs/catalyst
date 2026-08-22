@@ -1779,7 +1779,7 @@ export function defaultReviveDispatch(
 //     even if labelOnce keeps retrying the write, the cool-down suppresses
 //     the audit-event + label-call pair entirely so the scheduler's own
 //     event-log fast path stops self-feeding.
-function defaultApplyStalledLabel({ orchDir, ticket }) {
+function defaultApplyStalledLabel({ orchDir, ticket, reason = null, explanation = null }) {
   return labelNeedsHumanUnlessBeliefOwner(
     orchDir,
     ticket,
@@ -1788,6 +1788,13 @@ function defaultApplyStalledLabel({ orchDir, ticket }) {
       env: process.env,
       site: "recovery-stalled",
       log: { info: () => {} },
+      // ⛔ CTL-2159: forward the reason and the explanation. This is the recovery
+      // sweep's escalation — the highest-volume ASK-or-SYSTEM decision in the
+      // system — and with no reason the CTL-2158 classifier correctly answers
+      // HELD for every one of them, which would leave the SYSTEM retry path and
+      // the ASK path both permanently dark while every test still passed.
+      reason,
+      explanation: explanation ?? undefined,
     }
   );
 }
@@ -3146,7 +3153,7 @@ export function reclaimDeadWorkIfPossible(
     // 10-min cooldown on confirmed-or-unrecoverable so a transient 429 leaves the
     // retry window open. The .applied/.skipped markers written by labelOnce let us
     // classify the outcome without repeating the API call.
-    const labelConfirmed = applyStalledLabel({ orchDir, ticket });
+    const labelConfirmed = applyStalledLabel({ orchDir, ticket, reason, explanation });
     const markerBase = labelMarkerBase(orchDir, ticket, "needs-human");
     const labelApplied = labelConfirmed || existsSync(`${markerBase}.applied`);
     const labelUnrecoverable = existsSync(`${markerBase}.skipped`);

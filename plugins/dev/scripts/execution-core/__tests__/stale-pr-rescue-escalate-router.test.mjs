@@ -31,8 +31,11 @@ test("shadow (default): byte-identical to today — still labels, logs would-rou
       appendDelegateEvent: (e) => events.push(e),
       resolveSteward: () => null,
     });
-    expect(out.confirmed).toBe(true); // unchanged contract — the label still lands
-    expect(calls).toHaveLength(1); // applyLabel WAS called (today's path)
+    expect(out.confirmed).toBe(true); // unchanged contract — the escalation lands
+    // ⛔ CTL-2159: was toHaveLength(1). The escalation publishes through the
+    // classifier now; `confirmed` (asserted above) is the contract the rescue
+    // latch reads, and no Linear label is written on any path.
+    expect(calls).toHaveLength(0);
     expect(events.some((e) => e.type?.includes("would-route-steward"))).toBe(true);
   } finally {
     rmSync(orchDir, { recursive: true, force: true });

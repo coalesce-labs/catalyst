@@ -1,4 +1,13 @@
 #!/usr/bin/env bun
+// ⛔ CTL-2159 — THE NAME IS LEGACY; THIS NO LONGER APPLIES A LINEAR LABEL.
+// It still routes through the shared guard, and the guard now PUBLISHES the
+// escalation through the CTL-2158 classifier (SYSTEM → retry + the one fleet
+// alert, ASK → one ask ticket carrying `blocks`, MOOT → close, HELD → visible).
+// The file and its one shell caller (lib/escalate-workflow-scope.sh:63) keep
+// their names so the shell surface — which no JS import graph can see — is not
+// renamed in the same change that changes its behaviour; the rename belongs with
+// the marker-file rename in the consumer phase.
+//
 // label-needs-human.mjs — CTL-1552 CLI shim. Shell escalation sites (e.g.
 // lib/escalate-workflow-scope.sh) call this to apply the needs-human label
 // THROUGH the shared guard — the belief-owner check + read-verify applyLabel +
@@ -43,7 +52,9 @@ try {
     orchDir,
     ticket,
     { applyLabel },
-    { site: reason, explanation },
+    // CTL-2159: `--reason` is both the site id and the stall reason for this
+    // caller — the shell surface has no separate token — so it is passed as both.
+    { site: reason, reason, explanation },
   );
   console.error(
     `label-needs-human: ${ticket} needs-human apply -> ${applied ? "applied" : "deferred/no-op"}`,

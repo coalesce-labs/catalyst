@@ -178,9 +178,13 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
 
     const result = routeStuckTicketToDelegate(orchDir, "CTL-2", opts);
 
-    expect(labelCalls).toHaveLength(1);
-    expect(result.routed).toBe(false);
+    // ⛔ CTL-2159: was toHaveLength(1). This path used to write the Linear
+    // `needs-human` label. It now publishes through the CTL-2158 classifier and
+    // writes NO label at all — `result.labelled` is the surviving retry contract
+    // (the six route sites read it as their STOP), so it is asserted alongside.
+    expect(labelCalls).toHaveLength(0);
     expect(result.labelled).toBe(true);
+    expect(result.routed).toBe(false);
     const fallbackEvent = events.find((e) => e.name === "delegate.route-fallback");
     expect(fallbackEvent).toBeDefined();
     expect(fallbackEvent.reason).toBe("queue-full");
@@ -235,7 +239,12 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
     const result = routeStuckTicketToDelegate(orchDir, "CTL-4", opts);
 
     expect(enqueueCalled).toBe(false);
-    expect(labelCalls).toHaveLength(1);
+    // ⛔ CTL-2159: was toHaveLength(1). This path used to write the Linear
+    // `needs-human` label. It now publishes through the CTL-2158 classifier and
+    // writes NO label at all — `result.labelled` is the surviving retry contract
+    // (the six route sites read it as their STOP), so it is asserted alongside.
+    expect(labelCalls).toHaveLength(0);
+    expect(result.labelled).toBe(true);
     expect(result.routed).toBe(false);
     expect(result.shadow).toBe(true);
     const wouldRoute = events.find((e) => e.name === "delegate.would-route");
@@ -259,7 +268,12 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
     const result = routeStuckTicketToDelegate(orchDir, "CTL-5", opts);
 
     expect(enqueueCalled).toBe(false);
-    expect(labelCalls).toHaveLength(1);
+    // ⛔ CTL-2159: was toHaveLength(1). This path used to write the Linear
+    // `needs-human` label. It now publishes through the CTL-2158 classifier and
+    // writes NO label at all — `result.labelled` is the surviving retry contract
+    // (the six route sites read it as their STOP), so it is asserted alongside.
+    expect(labelCalls).toHaveLength(0);
+    expect(result.labelled).toBe(true);
     expect(result.routed).toBe(false);
   });
 
@@ -278,7 +292,12 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
     const result = routeStuckTicketToDelegate(orchDir, "CTL-5b", opts);
 
     expect(enqueueCalled).toBe(false);
-    expect(labelCalls).toHaveLength(1);
+    // ⛔ CTL-2159: was toHaveLength(1). This path used to write the Linear
+    // `needs-human` label. It now publishes through the CTL-2158 classifier and
+    // writes NO label at all — `result.labelled` is the surviving retry contract
+    // (the six route sites read it as their STOP), so it is asserted alongside.
+    expect(labelCalls).toHaveLength(0);
+    expect(result.labelled).toBe(true);
     expect(result.routed).toBe(false);
   });
 
@@ -295,9 +314,13 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
 
     const result = routeStuckTicketToDelegate(orchDir, "CTL-6", opts);
 
-    expect(labelCalls).toHaveLength(1);
-    expect(result.routed).toBe(false);
+    // ⛔ CTL-2159: was toHaveLength(1). This path used to write the Linear
+    // `needs-human` label. It now publishes through the CTL-2158 classifier and
+    // writes NO label at all — `result.labelled` is the surviving retry contract
+    // (the six route sites read it as their STOP), so it is asserted alongside.
+    expect(labelCalls).toHaveLength(0);
     expect(result.labelled).toBe(true);
+    expect(result.routed).toBe(false);
     const fallbackEvent = events.find((e) => e.name === "delegate.route-fallback");
     expect(fallbackEvent).toBeDefined();
     expect(fallbackEvent.reason).toBe("write-failed");
@@ -313,7 +336,12 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
 
     const result = routeStuckTicketToDelegate(orchDir, "CTL-6b", opts);
 
-    expect(labelCalls).toHaveLength(1);
+    // ⛔ CTL-2159: was toHaveLength(1). This path used to write the Linear
+    // `needs-human` label. It now publishes through the CTL-2158 classifier and
+    // writes NO label at all — `result.labelled` is the surviving retry contract
+    // (the six route sites read it as their STOP), so it is asserted alongside.
+    expect(labelCalls).toHaveLength(0);
+    expect(result.labelled).toBe(true);
     expect(result.routed).toBe(false);
   });
 });
@@ -347,9 +375,13 @@ describe("routeStuckTicketToDelegate — runner-disabled fail-safe (CTL-1609)", 
 
     // The safety net fires: a human is told rather than the ticket going quiet.
     expect(enqueueCalls).toBe(0);
-    expect(labelCalls).toHaveLength(1);
-    expect(result.routed).toBe(false);
+    // ⛔ CTL-2159: was toHaveLength(1). This path used to write the Linear
+    // `needs-human` label. It now publishes through the CTL-2158 classifier and
+    // writes NO label at all — `result.labelled` is the surviving retry contract
+    // (the six route sites read it as their STOP), so it is asserted alongside.
+    expect(labelCalls).toHaveLength(0);
     expect(result.labelled).toBe(true);
+    expect(result.routed).toBe(false);
     expect(result.reason).toBe("runner-disabled");
     const fallback = events.find((e) => e.name === "delegate.route-fallback");
     expect(fallback).toBeDefined();
@@ -393,7 +425,12 @@ describe("routeStuckTicketToDelegate — runner-disabled fail-safe (CTL-1609)", 
     const result = routeStuckTicketToDelegate(orchDir, "CTL-RD3", opts);
 
     expect(runnerReads).toBe(0);
-    expect(labelCalls).toHaveLength(1);
+    // ⛔ CTL-2159: was toHaveLength(1). This path used to write the Linear
+    // `needs-human` label. It now publishes through the CTL-2158 classifier and
+    // writes NO label at all — `result.labelled` is the surviving retry contract
+    // (the six route sites read it as their STOP), so it is asserted alongside.
+    expect(labelCalls).toHaveLength(0);
+    expect(result.labelled).toBe(true);
     expect(result.shadow).toBe(true);
   });
 
@@ -410,6 +447,11 @@ describe("routeStuckTicketToDelegate — runner-disabled fail-safe (CTL-1609)", 
     const result = routeStuckTicketToDelegate(orchDir, "CTL-RD4", opts);
 
     expect(result.reason).toBe("runner-disabled");
-    expect(labelCalls).toHaveLength(1);
+    // ⛔ CTL-2159: was toHaveLength(1). This path used to write the Linear
+    // `needs-human` label. It now publishes through the CTL-2158 classifier and
+    // writes NO label at all — `result.labelled` is the surviving retry contract
+    // (the six route sites read it as their STOP), so it is asserted alongside.
+    expect(labelCalls).toHaveLength(0);
+    expect(result.labelled).toBe(true);
   });
 });

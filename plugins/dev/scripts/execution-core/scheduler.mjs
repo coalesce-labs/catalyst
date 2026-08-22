@@ -463,10 +463,10 @@ import {
 import {
   buildExplanation,
   buildRemediateCapExplanation,
-  coerceExplanation,
   describeSignalReason,
   resolveSignalReason,
 } from "./escalation-explanation.mjs"; // CTL-1130, CTL-1754
+import { explanationForStall } from "./escalation-publish.mjs"; // CTL-2159
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -3386,9 +3386,13 @@ export function escalateDispatchExhausted(
     // absent / malformed → create fresh
   }
   if (existing.status === "stalled") return true; // idempotent
-  // CTL-1130: DECISION — dispatch retries exhausted; re-dispatch vs abandon is a
-  // priority call the scheduler cannot compute (D7). GATE 1 passes (re-dispatch
-  // is possible), no single dominant option → tie-break is human preference.
+  // ⛔ CTL-2159 — CTL-1130 CALLED THIS A DECISION AND IT IS NOT ONE.
+  // "dispatch retries exhausted → re-dispatch or abandon?" is the template, and
+  // `prior-artifact-retry-exhausted` is a SYSTEM stall: the provider, the box, or
+  // a late artifact. Asking a person to choose between retrying and abandoning is
+  // asking them to be the retry policy. The fields below are kept verbatim so
+  // that IF a future reason at this site ever classifies ASK the card is ready —
+  // but the class, not the site, decides whether one is written at all.
   let explanation;
   const explanationFields = {
     escalation_type: "decision",
@@ -3406,12 +3410,23 @@ export function escalateDispatchExhausted(
     ],
     why_you: `after ${cause ?? code ?? "exhausted retries"}, re-dispatch vs abandon is a priority call the scheduler cannot compute`,
   };
-  try {
-    explanation = buildExplanation(explanationFields);
-  } catch {
-    // CTL-1130: degrade with the full assembled fields (not just { problem })
-    // so the operator keeps the options/why_you decision context on the page.
-    explanation = coerceExplanation(explanationFields, { ticket, phase });
+  // The class gate. `explanationForStall` returns null for anything that is not an
+  // ASK — including the `coerceExplanation` fallback path, which is audit finding
+  // (b)'s named site: it passed no `canExecute`, so it degraded to a fabricated
+  // DECISION. Deleting only that degrade branch would have swapped a manufactured
+  // decision for a manufactured AUTHORIZATION; gating on the class removes both.
+  const permitted = explanationForStall({
+    fields: explanationFields,
+    ticket,
+    phase,
+    reason: "prior-artifact-retry-exhausted",
+  });
+  if (permitted) {
+    try {
+      explanation = buildExplanation(explanationFields);
+    } catch {
+      explanation = permitted;
+    }
   }
   try {
     mkdirSync(dir, { recursive: true });
@@ -3425,7 +3440,7 @@ export function escalateDispatchExhausted(
         stalledReason: "prior-artifact-retry-exhausted",
         dispatchFailureCode: code, // CTL-1045 Bug 2: exit code that exhausted retries (2 = prior_artifact_missing)
         dispatchFailureCause: cause, // CTL-1045 Bug 2: human-readable reason (observability)
-        explanation,
+        ...(explanation ? { explanation } : {}),
         needsHumanSince: existing.needsHumanSince ?? new Date().toISOString(), // CTL-1131: preserve prior stamp
         updatedAt: new Date().toISOString(),
       })
@@ -3468,9 +3483,22 @@ function writeTerminalStalled(
   // CTL-1130: every terminal stall carries a typed-union explanation so the inbox
   // shows a meaningful call_to_action. Callers may pass a richer typed explanation
   // via extra.explanation; fall back to a coerced decision generic.
+  // ⛔ CTL-2159 (audit finding (b)). A caller-supplied explanation is REAL
+  // evidence and passes through untouched. What is gone is the fallback that
+  // manufactured one from nothing but the reason string: `coerceExplanation({
+  // problem })` with no `canExecute` degraded every unexplained stall — a dead
+  // executor, a rate limit, a dirty tree — into the same "decide whether to
+  // retry, hand off, or cancel" human decision. Only an ASK-classified stall
+  // gets a manufactured card now.
   const explanation =
     extra.explanation ??
-    coerceExplanation({ problem: `${phase} phase stalled: ${reason}` }, { ticket, phase });
+    explanationForStall({
+      fields: { problem: `${phase} phase stalled: ${reason}` },
+      ticket,
+      phase,
+      reason,
+      signal: cur,
+    });
   try {
     writeFile(
       p,
@@ -3479,7 +3507,7 @@ function writeTerminalStalled(
         ...extra,
         status: "stalled",
         stalledReason: reason,
-        explanation,
+        ...(explanation ? { explanation } : {}),
         needsHumanSince: cur.needsHumanSince ?? new Date().toISOString(), // CTL-1131: preserve prior stamp
         updatedAt: new Date().toISOString(),
       })

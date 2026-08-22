@@ -134,21 +134,33 @@ describe("buildUnstuckEscalateSeam — CTL-1641", () => {
 // re-commented on every sweep. Both exercise the DEFAULT bindings against a real temp
 // orchDir so the marker files and the labelOnce/onOutcome path actually run.
 describe("buildUnstuckEscalateSeam — CTL-1641 Codex #3005 P2 remediation", () => {
-  test("a genuine non-confirming label write (applyLabel ran, applied:false) surfaces a 'label' error", () => {
+  // ⛔ CTL-2159: "a genuine non-confirming LABEL write" is no longer reachable —
+  // this seam publishes through the classifier and never calls applyLabel for
+  // needs-human, so a Linear failure cannot manufacture a `label` error. The
+  // surviving property is the one the seam exists for: the escalation is recorded
+  // and the comment posts, regardless of what the Linear transport would return.
+  test("CTL-2159 — a would-be-failing Linear transport neither blocks nor is consulted", () => {
     const dir = mkdtempSync(join(tmpdir(), "ctl1641-labelfail-"));
     mkdirSync(join(dir, "workers", "CTL-1"), { recursive: true });
+    const applyCalls = [];
     const seam = buildUnstuckEscalateSeam({
       orchDir: dir,
-      env: {},                                                     // not belief-owner → real labelOnce path
-      writeStatus: { applyLabel: () => ({ applied: false, reason: "rate-limited" }) },
+      env: {},                                                     // not belief-owner → the real publish path
+      writeStatus: {
+        applyLabel: (a) => {
+          applyCalls.push(a);
+          return { applied: false, reason: "rate-limited" };
+        },
+      },
       // applyNeedsHuman intentionally NOT injected — exercise the default structured binding.
       postComment: () => true,
       captureEvidence: () => ({ reason: "unknown", porcelainLines: [], prState: null, remediateHistory: [] }),
       commitsAhead: () => 2,
     });
     const r = seam(candidate("unknown", "CTL-1", "verify"), decision("unknown"));
-    expect(r.labelApplied).toBe(false);
-    expect(r.errors.some((e) => e.sideEffect === "label")).toBe(true);
+    expect(applyCalls).toEqual([]);
+    expect(r.labelApplied).toBe(true);
+    expect(r.errors.some((e) => e.sideEffect === "label")).toBe(false);
     expect(r.commentPosted).toBe(true);                            // independence: the comment still posts
   });
 

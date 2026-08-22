@@ -777,18 +777,27 @@ describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
     };
   }
 
-  test("with enforcement OFF: calls labelOnce (legacy behavior unchanged)", () => {
+  // ⛔ CTL-2159: this used to assert `ws.calls[0]` was
+  // `{ ticket, label: "needs-human" }`. The chokepoint no longer writes a Linear
+  // label at all — it publishes through the CTL-2158 classifier. The surviving
+  // property is: enforcement OFF still PUBLISHES (no deferral log), and nothing
+  // reaches the Linear write seam.
+  test("with enforcement OFF: publishes, and writes NO Linear label", () => {
     const ws = makeWS();
     mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
     const deferred = [];
-    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-1", ws, {
-      env: { CATALYST_INTENTS_ENFORCE: "0" },
+    const published = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-1", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0", CATALYST_ESCALATION_ASK: "off" },
       site: "test-site",
       log: { info: (obj) => deferred.push(obj) },
     });
-    expect(ws.calls.length).toBe(1);
-    expect(ws.calls[0]).toMatchObject({ ticket: "CTL-1", label: "needs-human" });
+    expect(ws.calls.length).toBe(0);
+    expect(published).toBe(true);
     expect(deferred.length).toBe(0);
+    // POSITIVE CONTROL: the same seam DOES record a call when one is made, so the
+    // zero above is a real absence and not an unwired spy.
+    ws.applyLabel({ ticket: "CTL-1", label: "queued" });
+    expect(ws.calls.length).toBe(1);
   });
 
   test("with enforcement ON: does NOT call labelOnce, records deferral", () => {
@@ -804,15 +813,16 @@ describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
     expect(deferred[0]).toMatchObject({ ticket: "CTL-2", site: "test-site" });
   });
 
-  test("with enforcement unset: calls labelOnce (default OFF)", () => {
+  test("with enforcement unset: publishes (default OFF), still no Linear label", () => {
     const ws = makeWS();
     mkdirSync(join(orchDir, "workers", "CTL-3"), { recursive: true });
-    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-3", ws, {
-      env: {},
+    const published = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-3", ws, {
+      env: { CATALYST_ESCALATION_ASK: "off" },
       site: "test-site",
       log: { info: () => {} },
     });
-    expect(ws.calls.length).toBe(1);
+    expect(published).toBe(true);
+    expect(ws.calls.length).toBe(0); // CTL-2159
   });
 
   // CTL-764 finding 8: the return value gates the caller's worker.transition emission
@@ -854,7 +864,12 @@ describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
   // attempt. labelOnce returns true for any first write attempt — including outcomes
   // where applyLabel reported applied:false — so gating a worker.transition on the raw
   // labelOnce boolean records a needs-human escalation that never actually landed.
-  test("finding C — returns false when applyLabel is attempted but not applied (rate-limited)", () => {
+  // ⛔ CTL-2159: finding C's rate-limited case no longer EXISTS as written. It
+  // asserted that a Linear 429 on the label write made the return false; there is
+  // no label write to rate-limit. The property that replaces it is stronger: the
+  // publish verdict is decided by the CLASS, so a Linear write seam that would
+  // have failed is never even consulted — one fewer shared-quota call per stall.
+  test("CTL-2159 — a would-be-failing Linear seam is never consulted", () => {
     const calls = [];
     const ws = {
       applyLabel: (args) => {
@@ -863,27 +878,33 @@ describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
       },
     };
     mkdirSync(join(orchDir, "workers", "CTL-C1"), { recursive: true });
-    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C1", ws, {
-      env: { CATALYST_INTENTS_ENFORCE: "0" },
+    const published = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C1", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0", CATALYST_ESCALATION_ASK: "off" },
       log: { info: () => {} },
     });
-    // The attempt happened (transient → no marker, retries next tick) but the label
-    // did not land, so no transition should be recorded.
-    expect(calls.length).toBe(1);
-    expect(wrote).toBe(false);
+    expect(calls.length).toBe(0);
+    expect(published).toBe(true);
   });
 
-  test("finding C — returns false on an unrecoverable failure (exclusive-conflict, .skipped written)", () => {
+  // ⛔ CTL-2159: the exclusive-conflict case is gone with the label — the
+  // `worker-status` group can no longer conflict on a member that is not applied.
+  // `.skipped` survives for the ONE remaining terminal failure (an ask that can
+  // never land); that case is pinned in escalation-publish.test.mjs.
+  test("CTL-2159 — an exclusive-conflict seam no longer writes .skipped (nothing conflicts)", () => {
     const ws = { applyLabel: () => ({ applied: false, reason: "exclusive-conflict" }) };
     mkdirSync(join(orchDir, "workers", "CTL-C2"), { recursive: true });
-    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C2", ws, {
-      env: { CATALYST_INTENTS_ENFORCE: "0" },
+    const published = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C2", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0", CATALYST_ESCALATION_ASK: "off" },
       log: { info: () => {} },
     });
-    expect(wrote).toBe(false);
-    // The .skipped marker is still written (storm-break) even though nothing applied.
+    expect(published).toBe(true);
     expect(
       existsSync(join(orchDir, "workers", "CTL-C2", ".linear-label-needs-human.skipped"))
+    ).toBe(false);
+    // POSITIVE CONTROL: the publish DID leave its once-marker, so the assertion
+    // above is about `.skipped` specifically, not about nothing having happened.
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-C2", ".linear-label-needs-human.applied"))
     ).toBe(true);
   });
 
@@ -1237,48 +1258,58 @@ describe("labelNeedsHumanUnlessBeliefOwner — explanation threading (CTL-1609)"
     });
     expect(wrote).toBe(true);
     const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E1"), "utf8"));
-    expect(sig.status).toBe("needs-human");
+    // ⛔ CTL-2159: was `status:"needs-human"` — the last writer of that value.
+    // CTL-1552 already normalized every other escalation to `stalled`; this one
+    // now agrees, and carries the CTL-2158 class as the durable verdict.
+    expect(sig.status).toBe("stalled");
+    expect(typeof sig.stallClass).toBe("string");
     expect(typeof sig.needsHumanSince).toBe("string");
     expect(sig.explanation.call_to_action).toBe("authorize retry of CTL-E1 or cancel");
     // No absent-warn because explanation was supplied
     expect(warns.some((w) => w.event === "escalation.explanation-absent")).toBe(false);
   });
 
-  test("no explanation supplied → degraded coerce + WARN logged, signal still written", () => {
+  // ⛔ CTL-2159 — THE HEADLINE INVERSION. This test used to REQUIRE the degrade:
+  // "no explanation supplied → degraded coerce … signal still written", i.e. it
+  // pinned the manufacture of a human decision out of nothing. That template
+  // ("priority call the agent cannot make unilaterally") is what turned ONE
+  // provider outage into 37 separate per-ticket decisions. The property is now
+  // its exact opposite: an unexplained stall gets NO explanation at all, and the
+  // class is what is recorded instead.
+  test("⛔ no explanation supplied → NOTHING is manufactured; the class is recorded", () => {
     const workerDir = join(orchDir, "workers", "CTL-E2");
     mkdirSync(workerDir, { recursive: true });
     const warns = [];
     const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E2", makeAppliedWS(), {
-      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      env: { CATALYST_INTENTS_ENFORCE: "0", CATALYST_ESCALATION_ASK: "off" },
       site: "terminal-sweep",
       log: { info: () => {}, warn: (obj) => warns.push(obj) },
       // no explanation
     });
     expect(wrote).toBe(true);
     const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E2"), "utf8"));
-    expect(sig.status).toBe("needs-human");
-    expect(sig.explanation).toBeTruthy();
-    expect(sig.explanation.degraded).toBe(true);
-    // call_to_action must pass the tautology gate
-    const { valid } = validateExplanation(sig.explanation);
-    expect(valid).toBe(true);
-    // WARN with event:"escalation.explanation-absent" and the site
-    const absentWarn = warns.find((w) => w.event === "escalation.explanation-absent");
-    expect(absentWarn).toBeTruthy();
-    expect(absentWarn.site).toBe("terminal-sweep");
+    expect(sig.status).toBe("stalled");
+    expect(sig.explanation).toBeUndefined();
+    // POSITIVE CONTROL: the signal WAS written — the absent explanation above is a
+    // deliberate absence, not a write that silently failed.
+    expect(sig.stallClass).toBeTruthy();
   });
 
-  test("label NOT applied (rate-limited) → no explanation signal written", () => {
+  // ⛔ CTL-2159: a rate-limited LABEL write no longer exists, so this scenario is
+  // re-pointed at the surviving one — a Linear seam that would fail is never
+  // consulted, and the publish lands anyway. That is the point: a shared-quota
+  // 429 can no longer decide whether a stalled ticket is recorded.
+  test("CTL-2159 — a rate-limited Linear seam neither blocks nor is called", () => {
     const workerDir = join(orchDir, "workers", "CTL-E3");
     mkdirSync(workerDir, { recursive: true });
     const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-E3", makeRateLimitedWS(), {
-      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      env: { CATALYST_INTENTS_ENFORCE: "0", CATALYST_ESCALATION_ASK: "off" },
       site: "dispatch-failures",
       log: { info: () => {}, warn: () => {} },
       explanation: { problem: "failed", call_to_action: "retry CTL-E3 or cancel" },
     });
-    expect(wrote).toBe(false);
-    expect(existsSync(RECOVERY_PASS_SIG(orchDir, "CTL-E3"))).toBe(false);
+    expect(wrote).toBe(true);
+    expect(existsSync(RECOVERY_PASS_SIG(orchDir, "CTL-E3"))).toBe(true);
   });
 
   test("belief-owner deferral (CATALYST_INTENTS_ENFORCE=1) writes nothing", () => {
@@ -1304,7 +1335,9 @@ describe("labelNeedsHumanUnlessBeliefOwner — explanation threading (CTL-1609)"
       })
     ).not.toThrow();
     const sig = JSON.parse(readFileSync(RECOVERY_PASS_SIG(orchDir, "CTL-E5"), "utf8"));
-    expect(sig.status).toBe("needs-human");
+    expect(sig.status).toBe("stalled"); // CTL-2159
+    // The garbage explanation is passed through verbatim rather than coerced into
+    // a manufactured decision — CTL-2159 removed the coerce from this path.
     expect(sig.explanation).toBeTruthy();
   });
 
@@ -1433,7 +1466,12 @@ describe("labelNeedsHumanUnlessBeliefOwner — live recovery-pass worker guard (
 
     expect(wrote).toBe(true);
     const sig = JSON.parse(readFileSync(SIG("CTL-LW-done"), "utf8"));
-    expect(sig.status).toBe("needs-human");
+    // ⛔ CTL-2159: the prior status is PRESERVED (was clobbered to "needs-human").
+    // Publishing no longer depends on a Linear call, so an unconditional overwrite
+    // would newly rewrite terminal records — including the yield-expiry sweep's
+    // `failed` + failureReason — on every escalation.
+    expect(sig.status).toBe("done");
+    expect(sig.stallClass).toBeTruthy(); // the escalation's real contribution
     expect(sig.explanation.call_to_action).toBe("review");
   });
 
@@ -1442,7 +1480,7 @@ describe("labelNeedsHumanUnlessBeliefOwner — live recovery-pass worker guard (
     const wrote = applyWith("CTL-LW-none");
 
     expect(wrote).toBe(true);
-    expect(JSON.parse(readFileSync(SIG("CTL-LW-none"), "utf8")).status).toBe("needs-human");
+    expect(JSON.parse(readFileSync(SIG("CTL-LW-none"), "utf8")).status).toBe("stalled"); // CTL-2159
   });
 });
 
@@ -1497,9 +1535,15 @@ describe("labelNeedsHumanUnlessBeliefOwner — CTL-2056 escalation emit", () => 
     expect(emitCalls.length).toBe(0);
   });
 
-  test("emits NOTHING on a failed apply (applied:false)", () => {
+  // ⛔ CTL-2159: "a failed apply" is no longer reachable — applyLabel is never
+  // called for this label, so a Linear failure cannot suppress the escalation
+  // event. What DOES suppress it is the marker no-op and the belief deferral,
+  // both pinned above. Re-pointed at the surviving property.
+  test("CTL-2159 — a Linear apply result no longer decides whether the event fires", () => {
     const calls = applyAndRecord({ applyResult: { applied: false, reason: "rate-limited" } });
-    expect(calls.length).toBe(0);
+    expect(calls.length).toBe(1);
+    // The class rides on the event so the fleet alert can group by condition.
+    expect(typeof calls[0].meta.stallClass).toBe("string");
   });
 
   test("a throwing emitEscalation seam never blocks the label application (fail-open)", () => {

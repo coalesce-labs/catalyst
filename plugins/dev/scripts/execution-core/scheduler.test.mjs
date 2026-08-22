@@ -1278,7 +1278,13 @@ describe("dispatch cool-down escalation", () => {
       writeStatus: ws,
       appendEvent: (e) => events.push(e),
     });
-    expect(applied).toEqual([{ ticket: "CTL-5", label: "needs-human" }]);
+    // ⛔ CTL-2159: was `[{ ticket: "CTL-5", label: "needs-human" }]`. The
+    // dispatch-circuit-breaker escalation classifies SYSTEM and publishes with
+    // zero per-ticket artifacts; the cooldown event below is unchanged.
+    expect(applied).toEqual([]);
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-5", ".linear-label-needs-human.applied"))
+    ).toBe(true);
     expect(events).toEqual([
       expect.objectContaining({
         ticket: "CTL-5",
@@ -1350,7 +1356,13 @@ describe("dispatch cool-down escalation", () => {
         appendWorkerTransitionEvent: (ev) => transitions.push(ev),
       });
     }
-    expect(applied).toContainEqual({ ticket: "CTL-7", label: "needs-human" });
+    // ⛔ CTL-2159: no Linear label; the escalation is the once-marker. The
+    // worker.transition below is UNCHANGED — the board's escalation record does
+    // not depend on the label and never did.
+    expect(applied.filter((l) => l.label === "needs-human")).toEqual([]);
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-7", ".linear-label-needs-human.applied"))
+    ).toBe(true);
     // CTL-764 finding 13: a ticket escalated solely by dispatch failures gets a
     // worker.transition(toDisposition="needs-human", source="dispatch-failures").
     const escalation = transitions.find(
@@ -2239,21 +2251,33 @@ describe("CTL-712: escalateDispatchExhausted — retry ceiling → stalled", () 
   });
 
   // CTL-1108: explanation coverage
-  test("CTL-1108: escalateDispatchExhausted attaches an explanation with non-empty call_to_action", () => {
+  // ⛔ CTL-2159: was "attaches an explanation with non-empty call_to_action".
+  // `prior-artifact-retry-exhausted` is a SYSTEM stall — dispatch retries ran out
+  // — and the card CTL-1108 required here ("Re-dispatch or abandon / re-scope?")
+  // is the scheduler asking a person to be the retry policy. The stall is still
+  // recorded; what is gone is the manufactured question.
+  test("CTL-2159: escalateDispatchExhausted records the stall with NO manufactured card", () => {
     expect(escalateDispatchExhausted(orchDir, "CTL-1108e", "pr")).toBe(true);
     const sig = JSON.parse(
       readFileSync(join(orchDir, "workers", "CTL-1108e", "phase-pr.json"), "utf8")
     );
+    // POSITIVE CONTROL: the signal WAS written and IS terminal — the absent
+    // explanation below is a deliberate absence, not a write that never happened.
+    expect(sig.status).toBe("stalled");
     expect(sig.stalledReason).toBe("prior-artifact-retry-exhausted");
-    expect(sig.explanation).toBeTruthy();
-    expect(typeof sig.explanation.call_to_action).toBe("string");
-    expect(sig.explanation.call_to_action.trim()).not.toBe("");
+    expect(sig.explanation).toBeUndefined();
   });
 });
 
 // ─── CTL-1108: writeTerminalStalled explanation coverage ───
 describe("CTL-1108: writeTerminalStalled explanation coverage", () => {
-  test("dispatch-circuit-breaker stall carries an explanation", () => {
+  // ⛔ CTL-2159 INVERTED THIS CONTRACT. CTL-1108 required that EVERY scheduler
+  // stall carry a human-facing `call_to_action` — which is precisely why one
+  // provider outage produced 37 identical "decide whether to retry, hand off, or
+  // cancel" cards. A stall now carries a CLASS; only an ASK-classified stall
+  // carries a question. What is asserted here is therefore the class, plus the
+  // fact that a SYSTEM stall carries NO manufactured card.
+  test("dispatch-circuit-breaker stall carries a SYSTEM class and NO manufactured card", () => {
     const t = "CTL-1108f",
       phase = "research";
     writeSignal(t, phase, "running");
@@ -2264,12 +2288,10 @@ describe("CTL-1108: writeTerminalStalled explanation coverage", () => {
       readFileSync(join(orchDir, "workers", t, `phase-${phase}.json`), "utf8")
     );
     expect(sig.stalledReason).toBe("dispatch-circuit-breaker");
-    expect(sig.explanation).toBeTruthy();
-    expect(typeof sig.explanation.call_to_action).toBe("string");
-    expect(sig.explanation.call_to_action.trim()).not.toBe("");
+    expect(sig.explanation).toBeUndefined();
   });
 
-  test("coverage guard: every scheduler stall reason produces a non-null explanation.call_to_action", () => {
+  test("coverage guard: a caller-supplied explanation survives; a MANUFACTURED one is refused", () => {
     // remediate-cycle-cap-exhausted (maybeEscalateRemediateExhausted)
     {
       const wdir = join(orchDir, "workers", "CTL-1108g");
@@ -2285,16 +2307,22 @@ describe("CTL-1108: writeTerminalStalled explanation coverage", () => {
         "fail",
         REMEDIATE_CYCLE_CAP
       );
+      // POSITIVE CONTROL / unchanged half: buildRemediateCapExplanation is a REAL
+      // explanation the caller assembled from verify.json findings. CTL-2159 never
+      // touches those — it only refuses to INVENT one.
       const sig = JSON.parse(readFileSync(join(wdir, "phase-verify.json"), "utf8"));
       expect(sig.explanation?.call_to_action?.trim()).toBeTruthy();
     }
-    // prior-artifact-retry-exhausted (escalateDispatchExhausted)
+    // prior-artifact-retry-exhausted (escalateDispatchExhausted) — SYSTEM.
+    // Dispatch retries running out is the provider or the box, not a judgment
+    // call, so no card is manufactured for it any more.
     {
       escalateDispatchExhausted(orchDir, "CTL-1108h", "plan");
       const sig = JSON.parse(
         readFileSync(join(orchDir, "workers", "CTL-1108h", "phase-plan.json"), "utf8")
       );
-      expect(sig.explanation?.call_to_action?.trim()).toBeTruthy();
+      expect(sig.stalledReason).toBe("prior-artifact-retry-exhausted");
+      expect(sig.explanation).toBeUndefined();
     }
     // dispatch-circuit-breaker (maybeTripCircuitBreaker → writeTerminalStalled)
     {
@@ -2307,7 +2335,7 @@ describe("CTL-1108: writeTerminalStalled explanation coverage", () => {
       const sig = JSON.parse(
         readFileSync(join(orchDir, "workers", t, `phase-${phase}.json`), "utf8")
       );
-      expect(sig.explanation?.call_to_action?.trim()).toBeTruthy();
+      expect(sig.explanation).toBeUndefined();
     }
   });
 });
@@ -2323,7 +2351,10 @@ describe("CTL-1131: escalateDispatchExhausted stamps needsHumanSince", () => {
     );
     expect(typeof sig.needsHumanSince).toBe("string");
     expect(ISO_RE.test(sig.needsHumanSince)).toBe(true);
-    expect(sig.explanation).toBeTruthy();
+    // ⛔ CTL-2159: `prior-artifact-retry-exhausted` is SYSTEM, so no card is
+    // manufactured. The timestamp — what this test is actually about — is
+    // unchanged.
+    expect(sig.explanation).toBeUndefined();
   });
 
   test("existing signal with needsHumanSince: preserves the prior stamp (does not reset age)", () => {
@@ -2432,7 +2463,12 @@ describe("CTL-712: dispatch retry ceiling (schedulerTick)", () => {
       now: () => 1_000 + 4 * STEP_MS,
     });
     expect(dispatch.calls).toHaveLength(3); // unchanged
-    expect(labels.some((l) => l.label === "needs-human")).toBe(true);
+    // ⛔ CTL-2159: the escalation still fires; it publishes a once-marker instead
+    // of a Linear label. Asserting the label here would assert the deleted act.
+    expect(labels.filter((l) => l.label === "needs-human")).toEqual([]);
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-712", ".linear-label-needs-human.applied"))
+    ).toBe(true);
   });
 });
 
@@ -4844,15 +4880,24 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     applyTerminalDone() {},
   });
 
-  test("applies `needs-human` when any phase signal is stalled", () => {
+  // ⛔ CTL-2159 — THE VOLUME PRODUCER. The terminal sweep (scheduler.mjs:9294) is
+  // the highest-frequency escalation site in the system and it reaches the label
+  // only through routeStuckTicketToDelegate, so it matches NONE of the tokens a
+  // producer sweep would grep for. This test is the property that catches it: a
+  // stalled signal PUBLISHES the escalation (marker + class) and writes zero
+  // Linear labels.
+  test("CTL-2159: a stalled phase signal publishes the escalation and writes NO label", () => {
     writeSignal("CTL-7", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const labels = [];
-    const writeStatus = { ...noWrites(), applyLabel: (a) => labels.push(a) };
+    const writeStatus = { ...noWrites(), applyLabel: (a) => { labels.push(a); return { applied: true }; } };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
-    expect(labels).toContainEqual(
-      expect.objectContaining({ ticket: "CTL-7", label: "needs-human" })
-    );
+    expect(labels.filter((l) => l.label === "needs-human")).toEqual([]);
+    // POSITIVE CONTROL: the escalation DID happen — the once-marker every retry
+    // loop reads is there, so the zero above is not "the sweep never ran".
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-7", ".linear-label-needs-human.applied"))
+    ).toBe(true);
   });
 
   // CTL-868 route (B): a stalled-no-recovery ticket also emits a canonical
@@ -4959,24 +5004,18 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     expect(labels).toHaveLength(0);
   });
 
-  test("writes the .applied marker only after applyLabel reports applied:true", () => {
+  // ⛔ CTL-2159: the marker no longer waits on Linear. It used to be written only
+  // when applyLabel confirmed, which is why a shared-quota 429 could leave a
+  // stalled ticket with no record at all and the sweep re-firing every tick.
+  test("CTL-2159: the once-marker is written regardless of what the Linear seam returns", () => {
     writeSignal("CTL-8", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const markerPath = join(orchDir, "workers", "CTL-8", ".linear-label-needs-human.applied");
-    // applyLabel reports failure → no marker written → retried next tick.
     const failWrite = { ...noWrites(), applyLabel: () => ({ applied: false }) };
     schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch: fakeDispatch(),
       writeStatus: failWrite,
-    });
-    expect(existsSync(markerPath)).toBe(false);
-    // applyLabel succeeds → marker written → not retried.
-    const okWrite = { ...noWrites(), applyLabel: () => ({ applied: true }) };
-    schedulerTick(orchDir, {
-      readEligible: () => [],
-      dispatch: fakeDispatch(),
-      writeStatus: okWrite,
     });
     expect(existsSync(markerPath)).toBe(true);
   });
@@ -4995,8 +5034,11 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     ).not.toThrow();
   });
 
-  // CTL-585: short-circuit the per-tick retry on an unrecoverable miss.
-  test("writes the .skipped marker on reason:'missing-label' and stops retrying", () => {
+  // ⛔ CTL-2159: `reason:"missing-label"` cannot happen for a label nothing
+  // applies — and the workspace no longer creates it at enrolment, which is why
+  // this case existed. The surviving property is the storm-break: one publish per
+  // (ticket, lifetime), whatever the transport does.
+  test("CTL-2159: exactly one publish per ticket-lifetime, and the transport is never called", () => {
     writeSignal("CTL-10", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const skipped = join(orchDir, "workers", "CTL-10", ".linear-label-needs-human.skipped");
@@ -5011,18 +5053,20 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
       },
     };
 
-    // Tick 1: missing-label → .skipped written, .applied not written.
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
-    expect(existsSync(skipped)).toBe(true);
-    expect(existsSync(applied)).toBe(false);
-    expect(calls).toBe(1);
+    expect(existsSync(applied)).toBe(true);
+    expect(existsSync(skipped)).toBe(false);
+    expect(calls).toBe(0);
 
-    // Tick 2: marker present → applyLabel never invoked again.
+    // Tick 2: marker present → the publish short-circuits (the storm-break).
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
-    expect(calls).toBe(1);
+    expect(calls).toBe(0);
   });
 
-  test("a transient failure still retries on the next tick", () => {
+  // ⛔ CTL-2159: "a transient failure still retries" described a per-tick RETRY
+  // of the Linear write. There is no write, so there is no retry to make — which
+  // is the CTL-638 storm removed at its source rather than throttled.
+  test("CTL-2159: no transport retry loop exists — zero calls across two ticks", () => {
     writeSignal("CTL-11", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const skipped = join(orchDir, "workers", "CTL-11", ".linear-label-needs-human.skipped");
@@ -5038,11 +5082,14 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
 
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
-    expect(calls).toBe(2);
+    expect(calls).toBe(0);
     expect(existsSync(skipped)).toBe(false);
   });
 
-  test("a rate-limited failure still retries on the next tick", () => {
+  // ⛔ CTL-2159: same as the transient case — the rate-limited retry that this
+  // test guarded is the exact loop that exhausted the shared 2500/hr quota at
+  // ~28 writes/min (CTL-638). It cannot recur: nothing is written.
+  test("CTL-2159: a rate-limited transport is never reached, so there is nothing to re-fire", () => {
     writeSignal("CTL-12", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     let calls = 0;
@@ -5055,7 +5102,11 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
-    expect(calls).toBe(2);
+    expect(calls).toBe(0);
+    // POSITIVE CONTROL: the escalation still happened.
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-12", ".linear-label-needs-human.applied"))
+    ).toBe(true);
   });
 
   test("a pre-existing .skipped marker prevents re-attempt", () => {
@@ -5277,7 +5328,13 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
       appendOrphanDetectedEvent,
     });
 
-    expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(true);
+    // ⛔ CTL-2159: "still applies needs-human" → "still PUBLISHES the escalation".
+    // The regression this test guards (a non-terminal stalled ticket must not be
+    // treated as resolved) is unchanged; only the artifact is.
+    expect(applied.filter((a) => a.label === "needs-human")).toEqual([]);
+    expect(
+      existsSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"))
+    ).toBe(true);
     expect(removed.filter((r) => r.t === TICKET && r.l === "needs-human")).toHaveLength(0);
     expect(orphans.some((o) => o.ticket === TICKET)).toBe(true);
   });
@@ -5338,7 +5395,11 @@ describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => 
       gateway,
     });
 
-    expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(true);
+    // ⛔ CTL-2159: the fail-safe still fires — as a publish, not a label write.
+    expect(applied.filter((a) => a.label === "needs-human")).toEqual([]);
+    expect(
+      existsSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"))
+    ).toBe(true);
   });
 });
 
@@ -9040,7 +9101,10 @@ describe("CTL-755: admission gate", () => {
     expect(held.events).toHaveLength(1);
   });
 
-  test("circular dep among triaged tickets → labelOnce(needs-human), no throw, no deadlock", () => {
+  // ⛔ CTL-2159: was "labelOnce(needs-human)". The escalation is unchanged; only
+  // the artifact it publishes is. The observable moves to the host-local
+  // once-marker, which is what every retry loop reads.
+  test("circular dep among triaged tickets → escalation published, no throw, no deadlock", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     writeSignal("CTL-A", "triage", "done");
     writeSignal("CTL-B", "triage", "done");
@@ -9064,9 +9128,11 @@ describe("CTL-755: admission gate", () => {
     }).not.toThrow();
     expect(dispatch.calls).toEqual([]); // neither member promotes
     expect(r.advanced).toEqual([]);
-    // Both cycle members are flagged needs-human (labelOnce).
-    expect(applied).toContainEqual({ ticket: "CTL-A", label: "needs-human" });
-    expect(applied).toContainEqual({ ticket: "CTL-B", label: "needs-human" });
+    // Both cycle members are escalated — and neither gets a Linear label.
+    expect(applied.filter((l) => l.label === "needs-human")).toEqual([]);
+    for (const t of ["CTL-A", "CTL-B"]) {
+      expect(existsSync(join(orchDir, "workers", t, ".linear-label-needs-human.applied"))).toBe(true);
+    }
   });
 
   test("triaged-blocks-triaged chain: the unblocked foundation promotes; the dependent is held 'blocked'", () => {
@@ -11982,10 +12048,11 @@ describe("CTL-925: dependency cycle hardening", () => {
       writeStatus: ws,
     });
     expect(dispatch.calls).toEqual([]);
-    const nhLabels = applied.filter((l) => l.label === "needs-human");
-    const nhTickets = nhLabels.map((l) => l.ticket).sort();
-    expect(nhTickets).toContain("CTL-1");
-    expect(nhTickets).toContain("CTL-2");
+    // ⛔ CTL-2159: no Linear label; the escalation is the once-marker.
+    expect(applied.filter((l) => l.label === "needs-human")).toEqual([]);
+    for (const t of ["CTL-1", "CTL-2"]) {
+      expect(existsSync(join(orchDir, "workers", t, ".linear-label-needs-human.applied"))).toBe(true);
+    }
   });
 
   test("Gap 1: 3-node eligible ring → all three escalated to needs-human, none dispatched", () => {
@@ -12005,13 +12072,10 @@ describe("CTL-925: dependency cycle hardening", () => {
       writeStatus: ws,
     });
     expect(dispatch.calls).toEqual([]);
-    const nhTickets = applied
-      .filter((l) => l.label === "needs-human")
-      .map((l) => l.ticket)
-      .sort();
-    expect(nhTickets).toContain("CTL-1");
-    expect(nhTickets).toContain("CTL-2");
-    expect(nhTickets).toContain("CTL-3");
+    expect(applied.filter((l) => l.label === "needs-human")).toEqual([]); // CTL-2159
+    for (const t of ["CTL-1", "CTL-2", "CTL-3"]) {
+      expect(existsSync(join(orchDir, "workers", t, ".linear-label-needs-human.applied"))).toBe(true);
+    }
   });
 
   test("Gap 1 control: non-cyclic eligible chain dispatches normally, no needs-human", () => {

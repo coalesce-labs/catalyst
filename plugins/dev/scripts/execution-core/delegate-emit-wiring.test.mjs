@@ -118,8 +118,13 @@ describe("CTL-1774 Phase 3 — Site 1: maybeEscalateDispatchFailures", () => {
     expect(evt.name).toBe("delegate.would-route");
     expect(evt.ticket).toBe("CTL-5");
     expect(evt.site).toBe("dispatch-failures");
-    // Shadow: label is still applied (no enqueue), spy was just an observer
-    expect(applied).toEqual([expect.objectContaining({ ticket: "CTL-5", label: "needs-human" })]);
+    // ⛔ CTL-2159: shadow used to still APPLY the Linear `needs-human` label here.
+    // scheduler.mjs:3330 (dispatch-failures) is one of the six producers that
+    // reach the label ONLY through routeStuckTicketToDelegate and match none of
+    // the plan's producer tokens. It writes no label now — the stall classifies
+    // SYSTEM (`dispatch-circuit-breaker:10`) and retries.
+    expect(applied.filter((a) => a.label === "needs-human")).toEqual([]);
+    expect(applied).toEqual([]);
   });
 
   test("off mode: appendDelegateEvent NOT called (byte-identical to today)", () => {

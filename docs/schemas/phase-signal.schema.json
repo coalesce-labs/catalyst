@@ -150,8 +150,13 @@
     },
     "escalationPublished": {
       "type": "boolean",
-      "description": "CTL-2158. Set by the producers that publish a COMPLETE escalation (label + brief + Linear comment): recovery-emit, recovery-reasoning, recovery.mjs::markEscalationCapTerminal, boot-resume's expired approval gate. unstuck-sweep's quiet-gate keys on this instead of on `stalledReason === \"needs_human\"`, so a ticket a human is already holding never receives a second authored comment once that token is deleted. \u26d4 It is deliberately NOT inferred from the presence of `explanation`: scheduler.mjs's generic stall writer attaches a coerced explanation to EVERY stall it records, so inferring it would silence the sweep's repair actions wholesale.",
+      "description": "CTL-2158/CTL-2159. Set by the producers that publish a COMPLETE per-ticket human escalation: recovery-emit, recovery-reasoning, recovery.mjs::markEscalationCapTerminal, boot-resume's expired approval gate, and (CTL-2159) escalation-publish.mjs when it files an ASK ticket. unstuck-sweep's quiet-gate keys on this instead of on `stalledReason === \"needs_human\"`, so a ticket a human is already holding never receives a second authored comment once that token is deleted. \u26d4 It is deliberately NOT inferred from the presence of `explanation`: scheduler.mjs's generic stall writer attaches a coerced explanation to EVERY stall it records, so inferring it would silence the sweep's repair actions wholesale. \u26d4 CTL-2159: it is set for ASK **only**. SYSTEM / MOOT / HELD publish ZERO per-ticket artifacts, so there is nothing for a later actor to duplicate \u2014 and stamping SYSTEM would silence the sweep's repair of `remediate-cycle-cap-exhausted` and `prior-artifact-retry-exhausted`, which is the same wholesale-silencing regression one level down.",
       "examples": [true]
+    },
+    "askTicket": {
+      "type": "string",
+      "description": "CTL-2159. The identifier of the ask ticket filed for this stall, when the class was ASK and `ask.mjs create` proved the `blocks` relation landed. Absent for every other class \u2014 SYSTEM, MOOT and HELD publish no per-ticket artifact.",
+      "examples": ["CTL-2200"]
     },
     "attentionReason": {
       "type": [

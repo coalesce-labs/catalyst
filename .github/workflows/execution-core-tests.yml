@@ -1210,6 +1210,21 @@ jobs:
         #   event-name step): `grep -rn stall-class .github/workflows/` returned
         #   NOTHING before this edit, against the same positive control of
         #   `assertion-evidence-parity`, which returns its list line.
+        #
+        #   CTL-2159 NOTE: escalation-publish.test.mjs is the PRODUCER SWEEP's
+        #   proof — per producer, that its own trigger no longer writes the Linear
+        #   `needs-human` label and that the correct replacement fired. It is
+        #   registered in the SAME change that adds it because this repo has now
+        #   shipped an unlisted (therefore inert) suite five times, and this one
+        #   guards a property no grep can: six of the producers reach the label
+        #   only through routeStuckTicketToDelegate and match none of the tokens a
+        #   producer sweep would grep for, so a regression there passes every
+        #   textual check. Pure + tmpdir only; no timer, no Linear call (24 pass,
+        #   ~130 ms). Instrument (a `run:`-anchored grep is invalid for this
+        #   multi-line block — see the event-name step):
+        #   `grep -rn escalation-publish .github/workflows/` returned NOTHING
+        #   before this edit, against the same positive control of
+        #   `assertion-evidence-parity`, which returns its list line.
         run: |
           bun test \
             beliefs/advance-rules.test.mjs \
@@ -1239,6 +1254,7 @@ jobs:
             ask-wake-daemon.test.mjs \
             stall-class.test.mjs \
             stall-class-wiring.test.mjs \
+            escalation-publish.test.mjs \
             cli-header-backtick-guard.test.mjs \
             agent-session-narrator.test.mjs \
             linear-comment-write.test.mjs \
