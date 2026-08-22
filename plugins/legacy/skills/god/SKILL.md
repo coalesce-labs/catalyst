@@ -40,7 +40,7 @@ free-form question          — "what PRs are open?", "which workers are stuck?"
 | Session database | `catalyst-session.sh list --active --json` | Active Claude sessions |
 | Worktree inventory | `ls ~/catalyst/wt/` | Projects and their worktrees |
 | Claude session recency | `ls -lt ~/.claude/projects/` | Which sessions were recently active (by mtime) |
-| Event log | `~/catalyst/events/YYYY-MM.jsonl` | Last 30–60 min of activity |
+| Event log | `~/catalyst/events/<period>.jsonl` | Last 30–60 min of activity |
 | Orchestrator dashboard | `~/catalyst/runs/<orch-id>/DASHBOARD.md` | Human-readable orch summary |
 | Rollup fragments | `~/catalyst/runs/<orch-id>/workers/<TICKET>-rollup.md` | Post-completion summaries |
 
@@ -261,7 +261,7 @@ SESS=$(ls ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/catalyst-sessi
 ls -lt ~/.claude/projects/ 2>/dev/null | grep "catalyst-wt" | head -15
 
 # Recent events (last 30 min)
-EVENTS_FILE=~/catalyst/events/$(date +%Y-%m).jsonl
+EVENTS_FILE=$(ls -t ~/catalyst/events/*.jsonl | head -1)
 if [ -f "$EVENTS_FILE" ]; then
   TOTAL=$(wc -l < "$EVENTS_FILE" | tr -d ' ')
   SINCE=$(( TOTAL > 2000 ? TOTAL - 2000 : 0 ))

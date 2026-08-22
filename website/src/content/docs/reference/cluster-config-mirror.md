@@ -47,7 +47,7 @@ and
 | Claude Code account login | macOS Keychain or `~/.claude/.credentials.json` | **PER-NODE** | Run `claude` interactively on the new host; each node uses its own account |
 | OTel endpoints | `~/.config/catalyst/config.json` → OTel keys | **PER-NODE** | Tailscale addresses differ per node; set in Layer-2 on each host |
 | `execution-core.env` | `~/catalyst/execution-core/execution-core.env` | **PER-NODE** | Proxy / tuning overrides are host-specific |
-| Event log | `~/catalyst/events/YYYY-MM.jsonl` | **PER-NODE** | Each node writes to its own log; nodes never share log files |
+| Event log | `~/catalyst/events/<period>.jsonl` | **PER-NODE** | Each node writes to its own log; nodes never share log files |
 | SQLite databases | `~/catalyst/*.db` (4 files) | **PER-NODE** | Host-local state; not replicated |
 | Worktree trust | `~/.claude.json` per worktree path | **PER-NODE** | Paths differ; re-trust on each host |
 | Linear personal token | `~/.config/catalyst/config-<key>.json` → `linear.apiKey` | **PER-NODE** | Personal token is user-scoped; each operator provides their own |

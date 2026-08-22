@@ -118,7 +118,7 @@ Some bash producers (`catalyst-state.sh:130-153`) still build event records
 internally using v1 raw event strings (`worker-pr-created`, `attention-raised`,
 …). The `event_append` helper translates those to canonical names BEFORE
 writing — see `__orch_canonical_for`. The line that lands in
-`~/catalyst/events/YYYY-MM.jsonl` always uses the canonical name. Filter
+`~/catalyst/events/<period>.jsonl` always uses the canonical name. Filter
 writers MUST target canonical:
 
 | v1 raw (caller-side strings) | canonical (on-disk `event.name`) |

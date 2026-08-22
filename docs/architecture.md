@@ -71,7 +71,7 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
 ~/catalyst/
 ├── state.json              # active orchestrators (denormalized summary)
 ├── catalyst.db             # durable SQLite session store (WAL)
-├── events/YYYY-MM.jsonl    # append-only JSONL event stream, rotated monthly
+├── events/<period>.jsonl   # append-only JSONL event stream, rotated WEEKLY (CTL-1216)
 ├── history/<id>--<ts>.json # archived orchestrator snapshots
 ├── execution-core/registry.json  # team → repoRoot → eligibleQuery registry
 └── wt/                     # worktrees
@@ -92,7 +92,42 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
   and `check-setup.sh` grades all three in its 5-table `core_tables` gate.
 - **state.json** — active-orchestrator registry (progress, worker status, attention items). Schema:
   `plugins/dev/templates/global-state.json`.
-- **events/** — every phase transition, PR creation, verification result, attention item. Schema:
+- **events/** — every phase transition, PR creation, verification result, attention item.
+
+  **Rotation is RESOLVED, never computed (CTL-1216).** `<period>` is an ISO week (`2026-W34`) by
+  default, or a UTC month (`2026-08`) under the rollback lever — one knob,
+  `catalyst.events.rotation` / `CATALYST_EVENT_LOG_ROTATION`, owned by the zero-npm-import leaf
+  `lib/event-log-paths.mjs` and its hand-written bash mirror `lib/catalyst-event-log-paths.sh`,
+  held byte-identical by the three-way parity suite `__tests__/event-log-paths-parity.test.sh`
+  (each engine checked against a `date(1)`-computed value, never merely against the other).
+  Motivation was measured, not estimated: the monthly file reached 2.41 GiB / 3,026,635 lines on
+  DAY 21 of 2026-08, growing ~123 MB/day. Rotation bounds the FILE, not the write RATE — which is
+  why it is not a fix for any byte-capped reader.
+
+  Three properties are load-bearing and each is guarded:
+  - **One resolver.** The scheme was previously re-derived at **32 production sites**, including
+    FOUR byte-identical `getEventLogPath()` copies, so writer and readers agreed only by each
+    computing the same string. `execution-core/event-log-path-derivation-guard.test.mjs` holds the
+    remaining set at snapshot equality and fails in BOTH directions, so a fixed site must delete
+    its allowlist entry. Its allowlist is now only SANCTIONED loud fallbacks — every one of those
+    warns to stderr rather than silently re-deriving, because a silent fallback keeps working
+    under the default and then splits writers from readers the day the scheme flips.
+  - **Readers never assume one file covers their window.** `resolveEventLogPathsForWindow`
+    enumerates and PARSES the directory, so a historical `YYYY-MM.jsonl` is read beside a
+    `YYYY-Www.jsonl` (nothing is renamed or migrated), and a 7-day lookback spans as many files as
+    it needs. Coverage **ANDs** across files — an OR reports a window complete whenever the newest
+    file was fully read, which is nearly always, i.e. a check that cannot fail. CTL-1813
+    `*.legacy.*` quarantine files parse to null and are never folded back in.
+  - **Every long-lived tail DRAINS the old file to EOF before retargeting** and seeds the new one
+    at offset 0 (`event-tail.mjs` `drainAndSwitch`, bounded and reporting truncation). Before
+    CTL-1216 all five abandoned the old file's unread tail at every boundary, and the broker and
+    monitor — explicit PEERS below — also skipped the new file's head. That is dropped WORK: a
+    `filter.wake` that never fires, a `dispatchTriage` that never runs, a human reply that reaches
+    no inbox. Monthly gave 12 such windows a year; weekly gives 52, which is what made fixing it a
+    prerequisite for the flip rather than a cleanup after it.
+
+  Full schema, precedence ladder, rollback and fleet rollout order:
+  `website/src/content/docs/reference/configuration.md` → "Event-log rotation". Schema:
   `plugins/dev/scripts/lib/event-envelope.mjs` (CTL-1819) — an executable, measured contract
   validated at the read boundary, counting violations without ever throwing. It replaced
   `plugins/dev/templates/global-event.json`, a draft-07 file cited here and in `docs/adrs.md` as the
@@ -190,7 +225,7 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
 
     Two of those are **hand-rolled live tails of the same file, and they are peers** — the broker's
     `readNewEvents` (`broker/tailer.mjs`) and the monitor's (`execution-core/monitor.mjs`), both
-    resolving `getEventLogPath()` to `~/catalyst/events/YYYY-MM.jsonl`, each driven for its whole
+    resolving `getEventLogPath()` to `~/catalyst/events/<period>.jsonl`, each driven for its whole
     process lifetime. Neither is "the" load-bearing one. The broker routes every `filter.wake`,
     every phase-lifecycle terminal, the ingestion-recency map and the worker-state projection; the
     monitor routes `handleStateChangedEvent` → **dispatchTriage**, `handleIssueUpdatedEvent` → the
@@ -595,7 +630,7 @@ In `dispatchMode = "phase-agents"` (template default; also used internally by th
 daemon) the orchestrator spawns one short-lived `claude --bg` job per phase, walking the 10-phase
 pipeline (triage → research → plan → implement → verify → review → pr → monitor-merge →
 monitor-deploy → teardown — see `docs/orchestrator-overview.md`). Phase agents never message each
-other; they **append typed events to the shared log** `~/catalyst/events/YYYY-MM.jsonl`. The
+other; they **append typed events to the shared log** `~/catalyst/events/<period>.jsonl`. The
 orchestrator wakes on those events via the broker (`filter.wake.<ORCH_NAME>`), advances the ticket
 via `orchestrate-phase-advance`, and dispatches the next `--bg` job. Dispatcher:
 `plugins/dev/scripts/phase-agent-dispatch` (CTL-448). `oneshot-legacy` (single long-lived
@@ -1179,7 +1214,7 @@ argv. Dep-skew is neither — the writer is healthy and fully capable of self-ac
   count-exactly / warn-sparsely discipline as CTL-1817/CTL-1823's `otel-forward/lib/sparse-warn.ts`.
 - **Unified event log** (the ticket's AC1 clause "the restart is visible in the event log"). The
   heartbeat line above is a **log** stream; it never reaches `catalyst-events wait-for`, the broker,
-  the HUD, or orch-monitor, all of which read `~/catalyst/events/YYYY-MM.jsonl`. So the dep-skew
+  the HUD, or orch-monitor, all of which read `~/catalyst/events/<period>.jsonl`. So the dep-skew
   path appends a **v2 envelope** to that file through the same `getEventLogPath()` +
   `appendFileSync` call `emitWriterIdleEvent` (CAT-21) already used in `cloud-sync.mjs` — the
   capability was present and merely unused here. Two names, not one name plus a payload flag,
@@ -1310,7 +1345,7 @@ flowchart LR
     CE[catalyst-events tail<br/>raw stream]
   end
   subgraph ObservationNodes["Observation nodes (monitor/developer)"]
-    EM[event-mirror daemon<br/>ssh-tail fan-in] -- "ssh tail -c +N<br/>per-host byte cursor" --> REMOTE_EL[worker host<br/>events/YYYY-MM.jsonl]
+    EM[event-mirror daemon<br/>ssh-tail fan-in] -- "ssh tail -c +N<br/>per-host byte cursor" --> REMOTE_EL[worker host<br/>events/<period>.jsonl]
     EM --> EL
   end
   SJ --> HUD
@@ -1324,7 +1359,7 @@ flowchart LR
 Writers (phase-agent workers, `phase-agent-dispatch`, broker daemon, webhook receiver,
 `catalyst-comms send`, reap-intent producers
 `lib/emit-reap-intent.sh`/`execution-core/reap-intent.mjs`, and the daemon reaper re-emitting
-`*.reap-complete`/`*.reap-failed`) all append to `~/catalyst/events/YYYY-MM.jsonl`. Readers
+`*.reap-complete`/`*.reap-failed`) all append to `~/catalyst/events/<period>.jsonl`. Readers
 (`catalyst-events tail`/`wait-for`, broker daemon, the daemon reaper [CTL-649: boot-replay +
 `fs.watch` byte-cursor driving `claude stop`/`git worktree remove`/`git branch -D`], `catalyst-hud`,
 orch-monitor) consume that log plus per-run state and broker registry without coordinating. The
@@ -1332,7 +1367,7 @@ broker and the reaper are each both reader and writer of the same file.
 
 **Event-mirror (CTL-1654) — observation-node fleet feed.** On `monitor`/`developer` nodes,
 `catalyst-stack start` launches the event-mirror daemon (`event-mirror/index.ts` supervised by
-launchd KeepAlive). It fans each worker host's `~/catalyst/events/YYYY-MM.jsonl` into the local copy
+launchd KeepAlive). It fans each worker host's `~/catalyst/events/<period>.jsonl` into the local copy
 via `ssh tail -c +N`, advancing a per-host byte cursor and deduplicating by event id (in-memory
 ring, scoped to the current month's file). The append is idempotent: events already in the local
 file are never double-written. `catalyst-events tail`/`wait-for` on the observation node then

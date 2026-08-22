@@ -35,7 +35,7 @@
 > e.g. `catalyst-events tail --filter 'if type=="object" then [.event, (.attributes | if type=="object" then ."event.name" else null end), .name] | map(select(type=="string" and . != "")) | first // "" else "" end | startswith("phase.")'`.
 > Reading `attributes["event.name"]` alone silently misses every v1 and v3 record.
 
-Authoritative field-level reference for the canonical v2 envelope in `~/catalyst/events/YYYY-MM.jsonl`.
+Authoritative field-level reference for the canonical v2 envelope in `~/catalyst/events/<period>.jsonl`.
 Derived directly from `plugins/dev/scripts/orch-monitor/lib/canonical-event.ts` and
 `plugins/dev/scripts/lib/canonical-event.sh`.
 
@@ -55,7 +55,7 @@ future OTLP exporter sidecar (CTL-306) will transcode canonical JSONL to OTLP wi
 
 ## Canonical envelope
 
-Every event in `~/catalyst/events/YYYY-MM.jsonl` has this shape. One canonical envelope per line.
+Every event in `~/catalyst/events/<period>.jsonl` has this shape. One canonical envelope per line.
 
 ```json
 {
@@ -285,7 +285,7 @@ worker's known PR.
 
 ## Wire format
 
-JSONL at `~/catalyst/events/YYYY-MM.jsonl`. One canonical envelope per line, no pretty-printing. On
+JSONL at `~/catalyst/events/<period>.jsonl`. One canonical envelope per line, no pretty-printing. On
 first canonical write, if the existing file's first line lacks an `attributes` field (legacy v1/v2
 detection), the file is rotated to `*.legacy.jsonl` before appending — this is a one-time migration,
 already complete on any installation that ran CTL-300.

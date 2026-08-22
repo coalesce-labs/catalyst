@@ -224,10 +224,10 @@ curl -s http://localhost:4318/v1/logs \
   -d '{"resourceLogs":[]}' | jq .
 
 # Count events in current log
-wc -l ~/catalyst/events/$(date +%Y-%m).jsonl
+wc -l $(ls -t ~/catalyst/events/*.jsonl | head -1)
 
 # Count canonical vs legacy
-grep -c '"attributes"' ~/catalyst/events/$(date +%Y-%m).jsonl || true
+grep -c '"attributes"' $(ls -t ~/catalyst/events/*.jsonl | head -1) || true
 ```
 
 ## Validation Queries

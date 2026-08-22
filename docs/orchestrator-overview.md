@@ -31,7 +31,7 @@ log — is in service of these:
   healthchecks, and turn caps cap the blast radius of any single stuck worker.
 
 - **Signal-routed IPC.** Background agents share no memory. They communicate by
-  appending to an immutable event log (`~/catalyst/events/YYYY-MM.jsonl`) and
+  appending to an immutable event log (`~/catalyst/events/<period>.jsonl`) and
   registering broker interests that describe which subset of events should wake
   them. Each agent's context loads only signals relevant to its task — no inbox
   sweeping, no low-value polling, no spam.
@@ -328,7 +328,7 @@ continuation branch.
 
 Everything Catalyst does — worker dispatch, phase transitions, PR lifecycle,
 GitHub/Linear webhooks, broker wakes — flows through one append-only file at
-`~/catalyst/events/YYYY-MM.jsonl` (monthly rotation, canonical OTel-style envelope).
+`~/catalyst/events/<period>.jsonl` (monthly rotation, canonical OTel-style envelope).
 This is the single source of cross-process truth.
 
 ```mermaid
@@ -344,7 +344,7 @@ flowchart LR
     BROKER["catalyst-broker daemon<br/>service.name=catalyst.broker"]
   end
 
-  EL[("events JSONL<br/>~/catalyst/events/YYYY-MM.jsonl<br/>append-only")]
+  EL[("events JSONL<br/>~/catalyst/events/<period>.jsonl<br/>append-only")]
 
   SESSION ==> EL
   STATE ==> EL
@@ -428,7 +428,7 @@ Five operator surfaces — four read structured state, one reads diagnostic logs
 |---|---|---|---|
 | **`catalyst-hud`** (Ink TUI) | `~/catalyst/runs/<id>/{state.json,workers/*.json}` + `~/catalyst/broker-interests.json` + `broker.state.json` | `plugins/dev/scripts/orch-monitor/cli/` | Live operator dashboard — workers, interests, broker key-health |
 | **orch-monitor web dashboard** | file-watches `DASHBOARD.md` → SSE; also `/api/archive/*` from `catalyst.db` | `plugins/dev/scripts/orch-monitor/` | Shareable browser view; archive replay |
-| **`catalyst-events tail --filter`** | append-only JSONL at `~/catalyst/events/YYYY-MM.jsonl` | `plugins/dev/scripts/catalyst-events` | Raw semantic event stream, jq-filterable |
+| **`catalyst-events tail --filter`** | append-only JSONL at `~/catalyst/events/<period>.jsonl` | `plugins/dev/scripts/catalyst-events` | Raw semantic event stream, jq-filterable |
 | **`catalyst-execution-core sessions/worktrees/branches list`** | live `claude agents` inventory + git worktree/branch state (read path of the CTL-649 audit CLI) | `plugins/dev/scripts/catalyst-execution-core` → `execution-core/cli/{sessions,worktrees,branches}.mjs` | Inventory and classify live sessions, worktrees, and branches — what the reaper sees before it acts |
 | **`catalyst broker logs`** | tails `~/catalyst/broker.log` (pino-structured daemon stdout) | `plugins/dev/scripts/catalyst-broker` | Broker daemon diagnostics — Groq errors, routing traces, key-missing warnings |
 
@@ -517,7 +517,7 @@ whatever inventory it exposes.
 | `~/catalyst/runs/<id>/findings.jsonl` | both | shared findings queue |
 | `~/catalyst/state.json` | `catalyst-state.sh` register/update/worker/heartbeat | global active-runs registry |
 | `~/catalyst/catalyst.db` | `catalyst-archive.ts sweep` + skill instrumentation | SQLite sessions + metrics + archive index |
-| `~/catalyst/events/YYYY-MM.jsonl` | seven producers (see "events JSONL" section) | append-only event log |
+| `~/catalyst/events/<period>.jsonl` | seven producers (see "events JSONL" section) | append-only event log |
 | `~/catalyst/broker.log` | broker daemon stdout/stderr | diagnostic log (view with `catalyst broker logs`) |
 | `~/catalyst/broker.state.json` | broker daemon | liveness + key-health snapshot |
 | `~/catalyst/archives/<id>/` | `catalyst-archive.ts sweep` (filesystem-first) | post-run archived artifacts |

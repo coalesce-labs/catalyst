@@ -16,7 +16,7 @@ smee channel, so "turn smee back on" is not one switch — and the two halves ha
 Linear ingestion is the **cloud feed** (`execution-core/cloud-feed-timer.mjs`,
 gate `CATALYST_CLOUD_FEED=enforce`). The three dispatch-class events —
 `linear.issue.state_changed`, `linear.issue.updated`, `linear.comment.created` —
-are produced from the local replica and appended to `~/catalyst/events/YYYY-MM.jsonl`,
+are produced from the local replica and appended to `~/catalyst/events/<period>.jsonl`,
 where `monitor.mjs`'s existing tail dispatches them through the same three
 handlers as before. Nothing about dispatch *semantics* changed at the cutover;
 only the producer did.
@@ -259,7 +259,7 @@ grep -ac "suppressing GitHub webhook smee tunnel start" ~/catalyst/monitor.log  
 grep -ac "webhook-tunnel" ~/catalyst/monitor.log                                 # must be 0
 
 # 4. a REAL dispatch-class event on the feed, plus the negative half
-grep '"event.channel":"cloud-feed"' <(tail -c 3000000 ~/catalyst/events/$(date -u +%Y-%m).jsonl) | tail -3
+grep '"event.channel":"cloud-feed"' <(tail -c 3000000 $(ls -t ~/catalyst/events/*.jsonl | head -1)) | tail -3
 #    want >= 1 github.* with "feedAuthority":true, and ZERO "event.channel":"webhook"
 #    github.* events after the flip.
 ```

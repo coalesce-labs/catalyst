@@ -514,7 +514,7 @@ consumers (they ignore unknown top-level fields via `.field // default` jq patte
 ```bash
 EVENTS_DIR="${CATALYST_DIR:-$HOME/catalyst}/events"
 mkdir -p "$EVENTS_DIR"
-BASELINE_FILE="${EVENTS_DIR}/$(date -u +%Y-%m).jsonl"
+BASELINE_FILE="$(ls -t "${EVENTS_DIR}"/*.jsonl | head -1)"
 [[ -f "$BASELINE_FILE" ]] || : > "$BASELINE_FILE"
 BASELINE_LINE=$(wc -l < "$BASELINE_FILE" | tr -d ' ')
 TMP="${ORCH_DIR}/state.json.tmp.$$"
