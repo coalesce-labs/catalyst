@@ -2,7 +2,7 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test recovery-reasoning.test.mjs
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import {
   reasoningRecoveryPass,
   defaultClassifyTicket,
@@ -35,10 +35,39 @@ import {
   defaultClearIntentCooldown,
   defaultLatchHasNoClock,
   restampNoClockEscalations,
+  deriveFailureSignature, // CAT-170
+  resolveCorrelationMode, // CAT-170
+  readCorrelationPointer, // CAT-170
+  writeCorrelationPointer, // CAT-170
 } from "./recovery-reasoning.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
 import { tmpdir } from "node:os";
+
+// CAT-170: this suite exercises defaultRecordIntent / defaultShouldSkipItem, whose orchDir
+// resolves `opts.orchDir ?? resolveOrchDir()` (recovery-reasoning.mjs:1479-1481, :2307).
+// `??` does not honor an explicit null, so an inherited CATALYST_ORCHESTRATOR_DIR — which every
+// phase agent exports — both flips 17 assertions to red AND writes fixture tickets into the
+// operator's live ~/catalyst/execution-core/.recovery-intents/. Delete it for the suite.
+const SAVED_ORCH_DIR = process.env.CATALYST_ORCHESTRATOR_DIR;
+beforeAll(() => {
+  delete process.env.CATALYST_ORCHESTRATOR_DIR;
+});
+afterAll(() => {
+  if (SAVED_ORCH_DIR === undefined) delete process.env.CATALYST_ORCHESTRATOR_DIR;
+  else process.env.CATALYST_ORCHESTRATOR_DIR = SAVED_ORCH_DIR;
+});
+
+describe("suite hermeticity (CAT-170)", () => {
+  test("the ledger never resolves to an ambient orchestrator dir", () => {
+    // Reproduces the phase-agent environment: a real orch dir exported by the caller.
+    // Before the beforeAll/afterAll isolation below, this test FAILS — defaultRecordIntent
+    // resolves `opts.orchDir ?? resolveOrchDir()`, so an explicit null falls through to the
+    // env and the call writes into the operator's live .recovery-intents/.
+    expect(process.env.CATALYST_ORCHESTRATOR_DIR).toBeUndefined();
+    expect(defaultRecordIntent("CTL-998", { decision: "fix" }, { orchDir: null })).toBeNull();
+  });
+});
 
 describe("checkDeterministicErrors", () => {
   test("detects push_rejected_no_workflow_scope", () => {
@@ -384,6 +413,129 @@ describe("defaultClassifyTicket", () => {
     expect(result.decision).toBe("fix");
     expect(result.fix_class).toBe("bounded-llm");
   });
+
+  // CTL-1679 Phase 1: cluster_fence_stale is provably retry-safe (the guard bows
+  // out BEFORE any side-effect and exit-10s) — it must classify as a deterministic
+  // FIX routed to the fence-stale-redispatch seam, NOT fall to the Rule-3 escalate.
+  test("CTL-1679: cluster_fence_stale (signal) → fix / fence_stale_redispatch (not escalate)", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: null,
+      jobState: null,
+      signal: { failureReason: "cluster_fence_stale", phase: "pr" },
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("fence_stale_redispatch");
+    expect(result.details.seam_id).toBe("fence-stale-redispatch");
+    expect(result.details.phase).toBe("pr");
+  });
+
+  test("CTL-1679: cluster_fence_stale (top-level failureReason) → fix / fence_stale_redispatch", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: null,
+      failureReason: "cluster_fence_stale",
+      signal: { phase: "monitor-merge" },
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("fence_stale_redispatch");
+    expect(result.details.seam_id).toBe("fence-stale-redispatch");
+    expect(result.details.phase).toBe("monitor-merge");
+  });
+
+  // CTL-1679 Phase 1: rule precedence — a cluster_fence_stale signal that ALSO
+  // carries a bounded-LLM-matching log pattern still classifies deterministically
+  // (Rule 1 wins over Rule 2), mirroring the existing deterministic > bounded-LLM order.
+  test("CTL-1679: cluster_fence_stale wins over a bounded-LLM log match (deterministic precedence)", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: "CONFLICT (content): Merge conflict in src/server.ts",
+      signal: { failureReason: "cluster_fence_stale", phase: "implement" },
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("fence_stale_redispatch");
+  });
+});
+
+describe("CTL-1679 Phase 3 — generalized retry_safe bounded retry", () => {
+  const zeroAttempts = () => 0;
+  const maxAttempts = () => RECOVERY_MAX_ATTEMPTS;
+
+  // (b) Unrecognized failure + retrySafe, budget remaining → bounded retry via the
+  // shared fence-stale-redispatch seam (NOT escalate).
+  test("unrecognized + retrySafe + budget remaining → fix / retry_safe_redispatch", () => {
+    const result = defaultClassifyTicket(
+      {
+        logsOutput: null,
+        failureReason: "some_unrecognized_reason",
+        retrySafe: true,
+        signal: { failureReason: "some_unrecognized_reason", phase: "verify" },
+      },
+      { ticket: "CTL-77", readIntentAttempts: zeroAttempts },
+    );
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("retry_safe_redispatch");
+    expect(result.details.seam_id).toBe("fence-stale-redispatch");
+    expect(result.details.phase).toBe("verify");
+  });
+
+  // (b→exhaustion) budget exhausted → escalate with a reason-named coverage-gap
+  // explanation carrying an attempts history.
+  test("unrecognized + retrySafe + budget exhausted → escalate with named reason", () => {
+    const result = defaultClassifyTicket(
+      {
+        logsOutput: null,
+        failureReason: "some_unrecognized_reason",
+        retrySafe: true,
+        signal: { failureReason: "some_unrecognized_reason", phase: "verify" },
+      },
+      { ticket: "CTL-77", readIntentAttempts: maxAttempts },
+    );
+    expect(result.decision).toBe("escalate");
+    expect(result.details.reason).toContain("some_unrecognized_reason");
+    expect(result.details.explanation).toBeDefined();
+    expect(result.details.explanation.escalation_type).toBeDefined();
+    expect(result.details.explanation.problem).toContain("some_unrecognized_reason");
+  });
+
+  // (c) Unrecognized + NOT retrySafe → immediate escalate exactly as today
+  // (regression guard — no retry budget consulted).
+  test("unrecognized + NOT retrySafe → immediate escalate (unchanged)", () => {
+    const result = defaultClassifyTicket(
+      {
+        logsOutput: null,
+        failureReason: "design-decision-required",
+        signal: { failureReason: "design-decision-required", phase: "implement" },
+      },
+      { ticket: "CTL-78", readIntentAttempts: zeroAttempts },
+    );
+    expect(result.decision).toBe("escalate");
+    expect(result.fix_class).toBe("human");
+  });
+
+  // Phase 1's deterministic cluster_fence_stale is ALSO budget-gated so an
+  // infinitely-stale fence can't loop forever: budget exhausted → escalate.
+  test("cluster_fence_stale budget exhausted → escalate with named reason", () => {
+    const result = defaultClassifyTicket(
+      {
+        logsOutput: null,
+        signal: { failureReason: "cluster_fence_stale", phase: "pr" },
+      },
+      { ticket: "CTL-79", readIntentAttempts: maxAttempts },
+    );
+    expect(result.decision).toBe("escalate");
+    expect(result.details.reason).toContain("cluster_fence_stale");
+  });
+
+  // cluster_fence_stale with budget remaining still fixes (Phase 1 preserved).
+  test("cluster_fence_stale budget remaining → fix (Phase 1 preserved)", () => {
+    const result = defaultClassifyTicket(
+      {
+        logsOutput: null,
+        signal: { failureReason: "cluster_fence_stale", phase: "pr" },
+      },
+      { ticket: "CTL-79", readIntentAttempts: zeroAttempts },
+    );
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("fence_stale_redispatch");
+  });
 });
 
 describe("reasoningRecoveryPass", () => {
@@ -542,6 +694,132 @@ describe("reasoningRecoveryPass", () => {
     expect(result.results[2].fix_class).toBe("human");
     expect(events.filter((e) => e.type === "recovery.would-fix").length).toBe(2);
     expect(events.filter((e) => e.type === "recovery.would-escalate").length).toBe(1);
+  });
+
+  // CTL-1679 Phase 1: gating — a cluster_fence_stale item flows through the
+  // classifier as a deterministic FIX. In SHADOW it emits recovery.would-fix and
+  // invokes NO seam; in ENFORCE it invokes the fence-stale-redispatch seam exactly
+  // once and emits recovery.fixed on success / recovery.fix-failed on failure.
+  const fenceStaleItem = {
+    ticket: "CTL-9",
+    evidence: {
+      logsOutput: null,
+      jobState: null,
+      signal: { failureReason: "cluster_fence_stale", phase: "pr" },
+      failureReason: "cluster_fence_stale",
+    },
+  };
+
+  // Hermetic injections shared by the CTL-1679 reasoningRecoveryPass tests: the
+  // default shouldSkipItem/readIntentAttempts read the LIVE host ledger under
+  // ~/catalyst/execution-core/.recovery-intents/ (a real CTL-9.json on a worker
+  // host would skip the item / exhaust the budget), so pin them here.
+  const hermeticRecovery = {
+    shouldSkipItem: () => false,
+    readIntentAttempts: () => 0,
+  };
+
+  test("CTL-1679: cluster_fence_stale in SHADOW → would-fix, no seam", () => {
+    const events = [];
+    let seamCalls = 0;
+    const result = reasoningRecoveryPass([fenceStaleItem], {
+      ...hermeticRecovery,
+      mode: "shadow",
+      invokeSeam: () => {
+        seamCalls += 1;
+        return { success: true };
+      },
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(result.results[0].decision).toBe("fix");
+    expect(result.results[0].fix_class).toBe("fence_stale_redispatch");
+    expect(seamCalls).toBe(0);
+    expect(events.some((e) => e.type === "recovery.would-fix")).toBe(true);
+  });
+
+  test("CTL-1679: cluster_fence_stale in ENFORCE → invokes seam once, emits recovery.fixed", () => {
+    const events = [];
+    const seamCalls = [];
+    reasoningRecoveryPass([fenceStaleItem], {
+      ...hermeticRecovery,
+      mode: "enforce",
+      invokeSeam: (ticket, seamId, brief) => {
+        seamCalls.push({ ticket, seamId, brief });
+        return { success: true, reason: "re-armed", details: {} };
+      },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(seamCalls).toHaveLength(1);
+    expect(seamCalls[0].seamId).toBe("fence-stale-redispatch");
+    expect(seamCalls[0].brief.phase).toBe("pr");
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(true);
+  });
+
+  test("CTL-1679: cluster_fence_stale ENFORCE seam failure → recovery.fix-failed", () => {
+    const events = [];
+    reasoningRecoveryPass([fenceStaleItem], {
+      ...hermeticRecovery,
+      mode: "enforce",
+      invokeSeam: () => ({ success: false, reason: "signal absent", details: {} }),
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(events.some((e) => e.type === "recovery.fix-failed")).toBe(true);
+  });
+
+  // CTL-1679 Phase 3: shadow twin. An unrecognized retrySafe failure that the
+  // classifier would RETRY emits recovery.would-retry (twin of would-fix) in
+  // shadow, but still records the shadow intent / does not invoke the seam.
+  const retrySafeItem = {
+    ticket: "CTL-88",
+    evidence: {
+      logsOutput: null,
+      failureReason: "unrecognized_retry_safe",
+      retrySafe: true,
+      signal: { failureReason: "unrecognized_retry_safe", phase: "verify" },
+    },
+  };
+
+  test("CTL-1679 Phase 3: retrySafe retry in SHADOW → recovery.would-retry twin", () => {
+    const events = [];
+    let seamCalls = 0;
+    reasoningRecoveryPass([retrySafeItem], {
+      ...hermeticRecovery,
+      mode: "shadow",
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "retry_safe_redispatch",
+        details: { seam_id: "fence-stale-redispatch", phase: "verify", reason: "retry unrecognized_retry_safe" },
+      }),
+      invokeSeam: () => {
+        seamCalls += 1;
+        return { success: true };
+      },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(seamCalls).toBe(0);
+    expect(events.some((e) => e.type === "recovery.would-retry")).toBe(true);
+  });
+
+  // CTL-1679 Phase 3: a reason-bearing item skipped by shouldSkipItem emits a
+  // per-ticket recovery.skipped.<reason> breadcrumb so coverage gaps stay queryable.
+  test("CTL-1679 Phase 3: ledger-skipped reason-bearing item → recovery.skipped.<reason>", () => {
+    const events = [];
+    reasoningRecoveryPass([fenceStaleItem], {
+      mode: "enforce",
+      shouldSkipItem: () => true, // latched / cooldown
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    const skipped = events.find((e) => typeof e.type === "string" && e.type.startsWith("recovery.skipped."));
+    expect(skipped).toBeDefined();
+    expect(skipped.type).toContain("cluster_fence_stale");
   });
 
   // CTL-1157 F #5 (Codex round-4): a `defer` decision must NOT write the cooldown
@@ -1126,13 +1404,71 @@ describe("recovery-intent ledger (cooldown + max-attempts + escalated)", () => {
     expect(second.attempts).toBe(2);
   });
 
+  // CAT-170 Phase 2: the attempt-time failure signature is durable, but marker
+  // writes must not accidentally erase it before the exhausted-intent sweep.
+  test("failure signature is normalized and preserved across marker writes", () => {
+    const t0 = 1_000_000_000_000;
+    const first = defaultRecordIntent(
+      "CAT-170",
+      { decision: "dispatched", signature: "  Hit your   SESSION limit  " },
+      { orchDir, now: () => t0 },
+    );
+    expect(first.signature).toBe("hit your session limit");
+    expect(first.escalated).toBe(false);
+
+    const marker = defaultRecordIntent(
+      "CAT-170",
+      { decision: "defer", attempts: 0 },
+      { orchDir, now: () => t0 + 1 },
+    );
+    expect(marker.signature).toBe("hit your session limit");
+    expect(marker.escalated).toBe(false);
+  });
+
+  test("classifier writes clear stale signatures and explicit signatures replace them", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent(
+      "CAT-171",
+      { decision: "dispatched", signature: "old failure" },
+      { orchDir, now: () => t0 },
+    );
+    const replaced = defaultRecordIntent(
+      "CAT-171",
+      { decision: "dispatched", signature: "new failure" },
+      { orchDir, now: () => t0 + 1 },
+    );
+    expect(replaced.signature).toBe("new failure");
+
+    const classified = defaultRecordIntent(
+      "CAT-171",
+      { decision: "fix", fix_class: "bounded-llm" },
+      { orchDir, now: () => t0 + 2 },
+    );
+    expect("signature" in classified).toBe(false);
+  });
+
+  test("missing and whitespace-only signatures do not alter the legacy ledger shape", () => {
+    const absent = defaultRecordIntent(
+      "CAT-172",
+      { decision: "dispatched" },
+      { orchDir, now: () => 1 },
+    );
+    const blank = defaultRecordIntent(
+      "CAT-173",
+      { decision: "dispatched", signature: " \n\t " },
+      { orchDir, now: () => 1 },
+    );
+    expect("signature" in absent).toBe(false);
+    expect("signature" in blank).toBe(false);
+  });
+
   test("fail-open: no ledger → shouldSkip returns false", () => {
     expect(defaultShouldSkipItem("CTL-999", { orchDir, now: () => Date.now() })).toBe(false);
   });
 
   test("no orchDir → record no-ops, shouldSkip fail-open false", () => {
-    // resolveOrchDir() returns null when CATALYST_ORCHESTRATOR_DIR is unset and
-    // none is injected. Force that by passing orchDir: null explicitly.
+    // The suite-level environment isolation makes resolveOrchDir() return null when
+    // no directory is injected; explicit null alone would fall through via `??`.
     expect(defaultRecordIntent("CTL-998", { decision: "fix" }, { orchDir: null })).toBeNull();
     expect(defaultShouldSkipItem("CTL-998", { orchDir: null })).toBe(false);
   });
@@ -2462,6 +2798,186 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
   });
 });
 
+// ─── CAT-170 Phase 3: correlate retry-cap escalations by failure signature ──
+describe("escalateExhaustedIntents correlation (CAT-170)", () => {
+  let orchDir;
+  const t0 = 1_000_000_000_000;
+
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-correlation-"));
+    mkdirSync(pathJoin(orchDir, ".recovery-intents"), { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  const seed = (ticket, signature, lastTs = t0) => {
+    const entry = {
+      ticket,
+      ts: lastTs,
+      lastTs,
+      decision: "dispatched",
+      fix_class: "board-health",
+      attempts: RECOVERY_MAX_ATTEMPTS,
+      escalated: false,
+      ...(signature ? { signature } : {}),
+    };
+    writeFileSync(
+      pathJoin(orchDir, ".recovery-intents", `${ticket}.json`),
+      JSON.stringify(entry),
+    );
+  };
+
+  const run = (overrides = {}) => {
+    const events = [];
+    const comments = [];
+    const labels = [];
+    const signals = [];
+    const result = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 100,
+      correlationMode: "enforce",
+      correlationWindowMs: 60 * 60_000,
+      correlationMinGroup: 2,
+      emitEvent: (event) => events.push(event),
+      postComment: (ticket, body) => comments.push({ ticket, body }),
+      labelNeedsHuman: (_dir, ticket) => { labels.push(ticket); return true; },
+      beliefOwnsLabel: () => false,
+      writeSignal: (ticket, payload) => signals.push({ ticket, payload }),
+      ...overrides,
+    });
+    return { result, events, comments, labels, signals };
+  };
+
+  test("enforce emits one anchored escalation and pointer events for matching signatures", () => {
+    seed("CAT-172", "account-rate-limited", t0 + 2);
+    seed("CAT-170", "account-rate-limited", t0);
+    seed("CAT-171", "account-rate-limited", t0 + 1);
+
+    const out = run();
+    const escalations = out.events.filter((e) => e.type === "recovery.escalated");
+    const pointers = out.events.filter((e) => e.type === "recovery.escalation.correlated");
+    expect(out.result).toEqual(["CAT-170"]);
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0].ticket).toBe("CAT-170");
+    expect(escalations[0].escalation.observed.correlated_tickets).toEqual([
+      "CAT-170", "CAT-171", "CAT-172",
+    ]);
+    expect(escalations[0].escalation.observed.signature).toBe("account-rate-limited");
+    expect(escalations[0].escalation.observed.correlation_id).toMatch(/^corr-/);
+    for (const ticket of ["CAT-170", "CAT-171", "CAT-172"]) {
+      expect(escalations[0].escalation.problem).toContain(ticket);
+      expect(escalations[0].escalation.call_to_action).toContain(ticket);
+    }
+    expect(pointers).toHaveLength(2);
+    expect(new Set(pointers.map((e) => e.correlation_id))).toEqual(
+      new Set([escalations[0].escalation.observed.correlation_id]),
+    );
+    expect(pointers.every((e) => e.anchor === "CAT-170")).toBe(true);
+    expect(out.labels.sort()).toEqual(["CAT-170", "CAT-171", "CAT-172"]);
+    expect(out.comments).toHaveLength(3);
+    const memberComments = out.comments.filter((c) => c.ticket !== "CAT-170");
+    expect(memberComments.every((c) => c.body.includes("CAT-170"))).toBe(true);
+    expect(memberComments.every((c) => !c.body.includes("authorize another recovery cycle"))).toBe(true);
+
+    // Every member is latched, while only the incident anchor is returned.
+    for (const ticket of ["CAT-170", "CAT-171", "CAT-172"]) {
+      const ledger = JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", `${ticket}.json`), "utf8"));
+      expect(ledger.escalated).toBe(true);
+    }
+    expect(run().events).toEqual([]);
+  });
+
+  // Regression (phase-review, CAT-170): when NO candidate in a correlated group
+  // can carry the anchor (every label write fails), each ticket must still be
+  // attempted exactly ONCE per tick. The pre-fix fallback re-ran every already-
+  // attempted candidate as a singleton, bumping each escalation-deferral counter
+  // twice and burning the RECOVERY_MAX_ESCALATION_DEFERRALS budget at 2x rate.
+  test("a correlated group whose anchor never lands bumps each deferral counter once per tick", () => {
+    seed("CAT-220", "account-rate-limited", t0);
+    seed("CAT-221", "account-rate-limited", t0 + 1);
+
+    const out = run({ labelNeedsHuman: () => false });
+
+    expect(out.result).toEqual([]);
+    expect(out.events.filter((e) => e.type === "recovery.escalated")).toHaveLength(0);
+    expect(out.events.filter((e) => e.type === "recovery.escalation.correlated")).toHaveLength(0);
+    const deferred = out.events.filter((e) => e.type === "recovery.escalation.deferred");
+    expect(deferred).toHaveLength(2);
+    expect(deferred.map((e) => e.ticket).sort()).toEqual(["CAT-220", "CAT-221"]);
+    for (const ticket of ["CAT-220", "CAT-221"]) {
+      expect(readEscalationDeferrals(orchDir, ticket)).toBe(1);
+    }
+  });
+
+  test("a durable provisional-anchor signal blocks failover when its ledger latch does not land", () => {
+    seed("CAT-222", "account-rate-limited", t0);
+    seed("CAT-223", "account-rate-limited", t0 + 1);
+
+    const out = run({ recordIntent: () => null });
+
+    expect(out.result).toEqual([]);
+    expect(out.events).toEqual([]);
+    expect(out.signals).toHaveLength(1);
+    expect(out.signals[0].ticket).toBe("CAT-222");
+    expect(out.signals[0].payload.correlation.role).toBe("anchor");
+    expect(out.labels).toEqual(["CAT-222"]);
+  });
+
+  test("different or absent signatures retain independent escalation behavior", () => {
+    seed("CAT-180", "account-rate-limited");
+    seed("CAT-181", "source-conflict");
+    seed("CAT-182", null);
+    const out = run();
+    expect(out.events.filter((e) => e.type === "recovery.escalated")).toHaveLength(3);
+    expect(out.events.filter((e) => e.type === "recovery.escalation.correlated")).toHaveLength(0);
+    for (const event of out.events.filter((e) => e.type === "recovery.escalated")) {
+      const otherTickets = ["CAT-180", "CAT-181", "CAT-182"].filter((t) => t !== event.ticket);
+      expect(otherTickets.some((t) => JSON.stringify(event.escalation).includes(t))).toBe(false);
+    }
+  });
+
+  test("shadow reports the would-be group but preserves one escalation per ticket", () => {
+    seed("CAT-190", "account-rate-limited", t0);
+    seed("CAT-191", "account-rate-limited", t0 + 1);
+    seed("CAT-192", "account-rate-limited", t0 + 2);
+    const out = run({ correlationMode: "shadow" });
+    expect(out.events.filter((e) => e.type === "recovery.escalated")).toHaveLength(3);
+    expect(out.events.filter((e) => e.type === "recovery.escalation.correlated")).toHaveLength(0);
+    const shadow = out.events.filter((e) => e.type === "recovery.escalation.would-correlate");
+    expect(shadow).toHaveLength(1);
+    expect(shadow[0]).toMatchObject({
+      signature: "account-rate-limited",
+      anchor: "CAT-190",
+      tickets: ["CAT-190", "CAT-191", "CAT-192"],
+    });
+  });
+
+  test("off emits no correlation events and preserves the pre-change brief exactly", () => {
+    seed("CAT-200", "account-rate-limited");
+    seed("CAT-201", "account-rate-limited", t0 + 1);
+    const out = run({ correlationMode: "off" });
+    expect(out.events.map((e) => e.type)).toEqual(["recovery.escalated", "recovery.escalated"]);
+    const event = out.events.find((e) => e.ticket === "CAT-200");
+    expect(event.escalation.problem).toBe(
+      'CAT-200 consumed 2 recovery attempts (last decision "dispatched") without any recorded verdict — the self-heal loop is not resolving it.',
+    );
+    expect(event.escalation.call_to_action).toBe(
+      "look at CAT-200: authorize another recovery cycle (clear its ledger latch), or take it over?",
+    );
+  });
+
+  test("inactive tickets are removed before grouping and cannot appear in anchor text", () => {
+    seed("CAT-210", "same-cause", t0);
+    seed("CAT-211", "same-cause", t0 + 1);
+    seed("CAT-212", "same-cause", t0 + 2);
+    const out = run({ isActive: (ticket) => ticket !== "CAT-210" });
+    const anchor = out.events.find((e) => e.type === "recovery.escalated");
+    expect(anchor.ticket).toBe("CAT-211");
+    expect(JSON.stringify(anchor.escalation)).not.toContain("CAT-210");
+    expect(out.labels).not.toContain("CAT-210");
+  });
+});
+
 // ─── CTL-1496: pr_not_merged classification ─────────────────────────────────
 
 describe("classifyPrNotMerged (CTL-1496)", () => {
@@ -3168,5 +3684,345 @@ describe("prNumberFromWorkerDir / resolvePrNumberForRecovery (CTL-1680)", () => 
     expect(
       resolvePrNumberForRecovery({ signal: { failureReason: "stalled" }, signalPath: signalPath() }),
     ).toBe(77);
+  });
+});
+
+// ─── CAT-170 (Codex #3209 review remediations) ──────────────────────────────
+
+describe("deriveFailureSignature (Codex #3209 P1)", () => {
+  test("reads the production item shape — fields live under .evidence, not .reason/.signal", () => {
+    // Exactly what buildRecoveryItems (recovery-evidence.mjs) emits.
+    const item = {
+      ticket: "CTL-1",
+      phase: "implement",
+      bgJobId: null,
+      evidence: { failureReason: "hit your session limit", signal: { failureReason: "hit your session limit" } },
+    };
+    expect(deriveFailureSignature(item)).toBe("hit your session limit");
+  });
+
+  test("stalledReason outranks failureReason at both altitudes", () => {
+    expect(
+      deriveFailureSignature({ evidence: { stalledReason: "phantom-ticket", failureReason: "other" } }),
+    ).toBe("phantom-ticket");
+    expect(
+      deriveFailureSignature({ evidence: { signal: { stalledReason: "nested", failureReason: "other" } } }),
+    ).toBe("nested");
+  });
+
+  test("an explicitly-supplied item-level field still wins", () => {
+    expect(
+      deriveFailureSignature({ reason: "explicit", evidence: { failureReason: "evidence" } }),
+    ).toBe("explicit");
+  });
+
+  test("nothing anywhere → null (a missing signature never correlates)", () => {
+    expect(deriveFailureSignature({})).toBeNull();
+    expect(deriveFailureSignature({ evidence: {} })).toBeNull();
+  });
+
+  test("an explicit evidence argument overrides item.evidence", () => {
+    expect(
+      deriveFailureSignature({ evidence: { failureReason: "stale" } }, { failureReason: "fresh" }),
+    ).toBe("fresh");
+  });
+});
+
+describe("resolveCorrelationMode (Codex #3209 P2)", () => {
+  test("the three supported modes pass through", () => {
+    for (const m of ["off", "shadow", "enforce"]) expect(resolveCorrelationMode(m)).toBe(m);
+  });
+
+  test("case and surrounding whitespace are normalized", () => {
+    expect(resolveCorrelationMode("  Enforce ")).toBe("enforce");
+    expect(resolveCorrelationMode("SHADOW")).toBe("shadow");
+  });
+
+  test("empty/misspelled/non-string values fall back to shadow, never silently to off", () => {
+    for (const bad of ["", "   ", "shdow", "on", null, undefined, 7, {}]) {
+      expect(resolveCorrelationMode(bad)).toBe("shadow");
+    }
+  });
+});
+
+describe("buildRecoveryEnvelope — correlation identifiers (Codex #3209 P2)", () => {
+  test("a shadow would-correlate event can identify its proposed group", () => {
+    const env = buildRecoveryEnvelope({
+      type: "recovery.escalation.would-correlate",
+      correlation_id: "corr-abc123",
+      signature: "hit your session limit",
+      anchor: "CTL-1",
+      tickets: ["CTL-1", "CTL-2", "CTL-3"],
+    });
+    expect(env.attributes["recovery.correlation_id"]).toBe("corr-abc123");
+    expect(env.attributes["recovery.signature"]).toBe("hit your session limit");
+    expect(env.attributes["recovery.anchor"]).toBe("CTL-1");
+    expect(env.attributes["recovery.correlated_count"]).toBe(3);
+    expect(env.body.payload.tickets).toEqual(["CTL-1", "CTL-2", "CTL-3"]);
+    expect(env.body.payload.correlation_id).toBe("corr-abc123");
+  });
+
+  test("an uncorrelated event is unchanged — no correlation keys are fabricated", () => {
+    const env = buildRecoveryEnvelope({ type: "recovery.escalated", ticket: "CTL-9" });
+    expect(env.attributes["recovery.correlation_id"]).toBeUndefined();
+    expect(env.attributes["recovery.anchor"]).toBeUndefined();
+    expect(env.body.payload).not.toHaveProperty("correlation_id");
+    expect(env.body.payload).not.toHaveProperty("tickets");
+  });
+});
+
+describe("escalateExhaustedIntents — correlation remediations (CAT-170 / Codex #3209)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-corr-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  const t0 = 1_000_000_000_000;
+  const seed = (ticket, signature, at = t0) =>
+    defaultRecordIntent(
+      ticket,
+      { decision: "dispatched", fix_class: "board-health", attempts: RECOVERY_MAX_ATTEMPTS, signature },
+      { orchDir, now: () => at },
+    );
+  const inert = { postComment: () => {}, writeSignal: () => {} };
+
+  test("P1 — a member whose label write fails is retried as a POINTER, not a new escalation", () => {
+    seed("CTL-1", "hit your session limit");
+    seed("CTL-2", "hit your session limit", t0 + 1000);
+
+    // Tick 1: the anchor (CTL-1, oldest) succeeds; the member's label write fails.
+    const events1 = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 2000,
+      correlationMode: "enforce",
+      emitEvent: (e) => events1.push(e),
+      labelNeedsHuman: (_d, t) => t === "CTL-1",
+      beliefOwnsLabel: () => false,
+      ...inert,
+    });
+    expect(events1.filter((e) => e.type === "recovery.escalated").map((e) => e.ticket)).toEqual(["CTL-1"]);
+    // CTL-2 did not complete — it deferred, and left a pointer at its anchor.
+    const pointer = readCorrelationPointer(orchDir, "CTL-2", { windowMs: 60 * 60 * 1000, now: t0 + 2000 });
+    expect(pointer).not.toBeNull();
+    expect(pointer.anchor).toBe("CTL-1");
+
+    // Tick 2: CTL-1 is now escalated:true, so it is NOT a candidate and no group can
+    // re-form. Pre-fix, CTL-2 regrouped as a singleton and got its own full
+    // recovery.escalated. It must stay a MEMBER pointer at CTL-1.
+    const events2 = [];
+    const signals2 = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 3000,
+      correlationMode: "enforce",
+      emitEvent: (e) => events2.push(e),
+      labelNeedsHuman: () => true,
+      beliefOwnsLabel: () => false,
+      postComment: () => {},
+      writeSignal: (t, payload) => signals2.push({ t, payload }),
+    });
+    expect(events2.filter((e) => e.type === "recovery.escalated")).toHaveLength(0);
+    const correlated = events2.filter((e) => e.type === "recovery.escalation.correlated");
+    expect(correlated).toHaveLength(1);
+    expect(correlated[0].ticket).toBe("CTL-2");
+    expect(correlated[0].anchor).toBe("CTL-1");
+    // and the pointer is cleared once the member completes
+    expect(readCorrelationPointer(orchDir, "CTL-2", {})).toBeNull();
+    // P1 — the correlation identity is board-readable on the written signal
+    expect(signals2[0].payload.correlation.role).toBe("member");
+    expect(signals2[0].payload.correlation.anchor).toBe("CTL-1");
+    expect(signals2[0].payload.correlation.id).toBe(correlated[0].correlation_id);
+  });
+
+  test("P1 (round 2) — a member whose SIGNAL write fails keeps its pointer and retries as a member", () => {
+    seed("CTL-1", "hit your session limit");
+    seed("CTL-2", "hit your session limit", t0 + 1000);
+
+    // Tick 1: the anchor completes; the MEMBER's signal write fails. The signal is
+    // the only durable carrier of correlation.role, so this act must not latch.
+    const events1 = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 2000,
+      correlationMode: "enforce",
+      emitEvent: (e) => events1.push(e),
+      labelNeedsHuman: () => true,
+      beliefOwnsLabel: () => false,
+      postComment: () => {},
+      writeSignal: (t) => t !== "CTL-2",
+    });
+    expect(events1.filter((e) => e.type === "recovery.escalated").map((e) => e.ticket)).toEqual([
+      "CTL-1",
+    ]);
+    // The member did NOT complete — no correlated event, and no comment/event fired.
+    expect(events1.filter((e) => e.type === "recovery.escalation.correlated")).toHaveLength(0);
+    // Its pointer survives, so the next tick still knows which incident it belongs to.
+    const pointer = readCorrelationPointer(orchDir, "CTL-2", {
+      windowMs: 60 * 60 * 1000,
+      now: t0 + 2000,
+    });
+    expect(pointer).not.toBeNull();
+    expect(pointer.anchor).toBe("CTL-1");
+
+    // Tick 2: the write succeeds. Pre-fix the member had ALREADY latched
+    // escalated:true (the latch ran before the write) with its pointer cleared, so it
+    // was never a candidate again and its member role was lost permanently — the
+    // board then treated it as independent and sent the duplicate operator alert this
+    // feature exists to suppress. It must now land as a member of the same anchor.
+    const events2 = [];
+    const signals2 = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 3000,
+      correlationMode: "enforce",
+      emitEvent: (e) => events2.push(e),
+      labelNeedsHuman: () => true,
+      beliefOwnsLabel: () => false,
+      postComment: () => {},
+      writeSignal: (t, payload) => {
+        signals2.push({ t, payload });
+        return true;
+      },
+    });
+    expect(events2.filter((e) => e.type === "recovery.escalated")).toHaveLength(0);
+    const correlated = events2.filter((e) => e.type === "recovery.escalation.correlated");
+    expect(correlated).toHaveLength(1);
+    expect(correlated[0].ticket).toBe("CTL-2");
+    expect(correlated[0].anchor).toBe("CTL-1");
+    // and the role is board-readable on the signal that finally persisted
+    const memberSignal = signals2.find((s) => s.t === "CTL-2");
+    expect(memberSignal.payload.correlation.role).toBe("member");
+    expect(memberSignal.payload.correlation.anchor).toBe("CTL-1");
+    expect(readCorrelationPointer(orchDir, "CTL-2", {})).toBeNull();
+  });
+
+  test("P2 — a candidate tried as a provisional anchor is not acted on twice in one tick", () => {
+    seed("CTL-1", "hit your session limit");
+    seed("CTL-2", "hit your session limit", t0 + 1000);
+
+    const deferred = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 2000,
+      correlationMode: "enforce",
+      emitEvent: (e) => {
+        if (e.type === "recovery.escalation.deferred") deferred.push(e.ticket);
+      },
+      // CTL-1 (the provisional anchor) always fails; CTL-2 succeeds as anchor.
+      labelNeedsHuman: (_d, t) => t === "CTL-2",
+      beliefOwnsLabel: () => false,
+      ...inert,
+    });
+    // Pre-fix CTL-1 was acted on twice (anchor attempt + member loop), bumping its
+    // bounded deferral counter twice and double-emitting the deferred event.
+    expect(deferred.filter((t) => t === "CTL-1")).toHaveLength(1);
+    expect(readEscalationDeferrals(orchDir, "CTL-1")).toBe(1);
+    // and it still carries a pointer at the anchor that actually won
+    expect(readCorrelationPointer(orchDir, "CTL-1", {}).anchor).toBe("CTL-2");
+  });
+
+  test("a stale pointer past the correlation window expires back to normal handling", () => {
+    seed("CTL-2", "hit your session limit");
+    writeCorrelationPointer(orchDir, "CTL-2", { anchor: "CTL-1", correlation_id: "corr-x" }, t0);
+    expect(readCorrelationPointer(orchDir, "CTL-2", { windowMs: 1000, now: t0 + 999 })).not.toBeNull();
+    expect(readCorrelationPointer(orchDir, "CTL-2", { windowMs: 1000, now: t0 + 5000 })).toBeNull();
+  });
+
+  test("a pointer at the ticket's own id is ignored (never self-anchors)", () => {
+    writeCorrelationPointer(orchDir, "CTL-2", { anchor: "CTL-2" }, t0);
+    expect(readCorrelationPointer(orchDir, "CTL-2", {})).toBeNull();
+  });
+
+  test("off/shadow modes ignore pointers entirely and stay independent escalations", () => {
+    seed("CTL-1", "hit your session limit");
+    seed("CTL-2", "hit your session limit", t0 + 1000);
+    writeCorrelationPointer(orchDir, "CTL-2", { anchor: "CTL-1", correlation_id: "corr-x" }, t0 + 1000);
+    const events = [];
+    escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 2000,
+      correlationMode: "off",
+      emitEvent: (e) => events.push(e),
+      labelNeedsHuman: () => true,
+      beliefOwnsLabel: () => false,
+      ...inert,
+    });
+    expect(events.filter((e) => e.type === "recovery.escalated").map((e) => e.ticket).sort()).toEqual([
+      "CTL-1",
+      "CTL-2",
+    ]);
+  });
+});
+
+// ─── CAT-170 phase-review: stale correlation block must not survive ──────────
+describe("defaultWriteEscalationSignal — stale correlation clearing (CAT-170)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-stale-corr-"));
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  const signalPath = (ticket) =>
+    pathJoin(orchDir, "workers", ticket, "phase-recovery-pass.json");
+  const readSignal = (ticket) => JSON.parse(readFileSync(signalPath(ticket), "utf8"));
+
+  test("a later UNCORRELATED escalation erases the prior member correlation block", () => {
+    // 1. escalate as a correlated member — the role is persisted first-class.
+    expect(
+      defaultWriteEscalationSignal(
+        "CTL-2",
+        { reason: "attempts exhausted", correlation: { id: "corr-a", role: "member", anchor: "CTL-1" } },
+        { orchDir },
+      ),
+    ).toBe(true);
+    expect(readSignal("CTL-2").correlation.role).toBe("member");
+
+    // 2. weeks later the same ticket exhausts again, this time on its own. The
+    // writer is a read-modify-write over the prior signal, so without an explicit
+    // delete the stale "member" role rides forward and every notification path
+    // suppresses a genuinely independent operator escalation.
+    expect(
+      defaultWriteEscalationSignal("CTL-2", { reason: "attempts exhausted" }, { orchDir }),
+    ).toBe(true);
+    expect(readSignal("CTL-2")).not.toHaveProperty("correlation");
+  });
+
+  test("an unrelated field on the prior signal is still preserved", () => {
+    defaultWriteEscalationSignal(
+      "CTL-3",
+      { reason: "attempts exhausted", correlation: { id: "corr-b", role: "anchor", anchor: "CTL-3" } },
+      { orchDir },
+    );
+    const first = readSignal("CTL-3");
+    expect(first.needsHumanSince).toBeTruthy();
+
+    defaultWriteEscalationSignal("CTL-3", { reason: "attempts exhausted" }, { orchDir });
+    const second = readSignal("CTL-3");
+    expect(second).not.toHaveProperty("correlation");
+    // the read-modify-write is otherwise intact — needsHumanSince still carries the
+    // FIRST escalation's timestamp rather than being reset.
+    expect(second.needsHumanSince).toBe(first.needsHumanSince);
+  });
+
+  test("a correlated payload still replaces a prior correlation block", () => {
+    defaultWriteEscalationSignal(
+      "CTL-4",
+      { reason: "r", correlation: { id: "corr-old", role: "member", anchor: "CTL-1" } },
+      { orchDir },
+    );
+    defaultWriteEscalationSignal(
+      "CTL-4",
+      { reason: "r", correlation: { id: "corr-new", role: "anchor", anchor: "CTL-4" } },
+      { orchDir },
+    );
+    expect(readSignal("CTL-4").correlation).toEqual({
+      id: "corr-new",
+      role: "anchor",
+      anchor: "CTL-4",
+    });
   });
 });

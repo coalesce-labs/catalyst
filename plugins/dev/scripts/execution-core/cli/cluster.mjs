@@ -9,9 +9,19 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { ownerForTicket } from "../hrw.mjs";
 import {
-  getClusterHosts,
+  // CTL-1785: `catalyst cluster` is mostly a DISPLAY/EXISTENCE surface (status
+  // shows the physical roster) — but `ownership` is a no-contention PROOF, so it
+  // must hash over the SAME roster source production HRW does (getEntitledHosts,
+  // code review chatgpt-codex-connector P2) or it silently diverges from
+  // production the moment enforce mode sheds a host. `--roster=` still overrides
+  // either default. `off` mode: getEntitledHosts() === getExistenceHosts() ===
+  // getClusterHosts().
+  getExistenceHosts,
+  getEntitledHosts,
   getHostName,
   getLivenessAnchorIssue,
+  getLivenessReadSource,
+  getLokiQueryUrl,
   getCatalystRepoDirHostsPath,
   getClusterRepoDir,
   getLayer2ConfigPath,
@@ -20,6 +30,7 @@ import {
   readClusterConfig,
 } from "../config.mjs";
 import { readPeerHeartbeatsSync } from "../cluster-heartbeat-sync.mjs";
+import { readClusterLivenessFromLokiSync } from "../loki-liveness-sync.mjs";
 import { writeSecretConfig } from "../write-secret-config.mjs";
 import { listInFlightTickets } from "../scheduler.mjs";
 import { clusterSync } from "../cluster-sync.mjs";
@@ -108,7 +119,14 @@ function commitAndPushCluster(git, clusterDir, message, { push = true } = {}) {
 
 // ── buildStatus — pure merge of roster ⊕ live heartbeats ⊕ drain ──────────
 
-export function buildStatus({ roster, self, peers, draining }) {
+export function buildStatus({
+  roster,
+  self,
+  peers,
+  draining,
+  anchor = null,
+  readSource = "linear",
+}) {
   const hosts = roster.map((name) => {
     const rec = peers[name];
     return {
@@ -119,10 +137,10 @@ export function buildStatus({ roster, self, peers, draining }) {
       inFlight: Array.isArray(rec?.in_flight_tickets) ? rec.in_flight_tickets : [],
     };
   });
-  return { roster, self, draining, hosts };
+  return { roster, self, draining, hosts, anchor, readSource };
 }
 
-function renderStatus(s) {
+export function renderStatus(s) {
   const lines = [`Cluster roster (${s.hosts.length} host${s.hosts.length === 1 ? "" : "s"}):`];
   for (const h of s.hosts) {
     const tags = [];
@@ -132,17 +150,52 @@ function renderStatus(s) {
     const inFlight = h.inFlight.length > 0 ? ` [${h.inFlight.join(", ")}]` : "";
     lines.push(`  ${h.name}${tags.length ? " (" + tags.join(", ") + ")" : ""}${inFlight}`);
   }
-  if (!s.hosts.some((h) => h.live)) lines.push("  (no live heartbeats — liveness anchor may be unset)");
+  if (!s.hosts.some((h) => h.live)) {
+    if (s.readSource && s.readSource !== "linear") {
+      lines.push(
+        `  (no live heartbeats from liveness read source '${s.readSource}' — ` +
+          `anchor attachments are not consulted)`,
+      );
+    } else if (!s.anchor) {
+      lines.push(
+        `  (no liveness anchor configured — set catalyst.cluster.livenessAnchorIssue, ` +
+          `e.g. 'catalyst-cluster set-anchor <ticket>')`,
+      );
+    } else {
+      lines.push(
+        `  (no live heartbeats on anchor '${s.anchor}' — every host is stale, or the ` +
+          `anchor is broken; run 'catalyst doctor' and read the liveness-anchor check)`,
+      );
+    }
+  }
   return lines.join("\n") + "\n";
 }
 
-export function runStatus(argv = []) {
-  const anchor = getLivenessAnchorIssue();
+export function runStatus(argv = [], deps = {}) {
+  const {
+    getAnchor = getLivenessAnchorIssue,
+    getReadSource = getLivenessReadSource,
+    getRoster = getExistenceHosts,
+    getSelf = getHostName,
+    readLinearPeers = readPeerHeartbeatsSync,
+    readLokiPeers = readClusterLivenessFromLokiSync,
+    getLokiUrl = getLokiQueryUrl,
+    getDraining = () => isDraining(getExecutionCoreDir()),
+  } = deps;
+  const anchor = getAnchor();
+  const readSource = getReadSource();
+  const peers = readSource === "loki"
+    ? readLokiPeers({ lokiUrl: getLokiUrl() })
+    : anchor
+      ? readLinearPeers({ anchorIssue: anchor })
+      : {};
   const status = buildStatus({
-    roster: getClusterHosts(),
-    self: getHostName(),
-    peers: anchor ? readPeerHeartbeatsSync({ anchorIssue: anchor }) : {},
-    draining: isDraining(getExecutionCoreDir()),
+    roster: getRoster(),
+    self: getSelf(),
+    peers,
+    draining: getDraining(),
+    anchor,
+    readSource,
   });
   if (argv.includes("--json")) {
     process.stdout.write(JSON.stringify(status) + "\n");
@@ -490,7 +543,7 @@ export function runOwnership(argv = [], { listTickets = listTodoTickets } = {}) 
   const rosterArg = argv.find((a) => a.startsWith("--roster="));
   const roster = rosterArg
     ? rosterArg.slice("--roster=".length).split(",").map((s) => s.trim()).filter(Boolean)
-    : getClusterHosts();
+    : getEntitledHosts();
   let tickets;
   try {
     tickets = listTickets();

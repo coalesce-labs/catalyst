@@ -70,6 +70,7 @@ function ticket(id: string, overrides: Partial<BoardTicket> = {}): BoardTicket {
     currentPhaseSince: null,
     attention: null,
     attentionSince: null,
+    correlationRole: null, // CAT-170
     blockers: [],
     host: null,
     generation: null,

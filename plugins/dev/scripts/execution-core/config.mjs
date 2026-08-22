@@ -8,7 +8,7 @@
 
 import { homedir, hostname } from "node:os";
 import { resolve, join } from "node:path";
-import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync, renameSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync, renameSync, appendFileSync } from "node:fs";
 
 // CTL-1211: schema-version policy for cluster config. config-schema.mjs is a
 // dep-free sibling leaf, so this import cannot reintroduce the bun-install crash
@@ -85,6 +85,28 @@ export {
   resolveDeploymentMode,
   getDeploymentMode,
 } from "../lib/deployment-mode.mjs";
+// CTL-1786: a LOCAL binding of the deployment resolver. The block above is `export … from`,
+// which re-exports without creating a usable local name, so resolveLeaseAuthorityMode's
+// single-host coherence needs this explicit import to call it in the module body.
+import { resolveDeploymentMode as resolveDeploymentModeLocal } from "../lib/deployment-mode.mjs";
+
+// CTL-1785 (W13): the entitlement seam — a zero-import leaf shared verbatim by
+// execution-core (this re-export) and doctor (bare-Node import), same rationale
+// as deployment-mode above. getEntitledHosts() / getExistenceHosts() below split
+// fleet MEMBERSHIP into existence (local, self-declared) vs entitlement
+// (may-take-work). Imported locally (not just re-exported) because
+// getEntitledHosts' default params reference getEntitlementMode /
+// makeLocalEntitlementProvider, and resolveEntitledRoster owns the shadow/enforce
+// logic (split out to keep config.mjs import-light).
+import {
+  ENTITLEMENT_MODES,
+  resolveEntitlementMode,
+  getEntitlementMode,
+  makeLocalEntitlementProvider,
+} from "../lib/entitlement.mjs";
+import { resolveEntitledRoster } from "./entitlement-roster.mjs";
+import { buildCanonicalEventLine } from "./lib/canonical-event.mjs";
+export { ENTITLEMENT_MODES, resolveEntitlementMode, getEntitlementMode };
 // CTL-1929: the canonical github-feed resolver. Zero-import leaf for the same reason
 // deployment-mode.mjs above is one — doctor.mjs runs under bare Node and cannot load
 // this file (its chain reaches bun:sqlite via linear-query.mjs).
@@ -447,6 +469,56 @@ export function getLayer2ConfigPath() {
   return legacyPath;
 }
 
+// CTL-1210: sibling file resolvers — resolved off the SAME dir getLayer2ConfigPath()
+// returns so the deferred canonical cutover (config.mjs:432–444) is untouched.
+// cluster-secrets.json: SHARED, byte-identical on every cluster node.
+// node.json: PER-NODE, generated/edited locally, never mirrored.
+export function resolveClusterSecretsPath() {
+  return resolve(getLayer2ConfigPath(), "..", "cluster-secrets.json");
+}
+export function resolveNodeConfigPath() {
+  return resolve(getLayer2ConfigPath(), "..", "node.json");
+}
+
+// CTL-1210: merged Layer-2 reader. Composes config.json (bottom) < node.json <
+// cluster-secrets.json (top). Each read is fail-open to {} (ENOENT/malformed/absent
+// key), matching every existing readLayer2* site. Shared and per-node keys are
+// disjoint by classification so precedence only matters for the legacy fallback:
+// every migrated key resolves from its new home; every un-migrated key still
+// resolves from config.json. With only config.json present, the merged result
+// is byte-equal to today's read — zero behavior change.
+function _deepMergeLayer2(target, source) {
+  const out = { ...target };
+  for (const key of Object.keys(source)) {
+    if (
+      source[key] !== null &&
+      typeof source[key] === "object" &&
+      !Array.isArray(source[key]) &&
+      target[key] !== null &&
+      typeof target[key] === "object" &&
+      !Array.isArray(target[key])
+    ) {
+      out[key] = _deepMergeLayer2(target[key], source[key]);
+    } else {
+      out[key] = source[key];
+    }
+  }
+  return out;
+}
+export function readLayer2Merged() {
+  const readCatalyst = (p) => {
+    try {
+      return JSON.parse(readFileSync(p, "utf8"))?.catalyst ?? {};
+    } catch {
+      return {};
+    }
+  };
+  const legacy = readCatalyst(getLayer2ConfigPath());
+  const node = readCatalyst(resolveNodeConfigPath());
+  const shared = readCatalyst(resolveClusterSecretsPath());
+  return { catalyst: _deepMergeLayer2(_deepMergeLayer2(legacy, node), shared) };
+}
+
 // The repo root that owns the committed cluster roster (.catalyst/hosts.json).
 // CATALYST_CONFIG_FILE points at <repoRoot>/.catalyst/config.json (mirrors the
 // reaper-config resolution in daemon.mjs main()); otherwise fall back to the
@@ -505,8 +577,7 @@ export function getHostName() {
   const envOverride = process.env.CATALYST_HOST_NAME;
   if (typeof envOverride === "string" && envOverride.length > 0) return envOverride;
   try {
-    const parsed = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"));
-    const name = parsed?.catalyst?.host?.name;
+    const name = readLayer2Merged().catalyst?.host?.name;
     if (typeof name === "string" && name.length > 0) return name;
   } catch {
     /* missing/malformed Layer-2 file → hostname default */
@@ -524,8 +595,8 @@ export function isHostNamePinnedFromConfig() {
   const env = process.env.CATALYST_HOST_NAME;
   if (typeof env === "string" && env.length > 0) return true;
   try {
-    const parsed = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"));
-    return typeof parsed?.catalyst?.host?.name === "string" && parsed.catalyst.host.name.length > 0;
+    const name = readLayer2Merged().catalyst?.host?.name;
+    return typeof name === "string" && name.length > 0;
   } catch {
     return false;
   }
@@ -561,7 +632,7 @@ const NODE_CLASS_MOST_RESTRICTIVE = "monitor";
 // being silently flattened to "absent".
 function readLayer2NodeClass() {
   try {
-    return JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.node?.class;
+    return readLayer2Merged().catalyst?.node?.class;
   } catch {
     /* missing/malformed Layer-2 file → undefined (default-to-worker) */
     return undefined;
@@ -1030,7 +1101,7 @@ export function getStaticRoster() {
     if (hosts.length > 0) return hosts;
   }
   try {
-    const raw = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cluster
+    const raw = readLayer2Merged().catalyst?.cluster
       ?.staticRoster;
     if (Array.isArray(raw)) {
       const hosts = raw.filter((h) => typeof h === "string" && h.length > 0);
@@ -1104,8 +1175,97 @@ export function resolveClusterHosts() {
 // hashes over). Delegates to resolveClusterHosts and returns just the hosts array
 // (the existing callers' contract; CTL-1273 moved the precedence into the
 // resolver so the boot assertion and the reader can never diverge). Never throws.
+//
+// CTL-1785: RETAINED, not deleted. It is byte-for-byte the EXISTENCE roster
+// (`resolveClusterHosts().hosts`), so display/observability callers that still read
+// it (orch-monitor's governance/roster views) get correct existence data. New code
+// should call the intent-explicit accessors below: getExistenceHosts() for
+// display/topology, getEntitledHosts() for any "may this host take work?" gate. The
+// hard rule the caller-classification guard enforces: NO entitlement caller reads
+// getClusterHosts() (they all hash over getEntitledHosts()).
 export function getClusterHosts() {
   return resolveClusterHosts().hosts;
+}
+
+// --- CTL-1785 (W13): existence vs. entitlement split ---
+//
+// getClusterHosts() historically served BOTH questions at once — "is this node in
+// the fleet?" (existence) and "may this node take work?" (entitlement) — which is
+// the CTL-1760 conflation (a silent node stayed a work-owner "by declaration" for
+// 33 days). These two accessors separate them. In the default `off` mode they are
+// byte-identical to getClusterHosts(), so reclassifying callers is behavior-neutral.
+
+// getExistenceHosts — local, self-declared, no network. An alias of today's local
+// roster: this is what observability / display / archive / topology callers want,
+// and it must keep working during a cloud/authority outage. multiHost topology
+// facts (the fenceGuard !multiHost short-circuit) stay keyed on THIS, never on
+// entitlement, so shedding can never re-enable an N=1 disarm (CTL-1781's defect
+// class).
+export function getExistenceHosts() {
+  return resolveClusterHosts().hosts;
+}
+
+// defaultEntitlementProvider — the local provider (entitled iff self ∈ roster),
+// which reproduces today's behavior. Swapped for W12's authority provider
+// (CTL-1786) when the lease store lands. A factory (not a singleton) so a fresh
+// ttlMs default is read each call and tests can inject freely.
+export function defaultEntitlementProvider() {
+  return makeLocalEntitlementProvider();
+}
+
+// defaultEntitlementEmit — the production event-append seam for shadow/enforce
+// entitlement events (`entitlement.would-shed/shed/restored.<host>`). Lives here,
+// not in entitlement-roster.mjs, because config.mjs owns getEventLogPath and
+// entitlement-roster.mjs must not import config.mjs (cycle). Best-effort/fail-open:
+// a failed append never blocks roster resolution — the same posture as
+// stale-pr-rescue-timer's defaultEmit. v3 bare-name via the canonical builder so
+// otel-forward's event-name boundary resolves it and the ticket suffix is not
+// present (the suffix is the HOST, mirrored as an attribute for off-machine reads).
+function defaultEntitlementEmit(name, payload) {
+  try {
+    appendFileSync(
+      getEventLogPath(),
+      buildCanonicalEventLine({
+        name,
+        payload,
+        attributes: payload?.host ? { "catalyst.host.name": payload.host } : {},
+      }),
+    );
+  } catch {
+    /* best-effort — never block dispatch/recovery on a telemetry append */
+  }
+}
+
+// Inter-tick shed-state accumulation for entitlement.restored.* (CTL-2108).
+// Module-level so the primary scheduler tick can accumulate across calls without
+// threading the Set through the scheduler's large closure. Opt-in via trackShedState;
+// only the primary per-tick call (scheduler.mjs:5354) enables it.
+let _entitlementShedState = new Set();
+/** @internal test-only — reset inter-tick shed accumulation between test cases */
+export function __resetEntitlementShedState() { _entitlementShedState = new Set(); }
+
+// getEntitledHosts — "may this host take work?" The roster dispatch/recovery hash
+// HRW ownership over. In `off` mode this is byte-identical to getClusterHosts(); in
+// shadow/enforce it consults the injectable provider via resolveEntitledRoster.
+// Never throws; fail direction preserves the full roster (today's behavior).
+// Every parameter is an injection seam with a production default, so callers that
+// already accept an injectable roster keep their seam — only the default changes.
+export function getEntitledHosts({
+  mode = getEntitlementMode(),
+  provider = defaultEntitlementProvider(),
+  hosts = getClusterHosts(),
+  self = getHostName(),
+  emit = defaultEntitlementEmit,
+  trackShedState = false,
+} = {}) {
+  if (mode === "off") return hosts;
+  const previouslyShedHosts = trackShedState ? _entitlementShedState : undefined;
+  const roster = resolveEntitledRoster({ mode, provider, hosts, self, emit, previouslyShedHosts });
+  if (trackShedState && mode === "enforce" && Array.isArray(hosts) && Array.isArray(roster)) {
+    // newShed = hosts \ roster, excluding self (self is always kept, never shed).
+    _entitlementShedState = new Set(hosts.filter((h) => h !== self && !roster.includes(h)));
+  }
+  return roster;
 }
 
 // getCatalystRepoDirHostsPath — absolute path to the committed cluster roster.
@@ -1143,7 +1303,7 @@ export function getLivenessAnchorIssue() {
   const env = process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
   if (typeof env === "string" && env.length > 0) return env;
   try {
-    const a = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cluster
+    const a = readLayer2Merged().catalyst?.cluster
       ?.livenessAnchorIssue;
     if (typeof a === "string" && a.length > 0) return a;
   } catch {
@@ -1268,9 +1428,44 @@ export const HEARTBEAT_GRACE_MS = Number(process.env.EXECUTION_CORE_HEARTBEAT_GR
 //
 // Invalid ⇒ the DEFAULT, reported through `onInvalid` (the daemon logs it) —
 // never a silent clamp, because the failure it causes is invisible for hours.
-export const HEARTBEAT_TAIL_WINDOW_MIN_MS = HEARTBEAT_GRACE_MS * 2;
 export const HEARTBEAT_TAIL_WINDOW_MAX_MS = 31 * 24 * 60 * 60_000; // 31 days
-export const HEARTBEAT_TAIL_WINDOW_DEFAULT_MS = HEARTBEAT_GRACE_MS * 72; // 12 h at the default grace
+// Codex #3760 review: the ceiling outranks the derived floor. A pathological grace
+// (> 15.5 days) would push 2x grace past the 31-day log horizon; an empty [min, max]
+// range must collapse to the ceiling, never invert it — clampDefault checks the min
+// side first, so an uncapped MIN here would return 2x grace and defeat the MAX.
+export const HEARTBEAT_TAIL_WINDOW_MIN_MS = Math.min(
+  HEARTBEAT_GRACE_MS * 2,
+  HEARTBEAT_TAIL_WINDOW_MAX_MS,
+);
+// CTL-1550: clamped to [min, max] so a pathologically large HEARTBEAT_GRACE_MS cannot
+// silently push the derived default above the 31-day ceiling. The derived default can
+// only breach the MAX side (since 72 > 2 ensures it always exceeds the MIN floor).
+export const HEARTBEAT_TAIL_WINDOW_DEFAULT_MS = Math.min(
+  HEARTBEAT_GRACE_MS * 72, // 12 h at the default grace
+  HEARTBEAT_TAIL_WINDOW_MAX_MS,
+);
+
+// clampDefault — apply [min, max] to a caller-supplied default and fire onInvalid when
+// a clamp was needed. ONLY fires when clamping actually occurs (not on a normal default).
+function clampDefault(defaultMs, min, max, onInvalid) {
+  // Codex #3760: an empty range (min > max, e.g. an injected floor above the
+  // month horizon) collapses to the CEILING — the min-side branch runs first,
+  // so an uncollapsed min would return a value above max and undo the cap.
+  if (min > max) min = max;
+  if (!Number.isFinite(defaultMs) || defaultMs < min) {
+    const clamped = min;
+    if (typeof onInvalid === "function")
+      onInvalid({ raw: String(defaultMs), reason: `derived default ${defaultMs}ms is below the ${min}ms minimum`, defaultMs: clamped, min, max });
+    return clamped;
+  }
+  if (defaultMs > max) {
+    const clamped = max;
+    if (typeof onInvalid === "function")
+      onInvalid({ raw: String(defaultMs), reason: `derived default ${defaultMs}ms exceeds the ${max}ms maximum`, defaultMs: clamped, min, max });
+    return clamped;
+  }
+  return defaultMs;
+}
 
 export function resolveHeartbeatTailWindowMs(
   raw,
@@ -1281,10 +1476,11 @@ export function resolveHeartbeatTailWindowMs(
     onInvalid = null,
   } = {}
 ) {
-  // Unset / empty is the documented way to take the default — stay silent.
-  if (raw === undefined || raw === null) return defaultMs;
+  // Unset / empty is the documented way to take the default — stay silent when the
+  // default is in-band; clamp and report when it isn't (e.g. a huge custom grace).
+  if (raw === undefined || raw === null) return clampDefault(defaultMs, min, max, onInvalid);
   const str = String(raw).trim();
-  if (str === "") return defaultMs;
+  if (str === "") return clampDefault(defaultMs, min, max, onInvalid);
 
   const n = Number(str);
   let reason = null;
@@ -1670,6 +1866,9 @@ export function readRatelimitPollerConfig() {
     usageEndpoint:
       process.env.EXECUTION_CORE_RATELIMIT_USAGE_ENDPOINT ||
       "https://api.anthropic.com/api/oauth/usage",
+    // CTL-2056: "accounts-env" (default) uses the durable setup-token probe;
+    // "oauth-login" restores the prior interactive-login keychain/file path.
+    credentialMode: process.env.EXECUTION_CORE_RATELIMIT_CRED_MODE || "accounts-env",
   };
 }
 
@@ -1739,7 +1938,7 @@ export const WATCHDOG_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2Watchdog() {
   try {
-    const w = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.watchdog;
+    const w = readLayer2Merged().catalyst?.watchdog;
     return w && typeof w === "object" ? w : {};
   } catch {
     return {};
@@ -1819,8 +2018,15 @@ export function readDaemonWatchdogConfigLayer1(configPath) {
   }
 }
 
-export function readDaemonWatchdogConfig(configPath) {
-  const l1 = readDaemonWatchdogConfigLayer1(configPath);
+// `layer1Override` lets a caller that has ALREADY read and validated the config
+// file hand in that exact snapshot instead of having it re-read here. Without it
+// a caller validates one read and this function consumes a second, so a file
+// replaced between the two is validated in one state and consumed in another —
+// and since readDaemonWatchdogConfigLayer1 swallows a parse failure and returns
+// {}, that divergence degrades silently to defaults. Omitted (undefined) keeps
+// the previous read-at-use behaviour for every existing caller.
+export function readDaemonWatchdogConfig(configPath, layer1Override) {
+  const l1 = layer1Override ?? readDaemonWatchdogConfigLayer1(configPath);
   // CATALYST_DAEMON_WATCHDOG=0 is the kill-switch → mode:off (mirrors
   // readWatchdogConfig's CATALYST_WATCHDOG=0). Otherwise env > Layer-1 > shadow.
   const mode =
@@ -1875,7 +2081,7 @@ const COST_CAP_DEFAULT_PROM_URL = "http://100.65.193.30:9098"; // OTel/Prom stac
 
 function readLayer2CostCap() {
   try {
-    const c = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.costCap;
+    const c = readLayer2Merged().catalyst?.costCap;
     return c && typeof c === "object" ? c : {};
   } catch {
     return {};
@@ -1956,7 +2162,7 @@ export const STALL_JANITOR_DEFAULT_CENSUS_INTERVAL_MS = 900_000; // 15 minutes
 
 function readLayer2StallJanitor() {
   try {
-    const sj = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.stallJanitor;
+    const sj = readLayer2Merged().catalyst?.stallJanitor;
     return sj && typeof sj === "object" ? sj : {};
   } catch {
     return {};
@@ -2002,7 +2208,7 @@ export const UNSTUCK_SWEEP_DEFAULT_INTERVAL_MS = 900_000; // 15 minutes
 
 function readLayer2UnstuckSweep() {
   try {
-    const us = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.unstuckSweep;
+    const us = readLayer2Merged().catalyst?.unstuckSweep;
     return us && typeof us === "object" ? us : {};
   } catch {
     return {};
@@ -2047,7 +2253,7 @@ export const RECOVERY_PASS_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2RecoveryPass() {
   try {
-    const rp = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.recovery?.pass;
+    const rp = readLayer2Merged().catalyst?.recovery?.pass;
     return rp && typeof rp === "object" ? rp : {};
   } catch {
     return {};
@@ -2083,7 +2289,7 @@ const DELEGATE_FIRST_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2DelegateFirst() {
   try {
-    const df = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.delegateFirst;
+    const df = readLayer2Merged().catalyst?.delegateFirst;
     return df && typeof df === "object" ? df : {};
   } catch {
     return {};
@@ -2101,6 +2307,34 @@ export function readDelegateFirstConfig(envObj = process.env) {
   return { mode };
 }
 
+// CTL-2000: steward-first escalation mode reader. Same three-layer ladder as
+// readDelegateFirstConfig — env (CATALYST_STEWARD_ESCALATION) > Layer-2
+// (.catalyst.stewardEscalation.mode) > code default. The ONE deliberate
+// deviation from delegate-first: the safe default is "shadow", not "off", so a
+// merge logs what it WOULD route (would-route-steward) without changing any
+// instrument's live behavior until an operator flips it to "enforce".
+export const STEWARD_ESCALATION_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2StewardEscalation() {
+  try {
+    const se = readLayer2Merged().catalyst?.stewardEscalation;
+    return se && typeof se === "object" ? se : {};
+  } catch {
+    return {};
+  }
+}
+
+export function readStewardEscalationConfig(envObj = process.env) {
+  const l2 = readLayer2StewardEscalation();
+  const env = envObj?.CATALYST_STEWARD_ESCALATION;
+  let mode;
+  if (env === "0") mode = "off";
+  else if (typeof env === "string" && STEWARD_ESCALATION_MODES.has(env)) mode = env;
+  else if (typeof l2.mode === "string" && STEWARD_ESCALATION_MODES.has(l2.mode)) mode = l2.mode;
+  else mode = "shadow"; // conservative default: shadow-first, never act until flipped
+  return { mode };
+}
+
 // CTL-1847: cloud-feed dispatch-source mode reader. Same ladder as
 // readDelegateFirstConfig — env (CATALYST_CLOUD_FEED) > Layer-2
 // (.catalyst.cloudFeed.mode) > 'off'.
@@ -2115,7 +2349,7 @@ const CLOUD_FEED_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2CloudFeed() {
   try {
-    const cf = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cloudFeed;
+    const cf = readLayer2Merged().catalyst?.cloudFeed;
     return cf && typeof cf === "object" ? cf : {};
   } catch {
     return {};
@@ -2168,8 +2402,29 @@ export function readCloudFeedConfig(envObj = process.env) {
 // the wrong direction for a containment knob — an operator reaching for the env var
 // to REDUCE actuation would have silently left a Layer-2 `enforce` live.
 export function readGithubFeedConfig(envObj = process.env) {
-  const { mode, intervalSec } = resolveGithubFeedMode({ env: envObj });
-  return { mode, intervalSec };
+  const { mode, intervalSec, source } = resolveGithubFeedMode({ env: envObj });
+  return { mode, intervalSec, source };
+}
+
+// CTL-2011 Phase 3: the broker/orch-monitor VIEW of the github-feed mode — the
+// second reader whose disagreement with this daemon is the reader-split alarm.
+//
+// The daemon (this process) sources execution-core.env, so its own mode carries
+// any CATALYST_GITHUB_FEED pin. The broker and orch-monitor NEVER source that
+// file, so their mode is the ambient env with the pin stripped — only Layer-2
+// (or the default) applies. This is the exact same pin-strip idiom doctor.mjs's
+// checkGithubFeedReaderConsistency uses to compute its broker view; here it is
+// the resolver the daemon hands to startGithubFeedTimer as `resolveLayer2ModeFn`
+// so the timer can edge-detect a split against the pinned exec-core mode. Named
+// (not inlined at the call site) so the production wiring is unit-testable and a
+// regression is caught by a test rather than only in the field.
+export function resolveGithubFeedLayer2Mode(envObj = process.env) {
+  const {
+    CATALYST_GITHUB_FEED: _pin,
+    CATALYST_GITHUB_FEED_INTERVAL_SEC: _pinInterval,
+    ...stripped
+  } = envObj;
+  return readGithubFeedConfig(stripped);
 }
 
 // CTL-1889: Linear write-proxy mode reader. Same ladder as readCloudFeedConfig —
@@ -2190,7 +2445,7 @@ export const LINEAR_WRITE_PROXY_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2LinearWriteProxy() {
   try {
-    const p = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.linearWriteProxy;
+    const p = readLayer2Merged().catalyst?.linearWriteProxy;
     return p && typeof p === "object" ? p : {};
   } catch {
     return {};
@@ -2218,6 +2473,52 @@ export function readLinearWriteProxyConfig(envObj = process.env) {
   return { mode, routes };
 }
 
+// CTL-1786: lease-authority claim mode reader. Same ladder as readLinearWriteProxyConfig —
+// env (CATALYST_LEASE_AUTHORITY) > Layer-2 (.catalyst.leaseAuthority.mode) > 'off'.
+//
+// ⛔ DELIBERATELY NOT READ FROM LAYER-1. This gate sits on the LIVE claim/dispatch path, so it
+// follows the write-proxy / cloud-feed containment posture, NOT the plan's literal "Layer-1"
+// mention: a claim gate in the committable Layer-1 config would let a MERGE flip the whole fleet
+// into enforce with no operator action and no per-host rollback (the exact hazard the githubFeed
+// reader's comment above spells out). Enforce is opted into per host via env or the host-local
+// Layer-2, and it ships 'off' so merging this wiring is a strict no-op everywhere until an
+// operator says otherwise.
+//
+// Deployment coherence: on a single-host deployment there are no peers to arbitrate, so `enforce`
+// degrades to `off` — a single-host clone that inherited an enforce env can never block its own
+// dispatch on a cloud round-trip. (The claim path is already unreachable single-host — callers
+// gate on a non-null clusterGeneration — this makes the guarantee explicit and fail-safe.) The
+// deployment read is wrapped so it can never throw the resolution.
+export const LEASE_AUTHORITY_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2LeaseAuthority() {
+  try {
+    const p = readLayer2Merged().catalyst?.leaseAuthority;
+    return p && typeof p === "object" ? p : {};
+  } catch {
+    return {};
+  }
+}
+
+export function resolveLeaseAuthorityMode(envObj = process.env) {
+  const l2 = readLayer2LeaseAuthority();
+  const env = envObj.CATALYST_LEASE_AUTHORITY;
+  let mode;
+  if (env === "0") mode = "off";
+  else if (typeof env === "string" && LEASE_AUTHORITY_MODES.has(env)) mode = env;
+  else if (typeof l2.mode === "string" && LEASE_AUTHORITY_MODES.has(l2.mode)) mode = l2.mode;
+  else mode = "off";
+  if (mode === "enforce") {
+    try {
+      const dep = resolveDeploymentModeLocal({ env: envObj });
+      if (dep?.mode === "single-host") mode = "off";
+    } catch {
+      // Deployment mode unreadable → leave enforce (cluster is this repo's Layer-1 default).
+    }
+  }
+  return mode;
+}
+
 // CTL-1245: dead-but-running doc-worker reclaim mode reader. Mirrors
 // readRecoveryPassConfig / readUnstuckSweepConfig exactly: env
 // (CATALYST_DEAD_DOC_WORKER_RECLAIM) overrides Layer-2 config
@@ -2234,7 +2535,7 @@ export const DEAD_DOC_WORKER_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2DeadDocWorker() {
   try {
-    const d = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.recovery
+    const d = readLayer2Merged().catalyst?.recovery
       ?.deadDocWorker;
     return d && typeof d === "object" ? d : {};
   } catch {
@@ -2285,7 +2586,7 @@ export const BOARD_HEALTH_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2BoardHealth() {
   try {
-    const b = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.boardHealth;
+    const b = readLayer2Merged().catalyst?.boardHealth;
     return b && typeof b === "object" ? b : {};
   } catch {
     return {};
@@ -2349,7 +2650,7 @@ export const COORDINATION_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2Coordination() {
   try {
-    const c = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.coordination;
+    const c = readLayer2Merged().catalyst?.coordination;
     return c && typeof c === "object" ? c : {};
   } catch {
     return {};
@@ -2480,7 +2781,7 @@ export const LINEAR_REPLICA_MODES = new Set(["on", "off"]);
 
 function readLayer2LinearReplica() {
   try {
-    const r = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.linearReplica;
+    const r = readLayer2Merged().catalyst?.linearReplica;
     return r && typeof r === "object" ? r : {};
   } catch {
     return {};
@@ -2662,7 +2963,7 @@ export function readDelegateQueueDepth() {
 
 function readLayer2Governance() {
   try {
-    const g = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.governance;
+    const g = readLayer2Merged().catalyst?.governance;
     return g && typeof g === "object" ? g : {};
   } catch {
     return {};
@@ -2762,4 +3063,158 @@ export function readGovernanceSources(env = process.env) {
     DEAD_DOC_WORKER_MODES
   );
   return out;
+}
+
+// CTL-1210: Frozen classification map (CTL-1187 table). Keyed by catalyst.* dotted
+// prefix; longest-prefix wins so "cluster.livenessAnchorIssue" → shared while
+// "cluster.staticRoster" → node. This is THE single source of truth for both the
+// migration (splitLayer2Config) and the writers.
+export const LAYER2_KEY_CLASS = Object.freeze({
+  "linear.bot": "shared",
+  "cluster.livenessAnchorIssue": "shared",
+  "layer1Identity": "shared",
+  "repository": "shared",
+  "feedback": "shared",
+  "monitor.github.smeeChannel": "shared",
+  "githubFeed.mode": "node",
+  "host.name": "node",
+  "node.class": "node",
+  "cluster.staticRoster": "node",
+  "watchdog": "node",
+  "costCap": "node",
+  "stallJanitor": "node",
+  "unstuckSweep": "node",
+  "recovery": "node",
+  "delegateFirst": "node",
+  "stewardEscalation": "node",
+  "cloudFeed": "node",
+  "linearWriteProxy": "node",
+  "leaseAuthority": "node",
+  "boardHealth": "node",
+  "coordination": "node",
+  "linearReplica": "node",
+  "governance": "node",
+  "orchestration": "node",
+  "readReplica": "node",
+  "monitor": "node",
+});
+
+// _classifyLayer2Key — return the LAYER2_KEY_CLASS class for a dotted catalyst.*
+// key, using longest-prefix-wins. Returns "unclassified" when no prefix matches.
+function _classifyLayer2Key(dotPath) {
+  let best = null;
+  let bestLen = -1;
+  for (const [prefix, cls] of Object.entries(LAYER2_KEY_CLASS)) {
+    if (dotPath === prefix || dotPath.startsWith(prefix + ".")) {
+      if (prefix.length > bestLen) {
+        bestLen = prefix.length;
+        best = cls;
+      }
+    }
+  }
+  return best ?? "unclassified";
+}
+
+// _sortedStringify — deterministic, 0o600 JSON serialization. Stable across runs
+// so the doctor hash check is meaningful.
+function _sortedStringify(obj) {
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+    return JSON.stringify(obj);
+  }
+  const keys = Object.keys(obj).sort();
+  const parts = keys.map((k) => `${JSON.stringify(k)}:${_sortedStringify(obj[k])}`);
+  return `{${parts.join(",")}}`;
+}
+
+// _setDotPath — set a dotted path inside a nested object, creating intermediaries.
+function _setDotPath(obj, dotPath, value) {
+  const parts = dotPath.split(".");
+  // Guard all segments upfront with explicit === comparisons (CodeQL-recognized sanitiser).
+  for (const p of parts) {
+    if (p === "__proto__" || p === "constructor" || p === "prototype") {
+      throw new Error(`_setDotPath: forbidden key segment "${p}"`);
+    }
+  }
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (cur[parts[i]] == null || typeof cur[parts[i]] !== "object") {
+      cur[parts[i]] = {};
+    }
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+
+// CTL-1210: splitLayer2Config — classify every catalyst.* key in an existing
+// config.json by LAYER2_KEY_CLASS, write shared keys to cluster-secrets.json and
+// per-node keys to node.json (both 0o600, sorted-key serialization, tmp+rename),
+// then rewrite config.json with the migrated keys removed.
+//
+// Idempotent: re-running on an already-split node is a no-op.
+// Crash-safe: new files are written FIRST; config.json is trimmed LAST.
+// Unclassified keys stay in config.json and are never dropped.
+// Mixed subtrees (e.g. catalyst.cluster contains both a shared and a node key)
+// are recursively decomposed — the classifer recurses when a path is unclassified
+// at a given depth but may have classified children.
+export function splitLayer2Config({
+  configPath = getLayer2ConfigPath(),
+  sharedPath = resolveClusterSecretsPath(),
+  nodePath = resolveNodeConfigPath(),
+} = {}) {
+  let existing;
+  try {
+    existing = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    return; // config.json absent or malformed — nothing to migrate
+  }
+  const catalyst = existing?.catalyst;
+  if (!catalyst || typeof catalyst !== "object" || Array.isArray(catalyst)) return;
+
+  const sharedCat = {};
+  const nodeCat = {};
+  const leftoverCat = {};
+
+  function walkCatalyst(obj, prefix) {
+    for (const [k, v] of Object.entries(obj)) {
+      const dotPath = prefix ? `${prefix}.${k}` : k;
+      const cls = _classifyLayer2Key(dotPath);
+      if (cls === "shared") {
+        _setDotPath(sharedCat, dotPath, v);
+      } else if (cls === "node") {
+        _setDotPath(nodeCat, dotPath, v);
+      } else if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+        // Unclassified at this depth — recurse into children to find classified sub-paths.
+        walkCatalyst(v, dotPath);
+      } else {
+        _setDotPath(leftoverCat, dotPath, v);
+      }
+    }
+  }
+  walkCatalyst(catalyst, "");
+
+  function writeAtomic(path, catObj) {
+    const content = _sortedStringify({ catalyst: catObj }) + "\n";
+    const tmp = `${path}.tmp.${process.pid}`;
+    writeFileSync(tmp, content, { mode: 0o600 });
+    renameSync(tmp, path);
+  }
+
+  const hasShared = Object.keys(sharedCat).length > 0;
+  const hasNode = Object.keys(nodeCat).length > 0;
+
+  // If config.json had no classified keys, nothing to migrate — preserve all files.
+  if (!hasShared && !hasNode) return;
+
+  // Write shared + node FIRST (crash-safe ordering: new files written before trimming).
+  // Always write both sibling files when any migration runs to establish clean known state
+  // so subsequent idempotency checks can read both files unconditionally.
+  writeAtomic(sharedPath, sharedCat);
+  writeAtomic(nodePath, nodeCat);
+
+  // Trim config.json to only leftover (unclassified) keys — LAST step.
+  const trimmedCat = Object.keys(leftoverCat).length > 0 ? leftoverCat : {};
+  const trimContent = _sortedStringify({ catalyst: trimmedCat }) + "\n";
+  const trimTmp = `${configPath}.tmp.${process.pid}`;
+  writeFileSync(trimTmp, trimContent, { mode: 0o600 });
+  renameSync(trimTmp, configPath);
 }

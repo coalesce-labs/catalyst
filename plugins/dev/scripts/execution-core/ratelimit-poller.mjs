@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { readRatelimitPollerConfig, log } from "./config.mjs";
 import { emitRatelimitEvent, RATELIMIT_EVENT_SAMPLED } from "./ratelimit-event.mjs";
+import { defaultProbeAccounts, pickActiveAccount } from "./ratelimit-accounts-probe.mjs";
 
 const PROFILE_ENDPOINT = "https://api.anthropic.com/api/oauth/profile";
 const OAUTH_BETA = "oauth-2025-04-20";
@@ -174,7 +175,8 @@ async function defaultResolveEmail(token, { userAgent }) {
  *
  * @param {object} opts
  * @param {object}   [opts.clock=realClock()]                fake-clock seam
- * @param {object}   [opts.config=readRatelimitPollerConfig()] cadence + endpoint
+ * @param {object}   [opts.config=readRatelimitPollerConfig()] cadence + endpoint + credentialMode
+ * @param {Function} [opts.probeAccounts=defaultProbeAccounts] accounts-env probe (CTL-2056)
  * @param {Function} [opts.readToken=defaultReadToken]       OAuth token reader (sync, returns string|null)
  * @param {Function} [opts.fetchUsage=defaultFetchUsage]     usage GET ({status,body})
  * @param {Function} [opts.resolveEmail=defaultResolveEmail] one-shot email resolver
@@ -184,6 +186,7 @@ async function defaultResolveEmail(token, { userAgent }) {
 export function startRatelimitPoller({
   clock = realClock(),
   config = readRatelimitPollerConfig(),
+  probeAccounts = defaultProbeAccounts,
   readToken = defaultReadToken,
   fetchUsage = defaultFetchUsage,
   resolveEmail = defaultResolveEmail,
@@ -215,6 +218,35 @@ export function startRatelimitPoller({
         return;
       }
 
+      // CTL-2056: durable setup-token path (default). When credentialMode is
+      // "oauth-login" fall through to the legacy interactive-login path below.
+      const credMode = config.credentialMode ?? "accounts-env";
+      if (credMode !== "oauth-login") {
+        const probe = await probeAccounts();
+        const account = pickActiveAccount(probe);
+        if (!account) {
+          log.warn("ratelimit-poller: no active account from accounts probe; skipping tick");
+          return;
+        }
+        emit(
+          RATELIMIT_EVENT_SAMPLED,
+          {
+            email: account.email ?? null,
+            fiveHourPct: account.fiveHour?.pct ?? null,
+            sevenDayPct: account.sevenDay?.pct ?? null,
+            fiveHourResetsAt: account.fiveHour?.resetsAt ?? null,
+            sevenDayResetsAt: account.sevenDay?.resetsAt ?? null,
+            opusPct: null,
+            sonnetPct: null,
+            subscriptionType: null,
+            rateLimitTier: null,
+          },
+          { now },
+        );
+        return;
+      }
+
+      // Legacy oauth-login path (rollback via EXECUTION_CORE_RATELIMIT_CRED_MODE=oauth-login).
       const token = readToken();
       if (!token) {
         log.warn("ratelimit-poller: no OAuth token available; skipping tick");

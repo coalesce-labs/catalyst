@@ -92,6 +92,35 @@ export const BUDGET_REASON_PREFIX = "budget:";
  */
 export const THROTTLED_LABEL_REASONS = Object.freeze(new Set(["rate-limited", "unauthorized"]));
 
+/**
+ * CLOUD_LABEL_REJECTION_REASONS — CTL-2052, a THIRD class: a DETERMINISTIC cloud
+ * rejection of a LABEL write.
+ *
+ * ⛔ On the enforce/proxy path (CTL-1889) the caller cannot read WHY Linear refused.
+ * The direct `linearis` path maps stderr "not exclusive child labels" →
+ * `exclusive-conflict` (TERMINAL), but through the proxy the same rejection surfaces
+ * as the generic `cloud:failed` / `cloud:rejected` — the human string lives only in
+ * the cloud's own logs, and `routeThroughProxy` drops `status`. So this class is
+ * reason-AGNOSTIC: a deterministic label rejection is cool-down-eligible on the
+ * strength of BEING one, without proving it is specifically an exclusive conflict.
+ * The normalization to the single member below happens at the one chokepoint that
+ * knows the route (`linear-write.mjs` `normalizeLabelProxyVerdict`); this set is the
+ * classifier's view of the already-normalized reason.
+ *
+ * ⛔ Deliberately NOT TERMINAL. Being unprovable-terminal on this host, it must never
+ * earn `labelOnce`'s permanent `.skipped` (COORD-236): a `needs-human` refused during
+ * one bad minute would be abandoned for the daemon's life and the operator it exists
+ * to page would never be paged.
+ * ⛔ Deliberately NOT THROTTLED. It is not a budget/rate-limit that clears on its own,
+ * so the operator log must not say "throttled/budget" (AC2 — surface the RIGHT reason).
+ */
+export const CLOUD_LABEL_REJECTION_REASONS = Object.freeze(new Set(["cloud:label-rejected"]));
+
+/** isCloudLabelRejection — a deterministic cloud LABEL rejection (CTL-2052). */
+export function isCloudLabelRejection(reason) {
+  return typeof reason === "string" && CLOUD_LABEL_REJECTION_REASONS.has(reason);
+}
+
 /** isTerminalLabelReason — may never land this run; stop retrying entirely. */
 export function isTerminalLabelReason(reason) {
   return typeof reason === "string" && TERMINAL_LABEL_REASONS.has(reason);
@@ -116,5 +145,9 @@ export function isThrottledLabelReason(reason) {
  * is permanent, and a throttled reason must never earn it.
  */
 export function shouldCoolDownLabel(reason) {
-  return isTerminalLabelReason(reason) || isThrottledLabelReason(reason);
+  return (
+    isTerminalLabelReason(reason) ||
+    isThrottledLabelReason(reason) ||
+    isCloudLabelRejection(reason) // CTL-2052 — the deterministic cloud label rejection cools down too
+  );
 }

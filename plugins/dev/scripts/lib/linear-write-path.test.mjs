@@ -132,7 +132,7 @@ const SCRIPTS = dirname(dirname(fileURLToPath(import.meta.url))) === ""
 /** The eyes-clear block of linear-reply.mjs, sliced by its own anchors. */
 function eyesClearBlock() {
   const src = readFileSync(join(SCRIPTS, "linear-reply.mjs"), "utf8");
-  const start = src.indexOf("CTL-1961 — WHY ONLY THIS WRITE IS ROUTED");
+  const start = src.indexOf("👀 clear on the comment we replied under");
   const end = src.indexOf("console.log(JSON.stringify({ ok:");
   if (start < 0 || end < 0 || end <= start) {
     throw new Error("anchors not found — the guard cannot report a clean pass it did not earn");

@@ -987,6 +987,18 @@ export function buildQueryOptions(spec, env, { turnCap } = {}) {
     allowDangerouslySkipPermissions: true,
     systemPrompt: { type: "preset", preset: "claude_code" }, // keep CLI behavior
   };
+  // OTL-67: settingSources ["user","project"] means a host's join-provisioned
+  // ~/.claude/settings.json (catalyst-join.sh provision_claude_settings, pinned
+  // to `host.name=<self>` for interactive-session host identity, CTL-1231) wins
+  // over the plain `env` above for OTEL_RESOURCE_ATTRIBUTES specifically — every
+  // SDK-dispatched worker's per-ticket project/branch/linear.key silently
+  // collapsed to just host_name on export. `options.settings` loads into the
+  // "flag settings" layer, which per sdk.d.ts outranks user/project
+  // (user < project < local < flag < policy) — set OTEL_RESOURCE_ATTRIBUTES
+  // there too so the per-job value wins instead of the host-level pin.
+  if (typeof env.OTEL_RESOURCE_ATTRIBUTES === "string" && env.OTEL_RESOURCE_ATTRIBUTES.length > 0) {
+    options.settings = { env: { OTEL_RESOURCE_ATTRIBUTES: env.OTEL_RESOURCE_ATTRIBUTES } };
+  }
   // CTL-1367 item 6: bound the run by the per-phase turn cap. Precedence: an
   // explicit option override (tests/tuning), else the spec's turnCap (the value
   // phase-agent-dispatch resolved for this phase). Without this the SDK ran

@@ -133,7 +133,32 @@ export function createGatewayReader({ dbPath = defaultDbPath() } = {}) {
     }
   };
 
-  return { getDescriptor, close: dropHandle };
+  // CTC-133 Phase 1: read ticket_fence directly (preferred source).
+  // Returns null when row absent (signal: fall back to ticket_state inline cols).
+  // Returns an object (possibly with ownerHost: null) when row exists.
+  const getFence = (ticket) => {
+    if (!ticket) return null;
+    try {
+      const row = open()
+        .prepare(
+          `SELECT owner_host, catalyst_generation, fence_phase, claimed_at
+           FROM ticket_fence WHERE ticket = ?`
+        )
+        .get(ticket);
+      if (!row) return null; // absent → signal fallback
+      return {
+        ownerHost: row.owner_host ?? null,
+        generation: row.catalyst_generation ?? null,
+        phase: row.fence_phase ?? null,
+        claimedAt: row.claimed_at ?? null,
+      };
+    } catch {
+      dropHandle();
+      return null; // treat as absent (pre-Phase-1 DB) → safe fallback
+    }
+  };
+
+  return { getDescriptor, getFence, close: dropHandle };
 }
 
 // gatewayLabelsHit — cache-only label probe for the retraction sweep (CTL-1079).
@@ -167,6 +192,33 @@ export function gatewayLabelsHit(gateway, ticket) {
 // suppress (fail-closed). Pure: never shells out, never throws.
 export function gatewayFence(gateway, ticket) {
   if (!gateway || typeof gateway.getDescriptor !== "function") return null;
+
+  // CTC-133 Phase 1: prefer ticket_fence (the CQRS read table) when the reader
+  // exposes getFence. null return means "row absent" → fall through to the
+  // ticket_state inline columns for pre-migration rows.
+  if (typeof gateway.getFence === "function") {
+    let fenceRow;
+    let fenceOk = false;
+    try {
+      fenceRow = gateway.getFence(ticket);
+      fenceOk = true;
+    } catch {
+      /* fall through to getDescriptor */
+    }
+    if (fenceOk && fenceRow !== null) {
+      // Row exists in ticket_fence; use it directly (no ticket_state fallback)
+      if (fenceRow.ownerHost == null) return null; // released → no active fence
+      return {
+        ownerHost: fenceRow.ownerHost,
+        generation: Number.isFinite(fenceRow.generation) ? fenceRow.generation : null,
+        phase: fenceRow.phase ?? null,
+        claimedAt: fenceRow.claimedAt ?? null,
+      };
+    }
+    // fenceRow === null → absent (pre-Phase-1 DB) → fall through to descriptor
+    // !fenceOk → getFence threw → fall through as safe fallback
+  }
+
   let d;
   try {
     d = gateway.getDescriptor(ticket);

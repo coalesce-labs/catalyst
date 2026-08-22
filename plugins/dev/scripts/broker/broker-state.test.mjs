@@ -25,6 +25,11 @@ import {
   setFilterStateClosed,
   getFilterStateByInterest,
   getAllPrStatuses,
+  // fence projection (CTC-133)
+  upsertTicketFence,
+  getTicketFence,
+  clearTicketFence,
+  getTicketDescriptor,
 } from "./broker-state.mjs";
 
 let tmpDir;
@@ -332,5 +337,79 @@ describe("getAllPrStatuses — pr_status_cache merge (CTL-1606)", () => {
     expect(byRepo.size).toBe(2);
     expect(byRepo.get("org/x")).toMatchObject({ status: "merged" });
     expect(byRepo.get("org/y")).toMatchObject({ status: "open" });
+  });
+});
+
+// ─── CTC-133 Phase 1: ticket_fence CRUD ──────────────────────────────────────
+
+describe("ticket_fence CRUD (CTC-133)", () => {
+  test("upsertTicketFence writes owner/generation/phase/claimed_at to ticket_fence", () => {
+    upsertTicketFence({
+      ticket: "CTC-1",
+      ownerHost: "mini",
+      generation: 5,
+      phase: "implement",
+      claimedAt: "2026-08-20T01:00:00Z",
+    });
+    const f = getTicketFence("CTC-1");
+    expect(f).not.toBeNull();
+    expect(f.ownerHost).toBe("mini");
+    expect(f.generation).toBe(5);
+    expect(f.phase).toBe("implement");
+    expect(f.claimedAt).toBe("2026-08-20T01:00:00Z");
+  });
+
+  test("clearTicketFence removes the row from ticket_fence", () => {
+    upsertTicketFence({ ticket: "CTC-2", ownerHost: "mini", generation: 1, phase: "pr", claimedAt: "2026-08-20T01:00:00Z" });
+    clearTicketFence("CTC-2");
+    expect(getTicketFence("CTC-2")).toBeNull();
+  });
+
+  test("getTicketFence returns null for absent ticket", () => {
+    expect(getTicketFence("CTC-nonexistent")).toBeNull();
+  });
+
+  test("stale-generation guard: lower incoming generation does not overwrite ticket_fence", () => {
+    upsertTicketFence({ ticket: "CTC-3", ownerHost: "laptop", generation: 6, phase: "verify", claimedAt: "2026-08-20T02:00:00Z" });
+    upsertTicketFence({ ticket: "CTC-3", ownerHost: "mini", generation: 5, phase: "implement", claimedAt: "2026-08-20T01:55:00Z" });
+    const f = getTicketFence("CTC-3");
+    expect(f.ownerHost).toBe("laptop"); // NOT overwritten by zombie
+    expect(f.generation).toBe(6);
+  });
+
+  test("equal generation refreshes ticket_fence (heartbeat)", () => {
+    upsertTicketFence({ ticket: "CTC-4", ownerHost: "mini", generation: 4, phase: "implement", claimedAt: "2026-08-20T01:00:00Z" });
+    upsertTicketFence({ ticket: "CTC-4", ownerHost: "mini", generation: 4, claimedAt: "2026-08-20T01:05:00Z" });
+    const f = getTicketFence("CTC-4");
+    expect(f.generation).toBe(4);
+    expect(f.claimedAt).toBe("2026-08-20T01:05:00Z"); // refreshed
+    expect(f.phase).toBe("implement"); // stored phase preserved (heartbeat omits phase)
+  });
+
+  test("higher generation overwrites ticket_fence (takeover)", () => {
+    upsertTicketFence({ ticket: "CTC-5", ownerHost: "mini", generation: 4, phase: "implement", claimedAt: "2026-08-20T01:00:00Z" });
+    upsertTicketFence({ ticket: "CTC-5", ownerHost: "laptop", generation: 7, phase: "verify", claimedAt: "2026-08-20T02:00:00Z" });
+    const f = getTicketFence("CTC-5");
+    expect(f.ownerHost).toBe("laptop");
+    expect(f.generation).toBe(7);
+    expect(f.phase).toBe("verify");
+  });
+
+  test("upsertTicketFence dual-writes: ticket_state still receives the fence data", () => {
+    upsertTicketFence({ ticket: "CTC-6", ownerHost: "mini", generation: 3, phase: "pr", claimedAt: "2026-08-20T01:00:00Z" });
+    const d = getTicketDescriptor("CTC-6");
+    expect(d).not.toBeNull();
+    expect(d.ownerHost).toBe("mini");
+    expect(d.generation).toBe(3);
+    expect(d.fencePhase).toBe("pr");
+  });
+
+  test("null ownerHost clears the fence columns in ticket_fence (release)", () => {
+    upsertTicketFence({ ticket: "CTC-7", ownerHost: "mini", generation: 2, phase: "implement", claimedAt: "2026-08-20T01:00:00Z" });
+    upsertTicketFence({ ticket: "CTC-7", ownerHost: null });
+    const f = getTicketFence("CTC-7");
+    expect(f).not.toBeNull(); // row still exists
+    expect(f.ownerHost).toBeNull();
+    expect(f.generation).toBeNull();
   });
 });

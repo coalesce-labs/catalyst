@@ -149,6 +149,20 @@ const ALLOWLIST = [
       "offset of EOF': a tail read would drop history AND desync tailOffset from the caller's cursor.",
   },
   {
+    file: "role-supervisor/dead-man.mjs",
+    count: 1,
+    symbol: "defaultLastChannelTurnMs",
+    ticket: "CTL-2000",
+    reason:
+      "NOT the event log — the concierge comms channel JSONL " +
+      "(~/catalyst/comms/channels/<name>.jsonl), the SAME file class already allowlisted for " +
+      "orch-monitor/lib/comms-reader.ts, which the taint analysis cannot distinguish because both " +
+      "paths are built the same way. Bounded in practice by one run's channel traffic (KBs), and the " +
+      "out-of-fleet dead-man tick runs on its own launchd timer with no event loop to block. The " +
+      "contract is 'the most recent GENUINE turn' (a non-instrument author), which needs every line " +
+      "because an instrument's own post may be the last one — a tail read would misreport it.",
+  },
+  {
     file: "orch-monitor/lib/inbox-state.ts",
     count: 1,
     symbol: "readRaisedQuestion",
