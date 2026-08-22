@@ -12,6 +12,9 @@
 
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+// CTL-1216: THE event-log path resolver. Aliased because this module re-exports
+// its own `getEventLogPath` under that name.
+import { getEventLogPath as leafGetEventLogPath } from "../lib/event-log-paths.mjs";
 
 // --- Logger (mirrors execution-core CTL-578) ---
 // Pino is the daemon's runtime logger. The standalone agent ships with no
@@ -76,12 +79,15 @@ function catalystDir() {
 
 // The unified monthly event log (Approach A emit target). UTC month to match
 // the writer convention shared with execution-core/orch-monitor — the tailer
-// resolves the same path or it would follow the wrong file. Own copy: the
-// standalone agent does not import execution-core's getEventLogPath.
+// resolves the same path or it would follow the wrong file.
+//
+// CTL-1216: the "own copy" that used to live here is gone. The reason for the
+// copy was that the standalone agent will not import execution-core's config
+// (which pulls a large graph); it does not apply to lib/event-log-paths.mjs,
+// which is a deliberately zero-npm-import leaf precisely so every stack —
+// including this one and bare-node `catalyst doctor` — can share it.
 export function getEventLogPath() {
-  const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return resolve(catalystDir(), "events", `${ym}.jsonl`);
+  return leafGetEventLogPath({ env: process.env });
 }
 
 // The liveness breadcrumb the standalone agent atomically refreshes after every

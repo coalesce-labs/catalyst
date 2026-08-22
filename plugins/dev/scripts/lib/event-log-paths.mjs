@@ -34,7 +34,7 @@
 
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const DAY_MS = 86400000;
 const WEEK_MS = 7 * DAY_MS;
@@ -129,10 +129,22 @@ export function parseEventLogBasename(name) {
 
 // ── directory + window resolution ───────────────────────────────────────────
 
+// eventsDir — the union of what the four former copies each honoured, so that
+// folding them together can only ever REDIRECT a write away from the shared
+// production log, never toward it:
+//
+//   • CATALYST_EVENTS_DIR wins. execution-core/config.mjs's copy ignored it
+//     while coordination-publish, recovery-pass-context and
+//     daemon-watchdog-predicates already honoured it — i.e. a caller that set
+//     it to redirect events into a sandbox still had getEventLogPath() pointing
+//     at ~/catalyst/events. Honouring it everywhere closes that.
+//   • `resolve` (not `join`) matches the execution-core and broker copies; it
+//     is a no-op for the absolute paths every caller actually supplies.
+//   • env.HOME ahead of homedir() matches the broker and respond-ticket copies.
 export function eventsDir({ env = process.env } = {}) {
   if (env?.CATALYST_EVENTS_DIR) return env.CATALYST_EVENTS_DIR;
   const home = env?.HOME ?? homedir();
-  return join(env?.CATALYST_DIR ?? join(home, "catalyst"), "events");
+  return resolve(env?.CATALYST_DIR ?? join(home, "catalyst"), "events");
 }
 
 // getEventLogPath — the drop-in replacement for all FOUR existing copies.
