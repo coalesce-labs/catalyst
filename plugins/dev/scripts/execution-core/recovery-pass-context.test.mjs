@@ -360,3 +360,113 @@ describe("cache fail-open — db absent never aborts the gather", () => {
     expect(out).toContain("TOTAL: 0 items");
   });
 });
+
+// ── CTL-1216: the lookback spans FILES, not just bytes ──────────────────────
+//
+// collectEventLog resolved ONE file (the current month's) and then scanned it
+// for a SEVEN-DAY window. That is structurally impossible to satisfy whenever
+// the file is younger than the window — on the 2nd of a month the "7-day
+// lookback" really covered ~1 day, silently. Under weekly rotation it would be
+// satisfiable only on the last day of a week.
+describe("collectEventLog: multi-file window (CTL-1216)", () => {
+  let eventsDir;
+  let savedEnv;
+
+  beforeEach(() => {
+    eventsDir = mkdtempSync(join(tmpdir(), "rpc-window-"));
+    savedEnv = process.env.CATALYST_EVENTS_DIR;
+    process.env.CATALYST_EVENTS_DIR = eventsDir;
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.CATALYST_EVENTS_DIR;
+    else process.env.CATALYST_EVENTS_DIR = savedEnv;
+    rmSync(eventsDir, { recursive: true, force: true });
+  });
+
+  function escalation(ticket, tsIso) {
+    return (
+      JSON.stringify({
+        ts: tsIso,
+        attributes: { "event.name": "recovery.escalated" },
+        body: { payload: { ticket, reason: "test-reason" } },
+      }) + "\n"
+    );
+  }
+
+  // 2026-W34 starts Mon 2026-08-17. Tuesday of W34 is 2026-08-18, so a 7-day
+  // lookback from it reaches back into W33 — the case one file can never serve.
+  const TUESDAY_W34 = new Date("2026-08-18T12:00:00Z").getTime();
+
+  it("reads the PREVIOUS file when the current one is younger than the window", () => {
+    writeFileSync(join(eventsDir, "2026-W33.jsonl"), escalation("CTL-AAA", "2026-08-13T12:00:00Z"));
+    writeFileSync(join(eventsDir, "2026-W34.jsonl"), escalation("CTL-BBB", "2026-08-17T12:00:00Z"));
+
+    const res = collectEventLog({ nowMs: TUESDAY_W34 });
+    expect(res.items.map((i) => i.ticket).sort()).toEqual(["CTL-AAA", "CTL-BBB"]);
+    expect(res.covered).toBe(true);
+  });
+
+  it("mixes schemes — a historical YYYY-MM.jsonl is read beside a YYYY-Www.jsonl (AC 3)", () => {
+    writeFileSync(join(eventsDir, "2026-08.jsonl"), escalation("CTL-MONTH", "2026-08-13T12:00:00Z"));
+    writeFileSync(join(eventsDir, "2026-W34.jsonl"), escalation("CTL-WEEK", "2026-08-17T12:00:00Z"));
+
+    const res = collectEventLog({ nowMs: TUESDAY_W34 });
+    expect(res.items.map((i) => i.ticket).sort()).toEqual(["CTL-MONTH", "CTL-WEEK"]);
+  });
+
+  it("ignores a file entirely OUTSIDE the window (positive control: it is not reading everything)", () => {
+    // Without this, the test above would pass for a resolver that simply
+    // returned every file in the directory.
+    writeFileSync(join(eventsDir, "2026-W20.jsonl"), escalation("CTL-ANCIENT", "2026-05-12T12:00:00Z"));
+    writeFileSync(join(eventsDir, "2026-W34.jsonl"), escalation("CTL-BBB", "2026-08-17T12:00:00Z"));
+
+    const res = collectEventLog({ nowMs: TUESDAY_W34 });
+    expect(res.items.map((i) => i.ticket)).toEqual(["CTL-BBB"]);
+  });
+
+  it("skips the CTL-1813 legacy-quarantine file rather than folding it back in", () => {
+    writeFileSync(join(eventsDir, "2026-W34.jsonl"), escalation("CTL-BBB", "2026-08-17T12:00:00Z"));
+    writeFileSync(
+      join(eventsDir, "2026-W34.jsonl.legacy.20260817T101010Z.512"),
+      escalation("CTL-QUARANTINED", "2026-08-17T11:00:00Z"),
+    );
+
+    const res = collectEventLog({ nowMs: TUESDAY_W34 });
+    expect(res.items.map((i) => i.ticket)).toEqual(["CTL-BBB"]);
+  });
+
+  it("coverage ANDs across files — the NEWEST file being covered is not enough", () => {
+    // Deliberately shaped so the newest file is FULLY covered and only the older
+    // one is not: a small W34 that fits the budget, a large W33 that does not.
+    // An OR — or the tempting "the last file's verdict wins" shortcut — reports
+    // this 7-day lookback as complete while the older half of it was never read.
+    // That is [].every(p) === true one level up: the newest file is nearly
+    // always fully covered, so an OR is a check that essentially cannot fail.
+    writeFileSync(
+      join(eventsDir, "2026-W33.jsonl"),
+      escalation("CTL-AAA", "2026-08-13T12:00:00Z").repeat(400),
+    );
+    writeFileSync(join(eventsDir, "2026-W34.jsonl"), escalation("CTL-BBB", "2026-08-17T12:00:00Z"));
+
+    const res = collectEventLog({ nowMs: TUESDAY_W34, maxBytes: 1000 });
+    // The newest file was read in full — its event is present...
+    expect(res.items.map((i) => i.ticket)).toContain("CTL-BBB");
+    // ...and the window is STILL reported under-covered, because W33 was not.
+    expect(res.covered).toBe(false);
+  });
+
+  it("an empty events dir is covered:true with no items (nothing to read is not a failure)", () => {
+    const res = collectEventLog({ nowMs: TUESDAY_W34 });
+    expect(res.items).toEqual([]);
+    expect(res.covered).toBe(true);
+  });
+
+  it("the explicit logPath seam still pins exactly ONE file", () => {
+    writeFileSync(join(eventsDir, "2026-W33.jsonl"), escalation("CTL-AAA", "2026-08-13T12:00:00Z"));
+    const only = join(eventsDir, "2026-W34.jsonl");
+    writeFileSync(only, escalation("CTL-BBB", "2026-08-17T12:00:00Z"));
+
+    const res = collectEventLog({ nowMs: TUESDAY_W34, logPath: only });
+    expect(res.items.map((i) => i.ticket)).toEqual(["CTL-BBB"]);
+  });
+});

@@ -1,10 +1,14 @@
 import { existsSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
-function defaultMonthPath(eventsDir: string): string {
-  const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return join(eventsDir, `${ym}.jsonl`);
+// CTL-1216: renamed off "Month" because it no longer is one. The filename is
+// resolved by lib/event-log-paths.mjs — the SAME resolver
+// execution-core/daemon-watchdog-predicates.mjs uses to decide whether this
+// forwarder is lagging, which is what makes those two agree at a rotation
+// boundary instead of merely promising to in a comment.
+function defaultEventLogPath(eventsDir: string): string {
+  return join(eventsDir, eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })));
 }
 
 export interface TailerOpts {
@@ -44,7 +48,7 @@ export interface Tailer {
 
 export function createTailer(opts: TailerOpts): Tailer {
   const pollMs = opts.pollMs ?? 200;
-  const monthFn = opts.monthFn ?? (() => defaultMonthPath(opts.eventsDir ?? ""));
+  const monthFn = opts.monthFn ?? (() => defaultEventLogPath(opts.eventsDir ?? ""));
   let currentPath = opts.filePath ?? monthFn();
   let offset = opts.offset;
   // CTL-1809: the trailing bytes of a read that did not end on a newline. A poll landing

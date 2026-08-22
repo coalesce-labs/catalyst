@@ -14,6 +14,7 @@ import { readVerifyVerdict } from "../../execution-core/work-done-probes.mjs";
 import { countRemediateCycles } from "../../execution-core/event-scan.mjs";
 import { assembleTicketRuns } from "./ticket-runs.mjs";
 import { PHASE_ORDER } from "./board-data.mjs";
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 // ── defaults ─────────────────────────────────────────────────────────────────
 
@@ -26,9 +27,10 @@ function defaultWorkersDir() {
 }
 
 // CAT-216: resolve from the same injectable catalyst root used by server.ts.
+// CTL-1216: the FILENAME comes from lib/event-log-paths.mjs; only the root
+// stays injectable. The name was already scheme-neutral, so only the body moved.
 export function eventLogPathFor(catalystDir, now = new Date()) {
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return join(catalystDir, "events", `${ym}.jsonl`);
+  return join(catalystDir, "events", eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })));
 }
 
 function defaultEventLogPath() {

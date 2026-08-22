@@ -21,6 +21,10 @@
 
 import { existsSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
+import {
+  eventLogBasenameFor,
+  resolveRotationScheme,
+} from "../../lib/event-log-paths.mjs";
 
 export interface EventRingOpts {
   catalystDir: string;
@@ -74,10 +78,11 @@ const DEFAULT_CAP_LINES = 50_000;
 const DEFAULT_POLL_MS = 1_000;
 const DEFAULT_TAIL_BYTES = 8 * 1024 * 1024; // 8 MB cold-start back-read
 
-function monthlyPath(catalystDir: string, d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return join(catalystDir, "events", `${y}-${m}.jsonl`);
+// CTL-1216: the FILENAME is resolved by lib/event-log-paths.mjs; only the
+// directory stays injectable here. Renamed off "monthly" because it no longer
+// is — under CATALYST_EVENT_LOG_ROTATION=week this returns 2026-W34.jsonl.
+function eventLogPathFor(catalystDir: string, d: Date): string {
+  return join(catalystDir, "events", eventLogBasenameFor(d, resolveRotationScheme({ env: process.env })));
 }
 
 /** Parse a line's `ts` field (string) without throwing; null on any failure. */
@@ -201,7 +206,7 @@ export function createEventRing(opts: EventRingOpts): EventRing {
   }
 
   function tick(): void {
-    const expectedPath = monthlyPath(opts.catalystDir, nowFn());
+    const expectedPath = eventLogPathFor(opts.catalystDir, nowFn());
     if (expectedPath !== currentPath) {
       // Month rollover: keep the existing ring (cross-month history stays
       // queryable until aged out), reset offset for the new file.
@@ -223,7 +228,7 @@ export function createEventRing(opts: EventRingOpts): EventRing {
     start(): void {
       if (started) return;
       started = true;
-      currentPath = monthlyPath(opts.catalystDir, nowFn());
+      currentPath = eventLogPathFor(opts.catalystDir, nowFn());
       coldFill(currentPath);
       timer = setInterval(tick, pollMs);
       // Bun/Node: don't keep the process alive for this background poller.

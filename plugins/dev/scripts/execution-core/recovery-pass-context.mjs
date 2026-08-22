@@ -39,6 +39,9 @@ import { ownerForTicket } from "./hrw.mjs";
 // an ENTITLEMENT question, so it reads the entitled roster. `off` mode (default):
 // getEntitledHosts() === getClusterHosts() → behavior-neutral.
 import { getEntitledHosts, getHostName } from "./config.mjs";
+// CTL-1216: THE event-log window resolver — every file overlapping the
+// lookback, so a 7-day window is not silently served from a 1-day-old file.
+import { resolveEventLogPathsForWindow } from "../lib/event-log-paths.mjs";
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
 function parseArgs(argv) {
@@ -116,12 +119,15 @@ function collectWorkerSignals(orchDir) {
 }
 
 // ── source 2: unified event log (recovery escalations) ───────────────────────
-function eventLogPath() {
-  const eventsDir =
-    process.env.CATALYST_EVENTS_DIR ||
-    join(process.env.CATALYST_DIR || join(process.env.HOME || "", "catalyst"), "events");
-  const ym = new Date().toISOString().slice(0, 7); // YYYY-MM
-  return join(eventsDir, `${ym}.jsonl`);
+// CTL-1216: this resolved ONE file — the current month's — and then scanned it
+// for a SEVEN-DAY window. That is structurally impossible to satisfy from one
+// file whenever the file is younger than the window: on the 2nd of a month the
+// lookback silently covered ~1 day, and under weekly rotation it would cover at
+// most 7 days only on the last day of a week. The window is now resolved to
+// EVERY file that overlaps it, oldest-first, mixing schemes so a historical
+// YYYY-MM.jsonl and a current YYYY-Www.jsonl are both read.
+function eventLogPathsFor(sinceMs, nowMs) {
+  return resolveEventLogPathsForWindow({ sinceMs, nowMs, env: process.env });
 }
 
 // CTL-1529: bounded. This ran once per recovery-pass worker launch and
@@ -159,46 +165,82 @@ export function collectEventLog({
   nowMs = Date.now(),
   windowMs = ESCALATION_LOOKBACK_MS,
   maxBytes = ESCALATION_TAIL_MAX_BYTES,
-  logPath = null, // test seam; production resolves the current month's log
+  logPath = null, // test seam; pins ONE file. Production resolves the whole window.
   chunkSize = undefined,
   initialWindow = undefined,
 } = {}) {
   const items = [];
-  const path = logPath ?? eventLogPath();
-  if (!existsSync(path)) return { items, covered: true, windowMs, oldestTs: null, maxBytes };
+  const sinceMs = nowMs - windowMs;
+  const paths = logPath ? [logPath] : eventLogPathsFor(sinceMs, nowMs);
+  if (paths.length === 0) return { items, covered: true, windowMs, oldestTs: null, maxBytes };
+
+  // The byte cap is a budget for the WHOLE window, not per file — otherwise a
+  // window spanning N files quietly authorises N x maxBytes of work. Files are
+  // scanned NEWEST-first so the budget is spent on the most recent events, and
+  // running out marks the window UNDER-covered rather than silently short.
+  let budget = maxBytes;
+  let covered = true;
+  let oldestTs = null;
+
   try {
-    const res = scanEventsSince({
-      path,
-      targetSinceMs: nowMs - windowMs,
-      maxBytes,
-      ...(chunkSize === undefined ? {} : { chunkSize }),
-      ...(initialWindow === undefined ? {} : { initialWindow }),
-      lineFilter: (line) => line.includes("recovery."),
-      onEvent: (evt) => {
-        // CTL-1550 (P2): scanEventsSince bounds the byte range to approximately
-        // cover the window, but individual records with backfilled or near-boundary
-        // timestamps can still slip through. Enforce the window per event.
-        const evtMs = typeof evt?.ts === "string" ? Date.parse(evt.ts) : NaN;
-        if (!Number.isFinite(evtMs) || evtMs < nowMs - windowMs) return;
-        const name = evt?.attributes?.["event.name"] || "";
-        if (!/^recovery\.(escalated|would-escalate)$/.test(name)) return;
-        const ticket = evt?.body?.payload?.ticket || evt?.attributes?.["event.label"] || "";
-        if (!ticket) return;
-        items.push({
-          ticket,
-          source: "log",
-          eventName: name,
-          reason: evt?.body?.payload?.reason || "-",
-        });
-      },
-    });
-    return {
-      items,
-      covered: res.covered !== false,
-      windowMs,
-      oldestTs: res.oldestTs ?? null,
-      maxBytes,
-    };
+    for (const path of [...paths].reverse()) {
+      if (!existsSync(path)) {
+        // Listed by the resolver but gone by the time we opened it — a rotation
+        // raced us. We cannot prove the window is covered, so we do not claim it.
+        covered = false;
+        continue;
+      }
+      if (budget <= 0) {
+        covered = false;
+        break;
+      }
+      const res = scanEventsSince({
+        path,
+        targetSinceMs: sinceMs,
+        maxBytes: budget,
+        ...(chunkSize === undefined ? {} : { chunkSize }),
+        ...(initialWindow === undefined ? {} : { initialWindow }),
+        lineFilter: (line) => line.includes("recovery."),
+        onEvent: (evt) => {
+          // CTL-1550 (P2): scanEventsSince bounds the byte range to approximately
+          // cover the window, but individual records with backfilled or near-boundary
+          // timestamps can still slip through. Enforce the window per event.
+          const evtMs = typeof evt?.ts === "string" ? Date.parse(evt.ts) : NaN;
+          if (!Number.isFinite(evtMs) || evtMs < sinceMs) return;
+          const name = evt?.attributes?.["event.name"] || "";
+          if (!/^recovery\.(escalated|would-escalate)$/.test(name)) return;
+          const ticket = evt?.body?.payload?.ticket || evt?.attributes?.["event.label"] || "";
+          if (!ticket) return;
+          items.push({
+            ticket,
+            source: "log",
+            eventName: name,
+            reason: evt?.body?.payload?.reason || "-",
+          });
+        },
+      });
+      // ⛔ AND, never OR. A window is covered only when EVERY file in it was.
+      // An OR reports a 7-day lookback as complete whenever ANY file in it was
+      // fully read — and the newest file nearly always is, so an OR here is a
+      // check that essentially cannot fail.
+      //
+      // HONEST NOTE on what the tests actually pin: today `scanEventsSince`
+      // only ever returns covered:false together with windowBytes === maxBytes
+      // (measured: 1000/5000/20000 all came back windowBytes === maxBytes,
+      // covered:false), so an exhausted file always drains the budget and the
+      // `budget <= 0` break below would set covered:false anyway. The AND is
+      // therefore not currently distinguishable by test from "the last verdict
+      // wins". It is kept because it does not DEPEND on that invariant of
+      // another module: if scanEventsSince ever reports a shortfall without
+      // consuming the whole budget, the AND still gives the safe answer and the
+      // shortcut silently starts lying.
+      covered = covered && res.covered !== false;
+      budget -= Number.isFinite(res.windowBytes) ? res.windowBytes : 0;
+      // Files are walked newest -> oldest, so each iteration reaches further
+      // back and the LAST non-null oldestTs is the oldest one seen.
+      if (res.oldestTs) oldestTs = res.oldestTs;
+    }
+    return { items, covered, windowMs, oldestTs, maxBytes };
   } catch {
     // An I/O failure means source 2 produced nothing AND we learned nothing —
     // report it as uncovered so the banner does not imply a clean 7-day sweep.

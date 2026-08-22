@@ -124,15 +124,7 @@ const ALLOWED_REMAINING = [
   "coordination-publish/index.ts",
   "event-mirror/index.ts",
   "execution-core/doctor.mjs",
-  "execution-core/recovery-pass-context.mjs",
-  "orch-monitor/lib/activity-briefing.ts",
-  "orch-monitor/lib/event-log-reader.ts",
-  "orch-monitor/lib/event-ring.ts",
-  "orch-monitor/lib/journey.mjs",
   "orch-monitor/lib/service-health-monitor.ts",
-  "orch-monitor/lib/substep-reader.ts",
-  "orch-monitor/server.ts",
-  "otel-forward/lib/tail.ts",
 
   // ── still to fold, Phase 4 (writers) ──────────────────────────────────────
   "lib/canonical-event.sh",
