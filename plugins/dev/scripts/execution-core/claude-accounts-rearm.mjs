@@ -16,18 +16,25 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test claude-accounts-rearm.test.mjs
 
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, mkdirSync, appendFileSync } from "node:fs";
+import { homedir, hostname } from "node:os";
+import { join, dirname } from "node:path";
+import { randomBytes } from "node:crypto";
 
-import { log as defaultLog } from "./config.mjs";
+import { log as defaultLog, getEventLogPath } from "./config.mjs";
 import { containsNul, isValidUtf8RoundTrip } from "../lib/secret-contract.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
 // PLACEHOLDER sentinel that the generator writes when no real token is present.
 const PLACEHOLDER = "PASTE_TOKEN_HERE";
 
-// parseActiveOauthToken — pure, unit-testable. Reads the active-slot token from the
-// text content of a claude-accounts.env file. Returns the resolved token string or null.
+// The event this hook emits on a genuine rotation (CTL-2147 Phase 1). Exported so
+// producer-parity tests import it rather than re-typing the literal.
+export const ACCOUNT_REARM_APPLIED_EVENT = "account.rearm.applied";
+
+// parseActiveOauthTokenDetailed — pure, unit-testable. Reads the active-slot token
+// (and, since CTL-2147, the selector's handle) from the text content of a
+// claude-accounts.env file. Returns { token, handle }; either may be null.
 //
 // The file format (written by catalyst-stack/setup-claude-accounts):
 //   CLAUDE_TOKEN_acct1='sk-ant-oat...'  # email@example.com
@@ -37,9 +44,12 @@ const PLACEHOLDER = "PASTE_TOKEN_HERE";
 //
 // Three resolution paths, in priority order:
 // 1. Selector line  (`_catalyst_active_token="$CLAUDE_TOKEN_<label>"`) — canonical.
-// 2. Direct literal (`export CLAUDE_CODE_OAUTH_TOKEN='<value>'`) — hand-authored fallback.
-// 3. Single CLAUDE_TOKEN_* assignment with no selector — implicit single-account file.
-export function parseActiveOauthToken(text) {
+//    The handle is the <label>.
+// 2. Direct literal (`export CLAUDE_CODE_OAUTH_TOKEN='<value>'`) — hand-authored
+//    fallback. No selector to name, so handle is null.
+// 3. Single CLAUDE_TOKEN_* assignment with no selector — implicit single-account
+//    file. The handle is that single label.
+export function parseActiveOauthTokenDetailed(text) {
   const lines = text.split("\n");
 
   // Collect every CLAUDE_TOKEN_<label>=<value> assignment.
@@ -68,7 +78,7 @@ export function parseActiveOauthToken(text) {
     const m = trimmed.match(SELECTOR_RE);
     if (!m) continue;
     const tok = tokenMap.get(m[1]);
-    if (tok) return tok;
+    if (tok) return { token: tok, handle: m[1] };
   }
 
   // Path 2 — direct literal: export CLAUDE_CODE_OAUTH_TOKEN='<literal>'
@@ -86,16 +96,72 @@ export function parseActiveOauthToken(text) {
     // variable NAME installed as the credential when Path 1 misses (unprovisioned
     // active slot). Guard on the PARSED value so both forms are rejected (CTL-1984 review).
     if (!value || value === PLACEHOLDER || value.startsWith("$")) continue;
-    return value;
+    return { token: value, handle: null };
   }
 
   // Path 3 — single-account implicit: one CLAUDE_TOKEN_* entry with no selector
   if (tokenMap.size === 1) {
-    const [tok] = tokenMap.values();
-    return tok;
+    const [[label, tok]] = tokenMap.entries();
+    return { token: tok, handle: label };
   }
 
-  return null;
+  return { token: null, handle: null };
+}
+
+// parseActiveOauthToken — back-compat wrapper. Existing callers only ever wanted
+// the token string; keep the exact contract so none of them change.
+export function parseActiveOauthToken(text) {
+  return parseActiveOauthTokenDetailed(text).token;
+}
+
+// rearmEventEnvelope — pure v2 OTel envelope builder for a genuine rearm (CTL-2147
+// Phase 1), modelled on cloud-sync-deps.mjs's depSkewEventEnvelope. Never carries a
+// token or email — only the account HANDLE (a label like "acct2") and the node name.
+export function rearmEventEnvelope({
+  handle = null,
+  host = null,
+  ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+  id = null,
+  traceId = null,
+  spanId = null,
+  resource = null,
+} = {}) {
+  return {
+    ts,
+    id,
+    observedTs: ts,
+    // INFO, not WARN: a successful account rotation is normal operation.
+    severityText: "INFO",
+    severityNumber: 9,
+    traceId,
+    spanId,
+    resource,
+    attributes: {
+      "event.name": ACCOUNT_REARM_APPLIED_EVENT,
+      "event.entity": "account",
+      "event.action": "rearm-applied",
+      "account.handle": handle,
+      "node.name": host,
+    },
+    body: {
+      message: `claude-accounts: re-armed in-process${handle ? ` to ${handle}` : ""} — no restart needed`,
+      payload: { handle },
+    },
+  };
+}
+
+// defaultEmitRearmEvent — the real fs-append seam. Fail-open: a failed append must
+// never surface as a rearm failure (the rearm already happened; the event is the
+// receipt, never the act). Same shape as cloud-sync.mjs's emit* helpers.
+function defaultEmitRearmEvent(envelope) {
+  try {
+    const logPath = getEventLogPath();
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, `${JSON.stringify(envelope)}\n`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // _parseValue — parse the RHS of a shell assignment (quoted or unquoted).
@@ -117,13 +183,20 @@ function _parseValue(rhs) {
 }
 
 // rearmClaudeAccountsFromFile — the registered rearm hook for the
-// claude-accounts.env row. Returns { rearmed, reason }; never throws.
+// claude-accounts.env row. Returns { rearmed, reason, handle }; never throws.
+// `handle` is the rotated-to account's label on a "rotated" result, null on every
+// other path.
 //
 // Injected readFile (for testing): must accept a path and return a Buffer or string.
+// Injected emit (CTL-2147, default defaultEmitRearmEvent): appends the
+// account.rearm.applied event on a genuine rotation; fires AFTER the env mutation,
+// inside its own try/catch, so a throwing emit can never prevent or undo the rearm.
 export function rearmClaudeAccountsFromFile({
   env = process.env,
   readFile = (p) => readFileSync(p),
   log = defaultLog,
+  emit = defaultEmitRearmEvent,
+  host = hostname(),
 } = {}) {
   try {
     const candidates = [
@@ -132,6 +205,7 @@ export function rearmClaudeAccountsFromFile({
     ].filter(Boolean);
 
     let tok = null;
+    let handle = null;
     let anyFound = false;
 
     for (const file of candidates) {
@@ -149,18 +223,19 @@ export function rearmClaudeAccountsFromFile({
       if (!isValidUtf8RoundTrip(buf, decoded)) continue;
       if (containsNul(decoded)) continue;
 
-      const resolved = parseActiveOauthToken(decoded);
-      if (resolved && resolved !== PLACEHOLDER && resolved.trim()) {
-        tok = resolved;
+      const resolved = parseActiveOauthTokenDetailed(decoded);
+      if (resolved.token && resolved.token !== PLACEHOLDER && resolved.token.trim()) {
+        tok = resolved.token;
+        handle = resolved.handle;
         break;
       }
     }
 
-    if (!anyFound) return { rearmed: false, reason: "absent" };
-    if (!tok || !tok.trim()) return { rearmed: false, reason: "empty" };
+    if (!anyFound) return { rearmed: false, reason: "absent", handle: null };
+    if (!tok || !tok.trim()) return { rearmed: false, reason: "empty", handle: null };
 
     if (tok === env.CLAUDE_CODE_OAUTH_TOKEN) {
-      return { rearmed: false, reason: "unchanged" };
+      return { rearmed: false, reason: "unchanged", handle: null };
     }
 
     env.CLAUDE_CODE_OAUTH_TOKEN = tok;
@@ -171,9 +246,54 @@ export function rearmClaudeAccountsFromFile({
         "(cluster-sync materialized a rotation or account-slot switch) — " +
         "re-armed in-process, no restart needed",
     );
-    return { rearmed: true, reason: "rotated" };
+    try {
+      emit(
+        rearmEventEnvelope({
+          handle,
+          host,
+          id: randomBytes(8).toString("hex"),
+          traceId: randomBytes(16).toString("hex"),
+          spanId: randomBytes(8).toString("hex"),
+          resource: buildCatalystResource({ serviceName: "catalyst.execution-core", host }),
+        }),
+      );
+    } catch {
+      // fail-open: the rearm is the act; the event is the receipt. Never let the
+      // receipt fail the act — a full disk must not pin the fleet to a walled account.
+    }
+    return { rearmed: true, reason: "rotated", handle };
   } catch (err) {
     log?.warn?.({ err: err?.message }, "claude-accounts-rearm: re-arm failed (continuing)");
-    return { rearmed: false, reason: "error" };
+    return { rearmed: false, reason: "error", handle: null };
   }
+}
+
+// makeRearmSignalHandler — CTL-2147. The on-demand counterpart to the 5-minute
+// cluster-sync tick. Deliberately arms ONLY claude-accounts.env: a signal handler
+// must not perform network I/O (git pull / sops) or touch unrelated credentials.
+export function makeRearmSignalHandler({ armSecret, env = process.env, log = defaultLog } = {}) {
+  return function onRearmSignal() {
+    try {
+      const r = armSecret("claude-accounts.env", { env });
+      log?.info?.({ armed: r?.armed === true }, "SIGHUP: claude-accounts rearm requested");
+    } catch (err) {
+      // A signal handler that throws takes the daemon down. Never.
+      log?.warn?.({ err: err?.message }, "SIGHUP: rearm threw (continuing)");
+    }
+  };
+}
+
+// wireRearmSighup — CTL-2147. The daemon's actual production wiring, extracted
+// out of daemon.mjs's main() so it is unit-testable: main() itself boots real
+// timers/fs.watch/child processes and is deliberately never called from a test,
+// which left the previous inline `process.on("SIGHUP", ...)` line provable only
+// by a source-scan regex (daemon-signals.test.mjs), never by actually firing the
+// signal and observing armSecret get called. Call with a real `process` in
+// production; a test passes any EventEmitter-shaped stand-in. Returns the
+// registered handler so a test can also invoke it directly without going
+// through emit().
+export function wireRearmSighup(proc = process, { armSecret, env = process.env, log = defaultLog } = {}) {
+  const handler = makeRearmSignalHandler({ armSecret, env, log });
+  proc.on("SIGHUP", handler);
+  return handler;
 }

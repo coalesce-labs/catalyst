@@ -72,6 +72,9 @@ import { ESCALATION_EVENT_NEEDS_HUMAN } from "../execution-core/escalation-event
 // namespace contract (a dedicated test below asserts it, alongside the salvage family).
 import { LABEL_RETRY_EXHAUSTED_EVENT } from "../execution-core/label-retry-event.mjs";
 import { FENCE_STANDOFF_EVENT } from "../execution-core/fence-standoff.mjs"; // CAT-173
+// CTL-2147 — the claude-accounts soft-rearm observability event, imported from its
+// owning module rather than re-typed as a literal (same precedent as CTL-1659/CTL-1889).
+import { ACCOUNT_REARM_APPLIED_EVENT } from "../execution-core/claude-accounts-rearm.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -126,6 +129,7 @@ const EXEC_CORE_EVENT_NAMES = [
   ESCALATION_EVENT_NEEDS_HUMAN, // CTL-2056 escalation-event.mjs — ticket.escalated (entity=ticket/action=escalated)
   LABEL_RETRY_EXHAUSTED_EVENT, // CTL-2052 label-retry-event.mjs — the "stopped after N and said so" escalation
   FENCE_STANDOFF_EVENT, // CAT-173 fence-standoff.mjs — mutual fence standoff escalation
+  ACCOUNT_REARM_APPLIED_EVENT, // CTL-2147 claude-accounts-rearm.mjs — soft-rearm observability
   ...INLINE_EVENT_NAMES,
 ];
 

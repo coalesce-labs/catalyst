@@ -29,8 +29,8 @@
 #   catalyst-stack verify-node [--json]
 #   catalyst-stack sync-cloud-env
 #   catalyst-stack claude-account status
-#   catalyst-stack claude-account switch <handle> [--yes]
-#   catalyst-stack claude-account sync [--yes]
+#   catalyst-stack claude-account switch <handle> [--soft] [--yes]
+#   catalyst-stack claude-account sync [--soft] [--yes]
 #
 # claude-account (CTL-1650):
 #   Fleet-wide Claude OAuth-account control, one command.
@@ -49,6 +49,16 @@
 #   sync            — for a second node after a switch was pushed elsewhere: git pull
 #                    the cluster repo, re-materialize claude-accounts.env, restart,
 #                    and verify.
+#   --soft (CTL-2147) — on either command, skip the stack restart: signal the running
+#                    execution-core daemon (SIGHUP) to re-arm claude-accounts.env
+#                    immediately (CTL-1984's already-shipped in-process rearm hook),
+#                    then verify against the daemon's OWN account.rearm.applied event
+#                    — never a re-read of the file, which would pass identically
+#                    against a daemon that never re-armed. Requires executor=sdk
+#                    (refuses otherwise); does NOT touch already-running workers
+#                    (they keep their launch-time account by design); does NOT
+#                    refill the CTL-2133 boot-resume pen the way a restart does.
+#                    Opt-in — the restart stays the default rotation path.
 #   Token values are never echoed, logged, or written anywhere but the 0600
 #   ~/.config/catalyst/claude-accounts.env target file.
 #
@@ -4076,6 +4086,9 @@ CA_ACCOUNTS_ENV_DEFAULT="${HOME}/.config/catalyst/claude-accounts.env"
 # posture as execution-core/cluster-sync.mjs's SOPS_CANDIDATES (CTL-1393: a restricted
 # daemon/shell PATH frequently omits /opt/homebrew/bin), plus ~/.local/bin (CTL-1650).
 CA_SOPS_CANDIDATES=("/opt/homebrew/bin/sops" "/usr/local/bin/sops" "/usr/bin/sops" "${HOME}/.local/bin/sops")
+# CTL-2147: how long --soft waits for the daemon's account.rearm.applied event
+# before giving up. Overridable for a slow/loaded node.
+CA_SOFT_VERIFY_TIMEOUT="${CA_SOFT_VERIFY_TIMEOUT:-60}"
 
 _ca_age_key_file()    { echo "${CATALYST_AGE_KEY_FILE:-$CA_AGE_KEY_FILE_DEFAULT}"; }
 # CTL-1650 Codex fix: mirror execution-core/config.mjs's getClusterRepoDir() exactly —
@@ -4246,6 +4259,98 @@ _ca_probe_handle_ok() {
   [[ -z "$rejected" ]]
 }
 
+# _ca_parse_mode [ARGS...] — CTL-2147. Pure, testable flag parser shared by both
+# switch and sync: prints "soft" when --soft is among ARGS, else "restart" (the
+# opt-in default — the restart stays the default rotation path). Any other flag
+# (typo'd or unknown) is a hard failure so a mistake is never silently treated
+# as "restart" — the caller's own `*) fail "unknown ... arg"` catch-all covers
+# real dispatch, but this pure helper must fail the same way when called directly.
+_ca_parse_mode() {
+  local mode="restart" a
+  for a in "$@"; do
+    case "$a" in
+      --soft) mode="soft" ;;
+      --yes) : ;;
+      *) return 1 ;;
+    esac
+  done
+  printf '%s\n' "$mode"
+}
+
+# _ca_soft_supported — CTL-2147. --soft is only correct where a dispatch binds the
+# token from the daemon's live process.env at call time. That is executor=sdk
+# (sdk-run-phase-agent.mjs:1152-1157 + :950). Under executor=bg the worker session
+# sits behind the claude --bg RPC boundary, which carries neither DISPATCH_ENV nor
+# CLAUDE_CODE_OAUTH_TOKEN in --settings — a soft switch there would report success
+# while every bg worker kept the old account. Refuse rather than under-deliver.
+_ca_soft_supported() {
+  local ex="${CATALYST_EXECUTOR:-sdk}"
+  [[ "$ex" == "sdk" ]] || { warn "--soft requires executor=sdk (this node reports '${ex}') — rerun without --soft"; return 1; }
+}
+
+# _ca_event_log_path — resolves the unified event log this node's daemon appends
+# to. CATALYST_EVENT_LOG is a full-path override (tests only); otherwise mirrors
+# execution-core/config.mjs's getEventLogPath(): <CATALYST_DIR>/events/YYYY-MM.jsonl.
+_ca_event_log_path() {
+  if [[ -n "${CATALYST_EVENT_LOG:-}" ]]; then
+    printf '%s' "$CATALYST_EVENT_LOG"
+    return 0
+  fi
+  printf '%s/events/%s.jsonl' "${CATALYST_DIR:-$HOME/catalyst}" "$(date -u +%Y-%m)"
+}
+
+# _ca_verify_soft_rearm HANDLE [TIMEOUT_SECONDS] [SINCE_TS] — CTL-2147. THE point
+# of this function is that it does NOT re-read claude-accounts.env.
+# _ca_verify_active sources that file in a subshell, so under --soft (no
+# restart) it proves only that WE wrote the file — it would pass identically
+# against a daemon that never re-armed and is still dispatching on the walled
+# account. That is a check that cannot fail. This one asks the DAEMON, by
+# scanning for the account.rearm.applied event IT emits, and requires the
+# event's account.handle to equal HANDLE.
+#
+# SINCE_TS (optional, ISO-8601 UTC "Z" form — the same shape `date -u
+# +%Y-%m-%dT%H:%M:%SZ` and the emitted event's own `ts` field both use, so a
+# plain string compare orders correctly) guards against a DIFFERENT
+# check-that-cannot-fail: the account pool is small (acctN) and fleets
+# legitimately revisit the same handle within a month, so an unbounded scan
+# would accept a stale event from an EARLIER rotation to the same handle as
+# proof that THIS rearm request landed. Callers that care record "now" via
+# `date -u +%Y-%m-%dT%H:%M:%SZ` immediately before signalling the daemon and
+# pass it as SINCE_TS. Omitted (the shell-test callers below) → no freshness
+# filter, matching any occurrence — the pre-CTL-2147-review-fix behavior,
+# kept as the default so a caller that hasn't been threaded a fencepost yet
+# degrades to "was it ever armed" rather than refusing to verify at all.
+#
+# Fail-closed: no event, an unreadable log, a different handle, or (when
+# SINCE_TS is given) a too-old event all return nonzero. Self-limiting
+# deadline loop that SLEEPS (AGENTS.md: never an unbounded `while :; do :;
+# done`) — bounded by TIMEOUT_SECONDS (default CA_SOFT_VERIFY_TIMEOUT).
+# Matches with `jq -R 'try fromjson catch empty'`, never a bare `jq -c
+# select` (which aborts at the first torn/unparseable line and would
+# silently miss every line after it).
+_ca_verify_soft_rearm() {
+  local handle="$1" timeout="${2:-${CA_SOFT_VERIFY_TIMEOUT:-60}}" since_ts="${3:-}"
+  local log_file; log_file="$(_ca_event_log_path)"
+  local end=$((SECONDS + timeout)) match
+  while :; do
+    if [[ -r "$log_file" ]]; then
+      match="$(jq -R --arg h "$handle" --arg since "$since_ts" '
+          (try fromjson catch empty) as $ev
+          | select($ev != null)
+          | ($ev.attributes // {}) as $attrs
+          | (($attrs["event.name"] // $ev.name // $ev.event) == "account.rearm.applied") as $name_ok
+          | (($attrs["account.handle"] // $ev.account_handle) == $h) as $handle_ok
+          | (($since == "") or (($ev.ts // $ev.observedTs // "") >= $since)) as $fresh_ok
+          | select($name_ok and $handle_ok and $fresh_ok)
+          | "match"
+        ' "$log_file" 2>/dev/null)"
+      [[ -n "$match" ]] && return 0
+    fi
+    [[ $SECONDS -lt $end ]] || return 1
+    sleep 1
+  done
+}
+
 # _ca_verify_active HANDLE — sources the just-materialized claude-accounts.env (which
 # sets CLAUDE_CODE_OAUTH_TOKEN from whichever account is now selected) in a subshell
 # and confirms the usage tool reports HANDLE — and only HANDLE — as ACTIVE. Prints the
@@ -4308,17 +4413,52 @@ cmd_claude_account_status() {
   )
 }
 
+# _ca_apply_rotation MODE HANDLE ASSUME_YES LABEL — CTL-2147. The shared switch/sync
+# tail: soft-rearm-and-verify, or restart-and-verify. LABEL is "switch" or "sync",
+# used only for log/error-message wording. Extracted out of both cmd_claude_account_*
+# functions (which were byte-similar here) so the mode decision is testable in
+# isolation — by stubbing cmd_restart / catalyst-execution-core / _ca_verify_soft_rearm
+# / _ca_verify_active as plain shell functions — without having to first drive the
+# real sops/git/probe plumbing above it in either caller.
+_ca_apply_rotation() {
+  local mode="$1" handle="$2" assume_yes="$3" label="$4"
+  if [[ "$mode" == "soft" ]]; then
+    log "claude-account ${label}: soft rotation — signalling the daemon to re-arm (no stack restart)..."
+    # Fencepost recorded BEFORE signalling: _ca_verify_soft_rearm must not accept a
+    # stale event from an earlier rotation to this same handle (the account pool is
+    # small and fleets legitimately revisit a handle within a month).
+    local rearm_since; rearm_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    catalyst-execution-core rearm \
+      || fail "could not signal the execution-core daemon to re-arm (not running?) — rerun without --soft"
+    _ca_verify_soft_rearm "$handle" "$CA_SOFT_VERIFY_TIMEOUT" "$rearm_since" \
+      || fail "claude-account ${label} --soft: the daemon did not report re-arming to ${handle}"
+    # File-level check too: soft mode must satisfy BOTH the daemon check above and
+    # the existing file check, never the file check alone.
+    _ca_verify_active "$handle" || fail "claude-account ${label} --soft: post-${label} file verification failed"
+  else
+    log "claude-account ${label}: restarting stack..."
+    if [[ "$assume_yes" == "yes" ]]; then cmd_restart --yes; else cmd_restart; fi
+    _ca_verify_active "$handle" || fail "claude-account ${label}: post-${label} verification failed"
+  fi
+}
+
 cmd_claude_account_switch() {
   local handle="${1:-}"
-  [[ -n "$handle" ]] || fail "usage: catalyst-stack claude-account switch <handle> [--yes] (e.g. acct2)"
+  [[ -n "$handle" ]] || fail "usage: catalyst-stack claude-account switch <handle> [--soft] [--yes] (e.g. acct2)"
   shift
   local assume_yes="${ASSUME_YES:-no}"
   for a in "$@"; do
     case "$a" in
       --yes) assume_yes="yes" ;;
+      --soft) : ;;
       *) fail "unknown claude-account switch arg: $a" ;;
     esac
   done
+  # CTL-2147: single source of truth for the mode decision (also unit-tested
+  # standalone) — recomputed here rather than trusted from the loop above so a
+  # future arg added to one and not the other can't desync the two.
+  local mode; mode="$(_ca_parse_mode "$@")" || fail "unknown claude-account switch arg (see usage)"
+  [[ "$mode" == "soft" ]] && { _ca_soft_supported || fail "claude-account switch --soft: unsupported executor"; }
 
   _ca_valid_handle "$handle" || fail "invalid handle '${handle}' — must match ^acct[0-9]+\$ (e.g. acct2)"
 
@@ -4426,10 +4566,7 @@ cmd_claude_account_switch() {
     || fail "sops decrypt of claude-accounts.env failed"
   chmod 600 "$dest"
 
-  log "claude-account switch: restarting stack..."
-  if [[ "$assume_yes" == "yes" ]]; then cmd_restart --yes; else cmd_restart; fi
-
-  _ca_verify_active "$handle" || fail "claude-account switch: post-switch verification failed"
+  _ca_apply_rotation "$mode" "$handle" "$assume_yes" "switch"
 }
 
 cmd_claude_account_sync() {
@@ -4437,9 +4574,15 @@ cmd_claude_account_sync() {
   for a in "$@"; do
     case "$a" in
       --yes) assume_yes="yes" ;;
+      --soft) : ;;
       *) fail "unknown claude-account sync arg: $a" ;;
     esac
   done
+  # CTL-2147: single source of truth for the mode decision (also unit-tested
+  # standalone) — recomputed here rather than trusted from the loop above so a
+  # future arg added to one and not the other can't desync the two.
+  local mode; mode="$(_ca_parse_mode "$@")" || fail "unknown claude-account sync arg (see usage)"
+  [[ "$mode" == "soft" ]] && { _ca_soft_supported || fail "claude-account sync --soft: unsupported executor"; }
 
   local age_key; age_key="$(_ca_age_key_file)"
   [[ -f "$age_key" ]] || fail "no age key at ${age_key} — this node cannot decrypt cluster secrets"
@@ -4468,10 +4611,7 @@ cmd_claude_account_sync() {
   local handle; handle="$(_ca_current_active_handle "$dest")" \
     || fail "could not determine the active account after sync"
 
-  log "claude-account sync: restarting stack..."
-  if [[ "$assume_yes" == "yes" ]]; then cmd_restart --yes; else cmd_restart; fi
-
-  _ca_verify_active "$handle" || fail "claude-account sync: post-sync verification failed"
+  _ca_apply_rotation "$mode" "$handle" "$assume_yes" "sync"
 }
 
 cmd_claude_account() {
@@ -4481,7 +4621,7 @@ cmd_claude_account() {
     status) cmd_claude_account_status "$@" ;;
     switch) cmd_claude_account_switch "$@" ;;
     sync)   cmd_claude_account_sync "$@" ;;
-    *) fail "usage: catalyst-stack claude-account status | switch <handle> [--yes] | sync [--yes]" ;;
+    *) fail "usage: catalyst-stack claude-account status | switch <handle> [--soft] [--yes] | sync [--soft] [--yes]" ;;
   esac
 }
 

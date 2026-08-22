@@ -73,6 +73,67 @@ else
 	pass "daemon probe routes correctly"
 fi
 
+echo "test 4b (CTL-2147): backcompat 'rearm' routes to daemon rearm (no daemon → nonzero)"
+OUT="$("$SCRIPT" rearm 2>&1)"
+RC=$?
+if [ "$RC" != "0" ] && echo "$OUT" | grep -qi "not running"; then
+	pass "backcompat rearm routes to daemon rearm"
+else
+	fail "backcompat rearm routes to daemon rearm" "rc=$RC out=$OUT"
+fi
+
+echo "test 4c (CTL-2147): 'daemon rearm' is the canonical form"
+OUT="$("$SCRIPT" daemon rearm 2>&1)"
+RC=$?
+if [ "$RC" != "0" ] && echo "$OUT" | grep -qi "not running"; then
+	pass "daemon rearm routes correctly"
+else
+	fail "daemon rearm routes correctly" "rc=$RC out=$OUT"
+fi
+
+echo "test 4d (CTL-2147): 'rearm' success path — a live pid actually gets SIGHUP"
+# Tests 4b/4c above only cover the "daemon not running" failure path. This exercises
+# the success path with a real (fake) process: a tiny script that traps SIGHUP and
+# writes a marker file, backgrounded and pointed to via EXECUTION_CORE_PID_FILE.
+# AGENTS.md "Spawning a background process": the loop is self-limiting via its own
+# SECONDS deadline (30s) so it exits on its own even if this test's cleanup below
+# never runs — never an unbounded `while :; do :; done`.
+REARM_MARKER="$SCRATCH/sighup-received"
+FAKE_DAEMON="$SCRATCH/fake-daemon.sh"
+cat >"$FAKE_DAEMON" <<'EOF'
+#!/usr/bin/env bash
+marker="$1"
+trap 'touch "$marker"; exit 0' HUP
+end=$((SECONDS + 30))
+while [ "$SECONDS" -lt "$end" ]; do sleep 1; done
+EOF
+chmod +x "$FAKE_DAEMON"
+rm -f "$REARM_MARKER"
+"$FAKE_DAEMON" "$REARM_MARKER" &
+FAKE_PID=$!
+FAKE_PID_FILE="$SCRATCH/fake-daemon.pid"
+echo "$FAKE_PID" > "$FAKE_PID_FILE"
+# Give the backgrounded interpreter time to actually install the HUP trap before
+# signalling it — without this, SIGHUP can arrive before `trap` runs and the
+# process dies to the DEFAULT SIGHUP action instead (observed: "Hangup: 1").
+sleep 0.3
+
+OUT="$(EXECUTION_CORE_PID_FILE="$FAKE_PID_FILE" "$SCRIPT" rearm 2>&1)"
+RC=$?
+
+# Bounded wait for the trap to fire (never an unbounded poll — AGENTS.md).
+end=$((SECONDS + 10))
+while [ ! -e "$REARM_MARKER" ] && [ "$SECONDS" -lt "$end" ]; do sleep 0.2; done
+
+if [ "$RC" = "0" ] && echo "$OUT" | grep -qi "SIGHUP sent" && [ -e "$REARM_MARKER" ]; then
+	pass "rearm success path: SIGHUP delivered to a live pid, exit 0"
+else
+	fail "rearm success path: SIGHUP delivered to a live pid, exit 0" "rc=$RC out=$OUT marker_exists=$([ -e "$REARM_MARKER" ] && echo yes || echo no)"
+fi
+
+kill "$FAKE_PID" 2>/dev/null || true
+rm -f "$FAKE_PID_FILE" "$REARM_MARKER" "$FAKE_DAEMON"
+
 echo "test 5 (CTL-649): 'sessions list --json' routes to the sessions module"
 OUT="$("$SCRIPT" sessions list --json 2>/dev/null)"
 RC=$?

@@ -155,7 +155,7 @@ import {
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-preflight.mjs"; // CTL-1612: boot GitHub-credential preflight (advisory; alerts only on a definitive 401)
-import { rearmClaudeAccountsFromFile } from "./claude-accounts-rearm.mjs"; // CTL-1984: account-slot live-rearm hook
+import { rearmClaudeAccountsFromFile, wireRearmSighup } from "./claude-accounts-rearm.mjs"; // CTL-1984: account-slot live-rearm hook; CTL-2147: SIGHUP on-demand rearm trigger
 import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { getReconcileHealth } from "./reconcile-health.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
@@ -2998,6 +2998,13 @@ function main() {
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  // CTL-2147: SIGHUP = "re-read the account credential NOW" — the on-demand path for
+  // `catalyst-stack claude-account switch --soft`, which must not wait out a 5-minute
+  // cluster-sync tick while the fleet dispatches on a walled account. Narrow and
+  // non-terminal: it arms one secret and returns; it is NOT a shutdown signal.
+  // wireRearmSighup (not an inline process.on) so the registration itself is
+  // unit-testable against a fake EventEmitter — see daemon-signals.test.mjs.
+  wireRearmSighup(process, { armSecret, log });
 }
 
 // Run main() only on direct invocation, never when imported as a module
