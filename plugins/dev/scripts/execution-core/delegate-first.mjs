@@ -42,9 +42,15 @@ export function readDelegateFirstMode(env = process.env) {
 //     appendEvent   — injectable event emitter (default: no-op; Phase-3 wires real)
 //
 // Returns:
-//   off / shadow   → { routed:false, labelled:<bool>, [shadow:true] }
+//   off / shadow   → { routed:false, labelled:<bool>, stallClass:<string|null>, [shadow:true] }
 //   enforce+ok     → { routed:true, reason:<string> }
-//   enforce+fallback → { routed:false, labelled:<bool>, reason:<string> }
+//   enforce+fallback → { routed:false, labelled:<bool>, stallClass:<string|null>, reason:<string> }
+//
+// `stallClass` is the CTL-2158 verdict the publish produced ("system"|"ask"|
+// "moot"|"held"), or null when nothing was published (belief-owner deferral,
+// marker no-op, or a routed intent). Callers that write a HUMAN-facing record off
+// this result MUST gate on it via escalationIsHumanFacing — `labelled` is a retry
+// contract and is true for a provider outage too.
 //
 export function routeStuckTicketToDelegate(
   orchDir,
@@ -65,13 +71,24 @@ export function routeStuckTicketToDelegate(
 ) {
   const mode = readDelegateFirstMode(env);
 
-  // helper: call the Phase-1 label chokepoint and return { labelled: bool }
+  // helper: call the Phase-1 label chokepoint and return { labelled, stallClass }
+  //
+  // CTL-2159: the CLASS is carried out alongside the boolean because the boolean
+  // alone is a RETRY contract — it is true for a provider outage too. Four
+  // scheduler call sites read it and emitted a durable per-ticket
+  // `worker.transition { toDisposition:"needs-human" }`; without the class they
+  // would keep writing that record for exactly the SYSTEM stalls this epic
+  // stopped labelling, moving the artifact one layer down instead of deleting it.
+  let lastStallClass = null;
   const labelDirect = () => {
     const labelled = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, applyLabel, {
       env,
       site,
       log: logArg,
       explanation,
+      onOutcome: (o) => {
+        lastStallClass = o?.stallClass ?? null;
+      },
       // ⛔ CTL-2159: forward the reason. All six escalation sites that reach the
       // label ONLY through this seam already compute one (`dispatch-circuit-
       // breaker:N`, `triage-redispatch-cap`, `unresolvable-conflict`, …) and it
@@ -87,14 +104,14 @@ export function routeStuckTicketToDelegate(
   // ── off: byte-identical to Phase 1 ────────────────────────────────────────
   if (mode === "off") {
     const labelled = labelDirect();
-    return { routed: false, labelled };
+    return { routed: false, labelled, stallClass: lastStallClass };
   }
 
   // ── shadow: log would-route, do NOT enqueue, DO label ─────────────────────
   if (mode === "shadow") {
     appendEvent({ name: "delegate.would-route", ticket, site, reason });
     const labelled = labelDirect();
-    return { routed: false, shadow: true, labelled };
+    return { routed: false, shadow: true, labelled, stallClass: lastStallClass };
   }
 
   // ── enforce: enqueue to delegate, fall back to label on failure ───────────
@@ -114,7 +131,7 @@ export function routeStuckTicketToDelegate(
   if (readRunnerConfig(env).mode !== "on") {
     appendEvent({ name: "delegate.route-fallback", ticket, site, reason: "runner-disabled" });
     const labelled = labelDirect();
-    return { routed: false, labelled, reason: "runner-disabled" };
+    return { routed: false, labelled, stallClass: lastStallClass, reason: "runner-disabled" };
   }
 
   const enqueue = deps.enqueue ?? enqueueDelegateIntent;
@@ -132,5 +149,5 @@ export function routeStuckTicketToDelegate(
   // Fallback: queue-full / write-failed / no-orch-dir → label+explain
   appendEvent({ name: "delegate.route-fallback", ticket, site, reason: q.reason });
   const labelled = labelDirect();
-  return { routed: false, labelled, reason: q.reason };
+  return { routed: false, labelled, stallClass: lastStallClass, reason: q.reason };
 }

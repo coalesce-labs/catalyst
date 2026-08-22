@@ -248,6 +248,23 @@ function postTicketComment(ticket, body) {
 // mergeExplanationIntoSignal — write the EscalationPayload as the signal's
 // `explanation` block WITHOUT clobbering bg_job_id / status / the rest of the
 // envelope (the signal-overwrite-drops-fields hazard). Read-modify-write, atomic.
+// readStallReasonToken — the CLASSIFIABLE reason for this escalation, read off
+// the phase signal before the merge rewrites `stalledReason`. Fail-open: an
+// absent/malformed signal degrades to the escalation's own observed reason, then
+// null (which the publisher reports loudly rather than guessing).
+function readStallReasonToken(orchDir, ticket, phase, escalation) {
+  const fromPayload = escalation?.observed?.reason ?? null;
+  if (!orchDir || !ticket) return fromPayload;
+  try {
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8")
+    );
+    return sig?.failureReason ?? fromPayload;
+  } catch {
+    return fromPayload;
+  }
+}
+
 function mergeExplanationIntoSignal(orchDir, ticket, phase, escalation) {
   if (!orchDir || !ticket) return false;
   const p = join(orchDir, "workers", ticket, `phase-${phase}.json`);
@@ -374,6 +391,13 @@ if (sub === "escalated") {
   // (1) Emit recovery.escalated (WARN) with the rich, composer-ready payload.
   defaultEmitEvent({ type: "recovery.escalated", ticket, reason, escalation });
 
+  // ⛔ CTL-2159: capture the CLASSIFIABLE reason token BEFORE the merge, because
+  // the merge overwrites `stalledReason` with the opaque `needs_human` handoff
+  // token. `reason` above is PROSE (escalation.problem) and classifies nothing;
+  // this is the same expression mergeExplanationIntoSignal classifies from, so
+  // the publisher and the signal cannot disagree about what kind of stall this is.
+  const stallReasonToken = readStallReasonToken(orchDir, ticket, phase, escalation);
+
   // (2) Merge the explanation onto the signal → inbox row + push gate.
   mergeExplanationIntoSignal(orchDir, ticket, phase, escalation);
 
@@ -412,7 +436,15 @@ if (sub === "escalated") {
           { applyLabel: (a) => applyLabel({ ...a, readLabels: replicaReadLabels }) },
           // treatAlreadyAppliedAsLanded: this gate asks "is the label PRESENT?",
           // not "did I apply it on this call" (Codex #2861 P1).
-          { site: "recovery-emit-escalated", treatAlreadyAppliedAsLanded: true },
+          {
+            site: "recovery-emit-escalated",
+            treatAlreadyAppliedAsLanded: true,
+            // ⛔ CTL-2159: forward the reason. Without it this file classified the
+            // SAME stall two contradictory ways — mergeExplanationIntoSignal
+            // stamped a real class onto the signal while the publisher, handed
+            // nothing, acted as HELD.
+            reason: stallReasonToken,
+          },
         ) === true;
     } catch (err) {
       process.stderr.write(`recovery-emit: needs-human label write threw on ${ticket}: ${err.message}\n`);

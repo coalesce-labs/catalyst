@@ -211,6 +211,19 @@ export const SYSTEM_TROUBLE_POLICY = Object.freeze({
     persistenceMs: parseIntKnob(process.env.FILTER_CAPACITY_PERSISTENCE_MS, 120000, { min: 0 }),
     cooldownMs: parseIntKnob(process.env.FILTER_CAPACITY_COOLDOWN_MS, 1800000, { min: 0 }),
   }),
+  // CTL-2159 — tickets stalled on a SYSTEM condition with no telemetry producer
+  // of their own (spent retry budgets, watchdog kills, wedged workers). Threshold
+  // 2 for the same reason provider_degraded uses 2: one unlucky ticket is not a
+  // fleet condition, and this kind's whole job is the fan-in. The window is long
+  // (1h) because these stalls are sparse — one every few minutes across the fleet
+  // — and a 10-minute window would let a real, sustained condition drop below
+  // threshold between arrivals and flap.
+  system_stall: Object.freeze({
+    threshold: parseIntKnob(process.env.FILTER_SYSTEM_STALL_THRESHOLD, 2, { min: 1 }),
+    windowMs: parseIntKnob(process.env.FILTER_SYSTEM_STALL_WINDOW_MS, 3600000, { min: 1000 }),
+    persistenceMs: parseIntKnob(process.env.FILTER_SYSTEM_STALL_PERSISTENCE_MS, 0, { min: 0 }),
+    cooldownMs: parseIntKnob(process.env.FILTER_SYSTEM_STALL_COOLDOWN_MS, 1800000, { min: 0 }),
+  }),
 });
 
 // account.ratelimit.sampled is a GAUGE: at or above this 5h-usage percentage the

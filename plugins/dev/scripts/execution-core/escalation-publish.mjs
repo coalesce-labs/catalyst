@@ -98,6 +98,39 @@ import {
 // The marker label. Unchanged on purpose — see note 2 in the header.
 export const ESCALATION_MARKER_LABEL = "needs-human";
 
+/**
+ * escalationIsHumanFacing — PURE. Did publishing this class put a per-ticket
+ * HUMAN-FACING record on the board, or not?
+ *
+ * ⛔ WHY CALLERS MUST ASK. `publishEscalation` returns TRUE for every class,
+ * because its boolean is a RETRY contract ("a disposition was published on this
+ * call — stop retrying"), not a statement about human attention. Five call sites
+ * used to read that same boolean as "a needs-human label landed" and emit a
+ * `worker.transition { toDisposition:"needs-human" }` on the strength of it.
+ * Left unchanged, every provider-overload stall would write a durable per-ticket
+ * needs-human record — the exact artifact this epic deletes, moved one layer
+ * down where the label sweep cannot see it.
+ *
+ * SYSTEM → false: the CTL-2156 fleet alert names the condition and the ticket
+ *   retries by itself; a per-ticket human record is the fan-out we are removing.
+ * MOOT   → false: nothing is left for anyone to do.
+ * ASK    → true: an ask ticket exists and a person owns it.
+ * HELD   → true: "a person must look" is the whole point of HELD; silencing it
+ *   here would ship the plan's named worst outcome (no label, no ask, no alert).
+ *
+ * ⛔ THE FAIL DIRECTION IS THE CALLER'S CHOICE, AND THE TWO CALLERS DIFFER ON
+ * PURPOSE. This predicate is fail-CLOSED on an unknown class (undefined → false),
+ * which is right for the scheduler's `worker.transition` emits: a missing
+ * telemetry record costs little and a false needs-human record is the artifact we
+ * are deleting. The unstuck sweep's authored Linear comment inverts it — it
+ * suppresses only on an EXPLICIT system/moot verdict — because that comment is
+ * the last thing making an unclassified stall visible at all, and going quiet on
+ * an absence of evidence would be the silent regression, not a tidy default.
+ */
+export function escalationIsHumanFacing(klass) {
+  return klass === STALL_CLASS.ASK || klass === STALL_CLASS.HELD;
+}
+
 // Kill switch for the ask transport. `off` makes an ASK verdict behave exactly
 // like HELD (recorded, visible, zero Linear writes) instead of filing. Infra as
 // code: this is a config knob, never a code edit.
@@ -262,9 +295,25 @@ export function publishEscalation(
   const base = markerBase;
   const alreadyPublished = existsSync(`${base}.applied`);
   if (alreadyPublished || existsSync(`${base}.skipped`)) {
-    // Marker-guarded no-op — byte-identical to labelOnce's early return.
+    // Marker-guarded no-op — byte-identical to labelOnce's early return, EXCEPT
+    // that it now reports the class already recorded for this ticket.
+    //
+    // ⛔ WHY THE CLASS MATTERS ON A NO-OP. Callers gate a per-ticket human artifact
+    // on it (the unstuck sweep's authored Linear comment, the scheduler's
+    // worker.transition). A later sweep over a still-stuck SYSTEM ticket reaches
+    // this early return, and reporting `stallClass: null` there would read as "no
+    // evidence" → fail-open → post the comment anyway. The verdict is on disk from
+    // the first publish; handing it back is the difference between "SYSTEM stalls
+    // write zero per-ticket artifacts" and "…zero, except on the second sweep".
     if (typeof onOutcome === "function") {
-      onOutcome({ deferred: false, applied: false, ran: false, reason: null, alreadyApplied: alreadyPublished });
+      onOutcome({
+        deferred: false,
+        applied: false,
+        ran: false,
+        reason: null,
+        alreadyApplied: alreadyPublished,
+        stallClass: signal?.stallClass ?? null,
+      });
     }
     return treatAlreadyPublishedAsLanded && alreadyPublished;
   }

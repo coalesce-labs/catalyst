@@ -22,6 +22,7 @@ import {
   ALERT_KIND_PROVIDER_DEGRADED,
   ALERT_KIND_RATE_LIMIT_EXHAUSTED,
   ALERT_KIND_CAPACITY_UNAVAILABLE,
+  ALERT_KIND_SYSTEM_STALL,
 } from "./alert-emit.mjs";
 
 const ev = (name, { payload = {}, attributes = {}, resource = {} } = {}) => ({
@@ -405,8 +406,13 @@ describe("classifySystemTrouble — non-events and hostile input", () => {
     expect(classifySystemTrouble(hostile)).toBeNull();
   });
 
-  test("every rule maps to one of the three declared kinds", () => {
-    expect(SYSTEM_TROUBLE_KINDS).toHaveLength(3);
+  test("every rule maps to one of the declared kinds", () => {
+    // CTL-2159 added a fourth: system_stall, fed by `ticket.escalated` carrying
+    // the classifier's own SYSTEM verdict. It exists because the other three are
+    // keyed on provider / account / node TELEMETRY and cover roughly three of the
+    // ~35 reason tokens the classifier calls SYSTEM — leaving spent retry budgets,
+    // watchdog kills and wedged workers with NO per-ticket artifact and NO alert.
+    expect(SYSTEM_TROUBLE_KINDS).toHaveLength(4);
     const kinds = new Set(SYSTEM_TROUBLE_KINDS);
     for (const name of Object.keys(TROUBLE_RULES)) {
       const o = TROUBLE_RULES[name](
@@ -417,6 +423,61 @@ describe("classifySystemTrouble — non-events and hostile input", () => {
       );
       if (o) expect(kinds.has(o.kind)).toBe(true);
     }
+  });
+});
+
+describe("⛔ CTL-2159 — system_stall: the escalation classes that had no telemetry", () => {
+  const esc = (attrs, payload = {}) =>
+    ev("ticket.escalated", { attributes: attrs, payload });
+
+  test("a SYSTEM-class escalation is trouble, keyed on the TICKET (fan-in)", () => {
+    const o = classifySystemTrouble(
+      esc(
+        { "escalation.stall_class": "system", "escalation.reason": "attempts-exhausted" },
+        { ticket: "CTL-900", reason: "attempts-exhausted", stallClass: "system" }
+      )
+    );
+    expect(o).toEqual({
+      kind: ALERT_KIND_SYSTEM_STALL,
+      key: "ticket:CTL-900",
+      active: true,
+      reason: "CTL-900 stalled on a system condition (attempts-exhausted)",
+    });
+  });
+
+  test("N system stalls are N distinct keys under ONE alert — and ZERO per-ticket artifacts", () => {
+    const w = makeSystemTroubleWindow();
+    const now = 2_000_000;
+    for (const t of ["CTL-1", "CTL-2", "CTL-3", "CTL-1"]) {
+      w.observeEvent(
+        esc({ "escalation.stall_class": "system" }, { ticket: t }),
+        now
+      );
+    }
+    expect(w.count(ALERT_KIND_SYSTEM_STALL, now)).toBe(3);
+  });
+
+  test("ASK / MOOT / HELD are NO OPINION — never counted, never a retraction", () => {
+    for (const klass of ["ask", "moot", "held"]) {
+      expect(
+        classifySystemTrouble(esc({ "escalation.stall_class": klass }, { ticket: "CTL-9" }))
+      ).toBeNull();
+    }
+    // POSITIVE CONTROL: the same instrument, same event name, only the class
+    // differing, DOES return an observation — so the nulls above are "no opinion",
+    // not "the rule is unreachable".
+    expect(
+      classifySystemTrouble(esc({ "escalation.stall_class": "system" }, { ticket: "CTL-9" }))
+    ).not.toBeNull();
+  });
+
+  test("a class-less escalation is NO OPINION (never a false raise)", () => {
+    expect(classifySystemTrouble(esc({}, { ticket: "CTL-9" }))).toBeNull();
+  });
+
+  test("the payload carries the class when the attribute does not", () => {
+    const o = classifySystemTrouble(esc({}, { ticket: "CTL-9", stallClass: "system" }));
+    expect(o?.kind).toBe(ALERT_KIND_SYSTEM_STALL);
   });
 });
 

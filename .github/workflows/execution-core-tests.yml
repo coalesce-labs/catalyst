@@ -927,7 +927,16 @@ jobs:
         # step documents). Measured green on origin/main (9 pass) and this branch
         # (10 pass), so it imports no pre-existing red like fence-held-fold would.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs event-leak-guard.test.mjs
+        # CTL-2159: system-trouble.test.mjs joins the same hand-enumerated list. It
+        # now gates the `system_stall` rule — the ONLY alert path for the ~30 SYSTEM
+        # reason tokens that have no telemetry producer (spent retry budgets,
+        # watchdog kills, wedged workers). Those tokens stopped writing a per-ticket
+        # artifact in CTL-2159; if this rule regresses they produce NO artifact and
+        # NO alert, which is silent and strictly worse than the bin the epic deletes.
+        # `grep -rn system-trouble .github/workflows/` returned NOTHING before this;
+        # positive control: the same grep for `worker-state-projection` returned the
+        # `run:` line below. Measured 39 pass / 0 fail on this branch.
+        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs event-leak-guard.test.mjs system-trouble.test.mjs
 
       - name: plugin-refresh + lock-resolution-audit tests (CTL-1831)
         # `grep plugin-refresh .github/workflows/` returned only two COMMENTS
@@ -1225,6 +1234,27 @@ jobs:
         #   `grep -rn escalation-publish .github/workflows/` returned NOTHING
         #   before this edit, against the same positive control of
         #   `assertion-evidence-parity`, which returns its list line.
+        #
+        #   CTL-2159 ROUND 2: delegate-first.test.mjs and durable-escalation.test.mjs
+        #   join for the same reason. delegate-first is the seam SIX producers reach
+        #   the escalation through — including the volume producer — and it now
+        #   carries the stall CLASS out to four scheduler sites that gate a durable
+        #   per-ticket `worker.transition {toDisposition:"needs-human"}` on it;
+        #   durable-escalation is the SECOND per-ticket artifact store (the board
+        #   renders every record as a needs-human card) and now carries the class
+        #   that keeps SYSTEM stalls off it. `grep -rn 'delegate-first.test\|durable
+        #   -escalation.test' .github/workflows/` returned NOTHING before this edit;
+        #   positive control: the same grep for `label-guard.test.mjs` returns its
+        #   list line. Measured 24 + 17 pass / 0 fail on this branch.
+        #
+        #   ⛔ DELIBERATELY NOT ADDED: delegate-emit-wiring.test.mjs and
+        #   delegate-shadow-e2e.test.mjs. Both are RED on origin/main and on this
+        #   branch alike (4 failures, all in stale-pr-rescue's defaultEscalate
+        #   emitting an EXTRA delegate event — verified pre-existing by checking out
+        #   HEAD~1 and re-running: same 4 by name). Registering a red suite makes the
+        #   gate red on arrival and teaches the next author to skip it. They belong
+        #   in CI the moment that defect is fixed; it is out of this change's scope
+        #   and is stated here rather than left as a silent omission.
         run: |
           bun test \
             beliefs/advance-rules.test.mjs \
@@ -1255,6 +1285,8 @@ jobs:
             stall-class.test.mjs \
             stall-class-wiring.test.mjs \
             escalation-publish.test.mjs \
+            delegate-first.test.mjs \
+            durable-escalation.test.mjs \
             cli-header-backtick-guard.test.mjs \
             agent-session-narrator.test.mjs \
             linear-comment-write.test.mjs \

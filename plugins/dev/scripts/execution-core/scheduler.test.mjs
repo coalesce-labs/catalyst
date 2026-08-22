@@ -1306,7 +1306,16 @@ describe("dispatch cool-down escalation", () => {
   });
 
   // CTL-764 finding 13: the return value gates the caller's worker.transition emission.
-  test("finding 13 — maybeEscalateDispatchFailures returns true when it writes the label", () => {
+  //
+  // ⛔ CTL-2159 RE-TARGET. It used to gate on "a needs-human label was written".
+  // With the label deleted, publishEscalation returns TRUE for every class —
+  // its boolean is a RETRY contract — so gating on it unchanged would have kept
+  // emitting a durable per-ticket `worker.transition {toDisposition:"needs-human"}`
+  // for provider outages and spent retry budgets: the artifact this epic deletes,
+  // moved one layer down where the label sweep cannot see it. The gate is now the
+  // CLASS. `dispatch-circuit-breaker:N` is an exact SYSTEM row, so this site — the
+  // highest-frequency dispatch failure in the system — records NO human record.
+  test("finding 13 / CTL-2159 — a SYSTEM circuit-breaker trip records NO human transition", () => {
     const applied = [];
     const ws = fakeWriteStatus(applied);
     const wrote = maybeEscalateDispatchFailures(
@@ -1314,7 +1323,20 @@ describe("dispatch cool-down escalation", () => {
       { ticket: "CTL-13A", phase: "research", code: 2, consecutiveFailures: 3 },
       { writeStatus: ws, appendEvent: () => {} }
     );
-    expect(wrote).toBe(true);
+    expect(wrote).toBe(false);
+    // POSITIVE CONTROL that the escalation DID happen and this is not a plumbing
+    // failure: the once-marker every retry loop keys on is on disk, and the signal
+    // carries the SYSTEM verdict that made the answer false.
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-13A", ".linear-label-needs-human.applied"))
+    ).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-13A", "phase-recovery-pass.json"), "utf8")
+    );
+    expect(sig.stallClass).toBe("system");
+    expect(sig.stallClassRule).toBe("prefix:dispatch-circuit-breaker:");
+    // and NO Linear label, on any path
+    expect(applied.filter((l) => l.label === "needs-human")).toEqual([]);
   });
 
   test("finding 13 — returns false below the escalation threshold (no write)", () => {
@@ -1356,20 +1378,25 @@ describe("dispatch cool-down escalation", () => {
         appendWorkerTransitionEvent: (ev) => transitions.push(ev),
       });
     }
-    // ⛔ CTL-2159: no Linear label; the escalation is the once-marker. The
-    // worker.transition below is UNCHANGED — the board's escalation record does
-    // not depend on the label and never did.
+    // ⛔ CTL-2159: no Linear label; the escalation is the once-marker.
     expect(applied.filter((l) => l.label === "needs-human")).toEqual([]);
     expect(
       existsSync(join(orchDir, "workers", "CTL-7", ".linear-label-needs-human.applied"))
     ).toBe(true);
-    // CTL-764 finding 13: a ticket escalated solely by dispatch failures gets a
-    // worker.transition(toDisposition="needs-human", source="dispatch-failures").
-    const escalation = transitions.find(
-      (e) => e.ticket === "CTL-7" && e.toDisposition === "needs-human"
-    );
-    expect(escalation).toBeDefined();
-    expect(escalation.source).toBe("dispatch-failures");
+    // ⛔ AND NO worker.transition either. Repeated dispatch failures are a SYSTEM
+    // condition — the ticket needs the executor back, not a person — so the whole
+    // per-ticket human record is withheld end-to-end through schedulerTick, not
+    // only at the Linear label. The CTL-2156 fleet alert names the condition once
+    // for the whole fleet (broker/system-trouble.mjs's system_stall rule).
+    expect(
+      transitions.filter((e) => e.ticket === "CTL-7" && e.toDisposition === "needs-human")
+    ).toEqual([]);
+    // POSITIVE CONTROL for that zero: the escalation demonstrably RAN — the
+    // once-marker asserted two lines up is only written by publishEscalation — so
+    // "no transition" is a decision the class gate made, not a tick that never
+    // reached the escalation branch. (The complementary control, that a NON-system
+    // class still produces one, is escalation-publish.test.mjs's HELD case.)
+    expect(transitions.some((e) => e.toDisposition === "needs-human")).toBe(false);
   });
 });
 

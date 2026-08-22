@@ -110,6 +110,12 @@ export const STALL_REASON_CLASS = Object.freeze({
 
   // ── S: executor / worker death, fences, zombies ───────────────────────────
   "watchdog-kill": STALL_CLASS.SYSTEM,
+  // ⛔ CTL-2159 (verification finding). `watchdog-kill` above is the SITE id, and
+  // a site is never classified from. The reason the watchdog actually writes is
+  // `hung_no_progress:<phase>:<N>m_<C>_commits` (watchdog-action.mjs:61) — which
+  // matched no row, no prefix and no family, so every hung-worker kill classified
+  // HELD. The exact token is here and the parameterised form is a prefix row below.
+  "hung-no-progress": STALL_CLASS.SYSTEM,
   "worker-oom": STALL_CLASS.SYSTEM,
   "ended-without-declaration": STALL_CLASS.SYSTEM,
   "cluster-fence-stale": STALL_CLASS.SYSTEM,
@@ -165,6 +171,7 @@ export const STALL_REASON_CLASS = Object.freeze({
 // `already_fixed_by_CTL-1234`). Longest prefix wins; checked after the exact table.
 export const STALL_REASON_PREFIX_CLASS = Object.freeze({
   "dispatch-circuit-breaker:": STALL_CLASS.SYSTEM,
+  "hung-no-progress:": STALL_CLASS.SYSTEM,
   "budget:": STALL_CLASS.SYSTEM,
   "cloud:": STALL_CLASS.SYSTEM,
   "already-fixed-by-": STALL_CLASS.MOOT,
@@ -183,7 +190,7 @@ export const STALL_REASON_PREFIX_CLASS = Object.freeze({
 // (see the header). Ambiguity is a verdict here, not a tiebreak.
 export const STALL_FAMILY_PATTERNS = Object.freeze({
   [STALL_CLASS.SYSTEM]:
-    /(rate-?limit|429|5\d\d|overload|throttl|capacity|quota|usage-limit|token.{0,4}exhaust|exhaust|retry|cycle-cap|backoff|timeout|timed-out|network|econn|etimedout|socket|dns|unreachable|offline|disconnect|oom|killed|crash|died|death|zombie|fence|orphan|stale|dirty-tree|untidy|flake|flaky|pre-push-hook|hook-failed|transient|infra|executor)/,
+    /(rate-?limit|429|5\d\d|overload|throttl|capacity|quota|usage-limit|token.{0,4}exhaust|exhaust|retry|cycle-cap|backoff|timeout|timed-out|network|econn|etimedout|socket|dns|unreachable|offline|disconnect|oom|killed|crash|died|death|zombie|hung|no-progress|wedged|fence|orphan|stale|dirty-tree|untidy|flake|flaky|pre-push-hook|hook-failed|transient|infra|executor)/,
   [STALL_CLASS.ASK]:
     /(approval|approve|authoriz|sign-?off|scope|priorit|product-decision|credential|secret-rotation|dashboard|provision|prd|design-review|owner-input|judgment)/,
   [STALL_CLASS.MOOT]:

@@ -410,6 +410,20 @@ export function inEscalationCooldown(orchDir, ticket, phase, now) {
 // the file this guard protects from being overwritten.
 const LIVE_RECOVERY_PASS_STATUSES = new Set(["dispatched", "running", YIELDED_STATUS]);
 
+// readRecoveryPassSignal — the on-disk half of the classifier's reason fallback.
+// Same path writeExplanationSignal writes. Fail-open: an absent or malformed file
+// is `null`, never a throw, and never blocks the escalation path.
+function readRecoveryPassSignal(orchDir, ticket) {
+  if (!orchDir || !ticket) return null;
+  try {
+    const p = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
+    const sig = JSON.parse(readFileSync(p, "utf8"));
+    return sig && typeof sig === "object" ? sig : null;
+  } catch {
+    return null;
+  }
+}
+
 function writeExplanationSignal(
   orchDir,
   ticket,
@@ -459,7 +473,22 @@ function writeExplanationSignal(
     // CTL-2159: scoped to the case that can actually clobber — a class-only
     // stamp carries no explanation, so it must not be dropped just because a
     // curated one is already on disk.
-    if (explanation && prior.explanation && prior.explanation.degraded !== true) return;
+    //
+    // ⛔ CTL-2159 (verification finding): this used to be an UNCONDITIONAL early
+    // return, which silently swallowed the stall-CLASS stamp too. A caller that
+    // passes a real explanation onto a ticket that already has a curated one
+    // (recovery.mjs's applyStalledLabel, the `attempts-exhausted` sweep) got no
+    // `stallClass` on disk at all — so the durable S/A/M/HELD record, the one
+    // thing this epic replaces the label with, was missing at exactly the sites
+    // that escalate most. Now the CURATED PROSE is still protected (it is simply
+    // not overwritten below), while a stamp carrying anything new still lands.
+    const priorExplanationWins = Boolean(
+      explanation && prior.explanation && prior.explanation.degraded !== true
+    );
+    const stampHasNews = Object.entries(extraFields ?? {}).some(
+      ([k, v]) => prior[k] !== v
+    );
+    if (priorExplanationWins && !stampHasNews) return;
     const nowIso = new Date().toISOString();
     const signal = {
       ...prior,
@@ -488,7 +517,9 @@ function writeExplanationSignal(
           : nowIso,
       updatedAt: nowIso,
       phase: "recovery-pass",
-      ...(explanation ? { explanation } : {}),
+      // Curated prose on disk beats a caller's thin one — that is the whole point
+      // of the guard above; only the stamp gets through.
+      ...(explanation && !priorExplanationWins ? { explanation } : {}),
     };
     mkdirSync(dirname(p), { recursive: true });
     const tmp = `${p}.tmp.${process.pid}`;
@@ -576,6 +607,14 @@ export function labelNeedsHumanUnlessBeliefOwner(
     // never fires. Every producer that has a reason MUST forward it — the six
     // routeStuckTicketToDelegate sites do so through delegate-first's labelDirect.
     reason = null,
+    // CTL-2159 (verification finding): the phase signal, when the caller holds
+    // one. classifyStall falls back `reason ?? signal.stalledReason ?? signal
+    // .failureReason` — but this call site never passed `signal`, so that whole
+    // fallback was DEAD on the only path any producer uses and a caller that
+    // omitted `reason` had no second chance. When neither is supplied we now read
+    // the on-disk signal ourselves (see resolveReasonFallback) rather than
+    // classifying HELD on an absence we could have looked up.
+    signal = null,
     onOutcome = null,
     // CTL-2056: injectable emit seam so tests can record escalation events
     // without real I/O. Defaults to the real emitter (fail-open, never throws).
@@ -625,10 +664,33 @@ export function labelNeedsHumanUnlessBeliefOwner(
   // canExecute HARDCODED false, so an unexplained worker death degraded to a
   // fabricated "priority call the agent cannot make unilaterally" card. That
   // template is what turned one provider outage into 37 separate human decisions.
+  // ⛔ THE NO-REASON CLIFF, MADE LOUD. `classifyStall` returns HELD with
+  // rule:"no-reason" when it is handed nothing — correct, because "I could not
+  // look" is not "nothing is wrong". But a producer that KNOWS its reason and
+  // forgets to forward it gets that same silent HELD, and the SYSTEM retry/alert
+  // path never fires. Three verification lenses independently found five such
+  // sites in this repo. So: recover the reason from the signal (given, or read
+  // off disk), and if there is genuinely none, WARN — a site that classifies
+  // HELD for want of a token should be visible in the log, not inferred weeks
+  // later from an absent alert.
+  const resolvedSignal = signal ?? readRecoveryPassSignal(orchDir, ticket);
+  const resolvedReason =
+    reason ?? resolvedSignal?.stalledReason ?? resolvedSignal?.failureReason ?? null;
+  if (resolvedReason == null) {
+    try {
+      (logArg ?? log).warn(
+        { ticket, site },
+        "escalation: no stall reason available — classifying HELD (CTL-2159)"
+      );
+    } catch {
+      /* logging must never block the escalation path */
+    }
+  }
   const published = publishEscalation(orchDir, ticket, {
     env,
     site,
-    reason,
+    reason: resolvedReason,
+    signal: resolvedSignal,
     log: logArg,
     explanation: explanation ?? null,
     markerBase: labelMarkerBase(orchDir, ticket, "needs-human"),

@@ -404,6 +404,7 @@ import {
   WORKER_STATUS_LABELS,
   labelMarkerBase, // CTL-1571: convergeHeldLabel writes the same once-marker labelOnce does
 } from "./label-guard.mjs";
+import { escalationIsHumanFacing } from "./escalation-publish.mjs"; // CTL-2159: class gate for the worker.transition emits
 import { DISPOSITIONS } from "./worker-disposition.mjs"; // CTL-1605: precedence order for the onTerminalCleared aggregate-arg → pre-clear `from` resolution
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
@@ -3360,7 +3361,13 @@ export function maybeEscalateDispatchFailures(
     code: marker.code,
     consecutiveFailures: marker.consecutiveFailures,
   });
-  return result.labelled === true;
+  // ⛔ CTL-2159: this boolean gates a durable per-ticket `worker.transition
+  // { toDisposition:"needs-human" }` at both call sites, and `labelled` alone is
+  // TRUE for a provider outage — publishEscalation returns true for every class
+  // because its boolean is a RETRY contract. Gate on the CLASS so a SYSTEM stall
+  // records no human-facing disposition (the CTL-2156 fleet alert names it and
+  // the ticket retries); ASK and HELD still do.
+  return result.labelled === true && escalationIsHumanFacing(result.stallClass);
 }
 
 // CTL-712: the refused-dispatch path writes NO signal file (the artifact gate
@@ -6625,16 +6632,25 @@ export function schedulerTick(
               labelNeedsHuman: (dir, t) =>
                 labelNeedsHumanUnlessBeliefOwner(dir, t, writeStatus, {
                   site: "attempts-exhausted",
+                  // ⛔ CTL-2159: forward the reason. `attempts-exhausted` is an
+                  // exact SYSTEM row; without it this classified HELD and a spent
+                  // retry budget — the highest-volume escalation in the system —
+                  // never reached the retry/alert path.
+                  reason: "attempts-exhausted",
                   // CTL-1568 (Codex #2861 P1): this gate decides whether to post a
                   // human-facing comment and latch the escalation, so what matters is
                   // that the label is PRESENT — not that this call applied it. Without
                   // this, a ticket another producer already parked needs-human has its
                   // escalation permanently suppressed once the deferral cap is hit.
                   treatAlreadyAppliedAsLanded: true,
-                  // The curated explanation is already on disk from escalateExhaustedIntents's
-                  // prior writeSignal call. Pass a thin hint so the absent-warn is suppressed;
-                  // writeExplanationSignal's no-overwrite guard keeps the richer signal intact.
-                  explanation: { human_question: "see recovery-pass escalation brief" },
+                  // ⛔ CTL-2159: the thin `explanation: { human_question: "see
+                  // recovery-pass escalation brief" }` hint that used to live here
+                  // is GONE. It was a hardcoded, manufactured human question — the
+                  // exact artifact class this epic deletes — and it was actively
+                  // harmful: writeExplanationSignal's no-overwrite guard fires only
+                  // when an explanation is supplied, so the hint suppressed the
+                  // stall-CLASS stamp as well. The curated brief escalateExhaustedIntents
+                  // already wrote to disk is preserved by the merge either way.
                 }),
               // Codex R1: a finished ticket's stale ledger is forgotten by the
               // terminal cleanup LATER in the tick — never page a human for it.
@@ -7532,7 +7548,7 @@ export function schedulerTick(
               });
               // CTL-764 finding 8: emit only on an actual label write (a persisted
               // marker after restart / belief-owner deferral is not a fresh escalation).
-              if (dcResult.labelled === true) {
+              if (dcResult.labelled === true && escalationIsHumanFacing(dcResult.stallClass)) {
                 recordTransition({
                   ticket: member,
                   toDisposition: "needs-human",
@@ -8598,7 +8614,7 @@ export function schedulerTick(
             });
             // CTL-764 finding 8: emit only on an actual label write (a persisted
             // marker after restart / belief-owner deferral is not a fresh escalation).
-            if (c925Result.labelled === true) {
+            if (c925Result.labelled === true && escalationIsHumanFacing(c925Result.stallClass)) {
               recordTransition({
                 ticket: member,
                 toDisposition: "needs-human",
@@ -9339,7 +9355,7 @@ export function schedulerTick(
             // actually occurred. A persisted .linear-label-needs-human marker after a
             // daemon restart (labelOnce no-ops) or a belief-owner deferral changes no
             // label — recording a fresh needs-human transition there is a false escalation.
-            if (tsResult.labelled === true) {
+            if (tsResult.labelled === true && escalationIsHumanFacing(tsResult.stallClass)) {
               recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
             }
           } else {

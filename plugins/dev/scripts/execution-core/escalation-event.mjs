@@ -31,11 +31,17 @@ export const ESCALATION_EVENT_NEEDS_HUMAN = "ticket.escalated";
  * @param {object} [meta]
  * @param {string} [meta.site]   short caller id (e.g. "scheduler", "monitor")
  * @param {string} [meta.reason] human-readable reason string or null
+ * @param {string} [meta.stallClass] CTL-2159 stall class — "system"|"ask"|"moot"|"held"
+ * @param {string} [meta.stallRule]  the classifier rule that decided it
  * @param {object} [opts]
  * @param {Function} [opts.now]  injectable timestamp fn (returns ISO string)
  * @returns {object} the envelope object
  */
-export function buildEscalationEnvelope(ticket, { site = null, reason = null } = {}, { now } = {}) {
+export function buildEscalationEnvelope(
+  ticket,
+  { site = null, reason = null, stallClass = null, stallRule = null } = {},
+  { now } = {}
+) {
   const ts = now ? now() : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const severityText = "INFO";
   const severityNumber = 9;
@@ -48,6 +54,15 @@ export function buildEscalationEnvelope(ticket, { site = null, reason = null } =
   };
   if (site != null) attributes["escalation.site"] = site;
   if (reason != null) attributes["escalation.reason"] = reason;
+  // ⛔ CTL-2159 LOAD-BEARING: the broker's SYSTEM-trouble detector
+  // (broker/system-trouble.mjs) keys its `system_stall` rule on this attribute.
+  // The chokepoint has always PASSED `stallClass` in `meta`; this builder simply
+  // dropped it on the floor, so the one signal that could fan N system-class
+  // stalls into ONE fleet alert never reached the broker. Without it a SYSTEM
+  // stall produces no per-ticket artifact AND no alert — silent, which is the
+  // regression this epic exists to avoid.
+  if (stallClass != null) attributes["escalation.stall_class"] = stallClass;
+  if (stallRule != null) attributes["escalation.stall_rule"] = stallRule;
 
   return {
     ts,
@@ -60,7 +75,7 @@ export function buildEscalationEnvelope(ticket, { site = null, reason = null } =
     resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
     attributes,
     body: {
-      payload: { ticket, site, reason },
+      payload: { ticket, site, reason, stallClass, stallRule },
     },
   };
 }

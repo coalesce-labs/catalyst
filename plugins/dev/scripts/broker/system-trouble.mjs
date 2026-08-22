@@ -33,6 +33,7 @@ import {
   ALERT_KIND_PROVIDER_DEGRADED,
   ALERT_KIND_RATE_LIMIT_EXHAUSTED,
   ALERT_KIND_CAPACITY_UNAVAILABLE,
+  ALERT_KIND_SYSTEM_STALL,
 } from "./alert-emit.mjs";
 
 // Default trailing window: how long one observation keeps its key "in trouble"
@@ -302,6 +303,43 @@ export const TROUBLE_RULES = Object.freeze({
           : `node ${host} capacity restored (maxParallel=${next})`,
     };
   },
+
+  // ── system_stall — a ticket stalled on a SYSTEM condition ─────────────────
+  //
+  // ⛔ THE HOLE THIS CLOSES. The six rules above are keyed on provider / account /
+  // node TELEMETRY, and between them they cover about three of the ~35 reason
+  // tokens the CTL-2158 classifier calls SYSTEM. For all the others — a spent
+  // retry budget, an exhausted remediate cycle, a watchdog kill on a hung worker,
+  // an unresolvable conflict — there is NO telemetry producer. CTL-2159 stopped
+  // writing the per-ticket needs-human label for them on the stated premise that
+  // "the fleet alert already names the condition". For these tokens it did not:
+  // they produced no per-ticket artifact AND no alert. Silent.
+  //
+  // The input is the classifier's own verdict, carried on the escalation event by
+  // execution-core/escalation-event.mjs — this rule NEVER re-derives a class from
+  // a reason string, so the alert and the ticket's on-disk `stallClass` can never
+  // disagree.
+  //
+  // Keyed on the TICKET (the same fan-in shape as the provider rule): N tickets
+  // stalled on system conditions are N distinct keys under ONE alert, and ZERO
+  // per-ticket artifacts. NEVER a retraction — an escalation event is only ever
+  // evidence of trouble, and a ticket that recovers simply stops arriving and ages
+  // out of the trailing window. Any non-system class is NO OPINION: an ask has its
+  // own ticket and a held stall is deliberately a person's problem, so counting
+  // either here would page the fleet for something a person already owns.
+  "ticket.escalated": (event) => {
+    const p = payloadOf(event);
+    const klass = str(attrOf(event, "escalation.stall_class")) ?? str(p.stallClass);
+    if (klass !== "system") return null;
+    const ticket = str(p.ticket) ?? str(attrOf(event, "event.label")) ?? "unknown";
+    const why = str(p.reason) ?? str(attrOf(event, "escalation.reason"));
+    return {
+      kind: ALERT_KIND_SYSTEM_STALL,
+      key: `ticket:${ticket}`,
+      active: true,
+      reason: `${ticket} stalled on a system condition${why ? ` (${why})` : ""}`,
+    };
+  },
 });
 
 /** Every kind this detector can raise — the alert contract, in one place. */
@@ -309,6 +347,7 @@ export const SYSTEM_TROUBLE_KINDS = Object.freeze([
   ALERT_KIND_PROVIDER_DEGRADED,
   ALERT_KIND_RATE_LIMIT_EXHAUSTED,
   ALERT_KIND_CAPACITY_UNAVAILABLE,
+  ALERT_KIND_SYSTEM_STALL,
 ]);
 
 /**

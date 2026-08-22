@@ -318,3 +318,63 @@ describe("mergeDurableEscalationsIntoCards — CAT-173 standoff visibility", () 
     expect(extra).toHaveLength(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-2159 — the class gate on the durable-escalation card.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ⛔ WHY. This store is a per-ticket escalation ARTIFACT in its own right, and
+// both paths above turn a record into `attention:"needs-human"` + a
+// humanQuestion. Deleting the Linear label while leaving this untouched would
+// have moved the artifact one layer down instead of removing it: a provider
+// outage across N tickets would still light N human cards. SYSTEM and MOOT are
+// filtered at the read; ASK, HELD and any class-less legacy record still surface.
+const durableMod = await import(
+  join(HERE, "..", "..", "execution-core", "durable-escalation.mjs"),
+);
+const isHumanFacing = (durableMod as Record<string, unknown>)
+  .isHumanFacingEscalationRecord as (rec: unknown) => boolean;
+
+describe("CTL-2159 — SYSTEM/MOOT durable records produce no human card", () => {
+  const card = (over: Record<string, unknown> = {}): BoardTicket =>
+    ({
+      id: "PROJ-9",
+      title: "a stalled ticket",
+      attention: null,
+      attentionSince: null,
+      humanQuestion: null,
+      ...over,
+    }) as unknown as BoardTicket;
+
+
+  it("the board's read is FILTERED — the wiring, pinned", () => {
+    // A predicate nothing calls is a predicate that ships inert. This pins the
+    // one call site that makes it real.
+    const squeeze = (t: string) => t.replace(/\s+/g, "");
+    expect(boardDataSrc).toContain("isHumanFacingEscalationRecord");
+    expect(squeeze(boardDataSrc)).toContain(
+      squeeze("readDurableEscalations(EC).filter( isHumanFacingEscalationRecord, )"),
+    );
+  });
+
+  it("a SYSTEM record is dropped before it can set attention", () => {
+    const recs = [durableRec({ stallClass: "system" })].filter(isHumanFacing);
+    const tickets = [card()];
+    mergeDurableEscalationsIntoCards(tickets, recs);
+    expect(tickets[0].attention).toBeNull();
+    expect(synthesizeDurableEscalations(recs, new Set<string>(), 600_000)).toHaveLength(0);
+  });
+
+  it("POSITIVE CONTROL: a HELD record survives the same filter and DOES set attention", () => {
+    // Without this, the zero above could mean the filter drops everything.
+    const recs = [durableRec({ stallClass: "held" })].filter(isHumanFacing);
+    const tickets = [card()];
+    mergeDurableEscalationsIntoCards(tickets, recs);
+    expect(tickets[0].attention).toBe("needs-human");
+  });
+
+  it("a legacy record with NO class still surfaces (fail-open)", () => {
+    const recs = [durableRec()].filter(isHumanFacing);
+    expect(recs).toHaveLength(1);
+  });
+});

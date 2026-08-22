@@ -29,6 +29,7 @@ import {
 } from "./escalation-publish.mjs";
 import { labelNeedsHumanUnlessBeliefOwner, labelMarkerBase } from "./label-guard.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs";
+import { surfaceStalePendingApprovals, bootResumePendingPath } from "./boot-resume.mjs";
 import { executeEscalations } from "./beliefs/escalate.mjs";
 import { STALL_CLASS, ESCALATION_PUBLISHED_FIELD } from "./stall-class.mjs";
 
@@ -73,11 +74,24 @@ describe("⛔ the chokepoint no longer writes the Linear label", () => {
     const published = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-1", spy.writeStatus, {
       env: QUIET_ENV,
       site: "terminal-sweep",
+      reason: "attempts-exhausted",
       explanation: { problem: "sdk overloaded", failureReason: "sdk-overloaded-exhausted" },
     });
     expect(spy.calls).toEqual([]);
     // ⛔ The return value is a RETRY CONTRACT — five loops read it as their STOP.
     expect(published).toBe(true);
+    // ⛔ AND IT IS ACTUALLY SYSTEM. This assertion is the point of the test and it
+    // was missing: as originally written the case passed NO reason, so it produced
+    // `stallClass:"held", stallClassRule:"no-reason"` — and every assertion above
+    // is true for HELD as well. The suite's flagship SYSTEM case proved nothing
+    // about SYSTEM. `site` is advisory on the verdict and is never classified
+    // from, so only the reason can carry the class.
+    const sig = readSignal(orchDir, "CTL-1");
+    expect(sig.stallClass).toBe(STALL_CLASS.SYSTEM);
+    expect(sig.stallClassRule).toBe("exact:attempts-exhausted");
+    // SYSTEM publishes NO per-ticket human artifact, so the sweep's quiet-gate
+    // stamp must stay OFF (see escalation-publish.mjs header note 3).
+    expect(sig[ESCALATION_PUBLISHED_FIELD]).toBeUndefined();
     rmSync(orchDir, { recursive: true, force: true });
   });
 
@@ -318,7 +332,62 @@ describe("⛔ the routeStuckTicketToDelegate producers (audit Gap 1)", () => {
     // ⛔ The delegate RE-DISPATCH and the publish are two arms of one branch.
     // `labelled` staying true is what keeps stale-pr-rescue's escalatedAt latching
     // and monitor's markTriageCapped firing.
-    expect(r).toEqual({ routed: false, labelled: true });
+    // ⛔ AND the CLASS rides out with it. `labelled` alone is a RETRY contract —
+    // publishEscalation returns true for a provider outage too — so four scheduler
+    // sites that emit a durable `worker.transition {toDisposition:"needs-human"}`
+    // read `stallClass` to tell "a person owns this" from "the fleet is degraded".
+    // If the seam ever stops forwarding `reason`, this reads "held", not "system".
+    expect(r).toEqual({ routed: false, labelled: true, stallClass: "system" });
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  // ⛔ THE MUTATION THIS SUITE COULD NOT CATCH BEFORE. Verification found that
+  // deleting `reason,` from delegate-first's labelDirect — the change its own
+  // author called "the highest-value thing I found, and it would have shipped
+  // inert" — broke NO test: every delegate assertion checked only `labelled` and
+  // an empty label spy, both of which are identical for SYSTEM and HELD. The
+  // observable difference is the CLASS, and the class is only correct when the
+  // reason survives the seam. This test fails if it does not.
+  test("⛔ the seam FORWARDS the reason — a SYSTEM token must not classify HELD", () => {
+    const orchDir = scratch();
+    workerDir(orchDir, "CTL-21");
+    const seen = [];
+    routeStuckTicketToDelegate(orchDir, "CTL-21", {
+      site: "dispatch-failures",
+      reason: "dispatch-circuit-breaker:7",
+      applyLabel: labelSpy().writeStatus,
+      env: { ...QUIET_ENV },
+      log: { info: () => {}, warn: (o) => seen.push(o) },
+    });
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-21", "phase-recovery-pass.json"), "utf8")
+    );
+    expect(sig.stallClass).toBe("system");
+    expect(sig.stallClassRule).toBe("prefix:dispatch-circuit-breaker:");
+    // and the no-reason cliff stayed silent, because a reason was in fact present
+    expect(seen.filter((o) => o?.site === "dispatch-failures")).toEqual([]);
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("POSITIVE CONTROL: a seam call with NO reason classifies HELD and WARNS", () => {
+    const orchDir = scratch();
+    workerDir(orchDir, "CTL-22");
+    const seen = [];
+    routeStuckTicketToDelegate(orchDir, "CTL-22", {
+      site: "dispatch-failures",
+      // reason deliberately omitted — this is the defect shape, asserted directly
+      applyLabel: labelSpy().writeStatus,
+      env: { ...QUIET_ENV },
+      log: { info: () => {}, warn: (o) => seen.push(o) },
+    });
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-22", "phase-recovery-pass.json"), "utf8")
+    );
+    expect(sig.stallClass).toBe("held");
+    expect(sig.stallClassRule).toBe("no-reason");
+    // ⛔ and it is LOUD. A site that classifies HELD for want of a token must be
+    // findable in the log, not inferred weeks later from a missing alert.
+    expect(seen.some((o) => o?.ticket === "CTL-22")).toBe(true);
     rmSync(orchDir, { recursive: true, force: true });
   });
 
@@ -463,5 +532,118 @@ describe("⛔ enrolment no longer creates the label", () => {
       expect(loops.length).toBeGreaterThan(0); // positive control: the loop exists
       for (const l of loops) expect(l).not.toContain("needs-human");
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. PER-SITE REASON FORWARDING — the "ships inert" defect, asserted per producer.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ⛔ WHY THIS SECTION EXISTS. `classifyStall` answers HELD with rule "no-reason"
+// when it is handed nothing, and HELD is indistinguishable from SYSTEM in every
+// assertion the original suite made (no label written, published:true). So a
+// producer that knows its reason and forgets to forward it ships a phase that
+// LOOKS correct, passes its own tests, and silently deletes the SYSTEM retry /
+// fleet-alert path for that site. Three independent verification lenses found
+// five such sites. Each one below drives the REAL producer and reads the class
+// off the signal it wrote.
+describe("⛔ every producer forwards its reason to the classifier", () => {
+  test("boot-resume-gate → the ASK row, not HELD", () => {
+    const orchDir = scratch();
+    workerDir(orchDir, "CTL-40");
+    writeFileSync(
+      bootResumePendingPath(orchDir, "CTL-40"),
+      JSON.stringify({ phase: "implement", requestedAt: "2026-08-01T00:00:00Z" })
+    );
+    const prev = process.env.CATALYST_ESCALATION_ASK;
+    process.env.CATALYST_ESCALATION_ASK = "off"; // never shell out to ask.mjs in a test
+    try {
+      // NOTE: the default `labelNeedsHuman` closure is deliberately NOT injected —
+      // it is the thing under test. It is IO-safe: the chokepoint no longer calls
+      // applyLabel at all.
+      const surfaced = surfaceStalePendingApprovals({
+        orchDir,
+        now: () => Date.parse("2026-08-21T00:00:00Z"),
+      });
+      expect(surfaced).toContain("CTL-40");
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_ESCALATION_ASK;
+      else process.env.CATALYST_ESCALATION_ASK = prev;
+    }
+    const sig = readSignal(orchDir, "CTL-40");
+    // `boot-resume-gate` is one of only eight exact ASK rows in the whole table —
+    // a stale approval gate genuinely IS a person's decision. With no reason it
+    // read "no-reason"/HELD and the ask path was dark for the site most likely to
+    // need it. (The klass itself downgrades to held here because the ask
+    // TRANSPORT is off for the test; the RULE proves the reason arrived.)
+    expect(sig.stallClassRule).toBe("exact:boot-resume-gate");
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("POSITIVE CONTROL: the same driver with the reason removed reads no-reason", () => {
+    // Proves the assertion above discriminates: it is the REASON that produces
+    // "exact:boot-resume-gate", not the site, the phase or the driver.
+    const orchDir = scratch();
+    workerDir(orchDir, "CTL-41");
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-41", labelSpy().writeStatus, {
+      env: QUIET_ENV,
+      site: "boot-resume-gate", // site ONLY — exactly the shape of the defect
+      log: { info: () => {}, warn: () => {} },
+    });
+    expect(readSignal(orchDir, "CTL-41").stallClassRule).toBe("no-reason");
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("the chokepoint recovers a reason from the ON-DISK signal when given none", () => {
+    // label-guard never passed `signal` to publishEscalation, so classifyStall's
+    // documented `signal.stalledReason ?? signal.failureReason` fallback was DEAD
+    // on the only path any producer uses. A caller that omits `reason` now gets a
+    // second chance off disk instead of an unconditional HELD.
+    const orchDir = scratch();
+    workerDir(orchDir, "CTL-42");
+    writeFileSync(
+      join(orchDir, "workers", "CTL-42", "phase-recovery-pass.json"),
+      JSON.stringify({ ticket: "CTL-42", status: "failed", failureReason: "worker-oom" })
+    );
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-42", labelSpy().writeStatus, {
+      env: QUIET_ENV,
+      site: "terminal-sweep",
+      log: { info: () => {}, warn: () => {} },
+    });
+    const sig = readSignal(orchDir, "CTL-42");
+    expect(sig.stallClass).toBe(STALL_CLASS.SYSTEM);
+    expect(sig.stallClassRule).toBe("exact:worker-oom");
+    // and the prior status is preserved, not clobbered
+    expect(sig.status).toBe("failed");
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("a caller-supplied explanation no longer SWALLOWS the class stamp", () => {
+    // writeExplanationSignal's no-overwrite guard was an unconditional early
+    // return, so a caller passing a real explanation onto a ticket that already
+    // had a curated one wrote NO stallClass at all — the durable S/A/M/HELD
+    // record was missing at exactly the sites that escalate most.
+    const orchDir = scratch();
+    workerDir(orchDir, "CTL-43");
+    writeFileSync(
+      join(orchDir, "workers", "CTL-43", "phase-recovery-pass.json"),
+      JSON.stringify({
+        ticket: "CTL-43",
+        status: "stalled",
+        explanation: { escalation_type: "decision", problem: "CURATED — do not clobber" },
+      })
+    );
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-43", labelSpy().writeStatus, {
+      env: QUIET_ENV,
+      site: "attempts-exhausted",
+      reason: "attempts-exhausted",
+      explanation: { problem: "thin" },
+      log: { info: () => {}, warn: () => {} },
+    });
+    const sig = readSignal(orchDir, "CTL-43");
+    expect(sig.stallClass).toBe(STALL_CLASS.SYSTEM);
+    // …and the curated prose SURVIVED, which is what the guard was for
+    expect(sig.explanation.problem).toBe("CURATED — do not clobber");
+    rmSync(orchDir, { recursive: true, force: true });
   });
 });

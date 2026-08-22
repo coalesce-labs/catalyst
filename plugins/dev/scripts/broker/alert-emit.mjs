@@ -51,6 +51,24 @@ export const ALERT_KIND_PROVIDER_DEGRADED = "provider_degraded";
 export const ALERT_KIND_RATE_LIMIT_EXHAUSTED = "rate_limit_exhausted";
 /** No free execution slots on a node (see system-trouble.mjs on executor death). */
 export const ALERT_KIND_CAPACITY_UNAVAILABLE = "capacity_unavailable";
+/**
+ * Tickets stalled on a SYSTEM condition — CTL-2159.
+ *
+ * ⛔ WHY A FOURTH KIND WAS REQUIRED. The other three are keyed on PROVIDER /
+ * ACCOUNT / NODE telemetry, and they cover roughly three of the ~35 reason tokens
+ * the CTL-2158 classifier calls SYSTEM. The rest — a spent retry budget, an
+ * exhausted remediate cycle, a watchdog kill, a wedged never-started worker, an
+ * unresolvable conflict — have no telemetry producer at all. Once CTL-2159 stopped
+ * writing the per-ticket label for them, they produced NEITHER a per-ticket
+ * artifact NOR a fleet alert: silent, which is the plan's named worst outcome and
+ * strictly worse than the bin this epic deletes.
+ *
+ * This kind closes that hole with the SAME fan-in shape: N system-class stalls are
+ * N distinct keys under ONE fleet alert, auto-clearing when they stop arriving.
+ * Its input is `ticket.escalated` carrying `escalation.stall_class="system"` — the
+ * classifier's own verdict, not a re-derivation.
+ */
+export const ALERT_KIND_SYSTEM_STALL = "system_stall";
 
 /**
  * buildAlertEnvelope — assemble the canonical OTel envelope for a

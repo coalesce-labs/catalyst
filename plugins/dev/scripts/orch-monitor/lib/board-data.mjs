@@ -56,7 +56,7 @@ import { getEventLogPath } from "../../execution-core/config.mjs";
 // bun:sqlite/pino edge, so this import is graph-safe.
 import { recordFullRead, scanFileLines } from "./event-log-reader.ts"; // CTL-1529: bounded chunked scan
 import { isLinearTerminal } from "../../execution-core/terminal-state.mjs";
-import { readDurableEscalations } from "../../execution-core/durable-escalation.mjs"; // CTL-1643: GC-surviving escalation store
+import { readDurableEscalations, isHumanFacingEscalationRecord } from "../../execution-core/durable-escalation.mjs"; // CTL-1643: GC-surviving escalation store; CTL-2159: class gate
 import { readClusterProjects } from "./cluster-roster.ts";
 
 const execFileP = promisify(execFile);
@@ -2447,7 +2447,18 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   const terminalLinearIds = new Set(
     Object.keys(linfo).filter((id) => isLinearTerminal(linfo[id]?.linearState))
   );
-  const durableEscalationRecords = readDurableEscalations(EC);
+  // ⛔ CTL-2159 CLASS GATE. The durable store is a per-ticket escalation artifact
+  // in its own right — it renders as `attention:"needs-human"` with a
+  // humanQuestion on both the merge and the synthesis path below. A SYSTEM stall
+  // (provider overload, a spent retry budget, a wedged worker) must produce ZERO
+  // of those: the CTL-2156 fleet alert names the condition once for the whole
+  // fleet and the tickets resume by themselves. MOOT has nothing for anyone to
+  // do. ASK and HELD — and any record with no class at all — still surface.
+  // The records stay ON DISK either way (labelAttempts accounting, the cooldown
+  // re-arm, forgetDurableEscalation); only the human-facing card is withheld.
+  const durableEscalationRecords = readDurableEscalations(EC).filter(
+    isHumanFacingEscalationRecord,
+  );
   // CAT-173: fill attention on cards that already exist BEFORE the id dedupe below
   // drops their records, so a fence-standoff break-glass on an otherwise
   // attention-less card (e.g. a BEHIND PR) still reaches the board and push bridge.

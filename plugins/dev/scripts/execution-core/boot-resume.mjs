@@ -198,7 +198,19 @@ export function surfaceStalePendingApprovals({
   // not on a bare status flip. Route through the same label-guard path the
   // P0b exhaustion sweep uses (labelOnce markers = idempotence).
   labelNeedsHuman = (dir, t) =>
-    labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel: defaultApplyLabel }, { site: "boot-resume-gate" }),
+    labelNeedsHumanUnlessBeliefOwner(
+      dir,
+      t,
+      { applyLabel: defaultApplyLabel },
+      {
+        site: "boot-resume-gate",
+        // ⛔ CTL-2159: forward the reason. `boot-resume-gate` is one of only eight
+        // exact ASK rows in the classifier table — a stale approval gate IS a
+        // person's decision — and without the token this classified HELD, leaving
+        // the ask path dark for the single site most likely to need it.
+        reason: "boot-resume-gate",
+      },
+    ),
 } = {}) {
   const surfaced = [];
   for (const gate of listPendingApprovals(orchDir, { now })) {
