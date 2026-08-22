@@ -27,6 +27,7 @@ import {
   resolveRotationScheme,
   resolveEventLogPathsForWindow,
 } from "../../lib/event-log-paths.mjs";
+import { drainAndSwitch } from "../../execution-core/event-tail.mjs";
 
 /**
  * CTL-1232 (profiling): process-wide counters for the full-log `readFileSync`
@@ -371,17 +372,45 @@ export async function tailEventLog(opts: TailEventLogOpts): Promise<void> {
   // Seek to EOF — we only emit *new* lines.
   let offset = existsSync(currentPath) ? statSync(currentPath).size : 0;
 
+  // CTL-1216: a rollover drain that produced lines counts as a busy tick, so the
+  // CTL-473 idle backoff does not slow the poll down immediately after a
+  // boundary — which is exactly when the new file starts filling.
+  let sawNewBytesOnRollover = false;
+
   try {
     while (!opts.signal.aborted) {
-      // Detect month rollover. Rollover does not count as "new bytes" — the
-      // next iteration will detect any newly-written content naturally.
+      // CTL-1216: DRAIN the old file to EOF before retargeting. This used to
+      // jump straight to the new file, so every byte appended to the old one
+      // between the last poll and the boundary was never delivered to this
+      // stream's subscribers. The old comment said "the next iteration will
+      // detect any newly-written content naturally" — true of the NEW file, and
+      // never true of the old one, which nothing revisits.
       const expectedPath = eventLogPathFor(opts.catalystDir, nowFn());
       if (expectedPath !== currentPath) {
+        const prevPath = currentPath;
+        const prevOffset = offset;
         currentPath = expectedPath;
         offset = 0;
+        const res = drainAndSwitch({
+          oldPath: prevPath,
+          oldOffset: prevOffset,
+          onLines: (drained) => {
+            for (const l of drained) stream.write(l);
+          },
+        });
+        if (res.lines > 0) {
+          await stream.flush();
+          sawNewBytesOnRollover = true;
+        }
+        if (res.truncated) {
+          console.warn(
+            `[event-log-reader] rollover drain TRUNCATED at ${res.drained} bytes on ${prevPath} — events beyond the cap were not delivered (CTL-1216)`,
+          );
+        }
       }
 
-      let sawNewBytes = false;
+      let sawNewBytes = sawNewBytesOnRollover;
+      sawNewBytesOnRollover = false;
       if (existsSync(currentPath)) {
         const size = statSync(currentPath).size;
         if (size > offset) {

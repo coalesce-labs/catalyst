@@ -95,21 +95,66 @@ describe("createTailer", () => {
     rmSync(dir, { recursive: true });
   });
 
-  test("handles month rollover by switching file path", async () => {
+  test("handles rollover by switching file path", async () => {
+    // CTL-1216: the option is `eventLogFn`, not `monthFn` — the resolved file is
+    // no longer necessarily a month.
     const dir = mkdtempSync(join(tmpdir(), "tail-"));
     let callCount = 0;
-    const monthFn = () => {
+    const eventLogFn = () => {
       callCount++;
-      return callCount === 1 ? join(dir, "2026-04.jsonl") : join(dir, "2026-05.jsonl");
+      return callCount === 1 ? join(dir, "2026-W17.jsonl") : join(dir, "2026-W18.jsonl");
     };
     const tailer = createTailer({
-      monthFn,
+      eventLogFn,
       offset: 0,
       onLine: () => {},
       signal: new AbortController().signal,
       pollMs: 10,
     });
-    expect(tailer.currentPath()).toBe(join(dir, "2026-04.jsonl"));
+    expect(tailer.currentPath()).toBe(join(dir, "2026-W17.jsonl"));
     rmSync(dir, { recursive: true });
+  });
+
+  test("CTL-1216: rollover DRAINS the old file's unread tail before switching", async () => {
+    // The forwarder abandoned the old file at every boundary, so bytes appended
+    // between its last poll and the rollover were never forwarded by anyone. The
+    // checkpoint keeps advancing across that hole, so nothing downstream reports it.
+    const dir = mkdtempSync(join(tmpdir(), "tail-drain-"));
+    try {
+      const fileA = join(dir, "2026-W17.jsonl");
+      const fileB = join(dir, "2026-W18.jsonl");
+      const a1 = JSON.stringify({ ts: "t", attributes: { "event.name": "a1" } });
+      const a2 = JSON.stringify({ ts: "t", attributes: { "event.name": "a2" } });
+      const b1 = JSON.stringify({ ts: "t", attributes: { "event.name": "b1" } });
+
+      writeFileSync(fileA, a1 + "\n");
+      writeFileSync(fileB, b1 + "\n");
+
+      let rolled = false;
+      const emitted: string[] = [];
+      const ac = new AbortController();
+      const tailer = createTailer({
+        eventLogFn: () => (rolled ? fileB : fileA),
+        offset: 0,
+        onLine: (l) => emitted.push(l),
+        signal: ac.signal,
+        pollMs: 5,
+      });
+
+      const run = tailer.run();
+      await new Promise((r) => setTimeout(r, 40)); // consumes a1
+      appendFileSync(fileA, a2 + "\n"); // written AFTER the last poll
+      rolled = true; // ...and the boundary happens before it is read
+      await new Promise((r) => setTimeout(r, 60));
+      ac.abort();
+      await run;
+
+      const names = emitted.map((l) => JSON.parse(l).attributes["event.name"]);
+      // a2 is the byte that used to vanish forever. b1 is the new file's head.
+      expect(names).toContain("a2");
+      expect(names).toContain("b1");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

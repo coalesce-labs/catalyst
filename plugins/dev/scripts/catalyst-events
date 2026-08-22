@@ -237,7 +237,15 @@ cmd_tail() {
     # The PPID check fires on each fswatch wake; the events file sees regular
     # traffic (heartbeats, lifecycle events) so the check runs frequently
     # enough in practice to catch orphan-to-init within the heartbeat window.
-    fswatch -o "$file" 2>/dev/null | while read -r _; do
+    # CTL-1216: watch the events DIRECTORY, not the file.
+    #
+    # `fswatch -o "$file"` binds to the file that existed when the pipeline
+    # started. After a rollover that file is never appended to again, so no wake
+    # ever fires and `catalyst-events tail` goes PERMANENTLY SILENT — the
+    # rollover would be noticed only if the OLD file changed, which is precisely
+    # what cannot happen. Watching the directory wakes us for appends to
+    # whichever file is current, and for the creation of the next one.
+    fswatch -o "$(dirname "$file")" 2>/dev/null | while read -r _; do
       kill -0 "$PPID" 2>/dev/null || exit 0
       local cur
       cur="$(line_count "$file")"
@@ -245,11 +253,22 @@ cmd_tail() {
         emit_lines_since "$file" "$last_lines" "$filter"
         last_lines="$cur"
       fi
-      # Re-resolve path for month rollover.
+      # Re-resolve for rollover.
       local new_file
       new_file="$(events_file_path)"
       if [[ "$new_file" != "$file" ]]; then
+        # DRAIN the old file's remaining lines before switching — without this,
+        # everything appended between the last wake and the boundary is lost.
+        local final
+        final="$(line_count "$file")"
+        if [[ "$final" -gt "$last_lines" ]]; then
+          emit_lines_since "$file" "$last_lines" "$filter"
+        fi
         file="$new_file"
+        # Seed at 0, not at the new file's current count: seeding at the count
+        # skips every line written to it before this wake.
+        last_lines=0
+        emit_lines_since "$file" 0 "$filter"
         last_lines="$(line_count "$file")"
       fi
     done
@@ -266,7 +285,15 @@ cmd_tail() {
       local new_file
       new_file="$(events_file_path)"
       if [[ "$new_file" != "$file" ]]; then
+        # CTL-1216: same drain-then-seed-at-0 as the fswatch branch above.
+        local final
+        final="$(line_count "$file")"
+        if [[ "$final" -gt "$last_lines" ]]; then
+          emit_lines_since "$file" "$last_lines" "$filter"
+        fi
         file="$new_file"
+        last_lines=0
+        emit_lines_since "$file" 0 "$filter"
         last_lines="$(line_count "$file")"
       fi
     done
