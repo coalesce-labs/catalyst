@@ -905,6 +905,20 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test event-log-paths.test.mjs
 
+      - name: canonical-event rotation writer test (CTL-1216)
+        # The WRITER half. Phases 1-3 moved every reader onto the shared
+        # resolver while the writer still computed its own name, so the property
+        # that actually matters is writer/reader AGREEMENT under either scheme —
+        # a test that only checked the filename would pass with the reader
+        # looking somewhere else entirely.
+        #
+        # Also pins that CTL-1813's legacy quarantine still fires on the week
+        # file, that an unparseable first line still REFUSES to rotate, and that
+        # no raw `>>` append slipped past CTL-1809's one-write(2) primitive.
+        # ⛔ Registered in the same change that adds the suite.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/canonical-event-rotation.test.sh
+
       - name: event-log-paths cross-stack parity test (CTL-1216)
         # THREE-WAY, never two-way: for every fixture BOTH engines are checked against
         # a COMPUTED-EXPECTED value from `date -u +%G-W%V` / `+%Y-%m`, because two

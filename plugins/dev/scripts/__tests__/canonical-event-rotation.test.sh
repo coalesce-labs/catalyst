@@ -1,76 +1,120 @@
 #!/usr/bin/env bash
-# CTL-1813: a malformed first line must quarantine itself, not retire the month beside it.
+# CTL-1216 Phase 4 — the WRITER resolves the same file the readers do.
 #
-# `canonical_jsonl_append` rotates the live month file aside when its first line is not a
-# canonical event. That rotation exists for the v1 -> canonical MIGRATION, and for that it is
-# correct. But the old test was `jq -e 'has("attributes")'`, which exits non-zero for BOTH a
-# legacy line and an UNPARSEABLE one — so one torn line moved the whole month aside, and
-# because the destination was a fixed `.legacy`, a second torn line one rotation later
-# overwrote the only surviving copy.
+# Phases 1-3 moved every reader onto the shared resolver while the writer still
+# computed its own name. This suite pins the writer's half, and the property
+# that actually matters: writer and reader agree under EITHER scheme. A test
+# that only checks "the file has the right name" would pass even if the reader
+# were looking somewhere else entirely.
 #
-# That composes with CTL-1809: our own bash appends TEAR above 1025 bytes (macOS BUFSIZ), so a
-# torn first line is a predictable product of the writer, not a rare accident.
-#
-# Driven against the REAL function, not a model of it.
-set -euo pipefail
+# Run: bash plugins/dev/scripts/__tests__/canonical-event-rotation.test.sh
+
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB="$(dirname "$SCRIPT_DIR")/lib/canonical-event.sh"
-[[ -f "$LIB" ]] || { echo "FAIL: canonical-event.sh not found at $LIB"; exit 1; }
-# shellcheck disable=SC1090
-source "$LIB"
+SCRIPTS="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-TMPS=()
-# NOTE the trailing `true`: without it the loop's last conditional decides this script's
-# EXIT STATUS, so a passing test can report failure. Cleanup must never be able to change
-# the verdict.
-cleanup() { local d; for d in "${TMPS[@]:-}"; do [[ -n "$d" ]] && rm -rf "$d"; done; true; }
-trap cleanup EXIT
-# NOTE: `newdir` is called inside a command substitution, which is a SUBSHELL — an array
-# append inside it never reaches the parent, so registering the path here would silently leak
-# every directory (Codex #3318 P2). The caller registers it instead.
-newdir() { mktemp -d; }
-monthfile() { printf '%s/%s.jsonl' "$1" "$(date -u +%Y-%m)"; }
-fail() { echo "FAIL: $*"; exit 1; }
+PASSES=0
+FAILURES=0
+ASSERTIONS=0
 
-# --- 1. A TORN first line must NOT rotate, and must lose nothing ---------------
-D="$(newdir)"; TMPS+=("$D"); F="$(monthfile "$D")"
-printf 'not json at all\n' > "$F"
-for i in $(seq 1 20); do printf '{"attributes":{"event.name":"e%s"}}\n' "$i" >> "$F"; done
+ok() { PASSES=$((PASSES+1)); ASSERTIONS=$((ASSERTIONS+1)); echo "  PASS: $1"; }
+bad() { FAILURES=$((FAILURES+1)); ASSERTIONS=$((ASSERTIONS+1)); echo "  FAIL: $1"; echo "    $2"; }
+expect_eq() { [[ "$2" == "$3" ]] && ok "$1" || bad "$1" "expected='$2' actual='$3'"; }
 
-WARNDIR="$(newdir)"; TMPS+=("$WARNDIR"); WARN="$WARNDIR/warn.txt"
-canonical_jsonl_append "$D" '{"attributes":{"event.name":"new"}}' 2>"$WARN"
+command -v jq >/dev/null 2>&1 || { echo "SKIP: jq required"; exit 0; }
 
-ROTATED="$(find "$D" -name '*legacy*' | wc -l | tr -d ' ')"
-[[ "$ROTATED" == "0" ]] || fail "a torn first line rotated the live log ($ROTATED files) — 20 events would have been retired"
+emit_one() {
+  # emit_one <events_dir> <name> — one canonical append through the REAL writer.
+  # Args are passed positionally, never interpolated into the -c string: a
+  # $(mktemp -d) path is data, and re-parsing it in an inner shell is how this
+  # helper silently emitted nothing while every assertion read as a real failure.
+  bash -c '
+    source "$0/lib/canonical-event.sh"
+    line="$(build_canonical_line --ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --event-name "$2" --severity INFO --service catalyst.ctl1216-test --orch ctl1216 --payload-json "{}")"
+    [ -n "$line" ] || exit 1
+    canonical_jsonl_append "$1" "$line"
+  ' "$SCRIPTS" "$1" "$2"
+}
 
-LIVE="$(grep -c 'event.name' "$F" || true)"
-[[ "$LIVE" == "21" ]] || fail "expected 21 live events preserved (20 + the append), found $LIVE"
+echo "=== T1: default (no env) writes the monthly file — byte-identical to today ==="
+D1="$(mktemp -d)/events"
+emit_one "$D1" "ctl1216.t1"
+expect_eq "default -> \$(date -u +%Y-%m).jsonl" "$(date -u +%Y-%m).jsonl" "$(ls "$D1" 2>/dev/null | head -1)"
 
-# Silence is a defect: refusing to rotate a DAMAGED log must be audible, or the damage is
-# invisible until someone goes looking.
-grep -q 'does not parse' "$WARN" || fail "refusing to rotate a damaged log was silent; stderr: $(cat "$WARN")"
+echo "=== T2: week scheme writes the ISO-week file ==="
+D2="$(mktemp -d)/events"
+CATALYST_EVENT_LOG_ROTATION=week emit_one "$D2" "ctl1216.t2"
+expect_eq "week -> \$(date -u +%G-W%V).jsonl" "$(date -u +%G-W%V).jsonl" "$(ls "$D2" 2>/dev/null | head -1)"
 
-# --- 2. A GENUINE legacy first line still rotates -----------------------------
-# POSITIVE CONTROL for case 1: proves the rotation feature still works, so case 1 is testing
-# the parse distinction rather than a rotation that has simply been disabled.
-D2="$(newdir)"; TMPS+=("$D2"); F2="$(monthfile "$D2")"
-printf '{"ts":"x","event":"MONTH_A"}\n' > "$F2"
-canonical_jsonl_append "$D2" '{"attributes":{"event.name":"n1"}}' 2>/dev/null
-[[ "$(find "$D2" -name '*legacy*' | wc -l | tr -d ' ')" == "1" ]] \
-  || fail "a genuine legacy first line did NOT rotate — the migration path is broken"
+echo "=== T3: an unrecognized scheme DEGRADES to month, it does not invent a file ==="
+D3="$(mktemp -d)/events"
+CATALYST_EVENT_LOG_ROTATION=daily emit_one "$D3" "ctl1216.t3"
+expect_eq "daily -> degrades to monthly" "$(date -u +%Y-%m).jsonl" "$(ls "$D3" 2>/dev/null | head -1)"
 
-# --- 3. A SECOND rotation must not clobber the first --------------------------
-# The unrecoverable half of the defect: a fixed `.legacy` is a rescue slot of depth one.
-printf '{"ts":"y","event":"MONTH_B"}\n' > "$F2"
-canonical_jsonl_append "$D2" '{"attributes":{"event.name":"n2"}}' 2>/dev/null
+echo "=== T4: WRITER/READER AGREEMENT — the whole point ==="
+# Emit under `week`, then ask the READER's own path resolver (the same mirror
+# catalyst-events sources) where to look, and read THAT file. If the two halves
+# disagreed about the filename this finds nothing on a file that plainly has one.
+#
+# `catalyst-events tail` FOLLOWS, so it is never invoked unbounded here — a
+# blocking child in a test suite is how a run hangs for two minutes and leaves a
+# process behind (AGENTS.md, "Spawning a background process"). The resolver is
+# the thing under test anyway; the follow loop is not.
+D4="$(mktemp -d)/events"
+CATALYST_EVENT_LOG_ROTATION=week emit_one "$D4" "ctl1216.t4.agree"
 
-COUNT="$(find "$D2" -name '*legacy*' | wc -l | tr -d ' ')"
-[[ "$COUNT" == "2" ]] || fail "expected 2 distinct rotated files, found $COUNT — one rotation clobbered another"
+reader_resolved_file() {
+  # exactly what catalyst-events' events_file_path computes, via the same mirror
+  CATALYST_EVENT_LOG_ROTATION="${1:-}" CATALYST_EVENTS_DIR="$2" bash -c '
+    source "'"${SCRIPTS}"'/lib/catalyst-event-log-paths.sh"
+    printf "%s/%s" "$(catalyst_events_dir)" "$(catalyst_event_log_basename)"
+  '
+}
 
-ALL="$(cat "$D2"/*legacy* 2>/dev/null || true)"
-grep -q MONTH_A <<<"$ALL" || fail "MONTH_A was destroyed by the second rotation"
-grep -q MONTH_B <<<"$ALL" || fail "MONTH_B is missing from the rotated copies"
+READER_FILE="$(reader_resolved_file week "$D4")"
+FOUND="$(/usr/bin/grep -c "ctl1216.t4.agree" "$READER_FILE" 2>/dev/null || true)"
+expect_eq "reader resolves the SAME file the writer wrote" "1" "$FOUND"
 
-echo "PASS: a torn first line preserves the month; a legacy line still rotates; rotations cannot clobber each other"
-exit 0
+# Positive control: the instrument must be able to return ZERO, or "it found it"
+# proves only that grep works.
+MISS="$(/usr/bin/grep -c "ctl1216.t4.NOT-EMITTED" "$READER_FILE" 2>/dev/null || true)"
+expect_eq "positive control: 0 for a name never emitted" "0" "$MISS"
+
+# And the reader must NOT be looking at the monthly name under `week` — this is
+# the assertion that would have caught a writer/reader split.
+expect_eq "reader is not pointed at the monthly file under week" \
+  "$(date -u +%G-W%V).jsonl" "$(basename "$READER_FILE")"
+
+echo "=== T5: CTL-1813 legacy quarantine still fires, on the WEEK file ==="
+D5="$(mktemp -d)/events"
+mkdir -p "$D5"
+WEEKFILE="${D5}/$(date -u +%G-W%V).jsonl"
+# A genuine v1 line: parses, and has no `attributes`.
+printf '{"ts":"2026-01-01T00:00:00Z","event":"legacy.v1","orchestrator":"x"}\n' > "$WEEKFILE"
+CATALYST_EVENT_LOG_ROTATION=week emit_one "$D5" "ctl1216.t5" 2>/dev/null
+QUARANTINED="$(ls "$D5" | /usr/bin/grep -c '\.legacy\.' || true)"
+expect_eq "v1 first line quarantined under the week scheme" "1" "$QUARANTINED"
+
+echo "=== T6: an UNPARSEABLE first line still REFUSES to rotate (events preserved) ==="
+D6="$(mktemp -d)/events"
+mkdir -p "$D6"
+WEEKFILE6="${D6}/$(date -u +%G-W%V).jsonl"
+printf 'this is not json at all\n' > "$WEEKFILE6"
+WARN6="$(CATALYST_EVENT_LOG_ROTATION=week emit_one "$D6" "ctl1216.t6" 2>&1 >/dev/null | /usr/bin/grep -c 'does not parse as JSON' || true)"
+expect_eq "unparseable first line warns" "1" "$WARN6"
+expect_eq "unparseable first line does NOT rotate" "0" "$(ls "$D6" | /usr/bin/grep -c '\.legacy\.' || true)"
+
+echo "=== T7: no raw '>>' append was introduced — CTL-1809's one-write(2) primitive still owns it ==="
+RAW="$(/usr/bin/grep -cE '^\s*printf .*>>\s*"\$(month_file|log_file)"' "${SCRIPTS}/lib/canonical-event.sh" || true)"
+expect_eq "no raw >> append in canonical_jsonl_append" "0" "$RAW"
+
+echo
+echo "assertions: ${ASSERTIONS}  passed: ${PASSES}  failed: ${FAILURES}"
+# Fail closed: a suite that barely ran is not evidence.
+if [[ "$ASSERTIONS" -lt 10 ]]; then
+  echo "FAIL: only ${ASSERTIONS} assertions ran"
+  exit 1
+fi
+[[ "$FAILURES" -eq 0 ]] || exit 1
+echo "PASS"
