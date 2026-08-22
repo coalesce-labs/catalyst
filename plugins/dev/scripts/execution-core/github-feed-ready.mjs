@@ -76,6 +76,15 @@ export function staleWindowMs(intervalSec) {
 /**
  * writeReadyState — called by the producer once per tick.
  *
+ * Record shape (all fields optional on old producers — readers must treat absent
+ * as unknown, never as "false" or "off"):
+ *   { ready, unready, mode, coverage, source, at, intervalSec }
+ *
+ * `source` ∈ "env" | "env-invalid" | "layer2" | "default" | null
+ *   Distinguishes a deliberately-pinned host (source:"env") from one that fell
+ *   through to Layer-2 or the default. Added in CTL-2011 (Phase 1). Absent on
+ *   records written by producers predating that change — treat as null.
+ *
  * Fail-open on write errors, deliberately: this file is EVIDENCE about the
  * producer, and evidence must never be load-bearing for the thing it observes. A
  * failed write simply ages out, which un-arms enforce — the safe direction.
