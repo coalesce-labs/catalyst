@@ -1177,6 +1177,24 @@ jobs:
         #   file in the list below — it drives readNewEvents directly and calls
         #   stopMonitor() before every append, so it arms no timer and no watcher
         #   (measured max 1.6 s per case locally, vs bun's 5 000 ms default).
+        #
+        #   CTL-2157 NOTE, the same shape one rung out: because daemon.test.mjs
+        #   is excluded, a handleCommentWake case added THERE would never run
+        #   here. The ask→work wake is the hard prerequisite of the needs-human
+        #   deletion (an ask nothing consumes piles up as the label did), so
+        #   its cases live in ask-wake-daemon.test.mjs, listed below. Like
+        #   monitor-torn it arms no timer and no watcher: it calls
+        #   handleCommentWake directly against tmp worker dirs with every seam
+        #   injected — no replica read, no Linear call (13 pass, 228 ms).
+        #   ask-wake.test.mjs is the pure resolver plus the ASK_LABEL_NAMES
+        #   parity pin against scripts/ask.mjs (26 pass, 51 ms).
+        #   Registered in the SAME change that adds both suites — the
+        #   four-times-burned allowlist lesson the ask-verb / event-name /
+        #   replica-path steps each document. Instrument (a `run:`-anchored grep
+        #   is invalid for this multi-line block — see the event-name step):
+        #   `grep -n ask-wake .github/workflows/` returned NOTHING before this
+        #   edit, against a positive control of `assertion-evidence-parity`,
+        #   which returns its list line.
         run: |
           bun test \
             beliefs/advance-rules.test.mjs \
@@ -1202,6 +1220,8 @@ jobs:
             abort-worker.test.mjs \
             assertion-evidence.test.mjs \
             assertion-evidence-parity.test.mjs \
+            ask-wake.test.mjs \
+            ask-wake-daemon.test.mjs \
             cli-header-backtick-guard.test.mjs \
             agent-session-narrator.test.mjs \
             linear-comment-write.test.mjs \

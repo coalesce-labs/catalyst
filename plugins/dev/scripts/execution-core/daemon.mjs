@@ -175,6 +175,7 @@ import { buildTeamIdentityMismatchEvents } from "./config-identity-event.mjs"; /
 import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
+import { createAskBlocksResolver } from "./ask-wake.mjs"; // CTL-2157: an answered ask wakes the work it blocks
 import { setLaneClaimGuard } from "./lane-claim-install.mjs"; // CTL-2068
 import { buildLaneClaimGuard, resolveStateMap } from "./lane-claim.mjs"; // CTL-2068
 // CTL-2070: the TIMELY per-ticket actor source (fleet write-ledger). loadLedger seeds the
@@ -586,6 +587,35 @@ export function clearNeedsHumanMarkers(orchDir, ticket, { rm = unlinkSync } = {}
   return { removed, failed };
 }
 
+// defaultResolveAskBlocks — CTL-2157. The PRODUCTION ask fan-out resolver:
+// `ticket` → the work tickets it blocks, when it carries an ask label.
+//
+// Replica-backed, so it costs ZERO Linear API quota: `details()` reads title +
+// description + labels + relations from ~/catalyst/catalyst-replica.db in one
+// snapshot, and the replica carries a normalized `relations` TABLE (937 `blocks`
+// rows, measured 2026-08-21). ⚠️ That table is NOT visible in `issues.raw`, whose
+// top-level keys carry no `relations` — reading `raw` is what makes local relation
+// data look unavailable. See ask-wake.mjs for the full note.
+//
+// Deliberately NOT gated on the CATALYST_LINEAR_REPLICA mode flag: this is not the
+// terminal-check accelerator (where a miss must fall through to a live read), it
+// is a wake path whose only alternative is not waking at all. Reader construction
+// is lazy and cached — a comment-heavy workspace opens one readonly handle, not
+// one per comment. Fail-open to `[]` (today's single-ticket wake) on ANY failure:
+// a replica that cannot answer must never invent a dispatch.
+let _askBlocksResolver = null;
+export function defaultResolveAskBlocks(ticket) {
+  try {
+    if (_askBlocksResolver === null) {
+      const reader = createReplicaReader();
+      _askBlocksResolver = createAskBlocksResolver((ids) => reader.details(ids));
+    }
+    return _askBlocksResolver(ticket);
+  } catch {
+    return [];
+  }
+}
+
 // handleCommentWake — CTL-549 re-dispatch hook. Called on each
 // `linear.comment.created` event by the daemon's `onComment` callback wired
 // into startMonitor. Scans all phase signals for the comment's ticket; for
@@ -625,6 +655,13 @@ export async function handleCommentWake(
     // silently returns to the inbox and cannot be retried. A human answering IS
     // the signal that another attempt is warranted.
     forgetIntent = defaultForgetIntent,
+    // CTL-2157: ticket → the WORK tickets it blocks, when it is an ask. Defaults
+    // to the REAL replica-backed resolver, deliberately: a fan-out that only fires
+    // when some launcher remembers to wire it is a fan-out that ships INERT (the
+    // CTL-1919/CTL-1935 failure mode), and an ask nothing consumes is the exact
+    // pile-up this epic exists to delete. Costs zero Linear quota — see
+    // ask-wake.mjs. Injectable so tests never touch the replica.
+    resolveAskBlocks = defaultResolveAskBlocks,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -635,6 +672,91 @@ export async function handleCommentWake(
   // writers' guard. botUserId accepts a string or Set<string>.
   if (_isBotId(botUserId, parsed.authorId)) return;
 
+  // ── CTL-2157: WHO does this comment wake? ────────────────────────────────────
+  // Until now the answer was always "the ticket the comment landed on". An ASK is
+  // a DIFFERENT ticket — one ask ticket carrying a `blocks` relation to the work
+  // it holds up — so a human's answer landed exactly where nothing was looking and
+  // the parked agent waited forever (ADV-1374/1376 sat for DAYS because nothing
+  // consumed the ask). An ask that does not wake its agent piles up precisely the
+  // way the `needs-human` label did: the same disease with a nicer name. So the
+  // wake is re-keyed — the commented ticket, PLUS every ticket an ask blocks.
+  //
+  // ⛔ GATED ON POSITIVE HUMAN PROVENANCE, not merely on "not a known bot" (the
+  // self-echo guard above). The agent posts the ask body and its follow-ups as the
+  // app actor; in the SUPPORTED botUserId-unset config `_isBotId` cannot recognize
+  // those, so an ungated fan-out would re-dispatch every ticket the ask blocks on
+  // the agent's OWN comment — CTL-756's self-wake bug, one indirection further
+  // out. Computed once here because it describes the comment, not the target.
+  const humanProvenance = Boolean(parsed.authorId) && Boolean(botUserId);
+  let askBlocked = [];
+  if (humanProvenance) {
+    try {
+      const raw = resolveAskBlocks(ticket);
+      askBlocked = (Array.isArray(raw) ? raw : []).filter(
+        (t) => typeof t === "string" && t !== "" && t !== ticket
+      );
+    } catch (err) {
+      // Fail-open in the SAFE direction: no fan-out, i.e. exactly today's
+      // single-ticket wake. A replica that cannot answer must never invent one.
+      askBlocked = [];
+      log.warn(
+        { ticket, err: err?.message },
+        "handleCommentWake: ask fan-out resolve failed — waking only the commented ticket"
+      );
+    }
+    if (askBlocked.length > 0) {
+      log.info(
+        { ask: ticket, wakes: askBlocked },
+        "handleCommentWake: ask answered — waking the work it blocks"
+      );
+    }
+  }
+
+  const perTicket = {
+    orchDir,
+    dispatch,
+    removeLabel,
+    resolveSession,
+    clearStall,
+    appendWorkerTransitionEvent,
+    clearDispositionEmit,
+    isManagedTicket,
+    forgetIntent,
+    humanProvenance,
+  };
+  // The commented ticket keeps its exact legacy treatment; the ask's blocked work
+  // is additive. Sequential, not Promise.all: each target does its own Linear
+  // writes, and a fan-out of N must not become N concurrent write bursts.
+  await wakeParkedTicket(ticket, perTicket);
+  for (const blocked of askBlocked) {
+    await wakeParkedTicket(blocked, { ...perTicket, viaAsk: ticket });
+  }
+}
+
+// wakeParkedTicket — everything handleCommentWake does FOR ONE TICKET: the
+// clear-first block (park labels, once-markers, recovery re-arm) and then the
+// per-signal stall-clear / re-dispatch loop. Split out for CTL-2157 so the same
+// treatment can be applied to a ticket the comment did NOT land on — the work an
+// answered ask was blocking. `viaAsk` is the ask's identifier when this ticket was
+// reached through one (observability only; the treatment is identical, because a
+// human answering the ask IS the answer this ticket was parked on).
+async function wakeParkedTicket(
+  ticket,
+  {
+    orchDir,
+    dispatch,
+    removeLabel,
+    resolveSession = resolvePhaseSessionId,
+    clearStall = () => false,
+    appendWorkerTransitionEvent = defaultAppendWorkerTransitionEvent,
+    clearDispositionEmit = defaultClearDispositionEmit,
+    isManagedTicket = defaultIsManagedTicket,
+    forgetIntent = defaultForgetIntent,
+    humanProvenance = false,
+    viaAsk = null,
+  }
+) {
+  if (viaAsk) log.info({ ticket, ask: viaAsk }, "handleCommentWake: waking via an answered ask");
   // CTL-1567: CLEAR FIRST — a human answered, so the ticket must drop off the
   // "Needs you" list before anything else is attempted, and regardless of whether
   // anything else succeeds.
@@ -669,7 +791,8 @@ export async function handleCommentWake(
   //      configured bot set before believing a human answered.
   //  (b) MANAGED ticket. The daemon sees every workspace comment; only clear on
   //      tickets this installation actually manages.
-  const humanProvenance = Boolean(parsed.authorId) && Boolean(botUserId);
+  // `humanProvenance` and the ask fan-out are computed ONCE by handleCommentWake and
+  // passed in — they describe the COMMENT, not the ticket being woken (CTL-2157).
   let clearedNeedsHuman = false;
   // Codex #2970 round 3: distinct from clearedNeedsHuman (which also covers the
   // idempotent already-absent case and gates the marker reconcile below — that
@@ -686,7 +809,11 @@ export async function handleCommentWake(
   // genuine write, wherever it happens in this invocation, produces exactly one
   // emission instead of zero.
   let needsInputWroteEarly = false;
-  if (humanProvenance && isManagedTicket(ticket, orchDir)) {
+  // CTL-2157: NAME the authorization, because it — not the label write — is what
+  // the local-state half of this block is really keyed on. See the marker block
+  // below for why the difference is load-bearing.
+  const parkClearAuthorized = humanProvenance && isManagedTicket(ticket, orchDir);
+  if (parkClearAuthorized) {
     try {
       const res = await removeLabel(ticket, "needs-human");
       clearedNeedsHuman = res?.removed !== false; // undefined (test stub) ⇒ success
@@ -732,7 +859,27 @@ export async function handleCommentWake(
       );
     }
   }
-  if (clearedNeedsHuman) {
+  // ⛔ CTL-2157 — RE-KEYED, and this is not cosmetics. This block used to be gated
+  // on `clearedNeedsHuman`, i.e. on the RESULT of `removeLabel(ticket,
+  // "needs-human")`. What lives inside it is NOT label cosmetics:
+  // `clearNeedsHumanMarkers` deletes `workers/<T>/.linear-label-needs-human.applied`,
+  // and boot-resume.mjs (:493-498) reads that marker to SUPPRESS auto-resume of a
+  // chronically-failing ticket. Two ways the old gate failed:
+  //   • a Linear 5xx on the removeLabel call (caught, fail-open) left
+  //     `clearedNeedsHuman` false, so a human's reply silently did NOT clear the
+  //     marker — the ticket stayed suppressed;
+  //   • when the label write itself is deleted (the point of this epic), the gate
+  //     would be false FOREVER and the marker would never clear again — a silent
+  //     regression that no test would have caught, because nothing asserted the
+  //     marker independently of the label.
+  // So it is keyed on the same AUTHORIZATION the clear runs under: a human
+  // answered (positive provenance) on a ticket we manage. That is the fact the
+  // local state actually depends on. The `.skipped` marker goes with it: a human
+  // response is precisely the signal that re-arming labelOnce is warranted — the
+  // same reasoning `forgetIntent` above is built on.
+  // The Linear-write-gated half (the worker.transition emission) keeps its own,
+  // narrower gate below — only the host that actually WROTE should emit.
+  if (parkClearAuthorized) {
     // Keep the once-marker in step with the label. Clearing one without the other
     // is the desync that leaves labelOnce permanently disarmed (or the board
     // showing a park Linear no longer has).
@@ -792,10 +939,16 @@ export async function handleCommentWake(
       } catch {
         /* observability only */
       }
-      // CTL-1643: clear the durable escalation record so the board durable-escalation
-      // card disappears when the operator responds. Fail-open (never throws).
-      forgetDurableEscalation(orchDir, ticket);
     }
+    // CTL-1643: clear the durable escalation record so the board durable-escalation
+    // card disappears when the operator responds. Fail-open (never throws).
+    // CTL-2157: keyed on the AUTHORIZATION, not on the label write — the card
+    // records that a human was asked, and the human has now answered. Leaving it
+    // keyed on the label write would strand the card the day the label goes away,
+    // which is the same silent regression the marker block above describes. (The
+    // dedup reset above keeps its confirmed-clear gate: that map is about the
+    // Linear LABEL's state and is meaningless without it.)
+    forgetDurableEscalation(orchDir, ticket);
   }
 
   const workerDir = join(orchDir, "workers", ticket);

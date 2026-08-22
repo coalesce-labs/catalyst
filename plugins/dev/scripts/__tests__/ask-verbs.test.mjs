@@ -26,6 +26,26 @@ import { fileURLToPath } from "node:url";
 
 const ASK_MJS = join(dirname(fileURLToPath(import.meta.url)), "..", "ask.mjs");
 
+// The MINIMUM argv a `create` now accepts (CTL-2157): two options, a default, and the
+// work the ask blocks. Shared so a change to the contract updates every call site here.
+const CREATE_MIN = [
+  "create",
+  "--team",
+  "CTL",
+  "--title",
+  "t",
+  "--why",
+  "w",
+  "--option",
+  "a",
+  "--option",
+  "b",
+  "--default",
+  "a",
+  "--blocks",
+  "CTL-1",
+];
+
 describe("buildAskBody renders the shape the trigger parses", () => {
   test("a full ask round-trips through the parser", () => {
     const body = buildAskBody({
@@ -215,7 +235,9 @@ describe("trap (a) — the documented path must not silently no-op", () => {
     );
     chmodSync(stub, 0o755);
 
-    const r = spawnSync("node", [link, "create", "--team", "CTL", "--title", "t", "--why", "w", "--dry-run"], {
+    // CTL-2157: --option x2 / --default / --blocks are now REQUIRED — the create
+    // refuses before it ever resolves labels without them.
+    const r = spawnSync("node", [link, ...CREATE_MIN, "--dry-run"], {
       encoding: "utf8",
       env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
     });
@@ -239,7 +261,7 @@ describe("trap (a) — the documented path must not silently no-op", () => {
     // spawnSync fails with ENOENT and returns status null — the test would then "pass"
     // on a process that never ran. That is the failure mode this whole ticket is about,
     // reproduced inside its own test, so the assertion below pins status to 1.
-    const r = spawnSync(process.execPath, [link, "create", "--team", "CTL", "--title", "t", "--why", "w", "--dry-run"], {
+    const r = spawnSync(process.execPath, [link, ...CREATE_MIN, "--dry-run"], {
       encoding: "utf8",
       env: { ...process.env, PATH: emptyBin },
     });
@@ -320,5 +342,142 @@ describe("trap (b) — the label set follows the TARGET TEAM", () => {
       .toBe("label-list-unparseable");
     expect(resolveTeamLabelIds("CTC", { runFn: () => ({ code: 0, stdout: "{}", stderr: "" }) }).reason)
       .toBe("label-list-unparseable");
+  });
+});
+
+// ── CTL-2157 ────────────────────────────────────────────────────────────────────
+// An ask that nothing can answer, or that wakes nobody when answered, is the
+// `needs-human` pile-up with a nicer name. An audit of this file found that a
+// machine could file one with zero options, no default and no blocking relation
+// and get EXIT 0 — the guarantee the ask SOP assumed simply did not exist.
+//
+// Every test here drives the REAL CLI through spawnSync (the argv contract is the
+// thing under test), hermetically: a stubbed `linearis` on PATH, so no credential
+// and no Linear call.
+
+const linearisStub = (script) => {
+  const bin = mkdtempSync(join(tmpdir(), "ask-stub-"));
+  const stub = join(bin, "linearis");
+  writeFileSync(stub, script);
+  chmodSync(stub, 0o755);
+  return bin;
+};
+
+const LABELS_JSON =
+  '{"nodes":[{"name":"catalyst-ask","id":"L1"},{"name":"ask/decision","id":"L2"}]}';
+
+const runCreate = (args, { bin } = {}) =>
+  spawnSync(process.execPath, [ASK_MJS, "create", ...args], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bin ?? linearisStub(`#!/bin/sh\nprintf '%s\\n' '${LABELS_JSON}'\n`)}:${process.env.PATH ?? ""}`,
+    },
+  });
+
+describe("CTL-2157 — a machine-filed ask must be decidable", () => {
+  const base = ["--team", "CTL", "--title", "t", "--why", "w", "--dry-run"];
+
+  test("ZERO options is REFUSED (it was exit 0 before — verifyAskBody calls it ok)", () => {
+    const r = runCreate([...base, "--default", "d", "--blocks", "CTL-1"]);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("at least TWO --option");
+  });
+
+  test("ONE option is REFUSED — a single choice is a rubber stamp, not a decision", () => {
+    const r = runCreate([...base, "--option", "a", "--default", "d", "--blocks", "CTL-1"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("at least TWO --option");
+  });
+
+  test("no --default is REFUSED — silence must mean something", () => {
+    const r = runCreate([...base, "--option", "a", "--option", "b", "--blocks", "CTL-1"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("--default is required");
+  });
+
+  test("no --blocks is REFUSED — an answer must have someone to wake", () => {
+    const r = runCreate([...base, "--option", "a", "--option", "b", "--default", "a"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("--blocks");
+    expect(r.stderr).toContain("wakes nobody");
+  });
+
+  // ⛔ POSITIVE CONTROL for all four refusals above: the same command WITH the
+  // required flags reaches the dry run and exits 0. Without this, every assertion
+  // above would also pass on a CLI that refuses everything.
+  test("POSITIVE CONTROL: a complete ask reaches the dry run and exits 0", () => {
+    const r = runCreate([
+      ...base,
+      "--option",
+      "a",
+      "--option",
+      "b",
+      "--default",
+      "a",
+      "--blocks",
+      "CTL-1",
+    ]);
+    expect(r.status).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.action).toBe("dry-run");
+    expect(out.parsedOptions).toEqual(["a", "b"]);
+    expect(out.body).toContain("Blocks: CTL-1");
+  });
+});
+
+describe("CTL-2157 — a dropped --blocks relation FAILS the create, it does not warn", () => {
+  // The stub is the whole `linearis` surface cmdCreate touches: the team's labels,
+  // the create, and the read-back. `issues read` names only CTL-1, reproducing the
+  // linearis behaviour ask.mjs documents — "keeps only the LAST --blocks flag".
+  //
+  // ⚠️ `printf '%s\n'`, never `echo`: /bin/sh's echo expands the `\n` escapes INSIDE
+  // the JSON string, so the payload arrives as unparseable JSON carrying real
+  // newlines — the read-back then fails for a reason that has nothing to do with the
+  // property under test. `%s` passes its argument through untouched.
+  const stubScript = (readBackBlocks) =>
+    `#!/bin/sh
+case "$1 $2" in
+  "labels list") printf '%s\\n' '${LABELS_JSON}' ;;
+  "issues create") printf '%s\\n' '{"identifier":"CTL-9000"}' ;;
+  "issues read") printf '%s\\n' '{"identifier":"CTL-9000","description":"**Why:** w\\n\\n**Options:**\\n- a\\n- b\\n\\n**Default if silent:** a\\n\\nBlocks: ${readBackBlocks}","relations":"${readBackBlocks}"}' ;;
+esac
+`;
+  const args = [
+    "--team",
+    "CTL",
+    "--title",
+    "t",
+    "--why",
+    "w",
+    "--option",
+    "a",
+    "--option",
+    "b",
+    "--default",
+    "a",
+    "--blocks",
+    "CTL-1",
+    "--blocks",
+    "CTL-2",
+  ];
+
+  test("a relation Linear never recorded is exit 2 and NAMED", () => {
+    const r = runCreate(args, { bin: linearisStub(stubScript("CTL-1")) });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("CTL-2");
+    expect(r.stderr).toContain("NOT on it");
+    // …and it is attributable to the RELATION, not to an unreadable body: the
+    // round trip on the same run reports the ask as decidable.
+    const out = JSON.parse(r.stdout);
+    expect(out.decidable).toBe(true);
+    expect(out.missingBlocks).toEqual(["CTL-2"]);
+  });
+
+  test("POSITIVE CONTROL: both relations present ⇒ exit 0", () => {
+    const r = runCreate(args, { bin: linearisStub(stubScript("CTL-1, CTL-2")) });
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout).missingBlocks).toEqual([]);
   });
 });

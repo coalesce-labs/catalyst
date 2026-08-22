@@ -258,13 +258,22 @@ function readTicketViaReplica(id) {
 
 function usage() {
   console.error(`Usage:
-  ask.mjs create --team <TEAM> --title <t> --why <text> [--option <label> ...]
-                 [--default <text>] [--blocks <ISSUE>] [--priority <1-4>] [--dry-run]
+  ask.mjs create --team <TEAM> --title <t> --why <text>
+                 --option <label> --option <label> [--option ...]   (at least TWO)
+                 --default <text> --blocks <ISSUE> [--blocks <ISSUE> ...]
+                 [--priority <1-4>] [--dry-run]
   ask.mjs accept <ISSUE> --as <AGENT> --body <markdown|-> [--dry-run]
 
 create files a correctly-shaped ask ticket, then READS IT BACK and proves the decision
-trigger can parse its options. accept replies in-thread as the app actor and moves the
-ticket to Done — refusing if the ticket is not an ask.`);
+trigger can parse its options AND that every requested blocking relation landed. accept
+replies in-thread as the app actor and moves the ticket to Done — refusing if the ticket
+is not an ask.
+
+⛔ --option (>=2), --default and --blocks are REQUIRED (CTL-2157). An ask with nothing to
+choose between, no meaning for silence, or no work attached is the pile-up asks exist to
+replace: the answer wakes the agents parked on the tickets the ask BLOCKS.
+Exit: 0 filed and provably answerable · 1 nothing was filed · 2 filed but DEFECTIVE
+(undecidable body, or a --blocks relation Linear did not record).`);
 }
 
 function argOf(argv, name, { many = false } = {}) {
@@ -287,6 +296,52 @@ function cmdCreate(argv) {
 
   if (!team || !title || !why) {
     console.error("ask create: --team, --title and --why are required");
+    return 1;
+  }
+
+  // ⛔ CTL-2157 — AN ASK MUST BE ANSWERABLE, AND MUST WAKE SOMETHING.
+  //
+  // These three were documented in the skill from day one and enforced NOWHERE: an
+  // audit of this file found a machine could file an ask with zero options, no
+  // default and no blocking relation and get exit 0. Each hole is a way for an ask
+  // to become the content-free bin the `needs-human` label was:
+  //
+  //   • FEWER THAN TWO OPTIONS — there is nothing to decide. verifyAskBody
+  //     explicitly returns ok:true for an option-less ask ("nothing to verify"),
+  //     so the round-trip validator cannot catch this; the check has to be here.
+  //     One option is worse than none: it reads as a decision and is a rubber stamp.
+  //   • NO DEFAULT — silence has no meaning, so the ask can only ever be resolved
+  //     by a human doing something, which is precisely the pile-up we are deleting.
+  //   • NO --blocks — nothing to wake. The daemon's comment-wake fans an answered
+  //     ask out to the work it blocks (execution-core/ask-wake.mjs); an ask that
+  //     blocks nothing answers into the void and its agent waits forever
+  //     (ADV-1374/1376 sat for DAYS on exactly that).
+  //
+  // No escape-hatch flag, deliberately: a flag that turns these off is a flag every
+  // caller in a hurry will pass. A genuinely open question still enumerates its
+  // options — "something else — tell me" is an option.
+  if (options.length < 2) {
+    console.error(
+      `ask create: REFUSING — an ask needs at least TWO --option values (got ${options.length}). ` +
+        "An ask with one option or none is not a decision; it is a status update wearing an ask's " +
+        "label, and nothing can be answered by tapping."
+    );
+    return 1;
+  }
+  if (!nonEmpty(dflt)) {
+    console.error(
+      "ask create: REFUSING — --default is required. Without a stated default, SILENCE HAS NO " +
+        "MEANING and the ask can only ever be cleared by a human acting, which is the pile-up " +
+        "asks exist to avoid."
+    );
+    return 1;
+  }
+  if (blocks.length === 0) {
+    console.error(
+      "ask create: REFUSING — --blocks <ISSUE> is required (repeat it for several). The answer " +
+        "wakes the agents parked on the tickets this ask BLOCKS; an ask that blocks nothing wakes " +
+        "nobody, and the work it was raised for waits forever."
+    );
     return 1;
   }
   const body = buildAskBody({ why, options, defaultIfSilent: dflt, blocks });
@@ -407,18 +462,26 @@ function cmdCreate(argv) {
       missingBlocks,
     })
   );
+  // ⛔ CTL-2157 — THIS IS A FAILURE, NOT A WARNING. It used to print a ⚠️ and then
+  // `return 0`, so an automated caller — which reads the exit code, not stderr —
+  // recorded "ask filed" for an ask whose relation to the work was never created.
+  // That relation is load-bearing twice over: the comment-wake fans an answered ask
+  // out along it (execution-core/ask-wake.mjs), and the triage ranking measures an
+  // ask's blast radius by the work it blocks. Exit 2 (the ticket EXISTS but is
+  // defective) rather than 1 (nothing was filed) — the caller must repair, not refile.
   if (missingBlocks.length > 0) {
     console.error(
-      `ask create: ⚠️ ${id} filed, but these --blocks relations are NOT on it: ${missingBlocks.join(", ")} — ` +
-        "add them by hand (linearis keeps only the last --blocks on some versions)."
+      `ask create: ⛔ ${id} filed, but these --blocks relations are NOT on it: ${missingBlocks.join(", ")} — ` +
+        "add them by hand (linearis keeps only the last --blocks on some versions). Until you do, " +
+        "an answer on this ask will not wake the agents parked on them."
     );
   }
   if (!post.ok) {
     console.error(
       `ask create: ⛔ ${id} exists but is NOT decidable (${post.reason}: ${post.note}) — fix the body before relying on it`
     );
-    return 2;
   }
+  if (missingBlocks.length > 0 || !post.ok) return 2;
   return 0;
 }
 

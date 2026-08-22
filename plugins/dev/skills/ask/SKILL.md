@@ -20,8 +20,9 @@ never a status paragraph.
 ## 2. Creating one (the raising agent)
 
 **Then use the verb** — it builds the exact body, files the ticket, reads it BACK out of Linear, and
-proves the decision trigger can parse the options. It exits **2** rather than leaving you a ticket
-that can never be answered:
+proves the decision trigger can parse the options AND that every `--blocks` relation landed. It exits
+**2** rather than leaving you a ticket that can never be answered (or that, when answered, wakes
+nobody):
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
@@ -38,6 +39,11 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
 EVERY ask filed by hand on 2026-08-17 wrote its options inline rather than bulleted. Those parsed to
 **zero** options, so no reply could ever match — structurally undecidable, while looking normal.
 
+⛔ **`--option` (≥2), `--default` and `--blocks` are REQUIRED** (CTL-2157) — the verb refuses without
+them. `--blocks` is the load-bearing one: a human comment on an ask **wakes the agents parked on the
+tickets it blocks** (§3), so an ask that blocks nothing answers into the void and its work waits
+forever (ADV-1374/1376 sat for DAYS on exactly that).
+
 Full field-by-field detail, the raw `linearis` form, and the exact body grammar:
 **[`references/creating.md`](references/creating.md)**.
 
@@ -45,6 +51,10 @@ Full field-by-field detail, the raw `linearis` form, and the exact body grammar:
 
 A comment on the ticket — top-level or a threaded reply — reaches the monitor. One word is enough
 ("A", "yes", "flip now"). Deciding by moving state without a comment is only seen on the next sweep.
+
+**The comment also WAKES the work** (CTL-2157): the daemon fans it out along the ask's `blocks`
+relations and unparks each agent waiting on them — no separate nudge, no per-ticket artifact. Only a
+human's comment does this; the app actor's own comments on the ask are suppressed.
 
 ## 4. Replying (any agent) — the form
 
