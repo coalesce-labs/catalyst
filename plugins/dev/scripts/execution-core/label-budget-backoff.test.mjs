@@ -241,13 +241,32 @@ describe("⛔ COORD-236: labelOnce must NOT treat a throttled reason as permanen
   // a budget refusal is not. Folding them would permanently abandon a
   // needs-human label refused during one exhausted minute — the operator it
   // exists to page would never be paged. That is strictly worse than the storm.
-  test("a budget refusal writes NO .skipped marker, so the next tick retries", () => {
+  test("a budget refusal writes NO .skipped marker, so a LATER tick still retries", () => {
+    // ⚠️ CTL-2043 (P2-a) changed the CADENCE this test used to pin, not the property
+    // it exists to defend. It asserted the retry happened on the very NEXT call —
+    // which was the P2-a defect: labelOnce armed no cool-down at all and re-issued
+    // every tick, spending a budget unit each time. What must survive is that the
+    // refusal is never PERMANENT, and that is what is asserted here: zero writes
+    // inside the window, and a real retry once it elapses.
     const w = failingWriter("budget:day-exhausted");
     withWorkerDir("CTL-5");
-    expect(labelOnce(orchDir, "CTL-5", "needs-human", w)).toBe(true);
+    let clock = 5_000_000;
+    const opts = { now: () => clock };
+    expect(labelOnce(orchDir, "CTL-5", "needs-human", w, opts)).toBe(true);
     expect(w.calls.length).toBe(1);
-    // No terminal marker ⇒ labelOnce runs the write again.
-    expect(labelOnce(orchDir, "CTL-5", "needs-human", w)).toBe(true);
+    // Still no PERMANENT marker — the whole COORD-236 asymmetry.
+    expect(existsSync(join(orchDir, "workers", "CTL-5", ".linear-label-needs-human.skipped"))).toBe(
+      false
+    );
+    // In-window: cooled down, zero further writes (CTL-2043 P2-a).
+    for (let i = 0; i < 30; i++) {
+      clock += 1_000;
+      labelOnce(orchDir, "CTL-5", "needs-human", w, opts);
+    }
+    expect(w.calls.length).toBe(1);
+    // Past the window: retried. The back-off is time-boxed, never permanent.
+    clock += 61_000;
+    expect(labelOnce(orchDir, "CTL-5", "needs-human", w, opts)).toBe(true);
     expect(w.calls.length).toBe(2);
   });
 
@@ -291,16 +310,81 @@ describe("COORD-236 wiring: the cool-down is armed by the WIDE predicate", () =>
     }
   });
 
+  // CTL-2043: extract whole import STATEMENTS, not lines beginning with `import`.
+  // The previous line filter had a hole big enough to drive the regression through:
+  // a MULTI-LINE `import { ... } from "./label-failure-class.mjs"` puts every
+  // specifier on a continuation line, so `shouldCoolDownLabel` could be imported here
+  // and the guard would still pass. (It is not hypothetical — this file's import
+  // became multi-line in CTL-2043, and prettier will re-wrap any single-line import
+  // that outgrows the print width, so the hole opens on a formatting pass alone.)
+  const importStatements = (src) => (src.match(/^import\s[\s\S]*?from\s+"[^"]+";/gm) ?? []).join("\n");
+
+  test("the extraction itself sees multi-line imports (positive control)", () => {
+    // Without this, an extraction that silently matched NOTHING would make every
+    // `not.toContain` assertion below pass vacuously — the false-clean shape.
+    const probe = importStatements(
+      'import {\n  alpha,\n  beta,\n} from "./x.mjs";\nconst y = 1;\nimport z from "./z.mjs";'
+    );
+    expect(probe).toContain("alpha");
+    expect(probe).toContain("beta");
+    expect(probe).toContain("z");
+    expect(probe).not.toContain("const y");
+    // ...and it really finds this file's own multi-line import of the classifier.
+    expect(importStatements(GUARD)).toContain("label-failure-class.mjs");
+  });
+
   test("label-guard does not IMPORT the wide predicate — the asymmetry is structural", () => {
-    // Asserted on the import statement, not on the file text: the header
+    // Asserted on the import statements, not on the file text: the header
     // deliberately NAMES `shouldCoolDownLabel` to explain why it is not used
     // here, and a prose match would make that explanation fail the build.
-    const imports = GUARD.split("\n").filter((l) => /^import /.test(l));
-    expect(imports.join("\n")).toContain("TERMINAL_LABEL_REASONS");
-    expect(imports.join("\n")).not.toContain("shouldCoolDownLabel");
+    const imports = importStatements(GUARD);
+    expect(imports).toContain("TERMINAL_LABEL_REASONS");
+    expect(imports).not.toContain("shouldCoolDownLabel");
     // ...and no code line calls it.
     const code = GUARD.split("\n").filter((l) => !l.trimStart().startsWith("//"));
     expect(code.join("\n")).not.toContain("shouldCoolDownLabel(");
+  });
+
+  test("CTL-2043: labelOnce composes the two NARROW predicates instead", () => {
+    // Decision B. labelOnce's cool-down set is exactly `shouldCoolDownLabel MINUS
+    // terminal` (a terminal reason writes .skipped and early-returns, so it never
+    // reaches the cool-down arm). Composing the narrow predicates expresses that
+    // precisely AND keeps the asymmetry structural — importing the wide predicate
+    // would put the terminal class one careless edit away from a permanent .skipped
+    // for a throttled reason, which is the strictly-worse-than-the-storm bug.
+    const imports = importStatements(GUARD);
+    expect(imports).toContain("isThrottledLabelReason");
+    expect(imports).toContain("isCloudReason");
+  });
+});
+
+// ── CTL-2043 Decision C — the primitives moved to a shared leaf ──────────────
+describe("CTL-2043: the cool-down primitives live in a leaf BOTH callers can import", () => {
+  test("label-cooldown.mjs owns them, and scheduler.mjs re-exports the two the tests read", async () => {
+    // label-guard.mjs is a leaf scheduler.mjs imports, so a label-guard → scheduler
+    // import would be the exact cycle the leaf placement exists to avoid. The
+    // re-export keeps every existing `from "./scheduler.mjs"` import resolving —
+    // asserted here so a future re-home fails loudly instead of breaking callers.
+    const leaf = await import("./label-cooldown.mjs");
+    expect(typeof leaf.labelCooldownPath).toBe("function");
+    expect(typeof leaf.labelRetryState).toBe("function");
+    expect(typeof leaf.inLabelCooldown).toBe("function");
+    expect(typeof leaf.recordLabelCooldown).toBe("function");
+    expect(typeof leaf.clearLabelCooldown).toBe("function");
+    expect(typeof leaf.readLabelCooldownMarker).toBe("function");
+    expect(typeof leaf.LABEL_COOLDOWN_MS).toBe("number");
+    // Same function object through both specifiers — a re-export, not a copy.
+    expect(labelCooldownPath).toBe(leaf.labelCooldownPath);
+    expect(labelRetryState).toBe(leaf.labelRetryState);
+  });
+
+  test("the cap machinery stays converger-only — it is NOT in the shared leaf", async () => {
+    // AC4 is the 60 s window alone; the cap (CTL-2052 AC3) is converger-specific and
+    // deliberately not wired into labelOnce. Keeping it out of the leaf is what stops
+    // it drifting in by import-convenience.
+    const leaf = await import("./label-cooldown.mjs");
+    expect(leaf.labelRetryCapBlocks).toBeUndefined();
+    expect(leaf.maybeEscalateRetryExhausted).toBeUndefined();
   });
 });
 
@@ -464,13 +548,20 @@ describe("CTL-2052: the converger backs off on the normalized cloud label reject
 
 describe("⛔ CTL-2052: labelOnce must NOT write .skipped for the cloud label rejection (COORD-236 asymmetry)", () => {
   test("a cloud:label-rejected refusal leaves NO .skipped marker, so a later genuine apply is not abandoned", () => {
+    // CTL-2043 (P2-a): the retry now waits out the cool-down window instead of
+    // firing on the very next tick — but it still fires. Unprovable-terminal must
+    // never be permanently abandoned.
     const w = failingWriter("cloud:label-rejected");
     withWorkerDir("CTL-23");
-    expect(labelOnce(orchDir, "CTL-23", "needs-human", w)).toBe(true);
+    let clock = 5_000_000;
+    const opts = { now: () => clock };
+    expect(labelOnce(orchDir, "CTL-23", "needs-human", w, opts)).toBe(true);
     expect(w.calls.length).toBe(1);
-    // No terminal marker ⇒ the next call runs the write again (unprovable-terminal
-    // must never be permanently abandoned).
-    expect(labelOnce(orchDir, "CTL-23", "needs-human", w)).toBe(true);
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-23", ".linear-label-needs-human.skipped"))
+    ).toBe(false);
+    clock += 61_000;
+    expect(labelOnce(orchDir, "CTL-23", "needs-human", w, opts)).toBe(true);
     expect(w.calls.length).toBe(2);
   });
 

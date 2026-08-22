@@ -454,6 +454,16 @@ import {
 } from "./label-failure-class.mjs";
 // CTL-2052 (AC3): the "stopped after N and said so" escalation emitter.
 import { emitLabelRetryExhaustedEvent } from "./label-retry-event.mjs";
+// CTL-2043 (Decision C): the time-boxed label cool-down ledger, now a shared leaf so
+// label-guard.mjs's labelOnce can arm the same window (see that file's header).
+import {
+  labelCooldownPath,
+  readLabelCooldownMarker,
+  clearLabelCooldown,
+  inLabelCooldown,
+  recordLabelCooldown,
+  labelRetryState,
+} from "./label-cooldown.mjs";
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
 import {
@@ -3097,65 +3107,13 @@ export function convergeStartedHeldLabels(
   }
 }
 
-// CTL-834 held-label apply cool-down — the same time-boxed-marker shape as the
-// CTL-624 dispatch cool-down: a per-(ticket,label) JSON marker carrying failedAt,
-// kept OUTSIDE workers/<T>/ so it survives worker-dir GC (see dispatchCooldownPath
-// + memory project_scheduler_marker_under_workers_excludes_ticket). The window
-// self-heals so an exclusive conflict that later clears lets the label re-apply.
-export function labelCooldownPath(orchDir, ticket, label) {
-  return join(orchDir, ".label-cooldowns", `${ticket}-${label}.json`);
-}
-// CTL-2052 — read the cool-down marker (or null). Its own owner of the parse, so the
-// attempt-counter reader and the time gate below cannot disagree about the shape.
-function readLabelCooldownMarker(orchDir, ticket, label) {
-  try {
-    return JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8"));
-  } catch {
-    return null;
-  }
-}
-// CTL-2052 — clear the ledger (on a successful apply, or when spending the single
-// self-heal probe). ENOENT is the expected case. Best-effort; never throws.
-function clearLabelCooldown(orchDir, ticket, label) {
-  try {
-    unlinkSync(labelCooldownPath(orchDir, ticket, label));
-  } catch {
-    /* ENOENT — nothing to clear */
-  }
-}
-function inLabelCooldown(orchDir, ticket, label, now) {
-  const marker = readLabelCooldownMarker(orchDir, ticket, label);
-  return marker != null && typeof marker.failedAt === "number" && now - marker.failedAt < LABEL_COOLDOWN_MS;
-}
-// CTL-2052 — the marker carries a per-(ticket,label) attempt count so AC3 can bound
-// the storm. Read the prior count, increment, persist, and RETURN the new value so the
-// caller can edge-trigger the cap-crossing escalation. Backward-compatible: an old
-// marker without `attempts` reads as 0, so the first increment is 1.
-function recordLabelCooldown(orchDir, ticket, label, now) {
-  const p = labelCooldownPath(orchDir, ticket, label);
-  mkdirSync(dirname(p), { recursive: true });
-  const prior = readLabelCooldownMarker(orchDir, ticket, label);
-  const priorAttempts = prior && Number.isInteger(prior.attempts) ? prior.attempts : 0;
-  const attempts = priorAttempts + 1;
-  writeFileSync(p, JSON.stringify({ failedAt: now, attempts }));
-  return attempts;
-}
-
-// CTL-2052 (AC3) — the pure cap arithmetic, exported so it can be exercised without
-// disk. `blocked` short-circuits the apply (still inside the long back-off after the
-// cap); `exhaustedProbe` says the long window elapsed so the caller may allow ONE probe
-// (and reset the ledger, so the label can still land if the sibling was removed
-// meanwhile — it self-heals on a long timescale rather than never; COORD-236 "never
-// permanently abandon a label").
-export function labelRetryState(marker, now, { cap, exhaustedMs } = {}) {
-  const attempts = marker && Number.isInteger(marker.attempts) ? marker.attempts : 0;
-  const failedAt = marker && typeof marker.failedAt === "number" ? marker.failedAt : 0;
-  if (attempts >= cap) {
-    if (now - failedAt < exhaustedMs) return { blocked: true, attempts, exhaustedProbe: false };
-    return { blocked: false, attempts, exhaustedProbe: true };
-  }
-  return { blocked: false, attempts, exhaustedProbe: false };
-}
+// CTL-2043 (Decision C): the label cool-down primitives moved to the shared leaf
+// `label-cooldown.mjs` so `label-guard.mjs` can arm the same window without a
+// `label-guard → scheduler` import cycle. They are re-exported below for the
+// existing `from "./scheduler.mjs"` importers. The CONVERGER-ONLY cap gate
+// (`labelRetryCapBlocks` / `maybeEscalateRetryExhausted`, above) deliberately
+// stayed here — see the leaf's header for why it must not follow.
+export { labelCooldownPath, labelRetryState } from "./label-cooldown.mjs";
 
 // CTL-624: dispatch cool-down marker. Conceptually mirrors the labelOnce
 // once-marker (workers/<T>/.linear-label-*), but with two deliberate
@@ -9658,9 +9616,10 @@ const TICK_DEBOUNCE_MS = Number(process.env.SCHEDULER_DEBOUNCE_MS) || 2_000;
 // (ticket,phase) to one attempt per window. Time-based (not a permanent
 // .skipped marker like labelOnce) so it self-heals once the artifact appears.
 const DISPATCH_COOLDOWN_MS = Number(process.env.SCHEDULER_DISPATCH_COOLDOWN_MS) || 60_000;
-// CTL-834: held-label apply cool-down window (convergeHeldLabel). Same default as
-// the dispatch cool-down; overridable for tests / quieter quota budgets.
-const LABEL_COOLDOWN_MS = Number(process.env.SCHEDULER_LABEL_COOLDOWN_MS) || 60_000;
+// CTL-834's LABEL_COOLDOWN_MS moved to label-cooldown.mjs with the rest of the
+// ledger (CTL-2043 Decision C) — the window and the guards that read it stay in one
+// place, so a test override of SCHEDULER_LABEL_COOLDOWN_MS cannot apply to one and
+// not the other.
 // CTL-2052 (AC3): after this many cool-down CYCLES for one (ticket,label), the
 // converger STOPS re-issuing (long back-off) and escalates once — so a genuinely
 // stuck label does not retry ~once-per-window forever. The current behavior is
