@@ -70,3 +70,7 @@ Monitor(command="catalyst-events tail --filter '<jq-predicate>'", description=".
 # Tail from beginning (diagnostic mode — verifies tunnel health)
 catalyst-events tail --since-line 0 --filter '...' | tail -5
 ```
+
+⚠️ **Safety net, every time:** pair every `wait-for` with an authoritative one-shot check after
+it returns (a `gh api` / `linearis` re-check of the actual state). When the broker or webhook
+infra is down, `wait-for` only times out — nothing rechecks the requested state for you.

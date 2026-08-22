@@ -35,8 +35,11 @@ case "$MERGED" in
 esac
 ```
 
-See [[broker]] §10 for the complete `wake-extract` output schema and the per-interest-type
-reason string catalogue.
+See `plugins/dev/skills/broker/references/wake-payload-reference.md` for the complete
+`wake-extract` output schema and
+`plugins/dev/skills/broker/references/wake-reason-strings.md` for the per-interest-type
+reason string catalogue (moved there after the broker split — `[[broker]] §10` no longer
+exists).
 
 **When `source_events` is empty** (watchdog wakes, some Groq prose wakes): all `wake-extract`
 fields are `null` except `interest_id` and `reason`. Treat the wake as a "go re-check" signal
