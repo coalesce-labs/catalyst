@@ -8,6 +8,12 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+// CTL-1216: THE event-log path resolver + its previous-file seam.
+import {
+  eventLogBasenameFor,
+  resolveRotationScheme,
+  getPrevEventLogPath,
+} from "../../lib/event-log-paths.mjs";
 
 import { readTailUtf8 } from "./event-log-reader";
 
@@ -113,17 +119,44 @@ async function probeUrl(
 }
 
 /** Read the age (ms) of the newest event-log line matching `matcher`. Scans the
- *  current monthly file tail (cheap — counts/timestamps only, no jq). Returns
- *  null when no match is found. */
+ *  current log file's tail (cheap — counts/timestamps only, no jq), falling back
+ *  to the PREVIOUS file when the current one yields no match. Returns null when
+ *  no match is found in either.
+ *
+ *  CTL-1216: the fallback is not cosmetic. A freshly-rotated file is empty or
+ *  near-empty, so a single-file read returns null for every service for minutes
+ *  after each boundary — and `applyRecency` reads null as "no recent emission",
+ *  i.e. it marks a perfectly live daemon `down`. Monthly rotation hid this
+ *  behind 12 boundaries a year; weekly would make it 52. Looking one file back
+ *  costs one extra bounded tail read, and only in the case where the current
+ *  file had nothing to say. */
 export function readEmissionAge(
   catalystDir: string,
   matcher: RecencyMatcher,
   now: number,
 ): number | null {
-  const d = new Date(now);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const path = join(catalystDir, "events", `${y}-${m}.jsonl`);
+  const eventsDir = join(catalystDir, "events");
+  const scheme = resolveRotationScheme({ env: process.env });
+  const path = join(eventsDir, eventLogBasenameFor(new Date(now), scheme));
+  const age = readEmissionAgeFromFile(path, matcher, now);
+  if (age !== null) return age;
+  // Nothing in the current file — look one file back. getPrevEventLogPath
+  // returns the newest file that actually EXISTS and is older than the current
+  // one, so it crosses a scheme change (a YYYY-MM.jsonl behind a YYYY-Www.jsonl)
+  // that arithmetic on the current name could not.
+  const prev = getPrevEventLogPath({
+    env: { ...process.env, CATALYST_EVENTS_DIR: eventsDir },
+    now: new Date(now),
+  });
+  if (prev === null || prev === path) return null;
+  return readEmissionAgeFromFile(prev, matcher, now);
+}
+
+function readEmissionAgeFromFile(
+  path: string,
+  matcher: RecencyMatcher,
+  now: number,
+): number | null {
   if (!existsSync(path)) return null;
   // Read only the tail of the file — daemon heartbeats are frequent so the
   // newest match is near the end. Cap at 512KB to bound the read.

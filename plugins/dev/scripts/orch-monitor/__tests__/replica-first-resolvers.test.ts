@@ -29,6 +29,9 @@ import {
   _sweepTitleDescCache,
 } from "../lib/linear-title-description-fallback.mjs";
 import { readReplicaTicketDetails } from "../lib/linear-cache-reader.mjs";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 // ── fetch spy ────────────────────────────────────────────────────────────────
 // Counts EVERY outbound call. Returns an empty-but-well-formed GraphQL body so a
@@ -132,7 +135,7 @@ afterEach(() => {
 // Read every catalyst.linear.read event this test emitted.
 function readEmitted(): Array<Record<string, unknown>> {
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   const p = join(eventDir, "events", `${ym}.jsonl`);
   if (!existsSync(p)) return [];
   const lines = readFileSync(p, "utf8").split("\n").filter(Boolean);

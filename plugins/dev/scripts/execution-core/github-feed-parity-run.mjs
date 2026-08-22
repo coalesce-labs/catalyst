@@ -36,13 +36,16 @@
 // Usage: bun github-feed-parity-run.mjs <ISO-lo> <ISO-hi> [--json]
 // Exit:  0 clean · 2 diverged · 3 inconclusive (the Linear leg's contract).
 
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { compareGithubStreams, parityExitCode } from "./github-feed-parity.mjs";
 import { GITHUB_CONSUMED_NAMES } from "./github-feed-gate.mjs";
 import { resolveGithubFeedMode } from "../lib/github-feed-mode.mjs";
+// CTL-1216: THE event-log window resolver — every file overlapping [lo, hi),
+// so a window straddling a rotation boundary is not silently truncated.
+import { resolveEventLogPathsForWindow } from "../lib/event-log-paths.mjs";
 // ⛔ IMPORTED, never re-typed. A hand-written copy of the marker name that drifts would
 // make every dropped dispatch class invisible again — silently, and in the instrument.
 import { EVENT_WOULD_DISPATCH as MARKER_NAME } from "./github-feed-timer.mjs";
@@ -80,8 +83,21 @@ const CATALYST = process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
 const account = process.env.CATALYST_GITHUB_FEED_ACCOUNT ?? "tenant-0";
 const shadowPath = process.env.CATALYST_GITHUB_FEED_SHADOW
   ?? join(CATALYST, "execution-core", "shadow", `github-feed-${account}.jsonl`);
-const eventsPath = process.env.CATALYST_EVENT_LOG
-  ?? join(CATALYST, "events", `${new Date(lo).toISOString().slice(0, 7)}.jsonl`);
+// CTL-1216: this used to be ONE file, named from the window's START
+// (`new Date(lo).toISOString().slice(0, 7)`). A parity window that straddles a
+// rotation boundary therefore read only the file the window opened in and
+// silently compared a partial event-log side against a complete feed side —
+// which reads as a parity GAP, i.e. as the defect this tool exists to detect.
+// It now resolves EVERY file overlapping [lo, hi), oldest-first, mixing schemes.
+// The explicit CATALYST_EVENT_LOG override still pins exactly one file.
+const eventsPaths = process.env.CATALYST_EVENT_LOG
+  ? [process.env.CATALYST_EVENT_LOG]
+  : resolveEventLogPathsForWindow({
+      eventsDir: join(CATALYST, "events"),
+      sinceMs: Date.parse(lo),
+      nowMs: Date.parse(hi),
+      env: process.env,
+    });
 
 const inWindow = (e) => {
   const t = e?.ts;
@@ -98,6 +114,17 @@ async function* jsonl(path) {
     // this log takes (see docs/architecture.md). It is also counted, so a window full
     // of damage cannot read as a window full of agreement.
     try { yield JSON.parse(line); } catch { torn++; }
+  }
+}
+
+// jsonlAll — the same stream over EVERY file covering the window, oldest-first
+// (CTL-1216). A missing file is skipped rather than fatal: the window resolver
+// only ever lists files it saw in the directory, but one can be rotated away
+// between the readdir and the open, and a parity run must not die on that.
+async function* jsonlAll(paths) {
+  for (const path of paths) {
+    if (!existsSync(path)) continue;
+    yield* jsonl(path);
   }
 }
 
@@ -120,7 +147,7 @@ if (feedSource === "shadow") {
 } else {
   // The feed's own copies on the unified log, identified by their POSITIVE provenance
   // stamp — never by elimination, the same rule the smee reader below follows.
-  for await (const e of jsonl(eventsPath)) {
+  for await (const e of jsonlAll(eventsPaths)) {
     const marker = markerEventName(e, MARKER_NAME);
     if (marker !== null) {
       if (!inWindow(e)) continue;
@@ -140,7 +167,7 @@ const seenDelivery = new Set();
 let smeeSeen = 0;
 let smeeLast = null;
 let smeeDuplicates = 0;
-for await (const e of jsonl(eventsPath)) {
+for await (const e of jsonlAll(eventsPaths)) {
   const n = e?.attributes?.["event.name"];
   if (typeof n !== "string" || !n.startsWith("github.")) continue;
   // Our own copy is excluded by its positive provenance stamp, never by elimination.

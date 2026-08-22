@@ -50,6 +50,10 @@ import {
   FLEET_FREEZE_CAUSE_ALL_PERSIST,
   FLEET_FREEZE_CAUSE_MIXED,
 } from "./fleet-freeze-alert.mjs"; // CTL-1420
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 let catalystDir;
 let prevCatalystDir;
@@ -1199,7 +1203,7 @@ describe("lifecycle", () => {
 // month's log under the temp CATALYST_DIR (the path getEventLogPath() uses).
 function eventLogPath() {
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   return join(catalystDir, "events", `${ym}.jsonl`);
 }
 function appendEventLog(line) {

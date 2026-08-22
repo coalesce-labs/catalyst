@@ -155,7 +155,13 @@ append_event() {
     if [ -n "${CATALYST_EVENTS_FILE:-}" ]; then
       events_file="$CATALYST_EVENTS_FILE"
     else
-      events_file="${CATALYST_EVENTS_DIR:-$CATALYST_DIR/events}/$(date -u +%Y-%m).jsonl"
+      # CTL-1216: resolved through the shared mirror; LOUD fallback.
+      if declare -f catalyst_event_log_basename >/dev/null 2>&1; then
+        events_file="${CATALYST_EVENTS_DIR:-$CATALYST_DIR/events}/$(catalyst_event_log_basename)"
+      else
+        printf '[catalyst] WARNING: event-log path mirror unavailable — falling back to the monthly filename\n' >&2
+        events_file="${CATALYST_EVENTS_DIR:-$CATALYST_DIR/events}/$(date -u +%Y-%m).jsonl"
+      fi
       mkdir -p "$(dirname "$events_file")"
     fi
     # CTL-1809: one write(2). canonical-event.sh was already sourced just above (for the

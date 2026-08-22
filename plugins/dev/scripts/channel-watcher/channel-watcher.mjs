@@ -19,6 +19,7 @@ import { hostname, homedir } from "node:os";
 import { join } from "node:path";
 import { tick } from "./lib/watch-loop.mjs";
 import { countTurns } from "./lib/turn-parser.mjs";
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 // Resolve config from env (with defaults).
 const WATCHER_CHANNEL = process.env.CATALYST_WATCHER_CHANNEL ?? "";
@@ -51,10 +52,10 @@ if (!Number.isFinite(INTERVAL_MS) || INTERVAL_MS < INTERVAL_FLOOR_MS) {
 }
 const CATALYST_DIR = process.env.CATALYST_DIR ?? `${process.env.HOME ?? homedir()}/catalyst`;
 
+// CTL-1216: the filename is resolved by lib/event-log-paths.mjs; CATALYST_DIR
+// stays this module's own captured root.
 function getEventLogPath() {
-  const now = new Date();
-  const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return join(CATALYST_DIR, "events", `${month}.jsonl`);
+  return join(CATALYST_DIR, "events", eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })));
 }
 
 // Compute baseline: the turn count at startup time.

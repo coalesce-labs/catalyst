@@ -24,6 +24,7 @@ import { dlqDepth } from "./lib/dlq.ts";
 import { buildCanonicalEnvelope } from "./lib/canonical.ts";
 import { createSparseWarnGate } from "./lib/sparse-warn.ts";
 import { configureDropSurface, evaluateDropSurface } from "./lib/drop-surface.ts";
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 const CATALYST_DIR = process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
 const EVENTS_DIR = process.env.CATALYST_EVENTS_DIR ?? join(CATALYST_DIR, "events");
@@ -173,13 +174,14 @@ const buffers: { otlp: CanonicalEvent[]; posthog: CanonicalEvent[]; cae: Canonic
   cae: [],
 };
 
-const CURRENT_MONTH = () => {
-  const now = new Date();
-  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-};
-// CTL-1506 (Codex P2): resolve the monthly log file on each use, not once at startup —
-// a daemon that crosses a UTC month boundary must write to the file the tailer now reads.
-const currentEventLogPath = () => join(EVENTS_DIR, `${CURRENT_MONTH()}.jsonl`);
+// CTL-1506 (Codex P2): resolve the log file on each use, not once at startup — a
+// daemon that crosses a rotation boundary must write to the file the tailer now
+// reads. CTL-1216 keeps that resolve-per-use property and moves the FILENAME
+// onto lib/event-log-paths.mjs, the same resolver lib/tail.ts and
+// execution-core/daemon-watchdog-predicates.mjs now use — which is what makes
+// "the file the tailer now reads" a fact rather than three copies agreeing.
+const currentEventLogPath = () =>
+  join(EVENTS_DIR, eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })));
 
 const OTLP_DLQ_PATH = join(CATALYST_DIR, "otel-forward-dlq-otlp.jsonl");
 

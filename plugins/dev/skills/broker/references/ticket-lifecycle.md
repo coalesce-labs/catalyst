@@ -22,7 +22,7 @@ jq -nc \
       wake_on: ["status_done", "pr_opened", "pr_merged"],
       persistent: true,
       session_id: $sid
-    }}' >> ~/catalyst/events/$(date -u +%Y-%m).jsonl
+    }}' >> $(ls -t ~/catalyst/events/*.jsonl | head -1)
 ```
 
 ## `wake_on` Values

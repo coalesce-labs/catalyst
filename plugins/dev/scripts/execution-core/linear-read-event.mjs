@@ -10,9 +10,15 @@
 // WHY a dedicated node-safe module (not a reuse of config.mjs's getEventLogPath):
 // `linear-cli.mjs` is under a `bun build --target=node` node-loadability CI gate
 // and deliberately imports only node builtins. config.mjs drags dynamic pino, so
-// importing it would break that gate. This module therefore inlines the (tiny,
-// UTC) event-log-path logic and imports only node builtins + catalyst-resource.mjs
-// (a confirmed leaf: host-identity + node-class, no config/pino/sqlite).
+// importing it would break that gate. This module therefore imports only node
+// builtins + two confirmed leaves: catalyst-resource.mjs (host-identity +
+// node-class) and, since CTL-1216, lib/event-log-paths.mjs.
+//
+// That second one used to be an INLINED copy of config.mjs's path arithmetic,
+// held "byte-identical" by hand for exactly this reason. lib/ is the
+// zero-npm-import zone, so the resolver can now be SHARED without costing this
+// module its node-loadability — the constraint that forced the copy is the one
+// the leaf was designed around.
 //
 // SAFETY (CTL-988): a diagnostic tap in the Linear read critical path with no
 // fallback once froze the fleet 17-37h. Every function here is best-effort and
@@ -38,6 +44,11 @@ import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
+// CTL-1216: THE event-log path resolver. Safe under this module's
+// `bun build --target=node` node-loadability gate for the same reason
+// catalyst-resource.mjs is: it is a confirmed leaf, importing only
+// node:fs/os/path — no config, no pino, no sqlite.
+import { getEventLogPath } from "../lib/event-log-paths.mjs";
 
 export const LINEAR_READ_EVENT = "catalyst.linear.read";
 
@@ -51,14 +62,14 @@ export const LINEAR_READ_SOURCES = Object.freeze([
   "linearis_exception",
 ]);
 
-// Inlined getEventLogPath (byte-identical to config.mjs:175-178, UTC month) so
-// this module carries no heavy import. Re-resolved per call so tests redirect via
-// CATALYST_DIR.
+// CTL-1216: this was an INLINED copy of config.mjs's getEventLogPath, kept
+// "byte-identical" by hand so the module carried no heavy import. That is
+// exactly the trade lib/event-log-paths.mjs removes: it is a zero-npm-import
+// leaf, so sharing the resolver costs nothing here and "byte-identical" stops
+// being a promise someone has to keep. Still re-resolved per call, so tests
+// redirect via CATALYST_DIR.
 function eventLogPath() {
-  const dir = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
-  const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return resolve(dir, "events", `${ym}.jsonl`);
+  return getEventLogPath({ env: process.env });
 }
 
 /**

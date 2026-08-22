@@ -16,6 +16,8 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
+// CTL-1216: THE event-log path resolver (sibling leaf, zero-npm-import).
+import { getEventLogPath } from "./event-log-paths.mjs";
 
 const SENTINEL_ORCHIDS = new Set(["orch-test"]);
 
@@ -90,11 +92,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (pathArg) {
     filePath = resolve(pathArg);
   } else {
-    const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-    const home = process.env.HOME ?? homedir();
-    const catalystDir = process.env.CATALYST_DIR ?? `${home}/catalyst`;
-    filePath = resolve(catalystDir, "events", `${ym}.jsonl`);
+    // CTL-1216: the active log, resolved rather than re-derived. Same file
+    // whichever scheme is in force, so `scrub-test-events` with no path
+    // argument keeps scrubbing the log that is actually being written.
+    filePath = resolve(getEventLogPath({ env: process.env }));
   }
 
   if (!existsSync(filePath)) {

@@ -85,6 +85,8 @@ import {
 } from "./lib/belief-store-queries.mjs";
 // CTL-1100: journey assembler (bun:sqlite-free — plain static import safe).
 import { assembleJourney, eventLogPathFor } from "./lib/journey.mjs";
+// CTL-1216: THE event-log path resolver (zero-npm-import leaf + .d.mts sidecar).
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 // CTL-887 (BFF5): the live transcript tail for execution-core workers. The
 // legacy /api/worker-stream reads the Plane-B runs/ tree (empty for EC); this
 // is the EC equivalent — tails ~/.claude/projects/*/<sessionId>.jsonl and
@@ -5068,8 +5070,13 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // CTL-1092 (Phase 5): per-node capacity change history from the event log.
         // Read-only; no writes. Scans the current-month JSONL for capacity events.
         if (url.pathname === "/api/capacity-history") {
-          const month = new Date().toISOString().slice(0, 7); // YYYY-MM
-          const capLogPath = join(CATALYST_DIR, "events", `${month}.jsonl`);
+          // CTL-1216: resolved, not derived — so this endpoint keeps reading
+          // the file the writer is actually appending to under either scheme.
+          const capLogPath = join(
+            CATALYST_DIR,
+            "events",
+            eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })),
+          );
           const data = readCapacityHistory({ logPath: capLogPath });
           return Response.json({ data });
         }

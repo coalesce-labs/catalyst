@@ -11,6 +11,22 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1216: resolve the event-log basename through the SAME mirror the code under
+# test uses, instead of pinning `$(date -u +%Y-%m)`. Pinning the scheme here made
+# these fixtures write a file the (now weekly) code never opened — and pinning
+# the NEW scheme would only move the coupling one flip further out.
+#
+# It fails LOUD on a bad path rather than falling back to the monthly name: a
+# silent fallback here reproduces the old behaviour while looking like it
+# resolved, which is precisely how a wrong path in this shim went unnoticed once
+# already.
+_ctl1216_active_log_basename() {
+  local _lib="${SCRIPT_DIR}/../catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  ( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )
+}
+
 LIB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REBASE_LIB="$LIB_DIR/worktree-rebase.sh"
 SEQUENCE_LIB="$LIB_DIR/phase-sequence.sh"
@@ -242,7 +258,7 @@ export ORCH_ID="test-orch" TICKET="CTL-TEST" PHASE="implement"
 
 # Helper: last event line from the test EVENTS_DIR.
 last_telem_line() {
-  tail -n1 "${EVENTS_DIR}/$(date -u +%Y-%m).jsonl" 2>/dev/null || echo ""
+  tail -n1 "${EVENTS_DIR}/$(_ctl1216_active_log_basename)" 2>/dev/null || echo ""
 }
 
 # ── 7. rebase_onto_base_classified — clean rebase → 0, strategy clean ──────
@@ -367,7 +383,7 @@ assert_eq "clean" "$(cat "$SCRATCH/t11.rebasedir")" "source conflict: no rebase-
 STALL_REASON2="$(jq -r '.body.payload.reason' <<<"$(last_telem_line)")"
 assert_eq "source_conflict_ctl708_unavailable" "$STALL_REASON2" "source conflict: stalled reason"
 # Categorize event is the second-to-last event; find it by filtering event name.
-CAT_LINE_T11="$(grep 'rebase-conflict-categorized' "${EVENTS_DIR}/$(date -u +%Y-%m).jsonl" 2>/dev/null | tail -n1 || echo "")"
+CAT_LINE_T11="$(grep 'rebase-conflict-categorized' "${EVENTS_DIR}/$(_ctl1216_active_log_basename)" 2>/dev/null | tail -n1 || echo "")"
 if [[ -n "$CAT_LINE_T11" ]]; then
   SC="$(jq -r '.body.payload.source_count' <<<"$CAT_LINE_T11")"
   TC="$(jq -r '.body.payload.test_count' <<<"$CAT_LINE_T11")"

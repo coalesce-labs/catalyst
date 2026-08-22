@@ -47,6 +47,9 @@ import {
 // divergence row) onto the SAME resolution every other of the 12 sites now
 // shares.
 import { resolveSecret } from "../lib/secret-contract.mjs";
+// CTL-1216: THE event-log path resolver — a zero-npm-import leaf, so it keeps
+// this CLI loadable on plain node.
+import { getEventLogPath } from "../lib/event-log-paths.mjs";
 export { defaultCheckOpenPrs, defaultDeriveBranchName };
 
 const TICKET_RE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
@@ -272,10 +275,8 @@ function buildApplyCorrection(configPath, primitives) {
 function emitDeclared(decl, enabled) {
   if (!enabled) return;
   try {
-    const dir = process.env.CATALYST_DIR || join(homedir(), "catalyst");
-    const d = new Date();
-    const month = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-    const file = join(dir, "events", `${month}.jsonl`);
+    // CTL-1216: resolved by lib/event-log-paths.mjs, not re-derived here.
+    const file = getEventLogPath({ env: process.env });
     mkdirSync(dirname(file), { recursive: true });
     const name = `ticket.completion.declared.${decl.ticket}`;
     // Canonical OTel envelope so the name lands in attributes["event.name"] where

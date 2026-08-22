@@ -105,7 +105,13 @@ emit_reap_intent() {
 	dir="$(_reap_events_dir)"
 	mkdir -p "$dir" 2>/dev/null || return 1
 	local month_file
-	month_file="${dir}/$(date -u +%Y-%m).jsonl"
+	# CTL-1216: resolved through the shared mirror; LOUD fallback.
+	if declare -f catalyst_event_log_basename >/dev/null 2>&1; then
+		month_file="${dir}/$(catalyst_event_log_basename)"
+	else
+		printf '[catalyst] WARNING: event-log path mirror unavailable — falling back to the monthly filename\n' >&2
+		month_file="${dir}/$(date -u +%Y-%m).jsonl"
+	fi
 
 	# CTL-1795: emit the superset envelope (v1 keys + a full canonical block) so this producer
 	# is visible to a consumer reading attributes["event.name"], exactly like its mjs twin

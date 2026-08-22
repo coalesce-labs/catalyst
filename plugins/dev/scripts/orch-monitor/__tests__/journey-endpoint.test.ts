@@ -5,6 +5,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer } from "../server";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 let server: ReturnType<typeof createServer>;
 let baseUrl: string;
@@ -62,7 +65,7 @@ describe("GET /api/journey/:ticket event-log injection", () => {
     const scopedTmp = mkdtempSync(join(tmpdir(), "journey-event-log-test-"));
     const catalystDir = join(scopedTmp, "catalyst");
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const eventsDir = join(catalystDir, "events");
     mkdirSync(eventsDir, { recursive: true });
     writeFileSync(join(eventsDir, `${ym}.jsonl`), `${JSON.stringify({

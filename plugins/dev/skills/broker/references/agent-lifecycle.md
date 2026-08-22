@@ -13,7 +13,7 @@ CATALYST_SESSION_ID=$(catalyst-session.sh start --skill oneshot --ticket CTL-275
 # ↑ The broker records: agent CTL-275 with no claimed_pr yet.
 
 # When you later create the PR, update claimed_pr via agent.checkin:
-cat >> ~/catalyst/events/$(date -u +%Y-%m).jsonl <<EOF
+cat >> $(ls -t ~/catalyst/events/*.jsonl | head -1) <<EOF
 {"ts":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","event":"agent.checkin","detail":{"session_id":"$CATALYST_SESSION_ID","ticket":"CTL-275","claimed_pr":$PR_NUMBER,"orchestrator":"${CATALYST_ORCHESTRATOR_ID:-}"}}
 EOF
 # ↑ The broker sees claimed_pr → auto-registers pr_lifecycle for filter.wake.$CATALYST_SESSION_ID

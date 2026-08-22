@@ -19,6 +19,22 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1216: resolve the event-log basename through the SAME mirror the code under
+# test uses, instead of pinning `$(date -u +%Y-%m)`. Pinning the scheme here made
+# these fixtures write a file the (now weekly) code never opened — and pinning
+# the NEW scheme would only move the coupling one flip further out.
+#
+# It fails LOUD on a bad path rather than falling back to the monthly name: a
+# silent fallback here reproduces the old behaviour while looking like it
+# resolved, which is precisely how a wrong path in this shim went unnoticed once
+# already.
+_ctl1216_active_log_basename() {
+  local _lib="${SCRIPT_DIR}/../catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  ( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )
+}
+
 LIB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SALVAGE_LIB="${LIB_DIR}/worktree-salvage.sh"
 
@@ -51,7 +67,7 @@ source "$SALVAGE_LIB"
 
 echo "worktree-salvage tests (CTL-1639)"
 
-EVENT_LOG="${CATALYST_EVENTS_DIR}/$(date -u +%Y-%m).jsonl"
+EVENT_LOG="${CATALYST_EVENTS_DIR}/$(_ctl1216_active_log_basename)"
 last_event_line() { tail -n1 "$EVENT_LOG" 2>/dev/null || echo ""; }
 reset_events()    { rm -f "$EVENT_LOG" 2>/dev/null || true; }
 clean_salvage()   { rm -rf "$CATALYST_SALVAGE_DIR" 2>/dev/null || true; mkdir -p "$CATALYST_SALVAGE_DIR"; }

@@ -35,6 +35,10 @@ import {
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { isLinearTerminal } from "./terminal-state.mjs"; // CTL-1340: replica-tier terminal assertions
 import { linearBreaker } from "./linear-breaker.mjs"; // CTL-1420: reset the shared breaker singleton between empty-path tests
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 // A fake exec returning a canned linearis result. `exec(cmd, args)` ->
 // { code, stdout, stderr } — the injectable seam runEligibleQuery uses so a
@@ -790,7 +794,7 @@ describe("fetchTicketState — reads-by-source emit (CTL-1403)", () => {
   });
   function readEvents() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     try {
       return readFileSync(join(dir, "events", `${ym}.jsonl`), "utf8")
         .trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))

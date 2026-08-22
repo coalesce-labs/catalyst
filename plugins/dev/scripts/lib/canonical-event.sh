@@ -3,13 +3,27 @@
 # (CTL-300). Mirrors `plugins/dev/scripts/orch-monitor/lib/canonical-event.ts`
 # so trace/span IDs match deterministically across TS and bash producers.
 #
-# Source this file from any bash producer that writes to
-# ~/catalyst/events/YYYY-MM.jsonl, then call:
+# Source this file from any bash producer that writes to the unified event log
+# (~/catalyst/events/<period>.jsonl — the filename is resolved by
+# lib/catalyst-event-log-paths.sh since CTL-1216, and is `YYYY-MM.jsonl` or
+# `YYYY-Www.jsonl` depending on catalyst.events.rotation), then call:
 #
 #   build_canonical_line  → echoes one canonical JSONL line on stdout
 #   derive_trace_id ORCH SESSION → echoes 32-hex (or empty)
 #   derive_span_id  WORKER SESSION → echoes 16-hex (or empty)
 #   severity_number SEVERITY    → echoes the OTel number
+
+# CTL-1216: the shared event-log path mirror. Sourced as a SIBLING so every bash
+# producer that sources canonical-event.sh resolves the same filename the
+# readers do, without each having to source it separately. Idempotent.
+if ! declare -f catalyst_event_log_basename >/dev/null 2>&1; then
+  _CANON_LIBDIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -r "${_CANON_LIBDIR}/catalyst-event-log-paths.sh" ]]; then
+    # shellcheck source=catalyst-event-log-paths.sh
+    . "${_CANON_LIBDIR}/catalyst-event-log-paths.sh" 2>/dev/null || true
+  fi
+  unset _CANON_LIBDIR
+fi
 #   plugin_version              → echoes catalyst-dev plugin version
 #
 # This module is idempotent: sourcing it twice is a no-op.
@@ -744,8 +758,26 @@ canonical_jsonl_append() {
     return 0
   fi
   mkdir -p "$base_dir" 2>/dev/null || return 0
+  # CTL-1216: the filename comes from lib/catalyst-event-log-paths.sh, the bash
+  # mirror of lib/event-log-paths.mjs (held byte-identical by the three-way
+  # parity suite). Everything below this line — the CTL-1813 legacy quarantine
+  # and canonical_atomic_append_line — was already path-agnostic and is
+  # unchanged; only which name it operates on moved.
+  #
+  # The fallback is LOUD, for the same reason catalyst-events' is: a silent
+  # `date -u +%Y-%m` would keep working under today's default and then, the day
+  # the scheme flips, split the fleet's writers across two files while every
+  # reader followed only one.
   local month_file
-  month_file="${base_dir}/$(date -u +%Y-%m).jsonl"
+  if declare -f catalyst_event_log_basename >/dev/null 2>&1; then
+    month_file="${base_dir}/$(catalyst_event_log_basename)"
+  else
+    if [[ -z "${_CANON_PATHS_WARNED:-}" ]]; then
+      _CANON_PATHS_WARNED=1
+      printf '[catalyst] WARNING: lib/catalyst-event-log-paths.sh not loaded — canonical_jsonl_append is falling back to the monthly filename. If the active rotation scheme is not `month`, this writes where no reader is looking.\n' >&2
+    fi
+    month_file="${base_dir}/$(date -u +%Y-%m).jsonl"
+  fi
   if [[ -f "$month_file" ]]; then
     local first
     first="$(head -n 1 "$month_file" 2>/dev/null || true)"

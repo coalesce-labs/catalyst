@@ -7,6 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildCanonicalEventLine } from "./canonical-event.mjs";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 const parse = (line) => JSON.parse(line.trimEnd());
 
@@ -103,7 +107,7 @@ describe("the two former v3 producers now emit canonical envelopes", () => {
 
   const readSoleEvent = () => {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const path = join(dir, "events", `${ym}.jsonl`);
     expect(existsSync(path)).toBe(true);
     const lines = readFileSync(path, "utf8").trim().split("\n");

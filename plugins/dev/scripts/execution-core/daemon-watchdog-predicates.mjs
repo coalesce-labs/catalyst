@@ -12,6 +12,9 @@
 import { statSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+// CTL-1216: THE event-log path resolver, shared with the forwarder this module
+// measures. A zero-npm-import leaf, so it costs this module nothing.
+import { getEventLogPath } from "../lib/event-log-paths.mjs";
 
 // Re-resolved per call so tests redirect via CATALYST_DIR — matches otel-forward's
 // own resolution (index.ts:24) and config.mjs's private catalystDir().
@@ -32,18 +35,21 @@ export function readDlqBytes(dlqPath) {
   }
 }
 
-// The forwarder's INPUT log — the file otel-forward tails and appends to. Resolved
-// exactly as otel-forward/index.ts (CATALYST_EVENTS_DIR override, then UTC month),
-// and recomputed per call so an execution-core daemon that stays up across a UTC
-// month rollover follows the new file instead of statting the prior month (CTL-1502
-// Codex P1). Distinct from config.mjs getEventLogPath(): that is the emitter path
-// (where the watchdog writes its OWN alert event); this is the file whose staleness
-// the lag predicate measures, which must match the forwarder's tail target.
+// The forwarder's INPUT log — the file otel-forward tails and appends to.
+// Recomputed per call so an execution-core daemon that stays up across a
+// rollover follows the new file instead of statting the prior one (CTL-1502
+// Codex P1). Distinct from config.mjs getEventLogPath(): that is the emitter
+// path (where the watchdog writes its OWN alert event); this is the file whose
+// staleness the lag predicate measures, which MUST match the forwarder's tail
+// target.
+//
+// CTL-1216: "resolved exactly as otel-forward/index.ts" was a comment, i.e. a
+// promise maintained by hand. It is now the same call. Leaving either side
+// self-derived would blind this predicate at every rotation boundary — the
+// forwarder would tail the new file while the watchdog statted the old one and
+// saw it frozen, which reads as a wedged forwarder.
 export function forwarderEventLogPath() {
-  const eventsDir = process.env.CATALYST_EVENTS_DIR ?? join(catalystDir(), "events");
-  const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return join(eventsDir, `${ym}.jsonl`);
+  return getEventLogPath({ env: process.env });
 }
 
 // P2 — forwarding-lag: lastForwardedTs frozen for >= stalenessMs WHILE the event

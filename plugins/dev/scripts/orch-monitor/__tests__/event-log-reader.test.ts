@@ -55,6 +55,24 @@ function makeLine(event: string, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({ ts: "2026-05-04T00:00:00Z", event, ...extra });
 }
 
+// CTL-1216: this whole file's fixtures are month-shaped — 27 hard-coded
+// `2026-05.jsonl`-style literals across five describes, with `now` mocked into
+// May. It is pinned to `month` rather than rewritten, because what it tests is
+// backlog/tail/stat behaviour, not the rotation scheme, and rewriting 27
+// literals would add risk without adding coverage.
+//
+// The scheme-crossing behaviour IS covered, elsewhere and deliberately: the
+// leaf's own suite (lib/event-log-paths.test.mjs) pins mixed-scheme window
+// resolution, and execution-core/recovery-pass-context.test.mjs asserts a
+// historical YYYY-MM.jsonl is read beside a YYYY-Www.jsonl (AC 3). Pinning here
+// would only be a problem if it were the ONLY place the property lived.
+beforeEach(() => {
+  process.env.CATALYST_EVENT_LOG_ROTATION = "month";
+});
+afterEach(() => {
+  delete process.env.CATALYST_EVENT_LOG_ROTATION;
+});
+
 describe("readBacklog", () => {
   it("returns empty array when file does not exist", async () => {
     const r = await readBacklog({

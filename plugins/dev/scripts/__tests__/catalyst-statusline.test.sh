@@ -12,6 +12,22 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1216: resolve the event-log basename through the SAME mirror the code under
+# test uses, instead of pinning `$(date -u +%Y-%m)`. Pinning the scheme here made
+# these fixtures write a file the (now weekly) code never opened — and pinning
+# the NEW scheme would only move the coupling one flip further out.
+#
+# It fails LOUD on a bad path rather than falling back to the monthly name: a
+# silent fallback here reproduces the old behaviour while looking like it
+# resolved, which is precisely how a wrong path in this shim went unnoticed once
+# already.
+_ctl1216_active_log_basename() {
+  local _lib="${SCRIPT_DIR}/../lib/catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  ( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )
+}
+
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 WRAPPER="${REPO_ROOT}/plugins/dev/scripts/catalyst-statusline.sh"
 SESSION_SCRIPT="${REPO_ROOT}/plugins/dev/scripts/catalyst-session.sh"
@@ -85,7 +101,7 @@ expect_contains "wrapper renders even with no matching session" "$OUT2" "STATUSL
 # Wait for any background emit to settle
 sleep 1
 
-EVENT_FILE="$EVENTS_DIR/$(date -u +%Y-%m).jsonl"
+EVENT_FILE="$EVENTS_DIR/$(_ctl1216_active_log_basename)"
 if [[ -f "$EVENT_FILE" ]]; then
   COUNT_BEFORE_SESSION="$(grep -c 'session.context' "$EVENT_FILE" 2>/dev/null || echo 0)"
 else

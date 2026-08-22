@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { CanonicalEventWriter } from "../lib/event-writer";
 import type { CanonicalEvent } from "../lib/canonical-event";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 // CTL-1813: rotation destinations are now UNIQUE (a fixed `.legacy` is a rescue slot of
 // depth one — the next rotation clobbers the previous month's only copy). Tests therefore
@@ -37,9 +40,7 @@ afterEach(() => {
 });
 
 function readMonth(baseDir: string, ts: Date): string {
-  const y = ts.getUTCFullYear();
-  const m = String(ts.getUTCMonth() + 1).padStart(2, "0");
-  const path = join(baseDir, `${y}-${m}.jsonl`);
+  const path = join(baseDir, eventLogBasenameFor(ts, resolveRotationScheme({ env: process.env })));
   return readFileSync(path, "utf8");
 }
 
@@ -70,6 +71,21 @@ function sampleEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
 }
 
 describe("CanonicalEventWriter", () => {
+  // CTL-1216: this block asserts against 16 hard-coded `YYYY-MM.jsonl` literals
+  // and one explicit MONTH-rollover case, so it is pinned to `month`. Left on the
+  // ambient default it would keep passing its non-path assertions while quietly
+  // testing nothing about rotation — the failure mode this ticket is about. The
+  // weekly rollover twin is at the end of the block.
+  let _prevRotation: string | undefined;
+  beforeEach(() => {
+    _prevRotation = process.env.CATALYST_EVENT_LOG_ROTATION;
+    process.env.CATALYST_EVENT_LOG_ROTATION = "month";
+  });
+  afterEach(() => {
+    if (_prevRotation === undefined) delete process.env.CATALYST_EVENT_LOG_ROTATION;
+    else process.env.CATALYST_EVENT_LOG_ROTATION = _prevRotation;
+  });
+
   it("appends a single canonical JSONL line per call", async () => {
     const fixed = new Date("2026-05-08T18:00:00Z");
     const writer = new CanonicalEventWriter({
@@ -346,5 +362,18 @@ describe("CanonicalEventWriter", () => {
     }
     expect(threw).toBe(false);
     expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it("CTL-1216: rolls over to a new file when the ISO WEEK changes", async () => {
+    // The twin of the month-rollover case above, on the scheme that ships.
+    // 2026-W33 ends Sun 2026-08-16; 2026-W34 starts Mon 2026-08-17.
+    process.env.CATALYST_EVENT_LOG_ROTATION = "week";
+    let now = new Date("2026-08-16T23:59:59Z");
+    const writer = new CanonicalEventWriter({ baseDir: workdir, now: () => now });
+    await writer.append(sampleEvent({ body: { message: "w33" } }));
+    now = new Date("2026-08-17T00:00:00Z");
+    await writer.append(sampleEvent({ body: { message: "w34" } }));
+    expect(readFileSync(join(workdir, "2026-W33.jsonl"), "utf8")).toContain("w33");
+    expect(readFileSync(join(workdir, "2026-W34.jsonl"), "utf8")).toContain("w34");
   });
 });

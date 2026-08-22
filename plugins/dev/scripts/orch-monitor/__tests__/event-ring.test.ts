@@ -9,6 +9,9 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createEventRing } from "../lib/event-ring";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 let workdir: string;
 
@@ -27,9 +30,7 @@ function eventsDir(): string {
 }
 
 function monthFile(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return join(workdir, "events", `${y}-${m}.jsonl`);
+  return join(workdir, "events", eventLogBasenameFor(d, resolveRotationScheme({ env: process.env })));
 }
 
 function line(event: string, ts: string, extra: Record<string, unknown> = {}): string {

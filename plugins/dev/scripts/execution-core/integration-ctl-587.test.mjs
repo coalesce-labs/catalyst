@@ -17,6 +17,10 @@ import { join } from "node:path";
 import { schedulerTick } from "./scheduler.mjs";
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
 import { countReviveEvents } from "./event-scan.mjs";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 let orchDir;
 let catalystDir;
@@ -40,7 +44,7 @@ beforeEach(() => {
   // budget-exhaustion test.
   mkdirSync(join(catalystDir, "events"), { recursive: true });
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   eventLogPath = join(catalystDir, "events", `${ym}.jsonl`);
   orchDir = join(catalystDir, "orch");
   mkdirSync(join(orchDir, "workers"), { recursive: true });

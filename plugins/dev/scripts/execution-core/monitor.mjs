@@ -166,7 +166,7 @@ import { recordReplicaRead } from "./replica-health.mjs"; // CAT-35
 // over the SAME unified event log the broker tails, so it needs the same tripwire — and it
 // must share the counter rather than start a second one. See noteTornLine's own comment: one
 // detector per process per log.
-import { noteTornLine } from "./event-tail.mjs";
+import { noteTornLine, drainAndSwitch } from "./event-tail.mjs";
 // CTL-1819: the envelope detector, shared with the broker's peer live tail.
 import { checkEnvelope } from "../lib/event-envelope.mjs";
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
@@ -2081,6 +2081,96 @@ export function seedTailerFromCursor() {
   });
 }
 
+// routeMonitorRawLine — the monitor's per-line pipeline: torn-line accounting,
+// the CTL-1819 envelope check, the CTL-1847 cloud-feed gate, the three event
+// handlers, and the CTL-1655 comment dedup.
+//
+// CTL-1216 extracted this from the steady-state loop so the ROLLOVER DRAIN
+// routes through EXACTLY the same path. Writing the drain its own copy is how
+// one of the two paths silently loses the dedup gate or the ORDER-IS-LOAD-BEARING
+// suppression-before-dedup rule documented inside it — and the drain is the rare
+// path, so it is the copy that would rot unnoticed.
+function routeMonitorRawLine(line, { foldOnly, triageBudget, tailerOpts }) {
+  if (!line.trim()) return;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      // CTL-1809: this is the daemon monitor's LIVE tail of the unified event log —
+      // structurally the same reader as broker/tailer.mjs's readNewEvents, on the same file
+      // (getEventLogPath), and it was silent in exactly the same way. It is not a minor
+      // path: startTailing drives it from both an fs.watch callback and a setInterval poll
+      // for the daemon's whole life, and it routes handleStateChangedEvent → dispatchTriage,
+      // handleIssueUpdatedEvent → the projection fold, and handleCommentCreatedEvent →
+      // onComment (the CTL-768 comment-wake needs-input clear + worker redispatch). A torn
+      // line here silently drops a dispatch or a human's reply.
+      //
+      // `line` is a COMPLETE line: leftoverBuf popped the trailing partial off `lines`
+      // before this loop, so an unparseable line here is real damage, not a read that raced
+      // a writer mid-append.
+      //
+      // COUNT AND ADVANCE. lastByteOffset (and the durable saveCursor) already moved to
+      // stat.size above, deliberately: a torn line is permanently corrupt, so parking on it
+      // would wedge the monitor forever on damage that never resolves.
+      noteTornLine(line);
+      return; // skip a malformed line, keep tailing
+    }
+    // CTL-1819: envelope check on this live path too. docs/architecture.md is
+    // explicit that this reader and broker/tailer.mjs's are PEERS — "neither is
+    // 'the' load-bearing one" — so instrumenting only the broker would leave the
+    // reader that drives dispatchTriage and the comment-wake blind. Non-gating:
+    // the event is routed regardless, exactly like the torn counter above.
+    checkEnvelope(event);
+    // CTL-1847: WHICH producer may drive dispatch. Both the smee→webhook
+    // receiver and the cloud feed write the same three dispatch-class names
+    // into this one log; the gate decides which is authoritative for this
+    // host right now, and the loser is CAPTURED rather than dropped so the
+    // parity harness can still answer "did the feed miss this edge?" after
+    // the fact. In the default mode (off) `decideDispatch` returns
+    // suppress:false for every webhook event, so this block is byte-identical
+    // to pre-CTL-1847 routing.
+    //
+    // ⚠️ ORDER IS LOAD-BEARING: this block must stay ABOVE the CTL-1655
+    // `markAndCheckCommentSeen` gate below. A suppressed smee comment must
+    // never enter the dedup set — if it did, it would mark the comment seen
+    // and the FEED's copy of that same comment would then be skipped as a
+    // duplicate, so the comment would reach no worker inbox at all. Because
+    // the suppression `continue`s first, exactly one copy (the feed's)
+    // dispatches. Moving this below the dedup turns enforce mode into a
+    // silent comment blackhole.
+    if (_cloudFeedGate) {
+      const verdict = decideDispatch(event, _cloudFeedGate);
+      if (verdict.suppress) {
+        _cloudFeedGate.capture?.append(event, verdict);
+        return;
+      }
+    }
+    // CTL-731: handleStateChangedEvent gates its dispatch side-effects on
+    // foldOnly; handleIssueUpdatedEvent is a pure projection fold (always safe);
+    // handleCommentCreatedEvent's onComment is a side-effect — withhold it on
+    // the fold-only boot drain so replayed comments don't re-fire subscribers.
+    handleStateChangedEvent(event, { ...tailerOpts, foldOnly, triageBudget });
+    handleIssueUpdatedEvent(
+      event,
+      foldOnly ? { ...tailerOpts, onUpdate: undefined } : tailerOpts
+    ); // CTL-681 + CTL-749
+    // CTL-1655: consult the shared cross-source dedup before routing so the
+    // two tails don't double-dispatch the same comment. Per plan §Phase 2
+    // ("whichever tail sees a given comment first wins and the other skips"),
+    // HONOR the result here: if the coordination-mirror tail already processed
+    // this comment (it won the race on the originating host, where the comment
+    // lands in BOTH the local event log and the hub-echoed coordination.jsonl),
+    // skip the redundant handleCommentCreatedEvent — otherwise Phase B
+    // dispatch fires twice for one Linear comment (the CTL-1653 pathology).
+    // foldOnly drains do NOT insert — replayed events must not permanently
+    // poison the dedup set and block their own future live delivery.
+    const eventName681 = getEventName(event); // CTL-1834: the shared boundary
+    if (eventName681 === "linear.comment.created" && !foldOnly) {
+      if (markAndCheckCommentSeen(commentKeyOf(event))) return;
+    }
+    handleCommentCreatedEvent(event, foldOnly ? {} : tailerOpts); // CTL-681
+}
+
 // readNewEvents — drain bytes appended since the last call, parse each
 // complete line, and feed it to handleStateChangedEvent. A leftover buffer
 // carries partial lines; on month rollover the new file is re-seeded at its
@@ -2097,16 +2187,60 @@ export function seedTailerFromCursor() {
 export function readNewEvents({ foldOnly = false } = {}) {
   const logPath = getEventLogPath();
   if (logPath !== lastLogPath) {
+    // CTL-1216: DRAIN the old file before switching, then seed the new one at
+    // byte 0 — not at its current size.
+    //
+    // docs/architecture.md calls this reader and broker/tailer.mjs's PEERS —
+    // "neither is 'the' load-bearing one" — and both dropped events at every
+    // boundary in the same two ways: the old file's unread tail was never read
+    // by anyone, and seeding at `fstatSync(fd).size` skipped the new file's
+    // head. What THIS tail routes is dispatchTriage, the eligible projection
+    // fold, and the CTL-768 comment-wake, so a dropped line is a dropped
+    // dispatch or a dropped human reply. The comment above this function used
+    // to describe the loss as intended ("its tail is not replayed"); it was not
+    // intended, it was unexamined.
+    const prevPath = lastLogPath;
+    const prevOffset = lastByteOffset;
+    const prevLeftover = leftoverBuf;
+
     lastLogPath = logPath;
     leftoverBuf = "";
-    try {
-      const fd = openSync(logPath, "r");
-      lastByteOffset = fstatSync(fd).size;
-      closeSync(fd);
-    } catch {
-      lastByteOffset = 0;
+    lastByteOffset = 0;
+
+    if (prevPath) {
+      // The drain honours the SAME foldOnly the caller passed: a boot/large-gap
+      // catch-up must not fire dispatch side-effects merely because it happened
+      // to cross a boundary.
+      const budget = foldOnly
+        ? undefined
+        : computeTriageBudget({
+            orchDir: tailerOpts.orchDir,
+            concurrency: tailerOpts.concurrency,
+            readMaxParallelFn: tailerOpts.readMaxParallelFn,
+            liveBackgroundCount: tailerOpts.liveBackgroundCount,
+            dispatchMode: tailerOpts.dispatchMode,
+            countSdkInflight: tailerOpts.countSdkInflight,
+            hasInProcessRoute: tailerOpts.hasInProcessRoute,
+          });
+      const res = drainAndSwitch({
+        oldPath: prevPath,
+        oldOffset: prevOffset,
+        leftover: prevLeftover,
+        onLines: (drained) => {
+          for (const l of drained) {
+            routeMonitorRawLine(l, { foldOnly, triageBudget: budget, tailerOpts });
+          }
+        },
+      });
+      if (res.truncated) {
+        log.warn(
+          { path: prevPath, drained: res.drained },
+          "monitor: rollover drain TRUNCATED — events beyond the cap were not routed (CTL-1216)",
+        );
+      }
     }
-    return;
+    // Deliberately NO `return`: fall through and read the new file from offset 0
+    // in this same pass, so its head is not left until the next watch/poll tick.
   }
   try {
     const fd = openSync(logPath, "r");
@@ -2142,84 +2276,7 @@ export function readNewEvents({ foldOnly = false } = {}) {
           hasInProcessRoute: tailerOpts.hasInProcessRoute, // CTL-1457 (N1)
         });
     for (const line of lines) {
-      if (!line.trim()) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        // CTL-1809: this is the daemon monitor's LIVE tail of the unified event log —
-        // structurally the same reader as broker/tailer.mjs's readNewEvents, on the same file
-        // (getEventLogPath), and it was silent in exactly the same way. It is not a minor
-        // path: startTailing drives it from both an fs.watch callback and a setInterval poll
-        // for the daemon's whole life, and it routes handleStateChangedEvent → dispatchTriage,
-        // handleIssueUpdatedEvent → the projection fold, and handleCommentCreatedEvent →
-        // onComment (the CTL-768 comment-wake needs-input clear + worker redispatch). A torn
-        // line here silently drops a dispatch or a human's reply.
-        //
-        // `line` is a COMPLETE line: leftoverBuf popped the trailing partial off `lines`
-        // before this loop, so an unparseable line here is real damage, not a read that raced
-        // a writer mid-append.
-        //
-        // COUNT AND ADVANCE. lastByteOffset (and the durable saveCursor) already moved to
-        // stat.size above, deliberately: a torn line is permanently corrupt, so parking on it
-        // would wedge the monitor forever on damage that never resolves.
-        noteTornLine(line);
-        continue; // skip a malformed line, keep tailing
-      }
-      // CTL-1819: envelope check on this live path too. docs/architecture.md is
-      // explicit that this reader and broker/tailer.mjs's are PEERS — "neither is
-      // 'the' load-bearing one" — so instrumenting only the broker would leave the
-      // reader that drives dispatchTriage and the comment-wake blind. Non-gating:
-      // the event is routed regardless, exactly like the torn counter above.
-      checkEnvelope(event);
-      // CTL-1847: WHICH producer may drive dispatch. Both the smee→webhook
-      // receiver and the cloud feed write the same three dispatch-class names
-      // into this one log; the gate decides which is authoritative for this
-      // host right now, and the loser is CAPTURED rather than dropped so the
-      // parity harness can still answer "did the feed miss this edge?" after
-      // the fact. In the default mode (off) `decideDispatch` returns
-      // suppress:false for every webhook event, so this block is byte-identical
-      // to pre-CTL-1847 routing.
-      //
-      // ⚠️ ORDER IS LOAD-BEARING: this block must stay ABOVE the CTL-1655
-      // `markAndCheckCommentSeen` gate below. A suppressed smee comment must
-      // never enter the dedup set — if it did, it would mark the comment seen
-      // and the FEED's copy of that same comment would then be skipped as a
-      // duplicate, so the comment would reach no worker inbox at all. Because
-      // the suppression `continue`s first, exactly one copy (the feed's)
-      // dispatches. Moving this below the dedup turns enforce mode into a
-      // silent comment blackhole.
-      if (_cloudFeedGate) {
-        const verdict = decideDispatch(event, _cloudFeedGate);
-        if (verdict.suppress) {
-          _cloudFeedGate.capture?.append(event, verdict);
-          continue;
-        }
-      }
-      // CTL-731: handleStateChangedEvent gates its dispatch side-effects on
-      // foldOnly; handleIssueUpdatedEvent is a pure projection fold (always safe);
-      // handleCommentCreatedEvent's onComment is a side-effect — withhold it on
-      // the fold-only boot drain so replayed comments don't re-fire subscribers.
-      handleStateChangedEvent(event, { ...tailerOpts, foldOnly, triageBudget });
-      handleIssueUpdatedEvent(
-        event,
-        foldOnly ? { ...tailerOpts, onUpdate: undefined } : tailerOpts
-      ); // CTL-681 + CTL-749
-      // CTL-1655: consult the shared cross-source dedup before routing so the
-      // two tails don't double-dispatch the same comment. Per plan §Phase 2
-      // ("whichever tail sees a given comment first wins and the other skips"),
-      // HONOR the result here: if the coordination-mirror tail already processed
-      // this comment (it won the race on the originating host, where the comment
-      // lands in BOTH the local event log and the hub-echoed coordination.jsonl),
-      // skip the redundant handleCommentCreatedEvent — otherwise Phase B
-      // dispatch fires twice for one Linear comment (the CTL-1653 pathology).
-      // foldOnly drains do NOT insert — replayed events must not permanently
-      // poison the dedup set and block their own future live delivery.
-      const eventName681 = getEventName(event); // CTL-1834: the shared boundary
-      if (eventName681 === "linear.comment.created" && !foldOnly) {
-        if (markAndCheckCommentSeen(commentKeyOf(event))) continue;
-      }
-      handleCommentCreatedEvent(event, foldOnly ? {} : tailerOpts); // CTL-681
+      routeMonitorRawLine(line, { foldOnly, triageBudget, tailerOpts });
     }
   } catch {
     // log file not yet created or a transient read error — best-effort

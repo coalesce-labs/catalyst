@@ -192,7 +192,17 @@ event_append() {
     # event matters more than its envelope) and the breadcrumb makes the divergence observable
     # instead of silent — same posture as lib/catalyst-deployment-mode.sh's jq-less resolver.
     canonical_note_v1_only "jq-missing:event_append"
-    local month_file="${EVENTS_DIR}/$(date -u +%Y-%m).jsonl"
+    # CTL-1216: resolved through the shared mirror (canonical-event.sh sources it
+    # as a sibling). This is the jq-LESS branch, so the mirror's own config layer
+    # is already degraded here — but the env/default layers still apply, and the
+    # fallback below stays LOUD rather than silently writing where no reader looks.
+    local month_file
+    if declare -f catalyst_event_log_basename >/dev/null 2>&1; then
+      month_file="${EVENTS_DIR}/$(catalyst_event_log_basename)"
+    else
+      printf '[catalyst] WARNING: event-log path mirror unavailable — falling back to the monthly filename\n' >&2
+      month_file="${EVENTS_DIR}/$(date -u +%Y-%m).jsonl"
+    fi
     # CTL-1809: the jq-less branch bypasses canonical_jsonl_append (whose sentinel and
     # rotation checks are jq programs and would mis-report here), but it must NOT bypass the
     # atomic append. The primitive is jq-free by construction precisely so this path keeps

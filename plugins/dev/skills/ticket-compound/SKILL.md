@@ -46,7 +46,7 @@ For `<TICKET>`, collect:
 2. **The diff** — `git log --oneline origin/main..HEAD` and `git diff --stat origin/main..HEAD`
    (or the merged SHA from `phase-monitor-merge.json`).
 3. **Ticket** — read via direct SQL against the replica (title, description, final state, estimate); see the `linearis` skill's "Reading Linear" section.
-4. **Event trail** (optional) — the ticket's lines in `~/catalyst/events/YYYY-MM.jsonl`.
+4. **Event trail** (optional) — the ticket's lines in `~/catalyst/events/<period>.jsonl`.
 
 Capture learnings from **failed/abandoned** tickets too — the dead-ends are high-signal ("what
 didn't work" is a first-class section).

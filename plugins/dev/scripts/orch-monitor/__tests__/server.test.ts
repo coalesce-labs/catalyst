@@ -9,6 +9,9 @@ import type { MonitorSnapshot } from "../lib/state-reader";
 import type { LinearTicket } from "../lib/linear";
 import { createPreviewFetcher } from "../lib/preview-status";
 import { ensureTestDist } from "./helpers/test-dist";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 let server: ReturnType<typeof createServer>;
 let baseUrl: string;
@@ -1940,7 +1943,7 @@ describe("GET /api/status/webhook-tunnel", () => {
 
     // Write a github event in the current month's event log
     const now = new Date();
-    const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const month = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const eventsDir = join(tmp, "events");
     mkdirSync(eventsDir, { recursive: true });
     writeFileSync(
@@ -2111,7 +2114,7 @@ describe("/api/ticket-substeps (CTL-753)", () => {
     mkdirSync(substepWt, { recursive: true });
     mkdirSync(eventsDir, { recursive: true });
 
-    const month = new Date().toISOString().slice(0, 7);
+    const month = eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const event = JSON.stringify({
       ts: "2026-06-02T10:00:00Z",
       resource: { "service.name": "catalyst.workflow" },

@@ -6,6 +6,7 @@ import { createCache, type Cache } from "./summarize/cache";
 import type { CanonicalEvent } from "./canonical-event";
 import type { EventRing } from "./event-ring";
 import { recordFullRead } from "./event-log-reader"; // CTL-1232 profiling counter
+import { resolveEventLogPathsForWindow } from "../../lib/event-log-paths.mjs";
 
 export type ActivityWindow = "30m" | "1h" | "6h";
 
@@ -69,12 +70,6 @@ const WINDOW_MS: Record<ActivityWindow, number> = {
 
 export function parseWindowMs(w: ActivityWindow): number {
   return WINDOW_MS[w] ?? WINDOW_MS["30m"];
-}
-
-function monthlyPath(catalystDir: string, d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return join(catalystDir, "events", `${y}-${m}.jsonl`);
 }
 
 /**
@@ -148,9 +143,14 @@ export function readActivityEvents(
   // File fallback (no ring, or ring underflows the window).
   const _t0 = performance.now();
   let _fallbackBytes = 0;
-  const currentPath = monthlyPath(catalystDir, now);
-  const prevPath = monthlyPath(catalystDir, cutoff);
-  const paths = currentPath === prevPath ? [currentPath] : [prevPath, currentPath];
+  // CTL-1216: see event-log-reader.ts — two computed names cover the window
+  // only while a file is ~a month long. Enumerate + parse the directory instead.
+  const paths = resolveEventLogPathsForWindow({
+    eventsDir: join(catalystDir, "events"),
+    sinceMs: cutoff.getTime(),
+    nowMs: now.getTime(),
+    env: process.env,
+  });
 
   const events: RawEvent[] = [];
   for (const filePath of paths) {

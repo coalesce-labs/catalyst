@@ -22,6 +22,12 @@ import { getEventName } from "../../lib/event-name.mjs"; // CTL-1834: THE shared
 import { join } from "node:path";
 import { createFilterStream } from "./event-filter";
 import type { EventRing } from "./event-ring";
+import {
+  eventLogBasenameFor,
+  resolveRotationScheme,
+  resolveEventLogPathsForWindow,
+} from "../../lib/event-log-paths.mjs";
+import { drainAndSwitch } from "../../execution-core/event-tail.mjs";
 
 /**
  * CTL-1232 (profiling): process-wide counters for the full-log `readFileSync`
@@ -53,10 +59,11 @@ export function recordFullRead(label: string, bytes: number, ms: number): void {
   m.lastRssMB = Math.round(process.memoryUsage().rss / 1048576);
 }
 
-function monthlyPath(catalystDir: string, d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return join(catalystDir, "events", `${y}-${m}.jsonl`);
+// CTL-1216: the FILENAME is resolved by lib/event-log-paths.mjs; only the
+// directory stays injectable here. Renamed off "monthly" because it no longer
+// is — under CATALYST_EVENT_LOG_ROTATION=week this returns 2026-W34.jsonl.
+function eventLogPathFor(catalystDir: string, d: Date): string {
+  return join(catalystDir, "events", eventLogBasenameFor(d, resolveRotationScheme({ env: process.env })));
 }
 
 /**
@@ -287,7 +294,7 @@ export async function readBacklog(opts: ReadBacklogOpts): Promise<string[]> {
   }
 
   const now = opts.now ?? (() => new Date());
-  const path = monthlyPath(opts.catalystDir, now());
+  const path = eventLogPathFor(opts.catalystDir, now());
   if (!existsSync(path)) return [];
 
   // CTL-1515: ring-underflow fallback. Instead of a single whole-file
@@ -361,21 +368,49 @@ export async function tailEventLog(opts: TailEventLogOpts): Promise<void> {
   const stream = createFilterStream(opts.predicate);
   stream.onMatch(opts.onEvent);
 
-  let currentPath = monthlyPath(opts.catalystDir, nowFn());
+  let currentPath = eventLogPathFor(opts.catalystDir, nowFn());
   // Seek to EOF — we only emit *new* lines.
   let offset = existsSync(currentPath) ? statSync(currentPath).size : 0;
 
+  // CTL-1216: a rollover drain that produced lines counts as a busy tick, so the
+  // CTL-473 idle backoff does not slow the poll down immediately after a
+  // boundary — which is exactly when the new file starts filling.
+  let sawNewBytesOnRollover = false;
+
   try {
     while (!opts.signal.aborted) {
-      // Detect month rollover. Rollover does not count as "new bytes" — the
-      // next iteration will detect any newly-written content naturally.
-      const expectedPath = monthlyPath(opts.catalystDir, nowFn());
+      // CTL-1216: DRAIN the old file to EOF before retargeting. This used to
+      // jump straight to the new file, so every byte appended to the old one
+      // between the last poll and the boundary was never delivered to this
+      // stream's subscribers. The old comment said "the next iteration will
+      // detect any newly-written content naturally" — true of the NEW file, and
+      // never true of the old one, which nothing revisits.
+      const expectedPath = eventLogPathFor(opts.catalystDir, nowFn());
       if (expectedPath !== currentPath) {
+        const prevPath = currentPath;
+        const prevOffset = offset;
         currentPath = expectedPath;
         offset = 0;
+        const res = drainAndSwitch({
+          oldPath: prevPath,
+          oldOffset: prevOffset,
+          onLines: (drained) => {
+            for (const l of drained) stream.write(l);
+          },
+        });
+        if (res.lines > 0) {
+          await stream.flush();
+          sawNewBytesOnRollover = true;
+        }
+        if (res.truncated) {
+          console.warn(
+            `[event-log-reader] rollover drain TRUNCATED at ${res.drained} bytes on ${prevPath} — events beyond the cap were not delivered (CTL-1216)`,
+          );
+        }
       }
 
-      let sawNewBytes = false;
+      let sawNewBytes = sawNewBytesOnRollover;
+      sawNewBytesOnRollover = false;
       if (existsSync(currentPath)) {
         const size = statSync(currentPath).size;
         if (size > offset) {
@@ -502,9 +537,19 @@ export function readTunnelEventStats(
   // blank lines.
   const _t0 = performance.now();
   let _fallbackBytes = 0;
-  const currentPath = monthlyPath(catalystDir, nowDate);
-  const prevPath = monthlyPath(catalystDir, cutoff24h);
-  const paths = currentPath === prevPath ? [currentPath] : [prevPath, currentPath];
+  // CTL-1216: this hand-rolled "current, plus the previous one if it differs"
+  // is the pattern the window resolver generalizes. Two computed names cover a
+  // 24 h window only while a file is guaranteed to be ~a month long; under
+  // weekly rotation, and across a scheme change where a YYYY-MM.jsonl sits
+  // beside a YYYY-Www.jsonl, the window can span files this arithmetic never
+  // names. resolveEventLogPathsForWindow enumerates the directory instead, so
+  // it returns exactly the files that overlap — oldest-first, both schemes.
+  const paths = resolveEventLogPathsForWindow({
+    eventsDir: join(catalystDir, "events"),
+    sinceMs: cutoff24h.getTime(),
+    nowMs: nowDate.getTime(),
+    env: process.env,
+  });
 
   for (const filePath of paths) {
     if (!existsSync(filePath)) continue;

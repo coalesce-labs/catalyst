@@ -3065,16 +3065,70 @@ describe("checkSdkDaemonEnv (CTL-1396 item A)", () => {
 
   it("scans the PREVIOUS month's log when the 24h cutoff crosses a UTC month boundary", () => {
     // now = Jul 1 00:30Z, fallback at Jun 30 23:50Z (inside 24h, in last month's file).
-    const fb = fallbackLine("2026-06-30T23:50:00Z");
-    const checks = checkSdkDaemonEnv(
-      healthy({
-        now: () => Date.parse("2026-07-01T00:30:00Z"),
-        // path-aware: only the June file carries the degrade.
-        readEventLog: (p) => (p.includes("2026-06.jsonl") ? fb + "\n" : ""),
-      }),
-    );
-    const fbCheck = checks.find((c) => c.name === "sdk-bg-fallback");
-    expect(fbCheck.status).toBe(STATUS.WARN);
+    //
+    // CTL-1216: pinned to `month`. This case is month-boundary-SPECIFIC by name
+    // and by fixture, so leaving it on the ambient default would silently retire
+    // it the moment that default moved — it would resolve weekly names, the
+    // path-aware mock would return "" for all of them, and the check would report
+    // PASS. A test that stops exercising its subject while still passing is worse
+    // than one that fails. The weekly twin below covers the ACTIVE scheme.
+    const prev = process.env.CATALYST_EVENT_LOG_ROTATION;
+    process.env.CATALYST_EVENT_LOG_ROTATION = "month";
+    try {
+      const fb = fallbackLine("2026-06-30T23:50:00Z");
+      const checks = checkSdkDaemonEnv(
+        healthy({
+          now: () => Date.parse("2026-07-01T00:30:00Z"),
+          // path-aware: only the June file carries the degrade.
+          readEventLog: (p) => (p.includes("2026-06.jsonl") ? fb + "\n" : ""),
+        }),
+      );
+      const fbCheck = checks.find((c) => c.name === "sdk-bg-fallback");
+      expect(fbCheck.status).toBe(STATUS.WARN);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_EVENT_LOG_ROTATION;
+      else process.env.CATALYST_EVENT_LOG_ROTATION = prev;
+    }
+  });
+
+  it("scans the PREVIOUS week's log when the 24h cutoff crosses an ISO-week boundary", () => {
+    // The CTL-1216 twin of the case above, on the scheme that actually ships.
+    // 2026-W34 starts Mon 2026-08-17; now = Mon 00:30Z, fallback Sun 23:50Z in W33.
+    const prev = process.env.CATALYST_EVENT_LOG_ROTATION;
+    process.env.CATALYST_EVENT_LOG_ROTATION = "week";
+    try {
+      const fb = fallbackLine("2026-08-16T23:50:00Z");
+      const checks = checkSdkDaemonEnv(
+        healthy({
+          now: () => Date.parse("2026-08-17T00:30:00Z"),
+          readEventLog: (p) => (p.includes("2026-W33.jsonl") ? fb + "\n" : ""),
+        }),
+      );
+      expect(checks.find((c) => c.name === "sdk-bg-fallback").status).toBe(STATUS.WARN);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_EVENT_LOG_ROTATION;
+      else process.env.CATALYST_EVENT_LOG_ROTATION = prev;
+    }
+  });
+
+  it("does NOT warn when the degrade is outside the window (positive control)", () => {
+    // Without this, both cases above would also pass against a resolver that
+    // simply read every file it could find and a check that warned on anything.
+    const prev = process.env.CATALYST_EVENT_LOG_ROTATION;
+    process.env.CATALYST_EVENT_LOG_ROTATION = "week";
+    try {
+      const fb = fallbackLine("2026-08-01T00:00:00Z"); // ~16 days before `now`
+      const checks = checkSdkDaemonEnv(
+        healthy({
+          now: () => Date.parse("2026-08-17T00:30:00Z"),
+          readEventLog: () => fb + "\n",
+        }),
+      );
+      expect(checks.find((c) => c.name === "sdk-bg-fallback").status).not.toBe(STATUS.WARN);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_EVENT_LOG_ROTATION;
+      else process.env.CATALYST_EVENT_LOG_ROTATION = prev;
+    }
   });
 });
 

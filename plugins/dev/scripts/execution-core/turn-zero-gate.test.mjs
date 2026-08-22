@@ -40,6 +40,10 @@ import {
 } from "./recovery.mjs";
 import { existsSync } from "node:fs";
 import { claudeLogs, agentStateForShortId } from "./claude-agents.mjs";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 // Frozen clock — all tests pin `now` so no wall-clock leaks in.
 const NOW = Date.parse("2026-06-09T18:35:00Z");
@@ -616,7 +620,7 @@ describe("defaultAppendWedgedNeverStartedEvent — envelope round-trip (CTL-932)
     });
     expect(ok).toBe(true);
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
       .split("\n")
       .filter(Boolean);

@@ -4,6 +4,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { isAbsolute, join } from "path";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 // Load journey functions via computed specifier (bun:sqlite-free but guards module graph).
 const journeyMod = await import(["../lib/journey.mjs"].join("")) as {
@@ -90,13 +93,33 @@ describe("event log path resolution", () => {
 
   it("resolves the current UTC month below an injected catalyst dir", () => {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     expect(eventLogPathFor("/tmp/x")).toBe(join("/tmp/x", "events", `${ym}.jsonl`));
   });
 
-  it("uses UTC and zero-pads a fixed month", () => {
-    expect(eventLogPathFor("/tmp/x", new Date("2026-01-05T00:00:00Z")))
-      .toBe(join("/tmp/x", "events", "2026-01.jsonl"));
+  it("uses UTC and zero-pads a fixed month under `month`", () => {
+    // CTL-1216: scheme named explicitly — this asserts a concrete filename.
+    const prev = process.env.CATALYST_EVENT_LOG_ROTATION;
+    process.env.CATALYST_EVENT_LOG_ROTATION = "month";
+    try {
+      expect(eventLogPathFor("/tmp/x", new Date("2026-01-05T00:00:00Z")))
+        .toBe(join("/tmp/x", "events", "2026-01.jsonl"));
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_EVENT_LOG_ROTATION;
+      else process.env.CATALYST_EVENT_LOG_ROTATION = prev;
+    }
+  });
+
+  it("uses the ISO year-week under `week` (the shipped default)", () => {
+    const prev = process.env.CATALYST_EVENT_LOG_ROTATION;
+    process.env.CATALYST_EVENT_LOG_ROTATION = "week";
+    try {
+      expect(eventLogPathFor("/tmp/x", new Date("2026-08-19T00:00:00Z")))
+        .toBe(join("/tmp/x", "events", "2026-W34.jsonl"));
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_EVENT_LOG_ROTATION;
+      else process.env.CATALYST_EVENT_LOG_ROTATION = prev;
+    }
   });
 
   it("the test preload pins CATALYST_DIR away from the host catalyst dir", () => {

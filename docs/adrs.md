@@ -46,7 +46,7 @@ back to `~/wt/<repo>`. No hardcoded paths.
 ## ADR-006: Global Orchestrator State
 
 Single `~/catalyst/state.json` global registry of active orchestrators + append-only event log
-`~/catalyst/events/YYYY-MM.jsonl` (rotated monthly) + completed snapshots in
+`~/catalyst/events/<period>.jsonl` (rotated monthly) + completed snapshots in
 `~/catalyst/history/<id>--<startedAt>.json`. Layout also includes `~/catalyst/catalyst.db` (SQLite,
 WAL) and `~/catalyst/wt/`.
 
@@ -129,7 +129,7 @@ feature flag); worst case = 10-min poll fallback.
   `setup-webhooks.sh` is the idempotent helper.
 - Startup replay: 1-hr delivery window from `gh api repos/{repo}/hooks/{id}/deliveries` replayed
   through the live handler (synthetic signing) to reconcile downtime.
-- Every accepted event fans out to `~/catalyst/events/YYYY-MM.jsonl` with topic
+- Every accepted event fans out to `~/catalyst/events/<period>.jsonl` with topic
   `<source>.<noun>.<verb>` (e.g. `github.pr.merged`) — seeded the unified event bus that CTL-210
   (Linear webhooks + `catalyst-events` CLI, shipped) and CTL-211 (worker DoD = deploy success,
   shipped) build on. Steady state: well under the 5k/hr ceilings.

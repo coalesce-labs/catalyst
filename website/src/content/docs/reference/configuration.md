@@ -526,7 +526,7 @@ permanently shadowed. Generate a personal key at Linear → Settings → API →
 
 ## Event forwarders (`catalyst.observability.forwarders`)
 
-The `catalyst-otel-forward` daemon tails the canonical event log (`~/catalyst/events/YYYY-MM.jsonl`)
+The `catalyst-otel-forward` daemon tails the canonical event log (`~/catalyst/events/<period>.jsonl` — `YYYY-Www` by default, see "Event-log rotation")
 and fans events out to OTLP/HTTP, PostHog, and Cloudflare Analytics Engine. Config lives in the
 Layer-2 file above under `catalyst.observability.forwarders`. **All forwarders are disabled by
 default.** This section is the authoritative schema; the developer reference
@@ -740,7 +740,7 @@ packaging — one declarative field that sets sensible **defaults for levers tha
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `developer` | A daemonless client you chat on. Not in the cluster roster, boots drained, runs no execution-core daemon or broker — it reads board UI data from a worker's monitor (agent Linear reads follow the two-mode rule — see the `catalyst-dev:linearis` skill's "Reading Linear" section). On `catalyst-stack start`, the event-mirror daemon fans worker host event logs into the local copy so `catalyst-events tail`/`wait-for` see fleet events.                                                                     |
 | `worker`    | Runs the full stack and picks up work (the default; a laptop that both runs the daemon and is chatted on is a "head-full worker").                                                                                                                                                                                                                                                                                                                                                                                  |
-| `monitor`   | A dedicated reporting host (CTL-1654). Like `developer` it carries the observation substrate (broker + monitor + event-mirror) without the execution layer (no heartbeat, no dispatch, no recovery). The event-mirror daemon (`event-mirror/index.ts`, launchd-supervised) fans each worker host's event log into the local `~/catalyst/events/YYYY-MM.jsonl` via ssh-tail with per-host byte cursors, so `catalyst-events tail`/`wait-for` resolve fleet events locally. Verify with `catalyst-stack verify-node`. |
+| `monitor`   | A dedicated reporting host (CTL-1654). Like `developer` it carries the observation substrate (broker + monitor + event-mirror) without the execution layer (no heartbeat, no dispatch, no recovery). The event-mirror daemon (`event-mirror/index.ts`, launchd-supervised) fans each worker host's event log into the local `~/catalyst/events/<period>.jsonl` via ssh-tail with per-file, per-host byte cursors (it asks the remote which file it is writing rather than computing the name locally — CTL-1216), so `catalyst-events tail`/`wait-for` resolve fleet events locally. Verify with `catalyst-stack verify-node`. |
 
 The class is **machine-local**, so it lives in **Layer-2** (`~/.config/catalyst/config.json`) beside
 `catalyst.host.name` — the same repo is checked out on every machine, so the role is per-machine,
@@ -1157,6 +1157,58 @@ Observable events (LogQL
 
 - `lease.claim.would-grant.<TICKET>` — shadow hit; the lease **would** have granted (attachment still authoritative)
 - `lease.claim.would-refuse.<TICKET>` — shadow hit; the lease **would** have refused
+
+## Event-log rotation (`catalyst.events.rotation`, CTL-1216)
+
+How often the canonical event log at `~/catalyst/events/` starts a new file.
+
+| Value                | File shape        | Notes                                    |
+| -------------------- | ----------------- | ---------------------------------------- |
+| `week` **(default)** | `2026-W34.jsonl`  | ISO-8601 year + week (`%G-W%V`)          |
+| `month`              | `2026-08.jsonl`   | The pre-CTL-1216 scheme; the rollback lever |
+
+**Precedence:** `CATALYST_EVENT_LOG_ROTATION` (env) > `catalyst.events.rotation` (Layer-2, then
+Layer-1 config) > the shipped default.
+
+**Why weekly.** Measured on a live worker host at 2026-08-22T02:14Z, the monthly file was 2.41 GiB
+(3,026,635 lines) on **day 21** of the month and growing ~123 MB/day; month over month `2026-06` =
+295 MiB, `2026-07` = 971 MiB, `2026-08` = 2.41 GiB. Every whole-file read, `grep`, `jq` and
+beginning-of-file walk pays that size. Weekly bounds the working file to ~860 MB against an
+extrapolated ~3.7 GB month.
+
+Rotation bounds the FILE, not the write RATE. Byte-capped windowed readers gain nothing from it,
+which is why every windowed reader resolves its files through `resolveEventLogPathsForWindow`
+(below) rather than assuming one file covers its window.
+
+**Degradation.** An unrecognized value settles at the shipped default — a real scheme, so a typo'd
+knob can never leave a host without a rotation policy. It deliberately does **not** fall back to
+`month`: degrading to a scheme the rest of the fleet is no longer using would leave one host writing
+to a file nobody else reads. Resolution never throws.
+
+**Reading is scheme-agnostic, always.** Readers do not compute a filename and hope; they enumerate
+and parse the events directory, so a historical `YYYY-MM.jsonl` and a current `YYYY-Www.jsonl` are
+both read, and a 7-day lookback spans as many files as it needs. Nothing is renamed or migrated when
+the scheme changes — existing monthly files stay exactly where they are and stay readable.
+
+**Rollback** is one variable plus a restart:
+
+```bash
+export CATALYST_EVENT_LOG_ROTATION=month   # or catalyst.events.rotation: "month"
+catalyst-stack restart
+```
+
+It is not destructive. Because readers understand both schemes, the weekly files written in the
+interim remain readable after rolling back.
+
+**Two engines, one scheme.** `plugins/dev/scripts/lib/event-log-paths.mjs` (a zero-npm-import leaf,
+so bare-Node `catalyst doctor` can load it) and its hand-written bash mirror
+`lib/catalyst-event-log-paths.sh`, held byte-identical by the three-way parity suite
+`__tests__/event-log-paths-parity.test.sh` — each engine checked against a value computed from
+`date(1)`, never merely against the other. Same posture as the secret contract and deployment mode.
+
+**Fleet rollout order matters.** Readers understand both schemes; a host running pre-CTL-1216 code
+does not. Deploy fleet-wide *before* any host writes weekly — a host reading old code while a peer
+writes weekly is the one genuinely dark configuration.
 
 ## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
 

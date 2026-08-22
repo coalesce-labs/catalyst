@@ -25,7 +25,7 @@
 // Exit code: number of FAIL-level checks (0 = all clear).
 
 import { readFileSync, statSync, existsSync, lstatSync, realpathSync, readdirSync, openSync, readSync, closeSync } from "node:fs";
-import { resolve, dirname, isAbsolute, join } from "node:path";
+import { resolve, dirname, isAbsolute, join, basename } from "node:path";
 import { homedir } from "node:os";
 // CTL-1918: install-completeness lives in its own module. doctor.mjs is NOT
 // prettier-formatted on main (verified against a pristine checkout), so any edit here
@@ -179,6 +179,9 @@ import { listProjects } from "./registry.mjs";
 import { collectConfigDump } from "./config-dump.mjs";
 import { probePublishCapability, resolvePushRemote } from "./publish-preflight.mjs"; // CAT-60: worker write-capability gate
 import { resolvePublishPreflightMode } from "./config.mjs";
+// CTL-1216: the event-log window resolver for the sdk-bg-fallback scan. Lives in
+// its own module rather than inline HERE — see doctor-event-log-window.mjs.
+import { eventLogPathsForWindow } from "./doctor-event-log-window.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -2308,14 +2311,6 @@ function procIsDaemon(psText, pidFilePath) {
   return /(?:^|\s|\/)daemon\.mjs(?:\s|$)/.test(psText) && psText.includes(`--pid-file ${pidFilePath}`);
 }
 
-// monthlyLogPath — the `.../events/YYYY-MM.jsonl` sibling for a given Date's UTC
-// month. Used to also scan the PREVIOUS month's log when the 24h recent-window
-// cutoff crosses a UTC month boundary (Codex P2: a fallback written just before the
-// boundary is still inside 24h but lives in last month's file).
-function monthlyLogPath(eventsDir, date) {
-  const ym = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
-  return resolve(eventsDir, `${ym}.jsonl`);
-}
 
 // scanRecentBgFallback — CTL-1396 item A (3): the daemon-boot auth gate
 // (resolveSdkBootExecutor) emits `execution-core.executor.bg-fallback` to the
@@ -2616,11 +2611,9 @@ export function checkSdkDaemonEnv(deps = {}) {
   }
 
   // ── (2) recent silent sdk→bg degrades from the unified event log (AUTHORITATIVE) ──
-  // Scan the current month AND the previous month when the 24h cutoff crosses a UTC
-  // month boundary, so a degrade written just before the boundary is not missed.
-  const paths = [monthlyLogPath(eventsDir, new Date(now()))];
-  const prev = monthlyLogPath(eventsDir, new Date(now() - recentWindowMs));
-  if (prev !== paths[0]) paths.push(prev);
+  // Scan EVERY log file the 24h window touches, so a degrade written just before
+  // a rotation boundary is not missed. See eventLogPathsForWindow above.
+  const paths = eventLogPathsForWindow(eventsDir, now(), recentWindowMs);
   // CTL-1529: resolve the scan seam. Explicit scanEventLog > legacy string seam
   // (tests) > the bounded time-covering tail (production).
   //

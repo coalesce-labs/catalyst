@@ -13,6 +13,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EventRing } from "./event-ring";
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 export interface SubStepEvent {
   ts: string;
@@ -84,8 +85,8 @@ export function readSubStepEventsFromFile(
   eventsDir: string,
   ticket: string,
 ): SubStepEvent[] {
-  const month = new Date().toISOString().slice(0, 7);
-  const logPath = join(eventsDir, `${month}.jsonl`);
+  // CTL-1216: resolved, not derived. `eventsDir` stays the injected root.
+  const logPath = join(eventsDir, eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })));
   const escapedTicket = escapeRegex(ticket);
   const pattern = new RegExp(
     `^workflow\\.substep\\.(started|complete|failed)\\.${escapedTicket}$`,

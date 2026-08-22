@@ -13,6 +13,22 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1216: resolve the event-log basename through the SAME mirror the code under
+# test uses, instead of pinning `$(date -u +%Y-%m)`. Pinning the scheme here made
+# these fixtures write a file the (now weekly) code never opened — and pinning
+# the NEW scheme would only move the coupling one flip further out.
+#
+# It fails LOUD on a bad path rather than falling back to the monthly name: a
+# silent fallback here reproduces the old behaviour while looking like it
+# resolved, which is precisely how a wrong path in this shim went unnoticed once
+# already.
+_ctl1216_active_log_basename() {
+  local _lib="${SCRIPT_DIR}/../lib/catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  ( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )
+}
+
 SCRIPTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LIB="${SCRIPTS_DIR}/lib/canonical-event.sh"
 
@@ -167,7 +183,7 @@ mkdir -p "$REAP_DIR"
   . "${SCRIPTS_DIR}/lib/emit-reap-intent.sh"
   emit_reap_intent phase.yield.reap-requested --ticket CTL-1795 --phase implement --bg-job-id abc12345
 )
-REAP_FILE="${REAP_DIR}/$(date -u +%Y-%m).jsonl"
+REAP_FILE="${REAP_DIR}/$(_ctl1216_active_log_basename)"
 if [[ ! -f "$REAP_FILE" ]]; then
   fail "emit_reap_intent wrote an event" "no file at $REAP_FILE"
 else
@@ -192,7 +208,7 @@ else
   SESS_HOME="$TMP/sess"
   mkdir -p "$SESS_HOME"
   SID="$(CATALYST_DIR="$SESS_HOME" "$SESSION_SH" start --skill phase-implement --ticket CTL-1795 2>/dev/null | tail -n 1)"
-  SESS_FILE="${SESS_HOME}/events/$(date -u +%Y-%m).jsonl"
+  SESS_FILE="${SESS_HOME}/events/$(_ctl1216_active_log_basename)"
   if [[ -z "$SID" || ! -f "$SESS_FILE" ]]; then
     fail "catalyst-session.sh start emitted events" "sid='$SID' file='$SESS_FILE'"
   else

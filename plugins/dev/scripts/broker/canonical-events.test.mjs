@@ -7,6 +7,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 let tmpDir;
 let originalCatalystDir;
@@ -32,8 +33,10 @@ afterEach(() => {
 
 function eventLogPath() {
   const now = new Date();
-  const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  return join(tmpDir, "events", `${ym}.jsonl`);
+  // CTL-1216: resolve through the SAME leaf production uses, so a scheme change
+  // moves this fixture and the code under test together. A pinned monthly name
+  // here writes a file the broker no longer opens.
+  return join(tmpDir, "events", eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })));
 }
 
 function readEvents() {

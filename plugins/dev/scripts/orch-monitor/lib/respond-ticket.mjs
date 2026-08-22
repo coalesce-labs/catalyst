@@ -53,6 +53,9 @@ import { dirname, join } from "node:path";
 import { readClusterHostCount, runFenceCheck } from "./stop-worker.mjs";
 import { PHASE_ORDER } from "./board-data.mjs";
 import { nodeClass } from "./canonical-event-shared.ts";
+// CTL-1216: THE event-log path resolver. Aliased because this module exports
+// its own `eventLogPath` wrapper over it.
+import { getEventLogPath as leafGetEventLogPath } from "../../lib/event-log-paths.mjs";
 
 // The execution-core worker tree root — ~/catalyst/execution-core/workers/<T>/.
 // Byte-identical to ticket-runs.mjs::DEFAULT_WORKERS_DIR and board-data.mjs's
@@ -71,15 +74,14 @@ const NEEDS_HUMAN_LABEL = "needs-human";
 export { readClusterHostCount, runFenceCheck };
 
 // ── the unified-event-log resume trigger ─────────────────────────────────────
-// getEventLogPath — the canonical monthly event log path. UTC month to match the
-// orch-monitor event-writer (event-writer.ts uses getUTCFullYear/getUTCMonth) and
-// the execution-core tailer (config.mjs::getEventLogPath), so the event we append
-// lands on the SAME file the daemon's monitor follows. CATALYST_DIR override is
-// honored (tests + non-default roots) exactly like config.mjs::catalystDir.
+// eventLogPath — the canonical event log path. CTL-1216: delegated to
+// lib/event-log-paths.mjs, which is what now MAKES the property this comment
+// asserts ("the event we append lands on the SAME file the daemon's monitor
+// follows") true, rather than restating a coincidence between four hand-kept
+// copies of the same arithmetic. Signature preserved for the existing callers;
+// the CATALYST_DIR override still works, and CATALYST_EVENTS_DIR now does too.
 export function eventLogPath({ env = process.env, now = new Date() } = {}) {
-  const root = env.CATALYST_DIR ? env.CATALYST_DIR : join(HOME, "catalyst");
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return join(root, "events", `${ym}.jsonl`);
+  return leafGetEventLogPath({ env, now });
 }
 
 // buildResumeEvent — a canonical `linear.comment.created` event carrying the

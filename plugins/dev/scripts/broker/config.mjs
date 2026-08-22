@@ -12,6 +12,12 @@ import { homedir } from "node:os";
 import { dirname, resolve, sep } from "node:path";
 import pino from "pino";
 import { resolveApiKey, deriveGroqEndpoint } from "../lib/api-key-health.mjs";
+// CTL-1216: THE event-log path resolver. `getEventLogPath` is aliased on import
+// because this module re-exports its own function under that name.
+import {
+  getEventLogPath as leafGetEventLogPath,
+  getPrevEventLogPath,
+} from "../lib/event-log-paths.mjs";
 
 // --- Logger ---
 export const log = pino({
@@ -237,30 +243,33 @@ export const BROKER_DEGRADED_SUSTAINED_TICKS = parseIntKnob(
   process.env.FILTER_BROKER_DEGRADED_SUSTAINED_TICKS, 5, { min: 1 });
 
 // --- Event log ---
+// CTL-1216: delegated to lib/event-log-paths.mjs. The CTL-1086 property this
+// used to assert in a comment — "parity with execution-core/config.mjs so fleet
+// hosts never disagree at the midnight-UTC boundary" — was maintained by hand
+// across four copies of the same six lines. It is now structural. The leaf
+// re-reads the env per call, so the "tests can redirect by setting the env var"
+// property is preserved.
 export function getEventLogPath() {
-  const now = new Date();
-  // CTL-1086: use UTC month (parity with execution-core/config.mjs) so
-  // fleet hosts never disagree at the midnight-UTC month boundary.
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  // Re-read CATALYST_DIR per call so tests can redirect by setting the env
-  // var. Production deployments still pin a stable value via daemon launch.
-  const home = process.env.HOME ?? homedir();
-  const catalystDir = process.env.CATALYST_DIR ?? `${home}/catalyst`;
-  return resolve(catalystDir, "events", `${ym}.jsonl`);
+  return leafGetEventLogPath({ env: process.env });
 }
 
-// CTL-1122: the immediately-prior UTC-month event-log path (same UTC math as
-// getEventLogPath, year rolled at January). The ingestion-recency seed falls
-// back to this when the current-month file holds no monitor heartbeat — so a
-// broker that (re)starts just after a month rollover, while the monitor is
-// already dead, still finds the last beat (which lives in the prior file).
-export function getPrevMonthEventLogPath() {
-  const now = new Date();
-  const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-  const ym = `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, "0")}`;
-  const home = process.env.HOME ?? homedir();
-  const catalystDir = process.env.CATALYST_DIR ?? `${home}/catalyst`;
-  return resolve(catalystDir, "events", `${ym}.jsonl`);
+// CTL-1122: the event-log file immediately BEFORE the current one. The
+// ingestion-recency seed falls back to it when the current file holds no
+// monitor heartbeat — so a broker that (re)starts just after a rollover, while
+// the monitor is already dead, still finds the last beat (which lives in the
+// prior file).
+//
+// CTL-1216 generalized it: "the previous UTC month" was arithmetic on a
+// filename, which answers wrong the moment the scheme is anything but monthly
+// (and answers wrong ACROSS a scheme change even under monthly, where the
+// previous FILE may be a weekly one). getPrevEventLogPath instead returns the
+// newest file that actually EXISTS and is older than the current one.
+//
+// CTL-1216 phase 4: the `getPrevMonthEventLogPath` alias that carried
+// router.mjs across the reader-migration phases is gone — that name promised
+// month arithmetic this no longer does.
+export function getPrevEventLogPathForBroker() {
+  return getPrevEventLogPath({ env: process.env });
 }
 
 // CTL-1086: sentinel guard — drop synthetic test events aimed at the default

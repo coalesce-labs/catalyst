@@ -710,8 +710,7 @@ describe("watchdog skips legitimately waiting sessions (CTL-403)", () => {
       reason: "test",
     });
 
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    const logPath = join(tmpDir, "events", activeLogBasename());
 
     runWatchdogTick();
 
@@ -771,8 +770,7 @@ describe("watchdog skips legitimately waiting sessions (CTL-403)", () => {
 
 describe("watchdog uses claude-agents liveness over heartbeat-ts (CTL-672)", () => {
   function wakeCount(notifyEvent) {
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    const logPath = join(tmpDir, "events", activeLogBasename());
     if (!existsSync(logPath)) return 0;
     return readFileSync(logPath, "utf8")
       .trim()
@@ -1107,6 +1105,16 @@ describe("watchdog treats orchestrator.status as liveness (CTL-405)", () => {
 
 import { loadExistingRegistrations, isOrchestratorStatusFresh } from "./index.mjs";
 
+// CTL-1216: fixture paths resolve through the SAME leaf production uses, so a
+// change of rotation scheme moves the test fixture and the code under test
+// together. Hard-coding `toISOString().slice(0, 7)` here made 26 of these tests
+// write a monthly file the (now weekly) broker never opened — they failed loudly,
+// but the same shape passing vacuously is the real hazard.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
+const activeLogBasename = () =>
+  eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env }));
+
+
 describe("loadExistingRegistrations replays orchestrator.status (CTL-507)", () => {
   let tmpDir;
   beforeEach(() => {
@@ -1276,8 +1284,7 @@ describe("processEvent dispatches agent identity events", () => {
 
 describe("filter.wake deduplication (CTL-406)", () => {
   function wakeLinesFromLog() {
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    const logPath = join(tmpDir, "events", activeLogBasename());
     if (!existsSync(logPath)) return [];
     return readFileSync(logPath, "utf8")
       .trim()
@@ -1830,8 +1837,7 @@ describe("backward compat: pr_lifecycle routing unchanged in broker", () => {
 
 describe("CTL-407: suppress redundant wakes when downstream state unchanged", () => {
   function countWakesInLog(notifyEvent) {
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    const logPath = join(tmpDir, "events", activeLogBasename());
     if (!existsSync(logPath)) return 0;
     const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
     return lines.filter((l) => {
@@ -2820,7 +2826,7 @@ describe("CTL-352 broker state + degraded event", () => {
         }
       });
   };
-  const logPathNow = () => join(tmpDir, "events", `${new Date().toISOString().slice(0, 7)}.jsonl`);
+  const logPathNow = () => join(tmpDir, "events", activeLogBasename());
 
   // CTL-1523: the detector is OPT-IN and dormant by default (an empty interest table
   // carries no information under execution-core dispatch, which registers no
@@ -3465,8 +3471,7 @@ describe("CTL-357 broker.daemon.prose_disabled startup event", () => {
     maybeEmitProseDisabled();
     maybeEmitProseDisabled(); // idempotent — should not double-emit
 
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    const logPath = join(tmpDir, "events", activeLogBasename());
     expect(existsSync(logPath)).toBe(true);
     const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
     const proseDisabledLines = lines.filter((l) => {
@@ -3502,8 +3507,7 @@ describe("CTL-357 broker.daemon.prose_disabled startup event", () => {
     });
     maybeEmitProseDisabled();
 
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    const logPath = join(tmpDir, "events", activeLogBasename());
     if (!existsSync(logPath)) return;
     const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
     const proseDisabledLines = lines.filter((l) => {
@@ -3532,8 +3536,7 @@ describe("CTL-357 broker.daemon.prose_disabled startup event", () => {
     });
     maybeEmitProseDisabled();
 
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    const logPath = join(tmpDir, "events", activeLogBasename());
     if (!existsSync(logPath)) {
       delete process.env.CATALYST_BROKER_PROSE_ENABLED;
       return;
@@ -3810,8 +3813,7 @@ describe("CTL-370: allowlist parity with broker routing tables", () => {
 describe("CTL-419 watchdog batching", () => {
   // Helper: reads all parsed events from the monthly event log with a given event name.
   function readWakeEvents(eventName) {
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    const logPath = join(tmpDir, "events", activeLogBasename());
     if (!existsSync(logPath)) return [];
     return readFileSync(logPath, "utf8")
       .trim()
@@ -4259,8 +4261,7 @@ describe("CTL-381 base_branches preserved on auto-registration", () => {
 
 describe("CTL-381 end-to-end: check-in → canonical webhook → filter.wake", () => {
   function countWakesInLog(notifyEvent) {
-    const ym = new Date().toISOString().slice(0, 7);
-    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    const logPath = join(tmpDir, "events", activeLogBasename());
     if (!existsSync(logPath)) return 0;
     const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
     return lines.filter((l) => {

@@ -12,6 +12,9 @@ import { join } from "node:path";
 
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs";
 import { appendDelegateEvent } from "./delegate-event.mjs";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme rather than pinning the monthly one.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 let orchDir;
 let catalystDir;
@@ -57,7 +60,7 @@ describe("CTL-1774 Phase 4 — end-to-end integration", () => {
     const logPath = join(
       catalystDir,
       "events",
-      `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`
+      eventLogBasenameFor(now, resolveRotationScheme({ env: process.env }))
     );
     const raw = readFileSync(logPath, "utf8").trim().split("\n");
     expect(raw).toHaveLength(1);
@@ -98,7 +101,7 @@ describe("CTL-1774 Phase 4 — end-to-end integration", () => {
     const logPath = join(
       catalystDir,
       "events",
-      `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`
+      eventLogBasenameFor(now, resolveRotationScheme({ env: process.env }))
     );
     let fileExists = false;
     try {

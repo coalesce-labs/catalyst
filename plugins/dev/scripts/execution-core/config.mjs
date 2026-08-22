@@ -25,6 +25,10 @@ import { schemaCompat } from "./config-schema.mjs";
 // consulted by getLayer2ConfigPath's dual-read shadow-diff below (design §8 PR6).
 import { resolveCloudTokenName, resolveLayer2Path } from "../lib/secret-contract.mjs";
 
+// CTL-1216: THE event-log path resolver. Aliased on import because this module
+// re-exports its own `getEventLogPath` (the name ~308 call sites already use).
+import { getEventLogPath as leafGetEventLogPath } from "../lib/event-log-paths.mjs";
+
 // --- Logger (CTL-578) ---
 // Pino is the daemon's runtime logger. A worktree checkout that hasn't run
 // `bun install` cannot resolve it — and any module graph that includes
@@ -433,13 +437,18 @@ export function getJobsRoot() {
   return process.env.CATALYST_HEALTHCHECK_JOBS_ROOT ?? resolve(homedir(), ".claude", "jobs");
 }
 
-// The unified monthly event log. UTC month to match the writer —
-// orch-monitor/lib/event-writer.ts uses getUTCFullYear/getUTCMonth, so the
-// tailer must resolve the same path or it would follow the wrong file.
+// The unified event log. CTL-1216: the rotation scheme is no longer computed
+// here — it is RESOLVED, by lib/event-log-paths.mjs, which every writer and
+// every reader now shares. This function used to be one of FOUR byte-identical
+// copies (broker/config.mjs, catalyst-agent/config.mjs,
+// orch-monitor/lib/respond-ticket.mjs), and the property this comment used to
+// assert ("the tailer must resolve the same path or it would follow the wrong
+// file") held only because all four happened to compute the same string.
+// Delegating is what makes it true by construction.
+//
+// The export name is deliberately unchanged: ~308 call sites route through it.
 export function getEventLogPath() {
-  const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return resolve(catalystDir(), "events", `${ym}.jsonl`);
+  return leafGetEventLogPath({ env: process.env });
 }
 
 // --- Host identity + cluster roster (CTL-859) ---

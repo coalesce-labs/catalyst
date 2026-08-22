@@ -43,9 +43,16 @@ expect_not_empty() {
 # Apply migrations
 "$DB_SCRIPT" init >/dev/null 2>&1 || { echo "FATAL: db init failed"; exit 1; }
 
-# Helper: find the active events JSONL file for this UTC month
+# Helper: find the ACTIVE events JSONL file.
+#
+# CTL-1216: resolved through the same mirror the writer uses, not pinned to the
+# month. Fails LOUD on an unreadable mirror rather than falling back to the
+# monthly name — a silent fallback reproduces the old behaviour while looking
+# like it resolved.
 events_file() {
-  printf '%s/%s.jsonl' "$EVENTS_DIR" "$(date -u +%Y-%m)"
+  local _lib="${SCRIPT_DIR}/../lib/catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  printf '%s/%s' "$EVENTS_DIR" "$( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )"
 }
 
 # ─── 1. --claude-session-id flag persists to SQLite ─────────────────────────

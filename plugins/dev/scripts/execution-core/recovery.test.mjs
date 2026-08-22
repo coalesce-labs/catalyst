@@ -444,7 +444,7 @@ describe("recoverStartup", () => {
   // Append a line to the current UTC month's event log.
   function eventLogPath() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     return join(catalystDir, "events", `${ym}.jsonl`);
   }
   function appendEvent(line) {
@@ -3390,7 +3390,7 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
   // Read back the single envelope written this test (current UTC month log).
   function readBackEnvelope() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
       .split("\n")
       .filter(Boolean);
@@ -3681,7 +3681,7 @@ describe("defaultAppendOperatorEvent (CTL-1044)", () => {
 
   function readBackEnvelope() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
       .split("\n")
       .filter(Boolean);
@@ -3776,7 +3776,7 @@ describe("boot-resume phase-regression event envelope (CTL-1006)", () => {
 
   function readBackEnvelope() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
       .split("\n")
       .filter(Boolean);
@@ -3837,7 +3837,7 @@ describe("reclaim event envelope round-trip (CTL-664)", () => {
 
   function readBackEnvelope() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
       .split("\n")
       .filter(Boolean);
@@ -3894,7 +3894,7 @@ describe("yield-file-skip event envelope (CTL-702)", () => {
 
   function readBackEnvelope() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
       .split("\n")
       .filter(Boolean);
@@ -4806,7 +4806,7 @@ describe("preemption event envelopes (CTL-705)", () => {
 
   function readBackEnvelope() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
       .split("\n")
       .filter(Boolean);
@@ -4877,7 +4877,7 @@ describe("parallelism event envelopes (CTL-684)", () => {
 
   function readBackEnvelope() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
       .split("\n")
       .filter(Boolean);
@@ -6406,6 +6406,10 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
 // CTL-1065: escalateOnce carries a valid structured explanation
 // ──────────────────────────────────────────────────────────────────────────
 import { validateExplanation } from "./escalation-explanation.mjs";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 describe("CTL-1065: reclaimDeadWorkIfPossible escalated event carries explanation", () => {
   const orch = mkdtempSync(join(tmpdir(), "ctl1065-reclaim-"));
@@ -6723,7 +6727,7 @@ describe("defaultAppendPhaseAdvanceAppliedEvent — CTL-1789 envelope shape", ()
 
   function readOnly() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const lines = readFileSync(join(dir, "events", `${ym}.jsonl`), "utf8")
       .trim()
       .split("\n");

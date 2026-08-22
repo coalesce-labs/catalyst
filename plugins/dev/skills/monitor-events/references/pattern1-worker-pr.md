@@ -36,7 +36,7 @@ else
   STALLED=false
   FILTER_MISMATCH=false
 
-  _LOG_FILE=~/catalyst/events/$(date -u +%Y-%m).jsonl
+  _LOG_FILE=$(ls -t ~/catalyst/events/*.jsonl | head -1)
   _LOG_LINES=$(wc -l < "$_LOG_FILE" 2>/dev/null | tr -d ' ')
   _SINCE_LINE=$(( ${_LOG_LINES:-0} > 500 ? ${_LOG_LINES:-0} - 500 : 0 ))
   HEARTBEATS=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null \

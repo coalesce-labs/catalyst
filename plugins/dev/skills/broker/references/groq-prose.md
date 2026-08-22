@@ -30,7 +30,7 @@ jq -nc \
       prompt: "Wake me when any of my workers has a CI failure or gets changes-requested",
       context: {pr_numbers: [501, 502], tickets: ["CTL-275", "CTL-276"]},
       persistent: true
-    }}' >> ~/catalyst/events/$(date -u +%Y-%m).jsonl
+    }}' >> $(ls -t ~/catalyst/events/*.jsonl | head -1)
 ```
 
 Requires `GROQ_API_KEY` or `groq.apiKey` in `~/.config/catalyst/config.json`.

@@ -882,6 +882,56 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/replica-path-parity.test.sh
 
+      - name: event-log-paths resolver unit tests (bun, CTL-1216)
+        # lib/event-log-paths.mjs is THE canonical event-log path resolver. Before it
+        # the rotation scheme was re-derived at 32 production sites including FOUR
+        # byte-identical getEventLogPath() copies, so writer and readers agreed only
+        # by each computing the same string.
+        #
+        # Own step, not the "Run stable unit tests" allowlist below, for the same
+        # reason the deployment-mode / catalyst-runtime-root / event-name /
+        # replica-path steps above carry: that step's working-directory is
+        # execution-core/ and this is a deliberately ZERO-IMPORT leaf outside it.
+        #
+        # ⛔ Registered in the SAME change that adds the suite — CI runs an EXPLICIT
+        # list and an unlisted suite ships inert (the trap the event-name, replica-path,
+        # join-bundle and linear-write-path steps above each document after finding it
+        # the hard way; its own comment calls the lesson "four-times-burned"). Verified
+        # with the instrument note on the event-name step (a `run:`-anchored grep is
+        # invalid for the multi-line allowlist block):
+        # `/usr/bin/grep -rn event-log-paths .github/workflows/` returned NOTHING before
+        # this step, against a positive control of `deployment-mode-parity`, which
+        # returns its `run:` lines.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test event-log-paths.test.mjs
+
+      - name: canonical-event rotation writer test (CTL-1216)
+        # The WRITER half. Phases 1-3 moved every reader onto the shared
+        # resolver while the writer still computed its own name, so the property
+        # that actually matters is writer/reader AGREEMENT under either scheme —
+        # a test that only checked the filename would pass with the reader
+        # looking somewhere else entirely.
+        #
+        # Also pins that CTL-1813's legacy quarantine still fires on the week
+        # file, that an unparseable first line still REFUSES to rotate, and that
+        # no raw `>>` append slipped past CTL-1809's one-write(2) primitive.
+        # ⛔ Registered in the same change that adds the suite.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/canonical-event-rotation.test.sh
+
+      - name: event-log-paths cross-stack parity test (CTL-1216)
+        # THREE-WAY, never two-way: for every fixture BOTH engines are checked against
+        # a COMPUTED-EXPECTED value from `date -u +%G-W%V` / `+%Y-%m`, because two
+        # implementations can agree with each other while both disagree with the spec.
+        #
+        # Both engines read the SAME fixture list
+        # (__tests__/fixtures/event-log-week-oracle.txt) — a divergent fixture set is
+        # how a parity suite passes while the engines disagree on an untested date.
+        # The suite fails closed if fewer than 40 assertions ran, so a loop that never
+        # executes cannot print a clean pass ([].every(p) is true).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/event-log-paths-parity.test.sh
+
       - name: deployment-mode cross-stack parity test (CTL-1617)
         # The fixture-matrix parity test asserting bash == node == the
         # design-spec-computed expected value at every cell (168 fixture

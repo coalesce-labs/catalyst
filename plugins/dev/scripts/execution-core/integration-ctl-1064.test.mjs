@@ -17,6 +17,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedulerTick, __resetForTests } from "./scheduler.mjs";
 import { openBeliefsDb } from "./beliefs/schema.mjs";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme rather than pinning the monthly one.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 let orchDir;
 beforeEach(() => {
@@ -393,7 +396,7 @@ describe("CTL-1064 remediation — real default emit seam (HIGH silent-failure)"
     const result = schedulerTick(orchDir, makeTickOpts({ mode: "shadow", candidates, omitEmit: true }));
 
     expect(result.unstuckWouldAct).toHaveLength(1);
-    const ym = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const logPath = join(orchDir, "events", `${ym}.jsonl`);
     expect(existsSync(logPath)).toBe(true);
     const lines = readFileSync(logPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));

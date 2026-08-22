@@ -6,7 +6,7 @@ events in parallel to OTLP/HTTP, PostHog, and Cloudflare Analytics Engine.
 ## Architecture
 
 ```
-~/catalyst/events/YYYY-MM.jsonl
+~/catalyst/events/<period>.jsonl
          │
          ▼ (byte-offset tail, 200ms poll)
   catalyst-otel-forward
@@ -224,10 +224,10 @@ curl -s http://localhost:4318/v1/logs \
   -d '{"resourceLogs":[]}' | jq .
 
 # Count events in current log
-wc -l ~/catalyst/events/$(date +%Y-%m).jsonl
+wc -l $(ls -t ~/catalyst/events/*.jsonl | head -1)
 
 # Count canonical vs legacy
-grep -c '"attributes"' ~/catalyst/events/$(date +%Y-%m).jsonl || true
+grep -c '"attributes"' $(ls -t ~/catalyst/events/*.jsonl | head -1) || true
 ```
 
 ## Validation Queries

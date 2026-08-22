@@ -18,6 +18,16 @@
 set -uo pipefail
 
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
+
+# CTL-1216: the shared event-log path mirror, so this gatherer reads the file the
+# writers are actually appending to under either rotation scheme. Sourced
+# explicitly — this script pulls in no other catalyst lib.
+_GG_LIBDIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+if [ -r "${_GG_LIBDIR}/catalyst-event-log-paths.sh" ]; then
+  # shellcheck source=lib/catalyst-event-log-paths.sh
+  . "${_GG_LIBDIR}/catalyst-event-log-paths.sh" 2>/dev/null || true
+fi
+unset _GG_LIBDIR
 CLAUDE_PROJECTS_DIR="${HOME}/.claude/projects"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EPOCH_NOW=$(date +%s)
@@ -196,7 +206,14 @@ fi
 # ── 6. Recent events (last 30 min) ───────────────────────────────────────────
 
 EVENTS_JSON="[]"
-EVENTS_FILE="${CATALYST_DIR}/events/$(date +%Y-%m).jsonl"
+# CTL-1216: resolved through the mirror; LOUD fallback (a silent one would read a
+# file nothing writes the day the scheme flips, and report zero recent events).
+if declare -f catalyst_event_log_basename >/dev/null 2>&1; then
+  EVENTS_FILE="${CATALYST_DIR}/events/$(catalyst_event_log_basename)"
+else
+  printf '[catalyst] WARNING: event-log path mirror unavailable — god-gather is falling back to the monthly filename\n' >&2
+  EVENTS_FILE="${CATALYST_DIR}/events/$(date +%Y-%m).jsonl"
+fi
 CUTOFF=$(minutes_ago_iso 30)
 
 if [ -f "$EVENTS_FILE" ] && [ -n "$CUTOFF" ]; then

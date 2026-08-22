@@ -9,7 +9,7 @@
 import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync } from "node:fs";
 // CTL-1529: bounded boot replay. tailParsedEvents returns the last N parsed events
 // in file order from a small window near EOF.
-import { tailParsedEvents, noteTornLine } from "../execution-core/event-tail.mjs";
+import { tailParsedEvents, noteTornLine, drainAndSwitch } from "../execution-core/event-tail.mjs";
 import { checkEnvelope } from "../lib/event-envelope.mjs";
 import { resolve, basename } from "node:path";
 import { getEventLogPath, log, CATALYST_DIR, LOOKBACK_LINES } from "./config.mjs";
@@ -82,6 +82,88 @@ export function getLastByteOffset() {
   return lastByteOffset;
 }
 
+// routeRawLine — the per-line pipeline: torn-line accounting, the CTL-1819
+// envelope check, the CTL-1929 github-feed gate, and processEvent with its
+// CTL-1330 slow-route timing.
+//
+// CTL-1216 extracted this from the steady-state loop so the ROLLOVER DRAIN
+// routes lines through EXACTLY the same path. A second hand-written copy for
+// the drain is how one of the two paths silently stops counting torn lines, or
+// stops honouring the feed gate, with nothing to say so — and the drain is the
+// rare path, so it is precisely the copy that would rot unnoticed.
+function routeRawLine(line) {
+  if (!line.trim()) return;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      // CTL-1809: the broker's LIVE tail is the load-bearing reader of this log — it
+      // routes every filter.wake, every phase-lifecycle terminal, and the ingestion-recency
+      // and worker-state projections — and this drop was completely silent. Its BOOT replay
+      // (tailParsedEvents above) has been counted since CTL-1809; without this the covered
+      // half was the one that runs once per process and the uncounted half was the one that
+      // runs for the process's whole life.
+      //
+      // `line` is a COMPLETE line: leftoverBuf popped the trailing partial off `lines`
+      // before this loop, so an unparseable line here is real damage and not a read that
+      // raced a writer mid-append. Shares event-tail.mjs's process counter deliberately —
+      // one detector per process per log (see noteTornLine).
+      //
+      // COUNT AND ADVANCE. lastByteOffset was already moved to stat.size above, and that is
+      // correct: a torn line is permanently corrupt, so re-reading it would wedge the
+      // broker on damage that never resolves. The counter is a LOWER BOUND — a splice that
+      // happens to parse is invisible here, which is why the write side is the fix.
+      noteTornLine(line);
+      return;
+    }
+    // CTL-1819: envelope check on the LIVE path, for exactly the reason the torn
+    // counter above is here — this loop is the load-bearing reader, and covering
+    // only the boot replay (tailParsedEvents) would instrument the half that runs
+    // once per process while leaving the half that runs for the process's whole
+    // life blind. Same process counter, same non-gating contract: the event is
+    // ROUTED regardless, so this can never change what the broker delivers.
+    checkEnvelope(event);
+    // CTL-1929: WHICH producer's `github.*` events may drive routing. Both the
+    // smee→webhook receiver and the GitHub feed write the same names into this one
+    // log; the gate picks one per event and the loser is CAPTURED, not dropped, so
+    // "did the feed miss this edge?" stays answerable after the fact.
+    //
+    // ⛔ SUPPRESSION IS PER NAME, AND HOW MANY NAMES IS A PROPERTY OF THIS HOST.
+    // `github.pr.merged` joined the suppressible set when CTC-691 shipped (0.1.17);
+    // `github.push` and `github.check_suite.completed` join it only on a replica
+    // that has `push_events` (CTC-704) and `check_suites.pull_request_numbers`
+    // (CTC-712, 0.1.18) respectively. The gate resolves both from the replica and
+    // re-reads them on a TTL, because they arrive at a cloud-sync writer restart
+    // this process never observes. A host missing either keeps smee authoritative
+    // for that name no matter how healthy the producer is. See github-feed-gate.mjs
+    // and github-feed-gate-install.mjs.
+    //
+    // ⚠️ Placed BEFORE processEvent and before the timing block, so a suppressed
+    // event is neither routed nor counted as a route — a suppressed event that
+    // still showed up in the slow-route histogram would make the two instruments
+    // disagree about what the broker did.
+    if (_githubGate) {
+      const verdict = decideGithubDispatch(event, _githubGate);
+      if (verdict.suppress) {
+        _githubGate.capture?.append(event, verdict);
+        return;
+      }
+    }
+    // CTL-1330 Tier 1: time each route; surface ONLY slow routes (default
+    // >100ms) so we catch a broker-side hot-loop stall without flooding Loki —
+    // the broker routes every appended event. ON by default (CATALYST_TICK_TIMING).
+    if (BROKER_ROUTE_TIMING) {
+      const t0 = performance.now();
+      processEvent(event);
+      const total_ms = Math.round((performance.now() - t0) * 10) / 10;
+      if (total_ms >= BROKER_SLOW_ROUTE_MS) {
+        log.warn({ event_name: getEventName(event), total_ms }, "broker: slow route (CTL-1330)");
+      }
+    } else {
+      processEvent(event);
+    }
+}
+
 // CTL-1809: exported as a test seam, in the shape seedTailer already established. The live
 // path is driven by an fs.watch callback, so without this the only way to exercise it is to
 // start a real watcher and race a timer — which is how a flaky test that proves nothing gets
@@ -90,17 +172,45 @@ export function readNewEvents() {
   const logPath = getEventLogPath();
 
   if (logPath !== lastLogPath) {
+    // CTL-1216: DRAIN the old file before switching, then seed the new one at
+    // byte 0 — not at its current size.
+    //
+    // This block used to do neither, and dropped events twice over: the old
+    // file's unread tail (everything appended between the last poll and the
+    // boundary) was never read by anyone, and seeding at `stat.size` also
+    // skipped the new file's HEAD. The broker routes every filter.wake and every
+    // phase-lifecycle terminal through here, so those are dropped WAKES, not
+    // dropped metrics. Monthly rotation gave 12 such windows a year; weekly
+    // gives 52, which is what makes this a prerequisite rather than a cleanup.
+    const prevPath = lastLogPath;
+    const prevOffset = lastByteOffset;
+    const prevLeftover = leftoverBuf;
+
     lastLogPath = logPath;
     leftoverBuf = "";
-    try {
-      const fd = openSync(logPath, "r");
-      const stat = fstatSync(fd);
-      lastByteOffset = stat.size;
-      closeSync(fd);
-    } catch {
-      lastByteOffset = 0;
+    lastByteOffset = 0;
+
+    if (prevPath) {
+      const res = drainAndSwitch({
+        oldPath: prevPath,
+        oldOffset: prevOffset,
+        leftover: prevLeftover,
+        onLines: (drained) => {
+          for (const l of drained) routeRawLine(l);
+        },
+      });
+      if (res.truncated) {
+        // Say it. A drain that reads less without reporting the shortfall is
+        // indistinguishable from a file that had nothing left to give.
+        log.warn(
+          { path: prevPath, drained: res.drained },
+          "broker: rollover drain TRUNCATED — events beyond the cap were not routed (CTL-1216)",
+        );
+      }
     }
-    return;
+    // Deliberately NO `return`: fall through and read the new file from offset 0
+    // in this same pass, so its head is not left sitting until the next watch
+    // event — which may never arrive if nothing further is appended.
   }
 
   try {
@@ -121,76 +231,7 @@ export function readNewEvents() {
     leftoverBuf = lines.pop() ?? "";
 
     for (const line of lines) {
-      if (!line.trim()) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        // CTL-1809: the broker's LIVE tail is the load-bearing reader of this log — it
-        // routes every filter.wake, every phase-lifecycle terminal, and the ingestion-recency
-        // and worker-state projections — and this drop was completely silent. Its BOOT replay
-        // (tailParsedEvents above) has been counted since CTL-1809; without this the covered
-        // half was the one that runs once per process and the uncounted half was the one that
-        // runs for the process's whole life.
-        //
-        // `line` is a COMPLETE line: leftoverBuf popped the trailing partial off `lines`
-        // before this loop, so an unparseable line here is real damage and not a read that
-        // raced a writer mid-append. Shares event-tail.mjs's process counter deliberately —
-        // one detector per process per log (see noteTornLine).
-        //
-        // COUNT AND ADVANCE. lastByteOffset was already moved to stat.size above, and that is
-        // correct: a torn line is permanently corrupt, so re-reading it would wedge the
-        // broker on damage that never resolves. The counter is a LOWER BOUND — a splice that
-        // happens to parse is invisible here, which is why the write side is the fix.
-        noteTornLine(line);
-        continue;
-      }
-      // CTL-1819: envelope check on the LIVE path, for exactly the reason the torn
-      // counter above is here — this loop is the load-bearing reader, and covering
-      // only the boot replay (tailParsedEvents) would instrument the half that runs
-      // once per process while leaving the half that runs for the process's whole
-      // life blind. Same process counter, same non-gating contract: the event is
-      // ROUTED regardless, so this can never change what the broker delivers.
-      checkEnvelope(event);
-      // CTL-1929: WHICH producer's `github.*` events may drive routing. Both the
-      // smee→webhook receiver and the GitHub feed write the same names into this one
-      // log; the gate picks one per event and the loser is CAPTURED, not dropped, so
-      // "did the feed miss this edge?" stays answerable after the fact.
-      //
-      // ⛔ SUPPRESSION IS PER NAME, AND HOW MANY NAMES IS A PROPERTY OF THIS HOST.
-      // `github.pr.merged` joined the suppressible set when CTC-691 shipped (0.1.17);
-      // `github.push` and `github.check_suite.completed` join it only on a replica
-      // that has `push_events` (CTC-704) and `check_suites.pull_request_numbers`
-      // (CTC-712, 0.1.18) respectively. The gate resolves both from the replica and
-      // re-reads them on a TTL, because they arrive at a cloud-sync writer restart
-      // this process never observes. A host missing either keeps smee authoritative
-      // for that name no matter how healthy the producer is. See github-feed-gate.mjs
-      // and github-feed-gate-install.mjs.
-      //
-      // ⚠️ Placed BEFORE processEvent and before the timing block, so a suppressed
-      // event is neither routed nor counted as a route — a suppressed event that
-      // still showed up in the slow-route histogram would make the two instruments
-      // disagree about what the broker did.
-      if (_githubGate) {
-        const verdict = decideGithubDispatch(event, _githubGate);
-        if (verdict.suppress) {
-          _githubGate.capture?.append(event, verdict);
-          continue;
-        }
-      }
-      // CTL-1330 Tier 1: time each route; surface ONLY slow routes (default
-      // >100ms) so we catch a broker-side hot-loop stall without flooding Loki —
-      // the broker routes every appended event. ON by default (CATALYST_TICK_TIMING).
-      if (BROKER_ROUTE_TIMING) {
-        const t0 = performance.now();
-        processEvent(event);
-        const total_ms = Math.round((performance.now() - t0) * 10) / 10;
-        if (total_ms >= BROKER_SLOW_ROUTE_MS) {
-          log.warn({ event_name: getEventName(event), total_ms }, "broker: slow route (CTL-1330)");
-        }
-      } else {
-        processEvent(event);
-      }
+      routeRawLine(line);
     }
   } catch {
     // Log file not yet created or transient read error

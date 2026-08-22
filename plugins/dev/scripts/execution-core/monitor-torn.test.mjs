@@ -27,6 +27,10 @@ import { join } from "node:path";
 import { startMonitor, stopMonitor, readNewEvents, __resetForTests } from "./monitor.mjs";
 import { dropProject } from "./eligible-set.mjs";
 import { tornLineCount, resetTornLineCount } from "./event-tail.mjs";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 let catalystDir;
 let prevCatalystDir;
@@ -58,7 +62,7 @@ function execEmpty() {
 
 function eventLogPath() {
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   return join(catalystDir, "events", `${ym}.jsonl`);
 }
 

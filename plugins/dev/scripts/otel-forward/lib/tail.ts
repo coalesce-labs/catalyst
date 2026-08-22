@@ -1,16 +1,21 @@
 import { existsSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
+import { drainAndSwitch } from "../../execution-core/event-tail.mjs";
 
-function defaultMonthPath(eventsDir: string): string {
-  const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return join(eventsDir, `${ym}.jsonl`);
+// CTL-1216: renamed off "Month" because it no longer is one. The filename is
+// resolved by lib/event-log-paths.mjs — the SAME resolver
+// execution-core/daemon-watchdog-predicates.mjs uses to decide whether this
+// forwarder is lagging, which is what makes those two agree at a rotation
+// boundary instead of merely promising to in a comment.
+function defaultEventLogPath(eventsDir: string): string {
+  return join(eventsDir, eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })));
 }
 
 export interface TailerOpts {
   eventsDir?: string;
   filePath?: string;
-  monthFn?: () => string;
+  eventLogFn?: () => string;
   offset: number;
   onLine: (line: string) => void;
   signal: AbortSignal;
@@ -44,8 +49,8 @@ export interface Tailer {
 
 export function createTailer(opts: TailerOpts): Tailer {
   const pollMs = opts.pollMs ?? 200;
-  const monthFn = opts.monthFn ?? (() => defaultMonthPath(opts.eventsDir ?? ""));
-  let currentPath = opts.filePath ?? monthFn();
+  const eventLogFn = opts.eventLogFn ?? (() => defaultEventLogPath(opts.eventsDir ?? ""));
+  let currentPath = opts.filePath ?? eventLogFn();
   let offset = opts.offset;
   // CTL-1809: the trailing bytes of a read that did not end on a newline. A poll landing
   // while a producer is mid-append sees a nonempty final fragment with no "\n" yet — that is
@@ -153,13 +158,44 @@ export function createTailer(opts: TailerOpts): Tailer {
 
   async function run(): Promise<void> {
     while (!opts.signal.aborted) {
-      const expected = monthFn();
+      const expected = eventLogFn();
       if (expected !== currentPath) {
+        // CTL-1216: DRAIN the old file to EOF before retargeting. This block used
+        // to jump straight to the new file, so every byte appended to the old one
+        // between the last poll and the boundary was never forwarded by anyone —
+        // a permanent egress hole, once per rotation. The checkpoint keeps
+        // advancing across it, so nothing downstream reports the gap.
+        const prevPath = currentPath;
+        const prevOffset = offset;
+        const prevLeftover = leftover;
+
         currentPath = expected;
         offset = 0;
-        // Month rollover: any fragment held from the previous month's file must not be
-        // prepended to the new file's first line.
+        // Any fragment held from the previous file must not be prepended to the
+        // new file's first line — the drain below consumes it instead.
         leftover = "";
+
+        const res = drainAndSwitch({
+          oldPath: prevPath,
+          oldOffset: prevOffset,
+          leftover: prevLeftover,
+          onLines: (drained) => {
+            for (const line of drained) {
+              if (line.length > 0 && shouldForward(line)) opts.onLine(line);
+            }
+          },
+        });
+        if (res.truncated) {
+          // Reported, never silent: this forwarder's own egress may be the thing
+          // that is broken, so the shortfall rides the caller's hook.
+          try {
+            opts.onUnparseable?.(
+              `[CTL-1216] rollover drain TRUNCATED at ${res.drained} bytes on ${prevPath}`,
+            );
+          } catch {
+            /* best-effort */
+          }
+        }
       }
       readNewLines();
       await new Promise<void>((resolve) => {

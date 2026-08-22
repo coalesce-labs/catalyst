@@ -11,6 +11,16 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1216: resolve the event-log basename through the SAME mirror the code under
+# test uses. Fails LOUD on a bad path — a silent fallback to the monthly name
+# reproduces the old behaviour while looking like it resolved.
+_ctl1216_active_log_basename() {
+  local _lib="${SCRIPT_DIR}/../lib/catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  ( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )
+}
+
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 EMIT_SCRIPT="${REPO_ROOT}/plugins/dev/scripts/phase-agent-emit-complete"
 
@@ -90,8 +100,8 @@ seed_thoughts_project() {
 # lines after, so we grep for the phase event prefix instead of tailing.
 read_event_line() {
 	local month
-	month=$(date -u +%Y-%m)
-	local logfile="${CATALYST_DIR}/events/${month}.jsonl"
+	month=$(_ctl1216_active_log_basename)
+	local logfile="${CATALYST_DIR}/events/${month}"
 	[[ -f $logfile ]] || {
 		echo ""
 		return 1
