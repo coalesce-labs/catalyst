@@ -7,6 +7,22 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1216: resolve the event-log basename through the SAME mirror the code under
+# test uses, instead of pinning `$(date -u +%Y-%m)`. Pinning the scheme here made
+# these fixtures write a file the (now weekly) code never opened — and pinning
+# the NEW scheme would only move the coupling one flip further out.
+#
+# It fails LOUD on a bad path rather than falling back to the monthly name: a
+# silent fallback here reproduces the old behaviour while looking like it
+# resolved, which is precisely how a wrong path in this shim went unnoticed once
+# already.
+_ctl1216_active_log_basename() {
+  local _lib="${SCRIPT_DIR}/../lib/catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  ( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )
+}
+
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 LIB="${REPO_ROOT}/plugins/dev/scripts/lib/canonical-event.sh"
 
@@ -301,7 +317,7 @@ fi
 
 # canonical_jsonl_append rotates legacy file on first write
 SCRATCH="$(mktemp -d)"
-LEGACY_FILE="${SCRATCH}/$(date -u +%Y-%m).jsonl"
+LEGACY_FILE="${SCRATCH}/$(_ctl1216_active_log_basename)"
 echo '{"event":"legacy","ts":"2026-05-07T00:00:00Z"}' > "$LEGACY_FILE"
 
 CANONICAL_LINE="$(build_canonical_line \

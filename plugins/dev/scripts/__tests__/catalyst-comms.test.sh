@@ -5,6 +5,22 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1216: resolve the event-log basename through the SAME mirror the code under
+# test uses, instead of pinning `$(date -u +%Y-%m)`. Pinning the scheme here made
+# these fixtures write a file the (now weekly) code never opened — and pinning
+# the NEW scheme would only move the coupling one flip further out.
+#
+# It fails LOUD on a bad path rather than falling back to the monthly name: a
+# silent fallback here reproduces the old behaviour while looking like it
+# resolved, which is precisely how a wrong path in this shim went unnoticed once
+# already.
+_ctl1216_active_log_basename() {
+  local _lib="${SCRIPT_DIR}/../lib/catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  ( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )
+}
+
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 COMMS="${REPO_ROOT}/plugins/dev/scripts/catalyst-comms"
 
@@ -188,7 +204,7 @@ reset_comms
 rm -rf "${CATALYST_DIR}/events"
 "$COMMS" join fanout-ch --as alice --ttl 300 > /dev/null
 MSG_ID=$("$COMMS" send fanout-ch "global fan-out test" --as alice --type info)
-EVENTS_FILE="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+EVENTS_FILE="${CATALYST_DIR}/events/$(_ctl1216_active_log_basename)"
 # CTL-300: events are now canonical OTel-shaped. event.name lives at
 # .attributes."event.name", message body at .body.payload.
 run "send writes a comms.message.posted line to events.jsonl" bash -c "
@@ -223,7 +239,7 @@ rm -rf "${CATALYST_DIR}/events"
 "$COMMS" join repo-flag-ch --as alice --ttl 300 > /dev/null
 MSG_ID_FLAG=$("$COMMS" send repo-flag-ch "explicit flag" \
   --as alice --type info --repo "coalesce-labs/catalyst")
-EVENTS_FILE_FLAG="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+EVENTS_FILE_FLAG="${CATALYST_DIR}/events/$(_ctl1216_active_log_basename)"
 run "--repo flag stamps vcs.repository.name" bash -c "
   jq -e --arg id '$MSG_ID_FLAG' \
     'select(.attributes.\"event.name\" == \"comms.message.posted\" and .body.payload.msgId == \$id)
@@ -237,7 +253,7 @@ rm -rf "${CATALYST_DIR}/events"
 "$COMMS" join repo-env-ch --as alice --ttl 300 > /dev/null
 MSG_ID_ENV=$(REPO="coalesce-labs/from-env" \
   "$COMMS" send repo-env-ch "env fallback" --as alice --type info)
-EVENTS_FILE_ENV="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+EVENTS_FILE_ENV="${CATALYST_DIR}/events/$(_ctl1216_active_log_basename)"
 run "\$REPO env stamps vcs.repository.name when --repo omitted" bash -c "
   jq -e --arg id '$MSG_ID_ENV' \
     'select(.attributes.\"event.name\" == \"comms.message.posted\" and .body.payload.msgId == \$id)
@@ -252,7 +268,7 @@ rm -rf "${CATALYST_DIR}/events"
 MSG_ID_PREC=$(REPO="coalesce-labs/env-loser" \
   "$COMMS" send repo-prec-ch "flag wins" --as alice --type info \
   --repo "coalesce-labs/flag-winner")
-EVENTS_FILE_PREC="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+EVENTS_FILE_PREC="${CATALYST_DIR}/events/$(_ctl1216_active_log_basename)"
 run "--repo flag overrides \$REPO env" bash -c "
   jq -e --arg id '$MSG_ID_PREC' \
     'select(.attributes.\"event.name\" == \"comms.message.posted\" and .body.payload.msgId == \$id)
@@ -266,7 +282,7 @@ rm -rf "${CATALYST_DIR}/events"
 "$COMMS" join repo-absent-ch --as alice --ttl 300 > /dev/null
 MSG_ID_ABS=$(unset REPO && "$COMMS" send repo-absent-ch "no repo" \
   --as alice --type info)
-EVENTS_FILE_ABS="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+EVENTS_FILE_ABS="${CATALYST_DIR}/events/$(_ctl1216_active_log_basename)"
 run "no repo source leaves vcs.repository.name unset" bash -c "
   jq -e --arg id '$MSG_ID_ABS' \
     'select(.attributes.\"event.name\" == \"comms.message.posted\" and .body.payload.msgId == \$id)

@@ -26,6 +26,22 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1216: resolve the event-log basename through the SAME mirror the code under
+# test uses, instead of pinning `$(date -u +%Y-%m)`. Pinning the scheme here made
+# these fixtures write a file the (now weekly) code never opened — and pinning
+# the NEW scheme would only move the coupling one flip further out.
+#
+# It fails LOUD on a bad path rather than falling back to the monthly name: a
+# silent fallback here reproduces the old behaviour while looking like it
+# resolved, which is precisely how a wrong path in this shim went unnoticed once
+# already.
+_ctl1216_active_log_basename() {
+  local _lib="${SCRIPT_DIR}/../lib/catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  ( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )
+}
+
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 SKILL_FILE="${REPO_ROOT}/plugins/dev/skills/phase-teardown/SKILL.md"
 EMIT_HELPER="${REPO_ROOT}/plugins/dev/scripts/lib/phase-emit-complete.sh"
@@ -670,7 +686,7 @@ run_b_case "caseb1"
 B1_EXIT="$(cat "$CDIR/exit-code" 2>/dev/null || echo 99)"
 assert_eq "case B1: exit code 0 (gate passes for merged current PR)" "0" "$B1_EXIT"
 B1_EMITTED="$(jq -r '.attributes."event.name" // empty' \
-  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+  "$FAKE_HOMEB/catalyst/events/$(_ctl1216_active_log_basename)" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
 assert_eq "case B1: emits teardown.complete" "phase.teardown.complete.CTL-9999" "$B1_EMITTED"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -702,7 +718,7 @@ else
   fail "case B2: worktree NOT removed" "worktree was deleted"
 fi
 B2_EMITTED="$(jq -r '.attributes."event.name" // empty' \
-  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+  "$FAKE_HOMEB/catalyst/events/$(_ctl1216_active_log_basename)" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
 assert_eq "case B2: emits teardown.failed" "phase.teardown.failed.CTL-9999" "$B2_EMITTED"
 B2_TRANS=0
 [ -f "$CDIR/linear-transition-calls.log" ] && \
@@ -732,7 +748,7 @@ else
   fail "case B3: exits non-zero (gh says OPEN despite disk saying merged)" "got exit 0"
 fi
 B3_EMITTED="$(jq -r '.attributes."event.name" // empty' \
-  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+  "$FAKE_HOMEB/catalyst/events/$(_ctl1216_active_log_basename)" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
 assert_eq "case B3: emits teardown.failed" "phase.teardown.failed.CTL-9999" "$B3_EMITTED"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -762,7 +778,7 @@ else
   fail "case B4: exits non-zero (gh failure → fail-closed)" "got exit 0 — should fail-closed"
 fi
 B4_EMITTED="$(jq -r '.attributes."event.name" // empty' \
-  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+  "$FAKE_HOMEB/catalyst/events/$(_ctl1216_active_log_basename)" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
 assert_eq "case B4: emits teardown.failed on gh error" "phase.teardown.failed.CTL-9999" "$B4_EMITTED"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -796,7 +812,7 @@ else
   fail "case B5: worktree NOT removed" "worktree was deleted"
 fi
 B5_EMITTED="$(jq -r '.attributes."event.name" // empty' \
-  "$FAKE_HOMEB/catalyst/events/$(date -u +%Y-%m).jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+  "$FAKE_HOMEB/catalyst/events/$(_ctl1216_active_log_basename)" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
 assert_eq "case B5: emits teardown.failed" "phase.teardown.failed.CTL-9999" "$B5_EMITTED"
 B5_TRANS=0
 [ -f "$CDIR/linear-transition-calls.log" ] && \

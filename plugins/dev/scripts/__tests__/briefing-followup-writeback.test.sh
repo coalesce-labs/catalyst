@@ -9,6 +9,22 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1216: resolve the event-log basename through the SAME mirror the code under
+# test uses, instead of pinning `$(date -u +%Y-%m)`. Pinning the scheme here made
+# these fixtures write a file the (now weekly) code never opened — and pinning
+# the NEW scheme would only move the coupling one flip further out.
+#
+# It fails LOUD on a bad path rather than falling back to the monthly name: a
+# silent fallback here reproduces the old behaviour while looking like it
+# resolved, which is precisely how a wrong path in this shim went unnoticed once
+# already.
+_ctl1216_active_log_basename() {
+  local _lib="${SCRIPT_DIR}/../lib/catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  ( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )
+}
+
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 BF_DIR="${REPO_ROOT}/plugins/dev/scripts/briefing-followup"
 WRITEBACK="${BF_DIR}/writeback.sh"
@@ -297,7 +313,7 @@ test_event_emission() {
     --date "$date" --no-commit --events-dir "$events_dir" >/dev/null 2>&1
 
   # Canonical events live at <events-dir>/YYYY-MM.jsonl
-  local month_file="${events_dir}/$(date -u +%Y-%m).jsonl"
+  local month_file="${events_dir}/$(_ctl1216_active_log_basename)"
   if [[ ! -f "$month_file" ]]; then
     fail "event log file written" "expected $month_file"
     return
