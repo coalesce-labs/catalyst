@@ -88,12 +88,13 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { resolveSecret } from "../lib/secret-contract.mjs";
 import {
   DEFAULT_DAILY_BUDGET,
   DEFAULT_PER_TICKET_CAP,
+  REASONS,
   classifyExhaustion,
   classifyWrite,
   convergenceKeyFor,
@@ -109,6 +110,11 @@ import {
 } from "./linear-write-budget.mjs";
 import { getEventLogPath, log as defaultLog } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
+// CTL-2027 Phase 3: only the PREFIX rule is reused (see isBudgetRefusalReason
+// below) — not the whole shouldCoolDownLabel predicate, whose TERMINAL /
+// cloud-label-rejection classes are label-specific concepts that do not apply
+// to a comment/session write's reason space.
+import { BUDGET_REASON_PREFIX } from "./label-failure-class.mjs";
 
 /** The three modes, house convention (cf. CLOUD_FEED_MODES / DELEGATE_FIRST_MODES). */
 export const LINEAR_WRITE_PROXY_MODES = Object.freeze(new Set(["off", "shadow", "enforce"]));
@@ -442,9 +448,16 @@ export function classifyProxyResponse({ code, stdout, stderr } = {}) {
   const status = /^\d{3}$/.test(statusRaw.trim()) ? Number(statusRaw.trim()) : null;
   const bodyText = nl === -1 ? "" : text.slice(0, nl);
   if (code !== 0) {
-    return { applied: false, reason: "transport-error", status, body: bodyText, stderr: scrub(stderr ?? "") };
+    return {
+      applied: false,
+      reason: "transport-error",
+      status,
+      body: bodyText,
+      stderr: scrub(stderr ?? ""),
+    };
   }
-  if (status === null) return { applied: false, reason: "unreadable", status: null, body: bodyText };
+  if (status === null)
+    return { applied: false, reason: "unreadable", status: null, body: bodyText };
 
   // ⛔ THE VERDICT COMES FROM THE BODY'S `outcome`, NOT FROM THE STATUS CODE ALONE.
   // CTC-509 returns a discriminated outcome (`succeeded` | `rejected` | `exhausted`,
@@ -465,21 +478,32 @@ export function classifyProxyResponse({ code, stdout, stderr } = {}) {
       // would restore the throttle by re-introducing a lie.
       const results = Array.isArray(parsed.results) ? parsed.results : null;
       const converged =
-        results !== null && results.length > 0 && results.every((r) => r?.outcome === "already-absent");
+        results !== null &&
+        results.length > 0 &&
+        results.every((r) => r?.outcome === "already-absent");
       return { applied: true, reason: null, status, body: bodyText, converged };
     }
-    const named = typeof parsed.reason === "string" && parsed.reason.trim() !== ""
-      ? scrub(parsed.reason).slice(0, 300)
-      : parsed.outcome;
-    return { applied: false, reason: `cloud:${parsed.outcome}`, detail: named, status, body: bodyText };
+    const named =
+      typeof parsed.reason === "string" && parsed.reason.trim() !== ""
+        ? scrub(parsed.reason).slice(0, 300)
+        : parsed.outcome;
+    return {
+      applied: false,
+      reason: `cloud:${parsed.outcome}`,
+      detail: named,
+      status,
+      body: bodyText,
+    };
   }
 
   // No parseable outcome — fall back to the status class. A 2xx here is NOT called
   // applied: these routes always answer with an outcome, so a 2xx without one means we
   // are not talking to the route we think we are (a proxy/redirect/HTML error page),
   // and "assume it worked" is the one reading a write path may never take.
-  if (status >= 200 && status < 300) return { applied: false, reason: "unreadable-outcome", status, body: bodyText };
-  if (status === 401 || status === 403) return { applied: false, reason: "unauthorized", status, body: bodyText };
+  if (status >= 200 && status < 300)
+    return { applied: false, reason: "unreadable-outcome", status, body: bodyText };
+  if (status === 401 || status === 403)
+    return { applied: false, reason: "unauthorized", status, body: bodyText };
   if (status === 404) return { applied: false, reason: "not-found", status, body: bodyText };
   if (status === 429) return { applied: false, reason: "rate-limited", status, body: bodyText };
   if (status >= 500) return { applied: false, reason: "server-error", status, body: bodyText };
@@ -513,7 +537,9 @@ export function classifyProxyResponse({ code, stdout, stderr } = {}) {
  * `"partial"` read as applied. A body with no recognised parts at all stays
  * `unreadable-outcome`, unchanged.
  */
-export const SESSION_PART_SUCCESS = Object.freeze(new Set(["succeeded", "created", "reused", "unchanged"]));
+export const SESSION_PART_SUCCESS = Object.freeze(
+  new Set(["succeeded", "created", "reused", "unchanged"])
+);
 
 /** The parts one /agent/session response can report on. Absent parts are not judged. */
 export const SESSION_PARTS = Object.freeze(["session", "plan", "activity"]);
@@ -536,7 +562,13 @@ export function classifySessionResponse(raw) {
     .filter((k) => !SESSION_PART_SUCCESS.has(parsed[k].outcome))
     .map((k) => `${k}:${parsed[k].outcome}`);
   if (bad.length > 0) {
-    return { applied: false, reason: "cloud:session-part-failed", detail: bad.join(","), status: base.status, body: base.body };
+    return {
+      applied: false,
+      reason: "cloud:session-part-failed",
+      detail: bad.join(","),
+      status: base.status,
+      body: base.body,
+    };
   }
   return { applied: true, reason: null, status: base.status, body: base.body, converged: false };
 }
@@ -645,11 +677,18 @@ export function defaultAsyncHttpFn({ url, method, token, body, onDone = null, sp
     onDone?.({ code, stdout, stderr, args, attempts: 1 });
   };
 
-  child.stdout?.on("data", (d) => { stdout += d; });
-  child.stderr?.on("data", (d) => { stderr += d; });
+  child.stdout?.on("data", (d) => {
+    stdout += d;
+  });
+  child.stderr?.on("data", (d) => {
+    stderr += d;
+  });
   child.stdout?.on("error", () => {});
   child.stderr?.on("error", () => {});
-  child.on("error", (err) => { stderr += String(err?.message ?? err); settle(127); });
+  child.on("error", (err) => {
+    stderr += String(err?.message ?? err);
+    settle(127);
+  });
   child.on("close", (code) => settle(code ?? 0));
 
   // ⛔ Codex #3529 round-1 P1. `end()` writes ASYNCHRONOUSLY. If curl has already exited
@@ -693,12 +732,109 @@ export const EVENT_APPLIED = "linear.write.proxy.applied";
 export const EVENT_FAILED = "linear.write.proxy.failed";
 /** CTL-1936 / AC5 — raised ONCE per exhaustion episode, never once per refused write. */
 export const EVENT_EXHAUSTED = "linear.write.proxy.budget-exhausted";
-export const PROXY_EVENT_NAMES = Object.freeze([EVENT_WOULD_WRITE, EVENT_APPLIED, EVENT_FAILED, EVENT_EXHAUSTED]);
+/**
+ * CTL-2027 Phase 3 — SHADOW's dry-run signal: "backpressure would have refused
+ * this write, but shadow never refuses". Deliberately a DIFFERENT name from
+ * EVENT_FAILED: an actual enforce-mode block is a genuine refusal and is
+ * reported as EVENT_FAILED (reason "backpressure:cooldown"), matching every
+ * other refusal this proxy already reports through that one name.
+ */
+export const EVENT_WOULD_BACKOFF = "linear.write.proxy.would-backoff";
+export const PROXY_EVENT_NAMES = Object.freeze([
+  EVENT_WOULD_WRITE,
+  EVENT_APPLIED,
+  EVENT_FAILED,
+  EVENT_EXHAUSTED,
+  EVENT_WOULD_BACKOFF,
+]);
 
 /** Default ledger location. One file per host; the daemon and any CLI share it. */
 export function defaultBudgetPath(env = process.env) {
   const home = env.HOME || "";
   return `${env.CATALYST_DIR || `${home}/catalyst`}/linear-write-budget.json`;
+}
+
+// ── CTL-2027 Phase 3 — proxy-side (ticket, route) backpressure ───────────────
+//
+// The relocation sequence this phase closes: applyLabel (COORD-236) →
+// removeLabel (CTL-2083) → comment/recovery-reasoning (1,096/hr and climbing at
+// the time of writing). Each fix correctly stopped ITS caller's storm and each
+// left the NEXT caller uncovered, because backpressure was fitted at the
+// CALLER (the scheduler's convergers) rather than at the CHOKEPOINT every
+// caller crosses. This is that fix, generalized.
+//
+// Ships behind `CATALYST_LINEAR_WRITE_BACKPRESSURE` ∈ off (default) | shadow |
+// enforce — off is a byte-identical no-op (see the wiring in `send`/`sendAsync`
+// below: every new code path is gated on `backpressureMode !== "off"`).
+
+export const LINEAR_WRITE_BACKPRESSURE_MODES = Object.freeze(new Set(["off", "shadow", "enforce"]));
+
+export function resolveLinearWriteBackpressureMode(env = process.env) {
+  const v = env.CATALYST_LINEAR_WRITE_BACKPRESSURE;
+  return typeof v === "string" && LINEAR_WRITE_BACKPRESSURE_MODES.has(v) ? v : "off";
+}
+
+/**
+ * Same default window CTL-834/CTL-2083 use for the converger-side
+ * (ticket,label) cool-down — deliberately, not independently chosen. If this
+ * window were LONGER than the converger's own, a label whose converger-side
+ * cool-down had already elapsed would immediately re-hit this STILL-ARMED
+ * proxy-side one, stranding the label for up to 2× the intended wait (test 5,
+ * "the label path does not double-back-off").
+ */
+export const DEFAULT_WRITE_COOLDOWN_MS =
+  Number(process.env.CATALYST_LINEAR_WRITE_COOLDOWN_MS) || 60_000;
+
+/** `.write-cooldowns/` sits beside the ledger (same CATALYST_DIR root), a
+ *  SIBLING of `.label-cooldowns/` — a different key space, `(ticket, route)`
+ *  rather than `(ticket, label)`, so the two directories can never collide. */
+export function defaultWriteCooldownDir(env = process.env) {
+  const home = env.HOME || "";
+  return `${env.CATALYST_DIR || `${home}/catalyst`}/.write-cooldowns`;
+}
+
+export function writeCooldownMarkerPath(dir, ticket, routeId) {
+  return join(dir, `${ticket}-${routeId}.json`);
+}
+
+function defaultReadWriteCooldownMarker(dir, ticket, routeId) {
+  try {
+    return JSON.parse(readFileSync(writeCooldownMarkerPath(dir, ticket, routeId), "utf8"));
+  } catch {
+    return null; // absent/malformed — no cool-down, matching the label-cooldown reader's convention
+  }
+}
+
+function defaultRecordWriteCooldown(dir, ticket, routeId, now) {
+  const p = writeCooldownMarkerPath(dir, ticket, routeId);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ failedAt: now }));
+}
+
+/**
+ * isBudgetRefusalReason — the prefix rule from label-failure-class.mjs's
+ * shouldCoolDownLabel is reused (test 4), MINUS one deliberate exclusion. A
+ * `cloud:*` rejection or a validation error (no-cloud-token, body-too-large,
+ * spawn-failed) needs RETRY, not backoff — those reasons never reach this
+ * predicate anyway, since they arise downstream of the local budget gate
+ * this is wired into (see `send`/`sendAsync` below), but the explicit narrow
+ * check is what a future refactor moving the call site cannot silently widen.
+ *
+ * ⛔ `REASONS.CONVERGED` ("budget:already-converged") shares the PREFIX but
+ * is deliberately excluded: it is not a capacity signal — it fires on every
+ * ROUTINE "this exact write already landed" hit, not a storm. Arming the
+ * coarse `(ticket, routeId)` cool-down on it would block every OTHER write
+ * on that route for the ticket (a different label, or the opposite-direction
+ * re-add `clearConvergence`/Codex #3505 P1 exists specifically to let
+ * through) for a full window, on the strength of a refusal that was never
+ * doomed to begin with.
+ */
+function isBudgetRefusalReason(reason) {
+  return (
+    typeof reason === "string" &&
+    reason.startsWith(BUDGET_REASON_PREFIX) &&
+    reason !== REASONS.CONVERGED
+  );
 }
 
 /**
@@ -752,7 +888,9 @@ export function buildProxyEvent({
         "catalyst.linear_write_proxy.reason": reason ?? undefined,
         "catalyst.linear_write_proxy.status": status ?? undefined,
         "catalyst.linear_write_proxy.caller": caller ?? undefined,
-        "catalyst.linear_write_proxy.labels": Array.isArray(labels) ? labels.join(",") : (labels ?? undefined),
+        "catalyst.linear_write_proxy.labels": Array.isArray(labels)
+          ? labels.join(",")
+          : (labels ?? undefined),
       },
       body: {
         payload: {
@@ -826,6 +964,12 @@ export function createLinearWriteProxy({
   nowFn = () => Date.now(),
   readLedgerFn = readLedger,
   writeLedgerFn = writeLedger,
+  // CTL-2027 Phase 3. Same DI shape as the ledger seams above.
+  backpressureMode = resolveLinearWriteBackpressureMode(env),
+  writeCooldownDir = null,
+  writeCooldownMs = DEFAULT_WRITE_COOLDOWN_MS,
+  readWriteCooldownMarkerFn = defaultReadWriteCooldownMarker,
+  recordWriteCooldownFn = defaultRecordWriteCooldown,
 } = {}) {
   if (mode !== "shadow" && mode !== "enforce") return null;
 
@@ -885,7 +1029,10 @@ export function createLinearWriteProxy({
       writeLedgerFn(ledgerPath, ledger);
     } catch (err) {
       // Never let bookkeeping fail a write that already happened.
-      log?.warn?.({ err: scrub(err?.message ?? "") }, "linear-write-proxy: budget ledger write failed");
+      log?.warn?.(
+        { err: scrub(err?.message ?? "") },
+        "linear-write-proxy: budget ledger write failed"
+      );
     }
   };
 
@@ -895,6 +1042,36 @@ export function createLinearWriteProxy({
     } catch (err) {
       // Emission must never mask or block the write decision it reports.
       log?.warn?.({ err: scrub(err?.message ?? "") }, "linear-write-proxy: event append failed");
+    }
+  };
+
+  // ── CTL-2027 Phase 3: proxy-side (ticket, route) backpressure ──
+  // Resolved ONCE per proxy instance, mirroring ledgerPath above.
+  const cooldownDir = writeCooldownDir ?? defaultWriteCooldownDir(env);
+
+  const inWriteCooldown = (ticket, routeId) => {
+    if (!ticket) return false; // no ticket → no key to check (matches the ledger's own no-op)
+    const marker = readWriteCooldownMarkerFn(cooldownDir, ticket, routeId);
+    return (
+      marker != null &&
+      typeof marker.failedAt === "number" &&
+      nowFn() - marker.failedAt < writeCooldownMs
+    );
+  };
+
+  // Arms the cooldown ONLY on a fresh, budget-class refusal from the local
+  // gate (never on the cooldown short-circuit itself — re-arming there would
+  // let a storm perpetually extend its own window, defeating the time-boxed,
+  // self-healing design CTL-834/CTL-2083 already established).
+  const armWriteCooldown = (ticket, routeId, reason) => {
+    if (!ticket || !isBudgetRefusalReason(reason)) return;
+    try {
+      recordWriteCooldownFn(cooldownDir, ticket, routeId, nowFn());
+    } catch (err) {
+      log?.warn?.(
+        { err: scrub(err?.message ?? "") },
+        "linear-write-proxy: write-cooldown marker write failed"
+      );
     }
   };
 
@@ -925,7 +1102,14 @@ export function createLinearWriteProxy({
 
       if (mode === "shadow") {
         counts.wouldWrite += 1;
-        emit(EVENT_WOULD_WRITE, { ticket, routeId, reason: "shadow", applied: false, caller, labels });
+        emit(EVENT_WOULD_WRITE, {
+          ticket,
+          routeId,
+          reason: "shadow",
+          applied: false,
+          caller,
+          labels,
+        });
         return { handled: false, applied: false, reason: "shadow" };
       }
 
@@ -942,6 +1126,39 @@ export function createLinearWriteProxy({
         return { handled: true, applied: false, reason, ...(detail ? { detail } : {}) };
       };
 
+      // ── CTL-2027 Phase 3: proxy-side backpressure — consult BEFORE the ledger
+      // read, so a cooled-down (ticket,route) short-circuits without even
+      // touching the ledger. `enforce` refuses; `shadow` only observes (falls
+      // through to the normal path below, which may still allow the write).
+      if (backpressureMode !== "off" && inWriteCooldown(ticket, routeId)) {
+        if (backpressureMode === "enforce") {
+          counts.refused += 1;
+          emit(EVENT_FAILED, {
+            ticket,
+            routeId,
+            reason: "backpressure:cooldown",
+            status: null,
+            applied: false,
+            caller,
+            labels,
+          });
+          log?.warn?.(
+            { ticket, route: routeId, caller, labels },
+            "linear-write-proxy: write refused by proxy-side backpressure — not sent to the cloud"
+          );
+          return { handled: true, applied: false, reason: "backpressure:cooldown" };
+        }
+        emit(EVENT_WOULD_BACKOFF, {
+          ticket,
+          routeId,
+          reason: "backpressure:cooldown",
+          status: null,
+          applied: false,
+          caller,
+          labels,
+        });
+      }
+
       // ── CTL-1936 / AC2 + AC3: refuse LOCALLY, before any cloud call ──
       // The runaway spent 302 of 307 writes on one ticket. A refusal here costs nothing,
       // where a refusal at the cloud costs a budget unit — which is how the whole day's
@@ -949,14 +1166,40 @@ export function createLinearWriteProxy({
       // write, and it is not an applied one.
       const { ledger: ledgerBefore, degraded: ledgerDegraded } = loadLedger();
       if (!ledgerDegraded) {
-        const gate = classifyWrite({ ledger: ledgerBefore, ticket, convergenceKey, dailyBudget, perTicketCap });
+        const gate = classifyWrite({
+          ledger: ledgerBefore,
+          ticket,
+          convergenceKey,
+          dailyBudget,
+          perTicketCap,
+        });
         if (!gate.allow) {
           counts.refused += 1;
-          emit(EVENT_FAILED, { ticket, routeId, reason: gate.reason, status: null, applied: false, caller, labels });
+          emit(EVENT_FAILED, {
+            ticket,
+            routeId,
+            reason: gate.reason,
+            status: null,
+            applied: false,
+            caller,
+            labels,
+          });
           log?.warn?.(
-            { ticket, route: routeId, caller, labels, reason: gate.reason, spentForTicket: gate.spentForTicket, total: gate.total },
+            {
+              ticket,
+              route: routeId,
+              caller,
+              labels,
+              reason: gate.reason,
+              spentForTicket: gate.spentForTicket,
+              total: gate.total,
+            },
             "linear-write-proxy: write refused by the HOST budget — not sent to the cloud"
           );
+          // CTL-2027 Phase 3: arm proxy-side backpressure on a BUDGET-CLASS
+          // refusal only (test 4) — a cloud rejection or validation error needs
+          // retry, not backoff, and never reaches this branch regardless.
+          if (backpressureMode !== "off") armWriteCooldown(ticket, routeId, gate.reason);
           return { handled: true, applied: false, reason: gate.reason };
         }
       }
@@ -978,8 +1221,10 @@ export function createLinearWriteProxy({
 
       const bytes = Buffer.byteLength(req.body, "utf8");
       if (bytes > MAX_BODY_BYTES) {
-        log?.error?.({ ticket, route: routeId, bytes, cap: MAX_BODY_BYTES },
-          "linear-write-proxy: body over cap — write REFUSED, never truncated");
+        log?.error?.(
+          { ticket, route: routeId, bytes, cap: MAX_BODY_BYTES },
+          "linear-write-proxy: body over cap — write REFUSED, never truncated"
+        );
         return fail("body-too-large");
       }
 
@@ -987,8 +1232,10 @@ export function createLinearWriteProxy({
       try {
         raw = httpFn({ url: req.url, method: req.method, token: key.value, body: req.body });
       } catch (err) {
-        log?.warn?.({ ticket, route: routeId, err: scrub(err?.message ?? "") },
-          "linear-write-proxy: transport threw");
+        log?.warn?.(
+          { ticket, route: routeId, err: scrub(err?.message ?? "") },
+          "linear-write-proxy: transport threw"
+        );
         return fail("spawn-failed");
       }
 
@@ -1018,7 +1265,15 @@ export function createLinearWriteProxy({
       const exhaustion = classifyExhaustion(ledgerAfter, { dailyBudget });
       if (exhaustion.announce) {
         ledgerAfter = markExhaustionAnnounced(ledgerAfter);
-        emit(EVENT_EXHAUSTED, { ticket, routeId, reason: "budget:day-exhausted", status: null, applied: false, caller, labels });
+        emit(EVENT_EXHAUSTED, {
+          ticket,
+          routeId,
+          reason: "budget:day-exhausted",
+          status: null,
+          applied: false,
+          caller,
+          labels,
+        });
         log?.error?.(
           { total: ledgerAfter.total, dailyBudget, day: ledgerAfter.day },
           "linear-write-proxy: host daily cloud write budget EXHAUSTED — every further Linear write is refused until the UTC day rolls"
@@ -1028,7 +1283,15 @@ export function createLinearWriteProxy({
 
       if (!verdict.applied) return fail(verdict.reason, verdict.status, verdict.detail ?? null);
       counts.applied += 1;
-      emit(EVENT_APPLIED, { ticket, routeId, reason: null, status: verdict.status, applied: true, caller, labels });
+      emit(EVENT_APPLIED, {
+        ticket,
+        routeId,
+        reason: null,
+        status: verdict.status,
+        applied: true,
+        caller,
+        labels,
+      });
       // CTL-2098: surface `converged` (this route's own already-converged verdict —
       // e.g. an already-absent label on a `remove`) ADDITIVELY. Ryan's decision
       // 2026-08-21: do not repurpose `applied`, and do not introduce a `wrote:false`
@@ -1097,7 +1360,10 @@ export function createLinearWriteProxy({
       try {
         raw = httpFn({ url: req.url, method: req.method, token: key.value, body: req.body });
       } catch (err) {
-        log?.warn?.({ ...ctx, err: scrub(err?.message ?? "") }, "linear-write-proxy: read transport threw");
+        log?.warn?.(
+          { ...ctx, err: scrub(err?.message ?? "") },
+          "linear-write-proxy: read transport threw"
+        );
         return refuse("spawn-failed");
       }
 
@@ -1110,7 +1376,11 @@ export function createLinearWriteProxy({
       // as no-claim-exists" failure the cloud's own MAX_ATTACHMENT_PAGES guard exists to stop.
       const body = parseProxyBody(verdict.body ?? "");
       if (!body || body.outcome !== "succeeded" || !Array.isArray(body.attachments)) {
-        return refuse("read-unreadable", verdict.status, typeof body?.reason === "string" ? body.reason : null);
+        return refuse(
+          "read-unreadable",
+          verdict.status,
+          typeof body?.reason === "string" ? body.reason : null
+        );
       }
       return { ok: true, attachments: body.attachments, reason: null, status: verdict.status };
     },
@@ -1145,13 +1415,23 @@ export function createLinearWriteProxy({
       const ctx = { ticket, route: routeId, phase, caller };
 
       if (!NON_BLOCKING_ROUTE_IDS.has(routeId)) {
-        log?.error?.(ctx, "linear-write-proxy: sendAsync REFUSED — route is not declared non-blocking");
+        log?.error?.(
+          ctx,
+          "linear-write-proxy: sendAsync REFUSED — route is not declared non-blocking"
+        );
         return { handled: true, dispatched: false, reason: "route-not-async-eligible" };
       }
 
       if (mode === "shadow") {
         counts.wouldWrite += 1;
-        emit(EVENT_WOULD_WRITE, { ticket, routeId, reason: "shadow", applied: false, caller, labels });
+        emit(EVENT_WOULD_WRITE, {
+          ticket,
+          routeId,
+          reason: "shadow",
+          applied: false,
+          caller,
+          labels,
+        });
         return { handled: false, dispatched: false, reason: "shadow" };
       }
 
@@ -1162,16 +1442,66 @@ export function createLinearWriteProxy({
         return { handled: true, dispatched: false, reason };
       };
 
+      // CTL-2027 Phase 3: same proxy-side backpressure check as `send`, before
+      // the ledger read. `session` (this method's one production route) is
+      // exactly one of the two routes the label convergers cannot reach.
+      if (backpressureMode !== "off" && inWriteCooldown(ticket, routeId)) {
+        if (backpressureMode === "enforce") {
+          counts.refused += 1;
+          emit(EVENT_FAILED, {
+            ticket,
+            routeId,
+            reason: "backpressure:cooldown",
+            status: null,
+            applied: false,
+            caller,
+            labels,
+          });
+          log?.warn?.(
+            { ...ctx },
+            "linear-write-proxy: narration refused by proxy-side backpressure — not sent to the cloud"
+          );
+          return { handled: true, dispatched: false, reason: "backpressure:cooldown" };
+        }
+        emit(EVENT_WOULD_BACKOFF, {
+          ticket,
+          routeId,
+          reason: "backpressure:cooldown",
+          status: null,
+          applied: false,
+          caller,
+          labels,
+        });
+      }
+
       // Same local budget gate as `send`, and for the same reason: a refusal here costs
       // nothing, where a refusal at the cloud costs a budget unit.
       const { ledger: ledgerBefore, degraded: ledgerDegraded } = loadLedger();
       if (!ledgerDegraded) {
-        const gate = classifyWrite({ ledger: ledgerBefore, ticket, convergenceKey, dailyBudget, perTicketCap });
+        const gate = classifyWrite({
+          ledger: ledgerBefore,
+          ticket,
+          convergenceKey,
+          dailyBudget,
+          perTicketCap,
+        });
         if (!gate.allow) {
           counts.refused += 1;
-          emit(EVENT_FAILED, { ticket, routeId, reason: gate.reason, status: null, applied: false, caller, labels });
-          log?.warn?.({ ...ctx, reason: gate.reason, total: gate.total },
-            "linear-write-proxy: narration refused by the HOST budget — not sent to the cloud");
+          emit(EVENT_FAILED, {
+            ticket,
+            routeId,
+            reason: gate.reason,
+            status: null,
+            applied: false,
+            caller,
+            labels,
+          });
+          log?.warn?.(
+            { ...ctx, reason: gate.reason, total: gate.total },
+            "linear-write-proxy: narration refused by the HOST budget — not sent to the cloud"
+          );
+          // CTL-2027 Phase 3: arm on a BUDGET-CLASS refusal only.
+          if (backpressureMode !== "off") armWriteCooldown(ticket, routeId, gate.reason);
           return { handled: true, dispatched: false, reason: gate.reason };
         }
       }
@@ -1181,8 +1511,10 @@ export function createLinearWriteProxy({
 
       const key = resolveHostKey(env);
       if (key.value === null) {
-        log?.error?.({ ...ctx, token_env: key.envVar },
-          "linear-write-proxy: no per-host cloud key — narration REFUSED (reason=no-cloud-token)");
+        log?.error?.(
+          { ...ctx, token_env: key.envVar },
+          "linear-write-proxy: no per-host cloud key — narration REFUSED (reason=no-cloud-token)"
+        );
         return refuse("no-cloud-token");
       }
 
@@ -1197,9 +1529,19 @@ export function createLinearWriteProxy({
         const exhaustion = classifyExhaustion(after, { dailyBudget });
         if (exhaustion.announce) {
           after = markExhaustionAnnounced(after);
-          emit(EVENT_EXHAUSTED, { ticket, routeId, reason: "budget:day-exhausted", status: null, applied: false, caller, labels });
-          log?.error?.({ total: after.total, dailyBudget, day: after.day },
-            "linear-write-proxy: host daily cloud write budget EXHAUSTED — every further Linear write is refused until the UTC day rolls");
+          emit(EVENT_EXHAUSTED, {
+            ticket,
+            routeId,
+            reason: "budget:day-exhausted",
+            status: null,
+            applied: false,
+            caller,
+            labels,
+          });
+          log?.error?.(
+            { total: after.total, dailyBudget, day: after.day },
+            "linear-write-proxy: host daily cloud write budget EXHAUSTED — every further Linear write is refused until the UTC day rolls"
+          );
         }
         persist(after);
       }
@@ -1215,26 +1557,53 @@ export function createLinearWriteProxy({
             routeId === "session" ? classifySessionResponse(raw) : classifyProxyResponse(raw);
           if (verdict.applied) {
             counts.applied += 1;
-            emit(EVENT_APPLIED, { ticket, routeId, reason: null, status: verdict.status, applied: true, caller, labels });
+            emit(EVENT_APPLIED, {
+              ticket,
+              routeId,
+              reason: null,
+              status: verdict.status,
+              applied: true,
+              caller,
+              labels,
+            });
             return;
           }
           counts.failed += 1;
-          emit(EVENT_FAILED, { ticket, routeId, reason: verdict.reason, status: verdict.status, applied: false, caller, labels });
+          emit(EVENT_FAILED, {
+            ticket,
+            routeId,
+            reason: verdict.reason,
+            status: verdict.status,
+            applied: false,
+            caller,
+            labels,
+          });
           // The ticket AND the phase, because "narration failed" with neither is an
           // alert nobody can act on.
           log?.warn?.(
-            { ...ctx, reason: verdict.reason, status: verdict.status, attempts: raw?.attempts ?? null },
+            {
+              ...ctx,
+              reason: verdict.reason,
+              status: verdict.status,
+              attempts: raw?.attempts ?? null,
+            },
             "linear-write-proxy: narration failed (non-blocking route — the dispatch was NOT affected)"
           );
         } catch (err) {
-          log?.warn?.({ ...ctx, err: scrub(err?.message ?? "") }, "linear-write-proxy: narration settle threw");
+          log?.warn?.(
+            { ...ctx, err: scrub(err?.message ?? "") },
+            "linear-write-proxy: narration settle threw"
+          );
         }
       };
 
       try {
         asyncHttpFn({ url: req.url, method: req.method, token: key.value, body: req.body, onDone });
       } catch (err) {
-        log?.warn?.({ ...ctx, err: scrub(err?.message ?? "") }, "linear-write-proxy: async transport threw");
+        log?.warn?.(
+          { ...ctx, err: scrub(err?.message ?? "") },
+          "linear-write-proxy: async transport threw"
+        );
         return refuse("spawn-failed");
       }
       return { handled: true, dispatched: true, reason: null };

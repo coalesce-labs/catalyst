@@ -26,6 +26,13 @@ import {
   utcDayOf,
 } from "./linear-write-budget.mjs";
 import { defaultBudgetPath } from "./linear-write-proxy.mjs";
+// CTL-2027 Phase 2: the shared arithmetic — this check used to be the ONLY place
+// "spent vs budget, spent vs per-ticket cap" existed. board-health.mjs now needs
+// the same arithmetic to publish headroom on the board scan, so it moved to a
+// zero-IO evaluator both callers share. This file keeps its own bespoke
+// unconfirmed-default / pid-file gating (that logic is doctor-specific and has
+// no board-health equivalent) and calls the evaluator only for the arithmetic.
+import { evaluateLinearWriteHeadroom } from "./linear-write-headroom.mjs";
 
 // CTL-2073: `env.CATALYST_LINEAR_WRITE_DAILY_BUDGET` used to mean "doctor's own
 // process.env" — but doctor runs in a plain shell, and the lever the DAEMON actually
@@ -51,7 +58,11 @@ import { defaultBudgetPath } from "./linear-write-proxy.mjs";
 // Returns { value, confirmed }. `confirmed:false` means neither the runtime
 // snapshot, the env FILE, nor doctor's own env carried the var, so `value` is
 // DEFAULT_* — a guess, not a read.
-function resolveDaemonBudget(varName, fallback, { env, execCoreEnvPath, envFileExists, envFileRead, runtimeCaps }) {
+function resolveDaemonBudget(
+  varName,
+  fallback,
+  { env, execCoreEnvPath, envFileExists, envFileRead, runtimeCaps }
+) {
   if (runtimeCaps && Number.isFinite(runtimeCaps[varName]) && runtimeCaps[varName] > 0) {
     return { value: runtimeCaps[varName], confirmed: true };
   }
@@ -84,7 +95,8 @@ export function checkLinearWriteBudget(deps = {}) {
     // deliberately: a test stubbing ONLY the ledger's existence must not also make
     // this env-file check believe execution-core.env exists on whatever host the
     // test happens to run on.
-    execCoreEnvPath = env.CATALYST_EXECUTION_CORE_ENV || resolve(homedir(), ".config", "catalyst", "execution-core.env"),
+    execCoreEnvPath = env.CATALYST_EXECUTION_CORE_ENV ||
+      resolve(homedir(), ".config", "catalyst", "execution-core.env"),
     envFileExists = existsSync,
     envFileRead = readFileSync,
     // CTL-2073 AC2: "never assert exhaustion off an unverified default." A daemon
@@ -96,7 +108,11 @@ export function checkLinearWriteBudget(deps = {}) {
     // Deliberately just existence, not full liveness/identity verification (unlike
     // checkSdkDaemonEnv's `ps eww` probe) — this check is advisory-only and a stale
     // pid-file merely means "be more cautious," never "FAIL".
-    pidFilePath = resolve(env.CATALYST_DIR || `${homedir()}/catalyst`, "execution-core", "daemon.pid"),
+    pidFilePath = resolve(
+      env.CATALYST_DIR || `${homedir()}/catalyst`,
+      "execution-core",
+      "daemon.pid"
+    ),
     pidFileExists = existsSync,
     // CTL-2073: same orchDir a live daemon's boot writes daemon-runtime-env.json
     // into (getExecutionCoreDir()) — matches pidFilePath's base dir above, built
@@ -114,13 +130,17 @@ export function checkLinearWriteBudget(deps = {}) {
       envFileRead,
       runtimeCaps,
     }),
-    perTicketCapR = resolveDaemonBudget("CATALYST_LINEAR_WRITE_TICKET_CAP", DEFAULT_PER_TICKET_CAP, {
-      env,
-      execCoreEnvPath,
-      envFileExists,
-      envFileRead,
-      runtimeCaps,
-    }),
+    perTicketCapR = resolveDaemonBudget(
+      "CATALYST_LINEAR_WRITE_TICKET_CAP",
+      DEFAULT_PER_TICKET_CAP,
+      {
+        env,
+        execCoreEnvPath,
+        envFileExists,
+        envFileRead,
+        runtimeCaps,
+      }
+    ),
   } = deps;
   const dailyBudget = dailyBudgetR.value;
   const perTicketCap = perTicketCapR.value;
@@ -160,11 +180,20 @@ export function checkLinearWriteBudget(deps = {}) {
   // recovered.
   const today = utcDayOf(nowFn());
   const ledger = rollToDay(r.ledger, today);
-  const total = Number(ledger.total ?? 0) || 0;
-  const byTicket = ledger.byTicket ?? {};
-  const worst = Object.entries(byTicket).sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0] ?? null;
+  // CTL-2027 Phase 2: the shared evaluator computes total/worst-ticket/headroom
+  // once; this check keeps its own wording and unconfirmed-default gating below,
+  // which the evaluator (a generic ok/warn/capped/unknown verdict) has no notion
+  // of. `total`/`worst` are read back from it rather than recomputed, so the two
+  // callers cannot silently disagree about what "the worst ticket" means.
+  const headroom = evaluateLinearWriteHeadroom({
+    ledger,
+    caps: { dailyBudget, perTicketCap },
+    now: nowFn(),
+  });
+  const total = Number.isFinite(headroom.total) ? headroom.total : Number(ledger.total ?? 0) || 0;
+  const worst = headroom.worstTicket ?? null;
 
-  if (total >= dailyBudget) {
+  if (headroom.dayRemaining <= 0) {
     // CTL-2073 AC2: "never assert exhaustion off an unverified default." dailyBudget
     // here is DEFAULT_DAILY_BUDGET (300) — a guess, not a read — precisely when a
     // daemon pid-file exists: some daemon is (or was) configured with its OWN real
@@ -187,7 +216,7 @@ export function checkLinearWriteBudget(deps = {}) {
         (worst ? ` (largest single ticket: ${worst[0]} at ${worst[1]})` : "")
     );
   }
-  if (worst && (worst[1] ?? 0) >= perTicketCap) {
+  if (worst && headroom.ticketRemaining <= 0) {
     if (!perTicketCapR.confirmed && daemonPossiblyRunning()) {
       return mkCheck(
         "linear-write-budget",

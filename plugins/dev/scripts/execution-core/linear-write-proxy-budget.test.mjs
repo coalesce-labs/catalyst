@@ -6,7 +6,11 @@
 // cloud call is not a fix, it is the incident with extra logging.
 
 import { describe, expect, test } from "bun:test";
-import { createLinearWriteProxy, EVENT_EXHAUSTED } from "./linear-write-proxy.mjs";
+import {
+  createLinearWriteProxy,
+  EVENT_EXHAUSTED,
+  EVENT_WOULD_BACKOFF,
+} from "./linear-write-proxy.mjs";
 import {
   emptyLedger,
   recordWrite,
@@ -20,15 +24,30 @@ const NOW = () => Date.parse("2026-08-18T04:00:00Z");
 const okBody = (results) =>
   `${JSON.stringify({ outcome: "succeeded", ...(results ? { results } : {}) })}\n200`;
 
-/** A proxy whose ledger lives in memory and whose HTTP is a counted stub. */
-function harness({ ledger = emptyLedger(DAY), stdout = okBody(null), env = {} } = {}) {
+/** A proxy whose ledger lives in memory and whose HTTP is a counted stub.
+ *  CTL-2027 Phase 3: `clock` lets a test advance time without re-building the
+ *  harness (so a cool-down window can be crossed mid-test); `backpressureMode`
+ *  and `cooldownMs` thread the new flag + window straight to the proxy. The
+ *  write-cooldown marker store is ALSO in-memory (a plain object keyed by
+ *  "ticket:route"), mirroring the ledger's own in-memory-store pattern above —
+ *  hermetic, no real filesystem. */
+function harness({
+  ledger = emptyLedger(DAY),
+  stdout = okBody(null),
+  env = {},
+  clock = { now: NOW() },
+  backpressureMode = "off",
+  cooldownMs = undefined,
+} = {}) {
   const calls = [];
   const events = [];
   let stored = ledger;
+  const cooldowns = {};
+  const nowFn = () => clock.now;
   const proxy = createLinearWriteProxy({
     mode: "enforce",
     env: { CATALYST_CLOUD_TOKEN: "tok-abcdefghijklmnopqrstuvwxyz012345678901234567", ...env },
-    nowFn: NOW,
+    nowFn,
     readLedgerFn: () =>
       stored === null ? { state: "unusable", reason: "test" } : { state: "loaded", ledger: stored },
     writeLedgerFn: (_p, l) => {
@@ -40,8 +59,22 @@ function harness({ ledger = emptyLedger(DAY), stdout = okBody(null), env = {} } 
     },
     appendEvent: (line) => events.push(JSON.parse(line)),
     log: { warn() {}, error() {}, info() {} },
+    backpressureMode,
+    ...(cooldownMs !== undefined ? { writeCooldownMs: cooldownMs } : {}),
+    readWriteCooldownMarkerFn: (_dir, ticket, routeId) => cooldowns[`${ticket}:${routeId}`] ?? null,
+    recordWriteCooldownFn: (_dir, ticket, routeId, now) => {
+      cooldowns[`${ticket}:${routeId}`] = { failedAt: now };
+    },
   });
-  return { proxy, calls, events, ledger: () => stored, unusable: () => (stored = null) };
+  return {
+    proxy,
+    calls,
+    events,
+    clock,
+    cooldowns,
+    ledger: () => stored,
+    unusable: () => (stored = null),
+  };
 }
 
 const labelPayload = (ids, mode = "remove") => ({ issueId: "i-1", labelIds: ids, mode });
@@ -305,5 +338,220 @@ describe("an unusable ledger fails OPEN, and never silently", () => {
     });
     expect(r.applied).toBe(true);
     expect(h.calls.length).toBe(1);
+  });
+});
+
+// ── CTL-2027 Phase 3 — proxy-side backpressure ────────────────────────────────
+// The relocation sequence: applyLabel (COORD-236) → removeLabel (CTL-2083) →
+// comment/recovery-reasoning (open, until this phase). Each fix was correct and
+// each left the NEXT caller uncovered, because backpressure was fitted to the
+// caller rather than to the refusal. Every caller crosses this proxy, so a fix
+// here generalizes instead of relocating a fourth time.
+describe("CTL-2027 Phase 3: proxy-side (ticket, route) backpressure — enforce", () => {
+  test("a budget-refused COMMENT write arms backpressure (the label convergers cannot reach this route)", () => {
+    let l = emptyLedger(DAY);
+    for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-9");
+    const h = harness({ ledger: l, backpressureMode: "enforce" });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-9",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(r.reason).toBe("budget:ticket-cap");
+    expect(h.calls.length).toBe(0);
+    expect(h.cooldowns["CTL-9:comment"]).toMatchObject({ failedAt: NOW() });
+  });
+
+  test("a budget-refused SESSION write arms backpressure (the other route the convergers cannot reach)", () => {
+    let l = emptyLedger(DAY);
+    for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-10");
+    const h = harness({ ledger: l, backpressureMode: "enforce" });
+    // session goes through sendAsync, not send.
+    h.proxy.sendAsync({
+      routeId: "session",
+      ticket: "CTL-10",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(h.cooldowns["CTL-10:session"]).toMatchObject({ failedAt: NOW() });
+  });
+
+  test("the next call INSIDE the window is refused WITHOUT touching the transport, even if the ledger would now allow it", () => {
+    let l = emptyLedger(DAY);
+    for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-11");
+    const h = harness({ ledger: l, backpressureMode: "enforce", cooldownMs: 60_000 });
+    const first = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-11",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(first.reason).toBe("budget:ticket-cap");
+    expect(h.calls.length).toBe(0);
+
+    // The ledger now fails OPEN (would allow) — proving the SECOND refusal below
+    // is backpressure, not the pre-existing budget gate re-firing.
+    h.unusable();
+    const second = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-11",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(second.applied).toBe(false);
+    expect(second.reason).toBe("backpressure:cooldown");
+    expect(h.calls.length).toBe(0); // still zero — no API attempt
+  });
+
+  test("POSITIVE CONTROL: OUTSIDE the window (ledger allowing) the SAME call reaches the transport exactly once", () => {
+    let l = emptyLedger(DAY);
+    for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-12");
+    const h = harness({ ledger: l, backpressureMode: "enforce", cooldownMs: 60_000 });
+    h.proxy.send({ routeId: "comment", ticket: "CTL-12", payload: { issueId: "i", body: "b" } });
+    expect(h.calls.length).toBe(0);
+
+    h.unusable(); // ledger now allows
+    h.clock.now += 60_001; // past the window
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-12",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(r.applied).toBe(true);
+    expect(h.calls.length).toBe(1); // proves "zero" above is measurable, not a broken harness
+  });
+
+  test("recovery-reasoning's exact live shape: route:'comment', reason:'budget:ticket-cap'", () => {
+    let l = emptyLedger(DAY);
+    for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-2015");
+    const h = harness({ ledger: l, backpressureMode: "enforce" });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-2015",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(r.reason).toBe("budget:ticket-cap");
+    expect(h.cooldowns["CTL-2015:comment"]).toBeTruthy();
+  });
+
+  test("only BUDGET-class reasons arm it — a cloud rejection does NOT", () => {
+    const rejected = `${JSON.stringify({ outcome: "rejected", reason: "nope" })}\n400`;
+    const h = harness({ backpressureMode: "enforce", stdout: rejected });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-13",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(r.applied).toBe(false);
+    expect(h.cooldowns["CTL-13:comment"]).toBeUndefined();
+    // proof it really didn't arm: the next call still reaches the transport.
+    const second = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-13",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(h.calls.length).toBe(2);
+    void second;
+  });
+
+  test("only BUDGET-class reasons arm it — a validation error (no-cloud-token) does NOT", () => {
+    const h = harness({ backpressureMode: "enforce", env: { CATALYST_CLOUD_TOKEN: "" } });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-14",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(r.reason).toBe("no-cloud-token");
+    expect(h.cooldowns["CTL-14:comment"]).toBeUndefined();
+  });
+
+  // ⛔ `budget:already-converged` shares the `budget:` PREFIX with the two
+  // genuine capacity reasons but is NOT a capacity refusal — it fires on
+  // every routine "this exact write already landed" hit, which is common and
+  // benign. Arming the coarse (ticket, route) proxy-side backpressure on it
+  // would block every OTHER "label" write on the ticket — including a
+  // DIFFERENT label, and the opposite-direction re-add Codex #3505 P1 exists
+  // specifically to let through — for a full cool-down window, on the
+  // strength of a refusal that was never a storm to begin with.
+  test("only BUDGET-class reasons arm it — 'budget:already-converged' does NOT (Codex round)", () => {
+    const allAbsent = `${JSON.stringify({ outcome: "succeeded", results: [{ labelId: "lab-1", outcome: "already-absent", attempts: 1 }] })}\n200`;
+    const h = harness({ backpressureMode: "enforce", stdout: allAbsent });
+    const payload = { issueId: "i-1", labelIds: ["lab-1"], mode: "remove" };
+    h.proxy.send({ routeId: "label", ticket: "CTL-18", payload });
+    expect(h.calls.length).toBe(1);
+
+    const second = h.proxy.send({ routeId: "label", ticket: "CTL-18", payload });
+    expect(second.reason).toBe("budget:already-converged");
+    expect(h.cooldowns["CTL-18:label"]).toBeUndefined(); // must NOT arm
+
+    // proof it really didn't arm: an UNRELATED label write on the SAME
+    // ticket + SAME route is not blocked by proxy-side backpressure.
+    const other = h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-18",
+      payload: { issueId: "i-1", labelIds: ["lab-2"], mode: "remove" },
+    });
+    expect(other.applied).toBe(true);
+    expect(h.calls.length).toBe(2);
+  });
+
+  test("the LABEL path arms only ONE window, not two nested ones stacked with the converger's own cool-down", () => {
+    // Simulates a caller hitting the proxy directly on the label route (the same
+    // route the scheduler's convergers use). The proxy's own window must be the
+    // SAME duration as the converger's (60s default), so the two cannot compound
+    // into a longer effective wait for the same refused label.
+    let l = emptyLedger(DAY);
+    for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-15");
+    const h = harness({ ledger: l, backpressureMode: "enforce", cooldownMs: 60_000 });
+    h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-15",
+      payload: { issueId: "i", labelIds: ["lab-1"], mode: "remove" },
+    });
+    h.unusable();
+    h.clock.now += 60_000; // exactly at the SAME window CTL-834/CTL-2083 use — not 2×
+    const r = h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-15",
+      payload: { issueId: "i", labelIds: ["lab-1"], mode: "remove" },
+    });
+    expect(r.applied).toBe(true); // window elapsed — allowed again, not still cooled
+  });
+});
+
+describe("CTL-2027 Phase 3: shadow mode observes, refuses nothing", () => {
+  test("would-backoff fires but the write still proceeds normally", () => {
+    let l = emptyLedger(DAY);
+    for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-16");
+    const h = harness({ ledger: l, backpressureMode: "shadow" });
+    h.proxy.send({ routeId: "comment", ticket: "CTL-16", payload: { issueId: "i", body: "b" } });
+    expect(h.cooldowns["CTL-16:comment"]).toBeTruthy(); // still armed — shadow evaluates fully
+
+    h.unusable(); // ledger now allows
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-16",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(r.applied).toBe(true); // shadow NEVER refuses on the strength of the cooldown
+    expect(h.calls.length).toBe(1);
+    const names = h.events.map((e) => e.attributes["event.name"]);
+    expect(names.some((n) => n.startsWith(EVENT_WOULD_BACKOFF))).toBe(true);
+  });
+});
+
+describe("CTL-2027 Phase 3: flag OFF ⇒ byte-identical behaviour", () => {
+  test("a pre-armed cooldown marker is ignored entirely when the flag is off (default)", () => {
+    let l = emptyLedger(DAY);
+    const h = harness({ ledger: l }); // backpressureMode defaults to "off"
+    h.cooldowns["CTL-17:comment"] = { failedAt: NOW() }; // pre-armed, out of band
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-17",
+      payload: { issueId: "i", body: "b" },
+    });
+    expect(r.applied).toBe(true);
+    expect(h.calls.length).toBe(1);
+  });
+
+  test("EVENT_WOULD_BACKOFF is a real, distinct, namespaced event constant", () => {
+    expect(EVENT_WOULD_BACKOFF).toBe("linear.write.proxy.would-backoff");
   });
 });
