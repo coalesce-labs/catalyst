@@ -150,6 +150,31 @@ gh api repos/coalesce-labs/catalyst/rules/branches/main \
 Re-add `Cloudflare Pages` to the required set (step 3 in reverse) and/or clear the CF Build watch
 paths so CF builds on every push again. Every step above is individually reversible.
 
+## Current live state — Cloudflare Pages project config (2026-08-21)
+
+The rollout above is complete: `main`'s required checks are `docs-gate`, `gitleaks`,
+`agents-md-gate`, `audit-references`, `check-versions`, `execution-core-unit-tests` — no
+`Cloudflare Pages` entry. Step 5 (CF Build watch paths) is also live, applied directly via the
+Cloudflare Pages API rather than the dashboard:
+
+- **Project:** `catalyst` (Cloudflare Pages), serving the docs/marketing site at
+  [catalyst.coalescelabs.ai](https://catalyst.coalescelabs.ai). Managed via Cloudflare's native
+  GitHub integration — there is no Pages deploy workflow file in `.github/workflows/`; the build
+  is configured and triggered entirely on the Cloudflare side.
+- **Build command:** `cd website && npm install && npm run build`, publishing `website/dist`
+  (the Astro Starlight site under `website/`).
+- **Watch-path scoping (live now):** `source.config.path_includes` = `["website/**"]`. A PR or
+  push only triggers a CF build+deploy when it touches something under `website/`.
+  ⚠️ This is **narrower** than the docs-relevant set `docs-gate` itself uses (`website/*` **and**
+  `plugins/*/CHANGELOG.md` / `plugins/playground/*/CHANGELOG.md` — see
+  `scripts/ci/docs-paths-changed.sh`). The "keep in sync" invariant noted below is not currently
+  satisfied by the live `path_includes`; a changelog-only PR builds under `docs-gate` but will not
+  trigger a CF deploy.
+- **Source of truth / how to verify or change it:** this setting lives in the Cloudflare
+  dashboard/API, not in this repo — `GET`/`PATCH
+  accounts/{account_id}/pages/projects/catalyst` (Cloudflare Pages API). If it's changed again,
+  update this section to match.
+
 ## Notes / edge cases
 
 - **CF force-builds** on 0-file, 3000+-file, or 20+-commit pushes regardless of watch paths. These
