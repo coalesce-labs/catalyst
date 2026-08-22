@@ -137,6 +137,24 @@ Start a Claude Code session and run:
 Follow the prompts. Catalyst spawns helper agents, documents what your code does, and saves the
 findings to `thoughts/shared/research/`.
 
+## 7. Start the coordination layer (optional)
+
+Catalyst's **concierge** is the only agent-management act a human takes: it starts stewards, which in
+turn dispatch tickets and keep initiative scopes moving. Start one with:
+
+```bash
+role-supervisor launch-concierge --human <your-name> --cwd <repo-path>
+```
+
+This installs a supervised LaunchAgent that keeps the concierge alive under launchd — so a provider
+overload or a session ending mid-turn does not require manual restart. The concierge itself starts
+stewards for each initiative; you do not launch stewards directly.
+
+```bash
+# Check whether the concierge is running and healthy
+role-supervisor doctor
+```
+
 ## Optional plugins
 
 Catalyst is a set of plugins. Install only what you need:

@@ -119,3 +119,37 @@ export function releaseLease(role, { pid = process.pid } = {}, env = process.env
   if (existsSync(f)) rmSync(f);
   return true;
 }
+
+// ── CTL-2095: activity reporting and completion ──────────────────────────────
+//
+// The supervisor's isScopeActive() reads manifest.activity, but nothing wrote
+// it — so the Done condition never fired. These helpers close that gap:
+// the steward writes its current activity each turn via writeActivity(), and
+// marks itself complete via markComplete() when its scope reaches Done.
+
+/**
+ * Merge `patch` into the manifest's `activity` object atomically.
+ * Does NOT clobber other manifest fields.
+ */
+export function writeActivity(role, patch, env = process.env) {
+  const manifest = readManifest(role, env);
+  if (!manifest) throw new Error(`role-supervisor: no manifest for role '${role}'`);
+  const updated = { ...manifest, activity: { ...(manifest.activity ?? {}), ...patch } };
+  writeManifest(role, updated, env);
+}
+
+/**
+ * Mark the role's scope as complete: zero all activity fields and set
+ * scope_active:false. The supervisor re-reads the manifest post-session and
+ * decides `stop` rather than `idle-reenter`.
+ */
+export function markComplete(role, env = process.env) {
+  const manifest = readManifest(role, env);
+  if (!manifest) throw new Error(`role-supervisor: no manifest for role '${role}'`);
+  const updated = {
+    ...manifest,
+    scope_active: false,
+    activity: { inFlightTickets: 0, openAsksRaised: 0, humanCommentNewerThanLastReply: false },
+  };
+  writeManifest(role, updated, env);
+}

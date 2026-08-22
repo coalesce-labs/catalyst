@@ -29,8 +29,35 @@ export function roleRow(role, { now = Date.now() } = {}, env = process.env) {
   const lease = readLease(role, env);
   const counters = readCounters(role, env);
 
-  const live = classifyHeartbeat(hb, { now });
   const scopeActive = manifest?.scope_active ?? true;
+
+  // CTL-2095: a deliberately-stopped role must NOT age into DEAD.
+  // A heartbeat with state="stopped" is terminal evidence — the role exited
+  // intentionally. Classify it here, before the age-based DEAD/MISSING logic,
+  // so a completed steward reads as "completed" or "stopped", never "dead".
+  if (hb?.state === "stopped") {
+    // scope_active:false → "completed" (scope done); still-active → "stopped" (early exit)
+    const terminalLiveness = !scopeActive ? "completed" : "stopped";
+    const doc = classifyStatusDoc({ updatedAtMs: manifest?.status_doc_updated_at ?? undefined, now, scopeActive: false });
+    return {
+      role,
+      scope: manifest?.scope ?? null,
+      pid: hb?.pid ?? null,
+      session: hb?.session ?? null,
+      liveness: terminalLiveness,
+      heartbeat_age_min: hb?.ts != null ? Math.round((now - hb.ts) / 60000) : null,
+      status_doc: doc.state,
+      status_doc_age_min: doc.ageMs == null ? null : Math.round(doc.ageMs / 60000),
+      restarts_24h: (counters.restarts ?? []).filter((t) => t >= now - 24 * 3600_000).length,
+      restarts_1h: countLastHour(counters, "restart", { now }),
+      lease_holder: lease?.pid ?? null,
+      last_artifact: hb?.last_artifact ?? null,
+      red: false,
+      problems: [],
+    };
+  }
+
+  const live = classifyHeartbeat(hb, { now });
   const doc = classifyStatusDoc({ updatedAtMs: manifest?.status_doc_updated_at ?? undefined, now, scopeActive });
 
   const problems = [];
@@ -73,7 +100,7 @@ export function formatReport(rep) {
   for (const r of rep.roles) {
     const mark = r.red ? "FAIL" : "pass";
     lines.push(
-      `  ${mark}  ${r.role}${r.scope ? `/${r.scope}` : ""}  pid=${r.pid ?? "-"}  liveness=${r.liveness}` +
+      `  ${mark}  ${r.role}${r.scope ? `/${r.scope}` : ""}  pid=${r.pid ?? "-"}  liveness=${r.liveness ?? "-"}` +
       `  hb=${r.heartbeat_age_min ?? "-"}m  doc=${r.status_doc}(${r.status_doc_age_min ?? "-"}m)  restarts24h=${r.restarts_24h}`,
     );
     for (const p of r.problems) lines.push(`         ⛔ ${p}`);

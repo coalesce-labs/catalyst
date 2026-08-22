@@ -228,5 +228,46 @@ await t("the idle re-entry does not ask the role to start over", () => {
   assert.match(p, /do not start over/);
 });
 
+// ── CTL-2095: manifest re-read after session ─────────────────────────────────
+console.log("10. manifest re-read: the supervisor honours a mid-session complete()");
+await t("a steward that marks itself complete mid-session is stopped, not re-entered", async () => {
+  const s = scratch();
+  // Scope starts active.
+  seedRole(s.env, "steward-complete", { activity: { inFlightTickets: 1 } });
+  let calls = 0;
+  const r = await superviseRole("steward-complete", {
+    env: s.env, sleep: noSleep, log: () => {},
+    runSession: async () => {
+      calls++;
+      // Simulate the steward calling `role-supervisor complete` during its turn.
+      const { writeActivity, markComplete } = await import("./state.mjs");
+      markComplete("steward-complete", s.env);
+      return { exitCode: 0, sessionId: "sess-complete" };
+    },
+  });
+  // The supervisor re-reads the manifest post-session, sees scope_active:false,
+  // and decides "stop" — not "idle-reenter".
+  assert.equal(calls, 1, "should run exactly one session and then stop");
+  assert.match(r.stopped, /quiet|scope/, `expected a quiet-scope stop reason, got '${r.stopped}'`);
+  s.cleanup();
+});
+
+await t("control: scope still active after session → idle-reenter, not stop", async () => {
+  const s = scratch();
+  seedRole(s.env, "steward-reenter", { activity: { inFlightTickets: 1 } });
+  let calls = 0;
+  await superviseRole("steward-reenter", {
+    env: s.env, sleep: noSleep, log: () => {}, maxIterations: 2,
+    runSession: async () => {
+      calls++;
+      // The steward does NOT call complete — scope remains active.
+      return { exitCode: 0, sessionId: "sess-active" };
+    },
+  });
+  // Should have re-entered (run more than once) because the scope stayed active.
+  assert.equal(calls, 2, "should re-enter while scope remains active");
+  s.cleanup();
+});
+
 console.log(`\nsupervisor.test.mjs: ${passes} passed, ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

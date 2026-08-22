@@ -82,5 +82,21 @@ assert_doc_has "remote: post-reboot start documented for unattended host" \
   "$REMOTE" "catalyst-stack start"
 
 echo ""
+echo "=== Phase 4: coordination layer (CTL-2095) ==="
+
+# The concierge launch command is the ONLY agent-management act documented for the human
+assert_doc_has "index: concierge launch command present" \
+  "$GS/index.md" "role-supervisor launch-concierge"
+# The section explicitly frames the concierge as the only agent-management act
+assert_doc_has "index: frames concierge as the only agent-management act" \
+  "$GS/index.md" "only agent-management act"
+# The section cross-links the doctor command for checking health
+assert_doc_has "index: coordination section cross-links role-supervisor doctor" \
+  "$GS/index.md" "role-supervisor doctor"
+# Section uses "coordination layer" heading so readers can navigate to it
+assert_doc_has "index: coordination layer heading present" \
+  "$GS/index.md" "coordination layer"
+
+echo ""
 echo "Results: $PASSES passed, $FAILURES failed"
 exit "$FAILURES"
