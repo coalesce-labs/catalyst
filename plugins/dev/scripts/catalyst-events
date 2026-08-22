@@ -60,18 +60,43 @@ while [[ -L "$_CE_SRC" ]]; do
   _CE_D="$(cd -P "$(dirname "$_CE_SRC")" && pwd)" && _CE_SRC="$(readlink "$_CE_SRC")"
   [[ "$_CE_SRC" != /* ]] && _CE_SRC="$_CE_D/$_CE_SRC"
 done
-_CE_LIB="$(cd -P "$(dirname "$_CE_SRC")" && pwd)/lib/canonical-event.sh"
+_CE_LIBDIR="$(cd -P "$(dirname "$_CE_SRC")" && pwd)/lib"
+_CE_LIB="${_CE_LIBDIR}/canonical-event.sh"
 if [[ -r "$_CE_LIB" ]]; then
   # shellcheck source=lib/canonical-event.sh
   . "$_CE_LIB" 2>/dev/null || true
 fi
+# CTL-1216: the shared event-log path mirror, so this reader resolves the same
+# file the writers do under either rotation scheme.
+if [[ -r "${_CE_LIBDIR}/catalyst-event-log-paths.sh" ]]; then
+  # shellcheck source=lib/catalyst-event-log-paths.sh
+  . "${_CE_LIBDIR}/catalyst-event-log-paths.sh" 2>/dev/null || true
+fi
 
-# Resolve the current month's events file. Re-resolved each loop iteration so
-# month rollover is handled transparently.
+# Resolve the ACTIVE events file. Re-resolved each loop iteration so rollover is
+# handled transparently.
+#
+# CTL-1216: the filename comes from lib/catalyst-event-log-paths.sh — the bash
+# mirror of lib/event-log-paths.mjs, held byte-identical to it by the three-way
+# parity suite. The CATALYST_EVENTS_FILE override stays FIRST: tests depend on it
+# pinning one exact file.
+#
+# The fallback below is deliberately LOUD rather than a silent re-derivation. A
+# quiet `date -u +%Y-%m` here would keep working under the default scheme and
+# then, the day the scheme flips, aim `catalyst-events tail` at a file nothing
+# writes — a reader that reports zero events on a busy log. Same posture
+# canonical_atomic_append_line's callers take: a dependency-free leaf may fall
+# back, but it must say so.
 events_file_path() {
   if [[ -n "${CATALYST_EVENTS_FILE:-}" ]]; then
     echo "$CATALYST_EVENTS_FILE"
+  elif declare -f catalyst_event_log_basename >/dev/null 2>&1; then
+    echo "$EVENTS_DIR/$(catalyst_event_log_basename)"
   else
+    if [[ -z "${_CE_PATHS_WARNED:-}" ]]; then
+      _CE_PATHS_WARNED=1
+      printf '[catalyst-events] WARNING: lib/catalyst-event-log-paths.sh not loaded — falling back to the monthly filename. If the active rotation scheme is not `month`, this reads a file nothing is writing.\n' >&2
+    fi
     echo "$EVENTS_DIR/$(date -u +%Y-%m).jsonl"
   fi
 }

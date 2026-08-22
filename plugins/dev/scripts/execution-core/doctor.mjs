@@ -179,6 +179,9 @@ import { listProjects } from "./registry.mjs";
 import { collectConfigDump } from "./config-dump.mjs";
 import { probePublishCapability, resolvePushRemote } from "./publish-preflight.mjs"; // CAT-60: worker write-capability gate
 import { resolvePublishPreflightMode } from "./config.mjs";
+// CTL-1216: THE event-log window resolver. A zero-npm-import leaf, which is
+// what lets bare-Node `catalyst doctor` import it with no node_modules.
+import { resolveEventLogPathsForWindow } from "../lib/event-log-paths.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -2308,13 +2311,21 @@ function procIsDaemon(psText, pidFilePath) {
   return /(?:^|\s|\/)daemon\.mjs(?:\s|$)/.test(psText) && psText.includes(`--pid-file ${pidFilePath}`);
 }
 
-// monthlyLogPath — the `.../events/YYYY-MM.jsonl` sibling for a given Date's UTC
-// month. Used to also scan the PREVIOUS month's log when the 24h recent-window
-// cutoff crosses a UTC month boundary (Codex P2: a fallback written just before the
-// boundary is still inside 24h but lives in last month's file).
-function monthlyLogPath(eventsDir, date) {
-  const ym = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
-  return resolve(eventsDir, `${ym}.jsonl`);
+// eventLogPathsForWindow — every log file overlapping [sinceMs, nowMs], oldest
+// -first. CTL-1216: this replaces monthlyLogPath + a hand-built "current, plus
+// the previous month if the cutoff crossed a boundary" pair (Codex P2: a
+// fallback written just before the boundary is still inside 24h but lives in
+// the previous file). That pair covers the window only while a file is about a
+// month long; the resolver enumerates the directory instead, so it stays correct
+// under weekly rotation and across a scheme change, where a YYYY-MM.jsonl and a
+// YYYY-Www.jsonl sit side by side and neither computed name finds the other.
+function eventLogPathsForWindow(eventsDir, nowMs, windowMs) {
+  return resolveEventLogPathsForWindow({
+    eventsDir: resolve(eventsDir),
+    sinceMs: nowMs - windowMs,
+    nowMs,
+    env: process.env,
+  }).map((pth) => resolve(pth));
 }
 
 // scanRecentBgFallback — CTL-1396 item A (3): the daemon-boot auth gate
@@ -2616,11 +2627,9 @@ export function checkSdkDaemonEnv(deps = {}) {
   }
 
   // ── (2) recent silent sdk→bg degrades from the unified event log (AUTHORITATIVE) ──
-  // Scan the current month AND the previous month when the 24h cutoff crosses a UTC
-  // month boundary, so a degrade written just before the boundary is not missed.
-  const paths = [monthlyLogPath(eventsDir, new Date(now()))];
-  const prev = monthlyLogPath(eventsDir, new Date(now() - recentWindowMs));
-  if (prev !== paths[0]) paths.push(prev);
+  // Scan EVERY log file the 24h window touches, so a degrade written just before
+  // a rotation boundary is not missed. See eventLogPathsForWindow above.
+  const paths = eventLogPathsForWindow(eventsDir, now(), recentWindowMs);
   // CTL-1529: resolve the scan seam. Explicit scanEventLog > legacy string seam
   // (tests) > the bounded time-covering tail (production).
   //

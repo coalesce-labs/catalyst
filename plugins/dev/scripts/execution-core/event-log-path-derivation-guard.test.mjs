@@ -119,12 +119,18 @@ export function scanForSelfDerivedEventLogNames(root) {
 // fixed site that stays listed is just as red as a new site that is not.
 const ALLOWED_REMAINING = [
   // ── still to fold, Phase 2 (readers) ──────────────────────────────────────
-  "catalyst-events",
-  "channel-watcher/channel-watcher.mjs",
-  "coordination-publish/index.ts",
   "event-mirror/index.ts",
-  "execution-core/doctor.mjs",
-  "orch-monitor/lib/service-health-monitor.ts",
+
+  // ── SANCTIONED loud fallbacks, not un-migrated sites ──────────────────────
+  // These DO resolve through the shared mirror on the normal path. What the
+  // scanner sees is the dependency-free fallback branch they keep for the case
+  // where the mirror cannot be sourced — and that branch WARNS to stderr rather
+  // than degrading silently, the same posture canonical_atomic_append_line's
+  // three leaf callers take (and that __tests__/event-append-atomicity.test.sh
+  // recognizes only by the warning). A silent re-derivation here would keep
+  // working under the default scheme and then, the day it flips, aim the reader
+  // at a file nothing writes.
+  "catalyst-events",
 
   // ── still to fold, Phase 4 (writers) ──────────────────────────────────────
   "lib/canonical-event.sh",

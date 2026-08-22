@@ -19,6 +19,7 @@ import { dirname } from "node:path";
 import { createTailer } from "../otel-forward/lib/tail.ts";
 import { HubClient } from "./lib/hub-client.ts";
 import { appendToDlq } from "../otel-forward/lib/dlq.ts";
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 export const SERVICE_NAME = "catalyst.coordination-publish";
 
@@ -42,14 +43,15 @@ export interface CoordinationCheckpoint {
 }
 
 /**
- * The current UTC monthly event-log path — the same `<eventsDir>/YYYY-MM.jsonl`
- * shape the reused otel-forward tailer (`defaultMonthPath`) resolves. Kept here so
- * the checkpoint month-gate below compares against the exact file the tailer opens.
+ * The current event-log path. CTL-1216: this used to re-derive the same
+ * `<eventsDir>/YYYY-MM.jsonl` shape as the reused otel-forward tailer, with a
+ * comment saying it was "kept here so the checkpoint gate compares against the
+ * exact file the tailer opens". Both now call the same resolver, so that is a
+ * fact rather than a promise — and it survives a scheme change, which a second
+ * hand-written copy would not.
  */
 export function currentEventLogPath(eventsDir: string): string {
-  const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  return join(eventsDir, `${ym}.jsonl`);
+  return join(eventsDir, eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })));
 }
 
 export function readCoordinationCheckpoint(ckPath: string): CoordinationCheckpoint | null {
