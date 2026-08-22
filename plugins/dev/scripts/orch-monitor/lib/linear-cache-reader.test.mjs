@@ -3,7 +3,13 @@
 // Run: cd plugins/dev/scripts/orch-monitor && bun test lib/linear-cache-reader.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { readLinearCache } from "./linear-cache-reader.mjs";
+import { readLinearCache, NEEDS_HUMAN_LABELS } from "./linear-cache-reader.mjs";
+// Parity: the canonical taxonomy source (imported in TEST only — the module
+// deliberately mirrors the strings locally, see the note above the constant).
+import {
+  ATTENTION_LABEL_NEEDS_HUMAN,
+  ATTENTION_LABEL_NEEDS_INPUT,
+} from "./board-data.mjs";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -146,5 +152,19 @@ describe("readLinearCache replica-first (CTC-133 Phase 2)", () => {
     // Only thing we can assert without a real DB: it doesn't throw and ticket_state data comes through
     expect(result["CTL-8"]).toBeDefined();
     expect(result["CTL-8"].linearState).toBe("Verify");
+  });
+});
+
+// ── CTL-2156: the LAST needs-human taxonomy copy, pinned ─────────────────────
+describe("needs-human label taxonomy parity (CTL-2156, was CTL-1123)", () => {
+  test("NEEDS_HUMAN_LABELS matches board-data's canonical ATTENTION_LABEL_* constants", () => {
+    // The broker used to carry this pin (broker/alert-emit.test.mjs) against its
+    // own copy of the taxonomy. That copy and its pile-up alert are retired, and
+    // an independent audit flagged THIS copy as the surviving unpinned one — so
+    // the pin moves here. Without it, a rename in board-data silently empties the
+    // parked-needs-human inbox instead of failing loudly.
+    expect(new Set(NEEDS_HUMAN_LABELS)).toEqual(
+      new Set([ATTENTION_LABEL_NEEDS_HUMAN, ATTENTION_LABEL_NEEDS_INPUT]),
+    );
   });
 });

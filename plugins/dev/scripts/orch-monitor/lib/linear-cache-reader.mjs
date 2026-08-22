@@ -143,18 +143,28 @@ async function readTicketStateById(dbPath) {
 // needs-input ticket whose worker dir was torn down (the PARKED case — most
 // parked tickets) is in NONE of those sets, so it never enters payload.tickets
 // and never reaches the inbox — even though deriveAttention already supports the
-// label. This reader is the cache source for that missing set: it mirrors
-// router.mjs::countNeedsHumanTickets EXACTLY — SAME accessor
-// (getAllTicketDescriptors → filter-state.db) and SAME predicate (non-removed,
-// non-terminal, carries a needs-human/needs-input label) — so the inbox surfaces
-// precisely the set the broker's pile-up signal counts.
+// label. This reader is the cache source for that missing set: the SAME accessor
+// (getAllTicketDescriptors → filter-state.db) and the predicate "non-removed,
+// non-terminal, carries a needs-human/needs-input label".
 //
-// Labels + the Linear terminal set are mirrored LOCALLY (from
-// broker/alert-emit.mjs NEEDS_HUMAN_LABELS + execution-core/terminal-state.mjs)
-// so this cache reader pulls in nothing from the broker beyond the descriptor
-// accessor — keeping the vite config graph free of bun:sqlite (see the long note
-// in readTicketStateById).
-const NEEDS_HUMAN_LABELS = ["needs-human", "needs-input"];
+// CTL-2156 — WHY THIS IS NOW THE LAST COPY, AND WHY IT IS PINNED. The broker used
+// to hold a second copy of this taxonomy (broker/alert-emit.mjs NEEDS_HUMAN_LABELS)
+// feeding the `needs_human_pileup` alert, and router.mjs::countNeedsHumanTickets
+// mirrored this predicate exactly. Both are RETIRED: counting needs-human labels
+// measured the per-ticket escalation artifact rather than the underlying condition,
+// so one provider outage read as N human asks. System trouble now raises ONE
+// fleet-scoped alert (broker/system-trouble.mjs).
+//
+// This copy survives because the dashboard still has to surface parked tickets
+// while the label exists, and it is deliberately mirrored LOCALLY (rather than
+// imported from board-data.mjs) to keep the vite config graph free of bun:sqlite
+// and to avoid a board-data ⇄ linear-cache-reader import cycle — see the long note
+// in readTicketStateById. The audit flagged this copy as UNPINNED once the broker's
+// pin went away, so it is now pinned by its own parity test against board-data's
+// canonical ATTENTION_LABEL_* constants (linear-cache-reader.test.mjs), which is
+// what stops a taxonomy rename (CTL-995) from silently emptying the parked inbox.
+// Exported for that test — not part of the module's functional API.
+export const NEEDS_HUMAN_LABELS = ["needs-human", "needs-input"];
 const TERMINAL_LINEAR_STATES = new Set(["Done", "Canceled"]);
 
 // readAllTicketDescriptors — the SAME bulk descriptor accessor readTicketStateById
@@ -172,7 +182,7 @@ async function readAllTicketDescriptors(dbPath) {
 // every non-removed, non-terminal ticket carrying a needs-human/needs-input label.
 // Fail-OPEN: any read error degrades to [] — the inbox keeps its current
 // worker-dir-sourced behavior and never throws out of the assemble (CTL-883
-// posture, consistent with countNeedsHumanTickets returning 0 on a db error).
+// posture: a cache read failure must never blank the board with an exception).
 // `descriptorReader` is injectable so unit tests drive the predicate without a DB.
 export async function readParkedNeedsHumanTickets({
   dbPath = DEFAULT_DB_PATH,

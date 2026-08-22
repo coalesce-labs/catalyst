@@ -401,10 +401,25 @@ during active work). See the configuration reference for the env knobs.
 `catalyst.ingestion.*` events above are low-level; the broker promotes the
 operator-actionable subset into a stable `catalyst.alert.{raised,cleared}` topic
 (`event.label` = the alert kind). `system_down` is promoted from a critical source's
-sustained `catalyst.ingestion.stale` (a dead monitor); `needs_human_pileup` is a level
-alert over the count of active, non-terminal tickets carrying a `needs-human`/`needs-input`
-label in `filter-state.db` (debounced by threshold + persistence + cooldown). These alert
-events ride the same event log → `otel-forward` → OTel collector → fan-out (Loki, dash0),
+sustained `catalyst.ingestion.stale` (a dead monitor).
+
+**System trouble is ONE fleet-scoped, auto-clearing alert — never one per ticket
+(CTL-2156).** Three kinds — `provider_degraded` (429/529 provider overload),
+`rate_limit_exhausted` (a Claude account / Linear / GitHub budget spent) and
+`capacity_unavailable` (a node with no execution slots) — are detected by
+`broker/system-trouble.mjs` from telemetry the fleet already emits
+(`execution-core.sdk.overloaded`, `account.status.changed`,
+`account.ratelimit.{sampled,unsampled}`, `linear.write.proxy.budget-exhausted`,
+`linear.label.retry-exhausted`, `node.capacity.changed`). Each kind's LEVEL is the
+number of *distinct* affected things (tickets / accounts / nodes) inside a trailing
+window, debounced by threshold + persistence + cooldown, so a provider outage
+touching forty tickets raises exactly **one** alert and writes **zero** per-ticket
+artifacts — the tickets simply wait and resume by themselves. The alert clears
+itself when the condition ends, either because a producer retracts (capacity
+restored, account no longer rejected) or because every affected key ages out of the
+window. This replaces the retired `needs_human_pileup` kind, which counted
+`needs-human` labels — the per-ticket escalation artifact — rather than the
+condition. These alert events ride the same event log → `otel-forward` → OTel collector → fan-out (Loki, dash0),
 where a downstream alert rule routes them to a channel. **Delivery is a separate concern**
 — the broker emits intent only; no channel or credential lives in the daemon, so the
 alerter survives a monitor death without depending on it.

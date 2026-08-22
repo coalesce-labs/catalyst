@@ -8,18 +8,15 @@ import {
   ALERT_RAISED,
   ALERT_CLEARED,
   ALERT_KIND_SYSTEM_DOWN,
-  ALERT_KIND_NEEDS_HUMAN_PILEUP,
-  NEEDS_HUMAN_LABELS,
+  ALERT_KIND_PROVIDER_DEGRADED,
+  ALERT_KIND_RATE_LIMIT_EXHAUSTED,
+  ALERT_KIND_CAPACITY_UNAVAILABLE,
   buildAlertEnvelope,
   emitAlertEvent,
-  initialPileupState,
-  nextPileupAlarmState,
+  initialAlarmState,
+  nextLevelAlarmState,
 } from "./alert-emit.mjs";
-// Parity: the canonical taxonomy source (monitor-tree; imported in TEST only).
-import {
-  ATTENTION_LABEL_NEEDS_HUMAN,
-  ATTENTION_LABEL_NEEDS_INPUT,
-} from "../orch-monitor/lib/board-data.mjs";
+import * as alertEmit from "./alert-emit.mjs";
 
 const NOW = () => "2026-06-18T20:00:00.000Z";
 
@@ -41,14 +38,42 @@ describe("buildAlertEnvelope (CTL-1123)", () => {
 
   test("cleared → catalyst.alert.cleared, INFO, count/threshold in payload", () => {
     const e = buildAlertEnvelope(
-      { action: "cleared", kind: ALERT_KIND_NEEDS_HUMAN_PILEUP, count: 0, threshold: 3, sinceMs: 600000 },
+      { action: "cleared", kind: ALERT_KIND_PROVIDER_DEGRADED, count: 0, threshold: 2, sinceMs: 600000 },
       { now: NOW },
     );
     expect(e.attributes["event.name"]).toBe(ALERT_CLEARED);
     expect(e.attributes["event.action"]).toBe("cleared");
-    expect(e.attributes["event.label"]).toBe("needs_human_pileup");
+    expect(e.attributes["event.label"]).toBe("provider_degraded");
     expect(e.severityText).toBe("INFO");
-    expect(e.body.payload).toMatchObject({ kind: "needs_human_pileup", count: 0, threshold: 3, sinceMs: 600000 });
+    expect(e.body.payload).toMatchObject({ kind: "provider_degraded", count: 0, threshold: 2, sinceMs: 600000 });
+  });
+});
+
+describe("alert KIND taxonomy (CTL-2156)", () => {
+  test("the three system-trouble kinds are stable, distinct strings", () => {
+    expect(ALERT_KIND_PROVIDER_DEGRADED).toBe("provider_degraded");
+    expect(ALERT_KIND_RATE_LIMIT_EXHAUSTED).toBe("rate_limit_exhausted");
+    expect(ALERT_KIND_CAPACITY_UNAVAILABLE).toBe("capacity_unavailable");
+    expect(
+      new Set([
+        ALERT_KIND_SYSTEM_DOWN,
+        ALERT_KIND_PROVIDER_DEGRADED,
+        ALERT_KIND_RATE_LIMIT_EXHAUSTED,
+        ALERT_KIND_CAPACITY_UNAVAILABLE,
+      ]).size,
+    ).toBe(4);
+  });
+
+  // The retirement, asserted rather than assumed. Deleting the label without
+  // deleting the alert kind that counted it would leave a detector wired to a
+  // taxonomy that no longer exists — a silently-never-firing alert.
+  test("needs_human_pileup and its label taxonomy are GONE from the broker", () => {
+    // Positive control: the same instrument sees the kind that DOES survive.
+    expect(alertEmit.ALERT_KIND_SYSTEM_DOWN).toBe("system_down");
+    expect(alertEmit.ALERT_KIND_NEEDS_HUMAN_PILEUP).toBeUndefined();
+    expect(alertEmit.NEEDS_HUMAN_LABELS).toBeUndefined();
+    expect(Object.keys(alertEmit)).not.toContain("ALERT_KIND_NEEDS_HUMAN_PILEUP");
+    expect(Object.keys(alertEmit)).not.toContain("NEEDS_HUMAN_LABELS");
   });
 });
 
@@ -88,20 +113,20 @@ describe("emitAlertEvent (CTL-1123)", () => {
   });
 });
 
-describe("nextPileupAlarmState — level debounce (CTL-1123)", () => {
+describe("nextLevelAlarmState — level debounce (CTL-1123 machine, CTL-2156 kinds)", () => {
   const T = 3; // threshold
   const P = 300_000; // persistence 5m
   const C = 3_600_000; // cooldown 1h
-  const step = (prev, count, nowMs) => nextPileupAlarmState(prev, { count, threshold: T, nowMs, persistenceMs: P, cooldownMs: C });
+  const step = (prev, count, nowMs) => nextLevelAlarmState(prev, { count, threshold: T, nowMs, persistenceMs: P, cooldownMs: C });
 
   test("below threshold → never raises", () => {
-    const r = step(initialPileupState(), 2, 1_000);
+    const r = step(initialAlarmState(), 2, 1_000);
     expect(r.emit).toBeNull();
     expect(r.state.raised).toBe(false);
   });
 
   test("at/above threshold but within persistence window → no raise yet", () => {
-    let s = initialPileupState();
+    let s = initialAlarmState();
     let r = step(s, 5, 0); // aboveSince=0, not yet persisted
     expect(r.emit).toBeNull();
     r = step(r.state, 5, P - 1); // still inside window
@@ -110,7 +135,7 @@ describe("nextPileupAlarmState — level debounce (CTL-1123)", () => {
   });
 
   test("sustained past persistence → raises exactly once (edge-triggered)", () => {
-    let r = step(initialPileupState(), 5, 0);
+    let r = step(initialAlarmState(), 5, 0);
     r = step(r.state, 5, P); // persistence elapsed → raise
     expect(r.emit).toBe("raised");
     expect(r.state.raised).toBe(true);
@@ -119,7 +144,7 @@ describe("nextPileupAlarmState — level debounce (CTL-1123)", () => {
   });
 
   test("drop below threshold while raised → clears and arms cooldown", () => {
-    let r = step(initialPileupState(), 5, 0);
+    let r = step(initialAlarmState(), 5, 0);
     r = step(r.state, 5, P); // raised
     r = step(r.state, 1, P + 1000); // drop → cleared
     expect(r.emit).toBe("cleared");
@@ -128,7 +153,7 @@ describe("nextPileupAlarmState — level debounce (CTL-1123)", () => {
   });
 
   test("re-raise within cooldown is deferred, then fires once cooldown expires", () => {
-    let r = step(initialPileupState(), 5, 0);
+    let r = step(initialAlarmState(), 5, 0);
     r = step(r.state, 5, P); // raised
     const clearAt = P + 1000;
     r = step(r.state, 0, clearAt); // cleared, cooldown armed
@@ -143,20 +168,10 @@ describe("nextPileupAlarmState — level debounce (CTL-1123)", () => {
   });
 
   test("a one-tick spike (above then immediately below) never raises", () => {
-    let r = step(initialPileupState(), 9, 0); // spike, aboveSince=0
+    let r = step(initialAlarmState(), 9, 0); // spike, aboveSince=0
     r = step(r.state, 0, 1000); // gone before persistence
     expect(r.emit).toBeNull();
     expect(r.state.raised).toBe(false);
     expect(r.state.aboveSince).toBeNull();
-  });
-});
-
-describe("needs-human label taxonomy parity (CTL-1123)", () => {
-  test("NEEDS_HUMAN_LABELS matches board-data's canonical ATTENTION_LABEL_* constants", () => {
-    // Guards against a silent taxonomy drift (CTL-995): if board-data renames the
-    // labels, this fails so the broker's pile-up count is updated in lockstep.
-    expect(new Set(NEEDS_HUMAN_LABELS)).toEqual(
-      new Set([ATTENTION_LABEL_NEEDS_HUMAN, ATTENTION_LABEL_NEEDS_INPUT]),
-    );
   });
 });

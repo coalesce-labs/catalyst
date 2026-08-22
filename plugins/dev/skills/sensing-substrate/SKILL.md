@@ -285,10 +285,16 @@ sum by (host_name, event_label, severity_text) (count_over_time({service_name=`c
      or sum by (host_name, event_label, severity_text) (count_over_time({service_name=`catalyst.broker`} | event_entity=`alert` | event_action=`raised` [20m])) * 0)
 ```
 ⚠️ This alert stream filters on **`host_name`** (an OTel host attr), **NOT** `catalyst_node_name` —
-the alert events don't carry the node tag. Observed live: only `needs_human_pileup`; `system_down`
-is built-for but unverified; **no `cleared` event has ever been seen** (the 20m window is the
-de-facto resolve). The richer spec payload (`kind/reason/source/count/threshold`) is **not** in
-Loki — only `event_label` / `host_name` / `severity_text` / timestamp are queryable.
+the alert events don't carry the node tag. Observed live (pre-CTL-2156): only `needs_human_pileup`;
+`system_down` is built-for but unverified; **no `cleared` event has ever been seen** (the 20m window
+is the de-facto resolve). The richer spec payload (`kind/reason/source/count/threshold`) is **not**
+in Loki — only `event_label` / `host_name` / `severity_text` / timestamp are queryable.
+
+⚠️ **CTL-2156 changed the kinds this stream carries.** `needs_human_pileup` is RETIRED; the
+`event_label` values to expect now are `system_down`, `provider_degraded`, `rate_limit_exhausted`
+and `capacity_unavailable`. Any saved alert rule or dashboard still keyed on `needs_human_pileup`
+matches nothing — silently. The new kinds DO emit a paired `cleared` (they auto-clear), so the
+"no cleared event ever seen" observation above should be re-measured rather than assumed.
 
 ---
 
@@ -396,8 +402,10 @@ deliberately want pino-structured daemons (broker / execution-core / otel-forwar
 
 ## Things to flag before relying on them
 
-1. **Alert LogQL (h)** filters on `host_name`, not `catalyst_node_name`; only `needs_human_pileup`
-   observed live; no `cleared` event ever seen; the rich payload is not in Loki.
+1. **Alert LogQL (h)** filters on `host_name`, not `catalyst_node_name`; the pre-CTL-2156 kind
+   `needs_human_pileup` is retired (rules keyed on it now match nothing); the rich payload is not
+   in Loki. Whether the CTL-2156 kinds and their `cleared` events actually reach Loki/dash0 and
+   route to a channel is **unverified end-to-end** — the broker emits INTENT only.
 2. **`system_*` / `catalyst_*` gauges** confirmed as series names but not live-confirmed populated
    on every node.
 3. **External Grafana URL** `otel.rozich.com` is the deployed stack (Tailscale `100.65.193.30`);

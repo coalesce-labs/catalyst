@@ -139,15 +139,16 @@ export const INGESTION_SEED_BYTES = parseInt(
 // the collector → Loki/dash0, where a separate "brain" routes to channels). Emit
 // is default-on with a call-time kill-switch (parity with isIngestionRecencyEnabled
 // — flip without a broker restart). system_down rides the CTL-1122 recency edges;
-// needs_human_pileup is a LEVEL count debounced by threshold + persistence + cooldown.
+// The CTL-2156 system-trouble kinds are LEVEL counts debounced by threshold +
+// persistence + cooldown (see SYSTEM_TROUBLE_POLICY below).
 export function isAlertEmitEnabled() {
   return process.env.FILTER_ALERT_ENABLED !== "0";
 }
 // Parse an int env knob with a default + lower bound, warning (not silently
 // degrading) on a malformed value. Without this a fat-fingered
-// FILTER_PILEUP_THRESHOLD=abc → NaN → `count >= NaN` is always false → the
-// detector silently never fires; =0 → always true → a spurious pile-up on an
-// empty board. A bad value falls back to the default and is logged loudly.
+// FILTER_PROVIDER_DEGRADED_THRESHOLD=abc → NaN → `count >= NaN` is always false → the
+// detector silently never fires; =0 → always true → a spurious alert on an idle
+// fleet. A bad value falls back to the default and is logged loudly.
 //
 // WHOLE-STRING VALIDATION (Codex round 3). `parseInt` is PREFIX-lenient: "1.5" and
 // "1garbage" both parse as 1, so a partially-parsed value slipped through as a
@@ -171,12 +172,53 @@ export function parseIntKnob(envVal, dflt, { min = 0 } = {}) {
   }
   return n;
 }
-// needs_human_pileup: how many active/non-terminal tickets must carry a
-// needs-human/needs-input label, for how long, before one alert fires; and the
-// minimum gap after a clear before it can re-fire (flap guard).
-export const PILEUP_THRESHOLD = parseIntKnob(process.env.FILTER_PILEUP_THRESHOLD, 3, { min: 1 });
-export const PILEUP_PERSISTENCE_MS = parseIntKnob(process.env.FILTER_PILEUP_PERSISTENCE_MS, 300000, { min: 0 });
-export const PILEUP_COOLDOWN_MS = parseIntKnob(process.env.FILTER_PILEUP_COOLDOWN_MS, 3600000, { min: 0 });
+// CTL-2156 — the SYSTEM-trouble alert policy, one row per alert kind.
+//
+// Replaces the retired FILTER_PILEUP_* knobs (which tuned `needs_human_pileup`,
+// a count of Linear needs-human LABELS — the per-ticket escalation artifact, not
+// the condition). Each kind is now tuned independently because they have
+// genuinely different shapes:
+//
+//   threshold      how many DISTINCT affected things (tickets / accounts / nodes)
+//                  must be in trouble at once. >1 for provider_degraded so a
+//                  single unlucky ticket is not an outage; 1 for the others,
+//                  where one exhausted account or one slotless node IS the fact.
+//   windowMs       how long one observation keeps its key "in trouble" with no
+//                  further news. Also the auto-clear BACKSTOP for producers that
+//                  only ever report trouble (sdk.overloaded never says "I'm fine").
+//   persistenceMs  how long the level must hold before raising. 0 where the
+//                  window itself is already the debounce; non-zero for capacity,
+//                  which dips through 0 transiently during autotune.
+//   cooldownMs     minimum gap after a clear before a re-raise (flap guard).
+//
+// A bad value falls back to the default and is logged loudly (parseIntKnob).
+export const SYSTEM_TROUBLE_POLICY = Object.freeze({
+  provider_degraded: Object.freeze({
+    threshold: parseIntKnob(process.env.FILTER_PROVIDER_DEGRADED_THRESHOLD, 2, { min: 1 }),
+    windowMs: parseIntKnob(process.env.FILTER_PROVIDER_DEGRADED_WINDOW_MS, 600000, { min: 1000 }),
+    persistenceMs: parseIntKnob(process.env.FILTER_PROVIDER_DEGRADED_PERSISTENCE_MS, 0, { min: 0 }),
+    cooldownMs: parseIntKnob(process.env.FILTER_PROVIDER_DEGRADED_COOLDOWN_MS, 1800000, { min: 0 }),
+  }),
+  rate_limit_exhausted: Object.freeze({
+    threshold: parseIntKnob(process.env.FILTER_RATE_LIMIT_THRESHOLD, 1, { min: 1 }),
+    windowMs: parseIntKnob(process.env.FILTER_RATE_LIMIT_WINDOW_MS, 1800000, { min: 1000 }),
+    persistenceMs: parseIntKnob(process.env.FILTER_RATE_LIMIT_PERSISTENCE_MS, 0, { min: 0 }),
+    cooldownMs: parseIntKnob(process.env.FILTER_RATE_LIMIT_COOLDOWN_MS, 1800000, { min: 0 }),
+  }),
+  capacity_unavailable: Object.freeze({
+    threshold: parseIntKnob(process.env.FILTER_CAPACITY_THRESHOLD, 1, { min: 1 }),
+    windowMs: parseIntKnob(process.env.FILTER_CAPACITY_WINDOW_MS, 3600000, { min: 1000 }),
+    persistenceMs: parseIntKnob(process.env.FILTER_CAPACITY_PERSISTENCE_MS, 120000, { min: 0 }),
+    cooldownMs: parseIntKnob(process.env.FILTER_CAPACITY_COOLDOWN_MS, 1800000, { min: 0 }),
+  }),
+});
+
+// account.ratelimit.sampled is a GAUGE: at or above this 5h-usage percentage the
+// account counts as an exhausted budget, and below it the observation RETRACTS
+// (an edge-accurate auto-clear rather than waiting out the window).
+export const ACCOUNT_EXHAUSTED_PCT = parseIntKnob(process.env.FILTER_ACCOUNT_EXHAUSTED_PCT, 100, {
+  min: 1,
+});
 
 // CTL-1523: broker-degraded detector (the CTL-352 empty-interests signal, fixed —
 // and then deliberately parked). OPT-IN: unset (the default) means the detector

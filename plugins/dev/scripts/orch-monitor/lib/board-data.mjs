@@ -1459,7 +1459,7 @@ export function synthesizeOrphanTickets(orphanState, now) {
 // whose worker dir was torn down is in none of those sets and never reached the
 // inbox — even though deriveAttention already supports the label. This mirrors
 // synthesizeOrphanTickets: it turns the cache-sourced parked descriptors
-// (readParkedNeedsHumanTickets — the broker's countNeedsHumanTickets predicate)
+// (readParkedNeedsHumanTickets — non-removed, non-terminal, needs-human-labelled)
 // into BoardTicket cards that classifyTicket buckets into the inbox "Needs you"
 // (attention) section. `existingIds` is every id ALREADY carded (worker-dir
 // live/between/done + queued + orphan) so a ticket with a real card is NEVER
@@ -2426,7 +2426,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // between-phases / recent-done / queued / orphan), so it never reached the inbox
   // even though deriveAttention supports the label. Read the SAME cache the board
   // enriches from (filter-state.db descriptors, via readParkedNeedsHumanTickets —
-  // the broker's countNeedsHumanTickets predicate) and append one attention card
+  // non-removed, non-terminal, needs-human-labelled) and append one attention card
   // per parked ticket NOT already carded. Deduped against every existing card id;
   // terminal/removed excluded by the reader; fail-open ([] on a db read error).
   const existingCardIds = new Set(tickets.map((t) => t.id));

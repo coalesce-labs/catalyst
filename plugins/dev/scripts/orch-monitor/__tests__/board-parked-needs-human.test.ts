@@ -12,7 +12,7 @@
 //     against the existing worker-dir / queued / orphan card set;
 //   • classifyTicket / deriveInbox bucket that card into the "Needs you" section;
 //   • the cache reader (readParkedNeedsHumanTickets) mirrors the broker's
-//     countNeedsHumanTickets predicate (terminal/removed excluded) and fails open.
+//     parked predicate — non-removed, non-terminal, needs-human-labelled — and fails open.
 
 import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";

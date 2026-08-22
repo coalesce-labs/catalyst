@@ -1842,14 +1842,36 @@ daemon. These knobs are env vars on the `catalyst-broker` process:
   `catalyst.ingestion.stale` (currently `catalyst.monitor` — a dead monitor). It rides that
   already-debounced recency edge, so it has no thresholds of its own; raised on stale, cleared on
   recovered.
-- The **`needs_human_pileup`** alert is a level signal: how many **active, non-terminal** tickets
-  carry a `needs-human`/`needs-input` label in the broker's `filter-state.db` (Done/Canceled and
-  removed tickets are excluded so a stale cached label can't pin the count). Knobs:
-  - `FILTER_PILEUP_THRESHOLD` (default `3`) — minimum labelled-ticket count to alert.
-  - `FILTER_PILEUP_PERSISTENCE_MS` (default `300000`) — the count must stay at/above the threshold
-    this long before one alert fires (spike guard).
-  - `FILTER_PILEUP_COOLDOWN_MS` (default `3600000`) — minimum gap after a clear before it can
-    re-fire (flap guard).
+- The three **system-trouble** alerts (CTL-2156) are level signals over *distinct affected things*
+  inside a trailing window. They are fleet-scoped and auto-clearing by design: a provider outage
+  touching forty tickets raises **one** alert and writes **zero** per-ticket artifacts, and the
+  alert clears itself when the condition ends — either because a producer retracts (capacity
+  restored, account no longer rejected) or because every affected key ages out of the window.
+  They replace the retired `needs_human_pileup` alert and its `FILTER_PILEUP_*` knobs, which
+  counted `needs-human` labels — the per-ticket escalation artifact — rather than the condition.
+
+  | kind | level = distinct… | fed by |
+  | --- | --- | --- |
+  | `provider_degraded` | tickets hit by a 429/529 | `execution-core.sdk.overloaded` |
+  | `rate_limit_exhausted` | spent budgets (accounts, Linear) | `account.status.changed`, `account.ratelimit.{sampled,unsampled}`, `linear.write.proxy.budget-exhausted`, `linear.label.retry-exhausted` |
+  | `capacity_unavailable` | nodes with no execution slots | `node.capacity.changed` (`new_maxParallel <= 0`) |
+
+  Each kind has four knobs, `FILTER_<KIND>_{THRESHOLD,WINDOW_MS,PERSISTENCE_MS,COOLDOWN_MS}`,
+  where `<KIND>` is `PROVIDER_DEGRADED`, `RATE_LIMIT` or `CAPACITY`:
+  - `…_THRESHOLD` — how many distinct affected things before one alert fires. Defaults: `2` for
+    `provider_degraded` (one unlucky ticket is not an outage), `1` for the other two (one exhausted
+    account or one slotless node *is* the fact).
+  - `…_WINDOW_MS` — how long one observation keeps its key "in trouble" with no further news, and
+    therefore the auto-clear backstop for producers that only ever report trouble. Defaults:
+    `600000` (provider), `1800000` (rate limit), `3600000` (capacity).
+  - `…_PERSISTENCE_MS` — how long the level must hold before raising. Defaults: `0` for provider
+    and rate limit (the window is already the debounce), `120000` for capacity, which dips through
+    zero transiently during autotune.
+  - `…_COOLDOWN_MS` (default `1800000` for all three) — minimum gap after a clear before a re-raise
+    (flap guard).
+- `FILTER_ACCOUNT_EXHAUSTED_PCT` (default `100`) — the 5-hour usage percentage at or above which an
+  `account.ratelimit.sampled` reading counts as an exhausted budget. Below it the observation
+  *retracts*, clearing the alert on the edge rather than waiting out the window.
 
 ### Broker-degraded detector (CTL-1523)
 
