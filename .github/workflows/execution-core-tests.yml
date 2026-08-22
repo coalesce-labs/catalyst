@@ -151,7 +151,6 @@ on:
       # confined to any of those files would otherwise skip this workflow.
       - "plugins/dev/skills/phase-monitor-merge/**"
       - "plugins/dev/skills/merge-pr/**"
-      - "plugins/dev/skills/recovery-pass/**"
       - "plugins/dev/skills/triage-aging-prs/**"
       - "plugins/dev/templates/**"
       - "plugins/legacy/skills/oneshot/**"
@@ -231,7 +230,6 @@ jobs:
               - "plugins/*/*/skills/**"
               - "plugins/dev/skills/phase-monitor-merge/**"
               - "plugins/dev/skills/merge-pr/**"
-              - "plugins/dev/skills/recovery-pass/**"
               - "plugins/dev/skills/triage-aging-prs/**"
               - "plugins/dev/templates/**"
               - "plugins/legacy/skills/oneshot/**"
@@ -624,10 +622,6 @@ jobs:
         # guard (skip on match, fail-closed on fetch failure).
         working-directory: plugins/dev/scripts
         run: bash __tests__/gh-pr-comment.test.sh
-
-      - name: recovery-pass pr_not_merged remediation test (CTL-1496)
-        working-directory: plugins/dev/scripts
-        run: bash __tests__/recovery-pass-pr-not-merged.test.sh
 
       - name: review-comments headless resolution test (CTL-1496)
         working-directory: plugins/dev/scripts
@@ -1115,10 +1109,9 @@ jobs:
         run: bash __tests__/oneshot-merge-worktree-guard.test.sh
 
       - name: cross-site worktree-safe merge guard — model-invoked skills and templates (CTL-56)
-        # Guards that merge-pr, recovery-pass, triage-aging-prs, followup-prompt, and
-        # fixup-prompt all use worktree-safe merge (no --delete-branch; checkout-free
-        # remote-ref delete). File list is an array in the test; a 6th call site is a
-        # one-line add.
+        # Guards that merge-pr, triage-aging-prs, followup-prompt, and fixup-prompt all
+        # use worktree-safe merge (no --delete-branch; checkout-free remote-ref delete).
+        # File list is an array in the test; a 5th call site is a one-line add.
         working-directory: plugins/dev/scripts
         run: bash __tests__/merge-delete-branch-worktree-guard.test.sh
 
