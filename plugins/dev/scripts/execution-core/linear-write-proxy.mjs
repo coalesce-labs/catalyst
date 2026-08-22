@@ -94,6 +94,7 @@ import { resolveSecret } from "../lib/secret-contract.mjs";
 import {
   DEFAULT_DAILY_BUDGET,
   DEFAULT_PER_TICKET_CAP,
+  REASONS,
   classifyExhaustion,
   classifyWrite,
   convergenceKeyFor,
@@ -811,16 +812,29 @@ function defaultRecordWriteCooldown(dir, ticket, routeId, now) {
 }
 
 /**
- * isBudgetRefusalReason — ONLY the prefix rule from label-failure-class.mjs's
- * shouldCoolDownLabel is reused (test 4). A `cloud:*` rejection or a
- * validation error (no-cloud-token, body-too-large, spawn-failed) needs
- * RETRY, not backoff — those reasons never reach this predicate anyway, since
- * they arise downstream of the local budget gate this is wired into (see
- * `send`/`sendAsync` below), but the explicit narrow check is what a future
- * refactor moving the call site cannot silently widen.
+ * isBudgetRefusalReason — the prefix rule from label-failure-class.mjs's
+ * shouldCoolDownLabel is reused (test 4), MINUS one deliberate exclusion. A
+ * `cloud:*` rejection or a validation error (no-cloud-token, body-too-large,
+ * spawn-failed) needs RETRY, not backoff — those reasons never reach this
+ * predicate anyway, since they arise downstream of the local budget gate
+ * this is wired into (see `send`/`sendAsync` below), but the explicit narrow
+ * check is what a future refactor moving the call site cannot silently widen.
+ *
+ * ⛔ `REASONS.CONVERGED` ("budget:already-converged") shares the PREFIX but
+ * is deliberately excluded: it is not a capacity signal — it fires on every
+ * ROUTINE "this exact write already landed" hit, not a storm. Arming the
+ * coarse `(ticket, routeId)` cool-down on it would block every OTHER write
+ * on that route for the ticket (a different label, or the opposite-direction
+ * re-add `clearConvergence`/Codex #3505 P1 exists specifically to let
+ * through) for a full window, on the strength of a refusal that was never
+ * doomed to begin with.
  */
 function isBudgetRefusalReason(reason) {
-  return typeof reason === "string" && reason.startsWith(BUDGET_REASON_PREFIX);
+  return (
+    typeof reason === "string" &&
+    reason.startsWith(BUDGET_REASON_PREFIX) &&
+    reason !== REASONS.CONVERGED
+  );
 }
 
 /**

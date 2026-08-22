@@ -462,6 +462,36 @@ describe("CTL-2027 Phase 3: proxy-side (ticket, route) backpressure — enforce"
     expect(h.cooldowns["CTL-14:comment"]).toBeUndefined();
   });
 
+  // ⛔ `budget:already-converged` shares the `budget:` PREFIX with the two
+  // genuine capacity reasons but is NOT a capacity refusal — it fires on
+  // every routine "this exact write already landed" hit, which is common and
+  // benign. Arming the coarse (ticket, route) proxy-side backpressure on it
+  // would block every OTHER "label" write on the ticket — including a
+  // DIFFERENT label, and the opposite-direction re-add Codex #3505 P1 exists
+  // specifically to let through — for a full cool-down window, on the
+  // strength of a refusal that was never a storm to begin with.
+  test("only BUDGET-class reasons arm it — 'budget:already-converged' does NOT (Codex round)", () => {
+    const allAbsent = `${JSON.stringify({ outcome: "succeeded", results: [{ labelId: "lab-1", outcome: "already-absent", attempts: 1 }] })}\n200`;
+    const h = harness({ backpressureMode: "enforce", stdout: allAbsent });
+    const payload = { issueId: "i-1", labelIds: ["lab-1"], mode: "remove" };
+    h.proxy.send({ routeId: "label", ticket: "CTL-18", payload });
+    expect(h.calls.length).toBe(1);
+
+    const second = h.proxy.send({ routeId: "label", ticket: "CTL-18", payload });
+    expect(second.reason).toBe("budget:already-converged");
+    expect(h.cooldowns["CTL-18:label"]).toBeUndefined(); // must NOT arm
+
+    // proof it really didn't arm: an UNRELATED label write on the SAME
+    // ticket + SAME route is not blocked by proxy-side backpressure.
+    const other = h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-18",
+      payload: { issueId: "i-1", labelIds: ["lab-2"], mode: "remove" },
+    });
+    expect(other.applied).toBe(true);
+    expect(h.calls.length).toBe(2);
+  });
+
   test("the LABEL path arms only ONE window, not two nested ones stacked with the converger's own cool-down", () => {
     // Simulates a caller hitting the proxy directly on the label route (the same
     // route the scheduler's convergers use). The proxy's own window must be the
