@@ -1100,7 +1100,12 @@ function dispatchTriage(
     labelNeedsHuman = (dir, t) =>
       routeStuckTicketToDelegate(dir, t, {
         site: "triage-redispatch-cap",
-        reason: "triage-redispatch-cap",
+        // CTL-2061 P1 (Codex): classify on the underlying phase failure reason
+        // (e.g. "sdk-overloaded-exhausted") when phase-triage.json recorded one,
+        // so the cap-check can tell an infra-class streak from a real product
+        // failure. Falls back to the literal cap reason (never infra-class —
+        // see infra-class-reasons.mjs) when no failure reason was recorded.
+        reason: readTriageSignalFailureReason(dir, t) ?? "triage-redispatch-cap",
         boardContext: { cap: TRIAGE_DISPATCH_CAP },
         applyLabel: { applyLabel },
         explanation: {
@@ -1600,6 +1605,25 @@ export function readTriageSignalStatus(orchDir, ticket) {
     return typeof sig?.status === "string" ? sig.status : null;
   } catch {
     return null; // absent/malformed → fail-open
+  }
+}
+
+// readTriageSignalFailureReason — CTL-2061 P1 (Codex): the triage-redispatch-cap
+// park was calling routeStuckTicketToDelegate with the literal reason string
+// "triage-redispatch-cap", which is not in infra-class-reasons.mjs's registry —
+// so isInfraClassReason() always saw a non-infra reason and an infra-class streak
+// (e.g. three straight `sdk-overloaded-exhausted` triage failures) still parked a
+// human. This reads the actual phase-triage.json `failureReason` (camelCase — the
+// signal-file spelling; see infra-class-reasons.mjs's header) so the cap-park path
+// can classify the SAME reason the phase itself recorded.
+export function readTriageSignalFailureReason(orchDir, ticket) {
+  try {
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", ticket, "phase-triage.json"), "utf8")
+    );
+    return typeof sig?.failureReason === "string" ? sig.failureReason : null;
+  } catch {
+    return null; // absent/malformed → fail-open (falls back to the cap reason)
   }
 }
 
