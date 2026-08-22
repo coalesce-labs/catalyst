@@ -17,6 +17,10 @@ import {
   isHeldForReview,
   stallClassSignalFields,
   stallSweepDisposition,
+  freshStallStatus,
+  isRetryableStallStatus,
+  RETRYABLE_STALL_STATUS,
+  TERMINAL_STALL_STATUS,
 } from "./stall-class.mjs";
 
 const klassOf = (reason, extra = {}) => classifyStall({ reason, ...extra }).klass;
@@ -367,5 +371,59 @@ describe("⛔ stallSweepDisposition — the already-escalated quiet gate", () =>
   test("ASK and MOOT are not quiet either, until a producer publishes for them", () => {
     expect(stallSweepDisposition({ reason: "design_signoff_gate" })).toBeNull();
     expect(stallSweepDisposition({ reason: "empty_branch" })).toBeNull();
+  });
+});
+
+// ── The retryable/terminal stall-status split (CTL-2159 follow-up) ───────────
+//
+// The property under test is the one a single shared status value destroyed: a
+// SYSTEM stall is "retry with backoff", so the status an escalation stamps for it
+// must NOT be the value every terminal reader vetoes on.
+describe("freshStallStatus — a retryable stall and a deadlock are different statuses", () => {
+  test("the two statuses are actually different values", () => {
+    // If these ever collapse to one string the split is decorative and the retry
+    // truncation is back, silently. This is the assertion that fires first.
+    expect(RETRYABLE_STALL_STATUS).not.toBe(TERMINAL_STALL_STATUS);
+  });
+
+  test("SYSTEM is the ONLY class that gets the retryable status", () => {
+    expect(freshStallStatus(STALL_CLASS.SYSTEM)).toBe(RETRYABLE_STALL_STATUS);
+    for (const klass of [STALL_CLASS.ASK, STALL_CLASS.MOOT, STALL_CLASS.HELD]) {
+      expect(freshStallStatus(klass)).toBe(TERMINAL_STALL_STATUS);
+    }
+  });
+
+  test("an unknown or absent class fails to the TERMINAL value", () => {
+    // Fail direction matters: a stall we could not classify is HELD, and HELD
+    // means a person must look. Retrying it forever on a table miss is the exact
+    // failure this epic removes.
+    for (const bogus of [undefined, null, "", "wibble", 7, {}]) {
+      expect(freshStallStatus(bogus)).toBe(TERMINAL_STALL_STATUS);
+    }
+  });
+
+  test("isRetryableStallStatus recognises only the retryable value", () => {
+    expect(isRetryableStallStatus(RETRYABLE_STALL_STATUS)).toBe(true);
+    for (const other of [TERMINAL_STALL_STATUS, "failed", "aborted", "done", "running", undefined]) {
+      expect(isRetryableStallStatus(other)).toBe(false);
+    }
+  });
+
+  test("the reasons that motivated the split classify SYSTEM", () => {
+    // The dispatch circuit breaker in both its spellings — the highest-frequency
+    // stall in the fleet, and the one whose retry budget the shared value cut
+    // from 8 to 3.
+    expect(freshStallStatus(classifyStall({ reason: "dispatch-circuit-breaker" }).klass)).toBe(
+      RETRYABLE_STALL_STATUS,
+    );
+    expect(freshStallStatus(classifyStall({ reason: "dispatch-circuit-breaker:7" }).klass)).toBe(
+      RETRYABLE_STALL_STATUS,
+    );
+    // CONTROL, same shape: a genuine human gate keeps the terminal status, so the
+    // assertions above are measuring the class and not a constant.
+    expect(freshStallStatus(classifyStall({ reason: "design-signoff-gate" }).klass)).toBe(
+      TERMINAL_STALL_STATUS,
+    );
+    expect(freshStallStatus(classifyStall({ reason: null }).klass)).toBe(TERMINAL_STALL_STATUS);
   });
 });

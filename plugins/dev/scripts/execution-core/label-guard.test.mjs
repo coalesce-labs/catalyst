@@ -23,6 +23,8 @@ import {
   WORKER_STATUS_LABELS,
 } from "./label-guard.mjs";
 import { validateExplanation } from "./escalation-explanation.mjs";
+import { RETRYABLE_STALL_STATUS, TERMINAL_STALL_STATUS } from "./stall-class.mjs";
+import { isTicketInFlight } from "./scheduler.mjs";
 
 let orchDir;
 
@@ -1557,5 +1559,75 @@ describe("labelNeedsHumanUnlessBeliefOwner — CTL-2056 escalation emit", () => 
     ).not.toThrow();
     // The .applied marker must still be written (label application succeeded).
     expect(existsSync(join(orchDir, "workers", "CTL-THROW", ".linear-label-needs-human.applied"))).toBe(true);
+  });
+});
+
+// ─── The escalation's fresh-signal status derives from the stall CLASS ────────
+//
+// ⛔ THE DEFECT THIS PINS. Publishing an escalation no longer depends on a Linear
+// call, so it now CREATES phase-recovery-pass.json on tickets that never had one.
+// Stamping the terminal `stalled` there made isTicketInFlight veto the ticket, and
+// the escalation fires at DISPATCH_FAILURE_ESCALATION_THRESHOLD (3) — so every
+// retry loop behind it silently ended at 3 instead of its own ceiling
+// (CIRCUIT_BREAKER_THRESHOLD 8, getMaxDispatchRetries 5), with no log line on
+// ticks 4-8. A SYSTEM stall is retry-with-backoff by definition; only ASK / MOOT /
+// HELD stop the work.
+describe("labelNeedsHumanUnlessBeliefOwner — fresh-signal status splits by stall class", () => {
+  const SIG = (ticket) => join(orchDir, "workers", ticket, "phase-recovery-pass.json");
+
+  function escalate(ticket, reason) {
+    mkdirSync(join(orchDir, "workers", ticket), { recursive: true });
+    return labelNeedsHumanUnlessBeliefOwner(
+      orchDir,
+      ticket,
+      { applyLabel: () => ({ applied: true }) },
+      {
+        env: { CATALYST_INTENTS_ENFORCE: "0", CATALYST_ESCALATION_ASK: "off" },
+        site: "dispatch-failures",
+        reason,
+        log: { info: () => {}, warn: () => {} },
+      }
+    );
+  }
+
+  test("a SYSTEM stall gets the RETRYABLE status, and the class is on disk", () => {
+    expect(escalate("CTL-SYS", "dispatch-circuit-breaker:3")).toBe(true);
+    const sig = JSON.parse(readFileSync(SIG("CTL-SYS"), "utf8"));
+    expect(sig.status).toBe(RETRYABLE_STALL_STATUS);
+    expect(sig.stallClass).toBe("system");
+  });
+
+  test("CONTROL: an unclassifiable stall keeps the TERMINAL status", () => {
+    // Same call, same shape, only the reason differs — so the assertion above is
+    // measuring the class and not just "whatever this function writes".
+    expect(escalate("CTL-HELD", "wibble-frobnicator-misaligned")).toBe(true);
+    const sig = JSON.parse(readFileSync(SIG("CTL-HELD"), "utf8"));
+    expect(sig.status).toBe(TERMINAL_STALL_STATUS);
+    expect(sig.stallClass).toBe("held");
+  });
+
+  test("a genuine human gate keeps the TERMINAL status", () => {
+    expect(escalate("CTL-ASK", "design-signoff-gate")).toBe(true);
+    expect(JSON.parse(readFileSync(SIG("CTL-ASK"), "utf8")).status).toBe(TERMINAL_STALL_STATUS);
+  });
+
+  test("⛔ THE PROPERTY: the retryable status does not stop dispatch; the terminal one does", () => {
+    // isTicketInFlight is the reader whose veto truncated the retry budget. It sees
+    // the recovery-pass signal as an unknown (never-superseded) phase, so its status
+    // decides the ticket's fate directly.
+    expect(isTicketInFlight({ research: "done", "recovery-pass": RETRYABLE_STALL_STATUS })).toBe(true);
+    expect(isTicketInFlight({ research: "done", "recovery-pass": TERMINAL_STALL_STATUS })).toBe(false);
+  });
+
+  test("a PRIOR status still wins over both — the escalation contributes the CLASS", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-PRIOR"), { recursive: true });
+    writeFileSync(
+      SIG("CTL-PRIOR"),
+      JSON.stringify({ ticket: "CTL-PRIOR", status: "failed", phase: "recovery-pass" })
+    );
+    expect(escalate("CTL-PRIOR", "dispatch-circuit-breaker:3")).toBe(true);
+    const sig = JSON.parse(readFileSync(SIG("CTL-PRIOR"), "utf8"));
+    expect(sig.status).toBe("failed"); // the yield-expiry sweep's record is not rewritten
+    expect(sig.stallClass).toBe("system");
   });
 });

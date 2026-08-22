@@ -24,6 +24,7 @@ import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 import { TERMINAL_LABEL_REASONS } from "./label-failure-class.mjs"; // COORD-236: one owner for the terminal set
 import { emitEscalationEvent } from "./escalation-event.mjs"; // CTL-2056
 import { publishEscalation } from "./escalation-publish.mjs"; // CTL-2159
+import { freshStallStatus, TERMINAL_STALL_STATUS } from "./stall-class.mjs"; // CTL-2159
 
 // ─── labelOnce — moved from scheduler.mjs (CTL-585, then CTL-638 re-home) ───
 //
@@ -428,7 +429,7 @@ function writeExplanationSignal(
   orchDir,
   ticket,
   explanation,
-  { log: logArg = null, extraFields = {} } = {}
+  { log: logArg = null, extraFields = {}, freshStatus = TERMINAL_STALL_STATUS } = {}
 ) {
   // CTL-2159: the signal is now worth writing even with NO explanation — the
   // stall CLASS is the durable record, and manufacturing an explanation to have
@@ -493,22 +494,25 @@ function writeExplanationSignal(
     const signal = {
       ...prior,
       ticket,
-      // ⛔ CTL-2159: was an unconditional `status:"needs-human"` — the LAST writer
-      // of that value anywhere in the tree (CTL-1552 normalized every other
-      // escalation to `stalled` + `stalledReason`).
-      //
-      // It is now two changes, and the second matters more than the first:
-      //   1. the fresh-signal value is `stalled`, the spelling every reader
-      //      already handles (isTicketInFlight, board-health's status set, the
-      //      unstuck sweep);
-      //   2. a PRIOR status is PRESERVED rather than clobbered. The old write
-      //      only ran when the Linear label landed, so the clobber was rare and
+      // ⛔ CTL-2159: was an unconditional terminal status. It is now THREE things,
+      // and the third is the one a reader will be tempted to "simplify" away:
+      //   1. a PRIOR status is PRESERVED rather than clobbered. The old write only
+      //      ran when the Linear label landed, so the clobber was rare and
       //      invisible; publishing no longer depends on a Linear call, so an
       //      unconditional overwrite would newly rewrite `failed` (and the
-      //      yield-expiry sweep's `failureReason` record) into `stalled` on
-      //      every escalation. The escalation's durable contribution is the
-      //      CLASS, not a status edit.
-      status: typeof prior.status === "string" && prior.status !== "" ? prior.status : "stalled",
+      //      yield-expiry sweep's `failureReason` record) on every escalation.
+      //      The escalation's durable contribution is the CLASS, not a status edit.
+      //   2. the fresh-signal value is a spelling every reader already handles.
+      //   3. ⛔ WHICH spelling DERIVES FROM THE STALL CLASS (freshStallStatus).
+      //      A hardcoded `stalled` here is TERMINAL to isTicketInFlight, so the
+      //      escalation that fires at DISPATCH_FAILURE_ESCALATION_THRESHOLD (3)
+      //      silently truncated every retry loop behind it — the circuit breaker's
+      //      8 and getMaxDispatchRetries's 5 both became 3, with nothing in the log
+      //      to say so (CTL-671's own test caught it). A SYSTEM stall is
+      //      retry-with-backoff BY DEFINITION; only ASK/MOOT/HELD stop the work.
+      //      See stall-class.mjs for why the two statuses cannot be one value.
+      status:
+        typeof prior.status === "string" && prior.status !== "" ? prior.status : freshStatus,
       ...(prior.stalledReason ? {} : { stalledReason: "escalated" }),
       ...extraFields,
       needsHumanSince:
@@ -700,10 +704,14 @@ export function labelNeedsHumanUnlessBeliefOwner(
     // The explanation card is written ONLY when the caller supplied a real one;
     // the stall CLASS is stamped either way, so an unexplained SYSTEM stall
     // leaves a durable record without manufacturing a human question.
-    writeSignal: ({ fields }) =>
+    writeSignal: ({ fields, klass }) =>
       writeExplanationSignal(orchDir, ticket, explanation ?? null, {
         log: logArg,
         extraFields: fields,
+        // ⛔ The CLASS picks the status. publishEscalation hands us the verdict it
+        // just reached; deriving here (rather than at the classifier) keeps
+        // stall-class.mjs pure and keeps the choice next to the write it governs.
+        freshStatus: freshStallStatus(klass),
       }),
   });
   return published;

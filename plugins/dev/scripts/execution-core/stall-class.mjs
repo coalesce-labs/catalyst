@@ -66,6 +66,68 @@ export const STALL_CLASS_ACTION = Object.freeze({
   [STALL_CLASS.HELD]: "hold-for-review",
 });
 
+// ── The two stall STATUSES, and why they are two ─────────────────────────────
+//
+// ⛔ A RETRYABLE STALL AND A DEADLOCK MUST NOT SHARE ONE STATUS VALUE. `stalled`
+// is read across this tree as TERMINAL — `isTicketInFlight` (scheduler.mjs) vetoes
+// on it, the terminal sweep escalates on it, `signal-reader.TERMINAL` counts it as
+// the phase being over. That is exactly right for a stall a person has to break:
+// a dependency ring, an unanswerable ask, an unclassified hold. It is exactly
+// WRONG for the SYSTEM class, whose whole contract is "retry with backoff; the
+// CTL-2156 fleet alert names the condition" — an escalation that writes a terminal
+// status silently converts a retry budget into a stop.
+//
+// MEASURED (CTL-671's own regression test): the dispatch-failure escalation fires
+// at 3 consecutive failures. Stamping `stalled` there cut the retry budget from 8
+// (CIRCUIT_BREAKER_THRESHOLD) / 5 (getMaxDispatchRetries) down to 3, with no log
+// line on ticks 4-8 — a silent, invisible truncation of every retry loop in the
+// system, caused by a field that answers two questions at once.
+//
+// So the fresh-signal status now DERIVES from the class:
+//   SYSTEM            → RETRYABLE_STALL_STATUS   (dispatch continues, stall recorded)
+//   ASK / MOOT / HELD → TERMINAL_STALL_STATUS    (dispatch stops, as before)
+//
+// ⛔ AND WHY A NEW TOKEN IS SAFE HERE, WHEN CTL-1790 SAYS IT USUALLY IS NOT.
+// sdk-run-phase-agent.mjs argues at length against inventing a status value: an
+// unrecognized token is not in any TERMINAL set, so `isTicketInFlight` holds the
+// ticket in flight forever — never advanced, never reclaimed, never escalated,
+// permanently invisible. That argument is about a token meant to be TERMINAL, and
+// every one of its failure modes is "the ticket never stops". This token is
+// deliberately NON-terminal: staying in flight IS the intended behaviour, the
+// advancement sweep keeps dispatching, the circuit breaker still trips at 8 and
+// writes a real `stalled`, and the fleet alert makes the condition visible without
+// a per-ticket artifact. Absence from a TERMINAL set is the feature, not the bug.
+//
+// It is also NOT a novel shape on disk: before CTL-2159 this same fresh signal
+// carried a non-terminal status for years, so every reader below already tolerates
+// a recovery-pass signal that is neither in-flight nor terminal.
+
+/** SYSTEM: the stall is recorded but the work must keep retrying. NON-terminal. */
+export const RETRYABLE_STALL_STATUS = "stalled-retryable";
+
+/** ASK / MOOT / HELD: the stall stops the work until someone breaks it. Terminal. */
+export const TERMINAL_STALL_STATUS = "stalled";
+
+/**
+ * freshStallStatus — PURE. The `status` an escalation stamps on a phase signal
+ * that has NONE yet. A signal that already carries a status keeps it (the
+ * escalation's durable contribution is the CLASS, not a status edit) — that
+ * preservation lives at the write site, not here.
+ *
+ * Fail direction: an unknown/absent class returns the TERMINAL value. A stall we
+ * could not classify is HELD, and HELD means a person must look — retrying it
+ * forever on the strength of a table miss is the failure this epic exists to
+ * remove.
+ */
+export function freshStallStatus(klass) {
+  return klass === STALL_CLASS.SYSTEM ? RETRYABLE_STALL_STATUS : TERMINAL_STALL_STATUS;
+}
+
+/** True when a phase-signal status means "stalled, but still retrying". */
+export function isRetryableStallStatus(status) {
+  return status === RETRYABLE_STALL_STATUS;
+}
+
 // canon — one spelling for lookup. CTL-1552 left `needs_human` and `needs-human`
 // both live (board-health.mjs's NEEDS_HUMAN_STATUSES reads both), and the reason
 // vocabulary mixes snake_case and kebab-case freely (`empty_branch` vs

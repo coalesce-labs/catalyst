@@ -54,13 +54,14 @@
     },
     "status": {
       "type": "string",
-      "description": "Current lifecycle status of this phase, written by the daemon on dispatch and updated by the phase-agent as work progresses. NOTE: this enum is known to be INCOMPLETE \u2014 the runtime also writes at least `needs-input`, `preempted` and `aborted`, which are absent here (tracked separately). A schema that rejects valid production signals is worse than none, so treat a failure against this enum as a schema gap until proven otherwise.",
+      "description": "Current lifecycle status of this phase, written by the daemon on dispatch and updated by the phase-agent as work progresses. `stalled` is TERMINAL (isTicketInFlight vetoes on it, the terminal sweep escalates on it); `stalled-retryable` is the SAME stall record with the opposite dispatch verdict \u2014 a SYSTEM-class stall that must keep retrying with backoff while one fleet alert names the condition. Splitting them is load-bearing: one value for both silently truncated every retry budget to the escalation threshold. See plugins/dev/scripts/execution-core/stall-class.mjs. NOTE: this enum is known to be INCOMPLETE \u2014 the runtime also writes at least `needs-input`, `preempted` and `aborted`, which are absent here (tracked separately). A schema that rejects valid production signals is worse than none, so treat a failure against this enum as a schema gap until proven otherwise.",
       "enum": [
         "dispatched",
         "running",
         "done",
         "failed",
         "stalled",
+        "stalled-retryable",
         "skipped",
         "turn-cap-exhausted",
         "awaiting-work"
