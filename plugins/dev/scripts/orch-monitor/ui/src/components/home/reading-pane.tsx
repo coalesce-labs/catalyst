@@ -280,6 +280,10 @@ function WhatsNeededNow({
             ["Why this needs you", escalation.whyYou, "why_you"],
             ["Why it couldn't self-heal", escalation.whyNotAuto, "why_not_auto"],
             ["What to do", escalation.whatToDo, "what_to_do"],
+            // CTL-1871 COORD-41: "what happens if nobody acts" — always present for
+            // escalations that passed through the CTL-1871 gate; may be absent for
+            // legacy explanations written before CTL-1871 shipped.
+            ["If no one acts", escalation.defaultIfSilent, "default_if_silent"],
           ] as const
         )
           .filter(([, value]) => value != null)

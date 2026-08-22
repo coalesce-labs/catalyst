@@ -16,8 +16,9 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "~catalyst-lib/*": ["../../lib/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src", "../../lib/state-vocabulary.d.ts"]
 }

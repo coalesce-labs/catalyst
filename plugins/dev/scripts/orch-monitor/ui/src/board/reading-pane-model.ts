@@ -156,6 +156,8 @@ export interface EscalationExplanationView {
   whyYou: string | null;
   whyNotAuto: string | null;
   whatToDo: string | null;
+  /** CTL-1871 COORD-41: what happens if nobody responds. */
+  defaultIfSilent: string | null;
 }
 
 const nz = (s: string | null | undefined): string | null =>
@@ -178,6 +180,7 @@ export function escalationExplanationFor(row: InboxRow): EscalationExplanationVi
     whyYou: nz(e.why_you),
     whyNotAuto: nz(e.why_not_auto),
     whatToDo: nz(e.what_to_do),
+    defaultIfSilent: nz(e.default_if_silent ?? null),
   };
   if (Object.values(view).every((v) => v == null)) return null;
   return view;

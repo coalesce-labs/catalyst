@@ -20,6 +20,8 @@ import {
   type HoldingBucketItem,
 } from "./queue-model";
 import { QueueRowShell } from "./queue-row";
+// CTL-1871 COORD-41: plain-language labels from the canonical vocabulary glossary.
+import { glossFor } from "~catalyst-lib/state-vocabulary";
 
 const DOT_COLOR: Record<HoldingBucket["kind"], string> = {
   "needs-you": C.yellow,
@@ -31,11 +33,11 @@ const DOT_COLOR: Record<HoldingBucket["kind"], string> = {
 };
 const BUCKET_LABEL: Record<HoldingBucket["kind"], string> = {
   "needs-you": "Needs you",
-  stalled: "Stalled — gave up",
+  stalled: glossFor("stalled").plainLabel,
   blocked: "Blocked by dependencies",
   queued: "Held — awaiting capacity",
-  "needs-input": "Waiting for input",
-  "needs-human": "Needs human review",
+  "needs-input": glossFor("needs-input").plainLabel,
+  "needs-human": glossFor("needs-human").plainLabel,
 };
 
 function ColorDot({ color }: { color: string }) {

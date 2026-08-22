@@ -103,6 +103,10 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": resolve(__dirname, "src"),
+      // CTL-1871 COORD-41: expose the scripts lib/ directory to the UI so
+      // state-vocabulary.mjs (and future zero-import leaf modules) can be
+      // imported as "~catalyst-lib/<name>" from any UI source file.
+      "~catalyst-lib": resolve(__dirname, "../../lib"),
     },
   },
   build: {

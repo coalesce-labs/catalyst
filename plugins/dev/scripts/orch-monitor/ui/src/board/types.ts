@@ -230,6 +230,8 @@ export interface BoardEscalationExplanation {
   why_you: string | null;
   why_not_auto: string | null;
   what_to_do: string | null;
+  /** CTL-1871 COORD-41: what happens if nobody responds. */
+  default_if_silent?: string | null;
 }
 
 export interface WorkflowSubStep {

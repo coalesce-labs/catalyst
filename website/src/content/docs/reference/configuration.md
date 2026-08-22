@@ -1766,6 +1766,59 @@ Observable on the event log (`delegate.routed` with a `phase.rescue.routed-to-{s
 type discriminator):
 `{job="catalyst-events"} | json | attributes["event.name"] = "delegate.routed"`
 
+### COORD-29: ASK comment gate (CTL-1871)
+
+When the execution-core daemon applies the `needs-human` label it now attempts to post a structured
+**ASK comment** in the same step — a single-sentence question and a default outcome if nobody
+answers. This makes every `needs-human` ticket actionable in the operator inbox. The gate is
+modal:
+
+| Key                         | Default  | Notes                                                                                                                                                                                                                                                       |
+| --------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CATALYST_NEEDS_HUMAN_ASK`  | `shadow` | `off` — gate is skipped entirely; `shadow` — attempts the comment, logs failure but always applies the label; `enforce` — withholds the label AND skips the escalation if the comment post fails (the ticket stays where it was). Garbage values → `shadow`. |
+
+**ASK comment format** (posted to Linear):
+
+```
+ASK (Ryan): <call_to_action> — default if silent: <default_if_silent>
+```
+
+The gate is idempotent: a `.needs-human-ask.applied` marker under `workers/<TICKET>/` prevents
+duplicate comments on repeated label applications for the same ticket. The marker is cleared by
+`clearNeedsHumanMarkers` whenever the `needs-human` label is removed (human responds), so the next
+escalation cycle re-arms cleanly.
+
+**Events emitted** (observable via `catalyst-events tail`):
+
+- `needs-human.ask.comment.failed` — comment post failed (any mode); includes `site`, `ticket`, `mode`, `err`
+- `needs-human.ask.label.withheld` — enforce-mode only; label suppressed because comment failed
+
+Both are registered in `broker/namespace-parity.test.mjs` via the imported `NEEDS_HUMAN_ASK_EVENTS`
+constant, so a rename cannot leave a re-typed literal behind.
+
+### COORD-29: stale-needs-human daily sweep (CTL-1871 Phase 4)
+
+The ASK gate covers **future** escalations. Legacy `needs-human` labels applied before the gate
+shipped, cross-host applications, and edge races can leave a ticket with the label but no ASK
+comment. The daily sweep closes that gap.
+
+| Key                                   | Default  | Notes                                                                                                                                                                                                                                                                                   |
+| ------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CATALYST_STALE_NEEDS_HUMAN_SWEEP`    | `shadow` | `off` — sweep is disabled; `shadow` (default) — scans and logs WOULD-flag events but applies nothing; `enforce` — applies `stale-needs-human` label and posts a defect comment with a suggested ASK template for each flagged ticket. Garbage values → `shadow`. |
+
+The sweep runs once at broker boot and then every 24 hours (`SWEEP_INTERVAL_MS = 86_400_000 ms`).
+It never modifies terminal tickets and is idempotent (a ticket already carrying `stale-needs-human`
+is skipped). After each pass it emits `broker.stale-needs-human.swept` with `{scanned, flagged,
+items}` on the unified event log — observable via `catalyst-events tail --filter broker.stale`.
+
+**Classifier logic** (`classifyStaleNeedsHuman`):
+
+1. Terminal state → `flag:false, reason:"terminal"` (skip entirely)
+2. No `needs-human` label → `flag:false, reason:"no-needs-human"`
+3. Already carries `stale-needs-human` → `flag:false, reason:"already-flagged"` (idempotent)
+4. Has at least one `parseAskComment`-recognised ASK comment → `flag:false, reason:"has-ask"`
+5. Otherwise → `flag:true` (the gap)
+
 ### Monitor reply-route trusted origins (CTL-1573)
 
 `POST /api/ticket/<ticket>/reply` posts operator-authored text to Linear, and the monitor binds
