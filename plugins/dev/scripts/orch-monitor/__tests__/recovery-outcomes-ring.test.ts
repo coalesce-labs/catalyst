@@ -13,6 +13,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadRecoveryOutcomes } from "../lib/board-data.mjs";
 import { createEventRing } from "../lib/event-ring";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 function recoveryLine(name: string, ticket: string, ts: string) {
   return JSON.stringify({
@@ -34,7 +37,7 @@ function setupLog(lines: string[]): { catalystDir: string; logPath: string } {
   tmp = mkdtempSync(join(tmpdir(), "ctl1257-rec-"));
   const eventsDir = join(tmp, "events");
   mkdirSync(eventsDir, { recursive: true });
-  const month = new Date().toISOString().slice(0, 7);
+  const month = eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   const logPath = join(eventsDir, `${month}.jsonl`);
   writeFileSync(logPath, lines.join("\n") + "\n");
   return { catalystDir: tmp, logPath };

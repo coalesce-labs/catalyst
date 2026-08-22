@@ -291,7 +291,9 @@ describe("emitEnvelope — eventlog | otlp | both router", () => {
 
   function monthlyLog() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    // CTL-1216: resolve through the production leaf, so this fixture follows
+    // the active scheme instead of pinning the monthly one.
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     return join(dir, "events", `${ym}.jsonl`);
   }
   function env() {
@@ -441,6 +443,7 @@ describe("shortHostname", () => {
 
 // ─── OTLP metrics transport (CTL-1227) ───────────────────────────────────────
 import { otlpMetric, sendOtlpMetrics, emitMetrics, metricResource } from "./emit.mjs";
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 describe("otlpMetric — semconv metric shape", () => {
   test("gauge wraps points under .gauge with asDouble + dropped-null attrs", () => {

@@ -473,14 +473,40 @@ describe("emitResumeEvent — append to the unified event log", () => {
   });
 });
 
-describe("eventLogPath — UTC monthly path (matches the daemon tailer)", () => {
-  it("honors CATALYST_DIR and uses UTC year-month", () => {
-    const p = eventLogPath({ env: { CATALYST_DIR: "/cat" }, now: new Date("2026-06-09T00:00:00Z") });
+describe("eventLogPath — resolved path (matches the daemon tailer)", () => {
+  // CTL-1216: the scheme is named EXPLICITLY in each case rather than inherited
+  // from the ambient default. These assert concrete filenames, so on the ambient
+  // default they would have to be rewritten at every flip — and in between would
+  // silently stop covering the other scheme.
+  it("honors CATALYST_DIR and uses UTC year-month under `month`", () => {
+    const p = eventLogPath({
+      env: { CATALYST_DIR: "/cat", CATALYST_EVENT_LOG_ROTATION: "month" },
+      now: new Date("2026-06-09T00:00:00Z"),
+    });
     expect(p).toBe("/cat/events/2026-06.jsonl");
   });
 
   it("zero-pads single-digit months", () => {
-    const p = eventLogPath({ env: { CATALYST_DIR: "/cat" }, now: new Date("2026-01-15T00:00:00Z") });
+    const p = eventLogPath({
+      env: { CATALYST_DIR: "/cat", CATALYST_EVENT_LOG_ROTATION: "month" },
+      now: new Date("2026-01-15T00:00:00Z"),
+    });
     expect(p).toBe("/cat/events/2026-01.jsonl");
+  });
+
+  it("uses the ISO year-week under `week` (the shipped default)", () => {
+    const p = eventLogPath({
+      env: { CATALYST_DIR: "/cat", CATALYST_EVENT_LOG_ROTATION: "week" },
+      now: new Date("2026-08-19T00:00:00Z"),
+    });
+    expect(p).toBe("/cat/events/2026-W34.jsonl");
+  });
+
+  it("zero-pads single-digit ISO weeks", () => {
+    const p = eventLogPath({
+      env: { CATALYST_DIR: "/cat", CATALYST_EVENT_LOG_ROTATION: "week" },
+      now: new Date("2026-01-08T00:00:00Z"),
+    });
+    expect(p).toBe("/cat/events/2026-W02.jsonl");
   });
 });

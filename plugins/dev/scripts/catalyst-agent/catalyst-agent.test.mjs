@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDomain, runOnce, main, defaultImporters, writeHeartbeat } from "./catalyst-agent.mjs";
 import { readAgentConfig, getHeartbeatPath } from "./config.mjs";
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 // The three domains whose importers the tests below inject. `versionEnabled` is
 // deliberately absent (falsy → skipped): these fixtures supply no `version`
@@ -337,7 +338,9 @@ describe("defaultImporters — real sampler composition (event-log emit)", () =>
 
   function eventLogFor(dir) {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    // CTL-1216: resolve through the production leaf, so this fixture follows
+    // the active scheme instead of pinning the monthly one.
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     return join(dir, "events", `${ym}.jsonl`);
   }
 

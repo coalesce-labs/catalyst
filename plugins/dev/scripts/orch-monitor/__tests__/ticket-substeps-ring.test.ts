@@ -7,6 +7,9 @@ import {
   readSubStepEvents,
   readSubStepEventsFromFile,
 } from "../lib/substep-reader";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 let workdir: string;
 
@@ -25,7 +28,7 @@ function eventsDir(): string {
 }
 
 function monthFile(): string {
-  const month = new Date().toISOString().slice(0, 7);
+  const month = eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   return join(workdir, "events", `${month}.jsonl`);
 }
 

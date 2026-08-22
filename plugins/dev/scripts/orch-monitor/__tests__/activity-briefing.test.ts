@@ -13,6 +13,9 @@ import {
 import type { SummarizeConfig } from "../lib/summarize/config";
 import type { SummarizeProvider } from "../lib/summarize/providers";
 import { createEventRing } from "../lib/event-ring";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 const BASE_TS = new Date("2026-05-07T10:00:00Z").toISOString();
 
@@ -339,9 +342,7 @@ describe("readActivityEvents", () => {
   }
 
   function monthFile(d: Date): string {
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-    return join(eventsDir, `${y}-${m}.jsonl`);
+    return join(eventsDir, eventLogBasenameFor(d, resolveRotationScheme({ env: process.env })));
   }
 
   beforeAll(() => {

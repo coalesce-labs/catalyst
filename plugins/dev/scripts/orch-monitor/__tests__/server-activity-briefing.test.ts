@@ -3,6 +3,9 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { createServer } from "../server";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 type Server = ReturnType<typeof createServer>;
 
@@ -19,7 +22,7 @@ describe("GET /api/briefing/activity — AI not configured", () => {
 
     // Write fixture events to the current month's log
     const now = new Date();
-    const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const month = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const eventFile = join(catalystDir, "events", `${month}.jsonl`);
     const recentTs = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     const lines = [

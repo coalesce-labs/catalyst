@@ -9,6 +9,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { readAgentConfig, getEventLogPath, shimNoticeEnabled } from "./config.mjs";
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 const ENVS = [
   "CATALYST_AGENT_EMIT",
@@ -185,10 +186,12 @@ describe("readAgentConfig — domain toggles", () => {
 });
 
 describe("getEventLogPath", () => {
-  test("defaults under ~/catalyst/events with a UTC YYYY-MM file", () => {
+  test("defaults under ~/catalyst/events with the ACTIVE-scheme file", () => {
     const p = getEventLogPath();
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    // CTL-1216: resolve through the production leaf, so this fixture follows
+    // the active scheme instead of pinning the monthly one.
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     expect(p).toBe(resolve(homedir(), "catalyst", "events", `${ym}.jsonl`));
   });
 
@@ -196,7 +199,9 @@ describe("getEventLogPath", () => {
     process.env.CATALYST_DIR = "/tmp/ctl812-fake-catalyst";
     const p = getEventLogPath();
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    // CTL-1216: resolve through the production leaf, so this fixture follows
+    // the active scheme instead of pinning the monthly one.
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     expect(p).toBe(resolve("/tmp/ctl812-fake-catalyst", "events", `${ym}.jsonl`));
   });
 });

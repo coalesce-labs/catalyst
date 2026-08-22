@@ -13,6 +13,9 @@ import {
   createServiceHealthMonitor,
   readEmissionAge,
 } from "../lib/service-health-monitor";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 // bytesRequested — total `length` argument across readSync calls. The spy's
 // call tuple resolves to the 3-arg `readSync(fd, buffer, opts)` overload under
@@ -38,9 +41,7 @@ afterEach(() => {
 
 function writeEvent(ts: string, serviceName: string): void {
   const now = new Date(ts);
-  const y = now.getUTCFullYear();
-  const m = String(now.getUTCMonth() + 1).padStart(2, "0");
-  const path = join(catalystDir, "events", `${y}-${m}.jsonl`);
+  const path = join(catalystDir, "events", eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })));
   const line =
     JSON.stringify({
       ts,

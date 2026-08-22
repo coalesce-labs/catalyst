@@ -15,6 +15,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../server";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme. A pinned monthly name writes a file the code never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 let server: ReturnType<typeof createServer>;
 let baseUrl: string;
@@ -24,7 +27,7 @@ let savedEnvCatalystDir: string | undefined;
 
 function nowMonth(): string {
   const d = new Date();
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  return eventLogBasenameFor(d, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
 }
 
 function makeLine(event: string, extra: Record<string, unknown> = {}): string {
