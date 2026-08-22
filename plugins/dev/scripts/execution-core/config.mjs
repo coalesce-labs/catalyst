@@ -193,6 +193,14 @@ export function writeDaemonRuntimeEnv(
     pid = process.pid,
     pidFile = null,
     now = () => new Date().toISOString(),
+    // CTL-2073: { CATALYST_LINEAR_WRITE_DAILY_BUDGET, CATALYST_LINEAR_WRITE_TICKET_CAP }
+    // — the SAME validated values createLinearWriteProxy resolved for THIS process
+    // (linear-write-proxy.mjs's resolveWriteBudgetCaps), or null when no write-proxy
+    // is live on this daemon (mode "off" — there is no live budget to disagree
+    // about; write-budget-health.mjs's own ledger-absent branch already covers that
+    // host state). Same mutable-file problem this whole mechanism exists to solve
+    // for drainDisabled/bootDrained, applied to the write-budget doctor check.
+    writeBudget = null,
   } = {}
 ) {
   const payload = {
@@ -208,6 +216,7 @@ export function writeDaemonRuntimeEnv(
     startedAt: now(),
     drainDisabled: isDrainDisabled(env),
     bootDrained: env?.CATALYST_BOOT_DRAINED === "1",
+    writeBudget,
   };
   try {
     const p = getDaemonRuntimeEnvPath(orchDir);
