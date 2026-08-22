@@ -960,7 +960,15 @@ _emit_checkout_updated() {
       --payload-json "$(jq -nc --arg c "$checkout" --arg o "$old" --arg n "$new" \
         '{checkout:$c, old_commit:$o, new_commit:$n}')")" || exit 0
     [[ -n "$line" ]] || exit 0
-    canonical_atomic_append_line "${events_dir}/$(date -u +%Y-%m).jsonl" "$line" || exit 0
+    # CTL-1216: canonical-event.sh (sourced above for canonical_atomic_append_line)
+    # also brings the path mirror in as a sibling.
+    if declare -f catalyst_event_log_basename >/dev/null 2>&1; then
+      _cs_log="${events_dir}/$(catalyst_event_log_basename)"
+    else
+      printf '[catalyst] WARNING: event-log path mirror unavailable — falling back to the monthly filename\n' >&2
+      _cs_log="${events_dir}/$(date -u +%Y-%m).jsonl"
+    fi
+    canonical_atomic_append_line "$_cs_log" "$line" || exit 0
   ) || true
 }
 
@@ -3116,8 +3124,17 @@ _vu_v_checkout() {
 
 # --- extractors (side-effecting: read a given path with jq) --------------------
 
-# _vu_event_log_path — this month's unified event log (UTC month, matches the writer).
-_vu_event_log_path() { printf '%s\n' "${CATALYST_DIR:-$HOME/catalyst}/events/$(date -u +%Y-%m).jsonl"; }
+# _vu_event_log_path — the ACTIVE unified event log, matching the writer.
+# CTL-1216: resolved through the shared mirror when it is loaded.
+_vu_event_log_path() {
+  local d="${CATALYST_DIR:-$HOME/catalyst}/events"
+  if declare -f catalyst_event_log_basename >/dev/null 2>&1; then
+    printf '%s\n' "${d}/$(catalyst_event_log_basename)"
+  else
+    printf '[catalyst] WARNING: event-log path mirror unavailable — falling back to the monthly filename\n' >&2
+    printf '%s\n' "${d}/$(date -u +%Y-%m).jsonl"
+  fi
+}
 
 # _vu_read_pull_owner <cfg> — pluginPullOwner from a Layer-2 config (empty if unset).
 _vu_read_pull_owner() {

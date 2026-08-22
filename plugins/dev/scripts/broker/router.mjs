@@ -41,7 +41,7 @@ import {
   INGESTION_RECENCY_HOLDDOWN_MS,
   INGESTION_SEED_BYTES,
   WATCHER_RECENCY_STALE_MS,
-  getPrevMonthEventLogPath,
+  getPrevEventLogPathForBroker,
   BROKER_DEGRADED_GRACE_MS,
   BROKER_DEGRADED_SUSTAINED_TICKS,
 } from "./config.mjs";
@@ -631,7 +631,13 @@ export function seedLastSeenByService({
   // month. Scan it too; otherwise the seed silently fails for exactly the
   // all-restart, monitor-stays-dead outage class it exists to close.
   if (!_lastSeenByService.has(MONITOR_SERVICE_NAME)) {
-    folded += scanLogTailInto(getPrevMonthEventLogPath(), seedBytes);
+    // CTL-1216: the previous file is now the newest one that actually EXISTS and
+    // is older than the current one, so it is legitimately NULL on a host whose
+    // log has never rotated. Guard rather than letting it reach scanLogTailInto:
+    // openSync(null) throws ERR_INVALID_ARG_TYPE, not ENOENT, so the catch there
+    // would log "seed log unreadable" for a perfectly normal first-period host.
+    const prevLog = getPrevEventLogPathForBroker();
+    if (prevLog) folded += scanLogTailInto(prevLog, seedBytes);
   }
   // Loud-on-blind: a non-empty log that yields no monitor baseline means the
   // detector booted cold for the monitor (corrupt tail / out-of-window / never

@@ -118,32 +118,29 @@ export function scanForSelfDerivedEventLogNames(root) {
 // means DELETING its line — the equality below fails in both directions, so a
 // fixed site that stays listed is just as red as a new site that is not.
 const ALLOWED_REMAINING = [
-  // ── still to fold, Phase 2 (readers) ──────────────────────────────────────
-
-  // ── SANCTIONED loud fallbacks, not un-migrated sites ──────────────────────
-  // These DO resolve through the shared mirror on the normal path. What the
-  // scanner sees is the dependency-free fallback branch they keep for the case
-  // where the mirror cannot be sourced — and that branch WARNS to stderr rather
-  // than degrading silently, the same posture canonical_atomic_append_line's
-  // three leaf callers take (and that __tests__/event-append-atomicity.test.sh
-  // recognizes only by the warning). A silent re-derivation here would keep
-  // working under the default scheme and then, the day it flips, aim the reader
-  // at a file nothing writes.
-  "catalyst-events",
-
-  // ── still to fold, Phase 4 (writers) ──────────────────────────────────────
+  // ── SANCTIONED loud fallbacks, NOT un-migrated sites ──────────────────────
+  // Every one of these resolves through lib/catalyst-event-log-paths.sh on the
+  // normal path. What the scanner sees is the dependency-free fallback branch
+  // each keeps for the case where the mirror cannot be sourced — and every one
+  // of those branches WARNS to stderr rather than degrading silently.
+  //
+  // That is the same posture canonical_atomic_append_line's three leaf callers
+  // take, and which __tests__/event-append-atomicity.test.sh recognizes only by
+  // the warning. The reason it matters here: a SILENT `date -u +%Y-%m` keeps
+  // working under today's default and then, the day the scheme flips, splits
+  // writers and readers across two files with nothing to say so.
   "lib/canonical-event.sh",
+  "catalyst-events",
   "catalyst-state.sh",
   "emit-worker-status-change.sh",
   "lib/emit-reap-intent.sh",
   "catalyst-stack",
-  "orch-monitor/lib/event-writer.ts",
-  "otel-forward/index.ts",
+  "catalyst-hud-classic.sh",
 
   // ── standalone helper scripts, outside the ticket's declared blast radius ─
+  // Neither writes to nor reads the live fleet log on any production path.
   "test-catalyst-session.sh",
   "orchestrate-replay-phase-events.sh",
-  "catalyst-hud-classic.sh",
 ];
 
 test("no un-migrated event-log filename derivations remain outside the leaf", () => {

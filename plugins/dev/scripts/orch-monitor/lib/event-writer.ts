@@ -25,6 +25,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { CanonicalEvent } from "./canonical-event";
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 export interface EventWriterLogger {
   warn?: (msg: string) => void;
@@ -165,10 +166,12 @@ export class CanonicalEventWriter {
     this.logger = opts.logger ?? {};
   }
 
-  private monthlyFilePath(d: Date): string {
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-    return join(this.baseDir, `${y}-${m}.jsonl`);
+  // CTL-1216: resolved by lib/event-log-paths.mjs. Renamed off "monthly"
+  // because it is not — under CATALYST_EVENT_LOG_ROTATION=week this returns
+  // 2026-W34.jsonl. The legacy-rotation behaviour documented at the top of this
+  // file is unchanged; only which filename it operates on moved.
+  private eventLogFilePath(d: Date): string {
+    return join(this.baseDir, eventLogBasenameFor(d, resolveRotationScheme({ env: process.env })));
   }
 
   private maybeRotateLegacy(filePath: string): void {
@@ -223,7 +226,7 @@ export class CanonicalEventWriter {
   }
 
   append(event: CanonicalEvent): Promise<void> {
-    const path = this.monthlyFilePath(this.now());
+    const path = this.eventLogFilePath(this.now());
     try {
       mkdirSync(this.baseDir, { recursive: true });
       this.maybeRotateLegacy(path);

@@ -9,6 +9,17 @@
 
 set -uo pipefail
 
+# CTL-1216: the shared event-log path mirror, so the HUD reads the file the
+# writers actually append to under either rotation scheme. Sourced explicitly
+# because this script does not otherwise pull in canonical-event.sh (which
+# brings the mirror in as a sibling for every other bash producer).
+_HUD_LIBDIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+if [[ -r "${_HUD_LIBDIR}/catalyst-event-log-paths.sh" ]]; then
+  # shellcheck source=lib/catalyst-event-log-paths.sh
+  . "${_HUD_LIBDIR}/catalyst-event-log-paths.sh" 2>/dev/null || true
+fi
+unset _HUD_LIBDIR
+
 # CTL-390: --version handling (early, before any arg parsing or stdin reads).
 case "${1:-}" in
   --version|-V)
@@ -209,7 +220,14 @@ if [[ -n "$SINCE_SPEC" ]]; then
     exit 2
   fi
   since_iso=$(epoch_to_iso "$since_epoch")
-  events_file="$EVENTS_DIR/$(date -u +%Y-%m).jsonl"
+  # CTL-1216: resolved through the shared mirror so the HUD reads the file the
+  # writers are actually appending to.
+  if declare -f catalyst_event_log_basename >/dev/null 2>&1; then
+    events_file="$EVENTS_DIR/$(catalyst_event_log_basename)"
+  else
+    printf '[catalyst] WARNING: event-log path mirror unavailable — the HUD is falling back to the monthly filename\n' >&2
+    events_file="$EVENTS_DIR/$(date -u +%Y-%m).jsonl"
+  fi
   since_line=$(find_since_line "$events_file" "$since_iso")
   set -- "--since-line" "$since_line" "$@"
 fi

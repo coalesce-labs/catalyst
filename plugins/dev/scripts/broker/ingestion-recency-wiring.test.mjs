@@ -9,7 +9,8 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { getEventLogPath, getPrevMonthEventLogPath, GITHUB_RECENCY_DOWN_MS } from "./config.mjs";
+import { getEventLogPath, getPrevEventLogPathForBroker, GITHUB_RECENCY_DOWN_MS } from "./config.mjs";
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 import {
   runWatchdogTick,
   processEvent,
@@ -214,18 +215,31 @@ describe("boot-seed → first watchdog tick, end-to-end (CTL-1122)", () => {
     expect(evs[0].caused_by).toBe("pre-restart-beat");
   });
 
-  test("month-boundary: a monitor beat only in the PRIOR month file still seeds (rollover restart)", () => {
+  test("rollover boundary: a monitor beat only in the PRIOR file still seeds (rollover restart)", () => {
     mkdirSync(join(dir, "events"), { recursive: true });
-    // current-month file is absent; the last beat lives in the prior month
+    // CTL-1216: the prior file is CONSTRUCTED by name here rather than asked for.
+    // getPrevEventLogPathForBroker now returns the newest file that actually
+    // EXISTS and is older than the current one — so it cannot name a file that
+    // has not been written yet, which is exactly the property the seed wants
+    // (it must not read a computed name that was never created).
+    const prevBasename = eventLogBasenameFor(
+      new Date(Date.now() - 40 * 86400000),
+      resolveRotationScheme({ env: process.env }),
+    );
+    const prevPath = join(dir, "events", prevBasename);
+    // current-period file is absent; the last beat lives in the prior file
     writeFileSync(
-      getPrevMonthEventLogPath(),
+      prevPath,
       JSON.stringify({
         ts: new Date(Date.now() - (TEN_MIN + 60_000)).toISOString(),
         id: "prev-month-beat",
         resource: { "service.name": "catalyst.monitor" },
       }) + "\n",
     );
-    seedLastSeenByService({ logPath: getEventLogPath() }); // current month missing → prior-month fallback
+    // Sanity: the resolver must now SEE that file — otherwise the assertion
+    // below could pass or fail for reasons unrelated to the seed.
+    expect(getPrevEventLogPathForBroker()).toBe(prevPath);
+    seedLastSeenByService({ logPath: getEventLogPath() }); // current file missing → prior-file fallback
     expect(__getLastSeenByServiceForTest().get("catalyst.monitor")?.id).toBe("prev-month-beat");
     runWatchdogTick();
     const evs = readIngestionEvents(getEventLogPath()).filter(

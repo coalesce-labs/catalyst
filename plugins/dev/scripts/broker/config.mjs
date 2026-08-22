@@ -265,10 +265,10 @@ export function getEventLogPath() {
 // previous FILE may be a weekly one). getPrevEventLogPath instead returns the
 // newest file that actually EXISTS and is older than the current one.
 //
-// The old export name is retained as an alias so router.mjs:634 — the one
-// consumer — changes in Phase 4 rather than churning twice across the risky
-// reader-migration phases.
-export function getPrevMonthEventLogPath() {
+// CTL-1216 phase 4: the `getPrevMonthEventLogPath` alias that carried
+// router.mjs across the reader-migration phases is gone — that name promised
+// month arithmetic this no longer does.
+export function getPrevEventLogPathForBroker() {
   return getPrevEventLogPath({ env: process.env });
 }
 
